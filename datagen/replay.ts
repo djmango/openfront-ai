@@ -31,15 +31,20 @@ import { createGame } from "../openfront/src/core/game/GameImpl";
 import { GameUpdateType } from "../openfront/src/core/game/GameUpdates";
 import { createNationsForGame } from "../openfront/src/core/game/NationCreation";
 import { Config } from "../openfront/src/core/configuration/Config";
-import { DoomsdayClockExecution } from "../openfront/src/core/execution/DoomsdayClockExecution";
 import { Executor } from "../openfront/src/core/execution/ExecutionManager";
 import { RecomputeRailClusterExecution } from "../openfront/src/core/execution/RecomputeRailClusterExecution";
 import { SpawnTimerExecution } from "../openfront/src/core/execution/SpawnTimerExecution";
 import { WinCheckExecution } from "../openfront/src/core/execution/WinCheckExecution";
 import { PseudoRandom } from "../openfront/src/core/PseudoRandom";
+import { createRequire } from "module";
 import { GameRecord, GameStartInfo } from "../openfront/src/core/Schemas";
 import { decompressGameRecord, simpleHash } from "../openfront/src/core/Util";
 import { loadFreshTerrain, snapshotEntities } from "./common";
+
+// The engine submodule gets checked out at whatever commit each game ran on
+// (see replay_all.sh), so modules/APIs that only exist on newer commits must
+// be loaded dynamically and skipped when absent.
+const dynRequire = createRequire(__filename);
 
 interface ReplayResult {
   ok: boolean;
@@ -118,7 +123,15 @@ async function replayGame(
     game.addExecution(...executor.spawnTribes(config.bots()));
   }
   game.addExecution(new WinCheckExecution());
-  if (config.doomsdayClockConfig().enabled) {
+  // Doomsday clock only exists on newer engine commits; mirror the init the
+  // live game actually ran.
+  const cfgAny = config as unknown as {
+    doomsdayClockConfig?: () => { enabled: boolean };
+  };
+  if (cfgAny.doomsdayClockConfig?.().enabled) {
+    const { DoomsdayClockExecution } = dynRequire(
+      "../openfront/src/core/execution/DoomsdayClockExecution",
+    );
     game.addExecution(new DoomsdayClockExecution());
   }
   if (!config.isUnitDisabled(UnitType.Factory)) {
