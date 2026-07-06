@@ -23,7 +23,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from collections import deque
 
-from rl.curriculum import ADVANCE_AT, STAGES, WINDOW
+from rl.curriculum import STAGES, WIN_AT, WINDOW
 from rl.obs import ACTIONS, encode_grids, load_ae
 from rl.policy import Policy
 from rl.vec import VecEnv
@@ -68,6 +68,7 @@ def main() -> None:
     vec = VecEnv(args.envs, args.stage, args.max_episode_ticks, args.decision_ticks)
     stage = args.stage
     recent_scores: deque[float] = deque(maxlen=WINDOW)
+    recent_wins: deque[float] = deque(maxlen=WINDOW)
     ae = load_ae(args.ckpt, device)
     policy = Policy().to(device)
     opt = torch.optim.AdamW(policy.parameters(), lr=args.lr)
@@ -128,21 +129,27 @@ def main() -> None:
                     writer.add_scalar("episode/score", info["score"], global_step)
                     writer.add_scalar("episode/won", float(info["won"]), global_step)
                     writer.add_scalar("curriculum/episode_stage", info["stage"], global_step)
-                    # Only current-stage episodes count toward advancement.
-                    if info["stage"] == stage:
+                    writer.add_scalar(
+                        "curriculum/rehearsal", float(info["rehearsal"]), global_step
+                    )
+                    # Only current-stage, non-rehearsal episodes count toward
+                    # advancement; the gate is win rate, not placement.
+                    if info["stage"] == stage and not info["rehearsal"]:
                         recent_scores.append(info["score"])
+                        recent_wins.append(float(info["won"]))
                     if (
-                        len(recent_scores) == WINDOW
-                        and np.mean(recent_scores) >= ADVANCE_AT
+                        len(recent_wins) == WINDOW
+                        and np.mean(recent_wins) > WIN_AT
                         and stage < len(STAGES) - 1
                     ):
                         stage += 1
                         vec.set_stage(stage)
                         recent_scores.clear()
+                        recent_wins.clear()
                         st = STAGES[stage]
                         print(
                             f"=== curriculum advance -> stage {stage}: "
-                            f"{st.map_name} bots={st.bots} {st.difficulty}",
+                            f"maps={','.join(st.maps)} bots={st.bots} {st.difficulty}",
                             flush=True,
                         )
 
@@ -231,12 +238,18 @@ def main() -> None:
             float(np.mean(recent_scores)) if recent_scores else 0.0,
             global_step,
         )
+        writer.add_scalar(
+            "curriculum/rolling_win",
+            float(np.mean(recent_wins)) if recent_wins else 0.0,
+            global_step,
+        )
         for i, a in enumerate(ACTIONS):
             writer.add_scalar(f"actions/{a}", action_counts[i] / (T * N), global_step)
         roll = float(np.mean(recent_scores)) if recent_scores else 0.0
+        roll_win = float(np.mean(recent_wins)) if recent_wins else 0.0
         print(
             f"update {update:4d}  step {global_step:7d}  eps {episodes_done:4d}  "
-            f"stage {stage}  roll-score {roll:.2f}  "
+            f"stage {stage}  roll-win {roll_win:.2f}  roll-score {roll:.2f}  "
             f"pg {pl_sum / n_mb:+.4f}  vf {vl_sum / n_mb:.4f}  ent {ent_sum / n_mb:.3f}  "
             f"{tps:.0f} game-ticks/s",
             flush=True,
