@@ -137,13 +137,26 @@ pass `--no-debug` for a clean map-only render:
 uv run python -m rl.watch --policy /tmp/policy.pt --stage 3 \
     --out replay.webm --record records-rl/game.json
 openfront/node_modules/.bin/tsx scripts/verify_record.ts records-rl/game.json
-
-# replay in the actual OpenFront client:
-uv run python scripts/serve_replay.py --records records-rl   # archive API shim
-(cd openfront && npm run start:client)                       # localhost:9000
-# in the browser console: localStorage.setItem("apiHost", "http://localhost:8987")
-# then Join Lobby with the gameID printed by watch.py
 ```
+
+**Real-graphics video** — `scripts/render_client_replay.py` replays the
+record in the actual OpenFront client (headless Chromium) and records a
+webm: full game UI, terrain art, units, boats, nukes, leaderboard. The
+viewer adopts the agent's identity (localStorage `replayViewAs` hook,
+patch in `patches/client-replay-viewas.patch`), so the agent shows as
+**AGENT** on the leaderboard/territory, gets the gold spawn ring, the
+crown icon when in first place, and the "You Won!" modal:
+
+```bash
+uv run playwright install chromium   # one-time
+uv run python scripts/render_client_replay.py \
+    --record records-rl/game.json --out replays/game_client.webm
+# useful flags: --zoom-out N (camera pull-back, default 3; ~6 for
+# World-sized maps), --speed {0.5,1,2,max}, --headed to watch it live
+```
+
+To browse a replay interactively instead, follow the manual steps in the
+`scripts/serve_replay.py` docstring (same shim + client, real browser).
 
 The bridge mirrors the client's `createGameRunner()` init exactly (same
 PseudoRandom ID stream, no spawn timer in singleplayer), so records replay

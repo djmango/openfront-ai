@@ -3,14 +3,15 @@
 The dev client fetches archived games from `${apiHost}/game/<gameID>`.
 This server mimics that endpoint for records saved by rl/watch.py.
 
-Workflow:
+Workflow (automated: scripts/render_client_replay.py does all of this and
+records a webm):
   1. uv run python -m rl.watch --policy ... --record records-rl/game.json
   2. uv run python scripts/serve_replay.py --records records-rl --port 8987
-  3. (cd openfront && npm run start:client)
+  3. (cd openfront && npm run start:client -- --host 127.0.0.1)
   4. In the browser devtools console on the client page:
        localStorage.setItem("apiHost", "http://localhost:8987")
-  5. Join a private lobby with the gameID printed by step 1 (or use
-     the direct URL: http://localhost:9000/#join=<gameID>).
+       localStorage.setItem("replayViewAs", "1")  // adopt agent perspective
+  5. Open http://localhost:9000/game/<gameID> (ID printed by step 1).
      The client fetches the record here and replays it in the full game UI.
 """
 
