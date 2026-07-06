@@ -125,7 +125,7 @@ function entities(game: Game): object {
 }
 
 /** Exact per-action legality from engine calls; Python builds masks. */
-function legality(game: Game, clientID: string): object {
+export function legality(game: Game, clientID: string): object {
   const agent = game.playerByClientID(clientID) ?? null;
   if (!agent || !agent.isAlive()) {
     return { spawn: game.inSpawnPhase(), actions: {} };
