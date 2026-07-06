@@ -380,6 +380,23 @@ are gitignored now.</p>
 
 <h3 id="next">Open threads</h3>
 <ul>
+  <li><b>PPO v4 wishlist:</b>
+    <ul>
+      <li><i>Learned spawn placement.</i> Today the agent spawns on a uniformly random land tile
+        (<code>spawn_randomly</code>) and the policy's first real decision comes after the spawn
+        phase. Spawn choice is one decision per episode but it shapes everything downstream:
+        neighbors, coastline access, expansion room. The tile-region head and its masking already
+        exist, so the plan is to expose the spawn-phase state as a normal observation, mask the
+        tile head to legal spawn tiles, and let episode return do the credit assignment. Human
+        games also carry spawn intents, so BC can supervise it directly.</li>
+      <li><i>v3.1 encoder</i> (d8 or d8c32, whichever the bake-off picks) wired into
+        <code>rl/obs.py</code>, plus the raw local owner-crop bypass.</li>
+      <li><i>BC warm start</i> from the human-game policy, if the pilot pans out.</li>
+      <li><i>From scratch, not from v3 weights:</i> the v2c lesson applies to v4 too, its
+        observation space and spawn behavior change the MDP enough that resuming would inherit
+        stale habits.</li>
+    </ul>
+  </li>
   <li><b>BC warm start:</b> does initializing PPO from human imitation beat the 1v1 curriculum
     bootstrap, or compound with it?</li>
   <li><b>Pick the final encoder:</b> the 1/8 x 32ch run (2x policy input) and the 96ch control are
