@@ -162,7 +162,7 @@ class ObsBuilder:
         scalars = self._scalars(obs, ents, me_slot)
         masks = self._masks(obs, lut)
         return {
-            "owners": owners,
+            "owners": owners.astype(np.uint8),  # slots < 128; keeps IPC cheap
             "terrain": terrain.astype(np.float32),
             "static": static,
             "ego_transient": np.concatenate([ego, transient]).astype(np.float32),
@@ -289,7 +289,7 @@ class ObsBuilder:
 def encode_grids(ae: SpatialAE, raws: list[dict], device: str) -> list[dict]:
     """Batched frozen-AE encode across envs (same map => same shapes).
     Consumes owners/terrain/static from each raw dict and emits 'grid'."""
-    owners = torch.from_numpy(np.stack([r["owners"] for r in raws])).to(device)
+    owners = torch.from_numpy(np.stack([r["owners"] for r in raws])).long().to(device)
     terrain = torch.from_numpy(np.stack([r["terrain"] for r in raws])).to(device)
     static = torch.from_numpy(np.stack([r["static"] for r in raws])).to(device)
     z = ae.encode(owners, terrain, static).cpu().numpy()

@@ -49,6 +49,7 @@ def main() -> None:
     ap.add_argument("--vf-coef", type=float, default=0.5)
     ap.add_argument("--max-episode-ticks", type=int, default=15000)
     ap.add_argument("--decision-ticks", type=int, default=10)
+    ap.add_argument("--resume", default=None, help="policy.pt to load before training")
     args = ap.parse_args()
 
     device = (
@@ -63,6 +64,10 @@ def main() -> None:
     vec = VecEnv(args.envs, args.map, args.max_episode_ticks, args.decision_ticks)
     ae = load_ae(args.ckpt, device)
     policy = Policy().to(device)
+    if args.resume:
+        state = torch.load(args.resume, map_location=device, weights_only=False)
+        policy.load_state_dict(state["model_state_dict"])
+        print(f"resumed from {args.resume}")
     opt = torch.optim.AdamW(policy.parameters(), lr=args.lr)
 
     T, N = args.rollout, args.envs
@@ -81,7 +86,7 @@ def main() -> None:
         action_counts = np.zeros(len(ACTIONS))
 
         for t in range(T):
-            raws = vec.prepare()
+            raws = vec.obs()
             obs_list = encode_grids(ae, raws, device)
             ot = {
                 k: torch.from_numpy(np.stack([o[k] for o in obs_list])).to(device)
@@ -91,7 +96,7 @@ def main() -> None:
             for c in choices:
                 action_counts[c["action"]] += 1
 
-            results = vec.apply(choices)
+            results = vec.step(choices)
             for i, (r, d, info) in enumerate(results):
                 reward_buf[t, i] = r
                 done_buf[t, i] = float(d)
@@ -109,7 +114,7 @@ def main() -> None:
             global_step += N
 
         # Bootstrap values and GAE per env.
-        raws = vec.prepare()
+        raws = vec.obs()
         obs_last = encode_grids(ae, raws, device)
         with torch.no_grad():
             ot = {

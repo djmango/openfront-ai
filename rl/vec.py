@@ -1,11 +1,14 @@
-"""Vectorized envs: N bridge processes stepped in parallel threads.
+"""Vectorized envs: one OS process per env (bridge + featurization), so
+JSON decode, gzip, and numpy work all escape the GIL. The main process
+only does batched AE encode + policy forward on the GPU.
 
-The Node engine does the heavy lifting in its own process per env, so
-threads are enough on the Python side; the frozen-AE encode and policy
-forward run batched across envs on the GPU.
+Pipe payloads stay small: static terrain ships once per episode and is
+cached main-side; per-step traffic is the uint8 owner grid plus small
+arrays (~300KB/env).
 """
 
-from concurrent.futures import ThreadPoolExecutor
+import multiprocessing as mp
+import sys
 
 import numpy as np
 
@@ -77,25 +80,83 @@ class EnvWorker:
         return reward, done, info
 
 
+def _child(idx: int, map_name: str, max_ticks: int, decision_ticks: int, conn) -> None:
+    try:
+        worker = EnvWorker(idx, map_name, max_ticks, decision_ticks)
+        sent_episode = -1
+
+        def pack(raw: dict, result) -> dict:
+            nonlocal sent_episode
+            msg = {"raw": raw, "result": result, "episode": worker.episode}
+            if worker.episode != sent_episode:
+                sent_episode = worker.episode
+            else:
+                msg["raw"] = {k: v for k, v in raw.items() if k != "terrain"}
+            return msg
+
+        conn.send(pack(worker.prepare(), None))
+        while True:
+            choice = conn.recv()
+            if choice is None:
+                break
+            result = worker.apply(choice)
+            conn.send(pack(worker.prepare(), result))
+        worker.env.close()
+    except Exception as e:
+        conn.send({"error": repr(e)})
+        raise
+    finally:
+        conn.close()
+
+
 class VecEnv:
     def __init__(self, n: int, map_name: str, max_episode_ticks: int, decision_ticks: int):
-        self.pool = ThreadPoolExecutor(max_workers=n)
-        self.workers = list(
-            self.pool.map(
-                lambda i: EnvWorker(i, map_name, max_episode_ticks, decision_ticks),
-                range(n),
+        ctx = mp.get_context("spawn" if sys.platform == "darwin" else "fork")
+        self.pipes = []
+        self.procs = []
+        self.terrains: list[np.ndarray | None] = [None] * n
+        for i in range(n):
+            parent, child = ctx.Pipe()
+            p = ctx.Process(
+                target=_child,
+                args=(i, map_name, max_episode_ticks, decision_ticks, child),
+                daemon=True,
             )
-        )
+            p.start()
+            child.close()
+            self.pipes.append(parent)
+            self.procs.append(p)
+        self._pending: list[dict] = [self._recv(i) for i in range(n)]
 
-    def prepare(self) -> list[dict]:
-        return list(self.pool.map(lambda w: w.prepare(), self.workers))
+    def _recv(self, i: int) -> dict:
+        msg = self.pipes[i].recv()
+        if "error" in msg:
+            raise RuntimeError(f"env worker {i}: {msg['error']}")
+        raw = msg["raw"]
+        if "terrain" in raw:
+            self.terrains[i] = raw["terrain"]
+        else:
+            raw["terrain"] = self.terrains[i]
+        return msg
 
-    def apply(self, choices: list[dict]) -> list[tuple[float, bool, dict | None]]:
-        return list(
-            self.pool.map(lambda wc: wc[0].apply(wc[1]), zip(self.workers, choices))
-        )
+    def obs(self) -> list[dict]:
+        """Current raw observations (state t)."""
+        return [m["raw"] for m in self._pending]
+
+    def step(self, choices: list[dict]) -> list[tuple[float, bool, dict | None]]:
+        """Send actions, collect (reward, done, info); next obs via obs()."""
+        for pipe, c in zip(self.pipes, choices):
+            pipe.send(c)
+        self._pending = [self._recv(i) for i in range(len(self.pipes))]
+        return [m["result"] for m in self._pending]
 
     def close(self) -> None:
-        for w in self.workers:
-            w.env.close()
-        self.pool.shutdown()
+        for pipe in self.pipes:
+            try:
+                pipe.send(None)
+            except (BrokenPipeError, OSError):
+                pass
+        for p in self.procs:
+            p.join(timeout=5)
+            if p.is_alive():
+                p.terminate()
