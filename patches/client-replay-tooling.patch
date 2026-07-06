@@ -1,0 +1,95 @@
+diff --git a/src/client/ClientGameRunner.ts b/src/client/ClientGameRunner.ts
+index 474ddc811..46f615a31 100644
+--- a/src/client/ClientGameRunner.ts
++++ b/src/client/ClientGameRunner.ts
+@@ -829,6 +829,9 @@ export class ClientGameRunner {
+         this.eventBus.emit(new SendHashEvent(hu.tick, hu.hash));
+       });
+       this.gameView.update(gu);
++      // RL replay tooling: expose the sim tick for the debug overlay.
++      (window as { __replayTick?: number }).__replayTick =
++        this.gameView.ticks();
+       this.webglBuilder?.update(this.gameView);
+       this.renderer.tick();
+ 
+@@ -882,7 +885,9 @@ export class ClientGameRunner {
+               return;
+             }
+ 
+-            this.eventBus.emit(new GoToPlayerEvent(myPlayer, 10));
++            if (this.userSettings.goToPlayer()) {
++              this.eventBus.emit(new GoToPlayerEvent(myPlayer, 10));
++            }
+           };
+ 
+           goToPlayer();
+diff --git a/src/client/LocalServer.ts b/src/client/LocalServer.ts
+index 0304224bf..da6c3714d 100644
+--- a/src/client/LocalServer.ts
++++ b/src/client/LocalServer.ts
+@@ -144,11 +144,28 @@ export class LocalServer {
+       gameStartInfo: this.lobbyConfig.gameStartInfo,
+       turns: [],
+       lobbyCreatedAt: this.lobbyConfig.gameStartInfo.lobbyCreatedAt,
+-      // Don't send myClientID for replays — viewer has no player identity.
+-      myClientID: this.lobbyConfig.gameRecord ? undefined : this.clientID,
++      // Don't send myClientID for replays — viewer has no player identity —
++      // unless a replay perspective was requested (RL replay tooling).
++      myClientID: this.replayPerspective(),
+     } satisfies ServerStartGameMessage);
+   }
+ 
++  /**
++   * Replays normally have no player identity. localStorage "replayViewAs"
++   * opts in: "1"/"first" adopts the record's first player (self borders,
++   * spawn ring, win modal), or set an explicit clientID.
++   */
++  private replayPerspective(): ClientID | undefined {
++    if (!this.lobbyConfig.gameRecord) return this.clientID;
++    try {
++      const v = localStorage.getItem("replayViewAs");
++      if (v === null || v === "") return undefined;
++      return v === "1" || v === "first" ? this.clientID : v;
++    } catch {
++      return undefined;
++    }
++  }
++
+   onMessage(clientMsg: ClientMessage) {
+     if (clientMsg.type === "rejoin") {
+       if (!this.clientID) {
+@@ -159,7 +176,7 @@ export class LocalServer {
+         gameStartInfo: this.lobbyConfig.gameStartInfo!,
+         turns: this.turns,
+         lobbyCreatedAt: this.lobbyConfig.gameStartInfo!.lobbyCreatedAt,
+-        myClientID: this.lobbyConfig.gameRecord ? undefined : this.clientID,
++        myClientID: this.replayPerspective(),
+       } satisfies ServerStartGameMessage);
+     }
+     if (clientMsg.type === "intent") {
+diff --git a/src/client/TransformHandler.ts b/src/client/TransformHandler.ts
+index 77a0bac69..d8e9776dd 100644
+--- a/src/client/TransformHandler.ts
++++ b/src/client/TransformHandler.ts
+@@ -43,6 +43,21 @@ export class TransformHandler {
+     private canvas: HTMLElement,
+   ) {
+     this._boundingRect = this.canvas.getBoundingClientRect();
++    // RL replay tooling: localStorage "replayFitMap" starts the camera
++    // centered on the whole map instead of the default offset view.
++    try {
++      if (localStorage.getItem("replayFitMap")) {
++        const vw = this._boundingRect.width || window.innerWidth;
++        const vh = this._boundingRect.height || window.innerHeight;
++        this.scale =
++          0.9 * Math.min(vw / this.game.width(), vh / this.game.height());
++        // canvasX(worldCenter) = W/2 - offsetX*scale; pin it to vw/2.
++        this.offsetX = (this.game.width() - vw) / (2 * this.scale);
++        this.offsetY = (this.game.height() - vh) / (2 * this.scale);
++      }
++    } catch {
++      // localStorage unavailable — keep defaults.
++    }
+     this.eventBus.on(ZoomEvent, (e) => this.onZoom(e));
+     this.eventBus.on(DragEvent, (e) => this.onMove(e));
+     this.eventBus.on(GoToPlayerEvent, (e) => this.onGoToPlayer(e));

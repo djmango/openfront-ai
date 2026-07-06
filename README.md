@@ -141,18 +141,20 @@ openfront/node_modules/.bin/tsx scripts/verify_record.ts records-rl/game.json
 
 **Real-graphics video** — `scripts/render_client_replay.py` replays the
 record in the actual OpenFront client (headless Chromium) and records a
-webm: full game UI, terrain art, units, boats, nukes, leaderboard. The
-viewer adopts the agent's identity (localStorage `replayViewAs` hook,
-patch in `patches/client-replay-viewas.patch`), so the agent shows as
-**AGENT** on the leaderboard/territory, gets the gold spawn ring, the
-crown icon when in first place, and the "You Won!" modal:
+webm: full game UI, terrain art, units, boats, nukes, leaderboard. Client
+hooks (localStorage, patch in `patches/client-replay-tooling.patch`) give
+it the agent's identity — **AGENT** on the leaderboard/territory, gold
+spawn ring, crown when first, the "You Won!" modal — and start the camera
+centered on the whole map. If the record has a `.debug.json` sidecar
+(written automatically by `rl.watch --record`), the video also gets a live
+MODEL panel: chosen action, value estimate, action-probability bars, and a
+recent-actions log, synced to the sim tick:
 
 ```bash
 uv run playwright install chromium   # one-time
 uv run python scripts/render_client_replay.py \
     --record records-rl/game.json --out replays/game_client.webm
-# useful flags: --zoom-out N (camera pull-back, default 3; ~6 for
-# World-sized maps), --speed {0.5,1,2,max}, --headed to watch it live
+# flags: --speed {0.5,1,2,max}, --no-overlay, --headed to watch it live
 ```
 
 To browse a replay interactively instead, follow the manual steps in the
