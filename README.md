@@ -58,6 +58,40 @@ Details:
 - Loss is border-weighted cross-entropy over owner slots — territory borders
   are what matter strategically and are what reconstruction losses blur first.
 
+## Results (v1)
+
+Trained 30k steps (batch 16) on 250 games / 10 maps, ~40 min on an RTX 3070 at
+~200 crops/s. Model: 1.0M params, latent 64 channels per 16x16 region.
+
+![Training curves](assets/loss_curve.png)
+
+Overall tile accuracy saturates >99% within ~3k steps; the remaining training
+mostly sharpens borders (the border-weighted CE keeps falling on a log scale).
+30k steps was overkill — ~10k gets within a hair of the same quality.
+
+Original (left) vs reconstruction through the 64-channel latent (right), on a
+World-map game with 17 surviving players:
+
+![World reconstruction](assets/recon_world.png)
+
+Honest numbers (mid/late-game snapshots): overall accuracy is inflated by
+water and empty land, so the metric that matters is **border-tile accuracy** —
+98.7% on a late-game 2-player map, 91.4% on World with 17 players, 90.1% on
+Africa with 27 players. Small enclaves and 1-tile border noise are what get
+lost; large-scale territory geometry survives.
+
+Compression per 16x16 region: 256 tiles -> 64 floats. Relative to the
+embedded input a policy would otherwise consume (11 channels at full
+resolution) that is a 44x smaller observation; a 2000x1000 World state becomes
+a 125x62x64 latent grid. The first 3 PCA components of that grid (World):
+
+![Latent PCA](assets/latent_pca_world.png)
+
+Artifacts: dataset at
+[djmango/openfront-snapshots](https://huggingface.co/datasets/djmango/openfront-snapshots),
+checkpoint at
+[djmango/openfront-tile-autoencoder](https://huggingface.co/djmango/openfront-tile-autoencoder).
+
 ## Roadmap
 
 1. ~~Headless datagen + autoencoder~~ (this repo)

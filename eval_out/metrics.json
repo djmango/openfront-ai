@@ -1,0 +1,50 @@
+[
+  {
+    "map": "onion",
+    "tick": 5450,
+    "alive_players": 2,
+    "tile_acc": 0.9994735717773438,
+    "border_tile_acc": 0.9872213412927898,
+    "latent_shape": [
+      64,
+      32,
+      32
+    ],
+    "grid_shape": [
+      512,
+      512
+    ]
+  },
+  {
+    "map": "world",
+    "tick": 9050,
+    "alive_players": 17,
+    "tile_acc": 0.9973251008064516,
+    "border_tile_acc": 0.9141561712846348,
+    "latent_shape": [
+      64,
+      62,
+      125
+    ],
+    "grid_shape": [
+      992,
+      2000
+    ]
+  },
+  {
+    "map": "africa",
+    "tick": 9050,
+    "alive_players": 27,
+    "tile_acc": 0.9969997091982821,
+    "border_tile_acc": 0.9008150848344553,
+    "latent_shape": [
+      64,
+      127,
+      121
+    ],
+    "grid_shape": [
+      2032,
+      1936
+    ]
+  }
+]

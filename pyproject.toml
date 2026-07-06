@@ -3,6 +3,7 @@ name = "openfront-ae"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+    "huggingface-hub>=1.18.0",
     "numpy>=2.4.6",
     "pillow>=12.2.0",
     "torch>=2.12.0",
