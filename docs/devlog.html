@@ -82,8 +82,7 @@
 <div class="sub">
   A self-play RL agent for <a href="https://openfront.io">OpenFront.io</a>, built on the real game engine.
   Covers Jul 5–6, 2026 (the first ~30 hours). Companion docs:
-  <a href="../DESIGN.md">DESIGN.md</a> (observation/action design) ·
-  <a href="alphafront-comparison.html">AlphaFront comparison</a> ·
+  <a href="../DESIGN.md">DESIGN.md</a> (the living spec: full intent table, obs schema, head layout) ·
   <a href="../README.md">README</a> (how to run everything).
 </div>
 
@@ -103,6 +102,7 @@
   <a href="#actions">Action space</a>
   <a href="#reward">Reward design</a>
   <a href="#curriculum">Curriculum</a>
+  <a href="#alphafront">Prior art: AlphaFront</a>
   <a href="#perf">Performance engineering</a>
   <a href="#tooling">Visualization &amp; tooling</a>
   <a href="#bugs">Bug war stories</a>
@@ -267,6 +267,57 @@ Three principles, all added after watching v1 fail to progress:
 <p>
 Advancement is <b>win-gated</b>: rolling win rate over the last 40 on-stage episodes must exceed 0.5 —
 the agent must be winning more often than not, not merely surviving.
+</p>
+
+<h2 id="alphafront">Prior art: AlphaFront</h2>
+<p>
+AlphaFront (<a href="https://github.com/josh-freeman/openfront-rl">josh-freeman/openfront-rl</a>,
+HF <a href="https://huggingface.co/mischievers/openfront-rl-agent">mischievers/openfront-rl-agent</a>, "v19b")
+is the only other PPO agent on the real engine we know of — a fork with an <code>rl/</code> directory
+bolted on, trained on a SLURM cluster.
+</p>
+<div class="card lesson">
+  <b>The one-line difference.</b>
+  They made the agent blind and moved all spatial intelligence into hand-coded heuristics; we are teaching
+  the agent to see. Their bet buys fast plumbing and quick wins vs easy bots; ours buys a higher skill
+  ceiling — nothing in their design can learn geography, chokepoints, or nuke aim.
+</div>
+<table>
+  <tr><th></th><th>AlphaFront</th><th>openfront-ai</th></tr>
+  <tr><td>Observation</td>
+    <td>~96 floats: 16 player scalars + 16 neighbors × 5. No map at all.</td>
+    <td>frozen spatial AE latent (64ch @ H/16, 99.4% tile acc) + ego planes + entity tokens + raw bypass</td></tr>
+  <tr><td>Action space</td>
+    <td>MultiDiscrete [17 types, 16 neighbor targets, 5 troop fractions]; <b>no diplomacy</b></td>
+    <td>full intent surface incl. all diplomacy; factorized heads, engine legality masks</td></tr>
+  <tr><td>Tile arguments</td>
+    <td>hand-coded heuristics (closest-border-tile, <code>pickBuildTile()</code> for builds and nuke aim)</td>
+    <td>learned spatial pointer over the latent grid; bridge snaps to the best legal tile in the region</td></tr>
+  <tr><td>Network</td>
+    <td>MLP 512-512-256, ~0.5M params</td>
+    <td>CNN + token transformer + pointer heads, 5.9M params</td></tr>
+  <tr><td>Curriculum</td>
+    <td>10 win-rate-gated stages (difficulty × nations × tribes), LR warmdown on stage change</td>
+    <td>11 win-gated stages over 7 real maps + rehearsal (their gating idea, adopted)</td></tr>
+  <tr><td>Human data</td>
+    <td>none</td>
+    <td>archived-game replay pipeline + behavior cloning (placement-conditioned)</td></tr>
+  <tr><td>Live deployment</td>
+    <td>Puppeteer bot driving the browser against a policy server</td>
+    <td>native websocket client (<code>bridge/play.ts</code>) joins real lobbies, no browser needed</td></tr>
+  <tr><td>Published results</td>
+    <td>100% win rate vs Easy/2 opponents (20 games); survival plateaus ~35–47% mid-curriculum</td>
+    <td>first engine wins on stage 0 (1v1); curriculum climb in progress</td></tr>
+</table>
+<p>
+<b>What they proved that we used:</b> PPO converges on this engine at ~10 ticks per decision (the cadence
+we chose independently); a win-rate-gated opponent curriculum works here — our win-gating is their idea,
+generalized to map pools and rehearsal. <b>Where their design caps out:</b> geography-blind (heuristic nuke
+aim never improves), max 16 neighbor targets, zero diplomacy — a huge part of how humans win public games.
+<b>Still worth stealing:</b> LR warmdown after stage transitions; tiny flat generated maps (their tier-1
+"plains") as an even softer stage 0; a mid-game "beat all bots" gate so advancement doesn't wait on long
+endgames. Our clearest differentiator remains the human-replay pipeline — imitation signal their scalar
+observation could never absorb.
 </p>
 
 <h2 id="perf">Performance engineering</h2>
