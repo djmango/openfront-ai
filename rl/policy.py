@@ -32,6 +32,27 @@ NEEDS_QUANTITY = {"attack", "expand", "boat", "donate_gold", "donate_troops"}
 MASKED_NEG = -1e9
 
 
+def _local_to_global(local: torch.Tensor, gw: int) -> torch.Tensor:
+    """Batch-local flat tile index -> global (GW_MAX-stride) region index.
+
+    Batches are padded only to their own max grid, so the flat index stride
+    varies per batch; region indices stored in choices/buffers always use
+    the fixed GW_MAX stride (what IntentTranslator decodes). Padding cells
+    are masked to ~0 probability, so probabilities over real cells are
+    identical whatever the padding — logprobs stay consistent between
+    rollout and update even if the two batches padded differently."""
+    from rl.curriculum import GW_MAX
+
+    return (local // gw) * GW_MAX + (local % gw)
+
+
+def _global_to_local(region: torch.Tensor, gw: int) -> torch.Tensor:
+    from rl.curriculum import GW_MAX
+
+    r = region.clamp(min=0)  # -1 sentinels are filtered by the caller's mask
+    return (r // GW_MAX) * gw + (r % GW_MAX)
+
+
 class ResBlock(nn.Module):
     def __init__(self, c: int):
         super().__init__()
@@ -172,7 +193,9 @@ class Policy(nn.Module):
             if needs_p[b]:
                 c["player_slot"] = int(heads["player"][0][b])
             if needs_t[b]:
-                c["tile_region"] = int(heads["tile"][0][b])
+                c["tile_region"] = int(
+                    _local_to_global(heads["tile"][0][b], o["grid"].shape[3])
+                )
             if is_build[b]:
                 c["build_type"] = int(heads["build"][0][b])
             if is_nuke[b]:
@@ -181,11 +204,11 @@ class Policy(nn.Module):
                 c["quantity"] = int(heads["quantity"][0][b])
             if debug:
                 c["debug"] = {
-                    "action_probs": d_act.probs[b].cpu().numpy(),
+                    "action_probs": d_act.probs[b].float().cpu().numpy(),
                     "value": float(out["value"][b]),
                 }
             choices.append(c)
-        return choices, logp.cpu().numpy(), out["value"].cpu().numpy()
+        return choices, logp.float().cpu().numpy(), out["value"].float().cpu().numpy()
 
     def evaluate(self, o: dict, choice: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Batched logprob/entropy/value for PPO updates.
@@ -221,6 +244,9 @@ class Policy(nn.Module):
             1, choice["action"].clamp(min=0)[:, None, None].expand(-1, 1, MAX_SLOTS)
         ).squeeze(1)
         sub("player", "player_slot", pmask)
+        choice = {**choice, "tile_region": _global_to_local(
+            choice["tile_region"], o["grid"].shape[3]
+        ).where(choice["tile_region"] >= 0, choice["tile_region"])}
         sub("tile", "tile_region")
         sub("build", "build_type")
         sub("nuke", "nuke_type")

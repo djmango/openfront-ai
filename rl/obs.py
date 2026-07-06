@@ -294,14 +294,10 @@ class ObsBuilder:
 @torch.no_grad()
 def encode_grids(ae: SpatialAE, raws: list[dict], device: str) -> list[dict]:
     """Batched frozen-AE encode. Envs may be on different maps: encode per
-    shape group, then zero-pad every grid to (C, GH_MAX, GW_MAX) and emit a
-    'grid_valid' mask so one policy batch spans mixed maps.
-
-    Maps larger than the training max are padded to their own grid instead
-    (the policy is fully convolutional, so any size runs; region indices are
-    decoded with the same max(GW_MAX, gw) convention in IntentTranslator).
-    Oversized maps can't share a stacked batch with smaller ones — np.stack
-    in the caller will fail loudly rather than mis-decode."""
+    shape group. Grids come back at NATIVE latent size (no padding); use
+    collate() to pad a mixed batch to its own max before stacking. Tile
+    regions use the global GW_MAX coordinate convention regardless of
+    padding (see Policy.act), so a grid may never exceed GH_MAX x GW_MAX."""
     from rl.curriculum import GH_MAX, GW_MAX
 
     groups: dict[tuple, list[int]] = {}
@@ -313,7 +309,7 @@ def encode_grids(ae: SpatialAE, raws: list[dict], device: str) -> list[dict]:
         owners = torch.from_numpy(np.stack([raws[i]["owners"] for i in idxs])).long().to(device)
         terrain = torch.from_numpy(np.stack([raws[i]["terrain"] for i in idxs])).to(device)
         static = torch.from_numpy(np.stack([raws[i]["static"] for i in idxs])).to(device)
-        z = ae.encode(owners, terrain, static).cpu().numpy()
+        z = ae.encode(owners, terrain, static).float().cpu().numpy()
         for j, i in enumerate(idxs):
             z_by_idx[i] = z[j]
 
@@ -322,12 +318,33 @@ def encode_grids(ae: SpatialAE, raws: list[dict], device: str) -> list[dict]:
         o = {k: v for k, v in r.items() if k not in ("owners", "terrain", "static", "ego_transient")}
         grid = np.concatenate([z_by_idx[i], r["ego_transient"]]).astype(np.float32)
         gh, gw = grid.shape[1], grid.shape[2]
-        ph, pw = max(GH_MAX, gh), max(GW_MAX, gw)
-        padded = np.zeros((grid.shape[0], ph, pw), dtype=np.float32)
-        padded[:, :gh, :gw] = grid
-        valid = np.zeros((ph, pw), dtype=np.float32)
-        valid[:gh, :gw] = 1.0
-        o["grid"] = padded
-        o["grid_valid"] = valid
+        if gh > GH_MAX or gw > GW_MAX:
+            raise ValueError(f"grid {gh}x{gw} exceeds GH_MAX/GW_MAX {GH_MAX}x{GW_MAX}")
+        o["grid"] = grid
+        o["grid_valid"] = np.ones((gh, gw), dtype=np.float32)
         out.append(o)
+    return out
+
+
+def collate(obs_list: list[dict], keys: list[str]) -> dict[str, np.ndarray]:
+    """Stack per-env obs dicts into batch arrays, zero-padding 'grid' and
+    'grid_valid' to the largest grid in THIS batch (not the curriculum-wide
+    max — that wasted ~9x conv compute on small maps)."""
+    out = {}
+    gh = max(o["grid"].shape[1] for o in obs_list)
+    gw = max(o["grid"].shape[2] for o in obs_list)
+    for k in keys:
+        if k == "grid":
+            b = np.zeros((len(obs_list), obs_list[0]["grid"].shape[0], gh, gw), dtype=np.float32)
+            for i, o in enumerate(obs_list):
+                g = o["grid"]
+                b[i, :, : g.shape[1], : g.shape[2]] = g
+        elif k == "grid_valid":
+            b = np.zeros((len(obs_list), gh, gw), dtype=np.float32)
+            for i, o in enumerate(obs_list):
+                v = o["grid_valid"]
+                b[i, : v.shape[0], : v.shape[1]] = v
+        else:
+            b = np.stack([o[k] for o in obs_list])
+        out[k] = b
     return out

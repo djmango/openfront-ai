@@ -31,9 +31,14 @@ import torch.nn.functional as F
 
 from rl.bc_data import BCSampler, N_PLACEMENT_BUCKETS
 from rl.obs import ACTIONS, N_ACTIONS, encode_grids, load_ae
-from rl.policy import MASKED_NEG, Policy
+from rl.obs import collate as obs_collate
+from rl.policy import MASKED_NEG, Policy, _global_to_local
 
 CHOICE_KEYS = ["action", "player_slot", "tile_region", "build_type", "nuke_type", "quantity"]
+OBS_KEYS = [
+    "grid", "grid_valid", "players", "pmask", "scalars",
+    "legal_actions", "legal_ptarget", "legal_build", "legal_nuke",
+]
 
 
 class BCPolicy(Policy):
@@ -82,15 +87,22 @@ class BCPolicy(Policy):
 
 
 def collate(raws: list[dict], device: str) -> tuple[dict, dict, torch.Tensor]:
-    """Stack encoded raws into policy input, choice targets, cond buckets."""
-    o = {}
-    for k in ["grid", "grid_valid", "players", "pmask", "scalars",
-              "legal_actions", "legal_ptarget", "legal_build", "legal_nuke"]:
-        o[k] = torch.from_numpy(np.stack([r[k] for r in raws])).to(device)
+    """Stack encoded raws into policy input, choice targets, cond buckets.
+    Grids are padded to this batch's max (rl.obs.collate); tile_region
+    labels use the global GW_MAX stride, so convert them to this batch's
+    local flat index to match the tile head's flattening."""
+    o = {
+        k: torch.from_numpy(v).to(device)
+        for k, v in obs_collate(raws, OBS_KEYS).items()
+    }
     choice = {
         k: torch.tensor([r["choice"][k] for r in raws], dtype=torch.long, device=device)
         for k in CHOICE_KEYS
     }
+    tr = choice["tile_region"]
+    choice["tile_region"] = torch.where(
+        tr >= 0, _global_to_local(tr, o["grid"].shape[3]), tr
+    )
     cond = torch.tensor([r["cond"] for r in raws], dtype=torch.long, device=device)
     return o, choice, cond
 

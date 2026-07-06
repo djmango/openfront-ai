@@ -50,7 +50,7 @@ import type {
 } from "../openfront/src/core/Schemas";
 import { simpleHash } from "../openfront/src/core/Util";
 import type { MapManifest } from "../openfront/src/core/game/TerrainMapFileLoader";
-import { buildObs, terrainPayload } from "./common";
+import { buildObsParts, terrainPayload } from "./common";
 
 // The engine logs to console.log; stdout must stay pure JSONL.
 console.log = console.info = console.warn = (...args: unknown[]) =>
@@ -96,7 +96,7 @@ class EnvSession {
     bots: number,
     difficulty: string,
     nations: number | "default" | "disabled" = "default",
-  ): Promise<object> {
+  ): Promise<{ head: Record<string, unknown>; tiles: Buffer }> {
     const mapType = GameMapType[mapKey as keyof typeof GameMapType];
     if (!mapType) throw new Error(`unknown map ${mapKey}`);
     const diff = Difficulty[difficulty as keyof typeof Difficulty];
@@ -194,10 +194,13 @@ class EnvSession {
 
     // Advance one tick so executions initialize; agent spawns via step().
     this.game.executeNextTick();
-    return buildObs(this.game, AGENT_CLIENT_ID, null);
+    return buildObsParts(this.game, AGENT_CLIENT_ID, null);
   }
 
-  step(intents: Intent[], ticks: number): object {
+  step(
+    intents: Intent[],
+    ticks: number,
+  ): { head: Record<string, unknown>; tiles: Buffer } {
     const stamped: StampedIntent[] = intents.map((i) => ({
       ...i,
       clientID: AGENT_CLIENT_ID,
@@ -220,7 +223,7 @@ class EnvSession {
         break;
       }
     }
-    return buildObs(this.game, AGENT_CLIENT_ID, winner);
+    return buildObsParts(this.game, AGENT_CLIENT_ID, winner);
   }
 
   /** GameRecord JSON loadable by the real OpenFront client replay viewer. */
@@ -267,6 +270,18 @@ async function main() {
   const session = new EnvSession();
   const rl = readline.createInterface({ input: process.stdin });
   const write = (obj: object) => process.stdout.write(JSON.stringify(obj) + "\n");
+  // Obs responses ship the tile state as a raw binary frame after the JSON
+  // header line ("tilesBin" = byte length) — no gzip, no base64. The tile
+  // codec was pure CPU overhead on both sides of the pipe.
+  const writeObs = (
+    parts: { head: Record<string, unknown>; tiles: Buffer },
+    extra: object = {},
+  ) => {
+    process.stdout.write(
+      JSON.stringify({ ...parts.head, ...extra, tilesBin: parts.tiles.length }) + "\n",
+    );
+    process.stdout.write(parts.tiles);
+  };
 
   for await (const line of rl) {
     if (!line.trim()) continue;
@@ -289,16 +304,16 @@ async function main() {
     }
     try {
       if (msg.op === "reset") {
-        const obs = await session.reset(
+        const parts = await session.reset(
           msg.map ?? "Onion",
           msg.seed ?? "0",
           msg.bots ?? 100,
           msg.difficulty ?? "Medium",
           msg.nations ?? "default",
         );
-        write({ ...obs, ...session.terrain() });
+        writeObs(parts, session.terrain());
       } else if (msg.op === "step") {
-        write(session.step(msg.intents ?? [], msg.ticks ?? 10));
+        writeObs(session.step(msg.intents ?? [], msg.ticks ?? 10));
       } else if (msg.op === "save_record") {
         write(session.saveRecord(msg.path ?? "/tmp/openfront_record.json"));
       } else if (msg.op === "close") {

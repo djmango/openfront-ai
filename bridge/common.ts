@@ -19,36 +19,46 @@ export const LAUNCHABLE = [
   UnitType.MIRV,
 ];
 
+export function buildObsParts(
+  game: Game,
+  clientID: string,
+  winner: unknown,
+): { head: Record<string, unknown>; tiles: Buffer } {
+  const numTiles = game.width() * game.height();
+  const tiles = Buffer.from(
+    game.tileStateBuffer().buffer,
+    game.tileStateBuffer().byteOffset,
+    numTiles * 2,
+  );
+  const agent = game.playerByClientID(clientID) ?? null;
+  return {
+    head: {
+      tick: game.ticks(),
+      width: game.width(),
+      height: game.height(),
+      spawnPhase: game.inSpawnPhase(),
+      winner,
+      me: agent?.smallID() ?? -1,
+      alive: agent?.isAlive() ?? false,
+      entities: entities(game),
+      legal: legality(game, clientID),
+    },
+    tiles,
+  };
+}
+
 export function buildObs(
   game: Game,
   clientID: string,
   winner: unknown,
 ): object {
-  const numTiles = game.width() * game.height();
-  const tiles = zlib
-    .gzipSync(
-      Buffer.from(
-        game.tileStateBuffer().buffer,
-        game.tileStateBuffer().byteOffset,
-        numTiles * 2,
-      ),
-      { level: 1 },
-    )
-    .toString("base64");
-
-  const agent = game.playerByClientID(clientID) ?? null;
-
+  // JSON-only variant (gzip+base64 tiles) used where the transport is
+  // plain JSONL (bridge/play.ts). The training env uses buildObsParts and
+  // ships tiles as a raw binary frame instead.
+  const { head, tiles } = buildObsParts(game, clientID, winner);
   return {
-    tick: game.ticks(),
-    width: game.width(),
-    height: game.height(),
-    spawnPhase: game.inSpawnPhase(),
-    winner,
-    me: agent?.smallID() ?? -1,
-    alive: agent?.isAlive() ?? false,
-    tiles,
-    entities: entities(game),
-    legal: legality(game, clientID),
+    ...head,
+    tiles: zlib.gzipSync(tiles, { level: 1 }).toString("base64"),
   };
 }
 

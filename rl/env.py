@@ -21,23 +21,35 @@ FALLOUT_BIT = 13
 
 class OpenFrontEnv:
     def __init__(self):
+        # Binary stdio: JSON header lines, with obs tile state following as
+        # a raw frame of "tilesBin" bytes (no gzip/base64 — the codec was
+        # measurable CPU on both sides at 48 envs).
         self.proc = subprocess.Popen(
             [str(TSX), str(REPO_ROOT / "bridge" / "env.ts")],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             cwd=REPO_ROOT,
-            text=True,
-            bufsize=1,
         )
         self.width = 0
         self.height = 0
         self.terrain: np.ndarray | None = None
         self.me = -1
 
+    def _read_exact(self, n: int) -> bytes:
+        assert self.proc.stdout
+        chunks = []
+        while n > 0:
+            b = self.proc.stdout.read(n)
+            if not b:
+                raise RuntimeError("bridge died mid-frame")
+            chunks.append(b)
+            n -= len(b)
+        return b"".join(chunks)
+
     def _rpc(self, msg: dict) -> dict:
         assert self.proc.stdin and self.proc.stdout
-        self.proc.stdin.write(json.dumps(msg) + "\n")
+        self.proc.stdin.write((json.dumps(msg) + "\n").encode())
         self.proc.stdin.flush()
         line = self.proc.stdout.readline()
         if not line:
@@ -45,6 +57,8 @@ class OpenFrontEnv:
         out = json.loads(line)
         if "error" in out:
             raise RuntimeError(f"bridge error: {out['error']}")
+        if "tilesBin" in out:
+            out["tiles_raw"] = self._read_exact(int(out.pop("tilesBin")))
         return out
 
     def reset(
@@ -70,11 +84,11 @@ class OpenFrontEnv:
         return self._decode(self._rpc({"op": "step", "intents": intents, "ticks": ticks}))
 
     def _decode(self, obs: dict) -> dict:
-        raw = gzip.decompress(base64.b64decode(obs["tiles"]))
-        state = np.frombuffer(raw, dtype="<u2").reshape(self.height, self.width)
+        state = np.frombuffer(obs.pop("tiles_raw"), dtype="<u2").reshape(
+            self.height, self.width
+        )
         obs["owners"] = state & OWNER_MASK
         obs["fallout"] = (state >> FALLOUT_BIT) & 1
-        del obs["tiles"]
         self.me = obs["me"]
         return obs
 

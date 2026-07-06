@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import contextlib
 import os
 import time
 from pathlib import Path
@@ -24,7 +25,7 @@ from torch.utils.tensorboard import SummaryWriter
 from collections import deque
 
 from rl.curriculum import STAGES, WIN_AT, WINDOW
-from rl.obs import ACTIONS, encode_grids, load_ae
+from rl.obs import ACTIONS, collate, encode_grids, load_ae
 from rl.policy import Policy
 from rl.vec import VecEnv
 
@@ -52,8 +53,10 @@ def main() -> None:
     ap.add_argument("--ent-coef", type=float, default=0.01)
     ap.add_argument("--vf-coef", type=float, default=0.5)
     ap.add_argument("--max-episode-ticks", type=int, default=15000)
-    ap.add_argument("--decision-ticks", type=int, default=10)
+    ap.add_argument("--decision-ticks", type=int, default=10,
+                    help="unused for stepping (stages carry their own); kept for compat")
     ap.add_argument("--resume", default=None, help="policy.pt to load before training")
+    ap.add_argument("--compile", action="store_true", help="torch.compile the policy")
     args = ap.parse_args()
 
     device = (
@@ -61,6 +64,12 @@ def main() -> None:
         else "mps" if torch.backends.mps.is_available() else "cpu"
     )
     print(f"device: {device}, envs: {args.envs}")
+    torch.set_float32_matmul_precision("high")
+
+    def amp():
+        if device == "cuda":
+            return torch.autocast("cuda", dtype=torch.bfloat16)
+        return contextlib.nullcontext()
 
     out_dir = Path("runs/rl") / args.name
     writer = SummaryWriter(out_dir)
@@ -70,13 +79,15 @@ def main() -> None:
     recent_scores: deque[float] = deque(maxlen=WINDOW)
     recent_wins: deque[float] = deque(maxlen=WINDOW)
     ae = load_ae(args.ckpt, device)
-    policy = Policy().to(device)
-    opt = torch.optim.AdamW(policy.parameters(), lr=args.lr)
+    base_policy = Policy().to(device)
+    opt = torch.optim.AdamW(
+        base_policy.parameters(), lr=args.lr, fused=(device == "cuda")
+    )
     start_update = 0
     global_step = 0
     if args.resume:
         state = torch.load(args.resume, map_location=device, weights_only=False)
-        policy.load_state_dict(state["model_state_dict"])
+        base_policy.load_state_dict(state["model_state_dict"])
         if "optimizer_state_dict" in state:
             opt.load_state_dict(state["optimizer_state_dict"])
         # Checkpoint stage is authoritative on resume: --stage only seeds
@@ -91,86 +102,111 @@ def main() -> None:
             f"step {global_step}, stage {stage}"
         )
 
+    # Compile after weights load; checkpoints always save base_policy's
+    # (unprefixed) state_dict.
+    policy = torch.compile(base_policy, dynamic=True) if args.compile else base_policy
+
     T, N = args.rollout, args.envs
     rng = np.random.default_rng(0)
     episodes_done = 0
     t0 = time.time()
     t0_step = global_step
 
+    # Two env groups pipelined: while one group's Node processes step the
+    # game, the GPU encodes + acts for the other group.
+    half = max(1, N // 2)
+    groups = (list(range(half)), list(range(half, N)))
+
+    def act_group(idxs: list[int]) -> tuple:
+        obs_list = encode_grids(ae, vec.obs_group(idxs), device)
+        ot = {
+            k: torch.from_numpy(v).to(device)
+            for k, v in collate(obs_list, OBS_KEYS).items()
+        }
+        with amp():
+            choices, logp, value = policy.act(ot)
+        return obs_list, choices, logp, value
+
     for update in range(start_update + 1, args.updates + 1):
-        obs_buf: list[list[dict]] = []
-        choice_buf: list[list[dict]] = []
+        obs_buf: list[list] = [[None] * N for _ in range(T)]
+        choice_buf: list[list] = [[None] * N for _ in range(T)]
         logp_buf = np.zeros((T, N), dtype=np.float32)
         value_buf = np.zeros((T, N), dtype=np.float32)
         reward_buf = np.zeros((T, N), dtype=np.float32)
         done_buf = np.zeros((T, N), dtype=np.float32)
         action_counts = np.zeros(len(ACTIONS))
 
-        for t in range(T):
-            raws = vec.obs()
-            obs_list = encode_grids(ae, raws, device)
-            ot = {
-                k: torch.from_numpy(np.stack([o[k] for o in obs_list])).to(device)
-                for k in OBS_KEYS
-            }
-            choices, logp, value = policy.act(ot)
-            for c in choices:
-                action_counts[c["action"]] += 1
-
-            results = vec.step(choices)
-            for i, (r, d, info) in enumerate(results):
+        def record(t: int, idxs: list[int], pack: tuple, results: list) -> None:
+            nonlocal episodes_done, stage
+            obs_list, choices, logp, value = pack
+            for j, i in enumerate(idxs):
+                obs_buf[t][i] = obs_list[j]
+                choice_buf[t][i] = choices[j]
+                logp_buf[t, i] = logp[j]
+                value_buf[t, i] = value[j]
+                action_counts[choices[j]["action"]] += 1
+                r, d, info = results[j]
                 reward_buf[t, i] = r
                 done_buf[t, i] = float(d)
-                if info is not None:
-                    episodes_done += 1
-                    writer.add_scalar("episode/reward", info["reward"], global_step)
-                    writer.add_scalar("episode/length", info["length"], global_step)
-                    writer.add_scalar("episode/final_tiles", info["final_tiles"], global_step)
-                    writer.add_scalar("episode/final_tick", info["final_tick"], global_step)
-                    writer.add_scalar("episode/place", info["place"], global_step)
-                    writer.add_scalar("episode/score", info["score"], global_step)
-                    writer.add_scalar("episode/won", float(info["won"]), global_step)
-                    writer.add_scalar("curriculum/episode_stage", info["stage"], global_step)
-                    writer.add_scalar(
-                        "curriculum/rehearsal", float(info["rehearsal"]), global_step
+                if info is None:
+                    continue
+                episodes_done += 1
+                writer.add_scalar("episode/reward", info["reward"], global_step)
+                writer.add_scalar("episode/length", info["length"], global_step)
+                writer.add_scalar("episode/final_tiles", info["final_tiles"], global_step)
+                writer.add_scalar("episode/final_tick", info["final_tick"], global_step)
+                writer.add_scalar("episode/place", info["place"], global_step)
+                writer.add_scalar("episode/score", info["score"], global_step)
+                writer.add_scalar("episode/won", float(info["won"]), global_step)
+                writer.add_scalar("curriculum/episode_stage", info["stage"], global_step)
+                writer.add_scalar(
+                    "curriculum/rehearsal", float(info["rehearsal"]), global_step
+                )
+                # Only current-stage, non-rehearsal episodes count toward
+                # advancement; the gate is win rate, not placement.
+                if info["stage"] == stage and not info["rehearsal"]:
+                    recent_scores.append(info["score"])
+                    recent_wins.append(float(info["won"]))
+                if (
+                    len(recent_wins) == WINDOW
+                    and np.mean(recent_wins) > WIN_AT
+                    and stage < len(STAGES) - 1
+                ):
+                    stage += 1
+                    vec.set_stage(stage)
+                    recent_scores.clear()
+                    recent_wins.clear()
+                    st = STAGES[stage]
+                    print(
+                        f"=== curriculum advance -> stage {stage}: "
+                        f"maps={','.join(st.maps)} nations={st.nations} "
+                        f"bots={st.bots} {st.difficulty}",
+                        flush=True,
                     )
-                    # Only current-stage, non-rehearsal episodes count toward
-                    # advancement; the gate is win rate, not placement.
-                    if info["stage"] == stage and not info["rehearsal"]:
-                        recent_scores.append(info["score"])
-                        recent_wins.append(float(info["won"]))
-                    if (
-                        len(recent_wins) == WINDOW
-                        and np.mean(recent_wins) > WIN_AT
-                        and stage < len(STAGES) - 1
-                    ):
-                        stage += 1
-                        vec.set_stage(stage)
-                        recent_scores.clear()
-                        recent_wins.clear()
-                        st = STAGES[stage]
-                        print(
-                            f"=== curriculum advance -> stage {stage}: "
-                            f"maps={','.join(st.maps)} nations={st.nations} "
-                            f"bots={st.bots} {st.difficulty}",
-                            flush=True,
-                        )
 
-            obs_buf.append(obs_list)
-            choice_buf.append(choices)
-            logp_buf[t] = logp
-            value_buf[t] = value
+        pack0 = act_group(groups[0])
+        vec.send_group(groups[0], pack0[1])
+        for t in range(T):
+            pack1 = None
+            if groups[1]:
+                pack1 = act_group(groups[1])  # overlaps group 0 stepping
+                vec.send_group(groups[1], pack1[1])
+            record(t, groups[0], pack0, vec.recv_group(groups[0]))
+            if t < T - 1:
+                pack0 = act_group(groups[0])  # overlaps group 1 stepping
+                vec.send_group(groups[0], pack0[1])
+            if pack1 is not None:
+                record(t, groups[1], pack1, vec.recv_group(groups[1]))
             global_step += N
 
         # Bootstrap values and GAE per env.
-        raws = vec.obs()
-        obs_last = encode_grids(ae, raws, device)
-        with torch.no_grad():
+        obs_last = encode_grids(ae, vec.obs(), device)
+        with torch.no_grad(), amp():
             ot = {
-                k: torch.from_numpy(np.stack([o[k] for o in obs_last])).to(device)
-                for k in OBS_KEYS
+                k: torch.from_numpy(v).to(device)
+                for k, v in collate(obs_last, OBS_KEYS).items()
             }
-            last_value = policy.forward(ot)["value"].cpu().numpy()
+            last_value = policy.forward(ot)["value"].float().cpu().numpy()
         adv = np.zeros((T, N), dtype=np.float32)
         last_gae = np.zeros(N, dtype=np.float32)
         for t in reversed(range(T)):
@@ -186,14 +222,10 @@ def main() -> None:
         ret_t = torch.from_numpy(returns.reshape(-1)).to(device)
         old_logp = torch.from_numpy(logp_buf.reshape(-1)).to(device)
 
-        # Rollout buffer stays on CPU (48x32 grids are GBs); minibatches
-        # move to the GPU one at a time.
+        # Rollout buffer stays on CPU at native grid sizes; each minibatch
+        # is collated (padded to its own max grid) and moved to GPU alone.
         all_obs = [o for row in obs_buf for o in row]
         all_choice = [c for row in choice_buf for c in row]
-        obs_t = {
-            k: torch.from_numpy(np.stack([o[k] for o in all_obs]))
-            for k in OBS_KEYS
-        }
         choice_t = {
             "action": torch.tensor([c["action"] for c in all_choice])
         }
@@ -208,10 +240,13 @@ def main() -> None:
             rng.shuffle(idx)
             for mb in np.split(idx, max(1, B_total // args.minibatch)):
                 mbt = torch.from_numpy(mb)
-                o_mb = {k: v[mbt].to(device) for k, v in obs_t.items()}
+                o_np = collate([all_obs[i] for i in mb], OBS_KEYS)
+                o_mb = {k: torch.from_numpy(v).to(device) for k, v in o_np.items()}
                 c_mb = {k: v[mbt].to(device) for k, v in choice_t.items()}
                 mbt = mbt.to(device)
-                logp, ent, value = policy.evaluate(o_mb, c_mb)
+                with amp():
+                    logp, ent, value = policy.evaluate(o_mb, c_mb)
+                logp, ent, value = logp.float(), ent.float(), value.float()
                 ratio = (logp - old_logp[mbt]).exp()
                 a_mb = adv_t[mbt]
                 pg = -torch.min(
@@ -229,7 +264,7 @@ def main() -> None:
                 ent_sum += float(ent.mean().item())
                 n_mb += 1
 
-        tps = (global_step - t0_step) * args.decision_ticks / (time.time() - t0)
+        tps = (global_step - t0_step) * STAGES[stage].decision_ticks / (time.time() - t0)
         writer.add_scalar("loss/policy", pl_sum / n_mb, global_step)
         writer.add_scalar("loss/value", vl_sum / n_mb, global_step)
         writer.add_scalar("loss/entropy", ent_sum / n_mb, global_step)
@@ -262,7 +297,7 @@ def main() -> None:
             tmp = out_dir / "policy.pt.tmp"
             torch.save(
                 {
-                    "model_state_dict": policy.state_dict(),
+                    "model_state_dict": base_policy.state_dict(),
                     "optimizer_state_dict": opt.state_dict(),
                     "stage": stage,
                     "update": update,
