@@ -64,7 +64,8 @@ function mapDirName(mapType: GameMapType): string {
   const key = Object.keys(GameMapType).find(
     (k) => GameMapType[k as keyof typeof GameMapType] === mapType,
   )!;
-  return key.charAt(0).toLowerCase() + key.slice(1);
+  // Map dirs are fully lowercase; matters on case-sensitive filesystems.
+  return key.toLowerCase();
 }
 
 function seedToGameID(seed: string): string {
