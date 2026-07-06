@@ -45,7 +45,7 @@ class EnvWorker:
 
     def reset_episode(self) -> None:
         self.stage = int(self.stage_val.value)
-        self.map_name, bots, difficulty, self.rehearsal = sample_episode(
+        self.map_name, bots, difficulty, nations, self.rehearsal = sample_episode(
             self.stage, self.rng
         )
         self.obs = self.env.reset(
@@ -53,6 +53,7 @@ class EnvWorker:
             seed=f"w{self.idx}-ep{self.episode}",
             bots=bots,
             difficulty=difficulty,
+            nations=nations,
         )
         self.builder.start_game(self.env.terrain)
         self.obs = spawn_randomly(self.env, self.rng)

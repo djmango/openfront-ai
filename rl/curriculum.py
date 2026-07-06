@@ -57,6 +57,7 @@ class Stage:
     maps: tuple[str, ...]
     bots: int
     difficulty: str
+    nations: int | str = "default"  # exact opponent count, or the map's default
 
 
 # Map pool (all in the AE training set) with featurized grid sizes (H//16 x W//16):
@@ -66,10 +67,14 @@ ALL_MAPS = (
     "Onion", "Pangaea", "Caucasus", "BlackSea", "BetweenTwoSeas", "World", "Asia",
 )
 
+# Early stages pin the opponent count (1v1, then 1v3) so wins are actually
+# reachable and the win signal is dense; later stages return to the map's
+# full nation roster plus tribe bots.
 STAGES = [
-    Stage(("Onion",), 5, "Easy"),
-    Stage(("Onion", "Pangaea"), 15, "Easy"),
-    Stage(("Pangaea", "Caucasus"), 15, "Easy"),
+    Stage(("Onion",), 0, "Easy", nations=1),
+    Stage(("Onion",), 0, "Easy", nations=3),
+    Stage(("Onion", "Pangaea"), 5, "Easy", nations=3),
+    Stage(("Pangaea", "Caucasus"), 10, "Easy", nations=6),
     Stage(("Pangaea", "Caucasus", "BlackSea"), 30, "Easy"),
     Stage(("BlackSea", "BetweenTwoSeas", "Caucasus"), 30, "Medium"),
     Stage(("World", "Asia", "BlackSea"), 50, "Medium"),
@@ -84,17 +89,19 @@ GH_MAX = 75
 GW_MAX = 125
 
 
-def sample_episode(stage: int, rng: np.random.Generator) -> tuple[str, int, str, bool]:
-    """Pick (map, bots, difficulty, is_rehearsal) for one episode.
+def sample_episode(
+    stage: int, rng: np.random.Generator
+) -> tuple[str, int, str, int | str, bool]:
+    """Pick (map, bots, difficulty, nations, is_rehearsal) for one episode.
 
     Rehearsal draws a map from a random earlier stage's pool but keeps the
-    current stage's bots/difficulty: old maps with harder opposition.
+    current stage's bots/difficulty/nations: old maps with harder opposition.
     """
     cur = STAGES[stage]
     if stage > 0 and rng.random() < REHEARSAL_P:
         past = STAGES[int(rng.integers(stage))]
-        return str(rng.choice(past.maps)), cur.bots, cur.difficulty, True
-    return str(rng.choice(cur.maps)), cur.bots, cur.difficulty, False
+        return str(rng.choice(past.maps)), cur.bots, cur.difficulty, cur.nations, True
+    return str(rng.choice(cur.maps)), cur.bots, cur.difficulty, cur.nations, False
 
 
 def timeweight(tick: int) -> float:

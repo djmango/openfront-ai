@@ -95,6 +95,7 @@ class EnvSession {
     seed: string,
     bots: number,
     difficulty: string,
+    nations: number | "default" | "disabled" = "default",
   ): Promise<object> {
     const mapType = GameMapType[mapKey as keyof typeof GameMapType];
     if (!mapType) throw new Error(`unknown map ${mapKey}`);
@@ -107,7 +108,7 @@ class EnvSession {
       gameMode: GameMode.FFA,
       gameType: GameType.Singleplayer,
       difficulty: diff,
-      nations: "default",
+      nations,
       donateGold: true,
       donateTroops: true,
       bots,
@@ -153,7 +154,7 @@ class EnvSession {
       (p) =>
         new PlayerInfo(p.username, PlayerType.Human, p.clientID, random.nextID()),
     );
-    const nations = createNationsForGame(
+    const gameNations = createNationsForGame(
       gameStart,
       manifest.nations,
       manifest.additionalNations ?? [],
@@ -163,7 +164,7 @@ class EnvSession {
 
     this.game = createGame(
       humans,
-      nations,
+      gameNations,
       gameMap,
       miniGameMap,
       config,
@@ -275,6 +276,7 @@ async function main() {
       seed?: string;
       bots?: number;
       difficulty?: string;
+      nations?: number | "default" | "disabled";
       intents?: Intent[];
       ticks?: number;
       path?: string;
@@ -292,6 +294,7 @@ async function main() {
           msg.seed ?? "0",
           msg.bots ?? 100,
           msg.difficulty ?? "Medium",
+          msg.nations ?? "default",
         );
         write({ ...obs, ...session.terrain() });
       } else if (msg.op === "step") {
