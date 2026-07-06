@@ -76,10 +76,10 @@ index 0304224bf..da6c3714d 100644
      if (clientMsg.type === "intent") {
 diff --git a/src/client/RlDebugOverlay.ts b/src/client/RlDebugOverlay.ts
 new file mode 100644
-index 000000000..eabc3228a
+index 000000000..010ea13b2
 --- /dev/null
 +++ b/src/client/RlDebugOverlay.ts
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,149 @@
 +/**
 + * RL replay tooling: live model-debug panel.
 + *
@@ -89,13 +89,14 @@ index 000000000..eabc3228a
 + * ClientGameRunner).
 + *
 + * Sources tried in order, first 200 wins:
-+ *   - localStorage "rlDebugHost"  (live agent process, rl.play --debug-port)
-+ *   - localStorage "apiHost"      (replay shim, scripts/serve_replay.py)
++ *   - localStorage "rlDebugHost"    (override for a non-default live port)
++ *   - localStorage "apiHost"        (replay shim, scripts/serve_replay.py)
++ *   - http://localhost:8988         (rl.play --debug-port default; only
++ *     probed when the client itself runs on localhost)
 + * at `${host}/debug/${gameID}`. Payload: { actions: string[], log: [...],
 + * live?: boolean }. When live, the log is re-fetched every 2s.
 + *
-+ * Does nothing unless one of those localStorage keys is set, or when
-+ * localStorage "rlDebugOverlay" === "0".
++ * Disable with localStorage "rlDebugOverlay" = "0".
 + */
 +
 +interface RlDebugEntry {
@@ -127,9 +128,13 @@ index 000000000..eabc3228a
 +  let hosts: string[];
 +  try {
 +    if (localStorage.getItem("rlDebugOverlay") === "0") return;
++    const local = ["localhost", "127.0.0.1"].includes(
++      window.location.hostname,
++    );
 +    hosts = [
 +      localStorage.getItem("rlDebugHost"),
 +      localStorage.getItem("apiHost"),
++      local ? "http://localhost:8988" : null,
 +    ].filter((h): h is string => !!h);
 +  } catch {
 +    return;
@@ -137,17 +142,22 @@ index 000000000..eabc3228a
 +  if (hosts.length === 0) return;
 +
 +  void (async () => {
-+    for (const host of hosts) {
-+      let data: RlDebugPayload;
-+      try {
-+        const resp = await fetch(`${host}/debug/${gameID}`);
-+        if (!resp.ok) continue;
-+        data = (await resp.json()) as RlDebugPayload;
-+      } catch {
-+        continue;
++    // A few attempts so a feed that comes up slightly after the first
++    // tick (or a slow shim) still gets the overlay.
++    for (let attempt = 0; attempt < 3; attempt++) {
++      for (const host of hosts) {
++        let data: RlDebugPayload;
++        try {
++          const resp = await fetch(`${host}/debug/${gameID}`);
++          if (!resp.ok) continue;
++          data = (await resp.json()) as RlDebugPayload;
++        } catch {
++          continue;
++        }
++        run(data, `${host}/debug/${gameID}`);
++        return;
 +      }
-+      run(data, `${host}/debug/${gameID}`);
-+      return;
++      await new Promise((r) => setTimeout(r, 5000));
 +    }
 +  })();
 +}

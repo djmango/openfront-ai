@@ -185,16 +185,12 @@ uv run python -m rl.play --policy /tmp/policy.pt --game <LOBBY_ID>
 # "AgentRL" appears in the lobby; Start Game and fight it.
 ```
 
-To watch the model think while you fight it, `rl.play` serves its live
-decisions on `--debug-port` (default 8988). One-time, in the browser
-console before the game starts:
-
-```js
-localStorage.setItem("rlDebugHost", "http://localhost:8988")
-```
-
-The same MODEL panel (action, value, probability bars, recent log) then
-tracks the agent in real time. Remove the key to turn it off.
+While you fight it, the MODEL panel (action, value, probability bars,
+recent log) tracks the agent in real time — `rl.play` serves its decisions
+on `--debug-port` (default 8988) and the client probes that port
+automatically on localhost. No setup; disable with
+`localStorage.setItem("rlDebugOverlay", "0")`, or set `rlDebugHost` if you
+picked a non-default port.
 
 ## Roadmap
 
