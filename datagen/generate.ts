@@ -28,13 +28,8 @@ import {
   UnitType,
 } from "../openfront/src/core/game/Game";
 import { createGame } from "../openfront/src/core/game/GameImpl";
-import { GameMapLoader, MapData } from "../openfront/src/core/game/GameMapLoader";
 import { GameUpdateType } from "../openfront/src/core/game/GameUpdates";
 import { createNationsForGame } from "../openfront/src/core/game/NationCreation";
-import {
-  genTerrainFromBin,
-  MapManifest,
-} from "../openfront/src/core/game/TerrainMapLoader";
 import { Config } from "../openfront/src/core/configuration/Config";
 import { DoomsdayClockExecution } from "../openfront/src/core/execution/DoomsdayClockExecution";
 import { Executor } from "../openfront/src/core/execution/ExecutionManager";
@@ -44,110 +39,12 @@ import { WinCheckExecution } from "../openfront/src/core/execution/WinCheckExecu
 import { PseudoRandom } from "../openfront/src/core/PseudoRandom";
 import { GameConfig, GameStartInfo } from "../openfront/src/core/Schemas";
 import { simpleHash } from "../openfront/src/core/Util";
+import { loadFreshTerrain, snapshotEntities } from "./common";
 
 const REPO_ROOT = path.join(__dirname, "..");
-const MAPS_DIR = path.join(REPO_ROOT, "openfront", "resources", "maps");
-
-class NodeMapLoader implements GameMapLoader {
-  getMapData(map: GameMapType): MapData {
-    const key = Object.keys(GameMapType).find(
-      (k) => GameMapType[k as keyof typeof GameMapType] === map,
-    );
-    if (!key) throw new Error(`Unknown map: ${map}`);
-    const dir = path.join(MAPS_DIR, key.toLowerCase());
-    return {
-      mapBin: async () => new Uint8Array(fs.readFileSync(path.join(dir, "map.bin"))),
-      map4xBin: async () =>
-        new Uint8Array(fs.readFileSync(path.join(dir, "map4x.bin"))),
-      map16xBin: async () =>
-        new Uint8Array(fs.readFileSync(path.join(dir, "map16x.bin"))),
-      manifest: async () =>
-        JSON.parse(
-          fs.readFileSync(path.join(dir, "manifest.json"), "utf8"),
-        ) as MapManifest,
-      webpPath: "",
-    };
-  }
-}
 
 interface Snapshot {
   tick: number;
-}
-
-/** Full entity state for one snapshot: everything the unified AE trains on. */
-function snapshotEntities(game: Game): object {
-  const players = game.players().map((p) => ({
-    id: p.smallID(),
-    name: p.name(),
-    type: p.type(),
-    troops: Math.round(p.troops()),
-    gold: p.gold().toString(),
-    tiles: p.numTilesOwned(),
-    alive: p.isAlive(),
-    traitor: p.isTraitor(),
-    disconnected: p.isDisconnected(),
-    targets: p.targets().map((t) => t.smallID()),
-    embargoes: p.getEmbargoes().map((e) => e.target.smallID()),
-    // Incoming/outgoing alliance requests (pending only).
-    reqsIn: p.incomingAllianceRequests().map((r) => r.requestor().smallID()),
-    reqsOut: p.outgoingAllianceRequests().map((r) => r.recipient().smallID()),
-    // Sparse: only players this one has a stored (non-default) relation with.
-    relations: p
-      .allRelationsSorted()
-      .map((r) => [r.player.smallID(), r.relation]),
-  }));
-
-  const alliances: number[][] = [];
-  const seenAlliance = new Set<string>();
-  for (const p of game.players()) {
-    for (const a of p.alliances()) {
-      const x = a.requestor().smallID();
-      const y = a.recipient().smallID();
-      const key = x < y ? `${x}:${y}` : `${y}:${x}`;
-      if (!seenAlliance.has(key)) {
-        seenAlliance.add(key);
-        alliances.push([x, y, a.expiresAt()]);
-      }
-    }
-  }
-
-  const units = game.players().flatMap((p) =>
-    p.units().map((u) => {
-      const tt = u.targetTile();
-      return {
-        type: u.type(),
-        owner: p.smallID(),
-        x: game.x(u.tile()),
-        y: game.y(u.tile()),
-        // Destination for units in transit (nukes, transports, warships):
-        // where it will land matters more than where it currently is.
-        tx: tt !== undefined ? game.x(tt) : null,
-        ty: tt !== undefined ? game.y(tt) : null,
-        samLock: u.targetedBySAM(),
-        level: u.level(),
-        health: u.hasHealth() ? u.health() : null,
-        constructing: u.isUnderConstruction(),
-        cooldown: u.isInCooldown(),
-        troops: Math.round(u.troops()),
-      };
-    }),
-  );
-
-  const attacks = game.players().flatMap((p) =>
-    p.outgoingAttacks().map((a) => {
-      const src = a.sourceTile();
-      return {
-        from: p.smallID(),
-        to: a.target().isPlayer() ? a.target().smallID() : 0,
-        troops: Math.round(a.troops()),
-        retreating: a.retreating(),
-        srcX: src !== null ? game.x(src) : null,
-        srcY: src !== null ? game.y(src) : null,
-      };
-    }),
-  );
-
-  return { players, alliances, units, attacks };
 }
 
 async function runGame(opts: {
@@ -172,6 +69,7 @@ async function runGame(opts: {
     infiniteGold: false,
     infiniteTroops: false,
     instantBuild: false,
+    randomSpawn: false,
   };
 
   const gameStart: GameStartInfo = {
@@ -182,21 +80,7 @@ async function runGame(opts: {
   };
 
   const config = new Config(gameConfig, null, false);
-  // Deliberately avoid loadTerrainMap(): it caches the mutable GameMap object
-  // across games, so a second game would inherit the first game's ownership
-  // state. Generating from the binary gives each game a fresh map.
-  const loader = new NodeMapLoader().getMapData(mapType);
-  const manifest = await loader.manifest();
-  const terrain = {
-    nations: manifest.nations,
-    additionalNations: manifest.additionalNations ?? [],
-    gameMap: await genTerrainFromBin(manifest.map, await loader.mapBin()),
-    miniGameMap: await genTerrainFromBin(
-      manifest.map4x,
-      await loader.map4xBin(),
-    ),
-    teamGameSpawnAreas: manifest.teamGameSpawnAreas,
-  };
+  const terrain = await loadFreshTerrain(mapType, GameMapSize.Normal);
   const random = new PseudoRandom(simpleHash(gameID));
   const nations = createNationsForGame(
     gameStart,

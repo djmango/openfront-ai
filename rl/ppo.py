@@ -163,19 +163,19 @@ def main() -> None:
         ret_t = torch.from_numpy(returns.reshape(-1)).to(device)
         old_logp = torch.from_numpy(logp_buf.reshape(-1)).to(device)
 
+        # Rollout buffer stays on CPU (48x32 grids are GBs); minibatches
+        # move to the GPU one at a time.
         all_obs = [o for row in obs_buf for o in row]
         all_choice = [c for row in choice_buf for c in row]
         obs_t = {
-            k: torch.from_numpy(np.stack([o[k] for o in all_obs])).to(device)
+            k: torch.from_numpy(np.stack([o[k] for o in all_obs]))
             for k in OBS_KEYS
         }
         choice_t = {
-            "action": torch.tensor([c["action"] for c in all_choice], device=device)
+            "action": torch.tensor([c["action"] for c in all_choice])
         }
         for k in SUB_KEYS:
-            choice_t[k] = torch.tensor(
-                [c.get(k, -1) for c in all_choice], device=device
-            )
+            choice_t[k] = torch.tensor([c.get(k, -1) for c in all_choice])
 
         B_total = T * N
         idx = np.arange(B_total)
@@ -184,9 +184,10 @@ def main() -> None:
         for _ in range(args.epochs):
             rng.shuffle(idx)
             for mb in np.split(idx, max(1, B_total // args.minibatch)):
-                mbt = torch.from_numpy(mb).to(device)
-                o_mb = {k: v[mbt] for k, v in obs_t.items()}
-                c_mb = {k: v[mbt] for k, v in choice_t.items()}
+                mbt = torch.from_numpy(mb)
+                o_mb = {k: v[mbt].to(device) for k, v in obs_t.items()}
+                c_mb = {k: v[mbt].to(device) for k, v in choice_t.items()}
+                mbt = mbt.to(device)
                 logp, ent, value = policy.evaluate(o_mb, c_mb)
                 ratio = (logp - old_logp[mbt]).exp()
                 a_mb = adv_t[mbt]

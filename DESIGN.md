@@ -19,6 +19,12 @@ Everything below is grounded in the engine's actual intent schemas
 (`openfront/src/core/Schemas.ts`) and `Player`/`Game` interfaces — nothing
 invented.
 
+**Prior art:** AlphaFront (josh-freeman/openfront-rl) trains PPO on the
+real engine with a scalar-only observation and heuristic tile choice — see
+[docs/alphafront-comparison.html](docs/alphafront-comparison.html) for a
+full comparison and the ideas worth borrowing (win-rate-gated opponent
+curriculum, LR warmdown, live-deployment bot).
+
 ## The full action surface
 
 Every gameplay intent the engine accepts (admin/lobby intents excluded):

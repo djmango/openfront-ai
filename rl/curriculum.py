@@ -86,11 +86,15 @@ def strengths(entities: dict, land_total: int) -> dict[int, float]:
 
 def placement(entities: dict, me: int, agent_alive: bool, land_total: int) -> tuple[int, int]:
     """Returns (place, n_players). Dead: behind everyone still alive.
-    Alive: ranked among the living by composite strength."""
-    n = len(entities["players"])
+    Alive: ranked among the living by composite strength. The engine may
+    drop a dead agent from the player list entirely, so count it back in
+    and clamp so place never exceeds n."""
+    ids = {p["id"] for p in entities["players"]}
+    n = len(ids) + (0 if me in ids else 1)
     s = strengths(entities, land_total)
     if not agent_alive or me not in s:
-        return 1 + len(s), n
+        others_alive = sum(1 for pid in s if pid != me)
+        return min(1 + others_alive, n), n
     mine = s[me]
     better = sum(1 for pid, v in s.items() if pid != me and v > mine)
     return 1 + better, n

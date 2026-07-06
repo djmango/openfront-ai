@@ -241,7 +241,9 @@ class EnvSession {
 
   private entities(): object {
     const game = this.game;
-    const players = game.players().map((p) => ({
+    // allPlayers(): game.players() filters to living players, which would
+    // drop the dead agent (and everyone eliminated) from placement math.
+    const players = game.allPlayers().map((p) => ({
       id: p.smallID(),
       pid: p.id(), // persistent ID; intents reference players by this
       type: p.type(),
