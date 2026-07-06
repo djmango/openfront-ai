@@ -106,11 +106,29 @@ Details:
   (~375k full-state snapshots, 250 games, 10 maps)
 - Checkpoints: [djmango/openfront-tile-autoencoder](https://huggingface.co/djmango/openfront-tile-autoencoder)
 
+## RL (in progress)
+
+- `bridge/env.ts` — persistent Node process wrapping the engine: JSONL
+  reset/step over stdio, ships the packed tile grid (gzip+base64), full
+  entities, and exact legality masks from engine calls each decision step.
+- `rl/env.py` — Python subprocess wrapper.
+- `rl/obs.py` — observation builder: frozen AE latent + ego ownership
+  planes + exact transient-unit planes (nukes with impact points, SAM
+  locks) + per-player bypass features + legality masks.
+- `rl/policy.py` — conv trunk, factorized masked heads: action type,
+  player-target pointer, tile-region pointer, build/nuke type, quantity.
+- `rl/ppo.py` — PPO + GAE, TensorBoard logging (`runs/rl/<name>`):
+
+```bash
+uv run python -m rl.ppo --map Onion --updates 1000 --name ppo_v1
+uv run tensorboard --logdir runs/rl   # live dashboard
+```
+
 ## Roadmap
 
 1. ~~Headless datagen + spatial autoencoder~~ (done, above)
-2. Environment bridge (reset/step over the headless engine, obs + legality
-   masks out, intents in)
-3. PPO agent on the frozen encoder + bypass features, full action surface
-   with factorized heads (see `DESIGN.md`)
+2. ~~Environment bridge + obs builder + PPO scaffold~~ (done, above)
+3. Scale PPO: parallel envs (the env loop, not the net, is the bottleneck),
+   remaining action heads (upgrade/delete/move-warship/cancel-boat),
+   reward shaping beyond territory delta
 4. Self-play league
