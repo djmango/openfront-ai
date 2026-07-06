@@ -19,15 +19,17 @@
 
 <body>
 <h1>openfront-ai devlog</h1>
-<p class="d">July 6, 2026 - the first ~30 hours. A self-play RL agent for
+<p class="d">July 6, 2026, ~24 hours in. A self-play RL agent for
 <a href="https://openfront.io">OpenFront.io</a>, built on the real game engine.
-See also: <a href="../DESIGN.md">DESIGN.md</a> (the living spec - intent table, obs schema, head layout),
+See also: <a href="../DESIGN.md">DESIGN.md</a> (the living spec: intent table, obs schema, head layout),
 <a href="../README.md">README</a> (how to run everything).</p>
 
 <ul>
   <li><a href="#status">Status</a></li>
+  <li><a href="#runs">Run ledger</a></li>
   <li><a href="#timeline">Timeline</a></li>
   <li><a href="#obs">Observation: compress the map, bypass the rest</a></li>
+  <li><a href="#ae31">AE v3.1: the border-accuracy push</a></li>
   <li><a href="#actions">Action space</a></li>
   <li><a href="#reward">Reward</a></li>
   <li><a href="#curriculum">Curriculum</a></li>
@@ -42,8 +44,10 @@ See also: <a href="../DESIGN.md">DESIGN.md</a> (the living spec - intent table, 
 
 <h3 id="status">Status</h3>
 <p>
-Two PPO runs live on RTX 5090 pods: <code>ppo_v2c</code> (restarted on the new curriculum) and
-<code>ppo_v3</code>. Both have produced genuine engine wins on stage 0 (1v1 vs one nation on Onion) -
+One PPO run is live: <code>ppo_v3</code>, trained from scratch on curriculum v2, now at stage 4
+(30 bots, three maps) with a 60-70% rolling win rate. Its rival <code>ppo_v2c</code>, warm-started
+from v2b weights, was retired Jul 6 evening after the fresh run overtook it by a full curriculum
+stage. Both produced genuine engine wins on stage 0 (1v1 vs one nation on Onion),
 the first time the win condition has actually fired, partly because the curriculum now makes wins
 reachable and partly because win detection was silently broken until today (<a href="#bugs">bugs</a>).
 A parallel experiment is training a behavior-cloning warm start from archived human games.
@@ -51,47 +55,101 @@ The full observe→act→reward loop, a 7-map win-gated curriculum, restart-proo
 complete visualization suite (real-client replay videos with a live model-debug overlay, plus live play
 against the agent) are in place.
 </p>
-<p class="d">
-Numbers: 375k full-state snapshots across 10 maps · AE tile accuracy 99.4% · 5.9M-param policy ·
-11 curriculum stages · first 2 engine wins Jul 6.
+<p>
+On the observation side, the encoder got its bake-off (<a href="#ae31">AE v3.1</a>): benchmarking the
+bot-trained AE on real human games exposed a 16-point border-accuracy gap, and parallel ablations found the fix: latent <i>resolution</i>, not channel count. The new best encoder
+(v3.1 @ 1/8 latent) reconstructs borders at 89.3% on human games / 96.1% on bot games, up from
+71.8% / 87.5%.
 </p>
+<p class="d">
+Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% → 89.3% (human) ·
+5.9M-param policy · 11 curriculum stages · first 2 engine wins Jul 6.
+</p>
+
+<h3 id="runs">Run ledger</h3>
+<p>What is running, what is done, and what is stale. All RL/BC still loads frozen
+<code>ae_v3.pt</code> until the v3.1 winner is wired into <code>rl/obs.py</code>.</p>
+<table>
+  <tr><th>run</th><th>status</th><th>notes</th></tr>
+  <tr><td><code>ppo_v3</code></td><td>active</td>
+    <td>Curriculum v2 from scratch. Stage 4 (30 bots, Pangaea/Caucasus/BlackSea) by Jul 6
+    evening, rolling win 0.6-0.7, roll-score 0.93. The run to bet on.</td></tr>
+  <tr><td><code>ppo_v2c</code></td><td><b>retired</b> Jul 6</td>
+    <td>Same curriculum v2, warm-started from v2b weights. Stalled at stage 3 (win rate
+    0.07-0.17, entropy stuck near 8) while from-scratch v3 sailed past to stage 4. Final
+    checkpoint (update 502, 771k steps) on HF as <code>ppo_v2c/policy.pt</code>. See
+    <a href="#lessons">lessons</a>: warm-starting from a stale reward/curriculum hurt.</td></tr>
+  <tr><td><code>bc_v0_pilot</code></td><td>active</td>
+    <td>Outcome-conditioned BC on partial human sidecars (~50 games). Feedforward policy,
+    placement conditioning. Data-loader cache fix landed; throughput still tuning.</td></tr>
+  <tr><td><code>bc_seq_v1</code></td><td>bootstrapping</td>
+    <td>Temporal BC (--seq 8). Waiting on HF dataset extract + bc sidecars.</td></tr>
+  <tr><td><code>ae_v31_d8</code></td><td><b>done</b></td>
+    <td>v3.1 @ 1/8 latent. Best border accuracy: 89.3% human / 96.1% bot. On HF as
+    <code>ae_v31_d8.pt</code>. Pending: wire into RL obs + optional owner-crop bypass.</td></tr>
+  <tr><td><code>ae_v31</code></td><td>done</td>
+    <td>Full v3.1 decoder/loss stack @ 1/16. Finished 40k steps; human borders 78.5%
+    (worse than mixed-data v3 retrain). Superseded by d8.</td></tr>
+  <tr><td><code>ae_v31_c96</code>, <code>ae_v31_d8c32</code></td><td>in flight</td>
+    <td>Channel-count control (96ch @ 1/16) and compact 1/8 x 32ch variant. Decide after
+    both finish whether d8c32 matches d8 at half the latent footprint.</td></tr>
+  <tr><td><code>ae_v3_mix</code></td><td>partial</td>
+    <td>Homelab bot+human retrain, OOM at step 22.7k. Proved data helps (80.1% human borders)
+    but run didn't finish.</td></tr>
+  <tr><td><code>ppo_v2b</code>, v1 curriculum</td><td>stale</td>
+    <td>Reached stage 4 on 90-player Pangaea with top-third placement but 0 wins.
+    Curriculum, reward, and win counting all changed since; checkpoint only useful as
+    warm start for v2c, not as a progress metric.</td></tr>
+  <tr><td><code>ppo_smoke</code>, <code>ppo_pod1</code>, etc.</td><td>archived</td>
+    <td>Early plumbing runs. No longer representative.</td></tr>
+</table>
+<p class="d"><b>Is PPO actually improving?</b> Yes, but the signal was hard to read. Placement-gated
+curriculum v1 looked like progress (roll-score ~0.65 on Pangaea) while the agent never won. Curriculum
+v2 reset both runs to 1v1, win detection was broken until 12:06, and both policies now win stage 0 in
+replay. By evening v3 had cleanly won the head-to-head: stage 4 with 60-70% wins vs v2c stuck at
+stage 3 with 7-17%, which is why v2c was retired. Neither lineage has been trained with the new
+encoder or BC warm start yet.</p>
 
 <h3 id="timeline">Timeline</h3>
 <ul>
-  <li><b>Jul 5 eve</b> - headless datagen + tile AE v1. TS runner boots the real engine in Node,
+  <li><b>Jul 5 eve:</b> headless datagen + tile AE v1. TS runner boots the real engine in Node,
     plays bot games, dumps packed tile grids + full entity state every 10 ticks.</li>
-  <li><b>Jul 5 night</b> - AE v2: one unified latent over ALL state. Spatial recon excellent; exact
+  <li><b>Jul 5 night:</b> AE v2: one unified latent over ALL state. Spatial recon excellent; exact
     facts not (alliance pairs F1 0.67, troop ordering 0.81 after four tuning runs).</li>
-  <li><b>Jul 5 23:14</b> - AE v3: spatial-only + bypass split. The pivotal correction. 1.17M params,
-    64ch latent per 16×16 region, structures at P/R 1.0 through the latent.</li>
-  <li><b>Jul 5 23:25 → Jul 6 00:36</b> - RL scaffold → vectorized PPO → curriculum v1. Engine bridge
+  <li><b>Jul 5 23:14:</b> AE v3: spatial-only + bypass split. The pivotal correction. 1.17M params,
+    64ch latent per 16x16 region, structures at P/R 1.0 through the latent.</li>
+  <li><b>Jul 5 23:25 → Jul 6 00:36:</b> RL scaffold → vectorized PPO → curriculum v1. Engine bridge
     over stdio, obs builder on the frozen AE, factorized masked heads, strength-index reward.</li>
-  <li><b>Jul 6 morning</b> - human-game pipeline (fetch archive, hash-verified deterministic replay to
-    snapshots, HF upload) and restart-proof cloud training (full-state checkpoints, pod supervisor,
-    HF checkpoint sync). Pods became disposable.</li>
-  <li><b>Jul 6 10:27–11:32</b> - GameRecord replays (bit-identical in the real client) and the
+  <li><b>Jul 6 morning:</b> human-game pipeline (fetch archive, hash-verified deterministic replay to
+    snapshots, HF upload) and restart-proof cloud training (full-state checkpoints, supervised
+    restarts, HF checkpoint sync). Training hosts became disposable.</li>
+  <li><b>Jul 6 10:27–11:32:</b> GameRecord replays (bit-identical in the real client) and the
     live-lobby agent client: fight the policy from a normal browser.</li>
-  <li><b>Jul 6 11:07–11:19</b> - curriculum v2: map pools, 25% rehearsal, win-gated advancement,
+  <li><b>Jul 6 11:07–11:19:</b> curriculum v2: map pools, 25% rehearsal, win-gated advancement,
     1v1 → 1v3 start for dense wins.</li>
-  <li><b>Jul 6 11:40</b> - behavior cloning from human games (placement-conditioned; optional
+  <li><b>Jul 6 11:40:</b> behavior cloning from human games (placement-conditioned; optional
     temporal transformer).</li>
-  <li><b>Jul 6 12:06</b> - win-detection bug found and fixed. Every win-rate stat before this is
+  <li><b>Jul 6 12:06:</b> win-detection bug found and fixed. Every win-rate stat before this is
     invalid.</li>
-  <li><b>Jul 6 12:20</b> - training speed overhaul: per-batch padding, pipelined rollout, bf16,
+  <li><b>Jul 6 12:20:</b> training speed overhaul: per-batch padding, pipelined rollout, bf16,
     binary IPC, per-stage decision cadence.</li>
-  <li><b>Jul 6 13:04–13:39</b> - real-client replay videos (actual game graphics, agent crowned as
+  <li><b>Jul 6 13:04–13:39:</b> real-client replay videos (actual game graphics, agent crowned as
     AGENT) and the MODEL debug overlay everywhere: rendered videos, browser replays, live matches.</li>
+  <li><b>Jul 6 aft:</b> AE reckoning: benchmarked the bot-trained encoder on human games (border
+    accuracy 71.8% vs 87.5% on bot data), retrained on a bot+human mix, then designed and ran the
+    v3.1 ablation matrix in parallel. Latent resolution won. New encoder + benchmark table
+    uploaded to HF.</li>
 </ul>
 
 <h3 id="obs">Observation: compress the map, bypass the rest</h3>
 <p>The core architectural finding so far. Three iterations:</p>
 <ul>
-  <li><b>v1</b> - AE over tile ownership + terrain. Worked; too narrow.</li>
-  <li><b>v2</b> - one unified AE over all state (tiles, players, units, diplomacy). Spatial recon
+  <li><b>v1:</b> AE over tile ownership + terrain. Worked; too narrow.</li>
+  <li><b>v2:</b> one unified AE over all state (tiles, players, units, diplomacy). Spatial recon
     excellent, but tiny exact facts fought the bottleneck: alliance pairs peaked at F1 0.67 and troop
     ordering 0.81 across four tuning attempts (loss weights, pooled-vector capacity, per-slot latents,
     graph-to-encoder).</li>
-  <li><b>v3 (current)</b> - compress only what is big: the map. Tile accuracy 99.4% (border-tile
+  <li><b>v3 (current):</b> compress only what is big: the map. Tile accuracy 99.4% (border-tile
     87–99% by map), structures precision/recall 1.0 per class. Everything small and exact bypasses
     the latent raw: pairwise diplomacy, per-player scalars, transient units (nukes in flight with
     impact points), attack aggregates, legality masks.</li>
@@ -102,32 +160,68 @@ capacity.</p>
 <p>AE details that held up: border-weighted cross-entropy (borders blur first and matter most),
 owner relabeling to static per-game spawn slots (any player count, fixed channels), fully-convolutional
 training on random crops (one model, any map size), and rarity-weighted BCE <i>detection</i> for
-structures - count regression collapses to all-zeros on 99.9%-empty grids.</p>
+structures: count regression collapses to all-zeros on 99.9%-empty grids.</p>
+
+<h3 id="ae31">AE v3.1: the border-accuracy push</h3>
+<p><b>The trigger:</b> overall tile accuracy saturates near 99% for every model (water and player
+interiors are easy), so the honest metric is border-tile accuracy, and it wasn't in the training logs
+at all. Benchmarking the bot-trained v3 on the newly replayed human games exposed a 16-point domain
+gap: 87.5% border accuracy on bot data, 71.8% on human. Human territories are gnarly (naval invasions,
+enclaves, 50+ player fronts); nation bots grow blobs.</p>
+<p><b>Two fixes ran in sequence.</b> First, retraining v3 unchanged on a bot+human mix recovered the
+domain gap (80.1% human), so data was part of the problem. Then v3.1 attacked the architecture with
+seven changes at once plus two ablations to find the real constraint:</p>
+<ul>
+  <li>decoder conditioned on <i>static</i> terrain (land + magnitude, never dynamic fallout), side
+    information the policy gets for free, so the latent stops re-encoding coastlines</li>
+  <li>nearest-upsample + 3x3 convs replacing ConvTranspose (no checkerboard), plus a full-res 3x3
+    refinement block before the classifier (was a bare 1x1, zero neighborhood context)</li>
+  <li>border-density rejection sampling for training crops (uniform crops waste most gradient on
+    ocean), focal loss on hard pixels, warmup+cosine LR, and native border-accuracy logging</li>
+  <li>ablations: latent channels 64→96 at 1/16 res, vs. latent grid at 1/8 res</li>
+</ul>
+<p><b>Result: resolution is the constraint, not capacity.</b> Uniform-crop eval, 256 samples:</p>
+<table>
+  <tr><th>model</th><th>latent</th><th>border (human)</th><th>border (bot)</th></tr>
+  <tr><td>v3 bot-only</td><td>64ch @ 1/16</td><td>71.8%</td><td>87.5%</td></tr>
+  <tr><td>v3 on bot+human mix</td><td>64ch @ 1/16</td><td>80.1%</td><td>86.8%</td></tr>
+  <tr><td>v3.1, all fixes</td><td>64ch @ 1/16</td><td>78.5%</td><td>90.7%</td></tr>
+  <tr><td><b>v3.1 @ 1/8 res</b></td><td>64ch @ 1/8</td><td><b>89.3%</b></td><td><b>96.1%</b></td></tr>
+</table>
+<p>At the same 1/16 resolution, the v3.1 decoder/loss work helped bot borders but couldn't beat plain
+mixed-data retraining on human borders. Borders are high-frequency spatial detail, and a 64-number
+vector summarizing a 16x16 patch simply cannot store where a ragged front cuts through. Halving the
+patch to 8x8 bought ~9 points on both domains. Structure detection stayed at precision/recall 1.0
+throughout. The catch: the 1/8 latent is 4x the policy input; a 1/8 x 32ch run (2x baseline) is in
+flight to see if the win survives halved channels, alongside the 96ch control.</p>
+<p><b>Complementary hedge (decided):</b> the policy will also receive a raw local owner-map crop
+around its own territory, exact borders where the agent acts most, latent for global context. The
+latent doesn't have to be pixel-perfect everywhere.</p>
 
 <h3 id="actions">Action space</h3>
 <p>Full intent surface from day one, legality masking only (never curricular). Factorized masked heads
-over a shared conv trunk - one flat softmax is impossible (tile arguments alone are millions of
+over a shared conv trunk. One flat softmax is impossible (tile arguments alone are millions of
 options):</p>
 <table>
   <tr><th>head</th><th>chooses</th></tr>
   <tr><td>action type</td><td>noop, attack, expand, boat, build, launch_nuke, alliance req/reject/break, donate gold/troops, embargo, retreat</td></tr>
   <tr><td>player pointer</td><td>target player slot</td></tr>
-  <tr><td>tile-region pointer</td><td>a 16×16 map region; the bridge snaps to the best legal tile inside it</td></tr>
+  <tr><td>tile-region pointer</td><td>a 16x16 map region; the bridge snaps to the best legal tile inside it</td></tr>
   <tr><td>build / nuke type</td><td>structure or warhead class</td></tr>
   <tr><td>quantity</td><td>troop fraction bucket</td></tr>
 </table>
-<p class="d">Masks come from exact engine legality calls each step - the policy can only pick what the
+<p class="d">Masks come from exact engine legality calls each step; the policy can only pick what the
 engine would accept. Full intent table in DESIGN.md.</p>
 
 <h3 id="reward">Reward</h3>
 <p>Iterated from raw land occupancy to a composite <b>strength index</b>:
-0.45·land + 0.25·military + 0.30·economy (shares). Land alone mis-scores legit strategies like
+0.45 x land + 0.25 x military + 0.30 x economy (shares). Land alone mis-scores legit strategies like
 tiny-island gold-stacking.</p>
 <ul>
-  <li>dense: <code>w_str · strength · timeweight</code>, timeweight 0.5→1.0 over the first 8000 ticks -
-    strong late is worth double strong early, and it doesn't net to zero on death like pure deltas</li>
+  <li>dense: <code>w_str x strength x timeweight</code>, timeweight 0.5→1.0 over the first 8000 ticks.
+    Strong late is worth double strong early, and it doesn't net to zero on death like pure deltas</li>
   <li>small delta term for immediate credit</li>
-  <li>terminal: <code>w_place · place^-0.7</code> - power law, 1st ≈ w_place, 2nd ≈ 0.62×, 10th ≈ 0.2×;
+  <li>terminal: <code>w_place x place^-0.7</code>, power law: 1st ≈ w_place, 2nd ≈ 0.62x, 10th ≈ 0.2x;
     the dead rank behind everyone still alive</li>
   <li>win bonus <code>w_win = 30</code> (doubled when the curriculum became win-gated)</li>
   <li>small flat death penalty</li>
@@ -142,7 +236,7 @@ Asia). Three principles, all added after watching v1 fail to progress:</p>
   <li><b>Map pools, not single maps.</b> The map is sampled per episode, so no overfitting one
     layout.</li>
   <li><b>Rehearsal against forgetting.</b> 25% of episodes replay an earlier stage's map at the
-    <i>current</i> bots/difficulty - old maps come back harder. Rehearsal trains but doesn't count
+    <i>current</i> bots/difficulty. Old maps come back harder. Rehearsal trains but doesn't count
     toward advancement.</li>
 </ol>
 <p>Advancement is win-gated: rolling win rate over the last 40 on-stage episodes must exceed 0.5. The
@@ -151,13 +245,13 @@ agent must be winning more often than not, not merely surviving.</p>
 <h3 id="alphafront">Prior art: AlphaFront</h3>
 <p><a href="https://github.com/josh-freeman/openfront-rl">josh-freeman/openfront-rl</a>
 (HF <a href="https://huggingface.co/mischievers/openfront-rl-agent">mischievers/openfront-rl-agent</a>,
-"v19b") - the only other PPO agent on this engine we know of. <b>The one-line difference: they made the
+"v19b"), the only other PPO agent on this engine we know of. <b>The one-line difference: they made the
 agent blind and moved all spatial intelligence into hand-coded heuristics; we are teaching the agent to
-see.</b> Their bet buys fast plumbing and quick wins vs easy bots; ours buys a higher ceiling - nothing
+see.</b> Their bet buys fast plumbing and quick wins vs easy bots; ours buys a higher ceiling. Nothing
 in their design can learn geography, chokepoints, or nuke aim.</p>
 <table>
   <tr><th></th><th>AlphaFront</th><th>openfront-ai</th></tr>
-  <tr><td>observation</td><td>~96 floats (16 player scalars + 16 neighbors × 5); no map at all</td>
+  <tr><td>observation</td><td>~96 floats (16 player scalars + 16 neighbors x 5); no map at all</td>
     <td>frozen spatial AE latent + ego planes + entity tokens + raw bypass</td></tr>
   <tr><td>actions</td><td>17 types, 16 neighbor targets, 5 fractions; no diplomacy</td>
     <td>full intent surface incl. diplomacy; factorized heads, engine masks</td></tr>
@@ -173,14 +267,14 @@ in their design can learn geography, chokepoints, or nuke aim.</p>
 <p>What they proved that we used: PPO converges on this engine at ~10 ticks/decision (we chose the same
 cadence independently); win-rate-gated advancement works here. Still worth stealing: LR warmdown on
 stage transitions; tiny flat generated maps as an even softer stage 0; a mid-game "beat all bots" gate
-so advancement doesn't wait on long endgames. Our clearest differentiator: the human-replay pipeline -
+so advancement doesn't wait on long endgames. Our clearest differentiator is the human-replay pipeline:
 imitation signal their scalar observation could never absorb.</p>
 
 <h3 id="perf">Performance</h3>
-<p>GPU util was poor and env stepping was the bottleneck. Five fixes, one afternoon:</p>
+<p>GPU util was poor and env stepping was the bottleneck:</p>
 <ul>
-  <li><b>Per-batch dynamic grid padding.</b> Everything was padded to the largest map (75×125 regions);
-    Onion is 32×32 - ~9× wasted conv compute on small maps. Obs stay native-size; collate pads to the
+  <li><b>Per-batch dynamic grid padding.</b> Everything was padded to the largest map (75x125 regions);
+    Onion is 32x32, ~9x wasted conv compute on small maps. Obs stay native-size; collate pads to the
     batch max; pointer heads convert global↔local region indices.</li>
   <li><b>Double-buffered rollout.</b> Env stepping (CPU/Node) and inference (GPU) were serial; now one
     env group steps while the other is on the GPU.</li>
@@ -196,19 +290,19 @@ exactly (same PseudoRandom ID stream, no spawn timer), so agent games saved as G
 <b>bit-identically</b> in the real client, and <code>verify_record.ts</code> proves it by re-simulating
 from intents alone.</p>
 <ul>
-  <li><code>rl/watch.py</code> - one greedy episode → flat debug WebM + GameRecord + a
+  <li><code>rl/watch.py</code>: one greedy episode → flat debug WebM + GameRecord + a
     <code>.debug.json</code> sidecar (every decision: action, probs, value).</li>
-  <li><code>scripts/render_client_replay.py</code> - headless Chromium replays the record in the
+  <li><code>scripts/render_client_replay.py</code>: headless Chromium replays the record in the
     <b>actual game client</b> → WebM with real graphics. Agent renders as AGENT with the gold spawn
     ring, crown when first, "You Won!" modal; camera starts fit to the whole map.</li>
-  <li><code>scripts/serve_replay.py</code> - archive-API shim so a normal browser replays agent
+  <li><code>scripts/serve_replay.py</code>: archive-API shim so a normal browser replays agent
     records interactively.</li>
-  <li>MODEL overlay (<code>RlDebugOverlay.ts</code>) - in-client panel synced to the sim tick: chosen
+  <li>MODEL overlay (<code>RlDebugOverlay.ts</code>): in-client panel synced to the sim tick: chosen
     action, value, probability bars, recent-actions log. Works in rendered videos, browser replays,
     and live matches; auto-probes the agent's feed on localhost:8988, zero setup.</li>
-  <li><code>rl/play.py</code> + <code>bridge/play.ts</code> - the agent joins a real lobby over the
+  <li><code>rl/play.py</code> + <code>bridge/play.ts</code>: the agent joins a real lobby over the
     live websocket protocol; you fight it while watching it think.</li>
-  <li><code>patches/client-replay-tooling.patch</code> - all client hooks as an uncommitted-submodule
+  <li><code>patches/client-replay-tooling.patch</code>: all client hooks as an uncommitted-submodule
     patch, auto-reapplied if the submodule resets.</li>
 </ul>
 
@@ -220,9 +314,9 @@ from intents alone.</p>
     the agent visibly won while the stats said otherwise. Validate the reward path end-to-end with a
     game you can see.</li>
   <li><b>Case-insensitive macOS hid a Linux crash.</b> Map dir lookup lowercased only the first char
-    (<code>BlackSea → blackSea</code>); dirs are fully lowercase. Fine on Mac, ENOENT on the pods.</li>
+    (<code>BlackSea → blackSea</code>); dirs are fully lowercase. Fine on Mac, ENOENT on Linux.</li>
   <li><b>Resume logic fought the supervisor.</b> Supervisor passed a stale <code>--stage 4</code>;
-    resume took max(cli, checkpoint), so a manually reset checkpoint kept snapping back - and a
+    resume took max(cli, checkpoint), so a manually reset checkpoint kept snapping back, and a
     still-running trainer kept re-saving its old stage over the reset. Checkpoint stage is now
     authoritative; kill the whole process group before editing checkpoints.</li>
   <li><b>Cropped-map index crash.</b> Transport/nuke target coords weren't bounds-checked against the
@@ -235,11 +329,17 @@ from intents alone.</p>
 <h3 id="lessons">Lessons</h3>
 <ul>
   <li><b>Only compress what's big.</b> The AE is for the map; exact small state rides the bypass. One
-    decision dissolved a week of planned loss-weight tuning.</li>
+    decision dissolved four v2 loss-weight tuning runs the same evening.</li>
   <li><b>Detection beats regression on sparse targets.</b> Structure counts under MSE collapse to
     zero; rarity-weighted BCE occupancy hits P/R 1.0.</li>
   <li><b>Make wins reachable before making them valuable.</b> A win bonus is useless if the setting
     never produces wins. 1v1 → 1v3 staging turned the win signal from theoretical to dense.</li>
+  <li><b>Warm starts inherit stale habits.</b> <code>ppo_v2c</code> resumed v2b weights (trained under
+    the old placement reward and pre-fix win counting) onto the new curriculum; <code>ppo_v3</code>
+    started from scratch on the same code. In one day the fresh run reached stage 4 at 60-70% wins
+    while v2c stalled at stage 3 at 7-17% with entropy stuck near 8, exploring without committing.
+    When the reward or curriculum changes materially, retrain; a checkpoint tuned for the old
+    objective is a local optimum in the new one.</li>
   <li><b>Rehearse or forget.</b> Revisit cleared maps at current difficulty for a fixed fraction of
     episodes.</li>
   <li><b>Exploit determinism everywhere.</b> Bit-identical replay gives verification, visualization,
@@ -248,30 +348,52 @@ from intents alone.</p>
     convolution.</li>
   <li><b>Watch the agent play.</b> The replay tooling caught the win-detection bug and the camera
     problems; curves never would have.</li>
-  <li><b>Treat cloud pods as disposable.</b> Checkpoint everything, sync to HF, restore on boot,
+  <li><b>The loss curve lies; log the metric you care about.</b> The mixed-retrain loss looked flat
+    for hours while border accuracy was still climbing. Overall tile accuracy is 99% saturated and
+    borders are a sliver of pixels. Border accuracy cost one line to log natively (the mask already
+    existed for the loss weighting).</li>
+  <li><b>Benchmark on the distribution you'll deploy on.</b> The encoder looked done at 87% border
+    accuracy until it met real human games and dropped 16 points. Bot data underrepresents exactly
+    what humans do: allying, betraying, invading by sea.</li>
+  <li><b>Spatial precision can't be bought with channels.</b> +50% latent channels does far less for
+    borders than halving the patch each latent vector must summarize. And don't make the latent
+    re-encode static side-information (terrain) the downstream consumer already has.</li>
+  <li><b>Treat training hosts as disposable.</b> Checkpoint everything, sync to HF, restore on boot,
     supervise with auto-restart. Every ops incident so far violated some part of this.</li>
 </ul>
 
 <h3 id="infra">Infrastructure</h3>
-<p>Five RTX 5090 RunPod pods: rl2 (ppo_v2c), rl3 (ppo_v3), three AE/BC experiment pods.
-<code>scripts/pod_train.sh</code> supervises (idempotent deploy, auto-restart, keeps sshd alive);
-<code>scripts/runpod_bootstrap.sh</code> bootstraps a fresh pod end-to-end. Datasets and checkpoints on
-Hugging Face: <a href="https://huggingface.co/datasets/djmango/openfront-snapshots">openfront-snapshots</a>,
+<p>Homelab for datagen and some training; cloud GPUs for long PPO and AE runs.
+<code>scripts/pod_train.sh</code> supervises RL jobs (idempotent deploy, auto-restart). Datasets are
+prefeaturized once; checkpoints live on Hugging Face:
+<a href="https://huggingface.co/datasets/djmango/openfront-snapshots">openfront-snapshots</a>,
+<a href="https://huggingface.co/datasets/djmango/openfront-human-games">openfront-human-games</a>
+(285 hash-verified replayed human games + raw intent records),
 <a href="https://huggingface.co/djmango/openfront-tile-autoencoder">openfront-tile-autoencoder</a>.
+Ops scar tissue from the AE push, mostly self-inflicted: the homelab mixed run was host-OOM-killed at
+step 22.7k (CPU evals + HF upload + 6 DataLoader workers on one box); remote trainers hit
+<code>ulimit -n</code> with 16 workers memory-mapping 459 game caches; a billing outage restarted
+cloud machines mid-run (tmux gone; the interrupted ablations were relaunched from scratch since AdamW
+state isn't checkpointed, only weights).
 Git history was scrubbed once with <code>git filter-repo</code> after large blobs snuck in; data dirs
 are gitignored now.</p>
 
 <h3 id="next">Open threads</h3>
 <ul>
-  <li><b>BC warm start</b> - does initializing PPO from human imitation beat the 1v1 curriculum
+  <li><b>BC warm start:</b> does initializing PPO from human imitation beat the 1v1 curriculum
     bootstrap, or compound with it?</li>
-  <li><b>AE v3.1</b> - terrain-conditioned decoder + checkerboard-free upsampling (default-off,
-    old checkpoints load unchanged); needs a bake-off on border accuracy.</li>
-  <li><b>Curriculum progression</b> - with wins now measured correctly, watch whether stages clear;
+  <li><b>Pick the final encoder:</b> the 1/8 x 32ch run (2x policy input) and the 96ch control are
+    still training; if d8c32 holds ≥ ~88% human borders, take it over d8's 4x. Then wire the winner
+    into <code>rl/obs.py</code>/<code>rl/policy.py</code> (they assume 1/16 latent and old
+    constructor args) and add the raw local owner-crop bypass.</li>
+  <li><b>Warm-start refreshes:</b> future same-architecture encoder updates on new data should
+    resume from the current checkpoint (and checkpoint optimizer state, see billing-restart scar)
+    instead of 40k fresh steps.</li>
+  <li><b>Curriculum progression:</b> with wins now measured correctly, watch whether stages clear;
     tune WIN_AT / WINDOW if stage 0 saturates or stalls.</li>
-  <li><b>Remaining action heads</b> - upgrade_structure, delete_unit, move_warship,
+  <li><b>Remaining action heads:</b> upgrade_structure, delete_unit, move_warship,
     cancel_attack/boat are schema'd but not all wired.</li>
-  <li><b>Self-play league</b> - past-policy opponents replacing scripted bots once the agent clears
+  <li><b>Self-play league:</b> past-policy opponents replacing scripted bots once the agent clears
     the bot curriculum.</li>
 </ul>
 
