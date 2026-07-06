@@ -20,12 +20,14 @@ REPO_DIR=/workspace/openfront-ai
 
 # --- bootstrap (skips anything already present) ---
 mkdir -p /workspace
-if [ ! -d "$REPO_DIR/.git" ]; then
+if [ ! -d "$REPO_DIR" ]; then
   git clone --recurse-submodules https://github.com/djmango/openfront-ai "$REPO_DIR"
 fi
 cd "$REPO_DIR"
-git pull --ff-only || true
-git submodule update --init
+if [ -d .git ]; then
+  git pull --ff-only || true
+  git submodule update --init || true
+fi  # rsynced copies have no .git; run whatever is present
 
 if ! command -v node >/dev/null 2>&1; then
   curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null
