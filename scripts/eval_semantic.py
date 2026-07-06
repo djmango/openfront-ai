@@ -3,7 +3,7 @@
 Pixel accuracy is not the point; this scores whether *strategically load-
 bearing* facts survive the latent bottleneck:
 
-  - alliance / targeting / embargo pair precision+recall
+  - alliance / embargo pair precision+recall
   - nuke-in-flight detection recall (any predicted mass in a cell that
     truly contains an airborne nuke)
   - silo / SAM / warship / transport cell detection recall
@@ -64,6 +64,7 @@ def main() -> None:
     det_pred = {k: [] for k in DETECT_CLASSES}
     det_true = {k: [] for k in DETECT_CLASSES}
     diplo_preds, diplo_trues = [], []
+    diplo_logit_vals, diplo_masks = [], []
     troop_pairs_ok = 0
     troop_pairs_n = 0
     alive_ok = 0
@@ -75,13 +76,14 @@ def main() -> None:
         owners, terrain, planes, pfeats, pmask, diplo = sampler.sample_batch(8)
         with torch.no_grad():
             (tile_logits, unit_pred, player_pred, diplo_logits), _ = model(
-                owners, terrain, planes, pfeats, pmask
+                owners, terrain, planes, pfeats, pmask, diplo
             )
 
         for k, names in DETECT_CLASSES.items():
             idxs = [cls_idx[n] for n in names]
-            t = planes[:, idxs].sum(1).numpy() > np.log(2.0) * 0.5  # >= 1 unit
-            p = unit_pred[:, idxs].sum(1).numpy() > np.log(2.0) * 0.5
+            t = planes[:, idxs].sum(1).numpy() > 0  # >= 1 unit in cell
+            # unit_pred is per-class occupancy logits; detect if any class fires.
+            p = unit_pred[:, idxs].max(dim=1).values.numpy() > 0
             det_true[k].append(t)
             det_pred[k].append(p)
 
@@ -90,6 +92,8 @@ def main() -> None:
         )
         diplo_preds.append((diplo_logits.numpy() > 0) & pair_mask)
         diplo_trues.append((diplo.numpy() > 0.5) & pair_mask)
+        diplo_logit_vals.append(diplo_logits.numpy())
+        diplo_masks.append(pair_mask)
 
         # Troop ordering + alive flags on reconstructed player stats.
         pf, pp, pm = pfeats.numpy(), player_pred.numpy(), pmask.numpy()
@@ -119,13 +123,30 @@ def main() -> None:
         report[f"{k}_precision"] = round(prec, 4)
         report[f"{k}_recall"] = round(rec, 4)
         report[f"{k}_true_cells"] = int(t.sum())
-    for r, name in enumerate(["alliance", "targeting", "embargo"]):
+    for r, name in enumerate(["alliance", "embargo"]):
         t = np.concatenate([x[:, r].ravel() for x in diplo_trues])
         p = np.concatenate([x[:, r].ravel() for x in diplo_preds])
         prec, rec = prf(p, t)
         report[f"{name}_precision"] = round(prec, 4)
         report[f"{name}_recall"] = round(rec, 4)
         report[f"{name}_true_pairs"] = int(t.sum())
+        # The BCE pos-weight shifts the natural operating point away from
+        # logit 0; sweep thresholds to find the best-F1 point, which tells us
+        # whether the latent actually separates the classes.
+        logits = np.concatenate([x[:, r].ravel() for x in diplo_logit_vals])
+        mask = np.concatenate([x[:, 0].ravel() for x in diplo_masks])
+        lv, tv = logits[mask], t[mask]
+        best = (0.0, 0.0, 0.0, 0.0)  # f1, thresh, prec, rec
+        for thresh in np.arange(-2.0, 8.01, 0.25):
+            pv = lv > thresh
+            pr, rc = prf(pv, tv)
+            f1 = 2 * pr * rc / max(1e-9, pr + rc)
+            if f1 > best[0]:
+                best = (f1, float(thresh), pr, rc)
+        report[f"{name}_best_f1"] = round(best[0], 4)
+        report[f"{name}_best_thresh"] = best[1]
+        report[f"{name}_best_precision"] = round(best[2], 4)
+        report[f"{name}_best_recall"] = round(best[3], 4)
     report["troop_ordering_acc"] = round(troop_pairs_ok / max(1, troop_pairs_n), 4)
     report["alive_flag_acc"] = round(alive_ok / max(1, alive_n), 4)
 

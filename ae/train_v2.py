@@ -72,7 +72,7 @@ class Featurizer:
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         feats = np.zeros((MAX_SLOTS, PLAYER_FEAT_DIM), dtype=np.float32)
         mask = np.zeros(MAX_SLOTS, dtype=np.float32)
-        # Pairwise diplomacy targets: [allied, targets, embargoes] per (i, j).
+        # Pairwise diplomacy targets: [allied, embargoes] per (i, j).
         self._diplo = np.zeros((NUM_DIPLO, MAX_SLOTS, MAX_SLOTS), dtype=np.float32)
 
         n_allies: dict[int, int] = {}
@@ -93,10 +93,8 @@ class Featurizer:
             if slot <= 0:
                 continue
             mask[slot] = 1.0
-            for t in p.get("targets", []):
-                self._diplo[1, slot, int(self.lut[t])] = 1.0
             for e in p.get("embargoes", []):
-                self._diplo[2, slot, int(self.lut[e])] = 1.0
+                self._diplo[1, slot, int(self.lut[e])] = 1.0
             feats[slot] = [
                 1.0 if p["alive"] else 0.0,
                 log_norm(p["troops"]),
@@ -105,7 +103,6 @@ class Featurizer:
                 1.0 if p.get("traitor") else 0.0,
                 1.0 if p.get("disconnected") else 0.0,
                 n_allies.get(p["id"], 0) / 8.0,
-                len(p.get("targets", [])) / 8.0,
                 len(p.get("embargoes", [])) / 8.0,
                 (len(p.get("reqsIn", [])) + len(p.get("reqsOut", []))) / 4.0,
                 log_norm(atk_out.get(p["id"], 0.0)),
@@ -114,7 +111,48 @@ class Featurizer:
         return feats, mask, self._diplo
 
 
+def sample_example(featurizers: list[Featurizer], rng, crop: int):
+    """One random (game, snapshot, crop) example as numpy arrays."""
+    fz = featurizers[rng.integers(len(featurizers))]
+    rec = fz.rec
+    si = int(rng.integers(rec.num_snapshots))
+    # Crop origin snapped to 16 so unit planes align with the latent grid.
+    y0 = int(rng.integers(max(1, (rec.height - crop) // 16 + 1))) * 16
+    x0 = int(rng.integers(max(1, (rec.width - crop) // 16 + 1))) * 16
+    slots, terr = fz.spatial(si, y0, x0, crop)
+    entities = rec.entities(si)
+    planes = fz.unit_planes(entities, y0, x0, crop)
+    pfeats, pmask, diplo = fz.player_feats(entities)
+    return slots, terr, planes, pfeats, pmask, diplo
+
+
+class SampleDataset(torch.utils.data.IterableDataset):
+    """Infinite stream of random samples; each DataLoader worker process
+    loads its own featurizer list and RNG, sidestepping the GIL entirely
+    (gzip decompress + numpy featurization are the bottleneck, not the GPU).
+    """
+
+    def __init__(self, data_root: str, crop: int, seed: int = 0):
+        self.data_root = data_root
+        self.crop = crop
+        self.seed = seed
+        self._featurizers: list[Featurizer] | None = None
+
+    def __iter__(self):
+        if self._featurizers is None:
+            self._featurizers = [Featurizer(r) for r in iter_games(self.data_root)]
+            if not self._featurizers:
+                raise SystemExit(f"no games found under {self.data_root}")
+        info = torch.utils.data.get_worker_info()
+        wid = info.id if info is not None else 0
+        rng = np.random.default_rng(self.seed * 100_003 + wid)
+        while True:
+            yield sample_example(self._featurizers, rng, self.crop)
+
+
 class SamplerV2:
+    """Thread-pool sampler kept for eval scripts (no worker processes)."""
+
     def __init__(self, data_root: str, crop: int, seed: int = 0, workers: int = 8):
         self.featurizers = [Featurizer(r) for r in iter_games(data_root)]
         if not self.featurizers:
@@ -128,17 +166,7 @@ class SamplerV2:
 
     def _sample_one(self, seed: int):
         rng = np.random.default_rng(seed)
-        fz = self.featurizers[rng.integers(len(self.featurizers))]
-        rec = fz.rec
-        si = int(rng.integers(rec.num_snapshots))
-        # Crop origin snapped to 16 so unit planes align with the latent grid.
-        y0 = int(rng.integers(max(1, (rec.height - self.crop) // 16 + 1))) * 16
-        x0 = int(rng.integers(max(1, (rec.width - self.crop) // 16 + 1))) * 16
-        slots, terr = fz.spatial(si, y0, x0, self.crop)
-        entities = fz.rec.entities(si)
-        planes = fz.unit_planes(entities, y0, x0, self.crop)
-        pfeats, pmask, diplo = fz.player_feats(entities)
-        return slots, terr, planes, pfeats, pmask, diplo
+        return sample_example(self.featurizers, rng, self.crop)
 
     def _submit(self, n: int):
         seeds = self.rng.integers(0, 2**63, size=n)
@@ -170,7 +198,8 @@ class SamplerV2:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="data")
-    ap.add_argument("--steps", type=int, default=20000)
+    # Curve from the 20k run plateaued by ~8-10k steps on every head.
+    ap.add_argument("--steps", type=int, default=10000)
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--crop", type=int, default=256)
     ap.add_argument("--latent-c", type=int, default=64)
@@ -178,9 +207,14 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--border-weight", type=float, default=4.0)
     ap.add_argument("--w-units", type=float, default=1.0)
-    ap.add_argument("--w-players", type=float, default=1.0)
+    ap.add_argument("--w-players", type=float, default=5.0)
     ap.add_argument("--w-diplo", type=float, default=1.0)
-    ap.add_argument("--diplo-pos-weight", type=float, default=50.0)
+    # 50.0 gave recall 0.96 but precision 0.13 (predicted alliances everywhere).
+    ap.add_argument("--diplo-pos-weight", type=float, default=10.0)
+    ap.add_argument("--workers", type=int, default=8)
+    # Base pos-weight for unit occupancy BCE, multiplied by per-class rarity
+    # weights. MSE on counts collapsed to all-zeros (recall 0.0 on every class).
+    ap.add_argument("--unit-pos-weight", type=float, default=20.0)
     ap.add_argument("--out", default="runs/ae_v2")
     args = ap.parse_args()
 
@@ -191,7 +225,16 @@ def main() -> None:
     )
     print(f"device: {device}")
 
-    sampler = SamplerV2(args.data, args.crop)
+    dataset = SampleDataset(args.data, args.crop)
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        num_workers=args.workers,
+        prefetch_factor=4 if args.workers else None,
+        persistent_workers=args.workers > 0,
+        pin_memory=device == "cuda",
+    )
+    batches = iter(loader)
     model = UnifiedStateAE(latent_c=args.latent_c, latent_d=args.latent_d).to(device)
     print(f"model: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M params")
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -199,27 +242,32 @@ def main() -> None:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    unit_w = torch.tensor(UNIT_CLASS_WEIGHTS, device=device).view(1, -1, 1, 1)
+    unit_pos_w = (
+        torch.tensor(UNIT_CLASS_WEIGHTS, device=device).view(1, -1, 1, 1)
+        * args.unit_pos_weight
+    )
     diplo_pos_w = torch.tensor(args.diplo_pos_weight, device=device)
 
     t0 = time.time()
     for step in range(1, args.steps + 1):
         owners, terrain, planes, pfeats, pmask, diplo = (
-            t.to(device) for t in sampler.sample_batch(args.batch_size)
+            t.to(device, non_blocking=True) for t in next(batches)
         )
 
         (tile_logits, unit_pred, player_pred, diplo_logits), _ = model(
-            owners, terrain, planes, pfeats, pmask
+            owners, terrain, planes, pfeats, pmask, diplo
         )
 
         per_tile = F.cross_entropy(tile_logits, owners, reduction="none")
         weights = border_weight(owners, args.border_weight)
         loss_tiles = (per_tile * weights).sum() / weights.sum()
 
-        # Rarity-weighted unit planes: a blurred nuke costs 25x a blurred city.
-        loss_units = (
-            (unit_pred - planes).pow(2) * unit_w
-        ).sum() / (unit_w.expand_as(planes)).sum()
+        # Unit occupancy as detection: BCE with rarity-scaled positive weight
+        # so the head can't win by predicting "no units anywhere".
+        unit_occ = (planes > 0).float()
+        loss_units = F.binary_cross_entropy_with_logits(
+            unit_pred, unit_occ, pos_weight=unit_pos_w
+        )
 
         per_player = F.mse_loss(player_pred, pfeats, reduction="none").mean(-1)
         loss_players = (per_player * pmask).sum() / pmask.sum().clamp(min=1)
@@ -246,12 +294,20 @@ def main() -> None:
         if step % 50 == 0 or step == 1:
             with torch.no_grad():
                 acc = (tile_logits.argmax(1) == owners).float().mean().item()
-                # Alliance recall: of true allied pairs, fraction predicted.
+                # Alliance recall/precision on this batch.
                 ally_true = diplo[:, 0] > 0.5
+                ally_pred = (diplo_logits[:, 0] > 0) & (pair_mask[:, 0] > 0)
                 n_true = ally_true.sum().item()
-                ally_rec = (
-                    ((diplo_logits[:, 0] > 0) & ally_true).sum().item() / n_true
-                    if n_true
+                n_pred = ally_pred.sum().item()
+                tp = (ally_pred & ally_true).sum().item()
+                ally_rec = tp / n_true if n_true else float("nan")
+                ally_prec = tp / n_pred if n_pred else float("nan")
+                # Unit-cell recall: of cells truly containing units, fraction hit.
+                occ_true = unit_occ > 0.5
+                n_occ = occ_true.sum().item()
+                unit_rec = (
+                    ((unit_pred > 0) & occ_true).sum().item() / n_occ
+                    if n_occ
                     else float("nan")
                 )
             rate = step * args.batch_size / (time.time() - t0)
@@ -259,7 +315,8 @@ def main() -> None:
                 f"step {step:5d}  loss {loss.item():.4f}  "
                 f"tiles {loss_tiles.item():.4f}  units {loss_units.item():.4f}  "
                 f"players {loss_players.item():.4f}  diplo {loss_diplo.item():.4f}  "
-                f"acc {acc:.4f}  ally-recall {ally_rec:.2f}  {rate:.1f} ex/s",
+                f"acc {acc:.4f}  ally-rec {ally_rec:.2f}  ally-prec {ally_prec:.2f}  "
+                f"unit-rec {unit_rec:.2f}  {rate:.1f} ex/s",
                 flush=True,
             )
 

@@ -112,26 +112,39 @@ function snapshotEntities(game: Game): object {
   }
 
   const units = game.players().flatMap((p) =>
-    p.units().map((u) => ({
-      type: u.type(),
-      owner: p.smallID(),
-      x: game.x(u.tile()),
-      y: game.y(u.tile()),
-      level: u.level(),
-      health: u.hasHealth() ? u.health() : null,
-      constructing: u.isUnderConstruction(),
-      cooldown: u.isInCooldown(),
-      troops: Math.round(u.troops()),
-    })),
+    p.units().map((u) => {
+      const tt = u.targetTile();
+      return {
+        type: u.type(),
+        owner: p.smallID(),
+        x: game.x(u.tile()),
+        y: game.y(u.tile()),
+        // Destination for units in transit (nukes, transports, warships):
+        // where it will land matters more than where it currently is.
+        tx: tt !== undefined ? game.x(tt) : null,
+        ty: tt !== undefined ? game.y(tt) : null,
+        samLock: u.targetedBySAM(),
+        level: u.level(),
+        health: u.hasHealth() ? u.health() : null,
+        constructing: u.isUnderConstruction(),
+        cooldown: u.isInCooldown(),
+        troops: Math.round(u.troops()),
+      };
+    }),
   );
 
   const attacks = game.players().flatMap((p) =>
-    p.outgoingAttacks().map((a) => ({
-      from: p.smallID(),
-      to: a.target().isPlayer() ? a.target().smallID() : 0,
-      troops: Math.round(a.troops()),
-      retreating: a.retreating(),
-    })),
+    p.outgoingAttacks().map((a) => {
+      const src = a.sourceTile();
+      return {
+        from: p.smallID(),
+        to: a.target().isPlayer() ? a.target().smallID() : 0,
+        troops: Math.round(a.troops()),
+        retreating: a.retreating(),
+        srcX: src !== null ? game.x(src) : null,
+        srcY: src !== null ? game.y(src) : null,
+      };
+    }),
   );
 
   return { players, alliances, units, attacks };
@@ -269,7 +282,7 @@ async function runGame(opts: {
 
   const elapsedS = (Date.now() - startedAt) / 1000;
   const meta = {
-    formatVersion: 2,
+    formatVersion: 3,
     gameID,
     map: mapType,
     width: w,
@@ -298,7 +311,9 @@ async function main() {
 
   const mapKey = getArg("map", "Onion");
   const numGames = parseInt(getArg("games", "1"), 10);
-  const snapshotEvery = parseInt(getArg("every", "25"), 10);
+  // 10 ticks = 1s of game time; a typical nuke flight (20-60 ticks at speed
+  // 10) now spans 2-6 snapshots instead of 0-2.
+  const snapshotEvery = parseInt(getArg("every", "10"), 10);
   const maxTicks = parseInt(getArg("max-ticks", "15000"), 10);
   const seedBase = getArg("seed", `${Date.now() % 100000}`);
 

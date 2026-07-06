@@ -1,9 +1,18 @@
 # Agent design: observation stack & action space
 
-**Decisions (2026-07-05):** (1) a single unified autoencoder compresses ALL
-game state — tiles, players, units, attacks, globals — into one joint latent
-that is the policy's primary observation; (2) the FULL action surface ships
-in v1 (legality masking only, no curriculum masking).
+**Decisions (2026-07-05):** (1) the autoencoder compresses ONLY spatial
+state (tiles, terrain, static structures); all small exact state (diplomacy,
+player scalars, transient units) bypasses the latent and feeds the policy
+raw; (2) the FULL action surface ships in v1 (legality masking only, no
+curriculum masking).
+
+**Revision note.** The original v2 decision was a single unified AE over
+ALL state. We built and trained it; spatial reconstruction was excellent,
+but tiny exact facts fought the bottleneck — alliance pairs peaked at
+F1 0.67 and troop ordering at 0.81 across four tuning runs (loss weights,
+pooled-vector capacity, per-slot latents, feeding the graph to the
+encoder). A one-bit fact reconstructed at 95% is strictly worse than
+reading the bit. Hence the bypass split below.
 
 Target: a self-play PPO agent over the full OpenFront gameplay surface.
 Everything below is grounded in the engine's actual intent schemas
@@ -67,45 +76,35 @@ are simply unrewarding; the policy must learn to ignore them.
 
 ## Observation stack
 
-### Unified state autoencoder (v2, supersedes tile-only AE)
+### Spatial autoencoder (v3) + raw bypass
 
-One model consumes every stream below and produces a single joint latent;
-the policy reads the latent instead of raw features. Architecture:
+**Compress only what is big.** The spatial AE (`ae/model_v3.py`) consumes
+tile ownership + terrain + fallout + static-structure planes (city, port,
+defense post, missile silo, SAM launcher, factory) and produces the grid
+latent (H/16 x W/16 x 64). Losses: border-weighted CE over owner slots;
+rarity-weighted BCE over structure occupancy (detection, not count
+regression — count MSE collapses to all-zeros on 99.9%-empty grids).
+Measured fidelity: 99.4% tile accuracy, structures at precision/recall 1.0
+per class.
 
-- **Encoders**: CNN over the tile grid (as in AE v1); a small transformer
-  over player/unit/attack tokens; an MLP over global scalars. Token
-  embeddings and grid features cross-attend, then fuse into:
-- **Joint latent**: the spatial grid latent (H/16 x W/16 x C) plus a
-  vector latent (pooled tokens + scalars). Per-token encoder embeddings
-  are retained as pointer keys for action heads 2 and 4.
-- **Decoders (reconstruction targets)** — chosen so nothing needs
-  set-decoding/Hungarian matching:
-  - tile owner slots: per-tile CE, border-weighted (as v1)
-  - per-player scalars: regression per *static slot* (slots are bounded
-    and fixed per game, so this is a fixed-shape head)
-  - units: spatial *presence planes* per unit class at grid resolution
-    (unit existence becomes an image, not a set)
-  - attacks-in-flight: per-slot-pair troop totals
-  - global scalars: direct regression
-- **Deterministic first.** Variational (true VAE) only if we later want
-  generative rollouts/world-model planning; for representation learning
-  the KL term mostly costs capacity.
+**Everything else bypasses the latent** and reaches the policy exactly:
 
-Two pragmatic skips around the bottleneck (the latent is lossy by design;
-these are exact by necessity):
+- pairwise diplomacy (alliance/embargo bits, expiry timers, pending
+  requests) — targeting exists in the engine but only humans use it, so it
+  is absent from bot data
+- per-player scalars (alive, troops, gold, tiles, traitor, attack in/out)
+- transient units as entity lists: nukes in flight with impact point
+  (tx/ty) and SAM-lock status, transports with landing point, warships,
+  trade ships
+- attack aggregates (from, to, troops, retreating, boat origin)
+- globals (tick, phase, players alive) and own-player internals
+- **legality masks**, straight to the action heads — a mask reconstructed
+  at 99% still yields illegal intents
 
-1. **Legality masks** go straight to the action heads, never through the
-   latent — a mask reconstructed at 99% accuracy still yields illegal
-   intents.
-2. **Own-player scalars** (own troops/gold/income) are appended raw to the
-   trunk input. Relative strength judgments ("do I outnumber him 1.4x?")
-   are too load-bearing to trust to reconstruction blur.
+**Deterministic, not variational.** A VAE's KL term costs capacity;
+generative rollouts are not needed for representation learning.
 
-Training data: requires datagen v2 — current snapshots lack units,
-attacks, alliances, and relations. Same headless pipeline, richer
-`meta.json` + unit/attack dumps per snapshot.
-
-### The streams (all consumed by the unified AE)
+### The streams
 
 ### 1. Spatial (the map)
 

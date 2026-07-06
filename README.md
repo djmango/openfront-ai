@@ -1,19 +1,60 @@
 # openfront-ai
 
-Learned spatial observation encoding for [OpenFront.io](https://openfront.io) RL agents.
+Toward a self-play RL agent for [OpenFront.io](https://openfront.io): headless
+data generation on the real game engine, a learned spatial observation
+encoder, and (next) a PPO self-play agent over the full action surface.
 
-This is step one of a larger project to train a self-play RL agent for OpenFront:
-a fully-convolutional autoencoder that compresses raw tile-ownership state (64x
-compression) into a spatial latent grid intended as the observation input for a
-future policy network.
+## Architecture: compress the map, bypass the rest
+
+The observation design went through three iterations (see `DESIGN.md`):
+
+1. **v1** — tile-only autoencoder over ownership + terrain.
+2. **v2** — one unified AE compressing *all* state (tiles, players, units,
+   diplomacy) into a joint latent. This worked for spatial state but spent
+   most of its capacity and all of our tuning effort reconstructing tiny
+   exact facts: alliance pairs peaked at F1 0.67 and relative troop
+   strength at 0.81, no matter how the losses were weighted.
+3. **v3 (current)** — the lesson: **only compress what is actually big.**
+   The AE compresses the map (tile ownership, terrain, fallout, static
+   structures — the only high-dimensional state). Everything small and
+   exact bypasses the latent and feeds the policy raw: pairwise diplomacy
+   bits, per-player scalars, transient units (nukes in flight with their
+   impact points, transports, warships), attack aggregates, legality masks.
+
+## Results (spatial AE v3)
+
+1.17M params, 64-channel latent per 16x16 region (64x spatial compression),
+any map size. Trained 10k steps / batch 64 in ~15 min on an RTX 5090 at
+~700 crops/s:
+
+![Training curves](assets/loss_curve_v3.png)
+
+Original (left) vs reconstruction through the latent (right), World map:
+
+![World reconstruction](assets/recon_v3_world.png)
+
+- Tile accuracy 99.4% overall; border-tile accuracy (the honest metric —
+  water inflates the overall number) 98.8% on Onion, 87.4% on World, 82.1%
+  on Africa mid-game with dozens of players.
+- Static structures (city, port, defense post, missile silo, SAM launcher,
+  factory): **precision 1.0 and recall 1.0, every class**, through the
+  latent — rarity-weighted BCE detection, not count regression (count MSE
+  collapses to all-zeros on 99.9%-empty grids).
+- First 3 latent PCA components, World:
+
+![Latent PCA](assets/latent_pca_v3_world.png)
 
 ## Layout
 
-- `datagen/` — TypeScript headless game runner. Boots the real (deterministic)
-  OpenFront engine in Node with no browser or server, plays bot/nation-only
-  games, and dumps gzipped tile-state snapshots plus per-player stats.
-- `ae/` — PyTorch autoencoder: dataset loader, model, training loop.
-- `openfront/` — git submodule of [openfrontio/OpenFrontIO](https://github.com/openfrontio/OpenFrontIO),
+- `datagen/` — TypeScript headless game runner. Boots the real
+  (deterministic) OpenFront engine in Node, plays bot/nation games, dumps
+  full-state snapshots every 10 ticks: packed tile grid + all entities
+  (players, diplomacy, units with target tiles, attacks).
+- `ae/` — PyTorch: dataset loaders, spatial AE (`model_v3.py`), training
+  (`train_v3.py`). `model.py`/`model_v2.py` are the earlier iterations.
+- `scripts/` — prefeaturization, evals, visuals, HF upload.
+- `openfront/` — git submodule of
+  [openfrontio/OpenFrontIO](https://github.com/openfrontio/OpenFrontIO),
   pinned to a known-good engine commit.
 
 ## Setup
@@ -34,70 +75,42 @@ openfront/node_modules/.bin/tsx datagen/generate.ts --map Onion --games 20
 bash datagen/gen_all.sh 25 10
 ```
 
-Each game writes `data/<map>/<gameID>/` containing `terrain.bin` (immutable
-terrain bytes), `states/t<tick>.bin.gz` (packed uint16 tile state every 25
-ticks: owner id in bits 0-11, fallout bit 13, defense bonus bit 14),
-`states/t<tick>.json.gz` (full entity state: player stats + diplomacy +
-sparse relations, alliances, units, attacks in flight), and `meta.json`
-(dims, snapshot tick list, winner).
-
-Throughput: a full game to victory takes ~5 s on a small map (~2,500 ticks/s
-headless), ~60 s on the largest maps.
+Snapshots are written every 10 ticks (1s of game time), so a typical nuke
+flight (20-60 ticks) spans 2-6 snapshots. Format details in the
+[dataset card](https://huggingface.co/datasets/djmango/openfront-snapshots).
 
 ## Train
 
 ```bash
-uv run python -m ae.train --data data --steps 30000 --batch-size 16
+# one-time: convert gzip+JSON snapshots to fast zstd caches (~10ms -> ~0.5ms/sample)
+PYTHONPATH=. uv run python scripts/prefeaturize.py --data data --workers 8
+
+uv run python -m ae.train_v3 --data data --steps 10000 --batch-size 64
 ```
 
 Details:
 
 - Owner IDs are relabeled to static per-game slots (assigned once by spawn
-  order, never reshuffled) and embedded via a learned 8-dim lookup, so any
-  player count works with fixed input channels.
+  order) and embedded via a learned 8-dim lookup, so any player count works
+  with fixed input channels.
 - Fully convolutional: trains on random 256x256 crops, runs on any map size.
-  The latent is a spatial grid, 64 channels per 16x16 tile region.
-- Loss is border-weighted cross-entropy over owner slots — territory borders
-  are what matter strategically and are what reconstruction losses blur first.
+- Losses: border-weighted cross-entropy over owner slots (borders are what
+  matter strategically and blur first) + rarity-weighted BCE over static
+  structure occupancy at latent resolution.
+- Data pipeline: `DataLoader` worker processes over memory-mapped zstd-1
+  frame caches; the GPU, not the loader, is the bottleneck.
 
-## Results (v1)
+## Artifacts
 
-Trained 30k steps (batch 16) on 250 games / 10 maps, ~40 min on an RTX 3070 at
-~200 crops/s. Model: 1.0M params, latent 64 channels per 16x16 region.
-
-![Training curves](assets/loss_curve.png)
-
-Overall tile accuracy saturates >99% within ~3k steps; the remaining training
-mostly sharpens borders (the border-weighted CE keeps falling on a log scale).
-30k steps was overkill — ~10k gets within a hair of the same quality.
-
-Original (left) vs reconstruction through the 64-channel latent (right), on a
-World-map game with 17 surviving players:
-
-![World reconstruction](assets/recon_world.png)
-
-Honest numbers (mid/late-game snapshots): overall accuracy is inflated by
-water and empty land, so the metric that matters is **border-tile accuracy** —
-98.7% on a late-game 2-player map, 91.4% on World with 17 players, 90.1% on
-Africa with 27 players. Small enclaves and 1-tile border noise are what get
-lost; large-scale territory geometry survives.
-
-Compression per 16x16 region: 256 tiles -> 64 floats. Relative to the
-embedded input a policy would otherwise consume (11 channels at full
-resolution) that is a 44x smaller observation; a 2000x1000 World state becomes
-a 125x62x64 latent grid. The first 3 PCA components of that grid (World):
-
-![Latent PCA](assets/latent_pca_world.png)
-
-Artifacts: dataset at
-[djmango/openfront-snapshots](https://huggingface.co/datasets/djmango/openfront-snapshots),
-checkpoint at
-[djmango/openfront-tile-autoencoder](https://huggingface.co/djmango/openfront-tile-autoencoder).
+- Dataset: [djmango/openfront-snapshots](https://huggingface.co/datasets/djmango/openfront-snapshots)
+  (~375k full-state snapshots, 250 games, 10 maps)
+- Checkpoints: [djmango/openfront-tile-autoencoder](https://huggingface.co/djmango/openfront-tile-autoencoder)
 
 ## Roadmap
 
-1. ~~Headless datagen + autoencoder~~ (this repo)
-2. Latent-quality probes (predict tile counts and future territory delta from
-   the frozen latent)
-3. Gym-style environment bridge (reset/step over the headless engine)
-4. PPO agent on the frozen encoder, then self-play league
+1. ~~Headless datagen + spatial autoencoder~~ (done, above)
+2. Environment bridge (reset/step over the headless engine, obs + legality
+   masks out, intents in)
+3. PPO agent on the frozen encoder + bypass features, full action surface
+   with factorized heads (see `DESIGN.md`)
+4. Self-play league

@@ -7,4 +7,5 @@ dependencies = [
     "numpy>=2.4.6",
     "pillow>=12.2.0",
     "torch>=2.12.0",
+    "zstandard>=0.25.0",
 ]
