@@ -10,8 +10,8 @@
 #   - lower Bots / Nations for a fair fight (default is 400)
 #   - wait until "AgentRL" appears in the lobby, then Start Game
 #
-# To see the model's decisions live (MODEL overlay panel), run once in the
-# browser console: localStorage.setItem("rlDebugHost", "http://localhost:8988")
+# The MODEL overlay panel (the agent's live decisions) appears automatically
+# in the browser; disable with localStorage.setItem("rlDebugOverlay", "0").
 
 set -euo pipefail
 
