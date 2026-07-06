@@ -20,7 +20,6 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as readline from "readline";
-import * as zlib from "zlib";
 import { Config } from "../openfront/src/core/configuration/Config";
 import { DoomsdayClockExecution } from "../openfront/src/core/execution/DoomsdayClockExecution";
 import { Executor } from "../openfront/src/core/execution/ExecutionManager";
@@ -51,6 +50,7 @@ import type {
 } from "../openfront/src/core/Schemas";
 import { simpleHash } from "../openfront/src/core/Util";
 import type { MapManifest } from "../openfront/src/core/game/TerrainMapFileLoader";
+import { buildObs, terrainPayload } from "./common";
 
 // The engine logs to console.log; stdout must stay pure JSONL.
 console.log = console.info = console.warn = (...args: unknown[]) =>
@@ -59,16 +59,6 @@ console.log = console.info = console.warn = (...args: unknown[]) =>
 const AGENT_CLIENT_ID = "AGENTRL1";
 const REPO_ROOT = path.resolve(__dirname, "..");
 const MAPS_DIR = path.join(REPO_ROOT, "openfront", "resources", "maps");
-
-const STRUCTURES = [
-  UnitType.City,
-  UnitType.Port,
-  UnitType.DefensePost,
-  UnitType.MissileSilo,
-  UnitType.SAMLauncher,
-  UnitType.Factory,
-];
-const LAUNCHABLE = [UnitType.AtomBomb, UnitType.HydrogenBomb, UnitType.MIRV];
 
 function mapDirName(mapType: GameMapType): string {
   const key = Object.keys(GameMapType).find(
@@ -93,7 +83,6 @@ function seedToGameID(seed: string): string {
 class EnvSession {
   game!: Game;
   executor!: Executor;
-  agentSmallID = -1;
   gameID = "";
   gameConfig!: GameConfig;
   turns: { turnNumber: number; intents: StampedIntent[] }[] = [];
@@ -203,7 +192,7 @@ class EnvSession {
 
     // Advance one tick so executions initialize; agent spawns via step().
     this.game.executeNextTick();
-    return this.buildObs(null);
+    return buildObs(this.game, AGENT_CLIENT_ID, null);
   }
 
   step(intents: Intent[], ticks: number): object {
@@ -229,7 +218,7 @@ class EnvSession {
         break;
       }
     }
-    return this.buildObs(winner);
+    return buildObs(this.game, AGENT_CLIENT_ID, winner);
   }
 
   /** GameRecord JSON loadable by the real OpenFront client replay viewer. */
@@ -267,171 +256,8 @@ class EnvSession {
     return { saved: outPath, gameID: this.gameID, turns: this.turns.length };
   }
 
-  private agent() {
-    return this.game.playerByClientID(AGENT_CLIENT_ID) ?? null;
-  }
-
-  private buildObs(winner: unknown): object {
-    const game = this.game;
-    const numTiles = game.width() * game.height();
-    const tiles = zlib
-      .gzipSync(
-        Buffer.from(
-          game.tileStateBuffer().buffer,
-          game.tileStateBuffer().byteOffset,
-          numTiles * 2,
-        ),
-        { level: 1 },
-      )
-      .toString("base64");
-
-    const agent = this.agent();
-    const me = agent?.smallID() ?? -1;
-    this.agentSmallID = me;
-
-    // Terrain ships once per reset (it is immutable); Python caches it.
-    return {
-      tick: game.ticks(),
-      width: game.width(),
-      height: game.height(),
-      spawnPhase: game.inSpawnPhase(),
-      winner,
-      me,
-      alive: agent?.isAlive() ?? false,
-      tiles,
-      entities: this.entities(),
-      legal: this.legality(),
-    };
-  }
-
   terrain(): object {
-    const game = this.game;
-    const numTiles = game.width() * game.height();
-    const buf = new Uint8Array(numTiles);
-    for (let ref = 0; ref < numTiles; ref++) buf[ref] = game.terrainByte(ref);
-    return {
-      terrain: zlib.gzipSync(Buffer.from(buf), { level: 6 }).toString("base64"),
-    };
-  }
-
-  private entities(): object {
-    const game = this.game;
-    // allPlayers(): game.players() filters to living players, which would
-    // drop the dead agent (and everyone eliminated) from placement math.
-    const players = game.allPlayers().map((p) => ({
-      id: p.smallID(),
-      pid: p.id(), // persistent ID; intents reference players by this
-      type: p.type(),
-      troops: Math.round(p.troops()),
-      gold: p.gold().toString(),
-      tiles: p.numTilesOwned(),
-      alive: p.isAlive(),
-      traitor: p.isTraitor(),
-      embargoes: p.getEmbargoes().map((e) => e.target.smallID()),
-      reqsIn: p.incomingAllianceRequests().map((r) => r.requestor().smallID()),
-      reqsOut: p.outgoingAllianceRequests().map((r) => r.recipient().smallID()),
-    }));
-
-    const alliances: number[][] = [];
-    const seen = new Set<string>();
-    for (const p of game.players()) {
-      for (const a of p.alliances()) {
-        const x = a.requestor().smallID();
-        const y = a.recipient().smallID();
-        const key = x < y ? `${x}:${y}` : `${y}:${x}`;
-        if (!seen.has(key)) {
-          seen.add(key);
-          alliances.push([x, y, a.expiresAt()]);
-        }
-      }
-    }
-
-    const units = game.players().flatMap((p) =>
-      p.units().map((u) => {
-        const tt = u.targetTile();
-        return {
-          uid: u.id(),
-          type: u.type(),
-          owner: p.smallID(),
-          x: game.x(u.tile()),
-          y: game.y(u.tile()),
-          tx: tt !== undefined ? game.x(tt) : null,
-          ty: tt !== undefined ? game.y(tt) : null,
-          samLock: u.targetedBySAM(),
-          level: u.level(),
-          constructing: u.isUnderConstruction(),
-          troops: Math.round(u.troops()),
-        };
-      }),
-    );
-
-    const attacks = game.players().flatMap((p) =>
-      p.outgoingAttacks().map((a) => ({
-        aid: a.id(),
-        from: p.smallID(),
-        to: a.target().isPlayer() ? a.target().smallID() : 0,
-        troops: Math.round(a.troops()),
-        retreating: a.retreating(),
-      })),
-    );
-
-    return { players, alliances, units, attacks };
-  }
-
-  /** Exact per-action legality from engine calls; Python builds masks. */
-  private legality(): object {
-    const game = this.game;
-    const agent = this.agent();
-    if (!agent || !agent.isAlive()) {
-      return { spawn: game.inSpawnPhase(), actions: {} };
-    }
-    const others = game.players().filter(
-      (p) => p !== agent && p.isAlive(),
-    );
-    const gold = agent.gold();
-    const buildable = [...STRUCTURES, ...LAUNCHABLE, UnitType.Warship].filter(
-      (t) => gold >= game.unitInfo(t).cost(game, agent),
-    );
-    return {
-      spawn: game.inSpawnPhase(),
-      actions: {
-        attackable: others
-          .filter((p) => agent.sharesBorderWith(p) && !agent.isFriendly(p))
-          .map((p) => p.smallID()),
-        allianceRequestable: others
-          .filter((p) => agent.canSendAllianceRequest(p))
-          .map((p) => p.smallID()),
-        allianceRejectable: agent
-          .incomingAllianceRequests()
-          .map((r) => r.requestor().smallID()),
-        breakable: agent.alliances().map((a) => a.other(agent).smallID()),
-        targetable: others
-          .filter((p) => agent.canTarget(p))
-          .map((p) => p.smallID()),
-        donatableGold: others
-          .filter((p) => agent.canDonateGold(p))
-          .map((p) => p.smallID()),
-        donatableTroops: others
-          .filter((p) => agent.canDonateTroops(p))
-          .map((p) => p.smallID()),
-        embargoable: others
-          .filter((p) => !agent.hasEmbargoAgainst(p))
-          .map((p) => p.smallID()),
-        buildableTypes: buildable,
-        hasSilo: agent
-          .units(UnitType.MissileSilo)
-          .some((u) => !u.isUnderConstruction()),
-        troops: Math.round(agent.troops()),
-        gold: gold.toString(),
-        attacks: agent.outgoingAttacks().map((a) => a.id()),
-        boats: agent.units(UnitType.Transport).map((u) => u.id()),
-        warships: agent.units(UnitType.Warship).map((u) => u.id()),
-        upgradable: agent
-          .units()
-          .filter((u) => game.unitInfo(u.type()).upgradable)
-          .map((u) => u.id()),
-      },
-    };
+    return terrainPayload(this.game);
   }
 }
 

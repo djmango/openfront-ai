@@ -151,6 +151,19 @@ Sample: [assets/replay_v2_stage3.webm](assets/replay_v2_stage3.webm)
 (ppo_v2c on stage 3 — Onion, 80 Medium bots; peaks ~13k tiles before dying
 at tick 3891).
 
+### Playing against the agent
+
+`bridge/play.ts` speaks the real client websocket protocol: it joins a live
+lobby, mirrors the deterministic sim from server turns, and submits intents
+picked by the policy. You fight it from the normal browser client:
+
+```bash
+(cd openfront && npm run dev)      # client :9000 + game server
+# browser: Create Lobby (private), copy the lobby ID, then:
+uv run python -m rl.play --policy /tmp/policy.pt --game <LOBBY_ID>
+# "AgentRL" appears in the lobby; Start Game and fight it.
+```
+
 ## Roadmap
 
 1. ~~Headless datagen + spatial autoencoder~~ (done, above)
