@@ -18,6 +18,20 @@ ENVS="${ENVS:-48}"
 STAGE="${STAGE:-0}"
 REPO_DIR=/workspace/openfront-ai
 
+# When run as the pod start command this replaces the image's /start.sh,
+# so keep SSH reachable ourselves.
+if [ -n "${PUBLIC_KEY:-}" ]; then
+  mkdir -p ~/.ssh && chmod 700 ~/.ssh
+  grep -qF "$PUBLIC_KEY" ~/.ssh/authorized_keys 2>/dev/null \
+    || echo "$PUBLIC_KEY" >> ~/.ssh/authorized_keys
+  chmod 600 ~/.ssh/authorized_keys
+fi
+if ! pgrep -x sshd >/dev/null 2>&1; then
+  mkdir -p /run/sshd
+  ssh-keygen -A >/dev/null 2>&1 || true
+  /usr/sbin/sshd || true
+fi
+
 # --- bootstrap (skips anything already present) ---
 mkdir -p /workspace
 if [ ! -d "$REPO_DIR" ]; then
