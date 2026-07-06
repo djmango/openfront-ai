@@ -70,7 +70,10 @@ def main() -> None:
 
     st = STAGES[args.stage]
     map_name = args.map or st.maps[0]
-    print(f"stage {args.stage}: {map_name}, {st.bots} bots, {st.difficulty}")
+    print(
+        f"stage {args.stage}: {map_name}, nations={st.nations}, "
+        f"{st.bots} bots, {st.difficulty}"
+    )
 
     device = "cpu"
     ae = load_ae(args.ckpt, device)
@@ -82,7 +85,10 @@ def main() -> None:
 
     env = OpenFrontEnv()
     builder = ObsBuilder()
-    obs = env.reset(map_name, seed=args.seed, bots=st.bots, difficulty=st.difficulty)
+    obs = env.reset(
+        map_name, seed=args.seed, bots=st.bots, difficulty=st.difficulty,
+        nations=st.nations,
+    )
     builder.start_game(env.terrain)
     rng = np.random.default_rng(0)
     obs = spawn_randomly(env, rng)

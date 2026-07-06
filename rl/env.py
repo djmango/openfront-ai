@@ -53,10 +53,11 @@ class OpenFrontEnv:
         seed: str = "0",
         bots: int = 100,
         difficulty: str = "Medium",
+        nations: int | str = "default",
     ) -> dict:
         obs = self._rpc(
             {"op": "reset", "map": map_name, "seed": seed, "bots": bots,
-             "difficulty": difficulty}
+             "difficulty": difficulty, "nations": nations}
         )
         self.width, self.height = obs["width"], obs["height"]
         terr = gzip.decompress(base64.b64decode(obs["terrain"]))

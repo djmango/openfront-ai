@@ -149,7 +149,8 @@ def main() -> None:
                         st = STAGES[stage]
                         print(
                             f"=== curriculum advance -> stage {stage}: "
-                            f"maps={','.join(st.maps)} bots={st.bots} {st.difficulty}",
+                            f"maps={','.join(st.maps)} nations={st.nations} "
+                            f"bots={st.bots} {st.difficulty}",
                             flush=True,
                         )
 
