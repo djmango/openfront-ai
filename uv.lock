@@ -568,7 +568,7 @@ wheels = [
 ]
 
 [[package]]
-name = "openfront-ae"
+name = "openfront-ai"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

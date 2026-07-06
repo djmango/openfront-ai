@@ -2,7 +2,7 @@
  * Headless OpenFront game runner that plays bot/nation-only games and dumps
  * tile-state snapshots for autoencoder training.
  *
- * Usage (from openfront-ae/):
+ * Usage (from openfront-ai/):
  *   openfront/node_modules/.bin/tsx datagen/generate.ts --map Onion --games 2
  *
  * Output layout, per game:

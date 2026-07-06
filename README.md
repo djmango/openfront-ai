@@ -1,4 +1,4 @@
-# openfront-ae
+# openfront-ai
 
 Learned spatial observation encoding for [OpenFront.io](https://openfront.io) RL agents.
 
