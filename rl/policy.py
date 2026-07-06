@@ -118,8 +118,12 @@ class Policy(nn.Module):
         return self.heads(h, g, p, o)
 
     @torch.no_grad()
-    def act(self, o: dict) -> tuple[list[dict], np.ndarray, np.ndarray]:
-        """Batched sampling. Returns (choices, logp (B,), value (B,))."""
+    def act(self, o: dict, debug: bool = False) -> tuple[list[dict], np.ndarray, np.ndarray]:
+        """Batched sampling. Returns (choices, logp (B,), value (B,)).
+
+        With debug=True each choice carries a "debug" dict (masked action
+        probabilities + value estimate) for visualization; strip it before
+        piping choices anywhere."""
         out = self.forward(o)
         B = out["action"].shape[0]
         dev = out["action"].device
@@ -175,6 +179,11 @@ class Policy(nn.Module):
                 c["nuke_type"] = int(heads["nuke"][0][b])
             if needs_q[b]:
                 c["quantity"] = int(heads["quantity"][0][b])
+            if debug:
+                c["debug"] = {
+                    "action_probs": d_act.probs[b].cpu().numpy(),
+                    "value": float(out["value"][b]),
+                }
             choices.append(c)
         return choices, logp.cpu().numpy(), out["value"].cpu().numpy()
 

@@ -12,22 +12,30 @@ import colorsys
 import shutil
 import subprocess
 import tempfile
+from collections import deque
 from pathlib import Path
 
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
-from rl.curriculum import STAGES
+from rl.curriculum import GW_MAX, STAGES
 from rl.env import OpenFrontEnv
-from rl.obs import ObsBuilder, encode_grids, load_ae
-from rl.policy import Policy
+from rl.obs import ACTIONS, BUILD_TYPES, NUKE_TYPES, ObsBuilder, encode_grids, load_ae
+from rl.policy import QUANTITY_FRACS, Policy
 from rl.ppo import OBS_KEYS
 from rl.ppo_translate import IntentTranslator, my_tiles, spawn_randomly
 
 AGENT_RGB = (60, 255, 60)
 WATER_RGB = (18, 26, 48)
 LAND_RGB = (72, 66, 60)
+PANEL_W = 260
+PANEL_BG = (12, 14, 22)
+TEXT_RGB = (210, 214, 224)
+DIM_RGB = (120, 126, 140)
+BAR_RGB = (70, 110, 190)
+BAR_HI_RGB = (90, 220, 90)
+MARK_RGB = (255, 80, 80)
 
 
 def palette(me_slot: int, n: int = 256) -> np.ndarray:
@@ -47,10 +55,140 @@ def render(env: OpenFrontEnv, builder: ObsBuilder, obs: dict, pal: np.ndarray, s
     land = (env.terrain >> 7) & 1
     img = pal[owners]
     img[(owners == 0) & (land == 0)] = WATER_RGB
+    builder._last_owners = owners  # for target-centroid markers
     im = Image.fromarray(img)
     if scale != 1:
         im = im.resize((im.width // scale, im.height // scale), Image.NEAREST)
     return im
+
+
+def _font(size: int) -> ImageFont.ImageFont:
+    try:
+        return ImageFont.truetype("DejaVuSans.ttf", size)
+    except OSError:
+        try:
+            return ImageFont.load_default(size)
+        except TypeError:
+            return ImageFont.load_default()
+
+
+def describe(choice: dict, obs: dict) -> str:
+    """One-line human description of a policy choice."""
+    name = ACTIONS[choice["action"]]
+    parts = [name]
+    if "player_slot" in choice:
+        parts.append(f"-> P{choice['player_slot']}")
+    if "tile_region" in choice:
+        gy, gx = divmod(choice["tile_region"], GW_MAX)
+        parts.append(f"@({gx},{gy})")
+    if "build_type" in choice:
+        parts.append(BUILD_TYPES[choice["build_type"]])
+    if "nuke_type" in choice:
+        parts.append(NUKE_TYPES[choice["nuke_type"]])
+    if "quantity" in choice:
+        frac = QUANTITY_FRACS[choice["quantity"]]
+        troops = int(obs["legal"]["actions"].get("troops", 0) * frac)
+        parts.append(f"{int(frac * 100)}% ({troops:,})")
+    return " ".join(parts)
+
+
+def draw_markers(
+    im: Image.Image, choice: dict, builder: ObsBuilder, scale: int
+) -> None:
+    """Mark what the agent is acting on: crosshair on the tile-region
+    target, ring on the attack target's territory centroid."""
+    d = ImageDraw.Draw(im)
+    if "tile_region" in choice:
+        gy, gx = divmod(choice["tile_region"], GW_MAX)
+        x, y = (gx * 16 + 8) / scale, (gy * 16 + 8) / scale
+        r = max(6, 16 // scale)
+        d.line([(x - r, y), (x + r, y)], fill=MARK_RGB, width=2)
+        d.line([(x, y - r), (x, y + r)], fill=MARK_RGB, width=2)
+        d.rectangle(
+            [gx * 16 / scale, gy * 16 / scale, (gx + 1) * 16 / scale, (gy + 1) * 16 / scale],
+            outline=MARK_RGB,
+        )
+    if "player_slot" in choice and builder.lut is not None:
+        # centroid of the target's territory on the (unscaled) owner grid
+        slot = choice["player_slot"]
+        owners = getattr(builder, "_last_owners", None)
+        if owners is not None:
+            ys, xs = np.nonzero(owners == slot)
+            if len(ys):
+                x, y = float(xs.mean()) / scale, float(ys.mean()) / scale
+                r = max(8, 24 // scale)
+                d.ellipse([x - r, y - r, x + r, y + r], outline=MARK_RGB, width=2)
+
+
+def compose(
+    map_im: Image.Image,
+    obs: dict,
+    choice: dict | None,
+    history: deque,
+    step: int,
+) -> Image.Image:
+    """Map frame + debug side panel (state, chosen action, action probs)."""
+    H = max(map_im.height, 460)
+    out = Image.new("RGB", (map_im.width + PANEL_W, H), PANEL_BG)
+    out.paste(map_im, (0, (H - map_im.height) // 2))
+    d = ImageDraw.Draw(out)
+    f = _font(13)
+    fs = _font(11)
+    x0 = map_im.width + 10
+    y = 8
+
+    me = next(
+        (p for p in obs["entities"]["players"] if p["id"] == obs["me"]), None
+    )
+    d.text((x0, y), f"tick {obs['tick']}  step {step}", font=f, fill=TEXT_RGB)
+    y += 20
+    if me:
+        d.text(
+            (x0, y),
+            f"tiles {me['tiles']:,}  troops {int(me['troops']):,}",
+            font=fs, fill=TEXT_RGB,
+        )
+        y += 16
+        d.text((x0, y), f"gold {int(float(me['gold'])):,}", font=fs, fill=TEXT_RGB)
+        y += 16
+    dbg = (choice or {}).get("debug")
+    if dbg is not None:
+        d.text((x0, y), f"value {dbg['value']:+.2f}", font=fs, fill=TEXT_RGB)
+        y += 16
+    y += 6
+
+    desc = (choice or {}).get("_desc")
+    if desc:
+        d.text((x0, y), desc, font=f, fill=BAR_HI_RGB)
+    else:
+        d.text((x0, y), "spawn phase", font=f, fill=DIM_RGB)
+    y += 24
+
+    # Action-probability bars.
+    if dbg is not None:
+        probs = dbg["action_probs"]
+        bar_x = x0 + 92
+        bar_w = PANEL_W - 112
+        for i, name in enumerate(ACTIONS):
+            chosen = choice is not None and choice["action"] == i
+            col = BAR_HI_RGB if chosen else (TEXT_RGB if probs[i] > 0.01 else DIM_RGB)
+            d.text((x0, y), name[:13], font=fs, fill=col)
+            w = int(bar_w * float(probs[i]))
+            d.rectangle([bar_x, y + 2, bar_x + bar_w, y + 10], outline=(40, 44, 58))
+            if w > 0:
+                d.rectangle(
+                    [bar_x, y + 2, bar_x + w, y + 10],
+                    fill=BAR_HI_RGB if chosen else BAR_RGB,
+                )
+            y += 15
+        y += 6
+
+    d.text((x0, y), "recent:", font=fs, fill=DIM_RGB)
+    y += 15
+    for line in list(history)[-8:]:
+        d.text((x0, y), line, font=fs, fill=DIM_RGB)
+        y += 14
+    return out
 
 
 def main() -> None:
@@ -66,6 +204,10 @@ def main() -> None:
     ap.add_argument("--scale", type=int, default=1, help="downscale factor (1 = native)")
     ap.add_argument("--fps", type=int, default=24)
     ap.add_argument("--seed", default="watch0")
+    ap.add_argument(
+        "--debug", action=argparse.BooleanOptionalAction, default=True,
+        help="side panel with the agent's action, probs, and value (--no-debug to disable)",
+    )
     args = ap.parse_args()
 
     st = STAGES[args.stage]
@@ -97,20 +239,34 @@ def main() -> None:
     me_slot = int(builder.lut[obs["me"]]) if obs["me"] >= 0 else 1
     pal = palette(me_slot)
 
-    frames = [render(env, builder, obs, pal, args.scale)]
+    history: deque[str] = deque(maxlen=8)
+
+    def frame(choice: dict | None, step: int) -> Image.Image:
+        im = render(env, builder, obs, pal, args.scale)
+        if not args.debug:
+            return im
+        if choice is not None:
+            draw_markers(im, choice, builder, args.scale)
+        return compose(im, obs, choice, history, step)
+
+    frames = [frame(None, 0)]
     for step in range(args.max_steps):
         raw = builder.prepare(obs)
         o = encode_grids(ae, [raw], device)[0]
         ot = {k: torch.from_numpy(o[k])[None] for k in OBS_KEYS}
-        choices, _, _ = policy.act(ot)
-        obs = env.step(translator.translate(choices[0], obs), ticks=10)
+        choices, _, _ = policy.act(ot, debug=args.debug)
+        choice = choices[0]
+        choice["_desc"] = describe(choice, obs)  # pre-step legality/troops
+        if ACTIONS[choice["action"]] != "noop":
+            history.append(f"t{obs['tick']:>5} {choice['_desc']}"[:40])
+        obs = env.step(translator.translate(choice, obs), ticks=10)
 
         if step % args.frame_every == 0:
-            frames.append(render(env, builder, obs, pal, args.scale))
+            frames.append(frame(choice, step))
         if step % 100 == 0:
             print(f"step {step}, tick {obs['tick']}, my tiles {my_tiles(obs)}, alive {obs['alive']}")
         if not obs["alive"] or obs["winner"] is not None:
-            frames.append(render(env, builder, obs, pal, args.scale))
+            frames.append(frame(choice, step))
             print(f"episode over at tick {obs['tick']}: alive={obs['alive']}, winner={obs['winner']}")
             break
 

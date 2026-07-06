@@ -128,7 +128,10 @@ uv run tensorboard --logdir runs/rl   # live dashboard
 
 `rl/watch.py` runs one greedy episode, renders a native-resolution WebM, and
 saves an engine `GameRecord` — the same format openfront.io archives — which
-the **real game client** can replay with the full UI:
+the **real game client** can replay with the full UI. The video includes a
+debug side panel (chosen action + arguments, action-probability bars, value
+estimate, recent-action log) and on-map markers for tile/player targets;
+pass `--no-debug` for a clean map-only render:
 
 ```bash
 uv run python -m rl.watch --policy /tmp/policy.pt --stage 3 \
