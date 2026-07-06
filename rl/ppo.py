@@ -69,19 +69,31 @@ def main() -> None:
     recent_scores: deque[float] = deque(maxlen=WINDOW)
     ae = load_ae(args.ckpt, device)
     policy = Policy().to(device)
+    opt = torch.optim.AdamW(policy.parameters(), lr=args.lr)
+    start_update = 0
+    global_step = 0
     if args.resume:
         state = torch.load(args.resume, map_location=device, weights_only=False)
         policy.load_state_dict(state["model_state_dict"])
-        print(f"resumed from {args.resume}")
-    opt = torch.optim.AdamW(policy.parameters(), lr=args.lr)
+        if "optimizer_state_dict" in state:
+            opt.load_state_dict(state["optimizer_state_dict"])
+        if "stage" in state:
+            stage = max(stage, int(state["stage"]))
+            vec.set_stage(stage)
+        start_update = int(state.get("update", 0))
+        global_step = int(state.get("global_step", 0))
+        print(
+            f"resumed from {args.resume}: update {start_update}, "
+            f"step {global_step}, stage {stage}"
+        )
 
     T, N = args.rollout, args.envs
     rng = np.random.default_rng(0)
-    global_step = 0
     episodes_done = 0
     t0 = time.time()
+    t0_step = global_step
 
-    for update in range(1, args.updates + 1):
+    for update in range(start_update + 1, args.updates + 1):
         obs_buf: list[list[dict]] = []
         choice_buf: list[list[dict]] = []
         logp_buf = np.zeros((T, N), dtype=np.float32)
@@ -206,7 +218,7 @@ def main() -> None:
                 ent_sum += float(ent.mean().item())
                 n_mb += 1
 
-        tps = global_step * args.decision_ticks / (time.time() - t0)
+        tps = (global_step - t0_step) * args.decision_ticks / (time.time() - t0)
         writer.add_scalar("loss/policy", pl_sum / n_mb, global_step)
         writer.add_scalar("loss/value", vl_sum / n_mb, global_step)
         writer.add_scalar("loss/entropy", ent_sum / n_mb, global_step)
@@ -230,10 +242,19 @@ def main() -> None:
         )
 
         if update % 10 == 0 or update == args.updates:
+            tmp = out_dir / "policy.pt.tmp"
             torch.save(
-                {"model_state_dict": policy.state_dict(), "args": vars(args)},
-                out_dir / "policy.pt",
+                {
+                    "model_state_dict": policy.state_dict(),
+                    "optimizer_state_dict": opt.state_dict(),
+                    "stage": stage,
+                    "update": update,
+                    "global_step": global_step,
+                    "args": vars(args),
+                },
+                tmp,
             )
+            tmp.rename(out_dir / "policy.pt")  # atomic: no torn ckpt on kill
 
     vec.close()
     writer.close()
