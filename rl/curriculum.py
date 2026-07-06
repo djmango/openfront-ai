@@ -16,18 +16,28 @@ Reward design (v2):
   else rank among the living by the same strength index.
 - Flat small death penalty w_death.
 
-Stage advancement: rolling mean placement score over the last WINDOW
-episodes; advance when it clears ADVANCE_AT. Score = (N - place) / (N - 1),
-1.0 = first of N, 0 = last.
+Curriculum (v2):
+- Each stage is a POOL of maps plus a bot count and difficulty; the map is
+  sampled per episode so the agent never overfits a single layout.
+- Anti-forgetting rehearsal: REHEARSAL_P of episodes replay a map pool from
+  an earlier (already-cleared) stage but at the CURRENT stage's bot count
+  and difficulty — old maps come back harder, so mastery has to hold up.
+  Rehearsal episodes still train the policy but do not count toward
+  advancement stats.
+- Advancement is win-gated: the agent must WIN (engine win, not just
+  survive) more often than not — rolling win rate over the last WINDOW
+  on-stage episodes must exceed WIN_AT before moving on.
 """
 
 import math
 from dataclasses import dataclass
 
+import numpy as np
+
 W_STR = 0.02
 W_DELTA = 5.0
 W_PLACE = 15.0
-W_WIN = 15.0
+W_WIN = 30.0
 W_DEATH = 1.0
 PLACE_POW = 0.7
 
@@ -38,29 +48,53 @@ K_MIL = 0.25
 K_ECO = 0.30
 
 WINDOW = 40
-ADVANCE_AT = 0.80
+WIN_AT = 0.5  # must win more often than not to advance
+REHEARSAL_P = 0.25  # fraction of episodes replaying earlier maps, harder
 
 
 @dataclass(frozen=True)
 class Stage:
-    map_name: str
+    maps: tuple[str, ...]
     bots: int
     difficulty: str
 
 
+# Map pool (all in the AE training set) with featurized grid sizes (H//16 x W//16):
+#   Onion 32x32, Pangaea 62x62, Caucasus 62x78, BlackSea 68x93,
+#   BetweenTwoSeas 66x111, World 62x125, Asia 75x125.
+ALL_MAPS = (
+    "Onion", "Pangaea", "Caucasus", "BlackSea", "BetweenTwoSeas", "World", "Asia",
+)
+
 STAGES = [
-    Stage("Onion", 10, "Easy"),
-    Stage("Onion", 30, "Easy"),
-    Stage("Onion", 60, "Medium"),
-    Stage("Onion", 100, "Medium"),
-    Stage("Pangaea", 60, "Medium"),
-    Stage("Pangaea", 100, "Medium"),
-    Stage("Pangaea", 100, "Hard"),
+    Stage(("Onion",), 5, "Easy"),
+    Stage(("Onion", "Pangaea"), 15, "Easy"),
+    Stage(("Pangaea", "Caucasus"), 15, "Easy"),
+    Stage(("Pangaea", "Caucasus", "BlackSea"), 30, "Easy"),
+    Stage(("BlackSea", "BetweenTwoSeas", "Caucasus"), 30, "Medium"),
+    Stage(("World", "Asia", "BlackSea"), 50, "Medium"),
+    Stage(("World", "Asia", "BetweenTwoSeas", "Caucasus"), 80, "Medium"),
+    Stage(ALL_MAPS, 80, "Hard"),
+    Stage(ALL_MAPS, 120, "Hard"),
+    Stage(ALL_MAPS, 150, "Impossible"),
 ]
 
-# Largest featurized grid across curriculum maps (Pangaea 1000x1000 -> 62).
-GH_MAX = 62
-GW_MAX = 62
+# Largest featurized grid across curriculum maps (Asia 2000x1200 -> 75x125).
+GH_MAX = 75
+GW_MAX = 125
+
+
+def sample_episode(stage: int, rng: np.random.Generator) -> tuple[str, int, str, bool]:
+    """Pick (map, bots, difficulty, is_rehearsal) for one episode.
+
+    Rehearsal draws a map from a random earlier stage's pool but keeps the
+    current stage's bots/difficulty: old maps with harder opposition.
+    """
+    cur = STAGES[stage]
+    if stage > 0 and rng.random() < REHEARSAL_P:
+        past = STAGES[int(rng.integers(stage))]
+        return str(rng.choice(past.maps)), cur.bots, cur.difficulty, True
+    return str(rng.choice(cur.maps)), cur.bots, cur.difficulty, False
 
 
 def timeweight(tick: int) -> float:

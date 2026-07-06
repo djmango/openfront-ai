@@ -13,12 +13,12 @@ import sys
 import numpy as np
 
 from rl.curriculum import (
-    STAGES,
     W_DEATH,
     W_DELTA,
     W_STR,
     placement,
     placement_score,
+    sample_episode,
     strengths,
     terminal_reward,
     timeweight,
@@ -45,12 +45,14 @@ class EnvWorker:
 
     def reset_episode(self) -> None:
         self.stage = int(self.stage_val.value)
-        st = STAGES[self.stage]
+        self.map_name, bots, difficulty, self.rehearsal = sample_episode(
+            self.stage, self.rng
+        )
         self.obs = self.env.reset(
-            st.map_name,
+            self.map_name,
             seed=f"w{self.idx}-ep{self.episode}",
-            bots=st.bots,
-            difficulty=st.difficulty,
+            bots=bots,
+            difficulty=difficulty,
         )
         self.builder.start_game(self.env.terrain)
         self.obs = spawn_randomly(self.env, self.rng)
@@ -107,6 +109,8 @@ class EnvWorker:
                 "score": placement_score(place, n),
                 "won": won,
                 "stage": self.stage,
+                "map": self.map_name,
+                "rehearsal": self.rehearsal,
             }
             self.reset_episode()
         else:

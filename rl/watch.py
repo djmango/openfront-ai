@@ -58,6 +58,7 @@ def main() -> None:
     ap.add_argument("--policy", required=True)
     ap.add_argument("--ckpt", default="runs/ae_v3/ae_v3.pt")
     ap.add_argument("--stage", type=int, default=3)
+    ap.add_argument("--map", default=None, help="override map (default: first in stage pool)")
     ap.add_argument("--out", default="replay.webm", help=".webm (ffmpeg) or .gif")
     ap.add_argument("--record", default=None, help="also save engine GameRecord JSON")
     ap.add_argument("--max-steps", type=int, default=1200)
@@ -68,7 +69,8 @@ def main() -> None:
     args = ap.parse_args()
 
     st = STAGES[args.stage]
-    print(f"stage {args.stage}: {st.map_name}, {st.bots} bots, {st.difficulty}")
+    map_name = args.map or st.maps[0]
+    print(f"stage {args.stage}: {map_name}, {st.bots} bots, {st.difficulty}")
 
     device = "cpu"
     ae = load_ae(args.ckpt, device)
@@ -80,7 +82,7 @@ def main() -> None:
 
     env = OpenFrontEnv()
     builder = ObsBuilder()
-    obs = env.reset(st.map_name, seed=args.seed, bots=st.bots, difficulty=st.difficulty)
+    obs = env.reset(map_name, seed=args.seed, bots=st.bots, difficulty=st.difficulty)
     builder.start_game(env.terrain)
     rng = np.random.default_rng(0)
     obs = spawn_randomly(env, rng)
