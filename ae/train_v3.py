@@ -10,6 +10,7 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import time
 from pathlib import Path
@@ -25,10 +26,20 @@ from ae.model_v3 import (
     STATIC_CLASS_WEIGHTS,
     SpatialAE,
 )
-from ae.train import border_weight
+from ae.train import border_mask
 from ae.units import STATIC_INDICES
 
 MAGNITUDE_NORM = 31.0
+
+# Border-density rejection sampling (v3.1): crops are accepted with
+# probability proportional to their border-edge density, floored so that
+# easy/ocean regions are not fully starved. Density is edges/tiles on the
+# already-decompressed owner-slot crop, so retries are nearly free; the
+# expensive frame decompress is reused across attempts (the snapshot is
+# redrawn once, halfway through the attempt budget).
+BORDER_SAMPLE_TRIES = 8
+BORDER_SAMPLE_FLOOR = 0.15
+BORDER_SAMPLE_FULL_DENSITY = 0.05  # >=5% differing edges -> always accept
 
 
 class CachedGame:
@@ -85,12 +96,34 @@ class CachedGame:
         packed = np.frombuffer(raw[hw:], dtype=np.uint8).reshape(self.h, -1)
         return slots, packed
 
-    def sample(self, rng: np.random.Generator, crop: int):
+    def sample(
+        self,
+        rng: np.random.Generator,
+        crop: int,
+        latent_down: int = 16,
+        border_sample: bool = True,
+    ):
         si = int(rng.integers(self.n))
-        y0 = int(rng.integers(max(1, (self.h - crop) // 16 + 1))) * 16
-        x0 = int(rng.integers(max(1, (self.w - crop) // 16 + 1))) * 16
-
         slots_full, fall_full = self.frame(si)
+        for attempt in range(BORDER_SAMPLE_TRIES):
+            if attempt == BORDER_SAMPLE_TRIES // 2:
+                si = int(rng.integers(self.n))
+                slots_full, fall_full = self.frame(si)
+            y0 = int(rng.integers(max(1, (self.h - crop) // 16 + 1))) * 16
+            x0 = int(rng.integers(max(1, (self.w - crop) // 16 + 1))) * 16
+            if not border_sample:
+                break
+            cs = slots_full[y0 : y0 + crop, x0 : x0 + crop]
+            edges = np.count_nonzero(cs[1:, :] != cs[:-1, :]) + np.count_nonzero(
+                cs[:, 1:] != cs[:, :-1]
+            )
+            p = max(
+                BORDER_SAMPLE_FLOOR,
+                min(1.0, edges / cs.size / BORDER_SAMPLE_FULL_DENSITY),
+            )
+            if rng.random() < p:
+                break
+
         slots = slots_full[y0 : y0 + crop, x0 : x0 + crop].astype(np.int64)
         fall_packed = fall_full[y0 : y0 + crop, x0 // 8 : (x0 + crop) // 8]
         fallout = np.unpackbits(fall_packed, axis=1).astype(np.float32)
@@ -113,17 +146,31 @@ class CachedGame:
             gy = (xy[:, 1] - y0) // 16
             ok = (gx >= 0) & (gx < g) & (gy >= 0) & (gy < g)
             np.add.at(planes, (cls[ok], gy[ok], gx[ok]), 1.0)
-        return slots, terrain, np.minimum(planes, 1.0)
+        planes = np.minimum(planes, 1.0)
+        if latent_down == 8:
+            # Static planes are built at 1/16; nearest-upsample 2x so both
+            # the encoder input and the structure head live at 1/8.
+            planes = planes.repeat(2, axis=1).repeat(2, axis=2)
+        return slots, terrain, planes
 
 
 class CachedDataset(torch.utils.data.IterableDataset):
     """Samples uniformly over games found under one or more roots
     (comma-separated), e.g. "data,data-human" for a bot+human mix."""
 
-    def __init__(self, data_root: str, crop: int, seed: int = 0):
+    def __init__(
+        self,
+        data_root: str,
+        crop: int,
+        seed: int = 0,
+        latent_down: int = 16,
+        border_sample: bool = True,
+    ):
         self.data_root = data_root
         self.crop = crop
         self.seed = seed
+        self.latent_down = latent_down
+        self.border_sample = border_sample
         self._games: list[CachedGame] | None = None
 
     def __iter__(self):
@@ -143,7 +190,9 @@ class CachedDataset(torch.utils.data.IterableDataset):
         rng = np.random.default_rng(self.seed * 100_003 + wid)
         games = self._games
         while True:
-            yield games[rng.integers(len(games))].sample(rng, self.crop)
+            yield games[rng.integers(len(games))].sample(
+                rng, self.crop, self.latent_down, self.border_sample
+            )
 
 
 def main() -> None:
@@ -153,8 +202,15 @@ def main() -> None:
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--crop", type=int, default=256)
     ap.add_argument("--latent-c", type=int, default=64)
-    ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--latent-down", type=int, default=16, choices=(8, 16))
+    ap.add_argument("--lr", type=float, default=3e-4, help="peak lr")
     ap.add_argument("--border-weight", type=float, default=4.0)
+    ap.add_argument(
+        "--focal-gamma",
+        type=float,
+        default=1.5,
+        help="focal modulation (1-p_true)^gamma on the tile CE; 0 disables",
+    )
     ap.add_argument("--w-units", type=float, default=1.0)
     ap.add_argument("--unit-pos-weight", type=float, default=20.0)
     ap.add_argument("--workers", type=int, default=8)
@@ -168,7 +224,7 @@ def main() -> None:
     )
     print(f"device: {device}")
 
-    dataset = CachedDataset(args.data, args.crop)
+    dataset = CachedDataset(args.data, args.crop, latent_down=args.latent_down)
     loader = torch.utils.data.DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -179,9 +235,30 @@ def main() -> None:
     )
     batches = iter(loader)
 
-    model = SpatialAE(latent_c=args.latent_c).to(device)
+    # v3.1: terrain-conditioned upsample decoder. Recorded in the checkpoint
+    # args so eval can rebuild the right architecture (old v3 checkpoints
+    # lack these keys and default back to the original architecture).
+    args.terrain_cond = True
+    args.upsample_decoder = True
+    model = SpatialAE(
+        latent_c=args.latent_c,
+        terrain_cond=args.terrain_cond,
+        upsample_decoder=args.upsample_decoder,
+        latent_down=args.latent_down,
+    ).to(device)
     print(f"model: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M params")
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
+
+    # Linear warmup then cosine decay to 5% of peak over the full run.
+    warmup = min(500, max(1, args.steps // 10))
+
+    def lr_lambda(step: int) -> float:  # step is 0-based
+        if step < warmup:
+            return (step + 1) / warmup
+        t = (step - warmup) / max(1, args.steps - warmup)
+        return 0.05 + 0.95 * 0.5 * (1.0 + math.cos(math.pi * t))
+
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -200,7 +277,13 @@ def main() -> None:
         tile_logits, unit_logits, _ = model(owners, terrain, planes)
 
         per_tile = F.cross_entropy(tile_logits, owners, reduction="none")
-        weights = border_weight(owners, args.border_weight)
+        if args.focal_gamma > 0:
+            # clamp: CE can be numerically epsilon-negative, and a negative
+            # base under a fractional power is NaN.
+            hard = (1.0 - torch.exp(-per_tile)).clamp_min(0.0)
+            per_tile = per_tile * hard**args.focal_gamma
+        border = border_mask(owners)
+        weights = 1.0 + args.border_weight * border.float()
         loss_tiles = (per_tile * weights).sum() / weights.sum()
 
         loss_units = F.binary_cross_entropy_with_logits(
@@ -211,10 +294,13 @@ def main() -> None:
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
+        sched.step()
 
         if step % 50 == 0 or step == 1:
             with torch.no_grad():
-                acc = (tile_logits.argmax(1) == owners).float().mean().item()
+                ok = tile_logits.argmax(1) == owners
+                acc = ok.float().mean().item()
+                bacc = ok[border].float().mean().item() if border.any() else 1.0
                 occ = planes > 0.5
                 n_occ = occ.sum().item()
                 unit_rec = (
@@ -226,15 +312,20 @@ def main() -> None:
             print(
                 f"step {step:5d}  loss {loss.item():.4f}  "
                 f"tiles {loss_tiles.item():.4f}  units {loss_units.item():.4f}  "
-                f"acc {acc:.4f}  unit-rec {unit_rec:.2f}  {rate:.1f} ex/s",
+                f"acc {acc:.4f}  bacc {bacc:.4f}  unit-rec {unit_rec:.2f}  "
+                f"lr {sched.get_last_lr()[0]:.2e}  {rate:.1f} ex/s",
                 flush=True,
             )
 
         if step % 500 == 0 or step == args.steps:
-            torch.save(
-                {"model_state_dict": model.state_dict(), "args": vars(args)},
-                out_dir / "ae_v3.pt",
-            )
+            ckpt = {
+                "model_state_dict": model.state_dict(),
+                "args": vars(args),
+                "step": step,
+            }
+            torch.save(ckpt, out_dir / "ae_v3.pt")
+            if step % 5000 == 0:
+                torch.save(ckpt, out_dir / f"ae_v3_step{step}.pt")
 
     print(f"saved {out_dir / 'ae_v3.pt'}")
 

@@ -69,15 +69,20 @@ def encode_crop(
     return slots, np.stack([land, mag, fallout])
 
 
-def border_weight(owners: torch.Tensor, weight: float) -> torch.Tensor:
-    """Per-tile loss weights: `1 + weight` on ownership borders, 1 elsewhere."""
-    w = torch.ones_like(owners, dtype=torch.float32)
+def border_mask(owners: torch.Tensor) -> torch.Tensor:
+    """Bool mask of border tiles: any 4-neighbour differs in true ownership."""
     diff = torch.zeros_like(owners, dtype=torch.bool)
     diff[:, 1:, :] |= owners[:, 1:, :] != owners[:, :-1, :]
     diff[:, :-1, :] |= owners[:, 1:, :] != owners[:, :-1, :]
     diff[:, :, 1:] |= owners[:, :, 1:] != owners[:, :, :-1]
     diff[:, :, :-1] |= owners[:, :, 1:] != owners[:, :, :-1]
-    return w + weight * diff.float()
+    return diff
+
+
+def border_weight(owners: torch.Tensor, weight: float) -> torch.Tensor:
+    """Per-tile loss weights: `1 + weight` on ownership borders, 1 elsewhere."""
+    w = torch.ones_like(owners, dtype=torch.float32)
+    return w + weight * border_mask(owners).float()
 
 
 class SnapshotSampler:

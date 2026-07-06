@@ -30,11 +30,27 @@ def main() -> None:
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     ckpt = torch.load(args.ckpt, map_location=device, weights_only=False)
-    model = SpatialAE(latent_c=ckpt["args"]["latent_c"]).to(device)
+    # v3.1 checkpoints record architecture flags in args; old v3 checkpoints
+    # lack them and default to the original architecture.
+    ca = ckpt["args"]
+    model = SpatialAE(
+        latent_c=ca["latent_c"],
+        terrain_cond=ca.get("terrain_cond", False),
+        upsample_decoder=ca.get("upsample_decoder", False),
+        latent_down=ca.get("latent_down", 16),
+    ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
-    ds = CachedDataset(args.data, args.crop, seed=1234)
+    # border_sample=False: keep the eval crop distribution uniform (and
+    # comparable across v3/v3.1) even though training samples border-dense.
+    ds = CachedDataset(
+        args.data,
+        args.crop,
+        seed=1234,
+        latent_down=ca.get("latent_down", 16),
+        border_sample=False,
+    )
     it = iter(ds)
 
     tile_ok = tile_n = border_ok = border_n = 0
