@@ -90,47 +90,65 @@ class Policy(nn.Module):
         return self.heads(h, g, p, o)
 
     @torch.no_grad()
-    def act(self, o: dict) -> tuple[dict, dict]:
-        """Sample one action (batch of 1). Returns (choice, logprob parts)."""
+    def act(self, o: dict) -> tuple[list[dict], np.ndarray, np.ndarray]:
+        """Batched sampling. Returns (choices, logp (B,), value (B,))."""
         out = self.forward(o)
-        choice: dict = {}
-        logp = torch.zeros(1, device=out["action"].device)
+        B = out["action"].shape[0]
+        dev = out["action"].device
 
-        dist = torch.distributions.Categorical(logits=out["action"])
-        a = dist.sample()
-        choice["action"] = int(a.item())
-        logp = logp + dist.log_prob(a)
-        name = ACTIONS[choice["action"]]
+        d_act = torch.distributions.Categorical(logits=out["action"])
+        a = d_act.sample()
+        logp = d_act.log_prob(a)
 
-        if name in NEEDS_PLAYER:
-            mask = o["legal_ptarget"][:, choice["action"]]
-            logits = out["player"] + (mask - 1) * -MASKED_NEG
+        # Player head mask depends on the sampled action.
+        pmask = o["legal_ptarget"].gather(
+            1, a[:, None, None].expand(-1, 1, MAX_SLOTS)
+        ).squeeze(1)
+        heads = {}
+        for name, logits in [
+            ("player", out["player"] + (pmask - 1) * -MASKED_NEG),
+            ("tile", out["tile"]),
+            ("build", out["build"]),
+            ("nuke", out["nuke"]),
+            ("quantity", out["quantity"]),
+        ]:
             d = torch.distributions.Categorical(logits=logits)
             s = d.sample()
-            choice["player_slot"] = int(s.item())
-            logp = logp + d.log_prob(s)
-        if name in NEEDS_TILE:
-            d = torch.distributions.Categorical(logits=out["tile"])
-            s = d.sample()
-            choice["tile_region"] = int(s.item())
-            logp = logp + d.log_prob(s)
-        if name == "build":
-            d = torch.distributions.Categorical(logits=out["build"])
-            s = d.sample()
-            choice["build_type"] = int(s.item())
-            logp = logp + d.log_prob(s)
-        if name == "launch_nuke":
-            d = torch.distributions.Categorical(logits=out["nuke"])
-            s = d.sample()
-            choice["nuke_type"] = int(s.item())
-            logp = logp + d.log_prob(s)
-        if name in NEEDS_QUANTITY:
-            d = torch.distributions.Categorical(logits=out["quantity"])
-            s = d.sample()
-            choice["quantity"] = int(s.item())
-            logp = logp + d.log_prob(s)
+            heads[name] = (s, d.log_prob(s))
 
-        return choice, {"logp": float(logp.item()), "value": float(out["value"].item())}
+        needs_p = torch.tensor(
+            [ACTIONS[i] in NEEDS_PLAYER for i in range(N_ACTIONS)], device=dev
+        )[a]
+        needs_t = torch.tensor(
+            [ACTIONS[i] in NEEDS_TILE for i in range(N_ACTIONS)], device=dev
+        )[a]
+        needs_q = torch.tensor(
+            [ACTIONS[i] in NEEDS_QUANTITY for i in range(N_ACTIONS)], device=dev
+        )[a]
+        is_build = a == ACTIONS.index("build")
+        is_nuke = a == ACTIONS.index("launch_nuke")
+
+        logp = logp + torch.where(needs_p, heads["player"][1], 0.0)
+        logp = logp + torch.where(needs_t, heads["tile"][1], 0.0)
+        logp = logp + torch.where(is_build, heads["build"][1], 0.0)
+        logp = logp + torch.where(is_nuke, heads["nuke"][1], 0.0)
+        logp = logp + torch.where(needs_q, heads["quantity"][1], 0.0)
+
+        choices = []
+        for b in range(B):
+            c = {"action": int(a[b])}
+            if needs_p[b]:
+                c["player_slot"] = int(heads["player"][0][b])
+            if needs_t[b]:
+                c["tile_region"] = int(heads["tile"][0][b])
+            if is_build[b]:
+                c["build_type"] = int(heads["build"][0][b])
+            if is_nuke[b]:
+                c["nuke_type"] = int(heads["nuke"][0][b])
+            if needs_q[b]:
+                c["quantity"] = int(heads["quantity"][0][b])
+            choices.append(c)
+        return choices, logp.cpu().numpy(), out["value"].cpu().numpy()
 
     def evaluate(self, o: dict, choice: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Batched logprob/entropy/value for PPO updates.

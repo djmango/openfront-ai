@@ -57,15 +57,26 @@ def log_norm(x: float) -> float:
     return float(np.log10(1.0 + max(0.0, x)) / 8.0)
 
 
+def load_ae(ckpt_path: str | Path, device: str = "cpu") -> SpatialAE:
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    ae = SpatialAE(latent_c=ckpt["args"]["latent_c"]).to(device)
+    ae.load_state_dict(ckpt["model_state_dict"])
+    ae.eval()
+    return ae
+
+
 class ObsBuilder:
-    def __init__(self, ckpt_path: str | Path, device: str = "cpu"):
-        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-        self.ae = SpatialAE(latent_c=ckpt["args"]["latent_c"]).to(device)
-        self.ae.load_state_dict(ckpt["model_state_dict"])
-        self.ae.eval()
+    def __init__(
+        self,
+        ckpt_path: str | Path | None = None,
+        device: str = "cpu",
+        ae: SpatialAE | None = None,
+    ):
+        # ae=None with a ckpt loads a private copy; pass ae to share weights,
+        # or leave both unset when encoding happens centrally (see prepare()).
+        self.ae = ae if ae is not None else (load_ae(ckpt_path, device) if ckpt_path else None)
         self.device = device
         self.lut: np.ndarray | None = None
-        self._terr_t: torch.Tensor | None = None
 
     def start_game(self, terrain: np.ndarray) -> None:
         """Call at reset; caches terrain tensors and clears the slot LUT."""
@@ -91,7 +102,9 @@ class ObsBuilder:
             self.lut = lut
         return self.lut
 
-    def build(self, obs: dict) -> dict:
+    def prepare(self, obs: dict) -> dict:
+        """Numpy-only featurization (thread-safe); AE encode happens in
+        encode_grids() so a vec runner can batch it across envs."""
         ents = obs["entities"]
         lut = self._slot_lut(ents["players"])
         me_slot = int(lut[obs["me"]]) if obs["me"] >= 0 else 0
@@ -132,13 +145,6 @@ class ObsBuilder:
             if u["constructing"]:
                 transient[7, gy, gx] = 1.0
 
-        with torch.no_grad():
-            z = self.ae.encode(
-                torch.from_numpy(owners[None]).to(self.device),
-                torch.from_numpy(terrain[None]).to(self.device),
-                torch.from_numpy(static[None]).to(self.device),
-            )[0].cpu().numpy()
-
         # Ego ownership planes at 1/16 (fraction of region owned).
         allies = self._ally_slots(ents, me_slot)
         own = (owners == me_slot).astype(np.float32)
@@ -152,12 +158,14 @@ class ObsBuilder:
             ]
         )
 
-        grid = np.concatenate([z, ego, transient]).astype(np.float32)
         players, pmask = self._player_feats(ents, lut, me_slot)
         scalars = self._scalars(obs, ents, me_slot)
         masks = self._masks(obs, lut)
         return {
-            "grid": grid,
+            "owners": owners,
+            "terrain": terrain.astype(np.float32),
+            "static": static,
+            "ego_transient": np.concatenate([ego, transient]).astype(np.float32),
             "players": players,
             "pmask": pmask,
             "scalars": scalars,
@@ -270,3 +278,24 @@ class ObsBuilder:
             "legal_build": build_mask,
             "legal_nuke": nuke_mask,
         }
+
+    def build(self, obs: dict) -> dict:
+        """Single-env convenience: prepare + encode with the private AE."""
+        raw = self.prepare(obs)
+        return encode_grids(self.ae, [raw], self.device)[0]
+
+
+@torch.no_grad()
+def encode_grids(ae: SpatialAE, raws: list[dict], device: str) -> list[dict]:
+    """Batched frozen-AE encode across envs (same map => same shapes).
+    Consumes owners/terrain/static from each raw dict and emits 'grid'."""
+    owners = torch.from_numpy(np.stack([r["owners"] for r in raws])).to(device)
+    terrain = torch.from_numpy(np.stack([r["terrain"] for r in raws])).to(device)
+    static = torch.from_numpy(np.stack([r["static"] for r in raws])).to(device)
+    z = ae.encode(owners, terrain, static).cpu().numpy()
+    out = []
+    for i, r in enumerate(raws):
+        o = {k: v for k, v in r.items() if k not in ("owners", "terrain", "static", "ego_transient")}
+        o["grid"] = np.concatenate([z[i], r["ego_transient"]]).astype(np.float32)
+        out.append(o)
+    return out
