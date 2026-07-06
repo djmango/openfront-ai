@@ -79,8 +79,10 @@ def main() -> None:
         policy.load_state_dict(state["model_state_dict"])
         if "optimizer_state_dict" in state:
             opt.load_state_dict(state["optimizer_state_dict"])
+        # Checkpoint stage is authoritative on resume: --stage only seeds
+        # fresh runs (supervisors pass a stale --stage on every relaunch).
         if "stage" in state:
-            stage = max(stage, int(state["stage"]))
+            stage = int(state["stage"])
             vec.set_stage(stage)
         start_update = int(state.get("update", 0))
         global_step = int(state.get("global_step", 0))
