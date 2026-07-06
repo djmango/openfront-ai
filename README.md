@@ -13,13 +13,13 @@ future policy network.
   OpenFront engine in Node with no browser or server, plays bot/nation-only
   games, and dumps gzipped tile-state snapshots plus per-player stats.
 - `ae/` — PyTorch autoencoder: dataset loader, model, training loop.
-- `openfront/` — clone of [openfrontio/OpenFrontIO](https://github.com/openfrontio/OpenFrontIO)
-  (gitignored; clone it yourself, see setup).
+- `openfront/` — git submodule of [openfrontio/OpenFrontIO](https://github.com/openfrontio/OpenFrontIO),
+  pinned to a known-good engine commit.
 
 ## Setup
 
 ```bash
-git clone https://github.com/openfrontio/OpenFrontIO.git openfront
+git submodule update --init
 (cd openfront && npm install)
 uv sync
 ```

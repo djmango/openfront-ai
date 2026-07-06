@@ -1,0 +1,3 @@
+[submodule "openfront"]
+	path = openfront
+	url = https://github.com/openfrontio/OpenFrontIO.git
