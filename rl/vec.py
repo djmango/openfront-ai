@@ -86,8 +86,10 @@ class EnvWorker:
             reward -= W_DEATH
             done = True
         elif self.obs["winner"] is not None:
+            # Engine emits ["player", clientID] for human wins (clientID,
+            # not username) and ["nation", name] for nation wins.
             w = self.obs["winner"]
-            won = isinstance(w, list) and len(w) > 1 and w[1] == "Agent"
+            won = isinstance(w, list) and len(w) > 1 and w[1] == "AGENTRL1"
             done = True
         elif self.obs["tick"] >= self.max_episode_ticks:
             done = True
