@@ -42,11 +42,33 @@ UNIT_CLASSES = [
 ]
 NUM_UNIT_CLASSES = len(UNIT_CLASSES)
 
+# Reconstruction weight per unit class. Strategic rarity-weighted: a missed
+# nuke-in-flight is catastrophic; a missed city is cheap to re-derive from
+# territory. Order matches UNIT_CLASSES.
+UNIT_CLASS_WEIGHTS = [
+    1.0,  # City
+    1.0,  # Port
+    1.0,  # Defense Post
+    4.0,  # Missile Silo
+    4.0,  # SAM Launcher
+    2.0,  # Factory
+    4.0,  # Warship
+    4.0,  # Transport (invasion inbound!)
+    1.0,  # Trade Ship
+    25.0,  # Atom Bomb
+    25.0,  # Hydrogen Bomb
+    25.0,  # MIRV
+]
+
 # Per-slot player features, all reconstructed:
 # [alive, troops_log, gold_log, tiles_frac, traitor, disconnected,
 #  n_allies, n_targets, n_embargoes, n_pending_reqs,
 #  attack_troops_out_log, attack_troops_in_log]
 PLAYER_FEAT_DIM = 12
+
+# Pairwise diplomacy channels reconstructed for every (slot i, slot j):
+# 0 = allied (symmetric), 1 = i targets j, 2 = i embargoes j
+NUM_DIPLO = 3
 
 
 def conv_block(c_in: int, c_out: int, stride: int) -> nn.Sequential:
@@ -113,11 +135,16 @@ class UnifiedStateAE(nn.Module):
             nn.Conv2d(32, MAX_SLOTS, kernel_size=1),
         )
         self.dec_units = nn.Conv2d(128, NUM_UNIT_CLASSES, kernel_size=1)
-        self.dec_players = nn.Sequential(
+        self.dec_player_hidden = nn.Sequential(
             nn.Linear(latent_d + 16, 128),
             nn.SiLU(),
-            nn.Linear(128, PLAYER_FEAT_DIM),
         )
+        self.dec_players = nn.Linear(128, PLAYER_FEAT_DIM)
+        # Pairwise diplomacy decoder: bilinear scores over per-slot hidden
+        # states -> (alliance, targeting, embargo) logits per (i, j) slot pair.
+        # Forces the latent to carry the diplomacy *graph*, not just counts.
+        self.diplo_bilinear = nn.Parameter(torch.randn(NUM_DIPLO, 64, 64) * 0.02)
+        self.diplo_proj = nn.Linear(128, 64)
 
     def encode(
         self,
@@ -147,7 +174,7 @@ class UnifiedStateAE(nn.Module):
 
     def decode(
         self, z_grid: torch.Tensor, z_vec: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         vec_map = z_vec[:, :, None, None].expand(
             -1, -1, z_grid.shape[2], z_grid.shape[3]
         )
@@ -159,8 +186,13 @@ class UnifiedStateAE(nn.Module):
         slot_ids = torch.arange(MAX_SLOTS, device=z_vec.device).expand(B, -1)
         se = self.slot_emb(slot_ids)  # (B, S, 16)
         zv = z_vec.unsqueeze(1).expand(-1, MAX_SLOTS, -1)
-        player_pred = self.dec_players(torch.cat([zv, se], dim=-1))
-        return tile_logits, unit_pred, player_pred
+        hidden = self.dec_player_hidden(torch.cat([zv, se], dim=-1))  # (B,S,128)
+        player_pred = self.dec_players(hidden)
+
+        # Pairwise diplomacy logits: (B, NUM_DIPLO, S, S)
+        d = self.diplo_proj(hidden)  # (B, S, 64)
+        diplo_logits = torch.einsum("bik,rkl,bjl->brij", d, self.diplo_bilinear, d)
+        return tile_logits, unit_pred, player_pred, diplo_logits
 
     def forward(self, owners, terrain, unit_planes, player_feats, player_mask):
         z_grid, z_vec, _ = self.encode(

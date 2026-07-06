@@ -16,8 +16,10 @@ import torch.nn.functional as F
 from ae.dataset import GameRecord, iter_games
 from ae.model_v2 import (
     MAX_SLOTS,
+    NUM_DIPLO,
     NUM_UNIT_CLASSES,
     PLAYER_FEAT_DIM,
+    UNIT_CLASS_WEIGHTS,
     UNIT_CLASSES,
     UnifiedStateAE,
 )
@@ -65,14 +67,21 @@ class Featurizer:
                 planes[ci, gy, gx] += 1.0
         return np.log1p(planes)
 
-    def player_feats(self, entities: dict) -> tuple[np.ndarray, np.ndarray]:
+    def player_feats(
+        self, entities: dict
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         feats = np.zeros((MAX_SLOTS, PLAYER_FEAT_DIM), dtype=np.float32)
         mask = np.zeros(MAX_SLOTS, dtype=np.float32)
+        # Pairwise diplomacy targets: [allied, targets, embargoes] per (i, j).
+        self._diplo = np.zeros((NUM_DIPLO, MAX_SLOTS, MAX_SLOTS), dtype=np.float32)
 
         n_allies: dict[int, int] = {}
         for a, b, _exp in entities["alliances"]:
             n_allies[a] = n_allies.get(a, 0) + 1
             n_allies[b] = n_allies.get(b, 0) + 1
+            sa, sb = int(self.lut[a]), int(self.lut[b])
+            self._diplo[0, sa, sb] = 1.0
+            self._diplo[0, sb, sa] = 1.0
         atk_out: dict[int, float] = {}
         atk_in: dict[int, float] = {}
         for atk in entities["attacks"]:
@@ -84,6 +93,10 @@ class Featurizer:
             if slot <= 0:
                 continue
             mask[slot] = 1.0
+            for t in p.get("targets", []):
+                self._diplo[1, slot, int(self.lut[t])] = 1.0
+            for e in p.get("embargoes", []):
+                self._diplo[2, slot, int(self.lut[e])] = 1.0
             feats[slot] = [
                 1.0 if p["alive"] else 0.0,
                 log_norm(p["troops"]),
@@ -98,7 +111,7 @@ class Featurizer:
                 log_norm(atk_out.get(p["id"], 0.0)),
                 log_norm(atk_in.get(p["id"], 0.0)),
             ]
-        return feats, mask
+        return feats, mask, self._diplo
 
 
 class SamplerV2:
@@ -124,8 +137,8 @@ class SamplerV2:
         slots, terr = fz.spatial(si, y0, x0, self.crop)
         entities = fz.rec.entities(si)
         planes = fz.unit_planes(entities, y0, x0, self.crop)
-        pfeats, pmask = fz.player_feats(entities)
-        return slots, terr, planes, pfeats, pmask
+        pfeats, pmask, diplo = fz.player_feats(entities)
+        return slots, terr, planes, pfeats, pmask, diplo
 
     def _submit(self, n: int):
         seeds = self.rng.integers(0, 2**63, size=n)
@@ -143,10 +156,14 @@ class SamplerV2:
         planes = np.empty((n, NUM_UNIT_CLASSES, g, g), dtype=np.float32)
         pfeats = np.empty((n, MAX_SLOTS, PLAYER_FEAT_DIM), dtype=np.float32)
         pmask = np.empty((n, MAX_SLOTS), dtype=np.float32)
+        diplo = np.empty((n, NUM_DIPLO, MAX_SLOTS, MAX_SLOTS), dtype=np.float32)
         for b, fut in enumerate(futures):
-            owners[b], terrain[b], planes[b], pfeats[b], pmask[b] = fut.result()
+            owners[b], terrain[b], planes[b], pfeats[b], pmask[b], diplo[b] = (
+                fut.result()
+            )
         return tuple(
-            torch.from_numpy(a) for a in (owners, terrain, planes, pfeats, pmask)
+            torch.from_numpy(a)
+            for a in (owners, terrain, planes, pfeats, pmask, diplo)
         )
 
 
@@ -162,6 +179,8 @@ def main() -> None:
     ap.add_argument("--border-weight", type=float, default=4.0)
     ap.add_argument("--w-units", type=float, default=1.0)
     ap.add_argument("--w-players", type=float, default=1.0)
+    ap.add_argument("--w-diplo", type=float, default=1.0)
+    ap.add_argument("--diplo-pos-weight", type=float, default=50.0)
     ap.add_argument("--out", default="runs/ae_v2")
     args = ap.parse_args()
 
@@ -180,24 +199,45 @@ def main() -> None:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    unit_w = torch.tensor(UNIT_CLASS_WEIGHTS, device=device).view(1, -1, 1, 1)
+    diplo_pos_w = torch.tensor(args.diplo_pos_weight, device=device)
+
     t0 = time.time()
     for step in range(1, args.steps + 1):
-        owners, terrain, planes, pfeats, pmask = (
+        owners, terrain, planes, pfeats, pmask, diplo = (
             t.to(device) for t in sampler.sample_batch(args.batch_size)
         )
 
-        (tile_logits, unit_pred, player_pred), _ = model(
+        (tile_logits, unit_pred, player_pred, diplo_logits), _ = model(
             owners, terrain, planes, pfeats, pmask
         )
 
         per_tile = F.cross_entropy(tile_logits, owners, reduction="none")
         weights = border_weight(owners, args.border_weight)
         loss_tiles = (per_tile * weights).sum() / weights.sum()
-        loss_units = F.mse_loss(unit_pred, planes)
+
+        # Rarity-weighted unit planes: a blurred nuke costs 25x a blurred city.
+        loss_units = (
+            (unit_pred - planes).pow(2) * unit_w
+        ).sum() / (unit_w.expand_as(planes)).sum()
+
         per_player = F.mse_loss(player_pred, pfeats, reduction="none").mean(-1)
         loss_players = (per_player * pmask).sum() / pmask.sum().clamp(min=1)
 
-        loss = loss_tiles + args.w_units * loss_units + args.w_players * loss_players
+        # Pairwise diplomacy BCE over pairs of existing slots, positives
+        # heavily upweighted (alliances are ~0.1% of pairs).
+        pair_mask = (pmask.unsqueeze(2) * pmask.unsqueeze(1)).unsqueeze(1)
+        per_pair = F.binary_cross_entropy_with_logits(
+            diplo_logits, diplo, pos_weight=diplo_pos_w, reduction="none"
+        )
+        loss_diplo = (per_pair * pair_mask).sum() / pair_mask.sum().clamp(min=1)
+
+        loss = (
+            loss_tiles
+            + args.w_units * loss_units
+            + args.w_players * loss_players
+            + args.w_diplo * loss_diplo
+        )
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -206,11 +246,20 @@ def main() -> None:
         if step % 50 == 0 or step == 1:
             with torch.no_grad():
                 acc = (tile_logits.argmax(1) == owners).float().mean().item()
+                # Alliance recall: of true allied pairs, fraction predicted.
+                ally_true = diplo[:, 0] > 0.5
+                n_true = ally_true.sum().item()
+                ally_rec = (
+                    ((diplo_logits[:, 0] > 0) & ally_true).sum().item() / n_true
+                    if n_true
+                    else float("nan")
+                )
             rate = step * args.batch_size / (time.time() - t0)
             print(
                 f"step {step:5d}  loss {loss.item():.4f}  "
                 f"tiles {loss_tiles.item():.4f}  units {loss_units.item():.4f}  "
-                f"players {loss_players.item():.4f}  acc {acc:.4f}  {rate:.1f} ex/s",
+                f"players {loss_players.item():.4f}  diplo {loss_diplo.item():.4f}  "
+                f"acc {acc:.4f}  ally-recall {ally_rec:.2f}  {rate:.1f} ex/s",
                 flush=True,
             )
 
