@@ -64,6 +64,22 @@ print('fetched AE checkpoint')
 "
 fi
 
+# Resume seed: if the local checkpoint is gone (disk wiped) but a synced
+# copy exists on HF, pull it down before starting.
+if [ ! -f "runs/rl/$RUN_NAME/policy.pt" ]; then
+  mkdir -p "runs/rl/$RUN_NAME"
+  python -c "
+from huggingface_hub import hf_hub_download
+import shutil
+try:
+    p = hf_hub_download('djmango/openfront-rl', '$RUN_NAME/policy.pt')
+    shutil.copy(p, 'runs/rl/$RUN_NAME/policy.pt')
+    print('restored checkpoint from HF')
+except Exception as e:
+    print(f'no HF checkpoint ({e.__class__.__name__}); starting fresh')
+" || true
+fi
+
 # --- tensorboard on the pod's exposed http port ---
 if ! pgrep -f "tensorboard.*19123" >/dev/null; then
   nohup tensorboard --logdir runs/rl --port 19123 --host 0.0.0.0 \
