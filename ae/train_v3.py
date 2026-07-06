@@ -10,6 +10,7 @@ Usage:
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 
@@ -39,20 +40,37 @@ class CachedGame:
         self.n, self.h, self.w = idx["n"], idx["h"], idx["w"]
         self.frames = np.memmap(cache / "frames.zst", dtype=np.uint8, mode="r")
         self.frame_offsets = np.asarray(idx["frame_offsets"], dtype=np.int64)
-        self.units = np.load(cache / "units.npy", mmap_mode="r")
-        self.unit_offsets = np.asarray(idx["unit_offsets"], dtype=np.int64)
+        unit_offsets = np.asarray(idx["unit_offsets"], dtype=np.int64)
         self._dctx: zstd.ZstdDecompressor | None = None
-        # Terrain kept as raw bytes; float conversion happens on crops only
-        # (full-map float32 planes were ~16MB/game and OOM-killed workers).
-        self.terr = np.fromfile(game_dir / "terrain.bin", dtype=np.uint8).reshape(
-            self.h, self.w
-        )
-        # Static-structure units only, pre-sorted by snapshot via offsets.
-        units_cls = np.asarray(self.units[:, 1])
-        self.static_mask = np.isin(units_cls, STATIC_INDICES)
-        self.static_class = np.searchsorted(
-            STATIC_INDICES, units_cls
-        )  # valid where static_mask
+        # Terrain mmapped, not loaded: pages are file-backed and shared across
+        # DataLoader workers. Float conversion happens on crops only.
+        self.terr = np.memmap(
+            game_dir / "terrain.bin", dtype=np.uint8, mode="r"
+        ).reshape(self.h, self.w)
+        # v3 training only reads static-structure units, a small fraction of
+        # unit rows. They live in a compact per-game sidecar (static.npz):
+        # deriving them from units.npy at construction means a full scan of
+        # every game per DataLoader worker, which OOM'd/IO-thrashed the mixed
+        # bot+human run. Built once by scripts/build_static_cache.py (or
+        # lazily here on first touch, with an atomic rename).
+        static_path = cache / "static.npz"
+        if not static_path.exists():
+            units = np.load(cache / "units.npy", mmap_mode="r")
+            static_rows = np.flatnonzero(np.isin(units[:, 1], STATIC_INDICES))
+            su = np.asarray(units[static_rows])
+            tmp = cache / f".static.{os.getpid()}.tmp"
+            with open(tmp, "wb") as fh:
+                np.savez(
+                    fh,
+                    xy=su[:, 2:4].astype(np.int32),
+                    cls=np.searchsorted(STATIC_INDICES, su[:, 1]).astype(np.int8),
+                    offsets=np.searchsorted(static_rows, unit_offsets),
+                )
+            os.replace(tmp, static_path)
+        z = np.load(static_path)
+        self.static_xy = z["xy"]
+        self.static_cls = z["cls"]
+        self.static_offsets = z["offsets"]
 
     def frame(self, si: int) -> tuple[np.ndarray, np.ndarray]:
         """(owner slots uint8 (h, w), packed fallout (h, w/8)) for snapshot si."""
@@ -87,20 +105,21 @@ class CachedGame:
 
         g = crop // 16
         planes = np.zeros((NUM_STATIC, g, g), dtype=np.float32)
-        lo, hi = self.unit_offsets[si], self.unit_offsets[si + 1]
-        rows = self.units[lo:hi]
-        m = self.static_mask[lo:hi]
-        if m.any():
-            rows = rows[m]
-            cls = self.static_class[lo:hi][m]
-            gx = (rows[:, 2] - x0) // 16
-            gy = (rows[:, 3] - y0) // 16
+        lo, hi = self.static_offsets[si], self.static_offsets[si + 1]
+        if hi > lo:
+            xy = self.static_xy[lo:hi]
+            cls = self.static_cls[lo:hi]
+            gx = (xy[:, 0] - x0) // 16
+            gy = (xy[:, 1] - y0) // 16
             ok = (gx >= 0) & (gx < g) & (gy >= 0) & (gy < g)
             np.add.at(planes, (cls[ok], gy[ok], gx[ok]), 1.0)
         return slots, terrain, np.minimum(planes, 1.0)
 
 
 class CachedDataset(torch.utils.data.IterableDataset):
+    """Samples uniformly over games found under one or more roots
+    (comma-separated), e.g. "data,data-human" for a bot+human mix."""
+
     def __init__(self, data_root: str, crop: int, seed: int = 0):
         self.data_root = data_root
         self.crop = crop
@@ -110,7 +129,9 @@ class CachedDataset(torch.utils.data.IterableDataset):
     def __iter__(self):
         if self._games is None:
             dirs = sorted(
-                p.parent.parent for p in Path(self.data_root).rglob("cache/index.json")
+                p.parent.parent
+                for root in self.data_root.split(",")
+                for p in Path(root).rglob("cache/index.json")
             )
             if not dirs:
                 raise SystemExit(

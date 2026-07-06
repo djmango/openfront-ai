@@ -81,13 +81,11 @@ def render_map(model: SpatialAE, game_dir: Path, out: Path, map_name: str) -> No
 
     g_h, g_w = h16 // 16, w16 // 16
     planes = np.zeros((NUM_STATIC, g_h, g_w), dtype=np.float32)
-    lo, hi = game.unit_offsets[si], game.unit_offsets[si + 1]
-    rows = np.asarray(game.units[lo:hi])
-    m = game.static_mask[lo:hi]
-    if m.any():
-        rows = rows[m]
-        cls = game.static_class[lo:hi][m]
-        gx, gy = rows[:, 2] // 16, rows[:, 3] // 16
+    lo, hi = game.static_offsets[si], game.static_offsets[si + 1]
+    if hi > lo:
+        xy = game.static_xy[lo:hi]
+        cls = game.static_cls[lo:hi]
+        gx, gy = xy[:, 0] // 16, xy[:, 1] // 16
         ok = (gx < g_w) & (gy < g_h)
         np.add.at(planes, (cls[ok], gy[ok], gx[ok]), 1.0)
     planes = np.minimum(planes, 1.0)
