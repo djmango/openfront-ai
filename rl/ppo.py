@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import os
 import time
 from pathlib import Path
 
@@ -255,6 +256,27 @@ def main() -> None:
                 tmp,
             )
             tmp.rename(out_dir / "policy.pt")  # atomic: no torn ckpt on kill
+            # Off-pod durability: push to HF so a fresh pod can resume even
+            # after total disk loss. Background thread; failures are logged
+            # and ignored.
+            if os.environ.get("HF_TOKEN") and update % 100 == 0:
+                import threading
+
+                def _hf_push(path=out_dir / "policy.pt", name=args.name):
+                    try:
+                        from huggingface_hub import HfApi
+
+                        api = HfApi()
+                        api.create_repo("djmango/openfront-rl", exist_ok=True)
+                        api.upload_file(
+                            path_or_fileobj=str(path),
+                            path_in_repo=f"{name}/policy.pt",
+                            repo_id="djmango/openfront-rl",
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        print(f"hf sync failed: {e}", flush=True)
+
+                threading.Thread(target=_hf_push, daemon=True).start()
 
     vec.close()
     writer.close()
