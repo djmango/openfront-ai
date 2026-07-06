@@ -47,8 +47,17 @@ class OpenFrontEnv:
             raise RuntimeError(f"bridge error: {out['error']}")
         return out
 
-    def reset(self, map_name: str = "Onion", seed: str = "0") -> dict:
-        obs = self._rpc({"op": "reset", "map": map_name, "seed": seed})
+    def reset(
+        self,
+        map_name: str = "Onion",
+        seed: str = "0",
+        bots: int = 100,
+        difficulty: str = "Medium",
+    ) -> dict:
+        obs = self._rpc(
+            {"op": "reset", "map": map_name, "seed": seed, "bots": bots,
+             "difficulty": difficulty}
+        )
         self.width, self.height = obs["width"], obs["height"]
         terr = gzip.decompress(base64.b64decode(obs["terrain"]))
         self.terrain = np.frombuffer(terr, dtype=np.uint8).reshape(

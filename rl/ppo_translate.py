@@ -16,11 +16,17 @@ class IntentTranslator:
         self.builder = builder
         land = (env.terrain >> 7) & 1
         self.land = land[: builder.h16, : builder.w16]
+        self.gh = builder.h16 // 16
         self.gw = builder.w16 // 16
         self.rng = np.random.default_rng(0)
 
     def region_tile(self, region: int) -> int | None:
-        gy, gx = divmod(region, self.gw)
+        # Region indices address the padded GW_MAX-wide policy grid.
+        from rl.curriculum import GW_MAX
+
+        gy, gx = divmod(region, GW_MAX)
+        if gy >= self.gh or gx >= self.gw:
+            return None  # padded region; masked, but stay safe
         block = self.land[gy * 16 : (gy + 1) * 16, gx * 16 : (gx + 1) * 16]
         ys, xs = np.nonzero(block)
         if len(ys) == 0:

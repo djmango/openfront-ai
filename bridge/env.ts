@@ -80,20 +80,27 @@ class EnvSession {
   executor!: Executor;
   agentSmallID = -1;
 
-  async reset(mapKey: string, seed: string): Promise<object> {
+  async reset(
+    mapKey: string,
+    seed: string,
+    bots: number,
+    difficulty: string,
+  ): Promise<object> {
     const mapType = GameMapType[mapKey as keyof typeof GameMapType];
     if (!mapType) throw new Error(`unknown map ${mapKey}`);
+    const diff = Difficulty[difficulty as keyof typeof Difficulty];
+    if (!diff) throw new Error(`unknown difficulty ${difficulty}`);
 
     const gameConfig: GameConfig = {
       gameMap: mapType,
       gameMapSize: GameMapSize.Normal,
       gameMode: GameMode.FFA,
       gameType: GameType.Singleplayer,
-      difficulty: Difficulty.Medium,
+      difficulty: diff,
       nations: "default",
       donateGold: true,
       donateTroops: true,
-      bots: 100,
+      bots,
       infiniteGold: false,
       infiniteTroops: false,
       instantBuild: false,
@@ -362,6 +369,8 @@ async function main() {
       op: string;
       map?: string;
       seed?: string;
+      bots?: number;
+      difficulty?: string;
       intents?: Intent[];
       ticks?: number;
     };
@@ -373,7 +382,12 @@ async function main() {
     }
     try {
       if (msg.op === "reset") {
-        const obs = await session.reset(msg.map ?? "Onion", msg.seed ?? "0");
+        const obs = await session.reset(
+          msg.map ?? "Onion",
+          msg.seed ?? "0",
+          msg.bots ?? 100,
+          msg.difficulty ?? "Medium",
+        );
         write({ ...obs, ...session.terrain() });
       } else if (msg.op === "step") {
         write(session.step(msg.intents ?? [], msg.ticks ?? 10));

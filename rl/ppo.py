@@ -8,7 +8,7 @@ upgrade_structure, delete_unit, move_warship, cancel_boat.
 Logs to TensorBoard (runs/rl/<name>).
 
 Usage:
-  uv run python -m rl.ppo --map Onion --envs 16 --updates 500 --name ppo_v1
+  uv run python -m rl.ppo --envs 48 --updates 2000 --name ppo_v2 --stage 0
 """
 
 import argparse
@@ -20,20 +20,23 @@ import torch
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
+from collections import deque
+
+from rl.curriculum import ADVANCE_AT, STAGES, WINDOW
 from rl.obs import ACTIONS, encode_grids, load_ae
 from rl.policy import Policy
 from rl.vec import VecEnv
 
 SUB_KEYS = ["player_slot", "tile_region", "build_type", "nuke_type", "quantity"]
 OBS_KEYS = [
-    "grid", "players", "pmask", "scalars",
+    "grid", "grid_valid", "players", "pmask", "scalars",
     "legal_actions", "legal_ptarget", "legal_build", "legal_nuke",
 ]
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--map", default="Onion")
+    ap.add_argument("--stage", type=int, default=0, help="starting curriculum stage")
     ap.add_argument("--ckpt", default="runs/ae_v3/ae_v3.pt")
     ap.add_argument("--name", default="ppo_v1")
     ap.add_argument("--envs", type=int, default=8)
@@ -61,7 +64,9 @@ def main() -> None:
     out_dir = Path("runs/rl") / args.name
     writer = SummaryWriter(out_dir)
 
-    vec = VecEnv(args.envs, args.map, args.max_episode_ticks, args.decision_ticks)
+    vec = VecEnv(args.envs, args.stage, args.max_episode_ticks, args.decision_ticks)
+    stage = args.stage
+    recent_scores: deque[float] = deque(maxlen=WINDOW)
     ae = load_ae(args.ckpt, device)
     policy = Policy().to(device)
     if args.resume:
@@ -106,6 +111,27 @@ def main() -> None:
                     writer.add_scalar("episode/length", info["length"], global_step)
                     writer.add_scalar("episode/final_tiles", info["final_tiles"], global_step)
                     writer.add_scalar("episode/final_tick", info["final_tick"], global_step)
+                    writer.add_scalar("episode/place", info["place"], global_step)
+                    writer.add_scalar("episode/score", info["score"], global_step)
+                    writer.add_scalar("episode/won", float(info["won"]), global_step)
+                    writer.add_scalar("curriculum/episode_stage", info["stage"], global_step)
+                    # Only current-stage episodes count toward advancement.
+                    if info["stage"] == stage:
+                        recent_scores.append(info["score"])
+                    if (
+                        len(recent_scores) == WINDOW
+                        and np.mean(recent_scores) >= ADVANCE_AT
+                        and stage < len(STAGES) - 1
+                    ):
+                        stage += 1
+                        vec.set_stage(stage)
+                        recent_scores.clear()
+                        st = STAGES[stage]
+                        print(
+                            f"=== curriculum advance -> stage {stage}: "
+                            f"{st.map_name} bots={st.bots} {st.difficulty}",
+                            flush=True,
+                        )
 
             obs_buf.append(obs_list)
             choice_buf.append(choices)
@@ -185,10 +211,18 @@ def main() -> None:
         writer.add_scalar("loss/entropy", ent_sum / n_mb, global_step)
         writer.add_scalar("perf/game_ticks_per_s", tps, global_step)
         writer.add_scalar("perf/episodes_done", episodes_done, global_step)
+        writer.add_scalar("curriculum/stage", stage, global_step)
+        writer.add_scalar(
+            "curriculum/rolling_score",
+            float(np.mean(recent_scores)) if recent_scores else 0.0,
+            global_step,
+        )
         for i, a in enumerate(ACTIONS):
             writer.add_scalar(f"actions/{a}", action_counts[i] / (T * N), global_step)
+        roll = float(np.mean(recent_scores)) if recent_scores else 0.0
         print(
             f"update {update:4d}  step {global_step:7d}  eps {episodes_done:4d}  "
+            f"stage {stage}  roll-score {roll:.2f}  "
             f"pg {pl_sum / n_mb:+.4f}  vf {vl_sum / n_mb:.4f}  ent {ent_sum / n_mb:.3f}  "
             f"{tps:.0f} game-ticks/s",
             flush=True,

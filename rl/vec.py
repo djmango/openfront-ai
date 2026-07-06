@@ -12,15 +12,26 @@ import sys
 
 import numpy as np
 
+from rl.curriculum import (
+    STAGES,
+    W_DEATH,
+    W_DELTA,
+    W_STR,
+    placement,
+    placement_score,
+    strengths,
+    terminal_reward,
+    timeweight,
+)
 from rl.env import OpenFrontEnv
 from rl.obs import ObsBuilder
 from rl.ppo_translate import IntentTranslator, my_tiles, spawn_randomly
 
 
 class EnvWorker:
-    def __init__(self, idx: int, map_name: str, max_episode_ticks: int, decision_ticks: int):
+    def __init__(self, idx: int, stage_val, max_episode_ticks: int, decision_ticks: int):
         self.idx = idx
-        self.map_name = map_name
+        self.stage_val = stage_val  # mp.Value: current curriculum stage
         self.max_episode_ticks = max_episode_ticks
         self.decision_ticks = decision_ticks
         self.env = OpenFrontEnv()
@@ -33,12 +44,21 @@ class EnvWorker:
         self.reset_episode()
 
     def reset_episode(self) -> None:
-        self.obs = self.env.reset(self.map_name, seed=f"w{self.idx}-ep{self.episode}")
+        self.stage = int(self.stage_val.value)
+        st = STAGES[self.stage]
+        self.obs = self.env.reset(
+            st.map_name,
+            seed=f"w{self.idx}-ep{self.episode}",
+            bots=st.bots,
+            difficulty=st.difficulty,
+        )
         self.builder.start_game(self.env.terrain)
         self.obs = spawn_randomly(self.env, self.rng)
         self.translator = IntentTranslator(self.env, self.builder)
         self.land_total = max(1, int(((self.env.terrain >> 7) & 1).sum()))
-        self.prev_tiles = my_tiles(self.obs)
+        self.prev_strength = strengths(self.obs["entities"], self.land_total).get(
+            self.obs["me"], 0.0
+        )
         self.ep_reward = 0.0
         self.ep_len = 0
         self.episode += 1
@@ -52,37 +72,52 @@ class EnvWorker:
         self.obs = self.env.step(intents, ticks=self.decision_ticks)
 
         tiles = my_tiles(self.obs)
-        reward = (tiles - self.prev_tiles) / self.land_total * 10.0
-        self.prev_tiles = tiles
+        mine = strengths(self.obs["entities"], self.land_total).get(self.obs["me"], 0.0)
+        tw = timeweight(self.obs["tick"])
+        reward = W_STR * mine * tw + W_DELTA * (mine - self.prev_strength)
+        self.prev_strength = mine
+
         done = False
+        won = False
         if not self.obs["alive"]:
-            reward -= 5.0
+            reward -= W_DEATH
             done = True
         elif self.obs["winner"] is not None:
             w = self.obs["winner"]
             won = isinstance(w, list) and len(w) > 1 and w[1] == "Agent"
-            reward += 10.0 if won else -2.0
             done = True
         elif self.obs["tick"] >= self.max_episode_ticks:
             done = True
 
-        self.ep_reward += reward
-        self.ep_len += 1
         info = None
         if done:
+            place, n = placement(
+                self.obs["entities"], self.obs["me"], self.obs["alive"], self.land_total
+            )
+            reward += terminal_reward(place, won)
+            self.ep_reward += reward
+            self.ep_len += 1
             info = {
                 "reward": self.ep_reward,
                 "length": self.ep_len,
                 "final_tiles": tiles,
                 "final_tick": self.obs["tick"],
+                "place": place,
+                "n_players": n,
+                "score": placement_score(place, n),
+                "won": won,
+                "stage": self.stage,
             }
             self.reset_episode()
+        else:
+            self.ep_reward += reward
+            self.ep_len += 1
         return reward, done, info
 
 
-def _child(idx: int, map_name: str, max_ticks: int, decision_ticks: int, conn) -> None:
+def _child(idx: int, stage_val, max_ticks: int, decision_ticks: int, conn) -> None:
     try:
-        worker = EnvWorker(idx, map_name, max_ticks, decision_ticks)
+        worker = EnvWorker(idx, stage_val, max_ticks, decision_ticks)
         sent_episode = -1
 
         def pack(raw: dict, result) -> dict:
@@ -110,8 +145,9 @@ def _child(idx: int, map_name: str, max_ticks: int, decision_ticks: int, conn) -
 
 
 class VecEnv:
-    def __init__(self, n: int, map_name: str, max_episode_ticks: int, decision_ticks: int):
+    def __init__(self, n: int, start_stage: int, max_episode_ticks: int, decision_ticks: int):
         ctx = mp.get_context("spawn" if sys.platform == "darwin" else "fork")
+        self.stage_val = ctx.Value("i", start_stage)
         self.pipes = []
         self.procs = []
         self.terrains: list[np.ndarray | None] = [None] * n
@@ -119,7 +155,7 @@ class VecEnv:
             parent, child = ctx.Pipe()
             p = ctx.Process(
                 target=_child,
-                args=(i, map_name, max_episode_ticks, decision_ticks, child),
+                args=(i, self.stage_val, max_episode_ticks, decision_ticks, child),
                 daemon=True,
             )
             p.start()
@@ -149,6 +185,11 @@ class VecEnv:
             pipe.send(c)
         self._pending = [self._recv(i) for i in range(len(self.pipes))]
         return [m["result"] for m in self._pending]
+
+    def set_stage(self, stage: int) -> None:
+        """Workers pick this up at their next episode reset."""
+        with self.stage_val.get_lock():
+            self.stage_val.value = stage
 
     def close(self) -> None:
         for pipe in self.pipes:

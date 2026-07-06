@@ -287,15 +287,36 @@ class ObsBuilder:
 
 @torch.no_grad()
 def encode_grids(ae: SpatialAE, raws: list[dict], device: str) -> list[dict]:
-    """Batched frozen-AE encode across envs (same map => same shapes).
-    Consumes owners/terrain/static from each raw dict and emits 'grid'."""
-    owners = torch.from_numpy(np.stack([r["owners"] for r in raws])).long().to(device)
-    terrain = torch.from_numpy(np.stack([r["terrain"] for r in raws])).to(device)
-    static = torch.from_numpy(np.stack([r["static"] for r in raws])).to(device)
-    z = ae.encode(owners, terrain, static).cpu().numpy()
+    """Batched frozen-AE encode. Envs may be on different maps: encode per
+    shape group, then zero-pad every grid to (C, GH_MAX, GW_MAX) and emit a
+    'grid_valid' mask so one policy batch spans mixed maps."""
+    from rl.curriculum import GH_MAX, GW_MAX
+
+    groups: dict[tuple, list[int]] = {}
+    for i, r in enumerate(raws):
+        groups.setdefault(r["owners"].shape, []).append(i)
+
+    z_by_idx: dict[int, np.ndarray] = {}
+    for idxs in groups.values():
+        owners = torch.from_numpy(np.stack([raws[i]["owners"] for i in idxs])).long().to(device)
+        terrain = torch.from_numpy(np.stack([raws[i]["terrain"] for i in idxs])).to(device)
+        static = torch.from_numpy(np.stack([raws[i]["static"] for i in idxs])).to(device)
+        z = ae.encode(owners, terrain, static).cpu().numpy()
+        for j, i in enumerate(idxs):
+            z_by_idx[i] = z[j]
+
     out = []
     for i, r in enumerate(raws):
         o = {k: v for k, v in r.items() if k not in ("owners", "terrain", "static", "ego_transient")}
-        o["grid"] = np.concatenate([z[i], r["ego_transient"]]).astype(np.float32)
+        grid = np.concatenate([z_by_idx[i], r["ego_transient"]]).astype(np.float32)
+        gh, gw = grid.shape[1], grid.shape[2]
+        if gh > GH_MAX or gw > GW_MAX:
+            raise ValueError(f"grid {gh}x{gw} exceeds GH_MAX/GW_MAX {GH_MAX}x{GW_MAX}")
+        padded = np.zeros((grid.shape[0], GH_MAX, GW_MAX), dtype=np.float32)
+        padded[:, :gh, :gw] = grid
+        valid = np.zeros((GH_MAX, GW_MAX), dtype=np.float32)
+        valid[:gh, :gw] = 1.0
+        o["grid"] = padded
+        o["grid_valid"] = valid
         out.append(o)
     return out

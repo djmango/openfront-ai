@@ -32,48 +32,76 @@ NEEDS_QUANTITY = {"attack", "expand", "boat", "donate_gold", "donate_troops"}
 MASKED_NEG = -1e9
 
 
+class ResBlock(nn.Module):
+    def __init__(self, c: int):
+        super().__init__()
+        self.conv1 = nn.Conv2d(c, c, 3, padding=1)
+        self.conv2 = nn.Conv2d(c, c, 3, padding=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = F.silu(self.conv1(x))
+        return F.silu(x + self.conv2(h))
+
+
 class Policy(nn.Module):
-    def __init__(self, hidden: int = 256):
+    """~6.4M params (17x the v1 scaffold): 256-ch residual grid tower,
+    2-layer transformer over player tokens, 512-wide trunk. Sized to soak
+    the idle GPU while env simulation stays the bottleneck."""
+
+    def __init__(self, hidden: int = 512, gc: int = 256, pc: int = 128, blocks: int = 4):
         super().__init__()
         self.grid_net = nn.Sequential(
-            nn.Conv2d(C_GRID, 128, 3, padding=1),
+            nn.Conv2d(C_GRID, gc, 3, padding=1),
             nn.SiLU(),
-            nn.Conv2d(128, 128, 3, padding=1),
-            nn.SiLU(),
+            *[ResBlock(gc) for _ in range(blocks)],
         )
-        self.player_net = nn.Sequential(
-            nn.Linear(P_FEAT, 64), nn.SiLU(), nn.Linear(64, 64)
+        self.player_in = nn.Linear(P_FEAT, pc)
+        self.player_tf = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(
+                d_model=pc, nhead=4, dim_feedforward=2 * pc,
+                batch_first=True, dropout=0.0,
+            ),
+            num_layers=2,
         )
         self.trunk = nn.Sequential(
-            nn.Linear(128 + 64 + N_SCALARS, hidden), nn.SiLU(),
+            nn.Linear(gc + pc + N_SCALARS, hidden), nn.SiLU(),
             nn.Linear(hidden, hidden), nn.SiLU(),
         )
         self.head_action = nn.Linear(hidden, N_ACTIONS)
-        self.head_player_q = nn.Linear(hidden, 64)  # query against player embs
-        self.head_tile = nn.Conv2d(128 + hidden, 1, 1)
+        self.head_player_q = nn.Linear(hidden, pc)  # query against player embs
+        self.head_tile = nn.Sequential(
+            nn.Conv2d(gc + hidden, 256, 1), nn.SiLU(), nn.Conv2d(256, 1, 1)
+        )
         self.head_build = nn.Linear(hidden, len(BUILD_TYPES))
         self.head_nuke = nn.Linear(hidden, len(NUKE_TYPES))
         self.head_quantity = nn.Linear(hidden, N_QUANTITY)
         self.head_value = nn.Linear(hidden, 1)
 
     def trunk_forward(self, o: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        g = self.grid_net(o["grid"])  # (B, 128, gh, gw)
-        g_pool = g.mean(dim=(2, 3))
-        p = self.player_net(o["players"])  # (B, S, 64)
+        g = self.grid_net(o["grid"])  # (B, gc, GH, GW)
+        gv = o["grid_valid"].unsqueeze(1)  # (B, 1, GH, GW)
+        g = g * gv  # zero padded regions so they don't leak into the pool
+        g_pool = g.sum(dim=(2, 3)) / gv.sum(dim=(2, 3)).clamp(min=1)
+
+        p = self.player_tf(
+            self.player_in(o["players"]),
+            src_key_padding_mask=o["pmask"] < 0.5,
+        )  # (B, S, pc)
         m = o["pmask"].unsqueeze(-1)
         p_pool = (p * m).sum(1) / m.sum(1).clamp(min=1)
+
         h = self.trunk(torch.cat([g_pool, p_pool, o["scalars"]], dim=-1))
         return h, g, p
 
     def heads(self, h: torch.Tensor, g: torch.Tensor, p: torch.Tensor, o: dict) -> dict:
-        B = h.shape[0]
         act_logits = self.head_action(h) + (o["legal_actions"] - 1) * -MASKED_NEG
 
-        q = self.head_player_q(h)  # (B, 64)
+        q = self.head_player_q(h)  # (B, pc)
         player_logits = torch.einsum("bd,bsd->bs", q, p)  # (B, S)
 
         hm = h[:, :, None, None].expand(-1, -1, g.shape[2], g.shape[3])
-        tile_logits = self.head_tile(torch.cat([g, hm], dim=1)).flatten(1)  # (B, gh*gw)
+        tile_logits = self.head_tile(torch.cat([g, hm], dim=1)).flatten(1)
+        tile_logits = tile_logits + (o["grid_valid"].flatten(1) - 1) * -MASKED_NEG
 
         return {
             "action": act_logits,
