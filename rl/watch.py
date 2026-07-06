@@ -9,6 +9,7 @@ Usage:
 
 import argparse
 import colorsys
+import json
 import shutil
 import subprocess
 import tempfile
@@ -240,6 +241,7 @@ def main() -> None:
     pal = palette(me_slot)
 
     history: deque[str] = deque(maxlen=8)
+    debug_log: list[dict] = []  # per-decision sidecar for the client overlay
 
     def frame(choice: dict | None, step: int) -> Image.Image:
         im = render(env, builder, obs, pal, args.scale)
@@ -259,6 +261,23 @@ def main() -> None:
         choice["_desc"] = describe(choice, obs)  # pre-step legality/troops
         if ACTIONS[choice["action"]] != "noop":
             history.append(f"t{obs['tick']:>5} {choice['_desc']}"[:40])
+        if args.record:
+            me = next(
+                (p for p in obs["entities"]["players"] if p["id"] == obs["me"]),
+                None,
+            )
+            entry = {
+                "tick": obs["tick"],
+                "desc": choice["_desc"],
+                "action": ACTIONS[choice["action"]],
+                "tiles": me["tiles"] if me else 0,
+                "troops": int(me["troops"]) if me else 0,
+            }
+            dbg = choice.get("debug")
+            if dbg is not None:
+                entry["value"] = round(float(dbg["value"]), 3)
+                entry["probs"] = [round(float(p), 4) for p in dbg["action_probs"]]
+            debug_log.append(entry)
         obs = env.step(translator.translate(choice, obs), ticks=10)
 
         if step % args.frame_every == 0:
@@ -273,6 +292,9 @@ def main() -> None:
     if args.record:
         info = env.save_record(str(Path(args.record).resolve()))
         print(f"game record: {info['saved']} (gameID {info['gameID']}, {info['turns']} turns)")
+        sidecar = Path(args.record).with_suffix(".debug.json")
+        sidecar.write_text(json.dumps({"actions": ACTIONS, "log": debug_log}))
+        print(f"debug sidecar: {sidecar} ({len(debug_log)} decisions)")
     env.close()
 
     if args.out.endswith(".gif"):
