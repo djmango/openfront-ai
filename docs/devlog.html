@@ -395,6 +395,18 @@ are gitignored now.</p>
       <li><i>From scratch, not from v3 weights:</i> the v2c lesson applies to v4 too, its
         observation space and spawn behavior change the MDP enough that resuming would inherit
         stale habits.</li>
+      <li><i>Greedy eval alongside training stats.</i> The rolling win rate is measured on
+        exploration-sampled actions and its window resets on every trainer restart, so it neither
+        matches deployment behavior nor survives ops churn. v4 should run a periodic fixed-seed
+        eval pass and log it as a separate curve; that is also the number to compare local
+        replay sessions against.</li>
+      <li><i>Persist the win-gate window in the checkpoint.</i> Stage advancement evidence
+        (the recent-wins deque) is lost on restart today: after a relaunch the agent must re-earn
+        the whole window at its current stage before it can advance, and roll-win reads 0.00
+        until it refills.</li>
+      <li><i>Entropy schedule.</i> v2c sat at entropy ~8, exploring without committing, while
+        v3's entropy fell naturally as it learned. A fixed ent-coef of 0.01 leaves the trap open;
+        anneal it (or target an entropy schedule) so late training commits harder.</li>
     </ul>
   </li>
   <li><b>BC warm start:</b> does initializing PPO from human imitation beat the 1v1 curriculum

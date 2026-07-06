@@ -2,9 +2,12 @@
 (WebM via ffmpeg, or GIF by extension), and saves an engine GameRecord that
 the real OpenFront client can replay (see scripts/serve_replay.py).
 
+Defaults: video to replays/<policy-run>_s<stage>_<seed>.webm, record to
+records-rl/<same-name>.json. Frames stream to a temp dir as they render,
+so memory stays flat even on big maps / long episodes.
+
 Usage:
-  uv run python -m rl.watch --policy /tmp/policy.pt --stage 3 \
-      --out replay.webm --record records-rl/replay.json
+  uv run python -m rl.watch --policy /tmp/policy.pt --stage 3
 """
 
 import argparse
@@ -198,8 +201,10 @@ def main() -> None:
     ap.add_argument("--ckpt", default="runs/ae_v3/ae_v3.pt")
     ap.add_argument("--stage", type=int, default=3)
     ap.add_argument("--map", default=None, help="override map (default: first in stage pool)")
-    ap.add_argument("--out", default="replay.webm", help=".webm (ffmpeg) or .gif")
-    ap.add_argument("--record", default=None, help="also save engine GameRecord JSON")
+    ap.add_argument("--out", default=None,
+                    help=".webm (ffmpeg) or .gif; default replays/<run>_s<stage>_<seed>.webm")
+    ap.add_argument("--record", default=None,
+                    help="engine GameRecord JSON; default records-rl/<run>_s<stage>_<seed>.json")
     ap.add_argument("--max-steps", type=int, default=1200)
     ap.add_argument("--frame-every", type=int, default=2, help="render every Nth decision")
     ap.add_argument("--scale", type=int, default=1, help="downscale factor (1 = native)")
@@ -210,6 +215,15 @@ def main() -> None:
         help="side panel with the agent's action, probs, and value (--no-debug to disable)",
     )
     args = ap.parse_args()
+
+    run = Path(args.policy).parent.name or "policy"
+    base = f"{run}_s{args.stage}_{args.seed}"
+    if args.out is None:
+        args.out = f"replays/{base}.webm"
+    if args.record is None:
+        args.record = f"records-rl/{base}.json"
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.record).parent.mkdir(parents=True, exist_ok=True)
 
     st = STAGES[args.stage]
     map_name = args.map or st.maps[0]
@@ -251,7 +265,17 @@ def main() -> None:
             draw_markers(im, choice, builder, args.scale)
         return compose(im, obs, choice, history, step)
 
-    frames = [frame(None, 0)]
+    # Frames go straight to disk: holding a long episode of full-map PIL
+    # images in memory OOMs on big maps.
+    frame_dir = Path(tempfile.mkdtemp(prefix="watch_frames_"))
+    n_frames = 0
+
+    def emit(im: Image.Image) -> None:
+        nonlocal n_frames
+        im.save(frame_dir / f"f{n_frames:05d}.png")
+        n_frames += 1
+
+    emit(frame(None, 0))
     for step in range(args.max_steps):
         raw = builder.prepare(obs)
         o = encode_grids(ae, [raw], device)[0]
@@ -281,12 +305,18 @@ def main() -> None:
         obs = env.step(translator.translate(choice, obs), ticks=10)
 
         if step % args.frame_every == 0:
-            frames.append(frame(choice, step))
+            emit(frame(choice, step))
         if step % 100 == 0:
-            print(f"step {step}, tick {obs['tick']}, my tiles {my_tiles(obs)}, alive {obs['alive']}")
+            print(
+                f"step {step}, tick {obs['tick']}, my tiles {my_tiles(obs)}, alive {obs['alive']}",
+                flush=True,
+            )
         if not obs["alive"] or obs["winner"] is not None:
-            frames.append(frame(choice, step))
-            print(f"episode over at tick {obs['tick']}: alive={obs['alive']}, winner={obs['winner']}")
+            emit(frame(choice, step))
+            print(
+                f"episode over at tick {obs['tick']}: alive={obs['alive']}, winner={obs['winner']}",
+                flush=True,
+            )
             break
 
     if args.record:
@@ -298,6 +328,9 @@ def main() -> None:
     env.close()
 
     if args.out.endswith(".gif"):
+        frames = [
+            Image.open(p) for p in sorted(frame_dir.glob("f*.png"))
+        ]
         frames[0].save(
             args.out,
             save_all=True,
@@ -310,23 +343,21 @@ def main() -> None:
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
             raise SystemExit("ffmpeg not found; use a .gif output or install ffmpeg")
-        with tempfile.TemporaryDirectory() as td:
-            for i, im in enumerate(frames):
-                im.save(f"{td}/f{i:05d}.png")
-            # yuv420p requires even dims; pad by one pixel if needed.
-            subprocess.run(
-                [
-                    ffmpeg, "-y", "-framerate", str(args.fps),
-                    "-i", f"{td}/f%05d.png",
-                    "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
-                    "-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "30",
-                    "-pix_fmt", "yuv420p",
-                    args.out,
-                ],
-                check=True,
-                capture_output=True,
-            )
-    print(f"wrote {args.out} ({len(frames)} frames)")
+        # yuv420p requires even dims; pad by one pixel if needed.
+        subprocess.run(
+            [
+                ffmpeg, "-y", "-framerate", str(args.fps),
+                "-i", f"{frame_dir}/f%05d.png",
+                "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+                "-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "30",
+                "-pix_fmt", "yuv420p",
+                args.out,
+            ],
+            check=True,
+            capture_output=True,
+        )
+    shutil.rmtree(frame_dir, ignore_errors=True)
+    print(f"wrote {args.out} ({n_frames} frames)", flush=True)
 
 
 if __name__ == "__main__":
