@@ -127,19 +127,25 @@ class ObsBuilder:
                 continue
             if ci in static_pos and not u["constructing"]:
                 static[static_pos[ci], gy, gx] = 1.0
+            # Targets can sit in the cropped edge strip (maps are trimmed to
+            # multiples of 16), so bounds-check them like unit positions.
+            ty, tx = (
+                (u["ty"] // 16, u["tx"] // 16) if u["tx"] is not None else (-1, -1)
+            )
+            target_ok = 0 <= ty < gh and 0 <= tx < gw
             t = u["type"]
             if t == "Warship":
                 transient[0, gy, gx] = 1.0
             elif t == "Transport":
                 transient[1, gy, gx] = 1.0
-                if u["tx"] is not None:
-                    transient[2, u["ty"] // 16, u["tx"] // 16] = 1.0
+                if target_ok:
+                    transient[2, ty, tx] = 1.0
             elif t == "Trade Ship":
                 transient[3, gy, gx] = 1.0
             elif t in ("Atom Bomb", "Hydrogen Bomb", "MIRV"):
                 transient[4, gy, gx] = 1.0
-                if u["tx"] is not None:
-                    transient[5, u["ty"] // 16, u["tx"] // 16] = 1.0
+                if target_ok:
+                    transient[5, ty, tx] = 1.0
                 if u["samLock"]:
                     transient[6, gy, gx] = 1.0
             if u["constructing"]:
