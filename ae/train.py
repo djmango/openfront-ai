@@ -31,7 +31,7 @@ def slot_lut(record: GameRecord) -> np.ndarray:
     cached = _slot_lut_cache.get(record.game_dir)
     if cached is not None:
         return cached
-    small_ids = sorted(p["smallID"] for p in record.meta["snapshots"][0]["players"])
+    small_ids = sorted(p["id"] for p in record.players(0))
     lut = np.zeros(4096, dtype=np.int64)
     for slot, sid in enumerate(small_ids, start=1):
         lut[sid] = min(slot, MAX_SLOTS - 1)

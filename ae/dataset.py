@@ -50,6 +50,22 @@ class GameRecord:
         raw = gzip.decompress(self.state_files[i].read_bytes())
         return np.frombuffer(raw, dtype="<u2").reshape(self.height, self.width)
 
+    def entities(self, i: int) -> dict:
+        """Full entity state for snapshot i (format v2): players, alliances,
+        units, attacks. For v1 games, synthesizes {players} from meta."""
+        if self.state_files:
+            ent_path = self.state_files[i].with_suffix("").with_suffix(".json.gz")
+            if ent_path.exists():
+                return json.loads(gzip.decompress(ent_path.read_bytes()))
+        snap = self.meta["snapshots"][i]
+        players = [
+            {**p, "id": p.get("id", p.get("smallID"))} for p in snap.get("players", [])
+        ]
+        return {"players": players, "alliances": [], "units": [], "attacks": []}
+
+    def players(self, i: int) -> list[dict]:
+        return self.entities(i)["players"]
+
     def owners(self, i: int) -> np.ndarray:
         """Owner smallID per tile (0 = unowned) for snapshot i."""
         return self.state(i) & OWNER_MASK

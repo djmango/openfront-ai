@@ -5,12 +5,15 @@
  * Usage (from openfront-ai/):
  *   openfront/node_modules/.bin/tsx datagen/generate.ts --map Onion --games 2
  *
- * Output layout, per game:
+ * Output layout, per game (format v2):
  *   data/<map>/<gameID>/
  *     terrain.bin       uint8[w*h]  immutable terrain bytes (land/ocean/shore/magnitude)
- *     states/t<tick>.bin.gz  gzipped uint16-le[w*h] per snapshot (owner id bits
+ *     states/t<tick>.bin.gz   gzipped uint16-le[w*h] per snapshot (owner id bits
  *                       0-11, fallout bit 13, defense bonus bit 14)
- *     meta.json         dims, snapshot ticks, per-snapshot player stats, winner
+ *     states/t<tick>.json.gz  gzipped JSON: full entity state per snapshot —
+ *                       players (stats, diplomacy, relations), alliances,
+ *                       units, attacks in flight
+ *     meta.json         dims, snapshot tick list, winner
  */
 import * as fs from "fs";
 import * as path from "path";
@@ -67,31 +70,71 @@ class NodeMapLoader implements GameMapLoader {
   }
 }
 
-interface PlayerSnapshot {
-  smallID: number;
-  name: string;
-  type: string;
-  troops: number;
-  gold: string;
-  tiles: number;
-  alive: boolean;
-}
-
 interface Snapshot {
   tick: number;
-  players: PlayerSnapshot[];
 }
 
-function snapshotPlayers(game: Game): PlayerSnapshot[] {
-  return game.players().map((p) => ({
-    smallID: p.smallID(),
+/** Full entity state for one snapshot: everything the unified AE trains on. */
+function snapshotEntities(game: Game): object {
+  const players = game.players().map((p) => ({
+    id: p.smallID(),
     name: p.name(),
     type: p.type(),
     troops: Math.round(p.troops()),
     gold: p.gold().toString(),
     tiles: p.numTilesOwned(),
     alive: p.isAlive(),
+    traitor: p.isTraitor(),
+    disconnected: p.isDisconnected(),
+    targets: p.targets().map((t) => t.smallID()),
+    embargoes: p.getEmbargoes().map((e) => e.target.smallID()),
+    // Incoming/outgoing alliance requests (pending only).
+    reqsIn: p.incomingAllianceRequests().map((r) => r.requestor().smallID()),
+    reqsOut: p.outgoingAllianceRequests().map((r) => r.recipient().smallID()),
+    // Sparse: only players this one has a stored (non-default) relation with.
+    relations: p
+      .allRelationsSorted()
+      .map((r) => [r.player.smallID(), r.relation]),
   }));
+
+  const alliances: number[][] = [];
+  const seenAlliance = new Set<string>();
+  for (const p of game.players()) {
+    for (const a of p.alliances()) {
+      const x = a.requestor().smallID();
+      const y = a.recipient().smallID();
+      const key = x < y ? `${x}:${y}` : `${y}:${x}`;
+      if (!seenAlliance.has(key)) {
+        seenAlliance.add(key);
+        alliances.push([x, y, a.expiresAt()]);
+      }
+    }
+  }
+
+  const units = game.players().flatMap((p) =>
+    p.units().map((u) => ({
+      type: u.type(),
+      owner: p.smallID(),
+      x: game.x(u.tile()),
+      y: game.y(u.tile()),
+      level: u.level(),
+      health: u.hasHealth() ? u.health() : null,
+      constructing: u.isUnderConstruction(),
+      cooldown: u.isInCooldown(),
+      troops: Math.round(u.troops()),
+    })),
+  );
+
+  const attacks = game.players().flatMap((p) =>
+    p.outgoingAttacks().map((a) => ({
+      from: p.smallID(),
+      to: a.target().isPlayer() ? a.target().smallID() : 0,
+      troops: Math.round(a.troops()),
+      retreating: a.retreating(),
+    })),
+  );
+
+  return { players, alliances, units, attacks };
 }
 
 async function runGame(opts: {
@@ -204,16 +247,21 @@ async function runGame(opts: {
 
     const pastSpawn = !game.inSpawnPhase();
     if (pastSpawn && game.ticks() % snapshotEvery === 0) {
+      const stem = `t${String(game.ticks()).padStart(6, "0")}`;
       const raw = Buffer.from(
         game.tileStateBuffer().buffer,
         game.tileStateBuffer().byteOffset,
         numTiles * 2,
       );
       fs.writeFileSync(
-        path.join(statesDir, `t${String(game.ticks()).padStart(6, "0")}.bin.gz`),
+        path.join(statesDir, `${stem}.bin.gz`),
         zlib.gzipSync(raw, { level: 6 }),
       );
-      snapshots.push({ tick: game.ticks(), players: snapshotPlayers(game) });
+      fs.writeFileSync(
+        path.join(statesDir, `${stem}.json.gz`),
+        zlib.gzipSync(JSON.stringify(snapshotEntities(game)), { level: 6 }),
+      );
+      snapshots.push({ tick: game.ticks() });
     }
 
     if (winner !== null) break;
@@ -221,6 +269,7 @@ async function runGame(opts: {
 
   const elapsedS = (Date.now() - startedAt) / 1000;
   const meta = {
+    formatVersion: 2,
     gameID,
     map: mapType,
     width: w,

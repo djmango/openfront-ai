@@ -36,8 +36,10 @@ bash datagen/gen_all.sh 25 10
 
 Each game writes `data/<map>/<gameID>/` containing `terrain.bin` (immutable
 terrain bytes), `states/t<tick>.bin.gz` (packed uint16 tile state every 25
-ticks: owner id in bits 0-11, fallout bit 13, defense bonus bit 14), and
-`meta.json` (dims, per-snapshot player stats, winner).
+ticks: owner id in bits 0-11, fallout bit 13, defense bonus bit 14),
+`states/t<tick>.json.gz` (full entity state: player stats + diplomacy +
+sparse relations, alliances, units, attacks in flight), and `meta.json`
+(dims, snapshot tick list, winner).
 
 Throughput: a full game to victory takes ~5 s on a small map (~2,500 ticks/s
 headless), ~60 s on the largest maps.
