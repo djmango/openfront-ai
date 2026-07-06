@@ -72,6 +72,11 @@ class PlaySession {
   constructor() {
     const rl = readline.createInterface({ input: process.stdin });
     this.stdin = rl[Symbol.asyncIterator]();
+    // If the Python driver dies, don't linger as a ghost player in the lobby.
+    rl.on("close", () => {
+      log("stdin closed (driver gone), exiting");
+      process.exit(0);
+    });
   }
 
   async run(): Promise<void> {
