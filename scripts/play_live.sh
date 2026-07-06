@@ -9,6 +9,9 @@
 #   - set Start Delay to 60+ seconds (host modal, default is 3)
 #   - lower Bots / Nations for a fair fight (default is 400)
 #   - wait until "AgentRL" appears in the lobby, then Start Game
+#
+# To see the model's decisions live (MODEL overlay panel), run once in the
+# browser console: localStorage.setItem("rlDebugHost", "http://localhost:8988")
 
 set -euo pipefail
 
