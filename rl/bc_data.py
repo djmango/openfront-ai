@@ -24,10 +24,21 @@ import gzip
 import hashlib
 import json
 import random
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+
+try:  # ~7x faster on the 30MB bc.json.gz docs; plain json works too
+    import orjson
+
+    _loads = orjson.loads
+    _dumps = orjson.dumps
+except ImportError:  # pragma: no cover
+    _loads = json.loads
+    _dumps = lambda o: json.dumps(o).encode()  # noqa: E731
 
 from rl.obs import ACTIONS, BUILD_TYPES, NUKE_TYPES, ObsBuilder
 from rl.policy import NEEDS_PLAYER, NEEDS_QUANTITY, NEEDS_TILE, QUANTITY_FRACS
@@ -56,16 +67,22 @@ def quantity_bucket(amt: float | None, avail: float) -> int:
 class GameHandle:
     path: Path
     meta: dict
-    bc: dict
+    placements: dict
+    steps_raw: list[bytes]  # one serialized step each; parse on demand
     terrain: np.ndarray  # strided by ds
     lut: np.ndarray  # smallID -> slot (built from the earliest snapshot)
     gh: int  # grid dims after striding
     gw: int
     ds: int  # tile-space stride so the grid fits (GH_MAX, GW_MAX)
 
-    @property
-    def steps(self) -> list[dict]:
-        return self.bc["steps"]
+    # A bc.json.gz materialized as Python dicts retains ~500MB (measured);
+    # as per-step JSON bytes it's ~10MB, and re-parsing one 26KB step with
+    # orjson is tens of microseconds - so handles stay cheap enough to LRU.
+    def n_steps(self) -> int:
+        return len(self.steps_raw)
+
+    def step(self, i: int) -> dict:
+        return _loads(self.steps_raw[i])
 
 
 def _slot_lut_from_players(players: list[dict]) -> np.ndarray:
@@ -99,7 +116,7 @@ def load_game(path: Path, gh_max: int, gw_max: int) -> GameHandle | None:
         if ds > 8:
             return None
 
-    bc = json.loads(gzip.decompress(bc_path.read_bytes()))
+    bc = _loads(gzip.decompress(bc_path.read_bytes()))
     if not bc["steps"]:
         return None
     terrain = np.frombuffer((path / "terrain.bin").read_bytes(), dtype=np.uint8)
@@ -112,7 +129,8 @@ def load_game(path: Path, gh_max: int, gw_max: int) -> GameHandle | None:
     return GameHandle(
         path=path,
         meta=meta,
-        bc=bc,
+        placements=bc["placements"],
+        steps_raw=[_dumps(s) for s in bc["steps"]],
         terrain=terrain,
         lut=_slot_lut_from_players(ents0["players"]),
         gh=gh,
@@ -142,7 +160,7 @@ def _load_entities(path: Path, tick: int) -> dict | None:
     f = path / "states" / f"t{tick:06d}.json.gz"
     if not f.exists():
         return None
-    return json.loads(gzip.decompress(f.read_bytes()))
+    return _loads(gzip.decompress(f.read_bytes()))
 
 
 def _load_grid(
@@ -222,6 +240,7 @@ class BCSampler:
         holdout: bool = False,
         noop_frac: float = 0.15,
         seed: int = 0,
+        cache_games: int = 32,
     ):
         from rl.curriculum import GH_MAX, GW_MAX
 
@@ -237,17 +256,41 @@ class BCSampler:
         if not self.games:
             raise FileNotFoundError(f"no bc.json.gz under {roots} (holdout={holdout})")
         self.gh_max, self.gw_max = GH_MAX, GW_MAX
-        self._handles: dict[Path, GameHandle | None] = {}
+        # Parsing one bc.json.gz costs ~0.25s (orjson; 1.5s stdlib) - a naive
+        # uniform draw over hundreds of games misses an LRU almost every
+        # time and data loading collapses (measured 2 ex/s on the pilot).
+        # Instead: true LRU + draws stay inside the resident set with prob
+        # `stickiness`, rotating fresh games in on the remainder, so miss
+        # cost amortizes while every game still cycles through over time.
+        self.cache_games = cache_games
+        self.stickiness = 0.9 if len(self.games) > cache_games else 0.0
+        self._handles: OrderedDict[Path, GameHandle | None] = OrderedDict()
         self._builders: dict[Path, ObsBuilder] = {}
+        self._lock = threading.Lock()  # trainer prefetches from threads
+        # Parsing a bc doc transiently peaks ~2GB; don't let every prefetch
+        # thread miss at once (cold start) and stack those peaks.
+        self._load_sem = threading.Semaphore(2)
 
     def _handle(self, path: Path) -> GameHandle | None:
-        if path not in self._handles:
-            # Cap the cache: handles hold bc docs (~tens of MB as objects).
-            if len(self._handles) > 16:
-                self._handles.clear()
-                self._builders.clear()
-            self._handles[path] = load_game(path, self.gh_max, self.gw_max)
-        return self._handles[path]
+        with self._lock:
+            if path in self._handles:
+                self._handles.move_to_end(path)
+                return self._handles[path]
+        with self._load_sem:  # slow; outside the cache lock
+            h = load_game(path, self.gh_max, self.gw_max)
+        with self._lock:
+            self._handles[path] = h
+            while len(self._handles) > self.cache_games:
+                old, _ = self._handles.popitem(last=False)
+                self._builders.pop(old, None)
+        return h
+
+    def _draw_game(self) -> GameHandle | None:
+        with self._lock:
+            resident = [p for p, h in self._handles.items() if h is not None]
+        if resident and self.rng.random() < self.stickiness:
+            return self._handle(self.rng.choice(resident))
+        return self._handle(self.rng.choice(self.games))
 
     def _builder(self, game: GameHandle) -> ObsBuilder:
         if game.path not in self._builders:
@@ -261,10 +304,10 @@ class BCSampler:
         """All samples for one random (game, snapshot): raw obs + choice +
         placement bucket per emitted player."""
         for _ in range(64):
-            game = self._handle(self.rng.choice(self.games))
+            game = self._draw_game()
             if game is None:
                 continue
-            step = self.rng.choice(game.steps)
+            step = game.step(self.rng.randrange(game.n_steps()))
             out = self._step_samples(game, step)
             if out:
                 return out
@@ -279,7 +322,7 @@ class BCSampler:
         entities = scale_entities(entities, game.ds)
         owners, fallout = _load_grid(game.path, tick, h, w, game.ds)
         builder = self._builder(game)
-        placements = game.bc["placements"]
+        placements = game.placements
 
         actors = [c for c, ls in step["labels"].items() if ls and c in step["legal"]]
         noops = [c for c in step["legal"] if c not in step["labels"]]
@@ -336,18 +379,17 @@ class BCSampler:
         choice on the last one (earlier steps carry noop placeholders that
         the trainer discards). Empty list when the draw fails; caller
         retries."""
-        game = self._handle(self.rng.choice(self.games))
-        if game is None or len(game.steps) < 1:
+        game = self._draw_game()
+        if game is None or game.n_steps() < 1:
             return []
-        steps = game.steps
 
         # Prefer windows ending on an acted step (same act/noop balance
         # logic as sample_step, applied to window ends).
         want_actor = self.rng.random() > self.noop_frac
-        ends = list(range(len(steps)))
+        ends = list(range(game.n_steps()))
         self.rng.shuffle(ends)
         for end in ends[:16]:
-            step = steps[end]
+            step = game.step(end)
             cands = [
                 c for c, ls in step["labels"].items() if ls and c in step["legal"]
             ] if want_actor else [
@@ -358,13 +400,12 @@ class BCSampler:
             cid = self.rng.choice(cands)
             idxs = list(range(max(0, end - k + 1), end + 1))
             idxs = [idxs[0]] * (k - len(idxs)) + idxs  # left-pad short histories
-            if any(cid not in steps[i]["legal"] for i in idxs):
+            window = [game.step(i) if i != end else step for i in idxs]
+            if any(cid not in s["legal"] for s in window):
                 continue  # player wasn't alive across the whole window
             out = []
-            for j, i in enumerate(idxs):
-                sample = self._one_sample(
-                    game, steps[i], cid, labeled=(j == k - 1)
-                )
+            for j, s in enumerate(window):
+                sample = self._one_sample(game, s, cid, labeled=(j == k - 1))
                 if sample is None:
                     break
                 out.append(sample)
@@ -408,7 +449,7 @@ class BCSampler:
                 raw["legal_build"][choice["build_type"]] = 1.0
             if choice["nuke_type"] >= 0:
                 raw["legal_nuke"][choice["nuke_type"]] = 1.0
-        p = game.bc["placements"].get(cid, {"placement": 0.5})
+        p = game.placements.get(cid, {"placement": 0.5})
         raw["choice"] = choice
         raw["cond"] = placement_bucket(float(p["placement"]))
         return raw
