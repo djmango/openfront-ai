@@ -1,0 +1,6 @@
+openfront/
+data/
+.venv/
+__pycache__/
+*.pt
+runs/
