@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -273,13 +274,34 @@ def main() -> None:
             model.train()
 
         if step % args.save_every == 0 or step == args.steps:
+            tmp = run_dir / "bc.pt.tmp"
             torch.save({
                 "model_state_dict": model.state_dict(),
                 "opt_state_dict": opt.state_dict(),
                 "sched_state_dict": sched.state_dict(),
                 "step": step,
                 "args": vars(args),
-            }, run_dir / "bc.pt")
+            }, tmp)
+            tmp.rename(run_dir / "bc.pt")  # atomic: no torn ckpt on kill
+            # Off-pod durability, same pattern as rl/ppo.py.
+            if os.environ.get("HF_TOKEN") and step % (args.save_every * 5) == 0:
+                import threading
+
+                def _hf_push(path=run_dir / "bc.pt", name=args.name):
+                    try:
+                        from huggingface_hub import HfApi
+
+                        api = HfApi()
+                        api.create_repo("djmango/openfront-rl", exist_ok=True)
+                        api.upload_file(
+                            path_or_fileobj=str(path),
+                            path_in_repo=f"{name}/bc.pt",
+                            repo_id="djmango/openfront-rl",
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        print(f"hf sync failed: {e}", flush=True)
+
+                threading.Thread(target=_hf_push, daemon=True).start()
 
 
 def _last_o(o: dict, seq: int, device: str) -> dict:
