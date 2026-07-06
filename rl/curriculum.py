@@ -58,6 +58,7 @@ class Stage:
     bots: int
     difficulty: str
     nations: int | str = "default"  # exact opponent count, or the map's default
+    decision_ticks: int = 10  # engine ticks per policy decision
 
 
 # Map pool (all in the AE training set) with featurized grid sizes (H//16 x W//16):
@@ -71,10 +72,10 @@ ALL_MAPS = (
 # reachable and the win signal is dense; later stages return to the map's
 # full nation roster plus tribe bots.
 STAGES = [
-    Stage(("Onion",), 0, "Easy", nations=1),
-    Stage(("Onion",), 0, "Easy", nations=3),
-    Stage(("Onion", "Pangaea"), 5, "Easy", nations=3),
-    Stage(("Pangaea", "Caucasus"), 10, "Easy", nations=6),
+    Stage(("Onion",), 0, "Easy", nations=1, decision_ticks=15),
+    Stage(("Onion",), 0, "Easy", nations=3, decision_ticks=15),
+    Stage(("Onion", "Pangaea"), 5, "Easy", nations=3, decision_ticks=15),
+    Stage(("Pangaea", "Caucasus"), 10, "Easy", nations=6, decision_ticks=15),
     Stage(("Pangaea", "Caucasus", "BlackSea"), 30, "Easy"),
     Stage(("BlackSea", "BetweenTwoSeas", "Caucasus"), 30, "Medium"),
     Stage(("World", "Asia", "BlackSea"), 50, "Medium"),

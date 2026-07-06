@@ -13,6 +13,7 @@ import sys
 import numpy as np
 
 from rl.curriculum import (
+    STAGES,
     W_DEATH,
     W_DELTA,
     W_STR,
@@ -45,6 +46,7 @@ class EnvWorker:
 
     def reset_episode(self) -> None:
         self.stage = int(self.stage_val.value)
+        self.dt = STAGES[self.stage].decision_ticks
         self.map_name, bots, difficulty, nations, self.rehearsal = sample_episode(
             self.stage, self.rng
         )
@@ -72,7 +74,7 @@ class EnvWorker:
     def apply(self, choice: dict) -> tuple[float, bool, dict | None]:
         """Translate + step. Auto-resets on done; returns (reward, done, ep_info)."""
         intents = self.translator.translate(choice, self.obs)
-        self.obs = self.env.step(intents, ticks=self.decision_ticks)
+        self.obs = self.env.step(intents, ticks=self.dt)
 
         tiles = my_tiles(self.obs)
         mine = strengths(self.obs["entities"], self.land_total).get(self.obs["me"], 0.0)
@@ -188,10 +190,25 @@ class VecEnv:
 
     def step(self, choices: list[dict]) -> list[tuple[float, bool, dict | None]]:
         """Send actions, collect (reward, done, info); next obs via obs()."""
-        for pipe, c in zip(self.pipes, choices):
-            pipe.send(c)
-        self._pending = [self._recv(i) for i in range(len(self.pipes))]
-        return [m["result"] for m in self._pending]
+        n = len(self.pipes)
+        self.send_group(range(n), choices)
+        return self.recv_group(range(n))
+
+    # Group variants let the trainer pipeline: while one half of the envs
+    # steps in their Node processes, the GPU acts for the other half.
+    def obs_group(self, idxs) -> list[dict]:
+        return [self._pending[i]["raw"] for i in idxs]
+
+    def send_group(self, idxs, choices) -> None:
+        for i, c in zip(idxs, choices):
+            self.pipes[i].send(c)
+
+    def recv_group(self, idxs) -> list[tuple[float, bool, dict | None]]:
+        out = []
+        for i in idxs:
+            self._pending[i] = self._recv(i)
+            out.append(self._pending[i]["result"])
+        return out
 
     def set_stage(self, stage: int) -> None:
         """Workers pick this up at their next episode reset."""
