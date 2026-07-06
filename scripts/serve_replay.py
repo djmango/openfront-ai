@@ -57,6 +57,16 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._send(200, f.read_bytes())
             return
+        # Model debug sidecar (rl.watch --record): /debug/<id>
+        m = re.fullmatch(r"/debug/([A-Za-z0-9]{8})", self.path)
+        if m:
+            f = self.index.get(m.group(1))
+            side = f.with_suffix(".debug.json") if f else None
+            if side is None or not side.exists():
+                self._send(404, b'{"error":"no debug sidecar"}')
+            else:
+                self._send(200, side.read_bytes())
+            return
         # Live-lobby existence probe: force the archive path.
         m = re.fullmatch(r"/api/game/([A-Za-z0-9]{8})/exists", self.path)
         if m:

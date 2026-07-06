@@ -1,18 +1,25 @@
 diff --git a/src/client/ClientGameRunner.ts b/src/client/ClientGameRunner.ts
-index 474ddc811..46f615a31 100644
+index 474ddc811..41d3087d9 100644
 --- a/src/client/ClientGameRunner.ts
 +++ b/src/client/ClientGameRunner.ts
-@@ -829,6 +829,9 @@ export class ClientGameRunner {
+@@ -1,4 +1,5 @@
+ import { Config } from "src/core/configuration/Config";
++import { initRlDebugOverlay } from "../client/RlDebugOverlay";
+ import { translateText } from "../client/Utils";
+ import { EventBus } from "../core/EventBus";
+ import {
+@@ -829,6 +830,10 @@ export class ClientGameRunner {
          this.eventBus.emit(new SendHashEvent(hu.tick, hu.hash));
        });
        this.gameView.update(gu);
 +      // RL replay tooling: expose the sim tick for the debug overlay.
 +      (window as { __replayTick?: number }).__replayTick =
 +        this.gameView.ticks();
++      initRlDebugOverlay(this.lobby.gameID);
        this.webglBuilder?.update(this.gameView);
        this.renderer.tick();
  
-@@ -882,7 +885,9 @@ export class ClientGameRunner {
+@@ -882,7 +887,9 @@ export class ClientGameRunner {
                return;
              }
  
@@ -67,6 +74,151 @@ index 0304224bf..da6c3714d 100644
        } satisfies ServerStartGameMessage);
      }
      if (clientMsg.type === "intent") {
+diff --git a/src/client/RlDebugOverlay.ts b/src/client/RlDebugOverlay.ts
+new file mode 100644
+index 000000000..eabc3228a
+--- /dev/null
++++ b/src/client/RlDebugOverlay.ts
+@@ -0,0 +1,139 @@
++/**
++ * RL replay tooling: live model-debug panel.
++ *
++ * Fetches per-decision policy debug data (chosen action, action
++ * probabilities, value estimate) for the current game and renders a small
++ * fixed panel that follows the sim via window.__replayTick (set in
++ * ClientGameRunner).
++ *
++ * Sources tried in order, first 200 wins:
++ *   - localStorage "rlDebugHost"  (live agent process, rl.play --debug-port)
++ *   - localStorage "apiHost"      (replay shim, scripts/serve_replay.py)
++ * at `${host}/debug/${gameID}`. Payload: { actions: string[], log: [...],
++ * live?: boolean }. When live, the log is re-fetched every 2s.
++ *
++ * Does nothing unless one of those localStorage keys is set, or when
++ * localStorage "rlDebugOverlay" === "0".
++ */
++
++interface RlDebugEntry {
++  tick: number;
++  desc: string;
++  action: string;
++  tiles: number;
++  troops: number;
++  value?: number;
++  probs?: number[];
++}
++
++interface RlDebugPayload {
++  actions: string[];
++  log: RlDebugEntry[];
++  live?: boolean;
++}
++
++let initialized = false;
++
++function esc(s: string): string {
++  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
++}
++
++export function initRlDebugOverlay(gameID: string): void {
++  if (initialized) return;
++  initialized = true;
++
++  let hosts: string[];
++  try {
++    if (localStorage.getItem("rlDebugOverlay") === "0") return;
++    hosts = [
++      localStorage.getItem("rlDebugHost"),
++      localStorage.getItem("apiHost"),
++    ].filter((h): h is string => !!h);
++  } catch {
++    return;
++  }
++  if (hosts.length === 0) return;
++
++  void (async () => {
++    for (const host of hosts) {
++      let data: RlDebugPayload;
++      try {
++        const resp = await fetch(`${host}/debug/${gameID}`);
++        if (!resp.ok) continue;
++        data = (await resp.json()) as RlDebugPayload;
++      } catch {
++        continue;
++      }
++      run(data, `${host}/debug/${gameID}`);
++      return;
++    }
++  })();
++}
++
++function run(data: RlDebugPayload, url: string): void {
++  const el = document.createElement("div");
++  el.style.cssText =
++    "position:fixed;left:8px;top:160px;width:250px;z-index:10005;" +
++    "background:rgba(12,14,22,.88);color:#d2d6e0;" +
++    "font:11px/1.4 ui-monospace,monospace;" +
++    "padding:8px 10px;border-radius:8px;pointer-events:none";
++  document.body.appendChild(el);
++
++  let log = data.log;
++  let idx = 0;
++  const recent: string[] = [];
++
++  if (data.live) {
++    setInterval(() => {
++      void fetch(url)
++        .then((r) => (r.ok ? r.json() : null))
++        .then((d: RlDebugPayload | null) => {
++          if (d) log = d.log;
++        })
++        .catch(() => {});
++    }, 2000);
++  }
++
++  setInterval(() => {
++    const t = (window as { __replayTick?: number }).__replayTick;
++    if (t === undefined) return;
++    while (idx < log.length && log[idx].tick <= t) {
++      const e = log[idx++];
++      if (e.action !== "noop") {
++        recent.push(`t${e.tick} ${e.desc}`);
++        if (recent.length > 8) recent.shift();
++      }
++    }
++    const e = idx > 0 ? log[idx - 1] : null;
++    let html =
++      '<b style="color:#fff">MODEL</b> ' +
++      `<span style="color:#787e8c">tick ${t}</span><br>`;
++    if (!e) {
++      el.innerHTML = html + "waiting for decisions...";
++      return;
++    }
++    html += `tiles ${e.tiles.toLocaleString()}  troops ${e.troops.toLocaleString()}`;
++    if (e.value !== undefined) html += `  v ${e.value.toFixed(2)}`;
++    html += `<br><span style="color:#5adc5a">${esc(e.desc)}</span>`;
++    if (e.probs) {
++      for (let i = 0; i < data.actions.length; i++) {
++        const hi = data.actions[i] === e.action;
++        const col = hi ? "#5adc5a" : e.probs[i] > 0.01 ? "#d2d6e0" : "#787e8c";
++        html +=
++          '<div style="display:flex;align-items:center;margin:1px 0">' +
++          `<span style="width:90px;color:${col}">${esc(data.actions[i].slice(0, 13))}</span>` +
++          '<span style="flex:1;height:7px;background:#282c3a;border-radius:2px">' +
++          `<span style="display:block;height:7px;border-radius:2px;width:${Math.round(
++            e.probs[i] * 100,
++          )}%;background:${hi ? "#5adc5a" : "#466ebe"}"></span></span></div>`;
++      }
++    }
++    if (recent.length) {
++      html +=
++        '<div style="color:#787e8c;margin-top:4px">recent:<br>' +
++        recent.map(esc).join("<br>") +
++        "</div>";
++    }
++    el.innerHTML = html;
++  }, 100);
++}
 diff --git a/src/client/TransformHandler.ts b/src/client/TransformHandler.ts
 index 77a0bac69..d8e9776dd 100644
 --- a/src/client/TransformHandler.ts

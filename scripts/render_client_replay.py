@@ -7,11 +7,13 @@ patches/client-replay-tooling.patch, pre-applied to the submodule):
   - replayViewAs: the viewer adopts the agent's identity — self-player
     styling, gold spawn ring, crown when first, "You Won!" modal
   - replayFitMap: camera starts centered on the whole map
-  - window.__replayTick: current sim tick, drives the model debug overlay
+  - RlDebugOverlay: in-client model panel (chosen action, value,
+    action-probability bars, recent-actions log) synced to the sim tick;
+    it fetches <apiHost>/debug/<gameID>, which the shim serves from the
+    rl.watch debug sidecar (<record>.debug.json)
 
-If rl.watch wrote a debug sidecar (<record>.debug.json) next to the record,
-the video gets a live model panel: chosen action, value estimate,
-action-probability bars, and a recent-actions log, synced to the sim tick.
+The same overlay works in a normal browser (manual serve_replay workflow)
+and in live games against rl.play --debug-port (localStorage rlDebugHost).
 
 Usage:
   uv run python scripts/render_client_replay.py \
@@ -34,59 +36,6 @@ import urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-
-# In-page model panel fed by the watch.py sidecar; follows the replay via
-# window.__replayTick (exposed by the submodule patch).
-OVERLAY_JS = """
-(payload) => {
-  const data = JSON.parse(payload);
-  const log = data.log, actions = data.actions;
-  const el = document.createElement("div");
-  el.style.cssText =
-    "position:fixed;left:8px;top:160px;width:250px;z-index:10005;" +
-    "background:rgba(12,14,22,.88);color:#d2d6e0;font:11px/1.4 ui-monospace,monospace;" +
-    "padding:8px 10px;border-radius:8px;pointer-events:none";
-  document.body.appendChild(el);
-  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
-  let idx = 0;
-  const recent = [];
-  setInterval(() => {
-    const t = window.__replayTick;
-    if (t === undefined || !log.length) return;
-    while (idx < log.length && log[idx].tick <= t) {
-      const e = log[idx++];
-      if (e.action !== "noop") {
-        recent.push("t" + e.tick + " " + e.desc);
-        if (recent.length > 8) recent.shift();
-      }
-    }
-    const e = idx > 0 ? log[idx - 1] : null;
-    let html = '<b style="color:#fff">MODEL</b> <span style="color:#787e8c">tick ' + t + "</span><br>";
-    if (!e) { el.innerHTML = html + "spawn phase"; return; }
-    html += "tiles " + e.tiles.toLocaleString() + "  troops " + e.troops.toLocaleString();
-    if (e.value !== undefined) html += "  v " + e.value.toFixed(2);
-    html += '<br><span style="color:#5adc5a">' + esc(e.desc) + "</span>";
-    if (e.probs) {
-      for (let i = 0; i < actions.length; i++) {
-        const hi = actions[i] === e.action;
-        const col = hi ? "#5adc5a" : e.probs[i] > 0.01 ? "#d2d6e0" : "#787e8c";
-        html +=
-          '<div style="display:flex;align-items:center;margin:1px 0">' +
-          '<span style="width:90px;color:' + col + '">' + esc(actions[i].slice(0, 13)) + "</span>" +
-          '<span style="flex:1;height:7px;background:#282c3a;border-radius:2px">' +
-          '<span style="display:block;height:7px;border-radius:2px;width:' +
-          Math.round(e.probs[i] * 100) + "%;background:" + (hi ? "#5adc5a" : "#466ebe") +
-          '"></span></span></div>';
-      }
-    }
-    if (recent.length) {
-      html += '<div style="color:#787e8c;margin-top:4px">recent:<br>' +
-        recent.map(esc).join("<br>") + "</div>";
-    }
-    el.innerHTML = html;
-  }, 100);
-}
-"""
 
 
 def port_open(port: int) -> bool:
@@ -112,9 +61,10 @@ def ensure_patch() -> None:
     markers = [
         ("openfront/src/client/LocalServer.ts", "replayViewAs"),
         ("openfront/src/client/TransformHandler.ts", "replayFitMap"),
-        ("openfront/src/client/ClientGameRunner.ts", "__replayTick"),
+        ("openfront/src/client/ClientGameRunner.ts", "initRlDebugOverlay"),
     ]
     present = [m in (REPO / f).read_text() for f, m in markers]
+    present.append((REPO / "openfront/src/client/RlDebugOverlay.ts").exists())
     if all(present):
         return
     if any(present):
@@ -154,9 +104,7 @@ def main() -> None:
     print(f"gameID {game_id} -> {out}")
 
     sidecar = record.with_suffix(".debug.json")
-    overlay_payload = None
     if args.overlay and sidecar.exists():
-        overlay_payload = sidecar.read_text()
         print(f"model overlay from {sidecar.name}")
     elif args.overlay:
         print(f"no {sidecar.name} — rendering without the model overlay "
@@ -198,10 +146,12 @@ def main() -> None:
             )
             # Must land before the app boots: archive API base, agent
             # identity, map-centered camera, no auto-focus on the player.
+            overlay_flag = "1" if args.overlay else "0"
             ctx.add_init_script(
                 f'localStorage.setItem("apiHost", "http://localhost:{args.api_port}");'
                 'localStorage.setItem("replayViewAs", "1");'
                 'localStorage.setItem("replayFitMap", "1");'
+                f'localStorage.setItem("rlDebugOverlay", "{overlay_flag}");'
                 'localStorage.setItem("settings.goToPlayer", "false");'
                 'localStorage.setItem("username", "AGENT");'
             )
@@ -218,8 +168,6 @@ def main() -> None:
                 page.locator("replay-panel button", has_text=speed_label).click()
             else:
                 page.locator("replay-panel button").last.click()  # max speed
-            if overlay_payload is not None:
-                page.evaluate(OVERLAY_JS, overlay_payload)
             print("replay running...")
 
             # Done when the win modal shows (or the turn feed runs dry).

@@ -159,6 +159,9 @@ uv run python scripts/render_client_replay.py \
 
 To browse a replay interactively instead, follow the manual steps in the
 `scripts/serve_replay.py` docstring (same shim + client, real browser).
+The MODEL panel appears there too — it's rendered by the client itself
+(`RlDebugOverlay` hook) whenever `apiHost` points at the shim and the
+record has a sidecar.
 
 The bridge mirrors the client's `createGameRunner()` init exactly (same
 PseudoRandom ID stream, no spawn timer in singleplayer), so records replay
@@ -181,6 +184,17 @@ picked by the policy. You fight it from the normal browser client:
 uv run python -m rl.play --policy /tmp/policy.pt --game <LOBBY_ID>
 # "AgentRL" appears in the lobby; Start Game and fight it.
 ```
+
+To watch the model think while you fight it, `rl.play` serves its live
+decisions on `--debug-port` (default 8988). One-time, in the browser
+console before the game starts:
+
+```js
+localStorage.setItem("rlDebugHost", "http://localhost:8988")
+```
+
+The same MODEL panel (action, value, probability bars, recent log) then
+tracks the agent in real time. Remove the key to turn it off.
 
 ## Roadmap
 

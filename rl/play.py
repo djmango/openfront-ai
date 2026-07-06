@@ -17,15 +17,18 @@ import gzip
 import json
 import re
 import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
 import torch
 
 from rl.env import FALLOUT_BIT, OWNER_MASK, REPO_ROOT, TSX
-from rl.obs import ObsBuilder, encode_grids, load_ae
+from rl.obs import ACTIONS, ObsBuilder, encode_grids, load_ae
 from rl.policy import Policy
 from rl.ppo import OBS_KEYS
 from rl.ppo_translate import IntentTranslator, my_tiles
+from rl.watch import describe
 
 
 class _EnvShim:
@@ -49,6 +52,36 @@ def parse_game_id(s: str) -> str:
     raise SystemExit(f"could not parse a lobby ID from {s!r}")
 
 
+def start_debug_server(game_id: str, port: int, log: list, lock: threading.Lock):
+    """Serve the model's decisions at /debug/<gameID> for the in-client
+    overlay (set localStorage rlDebugHost = "http://localhost:<port>")."""
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path == f"/debug/{game_id}":
+                with lock:
+                    body = json.dumps(
+                        {"actions": list(ACTIONS), "log": list(log), "live": True}
+                    ).encode()
+                code = 200
+            else:
+                body, code = b'{"error":"not found"}', 404
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt: str, *args) -> None:
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    print(f"debug overlay feed: http://localhost:{port}/debug/{game_id}")
+    print('  in the browser console: localStorage.setItem("rlDebugHost", '
+          f'"http://localhost:{port}")')
+
+
 def decode_tiles(obs: dict, width: int, height: int) -> dict:
     raw = gzip.decompress(base64.b64decode(obs["tiles"]))
     state = np.frombuffer(raw, dtype="<u2").reshape(height, width)
@@ -64,6 +97,8 @@ def main() -> None:
     ap.add_argument("--ckpt", default="runs/ae_v3/ae_v3.pt")
     ap.add_argument("--game", required=True, help="lobby ID from the browser")
     ap.add_argument("--host", default="localhost:9000")
+    ap.add_argument("--debug-port", type=int, default=8988,
+                    help="serve decisions for the in-client overlay (0 = off)")
     args = ap.parse_args()
     args.game = parse_game_id(args.game)
 
@@ -93,6 +128,11 @@ def main() -> None:
     rng = np.random.default_rng()
     spawn_tile: int | None = None
     steps = 0
+
+    debug_log: list[dict] = []
+    debug_lock = threading.Lock()
+    if args.debug_port:
+        start_debug_server(args.game, args.debug_port, debug_log, debug_lock)
 
     for line in proc.stdout:
         msg = json.loads(line)
@@ -139,8 +179,27 @@ def main() -> None:
             o = encode_grids(ae, [raw], device)[0]
             ot = {k: torch.from_numpy(o[k])[None] for k in OBS_KEYS}
             with torch.no_grad():
-                choices, _, _ = policy.act(ot)
-            intents = translator.translate(choices[0], obs)
+                choices, _, _ = policy.act(ot, debug=args.debug_port > 0)
+            choice = choices[0]
+            if args.debug_port:
+                me = next(
+                    (p for p in obs["entities"]["players"] if p["id"] == obs["me"]),
+                    None,
+                )
+                entry = {
+                    "tick": obs["tick"],
+                    "desc": describe(choice, obs),
+                    "action": ACTIONS[choice["action"]],
+                    "tiles": me["tiles"] if me else 0,
+                    "troops": int(me["troops"]) if me else 0,
+                }
+                dbg = choice.get("debug")
+                if dbg is not None:
+                    entry["value"] = round(float(dbg["value"]), 3)
+                    entry["probs"] = [round(float(p), 4) for p in dbg["action_probs"]]
+                with debug_lock:
+                    debug_log.append(entry)
+            intents = translator.translate(choice, obs)
             steps += 1
             if intents:
                 print(f"tick {obs['tick']} (tiles {my_tiles(obs)}): "
