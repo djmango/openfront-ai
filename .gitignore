@@ -8,3 +8,5 @@ records/
 records-rl/
 *.webm
 !assets/*.webm
+replays/
+.DS_Store
