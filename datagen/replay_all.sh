@@ -6,12 +6,15 @@
 # that commit, replays the bucket (hash-verified), then restores the pin.
 #
 # Usage: datagen/replay_all.sh [records_dir] [out_dir] [parallelism]
+# BC=1 passes --bc (dump behavior-cloning sidecars; incremental over
+# already-replayed games).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 RECORDS=${1:-records}
 OUT=${2:-data-human}
 JOBS=${3:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}
+BCFLAG=${BC:+--bc}
 TSX=openfront/node_modules/.bin/tsx
 
 PIN=$(git -C openfront rev-parse HEAD)
@@ -32,7 +35,7 @@ for bucket in "$RECORDS"/*/; do
   ls "$bucket"*.json.gz | xargs -P "$JOBS" -n 4 sh -c '
     tmp=$(mktemp -d)
     for f in "$@"; do ln -s "$(realpath "$f")" "$tmp/"; done
-    '"$TSX"' datagen/replay.ts --records "$tmp" --out '"$OUT"' 2>&1 | grep -Ev "not found|QuickChat|cannot build|Constructor"
+    '"$TSX"' datagen/replay.ts --records "$tmp" --out '"$OUT"' '"$BCFLAG"' 2>&1 | grep -Ev "not found|QuickChat|cannot build|Constructor"
     rm -rf "$tmp"
   ' sh
 done
