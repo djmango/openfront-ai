@@ -1,5 +1,10 @@
 # Agent design: observation stack & action space
 
+**Decisions (2026-07-05):** (1) a single unified autoencoder compresses ALL
+game state — tiles, players, units, attacks, globals — into one joint latent
+that is the policy's primary observation; (2) the FULL action surface ships
+in v1 (legality masking only, no curriculum masking).
+
 Target: a self-play PPO agent over the full OpenFront gameplay surface.
 Everything below is grounded in the engine's actual intent schemas
 (`openfront/src/core/Schemas.ts`) and `Player`/`Game` interfaces — nothing
@@ -56,13 +61,51 @@ masking, sampled in order. Per decision step:
 Heads 2-5 are only evaluated/trained where the chosen action type needs
 them (masked loss, standard practice).
 
-Curriculum note: the full space ships from day one; early phases simply
-mask off action types (alliances, nukes, warships) rather than changing
-network shapes. Nothing needs retraining to widen the space.
+All heads ship in v1. Masking is *legality-only* (what the engine would
+reject), never curricular. Against easy bots most diplomatic/build actions
+are simply unrewarding; the policy must learn to ignore them.
 
 ## Observation stack
 
-Three streams, fused by the policy trunk:
+### Unified state autoencoder (v2, supersedes tile-only AE)
+
+One model consumes every stream below and produces a single joint latent;
+the policy reads the latent instead of raw features. Architecture:
+
+- **Encoders**: CNN over the tile grid (as in AE v1); a small transformer
+  over player/unit/attack tokens; an MLP over global scalars. Token
+  embeddings and grid features cross-attend, then fuse into:
+- **Joint latent**: the spatial grid latent (H/16 x W/16 x C) plus a
+  vector latent (pooled tokens + scalars). Per-token encoder embeddings
+  are retained as pointer keys for action heads 2 and 4.
+- **Decoders (reconstruction targets)** — chosen so nothing needs
+  set-decoding/Hungarian matching:
+  - tile owner slots: per-tile CE, border-weighted (as v1)
+  - per-player scalars: regression per *static slot* (slots are bounded
+    and fixed per game, so this is a fixed-shape head)
+  - units: spatial *presence planes* per unit class at grid resolution
+    (unit existence becomes an image, not a set)
+  - attacks-in-flight: per-slot-pair troop totals
+  - global scalars: direct regression
+- **Deterministic first.** Variational (true VAE) only if we later want
+  generative rollouts/world-model planning; for representation learning
+  the KL term mostly costs capacity.
+
+Two pragmatic skips around the bottleneck (the latent is lossy by design;
+these are exact by necessity):
+
+1. **Legality masks** go straight to the action heads, never through the
+   latent — a mask reconstructed at 99% accuracy still yields illegal
+   intents.
+2. **Own-player scalars** (own troops/gold/income) are appended raw to the
+   trunk input. Relative strength judgments ("do I outnumber him 1.4x?")
+   are too load-bearing to trust to reconstruction blur.
+
+Training data: requires datagen v2 — current snapshots lack units,
+attacks, alliances, and relations. Same headless pipeline, richer
+`meta.json` + unit/attack dumps per snapshot.
+
+### The streams (all consumed by the unified AE)
 
 ### 1. Spatial (the map)
 
