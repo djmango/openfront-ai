@@ -21,10 +21,11 @@ class IntentTranslator:
         self.rng = np.random.default_rng(0)
 
     def region_tile(self, region: int) -> int | None:
-        # Region indices address the padded GW_MAX-wide policy grid.
+        # Region indices address the padded policy grid, whose width is
+        # GW_MAX or the map's own grid width if larger (see encode_grids).
         from rl.curriculum import GW_MAX
 
-        gy, gx = divmod(region, GW_MAX)
+        gy, gx = divmod(region, max(GW_MAX, self.gw))
         if gy >= self.gh or gx >= self.gw:
             return None  # padded region; masked, but stay safe
         block = self.land[gy * 16 : (gy + 1) * 16, gx * 16 : (gx + 1) * 16]

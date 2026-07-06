@@ -15,6 +15,7 @@ import argparse
 import base64
 import gzip
 import json
+import re
 import subprocess
 
 import numpy as np
@@ -36,6 +37,18 @@ class _EnvShim:
         self.terrain = terrain
 
 
+def parse_game_id(s: str) -> str:
+    """Accept a bare 8-char lobby ID or a full lobby URL
+    (http://host/w1/game/<ID>?lobby&s=...)."""
+    m = re.search(r"/game/([A-Za-z0-9]{8})", s)
+    if m:
+        return m.group(1)
+    s = s.strip()
+    if re.fullmatch(r"[A-Za-z0-9]{8}", s):
+        return s
+    raise SystemExit(f"could not parse a lobby ID from {s!r}")
+
+
 def decode_tiles(obs: dict, width: int, height: int) -> dict:
     raw = gzip.decompress(base64.b64decode(obs["tiles"]))
     state = np.frombuffer(raw, dtype="<u2").reshape(height, width)
@@ -52,6 +65,7 @@ def main() -> None:
     ap.add_argument("--game", required=True, help="lobby ID from the browser")
     ap.add_argument("--host", default="localhost:9000")
     args = ap.parse_args()
+    args.game = parse_game_id(args.game)
 
     device = "cpu"
     ae = load_ae(args.ckpt, device)
@@ -87,6 +101,15 @@ def main() -> None:
         if event == "lobby":
             continue
         if event == "start":
+            from rl.curriculum import GH_MAX, GW_MAX
+
+            gh, gw = msg["height"] // 16, msg["width"] // 16
+            if gh > GH_MAX or gw > GW_MAX:
+                print(
+                    f"note: map grid {gh}x{gw} exceeds the training max "
+                    f"{GH_MAX}x{GW_MAX}; the policy will run but is out of "
+                    "distribution here"
+                )
             terr = gzip.decompress(base64.b64decode(msg["terrain"]))
             terrain = np.frombuffer(terr, dtype=np.uint8).reshape(
                 msg["height"], msg["width"]
@@ -119,8 +142,11 @@ def main() -> None:
                 choices, _, _ = policy.act(ot)
             intents = translator.translate(choices[0], obs)
             steps += 1
-            if steps % 50 == 0:
-                print(f"tick {obs['tick']}: my tiles {my_tiles(obs)}")
+            if intents:
+                print(f"tick {obs['tick']} (tiles {my_tiles(obs)}): "
+                      + "; ".join(json.dumps(i) for i in intents))
+            elif steps % 50 == 0:
+                print(f"tick {obs['tick']}: idle, my tiles {my_tiles(obs)}")
 
         proc.stdin.write(json.dumps({"intents": intents}) + "\n")
         proc.stdin.flush()

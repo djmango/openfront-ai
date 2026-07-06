@@ -295,7 +295,13 @@ class ObsBuilder:
 def encode_grids(ae: SpatialAE, raws: list[dict], device: str) -> list[dict]:
     """Batched frozen-AE encode. Envs may be on different maps: encode per
     shape group, then zero-pad every grid to (C, GH_MAX, GW_MAX) and emit a
-    'grid_valid' mask so one policy batch spans mixed maps."""
+    'grid_valid' mask so one policy batch spans mixed maps.
+
+    Maps larger than the training max are padded to their own grid instead
+    (the policy is fully convolutional, so any size runs; region indices are
+    decoded with the same max(GW_MAX, gw) convention in IntentTranslator).
+    Oversized maps can't share a stacked batch with smaller ones — np.stack
+    in the caller will fail loudly rather than mis-decode."""
     from rl.curriculum import GH_MAX, GW_MAX
 
     groups: dict[tuple, list[int]] = {}
@@ -316,11 +322,10 @@ def encode_grids(ae: SpatialAE, raws: list[dict], device: str) -> list[dict]:
         o = {k: v for k, v in r.items() if k not in ("owners", "terrain", "static", "ego_transient")}
         grid = np.concatenate([z_by_idx[i], r["ego_transient"]]).astype(np.float32)
         gh, gw = grid.shape[1], grid.shape[2]
-        if gh > GH_MAX or gw > GW_MAX:
-            raise ValueError(f"grid {gh}x{gw} exceeds GH_MAX/GW_MAX {GH_MAX}x{GW_MAX}")
-        padded = np.zeros((grid.shape[0], GH_MAX, GW_MAX), dtype=np.float32)
+        ph, pw = max(GH_MAX, gh), max(GW_MAX, gw)
+        padded = np.zeros((grid.shape[0], ph, pw), dtype=np.float32)
         padded[:, :gh, :gw] = grid
-        valid = np.zeros((GH_MAX, GW_MAX), dtype=np.float32)
+        valid = np.zeros((ph, pw), dtype=np.float32)
         valid[:gh, :gw] = 1.0
         o["grid"] = padded
         o["grid_valid"] = valid
