@@ -6,6 +6,7 @@ dependencies = [
     "huggingface-hub>=1.18.0",
     "matplotlib>=3.10.9",
     "numpy>=2.4.6",
+    "orjson>=3.10.0",
     "pillow>=12.2.0",
     "playwright>=1.60.0",
     "tensorboard>=2.20.0",
