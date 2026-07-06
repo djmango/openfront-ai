@@ -218,6 +218,25 @@ def main() -> None:
             )
         print(f"done: https://huggingface.co/datasets/{HUMAN_DATASET_REPO}")
 
+    elif what == "bc-sidecars":
+        # Behavior-cloning supervision (datagen/replay.ts --bc): one tar of
+        # every data-human/<map>/<game>/bc.json.gz, paths relative to
+        # data-human so it extracts over the map tars.
+        import tarfile
+
+        out = Path("bc-sidecars.tar")
+        with tarfile.open(out, "w") as t:
+            for f in sorted(Path("data-human").glob("*/*/bc.json.gz")):
+                t.add(f, arcname=str(f.relative_to("data-human")))
+        print(f"packed {out} ({out.stat().st_size / 1e9:.2f} GB); uploading ...")
+        api.upload_file(
+            path_or_fileobj=out,
+            path_in_repo="bc/bc-sidecars.tar",
+            repo_id=HUMAN_DATASET_REPO,
+            repo_type="dataset",
+        )
+        print(f"done: https://huggingface.co/datasets/{HUMAN_DATASET_REPO}")
+
     elif what == "dataset-card":
         api.upload_file(
             path_or_fileobj=DATASET_CARD.encode(),
@@ -239,7 +258,7 @@ def main() -> None:
 
     else:
         raise SystemExit(
-            "usage: hf_upload.py dataset|model|dataset-card|human-dataset"
+            "usage: hf_upload.py dataset|model|dataset-card|human-dataset|bc-sidecars"
         )
 
 

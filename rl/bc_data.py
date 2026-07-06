@@ -80,8 +80,8 @@ def _slot_lut_from_players(players: list[dict]) -> np.ndarray:
 
 def load_game(path: Path, gh_max: int, gw_max: int) -> GameHandle | None:
     bc_path = path / "bc.json.gz"
-    if not bc_path.exists():
-        return None
+    if not bc_path.exists() or not (path / "meta.json").exists():
+        return None  # sidecar without snapshots (partial sync)
     meta = json.loads((path / "meta.json").read_text())
     h, w = meta["height"], meta["width"]
 
