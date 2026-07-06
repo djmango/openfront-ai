@@ -124,6 +124,33 @@ uv run python -m rl.ppo --map Onion --updates 1000 --name ppo_v1
 uv run tensorboard --logdir runs/rl   # live dashboard
 ```
 
+### Watching the agent play
+
+`rl/watch.py` runs one greedy episode, renders a native-resolution WebM, and
+saves an engine `GameRecord` — the same format openfront.io archives — which
+the **real game client** can replay with the full UI:
+
+```bash
+uv run python -m rl.watch --policy /tmp/policy.pt --stage 3 \
+    --out replay.webm --record records-rl/game.json
+openfront/node_modules/.bin/tsx scripts/verify_record.ts records-rl/game.json
+
+# replay in the actual OpenFront client:
+uv run python scripts/serve_replay.py --records records-rl   # archive API shim
+(cd openfront && npm run start:client)                       # localhost:9000
+# in the browser console: localStorage.setItem("apiHost", "http://localhost:8987")
+# then Join Lobby with the gameID printed by watch.py
+```
+
+The bridge mirrors the client's `createGameRunner()` init exactly (same
+PseudoRandom ID stream, no spawn timer in singleplayer), so records replay
+bit-identically: `verify_record.ts` re-simulates from intents alone and
+reproduces the agent's tile counts and death tick.
+
+Sample: [assets/replay_v2_stage3.webm](assets/replay_v2_stage3.webm)
+(ppo_v2c on stage 3 — Onion, 80 Medium bots; peaks ~13k tiles before dying
+at tick 3891).
+
 ## Roadmap
 
 1. ~~Headless datagen + spatial autoencoder~~ (done, above)

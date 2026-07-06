@@ -1,12 +1,18 @@
-"""Watch the trained agent play: runs one episode locally and renders an
-animated GIF (agent in bright green, enemies in muted colors).
+"""Watch the trained agent play: runs one episode locally, renders a video
+(WebM via ffmpeg, or GIF by extension), and saves an engine GameRecord that
+the real OpenFront client can replay (see scripts/serve_replay.py).
 
 Usage:
-  uv run python -m rl.watch --policy /tmp/policy.pt --stage 3 --out replay.gif
+  uv run python -m rl.watch --policy /tmp/policy.pt --stage 3 \
+      --out replay.webm --record records-rl/replay.json
 """
 
 import argparse
 import colorsys
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -52,10 +58,12 @@ def main() -> None:
     ap.add_argument("--policy", required=True)
     ap.add_argument("--ckpt", default="runs/ae_v3/ae_v3.pt")
     ap.add_argument("--stage", type=int, default=3)
-    ap.add_argument("--out", default="replay.gif")
+    ap.add_argument("--out", default="replay.webm", help=".webm (ffmpeg) or .gif")
+    ap.add_argument("--record", default=None, help="also save engine GameRecord JSON")
     ap.add_argument("--max-steps", type=int, default=1200)
-    ap.add_argument("--frame-every", type=int, default=3, help="render every Nth decision")
-    ap.add_argument("--scale", type=int, default=2, help="downscale factor")
+    ap.add_argument("--frame-every", type=int, default=2, help="render every Nth decision")
+    ap.add_argument("--scale", type=int, default=1, help="downscale factor (1 = native)")
+    ap.add_argument("--fps", type=int, default=24)
     ap.add_argument("--seed", default="watch0")
     args = ap.parse_args()
 
@@ -98,15 +106,40 @@ def main() -> None:
             print(f"episode over at tick {obs['tick']}: alive={obs['alive']}, winner={obs['winner']}")
             break
 
+    if args.record:
+        info = env.save_record(str(Path(args.record).resolve()))
+        print(f"game record: {info['saved']} (gameID {info['gameID']}, {info['turns']} turns)")
     env.close()
-    frames[0].save(
-        args.out,
-        save_all=True,
-        append_images=frames[1:],
-        duration=60,
-        loop=0,
-        optimize=True,
-    )
+
+    if args.out.endswith(".gif"):
+        frames[0].save(
+            args.out,
+            save_all=True,
+            append_images=frames[1:],
+            duration=1000 // args.fps,
+            loop=0,
+            optimize=True,
+        )
+    else:
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            raise SystemExit("ffmpeg not found; use a .gif output or install ffmpeg")
+        with tempfile.TemporaryDirectory() as td:
+            for i, im in enumerate(frames):
+                im.save(f"{td}/f{i:05d}.png")
+            # yuv420p requires even dims; pad by one pixel if needed.
+            subprocess.run(
+                [
+                    ffmpeg, "-y", "-framerate", str(args.fps),
+                    "-i", f"{td}/f%05d.png",
+                    "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+                    "-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "30",
+                    "-pix_fmt", "yuv420p",
+                    args.out,
+                ],
+                check=True,
+                capture_output=True,
+            )
     print(f"wrote {args.out} ({len(frames)} frames)")
 
 

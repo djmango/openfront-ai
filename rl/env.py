@@ -77,6 +77,10 @@ class OpenFrontEnv:
         self.me = obs["me"]
         return obs
 
+    def save_record(self, path: str) -> dict:
+        """Dump the episode so far as a GameRecord the real client can replay."""
+        return self._rpc({"op": "save_record", "path": path})
+
     def close(self) -> None:
         try:
             self._rpc({"op": "close"})
