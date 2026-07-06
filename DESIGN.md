@@ -110,6 +110,38 @@ per class.
 **Deterministic, not variational.** A VAE's KL term costs capacity;
 generative rollouts are not needed for representation learning.
 
+#### v3.1: border-accuracy push
+
+Overall tile accuracy saturates near 99% but border-tile accuracy (the
+metric that matters for the policy) lagged at 76.5%/83.5% (human/bot).
+v3.1 targets borders specifically:
+
+- **Static-terrain-conditioned decoder.** Land bit + magnitude are static
+  side-information the policy gets for free, so the decoder consumes them
+  (avg-pooled to each scale, concatenated at every upsampling stage and at
+  full res) without cheating; the latent then only encodes ownership
+  relative to terrain. Fallout is dynamic state and is never fed to the
+  decoder.
+- **Stronger decoder head:** nearest-upsample + 3x3 conv stages replace
+  ConvTranspose (no checkerboard artifacts), plus a full-resolution 3x3
+  refinement block before the classifier (previously a bare 1x1).
+- **Border-dense crop sampling:** crops are rejection-sampled with
+  acceptance probability proportional to border-edge density (floored at
+  0.15 so ocean/interior isn't starved; ≤8 attempts reusing one
+  decompressed frame). Eval still samples uniformly.
+- **Focal loss** (1 − p_true)^γ, γ=1.5 default, composed with the existing
+  border weighting; warmup+cosine LR schedule; native `bacc` logging and
+  step-tagged snapshot checkpoints.
+- **`--latent-down 8` ablation flag:** latent grid at 1/8 instead of 1/16
+  (one fewer stride-2 / upsample stage) for a capacity-vs-resolution
+  ablation on cloud GPUs.
+
+**Policy-side decision (approved):** in addition to the AE latent, the
+policy will receive a raw local owner-map crop around the agent's own
+territory as an exact-borders bypass — consistent with the v3 bypass
+philosophy of passing small exact state around the latent instead of
+forcing the latent to be pixel-perfect everywhere.
+
 ### The streams
 
 ### 1. Spatial (the map)
@@ -162,3 +194,31 @@ legality masks for every head (action types, valid player targets per
 type, valid tile regions per type, valid unit instances). The engine
 already computes all validity — the bridge's job is serialization, not
 game logic. Decision cadence: one policy step per ~10 game ticks.
+
+## Behavior cloning from archived human games
+
+Two BC variants train on the replayed human archive (see `datagen/replay.ts
+--bc` and `rl/bc.py`), both on the exact PPO policy architecture so BC
+weights double as PPO initialization (`load_state_dict(strict=False)`):
+
+1. **Outcome-conditioned (feedforward, `bc_v1`)** — every player's actions
+   are supervision, not just winners'. A final-placement embedding (8
+   percentile buckets, zero-init projection added to the trunk output) tells
+   the model *whose* behavior it is imitating; at deployment we condition on
+   the winner bucket. This is decision-transformer-style
+   return-conditioning, collapsed to a single episode-level token.
+2. **Temporal (`bc_seq_v1`, `--seq 8`)** — same, plus a 2-layer causal
+   transformer over the last 8 decision steps' trunk embeddings.
+   AlphaStar's core was a deep LSTM over game steps; OpenFront is fully
+   observable so memory is a hypothesis to test, not a given.
+
+Supervision detail: one sample per (snapshot, living human). The label is
+the player's intents in the following 10-tick window normalized to the
+factorized action space (multiple intents in a window: one sampled per
+visit). Idle steps are real supervision too (noop is ~90% of human decision
+steps) but are downsampled to ~15% of each batch. Loss is masked CE per
+head, sub-heads only where the labeled action uses them. Normal-size human
+maps are strided 2/4x down to the Compact grid budget — the engine's own
+Compact mode is exactly a downscaled Normal map, so strided games stay
+in-distribution for the frozen AE. Games split 90/10 train/holdout by game
+ID for eval.
