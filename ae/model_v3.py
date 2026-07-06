@@ -2,7 +2,7 @@
 
 Lesson from v2: squeezing tiny exact state (pairwise alliances, player
 scalars) through the latent and reconstructing it lossily is manufactured
-difficulty — three training runs got alliance precision to 0.55 when the
+difficulty - three training runs got alliance precision to 0.55 when the
 policy could just read the bit. The bypass split:
 
   AE compresses (high-dimensional, spatial):

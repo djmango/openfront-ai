@@ -121,11 +121,11 @@ if [[ -z "$GAME" ]]; then
 
 Browser steps (do these before pressing Enter):
   1. Create Lobby (private)
-  2. Set Start Delay to 60+ seconds  (default is 3 — not enough time to launch the bot)
+  2. Set Start Delay to 60+ seconds  (default is 3 - not enough time to launch the bot)
   3. Lower Bots / Nations            (default 400 is brutal)
   4. Copy the lobby ID (top right)
 
-Public lobbies on the home screen auto-start in ~5s in dev — use a private lobby instead.
+Public lobbies on the home screen auto-start in ~5s in dev - use a private lobby instead.
 
 EOF
   read -r -p "lobby ID: " GAME

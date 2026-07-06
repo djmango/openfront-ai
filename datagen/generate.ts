@@ -10,7 +10,7 @@
  *     terrain.bin       uint8[w*h]  immutable terrain bytes (land/ocean/shore/magnitude)
  *     states/t<tick>.bin.gz   gzipped uint16-le[w*h] per snapshot (owner id bits
  *                       0-11, fallout bit 13, defense bonus bit 14)
- *     states/t<tick>.json.gz  gzipped JSON: full entity state per snapshot —
+ *     states/t<tick>.json.gz  gzipped JSON: full entity state per snapshot -
  *                       players (stats, diplomacy, relations), alliances,
  *                       units, attacks in flight
  *     meta.json         dims, snapshot tick list, winner

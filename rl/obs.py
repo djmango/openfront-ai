@@ -3,7 +3,7 @@
 Per DESIGN.md: the AE compresses the map; everything small reaches the
 policy raw. Output tensors per step:
 
-  grid:     (C_GRID, H/16, W/16) — frozen z_grid (64ch) + ego ownership
+  grid:     (C_GRID, H/16, W/16) - frozen z_grid (64ch) + ego ownership
             planes (3) + transient unit planes (8, exact) = 75ch
   players:  (MAX_SLOTS, P_FEAT) per-player bypass features (exact)
   pmask:    (MAX_SLOTS,) slot exists
@@ -329,7 +329,7 @@ def encode_grids(ae: SpatialAE, raws: list[dict], device: str) -> list[dict]:
 def collate(obs_list: list[dict], keys: list[str]) -> dict[str, np.ndarray]:
     """Stack per-env obs dicts into batch arrays, zero-padding 'grid' and
     'grid_valid' to the largest grid in THIS batch (not the curriculum-wide
-    max — that wasted ~9x conv compute on small maps)."""
+    max - that wasted ~9x conv compute on small maps)."""
     out = {}
     gh = max(o["grid"].shape[1] for o in obs_list)
     gw = max(o["grid"].shape[2] for o in obs_list)

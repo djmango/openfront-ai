@@ -1,10 +1,10 @@
-"""Render a GameRecord as a video of the REAL OpenFront client — actual
+"""Render a GameRecord as a video of the REAL OpenFront client - actual
 game graphics: terrain art, units, factories, nukes, leaderboard, the lot.
 
 Drives a headless Chromium (Playwright) against the local dev client,
 replaying the record served by the archive-API shim. Client hooks (patch in
 patches/client-replay-tooling.patch, pre-applied to the submodule):
-  - replayViewAs: the viewer adopts the agent's identity — self-player
+  - replayViewAs: the viewer adopts the agent's identity - self-player
     styling, gold spawn ring, crown when first, "You Won!" modal
   - replayFitMap: camera starts centered on the whole map
   - RlDebugOverlay: in-client model panel (chosen action, value,
@@ -107,7 +107,7 @@ def main() -> None:
     if args.overlay and sidecar.exists():
         print(f"model overlay from {sidecar.name}")
     elif args.overlay:
-        print(f"no {sidecar.name} — rendering without the model overlay "
+        print(f"no {sidecar.name} - rendering without the model overlay "
               "(re-run rl.watch --record to get one)")
 
     ensure_patch()
