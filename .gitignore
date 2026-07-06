@@ -5,3 +5,6 @@ __pycache__/
 runs/
 data-human/
 records/
+records-rl/
+*.webm
+!assets/*.webm

@@ -22,7 +22,9 @@ import * as path from "path";
 import * as readline from "readline";
 import * as zlib from "zlib";
 import { Config } from "../openfront/src/core/configuration/Config";
+import { DoomsdayClockExecution } from "../openfront/src/core/execution/DoomsdayClockExecution";
 import { Executor } from "../openfront/src/core/execution/ExecutionManager";
+import { RecomputeRailClusterExecution } from "../openfront/src/core/execution/RecomputeRailClusterExecution";
 import { SpawnTimerExecution } from "../openfront/src/core/execution/SpawnTimerExecution";
 import { WinCheckExecution } from "../openfront/src/core/execution/WinCheckExecution";
 import {
@@ -75,10 +77,28 @@ function mapDirName(mapType: GameMapType): string {
   return key.charAt(0).toLowerCase() + key.slice(1);
 }
 
+function seedToGameID(seed: string): string {
+  // Deterministic 8-char alnum ID (GAME_ID_REGEX) from an arbitrary seed.
+  const alphabet =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let h = simpleHash(`rl-${seed}`);
+  let out = "";
+  for (let i = 0; i < 8; i++) {
+    h = (h * 1103515245 + 12345) & 0x7fffffff;
+    out += alphabet[h % alphabet.length];
+  }
+  return out;
+}
+
 class EnvSession {
   game!: Game;
   executor!: Executor;
   agentSmallID = -1;
+  gameID = "";
+  gameConfig!: GameConfig;
+  turns: { turnNumber: number; intents: StampedIntent[] }[] = [];
+  startTime = 0;
+  lastWinner: unknown = null;
 
   async reset(
     mapKey: string,
@@ -104,14 +124,22 @@ class EnvSession {
       infiniteGold: false,
       infiniteTroops: false,
       instantBuild: false,
+      randomSpawn: false,
     };
-    const gameID = `rl-${seed}`;
+    const gameID = seedToGameID(seed);
     const gameStart: GameStartInfo = {
       gameID,
       lobbyCreatedAt: Date.now(),
       config: gameConfig,
-      players: [],
+      players: [
+        { clientID: AGENT_CLIENT_ID, username: "Agent", clanTag: null },
+      ],
     };
+    this.gameID = gameID;
+    this.gameConfig = gameConfig;
+    this.turns = [];
+    this.startTime = Date.now();
+    this.lastWinner = null;
     const config = new Config(gameConfig, null, false);
 
     const dir = path.join(MAPS_DIR, mapDirName(mapType));
@@ -127,24 +155,24 @@ class EnvSession {
       new Uint8Array(fs.readFileSync(path.join(dir, "map4x.bin"))),
     );
 
+    // Mirror createGameRunner() exactly (humans consume random.nextID()
+    // first, then nations) so recorded games replay bit-identically in the
+    // real OpenFront client.
     const random = new PseudoRandom(simpleHash(gameID));
+    const humans = gameStart.players.map(
+      (p) =>
+        new PlayerInfo(p.username, PlayerType.Human, p.clientID, random.nextID()),
+    );
     const nations = createNationsForGame(
       gameStart,
       manifest.nations,
       manifest.additionalNations ?? [],
-      1, // one human slot
+      humans.length,
       random,
     );
 
-    const agentInfo = new PlayerInfo(
-      "Agent",
-      PlayerType.Human,
-      AGENT_CLIENT_ID,
-      random.nextID(),
-    );
-
     this.game = createGame(
-      [agentInfo],
+      humans,
       nations,
       gameMap,
       miniGameMap,
@@ -152,7 +180,11 @@ class EnvSession {
       manifest.teamGameSpawnAreas,
     );
     this.executor = new Executor(this.game, gameID, AGENT_CLIENT_ID);
-    this.game.addExecution(new SpawnTimerExecution());
+    // Mirror GameRunner.init(): singleplayer has no spawn timer — the spawn
+    // phase ends the moment the human (agent) picks a spawn.
+    if (gameConfig.gameType !== GameType.Singleplayer) {
+      this.game.addExecution(new SpawnTimerExecution());
+    }
     if (config.spawnNations()) {
       this.game.addExecution(...this.executor.nationExecutions());
     }
@@ -160,6 +192,14 @@ class EnvSession {
       this.game.addExecution(...this.executor.spawnTribes(config.bots()));
     }
     this.game.addExecution(new WinCheckExecution());
+    if (config.doomsdayClockConfig().enabled) {
+      this.game.addExecution(new DoomsdayClockExecution());
+    }
+    if (!config.isUnitDisabled(UnitType.Factory)) {
+      this.game.addExecution(
+        new RecomputeRailClusterExecution(this.game.railNetwork()),
+      );
+    }
 
     // Advance one tick so executions initialize; agent spawns via step().
     this.game.executeNextTick();
@@ -172,10 +212,9 @@ class EnvSession {
       clientID: AGENT_CLIENT_ID,
     })) as StampedIntent[];
     if (stamped.length > 0) {
-      for (const exec of this.executor.createExecs({
-        turnNumber: this.game.ticks(),
-        intents: stamped,
-      })) {
+      const turn = { turnNumber: this.game.ticks(), intents: stamped };
+      this.turns.push(turn);
+      for (const exec of this.executor.createExecs(turn)) {
         this.game.addExecution(exec);
       }
     }
@@ -186,10 +225,46 @@ class EnvSession {
       const winUpdates = updates[GameUpdateType.Win];
       if (winUpdates && winUpdates.length > 0) {
         winner = (winUpdates[0] as { winner: unknown }).winner;
+        this.lastWinner = winner;
         break;
       }
     }
     return this.buildObs(winner);
+  }
+
+  /** GameRecord JSON loadable by the real OpenFront client replay viewer. */
+  saveRecord(outPath: string): object {
+    const end = Date.now();
+    const record = {
+      info: {
+        gameID: this.gameID,
+        lobbyCreatedAt: this.startTime,
+        config: this.gameConfig,
+        players: [
+          {
+            clientID: AGENT_CLIENT_ID,
+            username: "Agent",
+            clanTag: null,
+            persistentID: null,
+            stats: {},
+          },
+        ],
+        start: this.startTime,
+        end,
+        duration: Math.floor((end - this.startTime) / 1000),
+        num_turns: this.game.ticks(),
+        winner: this.lastWinner ?? undefined,
+        lobbyFillTime: 0,
+      },
+      version: "v0.0.2",
+      gitCommit: "DEV",
+      subdomain: "rl",
+      domain: "localhost",
+      turns: this.turns,
+    };
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, JSON.stringify(record));
+    return { saved: outPath, gameID: this.gameID, turns: this.turns.length };
   }
 
   private agent() {
@@ -375,6 +450,7 @@ async function main() {
       difficulty?: string;
       intents?: Intent[];
       ticks?: number;
+      path?: string;
     };
     try {
       msg = JSON.parse(line);
@@ -393,6 +469,8 @@ async function main() {
         write({ ...obs, ...session.terrain() });
       } else if (msg.op === "step") {
         write(session.step(msg.intents ?? [], msg.ticks ?? 10));
+      } else if (msg.op === "save_record") {
+        write(session.saveRecord(msg.path ?? "/tmp/openfront_record.json"));
       } else if (msg.op === "close") {
         break;
       } else {
