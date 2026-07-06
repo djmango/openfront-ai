@@ -43,7 +43,7 @@ fi
 cd "$REPO_DIR"
 [ -d .git ] && git pull --ff-only || true
 command -v tmux >/dev/null 2>&1 || apt-get install -y tmux >/dev/null
-pip install -q tensorboard huggingface_hub 2>/dev/null | tail -0 || true
+pip install -q tensorboard huggingface_hub orjson 2>/dev/null | tail -0 || true
 
 if [ ! -f runs/ae_v3/ae_v3.pt ]; then
   mkdir -p runs/ae_v3
