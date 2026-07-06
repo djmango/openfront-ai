@@ -18,7 +18,7 @@
  *
  * --bc additionally writes bc.json.gz: per-snapshot legality for every living
  * human plus their intents in the following window normalized to the policy
- * action space, and final placements — the (state, action) supervision for
+ * action space, and final placements - the (state, action) supervision for
  * behavior cloning (rl/bc_data.py).
  */
 import * as fs from "fs";

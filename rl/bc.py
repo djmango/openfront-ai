@@ -3,7 +3,7 @@
 Two variants (DESIGN: imitation as warm start for RL):
 
   feedforward (default)  the exact rl.policy.Policy trunk+heads, plus an
-                         additive placement-conditioning embedding — trained
+                         additive placement-conditioning embedding - trained
                          on everyone, conditioned on "winner" at deployment
   --seq K                same, plus a small causal transformer over the last
                          K decision steps' trunk embeddings before the heads

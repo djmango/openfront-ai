@@ -14,8 +14,8 @@ action labels; steps where they didn't are no-op supervision, downsampled via
 --noop-frac at the sampler level (humans idle ~90% of decision steps; naive
 training collapses to "always noop").
 
-Obs assembly reuses rl.obs.ObsBuilder.prepare() — identical featurization to
-the live PPO env — so BC weights drop into PPO as initialization.
+Obs assembly reuses rl.obs.ObsBuilder.prepare() - identical featurization to
+the live PPO env - so BC weights drop into PPO as initialization.
 """
 
 from __future__ import annotations
@@ -87,7 +87,7 @@ def load_game(path: Path, gh_max: int, gw_max: int) -> GameHandle | None:
 
     # Human games run on Normal-size maps (up to ~4100 tiles wide), while the
     # policy grid is budgeted for Compact/small training maps. Stride tile
-    # space by 2/4 until it fits — the engine's own Compact mode is exactly a
+    # space by 2/4 until it fits - the engine's own Compact mode is exactly a
     # 2x-downscaled Normal map, so strided games stay in-distribution.
     ds = 1
     while True:

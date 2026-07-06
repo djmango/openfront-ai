@@ -21,11 +21,11 @@ Curriculum (v2):
   sampled per episode so the agent never overfits a single layout.
 - Anti-forgetting rehearsal: REHEARSAL_P of episodes replay a map pool from
   an earlier (already-cleared) stage but at the CURRENT stage's bot count
-  and difficulty — old maps come back harder, so mastery has to hold up.
+  and difficulty - old maps come back harder, so mastery has to hold up.
   Rehearsal episodes still train the policy but do not count toward
   advancement stats.
 - Advancement is win-gated: the agent must WIN (engine win, not just
-  survive) more often than not — rolling win rate over the last WINDOW
+  survive) more often than not - rolling win rate over the last WINDOW
   on-stage episodes must exceed WIN_AT before moving on.
 """
 

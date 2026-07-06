@@ -2,7 +2,7 @@
 
 STATIC_CLASSES are persistent structures the spatial AE compresses.
 TRANSIENT_CLASSES (mobile/projectile) bypass the AE: they are few, exact,
-and fully described by (owner, type, position, target) — the policy reads
+and fully described by (owner, type, position, target) - the policy reads
 them raw instead of through a lossy latent.
 """
 

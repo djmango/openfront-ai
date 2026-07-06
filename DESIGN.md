@@ -8,7 +8,7 @@ curriculum masking).
 
 **Revision note.** The original v2 decision was a single unified AE over
 ALL state. We built and trained it; spatial reconstruction was excellent,
-but tiny exact facts fought the bottleneck — alliance pairs peaked at
+but tiny exact facts fought the bottleneck - alliance pairs peaked at
 F1 0.67 and troop ordering at 0.81 across four tuning runs (loss weights,
 pooled-vector capacity, per-slot latents, feeding the graph to the
 encoder). A one-bit fact reconstructed at 95% is strictly worse than
@@ -16,11 +16,11 @@ reading the bit. Hence the bypass split below.
 
 Target: a self-play PPO agent over the full OpenFront gameplay surface.
 Everything below is grounded in the engine's actual intent schemas
-(`openfront/src/core/Schemas.ts`) and `Player`/`Game` interfaces — nothing
+(`openfront/src/core/Schemas.ts`) and `Player`/`Game` interfaces - nothing
 invented.
 
 **Prior art:** AlphaFront (josh-freeman/openfront-rl) trains PPO on the
-real engine with a scalar-only observation and heuristic tile choice — see
+real engine with a scalar-only observation and heuristic tile choice - see
 the [devlog](docs/devlog.html#alphafront) for the full comparison and the
 ideas worth borrowing (win-rate-gated opponent curriculum, LR warmdown,
 live-deployment bot).
@@ -89,14 +89,14 @@ tile ownership + terrain + fallout + static-structure planes (city, port,
 defense post, missile silo, SAM launcher, factory) and produces the grid
 latent (H/16 x W/16 x 64). Losses: border-weighted CE over owner slots;
 rarity-weighted BCE over structure occupancy (detection, not count
-regression — count MSE collapses to all-zeros on 99.9%-empty grids).
+regression - count MSE collapses to all-zeros on 99.9%-empty grids).
 Measured fidelity: 99.4% tile accuracy, structures at precision/recall 1.0
 per class.
 
 **Everything else bypasses the latent** and reaches the policy exactly:
 
 - pairwise diplomacy (alliance/embargo bits, expiry timers, pending
-  requests) — targeting exists in the engine but only humans use it, so it
+  requests) - targeting exists in the engine but only humans use it, so it
   is absent from bot data
 - per-player scalars (alive, troops, gold, tiles, traitor, attack in/out)
 - transient units as entity lists: nukes in flight with impact point
@@ -104,7 +104,7 @@ per class.
   trade ships
 - attack aggregates (from, to, troops, retreating, boat origin)
 - globals (tick, phase, players alive) and own-player internals
-- **legality masks**, straight to the action heads — a mask reconstructed
+- **legality masks**, straight to the action heads - a mask reconstructed
   at 99% still yields illegal intents
 
 **Deterministic, not variational.** A VAE's KL term costs capacity;
@@ -138,7 +138,7 @@ v3.1 targets borders specifically:
 
 **Policy-side decision (approved):** in addition to the AE latent, the
 policy will receive a raw local owner-map crop around the agent's own
-territory as an exact-borders bypass — consistent with the v3 bypass
+territory as an exact-borders bypass - consistent with the v3 bypass
 philosophy of passing small exact state around the latent instead of
 forcing the latent to be pixel-perfect everywhere.
 
@@ -150,7 +150,7 @@ Frozen tile-autoencoder latent: 64 channels at 1/16 resolution (see
 README results). Concatenated at the same resolution:
 
 - ownership fractions per region for {self, allies, enemies-at-war,
-  neutral players, unowned} (5 ch) — gives the policy an ego view the
+  neutral players, unowned} (5 ch) - gives the policy an ego view the
   ego-agnostic AE doesn't provide
 - structure presence per region, own vs. others, per structure class (2x6 ch)
 - active battle intensity (attack tile deltas per region), fallout, and
@@ -192,7 +192,7 @@ later if needed) -> action heads.
 The Node bridge must export per step: the three observation streams, plus
 legality masks for every head (action types, valid player targets per
 type, valid tile regions per type, valid unit instances). The engine
-already computes all validity — the bridge's job is serialization, not
+already computes all validity - the bridge's job is serialization, not
 game logic. Decision cadence: one policy step per ~10 game ticks.
 
 ## Behavior cloning from archived human games
@@ -201,13 +201,13 @@ Two BC variants train on the replayed human archive (see `datagen/replay.ts
 --bc` and `rl/bc.py`), both on the exact PPO policy architecture so BC
 weights double as PPO initialization (`load_state_dict(strict=False)`):
 
-1. **Outcome-conditioned (feedforward, `bc_v1`)** — every player's actions
+1. **Outcome-conditioned (feedforward, `bc_v1`)** - every player's actions
    are supervision, not just winners'. A final-placement embedding (8
    percentile buckets, zero-init projection added to the trunk output) tells
    the model *whose* behavior it is imitating; at deployment we condition on
    the winner bucket. This is decision-transformer-style
    return-conditioning, collapsed to a single episode-level token.
-2. **Temporal (`bc_seq_v1`, `--seq 8`)** — same, plus a 2-layer causal
+2. **Temporal (`bc_seq_v1`, `--seq 8`)** - same, plus a 2-layer causal
    transformer over the last 8 decision steps' trunk embeddings.
    AlphaStar's core was a deep LSTM over game steps; OpenFront is fully
    observable so memory is a hypothesis to test, not a given.
@@ -218,7 +218,7 @@ factorized action space (multiple intents in a window: one sampled per
 visit). Idle steps are real supervision too (noop is ~90% of human decision
 steps) but are downsampled to ~15% of each batch. Loss is masked CE per
 head, sub-heads only where the labeled action uses them. Normal-size human
-maps are strided 2/4x down to the Compact grid budget — the engine's own
+maps are strided 2/4x down to the Compact grid budget - the engine's own
 Compact mode is exactly a downscaled Normal map, so strided games stay
 in-distribution for the frozen AE. Games split 90/10 train/holdout by game
 ID for eval.

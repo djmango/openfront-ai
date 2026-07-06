@@ -8,15 +8,15 @@ encoder, and (next) a PPO self-play agent over the full action surface.
 
 The observation design went through three iterations (see `DESIGN.md`):
 
-1. **v1** — tile-only autoencoder over ownership + terrain.
-2. **v2** — one unified AE compressing *all* state (tiles, players, units,
+1. **v1** - tile-only autoencoder over ownership + terrain.
+2. **v2** - one unified AE compressing *all* state (tiles, players, units,
    diplomacy) into a joint latent. This worked for spatial state but spent
    most of its capacity and all of our tuning effort reconstructing tiny
    exact facts: alliance pairs peaked at F1 0.67 and relative troop
    strength at 0.81, no matter how the losses were weighted.
-3. **v3 (current)** — the lesson: **only compress what is actually big.**
+3. **v3 (current)** - the lesson: **only compress what is actually big.**
    The AE compresses the map (tile ownership, terrain, fallout, static
-   structures — the only high-dimensional state). Everything small and
+   structures - the only high-dimensional state). Everything small and
    exact bypasses the latent and feeds the policy raw: pairwise diplomacy
    bits, per-player scalars, transient units (nukes in flight with their
    impact points, transports, warships), attack aggregates, legality masks.
@@ -33,12 +33,12 @@ Original (left) vs reconstruction through the latent (right), World map:
 
 ![World reconstruction](assets/recon_v3_world.png)
 
-- Tile accuracy 99.4% overall; border-tile accuracy (the honest metric —
+- Tile accuracy 99.4% overall; border-tile accuracy (the honest metric -
   water inflates the overall number) 98.8% on Onion, 87.4% on World, 82.1%
   on Africa mid-game with dozens of players.
 - Static structures (city, port, defense post, missile silo, SAM launcher,
   factory): **precision 1.0 and recall 1.0, every class**, through the
-  latent — rarity-weighted BCE detection, not count regression (count MSE
+  latent - rarity-weighted BCE detection, not count regression (count MSE
   collapses to all-zeros on 99.9%-empty grids).
 - First 3 latent PCA components, World:
 
@@ -46,14 +46,14 @@ Original (left) vs reconstruction through the latent (right), World map:
 
 ## Layout
 
-- `datagen/` — TypeScript headless game runner. Boots the real
+- `datagen/` - TypeScript headless game runner. Boots the real
   (deterministic) OpenFront engine in Node, plays bot/nation games, dumps
   full-state snapshots every 10 ticks: packed tile grid + all entities
   (players, diplomacy, units with target tiles, attacks).
-- `ae/` — PyTorch: dataset loaders, spatial AE (`model_v3.py`), training
+- `ae/` - PyTorch: dataset loaders, spatial AE (`model_v3.py`), training
   (`train_v3.py`). `model.py`/`model_v2.py` are the earlier iterations.
-- `scripts/` — prefeaturization, evals, visuals, HF upload.
-- `openfront/` — git submodule of
+- `scripts/` - prefeaturization, evals, visuals, HF upload.
+- `openfront/` - git submodule of
   [openfrontio/OpenFrontIO](https://github.com/openfrontio/OpenFrontIO),
   pinned to a known-good engine commit.
 
@@ -108,16 +108,16 @@ Details:
 
 ## RL (in progress)
 
-- `bridge/env.ts` — persistent Node process wrapping the engine: JSONL
+- `bridge/env.ts` - persistent Node process wrapping the engine: JSONL
   reset/step over stdio, ships the packed tile grid (gzip+base64), full
   entities, and exact legality masks from engine calls each decision step.
-- `rl/env.py` — Python subprocess wrapper.
-- `rl/obs.py` — observation builder: frozen AE latent + ego ownership
+- `rl/env.py` - Python subprocess wrapper.
+- `rl/obs.py` - observation builder: frozen AE latent + ego ownership
   planes + exact transient-unit planes (nukes with impact points, SAM
   locks) + per-player bypass features + legality masks.
-- `rl/policy.py` — conv trunk, factorized masked heads: action type,
+- `rl/policy.py` - conv trunk, factorized masked heads: action type,
   player-target pointer, tile-region pointer, build/nuke type, quantity.
-- `rl/ppo.py` — PPO + GAE, TensorBoard logging (`runs/rl/<name>`):
+- `rl/ppo.py` - PPO + GAE, TensorBoard logging (`runs/rl/<name>`):
 
 ```bash
 uv run python -m rl.ppo --map Onion --updates 1000 --name ppo_v1
@@ -127,7 +127,7 @@ uv run tensorboard --logdir runs/rl   # live dashboard
 ### Watching the agent play
 
 `rl/watch.py` runs one greedy episode, renders a native-resolution WebM, and
-saves an engine `GameRecord` — the same format openfront.io archives — which
+saves an engine `GameRecord` - the same format openfront.io archives - which
 the **real game client** can replay with the full UI. The video includes a
 debug side panel (chosen action + arguments, action-probability bars, value
 estimate, recent-action log) and on-map markers for tile/player targets;
@@ -139,12 +139,12 @@ uv run python -m rl.watch --policy /tmp/policy.pt --stage 3 \
 openfront/node_modules/.bin/tsx scripts/verify_record.ts records-rl/game.json
 ```
 
-**Real-graphics video** — `scripts/render_client_replay.py` replays the
+**Real-graphics video** - `scripts/render_client_replay.py` replays the
 record in the actual OpenFront client (headless Chromium) and records a
 webm: full game UI, terrain art, units, boats, nukes, leaderboard. Client
 hooks (localStorage, patch in `patches/client-replay-tooling.patch`) give
-it the agent's identity — **AGENT** on the leaderboard/territory, gold
-spawn ring, crown when first, the "You Won!" modal — and start the camera
+it the agent's identity - **AGENT** on the leaderboard/territory, gold
+spawn ring, crown when first, the "You Won!" modal - and start the camera
 centered on the whole map. If the record has a `.debug.json` sidecar
 (written automatically by `rl.watch --record`), the video also gets a live
 MODEL panel: chosen action, value estimate, action-probability bars, and a
@@ -159,7 +159,7 @@ uv run python scripts/render_client_replay.py \
 
 To browse a replay interactively instead, follow the manual steps in the
 `scripts/serve_replay.py` docstring (same shim + client, real browser).
-The MODEL panel appears there too — it's rendered by the client itself
+The MODEL panel appears there too - it's rendered by the client itself
 (`RlDebugOverlay` hook) whenever `apiHost` points at the shim and the
 record has a sidecar.
 
@@ -169,7 +169,7 @@ bit-identically: `verify_record.ts` re-simulates from intents alone and
 reproduces the agent's tile counts and death tick.
 
 Sample: [assets/replay_v2_stage3.webm](assets/replay_v2_stage3.webm)
-(ppo_v2c on stage 3 — Onion, 80 Medium bots; peaks ~13k tiles before dying
+(ppo_v2c on stage 3 - Onion, 80 Medium bots; peaks ~13k tiles before dying
 at tick 3891).
 
 ### Playing against the agent
@@ -186,7 +186,7 @@ uv run python -m rl.play --policy /tmp/policy.pt --game <LOBBY_ID>
 ```
 
 While you fight it, the MODEL panel (action, value, probability bars,
-recent log) tracks the agent in real time — `rl.play` serves its decisions
+recent log) tracks the agent in real time - `rl.play` serves its decisions
 on `--debug-port` (default 8988) and the client probes that port
 automatically on localhost. No setup; disable with
 `localStorage.setItem("rlDebugOverlay", "0")`, or set `rlDebugHost` if you

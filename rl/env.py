@@ -22,7 +22,7 @@ FALLOUT_BIT = 13
 class OpenFrontEnv:
     def __init__(self):
         # Binary stdio: JSON header lines, with obs tile state following as
-        # a raw frame of "tilesBin" bytes (no gzip/base64 — the codec was
+        # a raw frame of "tilesBin" bytes (no gzip/base64 - the codec was
         # measurable CPU on both sides at 48 envs).
         self.proc = subprocess.Popen(
             [str(TSX), str(REPO_ROOT / "bridge" / "env.ts")],

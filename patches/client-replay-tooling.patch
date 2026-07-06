@@ -31,7 +31,7 @@ index 474ddc811..41d3087d9 100644
  
            goToPlayer();
 diff --git a/src/client/LocalServer.ts b/src/client/LocalServer.ts
-index 0304224bf..da6c3714d 100644
+index 0304224bf..4bc0c5b0e 100644
 --- a/src/client/LocalServer.ts
 +++ b/src/client/LocalServer.ts
 @@ -144,11 +144,28 @@ export class LocalServer {
@@ -40,7 +40,7 @@ index 0304224bf..da6c3714d 100644
        lobbyCreatedAt: this.lobbyConfig.gameStartInfo.lobbyCreatedAt,
 -      // Don't send myClientID for replays — viewer has no player identity.
 -      myClientID: this.lobbyConfig.gameRecord ? undefined : this.clientID,
-+      // Don't send myClientID for replays — viewer has no player identity —
++      // Don't send myClientID for replays (viewer has no player identity)
 +      // unless a replay perspective was requested (RL replay tooling).
 +      myClientID: this.replayPerspective(),
      } satisfies ServerStartGameMessage);
@@ -230,7 +230,7 @@ index 000000000..010ea13b2
 +  }, 100);
 +}
 diff --git a/src/client/TransformHandler.ts b/src/client/TransformHandler.ts
-index 77a0bac69..d8e9776dd 100644
+index 77a0bac69..543b94385 100644
 --- a/src/client/TransformHandler.ts
 +++ b/src/client/TransformHandler.ts
 @@ -43,6 +43,21 @@ export class TransformHandler {
@@ -250,7 +250,7 @@ index 77a0bac69..d8e9776dd 100644
 +        this.offsetY = (this.game.height() - vh) / (2 * this.scale);
 +      }
 +    } catch {
-+      // localStorage unavailable — keep defaults.
++      // localStorage unavailable - keep defaults.
 +    }
      this.eventBus.on(ZoomEvent, (e) => this.onZoom(e));
      this.eventBus.on(DragEvent, (e) => this.onMove(e));

@@ -39,7 +39,7 @@ def _local_to_global(local: torch.Tensor, gw: int) -> torch.Tensor:
     varies per batch; region indices stored in choices/buffers always use
     the fixed GW_MAX stride (what IntentTranslator decodes). Padding cells
     are masked to ~0 probability, so probabilities over real cells are
-    identical whatever the padding — logprobs stay consistent between
+    identical whatever the padding - logprobs stay consistent between
     rollout and update even if the two batches padded differently."""
     from rl.curriculum import GW_MAX
 

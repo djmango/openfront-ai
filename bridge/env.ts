@@ -8,7 +8,7 @@
  *   {"op": "close"}
  *
  * stdout (one JSON per line): observation payloads (see buildObs). Tile
- * state ships as base64(gzip(uint16-le grid)) — ~30-80KB per step at the
+ * state ships as base64(gzip(uint16-le grid)) - ~30-80KB per step at the
  * 10-tick decision cadence. All engine logging goes to stderr.
  *
  * Legality: the bridge reports action-type masks and per-player validity
@@ -171,7 +171,7 @@ class EnvSession {
       manifest.teamGameSpawnAreas,
     );
     this.executor = new Executor(this.game, gameID, AGENT_CLIENT_ID);
-    // Mirror GameRunner.init(): singleplayer has no spawn timer — the spawn
+    // Mirror GameRunner.init(): singleplayer has no spawn timer - the spawn
     // phase ends the moment the human (agent) picks a spawn.
     if (gameConfig.gameType !== GameType.Singleplayer) {
       this.game.addExecution(new SpawnTimerExecution());
@@ -271,7 +271,7 @@ async function main() {
   const rl = readline.createInterface({ input: process.stdin });
   const write = (obj: object) => process.stdout.write(JSON.stringify(obj) + "\n");
   // Obs responses ship the tile state as a raw binary frame after the JSON
-  // header line ("tilesBin" = byte length) — no gzip, no base64. The tile
+  // header line ("tilesBin" = byte length) - no gzip, no base64. The tile
   // codec was pure CPU overhead on both sides of the pipe.
   const writeObs = (
     parts: { head: Record<string, unknown>; tiles: Buffer },
