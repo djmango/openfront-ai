@@ -35,7 +35,7 @@ for bucket in "$RECORDS"/*/; do
   ls "$bucket"*.json.gz | xargs -P "$JOBS" -n 4 sh -c '
     tmp=$(mktemp -d)
     for f in "$@"; do ln -s "$(realpath "$f")" "$tmp/"; done
-    '"$TSX"' datagen/replay.ts --records "$tmp" --out '"$OUT"' '"$BCFLAG"' 2>&1 | grep -Ev "not found|QuickChat|cannot build|Constructor"
+    nice -n 15 '"$TSX"' datagen/replay.ts --records "$tmp" --out '"$OUT"' '"$BCFLAG"' 2>&1 | grep -Ev "not found|QuickChat|cannot build|cannot send|Constructor|Failed to find"
     rm -rf "$tmp"
   ' sh
 done
