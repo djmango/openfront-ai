@@ -4,7 +4,8 @@ Reward design (v2):
 - Dense signal is a composite STRENGTH index, not raw land: territory
   alone mis-scores legit strategies (tiny-island economies that stack
   gold). Strength blends land share (of the whole map), military share,
-  and economic share (of everything held by living players). Each decision
+  economic share, and (v5.1) structure-value share (of everything held by
+  living players). Each decision
   step earns w_str * strength * timeweight, where timeweight ramps
   0.5 -> 1.0 over the first 8000 ticks: being strong late is worth double
   being strong early, and unlike pure deltas (v1) this does not net to
@@ -57,9 +58,26 @@ PLACE_POW = 1.5
 
 # Strength blend: land still matters most (the win condition is territorial)
 # but military and economy make island/eco strategies score honestly.
-K_LAND = 0.45
-K_MIL = 0.25
-K_ECO = 0.30
+# v5.1 adds structures: without them, buying a building read as a strength
+# LOSS (gold share drops, the building counts nowhere), so the loss-averse
+# delta punished construction. Now structure value is its own component and
+# completing a building pays an immediate delta.
+K_LAND = 0.40
+K_MIL = 0.20
+K_ECO = 0.25
+K_BUILD = 0.15
+
+# Structure values ~ in-game gold cost ceilings / 1M (Config.ts unitInfo);
+# level multiplies (upgraded cities/silos are worth their reinvestment).
+# Under-construction units count once finished.
+STRUCT_VALUE = {
+    "City": 1.0,
+    "Port": 1.0,
+    "Factory": 1.0,
+    "Missile Silo": 1.0,
+    "Defense Post": 0.25,
+    "SAM Launcher": 3.0,
+}
 
 WINDOW = 40
 WIN_AT = 0.5  # must win more often than not to advance
@@ -126,16 +144,24 @@ def timeweight(tick: int) -> float:
 
 def strengths(entities: dict, land_total: int) -> dict[int, float]:
     """Composite strength per living player: blended land / military /
-    economic position. Land share is absolute (fraction of the map);
-    troops and gold are shares of what living players hold."""
+    economic / structural position. Land share is absolute (fraction of the
+    map); troops, gold, and structure value are shares of what living
+    players hold."""
     alive = [p for p in entities["players"] if p["alive"]]
     tot_troops = sum(p["troops"] for p in alive) + 1e-9
     tot_gold = sum(float(p["gold"]) for p in alive) + 1e-9
+    sv: dict[int, float] = {}
+    for u in entities.get("units", ()):
+        v = STRUCT_VALUE.get(u["type"])
+        if v is not None and not u["constructing"]:
+            sv[u["owner"]] = sv.get(u["owner"], 0.0) + v * max(1, u.get("level", 1))
+    tot_sv = sum(sv.get(p["id"], 0.0) for p in alive) + 1e-9
     return {
         p["id"]: (
             K_LAND * (p["tiles"] / land_total)
             + K_MIL * (p["troops"] / tot_troops)
             + K_ECO * (float(p["gold"]) / tot_gold)
+            + K_BUILD * (sv.get(p["id"], 0.0) / tot_sv)
         )
         for p in alive
     }

@@ -23,6 +23,7 @@ ships once per episode; dynamic fallout ships every step as packed bits
 saw frozen fallout after an episode's first step).
 """
 
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -416,6 +417,32 @@ def _local_crops(
     return out
 
 
+# Reused per-thread staging buffers for the big full-res stacks below.
+# Fresh np.stack allocations here ran ~0.5GB/batch (terrain_static alone is
+# 19MB/sample), all above glibc's mmap threshold: every batch paid
+# mmap+munmap page faults, and on hosts with fragmented physical memory
+# (bc2: compact_stall in the millions) that fault path degraded 3-4x over
+# hours - the "bc decay". A persistent buffer faults once and stays warm.
+# Keyed by name + per-sample shape, grown to the largest batch seen;
+# thread-local because PPO encodes from two acting threads concurrently.
+_staging = threading.local()
+
+
+def _staged_stack(name: str, arrays: list[np.ndarray]) -> np.ndarray:
+    bufs = getattr(_staging, "bufs", None)
+    if bufs is None:
+        bufs = _staging.bufs = {}
+    n = len(arrays)
+    key = (name, arrays[0].shape, arrays[0].dtype.str)
+    buf = bufs.get(key)
+    if buf is None or buf.shape[0] < n:
+        buf = np.empty((n, *arrays[0].shape), arrays[0].dtype)
+        bufs[key] = buf
+    out = buf[:n]
+    np.stack(arrays, out=out)
+    return out
+
+
 @torch.no_grad()
 def encode_grids(
     ae: SpatialAE, raws: list[dict], device: str, fp16: bool = False
@@ -443,16 +470,16 @@ def encode_grids(
     local_by_idx: dict[int, np.ndarray] = {}
     for idxs in groups.values():
         owners = torch.from_numpy(
-            np.stack([raws[i]["owners"] for i in idxs])
+            _staged_stack("owners", [raws[i]["owners"] for i in idxs])
         ).to(device)
         terr = torch.from_numpy(
-            np.stack([raws[i]["terrain_static"] for i in idxs])
+            _staged_stack("terr", [raws[i]["terrain_static"] for i in idxs])
         ).to(device)
         packed = torch.from_numpy(
-            np.stack([raws[i]["fallout_packed"] for i in idxs])
+            _staged_stack("packed", [raws[i]["fallout_packed"] for i in idxs])
         ).to(device)
         static = torch.from_numpy(
-            np.stack([raws[i]["static"] for i in idxs])
+            _staged_stack("static", [raws[i]["static"] for i in idxs])
         ).to(device)
         clut = torch.from_numpy(
             np.stack([raws[i]["clut"] for i in idxs])
