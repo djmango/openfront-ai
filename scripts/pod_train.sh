@@ -68,6 +68,19 @@ command -v tmux >/dev/null 2>&1 || apt-get install -y tmux >/dev/null
 # System python (image torch matches the driver); add the small extras.
 pip install -q tensorboard huggingface_hub 2>/dev/null | tail -0 || true
 
+# --- optional Rust hot paths (rl/native.py falls back to numpy if absent) ---
+if ! python -c "import ofrs" 2>/dev/null; then
+  if ! command -v cargo >/dev/null 2>&1; then
+    curl -sSf https://sh.rustup.rs | sh -s -- -y -q >/dev/null 2>&1 || true
+  fi
+  . "$HOME/.cargo/env" 2>/dev/null || true
+  if command -v cargo >/dev/null 2>&1; then
+    pip install -q ./rust/ofrs && echo "ofrs native paths built" || echo "ofrs build failed; using numpy fallbacks"
+  else
+    echo "no rust toolchain; using numpy fallbacks"
+  fi
+fi
+
 if [ ! -f runs/ae_v31_d8c32/ae_v3.pt ]; then
   mkdir -p runs/ae_v31_d8c32
   python -c "

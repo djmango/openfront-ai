@@ -10,3 +10,6 @@ records-rl/
 !assets/*.webm
 replays/
 .DS_Store
+rust/ofrs/target/
+rust/ofrs/Cargo.lock
+.venv-t/

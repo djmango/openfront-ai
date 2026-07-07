@@ -101,12 +101,12 @@ class CachedGame:
 
     def frame(self, tick: int) -> tuple[np.ndarray, np.ndarray]:
         """(owner slots uint8 (hr, wr), packed fallout (hr, wr/8))."""
+        from rl.native import decode_frame
+
         i = self._tick_row[tick]
-        raw = self._d(self._frames, self._frame_off, i, self.hr * self.wr * 2)
-        hw = self.hr * self.wr
-        slots = np.frombuffer(raw[:hw], dtype=np.uint8).reshape(self.hr, self.wr)
-        packed = np.frombuffer(raw[hw:], dtype=np.uint8).reshape(self.hr, -1)
-        return slots, packed
+        off = self._frame_off
+        blob = self._frames[off[i] : off[i + 1]].tobytes()
+        return decode_frame(blob, self.hr, self.wr, _dctx())
 
     def entities(self, tick: int) -> dict:
         i = self._tick_row[tick]

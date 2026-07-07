@@ -1,0 +1,19 @@
+[package]
+name = "ofrs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "ofrs"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.27", features = ["extension-module"] }
+numpy = { version = "0.27", features = ["half"] }
+zstd = "0.13"
+rayon = "1.10"
+half = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1
