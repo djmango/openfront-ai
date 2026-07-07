@@ -22,6 +22,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
+from rl.showcase_util import featured_game_id
+
+
 def load_state(state_path: Path | None) -> dict:
     if state_path is None or not state_path.exists():
         return {}
@@ -75,7 +78,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/replay":
             state = load_state(self.state_path)
-            gid = state.get("game_id")
+            gid = featured_game_id(state) or state.get("game_id")
             if not gid:
                 self._send(
                     503,

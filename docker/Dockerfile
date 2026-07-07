@@ -44,6 +44,7 @@ COPY --from=py-deps /build/.venv /app/.venv
 COPY rl ./rl
 COPY ae ./ae
 COPY bridge ./bridge
+COPY datagen ./datagen
 COPY scripts ./scripts
 COPY docker ./docker
 COPY patches ./patches
@@ -58,10 +59,12 @@ ENV PYTHONPATH=/app
 ENV DATA_DIR=/data
 ENV RUN_NAME=ppo_v4
 ENV STAGE=4
+ENV SHOWCASE_WATCH_STAGE=4
 ENV SEED=showcase0
-ENV SHOWCASE_SEEDS=showcase0,showcase1,showcase2
+ENV SHOWCASE_MAPS=Onion,Pangaea,Caucasus,BlackSea,BetweenTwoSeas,World,Asia
 ENV CLIP_MAX_SEC=90
-ENV REFRESH_HOURS=6
+ENV REFRESH_HOURS=1
+ENV LIVE_SHOWCASE=0
 ENV AE_CKPT=runs/ae_v31_d8c32/ae_v3.pt
 
 RUN mkdir -p /data/records /data/policy /data/clips \

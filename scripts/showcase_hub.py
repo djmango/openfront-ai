@@ -1,10 +1,10 @@
-"""Homelab showcase hub: semi-live spectate by default, on-demand 1v1 play.
+"""Homelab showcase hub: hourly replay spectate, on-demand 1v1 play.
 
-  GET /         -> landing (live iframe or last clip; watch link)
-  GET /watch    -> spectate the agent's current live game, else last archive replay
+  GET /         -> landing (featured map clip; watch link)
+  GET /watch    -> archived replay for the current hour's map
   GET /replay   -> alias for /watch
   GET /play     -> create 1v1+bots lobby, launch agent, join as human
-  GET /play/debug/<id> -> MODEL overlay feed for the active live game
+  GET /play/debug/<id> -> MODEL overlay feed for the active play lobby
   GET /status   -> JSON hub status
 """
 
@@ -21,7 +21,13 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from rl.showcase_util import ensure_ae, ensure_policy, hero_clip_urls, utc_now, write_json
+from rl.showcase_util import (
+    ensure_ae,
+    ensure_policy,
+    featured_showcase_entry,
+    utc_now,
+    write_json,
+)
 
 REPO = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -41,7 +47,7 @@ PLAY_NATIONS = int(os.environ.get("PLAY_NATIONS", "1"))
 PLAY_START_DELAY = int(os.environ.get("PLAY_START_DELAY", "30"))
 DEBUG_PORT = int(os.environ.get("PLAY_DEBUG_PORT", "8989"))
 LIVE_DEBUG_PORT = int(os.environ.get("LIVE_DEBUG_PORT", "8990"))
-LIVE_SHOWCASE = os.environ.get("LIVE_SHOWCASE", "1") != "0"
+LIVE_SHOWCASE = os.environ.get("LIVE_SHOWCASE", "0") != "0"
 WORKER_BASE_PORT = int(os.environ.get("WORKER_BASE_PORT", "3001"))
 
 _active_proc: subprocess.Popen | None = None
@@ -197,19 +203,14 @@ def live_game_active(hub: dict) -> bool:
     return True
 
 
-def watch_target() -> tuple[str, str]:
-    """Return (redirect path, mode) where mode is live|replay|none."""
-    hub = load_hub_state()
-    if live_game_active(hub):
-        return (
-            play_redirect(hub["live_game_id"], hub.get("live_worker_path")),
-            "live",
-        )
+def watch_target() -> tuple[str, str, dict | None]:
+    """Return (redirect path, mode, featured entry). Watch is replay-only."""
     replay = load_replay_state()
-    gid = replay.get("game_id")
+    featured = featured_showcase_entry(replay)
+    gid = featured.get("game_id") if featured else replay.get("game_id")
     if gid:
-        return f"/game/{gid}", "replay"
-    return "", "none"
+        return f"/game/{gid}", "replay", featured
+    return "", "none", None
 
 
 LANDING_HTML = """<!doctype html>
@@ -334,41 +335,29 @@ LANDING_HTML = """<!doctype html>
 
 
 def preview_markup(replay: dict) -> str:
-    hub = load_hub_state()
-    if live_game_active(hub):
-        url = play_redirect(hub["live_game_id"], hub.get("live_worker_path"))
-        return (
-            f'<iframe src="{url}" title="Live agent game" '
-            f'allow="autoplay; fullscreen" loading="lazy"></iframe>'
-        )
-    clips = hero_clip_urls(replay)
-    if not clips:
-        return '<div class="placeholder">Preview loading...</div>'
-    if len(clips) == 1:
+    featured = featured_showcase_entry(replay)
+    clip_url = featured.get("url") if featured else None
+    if not clip_url:
+        for entry in replay.get("hero_clips") or []:
+            clip_url = entry if isinstance(entry, str) else entry.get("url")
+            if clip_url:
+                break
+    if clip_url:
+        map_label = featured.get("map", "") if featured else ""
+        title = f"Replay preview ({map_label})" if map_label else "Replay preview"
         return (
             f'<video autoplay muted loop playsinline preload="auto" '
-            f'src="{clips[0]}"></video>'
+            f'src="{clip_url}" title="{title}"></video>'
         )
-    payload = json.dumps(clips)
-    return (
-        f'<video id="hero-vid" autoplay muted playsinline preload="auto"></video>'
-        f"<script>(function(){{"
-        f"const clips={payload};"
-        f"const v=document.getElementById('hero-vid');"
-        f"let i=0;"
-        f"function play(n){{v.src=clips[n];v.play().catch(function(){{}});}}"
-        f"v.addEventListener('ended',function(){{i=(i+1)%clips.length;play(i);}});"
-        f"play(0);"
-        f"}})();</script>"
-    )
+    return '<div class="placeholder">Preview loading...</div>'
 
 
 def render_landing(replay: dict) -> str:
-    _, mode = watch_target()
-    watch_label = {
-        "live": "Watch live",
-        "replay": "Watch last game",
-    }.get(mode, "Watch")
+    _, mode, featured = watch_target()
+    map_name = featured.get("map") if featured else replay.get("map")
+    watch_label = "Watch replay" if mode == "replay" else "Watch"
+    if map_name:
+        watch_label = f"Watch {map_name}"
     return (
         LANDING_HTML.replace("%%RUN_NAME%%", str(replay.get("run_name", RUN_NAME)))
         .replace("%%PREVIEW%%", preview_markup(replay))
@@ -397,23 +386,38 @@ class HubHandler(BaseHTTPRequestHandler):
             return
 
         if path in ("/watch", "/replay"):
-            target, mode = watch_target()
+            target, mode, featured = watch_target()
             if not target:
-                self._send(503, b'{"status":"warming","message":"no game yet"}')
+                self._send(503, b'{"status":"warming","message":"no replay yet"}')
                 return
             self.send_response(302)
             self.send_header("Location", target)
             self.send_header("X-Showcase-Watch", mode)
+            if featured and featured.get("map"):
+                self.send_header("X-Showcase-Map", str(featured["map"]))
             self.end_headers()
             return
 
         if path == "/status":
-            target, mode = watch_target()
+            target, mode, featured = watch_target()
+            replay = load_replay_state()
+            next_rotate = None
+            maps = replay.get("maps") or []
+            if maps:
+                hour = int(time.time() // 3600)
+                next_rotate = (hour + 1) * 3600
             payload = {
-                "watch": {"url": target or None, "mode": mode},
-                "replay": load_replay_state(),
+                "watch": {
+                    "url": target or None,
+                    "mode": mode,
+                    "map": featured.get("map") if featured else replay.get("map"),
+                    "game_id": featured.get("game_id") if featured else replay.get("game_id"),
+                    "next_rotate_at": next_rotate,
+                },
+                "replay": replay,
                 "hub": load_hub_state(),
                 "play_config": play_config(),
+                "live_showcase": LIVE_SHOWCASE,
             }
             self._send(200, json.dumps(payload).encode())
             return

@@ -23,25 +23,27 @@ echo "[2/5] build image (playwright + ffmpeg + CUDA torch)"
 export DOCKER_BUILDKIT=1
 docker build -t openfront-eval:local -f "$SRC/docker/Dockerfile" "$SRC"
 
-echo "[3/5] restart container with GPU"
+echo "[3/5] restart container with GPU (CDI device, not --gpus)"
 docker rm -f openfront-eval 2>/dev/null || true
 docker run -d \
   --name openfront-eval \
   --restart unless-stopped \
-  --gpus all \
+  --device nvidia.com/gpu=all \
   -p 127.0.0.1:8086:8086 \
   -p "[::1]:8086:8086" \
   -v "$DATA:/data" \
   -e RUN_NAME="${RUN_NAME:-ppo_v4}" \
   -e STAGE="${STAGE:-4}" \
-  -e SHOWCASE_SEEDS="${SHOWCASE_SEEDS:-showcase0,showcase1,showcase2}" \
+  -e SHOWCASE_WATCH_STAGE="${SHOWCASE_WATCH_STAGE:-4}" \
+  -e SHOWCASE_MAPS="${SHOWCASE_MAPS:-Onion,Pangaea,Caucasus,BlackSea,BetweenTwoSeas,World,Asia}" \
+  -e REFRESH_HOURS="${REFRESH_HOURS:-1}" \
+  -e LIVE_SHOWCASE="${LIVE_SHOWCASE:-0}" \
   -e CLIP_MAX_SEC="${CLIP_MAX_SEC:-90}" \
-  -e REFRESH_HOURS="${REFRESH_HOURS:-6}" \
   -e AE_CKPT="${AE_CKPT:-runs/ae_v31_d8c32/ae_v3.pt}" \
   -e PLAY_MAP="${PLAY_MAP:-Onion}" \
   -e PLAY_BOTS="${PLAY_BOTS:-10}" \
   -e PLAY_NATIONS="${PLAY_NATIONS:-1}" \
-  -e PLAY_START_DELAY="${PLAY_START_DELAY:-90}" \
+  -e PLAY_START_DELAY="${PLAY_START_DELAY:-15}" \
   -e ADMIN_BOT_API_KEY="${ADMIN_BOT_API_KEY:-WARNING_DEV_ADMIN_BOT_KEY_DO_NOT_USE_IN_PRODUCTION}" \
   --memory 8g --cpus 6 \
   openfront-eval:local

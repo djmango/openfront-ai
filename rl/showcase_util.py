@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shutil
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,6 +20,39 @@ REVISION_PATH = DATA_DIR / "policy_revision.txt"
 def showcase_seeds() -> list[str]:
     raw = os.environ.get("SHOWCASE_SEEDS", "showcase0,showcase1,showcase2")
     return [s.strip() for s in raw.split(",") if s.strip()]
+
+
+def showcase_maps() -> list[str]:
+    """Maps to pre-render for /watch; rotates one per hour on the hub."""
+    raw = os.environ.get("SHOWCASE_MAPS")
+    if raw:
+        return [m.strip() for m in raw.split(",") if m.strip()]
+    from rl.curriculum import ALL_MAPS
+
+    return list(ALL_MAPS)
+
+
+def map_seed(map_name: str) -> str:
+    return map_name.lower().replace(" ", "_")
+
+
+def featured_showcase_entry(state: dict, now: float | None = None) -> dict | None:
+    """Pick the replay entry for the current hour (UTC)."""
+    entries = state.get("maps")
+    if entries:
+        t = time.time() if now is None else now
+        return entries[int(t // 3600) % len(entries)]
+    if state.get("game_id"):
+        return state
+    return None
+
+
+def featured_game_id(state: dict) -> str | None:
+    entry = featured_showcase_entry(state)
+    if not entry:
+        return None
+    gid = entry.get("game_id")
+    return str(gid) if gid else None
 
 
 def hf_policy_revision(run_name: str) -> str:
