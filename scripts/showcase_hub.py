@@ -208,13 +208,13 @@ LANDING_HTML = """<!doctype html>
     .preview video {
       display: block;
       width: 100%;
-      aspect-ratio: 16 / 10;
-      object-fit: cover;
+      aspect-ratio: 16 / 9;
+      object-fit: contain;
       border: 0;
       background: #000;
     }
     .placeholder {
-      aspect-ratio: 16 / 10;
+      aspect-ratio: 16 / 9;
       display: grid;
       place-items: center;
       color: #888;

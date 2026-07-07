@@ -89,7 +89,7 @@ def trim_video(
     start_sec: float,
     max_duration: float | None,
     *,
-    crf: int = 22,
+    crf: int = 18,
 ) -> None:
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
@@ -145,7 +145,7 @@ def render_record(
     width: int = 1920,
     height: int = 1080,
     device_scale_factor: float = 2,
-    crf: int = 22,
+    crf: int = 18,
     timeout: int = 1200,
     api_port: int = 8987,
     client_port: int = 9000,
@@ -274,8 +274,8 @@ def main() -> None:
     ap.add_argument("--height", type=int, default=1080)
     ap.add_argument("--device-scale-factor", type=float, default=2,
                     help="emulate retina DPR so WebGL renders at 2x backing resolution")
-    ap.add_argument("--crf", type=int, default=22,
-                    help="VP9 quality for ffmpeg trim pass (lower = sharper, default 22)")
+    ap.add_argument("--crf", type=int, default=18,
+                    help="VP9 quality for ffmpeg trim pass (lower = sharper, default 18)")
     ap.add_argument("--timeout", type=int, default=1200, help="max seconds to wait for game end")
     ap.add_argument("--api-port", type=int, default=8987)
     ap.add_argument("--client-port", type=int, default=9000)

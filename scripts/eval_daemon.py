@@ -41,7 +41,7 @@ REFRESH_HOURS = float(os.environ.get("REFRESH_HOURS", "6"))
 CLIP_MAX_SEC = int(os.environ.get("CLIP_MAX_SEC", "90"))
 CLIP_WIDTH = int(os.environ.get("CLIP_WIDTH", "1920"))
 CLIP_HEIGHT = int(os.environ.get("CLIP_HEIGHT", "1080"))
-CLIP_CRF = int(os.environ.get("CLIP_CRF", "22"))
+CLIP_CRF = int(os.environ.get("CLIP_CRF", "18"))
 
 
 def log(msg: str) -> None:
