@@ -12,7 +12,8 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm AS py-deps
 WORKDIR /build
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev \
-    && uv pip install --index-url https://download.pytorch.org/whl/cu124 'torch>=2.12.0'
+    && uv pip install --index-url https://download.pytorch.org/whl/cu124 'torch>=2.12.0' \
+    && /build/.venv/bin/python -m playwright --version
 
 FROM node:22-bookworm
 WORKDIR /app
@@ -52,8 +53,8 @@ ENV REFRESH_HOURS=6
 ENV AE_CKPT=runs/ae_v31_d8c32/ae_v3.pt
 
 RUN mkdir -p /data/records /data/policy /data/clips \
-    && /app/.venv/bin/playwright install-deps chromium \
-    && /app/.venv/bin/playwright install chromium \
+    && /app/.venv/bin/python -m playwright install-deps chromium \
+    && /app/.venv/bin/python -m playwright install chromium \
     && chmod +x /app/docker/entrypoint.sh
 
 EXPOSE 8086
