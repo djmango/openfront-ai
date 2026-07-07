@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "ofrs"
 version = "0.1.0"
 description = "Rust hot paths for openfront-ai (GIL-free frame decode + batch collate)"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
