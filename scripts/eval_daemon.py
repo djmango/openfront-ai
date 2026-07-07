@@ -37,6 +37,7 @@ AE_PATH = Path(os.environ.get("AE_CKPT", "runs/ae_v31_d8c32/ae_v3.pt"))
 RUN_NAME = os.environ.get("RUN_NAME", "ppo_v4")
 STAGE = int(os.environ.get("STAGE", "4"))
 MAP = os.environ.get("MAP") or None
+SHOWCASE_WATCH_STAGE = int(os.environ.get("SHOWCASE_WATCH_STAGE", "0"))
 REFRESH_HOURS = float(os.environ.get("REFRESH_HOURS", "6"))
 CLIP_MAX_SEC = int(os.environ.get("CLIP_MAX_SEC", "90"))
 CLIP_WIDTH = int(os.environ.get("CLIP_WIDTH", "1920"))
@@ -81,7 +82,7 @@ def needs_showcase(state: dict, run_name: str) -> bool:
     return False
 
 
-def run_watch(policy: Path, ae: Path, seed: str, record: Path) -> None:
+def run_watch(policy: Path, ae: Path, seed: str, record: Path, stage: int) -> None:
     cmd = [
         sys.executable,
         "-m",
@@ -91,7 +92,7 @@ def run_watch(policy: Path, ae: Path, seed: str, record: Path) -> None:
         "--ckpt",
         str(ae),
         "--stage",
-        str(STAGE),
+        str(stage),
         "--seed",
         seed,
         "--record",
@@ -125,12 +126,12 @@ def render_client_clip(record: Path, out: Path) -> None:
 
 
 def generate_clip(policy: Path, ae: Path, seed: str) -> dict:
-    base = f"{RUN_NAME}_s{STAGE}_{seed}"
+    base = f"{RUN_NAME}_s{SHOWCASE_WATCH_STAGE}_{seed}"
     record = RECORDS_DIR / f"{base}.json"
     clip = CLIPS_DIR / f"{seed}.webm"
     if not record.exists():
-        log(f"clip {seed}: rl.watch -> {record.name}")
-        run_watch(policy, ae, seed, record)
+        log(f"clip {seed}: rl.watch stage {SHOWCASE_WATCH_STAGE} -> {record.name}")
+        run_watch(policy, ae, seed, record, SHOWCASE_WATCH_STAGE)
     else:
         log(f"clip {seed}: reusing {record.name}")
     if not clip.exists():

@@ -137,6 +137,20 @@ def client_worktree(commit: str):
         shutil.rmtree(wt, ignore_errors=True)
 
 
+def load_episode_meta(record: Path) -> dict:
+    """Outcome + end tick from rl.watch debug sidecar (fallback: record info)."""
+    sidecar = record.with_suffix(".debug.json")
+    meta = {"outcome": "death", "end_tick": None}
+    if sidecar.exists():
+        data = json.loads(sidecar.read_text())
+        meta["outcome"] = data.get("outcome", "death")
+        meta["end_tick"] = data.get("end_tick")
+    if meta["end_tick"] is None:
+        info = json.loads(record.read_text()).get("info", {})
+        meta["end_tick"] = info.get("num_turns")
+    return meta
+
+
 def render_record(
     record: Path,
     out: Path,
@@ -154,6 +168,8 @@ def render_record(
     reuse_services: bool = False,
     trim_gameplay: bool = False,
     max_duration: int | None = None,
+    death_trim_ticks: int = 55,
+    win_hold_sec: float = 2.5,
 ) -> None:
     from playwright.sync_api import sync_playwright
 
@@ -162,6 +178,8 @@ def render_record(
     print(f"gameID {game_id} -> {out}")
 
     sidecar = record.with_suffix(".debug.json")
+    episode = load_episode_meta(record)
+    print(f"episode outcome: {episode['outcome']} (end tick {episode['end_tick']})")
     if overlay and sidecar.exists():
         print(f"model overlay from {sidecar.name}")
     elif overlay:
@@ -215,7 +233,11 @@ def render_record(
                 )
                 page = ctx.new_page()
                 page_open_t0 = time.time()
-                page.goto(f"http://localhost:{client_port}/game/{game_id}")
+                page.goto(
+                    f"http://localhost:{client_port}/game/{game_id}",
+                    wait_until="domcontentloaded",
+                    timeout=120_000,
+                )
 
                 toggle = page.locator('img[alt="replay"]')
                 toggle.wait_for(state="visible", timeout=120_000)
@@ -230,18 +252,70 @@ def render_record(
                 gameplay_t0 = time.time()
                 print("replay running...")
 
+                end_tick = episode.get("end_tick")
+                outcome = episode.get("outcome", "death")
+                stop_tick = (
+                    int(end_tick) - death_trim_ticks
+                    if end_tick and outcome == "death"
+                    else None
+                )
                 t0 = time.time()
                 gameplay_duration: float | None = None
+                win_hold_t0: float | None = None
                 while time.time() - t0 < timeout:
-                    if page.locator("win-modal div.fixed").count() > 0:
-                        # Stop before the "You died" modal; don't linger on end cards.
-                        gameplay_duration = max(0.0, time.time() - gameplay_t0 - 1.0)
+                    tick = page.evaluate(
+                        "() => (typeof window.__replayTick === 'number' "
+                        "? window.__replayTick : null)"
+                    )
+                    if (
+                        stop_tick is not None
+                        and tick is not None
+                        and tick >= stop_tick
+                    ):
+                        gameplay_duration = max(0.0, time.time() - gameplay_t0 - 0.2)
                         print(
-                            f"game over after {time.time() - t0:.0f}s "
-                            f"(trimming to {gameplay_duration:.1f}s gameplay)"
+                            f"stopping before death at tick {tick} "
+                            f"(trim to {gameplay_duration:.1f}s gameplay)"
                         )
                         break
-                    page.wait_for_timeout(500)
+
+                    modal = page.locator("win-modal div.fixed")
+                    if modal.count() > 0:
+                        if outcome == "win":
+                            if win_hold_t0 is None:
+                                win_hold_t0 = time.time()
+                                print("win modal - holding for celebration")
+                            elif time.time() - win_hold_t0 >= win_hold_sec:
+                                gameplay_duration = time.time() - gameplay_t0
+                                break
+                        else:
+                            gameplay_duration = max(
+                                0.0, time.time() - gameplay_t0 - 1.5
+                            )
+                            print(
+                                f"death modal detected late "
+                                f"(trim to {gameplay_duration:.1f}s gameplay)"
+                            )
+                            break
+
+                    if (
+                        outcome == "win"
+                        and end_tick is not None
+                        and tick is not None
+                        and tick >= int(end_tick)
+                        and win_hold_t0 is None
+                    ):
+                        # Win tick reached; wait for modal then celebrate.
+                        for _ in range(30):
+                            if modal.count() > 0:
+                                win_hold_t0 = time.time()
+                                break
+                            page.wait_for_timeout(100)
+                        if win_hold_t0 is None:
+                            gameplay_duration = time.time() - gameplay_t0
+                            break
+
+                    page.wait_for_timeout(100)
                 else:
                     print("timeout reached; saving what we have")
 
