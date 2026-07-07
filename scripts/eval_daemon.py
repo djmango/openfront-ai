@@ -39,6 +39,9 @@ STAGE = int(os.environ.get("STAGE", "4"))
 MAP = os.environ.get("MAP") or None
 REFRESH_HOURS = float(os.environ.get("REFRESH_HOURS", "6"))
 CLIP_MAX_SEC = int(os.environ.get("CLIP_MAX_SEC", "90"))
+CLIP_WIDTH = int(os.environ.get("CLIP_WIDTH", "1920"))
+CLIP_HEIGHT = int(os.environ.get("CLIP_HEIGHT", "1080"))
+CLIP_CRF = int(os.environ.get("CLIP_CRF", "22"))
 
 
 def log(msg: str) -> None:
@@ -111,6 +114,12 @@ def render_client_clip(record: Path, out: Path) -> None:
         "--trim-gameplay",
         "--max-duration",
         str(CLIP_MAX_SEC),
+        "--width",
+        str(CLIP_WIDTH),
+        "--height",
+        str(CLIP_HEIGHT),
+        "--crf",
+        str(CLIP_CRF),
     ]
     subprocess.run(cmd, cwd=REPO, check=True)
 

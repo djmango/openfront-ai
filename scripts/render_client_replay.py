@@ -83,7 +83,14 @@ def chromium_args() -> list[str]:
     return base + ["--use-gl=angle", "--enable-gpu", "--ignore-gpu-blocklist"]
 
 
-def trim_video(src: Path, dst: Path, start_sec: float, max_duration: int | None) -> None:
+def trim_video(
+    src: Path,
+    dst: Path,
+    start_sec: float,
+    max_duration: float | None,
+    *,
+    crf: int = 22,
+) -> None:
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         if src != dst:
@@ -95,8 +102,11 @@ def trim_video(src: Path, dst: Path, start_sec: float, max_duration: int | None)
         cmd.extend(["-ss", f"{start_sec:.3f}"])
     cmd.extend(["-i", str(src)])
     if max_duration and max_duration > 0:
-        cmd.extend(["-t", str(max_duration)])
-    cmd.extend(["-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "32", "-an", str(dst)])
+        cmd.extend(["-t", f"{max_duration:.3f}"])
+    cmd.extend([
+        "-c:v", "libvpx-vp9", "-b:v", "0", "-crf", str(crf),
+        "-row-mt", "1", "-an", str(dst),
+    ])
     subprocess.run(cmd, check=True, capture_output=True)
     if src != dst and src.exists():
         src.unlink()
@@ -132,8 +142,10 @@ def render_record(
     out: Path,
     *,
     speed: str = "max",
-    width: int = 1600,
-    height: int = 900,
+    width: int = 1920,
+    height: int = 1080,
+    device_scale_factor: float = 2,
+    crf: int = 22,
     timeout: int = 1200,
     api_port: int = 8987,
     client_port: int = 9000,
@@ -188,6 +200,7 @@ def render_record(
                 )
                 ctx = browser.new_context(
                     viewport={"width": width, "height": height},
+                    device_scale_factor=device_scale_factor,
                     record_video_dir=td,
                     record_video_size={"width": width, "height": height},
                 )
@@ -244,7 +257,7 @@ def render_record(
                 if trim_gameplay:
                     print(f"trimming {trim_start:.1f}s of load-in")
                 trim_end = gameplay_duration if gameplay_duration is not None else max_duration
-                trim_video(raw, out, trim_start, trim_end)
+                trim_video(raw, out, trim_start, trim_end, crf=crf)
 
             print(f"wrote {out}")
         finally:
@@ -257,8 +270,12 @@ def main() -> None:
     ap.add_argument("--record", required=True, help="GameRecord JSON from rl.watch --record")
     ap.add_argument("--out", default=None, help="output .webm (default: <record>.client.webm)")
     ap.add_argument("--speed", default="max", choices=["0.5", "1", "2", "max"])
-    ap.add_argument("--width", type=int, default=1600)
-    ap.add_argument("--height", type=int, default=900)
+    ap.add_argument("--width", type=int, default=1920)
+    ap.add_argument("--height", type=int, default=1080)
+    ap.add_argument("--device-scale-factor", type=float, default=2,
+                    help="emulate retina DPR so WebGL renders at 2x backing resolution")
+    ap.add_argument("--crf", type=int, default=22,
+                    help="VP9 quality for ffmpeg trim pass (lower = sharper, default 22)")
     ap.add_argument("--timeout", type=int, default=1200, help="max seconds to wait for game end")
     ap.add_argument("--api-port", type=int, default=8987)
     ap.add_argument("--client-port", type=int, default=9000)
@@ -282,6 +299,8 @@ def main() -> None:
         speed=args.speed,
         width=args.width,
         height=args.height,
+        device_scale_factor=args.device_scale_factor,
+        crf=args.crf,
         timeout=args.timeout,
         api_port=args.api_port,
         client_port=args.client_port,
