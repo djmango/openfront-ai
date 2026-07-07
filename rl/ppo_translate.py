@@ -2,25 +2,33 @@
 
 import numpy as np
 
-from rl.env import OpenFrontEnv
-from rl.obs import ACTIONS, BUILD_TYPES, NUKE_TYPES, ObsBuilder
+from rl.obs import (
+    ACTIONS,
+    BUILD_TYPES,
+    IMPASSABLE_MAGNITUDE,
+    MAGNITUDE_MASK,
+    NUKE_TYPES,
+    REGION,
+    ObsBuilder,
+)
 from rl.policy import QUANTITY_FRACS
 
 
 class IntentTranslator:
     """choice dict -> engine intent JSON. Region pointers snap to a land
-    tile inside the 16x16 region (engine validates the rest)."""
+    tile inside the REGION x REGION block (engine validates the rest)."""
 
-    def __init__(self, env: OpenFrontEnv, builder: ObsBuilder):
+    def __init__(self, env, builder: ObsBuilder):
         self.env = env
         self.builder = builder
         land = (env.terrain >> 7) & 1
-        self.land = land[: builder.h16, : builder.w16]
-        self.gh = builder.h16 // 16
-        self.gw = builder.w16 // 16
+        self.land = land[: builder.hr, : builder.wr]
+        self.mag = (env.terrain & MAGNITUDE_MASK)[: builder.hr, : builder.wr]
+        self.gh = builder.hr // REGION
+        self.gw = builder.wr // REGION
         self.rng = np.random.default_rng(0)
 
-    def region_tile(self, region: int) -> int | None:
+    def region_tile(self, region: int, valid: np.ndarray | None = None) -> int | None:
         # Region indices address the padded policy grid, whose width is
         # GW_MAX or the map's own grid width if larger (see encode_grids).
         from rl.curriculum import GW_MAX
@@ -28,13 +36,26 @@ class IntentTranslator:
         gy, gx = divmod(region, max(GW_MAX, self.gw))
         if gy >= self.gh or gx >= self.gw:
             return None  # padded region; masked, but stay safe
-        block = self.land[gy * 16 : (gy + 1) * 16, gx * 16 : (gx + 1) * 16]
+        sl = (
+            slice(gy * REGION, (gy + 1) * REGION),
+            slice(gx * REGION, (gx + 1) * REGION),
+        )
+        block = self.land[sl] if valid is None else valid[sl]
         ys, xs = np.nonzero(block)
         if len(ys) == 0:
             return None
         i = self.rng.integers(len(ys))
-        y, x = gy * 16 + int(ys[i]), gx * 16 + int(xs[i])
+        y, x = gy * REGION + int(ys[i]), gx * REGION + int(xs[i])
         return y * self.env.width + x
+
+    def spawn_tile(self, region: int, obs: dict) -> int | None:
+        """Valid spawn tile inside the region: land, unowned, passable -
+        mirrors SpawnExecution's validity so a masked pick always lands."""
+        owners = obs["owners"][: self.builder.hr, : self.builder.wr]
+        valid = (
+            (self.land == 1) & (self.mag < IMPASSABLE_MAGNITUDE) & (owners == 0)
+        )
+        return self.region_tile(region, valid)
 
     def slot_to_pid(self, slot: int, obs: dict) -> str | None:
         """Slot -> persistent player ID (intents reference players by pid)."""
@@ -56,6 +77,11 @@ class IntentTranslator:
 
         if name == "noop":
             return []
+        if name == "spawn":
+            tile = self.spawn_tile(choice["tile_region"], obs)
+            if tile is None:
+                return []
+            return [{"type": "spawn", "tile": tile}]
         if name == "expand":
             return [{"type": "attack", "targetID": None, "troops": int(troops * frac)}]
         if name == "attack":
@@ -108,7 +134,9 @@ def my_tiles(obs: dict) -> int:
     return 0
 
 
-def spawn_randomly(env: OpenFrontEnv, rng: np.random.Generator) -> dict:
+def spawn_randomly(env, rng: np.random.Generator) -> dict:
+    """Fallback spawner (random land tile). v4 spawns via the policy's
+    spawn action; this remains as a safety valve if the spawn phase stalls."""
     land = (env.terrain >> 7) & 1
     ys, xs = np.nonzero(land)
     obs = None

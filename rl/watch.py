@@ -25,7 +25,15 @@ from PIL import Image, ImageDraw, ImageFont
 
 from rl.curriculum import GW_MAX, STAGES
 from rl.env import OpenFrontEnv
-from rl.obs import ACTIONS, BUILD_TYPES, NUKE_TYPES, ObsBuilder, encode_grids, load_ae
+from rl.obs import (
+    ACTIONS,
+    BUILD_TYPES,
+    NUKE_TYPES,
+    REGION,
+    ObsBuilder,
+    encode_grids,
+    load_ae,
+)
 from rl.policy import QUANTITY_FRACS, Policy
 from rl.ppo import OBS_KEYS
 from rl.ppo_translate import IntentTranslator, my_tiles, spawn_randomly
@@ -104,12 +112,16 @@ def draw_markers(
     d = ImageDraw.Draw(im)
     if "tile_region" in choice:
         gy, gx = divmod(choice["tile_region"], GW_MAX)
-        x, y = (gx * 16 + 8) / scale, (gy * 16 + 8) / scale
+        x = (gx * REGION + REGION // 2) / scale
+        y = (gy * REGION + REGION // 2) / scale
         r = max(6, 16 // scale)
         d.line([(x - r, y), (x + r, y)], fill=MARK_RGB, width=2)
         d.line([(x, y - r), (x, y + r)], fill=MARK_RGB, width=2)
         d.rectangle(
-            [gx * 16 / scale, gy * 16 / scale, (gx + 1) * 16 / scale, (gy + 1) * 16 / scale],
+            [
+                gx * REGION / scale, gy * REGION / scale,
+                (gx + 1) * REGION / scale, (gy + 1) * REGION / scale,
+            ],
             outline=MARK_RGB,
         )
     if "player_slot" in choice and builder.lut is not None:
@@ -198,7 +210,7 @@ def compose(
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--policy", required=True)
-    ap.add_argument("--ckpt", default="runs/ae_v3/ae_v3.pt")
+    ap.add_argument("--ckpt", default="runs/ae_v31_d8c32/ae_v3.pt")
     ap.add_argument("--stage", type=int, default=3)
     ap.add_argument("--map", default=None, help="override map (default: first in stage pool)")
     ap.add_argument("--out", default=None,
@@ -248,9 +260,20 @@ def main() -> None:
     )
     builder.start_game(env.terrain)
     rng = np.random.default_rng(0)
-    obs = spawn_randomly(env, rng)
     translator = IntentTranslator(env, builder)
-    builder._slot_lut(obs["entities"]["players"])  # build LUT before first render
+    # v4: the policy spawns itself (spawn action + tile head); fall back to
+    # a random spawn only if the phase stalls.
+    for _ in range(8):
+        if not obs["spawnPhase"]:
+            break
+        raw = builder.prepare(obs)
+        o = encode_grids(ae, [raw], device)[0]
+        ot = {k: torch.from_numpy(o[k])[None] for k in OBS_KEYS}
+        choices, _, _ = policy.act(ot)
+        obs = env.step(translator.translate(choices[0], obs), ticks=10)
+    if obs["spawnPhase"]:
+        obs = spawn_randomly(env, rng)
+    builder._slot_lut(obs["entities"]["players"])  # freeze LUT post-spawn
     me_slot = int(builder.lut[obs["me"]]) if obs["me"] >= 0 else 1
     pal = palette(me_slot)
 

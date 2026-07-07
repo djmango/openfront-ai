@@ -157,6 +157,16 @@ encoder or BC warm start yet.</p>
     accuracy 71.8% vs 87.5% on bot data), retrained on a bot+human mix, then designed and ran the
     v3.1 ablation matrix in parallel. Latent resolution won. New encoder + benchmark table
     uploaded to HF.</li>
+  <li><b>Jul 6 eve:</b> v4: the whole policy stack moved to 1/8 resolution (d8c32 encoder, 8x8
+    tile regions, 150x250 grid budget) - the clean cut, no space-to-depth shims. GPU-side
+    featurization (ego pooling, fallout unpack, AE encode, local crop batched in
+    <code>encode_grids</code>), which also fixed a stale-fallout bug (dynamic fallout was riding
+    inside the per-episode cached terrain tensor). Raw 64x64 local owner-crop bypass. Learned
+    spawn placement end to end: spawn action + legal-region mask in PPO, spawn-phase snapshots +
+    labels in replay sidecars (formatVersion 2) for BC. BC prefeaturize cache
+    (<code>scripts/prefeaturize_bc.py</code>): 1.45 ms/sample single-threaded vs ~15-20 ms before.
+    PPO v4 fixes: entropy anneal, stage LR warmdown, persisted win-gate window, periodic
+    fixed-seed greedy eval. Pod supervisors got commit assertions and crash-loop backoff.</li>
 </ul>
 
 <h3 id="obs">Observation: compress the map, bypass the rest</h3>
@@ -405,43 +415,52 @@ state isn't checkpointed, only weights).
 Git history was scrubbed once with <code>git filter-repo</code> after large blobs snuck in; data dirs
 are gitignored now.</p>
 
+<h3 id="v4recipe">v4 training recipe &amp; decision gates</h3>
+<p>Three arms, two launched together (Jul 6 eve), the third conditional:</p>
+<ul>
+  <li><b>Arm A - pure RL</b> (<code>ppo_v4</code>): from scratch, stage 0. Baseline and control;
+    also the only arm learning spawn placement without supervision.</li>
+  <li><b>Arm B - BC</b> (<code>bc_v4</code>): feedforward pilot, 60k steps on the cache-bc
+    pipeline. At ~1.5ms/sample CPU the run is GPU-bound; verdict lands in hours, not days.
+    Saves <code>bc_best.pt</code> on holdout improvement (acted-action + tile accuracy - the
+    honest heads; plain action accuracy is inflated by forced-legality noops).</li>
+  <li><b>Arm C - BC→RL</b> (<code>ppo_v4_bcinit</code>, conditional): launched when B plateaus.
+    <code>rl/ppo.py --init</code> loads the shared Policy weights and folds the winner-bucket
+    conditioning into the head biases - verified exact (max output diff ~1e-7 across all heads).
+    Same hypers/envs/pod class as A; judged at equal PPO wall-clock on the
+    <code>eval/win</code> curves and time-to-stage-N.</li>
+</ul>
+<p><b>Gates.</b> B is learning iff holdout <code>tile_region</code> accuracy climbs and holdout
+loss falls (10k steps ≈ 1M samples ≈ 5x the entire old pilot's data; flat there = dead, kill the
+pod, A continues regardless). B has plateaued (launch C) when holdout metrics are flat across two
+consecutive eval windows (~10k steps) or the cosine tail begins. C's first ~30min will look bad
+while the untrained value head catches up - judge after the critic settles. If C's entropy climbs
+back toward ~7 in the first hour, the BC prior got washed out: add a KL-to-prior regularizer
+(AlphaStar-style) before rerunning.</p>
+<p><b>Watch items.</b> BC first log line should read several hundred ex/s (under ~100 = cache
+problem, stop). Late-curriculum OOM lever: <code>MINIBATCH=64</code> env var (1/8 grids cost ~4x
+v3's conv activations at World/Asia). Rollout buffer RAM ~20GB at Asia-size grids with 96x32;
+halve <code>--rollout</code> if the pod is RAM-tight. Fixed-seed eval pauses training for minutes
+at late stages (~2% overhead at <code>eval-every 300</code>). Old v1 sidecars carry no spawn
+labels; re-replay with <code>BC=1 REBC=1 datagen/replay_all.sh</code> feeds the next BC run.</p>
+<p><b>Deliberately skipped:</b> BC value-head pretraining on placements (scale-mismatched with
+PPO returns, muddies A-vs-C), fp16 rollout buffers (RAM insurance we may not need), latent
+precompute to disk (at 1/8 a latent is ~2.4MB/snapshot ≈ 200GB corpus - the GPU-batched encode
+from the raw cache IS that idea, done right).</p>
+
 <h3 id="next">Open threads</h3>
 <ul>
-  <li><b>PPO v4 wishlist:</b>
-    <ul>
-      <li><i>Learned spawn placement.</i> Today the agent spawns on a uniformly random land tile
-        (<code>spawn_randomly</code>) and the policy's first real decision comes after the spawn
-        phase. Spawn choice is one decision per episode but it shapes everything downstream:
-        neighbors, coastline access, expansion room. The tile-region head and its masking already
-        exist, so the plan is to expose the spawn-phase state as a normal observation, mask the
-        tile head to legal spawn tiles, and let episode return do the credit assignment. Human
-        games also carry spawn intents, so BC can supervise it directly.</li>
-      <li><i>v3.1 encoder</i> (d8 or d8c32, whichever the bake-off picks) wired into
-        <code>rl/obs.py</code>, plus the raw local owner-crop bypass.</li>
-      <li><i>BC warm start</i> from the human-game policy, if the pilot pans out.</li>
-      <li><i>From scratch, not from v3 weights:</i> the v2c lesson applies to v4 too, its
-        observation space and spawn behavior change the MDP enough that resuming would inherit
-        stale habits.</li>
-      <li><i>Greedy eval alongside training stats.</i> The rolling win rate is measured on
-        exploration-sampled actions and its window resets on every trainer restart, so it neither
-        matches deployment behavior nor survives ops churn. v4 should run a periodic fixed-seed
-        eval pass and log it as a separate curve; that is also the number to compare local
-        replay sessions against.</li>
-      <li><i>Persist the win-gate window in the checkpoint.</i> Stage advancement evidence
-        (the recent-wins deque) is lost on restart today: after a relaunch the agent must re-earn
-        the whole window at its current stage before it can advance, and roll-win reads 0.00
-        until it refills.</li>
-      <li><i>Entropy schedule.</i> v2c sat at entropy ~8, exploring without committing, while
-        v3's entropy fell naturally as it learned. A fixed ent-coef of 0.01 leaves the trap open;
-        anneal it (or target an entropy schedule) so late training commits harder.</li>
-    </ul>
-  </li>
+  <li><b>PPO v4 wishlist: shipped (Jul 6 eve).</b> Learned spawn placement (PPO + BC), d8c32
+    encoder at full 1/8 with the local owner-crop bypass, periodic fixed-seed greedy eval
+    (<code>eval/*</code> curves), win-gate window persisted in the checkpoint, entropy anneal
+    (0.01 → 0.002 over 4k updates) and stage LR warmdown (x0.85 per advance). v4 trains from
+    scratch - the 1/8 grid, new action ("spawn"), and 43ch observation change the MDP and the
+    tensor shapes anyway.</li>
+  <li><b>Spawn supervision coverage:</b> only sidecars regenerated with
+    <code>--bc --rebc</code> (formatVersion 2) carry spawn labels; old v1 sidecars still train
+    everything else. Re-replay the archive on a pod to unlock BC spawn supervision everywhere.</li>
   <li><b>BC warm start:</b> does initializing PPO from human imitation beat the 1v1 curriculum
     bootstrap, or compound with it?</li>
-  <li><b>Pick the final encoder:</b> the 1/8 x 32ch run (2x policy input) and the 96ch control are
-    still training; if d8c32 holds ≥ ~88% human borders, take it over d8's 4x. Then wire the winner
-    into <code>rl/obs.py</code>/<code>rl/policy.py</code> (they assume 1/16 latent and old
-    constructor args) and add the raw local owner-crop bypass.</li>
   <li><b>Warm-start refreshes:</b> future same-architecture encoder updates on new data should
     resume from the current checkpoint (and checkpoint optimizer state, see billing-restart scar)
     instead of 40k fresh steps.</li>

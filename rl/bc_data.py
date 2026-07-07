@@ -1,50 +1,51 @@
-"""Behavior-cloning dataset over replayed human games.
+"""Behavior-cloning dataset over prefeaturized human-game caches.
 
-Assembles (observation, action, placement) samples from data-human game dirs
-that carry bc.json.gz sidecars (datagen/replay.ts --bc):
+Reads the cache-bc/ layout written by scripts/prefeaturize_bc.py (zstd-1
+frames + per-step orjson blobs, everything pre-strided to the policy grid
+budget). Per-sample CPU is ~1ms: one frame decode, one entity decode, and
+cheap small-state featurization via rl.obs.ObsBuilder.prepare() - the
+full-resolution work (AE encode, ego pooling, local crop) happens batched
+on the GPU in rl.obs.encode_grids, exactly like the PPO rollout path, so
+BC weights drop into PPO as initialization.
 
-  states/t<tick>.bin.gz   owner/fallout grid (shared across players at a tick)
-  states/t<tick>.json.gz  entities
-  bc.json.gz              per-snapshot legality per living human + their
-                          intents in the following window (normalized to the
-                          policy action space) + final placements
-
-One *step* is (game, snapshot, clientID). Steps where the player acted yield
-action labels; steps where they didn't are no-op supervision, downsampled via
---noop-frac at the sampler level (humans idle ~90% of decision steps; naive
-training collapses to "always noop").
-
-Obs assembly reuses rl.obs.ObsBuilder.prepare() - identical featurization to
-the live PPO env - so BC weights drop into PPO as initialization.
+One *step* is (game, step_idx, clientID). Steps where the player acted
+yield action labels; steps where they didn't are no-op supervision,
+downsampled via --noop-frac at the sampler level (humans idle ~90% of
+decision steps; naive training collapses to "always noop"). Sidecars with
+spawn supervision (formatVersion 2) additionally yield spawn-placement
+samples, drawn at --spawn-frac.
 """
 
 from __future__ import annotations
 
-import gzip
 import hashlib
 import json
 import random
 import threading
-from collections import OrderedDict
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import zstandard as zstd
 
-try:  # ~7x faster on the 30MB bc.json.gz docs; plain json works too
+_TLS = threading.local()
+
+
+def _dctx() -> zstd.ZstdDecompressor:
+    # One decompressor per thread: the trainer prefetches from a thread
+    # pool and zstd contexts are not thread-safe (nor fork/pickle-able).
+    if not hasattr(_TLS, "d"):
+        _TLS.d = zstd.ZstdDecompressor()
+    return _TLS.d
+
+try:
     import orjson
 
     _loads = orjson.loads
-    _dumps = orjson.dumps
 except ImportError:  # pragma: no cover
     _loads = json.loads
-    _dumps = lambda o: json.dumps(o).encode()  # noqa: E731
 
-from rl.obs import ACTIONS, BUILD_TYPES, NUKE_TYPES, ObsBuilder
+from rl.obs import ACTIONS, BUILD_TYPES, NUKE_TYPES, REGION, ObsBuilder
 from rl.policy import NEEDS_PLAYER, NEEDS_QUANTITY, NEEDS_TILE, QUANTITY_FRACS
-
-OWNER_MASK = 0x0FFF
-FALLOUT_BIT = 13
 
 N_PLACEMENT_BUCKETS = 8
 
@@ -63,116 +64,57 @@ def quantity_bucket(amt: float | None, avail: float) -> int:
     return int(np.argmin([abs(frac - f) for f in QUANTITY_FRACS]))
 
 
-@dataclass
-class GameHandle:
-    path: Path
-    meta: dict
-    placements: dict
-    steps_raw: list[bytes]  # one serialized step each; parse on demand
-    terrain: np.ndarray  # strided by ds
-    lut: np.ndarray  # smallID -> slot (built from the earliest snapshot)
-    gh: int  # grid dims after striding
-    gw: int
-    ds: int  # tile-space stride so the grid fits (GH_MAX, GW_MAX)
+class CachedGame:
+    """View over one game's cache-bc/ (mmapped; cheap enough to keep every
+    game resident - no LRU or sticky sampling needed anymore)."""
 
-    # A bc.json.gz materialized as Python dicts retains ~500MB (measured);
-    # as per-step JSON bytes it's ~10MB, and re-parsing one 26KB step with
-    # orjson is tens of microseconds - so handles stay cheap enough to LRU.
+    def __init__(self, path: Path):
+        cache = path / "cache-bc"
+        idx = json.loads((cache / "index.json").read_text())
+        self.path = path
+        self.ds = idx["ds"]
+        self.hr, self.wr = idx["hr"], idx["wr"]
+        self.gh, self.gw = self.hr // REGION, self.wr // REGION
+        self.placements = idx["placements"]
+        self.spawn_steps = idx["spawn_steps"]
+        self.n_spawn = idx["n_spawn"]
+        self._tick_row = {t: i for i, t in enumerate(idx["ticks"])}
+        self._frame_off = np.asarray(idx["frame_offsets"], dtype=np.int64)
+        self._ent_off = np.asarray(idx["ent_offsets"], dtype=np.int64)
+        self._step_off = np.asarray(idx["step_offsets"], dtype=np.int64)
+        self._frames = np.memmap(cache / "frames.zst", dtype=np.uint8, mode="r")
+        self._ents = np.memmap(cache / "ents.zst", dtype=np.uint8, mode="r")
+        self._steps = np.memmap(cache / "steps.zst", dtype=np.uint8, mode="r")
+        self.terrain = np.load(cache / "terrain.npy")
+        self.lut = np.load(cache / "lut.npy").astype(np.int64)
+
+    def _d(self, buf: np.ndarray, off: np.ndarray, i: int, max_out: int) -> bytes:
+        return _dctx().decompress(
+            buf[off[i] : off[i + 1]].tobytes(), max_output_size=max_out
+        )
+
     def n_steps(self) -> int:
-        return len(self.steps_raw)
+        return len(self._step_off) - 1
 
     def step(self, i: int) -> dict:
-        return _loads(self.steps_raw[i])
+        return _loads(self._d(self._steps, self._step_off, i, 1 << 26))
 
+    def frame(self, tick: int) -> tuple[np.ndarray, np.ndarray]:
+        """(owner slots uint8 (hr, wr), packed fallout (hr, wr/8))."""
+        i = self._tick_row[tick]
+        raw = self._d(self._frames, self._frame_off, i, self.hr * self.wr * 2)
+        hw = self.hr * self.wr
+        slots = np.frombuffer(raw[:hw], dtype=np.uint8).reshape(self.hr, self.wr)
+        packed = np.frombuffer(raw[hw:], dtype=np.uint8).reshape(self.hr, -1)
+        return slots, packed
 
-def _slot_lut_from_players(players: list[dict]) -> np.ndarray:
-    from ae.model_v3 import MAX_SLOTS
-
-    ids = sorted(p["id"] for p in players)
-    lut = np.zeros(4096, dtype=np.int64)
-    for slot, sid in enumerate(ids, start=1):
-        lut[sid] = min(slot, MAX_SLOTS - 1)
-    return lut
-
-
-def load_game(path: Path, gh_max: int, gw_max: int) -> GameHandle | None:
-    bc_path = path / "bc.json.gz"
-    if not bc_path.exists() or not (path / "meta.json").exists():
-        return None  # sidecar without snapshots (partial sync)
-    meta = json.loads((path / "meta.json").read_text())
-    h, w = meta["height"], meta["width"]
-
-    # Human games run on Normal-size maps (up to ~4100 tiles wide), while the
-    # policy grid is budgeted for Compact/small training maps. Stride tile
-    # space by 2/4 until it fits - the engine's own Compact mode is exactly a
-    # 2x-downscaled Normal map, so strided games stay in-distribution.
-    ds = 1
-    while True:
-        hs, ws = len(range(0, h, ds)), len(range(0, w, ds))
-        gh, gw = (hs - hs % 16) // 16, (ws - ws % 16) // 16
-        if gh <= gh_max and gw <= gw_max:
-            break
-        ds *= 2
-        if ds > 8:
-            return None
-
-    bc = _loads(gzip.decompress(bc_path.read_bytes()))
-    if not bc["steps"]:
-        return None
-    terrain = np.frombuffer((path / "terrain.bin").read_bytes(), dtype=np.uint8)
-    terrain = terrain.reshape(h, w)[::ds, ::ds]
-
-    first = bc["steps"][0]["tick"]
-    ents0 = _load_entities(path, first)
-    if ents0 is None:
-        return None
-    return GameHandle(
-        path=path,
-        meta=meta,
-        placements=bc["placements"],
-        steps_raw=[_dumps(s) for s in bc["steps"]],
-        terrain=terrain,
-        lut=_slot_lut_from_players(ents0["players"]),
-        gh=gh,
-        gw=gw,
-        ds=ds,
-    )
-
-
-def scale_entities(entities: dict, ds: int) -> dict:
-    """Unit coordinates live in tile space; stride them with the grid."""
-    if ds == 1:
-        return entities
-    units = [
-        {
-            **u,
-            "x": u["x"] // ds,
-            "y": u["y"] // ds,
-            "tx": u["tx"] // ds if u.get("tx") is not None else None,
-            "ty": u["ty"] // ds if u.get("ty") is not None else None,
-        }
-        for u in entities["units"]
-    ]
-    return {**entities, "units": units}
-
-
-def _load_entities(path: Path, tick: int) -> dict | None:
-    f = path / "states" / f"t{tick:06d}.json.gz"
-    if not f.exists():
-        return None
-    return _loads(gzip.decompress(f.read_bytes()))
-
-
-def _load_grid(
-    path: Path, tick: int, h: int, w: int, ds: int = 1
-) -> tuple[np.ndarray, np.ndarray]:
-    raw = gzip.decompress((path / "states" / f"t{tick:06d}.bin.gz").read_bytes())
-    state = np.frombuffer(raw, dtype="<u2").reshape(h, w)[::ds, ::ds]
-    return (state & OWNER_MASK).astype(np.int64), ((state >> FALLOUT_BIT) & 1)
+    def entities(self, tick: int) -> dict:
+        i = self._tick_row[tick]
+        return _loads(self._d(self._ents, self._ent_off, i, 1 << 27))
 
 
 def label_to_choice(
-    label: dict, game: GameHandle, entities: dict, client_smallid: int
+    label: dict, game: CachedGame, entities: dict, client_smallid: int
 ) -> dict | None:
     """Map a normalized BC label to policy head targets. Unused heads are -1
     (matches Policy.evaluate choice tensors)."""
@@ -193,7 +135,8 @@ def label_to_choice(
             return None
         choice["player_slot"] = slot
     if name in NEEDS_TILE:
-        gx, gy = (label["x"] // game.ds) // 16, (label["y"] // game.ds) // 16
+        gx = (label["x"] // game.ds) // REGION
+        gy = (label["y"] // game.ds) // REGION
         if not (0 <= gy < game.gh and 0 <= gx < game.gw):
             return None
         # Flattened over the *padded* (GH_MAX, GW_MAX) grid: padding sits at
@@ -226,8 +169,8 @@ NOOP_CHOICE = {
 
 class BCSampler:
     """Random (game, step) sampler that emits every acting player at the
-    chosen snapshot (amortizing the grid/entity decode) plus a controlled
-    ration of no-op players.
+    chosen snapshot (amortizing the frame/entity decode) plus a controlled
+    ration of no-op players and spawn-placement samples.
 
     Emits "raw" prepare() dicts; the trainer batches AE encoding on GPU via
     rl.obs.encode_grids, exactly like the PPO rollout path.
@@ -239,60 +182,29 @@ class BCSampler:
         holdout_every: int = 10,
         holdout: bool = False,
         noop_frac: float = 0.15,
+        spawn_frac: float = 0.03,
         seed: int = 0,
-        cache_games: int = 32,
     ):
-        from rl.curriculum import GH_MAX, GW_MAX
-
         self.rng = random.Random(seed)
         self.noop_frac = noop_frac
-        self.games: list[Path] = []
+        self.spawn_frac = spawn_frac
+        self.games: list[CachedGame] = []
         for root in roots:
-            for meta in sorted(root.glob("*/*/bc.json.gz")):
+            for idx in sorted(root.glob("*/*/cache-bc/index.json")):
+                game_dir = idx.parent.parent
                 # Stable split (builtin hash() is salted per process).
-                digest = hashlib.md5(meta.parent.name.encode()).digest()
+                digest = hashlib.md5(game_dir.name.encode()).digest()
                 if (digest[0] % holdout_every == 0) == holdout:
-                    self.games.append(meta.parent)
+                    self.games.append(CachedGame(game_dir))
         if not self.games:
-            raise FileNotFoundError(f"no bc.json.gz under {roots} (holdout={holdout})")
-        self.gh_max, self.gw_max = GH_MAX, GW_MAX
-        # Parsing one bc.json.gz costs ~0.25s (orjson; 1.5s stdlib) - a naive
-        # uniform draw over hundreds of games misses an LRU almost every
-        # time and data loading collapses (measured 2 ex/s on the pilot).
-        # Instead: true LRU + draws stay inside the resident set with prob
-        # `stickiness`, rotating fresh games in on the remainder, so miss
-        # cost amortizes while every game still cycles through over time.
-        self.cache_games = cache_games
-        self.stickiness = 0.9 if len(self.games) > cache_games else 0.0
-        self._handles: OrderedDict[Path, GameHandle | None] = OrderedDict()
+            raise FileNotFoundError(
+                f"no cache-bc under {roots} (holdout={holdout}); "
+                "run scripts/prefeaturize_bc.py"
+            )
+        self.spawn_games = [g for g in self.games if g.n_spawn > 0]
         self._builders: dict[Path, ObsBuilder] = {}
-        self._lock = threading.Lock()  # trainer prefetches from threads
-        # Parsing a bc doc transiently peaks ~2GB; don't let every prefetch
-        # thread miss at once (cold start) and stack those peaks.
-        self._load_sem = threading.Semaphore(2)
 
-    def _handle(self, path: Path) -> GameHandle | None:
-        with self._lock:
-            if path in self._handles:
-                self._handles.move_to_end(path)
-                return self._handles[path]
-        with self._load_sem:  # slow; outside the cache lock
-            h = load_game(path, self.gh_max, self.gw_max)
-        with self._lock:
-            self._handles[path] = h
-            while len(self._handles) > self.cache_games:
-                old, _ = self._handles.popitem(last=False)
-                self._builders.pop(old, None)
-        return h
-
-    def _draw_game(self) -> GameHandle | None:
-        with self._lock:
-            resident = [p for p, h in self._handles.items() if h is not None]
-        if resident and self.rng.random() < self.stickiness:
-            return self._handle(self.rng.choice(resident))
-        return self._handle(self.rng.choice(self.games))
-
-    def _builder(self, game: GameHandle) -> ObsBuilder:
+    def _builder(self, game: CachedGame) -> ObsBuilder:
         if game.path not in self._builders:
             b = ObsBuilder()  # no AE: encode happens centrally
             b.start_game(game.terrain)
@@ -304,23 +216,62 @@ class BCSampler:
         """All samples for one random (game, snapshot): raw obs + choice +
         placement bucket per emitted player."""
         for _ in range(64):
-            game = self._draw_game()
-            if game is None:
-                continue
-            step = game.step(self.rng.randrange(game.n_steps()))
-            out = self._step_samples(game, step)
+            if self.spawn_games and self.rng.random() < self.spawn_frac:
+                out = self._spawn_samples(self.rng.choice(self.spawn_games))
+            else:
+                game = self.rng.choice(self.games)
+                out = self._step_samples(game, game.step(self.rng.randrange(game.n_steps())))
             if out:
                 return out
         raise RuntimeError("could not draw a non-empty BC step in 64 tries")
 
-    def _step_samples(self, game: GameHandle, step: dict) -> list[dict]:
-        tick = step["tick"]
-        h, w = game.meta["height"], game.meta["width"]
-        entities = _load_entities(game.path, tick)
-        if entities is None:
+    def _obs(self, game: CachedGame, tick: int, entities: dict, leg: dict,
+             spawn: bool) -> dict:
+        owners, fallout_packed = game.frame(tick)
+        return {
+            "tick": tick,
+            "spawnPhase": spawn,
+            "me": leg["me"],
+            "alive": not spawn,
+            "owners_slots": owners,
+            "fallout_packed": fallout_packed,
+            "entities": entities,
+            "legal": leg.get("legal", {"actions": {}}),
+        }
+
+    def _spawn_samples(self, game: CachedGame) -> list[dict]:
+        """One spawn-placement sample: the map state at the moment a human
+        picked their spawn, supervised with their actual pick."""
+        from rl.curriculum import GW_MAX
+
+        step = self.rng.choice(game.spawn_steps)
+        cands = list(step["labels"].items())
+        if not cands:
             return []
-        entities = scale_entities(entities, game.ds)
-        owners, fallout = _load_grid(game.path, tick, h, w, game.ds)
+        cid, label = self.rng.choice(cands)
+        gx = (label["x"] // game.ds) // REGION
+        gy = (label["y"] // game.ds) // REGION
+        if not (0 <= gy < game.gh and 0 <= gx < game.gw):
+            return []
+        entities = game.entities(step["tick"])
+        raw = self._builder(game).prepare(
+            self._obs(game, step["tick"], entities,
+                      {"me": label.get("me", -1)}, spawn=True)
+        )
+        choice = dict(NOOP_CHOICE)
+        choice["action"] = ACTIONS.index("spawn")
+        choice["tile_region"] = gy * GW_MAX + gx
+        # The human did spawn there, so the region was legal at that tick;
+        # force it into the mask (our reconstruction can be narrower).
+        raw["legal_tile"][gy, gx] = 1.0
+        p = game.placements.get(cid, {"placement": 0.5})
+        raw["choice"] = choice
+        raw["cond"] = placement_bucket(float(p["placement"]))
+        return [raw]
+
+    def _step_samples(self, game: CachedGame, step: dict) -> list[dict]:
+        tick = step["tick"]
+        entities = game.entities(tick)
         builder = self._builder(game)
         placements = game.placements
 
@@ -333,17 +284,7 @@ class BCSampler:
         out = []
         for cid in take:
             leg = step["legal"][cid]
-            obs = {
-                "tick": tick,
-                "spawnPhase": False,
-                "me": leg["me"],
-                "alive": True,
-                "owners": owners,
-                "fallout": fallout,
-                "entities": entities,
-                "legal": leg["legal"],
-            }
-            raw = builder.prepare(obs)
+            raw = builder.prepare(self._obs(game, tick, entities, leg, spawn=False))
             if cid in step["labels"]:
                 label = self.rng.choice(step["labels"][cid])
                 choice = label_to_choice(label, game, entities, leg["me"])
@@ -379,8 +320,8 @@ class BCSampler:
         choice on the last one (earlier steps carry noop placeholders that
         the trainer discards). Empty list when the draw fails; caller
         retries."""
-        game = self._draw_game()
-        if game is None or game.n_steps() < 1:
+        game = self.rng.choice(self.games)
+        if game.n_steps() < 1:
             return []
 
         # Prefer windows ending on an acted step (same act/noop balance
@@ -414,27 +355,14 @@ class BCSampler:
         return []
 
     def _one_sample(
-        self, game: GameHandle, step: dict, cid: str, labeled: bool
+        self, game: CachedGame, step: dict, cid: str, labeled: bool
     ) -> dict | None:
         tick = step["tick"]
-        h, w = game.meta["height"], game.meta["width"]
-        entities = _load_entities(game.path, tick)
-        if entities is None:
-            return None
-        entities = scale_entities(entities, game.ds)
-        owners, fallout = _load_grid(game.path, tick, h, w, game.ds)
+        entities = game.entities(tick)
         leg = step["legal"][cid]
-        obs = {
-            "tick": tick,
-            "spawnPhase": False,
-            "me": leg["me"],
-            "alive": True,
-            "owners": owners,
-            "fallout": fallout,
-            "entities": entities,
-            "legal": leg["legal"],
-        }
-        raw = self._builder(game).prepare(obs)
+        raw = self._builder(game).prepare(
+            self._obs(game, tick, entities, leg, spawn=False)
+        )
         choice = dict(NOOP_CHOICE)
         if labeled and step["labels"].get(cid):
             label = self.rng.choice(step["labels"][cid])

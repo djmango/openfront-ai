@@ -63,11 +63,13 @@ masking, sampled in order. Per decision step:
    (`canAttackPlayer`, `canSendAllianceRequest`, `canDonate`, ...). Static
    per-game slots, same indexing as the observation.
 3. **Tile target** (spatial pointer): argument for spawn, boat, build,
-   nuke launch, warship move. Logits over the latent grid (H/16 x W/16),
-   i.e. the policy points at a 16x16 region; the bridge snaps to the best
-   legal tile in that region (`canBuild`, `bestTransportShipSpawn`,
-   valid-shore checks). Snapping keeps the head size map-independent and
-   pushes pixel-perfect legality into the engine, which already knows it.
+   nuke launch, warship move. Logits over the latent grid (H/8 x W/8 as of
+   v4), i.e. the policy points at an 8x8 region; the bridge snaps to the
+   best legal tile in that region (`canBuild`, `bestTransportShipSpawn`,
+   valid-shore checks; spawn snaps to land-unowned-passable). Snapping
+   keeps the head size map-independent and pushes pixel-perfect legality
+   into the engine, which already knows it. During the spawn phase the
+   head is additionally masked to regions containing a valid spawn tile.
 4. **Unit instance** (pointer over own-unit tokens): argument for upgrade,
    delete, cancel_boat, move_warship, cancel_attack (over active attacks).
 5. **Quantity** (fraction of available troops/gold): {5, 10, 25, 50, 100}%.
@@ -146,17 +148,25 @@ forcing the latent to be pixel-perfect everywhere.
 
 ### 1. Spatial (the map)
 
-Frozen tile-autoencoder latent: 64 channels at 1/16 resolution (see
-README results). Concatenated at the same resolution:
+Frozen tile-autoencoder latent (v4: `ae_v31_d8c32`, 32 channels at 1/8
+resolution - the border-accuracy winner of the v3.1 ablation).
+Concatenated at the same resolution:
 
-- ownership fractions per region for {self, allies, enemies-at-war,
-  neutral players, unowned} (5 ch) - gives the policy an ego view the
-  ego-agnostic AE doesn't provide
-- structure presence per region, own vs. others, per structure class (2x6 ch)
-- active battle intensity (attack tile deltas per region), fallout, and
-  incoming-boat/nuke trajectories (3 ch)
+- ego ownership fractions per region for {self, allies, enemies} (3 ch) -
+  the ego view the ego-agnostic AE doesn't provide
+- transient unit planes (8 ch, exact): warships, transports +
+  destinations, trade ships, nukes + impact points + SAM locks,
+  construction
 
-Total ~80 channels at H/16 x W/16, any map size.
+Total 43 channels at H/8 x W/8, any map size (curriculum budget 150x250 =
+Asia). As of v4 all full-resolution featurization (slot classing, ego
+pooling, fallout unpack, AE encode, local crop) runs batched on the GPU
+in `encode_grids`; env workers and the BC loader only touch small exact
+state.
+
+Plus the exact-borders bypass: a raw 64x64-tile local owner crop
+(own/ally/enemy/land planes) centered on the agent's territory centroid,
+encoded by a small strided CNN into the trunk.
 
 ### 2. Entity tokens (variable-length sets, attention-pooled)
 

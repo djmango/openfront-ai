@@ -17,6 +17,7 @@ set -uo pipefail
 RUN_NAME="${RUN_NAME:-bc_v1}"
 SEQ="${SEQ:-0}"
 BATCH="${BATCH:-96}"
+ACCUM="${ACCUM:-1}"
 STEPS="${STEPS:-60000}"
 WORKERS="${WORKERS:-16}"
 REPO_DIR=/workspace/openfront-ai
@@ -41,18 +42,28 @@ if [ ! -d "$REPO_DIR" ]; then
   git clone https://github.com/djmango/openfront-ai "$REPO_DIR"
 fi
 cd "$REPO_DIR"
-[ -d .git ] && git pull --ff-only || true
+if [ -d .git ] && [ -z "${SKIP_SYNC:-}" ]; then
+  # Deployed code MUST match origin/master (a silently failed pull once ran
+  # a pod on stale code all day). Pods never carry local commits.
+  git fetch origin master || true
+  git reset --hard origin/master || true
+  if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/master 2>/dev/null)" ]; then
+    echo "FATAL: HEAD $(git rev-parse --short HEAD) != origin/master; refusing to train stale code"
+    exit 1
+  fi
+  echo "deployed commit: $(git rev-parse --short HEAD)"
+fi
 command -v tmux >/dev/null 2>&1 || apt-get install -y tmux >/dev/null
-pip install -q tensorboard huggingface_hub orjson 2>/dev/null | tail -0 || true
+pip install -q tensorboard huggingface_hub orjson zstandard 2>/dev/null | tail -0 || true
 
-if [ ! -f runs/ae_v3/ae_v3.pt ]; then
-  mkdir -p runs/ae_v3
+if [ ! -f runs/ae_v31_d8c32/ae_v3.pt ]; then
+  mkdir -p runs/ae_v31_d8c32
   python -c "
 from huggingface_hub import hf_hub_download
 import shutil
-p = hf_hub_download('djmango/openfront-tile-autoencoder', 'ae_v3.pt')
-shutil.copy(p, 'runs/ae_v3/ae_v3.pt')
-print('fetched AE checkpoint')
+p = hf_hub_download('djmango/openfront-tile-autoencoder', 'ae_v31_d8c32.pt')
+shutil.copy(p, 'runs/ae_v31_d8c32/ae_v3.pt')
+print('fetched AE checkpoint (v3.1 d8c32)')
 "
 fi
 
@@ -82,6 +93,11 @@ EOF
   [ "$n" -gt 0 ] && touch data-human/.complete
 fi
 
+# --- prefeaturize into cache-bc (idempotent; ~10 min parallel, one-time) ---
+# This is what takes BC from ~34 ex/s (gzip+JSON per sample) to GPU-bound.
+PYTHONPATH=. python scripts/prefeaturize_bc.py --data data-human \
+  --workers "$WORKERS" 2>&1 | tail -5
+
 # Resume seed from HF if local checkpoint is gone.
 if [ ! -f "runs/bc/$RUN_NAME/bc.pt" ]; then
   mkdir -p "runs/bc/$RUN_NAME"
@@ -97,17 +113,28 @@ except Exception as e:
 " || true
 fi
 
-# --- crash-proof training loop ---
+# --- crash-proof training loop (with crash-loop backoff: an auto-restart
+# that relaunches into the same wall every 10s is not auto-recovery) ---
+FAST_EXITS=0
 while true; do
   RESUME=""
   if [ -f "runs/bc/$RUN_NAME/bc.pt" ]; then
     RESUME="--resume runs/bc/$RUN_NAME/bc.pt"
   fi
-  echo "=== $(date -u +%FT%TZ) launching $RUN_NAME (seq=$SEQ) $RESUME ==="
+  echo "=== $(date -u +%FT%TZ) launching $RUN_NAME (seq=$SEQ accum=$ACCUM) $RESUME ==="
+  START_TS=$(date +%s)
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH=. \
     python -m rl.bc --data data-human --name "$RUN_NAME" --seq "$SEQ" \
-    --batch "$BATCH" --steps "$STEPS" --workers "$WORKERS" $RESUME \
+    --batch "$BATCH" --accum "$ACCUM" --steps "$STEPS" --workers "$WORKERS" $RESUME \
     2>&1 | tee -a "/tmp/bc_$RUN_NAME.log"
-  echo "=== trainer exited ($?); restarting in 10s ===" | tee -a "/tmp/bc_$RUN_NAME.log"
-  sleep 10
+  ELAPSED=$(( $(date +%s) - START_TS ))
+  if [ "$ELAPSED" -lt 120 ]; then
+    FAST_EXITS=$((FAST_EXITS + 1))
+  else
+    FAST_EXITS=0
+  fi
+  BACKOFF=$(( FAST_EXITS >= 2 ? (FAST_EXITS >= 4 ? 600 : 60) : 10 ))
+  echo "=== trainer exited ($?) after ${ELAPSED}s; fast-exits=$FAST_EXITS, restarting in ${BACKOFF}s ===" \
+    | tee -a "/tmp/bc_$RUN_NAME.log"
+  sleep "$BACKOFF"
 done

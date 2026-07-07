@@ -16,6 +16,12 @@ set -uo pipefail
 RUN_NAME="${RUN_NAME:-ppo_auto}"
 ENVS="${ENVS:-48}"
 STAGE="${STAGE:-0}"
+# OOM lever for late-curriculum maps: the 1/8 grid costs ~4x v3's conv
+# activations at World/Asia sizes; drop to 64 if stage 6+ OOMs.
+MINIBATCH="${MINIBATCH:-128}"
+# INIT_BC=bc_v4 warm-starts a FRESH run from that BC run's checkpoint on HF
+# (ignored once the run has its own policy.pt; --init defers to --resume).
+INIT_BC="${INIT_BC:-}"
 REPO_DIR=/workspace/openfront-ai
 
 # When run as the pod start command this replaces the image's /start.sh,
@@ -38,9 +44,18 @@ if [ ! -d "$REPO_DIR" ]; then
   git clone --recurse-submodules https://github.com/djmango/openfront-ai "$REPO_DIR"
 fi
 cd "$REPO_DIR"
-if [ -d .git ]; then
-  git pull --ff-only || true
+if [ -d .git ] && [ -z "${SKIP_SYNC:-}" ]; then
+  # Deployed code MUST match origin/master: a silently failed pull once ran
+  # a pod on stale code for a whole day. Pods never carry local commits, so
+  # hard-sync and assert.
+  git fetch origin master || true
+  git reset --hard origin/master || true
   git submodule update --init || true
+  if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/master 2>/dev/null)" ]; then
+    echo "FATAL: HEAD $(git rev-parse --short HEAD) != origin/master; refusing to train stale code"
+    exit 1
+  fi
+  echo "deployed commit: $(git rev-parse --short HEAD)"
 fi  # rsynced copies have no .git; run whatever is present
 
 if ! command -v node >/dev/null 2>&1; then
@@ -53,14 +68,14 @@ command -v tmux >/dev/null 2>&1 || apt-get install -y tmux >/dev/null
 # System python (image torch matches the driver); add the small extras.
 pip install -q tensorboard huggingface_hub 2>/dev/null | tail -0 || true
 
-if [ ! -f runs/ae_v3/ae_v3.pt ]; then
-  mkdir -p runs/ae_v3
+if [ ! -f runs/ae_v31_d8c32/ae_v3.pt ]; then
+  mkdir -p runs/ae_v31_d8c32
   python -c "
 from huggingface_hub import hf_hub_download
 import shutil
-p = hf_hub_download('djmango/openfront-tile-autoencoder', 'ae_v3.pt')
-shutil.copy(p, 'runs/ae_v3/ae_v3.pt')
-print('fetched AE checkpoint')
+p = hf_hub_download('djmango/openfront-tile-autoencoder', 'ae_v31_d8c32.pt')
+shutil.copy(p, 'runs/ae_v31_d8c32/ae_v3.pt')
+print('fetched AE checkpoint (v3.1 d8c32)')
 "
 fi
 
@@ -80,23 +95,59 @@ except Exception as e:
 " || true
 fi
 
+# BC warm start: fetch the BC checkpoint if this run hasn't produced its
+# own policy.pt yet (after that, resume wins and --init is a no-op).
+INIT=""
+if [ -n "$INIT_BC" ] && [ ! -f "runs/rl/$RUN_NAME/policy.pt" ]; then
+  if [ ! -f "runs/bc/$INIT_BC/bc_init.pt" ]; then
+    mkdir -p "runs/bc/$INIT_BC"
+    python -c "
+from huggingface_hub import hf_hub_download
+import shutil
+# Prefer the best-holdout checkpoint over the last one.
+for f in ('bc_best.pt', 'bc.pt'):
+    try:
+        p = hf_hub_download('djmango/openfront-rl', f'$INIT_BC/{f}')
+        shutil.copy(p, 'runs/bc/$INIT_BC/bc_init.pt')
+        print(f'fetched BC checkpoint $INIT_BC/{f}')
+        break
+    except Exception as e:
+        print(f'{f}: {e.__class__.__name__}')
+else:
+    raise SystemExit('INIT_BC set but no BC checkpoint found on HF')
+"
+  fi
+  INIT="--init runs/bc/$INIT_BC/bc_init.pt"
+fi
+
 # --- tensorboard on the pod's exposed http port ---
 if ! pgrep -f "tensorboard.*19123" >/dev/null; then
   nohup tensorboard --logdir runs/rl --port 19123 --host 0.0.0.0 \
     >/tmp/tensorboard.log 2>&1 &
 fi
 
-# --- crash-proof training loop ---
+# --- crash-proof training loop (with crash-loop backoff: an auto-restart
+# that relaunches into the same wall every 10s is not auto-recovery) ---
+FAST_EXITS=0
 while true; do
   RESUME=""
   if [ -f "runs/rl/$RUN_NAME/policy.pt" ]; then
     RESUME="--resume runs/rl/$RUN_NAME/policy.pt"
   fi
   echo "=== $(date -u +%FT%TZ) launching $RUN_NAME $RESUME ==="
+  START_TS=$(date +%s)
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH=. \
     python -m rl.ppo --envs "$ENVS" --updates 100000 --rollout 32 \
-    --minibatch 128 --name "$RUN_NAME" --stage "$STAGE" $RESUME \
+    --minibatch "$MINIBATCH" --name "$RUN_NAME" --stage "$STAGE" $RESUME $INIT \
     2>&1 | tee -a "/tmp/train_$RUN_NAME.log"
-  echo "=== trainer exited ($?); restarting in 10s ===" | tee -a "/tmp/train_$RUN_NAME.log"
-  sleep 10
+  ELAPSED=$(( $(date +%s) - START_TS ))
+  if [ "$ELAPSED" -lt 120 ]; then
+    FAST_EXITS=$((FAST_EXITS + 1))
+  else
+    FAST_EXITS=0
+  fi
+  BACKOFF=$(( FAST_EXITS >= 2 ? (FAST_EXITS >= 4 ? 600 : 60) : 10 ))
+  echo "=== trainer exited ($?) after ${ELAPSED}s; fast-exits=$FAST_EXITS, restarting in ${BACKOFF}s ===" \
+    | tee -a "/tmp/train_$RUN_NAME.log"
+  sleep "$BACKOFF"
 done
