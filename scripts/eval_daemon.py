@@ -1,9 +1,8 @@
 """Background worker for the homelab eval showcase.
 
-Pulls the latest RL policy checkpoint from Hugging Face, runs one greedy
-episode via rl.watch (with --record for the MODEL overlay sidecar), and
-writes /data/state.json so serve_replay.py can redirect visitors to the
-current replay.
+Pulls the latest RL policy checkpoint from Hugging Face, runs greedy episodes
+via rl.watch (with --record for the MODEL overlay sidecar), renders trimmed
+client WebM clips, and writes /data/state.json for the hub + archive API.
 
 Usage (normally started by docker/entrypoint.sh):
   uv run python scripts/eval_daemon.py
@@ -19,10 +18,13 @@ import time
 from pathlib import Path
 
 from rl.showcase_util import (
+    CLIPS_DIR,
     ensure_ae,
     ensure_policy,
+    hero_clip_urls,
     hf_policy_revision,
     policy_meta,
+    showcase_seeds,
     utc_now,
     write_json,
 )
@@ -35,8 +37,8 @@ AE_PATH = Path(os.environ.get("AE_CKPT", "runs/ae_v31_d8c32/ae_v3.pt"))
 RUN_NAME = os.environ.get("RUN_NAME", "ppo_v4")
 STAGE = int(os.environ.get("STAGE", "4"))
 MAP = os.environ.get("MAP") or None
-SEED = os.environ.get("SEED", "showcase0")
 REFRESH_HOURS = float(os.environ.get("REFRESH_HOURS", "6"))
+CLIP_MAX_SEC = int(os.environ.get("CLIP_MAX_SEC", "90"))
 
 
 def log(msg: str) -> None:
@@ -61,12 +63,22 @@ def policy_changed(run_name: str) -> bool:
         return True
 
 
-def generate_showcase(policy: Path, ae: Path) -> dict:
-    RECORDS_DIR.mkdir(parents=True, exist_ok=True)
-    base = f"{RUN_NAME}_s{STAGE}_{SEED}"
-    record = RECORDS_DIR / f"{base}.json"
-    log(f"running rl.watch -> {record.name}")
+def needs_showcase(state: dict, run_name: str) -> bool:
+    if not state.get("game_id"):
+        return True
+    if policy_changed(run_name):
+        return True
+    urls = hero_clip_urls(state)
+    if not urls:
+        return True
+    for url in urls:
+        name = url.rsplit("/", 1)[-1]
+        if not (CLIPS_DIR / name).is_file():
+            return True
+    return False
 
+
+def run_watch(policy: Path, ae: Path, seed: str, record: Path) -> None:
     cmd = [
         sys.executable,
         "-m",
@@ -78,26 +90,78 @@ def generate_showcase(policy: Path, ae: Path) -> dict:
         "--stage",
         str(STAGE),
         "--seed",
-        SEED,
+        seed,
         "--record",
         str(record),
-        "--out",
-        str(RECORDS_DIR / f"{base}.webm"),
     ]
     if MAP:
         cmd.extend(["--map", MAP])
-
     subprocess.run(cmd, cwd=REPO, check=True)
 
+
+def render_client_clip(record: Path, out: Path) -> None:
+    cmd = [
+        sys.executable,
+        "scripts/render_client_replay.py",
+        "--record",
+        str(record),
+        "--out",
+        str(out),
+        "--reuse-services",
+        "--trim-gameplay",
+        "--max-duration",
+        str(CLIP_MAX_SEC),
+    ]
+    subprocess.run(cmd, cwd=REPO, check=True)
+
+
+def generate_clip(policy: Path, ae: Path, seed: str) -> dict:
+    base = f"{RUN_NAME}_s{STAGE}_{seed}"
+    record = RECORDS_DIR / f"{base}.json"
+    clip = CLIPS_DIR / f"{seed}.webm"
+    if not record.exists():
+        log(f"clip {seed}: rl.watch -> {record.name}")
+        run_watch(policy, ae, seed, record)
+    else:
+        log(f"clip {seed}: reusing {record.name}")
+    if not clip.exists():
+        log(f"clip {seed}: render client video -> {clip.name}")
+        render_client_clip(record, clip)
+    else:
+        log(f"clip {seed}: reusing {clip.name}")
     meta = json.loads(record.read_text())
-    state = {
+    return {
+        "seed": seed,
         "game_id": meta["info"]["gameID"],
+        "map": meta["info"].get("map") or MAP,
+        "clip": str(clip),
+        "url": f"/archive/clips/{clip.name}",
+    }
+
+
+def generate_showcase(policy: Path, ae: Path) -> dict:
+    RECORDS_DIR.mkdir(parents=True, exist_ok=True)
+    CLIPS_DIR.mkdir(parents=True, exist_ok=True)
+
+    clip_infos: list[dict] = []
+    for seed in showcase_seeds():
+        try:
+            clip_infos.append(generate_clip(policy, ae, seed))
+        except Exception as exc:
+            log(f"clip {seed} failed: {exc}")
+
+    if not clip_infos:
+        raise RuntimeError("no showcase clips generated")
+
+    primary = clip_infos[0]
+    state = {
+        "game_id": primary["game_id"],
         "run_name": RUN_NAME,
         "stage": STAGE,
-        "map": meta["info"].get("map") or MAP,
-        "seed": SEED,
-        "record": str(record),
-        "preview_webm": str(RECORDS_DIR / f"{base}.webm"),
+        "map": primary.get("map"),
+        "record": str(RECORDS_DIR / f"{RUN_NAME}_s{STAGE}_{primary['seed']}.json"),
+        "hero_clips": [c["url"] for c in clip_infos],
+        "clips": clip_infos,
         "generated_at": utc_now(),
         **policy_meta(policy),
     }
@@ -105,7 +169,10 @@ def generate_showcase(policy: Path, ae: Path) -> dict:
     from rl.showcase_util import REVISION_PATH
 
     REVISION_PATH.write_text(hf_policy_revision(RUN_NAME))
-    log(f"showcase ready: game_id={state['game_id']} update={state.get('policy_update')}")
+    log(
+        f"showcase ready: {len(clip_infos)} clip(s), "
+        f"game_id={state['game_id']} update={state.get('policy_update')}"
+    )
     return state
 
 
@@ -115,7 +182,7 @@ def main() -> None:
 
     while True:
         try:
-            if policy_changed(RUN_NAME) or not load_state().get("game_id"):
+            if needs_showcase(load_state(), RUN_NAME):
                 policy = ensure_policy(RUN_NAME)
                 generate_showcase(policy, ae)
             else:

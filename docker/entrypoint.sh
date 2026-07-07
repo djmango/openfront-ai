@@ -9,7 +9,7 @@ export PYTHONPATH=/app
 export PATH="/app/.venv/bin:/app/openfront/node_modules/.bin:${PATH}"
 PY="/app/.venv/bin/python"
 
-mkdir -p "${DATA_DIR}/records" "${DATA_DIR}/policy"
+mkdir -p "${DATA_DIR}/records" "${DATA_DIR}/policy" "${DATA_DIR}/clips"
 
 export SKIP_BROWSER_OPEN=true
 export ADMIN_BOT_API_KEY="${ADMIN_BOT_API_KEY:-WARNING_DEV_ADMIN_BOT_KEY_DO_NOT_USE_IN_PRODUCTION}"
@@ -31,6 +31,7 @@ done
 echo "[entrypoint] replay archive API on :8987"
 "$PY" scripts/serve_replay.py \
   --records "${DATA_DIR}/records" \
+  --clips "${DATA_DIR}/clips" \
   --state "${DATA_DIR}/state.json" \
   --bind 0.0.0.0 \
   --port 8987 &

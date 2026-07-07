@@ -25,10 +25,13 @@ serve_replay.py itself; starts the vite client too unless one is already
 on --client-port.
 """
 
+from __future__ import annotations
+
 import argparse
 import contextlib
 import json
 import os
+import platform
 import shutil
 import socket
 import subprocess
@@ -73,12 +76,35 @@ def record_engine_commit(record: Path) -> str:
     ).strip()
 
 
+def chromium_args() -> list[str]:
+    base = ["--no-sandbox", "--disable-dev-shm-usage"]
+    if platform.system() == "Darwin":
+        return base + ["--use-angle=metal", "--enable-gpu", "--ignore-gpu-blocklist"]
+    return base + ["--use-gl=angle", "--enable-gpu", "--ignore-gpu-blocklist"]
+
+
+def trim_video(src: Path, dst: Path, start_sec: float, max_duration: int | None) -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        if src != dst:
+            shutil.move(src, dst)
+        return
+
+    cmd = [ffmpeg, "-y"]
+    if start_sec > 0.05:
+        cmd.extend(["-ss", f"{start_sec:.3f}"])
+    cmd.extend(["-i", str(src)])
+    if max_duration and max_duration > 0:
+        cmd.extend(["-t", str(max_duration)])
+    cmd.extend(["-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "32", "-an", str(dst)])
+    subprocess.run(cmd, check=True, capture_output=True)
+    if src != dst and src.exists():
+        src.unlink()
+
+
 @contextlib.contextmanager
 def client_worktree(commit: str):
-    """Detached openfront worktree at `commit` with replay-tooling patch applied.
-
-    The main submodule working tree is never touched; node_modules is
-    symlinked from the pin checkout when present."""
+    """Detached openfront worktree at `commit` with replay-tooling patch applied."""
     wt = Path(tempfile.mkdtemp(prefix="openfront-client-"))
     try:
         subprocess.run(
@@ -101,6 +127,125 @@ def client_worktree(commit: str):
         shutil.rmtree(wt, ignore_errors=True)
 
 
+def render_record(
+    record: Path,
+    out: Path,
+    *,
+    speed: str = "max",
+    width: int = 1600,
+    height: int = 900,
+    timeout: int = 1200,
+    api_port: int = 8987,
+    client_port: int = 9000,
+    headed: bool = False,
+    overlay: bool = True,
+    reuse_services: bool = False,
+    trim_gameplay: bool = False,
+    max_duration: int | None = None,
+) -> None:
+    from playwright.sync_api import sync_playwright
+
+    game_id = json.loads(record.read_text())["info"]["gameID"]
+    out.parent.mkdir(parents=True, exist_ok=True)
+    print(f"gameID {game_id} -> {out}")
+
+    sidecar = record.with_suffix(".debug.json")
+    if overlay and sidecar.exists():
+        print(f"model overlay from {sidecar.name}")
+    elif overlay:
+        print(f"no {sidecar.name} - rendering without the model overlay")
+
+    procs: list[subprocess.Popen] = []
+    client_ctx = (
+        contextlib.nullcontext(OPENFRONT)
+        if reuse_services
+        else client_worktree(record_engine_commit(record))
+    )
+
+    with client_ctx as client_dir:
+        try:
+            if not reuse_services or not port_open(api_port):
+                procs.append(subprocess.Popen(
+                    [sys.executable, "scripts/serve_replay.py",
+                     "--records", str(record.parent), "--port", str(api_port)],
+                    cwd=REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                ))
+            if not reuse_services or not port_open(client_port):
+                print("starting vite client (first boot takes ~15s)...")
+                procs.append(subprocess.Popen(
+                    ["npm", "run", "start:client", "--", "--host", "127.0.0.1"],
+                    cwd=client_dir,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                ))
+            wait_http(f"http://localhost:{client_port}", 90)
+
+            speed_label = {"0.5": "×0.5", "1": "×1", "2": "×2"}.get(speed)
+
+            with sync_playwright() as pw, tempfile.TemporaryDirectory() as td:
+                browser = pw.chromium.launch(
+                    headless=not headed,
+                    args=chromium_args(),
+                )
+                ctx = browser.new_context(
+                    viewport={"width": width, "height": height},
+                    record_video_dir=td,
+                    record_video_size={"width": width, "height": height},
+                )
+                overlay_flag = "1" if overlay else "0"
+                ctx.add_init_script(
+                    f'localStorage.setItem("apiHost", "http://127.0.0.1:{api_port}");'
+                    'localStorage.setItem("replayViewAs", "1");'
+                    'localStorage.setItem("replayFitMap", "1");'
+                    f'localStorage.setItem("rlDebugOverlay", "{overlay_flag}");'
+                    'localStorage.setItem("settings.goToPlayer", "false");'
+                    'localStorage.setItem("username", "AGENT");'
+                )
+                page = ctx.new_page()
+                page_open_t0 = time.time()
+                page.goto(f"http://localhost:{client_port}/game/{game_id}")
+
+                toggle = page.locator('img[alt="replay"]')
+                toggle.wait_for(state="visible", timeout=120_000)
+                toggle.click()
+                panel = page.locator("replay-panel button").first
+                panel.wait_for(state="visible", timeout=10_000)
+                if speed_label:
+                    page.locator("replay-panel button", has_text=speed_label).click()
+                else:
+                    page.locator("replay-panel button").last.click()
+                page.wait_for_timeout(800)
+                gameplay_t0 = time.time()
+                print("replay running...")
+
+                t0 = time.time()
+                while time.time() - t0 < timeout:
+                    if page.locator("win-modal div.fixed").count() > 0:
+                        print(f"game over after {time.time() - t0:.0f}s")
+                        page.wait_for_timeout(2500)
+                        break
+                    page.wait_for_timeout(2000)
+                else:
+                    print("timeout reached; saving what we have")
+
+                page.close()
+                video = page.video.path() if page.video else None
+                ctx.close()
+                browser.close()
+                if not video or not Path(video).exists():
+                    raise SystemExit("no video captured")
+
+                raw = Path(video)
+                trim_start = (gameplay_t0 - page_open_t0) if trim_gameplay else 0.0
+                if trim_gameplay:
+                    print(f"trimming {trim_start:.1f}s of load-in")
+                trim_video(raw, out, trim_start, max_duration)
+
+            print(f"wrote {out}")
+        finally:
+            for p in procs:
+                p.terminate()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--record", required=True, help="GameRecord JSON from rl.watch --record")
@@ -114,106 +259,32 @@ def main() -> None:
     ap.add_argument("--headed", action="store_true", help="show the browser window")
     ap.add_argument("--overlay", action=argparse.BooleanOptionalAction, default=True,
                     help="model debug panel from <record>.debug.json (--no-overlay to disable)")
+    ap.add_argument("--reuse-services", action="store_true",
+                    help="use existing serve_replay + vite on api/client ports")
+    ap.add_argument("--trim-gameplay", action="store_true",
+                    help="ffmpeg-trim load-in before replay starts")
+    ap.add_argument("--max-duration", type=int, default=0,
+                    help="cap output length in seconds (0 = full replay)")
     args = ap.parse_args()
 
-    from playwright.sync_api import sync_playwright
-
     record = Path(args.record).resolve()
-    game_id = json.loads(record.read_text())["info"]["gameID"]
     out = Path(args.out or record.with_suffix(".client.webm"))
-    out.parent.mkdir(parents=True, exist_ok=True)
-    print(f"gameID {game_id} -> {out}")
-
-    sidecar = record.with_suffix(".debug.json")
-    if args.overlay and sidecar.exists():
-        print(f"model overlay from {sidecar.name}")
-    elif args.overlay:
-        print(f"no {sidecar.name} - rendering without the model overlay "
-              "(re-run rl.watch --record to get one)")
-
-    commit = record_engine_commit(record)
-    procs: list[subprocess.Popen] = []
-    with client_worktree(commit) as client_dir:
-        try:
-            procs.append(subprocess.Popen(
-                [sys.executable, "scripts/serve_replay.py",
-                 "--records", str(record.parent), "--port", str(args.api_port)],
-                cwd=REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            ))
-            if not port_open(args.client_port):
-                print("starting vite client (first boot takes ~15s)...")
-                # IPv4 explicitly: vite defaults to ::1 which headless chromium
-                # won't reach when resolving localhost to 127.0.0.1.
-                procs.append(subprocess.Popen(
-                    ["npm", "run", "start:client", "--", "--host", "127.0.0.1"],
-                    cwd=client_dir,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                ))
-            wait_http(f"http://localhost:{args.client_port}", 90)
-
-            speed_label = {"0.5": "×0.5", "1": "×1", "2": "×2"}.get(args.speed)
-
-            with sync_playwright() as pw, tempfile.TemporaryDirectory() as td:
-                # Client rejects software WebGL; force hardware ANGLE (Metal on
-                # macOS falls back gracefully elsewhere).
-                browser = pw.chromium.launch(
-                    headless=not args.headed,
-                    args=["--use-angle=metal", "--enable-gpu", "--ignore-gpu-blocklist"],
-                )
-                ctx = browser.new_context(
-                    viewport={"width": args.width, "height": args.height},
-                    record_video_dir=td,
-                    record_video_size={"width": args.width, "height": args.height},
-                )
-                # Must land before the app boots: archive API base, agent
-                # identity, map-centered camera, no auto-focus on the player.
-                overlay_flag = "1" if args.overlay else "0"
-                ctx.add_init_script(
-                    f'localStorage.setItem("apiHost", "http://localhost:{args.api_port}");'
-                    'localStorage.setItem("replayViewAs", "1");'
-                    'localStorage.setItem("replayFitMap", "1");'
-                    f'localStorage.setItem("rlDebugOverlay", "{overlay_flag}");'
-                    'localStorage.setItem("settings.goToPlayer", "false");'
-                    'localStorage.setItem("username", "AGENT");'
-                )
-                page = ctx.new_page()
-                page.goto(f"http://localhost:{args.client_port}/game/{game_id}")
-
-                # Sidebar replay toggle appearing = game booted and is ticking.
-                toggle = page.locator('img[alt="replay"]')
-                toggle.wait_for(state="visible", timeout=120_000)
-                toggle.click()
-                panel = page.locator("replay-panel button").first
-                panel.wait_for(state="visible", timeout=10_000)
-                if speed_label:
-                    page.locator("replay-panel button", has_text=speed_label).click()
-                else:
-                    page.locator("replay-panel button").last.click()  # max speed
-                print("replay running...")
-
-                # Done when the win modal shows (or the turn feed runs dry).
-                t0 = time.time()
-                while time.time() - t0 < args.timeout:
-                    if page.locator("win-modal div.fixed").count() > 0:
-                        print(f"game over after {time.time() - t0:.0f}s")
-                        page.wait_for_timeout(4000)  # linger on the win screen
-                        break
-                    page.wait_for_timeout(2000)
-                else:
-                    print("timeout reached; saving what we have")
-
-                page.close()
-                video = page.video.path() if page.video else None
-                ctx.close()
-                browser.close()
-                if not video or not Path(video).exists():
-                    raise SystemExit("no video captured")
-                shutil.move(video, out)
-
-            print(f"wrote {out}")
-        finally:
-            for p in procs:
-                p.terminate()
+    max_duration = args.max_duration if args.max_duration > 0 else None
+    render_record(
+        record,
+        out,
+        speed=args.speed,
+        width=args.width,
+        height=args.height,
+        timeout=args.timeout,
+        api_port=args.api_port,
+        client_port=args.client_port,
+        headed=args.headed,
+        overlay=args.overlay,
+        reuse_services=args.reuse_services,
+        trim_gameplay=args.trim_gameplay,
+        max_duration=max_duration,
+    )
 
 
 if __name__ == "__main__":

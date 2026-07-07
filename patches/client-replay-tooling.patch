@@ -259,13 +259,15 @@ diff --git a/index.html b/index.html
 index f042ec74b..a14b6bfd3 100644
 --- a/index.html
 +++ b/index.html
-@@ -7,6 +7,37 @@
+@@ -7,6 +7,53 @@
        content="width=device-width, initial-scale=1.0, viewport-fit=cover"
      />
      <title data-i18n="main.title">OpenFront (ALPHA)</title>
 +    <script>
 +      (function () {
 +        try {
++          var embed = new URLSearchParams(location.search).get("embed") === "1";
++          if (embed) document.documentElement.classList.add("showcase-embed");
 +          var o = location.origin;
 +          if (!localStorage.getItem("apiHost"))
 +            localStorage.setItem("apiHost", o + "/archive");
@@ -278,22 +280,40 @@ index f042ec74b..a14b6bfd3 100644
 +          if (!localStorage.getItem("rlDebugOverlay"))
 +            localStorage.setItem("rlDebugOverlay", "1");
 +          window.addEventListener("DOMContentLoaded", function () {
-+            if (document.getElementById("agent-play-btn")) return;
-+            var a = document.createElement("a");
-+            a.id = "agent-play-btn";
-+            a.href = "/play";
-+            a.textContent = "Play vs Agent";
-+            a.style.cssText =
-+              "position:fixed;right:14px;bottom:14px;z-index:10010;" +
-+              "padding:10px 14px;border-radius:8px;" +
-+              "background:rgba(42,90,42,.92);color:#5adc5a;" +
-+              "font:600 13px system-ui,sans-serif;text-decoration:none;" +
-+              "border:1px solid #5adc5a;pointer-events:auto";
-+            document.body.appendChild(a);
++            if (!embed && !document.getElementById("agent-play-btn")) {
++              var a = document.createElement("a");
++              a.id = "agent-play-btn";
++              a.href = "/play";
++              a.textContent = "Play vs Agent";
++              a.style.cssText =
++                "position:fixed;right:14px;bottom:14px;z-index:10010;" +
++                "padding:10px 14px;border-radius:8px;" +
++                "background:rgba(42,90,42,.92);color:#5adc5a;" +
++                "font:600 13px system-ui,sans-serif;text-decoration:none;" +
++                "border:1px solid #5adc5a;pointer-events:auto";
++              document.body.appendChild(a);
++            }
++            if (embed) {
++              (function tryAutoplay() {
++                var toggle = document.querySelector('img[alt="replay"]');
++                if (!toggle) {
++                  setTimeout(tryAutoplay, 500);
++                  return;
++                }
++                toggle.click();
++                setTimeout(function () {
++                  var buttons = document.querySelectorAll("replay-panel button");
++                  if (buttons.length) buttons[buttons.length - 1].click();
++                }, 600);
++              })();
++            }
 +          });
 +        } catch (e) {}
 +      })();
 +    </script>
++    <style>
++      html.showcase-embed #agent-play-btn { display: none !important; }
++    </style>
      <link rel="manifest" href="<%- manifestHref %>" />
      <link rel="icon" type="image/svg+xml" href="<%- faviconHref %>" />
  
