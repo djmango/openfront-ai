@@ -52,6 +52,13 @@ def main() -> None:
     ap.add_argument("--ckpt", default="runs/ae_v31_d8c32/ae_v3.pt")
     ap.add_argument("--stage", type=int, default=3)
     ap.add_argument("--map", default=None, help="override map (default: first in stage pool)")
+    ap.add_argument(
+        "--nations",
+        default=None,
+        help='override nations count or "default"/"disabled"',
+    )
+    ap.add_argument("--bots", type=int, default=None, help="override bot count")
+    ap.add_argument("--difficulty", default=None, help="override difficulty")
     ap.add_argument("--record", default=None,
                     help="engine GameRecord JSON; default records-rl/<run>_s<stage>_<seed>.json")
     ap.add_argument("--max-steps", type=int, default=1200)
@@ -70,9 +77,14 @@ def main() -> None:
 
     st = STAGES[args.stage]
     map_name = args.map or st.maps[0]
+    nations = st.nations if args.nations is None else args.nations
+    if isinstance(nations, str) and nations not in ("default", "disabled"):
+        nations = int(nations)
+    bots = st.bots if args.bots is None else args.bots
+    difficulty = st.difficulty if args.difficulty is None else args.difficulty
     print(
-        f"stage {args.stage}: {map_name}, nations={st.nations}, "
-        f"{st.bots} bots, {st.difficulty}"
+        f"stage {args.stage}: {map_name}, nations={nations}, "
+        f"{bots} bots, {difficulty}"
     )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -87,8 +99,8 @@ def main() -> None:
     env = OpenFrontEnv()
     builder = ObsBuilder()
     obs = env.reset(
-        map_name, seed=args.seed, bots=st.bots, difficulty=st.difficulty,
-        nations=st.nations,
+        map_name, seed=args.seed, bots=bots, difficulty=difficulty,
+        nations=nations,
     )
     builder.start_game(env.terrain)
     rng = np.random.default_rng(0)

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -21,10 +22,11 @@ from rl.showcase_util import (
     CLIPS_DIR,
     ensure_ae,
     ensure_policy,
-    hero_clip_urls,
+    featured_showcase_entry,
     hf_policy_revision,
+    map_seed,
     policy_meta,
-    showcase_seeds,
+    showcase_maps,
     utc_now,
     write_json,
 )
@@ -37,8 +39,14 @@ AE_PATH = Path(os.environ.get("AE_CKPT", "runs/ae_v31_d8c32/ae_v3.pt"))
 RUN_NAME = os.environ.get("RUN_NAME", "ppo_v4")
 STAGE = int(os.environ.get("STAGE", "4"))
 MAP = os.environ.get("MAP") or None
-SHOWCASE_WATCH_STAGE = int(os.environ.get("SHOWCASE_WATCH_STAGE", "0"))
-REFRESH_HOURS = float(os.environ.get("REFRESH_HOURS", "6"))
+SHOWCASE_WATCH_STAGE = int(
+    os.environ.get("SHOWCASE_WATCH_STAGE", str(STAGE)),
+)
+SHOWCASE_NATIONS = os.environ.get("SHOWCASE_NATIONS", "disabled")
+SHOWCASE_BOTS = int(os.environ.get("SHOWCASE_BOTS", "30"))
+SHOWCASE_DIFFICULTY = os.environ.get("SHOWCASE_DIFFICULTY", "Easy")
+LEGACY_SHOWCASE_CLIPS = {"Pangaea": "showcase0"}
+REFRESH_HOURS = float(os.environ.get("REFRESH_HOURS", "1"))
 CLIP_MAX_SEC = int(os.environ.get("CLIP_MAX_SEC", "90"))
 CLIP_WIDTH = int(os.environ.get("CLIP_WIDTH", "1920"))
 CLIP_HEIGHT = int(os.environ.get("CLIP_HEIGHT", "1080"))
@@ -68,21 +76,30 @@ def policy_changed(run_name: str) -> bool:
 
 
 def needs_showcase(state: dict, run_name: str) -> bool:
-    if not state.get("game_id"):
-        return True
     if policy_changed(run_name):
         return True
-    urls = hero_clip_urls(state)
-    if not urls:
+    expected = {map_seed(m) for m in showcase_maps()}
+    have = {e.get("seed") for e in state.get("maps") or [] if e.get("seed")}
+    if expected - have:
         return True
-    for url in urls:
-        name = url.rsplit("/", 1)[-1]
-        if not (CLIPS_DIR / name).is_file():
+    for map_name in showcase_maps():
+        seed = map_seed(map_name)
+        if not (CLIPS_DIR / f"{seed}.webm").is_file():
+            return True
+        record = RECORDS_DIR / f"{RUN_NAME}_s{SHOWCASE_WATCH_STAGE}_{seed}.json"
+        if not record.is_file():
             return True
     return False
 
 
-def run_watch(policy: Path, ae: Path, seed: str, record: Path, stage: int) -> None:
+def run_watch(
+    policy: Path,
+    ae: Path,
+    seed: str,
+    record: Path,
+    stage: int,
+    map_name: str | None = None,
+) -> None:
     cmd = [
         sys.executable,
         "-m",
@@ -98,8 +115,19 @@ def run_watch(policy: Path, ae: Path, seed: str, record: Path, stage: int) -> No
         "--record",
         str(record),
     ]
-    if MAP:
-        cmd.extend(["--map", MAP])
+    chosen = map_name or MAP
+    if chosen:
+        cmd.extend(["--map", chosen])
+    cmd.extend(
+        [
+            "--nations",
+            str(SHOWCASE_NATIONS),
+            "--bots",
+            str(SHOWCASE_BOTS),
+            "--difficulty",
+            SHOWCASE_DIFFICULTY,
+        ]
+    )
     subprocess.run(cmd, cwd=REPO, check=True)
 
 
@@ -125,25 +153,44 @@ def render_client_clip(record: Path, out: Path) -> None:
     subprocess.run(cmd, cwd=REPO, check=True)
 
 
-def generate_clip(policy: Path, ae: Path, seed: str) -> dict:
+def generate_clip(policy: Path, ae: Path, map_name: str) -> dict:
+    seed = map_seed(map_name)
     base = f"{RUN_NAME}_s{SHOWCASE_WATCH_STAGE}_{seed}"
     record = RECORDS_DIR / f"{base}.json"
     clip = CLIPS_DIR / f"{seed}.webm"
     if not record.exists():
-        log(f"clip {seed}: rl.watch stage {SHOWCASE_WATCH_STAGE} -> {record.name}")
-        run_watch(policy, ae, seed, record, SHOWCASE_WATCH_STAGE)
-    else:
-        log(f"clip {seed}: reusing {record.name}")
+        legacy_seed = LEGACY_SHOWCASE_CLIPS.get(map_name)
+        if legacy_seed:
+            legacy = RECORDS_DIR / f"{RUN_NAME}_s{STAGE}_{legacy_seed}.json"
+            if legacy.is_file():
+                shutil.copy2(legacy, record)
+                log(f"clip {map_name}: migrated legacy {legacy.name}")
     if not clip.exists():
-        log(f"clip {seed}: render client video -> {clip.name}")
+        legacy_seed = LEGACY_SHOWCASE_CLIPS.get(map_name)
+        if legacy_seed:
+            legacy_clip = CLIPS_DIR / f"{legacy_seed}.webm"
+            if legacy_clip.is_file():
+                shutil.copy2(legacy_clip, clip)
+                log(f"clip {map_name}: migrated legacy {legacy_clip.name}")
+    if not record.exists():
+        log(
+            f"clip {map_name}: rl.watch stage {SHOWCASE_WATCH_STAGE} "
+            f"-> {record.name}"
+        )
+        run_watch(policy, ae, seed, record, SHOWCASE_WATCH_STAGE, map_name)
+    else:
+        log(f"clip {map_name}: reusing {record.name}")
+    if not clip.exists():
+        log(f"clip {map_name}: render client video -> {clip.name}")
         render_client_clip(record, clip)
     else:
-        log(f"clip {seed}: reusing {clip.name}")
+        log(f"clip {map_name}: reusing {clip.name}")
     meta = json.loads(record.read_text())
     return {
         "seed": seed,
         "game_id": meta["info"]["gameID"],
-        "map": meta["info"].get("map") or MAP,
+        "map": meta["info"].get("map") or map_name,
+        "record": str(record),
         "clip": str(clip),
         "url": f"/archive/clips/{clip.name}",
     }
@@ -154,27 +201,30 @@ def generate_showcase(policy: Path, ae: Path) -> dict:
     CLIPS_DIR.mkdir(parents=True, exist_ok=True)
 
     clip_infos: list[dict] = []
-    for seed in showcase_seeds():
+    for map_name in showcase_maps():
         try:
-            clip_infos.append(generate_clip(policy, ae, seed))
+            clip_infos.append(generate_clip(policy, ae, map_name))
         except Exception as exc:
-            log(f"clip {seed} failed: {exc}")
+            log(f"clip {map_name} failed: {exc}")
 
     if not clip_infos:
         raise RuntimeError("no showcase clips generated")
 
-    primary = clip_infos[0]
     state = {
-        "game_id": primary["game_id"],
+        "maps": clip_infos,
         "run_name": RUN_NAME,
         "stage": STAGE,
-        "map": primary.get("map"),
-        "record": str(RECORDS_DIR / f"{RUN_NAME}_s{STAGE}_{primary['seed']}.json"),
-        "hero_clips": [c["url"] for c in clip_infos],
-        "clips": clip_infos,
+        "watch_stage": SHOWCASE_WATCH_STAGE,
+        "rotate_hours": 1,
         "generated_at": utc_now(),
         **policy_meta(policy),
     }
+    featured = featured_showcase_entry(state)
+    if featured:
+        state["game_id"] = featured["game_id"]
+        state["map"] = featured.get("map")
+        state["record"] = featured.get("record")
+        state["hero_clips"] = [featured["url"]]
     write_json(STATE_PATH, state)
     from rl.showcase_util import REVISION_PATH
 
@@ -191,20 +241,25 @@ def main() -> None:
     ae = ensure_ae(AE_PATH)
 
     while True:
+        sleep_hours = REFRESH_HOURS
         try:
             if needs_showcase(load_state(), RUN_NAME):
                 policy = ensure_policy(RUN_NAME)
                 generate_showcase(policy, ae)
+                if needs_showcase(load_state(), RUN_NAME):
+                    sleep_hours = min(0.25, REFRESH_HOURS)
+                    log(f"showcase incomplete; retry in {sleep_hours}h")
             else:
-                log(f"policy unchanged ({RUN_NAME}); next check in {REFRESH_HOURS}h")
+                log(f"showcase ready ({RUN_NAME}); next check in {REFRESH_HOURS}h")
         except Exception as exc:
             log(f"showcase generation failed: {exc}")
             write_json(
                 STATE_PATH,
                 {**load_state(), "error": str(exc), "failed_at": utc_now()},
             )
+            sleep_hours = min(0.25, REFRESH_HOURS)
 
-        time.sleep(max(REFRESH_HOURS, 0.25) * 3600)
+        time.sleep(max(sleep_hours, 0.25) * 3600)
 
 
 if __name__ == "__main__":
