@@ -106,6 +106,8 @@ def main() -> None:
     builder._slot_lut(obs["entities"]["players"])
 
     debug_log: list[dict] = []
+    episode_outcome = "death"
+    end_tick = 0
 
     for step in range(args.max_steps):
         raw = builder.prepare(obs)
@@ -139,8 +141,18 @@ def main() -> None:
                 flush=True,
             )
         if not obs["alive"] or obs["winner"] is not None:
+            end_tick = int(obs["tick"])
+            w = obs.get("winner")
+            won = (
+                w is not None
+                and isinstance(w, list)
+                and len(w) > 1
+                and w[1] == "AGENTRL1"
+            )
+            episode_outcome = "win" if won else "death"
             print(
-                f"episode over at tick {obs['tick']}: alive={obs['alive']}, winner={obs['winner']}",
+                f"episode over at tick {end_tick}: alive={obs['alive']}, "
+                f"winner={w}, outcome={episode_outcome}",
                 flush=True,
             )
             break
@@ -150,7 +162,16 @@ def main() -> None:
         print(f"game record: {info['saved']} (gameID {info['gameID']}, {info['turns']} turns)")
         if args.debug:
             sidecar = Path(args.record).with_suffix(".debug.json")
-            sidecar.write_text(json.dumps({"actions": ACTIONS, "log": debug_log}))
+            sidecar.write_text(
+                json.dumps(
+                    {
+                        "actions": ACTIONS,
+                        "log": debug_log,
+                        "outcome": episode_outcome,
+                        "end_tick": end_tick,
+                    }
+                )
+            )
             print(f"debug sidecar: {sidecar} ({len(debug_log)} decisions)")
     env.close()
 
