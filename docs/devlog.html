@@ -53,9 +53,9 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 7th, 2026, midday</h2>
-  <p><code>ppo_v5</code> on rl4: stages 0-4 in ~5.5h off the BC warm start, then grinding stage 4
-  (roll-win up to 0.17, score 0.84) with periodic CUDA OOM restarts; relaunching as <b>v5.1</b> with
-  structure-value rewards (<a href="#v51-bc2fix">below</a>).
+  <p><code>ppo_v5</code> on rl4, running <b>v5.1</b>: structure-value rewards, per-stage win
+  gates (0.9 at stage 0 tapering to 0.3), curriculum reset to stage 0 with weights kept - it
+  must re-earn every stage under dominance gates (<a href="#v51-bc2fix">below</a>).
   <code>bc_v4</code> on bc2 ~step 22k (holdout best 0.4525); feed decay <b>root-caused and fixed</b>
   (<a href="#v51-bc2fix">mmap churn</a>). <code>bc_seq_v4</code> on bc3 ~step 5k (holdout 0.318).</p>
   <p class="d" style="margin:.75rem 0 0">375k bot + 420k human snapshots · d8c32 encoder · 5.9M-param policy ·
@@ -590,6 +590,16 @@ doesn't). Two changes:</p>
     into persistent per-thread staging buffers (<code>np.stack(out=...)</code>), keyed by
     array name+shape and grown to the largest batch seen - the pages fault once and stay
     warm, so there is nothing left to decay.</li>
+  <li><b>Per-stage win gates + curriculum re-grounding (afternoon).</b> Stage-4 telemetry
+    showed the safe-second signature reforming under v5.1: roll-score climbed 0.29 &rarr;
+    0.84 and saturated while roll-win stalled at 0.17 - the agent reliably places 2nd but
+    doesn't close out games. Diagnosis: the flat 0.5 gate let the BC-warm-started run clear
+    stages 0-3 at 21/40 wins each, so it never mastered the close-out kill where wins are
+    cheap (1v1 Onion). The gate is now per-stage - 0.9 / 0.8 / 0.75 / 0.65 / 0.55 for
+    stages 0-4, tapering to 0.3 by stage 10 where winning is genuinely hard - and
+    <code>ppo_v5</code>'s checkpoint was reset to stage 0 (weights and optimizer kept,
+    win window cleared): it must now re-earn the curriculum under dominance gates, with
+    rehearsal keeping the old maps in the mix.</li>
 </ul>
 
 <h3 id="reward-mdp">Reward MDP reference (Jul 7)</h3>
