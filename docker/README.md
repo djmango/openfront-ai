@@ -40,4 +40,4 @@ docker run --rm -p 8086:8086 -v openfront-eval-data:/data openfront-eval
 | `PLAY_START_DELAY` | `90` | Lobby countdown (seconds) |
 | `STAGE` | `4` | Curriculum stage for replay generation |
 
-Homelab: [homelab README](https://github.com/djmango/homelab), `agent.skg.gg`.
+Homelab: [homelab README](https://github.com/djmango/homelab), `openfrontai.skg.gg`.
