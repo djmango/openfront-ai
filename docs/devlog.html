@@ -357,6 +357,32 @@ it appears as annotated reference lines from the devlog record.</p>
     comparison) needs the full 60k-step run.</li>
 </ul>
 
+<h3 id="native">Escaping the GIL: Rust hot paths + free-threaded Python (Jul 7 early am)</h3>
+<p>Every performance fix this project has shipped was some flavor of "get work off the single
+Python thread" (VecEnv processes, GPU featurization, pinned prefetch, the v4.1 async collector).
+Two structural moves land the endgame:</p>
+<ul>
+  <li><b>rust/ofrs (PyO3 + rayon, <code>9f262a6</code>).</b> The two stable, allocation-heavy
+    loops are now Rust with the GIL fully released: cache-bc frame decode (zstd + split) and the
+    pad+stack collate that runs per PPO minibatch (2.6x single-threaded, and it no longer blocks
+    other threads at all - which is what the prefetch thread actually needed).
+    <code>rl/native.py</code> keeps numpy fallbacks so nothing requires the toolchain; pod
+    scripts build the wheel opportunistically at boot. Formats are frozen (CACHE_FORMAT=1,
+    obs v4), which is what makes these safe to freeze in a compiled language.</li>
+  <li><b>Free-threaded CPython works, today, on our stack.</b> torch dropped 3.13t but ships
+    cp314t wheels (2.10+, CPU/CUDA/macOS); numpy and zstandard have cp314t wheels; orjson
+    doesn't (we already fall back to stdlib json). Verified locally on 3.14.5t: torch 2.11
+    imports with the GIL genuinely off, rl.bc trains, and the BC sampler scales
+    322 &rarr; 1104 samples/s at 4 threads (vs 356 &rarr; 598 with the GIL - 1.7x from thread
+    parallelism the GIL was eating). Two caveats from the bench: threads must own their
+    samplers (shared hot objects ping refcounts across cores), and 8 threads regressed on the
+    laptop (memory bandwidth), so pods should tune worker count.</li>
+  <li><b>Migration stance:</b> pods stay on the image's GIL python while runs are hot; the
+    RunPod images pin torch to the driver. Next fresh pod generation moves to 3.14t
+    (cu130 cp314t wheels exist), at which point thread-based feeding replaces the
+    DataLoader-process workaround and the PPO collector/updater threads stop time-slicing.</li>
+</ul>
+
 <h3 id="tooling">Visualization &amp; tooling</h3>
 <p>Determinism is the superpower: the bridge mirrors the client's <code>createGameRunner()</code> init
 exactly (same PseudoRandom ID stream, no spawn timer), so agent games saved as GameRecords replay
