@@ -76,11 +76,24 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <code>ae_v3.pt</code> until the v3.1 winner is wired into <code>rl/obs.py</code>.</p>
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
-  <tr><td><code>ppo_v3</code></td><td>active</td>
+  <tr><td><code>ppo_v4</code></td><td>active (v4.1 code)</td>
+    <td>The full v4 stack from scratch: d8c32 encoder at 1/8, learned spawns, local owner crop,
+    eval loop. Stages 0→3 in ~2h, stage 4 by ~3.6h despite two restarts (OOM at minibatch 128,
+    then the throughput redeploys). Running the v4.1 async collector since Jul 6 ~11pm.
+    Checkpoint on HF as <code>ppo_v4/policy.pt</code>.</td></tr>
+  <tr><td><code>bc_v4</code></td><td>active</td>
+    <td>Feedforward BC on the full 291-game cache-bc dataset (265 train / 26 holdout) with spawn
+    supervision. ~56 ex/s GPU-bound at batch 24 x accum 4. Uploads <code>bc.pt</code> +
+    <code>bc_best.pt</code> to HF.</td></tr>
+  <tr><td><code>bc_seq_v4</code></td><td>active</td>
+    <td>The temporal transformer experiment (--seq 8), judged properly this time: same cache-bc
+    data as bc_v4, A100-80GB pod (bc3), batch 8 x accum 4 effective 32. Pod bootstraps from the
+    prebuilt cache-bc tars on HF (no raw download, no replay, no prefeaturize).</td></tr>
+  <tr><td><code>ppo_v3</code></td><td><b>retired</b> Jul 6 night</td>
     <td>Curriculum v2 from scratch. Stage 4 (30 bots, Pangaea/Caucasus/BlackSea) by Jul 6
-    evening, rolling win 0.6-0.7, roll-score 0.93. Now on 96 envs (2x throughput; the env
-    count, not the GPU, was the limiter). First local eval: 2W/2L over four stage-4 games,
-    wins by outright conquest at ticks ~10-15k. The run to bet on.</td></tr>
+    evening, rolling win 0.6-0.7, roll-score 0.93. Local eval: 2W/2L over four stage-4 games,
+    wins by outright conquest at ticks ~10-15k. Pod terminated after final checkpoint (update
+    632) uploaded to HF; its TB event files died with the pod.</td></tr>
   <tr><td><code>ppo_v2c</code></td><td><b>retired</b> Jul 6</td>
     <td>Same curriculum v2, warm-started from v2b weights. Stalled at stage 3 (win rate
     0.07-0.17, entropy stuck near 8) while from-scratch v3 sailed past to stage 4. Final
@@ -337,10 +350,11 @@ it appears as annotated reference lines from the devlog record.</p>
   <li><b>Throughput:</b> the per-update tps window decays as the curriculum moves to bigger maps
     (Node engine tick cost), so compare like-for-like: at stage 3-4 the fp16+prefetch fix took
     sustained tps from ~590 to ~2100, and v4.1 hides the rollout phase entirely.</li>
-  <li><b>BC:</b> the cache-fed run consumes samples ~16x faster than the starved pilot
-    (34 → ~550 ex/s effective with batch 24 x accum 4); loss/accuracy now measure the model,
-    not the data pipeline. Loss is not yet trending down - that judgment (and the temporal
-    transformer comparison) needs the full 60k-step run.</li>
+  <li><b>BC:</b> the cache killed the data bottleneck (~1.5ms/sample vs 15-20ms), which moved the
+    limiter to the GPU: bc_v4 runs ~56 ex/s at batch 24 x accum 4 on the 5090 (vs the pilot's 34 ex/s
+    where the GPU sat idle waiting on gzip+JSON). Loss/accuracy now measure the model, not the
+    pipeline. Loss is not yet trending down - that judgment (and the temporal transformer
+    comparison) needs the full 60k-step run.</li>
 </ul>
 
 <h3 id="tooling">Visualization &amp; tooling</h3>
