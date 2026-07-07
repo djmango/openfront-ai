@@ -232,6 +232,8 @@ LANDING_HTML = """<!doctype html>
     <p class="meta">policy: %%RUN_NAME%%</p>
 
     <p class="links">
+      <a href="https://skg.gg" target="_blank" rel="noopener">skg.gg</a>
+      <span class="sep">·</span>
       <a href="https://skg.gg/pages/openfront-devlog/" target="_blank" rel="noopener">Devlog</a>
       <span class="sep">·</span>
       <a href="https://github.com/djmango/openfront-ai" target="_blank" rel="noopener">GitHub</a>
