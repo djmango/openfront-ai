@@ -27,7 +27,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from collections import deque
 
-from rl.curriculum import STAGES, WIN_AT, WINDOW
+from rl.curriculum import STAGES, WINDOW
 from rl.obs import ACTIONS, collate, encode_grids, load_ae
 from rl.policy import Policy
 from rl.vec import VecEnv
@@ -328,7 +328,7 @@ def main() -> None:
                         recent_wins.append(float(info["won"]))
                     advance = (
                         len(recent_wins) == WINDOW
-                        and np.mean(recent_wins) > WIN_AT
+                        and np.mean(recent_wins) > STAGES[shared["stage"]].win_at
                         and shared["stage"] < len(STAGES) - 1
                     )
                     if advance:

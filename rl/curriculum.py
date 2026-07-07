@@ -31,8 +31,10 @@ Curriculum (v2):
   Rehearsal episodes still train the policy but do not count toward
   advancement stats.
 - Advancement is win-gated: the agent must WIN (engine win, not just
-  survive) more often than not - rolling win rate over the last WINDOW
-  on-stage episodes must exceed WIN_AT before moving on.
+  survive) - rolling win rate over the last WINDOW on-stage episodes must
+  exceed the stage's win_at before moving on. v5.1: gates are per-stage,
+  demanding dominance (0.9) where wins are cheap and tapering as they get
+  genuinely hard.
 """
 
 import math
@@ -80,7 +82,6 @@ STRUCT_VALUE = {
 }
 
 WINDOW = 40
-WIN_AT = 0.5  # must win more often than not to advance
 REHEARSAL_P = 0.25  # fraction of episodes replaying earlier maps, harder
 
 
@@ -91,6 +92,12 @@ class Stage:
     difficulty: str
     nations: int | str = "default"  # exact opponent count, or the map's default
     decision_ticks: int = 10  # engine ticks per policy decision
+    # v5.1: per-stage advancement gate. A flat 0.5 let the BC-warm-started
+    # v5 clear stages 0-3 at 21/40 wins and arrive at stage 4 without ever
+    # mastering the close-out kill; it then saturated at 2nd place (score
+    # 0.84, wins 0.17). Early stages now demand dominance where wins are
+    # cheap; later stages taper back as winning gets genuinely hard.
+    win_at: float = 0.5
 
 
 # Map pool (all in the AE training set) with featurized grid sizes (H//8 x W//8):
@@ -104,17 +111,17 @@ ALL_MAPS = (
 # reachable and the win signal is dense; later stages return to the map's
 # full nation roster plus tribe bots.
 STAGES = [
-    Stage(("Onion",), 0, "Easy", nations=1, decision_ticks=15),
-    Stage(("Onion",), 0, "Easy", nations=3, decision_ticks=15),
-    Stage(("Onion", "Pangaea"), 5, "Easy", nations=3, decision_ticks=15),
-    Stage(("Pangaea", "Caucasus"), 10, "Easy", nations=6, decision_ticks=15),
-    Stage(("Pangaea", "Caucasus", "BlackSea"), 30, "Easy"),
+    Stage(("Onion",), 0, "Easy", nations=1, decision_ticks=15, win_at=0.9),
+    Stage(("Onion",), 0, "Easy", nations=3, decision_ticks=15, win_at=0.8),
+    Stage(("Onion", "Pangaea"), 5, "Easy", nations=3, decision_ticks=15, win_at=0.75),
+    Stage(("Pangaea", "Caucasus"), 10, "Easy", nations=6, decision_ticks=15, win_at=0.65),
+    Stage(("Pangaea", "Caucasus", "BlackSea"), 30, "Easy", win_at=0.55),
     Stage(("BlackSea", "BetweenTwoSeas", "Caucasus"), 30, "Medium"),
     Stage(("World", "Asia", "BlackSea"), 50, "Medium"),
-    Stage(("World", "Asia", "BetweenTwoSeas", "Caucasus"), 80, "Medium"),
-    Stage(ALL_MAPS, 80, "Hard"),
-    Stage(ALL_MAPS, 120, "Hard"),
-    Stage(ALL_MAPS, 150, "Impossible"),
+    Stage(("World", "Asia", "BetweenTwoSeas", "Caucasus"), 80, "Medium", win_at=0.45),
+    Stage(ALL_MAPS, 80, "Hard", win_at=0.4),
+    Stage(ALL_MAPS, 120, "Hard", win_at=0.35),
+    Stage(ALL_MAPS, 150, "Impossible", win_at=0.3),  # terminal; gate moot
 ]
 
 # Largest featurized grid across curriculum maps (Asia 2000x1200 -> 150x250
