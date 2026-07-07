@@ -22,6 +22,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=py-deps /build/.venv /app/.venv
+COPY --from=py-deps /usr/local/bin/python3.12 /usr/local/bin/python3.12
+COPY --from=py-deps /usr/local/lib/python3.12 /usr/local/lib/python3.12
+COPY --from=py-deps /usr/local/lib/libpython3.12.so.1.0 /usr/local/lib/
+RUN ln -sf /usr/local/bin/python3.12 /usr/local/bin/python3
 COPY --from=openfront-deps /build/openfront/node_modules /app/openfront/node_modules
 
 COPY . /app
