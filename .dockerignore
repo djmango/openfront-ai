@@ -1,5 +1,4 @@
 .git
-openfront/.git
 **/__pycache__
 **/.pytest_cache
 **/.mypy_cache
@@ -15,3 +14,6 @@ hf-human/
 *.gif
 .env
 .venv
+
+# Clone + patch openfront inside the image; keep submodule out of build context.
+openfront/
