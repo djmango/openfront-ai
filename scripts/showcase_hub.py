@@ -37,8 +37,9 @@ ADMIN_HEADER = "x-admin-bot-key"
 PLAY_MAP = os.environ.get("PLAY_MAP", "Onion")
 PLAY_BOTS = int(os.environ.get("PLAY_BOTS", "10"))
 PLAY_NATIONS = int(os.environ.get("PLAY_NATIONS", "1"))
-PLAY_START_DELAY = int(os.environ.get("PLAY_START_DELAY", "90"))
+PLAY_START_DELAY = int(os.environ.get("PLAY_START_DELAY", "30"))
 DEBUG_PORT = int(os.environ.get("PLAY_DEBUG_PORT", "8989"))
+WORKER_BASE_PORT = int(os.environ.get("WORKER_BASE_PORT", "3001"))
 
 _active_proc: subprocess.Popen | None = None
 _active_game: str | None = None
@@ -96,7 +97,40 @@ def play_config() -> dict:
 def create_play_lobby() -> dict:
     base = f"http://{CLIENT_HOST}"
     info = http_json("POST", f"{base}/api/adminbot/create_game", play_config())
-    log(f"play lobby {info['gameID']} ({PLAY_MAP}, {PLAY_NATIONS} nations, {PLAY_BOTS} bots)")
+    log(
+        f"play lobby {info['gameID']} ({PLAY_MAP}, {PLAY_NATIONS} nations, "
+        f"{PLAY_BOTS} bots, worker {info.get('workerIndex', '?')})"
+    )
+    return info
+
+
+def worker_path_for(game_id: str) -> str:
+    hub = load_hub_state()
+    if hub.get("game_id") == game_id and hub.get("worker_path"):
+        return str(hub["worker_path"])
+    num_workers = int(os.environ.get("NUM_WORKERS", "2"))
+    h = 0
+    for ch in game_id:
+        h = ((h << 5) - h + ord(ch)) & 0xFFFFFFFF
+    if h & 0x80000000:
+        h = -((~h + 1) & 0xFFFFFFFF)
+    return f"w{h % num_workers}"
+
+
+def play_redirect(game_id: str, worker_path: str | None = None) -> str:
+    wp = worker_path or worker_path_for(game_id)
+    return f"/{wp}/game/{game_id}"
+
+
+def start_play_lobby(game_id: str, worker_index: int) -> dict:
+    """Arm the lobby countdown via the admin bot on the owning game worker."""
+    base = f"http://127.0.0.1:{WORKER_BASE_PORT + worker_index}"
+    info = http_json(
+        "POST",
+        f"{base}/api/adminbot/game/{game_id}/intent",
+        {"type": "toggle_game_start_timer"},
+    )
+    log(f"countdown armed for {game_id} (delay {PLAY_START_DELAY}s)")
     return info
 
 
@@ -324,44 +358,53 @@ class HubHandler(BaseHTTPRequestHandler):
 
         if path == "/play":
             global _active_proc, _active_game
+            redirect = None
             with _lock:
                 if _active_game and _active_proc and _active_proc.poll() is None:
                     log(f"reusing active lobby {_active_game}")
-                    self.send_response(302)
-                    self.send_header("Location", f"/game/{_active_game}")
-                    self.end_headers()
-                    return
-
-                if self.policy_path is None or self.ae_path is None:
+                    redirect = play_redirect(_active_game)
+                elif self.policy_path is None or self.ae_path is None:
                     self._send(503, b'{"error":"policy not ready"}')
                     return
+                else:
+                    try:
+                        info = create_play_lobby()
+                    except Exception as exc:
+                        log(f"lobby create failed: {exc}")
+                        self._send(500, json.dumps({"error": str(exc)}).encode())
+                        return
 
-                try:
-                    info = create_play_lobby()
-                except Exception as exc:
-                    log(f"lobby create failed: {exc}")
-                    self._send(500, json.dumps({"error": str(exc)}).encode())
-                    return
+                    game_id = info["gameID"]
+                    worker_index = int(info["workerIndex"])
+                    worker_path = info.get("workerPath") or f"w{worker_index}"
+                    _active_game = game_id
+                    _active_proc = launch_agent(game_id, self.policy_path, self.ae_path)
 
-                game_id = info["gameID"]
-                _active_game = game_id
-                _active_proc = launch_agent(game_id, self.policy_path, self.ae_path)
-
-                write_json(
-                    HUB_STATE,
-                    {
+                    hub_payload = {
                         "game_id": game_id,
                         "status": "lobby",
                         "config": play_config(),
                         "run_name": RUN_NAME,
                         "started_at": utc_now(),
-                    },
-                )
-                log(f"agent joining {game_id}, you have {PLAY_START_DELAY}s after Start")
+                        "worker_index": worker_index,
+                        "worker_path": worker_path,
+                    }
+                    try:
+                        started = start_play_lobby(game_id, worker_index)
+                        hub_payload["status"] = "countdown"
+                        hub_payload["starts_at"] = started.get("startsAt")
+                    except Exception as exc:
+                        log(f"lobby start failed: {exc}")
+                        hub_payload["start_error"] = str(exc)
 
-            self.send_response(302)
-            self.send_header("Location", f"/game/{game_id}")
-            self.end_headers()
+                    write_json(HUB_STATE, hub_payload)
+                    redirect = play_redirect(game_id, worker_path)
+                    log(f"agent joining {game_id}; redirect -> {redirect}")
+
+            if redirect:
+                self.send_response(302)
+                self.send_header("Location", redirect)
+                self.end_headers()
             return
 
         self._send(404, b'{"error":"unknown route"}')
