@@ -94,7 +94,7 @@ def decode_tiles(obs: dict, width: int, height: int) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--policy", required=True)
-    ap.add_argument("--ckpt", default="runs/ae_v3/ae_v3.pt")
+    ap.add_argument("--ckpt", default="runs/ae_v31_d8c32/ae_v3.pt")
     ap.add_argument("--game", required=True, help="lobby ID from the browser")
     ap.add_argument("--host", default="localhost:9000")
     ap.add_argument("--debug-port", type=int, default=8988,
@@ -126,7 +126,6 @@ def main() -> None:
     builder = ObsBuilder()
     translator: IntentTranslator | None = None
     rng = np.random.default_rng()
-    spawn_tile: int | None = None
     steps = 0
 
     debug_log: list[dict] = []
@@ -142,8 +141,9 @@ def main() -> None:
             continue
         if event == "start":
             from rl.curriculum import GH_MAX, GW_MAX
+            from rl.obs import REGION
 
-            gh, gw = msg["height"] // 16, msg["width"] // 16
+            gh, gw = msg["height"] // REGION, msg["width"] // REGION
             if gh > GH_MAX or gw > GW_MAX:
                 print(
                     f"note: map grid {gh}x{gw} exceeds the training max "
@@ -157,10 +157,6 @@ def main() -> None:
             env = _EnvShim(msg["width"], msg["height"], terrain)
             builder.start_game(terrain)
             translator = IntentTranslator(env, builder)  # type: ignore[arg-type]
-            land = (terrain >> 7) & 1
-            ys, xs = np.nonzero(land)
-            i = rng.integers(len(ys))
-            spawn_tile = int(ys[i]) * msg["width"] + int(xs[i])
             print(f"game started: {msg['width']}x{msg['height']}, spawning")
             continue
         if event == "end":
@@ -171,7 +167,21 @@ def main() -> None:
 
         obs = decode_tiles(msg, env.width, env.height)
         if obs["spawnPhase"]:
-            intents = [{"type": "spawn", "tile": spawn_tile}] if spawn_tile else []
+            # The policy places its own spawn (spawn action + tile head);
+            # random fallback keeps live games moving if the snap fails.
+            raw = builder.prepare(obs)
+            o = encode_grids(ae, [raw], device)[0]
+            ot = {k: torch.from_numpy(o[k])[None] for k in OBS_KEYS}
+            with torch.no_grad():
+                choices, _, _ = policy.act(ot)
+            intents = translator.translate(choices[0], obs)
+            if not intents:
+                land = (env.terrain >> 7) & 1
+                ys, xs = np.nonzero(land)
+                i = rng.integers(len(ys))
+                intents = [
+                    {"type": "spawn", "tile": int(ys[i]) * env.width + int(xs[i])}
+                ]
         elif not obs["alive"]:
             intents = []
         else:

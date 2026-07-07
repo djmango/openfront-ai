@@ -36,7 +36,7 @@ from rl.policy import MASKED_NEG, Policy, _global_to_local
 
 CHOICE_KEYS = ["action", "player_slot", "tile_region", "build_type", "nuke_type", "quantity"]
 OBS_KEYS = [
-    "grid", "grid_valid", "players", "pmask", "scalars",
+    "grid", "grid_valid", "legal_tile", "local", "players", "pmask", "scalars",
     "legal_actions", "legal_ptarget", "legal_build", "legal_nuke",
 ]
 
@@ -169,13 +169,19 @@ def seq_batch(sampler: BCSampler, batch: int, seq: int) -> list[dict]:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", nargs="+", default=["data-human"])
-    ap.add_argument("--ae", default="runs/ae_v3/ae_v3.pt")
+    ap.add_argument("--ae", default="runs/ae_v31_d8c32/ae_v3.pt")
     ap.add_argument("--name", default="bc_v1")
     ap.add_argument("--steps", type=int, default=20000)
     ap.add_argument("--batch", type=int, default=64)
+    ap.add_argument("--accum", type=int, default=1,
+                    help="gradient accumulation: effective batch = batch * accum "
+                         "(seq runs OOM above micro-batch ~8 on 24GB cards)")
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--seq", type=int, default=0)
     ap.add_argument("--noop-frac", type=float, default=0.15)
+    ap.add_argument("--spawn-frac", type=float, default=0.03,
+                    help="fraction of draws that are spawn-placement samples "
+                         "(needs formatVersion-2 sidecars)")
     ap.add_argument("--holdout-every", type=int, default=10)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--eval-every", type=int, default=500)
@@ -187,12 +193,12 @@ def main() -> None:
     roots = [Path(d) for d in args.data]
     sampler = BCSampler(
         roots, holdout_every=args.holdout_every, holdout=False,
-        noop_frac=args.noop_frac,
+        noop_frac=args.noop_frac, spawn_frac=args.spawn_frac,
     )
     try:
         eval_sampler = BCSampler(
             roots, holdout_every=args.holdout_every, holdout=True,
-            noop_frac=args.noop_frac, seed=1,
+            noop_frac=args.noop_frac, spawn_frac=args.spawn_frac, seed=1,
         )
     except FileNotFoundError:
         eval_sampler = None  # tiny smoke datasets may have no holdout games
@@ -204,12 +210,14 @@ def main() -> None:
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.steps)
     start_step = 0
+    best_metric = -1.0
     if args.resume and Path(args.resume).exists():
         ck = torch.load(args.resume, map_location=device, weights_only=False)
         model.load_state_dict(ck["model_state_dict"])
         opt.load_state_dict(ck["opt_state_dict"])
         sched.load_state_dict(ck["sched_state_dict"])
         start_step = ck["step"]
+        best_metric = ck.get("best_metric", -1.0)
         print(f"resumed {args.resume} at step {start_step}")
 
     n_params = sum(p.numel() for p in model.parameters())
@@ -229,28 +237,34 @@ def main() -> None:
 
     t0 = time.time()
     for step in range(start_step + 1, args.steps + 1):
-        raws = pending.pop(0).result()
-        pending.append(pool.submit(draw, sampler))
-        enc = encode_batch(ae, raws, device)
-        if args.seq:
-            # collate keeps step-major flattening; choice/cond of last steps.
-            o, choice, cond = collate(enc, device)
-            last = torch.arange(args.seq - 1, len(enc), args.seq, device=device)
-            choice = {k: v[last] for k, v in choice.items()}
-            cond = cond[last]
-        else:
-            o, choice, cond = collate(enc, device)
-
-        out = model.forward_bc(o, cond)
-        loss, parts = bc_loss(out, o if not args.seq else _last_o(o, args.seq, device), choice)
+        # Gradient accumulation: seq runs multiply activation memory by the
+        # window length, so they train at a small micro-batch but still get
+        # a real effective batch (batch * accum) per optimizer step.
         opt.zero_grad(set_to_none=True)
-        loss.backward()
+        for _ in range(args.accum):
+            raws = pending.pop(0).result()
+            pending.append(pool.submit(draw, sampler))
+            enc = encode_batch(ae, raws, device)
+            if args.seq:
+                # collate keeps step-major flattening; choice/cond of last steps.
+                o, choice, cond = collate(enc, device)
+                last = torch.arange(args.seq - 1, len(enc), args.seq, device=device)
+                choice = {k: v[last] for k, v in choice.items()}
+                cond = cond[last]
+            else:
+                o, choice, cond = collate(enc, device)
+
+            out = model.forward_bc(o, cond)
+            loss, parts = bc_loss(
+                out, o if not args.seq else _last_o(o, args.seq, device), choice
+            )
+            (loss / args.accum).backward()
         nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
         sched.step()
 
         if step % 50 == 0:
-            rate = 50 * args.batch / (time.time() - t0)
+            rate = 50 * args.batch * args.accum / (time.time() - t0)
             t0 = time.time()
             accs = head_accuracy(out, _last_o(o, args.seq, device) if args.seq else o, choice)
             msg = (f"step {step:6d}  loss {float(loss):.4f}  "
@@ -283,6 +297,25 @@ def main() -> None:
             print(f"  [eval] {evals}", flush=True)
             with log_path.open("a") as f:
                 f.write(json.dumps({"step": step, "eval": evals}) + "\n")
+            # Best-holdout checkpoint: the PPO warm start should take the
+            # plateau model, not whatever the final step happened to be
+            # (the honest heads: acted-action + tile accuracy).
+            vals = [evals[k] for k in ("action_no_noop", "tile_region") if k in evals]
+            metric = float(np.mean(vals)) if vals else -1.0
+            if metric > best_metric:
+                best_metric = float(metric)
+                tmp = run_dir / "bc_best.pt.tmp"
+                torch.save(
+                    {
+                        "model_state_dict": model.state_dict(),
+                        "step": step,
+                        "best_metric": best_metric,
+                        "args": vars(args),
+                    },
+                    tmp,
+                )
+                tmp.rename(run_dir / "bc_best.pt")
+                print(f"  [eval] new best ({best_metric:.4f}) -> bc_best.pt", flush=True)
             model.train()
 
         if step % args.save_every == 0 or step == args.steps:
@@ -292,6 +325,7 @@ def main() -> None:
                 "opt_state_dict": opt.state_dict(),
                 "sched_state_dict": sched.state_dict(),
                 "step": step,
+                "best_metric": best_metric,
                 "args": vars(args),
             }, tmp)
             tmp.rename(run_dir / "bc.pt")  # atomic: no torn ckpt on kill
@@ -299,17 +333,19 @@ def main() -> None:
             if os.environ.get("HF_TOKEN") and step % (args.save_every * 5) == 0:
                 import threading
 
-                def _hf_push(path=run_dir / "bc.pt", name=args.name):
+                def _hf_push(run_dir=run_dir, name=args.name):
                     try:
                         from huggingface_hub import HfApi
 
                         api = HfApi()
                         api.create_repo("djmango/openfront-rl", exist_ok=True)
-                        api.upload_file(
-                            path_or_fileobj=str(path),
-                            path_in_repo=f"{name}/bc.pt",
-                            repo_id="djmango/openfront-rl",
-                        )
+                        for fname in ("bc.pt", "bc_best.pt"):
+                            if (run_dir / fname).exists():
+                                api.upload_file(
+                                    path_or_fileobj=str(run_dir / fname),
+                                    path_in_repo=f"{name}/{fname}",
+                                    repo_id="djmango/openfront-rl",
+                                )
                     except Exception as e:  # noqa: BLE001
                         print(f"hf sync failed: {e}", flush=True)
 

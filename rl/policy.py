@@ -12,7 +12,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ae.model_v3 import MAX_SLOTS
-from rl.obs import ACTIONS, BUILD_TYPES, C_GRID, N_ACTIONS, N_SCALARS, NUKE_TYPES, P_FEAT
+from rl.obs import (
+    ACTIONS,
+    BUILD_TYPES,
+    C_GRID,
+    N_ACTIONS,
+    N_LOCAL,
+    N_SCALARS,
+    NUKE_TYPES,
+    P_FEAT,
+)
 
 N_QUANTITY = 5  # {5, 10, 25, 50, 100}% of troops/gold
 QUANTITY_FRACS = [0.05, 0.10, 0.25, 0.50, 1.00]
@@ -26,7 +35,7 @@ NEEDS_PLAYER = {
     "donate_troops",
     "embargo",
 }
-NEEDS_TILE = {"boat", "build", "launch_nuke"}
+NEEDS_TILE = {"boat", "build", "launch_nuke", "spawn"}
 NEEDS_QUANTITY = {"attack", "expand", "boat", "donate_gold", "donate_troops"}
 
 MASKED_NEG = -1e9
@@ -69,12 +78,23 @@ class Policy(nn.Module):
     2-layer transformer over player tokens, 512-wide trunk. Sized to soak
     the idle GPU while env simulation stays the bottleneck."""
 
-    def __init__(self, hidden: int = 512, gc: int = 256, pc: int = 128, blocks: int = 4):
+    def __init__(
+        self, hidden: int = 512, gc: int = 256, pc: int = 128, blocks: int = 4,
+        lc: int = 64,
+    ):
         super().__init__()
         self.grid_net = nn.Sequential(
             nn.Conv2d(C_GRID, gc, 3, padding=1),
             nn.SiLU(),
             *[ResBlock(gc) for _ in range(blocks)],
+        )
+        # Exact-borders bypass: raw local owner crop (64x64 tiles around own
+        # territory) through a small strided CNN, pooled into the trunk.
+        self.local_net = nn.Sequential(
+            nn.Conv2d(N_LOCAL, 32, 3, stride=2, padding=1), nn.SiLU(),
+            nn.Conv2d(32, 64, 3, stride=2, padding=1), nn.SiLU(),
+            nn.Conv2d(64, lc, 3, stride=2, padding=1), nn.SiLU(),
+            nn.AdaptiveAvgPool2d(1), nn.Flatten(),
         )
         self.player_in = nn.Linear(P_FEAT, pc)
         self.player_tf = nn.TransformerEncoder(
@@ -85,7 +105,7 @@ class Policy(nn.Module):
             num_layers=2,
         )
         self.trunk = nn.Sequential(
-            nn.Linear(gc + pc + N_SCALARS, hidden), nn.SiLU(),
+            nn.Linear(gc + pc + lc + N_SCALARS, hidden), nn.SiLU(),
             nn.Linear(hidden, hidden), nn.SiLU(),
         )
         self.head_action = nn.Linear(hidden, N_ACTIONS)
@@ -111,7 +131,8 @@ class Policy(nn.Module):
         m = o["pmask"].unsqueeze(-1)
         p_pool = (p * m).sum(1) / m.sum(1).clamp(min=1)
 
-        h = self.trunk(torch.cat([g_pool, p_pool, o["scalars"]], dim=-1))
+        l_pool = self.local_net(o["local"])
+        h = self.trunk(torch.cat([g_pool, p_pool, l_pool, o["scalars"]], dim=-1))
         return h, g, p
 
     def heads(self, h: torch.Tensor, g: torch.Tensor, p: torch.Tensor, o: dict) -> dict:
@@ -122,7 +143,10 @@ class Policy(nn.Module):
 
         hm = h[:, :, None, None].expand(-1, -1, g.shape[2], g.shape[3])
         tile_logits = self.head_tile(torch.cat([g, hm], dim=1)).flatten(1)
-        tile_logits = tile_logits + (o["grid_valid"].flatten(1) - 1) * -MASKED_NEG
+        # legal_tile is all-ones normally and the valid-spawn-region mask
+        # during the spawn phase; padding is zero in both it and grid_valid.
+        tile_mask = o["grid_valid"] * o["legal_tile"]
+        tile_logits = tile_logits + (tile_mask.flatten(1) - 1) * -MASKED_NEG
 
         return {
             "action": act_logits,
@@ -139,9 +163,12 @@ class Policy(nn.Module):
         return self.heads(h, g, p, o)
 
     @torch.no_grad()
-    def act(self, o: dict, debug: bool = False) -> tuple[list[dict], np.ndarray, np.ndarray]:
+    def act(
+        self, o: dict, debug: bool = False, greedy: bool = False
+    ) -> tuple[list[dict], np.ndarray, np.ndarray]:
         """Batched sampling. Returns (choices, logp (B,), value (B,)).
 
+        greedy=True takes the argmax of every head (deployment-style eval).
         With debug=True each choice carries a "debug" dict (masked action
         probabilities + value estimate) for visualization; strip it before
         piping choices anywhere."""
@@ -150,7 +177,7 @@ class Policy(nn.Module):
         dev = out["action"].device
 
         d_act = torch.distributions.Categorical(logits=out["action"])
-        a = d_act.sample()
+        a = d_act.probs.argmax(-1) if greedy else d_act.sample()
         logp = d_act.log_prob(a)
 
         # Player head mask depends on the sampled action.
@@ -166,7 +193,7 @@ class Policy(nn.Module):
             ("quantity", out["quantity"]),
         ]:
             d = torch.distributions.Categorical(logits=logits)
-            s = d.sample()
+            s = d.probs.argmax(-1) if greedy else d.sample()
             heads[name] = (s, d.log_prob(s))
 
         needs_p = torch.tensor(

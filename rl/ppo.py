@@ -31,15 +31,53 @@ from rl.vec import VecEnv
 
 SUB_KEYS = ["player_slot", "tile_region", "build_type", "nuke_type", "quantity"]
 OBS_KEYS = [
-    "grid", "grid_valid", "players", "pmask", "scalars",
+    "grid", "grid_valid", "legal_tile", "local", "players", "pmask", "scalars",
     "legal_actions", "legal_ptarget", "legal_build", "legal_nuke",
 ]
+
+
+@torch.no_grad()
+def run_eval(
+    policy, ae, device: str, stage: int, episodes: int, max_ticks: int
+) -> dict:
+    """Deployment-style eval: fresh fixed-seed envs (worker i always plays
+    seed w{i}-ep0 at this stage), greedy actions, one episode per env.
+    Returns win rate / mean score over the completed episodes."""
+    vec = VecEnv(episodes, stage, max_ticks, 10)
+    results: dict[int, dict] = {}
+    try:
+        step_cap = max_ticks // STAGES[stage].decision_ticks + 64
+        for _ in range(step_cap):
+            pending = [i for i in range(episodes) if i not in results]
+            if not pending:
+                break
+            obs_list = encode_grids(ae, vec.obs_group(pending), device)
+            ot = {
+                k: torch.from_numpy(v).to(device)
+                for k, v in collate(obs_list, OBS_KEYS).items()
+            }
+            choices, _, _ = policy.act(ot, greedy=True)
+            vec.send_group(pending, choices)
+            for i, (_, _, info) in zip(pending, vec.recv_group(pending)):
+                if info is not None:
+                    results[i] = info
+    finally:
+        vec.close()
+    if not results:
+        return {"win": 0.0, "score": 0.0, "episodes": 0}
+    wins = [float(r["won"]) for r in results.values()]
+    scores = [r["score"] for r in results.values()]
+    return {
+        "win": float(np.mean(wins)),
+        "score": float(np.mean(scores)),
+        "episodes": len(results),
+    }
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", type=int, default=0, help="starting curriculum stage")
-    ap.add_argument("--ckpt", default="runs/ae_v3/ae_v3.pt")
+    ap.add_argument("--ckpt", default="runs/ae_v31_d8c32/ae_v3.pt")
     ap.add_argument("--name", default="ppo_v1")
     ap.add_argument("--envs", type=int, default=8)
     ap.add_argument("--updates", type=int, default=1000)
@@ -47,15 +85,31 @@ def main() -> None:
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--minibatch", type=int, default=128)
     ap.add_argument("--lr", type=float, default=2.5e-4)
+    ap.add_argument("--stage-lr-decay", type=float, default=0.85,
+                    help="LR warmdown: lr = lr * decay^stage (AlphaFront's trick)")
     ap.add_argument("--gamma", type=float, default=0.999)
     ap.add_argument("--lam", type=float, default=0.95)
     ap.add_argument("--clip", type=float, default=0.2)
     ap.add_argument("--ent-coef", type=float, default=0.01)
+    ap.add_argument("--ent-coef-final", type=float, default=0.002,
+                    help="entropy coef anneals linearly to this (v2c sat at "
+                         "entropy ~8 under a flat 0.01, exploring forever)")
+    ap.add_argument("--ent-anneal-updates", type=int, default=4000)
     ap.add_argument("--vf-coef", type=float, default=0.5)
     ap.add_argument("--max-episode-ticks", type=int, default=15000)
     ap.add_argument("--decision-ticks", type=int, default=10,
                     help="unused for stepping (stages carry their own); kept for compat")
+    ap.add_argument("--eval-every", type=int, default=300,
+                    help="updates between fixed-seed greedy eval passes (0 = off)")
+    ap.add_argument("--eval-episodes", type=int, default=8)
     ap.add_argument("--resume", default=None, help="policy.pt to load before training")
+    ap.add_argument("--init", default=None,
+                    help="warm-start from a BC checkpoint (bc.pt): loads the "
+                         "shared Policy weights, folds the winner-bucket "
+                         "conditioning into the heads, fresh optimizer/stage")
+    ap.add_argument("--init-cond-bucket", type=int, default=7,
+                    help="placement bucket to condition the BC prior on "
+                         "(7 = winner tier)")
     ap.add_argument("--compile", action="store_true", help="torch.compile the policy")
     args = ap.parse_args()
 
@@ -85,6 +139,42 @@ def main() -> None:
     )
     start_update = 0
     global_step = 0
+    if args.init and not args.resume:
+        # BC warm start: shared Policy weights from a BCPolicy checkpoint
+        # (cond/temporal modules dropped), then fold the placement
+        # conditioning h += cond_proj(cond_emb[bucket]) into the head
+        # biases. That fold is exact: the BC bias is additive after the
+        # trunk and every head consumes h linearly. The value head stays
+        # untrained (BC has no value loss), so early PPO updates mostly
+        # fit the critic - expect noisy advantages for the first ~100
+        # updates; the behavior prior is what we're buying.
+        sd = torch.load(args.init, map_location=device, weights_only=False)[
+            "model_state_dict"
+        ]
+        own = base_policy.state_dict()
+        shared = {k: v for k, v in sd.items() if k in own}
+        base_policy.load_state_dict(shared, strict=True)
+        if "cond_emb.weight" in sd:
+            c = (
+                sd["cond_proj.weight"] @ sd["cond_emb.weight"][args.init_cond_bucket]
+                + sd["cond_proj.bias"]
+            ).to(device)
+            with torch.no_grad():
+                for head in (
+                    base_policy.head_action, base_policy.head_player_q,
+                    base_policy.head_build, base_policy.head_nuke,
+                    base_policy.head_quantity, base_policy.head_value,
+                ):
+                    head.bias += head.weight @ c
+                conv = base_policy.head_tile[0]  # Conv2d(gc + hidden, ., 1)
+                gc_in = conv.in_channels - c.shape[0]
+                conv.bias += conv.weight[:, gc_in:, 0, 0] @ c
+        dropped = sorted({k.split(".")[0] for k in sd if k not in own})
+        print(
+            f"warm start from {args.init}: {len(shared)} tensors, "
+            f"cond bucket {args.init_cond_bucket} folded, dropped {dropped}"
+        )
+
     if args.resume:
         state = torch.load(args.resume, map_location=device, weights_only=False)
         base_policy.load_state_dict(state["model_state_dict"])
@@ -95,12 +185,25 @@ def main() -> None:
         if "stage" in state:
             stage = int(state["stage"])
             vec.set_stage(stage)
+        # Win-gate evidence survives restarts: without this, every relaunch
+        # forced the agent to re-earn the whole advancement window.
+        recent_wins.extend(state.get("recent_wins", []))
+        recent_scores.extend(state.get("recent_scores", []))
         start_update = int(state.get("update", 0))
         global_step = int(state.get("global_step", 0))
         print(
             f"resumed from {args.resume}: update {start_update}, "
-            f"step {global_step}, stage {stage}"
+            f"step {global_step}, stage {stage}, "
+            f"win-window {len(recent_wins)}/{WINDOW}"
         )
+
+    def set_lr(current_stage: int) -> float:
+        lr = args.lr * args.stage_lr_decay ** current_stage
+        for grp in opt.param_groups:
+            grp["lr"] = lr
+        return lr
+
+    set_lr(stage)
 
     # Compile after weights load; checkpoints always save base_policy's
     # (unprefixed) state_dict.
@@ -176,11 +279,12 @@ def main() -> None:
                     vec.set_stage(stage)
                     recent_scores.clear()
                     recent_wins.clear()
+                    lr_now = set_lr(stage)
                     st = STAGES[stage]
                     print(
                         f"=== curriculum advance -> stage {stage}: "
                         f"maps={','.join(st.maps)} nations={st.nations} "
-                        f"bots={st.bots} {st.difficulty}",
+                        f"bots={st.bots} {st.difficulty}  lr -> {lr_now:.2e}",
                         flush=True,
                     )
 
@@ -232,6 +336,11 @@ def main() -> None:
         for k in SUB_KEYS:
             choice_t[k] = torch.tensor([c.get(k, -1) for c in all_choice])
 
+        # Entropy anneal: linear from ent-coef to ent-coef-final so late
+        # training commits instead of exploring forever.
+        frac = min(1.0, update / max(1, args.ent_anneal_updates))
+        ent_coef = args.ent_coef + (args.ent_coef_final - args.ent_coef) * frac
+
         B_total = T * N
         idx = np.arange(B_total)
         pl_sum = vl_sum = ent_sum = 0.0
@@ -254,7 +363,7 @@ def main() -> None:
                     ratio.clamp(1 - args.clip, 1 + args.clip) * a_mb,
                 ).mean()
                 vl = F.mse_loss(value, ret_t[mbt])
-                loss = pg + args.vf_coef * vl - args.ent_coef * ent.mean()
+                loss = pg + args.vf_coef * vl - ent_coef * ent.mean()
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
@@ -268,6 +377,8 @@ def main() -> None:
         writer.add_scalar("loss/policy", pl_sum / n_mb, global_step)
         writer.add_scalar("loss/value", vl_sum / n_mb, global_step)
         writer.add_scalar("loss/entropy", ent_sum / n_mb, global_step)
+        writer.add_scalar("loss/ent_coef", ent_coef, global_step)
+        writer.add_scalar("loss/lr", opt.param_groups[0]["lr"], global_step)
         writer.add_scalar("perf/game_ticks_per_s", tps, global_step)
         writer.add_scalar("perf/episodes_done", episodes_done, global_step)
         writer.add_scalar("curriculum/stage", stage, global_step)
@@ -293,6 +404,26 @@ def main() -> None:
             flush=True,
         )
 
+        if args.eval_every and update % args.eval_every == 0:
+            # Deployment-style number: fixed seeds, greedy actions. This is
+            # the curve to compare local replay sessions against (the
+            # rolling train win rate is exploration-sampled and its window
+            # resets on ops churn).
+            t_eval = time.time()
+            ev = run_eval(
+                policy, ae, device, stage, args.eval_episodes, args.max_episode_ticks
+            )
+            writer.add_scalar("eval/win", ev["win"], global_step)
+            writer.add_scalar("eval/score", ev["score"], global_step)
+            writer.add_scalar("eval/stage", stage, global_step)
+            print(
+                f"[eval] stage {stage}  win {ev['win']:.2f}  "
+                f"score {ev['score']:.2f}  ({ev['episodes']} eps, "
+                f"{time.time() - t_eval:.0f}s)",
+                flush=True,
+            )
+            t0, t0_step = time.time(), global_step  # don't count eval in tps
+
         if update % 10 == 0 or update == args.updates:
             tmp = out_dir / "policy.pt.tmp"
             torch.save(
@@ -302,6 +433,8 @@ def main() -> None:
                     "stage": stage,
                     "update": update,
                     "global_step": global_step,
+                    "recent_wins": list(recent_wins),
+                    "recent_scores": list(recent_scores),
                     "args": vars(args),
                 },
                 tmp,

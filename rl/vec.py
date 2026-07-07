@@ -50,6 +50,8 @@ class EnvWorker:
         self.map_name, bots, difficulty, nations, self.rehearsal = sample_episode(
             self.stage, self.rng
         )
+        # The episode starts inside the spawn phase: the policy's first
+        # decision is WHERE to spawn (spawn action + tile-region head).
         self.obs = self.env.reset(
             self.map_name,
             seed=f"w{self.idx}-ep{self.episode}",
@@ -58,12 +60,10 @@ class EnvWorker:
             nations=nations,
         )
         self.builder.start_game(self.env.terrain)
-        self.obs = spawn_randomly(self.env, self.rng)
         self.translator = IntentTranslator(self.env, self.builder)
         self.land_total = max(1, int(((self.env.terrain >> 7) & 1).sum()))
-        self.prev_strength = strengths(self.obs["entities"], self.land_total).get(
-            self.obs["me"], 0.0
-        )
+        self.prev_strength = 0.0
+        self.spawn_steps = 0
         self.ep_reward = 0.0
         self.ep_len = 0
         self.episode += 1
@@ -75,6 +75,16 @@ class EnvWorker:
         """Translate + step. Auto-resets on done; returns (reward, done, ep_info)."""
         intents = self.translator.translate(choice, self.obs)
         self.obs = self.env.step(intents, ticks=self.dt)
+
+        if self.obs["spawnPhase"]:
+            # Masked spawn picks should always land; if the phase somehow
+            # stalls (snap failure), fall back to a random spawn.
+            self.spawn_steps += 1
+            if self.spawn_steps >= 8:
+                self.obs = spawn_randomly(self.env, self.rng)
+            else:
+                self.ep_len += 1
+                return 0.0, False, None
 
         tiles = my_tiles(self.obs)
         mine = strengths(self.obs["entities"], self.land_total).get(self.obs["me"], 0.0)
@@ -130,12 +140,15 @@ def _child(idx: int, stage_val, max_ticks: int, decision_ticks: int, conn) -> No
         sent_episode = -1
 
         def pack(raw: dict, result) -> dict:
+            # terrain_static is constant per episode: ship it once, the
+            # parent re-attaches it (dynamic fallout ships every step as
+            # packed bits - it must NOT ride inside the cached tensor).
             nonlocal sent_episode
             msg = {"raw": raw, "result": result, "episode": worker.episode}
             if worker.episode != sent_episode:
                 sent_episode = worker.episode
             else:
-                msg["raw"] = {k: v for k, v in raw.items() if k != "terrain"}
+                msg["raw"] = {k: v for k, v in raw.items() if k != "terrain_static"}
             return msg
 
         conn.send(pack(worker.prepare(), None))
@@ -178,10 +191,10 @@ class VecEnv:
         if "error" in msg:
             raise RuntimeError(f"env worker {i}: {msg['error']}")
         raw = msg["raw"]
-        if "terrain" in raw:
-            self.terrains[i] = raw["terrain"]
+        if "terrain_static" in raw:
+            self.terrains[i] = raw["terrain_static"]
         else:
-            raw["terrain"] = self.terrains[i]
+            raw["terrain_static"] = self.terrains[i]
         return msg
 
     def obs(self) -> list[dict]:

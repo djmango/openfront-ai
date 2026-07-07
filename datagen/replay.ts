@@ -20,6 +20,12 @@
  * human plus their intents in the following window normalized to the policy
  * action space, and final placements - the (state, action) supervision for
  * behavior cloning (rl/bc_data.py).
+ *
+ * formatVersion 2 adds spawn supervision: every human spawn intent is
+ * recorded with a state snapshot taken at the moment the pick was made
+ * (pre-execution), so BC can train the spawn-placement head on what the
+ * player actually saw. Spawn-phase snapshots share the states/ dir (their
+ * ticks precede all regular snapshots).
  */
 import * as fs from "fs";
 import * as path from "path";
@@ -318,7 +324,34 @@ async function replayGame(
     tick: number;
     legal: Record<string, { me: number; legal: object }>;
   }[] = [];
+  // Spawn supervision (formatVersion 2): human spawn picks with a snapshot
+  // of the state they were looking at when they picked. smallIDs resolve
+  // AFTER the turn executes - the player object is created by
+  // SpawnExecution, so it does not exist when the intent is first seen.
+  const spawnSteps = new Map<
+    number,
+    Record<string, { x: number; y: number; me: number }>
+  >();
+  let pendingSpawns: { cid: string; x: number; y: number; tick: number }[] = [];
+  const spawnTicksDumped = new Set<number>();
   const humanClientIDs = new Set(info.players.map((p) => p.clientID));
+
+  const writeSnapshot = (tick: number) => {
+    const stem = `t${String(tick).padStart(6, "0")}`;
+    const raw = Buffer.from(
+      game.tileStateBuffer().buffer,
+      game.tileStateBuffer().byteOffset,
+      numTiles * 2,
+    );
+    fs.writeFileSync(
+      path.join(statesDir, `${stem}.bin.gz`),
+      zlib.gzipSync(raw, { level: 6 }),
+    );
+    fs.writeFileSync(
+      path.join(statesDir, `${stem}.json.gz`),
+      zlib.gzipSync(JSON.stringify(snapshotEntities(game)), { level: 6 }),
+    );
+  };
 
   for (const turn of record.turns) {
     if (bc) {
@@ -327,7 +360,22 @@ async function replayGame(
       for (const si of turn.intents) {
         const cid = (si as { clientID: string }).clientID;
         if (!humanClientIDs.has(cid)) continue;
-        const label = normalizeIntent(game, si as Record<string, unknown>);
+        const intent = si as Record<string, unknown>;
+        if (intent.type === "spawn" && game.inSpawnPhase()) {
+          const tick = game.ticks();
+          pendingSpawns.push({
+            cid,
+            x: game.x(intent.tile as never),
+            y: game.y(intent.tile as never),
+            tick,
+          });
+          if (!spawnTicksDumped.has(tick)) {
+            spawnTicksDumped.add(tick);
+            writeSnapshot(tick);
+          }
+          continue;
+        }
+        const label = normalizeIntent(game, intent);
         if (label === null) continue;
         const byClient = labelsByTick.get(game.ticks()) ?? {};
         (byClient[cid] ??= []).push(label);
@@ -336,6 +384,21 @@ async function replayGame(
     }
     game.addExecution(...executor.createExecs(turn));
     const updates = game.executeNextTick();
+
+    if (bc && pendingSpawns.length) {
+      const unresolved: typeof pendingSpawns = [];
+      for (const ps of pendingSpawns) {
+        const player = game.playerByClientID(ps.cid);
+        if (!player) {
+          unresolved.push(ps);
+          continue;
+        }
+        const byClient = spawnSteps.get(ps.tick) ?? {};
+        byClient[ps.cid] = { x: ps.x, y: ps.y, me: player.smallID() };
+        spawnSteps.set(ps.tick, byClient);
+      }
+      pendingSpawns = unresolved;
+    }
 
     // Verify state hashes where the record has them. The engine emits a
     // Hash update every 10 ticks; live clients reported the same value and
@@ -365,20 +428,7 @@ async function replayGame(
 
     if (!game.inSpawnPhase() && game.ticks() % snapshotEvery === 0) {
       if (writeStates) {
-        const stem = `t${String(game.ticks()).padStart(6, "0")}`;
-        const raw = Buffer.from(
-          game.tileStateBuffer().buffer,
-          game.tileStateBuffer().byteOffset,
-          numTiles * 2,
-        );
-        fs.writeFileSync(
-          path.join(statesDir, `${stem}.bin.gz`),
-          zlib.gzipSync(raw, { level: 6 }),
-        );
-        fs.writeFileSync(
-          path.join(statesDir, `${stem}.json.gz`),
-          zlib.gzipSync(JSON.stringify(snapshotEntities(game)), { level: 6 }),
-        );
+        writeSnapshot(game.ticks());
       }
       snapshots.push({ tick: game.ticks() });
 
@@ -408,10 +458,14 @@ async function replayGame(
       return { ...s, labels };
     });
     const bcDoc = {
-      formatVersion: 1,
+      formatVersion: 2,
       snapshotEvery,
       placements: placements(game, record),
       steps,
+      spawn_steps: [...spawnSteps.entries()].map(([tick, labels]) => ({
+        tick,
+        labels,
+      })),
     };
     fs.writeFileSync(
       path.join(outDir, "bc.json.gz"),
@@ -469,6 +523,9 @@ async function main() {
   const snapshotEvery = parseInt(getArg("every", "10"), 10);
   const limit = parseInt(getArg("limit", "0"), 10);
   const bc = args.includes("--bc");
+  // Regenerate sidecars even where bc.json.gz exists (e.g. upgrading
+  // formatVersion 1 -> 2 for spawn supervision). States are reused.
+  const rebc = args.includes("--rebc");
 
   const files = fs
     .readdirSync(recordsDir, { recursive: true })
@@ -495,7 +552,8 @@ async function main() {
       .replace(/\s+/g, "");
     const outDir = path.join(outRoot, mapKey, gameID);
     const hasStates = fs.existsSync(path.join(outDir, "meta.json"));
-    if (hasStates && (!bc || fs.existsSync(path.join(outDir, "bc.json.gz")))) {
+    const hasBc = fs.existsSync(path.join(outDir, "bc.json.gz"));
+    if (hasStates && (!bc || (hasBc && !rebc))) {
       continue; // already replayed (and bc-dumped, when requested)
     }
     const started = Date.now();

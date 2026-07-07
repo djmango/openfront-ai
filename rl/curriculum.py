@@ -61,9 +61,9 @@ class Stage:
     decision_ticks: int = 10  # engine ticks per policy decision
 
 
-# Map pool (all in the AE training set) with featurized grid sizes (H//16 x W//16):
-#   Onion 32x32, Pangaea 62x62, Caucasus 62x78, BlackSea 68x93,
-#   BetweenTwoSeas 66x111, World 62x125, Asia 75x125.
+# Map pool (all in the AE training set) with featurized grid sizes (H//8 x W//8):
+#   Onion 64x64, Pangaea 125x125, Caucasus 125x156, BlackSea 137x187,
+#   BetweenTwoSeas 132x223, World 125x250, Asia 150x250.
 ALL_MAPS = (
     "Onion", "Pangaea", "Caucasus", "BlackSea", "BetweenTwoSeas", "World", "Asia",
 )
@@ -85,9 +85,10 @@ STAGES = [
     Stage(ALL_MAPS, 150, "Impossible"),
 ]
 
-# Largest featurized grid across curriculum maps (Asia 2000x1200 -> 75x125).
-GH_MAX = 75
-GW_MAX = 125
+# Largest featurized grid across curriculum maps (Asia 2000x1200 -> 150x250
+# at the v4 1/8 latent resolution).
+GH_MAX = 150
+GW_MAX = 250
 
 
 def sample_episode(

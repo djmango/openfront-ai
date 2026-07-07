@@ -7,14 +7,15 @@
 #
 # Usage: datagen/replay_all.sh [records_dir] [out_dir] [parallelism]
 # BC=1 passes --bc (dump behavior-cloning sidecars; incremental over
-# already-replayed games).
+# already-replayed games). REBC=1 additionally passes --rebc to regenerate
+# existing sidecars (formatVersion 1 -> 2 upgrade for spawn supervision).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 RECORDS=${1:-records}
 OUT=${2:-data-human}
 JOBS=${3:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}
-BCFLAG=${BC:+--bc}
+BCFLAG="${BC:+--bc}${REBC:+ --rebc}"
 TSX=openfront/node_modules/.bin/tsx
 
 PIN=$(git -C openfront rev-parse HEAD)
