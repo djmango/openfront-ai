@@ -164,7 +164,14 @@ while true; do
   fi
   echo "=== $(date -u +%FT%TZ) launching $RUN_NAME (seq=$SEQ accum=$ACCUM) $RESUME ==="
   START_TS=$(date +%s)
+  # MALLOC_*: batch buffers (collate/stack outputs, ~50-80MB) exceed glibc's
+  # 32MB dynamic mmap-threshold cap, so every batch was a fresh mmap/munmap
+  # + zero-page faults - the slow decay (bc_v4: 88 -> 12 ex/s over ~5h,
+  # first in enc, then col after the obs.py staging fix). A 256MB threshold
+  # keeps them on the reusable heap; trim threshold matches so the heap
+  # isn't returned to the kernel between batches.
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH=. \
+    MALLOC_MMAP_THRESHOLD_=268435456 MALLOC_TRIM_THRESHOLD_=268435456 \
     python -m rl.bc --data data-human --name "$RUN_NAME" --seq "$SEQ" \
     --batch "$BATCH" --accum "$ACCUM" --steps "$STEPS" --workers "$WORKERS" $RESUME \
     2>&1 | tee -a "/tmp/bc_$RUN_NAME.log"

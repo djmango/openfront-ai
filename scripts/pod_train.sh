@@ -149,7 +149,11 @@ while true; do
   fi
   echo "=== $(date -u +%FT%TZ) launching $RUN_NAME $RESUME ==="
   START_TS=$(date +%s)
+  # MALLOC_*: see pod_bc.sh - keeps large per-batch buffers on the reusable
+  # heap instead of per-batch mmap/munmap (glibc caps its dynamic threshold
+  # at 32MB; collated batches are bigger), preventing slow page-fault decay.
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH=. \
+    MALLOC_MMAP_THRESHOLD_=268435456 MALLOC_TRIM_THRESHOLD_=268435456 \
     python -m rl.ppo --envs "$ENVS" --updates 100000 --rollout 32 \
     --minibatch "$MINIBATCH" --name "$RUN_NAME" --stage "$STAGE" $RESUME $INIT \
     2>&1 | tee -a "/tmp/train_$RUN_NAME.log"
