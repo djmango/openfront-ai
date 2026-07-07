@@ -56,10 +56,15 @@ complete visualization suite (real-client replay videos with a live model-debug 
 against the agent) are in place.
 </p>
 <p>
-On the observation side, the encoder got its bake-off (<a href="#ae31">AE v3.1</a>): benchmarking the
-bot-trained AE on real human games exposed a 16-point border-accuracy gap, and parallel ablations found the fix: latent <i>resolution</i>, not channel count. The new best encoder
-(v3.1 @ 1/8 latent) reconstructs borders at 89.3% on human games / 96.1% on bot games, up from
-71.8% / 87.5%.
+On the observation side, the encoder bake-off (<a href="#ae31">AE v3.1</a>) is <b>concluded</b>:
+benchmarking the bot-trained AE on real human games exposed a 16-point border-accuracy gap, and
+parallel ablations found the fix: latent <i>resolution</i>, not channel count. Final standings on
+uniform-crop eval: d8 (64ch @ 1/8) at 89.3% human / 96.1% bot borders, and the compact d8c32
+(32ch @ 1/8) at 88.2% / 95.5%, one point behind at <i>half</i> the policy input. d8c32 cleared the
+pre-registered ≥88% bar, so it is the encoder for PPO v4. The channel-count control (c96) was
+pruned unfinished: its host kept dying and the resolution result had already answered the question.
+First deployment-style eval of <code>ppo_v3</code> (fixed-seed local games, sampled actions):
+2 wins / 2 losses on the first four stage-4 games, consistent with its training roll-win.
 </p>
 <p class="d">
 Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% → 89.3% (human) ·
@@ -73,7 +78,9 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
   <tr><th>run</th><th>status</th><th>notes</th></tr>
   <tr><td><code>ppo_v3</code></td><td>active</td>
     <td>Curriculum v2 from scratch. Stage 4 (30 bots, Pangaea/Caucasus/BlackSea) by Jul 6
-    evening, rolling win 0.6-0.7, roll-score 0.93. The run to bet on.</td></tr>
+    evening, rolling win 0.6-0.7, roll-score 0.93. Now on 96 envs (2x throughput; the env
+    count, not the GPU, was the limiter). First local eval: 2W/2L over four stage-4 games,
+    wins by outright conquest at ticks ~10-15k. The run to bet on.</td></tr>
   <tr><td><code>ppo_v2c</code></td><td><b>retired</b> Jul 6</td>
     <td>Same curriculum v2, warm-started from v2b weights. Stalled at stage 3 (win rate
     0.07-0.17, entropy stuck near 8) while from-scratch v3 sailed past to stage 4. Final
@@ -81,18 +88,26 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
     <a href="#lessons">lessons</a>: warm-starting from a stale reward/curriculum hurt.</td></tr>
   <tr><td><code>bc_v0_pilot</code></td><td>active</td>
     <td>Outcome-conditioned BC on partial human sidecars (~50 games). Feedforward policy,
-    placement conditioning. Data-loader cache fix landed; throughput still tuning.</td></tr>
-  <tr><td><code>bc_seq_v1</code></td><td>bootstrapping</td>
-    <td>Temporal BC (--seq 8). Waiting on HF dataset extract + bc sidecars.</td></tr>
-  <tr><td><code>ae_v31_d8</code></td><td><b>done</b></td>
-    <td>v3.1 @ 1/8 latent. Best border accuracy: 89.3% human / 96.1% bot. On HF as
-    <code>ae_v31_d8.pt</code>. Pending: wire into RL obs + optional owner-crop bypass.</td></tr>
+    placement conditioning. The cache fix took it from 2.4 to ~40 ex/s; the earlier slowness
+    turned out to be a failed git pull, the pod was running pre-fix code.</td></tr>
+  <tr><td><code>bc_seq_v1</code></td><td>active</td>
+    <td>Temporal BC (--seq 8). Spent hours OOM crash-looping at batch 24 (a seq-8 window
+    multiplies activation memory 8x; one 19.9 GiB allocation on a 24 GiB card); training at
+    batch 8. Thin data so far: 11 games with sidecars on that pod, more replaying.</td></tr>
+  <tr><td><code>ae_v31_d8c32</code></td><td><b>done, chosen for v4</b></td>
+    <td>Compact v3.1: 32ch @ 1/8 latent. Uniform eval 88.2% human / 95.5% bot borders,
+    one point behind d8 at half the latent footprint. On HF as <code>ae_v31_d8c32.pt</code>.</td></tr>
+  <tr><td><code>ae_v31_d8</code></td><td>done</td>
+    <td>v3.1 @ 1/8 latent, 64ch. Best absolute border accuracy: 89.3% human / 96.1% bot. On HF
+    as <code>ae_v31_d8.pt</code>. Kept as the quality ceiling; d8c32 preferred for policy input
+    size.</td></tr>
   <tr><td><code>ae_v31</code></td><td>done</td>
     <td>Full v3.1 decoder/loss stack @ 1/16. Finished 40k steps; human borders 78.5%
     (worse than mixed-data v3 retrain). Superseded by d8.</td></tr>
-  <tr><td><code>ae_v31_c96</code>, <code>ae_v31_d8c32</code></td><td>in flight</td>
-    <td>Channel-count control (96ch @ 1/16) and compact 1/8 x 32ch variant. Decide after
-    both finish whether d8c32 matches d8 at half the latent footprint.</td></tr>
+  <tr><td><code>ae_v31_c96</code></td><td>pruned</td>
+    <td>Channel-count control (96ch @ 1/16). Killed twice by an oversubscribed host (load 435
+    on 384 cores) and abandoned: d8 vs v3.1-at-1/16 already isolated resolution as the variable
+    that matters, so the control's answer would not change any decision.</td></tr>
   <tr><td><code>ae_v3_mix</code></td><td>partial</td>
     <td>Homelab bot+human retrain, OOM at step 22.7k. Proved data helps (80.1% human borders)
     but run didn't finish.</td></tr>
@@ -360,6 +375,15 @@ from intents alone.</p>
     re-encode static side-information (terrain) the downstream consumer already has.</li>
   <li><b>Treat training hosts as disposable.</b> Checkpoint everything, sync to HF, restore on boot,
     supervise with auto-restart. Every ops incident so far violated some part of this.</li>
+  <li><b>Auto-restart is not auto-recover.</b> The temporal-BC supervisor relaunched an OOM-crashing
+    trainer into the same wall for hours, and a separate pod ran stale code all day because its
+    <code>git pull</code> had silently failed on an untracked file. A restart loop needs two cheap
+    guards: back off (or change something, or alert) when the child dies instantly twice in a row,
+    and assert the deployed commit matches origin/master at launch.</li>
+  <li><b>Sequence models multiply memory before they multiply quality.</b> A seq-8 BC window is 8
+    full observations through the frozen encoder per sample: activation memory scales with window
+    length, so batch size must scale down by the same factor. Budget it before launch instead of
+    discovering it as a 19.9 GiB allocation on a 24 GiB card.</li>
 </ul>
 
 <h3 id="infra">Infrastructure</h3>
