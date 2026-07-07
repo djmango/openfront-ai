@@ -22,6 +22,7 @@ import contextlib
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -300,23 +301,37 @@ def main() -> None:
     )
     feed_it = iter(loader)
 
+    # Micro-batch pipeline: fetch + AE encode + collate for k+1 runs on a
+    # worker thread during k's forward/backward (same surgery as PPO's
+    # prefetch; the serialized loop left the GPU ~35% busy). The worker is
+    # the only consumer of feed_it, so the DataLoader iterator stays
+    # single-threaded.
+    def prep_next() -> tuple:
+        raws = next(feed_it)
+        enc = encode_batch(ae, raws, device)
+        o, choice, cond = collate(enc, device)
+        if args.seq:
+            # collate keeps step-major flattening; choice/cond of last steps.
+            last = torch.arange(args.seq - 1, len(enc), args.seq, device=device)
+            choice = {k: v[last] for k, v in choice.items()}
+            cond = cond[last]
+        return o, choice, cond
+
+    pf = ThreadPoolExecutor(max_workers=1)
+    fut = pf.submit(prep_next)
+
     t0 = time.time()
+    stall_s = 0.0
     for step in range(start_step + 1, args.steps + 1):
         # Gradient accumulation: seq runs multiply activation memory by the
         # window length, so they train at a small micro-batch but still get
         # a real effective batch (batch * accum) per optimizer step.
         opt.zero_grad(set_to_none=True)
         for _ in range(args.accum):
-            raws = next(feed_it)
-            enc = encode_batch(ae, raws, device)
-            if args.seq:
-                # collate keeps step-major flattening; choice/cond of last steps.
-                o, choice, cond = collate(enc, device)
-                last = torch.arange(args.seq - 1, len(enc), args.seq, device=device)
-                choice = {k: v[last] for k, v in choice.items()}
-                cond = cond[last]
-            else:
-                o, choice, cond = collate(enc, device)
+            t_w = time.time()
+            o, choice, cond = fut.result()
+            stall_s += time.time() - t_w
+            fut = pf.submit(prep_next)
 
             with amp():
                 out = model.forward_bc(o, cond)
@@ -336,7 +351,8 @@ def main() -> None:
                    f"act {accs.get('action', 0):.3f}  "
                    f"act! {accs.get('action_no_noop', 0):.3f}  "
                    f"tile {accs.get('tile_region', float('nan')):.3f}  "
-                   f"{rate:.1f} ex/s")
+                   f"{rate:.1f} ex/s  stall {stall_s:.1f}s")
+            stall_s = 0.0
             print(msg, flush=True)
             with log_path.open("a") as f:
                 f.write(json.dumps({"step": step, "loss": float(loss),
