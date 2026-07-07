@@ -515,9 +515,17 @@ that, and it hasn't reached matched sample counts yet.</p>
     GPU ~95%: the next real lever there is caching AE latents in cache-bc (the encoder is
     finally frozen at d8c32, so the cache won't be invalidated - v4's reason to skip it
     is gone).</li>
-  <li><b>Decay watch:</b> the phase breakdown + reserved-memory log will show whether a
-    recurrence is encode growth (GPU-side fragmentation/throttle) or sample growth. Note
-    the overnight decay happened <i>with</i> expandable_segments already on.</li>
+  <li><b>Decay watch - caught in the act (30 min after restart):</b> bc2 slid 93 &rarr; 35
+    ex/s again, and the instrumentation pins it: <code>enc</code> grew 49 &rarr; 135s/window
+    while <code>smp</code> stayed 0.0 and <code>col</code> ~9s; CUDA reserved is <b>flat</b>
+    at 27.5GB; GPU util 31% with clocks at 2872/3090MHz, 43&deg;C, 202W. So it is NOT
+    fragmentation, NOT thermal throttle, NOT the sampler - something CPU-side inside
+    <code>encode_batch</code> (the single-threaded <code>np.stack</code> H2D staging of
+    full-res owner grids) slows as the process ages. RSS was already 11.7GB at 34 min
+    uptime (23GB overnight): prime suspect is glibc heap/arena churn from the hundreds of
+    MB of short-lived numpy buffers per batch - consistent with a restart fully fixing it.
+    Experiment running: <code>MALLOC_ARENA_MAX=2</code> on bc2. Real fix if confirmed:
+    have ofrs return pre-stacked batch arrays so the Python-side memcpy churn disappears.</li>
 </ul>
 
 <h3 id="tooling">Visualization &amp; tooling</h3>
