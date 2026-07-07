@@ -399,7 +399,7 @@ index 4af07ad2d..912e0e888 100644
    </body>
  </html>
 diff --git a/src/client/Main.ts b/src/client/Main.ts
-index ebfef8a41..137dda2c3 100644
+index ebfef8a41..4fdf9d598 100644
 --- a/src/client/Main.ts
 +++ b/src/client/Main.ts
 @@ -28,7 +28,6 @@ import { GameInfoModal } from "./GameInfoModal";
@@ -421,4 +421,56 @@ index ebfef8a41..137dda2c3 100644
        document.dispatchEvent(
          new CustomEvent("userMeResponse", {
            detail: userMeResponse,
+@@ -787,6 +784,35 @@ class Client {
+     return true;
+   }
+ 
++  /** Replay perspective uses the archived player's name, not the visitor's Anon### default. */
++  private replayIdentity(lobby: JoinLobbyEvent): {
++    playerName: string;
++    playerClanTag: string | null;
++  } {
++    const defaultName = this.usernameInput?.getUsername() ?? genAnonUsername();
++    const defaultTag = this.usernameInput?.getClanTag() ?? null;
++    if (!lobby.gameRecord) {
++      return { playerName: defaultName, playerClanTag: defaultTag };
++    }
++    try {
++      const v = localStorage.getItem("replayViewAs");
++      if (v === null || v === "") {
++        return { playerName: defaultName, playerClanTag: defaultTag };
++      }
++      const players = lobby.gameRecord.info.players;
++      const picked =
++        v === "1" || v === "first"
++          ? players[0]
++          : players.find((p) => p.clientID === v);
++      return {
++        playerName: picked?.username ?? defaultName,
++        playerClanTag: picked?.clanTag ?? null,
++      };
++    } catch {
++      return { playerName: defaultName, playerClanTag: defaultTag };
++    }
++  }
++
+   private async handleJoinLobby(event: CustomEvent<JoinLobbyEvent>) {
+     const lobby = event.detail;
+     this.mostRecentJoinEvent = event.timeStamp;
+@@ -812,12 +838,13 @@ class Client {
+     }
+     const auth = await userAuth();
+     const playerRole = auth !== false ? (auth.claims.role ?? null) : null;
++    const { playerName, playerClanTag } = this.replayIdentity(lobby);
+     const newLobbyHandle = joinLobby(this.eventBus, {
+       gameID: lobby.gameID,
+       cosmetics: await getPlayerCosmeticsRefs(),
+       turnstileToken: await this.getTurnstileToken(lobby),
+-      playerName: this.usernameInput?.getUsername() ?? genAnonUsername(),
+-      playerClanTag: this.usernameInput?.getClanTag() ?? null,
++      playerName,
++      playerClanTag,
+       clanTagCheck: this.usernameInput?.getClanCheck(),
+       playerRole,
+       gameStartInfo: lobby.gameStartInfo ?? lobby.gameRecord?.info,
 

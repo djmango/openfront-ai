@@ -97,7 +97,7 @@ class PlaySession {
           type: "join",
           token,
           gameID,
-          username: "AgentRL",
+          username: "Agent",
           clanTag: null,
           turnstileToken: null,
         }),
