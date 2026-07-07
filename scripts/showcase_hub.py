@@ -165,7 +165,7 @@ LANDING_HTML = """<!doctype html>
       <a class="watch" href="/watch">Watch latest replay</a>
       <a class="play" href="/play">Play vs Agent</a>
     </div>
-    <p class="meta">policy: {run_name}</p>
+    <p class="meta">policy: %%RUN_NAME%%</p>
   </main>
 </body>
 </html>
@@ -188,7 +188,9 @@ class HubHandler(BaseHTTPRequestHandler):
 
         if path == "/":
             replay = load_replay_state()
-            html = LANDING_HTML.format(run_name=replay.get("run_name", RUN_NAME))
+            html = LANDING_HTML.replace(
+                "%%RUN_NAME%%", str(replay.get("run_name", RUN_NAME))
+            )
             self._send(200, html.encode(), "text/html; charset=utf-8")
             return
 
