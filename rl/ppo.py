@@ -29,10 +29,21 @@ from collections import deque
 
 from rl.curriculum import STAGES, WINDOW
 from rl.obs import ACTIONS, collate, encode_grids, load_ae
-from rl.policy import Policy
+from rl.policy import N_QUANTITY, QUANTITY_FRACS, Policy
 from rl.vec import VecEnv
 
 SUB_KEYS = ["player_slot", "tile_region", "build_type", "nuke_type", "quantity"]
+# Latent-cell budget per update forward/backward. collate() pads a minibatch
+# to its largest grid, so one BetweenTwoSeas sample (132x223) pads 127
+# others to 29k cells each and backward tries multi-GiB activation allocs -
+# the stage-5 OOM crash loop that twice threw away a curriculum advance.
+# Minibatches are instead split by native grid shape (zero padding waste)
+# and capped at this many latent cells per sub-batch; sub-batch losses are
+# weighted by their sample fraction, so accumulated gradients are
+# numerically identical to the single big batch. Small-map stages stay one
+# sub-batch per minibatch (no slowdown); mixed batches drop the padded
+# compute entirely.
+MAX_UPD_PIX = 1_600_000
 OBS_KEYS = [
     "grid", "grid_valid", "legal_tile", "local", "players", "pmask", "scalars",
     "legal_actions", "legal_ptarget", "legal_build", "legal_nuke",
@@ -292,6 +303,7 @@ def main() -> None:
         reward_buf = np.zeros((T, N), dtype=np.float32)
         done_buf = np.zeros((T, N), dtype=np.float32)
         action_counts = np.zeros(len(ACTIONS))
+        quantity_counts = np.zeros(N_QUANTITY)
 
         def record(t: int, idxs: list[int], pack: tuple, results: list) -> None:
             obs_list, choices, logp, value = pack
@@ -302,6 +314,9 @@ def main() -> None:
                 logp_buf[t, i] = logp[j]
                 value_buf[t, i] = value[j]
                 action_counts[choices[j]["action"]] += 1
+                q = choices[j].get("quantity")
+                if q is not None:
+                    quantity_counts[q] += 1
                 r, d, info = results[j]
                 reward_buf[t, i] = r
                 done_buf[t, i] = float(d)
@@ -336,6 +351,10 @@ def main() -> None:
                         recent_scores.clear()
                         recent_wins.clear()
                 if advance:
+                    # Save at the end of the in-flight update: v5.1 twice
+                    # cleared stage 5 and lost it to a crash inside the
+                    # 10-update save cadence.
+                    shared["ckpt_advance"] = True
                     vec.set_stage(shared["stage"])
                     lr_now = set_lr(shared["stage"])
                     st = STAGES[shared["stage"]]
@@ -391,6 +410,7 @@ def main() -> None:
             "adv": adv.reshape(-1),
             "returns": returns.reshape(-1),
             "action_counts": action_counts,
+            "quantity_counts": quantity_counts,
             "roll_s": time.time() - t_roll0,
         }
 
@@ -448,43 +468,63 @@ def main() -> None:
         t_upd0 = time.time()
         stall_s = 0.0
 
-        def prep(mb: np.ndarray) -> dict:
-            return collate([all_obs[i] for i in mb], OBS_KEYS)
+        def prep(mb: np.ndarray) -> list[tuple[np.ndarray, dict]]:
+            # Shape-grouped, pixel-budgeted sub-batches (see MAX_UPD_PIX).
+            by_shape: dict[tuple, list[int]] = {}
+            for i in mb:
+                by_shape.setdefault(all_obs[i]["grid"].shape[1:], []).append(int(i))
+            subs = []
+            for (h, w), idxs in by_shape.items():
+                per = max(1, MAX_UPD_PIX // (h * w))
+                for k in range(0, len(idxs), per):
+                    part = idxs[k : k + per]
+                    subs.append(
+                        (np.asarray(part), collate([all_obs[i] for i in part], OBS_KEYS))
+                    )
+            return subs
 
+        sub_i = 0
         for _ in range(args.epochs):
             rng.shuffle(idx)
             mbs = np.split(idx, max(1, B_total // args.minibatch))
             fut = mb_pool.submit(prep, mbs[0])
             for i_mb, mb in enumerate(mbs):
                 t_w = time.time()
-                o_np = fut.result()  # collated on the worker thread
+                subs = fut.result()  # collated on the worker thread
                 stall_s += time.time() - t_w
                 if i_mb + 1 < len(mbs):
                     fut = mb_pool.submit(prep, mbs[i_mb + 1])
-                mbt = torch.from_numpy(mb)
-                # Alternating pinned buffer sets: the per-minibatch .item()
-                # sync guarantees set i%2's copy landed before its reuse.
-                o_mb = to_device(o_np, f"upd{i_mb % 2}")
-                c_mb = {k: v[mbt].to(device) for k, v in choice_t.items()}
-                mbt = mbt.to(device)
-                with amp():
-                    logp, ent, value = policy.evaluate(o_mb, c_mb)
-                logp, ent, value = logp.float(), ent.float(), value.float()
-                ratio = (logp - old_logp[mbt]).exp()
-                a_mb = adv_t[mbt]
-                pg = -torch.min(
-                    ratio * a_mb,
-                    ratio.clamp(1 - args.clip, 1 + args.clip) * a_mb,
-                ).mean()
-                vl = F.mse_loss(value, ret_t[mbt])
-                loss = pg + args.vf_coef * vl - ent_coef * ent.mean()
                 opt.zero_grad(set_to_none=True)
-                loss.backward()
+                pg_mb = vl_mb = ent_mb = 0.0
+                for sub, o_np in subs:
+                    w_sub = len(sub) / len(mb)
+                    # Alternating pinned buffer sets: the per-sub .item()
+                    # sync guarantees a set's copy landed before its reuse.
+                    o_mb = to_device(o_np, f"upd{sub_i % 2}")
+                    sub_i += 1
+                    sub_t = torch.from_numpy(sub)
+                    c_mb = {k: v[sub_t].to(device) for k, v in choice_t.items()}
+                    sub_t = sub_t.to(device)
+                    with amp():
+                        logp, ent, value = policy.evaluate(o_mb, c_mb)
+                    logp, ent, value = logp.float(), ent.float(), value.float()
+                    ratio = (logp - old_logp[sub_t]).exp()
+                    a_mb = adv_t[sub_t]
+                    pg = -torch.min(
+                        ratio * a_mb,
+                        ratio.clamp(1 - args.clip, 1 + args.clip) * a_mb,
+                    ).mean()
+                    vl = F.mse_loss(value, ret_t[sub_t])
+                    ent_m = ent.mean()
+                    ((pg + args.vf_coef * vl - ent_coef * ent_m) * w_sub).backward()
+                    pg_mb += float(pg.item()) * w_sub
+                    vl_mb += float(vl.item()) * w_sub
+                    ent_mb += float(ent_m.item()) * w_sub
                 torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
                 opt.step()
-                pl_sum += float(pg.item())
-                vl_sum += float(vl.item())
-                ent_sum += float(ent.mean().item())
+                pl_sum += pg_mb
+                vl_sum += vl_mb
+                ent_sum += ent_mb
                 n_mb += 1
 
         # Entropy floor controller: nudge the coef scale toward keeping
@@ -526,6 +566,14 @@ def main() -> None:
         writer.add_scalar("curriculum/rolling_win", roll_win, global_step)
         for i, a in enumerate(ACTIONS):
             writer.add_scalar(f"actions/{a}", action_counts[i] / (T * N), global_step)
+        q_total = data["quantity_counts"].sum()
+        if q_total:
+            for i, f in enumerate(QUANTITY_FRACS):
+                writer.add_scalar(
+                    f"actions/quantity_{int(f * 100)}pct",
+                    data["quantity_counts"][i] / q_total,
+                    global_step,
+                )
         print(
             f"update {update:4d}  step {global_step:7d}  eps {episodes_done:4d}  "
             f"stage {stage}  roll-win {roll_win:.2f}  roll-score {roll:.2f}  "
@@ -556,7 +604,11 @@ def main() -> None:
             )
             t0, t0_step = time.time(), global_step  # don't count eval in tps
 
-        if update % 10 == 0 or update == args.updates:
+        if (
+            update % 10 == 0
+            or update == args.updates
+            or shared.pop("ckpt_advance", False)
+        ):
             tmp = out_dir / "policy.pt.tmp"
             with win_lock:
                 wins_snap = list(recent_wins)
