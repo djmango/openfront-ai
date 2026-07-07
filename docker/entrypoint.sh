@@ -7,6 +7,7 @@ DATA_DIR="${DATA_DIR:-/data}"
 export DATA_DIR
 export PYTHONPATH=/app
 export PATH="/app/.venv/bin:/app/openfront/node_modules/.bin:${PATH}"
+PY="/app/.venv/bin/python"
 
 mkdir -p "${DATA_DIR}/records" "${DATA_DIR}/policy"
 
@@ -28,17 +29,17 @@ for _ in $(seq 1 120); do
 done
 
 echo "[entrypoint] replay archive API on :8987"
-python scripts/serve_replay.py \
+"$PY" scripts/serve_replay.py \
   --records "${DATA_DIR}/records" \
   --state "${DATA_DIR}/state.json" \
   --bind 0.0.0.0 \
   --port 8987 &
 
 echo "[entrypoint] replay showcase daemon (RUN_NAME=${RUN_NAME:-ppo_v4})"
-python scripts/eval_daemon.py &
+"$PY" scripts/eval_daemon.py &
 
 echo "[entrypoint] showcase hub on :8988 (watch + on-demand play)"
-python scripts/showcase_hub.py &
+"$PY" scripts/showcase_hub.py &
 
 echo "[entrypoint] Caddy on :8086"
 exec caddy run --config /app/docker/Caddyfile --adapter caddyfile
