@@ -12,7 +12,7 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm AS py-deps
 WORKDIR /build
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev \
-    && uv pip install --index-url https://download.pytorch.org/whl/cpu 'torch>=2.12.0'
+    && uv pip install --index-url https://download.pytorch.org/whl/cu124 'torch>=2.12.0'
 
 FROM node:22-bookworm
 WORKDIR /app
