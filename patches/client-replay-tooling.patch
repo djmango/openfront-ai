@@ -76,27 +76,17 @@ index 0304224bf..4bc0c5b0e 100644
      if (clientMsg.type === "intent") {
 diff --git a/src/client/RlDebugOverlay.ts b/src/client/RlDebugOverlay.ts
 new file mode 100644
-index 000000000..010ea13b2
+index 000000000..111111111
 --- /dev/null
 +++ b/src/client/RlDebugOverlay.ts
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,185 @@
 +/**
 + * RL replay tooling: live model-debug panel.
 + *
 + * Fetches per-decision policy debug data (chosen action, action
 + * probabilities, value estimate) for the current game and renders a small
-+ * fixed panel that follows the sim via window.__replayTick (set in
++ * draggable panel that follows the sim via window.__replayTick (set in
 + * ClientGameRunner).
-+ *
-+ * Sources tried in order, first 200 wins:
-+ *   - localStorage "rlDebugHost"    (override for a non-default live port)
-+ *   - localStorage "apiHost"        (replay shim, scripts/serve_replay.py)
-+ *   - http://localhost:8988         (rl.play --debug-port default; only
-+ *     probed when the client itself runs on localhost)
-+ * at `${host}/debug/${gameID}`. Payload: { actions: string[], log: [...],
-+ * live?: boolean }. When live, the log is re-fetched every 2s.
-+ *
-+ * Disable with localStorage "rlDebugOverlay" = "0".
 + */
 +
 +interface RlDebugEntry {
@@ -121,6 +111,52 @@ index 000000000..010ea13b2
 +  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
 +}
 +
++function makeDraggable(el: HTMLElement): void {
++  const key = "rlDebugOverlayPos";
++  try {
++    const saved = localStorage.getItem(key);
++    if (saved) {
++      const pos = JSON.parse(saved) as { left: number; top: number };
++      el.style.left = `${pos.left}px`;
++      el.style.top = `${pos.top}px`;
++    }
++  } catch {
++    // ignore bad saved position
++  }
++
++  let dragging = false;
++  let offsetX = 0;
++  let offsetY = 0;
++
++  el.addEventListener("mousedown", (ev) => {
++    dragging = true;
++    offsetX = ev.clientX - el.offsetLeft;
++    offsetY = ev.clientY - el.offsetTop;
++    ev.preventDefault();
++  });
++
++  window.addEventListener("mousemove", (ev) => {
++    if (!dragging) return;
++    const left = Math.max(0, Math.min(window.innerWidth - el.offsetWidth, ev.clientX - offsetX));
++    const top = Math.max(0, Math.min(window.innerHeight - 40, ev.clientY - offsetY));
++    el.style.left = `${left}px`;
++    el.style.top = `${top}px`;
++  });
++
++  window.addEventListener("mouseup", () => {
++    if (!dragging) return;
++    dragging = false;
++    try {
++      localStorage.setItem(
++        key,
++        JSON.stringify({ left: el.offsetLeft, top: el.offsetTop }),
++      );
++    } catch {
++      // localStorage unavailable
++    }
++  });
++}
++
 +export function initRlDebugOverlay(gameID: string): void {
 +  if (initialized) return;
 +  initialized = true;
@@ -128,9 +164,7 @@ index 000000000..010ea13b2
 +  let hosts: string[];
 +  try {
 +    if (localStorage.getItem("rlDebugOverlay") === "0") return;
-+    const local = ["localhost", "127.0.0.1"].includes(
-+      window.location.hostname,
-+    );
++    const local = ["localhost", "127.0.0.1"].includes(window.location.hostname);
 +    hosts = [
 +      localStorage.getItem("rlDebugHost"),
 +      localStorage.getItem("apiHost"),
@@ -142,8 +176,6 @@ index 000000000..010ea13b2
 +  if (hosts.length === 0) return;
 +
 +  void (async () => {
-+    // A few attempts so a feed that comes up slightly after the first
-+    // tick (or a slow shim) still gets the overlay.
 +    for (let attempt = 0; attempt < 3; attempt++) {
 +      for (const host of hosts) {
 +        let data: RlDebugPayload;
@@ -165,11 +197,13 @@ index 000000000..010ea13b2
 +function run(data: RlDebugPayload, url: string): void {
 +  const el = document.createElement("div");
 +  el.style.cssText =
-+    "position:fixed;left:8px;top:160px;width:250px;z-index:10005;" +
-+    "background:rgba(12,14,22,.88);color:#d2d6e0;" +
++    "position:fixed;left:8px;top:160px;width:280px;z-index:10005;" +
++    "background:rgba(12,14,22,.9);color:#d2d6e0;" +
 +    "font:11px/1.4 ui-monospace,monospace;" +
-+    "padding:8px 10px;border-radius:8px;pointer-events:none";
++    "padding:8px 10px;border-radius:8px;pointer-events:auto;" +
++    "border:1px solid rgba(255,255,255,.08);cursor:move;user-select:none";
 +  document.body.appendChild(el);
++  makeDraggable(el);
 +
 +  let log = data.log;
 +  let idx = 0;
@@ -205,24 +239,26 @@ index 000000000..010ea13b2
 +      return;
 +    }
 +    html += `tiles ${e.tiles.toLocaleString()}  troops ${e.troops.toLocaleString()}`;
-+    if (e.value !== undefined) html += `  v ${e.value.toFixed(2)}`;
++    if (e.value !== undefined) html += `  v ${e.value >= 0 ? "+" : ""}${e.value.toFixed(2)}`;
 +    html += `<br><span style="color:#5adc5a">${esc(e.desc)}</span>`;
 +    if (e.probs) {
++      html += '<div style="margin-top:6px;color:#787e8c;font-size:10px">action probs</div>';
 +      for (let i = 0; i < data.actions.length; i++) {
 +        const hi = data.actions[i] === e.action;
-+        const col = hi ? "#5adc5a" : e.probs[i] > 0.01 ? "#d2d6e0" : "#787e8c";
++        const p = e.probs[i] ?? 0;
++        const pct = Math.round(p * 100);
++        const col = hi ? "#5adc5a" : p > 0.01 ? "#d2d6e0" : "#787e8c";
 +        html +=
-+          '<div style="display:flex;align-items:center;margin:1px 0">' +
-+          `<span style="width:90px;color:${col}">${esc(data.actions[i].slice(0, 13))}</span>` +
-+          '<span style="flex:1;height:7px;background:#282c3a;border-radius:2px">' +
-+          `<span style="display:block;height:7px;border-radius:2px;width:${Math.round(
-+            e.probs[i] * 100,
-+          )}%;background:${hi ? "#5adc5a" : "#466ebe"}"></span></span></div>`;
++          '<div style="display:flex;align-items:center;gap:4px;margin:2px 0">' +
++          `<span style="width:92px;color:${col};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(data.actions[i].slice(0, 14))}</span>` +
++          '<span style="flex:1;height:8px;background:#282c3a;border-radius:2px;overflow:hidden">' +
++          `<span style="display:block;height:8px;border-radius:2px;width:${pct}%;background:${hi ? "#5adc5a" : "#466ebe"}"></span></span>` +
++          `<span style="width:30px;text-align:right;color:${col};font-size:10px">${pct}%</span></div>`;
 +      }
 +    }
 +    if (recent.length) {
 +      html +=
-+        '<div style="color:#787e8c;margin-top:4px">recent:<br>' +
++        '<div style="color:#787e8c;margin-top:6px;font-size:10px">recent:<br>' +
 +        recent.map(esc).join("<br>") +
 +        "</div>";
 +    }
@@ -259,8 +295,7 @@ diff --git a/index.html b/index.html
 index f042ec74b..a14b6bfd3 100644
 --- a/index.html
 +++ b/index.html
-@@ -7,6 +7,53 @@
-       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+@@ -9,4 +9,55 @@
      />
      <title data-i18n="main.title">OpenFront (ALPHA)</title>
 +    <script>
