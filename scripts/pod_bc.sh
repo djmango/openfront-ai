@@ -67,7 +67,35 @@ print('fetched AE checkpoint (v3.1 d8c32)')
 "
 fi
 
-# --- human dataset: map tars + bc sidecars from HF ---
+# --- human dataset ---
+# Preferred: prebuilt cache-bc tars (prefeaturized frames + v2 sidecars,
+# ~26GB) uploaded from a previous pod. Training only reads cache-bc/, so
+# this skips the 110GB raw download, the engine replay, and prefeaturize.
+# Set RAW_DATA=1 to force the old full pipeline (needed to REBUILD caches).
+if [ ! -f data-human/.complete ] && [ -z "${RAW_DATA:-}" ]; then
+  python - <<'EOF'
+import os
+import tarfile
+from pathlib import Path
+from huggingface_hub import HfApi, hf_hub_download
+
+repo = "djmango/openfront-human-games"
+api = HfApi()
+tars = [f for f in api.list_repo_files(repo, repo_type="dataset")
+        if f.startswith("cache-bc/") and f.endswith(".tar")]
+Path("data-human").mkdir(exist_ok=True)
+for i, f in enumerate(sorted(tars)):
+    print(f"[{i+1}/{len(tars)}] {f}", flush=True)
+    p = hf_hub_download(repo, f, repo_type="dataset")
+    with tarfile.open(p) as t:
+        t.extractall("data-human")
+    os.remove(os.path.realpath(p))
+if tars:
+    Path("data-human/.complete").touch()
+EOF
+fi
+
+# Fallback / cache-rebuild path: raw map tars + bc sidecars (~110GB).
 # Marker file makes the (long) download+extract idempotent across restarts.
 if [ ! -f data-human/.complete ]; then
   python - <<'EOF'
