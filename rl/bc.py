@@ -202,6 +202,12 @@ class BCFeed(torch.utils.data.IterableDataset):
 
 
 def main() -> None:
+    # Stall forensics on pods without ptrace (no py-spy): dump all thread
+    # stacks to stderr every 5 minutes.
+    import faulthandler
+
+    faulthandler.dump_traceback_later(300, repeat=True)
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", nargs="+", default=["data-human"])
     ap.add_argument("--ae", default="runs/ae_v31_d8c32/ae_v3.pt")
