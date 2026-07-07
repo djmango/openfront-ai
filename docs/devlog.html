@@ -15,29 +15,25 @@
     img{max-width:100%;height:auto;display:block;margin:1rem 0}
     .d{color:#666;font-size:16px}
     .now{background:#fafafa;border:1px solid #e8e8e8;padding:14px 16px;margin:1.5rem 0;font-size:16px}
-    h2.date{font-size:1.35rem;margin:2.75rem 0 .35rem;border-top:1px solid #ccc;padding-top:1.25rem}
-    h2.date:first-of-type{border-top:none;padding-top:0;margin-top:1.25rem}
+    h2.date{font-size:1.35rem;margin:2.5rem 0 .35rem;border-top:1px solid #ddd;padding-top:1.25rem}
     h3{margin:1.35rem 0 .45rem;font-size:1.08rem}
-    h3:first-of-type{margin-top:.5rem}
     .session{color:#666;font-size:16px;font-weight:normal;margin:0 0 1rem}
     nav.toc{font-size:15px;line-height:2;margin:1rem 0 1.25rem}
-    .ref{margin-top:3rem;padding-top:1.5rem;border-top:2px solid #ccc}
-    .ref>h2{font-size:1.25rem;margin-bottom:.5rem}
   </style>
 </head>
 <body>
 <h1>openfront-ai devlog</h1>
-<p class="d">Self-play RL on <a href="https://openfront.io">OpenFront.io</a>, real engine.
+<p class="d">Self-play RL on <a href="https://openfront.io">OpenFront.io</a>, real engine, ~two days in.
 <a href="../DESIGN.md">DESIGN.md</a> · <a href="../README.md">README</a></p>
 
 <nav class="toc">
   <a href="#now">Now</a> ·
   <a href="#runs">Run ledger</a> ·
+  <a href="#timeline">Timeline</a> ·
   <a href="#jul-7">July 7th</a> ·
   <a href="#jul-6-late">July 6th, late night</a> ·
   <a href="#jul-6-eve">July 6th, evening</a> ·
   <a href="#jul-6">July 6th</a> ·
-  <a href="#jul-5">July 5th-6th</a> ·
   <a href="#obs">Observation</a> ·
   <a href="#ae31">AE v3.1</a> ·
   <a href="#actions">Actions</a> ·
@@ -51,28 +47,75 @@
   <a href="#bugs">Bugs</a> ·
   <a href="#lessons">Lessons</a> ·
   <a href="#infra">Infra</a> ·
+  <a href="#v4recipe">v4 recipe</a> ·
   <a href="#next">Open threads</a>
 </nav>
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 7th, 2026</h2>
-  <p><code>ppo_v5</code> on rl4 (BC warm start, entropy floor, sharper placement, loss-averse deltas).
-  <code>bc_v4</code> on bc2 ~step 18k. <code>bc_seq_v4</code> on bc3 ~step 3k.
-  Encoder <code>ae_v31_d8c32</code>. 375k bot + 420k human snapshots on HF.</p>
+  <p><code>ppo_v5</code> on rl4: BC warm start, entropy floor, sharper placement, loss-averse deltas; stage 2 in ~1h.
+  <code>bc_v4</code> on bc2 ~step 18k (holdout 0.406). <code>bc_seq_v4</code> on bc3 ~step 3k.
+  <code>ppo_v4</code> retired at update 433 (safe-second collapse).</p>
+  <p class="d" style="margin:.75rem 0 0">375k bot + 420k human snapshots · d8c32 encoder · 5.9M-param policy ·
+  11 curriculum stages · encoder border accuracy 71.8% → 89.3% (human).</p>
 </div>
-
+<h3 id="status">Status snapshot (July 6th evening)</h3>
+<p>
+One PPO run is live: <code>ppo_v3</code>, trained from scratch on curriculum v2, now at stage 4
+(30 bots, three maps) with a 60-70% rolling win rate. Its rival <code>ppo_v2c</code>, warm-started
+from v2b weights, was retired Jul 6 evening after the fresh run overtook it by a full curriculum
+stage. Both produced genuine engine wins on stage 0 (1v1 vs one nation on Onion),
+the first time the win condition has actually fired, partly because the curriculum now makes wins
+reachable and partly because win detection was silently broken until today (<a href="#bugs">bugs</a>).
+A parallel experiment is training a behavior-cloning warm start from archived human games.
+The full observe→act→reward loop, a 7-map win-gated curriculum, restart-proof cloud training, and a
+complete visualization suite (real-client replay videos with a live model-debug overlay, plus live play
+against the agent) are in place.
+</p>
+<p>
+On the observation side, the encoder bake-off (<a href="#ae31">AE v3.1</a>) is <b>concluded</b>:
+benchmarking the bot-trained AE on real human games exposed a 16-point border-accuracy gap, and
+parallel ablations found the fix: latent <i>resolution</i>, not channel count. Final standings on
+uniform-crop eval: d8 (64ch @ 1/8) at 89.3% human / 96.1% bot borders, and the compact d8c32
+(32ch @ 1/8) at 88.2% / 95.5%, one point behind at <i>half</i> the policy input. d8c32 cleared the
+pre-registered ≥88% bar, so it is the encoder for PPO v4. The channel-count control (c96) was
+pruned unfinished: its host kept dying and the resolution result had already answered the question.
+First deployment-style eval of <code>ppo_v3</code> (fixed-seed local games, sampled actions):
+2 wins / 2 losses on the first four stage-4 games, consistent with its training roll-win.
+</p>
+<p>
+<b>Jul 7 ~00:45: v4.2 deployed mid-run.</b> Watching v4 replays exposed the phantom-boat exploit
+(43-78% of decisions were boats the engine silently discarded - see <a href="#bugs">bugs</a>).
+v4.2 fixes it three ways (honest masks, valid-tile snapping, wasted-intent penalty) and resumed
+<code>ppo_v4</code> from its own checkpoint - no retrain needed, since no tensor shapes changed.
+The new <code>episode/wasted</code> curve opened at <b>~85-93 discarded intents per episode</b>
+(stage 4), the measured size of the exploit; the penalty now prices those at noop-minus-w_waste.
+Watch items: wasted falling, boat's action-mix share normalizing, and a transient roll-win dip
+while the value head absorbs the reward shift (resumed at update 260, roll-win 0.28).
+</p>
+<p class="d">
+Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% → 89.3% (human) ·
+5.9M-param policy · 11 curriculum stages · first 2 engine wins Jul 6.
+</p>
 <h3 id="runs">Run ledger</h3>
 <p>What is running, what is done, and what is stale. All RL/BC still loads frozen
 <code>ae_v3.pt</code> until the v3.1 winner is wired into <code>rl/obs.py</code>.</p>
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
   <tr><td><code>ppo_v5</code></td><td>active</td>
-    <td>Launched Jul 7 morning. BC warm start from <code>bc_v4/bc_best.pt</code>, entropy floor, PLACE_POW 1.5, loss-averse deltas. Cleared stage 2 in ~1h.</td></tr>
+    <td>Launched July 7th morning. BC warm start from <code>bc_v4/bc_best.pt</code>, entropy floor (<code>--ent-floor 3.5</code>), PLACE_POW 1.5, loss-averse deltas (gain 5.0 / loss 6.5). Cleared stage 2 in ~1 hour. See <a href="#ppo-v5">PPO v5</a>.</td></tr>
   <tr><td><code>ppo_v4</code></td><td><b>retired</b> Jul 7</td>
-    <td>Update 433 / stage 4. Safe-second collapse. Final ckpt on HF. v4.2 mid-run.</td></tr>
+    <td>The full v4 stack from scratch: d8c32 encoder at 1/8, learned spawns, local owner crop,
+    eval loop. Stages 0→3 in ~2h, stage 4 by ~3.6h despite two restarts (OOM at minibatch 128,
+    then the throughput redeploys). v4.1 async collector since Jul 6 ~11pm; <b>v4.2</b> (honest
+    boat/expand/nuke masks, valid-tile snapping, wasted-intent penalty - the phantom-boat fix)
+    resumed from the same checkpoint Jul 7 ~00:45, no retrain: no tensor shapes changed, only
+    mask semantics and a small reward term. Expect a transient dip while the value head absorbs
+    the reward shift; watch <code>episode/wasted</code> fall and the boat share of the action mix
+    normalize. Checkpoint on HF as <code>ppo_v4/policy.pt</code>.</td></tr>
   <tr><td><code>bc_v4</code></td><td>active</td>
     <td>Feedforward BC on the full 291-game cache-bc dataset (265 train / 26 holdout) with spawn
-    supervision. ~step 18k, holdout 0.406; encode-bound feed. Uploads <code>bc.pt</code> +
+    supervision. ~step 18k, holdout best 0.406; encode-bound feed (~85-93 ex/s); <code>MALLOC_ARENA_MAX=2</code> trial for decay. Uploads <code>bc.pt</code> +
     <code>bc_best.pt</code> to HF.</td></tr>
   <tr><td><code>bc_seq_v4</code></td><td>active</td>
     <td>The temporal transformer experiment (--seq 8), judged properly this time: same cache-bc
@@ -130,129 +173,38 @@ replay. By evening v3 had cleanly won the head-to-head: stage 4 with 60-70% wins
 stage 3 with 7-17%, which is why v2c was retired. Neither lineage has been trained with the new
 encoder or BC warm start yet.</p>
 
-<h2 class="date" id="jul-7">July 7th, 2026</h2>
-<p class="session">Overnight through the morning session.</p>
-<h3 id="overnight-jul7">Overnight results (Jul 7 morning)</h3>
+<h2 class="date" id="jul-5">July 5th through July 7th, 2026</h2>
+<p class="session">Complete chronological record (newest entries at bottom of list).</p>
+<h3 id="timeline">Timeline</h3>
 <ul>
-  <li><b>bc_v4 (bc2):</b> step 6.5k &rarr; 17k overnight (~1M examples at ~95-105 ex/s).
-    Holdout: acted-action 0.74-0.75, player 0.65, quantity 0.62, build 0.67-0.79, nuke 0.75;
-    best-checkpoint metric climbed to 0.406. tile_region stays ~0-0.07 - the ~37k-class tile
-    head is the clear weak spot, not new tonight. <b>Known issue:</b> throughput decays over
-    hours (100 &rarr; 25 ex/s, RSS 23GB, stall climbing) and a trainer restart fully restores
-    it - smells like slow accumulation in the feed path; restart-on-decay is the mitigation
-    until it's profiled.</li>
-  <li><b>bc_seq_v4 (bc3):</b> ~3k steps at ~10 ex/s. First holdout evals: acted-action ~0.50,
-    player 0.59-0.60. Behind the feedforward run at the same wall-clock, as expected at 5x
-    less data; the temporal-vs-feedforward call needs matched sample counts, not matched
-    hours.</li>
-  <li><b>ppo_v4 (rl4):</b> reached update 433 / 1.35M steps, stage 4. <b>Headline concern:</b>
-    rolling win rate fell 0.28 &rarr; 0.00 over ~120 updates while placement score held
-    0.72-0.84 and entropy slid 9.2 &rarr; 2.8. The agent consistently places 2nd and has
-    stopped converting to wins - looks like entropy collapse into a safe-second strategy
-    (the win bonus vanishes from its experience, so nothing pushes it over the top).
-    The binary-IPC deploy is exonerated: a pod-side round-trip probe preserves the win bool,
-    and the decline started before the deploy. Candidate levers for the next session:
-    entropy-coef floor or schedule, and the v5 asymmetric strength shaping.</li>
-</ul>
-<h3 id="bc-decay-hunt">bc2 decay hunt + encode as the real feed cost (Jul 7)</h3>
-<ul>
-  <li><b>Instrumentation first:</b> bc.py now logs per-phase feed seconds
-    (<code>smp/enc/col</code>) plus CUDA allocated/reserved every 50 steps. First readings
-    overturned the "sampler accumulation" theory: <code>smp ~0s</code> (the Rust sampler is
-    essentially free), <code>col ~5s</code>, <code>enc 50-65s</code> per 50-step window -
-    <b>the frozen-AE encode is the entire feed cost</b>, and it shares the GPU with the
-    trainer.</li>
-  <li><b>bf16 autocast on the frozen AE encode</b> (rl/obs.py): free conv throughput -
-    the latents already ship as fp16 to PPO. bc2 recovered to ~85-93 ex/s; bc3's seq run
-    is fully encode-bound (enc 153s of a 163s window, 8 frames per sample) and sits at
-    GPU ~95%: the next real lever there is caching AE latents in cache-bc (the encoder is
-    finally frozen at d8c32, so the cache won't be invalidated - v4's reason to skip it
-    is gone).</li>
-  <li><b>Decay watch - caught in the act (30 min after restart):</b> bc2 slid 93 &rarr; 35
-    ex/s again, and the instrumentation pins it: <code>enc</code> grew 49 &rarr; 135s/window
-    while <code>smp</code> stayed 0.0 and <code>col</code> ~9s; CUDA reserved is <b>flat</b>
-    at 27.5GB; GPU util 31% with clocks at 2872/3090MHz, 43&deg;C, 202W. So it is NOT
-    fragmentation, NOT thermal throttle, NOT the sampler - something CPU-side inside
-    <code>encode_batch</code> (the single-threaded <code>np.stack</code> H2D staging of
-    full-res owner grids) slows as the process ages. RSS was already 11.7GB at 34 min
-    uptime (23GB overnight): prime suspect is glibc heap/arena churn from the hundreds of
-    MB of short-lived numpy buffers per batch - consistent with a restart fully fixing it.
-    Experiment running: <code>MALLOC_ARENA_MAX=2</code> on bc2. Real fix if confirmed:
-    have ofrs return pre-stacked batch arrays so the Python-side memcpy churn disappears.</li>
-</ul>
-<h3 id="ppo-v5">PPO v5: breaking the safe-second attractor (Jul 7)</h3>
-<p>ppo_v4 was killed at update 433 (final checkpoint archived to HF) and <b>ppo_v5</b>
-launched on the same pod with three MDP/optimizer changes aimed squarely at the collapse,
-plus a BC warm start:</p>
-<ul>
-  <li><b>Adaptive entropy floor</b> (<code>--ent-floor 3.5</code>): a multiplicative
-    controller on the entropy coef (x1.3 per update when measured entropy is under the
-    floor, capped at x30, hysteresis at 1.4x floor). v4's entropy slid 9.2 &rarr; 2.8 at a
-    barely-annealed coef of 0.009 - the schedule alone cannot prevent collapse, only a
-    feedback loop can. The scale persists through checkpoints and multiplies the existing
-    anneal.</li>
-  <li><b>Sharper placement curve</b>: <code>PLACE_POW</code> 0.7 &rarr; 1.5. Terminal
-    rewards for 1st/2nd/3rd go from 45/9.2/6.9 to 45/5.3/2.9 - second place lost 42% of
-    its value, so "safe second" is no longer a comfortable optimum even before the win
-    bonus enters experience.</li>
-  <li><b>Loss-aversion delta shaping</b> (v5 wishlist): <code>W_DELTA</code> splits into
-    GAIN 5.0 / LOSS 6.5. v4 games showed hyper-expansion then collapse (103k tiles at
-    t8001, dead by t10711); symmetric shaping priced a lost tile the same as a gained one,
-    so defense was never worth learning.</li>
-  <li><b>BC warm start</b>: <code>INIT_BC=bc_v4</code> pulls <code>bc_best.pt</code>
-    (holdout 0.406) from HF, loads the 70 shared Policy tensors and folds the
-    winner-bucket conditioning into the head biases.</li>
-</ul>
-<p>Early read (30 min in): stage 0 cleared in ~25 updates, stage 2 by update 64 - v4 needed
-hours for the same ground. Entropy holds ~4.8 with the floor controller live
-(ecoef oscillating 0.010-0.048 as the controller breathes). Deliberately NOT in v5:
-the LSTM/temporal policy - bc3's seq-vs-feedforward comparison is the evidence gate for
-that, and it hasn't reached matched sample counts yet.</p>
-<h3 id="reward-mdp">Reward MDP reference (Jul 7)</h3>
-<p>The dense + terminal reward is fully specified in <code>rl/curriculum.py</code> and applied in
-<code>rl/vec.py</code>. These panels are generated from the live constants by
-<code>scripts/make_reward_graphs.py</code> (re-run after any tweak):</p>
-<p>
-  <img src="graphs/reward_terminal.png" alt="terminal placement v4 vs v5" width="820"><br>
-  <img src="graphs/reward_dense.png" alt="dense reward: timeweight, delta asymmetry, heatmap, waste tax" width="820"><br>
-  <img src="graphs/reward_scenarios.png" alt="archetypal episode cumulative returns v4 vs v5" width="820"><br>
-  <img src="graphs/reward_strength.png" alt="strength index by play style" width="820">
-</p>
-<table>
-  <tr><th>constant</th><th>v4</th><th>v5 (current)</th><th>role</th></tr>
-  <tr><td><code>W_STR</code></td><td>0.02</td><td>0.02</td><td>dense: strength &times; timeweight each decision</td></tr>
-  <tr><td><code>W_DELTA</code></td><td>5.0 symmetric</td><td>gain 5.0 / loss 6.5</td><td>immediate credit for strength change; losses hurt more</td></tr>
-  <tr><td><code>PLACE_POW</code></td><td>0.7</td><td>1.5</td><td>terminal: <code>W_PLACE &times; rank<sup>-pow</sup></code></td></tr>
-  <tr><td><code>W_PLACE</code></td><td>15</td><td>15</td><td>terminal placement scale (1st alone = 15.0)</td></tr>
-  <tr><td><code>W_WIN</code></td><td>30</td><td>30</td><td>extra on engine win (on top of placement)</td></tr>
-  <tr><td><code>W_DEATH</code></td><td>1</td><td>1</td><td>flat penalty when eliminated</td></tr>
-  <tr><td><code>W_WASTE</code></td><td>0.01</td><td>0.01</td><td>per silently-discarded intent (boat/build spam)</td></tr>
-  <tr><td>timeweight</td><td>0.5&rarr;1.0</td><td>same</td><td>ramps over first 8000 engine ticks</td></tr>
-  <tr><td>strength blend</td><td>45/25/30</td><td>same</td><td>land / military / economy shares of alive totals</td></tr>
-</table>
-<ul>
-  <li><b>Terminal panel:</b> v5's sharper <code>PLACE_POW</code> is the main anti-safe-second lever -
-    2nd place drops from 9.2 to 5.3 before any win bonus. The win bonus (+30) still dominates a
-    outright win (45 total for 1st+win vs 5.3 for 2nd-only), but the agent has to actually win
-    to see it; placement alone now pushes harder for the top.</li>
-  <li><b>Dense panel:</b> most steps are small (strength ~0.1-0.3 at timeweight 1.0 gives
-    ~0.002-0.006/step); the delta term is where expansion and collapse show up (&plusmn;0.05
-    strength swing &asymp; &plusmn;0.25-0.33 per step). The heatmap is the tuning surface for
-    "how aggressive should expansion be?" Loss-aversion tilts the agent toward defending a lead.</li>
-  <li><b>Scenario panel:</b> synthetic strength traces (not real games) show total return under
-    the old vs new MDP. Safe-second timeout pays similarly in dense terms but v5 cuts the terminal;
-    expand-then-collapse gets punished twice (asymmetric deltas on the way down + worse placement).
-    Waste spam shows why <code>W_WASTE</code> exists: without it, doomed boats are free lottery
-    tickets.</li>
-  <li><b>Strength panel:</b> the composite index is not raw land - eco islands and military rushes
-    can score honestly. Tuning <code>K_LAND/K_MIL/K_ECO</code> shifts which strategies the dense
-    signal rewards mid-game.</li>
-</ul>
-
-<h2 class="date" id="jul-6-late">July 6th, 2026 - late night</h2>
-<p class="session">Phantom-boat fix and the Rust port (~5:45 p.m. through midnight).</p>
-<h3>v4.2 - phantom boat exploit fixed mid-run</h3>
-<p>the phantom-boat audit. Replay sidecars showed the agent picking
+  <li><b>Jul 5 eve:</b> headless datagen + tile AE v1. TS runner boots the real engine in Node,
+    plays bot games, dumps packed tile grids + full entity state every 10 ticks.</li>
+  <li><b>Jul 5 night:</b> AE v2: one unified latent over ALL state. Spatial recon excellent; exact
+    facts not (alliance pairs F1 0.67, troop ordering 0.81 after four tuning runs).</li>
+  <li><b>Jul 5 23:14:</b> AE v3: spatial-only + bypass split. The pivotal correction. 1.17M params,
+    64ch latent per 16x16 region, structures at P/R 1.0 through the latent.</li>
+  <li><b>Jul 5 23:25 → Jul 6 00:36:</b> RL scaffold → vectorized PPO → curriculum v1. Engine bridge
+    over stdio, obs builder on the frozen AE, factorized masked heads, strength-index reward.</li>
+  <li><b>Jul 6 morning:</b> human-game pipeline (fetch archive, hash-verified deterministic replay to
+    snapshots, HF upload) and restart-proof cloud training (full-state checkpoints, supervised
+    restarts, HF checkpoint sync). Training hosts became disposable.</li>
+  <li><b>Jul 6 10:27–11:32:</b> GameRecord replays (bit-identical in the real client) and the
+    live-lobby agent client: fight the policy from a normal browser.</li>
+  <li><b>Jul 6 11:07–11:19:</b> curriculum v2: map pools, 25% rehearsal, win-gated advancement,
+    1v1 → 1v3 start for dense wins.</li>
+  <li><b>Jul 6 11:40:</b> behavior cloning from human games (placement-conditioned; optional
+    temporal transformer).</li>
+  <li><b>Jul 6 12:06:</b> win-detection bug found and fixed. Every win-rate stat before this is
+    invalid.</li>
+  <li><b>Jul 6 12:20:</b> training speed overhaul: per-batch padding, pipelined rollout, bf16,
+    binary IPC, per-stage decision cadence.</li>
+  <li><b>Jul 6 13:04–13:39:</b> real-client replay videos (actual game graphics, agent crowned as
+    AGENT) and the MODEL debug overlay everywhere: rendered videos, browser replays, live matches.</li>
+  <li><b>Jul 6 aft:</b> AE reckoning: benchmarked the bot-trained encoder on human games (border
+    accuracy 71.8% vs 87.5% on bot data), retrained on a bot+human mix, then designed and ran the
+    v3.1 ablation matrix in parallel. Latent resolution won. New encoder + benchmark table
+    uploaded to HF.</li>
+  <li><b>Jul 7 early:</b> the phantom-boat audit. Replay sidecars showed the agent picking
     <code>boat</code> on 43-78% of decisions (p(boat) up to 0.79, p(noop) 0.01) with nearly all of
     them silently discarded by the engine - the cap is 3 transports in flight. Root cause: a
     whole class of actions was "legal" per the mask but a guaranteed no-op at execution, and a
@@ -268,7 +220,211 @@ that, and it hasn't reached matched sample counts yet.</p>
     hot-deployed to the running <code>ppo_v4</code> pod at ~00:45: trainer killed, repo synced,
     resumed from the same checkpoint (update 260, stage 4, win-window intact) - resume-safe
     because nothing about the network changed. First v4.2 episodes measured the exploit at
-    ~85-93 wasted intents per episode.</p>
+    ~85-93 wasted intents per episode.</li>
+  <li><b>Jul 6 eve:</b> v4: the whole policy stack moved to 1/8 resolution (d8c32 encoder, 8x8
+    tile regions, 150x250 grid budget) - the clean cut, no space-to-depth shims. GPU-side
+    featurization (ego pooling, fallout unpack, AE encode, local crop batched in
+    <code>encode_grids</code>), which also fixed a stale-fallout bug (dynamic fallout was riding
+    inside the per-episode cached terrain tensor). Raw 64x64 local owner-crop bypass. Learned
+    spawn placement end to end: spawn action + legal-region mask in PPO, spawn-phase snapshots +
+    labels in replay sidecars (formatVersion 2) for BC. BC prefeaturize cache
+    (<code>scripts/prefeaturize_bc.py</code>): 1.45 ms/sample single-threaded vs ~15-20 ms before.
+    PPO v4 fixes: entropy anneal, stage LR warmdown, persisted win-gate window, periodic
+    fixed-seed greedy eval. Pod supervisors got commit assertions and crash-loop backoff.</li>
+</ul>
+
+<h2 class="date" id="jul-6">July 6th, 2026 - architecture and curriculum</h2>
+<p class="session">Observation stack, reward, curriculum design (written this day).</p>
+<h3 id="obs">Observation: compress the map, bypass the rest</h3>
+<p>The core architectural finding so far. Three iterations:</p>
+<ul>
+  <li><b>v1:</b> AE over tile ownership + terrain. Worked; too narrow.</li>
+  <li><b>v2:</b> one unified AE over all state (tiles, players, units, diplomacy). Spatial recon
+    excellent, but tiny exact facts fought the bottleneck: alliance pairs peaked at F1 0.67 and troop
+    ordering 0.81 across four tuning attempts (loss weights, pooled-vector capacity, per-slot latents,
+    graph-to-encoder).</li>
+  <li><b>v3 (current):</b> compress only what is big: the map. Tile accuracy 99.4% (border-tile
+    87–99% by map), structures precision/recall 1.0 per class. Everything small and exact bypasses
+    the latent raw: pairwise diplomacy, per-player scalars, transient units (nukes in flight with
+    impact points), attack aggregates, legality masks.</li>
+</ul>
+<p><b>The lesson: a one-bit fact reconstructed at 95% is strictly worse than reading the bit.</b>
+Autoencoders are for high-dimensional state; never make exact small state fight the map for latent
+capacity.</p>
+<p>AE details that held up: border-weighted cross-entropy (borders blur first and matter most),
+owner relabeling to static per-game spawn slots (any player count, fixed channels), fully-convolutional
+training on random crops (one model, any map size), and rarity-weighted BCE <i>detection</i> for
+structures: count regression collapses to all-zeros on 99.9%-empty grids.</p>
+
+<h3 id="ae31">AE v3.1: the border-accuracy push</h3>
+<p><b>The trigger:</b> overall tile accuracy saturates near 99% for every model (water and player
+interiors are easy), so the honest metric is border-tile accuracy, and it wasn't in the training logs
+at all. Benchmarking the bot-trained v3 on the newly replayed human games exposed a 16-point domain
+gap: 87.5% border accuracy on bot data, 71.8% on human. Human territories are gnarly (naval invasions,
+enclaves, 50+ player fronts); nation bots grow blobs.</p>
+<p><b>Two fixes ran in sequence.</b> First, retraining v3 unchanged on a bot+human mix recovered the
+domain gap (80.1% human), so data was part of the problem. Then v3.1 attacked the architecture with
+seven changes at once plus two ablations to find the real constraint:</p>
+<ul>
+  <li>decoder conditioned on <i>static</i> terrain (land + magnitude, never dynamic fallout), side
+    information the policy gets for free, so the latent stops re-encoding coastlines</li>
+  <li>nearest-upsample + 3x3 convs replacing ConvTranspose (no checkerboard), plus a full-res 3x3
+    refinement block before the classifier (was a bare 1x1, zero neighborhood context)</li>
+  <li>border-density rejection sampling for training crops (uniform crops waste most gradient on
+    ocean), focal loss on hard pixels, warmup+cosine LR, and native border-accuracy logging</li>
+  <li>ablations: latent channels 64→96 at 1/16 res, vs. latent grid at 1/8 res</li>
+</ul>
+<p><b>Result: resolution is the constraint, not capacity.</b> Uniform-crop eval, 256 samples:</p>
+<table>
+  <tr><th>model</th><th>latent</th><th>border (human)</th><th>border (bot)</th></tr>
+  <tr><td>v3 bot-only</td><td>64ch @ 1/16</td><td>71.8%</td><td>87.5%</td></tr>
+  <tr><td>v3 on bot+human mix</td><td>64ch @ 1/16</td><td>80.1%</td><td>86.8%</td></tr>
+  <tr><td>v3.1, all fixes</td><td>64ch @ 1/16</td><td>78.5%</td><td>90.7%</td></tr>
+  <tr><td><b>v3.1 @ 1/8 res</b></td><td>64ch @ 1/8</td><td><b>89.3%</b></td><td><b>96.1%</b></td></tr>
+</table>
+<p>At the same 1/16 resolution, the v3.1 decoder/loss work helped bot borders but couldn't beat plain
+mixed-data retraining on human borders. Borders are high-frequency spatial detail, and a 64-number
+vector summarizing a 16x16 patch simply cannot store where a ragged front cuts through. Halving the
+patch to 8x8 bought ~9 points on both domains. Structure detection stayed at precision/recall 1.0
+throughout. The catch: the 1/8 latent is 4x the policy input; a 1/8 x 32ch run (2x baseline) is in
+flight to see if the win survives halved channels, alongside the 96ch control.</p>
+<p><b>Complementary hedge (decided):</b> the policy will also receive a raw local owner-map crop
+around its own territory, exact borders where the agent acts most, latent for global context. The
+latent doesn't have to be pixel-perfect everywhere.</p>
+
+<h3 id="actions">Action space</h3>
+<p>Full intent surface from day one, legality masking only (never curricular). Factorized masked heads
+over a shared conv trunk. One flat softmax is impossible (tile arguments alone are millions of
+options):</p>
+<table>
+  <tr><th>head</th><th>chooses</th></tr>
+  <tr><td>action type</td><td>noop, attack, expand, boat, build, launch_nuke, alliance req/reject/break, donate gold/troops, embargo, retreat</td></tr>
+  <tr><td>player pointer</td><td>target player slot</td></tr>
+  <tr><td>tile-region pointer</td><td>a 16x16 map region; the bridge snaps to the best legal tile inside it</td></tr>
+  <tr><td>build / nuke type</td><td>structure or warhead class</td></tr>
+  <tr><td>quantity</td><td>troop fraction bucket</td></tr>
+</table>
+<p class="d">Masks come from exact engine legality calls each step; the policy can only pick what the
+engine would accept. Where a tile argument can still fail at execution (boat destination
+unreachable by water, build site too close to another structure), the bridge counts the discarded
+intent and the env charges w_waste for it - the mask keeps the policy honest, the penalty keeps
+the engine honest. Full intent table in DESIGN.md.</p>
+
+<h3 id="reward">Reward</h3>
+<p>Iterated from raw land occupancy to a composite <b>strength index</b>:
+0.45 x land + 0.25 x military + 0.30 x economy (shares). Land alone mis-scores legit strategies like
+tiny-island gold-stacking.</p>
+<ul>
+  <li>dense: <code>w_str x strength x timeweight</code>, timeweight 0.5→1.0 over the first 8000 ticks.
+    Strong late is worth double strong early, and it doesn't net to zero on death like pure deltas</li>
+  <li>delta term for immediate credit (v4: symmetric 5.0; <b>v5: gain 5.0 / loss 6.5</b>)</li>
+  <li>terminal: <code>w_place x place^-pow</code> (v4: pow=0.7; <b>v5: pow=1.5</b>), power law: 1st ≈ w_place, 2nd much lower at v5;
+    the dead rank behind everyone still alive</li>
+  <li>win bonus <code>w_win = 30</code> (doubled when the curriculum became win-gated)</li>
+  <li>small flat death penalty</li>
+  <li>wasted-intent penalty <code>w_waste = 0.01</code> per intent the engine silently discarded
+    (doomed boat, invalid build site, expand with no neutral border): without a price these are
+    noop-with-upside and the policy farms them (see <a href="#bugs">bugs</a>)</li>
+</ul>
+
+<h3 id="curriculum">Curriculum</h3>
+<p>Eleven stages over seven maps (Onion → Pangaea → Caucasus → BlackSea → BetweenTwoSeas → World →
+Asia). Three principles, all added after watching v1 fail to progress:</p>
+<ol>
+  <li><b>Dense win signal first.</b> Stage 0 is 1v1 vs a single nation on Onion; stage 1 is 1v3. Only
+    then tribe bots and full rosters. Before this the win bonus essentially never fired.</li>
+  <li><b>Map pools, not single maps.</b> The map is sampled per episode, so no overfitting one
+    layout.</li>
+  <li><b>Rehearsal against forgetting.</b> 25% of episodes replay an earlier stage's map at the
+    <i>current</i> bots/difficulty. Old maps come back harder. Rehearsal trains but doesn't count
+    toward advancement.</li>
+</ol>
+<p>Advancement is win-gated: rolling win rate over the last 40 on-stage episodes must exceed 0.5. The
+agent must be winning more often than not, not merely surviving.</p>
+
+<h3 id="alphafront">Prior art: AlphaFront</h3>
+<p><a href="https://github.com/josh-freeman/openfront-rl">josh-freeman/openfront-rl</a>
+(HF <a href="https://huggingface.co/mischievers/openfront-rl-agent">mischievers/openfront-rl-agent</a>,
+"v19b") is the other PPO agent on this engine we're aware of, and a lot of our scaffolding follows
+from what they figured out first. The main fork is observation and tile choice: they keep a compact
+scalar view (~96 floats) and route spatial decisions through hand-coded heuristics (closest border
+tile, <code>pickBuildTile()</code>); we put map structure in the observation stack and learn tile
+selection with a spatial pointer (the bridge still snaps to legal tiles). Different tradeoffs: compact
+obs plus heuristics is simpler to train and deploy; richer spatial input is heavier but can in
+principle learn geography, chokepoints, and nuke aim.</p>
+<table>
+  <tr><th></th><th>AlphaFront</th><th>openfront-ai</th></tr>
+  <tr><td>observation</td><td>~96 floats (16 player scalars + 16 neighbors × 5); no map</td>
+    <td>frozen spatial AE latent + ego planes + entity tokens + raw bypass</td></tr>
+  <tr><td>actions</td><td>17 types, 16 neighbor targets, 5 fractions; no diplomacy</td>
+    <td>full intent surface incl. diplomacy; factorized heads, engine masks</td></tr>
+  <tr><td>tile choice</td><td>heuristics (<code>pickBuildTile()</code>, closest border, etc.)</td>
+    <td>learned spatial pointer; bridge snaps within the chosen region</td></tr>
+  <tr><td>network</td><td>MLP 512-512-256, ~0.5M params</td><td>CNN + token transformer + pointers, 5.9M</td></tr>
+  <tr><td>curriculum</td><td>10 win-rate-gated stages, LR warmdown</td>
+    <td>11 win-gated stages, 7 real maps, rehearsal (gating idea borrowed from them)</td></tr>
+  <tr><td>human data</td><td>not in scope</td><td>archive replay pipeline + behavior cloning</td></tr>
+  <tr><td>live play</td><td>Puppeteer bot driving a browser</td><td>native websocket client, no browser</td></tr>
+  <tr><td>results</td><td>100% vs Easy/2 opp (20 games); survival plateaus ~35–47% mid-curriculum</td>
+    <td>first engine wins on stage 0; climb in progress</td></tr>
+</table>
+<p>What they showed works here, and we adopted: PPO converges on this engine at ~10 ticks/decision (we
+chose the same cadence independently); win-rate-gated advancement is viable. Still on our borrow
+list from their setup: LR warmdown on stage transitions; tiny flat generated maps as an even softer
+stage 0; a mid-game "beat all bots" gate so advancement doesn't wait on long endgames. On our side
+we've added a human-replay pipeline for behavior cloning: extra imitation signal that's awkward to
+fold into a purely scalar observation.</p>
+
+<h2 class="date" id="jul-6-eve">July 6th, 2026 - evening</h2>
+<p class="session">Throughput engineering, progress graphs.</p>
+<h3 id="perf">Performance</h3>
+<p>GPU util was poor and env stepping was the bottleneck:</p>
+<ul>
+  <li><b>Per-batch dynamic grid padding.</b> Everything was padded to the largest map (75x125 regions);
+    Onion is 32x32, ~9x wasted conv compute on small maps. Obs stay native-size; collate pads to the
+    batch max; pointer heads convert global↔local region indices.</li>
+  <li><b>Double-buffered rollout.</b> Env stepping (CPU/Node) and inference (GPU) were serial; now one
+    env group steps while the other is on the GPU.</li>
+  <li><b>bf16 autocast + TF32 + fused AdamW</b>, plus a <code>--compile</code> flag.</li>
+  <li><b>Binary tile IPC.</b> Tile grids crossed the bridge as gzip+base64 JSON every step; now a JSON
+    header + raw bytes on stdout.</li>
+  <li><b>Per-stage decision cadence.</b> Early stages decide every 15 engine ticks instead of 10.</li>
+  <li><b>fp16 rollout storage + pinned staging + prefetch (Jul 6, <code>8a0da05</code>).</b> The
+    single main thread was serializing fp32 copies, minibatch collation, and GPU compute; observations
+    now ride as fp16, transfers go through pinned buffers, and a worker thread collates the next
+    minibatch during the current backward. 3.6x on stage-3 maps (~590 → ~2100 game-ticks/s).</li>
+  <li><b>v4.1 async rollout/update overlap (Jul 6 night, <code>b8c331c</code>).</b> A collector
+    thread builds rollout k+1 (env stepping + encode/act on a snapshot policy) while the main thread
+    runs the PPO update on rollout k. One rollout of staleness; <code>old_logp</code> stays anchored
+    to the acting snapshot so the clipped ratio math is unchanged. The former ~35s rollout phase now
+    hides inside the update phase (<code>perf/rollout_wait_s</code> tracks what's left).</li>
+</ul>
+
+<h3 id="graphs">Progress graphs (Jul 6 night)</h3>
+<p>Generated by <code>scripts/make_progress_graphs.py</code> from the surviving TB event files and
+BC jsonl logs. ppo_v3's curves died with its pod (lesson: archive events before terminating);
+it appears as annotated reference lines from the devlog record.</p>
+<p>
+  <img src="graphs/curriculum_progress.png" alt="curriculum progress by run generation" width="820"><br>
+  <img src="graphs/throughput.png" alt="ppo_v4 throughput timeline" width="820"><br>
+  <img src="graphs/bc_pipeline.png" alt="BC pilot vs cache-fed v4" width="820">
+</p>
+<ul>
+  <li><b>Curriculum:</b> ppo_v4 cleared stages 0→3 in ~2h from scratch and reached stage 4 at ~3.6h
+    - territory v2c never reached and roughly v3's pace despite v4 carrying the 1/8-resolution
+    stack, learned spawns, and two mid-run restarts.</li>
+  <li><b>Throughput:</b> the per-update tps window decays as the curriculum moves to bigger maps
+    (Node engine tick cost), so compare like-for-like: at stage 3-4 the fp16+prefetch fix took
+    sustained tps from ~590 to ~2100, and v4.1 hides the rollout phase entirely.</li>
+  <li><b>BC:</b> the cache killed the data bottleneck (~1.5ms/sample vs 15-20ms), which moved the
+    limiter to the GPU: bc_v4 runs ~56 ex/s at batch 24 x accum 4 on the 5090 (vs the pilot's 34 ex/s
+    where the GPU sat idle waiting on gzip+JSON). Loss/accuracy now measure the model, not the
+    pipeline. Loss is not yet trending down - that judgment (and the temporal transformer
+    comparison) needs the full 60k-step run.</li>
+</ul>
+
+<h2 class="date" id="jul-6-late">July 6th, 2026 - late night</h2>
+<p class="session">Phantom-boat fix and the Rust port (~midnight).</p>
 <h3 id="native">Escaping the GIL: Rust hot paths + free-threaded Python (Jul 7 early am)</h3>
 <p>Every performance fix this project has shipped was some flavor of "get work off the single
 Python thread" (VecEnv processes, GPU featurization, pinned prefetch, the v4.1 async collector).
@@ -319,269 +475,130 @@ window on bc2). The fix was to delete the abstraction, not tune it:</p>
     (fragmentation after 1135s uptime, not the new code path).</li>
 </ul>
 
-<h2 class="date" id="jul-6-eve">July 6th, 2026 - evening</h2>
-<p class="session">v4 launch, throughput engineering, progress graphs.</p>
-<h3>v4 launch</h3>
-<p>v4: the whole policy stack moved to 1/8 resolution (d8c32 encoder, 8x8
-    tile regions, 150x250 grid budget) - the clean cut, no space-to-depth shims. GPU-side
-    featurization (ego pooling, fallout unpack, AE encode, local crop batched in
-    <code>encode_grids</code>), which also fixed a stale-fallout bug (dynamic fallout was riding
-    inside the per-episode cached terrain tensor). Raw 64x64 local owner-crop bypass. Learned
-    spawn placement end to end: spawn action + legal-region mask in PPO, spawn-phase snapshots +
-    labels in replay sidecars (formatVersion 2) for BC. BC prefeaturize cache
-    (<code>scripts/prefeaturize_bc.py</code>): 1.45 ms/sample single-threaded vs ~15-20 ms before.
-    PPO v4 fixes: entropy anneal, stage LR warmdown, persisted win-gate window, periodic
-    fixed-seed greedy eval. Pod supervisors got commit assertions and crash-loop backoff.</p>
-<h3 id="v4recipe">v4 training recipe &amp; decision gates</h3>
-<p>Three arms, two launched together (Jul 6 eve), the third conditional:</p>
+<h2 class="date" id="jul-7">July 7th, 2026</h2>
+<p class="session">Overnight check-in through the morning session.</p>
+<h3 id="overnight-jul7">Overnight results (Jul 7 morning)</h3>
 <ul>
-  <li><b>Arm A - pure RL</b> (<code>ppo_v4</code>): from scratch, stage 0. Baseline and control;
-    also the only arm learning spawn placement without supervision.</li>
-  <li><b>Arm B - BC</b> (<code>bc_v4</code>): feedforward pilot, 60k steps on the cache-bc
-    pipeline. At ~1.5ms/sample CPU the run is GPU-bound; verdict lands in hours, not days.
-    Saves <code>bc_best.pt</code> on holdout improvement (acted-action + tile accuracy - the
-    honest heads; plain action accuracy is inflated by forced-legality noops).</li>
-  <li><b>Arm C - BC→RL</b> (<code>ppo_v4_bcinit</code>, conditional): launched when B plateaus.
-    <code>rl/ppo.py --init</code> loads the shared Policy weights and folds the winner-bucket
-    conditioning into the head biases - verified exact (max output diff ~1e-7 across all heads).
-    Same hypers/envs/pod class as A; judged at equal PPO wall-clock on the
-    <code>eval/win</code> curves and time-to-stage-N.</li>
+  <li><b>bc_v4 (bc2):</b> step 6.5k &rarr; 17k overnight (~1M examples at ~95-105 ex/s).
+    Holdout: acted-action 0.74-0.75, player 0.65, quantity 0.62, build 0.67-0.79, nuke 0.75;
+    best-checkpoint metric climbed to 0.406. tile_region stays ~0-0.07 - the ~37k-class tile
+    head is the clear weak spot, not new tonight. <b>Known issue:</b> throughput decays over
+    hours (100 &rarr; 25 ex/s, RSS 23GB, stall climbing) and a trainer restart fully restores
+    it - smells like slow accumulation in the feed path; restart-on-decay is the mitigation
+    until it's profiled.</li>
+  <li><b>bc_seq_v4 (bc3):</b> ~3k steps at ~10 ex/s. First holdout evals: acted-action ~0.50,
+    player 0.59-0.60. Behind the feedforward run at the same wall-clock, as expected at 5x
+    less data; the temporal-vs-feedforward call needs matched sample counts, not matched
+    hours.</li>
+  <li><b>ppo_v4 (rl4):</b> reached update 433 / 1.35M steps, stage 4. <b>Headline concern:</b>
+    rolling win rate fell 0.28 &rarr; 0.00 over ~120 updates while placement score held
+    0.72-0.84 and entropy slid 9.2 &rarr; 2.8. The agent consistently places 2nd and has
+    stopped converting to wins - looks like entropy collapse into a safe-second strategy
+    (the win bonus vanishes from its experience, so nothing pushes it over the top).
+    The binary-IPC deploy is exonerated: a pod-side round-trip probe preserves the win bool,
+    and the decline started before the deploy. Candidate levers for the next session:
+    entropy-coef floor or schedule, and the v5 asymmetric strength shaping.</li>
 </ul>
-<p><b>Gates.</b> B is learning iff holdout <code>tile_region</code> accuracy climbs and holdout
-loss falls (10k steps ≈ 1M samples ≈ 5x the entire old pilot's data; flat there = dead, kill the
-pod, A continues regardless). B has plateaued (launch C) when holdout metrics are flat across two
-consecutive eval windows (~10k steps) or the cosine tail begins. C's first ~30min will look bad
-while the untrained value head catches up - judge after the critic settles. If C's entropy climbs
-back toward ~7 in the first hour, the BC prior got washed out: add a KL-to-prior regularizer
-(AlphaStar-style) before rerunning.</p>
-<p><b>Watch items.</b> BC first log line should read several hundred ex/s (under ~100 = cache
-problem, stop). Late-curriculum OOM lever: <code>MINIBATCH=64</code> env var (1/8 grids cost ~4x
-v3's conv activations at World/Asia). Rollout buffer RAM ~20GB at Asia-size grids with 96x32;
-halve <code>--rollout</code> if the pod is RAM-tight. Fixed-seed eval pauses training for minutes
-at late stages (~2% overhead at <code>eval-every 300</code>). Old v1 sidecars carry no spawn
-labels; re-replay with <code>BC=1 REBC=1 datagen/replay_all.sh</code> feeds the next BC run.</p>
-<p><b>Deliberately skipped:</b> BC value-head pretraining on placements (scale-mismatched with
-PPO returns, muddies A-vs-C), fp16 rollout buffers (RAM insurance we may not need), latent
-precompute to disk (at 1/8 a latent is ~2.4MB/snapshot ≈ 200GB corpus - the GPU-batched encode
-from the raw cache IS that idea, done right).</p>
-<h3 id="perf">Performance</h3>
-<p>GPU util was poor and env stepping was the bottleneck:</p>
+
+<h3 id="ppo-v5">PPO v5: breaking the safe-second attractor (Jul 7)</h3>
+<p>ppo_v4 was killed at update 433 (final checkpoint archived to HF) and <b>ppo_v5</b>
+launched on the same pod with three MDP/optimizer changes aimed squarely at the collapse,
+plus a BC warm start:</p>
 <ul>
-  <li><b>Per-batch dynamic grid padding.</b> Everything was padded to the largest map (75x125 regions);
-    Onion is 32x32, ~9x wasted conv compute on small maps. Obs stay native-size; collate pads to the
-    batch max; pointer heads convert global↔local region indices.</li>
-  <li><b>Double-buffered rollout.</b> Env stepping (CPU/Node) and inference (GPU) were serial; now one
-    env group steps while the other is on the GPU.</li>
-  <li><b>bf16 autocast + TF32 + fused AdamW</b>, plus a <code>--compile</code> flag.</li>
-  <li><b>Binary tile IPC.</b> Tile grids crossed the bridge as gzip+base64 JSON every step; now a JSON
-    header + raw bytes on stdout.</li>
-  <li><b>Per-stage decision cadence.</b> Early stages decide every 15 engine ticks instead of 10.</li>
-  <li><b>fp16 rollout storage + pinned staging + prefetch (Jul 6, <code>8a0da05</code>).</b> The
-    single main thread was serializing fp32 copies, minibatch collation, and GPU compute; observations
-    now ride as fp16, transfers go through pinned buffers, and a worker thread collates the next
-    minibatch during the current backward. 3.6x on stage-3 maps (~590 → ~2100 game-ticks/s).</li>
-  <li><b>v4.1 async rollout/update overlap (Jul 6 night, <code>b8c331c</code>).</b> A collector
-    thread builds rollout k+1 (env stepping + encode/act on a snapshot policy) while the main thread
-    runs the PPO update on rollout k. One rollout of staleness; <code>old_logp</code> stays anchored
-    to the acting snapshot so the clipped ratio math is unchanged. The former ~35s rollout phase now
-    hides inside the update phase (<code>perf/rollout_wait_s</code> tracks what's left).</li>
+  <li><b>Adaptive entropy floor</b> (<code>--ent-floor 3.5</code>): a multiplicative
+    controller on the entropy coef (x1.3 per update when measured entropy is under the
+    floor, capped at x30, hysteresis at 1.4x floor). v4's entropy slid 9.2 &rarr; 2.8 at a
+    barely-annealed coef of 0.009 - the schedule alone cannot prevent collapse, only a
+    feedback loop can. The scale persists through checkpoints and multiplies the existing
+    anneal.</li>
+  <li><b>Sharper placement curve</b>: <code>PLACE_POW</code> 0.7 &rarr; 1.5. Terminal
+    rewards for 1st/2nd/3rd go from 45/9.2/6.9 to 45/5.3/2.9 - second place lost 42% of
+    its value, so "safe second" is no longer a comfortable optimum even before the win
+    bonus enters experience.</li>
+  <li><b>Loss-aversion delta shaping</b> (v5 wishlist): <code>W_DELTA</code> splits into
+    GAIN 5.0 / LOSS 6.5. v4 games showed hyper-expansion then collapse (103k tiles at
+    t8001, dead by t10711); symmetric shaping priced a lost tile the same as a gained one,
+    so defense was never worth learning.</li>
+  <li><b>BC warm start</b>: <code>INIT_BC=bc_v4</code> pulls <code>bc_best.pt</code>
+    (holdout 0.406) from HF, loads the 70 shared Policy tensors and folds the
+    winner-bucket conditioning into the head biases.</li>
 </ul>
-<h3 id="graphs">Progress graphs (Jul 6 night)</h3>
-<p>Generated by <code>scripts/make_progress_graphs.py</code> from the surviving TB event files and
-BC jsonl logs. ppo_v3's curves died with its pod (lesson: archive events before terminating);
-it appears as annotated reference lines from the devlog record.</p>
+<p>Early read (30 min in): stage 0 cleared in ~25 updates, stage 2 by update 64 - v4 needed
+hours for the same ground. Entropy holds ~4.8 with the floor controller live
+(ecoef oscillating 0.010-0.048 as the controller breathes). Deliberately NOT in v5:
+the LSTM/temporal policy - bc3's seq-vs-feedforward comparison is the evidence gate for
+that, and it hasn't reached matched sample counts yet.</p>
+
+<h3 id="bc-decay-hunt">bc2 decay hunt + encode as the real feed cost (Jul 7)</h3>
+<ul>
+  <li><b>Instrumentation first:</b> bc.py now logs per-phase feed seconds
+    (<code>smp/enc/col</code>) plus CUDA allocated/reserved every 50 steps. First readings
+    overturned the "sampler accumulation" theory: <code>smp ~0s</code> (the Rust sampler is
+    essentially free), <code>col ~5s</code>, <code>enc 50-65s</code> per 50-step window -
+    <b>the frozen-AE encode is the entire feed cost</b>, and it shares the GPU with the
+    trainer.</li>
+  <li><b>bf16 autocast on the frozen AE encode</b> (rl/obs.py): free conv throughput -
+    the latents already ship as fp16 to PPO. bc2 recovered to ~85-93 ex/s; bc3's seq run
+    is fully encode-bound (enc 153s of a 163s window, 8 frames per sample) and sits at
+    GPU ~95%: the next real lever there is caching AE latents in cache-bc (the encoder is
+    finally frozen at d8c32, so the cache won't be invalidated - v4's reason to skip it
+    is gone).</li>
+  <li><b>Decay watch - caught in the act (30 min after restart):</b> bc2 slid 93 &rarr; 35
+    ex/s again, and the instrumentation pins it: <code>enc</code> grew 49 &rarr; 135s/window
+    while <code>smp</code> stayed 0.0 and <code>col</code> ~9s; CUDA reserved is <b>flat</b>
+    at 27.5GB; GPU util 31% with clocks at 2872/3090MHz, 43&deg;C, 202W. So it is NOT
+    fragmentation, NOT thermal throttle, NOT the sampler - something CPU-side inside
+    <code>encode_batch</code> (the single-threaded <code>np.stack</code> H2D staging of
+    full-res owner grids) slows as the process ages. RSS was already 11.7GB at 34 min
+    uptime (23GB overnight): prime suspect is glibc heap/arena churn from the hundreds of
+    MB of short-lived numpy buffers per batch - consistent with a restart fully fixing it.
+    Experiment running: <code>MALLOC_ARENA_MAX=2</code> on bc2. Real fix if confirmed:
+    have ofrs return pre-stacked batch arrays so the Python-side memcpy churn disappears.</li>
+</ul>
+
+<h3 id="reward-mdp">Reward MDP reference (Jul 7)</h3>
+<p>The dense + terminal reward is fully specified in <code>rl/curriculum.py</code> and applied in
+<code>rl/vec.py</code>. These panels are generated from the live constants by
+<code>scripts/make_reward_graphs.py</code> (re-run after any tweak):</p>
 <p>
-  <img src="graphs/curriculum_progress.png" alt="curriculum progress by run generation" width="820"><br>
-  <img src="graphs/throughput.png" alt="ppo_v4 throughput timeline" width="820"><br>
-  <img src="graphs/bc_pipeline.png" alt="BC pilot vs cache-fed v4" width="820">
+  <img src="graphs/reward_terminal.png" alt="terminal placement v4 vs v5" width="820"><br>
+  <img src="graphs/reward_dense.png" alt="dense reward: timeweight, delta asymmetry, heatmap, waste tax" width="820"><br>
+  <img src="graphs/reward_scenarios.png" alt="archetypal episode cumulative returns v4 vs v5" width="820"><br>
+  <img src="graphs/reward_strength.png" alt="strength index by play style" width="820">
 </p>
+<table>
+  <tr><th>constant</th><th>v4</th><th>v5 (current)</th><th>role</th></tr>
+  <tr><td><code>W_STR</code></td><td>0.02</td><td>0.02</td><td>dense: strength &times; timeweight each decision</td></tr>
+  <tr><td><code>W_DELTA</code></td><td>5.0 symmetric</td><td>gain 5.0 / loss 6.5</td><td>immediate credit for strength change; losses hurt more</td></tr>
+  <tr><td><code>PLACE_POW</code></td><td>0.7</td><td>1.5</td><td>terminal: <code>W_PLACE &times; rank<sup>-pow</sup></code></td></tr>
+  <tr><td><code>W_PLACE</code></td><td>15</td><td>15</td><td>terminal placement scale (1st alone = 15.0)</td></tr>
+  <tr><td><code>W_WIN</code></td><td>30</td><td>30</td><td>extra on engine win (on top of placement)</td></tr>
+  <tr><td><code>W_DEATH</code></td><td>1</td><td>1</td><td>flat penalty when eliminated</td></tr>
+  <tr><td><code>W_WASTE</code></td><td>0.01</td><td>0.01</td><td>per silently-discarded intent (boat/build spam)</td></tr>
+  <tr><td>timeweight</td><td>0.5&rarr;1.0</td><td>same</td><td>ramps over first 8000 engine ticks</td></tr>
+  <tr><td>strength blend</td><td>45/25/30</td><td>same</td><td>land / military / economy shares of alive totals</td></tr>
+</table>
 <ul>
-  <li><b>Curriculum:</b> ppo_v4 cleared stages 0→3 in ~2h from scratch and reached stage 4 at ~3.6h
-    - territory v2c never reached and roughly v3's pace despite v4 carrying the 1/8-resolution
-    stack, learned spawns, and two mid-run restarts.</li>
-  <li><b>Throughput:</b> the per-update tps window decays as the curriculum moves to bigger maps
-    (Node engine tick cost), so compare like-for-like: at stage 3-4 the fp16+prefetch fix took
-    sustained tps from ~590 to ~2100, and v4.1 hides the rollout phase entirely.</li>
-  <li><b>BC:</b> the cache killed the data bottleneck (~1.5ms/sample vs 15-20ms), which moved the
-    limiter to the GPU: bc_v4 runs ~56 ex/s at batch 24 x accum 4 on the 5090 (vs the pilot's 34 ex/s
-    where the GPU sat idle waiting on gzip+JSON). Loss/accuracy now measure the model, not the
-    pipeline. Loss is not yet trending down - that judgment (and the temporal transformer
-    comparison) needs the full 60k-step run.</li>
+  <li><b>Terminal panel:</b> v5's sharper <code>PLACE_POW</code> is the main anti-safe-second lever -
+    2nd place drops from 9.2 to 5.3 before any win bonus. The win bonus (+30) still dominates a
+    outright win (45 total for 1st+win vs 5.3 for 2nd-only), but the agent has to actually win
+    to see it; placement alone now pushes harder for the top.</li>
+  <li><b>Dense panel:</b> most steps are small (strength ~0.1-0.3 at timeweight 1.0 gives
+    ~0.002-0.006/step); the delta term is where expansion and collapse show up (&plusmn;0.05
+    strength swing &asymp; &plusmn;0.25-0.33 per step). The heatmap is the tuning surface for
+    "how aggressive should expansion be?" Loss-aversion tilts the agent toward defending a lead.</li>
+  <li><b>Scenario panel:</b> synthetic strength traces (not real games) show total return under
+    the old vs new MDP. Safe-second timeout pays similarly in dense terms but v5 cuts the terminal;
+    expand-then-collapse gets punished twice (asymmetric deltas on the way down + worse placement).
+    Waste spam shows why <code>W_WASTE</code> exists: without it, doomed boats are free lottery
+    tickets.</li>
+  <li><b>Strength panel:</b> the composite index is not raw land - eco islands and military rushes
+    can score honestly. Tuning <code>K_LAND/K_MIL/K_ECO</code> shifts which strategies the dense
+    signal rewards mid-game.</li>
 </ul>
 
-<h2 class="date" id="jul-6">July 6th, 2026</h2>
-<p class="session">Curriculum v2, first real wins, tooling, encoder bake-off.</p>
-<h3>Chronology</h3>
-<ul>
-  <li><b>Jul 6 morning:</b> human-game pipeline (fetch archive, hash-verified deterministic replay to
-    snapshots, HF upload) and restart-proof cloud training (full-state checkpoints, supervised
-    restarts, HF checkpoint sync). Training hosts became disposable.</li>
-  <li><b>Jul 6 10:27–11:32:</b> GameRecord replays (bit-identical in the real client) and the
-    live-lobby agent client: fight the policy from a normal browser.</li>
-  <li><b>Jul 6 11:07–11:19:</b> curriculum v2: map pools, 25% rehearsal, win-gated advancement,
-    1v1 → 1v3 start for dense wins.</li>
-  <li><b>Jul 6 11:40:</b> behavior cloning from human games (placement-conditioned; optional
-    temporal transformer).</li>
-  <li><b>Jul 6 12:06:</b> win-detection bug found and fixed. Every win-rate stat before this is
-    invalid.</li>
-  <li><b>Jul 6 12:20:</b> training speed overhaul: per-batch padding, pipelined rollout, bf16,
-    binary IPC, per-stage decision cadence.</li>
-  <li><b>Jul 6 13:04–13:39:</b> real-client replay videos (actual game graphics, agent crowned as
-    AGENT) and the MODEL debug overlay everywhere: rendered videos, browser replays, live matches.</li>
-  <li><b>Jul 6 aft:</b> AE reckoning: benchmarked the bot-trained encoder on human games (border
-    accuracy 71.8% vs 87.5% on bot data), retrained on a bot+human mix, then designed and ran the
-    v3.1 ablation matrix in parallel. Latent resolution won. New encoder + benchmark table
-    uploaded to HF.</li>
-</ul>
-
-<h2 class="date" id="jul-5">July 5th-6th, 2026 - first night</h2>
-<p class="session">Datagen, autoencoder iterations, RL scaffold.</p>
-<ul>
-  <li><b>Jul 5 eve:</b> headless datagen + tile AE v1. TS runner boots the real engine in Node,
-    plays bot games, dumps packed tile grids + full entity state every 10 ticks.</li>
-  <li><b>Jul 5 night:</b> AE v2: one unified latent over ALL state. Spatial recon excellent; exact
-    facts not (alliance pairs F1 0.67, troop ordering 0.81 after four tuning runs).</li>
-  <li><b>Jul 5 23:14:</b> AE v3: spatial-only + bypass split. The pivotal correction. 1.17M params,
-    64ch latent per 16x16 region, structures at P/R 1.0 through the latent.</li>
-</ul>
-
-<div class="ref">
-<h2>Design reference</h2>
-<p class="d">Stable specs and accumulated notes. Session sections above are the chronological record.</p>
-<h3 id="obs">Observation: compress the map, bypass the rest</h3>
-<p>The core architectural finding so far. Three iterations:</p>
-<ul>
-  <li><b>v1:</b> AE over tile ownership + terrain. Worked; too narrow.</li>
-  <li><b>v2:</b> one unified AE over all state (tiles, players, units, diplomacy). Spatial recon
-    excellent, but tiny exact facts fought the bottleneck: alliance pairs peaked at F1 0.67 and troop
-    ordering 0.81 across four tuning attempts (loss weights, pooled-vector capacity, per-slot latents,
-    graph-to-encoder).</li>
-  <li><b>v3 (current):</b> compress only what is big: the map. Tile accuracy 99.4% (border-tile
-    87–99% by map), structures precision/recall 1.0 per class. Everything small and exact bypasses
-    the latent raw: pairwise diplomacy, per-player scalars, transient units (nukes in flight with
-    impact points), attack aggregates, legality masks.</li>
-</ul>
-<p><b>The lesson: a one-bit fact reconstructed at 95% is strictly worse than reading the bit.</b>
-Autoencoders are for high-dimensional state; never make exact small state fight the map for latent
-capacity.</p>
-<p>AE details that held up: border-weighted cross-entropy (borders blur first and matter most),
-owner relabeling to static per-game spawn slots (any player count, fixed channels), fully-convolutional
-training on random crops (one model, any map size), and rarity-weighted BCE <i>detection</i> for
-structures: count regression collapses to all-zeros on 99.9%-empty grids.</p>
-<h3 id="ae31">AE v3.1: the border-accuracy push</h3>
-<p><b>The trigger:</b> overall tile accuracy saturates near 99% for every model (water and player
-interiors are easy), so the honest metric is border-tile accuracy, and it wasn't in the training logs
-at all. Benchmarking the bot-trained v3 on the newly replayed human games exposed a 16-point domain
-gap: 87.5% border accuracy on bot data, 71.8% on human. Human territories are gnarly (naval invasions,
-enclaves, 50+ player fronts); nation bots grow blobs.</p>
-<p><b>Two fixes ran in sequence.</b> First, retraining v3 unchanged on a bot+human mix recovered the
-domain gap (80.1% human), so data was part of the problem. Then v3.1 attacked the architecture with
-seven changes at once plus two ablations to find the real constraint:</p>
-<ul>
-  <li>decoder conditioned on <i>static</i> terrain (land + magnitude, never dynamic fallout), side
-    information the policy gets for free, so the latent stops re-encoding coastlines</li>
-  <li>nearest-upsample + 3x3 convs replacing ConvTranspose (no checkerboard), plus a full-res 3x3
-    refinement block before the classifier (was a bare 1x1, zero neighborhood context)</li>
-  <li>border-density rejection sampling for training crops (uniform crops waste most gradient on
-    ocean), focal loss on hard pixels, warmup+cosine LR, and native border-accuracy logging</li>
-  <li>ablations: latent channels 64→96 at 1/16 res, vs. latent grid at 1/8 res</li>
-</ul>
-<p><b>Result: resolution is the constraint, not capacity.</b> Uniform-crop eval, 256 samples:</p>
-<table>
-  <tr><th>model</th><th>latent</th><th>border (human)</th><th>border (bot)</th></tr>
-  <tr><td>v3 bot-only</td><td>64ch @ 1/16</td><td>71.8%</td><td>87.5%</td></tr>
-  <tr><td>v3 on bot+human mix</td><td>64ch @ 1/16</td><td>80.1%</td><td>86.8%</td></tr>
-  <tr><td>v3.1, all fixes</td><td>64ch @ 1/16</td><td>78.5%</td><td>90.7%</td></tr>
-  <tr><td><b>v3.1 @ 1/8 res</b></td><td>64ch @ 1/8</td><td><b>89.3%</b></td><td><b>96.1%</b></td></tr>
-</table>
-<p>At the same 1/16 resolution, the v3.1 decoder/loss work helped bot borders but couldn't beat plain
-mixed-data retraining on human borders. Borders are high-frequency spatial detail, and a 64-number
-vector summarizing a 16x16 patch simply cannot store where a ragged front cuts through. Halving the
-patch to 8x8 bought ~9 points on both domains. Structure detection stayed at precision/recall 1.0
-throughout. The catch: the 1/8 latent is 4x the policy input; a 1/8 x 32ch run (2x baseline) is in
-flight to see if the win survives halved channels, alongside the 96ch control.</p>
-<p><b>Complementary hedge (decided):</b> the policy will also receive a raw local owner-map crop
-around its own territory, exact borders where the agent acts most, latent for global context. The
-latent doesn't have to be pixel-perfect everywhere.</p>
-<h3 id="actions">Action space</h3>
-<p>Full intent surface from day one, legality masking only (never curricular). Factorized masked heads
-over a shared conv trunk. One flat softmax is impossible (tile arguments alone are millions of
-options):</p>
-<table>
-  <tr><th>head</th><th>chooses</th></tr>
-  <tr><td>action type</td><td>noop, attack, expand, boat, build, launch_nuke, alliance req/reject/break, donate gold/troops, embargo, retreat</td></tr>
-  <tr><td>player pointer</td><td>target player slot</td></tr>
-  <tr><td>tile-region pointer</td><td>a 16x16 map region; the bridge snaps to the best legal tile inside it</td></tr>
-  <tr><td>build / nuke type</td><td>structure or warhead class</td></tr>
-  <tr><td>quantity</td><td>troop fraction bucket</td></tr>
-</table>
-<p class="d">Masks come from exact engine legality calls each step; the policy can only pick what the
-engine would accept. Where a tile argument can still fail at execution (boat destination
-unreachable by water, build site too close to another structure), the bridge counts the discarded
-intent and the env charges w_waste for it - the mask keeps the policy honest, the penalty keeps
-the engine honest. Full intent table in DESIGN.md.</p>
-<h3 id="reward">Reward</h3>
-<p>Iterated from raw land occupancy to a composite <b>strength index</b>:
-0.45 x land + 0.25 x military + 0.30 x economy (shares). Land alone mis-scores legit strategies like
-tiny-island gold-stacking.</p>
-<ul>
-  <li>dense: <code>w_str x strength x timeweight</code>, timeweight 0.5→1.0 over the first 8000 ticks.
-    Strong late is worth double strong early, and it doesn't net to zero on death like pure deltas</li>
-  <li>delta term for immediate credit (v4 symmetric 5.0; <b>v5: gain 5.0 / loss 6.5</b>)</li>
-  <li>terminal: <code>w_place x place^-pow</code> (v4: pow=0.7; <b>v5: pow=1.5</b>), power law: 1st ≈ w_place, 2nd ≈ 0.62x, 10th ≈ 0.2x;
-    the dead rank behind everyone still alive</li>
-  <li>win bonus <code>w_win = 30</code> (doubled when the curriculum became win-gated)</li>
-  <li>small flat death penalty</li>
-  <li>wasted-intent penalty <code>w_waste = 0.01</code> per intent the engine silently discarded
-    (doomed boat, invalid build site, expand with no neutral border): without a price these are
-    noop-with-upside and the policy farms them (see <a href="#bugs">bugs</a>)</li>
-</ul>
-<h3 id="curriculum">Curriculum</h3>
-<p>Eleven stages over seven maps (Onion → Pangaea → Caucasus → BlackSea → BetweenTwoSeas → World →
-Asia). Three principles, all added after watching v1 fail to progress:</p>
-<ol>
-  <li><b>Dense win signal first.</b> Stage 0 is 1v1 vs a single nation on Onion; stage 1 is 1v3. Only
-    then tribe bots and full rosters. Before this the win bonus essentially never fired.</li>
-  <li><b>Map pools, not single maps.</b> The map is sampled per episode, so no overfitting one
-    layout.</li>
-  <li><b>Rehearsal against forgetting.</b> 25% of episodes replay an earlier stage's map at the
-    <i>current</i> bots/difficulty. Old maps come back harder. Rehearsal trains but doesn't count
-    toward advancement.</li>
-</ol>
-<p>Advancement is win-gated: rolling win rate over the last 40 on-stage episodes must exceed 0.5. The
-agent must be winning more often than not, not merely surviving.</p>
-<h3 id="alphafront">Prior art: AlphaFront</h3>
-<p><a href="https://github.com/josh-freeman/openfront-rl">josh-freeman/openfront-rl</a>
-(HF <a href="https://huggingface.co/mischievers/openfront-rl-agent">mischievers/openfront-rl-agent</a>,
-"v19b") is the other PPO agent on this engine we're aware of, and a lot of our scaffolding follows
-from what they figured out first. The main fork is observation and tile choice: they keep a compact
-scalar view (~96 floats) and route spatial decisions through hand-coded heuristics (closest border
-tile, <code>pickBuildTile()</code>); we put map structure in the observation stack and learn tile
-selection with a spatial pointer (the bridge still snaps to legal tiles). Different tradeoffs: compact
-obs plus heuristics is simpler to train and deploy; richer spatial input is heavier but can in
-principle learn geography, chokepoints, and nuke aim.</p>
-<table>
-  <tr><th></th><th>AlphaFront</th><th>openfront-ai</th></tr>
-  <tr><td>observation</td><td>~96 floats (16 player scalars + 16 neighbors × 5); no map</td>
-    <td>frozen spatial AE latent + ego planes + entity tokens + raw bypass</td></tr>
-  <tr><td>actions</td><td>17 types, 16 neighbor targets, 5 fractions; no diplomacy</td>
-    <td>full intent surface incl. diplomacy; factorized heads, engine masks</td></tr>
-  <tr><td>tile choice</td><td>heuristics (<code>pickBuildTile()</code>, closest border, etc.)</td>
-    <td>learned spatial pointer; bridge snaps within the chosen region</td></tr>
-  <tr><td>network</td><td>MLP 512-512-256, ~0.5M params</td><td>CNN + token transformer + pointers, 5.9M</td></tr>
-  <tr><td>curriculum</td><td>10 win-rate-gated stages, LR warmdown</td>
-    <td>11 win-gated stages, 7 real maps, rehearsal (gating idea borrowed from them)</td></tr>
-  <tr><td>human data</td><td>not in scope</td><td>archive replay pipeline + behavior cloning</td></tr>
-  <tr><td>live play</td><td>Puppeteer bot driving a browser</td><td>native websocket client, no browser</td></tr>
-  <tr><td>results</td><td>100% vs Easy/2 opp (20 games); survival plateaus ~35–47% mid-curriculum</td>
-    <td>first engine wins on stage 0; climb in progress</td></tr>
-</table>
-<p>What they showed works here, and we adopted: PPO converges on this engine at ~10 ticks/decision (we
-chose the same cadence independently); win-rate-gated advancement is viable. Still on our borrow
-list from their setup: LR warmdown on stage transitions; tiny flat generated maps as an even softer
-stage 0; a mid-game "beat all bots" gate so advancement doesn't wait on long endgames. On our side
-we've added a human-replay pipeline for behavior cloning: extra imitation signal that's awkward to
-fold into a purely scalar observation.</p>
+<h2 class="date" id="reference">Reference and open threads</h2>
+<p class="session">Tooling, bugs, lessons, infra, recipes, backlog.</p>
 <h3 id="tooling">Visualization &amp; tooling</h3>
 <p>Determinism is the superpower: the bridge mirrors the client's <code>createGameRunner()</code> init
 exactly (same PseudoRandom ID stream, no spawn timer), so agent games saved as GameRecords replay
@@ -603,6 +620,7 @@ from intents alone.</p>
   <li><code>patches/client-replay-tooling.patch</code>: all client hooks as an uncommitted-submodule
     patch, auto-reapplied if the submodule resets.</li>
 </ul>
+
 <h3 id="bugs">Bugs</h3>
 <ul>
   <li><b>Wins were never counted.</b> <code>vec.py</code> checked <code>winner[1] == "Agent"</code>
@@ -635,6 +653,7 @@ from intents alone.</p>
     resolves localhost to IPv4 (force <code>--host 127.0.0.1</code>); the client rejects software
     WebGL (needs <code>--use-angle=metal --enable-gpu --ignore-gpu-blocklist</code>).</li>
 </ul>
+
 <h3 id="lessons">Lessons</h3>
 <ul>
   <li><b>Only compress what's big.</b> The AE is for the map; exact small state rides the bypass. One
@@ -684,6 +703,7 @@ from intents alone.</p>
     length, so batch size must scale down by the same factor. Budget it before launch instead of
     discovering it as a 19.9 GiB allocation on a 24 GiB card.</li>
 </ul>
+
 <h3 id="infra">Infrastructure</h3>
 <p>Homelab for datagen and some training; cloud GPUs for long PPO and AE runs.
 <code>scripts/pod_train.sh</code> supervises RL jobs (idempotent deploy, auto-restart). Datasets are
@@ -699,6 +719,40 @@ cloud machines mid-run (tmux gone; the interrupted ablations were relaunched fro
 state isn't checkpointed, only weights).
 Git history was scrubbed once with <code>git filter-repo</code> after large blobs snuck in; data dirs
 are gitignored now.</p>
+
+<h3 id="v4recipe">v4 training recipe &amp; decision gates</h3>
+<p>Three arms, two launched together (Jul 6 eve), the third conditional:</p>
+<ul>
+  <li><b>Arm A - pure RL</b> (<code>ppo_v4</code>): from scratch, stage 0. Baseline and control;
+    also the only arm learning spawn placement without supervision.</li>
+  <li><b>Arm B - BC</b> (<code>bc_v4</code>): feedforward pilot, 60k steps on the cache-bc
+    pipeline. At ~1.5ms/sample CPU the run is GPU-bound; verdict lands in hours, not days.
+    Saves <code>bc_best.pt</code> on holdout improvement (acted-action + tile accuracy - the
+    honest heads; plain action accuracy is inflated by forced-legality noops).</li>
+  <li><b>Arm C - BC→RL</b> (<code>ppo_v4_bcinit</code>, conditional): launched when B plateaus.
+    <code>rl/ppo.py --init</code> loads the shared Policy weights and folds the winner-bucket
+    conditioning into the head biases - verified exact (max output diff ~1e-7 across all heads).
+    Same hypers/envs/pod class as A; judged at equal PPO wall-clock on the
+    <code>eval/win</code> curves and time-to-stage-N.</li>
+</ul>
+<p><b>Gates.</b> B is learning iff holdout <code>tile_region</code> accuracy climbs and holdout
+loss falls (10k steps ≈ 1M samples ≈ 5x the entire old pilot's data; flat there = dead, kill the
+pod, A continues regardless). B has plateaued (launch C) when holdout metrics are flat across two
+consecutive eval windows (~10k steps) or the cosine tail begins. C's first ~30min will look bad
+while the untrained value head catches up - judge after the critic settles. If C's entropy climbs
+back toward ~7 in the first hour, the BC prior got washed out: add a KL-to-prior regularizer
+(AlphaStar-style) before rerunning.</p>
+<p><b>Watch items.</b> BC first log line should read several hundred ex/s (under ~100 = cache
+problem, stop). Late-curriculum OOM lever: <code>MINIBATCH=64</code> env var (1/8 grids cost ~4x
+v3's conv activations at World/Asia). Rollout buffer RAM ~20GB at Asia-size grids with 96x32;
+halve <code>--rollout</code> if the pod is RAM-tight. Fixed-seed eval pauses training for minutes
+at late stages (~2% overhead at <code>eval-every 300</code>). Old v1 sidecars carry no spawn
+labels; re-replay with <code>BC=1 REBC=1 datagen/replay_all.sh</code> feeds the next BC run.</p>
+<p><b>Deliberately skipped:</b> BC value-head pretraining on placements (scale-mismatched with
+PPO returns, muddies A-vs-C), fp16 rollout buffers (RAM insurance we may not need), latent
+precompute to disk (at 1/8 a latent is ~2.4MB/snapshot ≈ 200GB corpus - the GPU-batched encode
+from the raw cache IS that idea, done right).</p>
+
 <h3 id="next">Open threads</h3>
 <ul>
   <li><b>v5 wishlist (drafted Jul 6 night, from watching v4 launch day):</b>
@@ -742,7 +796,6 @@ are gitignored now.</p>
   <li><b>Self-play league:</b> past-policy opponents replacing scripted bots once the agent clears
     the bot curriculum.</li>
 </ul>
-</div>
 
 <footer>
   <hr />
@@ -751,5 +804,7 @@ are gitignored now.</p>
     <p style="margin: 0"><a href="../DESIGN.md">/design</a></p>
   </nav>
 </footer>
+
 </body>
+
 </html>
