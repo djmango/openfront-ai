@@ -15,6 +15,7 @@ import argparse
 import contextlib
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -215,22 +216,51 @@ def main() -> None:
     t0 = time.time()
     t0_step = global_step
 
+    # Host->device staging. Reusable pinned buffers double PCIe bandwidth and
+    # allow async copies; without them every upload is a pageable-memory
+    # single-thread crawl on the main process (the profiled bottleneck).
+    # Reuse is safe: every consumer syncs the stream (.item()/.cpu()) before
+    # the same buffer set is written again.
+    pinned: dict[str, dict[str, torch.Tensor]] = {}
+
+    def to_device(np_dict: dict, pool: str) -> dict:
+        bufs = pinned.setdefault(pool, {})
+        out = {}
+        for k, v in np_dict.items():
+            t = torch.from_numpy(v)
+            if device == "cuda":
+                n = t.numel()
+                buf = bufs.get(k)
+                if buf is None or buf.numel() < n or buf.dtype != t.dtype:
+                    buf = torch.empty(n, dtype=t.dtype, pin_memory=True)
+                    bufs[k] = buf
+                staged = buf[:n]
+                staged.copy_(t.reshape(-1))
+                d = staged.view(t.shape).to(device, non_blocking=True)
+            else:
+                d = t.to(device)
+            # Rollout grids ride as fp16 (transfer cost); model runs fp32/amp.
+            out[k] = d.float() if d.dtype == torch.float16 else d
+        return out
+
     # Two env groups pipelined: while one group's Node processes step the
     # game, the GPU encodes + acts for the other group.
     half = max(1, N // 2)
     groups = (list(range(half)), list(range(half, N)))
 
     def act_group(idxs: list[int]) -> tuple:
-        obs_list = encode_grids(ae, vec.obs_group(idxs), device)
-        ot = {
-            k: torch.from_numpy(v).to(device)
-            for k, v in collate(obs_list, OBS_KEYS).items()
-        }
+        obs_list = encode_grids(ae, vec.obs_group(idxs), device, fp16=True)
+        ot = to_device(collate(obs_list, OBS_KEYS), f"act{idxs[0]}")
         with amp():
             choices, logp, value = policy.act(ot)
         return obs_list, choices, logp, value
 
+    # Update-phase minibatches are collated + staged on a worker thread so
+    # the (numpy, GIL-releasing) data work overlaps GPU forward/backward.
+    mb_pool = ThreadPoolExecutor(max_workers=1)
+
     for update in range(start_update + 1, args.updates + 1):
+        t_roll0 = time.time()
         obs_buf: list[list] = [[None] * N for _ in range(T)]
         choice_buf: list[list] = [[None] * N for _ in range(T)]
         logp_buf = np.zeros((T, N), dtype=np.float32)
@@ -303,6 +333,8 @@ def main() -> None:
                 record(t, groups[1], pack1, vec.recv_group(groups[1]))
             global_step += N
 
+        roll_s = time.time() - t_roll0
+
         # Bootstrap values and GAE per env.
         obs_last = encode_grids(ae, vec.obs(), device)
         with torch.no_grad(), amp():
@@ -345,12 +377,26 @@ def main() -> None:
         idx = np.arange(B_total)
         pl_sum = vl_sum = ent_sum = 0.0
         n_mb = 0
+        t_upd0 = time.time()
+        stall_s = 0.0
+
+        def prep(mb: np.ndarray) -> dict:
+            return collate([all_obs[i] for i in mb], OBS_KEYS)
+
         for _ in range(args.epochs):
             rng.shuffle(idx)
-            for mb in np.split(idx, max(1, B_total // args.minibatch)):
+            mbs = np.split(idx, max(1, B_total // args.minibatch))
+            fut = mb_pool.submit(prep, mbs[0])
+            for i_mb, mb in enumerate(mbs):
+                t_w = time.time()
+                o_np = fut.result()  # collated on the worker thread
+                stall_s += time.time() - t_w
+                if i_mb + 1 < len(mbs):
+                    fut = mb_pool.submit(prep, mbs[i_mb + 1])
                 mbt = torch.from_numpy(mb)
-                o_np = collate([all_obs[i] for i in mb], OBS_KEYS)
-                o_mb = {k: torch.from_numpy(v).to(device) for k, v in o_np.items()}
+                # Alternating pinned buffer sets: the per-minibatch .item()
+                # sync guarantees set i%2's copy landed before its reuse.
+                o_mb = to_device(o_np, f"upd{i_mb % 2}")
                 c_mb = {k: v[mbt].to(device) for k, v in choice_t.items()}
                 mbt = mbt.to(device)
                 with amp():
@@ -373,7 +419,11 @@ def main() -> None:
                 ent_sum += float(ent.mean().item())
                 n_mb += 1
 
+        upd_s = time.time() - t_upd0
         tps = (global_step - t0_step) * STAGES[stage].decision_ticks / (time.time() - t0)
+        writer.add_scalar("perf/rollout_s", roll_s, global_step)
+        writer.add_scalar("perf/update_s", upd_s, global_step)
+        writer.add_scalar("perf/update_stall_s", stall_s, global_step)
         writer.add_scalar("loss/policy", pl_sum / n_mb, global_step)
         writer.add_scalar("loss/value", vl_sum / n_mb, global_step)
         writer.add_scalar("loss/entropy", ent_sum / n_mb, global_step)
@@ -400,7 +450,8 @@ def main() -> None:
             f"update {update:4d}  step {global_step:7d}  eps {episodes_done:4d}  "
             f"stage {stage}  roll-win {roll_win:.2f}  roll-score {roll:.2f}  "
             f"pg {pl_sum / n_mb:+.4f}  vf {vl_sum / n_mb:.4f}  ent {ent_sum / n_mb:.3f}  "
-            f"{tps:.0f} game-ticks/s",
+            f"{tps:.0f} game-ticks/s  "
+            f"[roll {roll_s:.1f}s upd {upd_s:.1f}s stall {stall_s:.1f}s]",
             flush=True,
         )
 

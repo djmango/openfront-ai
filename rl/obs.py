@@ -410,14 +410,22 @@ def _local_crops(
 
 
 @torch.no_grad()
-def encode_grids(ae: SpatialAE, raws: list[dict], device: str) -> list[dict]:
+def encode_grids(
+    ae: SpatialAE, raws: list[dict], device: str, fp16: bool = False
+) -> list[dict]:
     """Batched full-resolution featurization on the GPU: frozen-AE encode,
     ego ownership pooling, fallout unpacking, and the local owner crop.
     Envs may be on different maps: work per shape group. Grids come back at
     NATIVE latent size (no padding); use collate() to pad a mixed batch to
     its own max before stacking. Tile regions use the global GW_MAX
     coordinate convention regardless of padding (see Policy.act), so a grid
-    may never exceed GH_MAX x GW_MAX."""
+    may never exceed GH_MAX x GW_MAX.
+
+    fp16=True halves the device->host transfer and downstream collate /
+    rollout-buffer / host->device cost (PPO's main-loop bottleneck). Values
+    are safe in half precision: AE latents, {0..1} pooled fractions, and
+    small integer unit counts. Consumers must cast back to float32 (or run
+    under autocast) after upload."""
     from rl.curriculum import GH_MAX, GW_MAX
 
     groups: dict[tuple, list[int]] = {}
@@ -456,18 +464,22 @@ def encode_grids(ae: SpatialAE, raws: list[dict], device: str) -> list[dict]:
         )
         ego = F.avg_pool2d(ego, REGION)
 
-        grid = torch.cat([z.float(), ego], dim=1).cpu().numpy()
-        local = _local_crops(classmap, terr[:, 0]).cpu().numpy()
+        grid = torch.cat([z.float(), ego], dim=1)
+        local = _local_crops(classmap, terr[:, 0])
+        if fp16:
+            grid, local = grid.half(), local.half()
+        grid, local = grid.cpu().numpy(), local.cpu().numpy()
         for j, i in enumerate(idxs):
             grid_by_idx[i] = grid[j]
             local_by_idx[i] = local[j]
 
     consumed = ("owners", "terrain_static", "fallout_packed", "static", "clut", "transient")
+    dtype = np.float16 if fp16 else np.float32
     out = []
     global _warned_oversize
     for i, r in enumerate(raws):
         o = {k: v for k, v in r.items() if k not in consumed}
-        grid = np.concatenate([grid_by_idx[i], r["transient"]]).astype(np.float32)
+        grid = np.concatenate([grid_by_idx[i], r["transient"].astype(dtype)])
         gh, gw = grid.shape[1], grid.shape[2]
         if (gh > GH_MAX or gw > GW_MAX) and not _warned_oversize:
             # Training can't get here (curriculum and the BC stride picker
@@ -481,7 +493,7 @@ def encode_grids(ae: SpatialAE, raws: list[dict], device: str) -> list[dict]:
             )
         o["grid"] = grid
         o["grid_valid"] = np.ones((gh, gw), dtype=np.float32)
-        o["local"] = local_by_idx[i].astype(np.float32)
+        o["local"] = local_by_idx[i]
         out.append(o)
     return out
 
@@ -495,7 +507,12 @@ def collate(obs_list: list[dict], keys: list[str]) -> dict[str, np.ndarray]:
     gw = max(o["grid"].shape[2] for o in obs_list)
     for k in keys:
         if k == "grid":
-            b = np.zeros((len(obs_list), obs_list[0]["grid"].shape[0], gh, gw), dtype=np.float32)
+            # dtype-preserving: ppo stores rollout grids as fp16 to halve
+            # collate/PCIe cost; everyone else passes fp32 through unchanged
+            b = np.zeros(
+                (len(obs_list), obs_list[0]["grid"].shape[0], gh, gw),
+                dtype=obs_list[0]["grid"].dtype,
+            )
             for i, o in enumerate(obs_list):
                 g = o["grid"]
                 b[i, :, : g.shape[1], : g.shape[2]] = g
