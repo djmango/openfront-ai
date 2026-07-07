@@ -449,6 +449,29 @@ window on bc2). The fix was to delete the abstraction, not tune it:</p>
     (fragmentation after 1135s uptime, not the new code path).</li>
 </ul>
 
+<h3 id="overnight-jul7">Overnight results (Jul 7 morning)</h3>
+<ul>
+  <li><b>bc_v4 (bc2):</b> step 6.5k &rarr; 17k overnight (~1M examples at ~95-105 ex/s).
+    Holdout: acted-action 0.74-0.75, player 0.65, quantity 0.62, build 0.67-0.79, nuke 0.75;
+    best-checkpoint metric climbed to 0.406. tile_region stays ~0-0.07 - the ~37k-class tile
+    head is the clear weak spot, not new tonight. <b>Known issue:</b> throughput decays over
+    hours (100 &rarr; 25 ex/s, RSS 23GB, stall climbing) and a trainer restart fully restores
+    it - smells like slow accumulation in the feed path; restart-on-decay is the mitigation
+    until it's profiled.</li>
+  <li><b>bc_seq_v4 (bc3):</b> ~3k steps at ~10 ex/s. First holdout evals: acted-action ~0.50,
+    player 0.59-0.60. Behind the feedforward run at the same wall-clock, as expected at 5x
+    less data; the temporal-vs-feedforward call needs matched sample counts, not matched
+    hours.</li>
+  <li><b>ppo_v4 (rl4):</b> reached update 433 / 1.35M steps, stage 4. <b>Headline concern:</b>
+    rolling win rate fell 0.28 &rarr; 0.00 over ~120 updates while placement score held
+    0.72-0.84 and entropy slid 9.2 &rarr; 2.8. The agent consistently places 2nd and has
+    stopped converting to wins - looks like entropy collapse into a safe-second strategy
+    (the win bonus vanishes from its experience, so nothing pushes it over the top).
+    The binary-IPC deploy is exonerated: a pod-side round-trip probe preserves the win bool,
+    and the decline started before the deploy. Candidate levers for the next session:
+    entropy-coef floor or schedule, and the v5 asymmetric strength shaping.</li>
+</ul>
+
 <h3 id="tooling">Visualization &amp; tooling</h3>
 <p>Determinism is the superpower: the bridge mirrors the client's <code>createGameRunner()</code> init
 exactly (same PseudoRandom ID stream, no spawn timer), so agent games saved as GameRecords replay
