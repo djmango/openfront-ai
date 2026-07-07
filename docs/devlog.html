@@ -52,10 +52,12 @@
 </nav>
 
 <div class="now" id="now">
-  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 7th, 2026</h2>
-  <p><code>ppo_v5</code> on rl4: BC warm start, entropy floor, sharper placement, loss-averse deltas; stage 2 in ~1h.
-  <code>bc_v4</code> on bc2 ~step 18k (holdout 0.406). <code>bc_seq_v4</code> on bc3 ~step 3k.
-  <code>ppo_v4</code> retired at update 433 (safe-second collapse).</p>
+  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 7th, 2026, midday</h2>
+  <p><code>ppo_v5</code> on rl4: stages 0-4 in ~5.5h off the BC warm start, then grinding stage 4
+  (roll-win up to 0.17, score 0.84) with periodic CUDA OOM restarts; relaunching as <b>v5.1</b> with
+  structure-value rewards (<a href="#v51-bc2fix">below</a>).
+  <code>bc_v4</code> on bc2 ~step 22k (holdout best 0.4525); feed decay <b>root-caused and fixed</b>
+  (<a href="#v51-bc2fix">mmap churn</a>). <code>bc_seq_v4</code> on bc3 ~step 5k (holdout 0.318).</p>
   <p class="d" style="margin:.75rem 0 0">375k bot + 420k human snapshots · d8c32 encoder · 5.9M-param policy ·
   11 curriculum stages · encoder border accuracy 71.8% → 89.3% (human).</p>
 </div>
@@ -102,8 +104,8 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <code>ae_v3.pt</code> until the v3.1 winner is wired into <code>rl/obs.py</code>.</p>
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
-  <tr><td><code>ppo_v5</code></td><td>active</td>
-    <td>Launched July 7th morning. BC warm start from <code>bc_v4/bc_best.pt</code>, entropy floor (<code>--ent-floor 3.5</code>), PLACE_POW 1.5, loss-averse deltas (gain 5.0 / loss 6.5). Cleared stage 2 in ~1 hour. See <a href="#ppo-v5">PPO v5</a>.</td></tr>
+  <tr><td><code>ppo_v5</code></td><td>active (v5.1)</td>
+    <td>Launched July 7th morning. BC warm start from <code>bc_v4/bc_best.pt</code>, entropy floor (<code>--ent-floor 3.5</code>), PLACE_POW 1.5, loss-averse deltas (gain 5.0 / loss 6.5). Stages 0-4 in ~5.5h; roll-win 0.17 / score 0.85 on stage 4 by update 260. Relaunched midday as <b>v5.1</b>: structure-value share in the strength blend (<a href="#v51-bc2fix">denser rewards</a>), resumed from its own checkpoint. See <a href="#ppo-v5">PPO v5</a>.</td></tr>
   <tr><td><code>ppo_v4</code></td><td><b>retired</b> Jul 7</td>
     <td>The full v4 stack from scratch: d8c32 encoder at 1/8, learned spawns, local owner crop,
     eval loop. Stages 0→3 in ~2h, stage 4 by ~3.6h despite two restarts (OOM at minibatch 128,
@@ -115,7 +117,9 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
     normalize. Checkpoint on HF as <code>ppo_v4/policy.pt</code>.</td></tr>
   <tr><td><code>bc_v4</code></td><td>active</td>
     <td>Feedforward BC on the full 291-game cache-bc dataset (265 train / 26 holdout) with spawn
-    supervision. ~step 18k, holdout best 0.406; encode-bound feed (~85-93 ex/s); <code>MALLOC_ARENA_MAX=2</code> trial for decay. Uploads <code>bc.pt</code> +
+    supervision. ~step 22k, holdout best 0.4525; feed decay root-caused (mmap churn on the
+    full-res stacks) and fixed with persistent staging buffers - see
+    <a href="#v51-bc2fix">Jul 7 midday</a>. Uploads <code>bc.pt</code> +
     <code>bc_best.pt</code> to HF.</td></tr>
   <tr><td><code>bc_seq_v4</code></td><td>active</td>
     <td>The temporal transformer experiment (--seq 8), judged properly this time: same cache-bc
@@ -556,6 +560,38 @@ that, and it hasn't reached matched sample counts yet.</p>
     have ofrs return pre-stacked batch arrays so the Python-side memcpy churn disappears.</li>
 </ul>
 
+<h3 id="v51-bc2fix">v5.1 denser rewards + bc2 decay root-caused (Jul 7 midday)</h3>
+<p><b>ppo_v5 status at the time:</b> not stuck so much as slow - roll-win crept 0.00 &rarr; 0.17
+and roll-score 0.29 &rarr; 0.85 on stage 4 by update 260, but the gate needs &gt;0.5 wins, and the
+run was also OOM-crash-looping every ~1h (CUDA OOM in group_norm/conv2d at 96 envs on the
+stage-4 map pool; the supervisor restarts and resumes, so progress survives but momentum
+doesn't). Two changes:</p>
+<ul>
+  <li><b>v5.1: structures join the strength blend.</b> The old blend (land/mil/eco 45/25/30)
+    had a real mis-incentive: buying a building read as a strength <i>loss</i> - your gold
+    share drops and the building counts nowhere, so the loss-averse delta actively punished
+    construction. Now <code>K_BUILD=0.15</code> adds a structure-value share (blend
+    40/20/25/15): each player's finished structures are valued by in-game cost ceilings
+    (City/Port/Factory/Silo 1.0, DefensePost 0.25, SAM 3.0, &times; level) and shared over
+    living players' totals. Completing a building now pays an immediate
+    <code>W_DELTA_GAIN</code> spike, losing one to a nuke costs
+    <code>W_DELTA_LOSS</code>, and holding a built-up economy earns dense reward every
+    step - the reward is denser exactly where the action space was silent.</li>
+  <li><b>bc2 decay: root-caused and fixed fundamentally.</b> The faulthandler dumps caught
+    the prefetch thread in <code>np.stack</code> at <code>rl/obs.py:449</code> - the
+    <code>terrain_static</code> stack, ~460MB of fresh float32 per batch (19MB/sample
+    &times; 24), freed immediately. Allocations that size go through glibc's mmap path, so
+    every batch paid mmap+munmap page faults; on a host with badly fragmented physical
+    memory (65M compaction stalls, 115B failed page migrations in vmstat) the fault path
+    itself degrades - a fresh-allocation memcpy microbenchmark on the degraded box ran
+    ~300MB/s cold vs 1.6GB/s warm. That's why restarts fixed it (fresh page tables, warm
+    buffers) and <code>MALLOC_ARENA_MAX</code> didn't (arenas don't govern mmap'd
+    allocations). Fix: <code>encode_grids</code> now stacks the four big full-res arrays
+    into persistent per-thread staging buffers (<code>np.stack(out=...)</code>), keyed by
+    array name+shape and grown to the largest batch seen - the pages fault once and stay
+    warm, so there is nothing left to decay.</li>
+</ul>
+
 <h3 id="reward-mdp">Reward MDP reference (Jul 7)</h3>
 <p>The dense + terminal reward is fully specified in <code>rl/curriculum.py</code> and applied in
 <code>rl/vec.py</code>. These panels are generated from the live constants by
@@ -576,7 +612,7 @@ that, and it hasn't reached matched sample counts yet.</p>
   <tr><td><code>W_DEATH</code></td><td>1</td><td>1</td><td>flat penalty when eliminated</td></tr>
   <tr><td><code>W_WASTE</code></td><td>0.01</td><td>0.01</td><td>per silently-discarded intent (boat/build spam)</td></tr>
   <tr><td>timeweight</td><td>0.5&rarr;1.0</td><td>same</td><td>ramps over first 8000 engine ticks</td></tr>
-  <tr><td>strength blend</td><td>45/25/30</td><td>same</td><td>land / military / economy shares of alive totals</td></tr>
+  <tr><td>strength blend</td><td>45/25/30</td><td>40/20/25/15 (v5.1)</td><td>land / military / economy / structure-value shares of alive totals</td></tr>
 </table>
 <ul>
   <li><b>Terminal panel:</b> v5's sharper <code>PLACE_POW</code> is the main anti-safe-second lever -

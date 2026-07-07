@@ -22,6 +22,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from rl.curriculum import (
+    K_BUILD,
     K_ECO,
     K_LAND,
     K_MIL,
@@ -269,21 +270,25 @@ def fig_scenarios(out: Path) -> None:
 
 
 def fig_strength_blend(out: Path) -> None:
-    """How land / military / economy shares blend into strength."""
+    """How land / military / economy / structure shares blend into strength."""
     fig, ax = plt.subplots(figsize=(9, 4.5))
 
+    # (land, mil, eco, build) shares per archetype.
     archetypes = {
-        "Territory hog\n(60% land)": (0.60, 0.20, 0.20),
-        "Balanced\n(33/33/33)": (0.33, 0.33, 0.34),
-        "Eco island\n(10% land, rich)": (0.10, 0.15, 0.75),
-        "Military rush\n(25% land, stacked troops)": (0.25, 0.65, 0.10),
+        "Territory hog\n(60% land)": (0.60, 0.20, 0.20, 0.10),
+        "Balanced\n(even shares)": (0.33, 0.33, 0.34, 0.33),
+        "Eco island\n(10% land, rich)": (0.10, 0.15, 0.75, 0.50),
+        "Military rush\n(25% land, stacked troops)": (0.25, 0.65, 0.10, 0.05),
     }
     names = list(archetypes)
     vals = [
-        K_LAND * l + K_MIL * m + K_ECO * e
-        for l, m, e in archetypes.values()
+        K_LAND * l + K_MIL * m + K_ECO * e + K_BUILD * b
+        for l, m, e, b in archetypes.values()
     ]
-    parts = np.array([[K_LAND * l, K_MIL * m, K_ECO * e] for l, m, e in archetypes.values()])
+    parts = np.array([
+        [K_LAND * l, K_MIL * m, K_ECO * e, K_BUILD * b]
+        for l, m, e, b in archetypes.values()
+    ])
     x = np.arange(len(names))
     ax.bar(x, parts[:, 0], label=f"land (K={K_LAND})", color="tab:green")
     ax.bar(x, parts[:, 1], bottom=parts[:, 0], label=f"mil (K={K_MIL})", color="tab:red")
@@ -293,6 +298,13 @@ def fig_strength_blend(out: Path) -> None:
         bottom=parts[:, 0] + parts[:, 1],
         label=f"eco (K={K_ECO})",
         color="goldenrod",
+    )
+    ax.bar(
+        x,
+        parts[:, 3],
+        bottom=parts[:, 0] + parts[:, 1] + parts[:, 2],
+        label=f"structures (K={K_BUILD}, v5.1)",
+        color="tab:blue",
     )
     for i, v in enumerate(vals):
         ax.text(i, v + 0.015, f"{v:.2f}", ha="center", fontsize=9, fontweight="bold")
