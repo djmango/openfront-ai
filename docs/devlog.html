@@ -286,30 +286,35 @@ agent must be winning more often than not, not merely surviving.</p>
 <h3 id="alphafront">Prior art: AlphaFront</h3>
 <p><a href="https://github.com/josh-freeman/openfront-rl">josh-freeman/openfront-rl</a>
 (HF <a href="https://huggingface.co/mischievers/openfront-rl-agent">mischievers/openfront-rl-agent</a>,
-"v19b"), the only other PPO agent on this engine we know of. <b>The one-line difference: they made the
-agent blind and moved all spatial intelligence into hand-coded heuristics; we are teaching the agent to
-see.</b> Their bet buys fast plumbing and quick wins vs easy bots; ours buys a higher ceiling. Nothing
-in their design can learn geography, chokepoints, or nuke aim.</p>
+"v19b") is the other PPO agent on this engine we're aware of, and a lot of our scaffolding follows
+from what they figured out first. The main fork is observation and tile choice: they keep a compact
+scalar view (~96 floats) and route spatial decisions through hand-coded heuristics (closest border
+tile, <code>pickBuildTile()</code>); we put map structure in the observation stack and learn tile
+selection with a spatial pointer (the bridge still snaps to legal tiles). Different tradeoffs: compact
+obs plus heuristics is simpler to train and deploy; richer spatial input is heavier but can in
+principle learn geography, chokepoints, and nuke aim.</p>
 <table>
   <tr><th></th><th>AlphaFront</th><th>openfront-ai</th></tr>
-  <tr><td>observation</td><td>~96 floats (16 player scalars + 16 neighbors x 5); no map at all</td>
+  <tr><td>observation</td><td>~96 floats (16 player scalars + 16 neighbors × 5); no map</td>
     <td>frozen spatial AE latent + ego planes + entity tokens + raw bypass</td></tr>
   <tr><td>actions</td><td>17 types, 16 neighbor targets, 5 fractions; no diplomacy</td>
     <td>full intent surface incl. diplomacy; factorized heads, engine masks</td></tr>
-  <tr><td>tile choice</td><td>hand-coded heuristics (closest border tile, <code>pickBuildTile()</code>)</td>
+  <tr><td>tile choice</td><td>heuristics (<code>pickBuildTile()</code>, closest border, etc.)</td>
     <td>learned spatial pointer; bridge snaps within the chosen region</td></tr>
   <tr><td>network</td><td>MLP 512-512-256, ~0.5M params</td><td>CNN + token transformer + pointers, 5.9M</td></tr>
-  <tr><td>curriculum</td><td>10 win-rate-gated stages, LR warmdown</td><td>11 win-gated stages, 7 real maps, rehearsal (their gating idea, adopted)</td></tr>
-  <tr><td>human data</td><td>none</td><td>archive replay pipeline + behavior cloning</td></tr>
+  <tr><td>curriculum</td><td>10 win-rate-gated stages, LR warmdown</td>
+    <td>11 win-gated stages, 7 real maps, rehearsal (gating idea borrowed from them)</td></tr>
+  <tr><td>human data</td><td>not in scope</td><td>archive replay pipeline + behavior cloning</td></tr>
   <tr><td>live play</td><td>Puppeteer bot driving a browser</td><td>native websocket client, no browser</td></tr>
   <tr><td>results</td><td>100% vs Easy/2 opp (20 games); survival plateaus ~35–47% mid-curriculum</td>
     <td>first engine wins on stage 0; climb in progress</td></tr>
 </table>
-<p>What they proved that we used: PPO converges on this engine at ~10 ticks/decision (we chose the same
-cadence independently); win-rate-gated advancement works here. Still worth stealing: LR warmdown on
-stage transitions; tiny flat generated maps as an even softer stage 0; a mid-game "beat all bots" gate
-so advancement doesn't wait on long endgames. Our clearest differentiator is the human-replay pipeline:
-imitation signal their scalar observation could never absorb.</p>
+<p>What they showed works here, and we adopted: PPO converges on this engine at ~10 ticks/decision (we
+chose the same cadence independently); win-rate-gated advancement is viable. Still on our borrow
+list from their setup: LR warmdown on stage transitions; tiny flat generated maps as an even softer
+stage 0; a mid-game "beat all bots" gate so advancement doesn't wait on long endgames. On our side
+we've added a human-replay pipeline for behavior cloning: extra imitation signal that's awkward to
+fold into a purely scalar observation.</p>
 
 <h3 id="perf">Performance</h3>
 <p>GPU util was poor and env stepping was the bottleneck:</p>
