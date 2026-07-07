@@ -466,9 +466,20 @@ def encode_grids(
     for i, r in enumerate(raws):
         groups.setdefault(r["owners"].shape, []).append(i)
 
+    # Cap the full-res pixel footprint of one encode chunk: enc_stem's
+    # activations run ~32ch x B x H x W, so an unlucky batch of same-map
+    # large-map samples tried 7-14GiB single allocations and OOM'd (bc2
+    # crash-looped deterministically at step 27k - the resumed sampler
+    # redraws the same batch). Chunking bounds the peak; results identical.
+    MAX_ENC_PIX = 16_000_000
+    chunks: list[list[int]] = []
+    for (H, W), idxs in groups.items():
+        per = max(1, MAX_ENC_PIX // (H * W))
+        chunks.extend(idxs[k : k + per] for k in range(0, len(idxs), per))
+
     grid_by_idx: dict[int, np.ndarray] = {}
     local_by_idx: dict[int, np.ndarray] = {}
-    for idxs in groups.values():
+    for idxs in chunks:
         owners = torch.from_numpy(
             _staged_stack("owners", [raws[i]["owners"] for i in idxs])
         ).to(device)
