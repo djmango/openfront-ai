@@ -47,6 +47,53 @@ def collate_grids(grids: list[np.ndarray], gh: int, gw: int) -> np.ndarray:
     return b
 
 
+def stack(arrays: list[np.ndarray]) -> np.ndarray:
+    """np.stack for equal-shape f32/f16 arrays (parallel copy, GIL-free);
+    anything else falls back to numpy."""
+    a0 = arrays[0]
+    if _ofrs is not None and isinstance(a0, np.ndarray) and a0.dtype in (
+        np.float32,
+        np.float16,
+    ):
+        fn = _ofrs.stack_f32 if a0.dtype == np.float32 else _ofrs.stack_f16
+        flat = fn([np.ascontiguousarray(a) for a in arrays])
+        return flat.reshape(len(arrays), *a0.shape)
+    return np.stack(arrays)
+
+
+def pack_arrays(msg: dict, arrays: dict[str, np.ndarray]) -> bytes:
+    """Serialize an env-worker message for unpack_arrays: u32 header length
+    ++ header json ++ raw array buffers. Cheaper than pickle on both sides
+    (used by rl/vec.py; works without the extension too)."""
+    import json
+
+    specs, bufs = [], []
+    for k, v in arrays.items():
+        v = np.ascontiguousarray(v)
+        specs.append([k, v.dtype.str, list(v.shape)])
+        bufs.append(v.tobytes())
+    header = json.dumps({"arrays": specs, **msg}).encode()
+    return b"".join([len(header).to_bytes(4, "little"), header, *bufs])
+
+
+def unpack_arrays(payload: bytes) -> tuple[dict, dict[str, np.ndarray]]:
+    """Inverse of pack_arrays: (rest-of-header dict, {key: array})."""
+    import json
+
+    if _ofrs is not None:
+        rest, arrays = _ofrs.unpack_arrays(payload)
+        return json.loads(rest), arrays
+    hlen = int.from_bytes(payload[:4], "little")
+    header = json.loads(payload[4 : 4 + hlen])
+    off = 4 + hlen
+    arrays = {}
+    for k, dt, shape in header.pop("arrays"):
+        n = int(np.prod(shape)) * np.dtype(dt).itemsize
+        arrays[k] = np.frombuffer(payload[off : off + n], dtype=dt).reshape(shape)
+        off += n
+    return header, arrays
+
+
 def collate_masks(masks: list[np.ndarray], gh: int, gw: int) -> np.ndarray:
     """Pad+stack (h, w) float32 arrays to (B, gh, gw)."""
     if _ofrs is not None:

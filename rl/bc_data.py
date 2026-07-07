@@ -203,6 +203,20 @@ class BCSampler:
             )
         self.spawn_games = [g for g in self.games if g.n_spawn > 0]
         self._builders: dict[Path, ObsBuilder] = {}
+        # Rust fast path (rust/ofrs sampler.rs): decode + featurize + labels
+        # in native threads, ~10x a Python draw and GIL-free. Parity with
+        # this class is enforced by scripts/test_ofrs_parity.py.
+        self._native = None
+        try:
+            import ofrs
+
+            self._native = ofrs.Sampler(
+                [str(r) for r in roots], holdout_every=holdout_every,
+                holdout=holdout, noop_frac=noop_frac, spawn_frac=spawn_frac,
+                seed=seed,
+            )
+        except ImportError:
+            pass
 
     def _builder(self, game: CachedGame) -> ObsBuilder:
         if game.path not in self._builders:
@@ -308,6 +322,8 @@ class BCSampler:
         return out
 
     def sample_batch(self, n: int) -> list[dict]:
+        if self._native is not None:
+            return self._native.sample_batch(n)
         out: list[dict] = []
         while len(out) < n:
             out.extend(self.sample_step())
@@ -320,6 +336,8 @@ class BCSampler:
         choice on the last one (earlier steps carry noop placeholders that
         the trainer discards). Empty list when the draw fails; caller
         retries."""
+        if self._native is not None:
+            return self._native.sample_window(k)
         game = self.rng.choice(self.games)
         if game.n_steps() < 1:
             return []
