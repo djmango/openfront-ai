@@ -331,3 +331,94 @@ index 393dc2ca7..dcdb9ab79 100644
        open: process.env.SKIP_BROWSER_OPEN !== "true",
        proxy: {
 
+diff --git a/index.html b/index.html
+index 4af07ad2d..912e0e888 100644
+--- a/index.html
++++ b/index.html
+@@ -96,49 +96,6 @@
+       async
+       defer
+     ></script>
+-
+-    <script data-cfasync="false">
+-      window.ramp = window.ramp || {};
+-      window.ramp.que = window.ramp.que || [];
+-      window.ramp.passiveMode = true;
+-    </script>
+-
+-    <script>
+-      window.googletag = window.googletag || { cmd: [] };
+-      googletag.cmd.push(function () {
+-        googletag.pubads().set("page_url", "http://openfront.io ");
+-      });
+-    </script>
+-
+-    <!-- Analytics -->
+-    <script
+-      async
+-      src="https://www.googletagmanager.com/gtag/js?id=AW-16702609763"
+-    ></script>
+-    <script>
+-      window.dataLayer = window.dataLayer || [];
+-
+-      function gtag() {
+-        dataLayer.push(arguments);
+-      }
+-
+-      gtag("js", new Date());
+-      gtag("config", "AW-16702609763");
+-    </script>
+-    <!-- Google tag (gtag.js) -->
+-    <script
+-      async
+-      src="https://www.googletagmanager.com/gtag/js?id=G-WQGQQ8RDN4"
+-    ></script>
+-    <script>
+-      window.dataLayer = window.dataLayer || [];
+-      function gtag() {
+-        dataLayer.push(arguments);
+-      }
+-      gtag("js", new Date());
+-
+-      gtag("config", "G-WQGQQ8RDN4");
+-    </script>
+   </head>
+ 
+   <body
+@@ -441,12 +398,5 @@
+       data-cf-beacon='{"token": "03d93e6fefb349c28ee69b408fa25a13"}'
+     ></script>
+     <script type="module" src="/src/client/Main.ts"></script>
+-    <footer>
+-      <script
+-        data-cfasync="false"
+-        async
+-        src="//cdn.intergient.com/1025558/75940/ramp.js"
+-      ></script>
+-    </footer>
+   </body>
+ </html>
+diff --git a/src/client/Main.ts b/src/client/Main.ts
+index ebfef8a41..137dda2c3 100644
+--- a/src/client/Main.ts
++++ b/src/client/Main.ts
+@@ -28,7 +28,6 @@ import { GameInfoModal } from "./GameInfoModal";
+ import "./GameModeSelector";
+ import { GameModeSelector } from "./GameModeSelector";
+ import { GameStartingModal } from "./GameStartingModal";
+-import "./GoogleAdElement";
+ import { HelpModal } from "./HelpModal";
+ import "./HomepagePromos";
+ import { HostLobbyModal as HostPrivateLobbyModal } from "./HostLobbyModal";
+@@ -477,9 +476,7 @@ class Client {
+ 
+     const onUserMe = async (userMeResponse: UserMeResponse | false) => {
+       updateAccountNavButton(userMeResponse);
+-      const isAdFree =
+-        userMeResponse !== false && userMeResponse.player?.adfree === true;
+-      window.adsEnabled = !isAdFree && !crazyGamesSDK.isOnCrazyGames();
++      window.adsEnabled = false;
+       document.dispatchEvent(
+         new CustomEvent("userMeResponse", {
+           detail: userMeResponse,
+
