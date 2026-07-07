@@ -167,41 +167,6 @@ def seq_batch(sampler: BCSampler, batch: int, seq: int) -> list[dict]:
     return out[: batch * seq]
 
 
-def _first(b):
-    """collate_fn that unwraps DataLoader's batch-of-1 without touching the
-    numpy payloads (default_convert would tensorify them)."""
-    return b[0]
-
-
-class BCFeed(torch.utils.data.IterableDataset):
-    """Infinite stream of raw sample batches, one BCSampler per worker
-    process. Thread pools couldn't feed the GPU (the numpy featurization
-    between GIL-releasing zstd decodes serialized ~24 threads onto one
-    core); processes sidestep the GIL entirely and the cache-bc mmaps are
-    shared pages, so per-worker memory stays flat."""
-
-    def __init__(self, roots, holdout_every, noop_frac, spawn_frac, batch, seq):
-        self.roots = roots
-        self.holdout_every = holdout_every
-        self.noop_frac = noop_frac
-        self.spawn_frac = spawn_frac
-        self.batch = batch
-        self.seq = seq
-
-    def __iter__(self):
-        wi = torch.utils.data.get_worker_info()
-        sampler = BCSampler(
-            self.roots, holdout_every=self.holdout_every, holdout=False,
-            noop_frac=self.noop_frac, spawn_frac=self.spawn_frac,
-            seed=0 if wi is None else (wi.id + 1) * 7919,
-        )
-        while True:
-            if self.seq:
-                yield seq_batch(sampler, self.batch, self.seq)
-            else:
-                yield sampler.sample_batch(self.batch)
-
-
 def main() -> None:
     # Stall forensics on pods without ptrace (no py-spy): dump all thread
     # stacks to stderr every 5 minutes.
@@ -290,24 +255,24 @@ def main() -> None:
         draw = lambda s: seq_batch(s, args.batch, args.seq)  # noqa: E731
     else:
         draw = lambda s: s.sample_batch(args.batch)  # noqa: E731
-    # Process-based prefetch: each worker owns a BCSampler and streams whole
-    # raw batches; the main process only does GPU work.
-    feed = BCFeed(roots, args.holdout_every, args.noop_frac, args.spawn_frac,
-                  args.batch, args.seq)
-    loader = torch.utils.data.DataLoader(
-        feed, batch_size=1, collate_fn=_first,
-        num_workers=args.workers, prefetch_factor=4 if args.workers else None,
-        persistent_workers=bool(args.workers),
-    )
-    feed_it = iter(loader)
+    # Thread-pool raw-batch prefetch. Process workers (DataLoader) looked
+    # right on paper but regressed hard on the pods: 16 idle workers, the
+    # main process stalled on IPC pickling of ~50MB raw batches. Threads
+    # share memory (no pickling) and the decode path releases the GIL
+    # (zstd/ofrs), so they actually feed. Depth 8 rides out sampling
+    # variance between big and small games.
+    sample_pool = ThreadPoolExecutor(max_workers=args.workers)
+    raw_q: list = [sample_pool.submit(draw, sampler) for _ in range(8)]
+
+    def next_raws():
+        raw_q.append(sample_pool.submit(draw, sampler))
+        return raw_q.pop(0).result()
 
     # Micro-batch pipeline: fetch + AE encode + collate for k+1 runs on a
     # worker thread during k's forward/backward (same surgery as PPO's
-    # prefetch; the serialized loop left the GPU ~35% busy). The worker is
-    # the only consumer of feed_it, so the DataLoader iterator stays
-    # single-threaded.
+    # prefetch; the serialized loop left the GPU ~35% busy).
     def prep_next() -> tuple:
-        raws = next(feed_it)
+        raws = next_raws()
         enc = encode_batch(ae, raws, device)
         o, choice, cond = collate(enc, device)
         if args.seq:
