@@ -779,6 +779,49 @@ impl Sampler {
             .collect()
     }
 
+    /// `batch` windows of k steps each, drawn in parallel (rayon): the seq
+    /// trainer's whole micro-batch in one call. Failed draws (want_actor
+    /// misses, dead-player windows) retry internally, so exactly batch*k
+    /// samples come back, step-major.
+    fn sample_windows<'py>(
+        &self,
+        py: Python<'py>,
+        batch: usize,
+        k: usize,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let games = &self.games;
+        let nf = self.noop_frac;
+        let mut built: Vec<Built> = Vec::with_capacity(batch * k);
+        for _ in 0..64 {
+            let need = batch - built.len() / k;
+            if need == 0 {
+                break;
+            }
+            let seeds: Vec<u64> = (0..need).map(|_| self.next_seed()).collect();
+            let new: Result<Vec<Vec<Built>>, String> = py.allow_threads(|| {
+                seeds
+                    .into_par_iter()
+                    .map(|s| {
+                        let mut rng = SmallRng::seed_from_u64(s);
+                        let gi = rng.gen_range(0..games.len());
+                        sample_window_native(games, gi, k, nf, &mut rng)
+                    })
+                    .collect()
+            });
+            for v in new.map_err(PyRuntimeError::new_err)? {
+                if v.len() == k {
+                    built.extend(v);
+                }
+            }
+        }
+        if built.len() != batch * k {
+            return Err(PyRuntimeError::new_err(
+                "could not draw enough seq windows in 64 rounds",
+            ));
+        }
+        built.into_iter().map(|b| self.built_to_dict(py, b)).collect()
+    }
+
     /// Deterministic samples for parity testing: game gi, step si, actors
     /// only (no noop draw), first label per actor.
     fn debug_step_samples<'py>(

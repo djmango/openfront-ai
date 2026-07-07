@@ -161,6 +161,10 @@ def encode_batch(ae, raws: list[dict], device: str) -> list[dict]:
 def seq_batch(sampler: BCSampler, batch: int, seq: int) -> list[dict]:
     """Draw `batch` windows of `seq` consecutive steps for single players;
     flattened step-major, label on the last step of each window."""
+    if sampler._native is not None:
+        # Whole micro-batch in one native call: windows draw in parallel
+        # (rayon) instead of one failed-draw-prone window per call.
+        return sampler._native.sample_windows(batch, seq)
     out: list[dict] = []
     while len(out) < batch * seq:
         out.extend(sampler.sample_window(seq))
