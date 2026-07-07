@@ -461,7 +461,14 @@ def encode_grids(
         B, H, W = owners.shape
         fallout = _unpack_bits(packed, W)
         terrain = torch.cat([terr, fallout.unsqueeze(1)], dim=1)
-        z = ae.encode(owners.long(), terrain, static)
+        # The frozen AE runs in bf16 on cuda: profiling showed the encode
+        # phase dominating BC's feed thread (enc 60s vs smp 0s per window)
+        # and it shares the GPU with the trainer's forward/backward.
+        if owners.is_cuda:
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                z = ae.encode(owners.long(), terrain, static)
+        else:
+            z = ae.encode(owners.long(), terrain, static)
 
         classmap = torch.gather(
             clut, 1, owners.long().reshape(B, -1)
