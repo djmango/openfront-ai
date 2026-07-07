@@ -83,7 +83,6 @@ def generate_showcase(policy: Path, ae: Path) -> dict:
         str(record),
         "--out",
         str(RECORDS_DIR / f"{base}.webm"),
-        "--no-debug",
     ]
     if MAP:
         cmd.extend(["--map", MAP])
@@ -98,6 +97,7 @@ def generate_showcase(policy: Path, ae: Path) -> dict:
         "map": meta["info"].get("map") or MAP,
         "seed": SEED,
         "record": str(record),
+        "preview_webm": str(RECORDS_DIR / f"{base}.webm"),
         "generated_at": utc_now(),
         **policy_meta(policy),
     }
