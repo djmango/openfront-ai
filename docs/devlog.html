@@ -15,409 +15,209 @@
     pre{font-size:14px;overflow-x:auto;background:#f5f5f5;padding:8px 12px}
     img{max-width:100%;height:auto;display:block;margin:1rem 0}
     .d{color:#666;font-size:16px}
-    .status-box{background:#fafafa;border:1px solid #e8e8e8;padding:14px 16px;margin:1.5rem 0;font-size:16px}
-    .status-box h2{font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em;color:#444}
-    .entry{margin:2.5rem 0;padding-top:1.5rem;border-top:2px solid #eee}
-    .entry time{display:block;font-size:14px;color:#666;font-weight:600;font-variant-numeric:tabular-nums}
-    .entry h2{font-size:1.2rem;margin:.2rem 0 .6rem;line-height:1.3}
-    .tags{font-size:13px;color:#666;margin-bottom:.5rem}
-    .tags span{background:#f0f0f0;padding:2px 7px;border-radius:3px;margin-right:5px;white-space:nowrap}
-    .ref{margin-top:3rem;padding-top:2rem;border-top:3px double #ddd}
-    .ref h2{font-size:1.35rem;margin-bottom:1rem}
-    .ref h3{font-size:1.05rem;margin-top:1.75rem}
-    nav.toc{font-size:16px;line-height:1.8}
+    .now{background:#fafafa;border:1px solid #e8e8e8;padding:14px 16px;margin:1.5rem 0;font-size:16px}
+    h2.date{font-size:1.35rem;margin:2.5rem 0 .25rem;border-top:1px solid #ddd;padding-top:1.5rem}
+    h2.date:first-of-type{border-top:none;padding-top:0;margin-top:1.5rem}
+    h3{margin:1.25rem 0 .4rem;font-size:1.05rem}
+    .session{color:#666;font-size:16px;font-weight:normal;margin:0 0 .75rem}
+    .ref{margin-top:3rem;padding-top:1.5rem;border-top:2px solid #ddd}
+    .ref h2{font-size:1.25rem;margin-bottom:.75rem}
+    .ref h3{font-size:1.05rem;margin-top:1.5rem}
   </style>
 </head>
 
 <body>
 <h1>openfront-ai devlog</h1>
-<p class="d">Chronological log for a self-play RL agent on
-<a href="https://openfront.io">OpenFront.io</a>, built on the real game engine.
-New work gets a dated entry; only the status box below is rewritten in place.
-Spec: <a href="../DESIGN.md">DESIGN.md</a> · how-to: <a href="../README.md">README</a> ·
-<b>graphs:</b> <a href="https://djmango.github.io/openfront-ai/devlog.html">GitHub Pages</a>
-(GitHub's file viewer won't load PNGs).</p>
+<p class="d">Self-play RL on <a href="https://openfront.io">OpenFront.io</a>, real engine, ~two days in.
+<a href="../DESIGN.md">DESIGN.md</a> · <a href="../README.md">README</a></p>
 
-<nav class="toc">
-  <a href="#status">Status</a> ·
-  <a href="#entries">Entries</a> ·
-  <a href="#ref-arch">Reference</a> ·
-  <a href="#ref-graphs">Graphs</a> ·
-  <a href="#ref-tooling">Tooling</a> ·
-  <a href="#ref-bugs">Bugs</a> ·
-  <a href="#ref-lessons">Lessons</a>
-</nav>
-
-<div class="status-box" id="status">
-  <h2>Now (Jul 7, ~06:30 UTC)</h2>
+<div class="now" id="now">
+  <h2 style="font-size:1rem;margin:0 0 .5rem">Now - July 7th, 2026</h2>
   <table>
     <tr><th>run</th><th>pod</th><th>state</th></tr>
     <tr><td><code>ppo_v5</code></td><td>rl4</td>
-      <td>Active. BC warm start from <code>bc_v4/bc_best.pt</code>. Entropy floor +
-      sharper placement + loss-averse deltas. Cleared stage 2 in ~1h (v4 needed hours).
-      <code>ppo_v4</code> killed at update 433; final ckpt on HF.</td></tr>
+      <td>Active. BC warm start, entropy floor, sharper placement, loss-averse deltas.
+      Stage 2 in ~1 hour. <code>ppo_v4</code> retired (update 433 on HF).</td></tr>
     <tr><td><code>bc_v4</code></td><td>bc2</td>
-      <td>Active ~step 18k. Holdout best 0.406. Feed = frozen-AE encode on GPU;
-      <code>MALLOC_ARENA_MAX=2</code> experiment for throughput decay.</td></tr>
+      <td>~step 18k, holdout best 0.406. <code>MALLOC_ARENA_MAX=2</code> trial for feed decay.</td></tr>
     <tr><td><code>bc_seq_v4</code></td><td>bc3</td>
-      <td>Active ~step 3k. Seq-8 temporal experiment; encode-bound ~10 ex/s.</td></tr>
-    <tr><td><code>ppo_v3</code></td><td>-</td>
-      <td>Retired Jul 6. Stage 4, 60-70% roll-win. Ckpt on HF; TB curves lost.</td></tr>
+      <td>~step 3k, seq-8 temporal experiment, encode-bound ~10 ex/s.</td></tr>
   </table>
-  <p class="d" style="margin:.75rem 0 0">Encoder: <code>ae_v31_d8c32</code> (32ch @ 1/8).
-  Policy: 5.9M params, factorized masked heads, 11-stage win-gated curriculum.
-  Data: 375k bot + 420k human snapshots, 285 hash-verified human replays on HF.</p>
 </div>
 
-<h2 id="entries">Entries</h2>
-<p class="d">Newest first. Each entry is frozen once written.</p>
+<h2 class="date" id="jul-7-morning">July 7th, 2026</h2>
+<p class="session">Overnight check-in through the morning session.</p>
 
-<article class="entry" id="2026-07-07-devlog-reorg">
-  <time datetime="2026-07-07T13:27:00Z">2026-07-07 06:27 PDT</time>
-  <div class="tags"><span>meta</span><span>docs</span></div>
-  <h2>Devlog reorganized + GitHub Pages</h2>
-  <p>Replaced topic sections that kept getting rewritten with an append-only entry log
-  (this format) plus a single living status box. Enabled GitHub Pages from <code>/docs</code>
-  so graph PNGs render: <a href="https://djmango.github.io/openfront-ai/devlog.html">djmango.github.io/openfront-ai/devlog.html</a>.
-  README links to the hosted URL.</p>
-</article>
+<h3>Overnight results</h3>
+<p><b>bc_v4</b> climbed 6.5k → 17k steps (~1M examples at ~95-105 ex/s). Holdout acted-action
+0.74-0.75, best checkpoint metric 0.406. <code>tile_region</code> still ~0-0.07 - the 37k-class
+head is the weak spot.</p>
+<p><b>bc_seq_v4</b> ~3k steps, acted-action ~0.50 - too early for a temporal verdict.</p>
+<p><b>ppo_v4</b> hit update 433 / stage 4. Rolling win rate fell 0.28 → 0.00 while placement
+held 0.72-0.84 and entropy slid 9.2 → 2.8. Safe-second attractor, not an IPC bug (pod probe
+preserves the win bool).</p>
 
-<article class="entry" id="2026-07-07-reward-graphs">
-  <time datetime="2026-07-07T13:18:00Z">2026-07-07 06:18 PDT</time>
-  <div class="tags"><span>reward</span><span>tooling</span></div>
-  <h2>Reward MDP reference graphs</h2>
-  <p>Added <code>scripts/make_reward_graphs.py</code> - imports live constants from
-  <code>rl/curriculum.py</code> so panels stay in sync when tuning. Four figures:
-  terminal placement v4 vs v5, dense shaping (timeweight / delta / waste), archetypal
-  episode returns, strength blend by play style. See <a href="#ref-graphs">graphs</a>.</p>
-</article>
+<h3>bc2 throughput decay - encode is the feed cost</h3>
+<p>Throughput decayed 100 → 25 ex/s over ~8 hours; a restart fully fixed it. Phase logging
+(<code>smp/enc/col</code>) showed the Rust sampler at ~0s, collate ~5-9s, and frozen-AE encode
+at 50-135s per window - the encode shares the GPU with the trainer. CUDA reserved flat at 27.5GB,
+so not fragmentation or thermal throttle. bf16 autocast on the AE encode brought bc2 back to
+~85-93 ex/s. Decay recurred within 30 minutes; suspect glibc arena churn from numpy H2D staging.
+Running <code>MALLOC_ARENA_MAX=2</code>; durable fix is ofrs returning pre-stacked batches.</p>
 
-<article class="entry" id="2026-07-07-ppo-v5">
-  <time datetime="2026-07-07T12:20:00Z">2026-07-07 05:20 PDT</time>
-  <div class="tags"><span>ppo</span><span>reward</span><span>bc</span></div>
-  <h2>PPO v5: break the safe-second attractor</h2>
-  <p><code>ppo_v4</code> reached update 433 / 1.35M steps / stage 4, then collapsed:
-  roll-win 0.28 &rarr; 0.00 while placement held 0.72-0.84 and entropy 9.2 &rarr; 2.8.
-  Deterministic "safe second" - the win bonus never entered experience.</p>
-  <p>Killed v4, archived final ckpt to HF, launched <code>ppo_v5</code> on rl4 with:</p>
-  <ul>
-    <li><b>Adaptive entropy floor</b> (<code>--ent-floor 3.5</code>): coef scales x1.3/update
-    when measured entropy drops below floor (cap x30).</li>
-    <li><b>Sharper placement</b>: <code>PLACE_POW</code> 0.7 &rarr; 1.5 (2nd: 9.2 &rarr; 5.3).</li>
-    <li><b>Loss-averse deltas</b>: gain 5.0 / loss 6.5 (was symmetric 5.0).</li>
-    <li><b>BC warm start</b> from <code>bc_v4/bc_best.pt</code> (holdout 0.406).</li>
-  </ul>
-  <p>Early read: stage 0 in ~25 updates, stage 2 by update 64, entropy ~4.8 with floor
-  controller breathing. LSTM deliberately deferred until bc3 seq-vs-feedforward verdict.</p>
-</article>
+<h3>PPO v5 - breaking the safe-second attractor</h3>
+<p>Killed <code>ppo_v4</code>, archived final checkpoint to HF, launched <code>ppo_v5</code> with:</p>
+<ul>
+  <li>Adaptive entropy floor (<code>--ent-floor 3.5</code>) - coef scales ×1.3/update when
+  measured entropy drops, cap ×30.</li>
+  <li>Sharper placement curve - <code>PLACE_POW</code> 0.7 → 1.5 (2nd place: 9.2 → 5.3).</li>
+  <li>Loss-averse deltas - gain 5.0 / loss 6.5.</li>
+  <li>BC warm start from <code>bc_v4/bc_best.pt</code>.</li>
+</ul>
+<p>Early read: stage 0 in ~25 updates, stage 2 by update 64, entropy ~4.8. LSTM deferred until
+bc3 seq-vs-feedforward at matched sample counts.</p>
 
-<article class="entry" id="2026-07-07-bc-decay">
-  <time datetime="2026-07-07T11:30:00Z">2026-07-07 04:30 PDT</time>
-  <div class="tags"><span>bc</span><span>perf</span></div>
-  <h2>bc2 throughput decay profiled; encode is the feed cost</h2>
-  <p>Overnight bc_v4 hit ~105 ex/s then decayed 100 &rarr; 25 ex/s over ~8h; restart fully
-  restored. Added per-phase logging to bc.py (<code>smp/enc/col</code> + CUDA alloc/reserved).</p>
-  <ul>
-    <li><code>smp ~0s</code> - Rust sampler essentially free.</li>
-    <li><code>enc 50-135s/window</code> - frozen AE encode dominates; shares GPU with trainer.</li>
-    <li>CUDA reserved flat at 27.5GB - not fragmentation or thermal throttle.</li>
-    <li>bf16 autocast on AE encode (rl/obs.py): bc2 back to ~85-93 ex/s.</li>
-    <li>Decay recurred in 30 min post-restart; suspect glibc arena churn from numpy H2D staging.
-    Running <code>MALLOC_ARENA_MAX=2</code> on bc2. Durable fix: ofrs returns pre-stacked batches.</li>
-  </ul>
-</article>
+<h3>Reward MDP reference graphs</h3>
+<p><code>scripts/make_reward_graphs.py</code> imports live constants from <code>rl/curriculum.py</code>
+- four panels for tuning terminal placement, dense shaping, episode archetypes, and strength blend.
+See <a href="#graphs">graphs</a> below.</p>
 
-<article class="entry" id="2026-07-07-overnight">
-  <time datetime="2026-07-07T08:00:00Z">2026-07-07 01:00 PDT</time>
-  <div class="tags"><span>bc</span><span>ppo</span></div>
-  <h2>Overnight: bc_v4 at 17k steps, ppo_v4 win-rate collapse flagged</h2>
-  <ul>
-    <li><b>bc_v4:</b> 6.5k &rarr; 17k steps (~1M ex). Holdout acted-action 0.74-0.75, best ckpt
-    metric 0.406. tile_region still ~0-0.07 (37k-class head is the weak spot).</li>
-    <li><b>bc_seq_v4:</b> ~3k steps, acted-action ~0.50. Too early for temporal verdict.</li>
-    <li><b>ppo_v4:</b> update 433, stage 4. Roll-win collapse noted above; IPC protocol exonerated
-    (pod round-trip preserves win bool).</li>
-  </ul>
-</article>
+<h2 class="date" id="jul-6-late">July 6th, 2026 - late night</h2>
+<p class="session">Rust port and the phantom-boat fix, ~midnight through 11 p.m.</p>
 
-<article class="entry" id="2026-07-07-rust-sampler">
-  <time datetime="2026-07-07T06:00:00Z">2026-07-06 23:00 PDT</time>
-  <div class="tags"><span>rust</span><span>bc</span><span>ppo</span><span>perf</span></div>
-  <h2>Rust round 2: full BC sampler + binary vec IPC</h2>
-  <p>DataLoader process workers regressed (16 workers idle, main choked unpickling ~50MB batches).
-  Deleted the abstraction:</p>
-  <ul>
-    <li><code>ofrs::Sampler</code> - decode + featurize + labels in Rust/rayon. 639 &rarr; 2631
-    samples/s laptop; exact parity via <code>scripts/test_ofrs_parity.py</code> (11.8k samples).</li>
-    <li><code>vec.py</code> IPC off pickle - binary frame parsed by <code>ofrs::unpack_arrays</code>.</li>
-    <li>Collate fully native (<code>stack_f32/f16</code>).</li>
-    <li>Pod results: bc2 14.9 &rarr; ~105 ex/s; bc3 seq 4.5 &rarr; ~10.5 ex/s; rl4 OOM at u267
-    (fragmentation, fixed with <code>expandable_segments</code>).</li>
-  </ul>
-  <p>Earlier same night: initial <code>ofrs</code> decode+collate (<code>9f262a6</code>).
-  Free-threaded CPython 3.14t verified locally (BC sampler 1.7x at 4 threads).</p>
-</article>
+<h3>v4.2 - phantom boat exploit fixed mid-run</h3>
+<p>Replay sidecars: 43-78% of decisions were <code>boat</code>, nearly all silently discarded
+(max 3 transports). Discarded intents paid like noop with occasional upside - free lottery tickets.</p>
+<p>Fixed resume-safe (no tensor shape changes): honest masks, valid-tile snapping,
+<code>W_WASTE=0.01</code> per discarded intent. Hot-deployed to <code>ppo_v4</code> at update 260;
+first v4.2 episodes measured ~85-93 wasted intents per episode.</p>
 
-<article class="entry" id="2026-07-07-v42">
-  <time datetime="2026-07-07T00:45:00Z">2026-07-06 17:45 PDT</time>
-  <div class="tags"><span>ppo</span><span>reward</span><span>bugs</span></div>
-  <h2>v4.2: phantom boat exploit fixed mid-run</h2>
-  <p>Replay sidecars: 43-78% of decisions were <code>boat</code> with p(boat) up to 0.79;
-  nearly all silently discarded (max 3 transports). Discarded intents paid like noop with
-  occasional upside - free lottery tickets.</p>
-  <p>Fixed three ways (no tensor shape changes, resume-safe): honest masks
-  (<code>canBoat</code>, <code>canExpand</code>, silo cooldown), valid-tile snapping,
-  <code>W_WASTE=0.01</code> per discarded intent + <code>episode/wasted</code> TB curve.
-  Hot-deployed to <code>ppo_v4</code> at update 260; first episodes measured ~85-93 wasted/ep.</p>
-</article>
+<h3>Rust round two - full BC sampler and binary vec IPC</h3>
+<p>DataLoader process workers regressed - 16 workers idle while the main process choked unpickling
+~50MB batches. Replaced with <code>ofrs::Sampler</code> (decode + featurize + labels in Rust/rayon,
+639 → 2631 samples/s laptop, exact parity on 11.8k samples), binary <code>vec.py</code> IPC off
+pickle, and native collate. Pod results: bc2 14.9 → ~105 ex/s; bc3 seq 4.5 → ~10.5 ex/s.</p>
+<p>Earlier same stretch: initial <code>ofrs</code> decode+collate; free-threaded CPython 3.14t
+verified locally (BC sampler 1.7× at 4 threads).</p>
 
-<article class="entry" id="2026-07-06-graphs">
-  <time datetime="2026-07-06T23:00:00Z">2026-07-06 16:00 PDT</time>
-  <div class="tags"><span>tooling</span><span>ppo</span><span>bc</span></div>
-  <h2>Progress graphs + v4.1 async rollout overlap</h2>
-  <p><code>scripts/make_progress_graphs.py</code> - curriculum, throughput, BC pipeline panels
-  (<a href="#ref-graphs">graphs</a>). ppo_v3 TB curves died with its pod.</p>
-  <p>v4.1 (<code>b8c331c</code>): collector thread builds rollout k+1 while main runs PPO update
-  on k. ~1.35x wall-clock per update; rollout phase hides inside update
-  (<code>perf/rollout_wait_s</code>).</p>
-  <p>Earlier Jul 6 eve perf stack: fp16 rollout + pinned staging + prefetch (<code>8a0da05</code>,
-  3.6x stage-3 tps ~590 &rarr; ~2100).</p>
-</article>
+<h2 class="date" id="jul-6-eve">July 6th, 2026 - evening</h2>
+<p class="session">v4 launch, throughput work, and progress graphs.</p>
 
-<article class="entry" id="2026-07-06-v4-launch">
-  <time datetime="2026-07-06T20:00:00Z">2026-07-06 13:00 PDT</time>
-  <div class="tags"><span>ppo</span><span>bc</span><span>obs</span></div>
-  <h2>v4 launch: 1/8 resolution, d8c32, learned spawns, BC arms</h2>
-  <p>Three training arms launched:</p>
-  <ul>
-    <li><b>ppo_v4</b> - from scratch, d8c32 @ 1/8, local owner crop, spawn action, eval loop.</li>
-    <li><b>bc_v4</b> - feedforward BC on cache-bc (265 train / 26 holdout games).</li>
-    <li><b>bc_seq_v4</b> - temporal (--seq 8), conditional on matched-sample verdict.</li>
-  </ul>
-  <p>Policy stack: GPU <code>encode_grids</code>, entropy anneal, stage LR warmdown, persisted
-  win-gate window, pod commit assertions + crash backoff. cache-bc: ~1.5ms/sample vs 15-20ms raw.
-  Stages 0&rarr;3 in ~2h, stage 4 by ~3.6h despite two restarts (OOM minibatch 128&rarr;64).</p>
-</article>
+<h3>v4 launch - 1/8 resolution, d8c32, learned spawns</h3>
+<p>Three arms: <code>ppo_v4</code> from scratch, <code>bc_v4</code> feedforward on cache-bc,
+<code>bc_seq_v4</code> temporal (--seq 8). Policy stack at 1/8 with d8c32 encoder, local owner
+crop, spawn action, GPU <code>encode_grids</code>, entropy anneal, stage LR warmdown. cache-bc
+~1.5 ms/sample vs 15-20 ms raw. Stages 0→3 in ~2h, stage 4 by ~3.6h despite two OOM restarts.</p>
 
-<article class="entry" id="2026-07-06-ae31">
-  <time datetime="2026-07-06T18:00:00Z">2026-07-06 11:00 PDT</time>
-  <div class="tags"><span>ae</span><span>obs</span></div>
-  <h2>AE v3.1 bake-off: resolution beats channels</h2>
-  <p>Bot-trained v3 on human games: border accuracy 71.8% vs 87.5% on bot data. v3.1 ablations
-  found latent <i>resolution</i> is the constraint, not channel count.</p>
-  <table>
-    <tr><th>model</th><th>latent</th><th>border (human)</th><th>border (bot)</th></tr>
-    <tr><td>v3 bot-only</td><td>64ch @ 1/16</td><td>71.8%</td><td>87.5%</td></tr>
-    <tr><td>v3 on bot+human mix</td><td>64ch @ 1/16</td><td>80.1%</td><td>86.8%</td></tr>
-    <tr><td>v3.1 @ 1/8 res</td><td>64ch @ 1/8</td><td><b>89.3%</b></td><td><b>96.1%</b></td></tr>
-    <tr><td><b>d8c32 (chosen)</b></td><td>32ch @ 1/8</td><td>88.2%</td><td>95.5%</td></tr>
-  </table>
-  <p>Policy hedge: raw local owner-map crop around own territory (exact borders where the agent acts).
-  c96 control pruned (host kept dying; resolution already answered the question).</p>
-</article>
+<h3>Throughput - fp16 prefetch and async rollout overlap</h3>
+<p>fp16 rollout storage + pinned staging + prefetch (<code>8a0da05</code>): 3.6× on stage-3 maps
+(~590 → ~2100 game-ticks/s). v4.1 async collector (<code>b8c331c</code>): rollout k+1 overlaps
+PPO update on k, ~1.35× wall-clock per update.</p>
 
-<article class="entry" id="2026-07-06-tooling">
-  <time datetime="2026-07-06T13:39:00Z">2026-07-06 06:39 PDT</time>
-  <div class="tags"><span>tooling</span></div>
-  <h2>Real-client replay videos + MODEL debug overlay</h2>
-  <p>Headless Chromium replays GameRecords in the actual OpenFront client - full graphics,
-  agent as AGENT with gold spawn ring and crown. MODEL overlay (<code>RlDebugOverlay.ts</code>)
-  synced to sim tick: action, value, prob bars. Works in rendered videos, browser replays,
-  and live matches. See <a href="#ref-tooling">tooling</a>.</p>
-</article>
+<h3>Progress graphs</h3>
+<p><code>scripts/make_progress_graphs.py</code> - curriculum, throughput, BC pipeline panels.
+ppo_v3 TB curves died with its pod; lesson: archive events before terminating.</p>
 
-<article class="entry" id="2026-07-06-perf">
-  <time datetime="2026-07-06T12:20:00Z">2026-07-06 05:20 PDT</time>
-  <div class="tags"><span>perf</span><span>ppo</span></div>
-  <h2>Training speed overhaul</h2>
-  <ul>
-    <li>Per-batch dynamic grid padding (pad to batch max, not Asia max).</li>
-    <li>Double-buffered rollout (env stepping overlaps GPU inference).</li>
-    <li>bf16 autocast + TF32 + fused AdamW.</li>
-    <li>Binary tile IPC (JSON header + raw bytes, not gzip+base64 every step).</li>
-    <li>Per-stage decision cadence (15 ticks early, 10 later).</li>
-  </ul>
-</article>
+<h2 class="date" id="jul-6-day">July 6th, 2026</h2>
+<p class="session">Encoder bake-off, curriculum v2, tooling, and the win-counting bug.</p>
 
-<article class="entry" id="2026-07-06-win-bug">
-  <time datetime="2026-07-06T12:06:00Z">2026-07-06 05:06 PDT</time>
-  <div class="tags"><span>bugs</span><span>ppo</span></div>
-  <h2>Win detection bug fixed</h2>
-  <p><code>vec.py</code> checked <code>winner[1] == "Agent"</code> (username); engine emits
-  clientID <code>"AGENTRL1"</code>. Every win-rate stat before this timestamp is partly invalid.
-  Found by watching a replay where the agent visibly won while stats said otherwise.</p>
-</article>
+<h3>AE v3.1 - resolution beats channels</h3>
+<p>Bot-trained v3 on human games: 71.8% border accuracy vs 87.5% on bot data. Ablations found
+latent resolution is the constraint, not channel count.</p>
+<table>
+  <tr><th>model</th><th>latent</th><th>border (human)</th><th>border (bot)</th></tr>
+  <tr><td>v3 bot-only</td><td>64ch @ 1/16</td><td>71.8%</td><td>87.5%</td></tr>
+  <tr><td>v3 bot+human mix</td><td>64ch @ 1/16</td><td>80.1%</td><td>86.8%</td></tr>
+  <tr><td>v3.1 @ 1/8</td><td>64ch @ 1/8</td><td><b>89.3%</b></td><td><b>96.1%</b></td></tr>
+  <tr><td><b>d8c32 (chosen)</b></td><td>32ch @ 1/8</td><td>88.2%</td><td>95.5%</td></tr>
+</table>
+<p>Policy also gets a raw local owner-map crop around own territory. c96 control pruned - host kept
+dying and resolution had already answered the question.</p>
 
-<article class="entry" id="2026-07-06-bc">
-  <time datetime="2026-07-06T11:40:00Z">2026-07-06 04:40 PDT</time>
-  <div class="tags"><span>bc</span><span>data</span></div>
-  <h2>Behavior cloning from human games</h2>
-  <p>Placement-conditioned BC on hash-verified human replays (285 games on HF).
-  Optional temporal transformer (--seq). Pilot (<code>bc_v0_pilot</code>) paused at step 3850 -
-  CPU-bound at 34 ex/s, flat loss - pending cache-bc pipeline.</p>
-</article>
+<h3>Curriculum v2 and the first real wins</h3>
+<p>Stage 0 = 1v1 Onion, stage 1 = 1v3. Map pools, 25% rehearsal, win-gated advancement.
+Strength-index reward (land/mil/eco blend). <code>ppo_v3</code> from scratch overtook warm-started
+<code>ppo_v2c</code> (stage 4 @ 60-70% wins vs stage 3 @ 7-17%); v2c retired.</p>
 
-<article class="entry" id="2026-07-06-curriculum-v2">
-  <time datetime="2026-07-06T11:19:00Z">2026-07-06 04:19 PDT</time>
-  <div class="tags"><span>curriculum</span><span>reward</span></div>
-  <h2>Curriculum v2: dense wins, map pools, rehearsal</h2>
-  <p>Stage 0 = 1v1 Onion, stage 1 = 1v3. Map pools per stage (not single maps).
-  25% rehearsal at current difficulty. Win-gated advancement (roll-win &gt; 0.5 over 40 eps).
-  Strength-index reward (land/mil/eco blend) replaces raw land. See <a href="#ref-reward">reward</a>.</p>
-  <p>Same day: <code>ppo_v3</code> from scratch overtook warm-started <code>ppo_v2c</code>
-  (stage 4 @ 60-70% wins vs stage 3 @ 7-17%). v2c retired.</p>
-</article>
+<h3>Win detection was broken</h3>
+<p><code>vec.py</code> checked <code>winner[1] == "Agent"</code>; engine emits clientID
+<code>"AGENTRL1"</code>. Every win-rate stat before noon is partly invalid. Found by watching a
+replay where the agent visibly won while stats said otherwise.</p>
 
-<article class="entry" id="2026-07-06-replay">
-  <time datetime="2026-07-06T11:32:00Z">2026-07-06 04:32 PDT</time>
-  <div class="tags"><span>tooling</span><span>bridge</span></div>
-  <h2>GameRecord replays + live lobby agent</h2>
-  <p>Deterministic bridge mirrors client init (PseudoRandom ID stream, no spawn timer).
-  Games replay bit-identically in the real client; <code>verify_record.ts</code> proves it.
-  <code>rl/play.py</code> joins a live lobby over websocket - fight the agent from a browser.</p>
-</article>
+<h3>Behavior cloning from human games</h3>
+<p>285 hash-verified replays on HF. Placement-conditioned BC; optional temporal transformer.
+Pilot paused at step 3850 - CPU-bound at 34 ex/s, flat loss - until cache-bc landed.</p>
 
-<article class="entry" id="2026-07-06-cloud">
-  <time datetime="2026-07-06T10:00:00Z">2026-07-06 03:00 PDT</time>
-  <div class="tags"><span>infra</span><span>data</span></div>
-  <h2>Human-game pipeline + restart-proof cloud training</h2>
-  <p>Fetch archive, hash-verified deterministic replay to snapshots, HF upload.
-  <code>scripts/pod_train.sh</code>: idempotent deploy, auto-resume from checkpoint,
-  HF sync. Training hosts become disposable.</p>
-</article>
+<h3>Training speed overhaul</h3>
+<p>Per-batch dynamic padding, double-buffered rollout, bf16 + TF32 + fused AdamW, binary tile IPC,
+per-stage decision cadence (15 ticks early, 10 later).</p>
 
-<article class="entry" id="2026-07-06-rl-scaffold">
-  <time datetime="2026-07-06T00:36:00Z">2026-07-05 17:36 PDT</time>
-  <div class="tags"><span>ppo</span><span>bridge</span></div>
-  <h2>RL scaffold: vectorized PPO + curriculum v1</h2>
-  <p>Engine bridge over stdio, obs builder on frozen AE, factorized masked heads,
-  strength-index reward, VecEnv. Curriculum v1 reached stage 4 placement but 0 wins -
-  led to v2 redesign.</p>
-</article>
+<h3>Visualization</h3>
+<p>GameRecords replay bit-identically in the real client; <code>verify_record.ts</code> proves it.
+Headless Chromium renders full-graphics WebM; MODEL overlay synced to sim tick. Live lobby agent
+over websocket.</p>
 
-<article class="entry" id="2026-07-05-ae-v3">
-  <time datetime="2026-07-05T23:14:00Z">2026-07-05 16:14 PDT</time>
-  <div class="tags"><span>ae</span><span>obs</span></div>
-  <h2>AE v3: spatial-only + bypass split</h2>
-  <p>Pivotal correction after v2's unified latent failed on exact facts (alliance F1 0.67).
-  Compress only the map (99.4% tile accuracy); diplomacy, players, units, legality bypass raw.
-  <b>Lesson:</b> a one-bit fact at 95% recon is worse than reading the bit.</p>
-</article>
+<h3>Cloud training and human-game pipeline</h3>
+<p>Hash-verified archive replay → snapshots → HF. <code>scripts/pod_train.sh</code>: idempotent deploy,
+auto-resume, HF sync. Training hosts disposable.</p>
 
-<article class="entry" id="2026-07-05-start">
-  <time datetime="2026-07-05T18:00:00Z">2026-07-05 11:00 PDT</time>
-  <div class="tags"><span>ae</span><span>datagen</span></div>
-  <h2>Project start</h2>
-  <p>Headless datagen: TS runner boots real engine in Node, bot games dump packed tile grids
-  + full entity state every 10 ticks. AE v1 over tile ownership; v2 same evening tried unified
-  latent over all state (spatial recon excellent, exact facts not).</p>
-</article>
+<h2 class="date" id="jul-5-start">July 5th-6th, 2026 - first night</h2>
+<p class="session">Datagen, autoencoder iterations, RL scaffold.</p>
 
-<!-- ========== REFERENCE (stable; edit rarely) ========== -->
+<h3>Project start</h3>
+<p>Headless datagen: TS runner boots the real engine, bot games dump tile grids + entity state every
+10 ticks. AE v1 over ownership; v2 same evening unified all state in one latent (spatial recon
+excellent, exact facts not).</p>
 
-<div class="ref" id="ref-arch">
-  <h2>Reference</h2>
+<h3>AE v3 - spatial-only + bypass</h3>
+<p>Compress only the map; diplomacy, players, units, legality bypass raw. 99.4% tile accuracy.
+The lesson that stuck: a one-bit fact at 95% recon is worse than reading the bit.</p>
 
-  <h3 id="ref-obs">Observation</h3>
-  <p>Frozen spatial AE latent (d8c32 @ 1/8) + ego ownership planes + entity tokens +
-  legality masks + raw local owner crop around own territory. Everything small and exact
-  bypasses the latent. Details in <a href="../DESIGN.md">DESIGN.md</a>.</p>
+<h3>RL scaffold</h3>
+<p>Vectorized PPO over stdio bridge, factorized masked heads, strength-index reward, curriculum v1.
+Reached stage-4 placement but zero wins - led to v2.</p>
 
-  <h3 id="ref-actions">Action space</h3>
-  <table>
-    <tr><th>head</th><th>chooses</th></tr>
-    <tr><td>action type</td><td>noop, attack, expand, boat, build, launch_nuke, diplomacy, donate, embargo, retreat, spawn</td></tr>
-    <tr><td>player / tile / build / nuke / quantity</td><td>factorized arguments; bridge snaps tile to legal target inside chosen region</td></tr>
-  </table>
+<!-- reference -->
 
-  <h3 id="ref-reward">Reward (v5 constants)</h3>
-  <p>Specified in <code>rl/curriculum.py</code>, applied in <code>rl/vec.py</code>.</p>
-  <table>
-    <tr><th>term</th><th>value</th><th>notes</th></tr>
-    <tr><td>dense</td><td><code>W_STR=0.02</code> &times; strength &times; timeweight</td><td>timeweight 0.5&rarr;1.0 by tick 8000</td></tr>
-    <tr><td>delta</td><td>gain 5.0 / loss 6.5</td><td>asymmetric since v5</td></tr>
-    <tr><td>terminal</td><td><code>15 &times; rank<sup>-1.5</sup></code></td><td>PLACE_POW was 0.7 in v4</td></tr>
-    <tr><td>win bonus</td><td>+30</td><td>on engine win</td></tr>
-    <tr><td>death</td><td>-1</td><td>flat</td></tr>
-    <tr><td>wasted intent</td><td>-0.01 each</td><td>since v4.2</td></tr>
-    <tr><td>strength blend</td><td>45% land / 25% mil / 30% eco</td><td>shares of alive totals</td></tr>
-  </table>
+<div class="ref">
+  <h2 id="reference">Reference</h2>
 
-  <h3 id="ref-curriculum">Curriculum</h3>
-  <p>11 stages, 7 maps (Onion &rarr; Asia). Win-gated advancement, map pools, 25% rehearsal.
-  Early stages pin opponent count (1v1, 1v3) so wins are reachable.</p>
+  <h3 id="reward">Reward (v5)</h3>
+  <p><code>rl/curriculum.py</code> / <code>rl/vec.py</code>. Dense: <code>0.02 × strength × timeweight</code>
+  (0.5→1.0 by tick 8000). Delta: gain 5.0 / loss 6.5. Terminal: <code>15 × rank<sup>-1.5</sup></code>
+  + 30 win bonus. Death −1, wasted intent −0.01. Strength: 45% land / 25% mil / 30% eco.</p>
 
-  <h3 id="ref-alphafront">AlphaFront comparison</h3>
-  <p><a href="https://github.com/josh-freeman/openfront-rl">openfront-rl</a> - scalar obs (~96 floats)
-  + heuristic tile choice vs our spatial latent + learned pointer. We borrowed win-gated curriculum
-  and LR warmdown ideas; they showed PPO converges at ~10 ticks/decision on this engine.</p>
-</div>
+  <h3 id="curriculum">Curriculum</h3>
+  <p>11 stages, 7 maps. Win-gated advancement, map pools, 25% rehearsal. Early 1v1 → 1v3 so wins
+  are reachable before they matter.</p>
 
-<div class="ref" id="ref-graphs">
-  <h3>Graphs</h3>
-  <p>Regenerate after training or reward tweaks:</p>
+  <h3 id="graphs">Graphs</h3>
   <pre>PYTHONPATH=. uv run python scripts/make_progress_graphs.py
 PYTHONPATH=. uv run python scripts/make_reward_graphs.py</pre>
-  <p><b>Training progress</b> (Jul 6):</p>
-  <img src="graphs/curriculum_progress.png" alt="curriculum progress by run generation">
-  <img src="graphs/throughput.png" alt="ppo_v4 throughput timeline">
-  <img src="graphs/bc_pipeline.png" alt="BC pilot vs cache-fed v4">
-  <p><b>Reward MDP</b> (Jul 7, live constants):</p>
-  <img src="graphs/reward_terminal.png" alt="terminal placement v4 vs v5">
-  <img src="graphs/reward_dense.png" alt="dense reward surfaces">
-  <img src="graphs/reward_scenarios.png" alt="archetypal episode returns">
-  <img src="graphs/reward_strength.png" alt="strength blend by play style">
-</div>
+  <img src="graphs/curriculum_progress.png" alt="curriculum progress">
+  <img src="graphs/throughput.png" alt="throughput">
+  <img src="graphs/bc_pipeline.png" alt="BC pipeline">
+  <img src="graphs/reward_terminal.png" alt="reward terminal v4 vs v5">
+  <img src="graphs/reward_dense.png" alt="reward dense">
+  <img src="graphs/reward_scenarios.png" alt="reward scenarios">
+  <img src="graphs/reward_strength.png" alt="reward strength blend">
 
-<div class="ref" id="ref-tooling">
-  <h3>Tooling</h3>
+  <h3 id="tooling">Tooling</h3>
   <ul>
-    <li><code>rl/watch.py</code> - greedy episode &rarr; GameRecord + optional <code>.debug.json</code></li>
+    <li><code>rl/watch.py</code> - greedy episode → GameRecord</li>
     <li><code>scripts/render_client_replay.py</code> - real-client WebM</li>
-    <li><code>scripts/serve_replay.py</code> - browser replay shim</li>
-    <li><code>rl/play.py</code> + <code>bridge/play.ts</code> - live lobby agent</li>
-    <li><code>scripts/pod_train.sh</code> / <code>scripts/pod_bc.sh</code> - cloud supervisors</li>
+    <li><code>rl/play.py</code> - live lobby agent</li>
+    <li><code>scripts/pod_train.sh</code> / <code>pod_bc.sh</code> - cloud supervisors</li>
   </ul>
-  <p>HF: <a href="https://huggingface.co/datasets/djmango/openfront-snapshots">snapshots</a>,
-  <a href="https://huggingface.co/datasets/djmango/openfront-human-games">human games</a>,
-  <a href="https://huggingface.co/djmango/openfront-tile-autoencoder">autoencoder</a>,
-  <a href="https://huggingface.co/djmango/openfront-rl">RL checkpoints</a>.</p>
-</div>
 
-<div class="ref" id="ref-bugs">
-  <h3>Bugs (hall of fame)</h3>
-  <ul>
-    <li><b>Win detection</b> (Jul 6 12:06) - username vs clientID. Fixed.</li>
-    <li><b>Phantom boats</b> (Jul 7) - legal mask but silent no-op + no penalty. v4.2 fix.</li>
-    <li><b>Resume vs supervisor</b> - stale <code>--stage</code> fought checkpoint. Checkpoint authoritative now.</li>
-    <li><b>Case-insensitive macOS</b> - map dir lookup broke on Linux.</li>
-    <li><b>Cropped-map index crash</b> - boat coords off trimmed grid edge.</li>
-    <li><b>Auto-restart without backoff</b> - OOM crash loops for hours; commit assert added.</li>
-  </ul>
-</div>
-
-<div class="ref" id="ref-lessons">
-  <h3>Lessons</h3>
+  <h3 id="lessons">Lessons</h3>
   <ul>
     <li>Only compress what's big; exact small state bypasses the latent.</li>
-    <li>Make wins reachable before making them valuable (1v1 staging).</li>
-    <li>Warm starts inherit stale habits - retrain when reward/curriculum changes materially.</li>
-    <li>An action that silently fails at noop cost is a free lottery ticket - mask it or price it.</li>
-    <li>Benchmark on the distribution you'll deploy on (bot AE dropped 16pt on human borders).</li>
-    <li>Spatial precision comes from resolution, not channels.</li>
-    <li>Watch the agent play - curves missed win bug and phantom boats.</li>
-    <li>Pad to the batch max, not the curriculum max.</li>
-    <li>Treat training hosts as disposable; checkpoint + HF sync everything.</li>
-    <li>Sequence models multiply memory before they multiply quality.</li>
-  </ul>
-
-  <h3 id="ref-open">Open threads</h3>
-  <ul>
-    <li>PPO LSTM - gated on bc3 seq-vs-feedforward at matched samples.</li>
-    <li>AE latent cache in cache-bc - encoder finally frozen at d8c32.</li>
-    <li>ofrs pre-stacked batches - fix bc2 encode-path decay.</li>
-    <li>Self-play league past bot curriculum.</li>
-    <li>Remaining action heads not fully wired (upgrade, delete, warship move, cancel).</li>
+    <li>Make wins reachable before making them valuable.</li>
+    <li>Warm starts inherit stale habits when reward/curriculum changes.</li>
+    <li>A silently-failing "legal" action is a free lottery ticket - mask it or price it.</li>
+    <li>Benchmark on the distribution you'll deploy on.</li>
+    <li>Watch the agent play; curves missed the win bug and phantom boats.</li>
   </ul>
 </div>
 
