@@ -52,7 +52,7 @@ def parse_game_id(s: str) -> str:
     raise SystemExit(f"could not parse a lobby ID from {s!r}")
 
 
-def start_debug_server(game_id: str, port: int, log: list, lock: threading.Lock):
+def start_debug_server(game_id: str, port: int, bind: str, log: list, lock: threading.Lock):
     """Serve the model's decisions at /debug/<gameID> for the in-client
     overlay (set localStorage rlDebugHost = "http://localhost:<port>")."""
 
@@ -75,7 +75,7 @@ def start_debug_server(game_id: str, port: int, log: list, lock: threading.Lock)
         def log_message(self, fmt: str, *args) -> None:
             pass
 
-    srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+    srv = ThreadingHTTPServer((bind, port), H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     print(f"debug overlay feed: http://localhost:{port}/debug/{game_id}")
     print('  in the browser console: localStorage.setItem("rlDebugHost", '
@@ -99,6 +99,8 @@ def main() -> None:
     ap.add_argument("--host", default="localhost:9000")
     ap.add_argument("--debug-port", type=int, default=8988,
                     help="serve decisions for the in-client overlay (0 = off)")
+    ap.add_argument("--debug-bind", default="127.0.0.1",
+                    help="bind address for the debug overlay feed")
     args = ap.parse_args()
     args.game = parse_game_id(args.game)
 
@@ -131,7 +133,7 @@ def main() -> None:
     debug_log: list[dict] = []
     debug_lock = threading.Lock()
     if args.debug_port:
-        start_debug_server(args.game, args.debug_port, debug_log, debug_lock)
+        start_debug_server(args.game, args.debug_port, args.debug_bind, debug_log, debug_lock)
 
     for line in proc.stdout:
         msg = json.loads(line)

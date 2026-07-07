@@ -255,3 +255,66 @@ index 77a0bac69..543b94385 100644
      this.eventBus.on(ZoomEvent, (e) => this.onZoom(e));
      this.eventBus.on(DragEvent, (e) => this.onMove(e));
      this.eventBus.on(GoToPlayerEvent, (e) => this.onGoToPlayer(e));
+diff --git a/index.html b/index.html
+index f042ec74b..a14b6bfd3 100644
+--- a/index.html
++++ b/index.html
+@@ -7,6 +7,37 @@
+       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+     />
+     <title data-i18n="main.title">OpenFront (ALPHA)</title>
++    <script>
++      (function () {
++        try {
++          var o = location.origin;
++          if (!localStorage.getItem("apiHost"))
++            localStorage.setItem("apiHost", o + "/archive");
++          if (!localStorage.getItem("rlDebugHost"))
++            localStorage.setItem("rlDebugHost", o + "/play");
++          if (!localStorage.getItem("replayViewAs"))
++            localStorage.setItem("replayViewAs", "1");
++          if (!localStorage.getItem("replayFitMap"))
++            localStorage.setItem("replayFitMap", "1");
++          if (!localStorage.getItem("rlDebugOverlay"))
++            localStorage.setItem("rlDebugOverlay", "1");
++          window.addEventListener("DOMContentLoaded", function () {
++            if (document.getElementById("agent-play-btn")) return;
++            var a = document.createElement("a");
++            a.id = "agent-play-btn";
++            a.href = "/play";
++            a.textContent = "Play vs Agent";
++            a.style.cssText =
++              "position:fixed;right:14px;bottom:14px;z-index:10010;" +
++              "padding:10px 14px;border-radius:8px;" +
++              "background:rgba(42,90,42,.92);color:#5adc5a;" +
++              "font:600 13px system-ui,sans-serif;text-decoration:none;" +
++              "border:1px solid #5adc5a;pointer-events:auto";
++            document.body.appendChild(a);
++          });
++        } catch (e) {}
++      })();
++    </script>
+     <link rel="manifest" href="<%- manifestHref %>" />
+     <link rel="icon" type="image/svg+xml" href="<%- faviconHref %>" />
+ 
+diff --git a/src/client/Api.ts b/src/client/Api.ts
+index 82e55f6e0..9b8927a9b 100644
+--- a/src/client/Api.ts
++++ b/src/client/Api.ts
+@@ -315,6 +315,15 @@ export async function openSubscriptionPortal(): Promise<string | false> {
+ }
+ 
+ export function getApiBase() {
++  try {
++    const override = localStorage.getItem("apiHost");
++    if (override) {
++      return override.replace(/\/$/, "");
++    }
++  } catch {
++    // localStorage unavailable
++  }
++
+   const domainname = getAudience();
+ 
+   if (domainname === "localhost") {
+

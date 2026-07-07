@@ -1,0 +1,32 @@
+{
+  auto_https off
+  admin off
+}
+
+:8086 {
+  handle /archive/* {
+    uri strip_prefix /archive
+    reverse_proxy 127.0.0.1:8987
+  }
+  handle /play/debug/* {
+    reverse_proxy 127.0.0.1:8988
+  }
+  handle /play {
+    reverse_proxy 127.0.0.1:8988
+  }
+  handle /watch {
+    reverse_proxy 127.0.0.1:8988
+  }
+  handle /replay {
+    reverse_proxy 127.0.0.1:8988
+  }
+  handle /status {
+    reverse_proxy 127.0.0.1:8988
+  }
+  handle / {
+    reverse_proxy 127.0.0.1:8988
+  }
+  handle {
+    reverse_proxy 127.0.0.1:9000
+  }
+}

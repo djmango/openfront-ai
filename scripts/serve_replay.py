@@ -22,6 +22,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
+def load_state(state_path: Path | None) -> dict:
+    if state_path is None or not state_path.exists():
+        return {}
+    try:
+        return json.loads(state_path.read_text())
+    except Exception:
+        return {}
+
+
 def build_index(records_dir: Path) -> dict[str, Path]:
     idx = {}
     for f in records_dir.rglob("*.json"):
@@ -35,6 +44,8 @@ def build_index(records_dir: Path) -> dict[str, Path]:
 
 class Handler(BaseHTTPRequestHandler):
     index: dict[str, Path] = {}
+    records_dir: Path = Path("records-rl")
+    state_path: Path | None = None
 
     def _send(self, code: int, body: bytes, ctype: str = "application/json") -> None:
         self.send_response(code)
@@ -47,7 +58,33 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:  # CORS preflight
         self._send(204, b"")
 
+    def _refresh_index(self) -> None:
+        self.index = build_index(self.records_dir)
+
     def do_GET(self) -> None:
+        if self.path == "/replay":
+            state = load_state(self.state_path)
+            gid = state.get("game_id")
+            if not gid:
+                self._send(
+                    503,
+                    b'{"status":"warming","message":"showcase replay is generating"}',
+                )
+                return
+            self.send_response(302)
+            self.send_header("Location", f"/game/{gid}")
+            self.end_headers()
+            return
+        if self.path == "/status":
+            self._refresh_index()
+            payload = {
+                "records": len(self.index),
+                **load_state(self.state_path),
+            }
+            self._send(200, json.dumps(payload).encode())
+            return
+
+        self._refresh_index()
         # Archived-game fetch: /game/<id>
         m = re.fullmatch(r"/game/([A-Za-z0-9]{8})", self.path)
         if m:
@@ -82,13 +119,18 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--records", default="records-rl")
     ap.add_argument("--port", type=int, default=8987)
+    ap.add_argument("--bind", default="127.0.0.1")
+    ap.add_argument("--state", default=None, help="state.json from eval_daemon (for / and /status)")
     args = ap.parse_args()
 
-    Handler.index = build_index(Path(args.records))
-    print(f"serving {len(Handler.index)} record(s) on http://localhost:{args.port}")
+    records_dir = Path(args.records)
+    Handler.records_dir = records_dir
+    Handler.state_path = Path(args.state) if args.state else None
+    Handler.index = build_index(records_dir)
+    print(f"serving {len(Handler.index)} record(s) on http://{args.bind}:{args.port}")
     for gid, f in Handler.index.items():
         print(f"  {gid}  {f}")
-    ThreadingHTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
+    ThreadingHTTPServer((args.bind, args.port), Handler).serve_forever()
 
 
 if __name__ == "__main__":
