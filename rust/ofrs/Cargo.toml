@@ -1,6 +1,6 @@
 [package]
 name = "ofrs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [lib]
@@ -13,6 +13,10 @@ numpy = { version = "0.27", features = ["half"] }
 zstd = "0.13"
 rayon = "1.10"
 half = "2"
+memmap2 = "0.9"
+serde_json = { version = "1", features = ["preserve_order"] }
+rand = { version = "0.8", features = ["small_rng"] }
+md-5 = "0.10"
 
 [profile.release]
 lto = true

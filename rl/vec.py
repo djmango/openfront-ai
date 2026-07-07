@@ -148,32 +148,43 @@ class EnvWorker:
 
 
 def _child(idx: int, stage_val, max_ticks: int, decision_ticks: int, conn) -> None:
+    from rl.native import pack_arrays
+
     try:
         worker = EnvWorker(idx, stage_val, max_ticks, decision_ticks)
         sent_episode = -1
 
-        def pack(raw: dict, result) -> dict:
-            # terrain_static is constant per episode: ship it once, the
-            # parent re-attaches it (dynamic fallout ships every step as
-            # packed bits - it must NOT ride inside the cached tensor).
+        def pack(raw: dict, result) -> bytes:
+            # Binary framing instead of pickle: the parent parses ~300KB/env
+            # messages every decision tick, and rl.native.unpack_arrays does
+            # it in Rust off the pickle path. terrain_static is constant per
+            # episode: ship it once, the parent re-attaches it (dynamic
+            # fallout ships every step as packed bits - it must NOT ride
+            # inside the cached tensor).
             nonlocal sent_episode
-            msg = {"raw": raw, "result": result, "episode": worker.episode}
-            if worker.episode != sent_episode:
-                sent_episode = worker.episode
-            else:
-                msg["raw"] = {k: v for k, v in raw.items() if k != "terrain_static"}
-            return msg
+            arrays = {
+                k: v
+                for k, v in raw.items()
+                if isinstance(v, np.ndarray)
+                and not (k == "terrain_static" and worker.episode == sent_episode)
+            }
+            other = {k: v for k, v in raw.items() if not isinstance(v, np.ndarray)}
+            sent_episode = worker.episode
+            return pack_arrays(
+                {"result": result, "episode": worker.episode, "raw_other": other},
+                arrays,
+            )
 
-        conn.send(pack(worker.prepare(), None))
+        conn.send_bytes(pack(worker.prepare(), None))
         while True:
             choice = conn.recv()
             if choice is None:
                 break
             result = worker.apply(choice)
-            conn.send(pack(worker.prepare(), result))
+            conn.send_bytes(pack(worker.prepare(), result))
         worker.env.close()
     except Exception as e:
-        conn.send({"error": repr(e)})
+        conn.send_bytes(pack_arrays({"error": repr(e)}, {}))
         raise
     finally:
         conn.close()
@@ -200,14 +211,17 @@ class VecEnv:
         self._pending: list[dict] = [self._recv(i) for i in range(n)]
 
     def _recv(self, i: int) -> dict:
-        msg = self.pipes[i].recv()
+        from rl.native import unpack_arrays
+
+        msg, arrays = unpack_arrays(self.pipes[i].recv_bytes())
         if "error" in msg:
             raise RuntimeError(f"env worker {i}: {msg['error']}")
-        raw = msg["raw"]
+        raw = {**msg.pop("raw_other"), **arrays}
         if "terrain_static" in raw:
             self.terrains[i] = raw["terrain_static"]
         else:
             raw["terrain_static"] = self.terrains[i]
+        msg["raw"] = raw
         return msg
 
     def obs(self) -> list[dict]:

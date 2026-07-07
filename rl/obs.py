@@ -509,7 +509,7 @@ def collate(obs_list: list[dict], keys: list[str]) -> dict[str, np.ndarray]:
     """Stack per-env obs dicts into batch arrays, zero-padding 'grid',
     'grid_valid', and 'legal_tile' to the largest grid in THIS batch (not
     the curriculum-wide max - that wasted ~9x conv compute on small maps)."""
-    from rl.native import collate_grids, collate_masks
+    from rl.native import collate_grids, collate_masks, stack
 
     out = {}
     gh = max(o["grid"].shape[1] for o in obs_list)
@@ -522,6 +522,6 @@ def collate(obs_list: list[dict], keys: list[str]) -> dict[str, np.ndarray]:
         elif k in ("grid_valid", "legal_tile"):
             b = collate_masks([o[k] for o in obs_list], gh, gw)
         else:
-            b = np.stack([o[k] for o in obs_list])
+            b = stack([o[k] for o in obs_list])
         out[k] = b
     return out
