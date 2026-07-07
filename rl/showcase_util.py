@@ -17,8 +17,8 @@ REVISION_PATH = DATA_DIR / "policy_revision.txt"
 def hf_policy_revision(run_name: str) -> str:
     from huggingface_hub import HfApi
 
-    info = HfApi().repo_file_info("djmango/openfront-rl", f"{run_name}/policy.pt")
-    return f"{info.last_modified}:{info.blob_id}"
+    info = HfApi().get_paths_info("djmango/openfront-rl", [f"{run_name}/policy.pt"])[0]
+    return str(getattr(info, "blob_id", "") or getattr(info, "last_modified", ""))
 
 
 def ensure_ae(ae_path: Path) -> Path:
