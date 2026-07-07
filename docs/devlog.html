@@ -450,6 +450,26 @@ from the raw cache IS that idea, done right).</p>
 
 <h3 id="next">Open threads</h3>
 <ul>
+  <li><b>v5 wishlist (drafted Jul 6 night, from watching v4 launch day):</b>
+    <ul>
+      <li><b>Memory.</b> The policy is purely reactive - one snapshot per decision, no
+        recurrence. It can't see trends (massing neighbors, receding attacks) or its own
+        commitments (attack/retreat flip-flopping in the overlays). Add an LSTM between trunk
+        and heads for PPO; hidden states ride the rollout buffer through resets.</li>
+      <li><b>BC temporal transformer, judged properly.</b> The <code>--seq</code> BCPolicy
+        exists but has only ever run at starvation throughput. With cache-bc feeding it, run
+        seq=8 vs feedforward at equal samples on full holdout; if seq wins, that's the
+        evidence that buys the PPO LSTM.</li>
+      <li><b>Reward MDP audit + asymmetric strength shaping.</b> v4 games show the shape:
+        hyper-aggressive expansion, big holdings, then collapse (s2 seed 7: 103k tiles at
+        t8001, dead by t10711). W_DELTA treats gains and losses symmetrically; weight losses
+        heavier than gains (loss-aversion shaping) so defense is learned before stage 4
+        punishes its absence. While in there: audit timeweight and the noop-heavy action mix
+        (35% noop at stage 2) against the actual returns.</li>
+      <li><b>Async rollout/update overlap.</b> Post-fix the phases are still sequential
+        (~33s rollout with GPU half idle, ~48s update with 46 cores idle). Overlapping them
+        is another ~1.5-2x. Same surgery should batch the two act-groups' encodes.</li>
+    </ul></li>
   <li><b>PPO v4 wishlist: shipped (Jul 6 eve).</b> Learned spawn placement (PPO + BC), d8c32
     encoder at full 1/8 with the local owner-crop bypass, periodic fixed-seed greedy eval
     (<code>eval/*</code> curves), win-gate window persisted in the checkpoint, entropy anneal
