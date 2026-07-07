@@ -13,6 +13,7 @@
     th{font-weight:600}
     code{font-size:.85em}
     pre{font-size:14px;overflow-x:auto;background:#f5f5f5;padding:8px 12px}
+    img{max-width:100%;height:auto;display:block;margin:1rem 0}
     .d{color:#666}
   </style>
 </head>
@@ -22,7 +23,10 @@
 <p class="d">July 6, 2026, ~24 hours in. A self-play RL agent for
 <a href="https://openfront.io">OpenFront.io</a>, built on the real game engine.
 See also: <a href="../DESIGN.md">DESIGN.md</a> (the living spec: intent table, obs schema, head layout),
-<a href="../README.md">README</a> (how to run everything).</p>
+<a href="../README.md">README</a> (how to run everything).
+<b>View with graphs:</b> open this file via
+<a href="https://djmango.github.io/openfront-ai/devlog.html">GitHub Pages</a>
+(GitHub's file viewer shows raw HTML and won't load the PNGs).</p>
 
 <ul>
   <li><a href="#status">Status</a></li>
@@ -35,6 +39,8 @@ See also: <a href="../DESIGN.md">DESIGN.md</a> (the living spec: intent table, o
   <li><a href="#curriculum">Curriculum</a></li>
   <li><a href="#alphafront">Prior art: AlphaFront</a></li>
   <li><a href="#perf">Performance</a></li>
+  <li><a href="#graphs">Progress graphs</a></li>
+  <li><a href="#reward-mdp">Reward MDP graphs</a></li>
   <li><a href="#tooling">Visualization &amp; tooling</a></li>
   <li><a href="#bugs">Bugs</a></li>
   <li><a href="#lessons">Lessons</a></li>

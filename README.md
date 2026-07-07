@@ -4,7 +4,7 @@ Toward a self-play RL agent for [OpenFront.io](https://openfront.io): headless
 data generation on the real game engine, a learned spatial observation
 encoder, and PPO self-play over the full action surface.
 
-**Devlog:** [docs/devlog.html](docs/devlog.html) - run ledger, timeline, bugs,
+**Devlog:** [djmango.github.io/openfront-ai/devlog.html](https://djmango.github.io/openfront-ai/devlog.html) - run ledger, timeline, bugs,
 lessons, and the full AE v3.1 bake-off. **Living spec:**
 [DESIGN.md](DESIGN.md).
 
@@ -101,7 +101,7 @@ at tick 3891).
 
 ## Key learnings
 
-Condensed from the [devlog](docs/devlog.html#lessons):
+Condensed from the [devlog](https://djmango.github.io/openfront-ai/devlog.html#lessons):
 
 - **Make wins reachable before making them valuable.** 1v1 → 1v3 staging turned
   the win bonus from theoretical to dense; win detection was silently broken
