@@ -66,6 +66,16 @@ pruned unfinished: its host kept dying and the resolution result had already ans
 First deployment-style eval of <code>ppo_v3</code> (fixed-seed local games, sampled actions):
 2 wins / 2 losses on the first four stage-4 games, consistent with its training roll-win.
 </p>
+<p>
+<b>Jul 7 ~00:45: v4.2 deployed mid-run.</b> Watching v4 replays exposed the phantom-boat exploit
+(43-78% of decisions were boats the engine silently discarded - see <a href="#bugs">bugs</a>).
+v4.2 fixes it three ways (honest masks, valid-tile snapping, wasted-intent penalty) and resumed
+<code>ppo_v4</code> from its own checkpoint - no retrain needed, since no tensor shapes changed.
+The new <code>episode/wasted</code> curve opened at <b>~85-93 discarded intents per episode</b>
+(stage 4), the measured size of the exploit; the penalty now prices those at noop-minus-w_waste.
+Watch items: wasted falling, boat's action-mix share normalizing, and a transient roll-win dip
+while the value head absorbs the reward shift (resumed at update 260, roll-win 0.28).
+</p>
 <p class="d">
 Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% → 89.3% (human) ·
 5.9M-param policy · 11 curriculum stages · first 2 engine wins Jul 6.
@@ -186,7 +196,11 @@ encoder or BC warm start yet.</p>
     work (boats never target own/ally land, builds only own territory, ports own shore), and
     whatever still slips through is counted by the bridge (<code>wasted</code>, exact engine
     calls per intent) and penalized at W_WASTE=0.01 per discarded intent, so noop strictly
-    dominates doomed actions. New <code>episode/wasted</code> TB curve.</li>
+    dominates doomed actions. New <code>episode/wasted</code> TB curve. Tagged <b>v4.2</b> and
+    hot-deployed to the running <code>ppo_v4</code> pod at ~00:45: trainer killed, repo synced,
+    resumed from the same checkpoint (update 260, stage 4, win-window intact) - resume-safe
+    because nothing about the network changed. First v4.2 episodes measured the exploit at
+    ~85-93 wasted intents per episode.</li>
   <li><b>Jul 6 eve:</b> v4: the whole policy stack moved to 1/8 resolution (d8c32 encoder, 8x8
     tile regions, 150x250 grid budget) - the clean cut, no space-to-depth shims. GPU-side
     featurization (ego pooling, fallout unpack, AE encode, local crop batched in
