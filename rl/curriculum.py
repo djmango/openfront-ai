@@ -15,6 +15,11 @@ Reward design (v2):
   outright engine win. Placement = 1 + players still alive if we died,
   else rank among the living by the same strength index.
 - Flat small death penalty w_death.
+- Wasted-intent penalty w_waste per intent the engine silently discarded
+  (doomed boat, invalid build site, expand with no neutral border). These
+  are otherwise reward-identical to noop but with occasional upside, so
+  the policy farms them as free lottery tickets (v3/v4 replays: 40-80% of
+  decisions were boats/builds that did nothing).
 
 Curriculum (v2):
 - Each stage is a POOL of maps plus a bot count and difficulty; the map is
@@ -39,6 +44,7 @@ W_DELTA = 5.0
 W_PLACE = 15.0
 W_WIN = 30.0
 W_DEATH = 1.0
+W_WASTE = 0.01  # per silently-discarded intent; makes noop dominate them
 PLACE_POW = 0.7
 
 # Strength blend: land still matters most (the win condition is territorial)

@@ -15,8 +15,14 @@ from rl.policy import QUANTITY_FRACS
 
 
 class IntentTranslator:
-    """choice dict -> engine intent JSON. Region pointers snap to a land
-    tile inside the REGION x REGION block (engine validates the rest)."""
+    """choice dict -> engine intent JSON. Region pointers snap to a tile
+    inside the REGION x REGION block that passes the same cheap validity
+    checks the engine runs at execution (ownership, passability, shore for
+    ports) so region picks rarely become silently-discarded intents; the
+    engine still validates the rest, and the env penalizes what slips
+    through (see bridge/env.ts countWasted)."""
+
+    SHORELINE_BIT = 6  # terrain byte layout, see GameMapImpl
 
     def __init__(self, env, builder: ObsBuilder):
         self.env = env
@@ -24,6 +30,10 @@ class IntentTranslator:
         land = (env.terrain >> 7) & 1
         self.land = land[: builder.hr, : builder.wr]
         self.mag = (env.terrain & MAGNITUDE_MASK)[: builder.hr, : builder.wr]
+        self.shore = ((env.terrain >> self.SHORELINE_BIT) & 1)[
+            : builder.hr, : builder.wr
+        ]
+        self.passable = (self.land == 1) & (self.mag < IMPASSABLE_MAGNITUDE)
         self.gh = builder.hr // REGION
         self.gw = builder.wr // REGION
         self.rng = np.random.default_rng(0)
@@ -52,9 +62,31 @@ class IntentTranslator:
         """Valid spawn tile inside the region: land, unowned, passable -
         mirrors SpawnExecution's validity so a masked pick always lands."""
         owners = obs["owners"][: self.builder.hr, : self.builder.wr]
-        valid = (
-            (self.land == 1) & (self.mag < IMPASSABLE_MAGNITUDE) & (owners == 0)
-        )
+        valid = self.passable & (owners == 0)
+        return self.region_tile(region, valid)
+
+    def _owners(self, obs: dict) -> np.ndarray:
+        return obs["owners"][: self.builder.hr, : self.builder.wr]
+
+    def boat_tile(self, region: int, obs: dict) -> int | None:
+        """Boat destination inside the region: passable land not owned by
+        self or an ally - mirrors TransportShipExecution's target checks
+        (a boat to own/friendly territory is silently discarded)."""
+        me = obs["me"]
+        valid = self.passable & (self._owners(obs) != me)
+        for a, b, _exp in obs["entities"]["alliances"]:
+            ally = b if a == me else a if b == me else None
+            if ally is not None:
+                valid &= self._owners(obs) != ally
+        return self.region_tile(region, valid)
+
+    def build_tile(self, region: int, obs: dict, unit: str) -> int | None:
+        """Structure site inside the region: own territory (engine's
+        validStructureSpawnTiles requires ownership); ports additionally
+        need own shore within the engine's port-spawn search radius."""
+        valid = self.passable & (self._owners(obs) == obs["me"])
+        if unit == "Port":
+            valid &= self.shore == 1
         return self.region_tile(region, valid)
 
     def slot_to_pid(self, slot: int, obs: dict) -> str | None:
@@ -90,17 +122,18 @@ class IntentTranslator:
                 return []
             return [{"type": "attack", "targetID": pid, "troops": int(troops * frac)}]
         if name == "boat":
-            tile = self.region_tile(choice["tile_region"])
+            tile = self.boat_tile(choice["tile_region"], obs)
             if tile is None:
                 return []
             return [{"type": "boat", "dst": tile, "troops": int(troops * frac)}]
         if name == "build":
-            tile = self.region_tile(choice["tile_region"])
+            unit = BUILD_TYPES[choice["build_type"]]
+            tile = self.build_tile(choice["tile_region"], obs, unit)
             if tile is None:
                 return []
-            return [{"type": "build_unit", "unit": BUILD_TYPES[choice["build_type"]], "tile": tile}]
+            return [{"type": "build_unit", "unit": unit, "tile": tile}]
         if name == "launch_nuke":
-            tile = self.region_tile(choice["tile_region"])
+            tile = self.region_tile(choice["tile_region"], self.passable)
             if tile is None:
                 return []
             return [{"type": "build_unit", "unit": NUKE_TYPES[choice["nuke_type"]], "tile": tile}]

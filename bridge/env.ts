@@ -13,7 +13,10 @@
  *
  * Legality: the bridge reports action-type masks and per-player validity
  * (exact engine calls). Tile arguments are validated by the engine at
- * execution; illegal tile picks become no-ops the policy learns to avoid
+ * execution; intents the engine would silently discard are counted in the
+ * obs head as "wasted" so the env can penalize them - without a cost, a
+ * doomed boat/build is reward-identical to noop and strictly better in
+ * expectation (occasional lottery win), so the policy farms them
  * (region-snapping happens Python-side, see DESIGN.md head 3).
  */
 
@@ -49,8 +52,8 @@ import type {
   StampedIntent,
 } from "../openfront/src/core/Schemas";
 import { simpleHash } from "../openfront/src/core/Util";
-import type { MapManifest } from "../openfront/src/core/game/TerrainMapFileLoader";
-import { buildObsParts, terrainPayload } from "./common";
+import type { MapManifest } from "../openfront/src/core/game/TerrainMapLoader";
+import { bordersNeutralLand, buildObsParts, terrainPayload } from "./common";
 
 // The engine logs to console.log; stdout must stay pure JSONL.
 console.log = console.info = console.warn = (...args: unknown[]) =>
@@ -197,10 +200,43 @@ class EnvSession {
     return buildObsParts(this.game, AGENT_CLIENT_ID, null);
   }
 
+  /** Count intents the engine would silently discard at execution. Uses
+   * the same engine calls the executions run at init, against the same
+   * state the action masks were built from, so the env can penalize
+   * wasted intents (otherwise a doomed boat/build is reward-identical to
+   * noop and the policy farms them as free lottery tickets). */
+  countWasted(intents: Intent[]): number {
+    const agent = this.game.playerByClientID(AGENT_CLIENT_ID);
+    if (!agent || !agent.isAlive()) return 0;
+    let wasted = 0;
+    for (const intent of intents) {
+      if (intent.type === "boat") {
+        // TransportShipExecution.init(): boat cap, reachable target shore,
+        // launchable own shore, non-friendly destination owner.
+        if (agent.canBuild(UnitType.TransportShip, intent.dst) === false) {
+          wasted++;
+        }
+      } else if (intent.type === "build_unit") {
+        // ConstructionExecution / NukeExecution: ownership + structure
+        // spacing for buildings, silo cooldown + spawn immunity for nukes.
+        if (agent.canBuild(intent.unit, intent.tile) === false) {
+          wasted++;
+        }
+      } else if (intent.type === "attack" && intent.targetID === null) {
+        // AttackExecution on terra nullius fizzles without neutral border.
+        if (!bordersNeutralLand(this.game, agent)) {
+          wasted++;
+        }
+      }
+    }
+    return wasted;
+  }
+
   step(
     intents: Intent[],
     ticks: number,
   ): { head: Record<string, unknown>; tiles: Buffer } {
+    const wasted = this.countWasted(intents);
     const stamped: StampedIntent[] = intents.map((i) => ({
       ...i,
       clientID: AGENT_CLIENT_ID,
@@ -223,7 +259,9 @@ class EnvSession {
         break;
       }
     }
-    return buildObsParts(this.game, AGENT_CLIENT_ID, winner);
+    const parts = buildObsParts(this.game, AGENT_CLIENT_ID, winner);
+    parts.head.wasted = wasted;
+    return parts;
   }
 
   /** GameRecord JSON loadable by the real OpenFront client replay viewer. */

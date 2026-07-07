@@ -17,6 +17,7 @@ from rl.curriculum import (
     W_DEATH,
     W_DELTA,
     W_STR,
+    W_WASTE,
     placement,
     placement_score,
     sample_episode,
@@ -25,7 +26,7 @@ from rl.curriculum import (
     timeweight,
 )
 from rl.env import OpenFrontEnv
-from rl.obs import ObsBuilder
+from rl.obs import ACTIONS, ObsBuilder
 from rl.ppo_translate import IntentTranslator, my_tiles, spawn_randomly
 
 
@@ -66,6 +67,7 @@ class EnvWorker:
         self.spawn_steps = 0
         self.ep_reward = 0.0
         self.ep_len = 0
+        self.ep_wasted = 0
         self.episode += 1
 
     def prepare(self) -> dict:
@@ -73,8 +75,16 @@ class EnvWorker:
 
     def apply(self, choice: dict) -> tuple[float, bool, dict | None]:
         """Translate + step. Auto-resets on done; returns (reward, done, ep_info)."""
+        name = ACTIONS[choice["action"]]
         intents = self.translator.translate(choice, self.obs)
         self.obs = self.env.step(intents, ticks=self.dt)
+        # Intents the engine silently discarded (bridge countWasted) plus
+        # choices the translator couldn't realize (no valid tile in the
+        # picked region). Both are noop-equivalent in effect; the penalty
+        # makes actual noop strictly dominate them.
+        wasted = int(self.obs.get("wasted", 0))
+        if not intents and name not in ("noop", "spawn"):
+            wasted += 1
 
         if self.obs["spawnPhase"]:
             # Masked spawn picks should always land; if the phase somehow
@@ -90,6 +100,8 @@ class EnvWorker:
         mine = strengths(self.obs["entities"], self.land_total).get(self.obs["me"], 0.0)
         tw = timeweight(self.obs["tick"])
         reward = W_STR * mine * tw + W_DELTA * (mine - self.prev_strength)
+        reward -= W_WASTE * wasted
+        self.ep_wasted += wasted
         self.prev_strength = mine
 
         done = False
@@ -123,6 +135,7 @@ class EnvWorker:
                 "n_players": n,
                 "score": placement_score(place, n),
                 "won": won,
+                "wasted": self.ep_wasted,
                 "stage": self.stage,
                 "map": self.map_name,
                 "rehearsal": self.rehearsal,

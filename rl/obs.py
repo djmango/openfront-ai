@@ -337,8 +337,15 @@ class ObsBuilder:
             fill("donate_gold", legal.get("donatableGold", []))
             fill("donate_troops", legal.get("donatableTroops", []))
             fill("embargo", legal.get("embargoable", []))
-            act[ACTIONS.index("expand")] = 1.0
-            act[ACTIONS.index("boat")] = 1.0 if legal.get("troops", 0) > 100 else 0.0
+            # canExpand/canBoat are exact engine-state checks from the
+            # bridge (neutral border, boat cap + own shore). Default True
+            # for old BC caches whose legality blobs predate the keys.
+            act[ACTIONS.index("expand")] = 1.0 if legal.get("canExpand", True) else 0.0
+            act[ACTIONS.index("boat")] = (
+                1.0
+                if legal.get("canBoat", True) and legal.get("troops", 0) > 100
+                else 0.0
+            )
             build_ok = [t for t in BUILD_TYPES if t in legal.get("buildableTypes", [])]
             act[ACTIONS.index("build")] = 1.0 if build_ok else 0.0
             nukes_ok = [t for t in NUKE_TYPES if t in legal.get("buildableTypes", [])]
