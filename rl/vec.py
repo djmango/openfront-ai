@@ -15,7 +15,8 @@ import numpy as np
 from rl.curriculum import (
     STAGES,
     W_DEATH,
-    W_DELTA,
+    W_DELTA_GAIN,
+    W_DELTA_LOSS,
     W_STR,
     W_WASTE,
     placement,
@@ -99,7 +100,11 @@ class EnvWorker:
         tiles = my_tiles(self.obs)
         mine = strengths(self.obs["entities"], self.land_total).get(self.obs["me"], 0.0)
         tw = timeweight(self.obs["tick"])
-        reward = W_STR * mine * tw + W_DELTA * (mine - self.prev_strength)
+        delta = mine - self.prev_strength
+        # Loss-aversion shaping (v5): losing strength hurts more than gaining
+        # it pays, so holding ground is worth something and defense gets
+        # learned before late stages punish its absence.
+        reward = W_STR * mine * tw + (W_DELTA_GAIN if delta >= 0 else W_DELTA_LOSS) * delta
         reward -= W_WASTE * wasted
         self.ep_wasted += wasted
         self.prev_strength = mine

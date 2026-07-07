@@ -40,12 +40,20 @@ from dataclasses import dataclass
 import numpy as np
 
 W_STR = 0.02
-W_DELTA = 5.0
+# v5: asymmetric strength delta (loss-aversion shaping). v4 games showed
+# hyper-expansion followed by collapse; symmetric W_DELTA priced a lost
+# tile the same as a gained one, so defense was never worth learning.
+W_DELTA_GAIN = 5.0
+W_DELTA_LOSS = 6.5
 W_PLACE = 15.0
 W_WIN = 30.0
 W_DEATH = 1.0
 W_WASTE = 0.01  # per silently-discarded intent; makes noop dominate them
-PLACE_POW = 0.7
+# v5: 0.7 -> 1.5. ppo_v4 converged to a "safe second" attractor (score 0.82,
+# win rate 0, entropy collapsed): at 0.7 the 1st-vs-2nd terminal gap was
+# only 5.8 (15.0 vs 9.2) before the win bonus. At 1.5 it's 9.7 (15.0 vs
+# 5.3), and 3rd drops to 2.9 - placement alone now pushes for the top.
+PLACE_POW = 1.5
 
 # Strength blend: land still matters most (the win condition is territorial)
 # but military and economy make island/eco strategies score honestly.
