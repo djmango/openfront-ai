@@ -318,3 +318,16 @@ index 82e55f6e0..9b8927a9b 100644
  
    if (domainname === "localhost") {
 
+diff --git a/vite.config.ts b/vite.config.ts
+index 393dc2ca7..dcdb9ab79 100644
+--- a/vite.config.ts
++++ b/vite.config.ts
+@@ -265,6 +265,7 @@ export default defineConfig(({ mode }) => {
+     server: {
+       port: 9000,
+       host: process.env.VITE_HOST === "lan",
++      allowedHosts: ["openfrontai.skg.gg", "ofai.skg.gg"],
+       // Automatically open the browser when the server starts
+       open: process.env.SKIP_BROWSER_OPEN !== "true",
+       proxy: {
+
