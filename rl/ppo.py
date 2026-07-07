@@ -14,6 +14,8 @@ Usage:
 import argparse
 import contextlib
 import os
+import queue
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -243,6 +245,23 @@ def main() -> None:
             out[k] = d.float() if d.dtype == torch.float16 else d
         return out
 
+    # ---- v4.1 async pipeline ----
+    # A collector thread builds rollout k+1 (env stepping + GPU encode/act
+    # on a snapshot policy) while the main thread runs the PPO update on
+    # rollout k. One-rollout staleness: old_logp is recorded from the acting
+    # snapshot, so the clipped ratio still bounds movement from the policy
+    # that actually produced the data.
+    act_policy = Policy().to(device)
+    act_policy.load_state_dict(base_policy.state_dict())
+    act_policy.eval()
+    act_lock = threading.Lock()  # act forward vs. weight refresh
+    win_lock = threading.Lock()  # advancement deques (collector vs. logging)
+    shared = {
+        "stage": stage,
+        "global_step": global_step,
+        "episodes_done": episodes_done,
+    }
+
     # Two env groups pipelined: while one group's Node processes step the
     # game, the GPU encodes + acts for the other group.
     half = max(1, N // 2)
@@ -251,15 +270,11 @@ def main() -> None:
     def act_group(idxs: list[int]) -> tuple:
         obs_list = encode_grids(ae, vec.obs_group(idxs), device, fp16=True)
         ot = to_device(collate(obs_list, OBS_KEYS), f"act{idxs[0]}")
-        with amp():
-            choices, logp, value = policy.act(ot)
+        with act_lock, torch.no_grad(), amp():
+            choices, logp, value = act_policy.act(ot)
         return obs_list, choices, logp, value
 
-    # Update-phase minibatches are collated + staged on a worker thread so
-    # the (numpy, GIL-releasing) data work overlaps GPU forward/backward.
-    mb_pool = ThreadPoolExecutor(max_workers=1)
-
-    for update in range(start_update + 1, args.updates + 1):
+    def collect_rollout() -> dict:
         t_roll0 = time.time()
         obs_buf: list[list] = [[None] * N for _ in range(T)]
         choice_buf: list[list] = [[None] * N for _ in range(T)]
@@ -270,8 +285,8 @@ def main() -> None:
         action_counts = np.zeros(len(ACTIONS))
 
         def record(t: int, idxs: list[int], pack: tuple, results: list) -> None:
-            nonlocal episodes_done, stage
             obs_list, choices, logp, value = pack
+            gs = shared["global_step"]
             for j, i in enumerate(idxs):
                 obs_buf[t][i] = obs_list[j]
                 choice_buf[t][i] = choices[j]
@@ -283,36 +298,39 @@ def main() -> None:
                 done_buf[t, i] = float(d)
                 if info is None:
                     continue
-                episodes_done += 1
-                writer.add_scalar("episode/reward", info["reward"], global_step)
-                writer.add_scalar("episode/length", info["length"], global_step)
-                writer.add_scalar("episode/final_tiles", info["final_tiles"], global_step)
-                writer.add_scalar("episode/final_tick", info["final_tick"], global_step)
-                writer.add_scalar("episode/place", info["place"], global_step)
-                writer.add_scalar("episode/score", info["score"], global_step)
-                writer.add_scalar("episode/won", float(info["won"]), global_step)
-                writer.add_scalar("curriculum/episode_stage", info["stage"], global_step)
+                shared["episodes_done"] += 1
+                writer.add_scalar("episode/reward", info["reward"], gs)
+                writer.add_scalar("episode/length", info["length"], gs)
+                writer.add_scalar("episode/final_tiles", info["final_tiles"], gs)
+                writer.add_scalar("episode/final_tick", info["final_tick"], gs)
+                writer.add_scalar("episode/place", info["place"], gs)
+                writer.add_scalar("episode/score", info["score"], gs)
+                writer.add_scalar("episode/won", float(info["won"]), gs)
+                writer.add_scalar("curriculum/episode_stage", info["stage"], gs)
                 writer.add_scalar(
-                    "curriculum/rehearsal", float(info["rehearsal"]), global_step
+                    "curriculum/rehearsal", float(info["rehearsal"]), gs
                 )
                 # Only current-stage, non-rehearsal episodes count toward
                 # advancement; the gate is win rate, not placement.
-                if info["stage"] == stage and not info["rehearsal"]:
-                    recent_scores.append(info["score"])
-                    recent_wins.append(float(info["won"]))
-                if (
-                    len(recent_wins) == WINDOW
-                    and np.mean(recent_wins) > WIN_AT
-                    and stage < len(STAGES) - 1
-                ):
-                    stage += 1
-                    vec.set_stage(stage)
-                    recent_scores.clear()
-                    recent_wins.clear()
-                    lr_now = set_lr(stage)
-                    st = STAGES[stage]
+                with win_lock:
+                    if info["stage"] == shared["stage"] and not info["rehearsal"]:
+                        recent_scores.append(info["score"])
+                        recent_wins.append(float(info["won"]))
+                    advance = (
+                        len(recent_wins) == WINDOW
+                        and np.mean(recent_wins) > WIN_AT
+                        and shared["stage"] < len(STAGES) - 1
+                    )
+                    if advance:
+                        shared["stage"] += 1
+                        recent_scores.clear()
+                        recent_wins.clear()
+                if advance:
+                    vec.set_stage(shared["stage"])
+                    lr_now = set_lr(shared["stage"])
+                    st = STAGES[shared["stage"]]
                     print(
-                        f"=== curriculum advance -> stage {stage}: "
+                        f"=== curriculum advance -> stage {shared['stage']}: "
                         f"maps={','.join(st.maps)} nations={st.nations} "
                         f"bots={st.bots} {st.difficulty}  lr -> {lr_now:.2e}",
                         flush=True,
@@ -331,18 +349,17 @@ def main() -> None:
                 vec.send_group(groups[0], pack0[1])
             if pack1 is not None:
                 record(t, groups[1], pack1, vec.recv_group(groups[1]))
-            global_step += N
+            shared["global_step"] += N
 
-        roll_s = time.time() - t_roll0
-
-        # Bootstrap values and GAE per env.
+        # Bootstrap values and GAE per env (values from the acting snapshot,
+        # consistent with value_buf).
         obs_last = encode_grids(ae, vec.obs(), device)
-        with torch.no_grad(), amp():
+        with act_lock, torch.no_grad(), amp():
             ot = {
-                k: torch.from_numpy(v).to(device)
+                k: (torch.from_numpy(v).to(device))
                 for k, v in collate(obs_last, OBS_KEYS).items()
             }
-            last_value = policy.forward(ot)["value"].float().cpu().numpy()
+            last_value = act_policy.forward(ot)["value"].float().cpu().numpy()
         adv = np.zeros((T, N), dtype=np.float32)
         last_gae = np.zeros(N, dtype=np.float32)
         for t in reversed(range(T)):
@@ -353,20 +370,59 @@ def main() -> None:
             adv[t] = last_gae
         returns = adv + value_buf
 
-        flat = adv.reshape(-1)
-        adv_t = torch.from_numpy((flat - flat.mean()) / (flat.std() + 1e-8)).to(device)
-        ret_t = torch.from_numpy(returns.reshape(-1)).to(device)
-        old_logp = torch.from_numpy(logp_buf.reshape(-1)).to(device)
-
-        # Rollout buffer stays on CPU at native grid sizes; each minibatch
-        # is collated (padded to its own max grid) and moved to GPU alone.
-        all_obs = [o for row in obs_buf for o in row]
         all_choice = [c for row in choice_buf for c in row]
-        choice_t = {
-            "action": torch.tensor([c["action"] for c in all_choice])
-        }
+        choice_t = {"action": torch.tensor([c["action"] for c in all_choice])}
         for k in SUB_KEYS:
             choice_t[k] = torch.tensor([c.get(k, -1) for c in all_choice])
+        return {
+            "all_obs": [o for row in obs_buf for o in row],
+            "choice_t": choice_t,
+            "logp": logp_buf.reshape(-1),
+            "adv": adv.reshape(-1),
+            "returns": returns.reshape(-1),
+            "action_counts": action_counts,
+            "roll_s": time.time() - t_roll0,
+        }
+
+    rollout_q: queue.Queue = queue.Queue(maxsize=1)
+    stop = threading.Event()
+
+    def collector() -> None:
+        try:
+            while not stop.is_set():
+                data = collect_rollout()
+                while not stop.is_set():
+                    try:
+                        rollout_q.put(data, timeout=1.0)
+                        break
+                    except queue.Full:
+                        continue
+        except BaseException as e:  # propagate crashes instead of hanging main
+            if stop.is_set():  # teardown race (vec closed mid-rollout)
+                return
+            rollout_q.put(e)
+            raise
+
+    threading.Thread(target=collector, daemon=True, name="collector").start()
+
+    # Update-phase minibatches are collated + staged on a worker thread so
+    # the (numpy, GIL-releasing) data work overlaps GPU forward/backward.
+    mb_pool = ThreadPoolExecutor(max_workers=1)
+
+    for update in range(start_update + 1, args.updates + 1):
+        t_wait0 = time.time()
+        data = rollout_q.get()
+        if isinstance(data, BaseException):
+            raise data
+        wait_s = time.time() - t_wait0
+        all_obs = data["all_obs"]
+        choice_t = data["choice_t"]
+        action_counts = data["action_counts"]
+        roll_s = data["roll_s"]
+        a = data["adv"]
+        adv_t = torch.from_numpy((a - a.mean()) / (a.std() + 1e-8)).to(device)
+        ret_t = torch.from_numpy(data["returns"]).to(device)
+        old_logp = torch.from_numpy(data["logp"]).to(device)
 
         # Entropy anneal: linear from ent-coef to ent-coef-final so late
         # training commits instead of exploring forever.
@@ -419,11 +475,22 @@ def main() -> None:
                 ent_sum += float(ent.mean().item())
                 n_mb += 1
 
+        # Publish the updated weights to the acting snapshot.
+        with act_lock, torch.no_grad():
+            act_policy.load_state_dict(base_policy.state_dict())
+
         upd_s = time.time() - t_upd0
+        global_step = shared["global_step"]
+        stage = shared["stage"]
+        episodes_done = shared["episodes_done"]
         tps = (global_step - t0_step) * STAGES[stage].decision_ticks / (time.time() - t0)
+        with win_lock:
+            roll = float(np.mean(recent_scores)) if recent_scores else 0.0
+            roll_win = float(np.mean(recent_wins)) if recent_wins else 0.0
         writer.add_scalar("perf/rollout_s", roll_s, global_step)
         writer.add_scalar("perf/update_s", upd_s, global_step)
         writer.add_scalar("perf/update_stall_s", stall_s, global_step)
+        writer.add_scalar("perf/rollout_wait_s", wait_s, global_step)
         writer.add_scalar("loss/policy", pl_sum / n_mb, global_step)
         writer.add_scalar("loss/value", vl_sum / n_mb, global_step)
         writer.add_scalar("loss/entropy", ent_sum / n_mb, global_step)
@@ -432,26 +499,16 @@ def main() -> None:
         writer.add_scalar("perf/game_ticks_per_s", tps, global_step)
         writer.add_scalar("perf/episodes_done", episodes_done, global_step)
         writer.add_scalar("curriculum/stage", stage, global_step)
-        writer.add_scalar(
-            "curriculum/rolling_score",
-            float(np.mean(recent_scores)) if recent_scores else 0.0,
-            global_step,
-        )
-        writer.add_scalar(
-            "curriculum/rolling_win",
-            float(np.mean(recent_wins)) if recent_wins else 0.0,
-            global_step,
-        )
+        writer.add_scalar("curriculum/rolling_score", roll, global_step)
+        writer.add_scalar("curriculum/rolling_win", roll_win, global_step)
         for i, a in enumerate(ACTIONS):
             writer.add_scalar(f"actions/{a}", action_counts[i] / (T * N), global_step)
-        roll = float(np.mean(recent_scores)) if recent_scores else 0.0
-        roll_win = float(np.mean(recent_wins)) if recent_wins else 0.0
         print(
             f"update {update:4d}  step {global_step:7d}  eps {episodes_done:4d}  "
             f"stage {stage}  roll-win {roll_win:.2f}  roll-score {roll:.2f}  "
             f"pg {pl_sum / n_mb:+.4f}  vf {vl_sum / n_mb:.4f}  ent {ent_sum / n_mb:.3f}  "
             f"{tps:.0f} game-ticks/s  "
-            f"[roll {roll_s:.1f}s upd {upd_s:.1f}s stall {stall_s:.1f}s]",
+            f"[roll {roll_s:.1f}s upd {upd_s:.1f}s wait {wait_s:.1f}s stall {stall_s:.1f}s]",
             flush=True,
         )
 
@@ -477,15 +534,18 @@ def main() -> None:
 
         if update % 10 == 0 or update == args.updates:
             tmp = out_dir / "policy.pt.tmp"
+            with win_lock:
+                wins_snap = list(recent_wins)
+                scores_snap = list(recent_scores)
             torch.save(
                 {
                     "model_state_dict": base_policy.state_dict(),
                     "optimizer_state_dict": opt.state_dict(),
-                    "stage": stage,
+                    "stage": shared["stage"],
                     "update": update,
-                    "global_step": global_step,
-                    "recent_wins": list(recent_wins),
-                    "recent_scores": list(recent_scores),
+                    "global_step": shared["global_step"],
+                    "recent_wins": wins_snap,
+                    "recent_scores": scores_snap,
                     "args": vars(args),
                 },
                 tmp,
@@ -495,7 +555,6 @@ def main() -> None:
             # after total disk loss. Background thread; failures are logged
             # and ignored.
             if os.environ.get("HF_TOKEN") and update % 100 == 0:
-                import threading
 
                 def _hf_push(path=out_dir / "policy.pt", name=args.name):
                     try:
@@ -513,6 +572,9 @@ def main() -> None:
 
                 threading.Thread(target=_hf_push, daemon=True).start()
 
+    stop.set()
+    with contextlib.suppress(queue.Empty):
+        rollout_q.get_nowait()  # unblock the collector if it's mid-put
     vec.close()
     writer.close()
 
