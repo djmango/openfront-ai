@@ -29,7 +29,8 @@ RUN ln -sf /usr/local/bin/python3.12 /usr/local/bin/python3
 COPY --from=openfront-deps /build/openfront/node_modules /app/openfront/node_modules
 
 COPY . /app
-RUN git -C openfront apply ../patches/client-replay-tooling.patch
+# openfront/.git is dockerignored; apply the replay patch from the repo root.
+RUN git apply --directory=openfront patches/client-replay-tooling.patch
 
 ENV PATH="/app/.venv/bin:/app/openfront/node_modules/.bin:${PATH}"
 ENV PYTHONPATH=/app

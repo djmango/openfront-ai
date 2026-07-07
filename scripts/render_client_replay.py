@@ -218,12 +218,17 @@ def render_record(
                 print("replay running...")
 
                 t0 = time.time()
+                gameplay_duration: float | None = None
                 while time.time() - t0 < timeout:
                     if page.locator("win-modal div.fixed").count() > 0:
-                        print(f"game over after {time.time() - t0:.0f}s")
-                        page.wait_for_timeout(2500)
+                        # Stop before the "You died" modal; don't linger on end cards.
+                        gameplay_duration = max(0.0, time.time() - gameplay_t0 - 1.0)
+                        print(
+                            f"game over after {time.time() - t0:.0f}s "
+                            f"(trimming to {gameplay_duration:.1f}s gameplay)"
+                        )
                         break
-                    page.wait_for_timeout(2000)
+                    page.wait_for_timeout(500)
                 else:
                     print("timeout reached; saving what we have")
 
@@ -238,7 +243,8 @@ def render_record(
                 trim_start = (gameplay_t0 - page_open_t0) if trim_gameplay else 0.0
                 if trim_gameplay:
                     print(f"trimming {trim_start:.1f}s of load-in")
-                trim_video(raw, out, trim_start, max_duration)
+                trim_end = gameplay_duration if gameplay_duration is not None else max_duration
+                trim_video(raw, out, trim_start, trim_end)
 
             print(f"wrote {out}")
         finally:
