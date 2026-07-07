@@ -245,7 +245,7 @@ LANDING_HTML = """<!doctype html>
 def preview_markup(replay: dict) -> str:
     clips = hero_clip_urls(replay)
     if not clips:
-        return '<div class="placeholder">Generating showcase clips...</div>'
+        return '<div class="placeholder">Preview loading...</div>'
     if len(clips) == 1:
         return (
             f'<video autoplay muted loop playsinline preload="auto" '
