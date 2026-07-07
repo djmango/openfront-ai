@@ -42,6 +42,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=py-deps /build/.venv /app/.venv
 
 COPY rl ./rl
+COPY ae ./ae
 COPY bridge ./bridge
 COPY scripts ./scripts
 COPY docker ./docker
