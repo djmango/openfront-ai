@@ -1,7 +1,7 @@
-"""Homelab showcase hub: view-only replay by default, on-demand 1v1 play.
+"""Homelab showcase hub: semi-live spectate by default, on-demand 1v1 play.
 
-  GET /         -> landing (watch link + play button)
-  GET /watch    -> redirect to latest checkpoint replay
+  GET /         -> landing (live iframe or last clip; watch link)
+  GET /watch    -> spectate the agent's current live game, else last archive replay
   GET /replay   -> alias for /watch
   GET /play     -> create 1v1+bots lobby, launch agent, join as human
   GET /play/debug/<id> -> MODEL overlay feed for the active live game
@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -39,6 +40,8 @@ PLAY_BOTS = int(os.environ.get("PLAY_BOTS", "10"))
 PLAY_NATIONS = int(os.environ.get("PLAY_NATIONS", "1"))
 PLAY_START_DELAY = int(os.environ.get("PLAY_START_DELAY", "30"))
 DEBUG_PORT = int(os.environ.get("PLAY_DEBUG_PORT", "8989"))
+LIVE_DEBUG_PORT = int(os.environ.get("LIVE_DEBUG_PORT", "8990"))
+LIVE_SHOWCASE = os.environ.get("LIVE_SHOWCASE", "1") != "0"
 WORKER_BASE_PORT = int(os.environ.get("WORKER_BASE_PORT", "3001"))
 
 _active_proc: subprocess.Popen | None = None
@@ -134,7 +137,13 @@ def start_play_lobby(game_id: str, worker_index: int) -> dict:
     return info
 
 
-def launch_agent(game_id: str, policy: Path, ae: Path) -> subprocess.Popen:
+def launch_agent(
+    game_id: str,
+    policy: Path,
+    ae: Path,
+    *,
+    debug_port: int = DEBUG_PORT,
+) -> subprocess.Popen:
     cmd = [
         sys.executable,
         "-m",
@@ -148,7 +157,7 @@ def launch_agent(game_id: str, policy: Path, ae: Path) -> subprocess.Popen:
         "--host",
         CLIENT_HOST,
         "--debug-port",
-        str(DEBUG_PORT),
+        str(debug_port),
         "--debug-bind",
         "0.0.0.0",
     ]
@@ -156,12 +165,51 @@ def launch_agent(game_id: str, policy: Path, ae: Path) -> subprocess.Popen:
 
 
 def proxy_debug(game_id: str) -> bytes | None:
-    url = f"http://127.0.0.1:{DEBUG_PORT}/debug/{game_id}"
-    try:
-        with urllib.request.urlopen(url, timeout=2) as resp:
-            return resp.read()
-    except Exception:
-        return None
+    hub = load_hub_state()
+    ports: list[int] = []
+    if hub.get("live_game_id") == game_id:
+        ports.append(LIVE_DEBUG_PORT)
+    ports.append(DEBUG_PORT)
+    if LIVE_DEBUG_PORT not in ports:
+        ports.append(LIVE_DEBUG_PORT)
+    for port in ports:
+        url = f"http://127.0.0.1:{port}/debug/{game_id}"
+        try:
+            with urllib.request.urlopen(url, timeout=2) as resp:
+                return resp.read()
+        except Exception:
+            continue
+    return None
+
+
+def live_game_active(hub: dict) -> bool:
+    gid = hub.get("live_game_id")
+    if not gid:
+        return False
+    if hub.get("live_status") not in ("lobby", "countdown", "playing"):
+        return False
+    pid = hub.get("live_pid")
+    if pid is not None:
+        try:
+            os.kill(int(pid), 0)
+        except OSError:
+            return False
+    return True
+
+
+def watch_target() -> tuple[str, str]:
+    """Return (redirect path, mode) where mode is live|replay|none."""
+    hub = load_hub_state()
+    if live_game_active(hub):
+        return (
+            play_redirect(hub["live_game_id"], hub.get("live_worker_path")),
+            "live",
+        )
+    replay = load_replay_state()
+    gid = replay.get("game_id")
+    if gid:
+        return f"/game/{gid}", "replay"
+    return "", "none"
 
 
 LANDING_HTML = """<!doctype html>
@@ -213,6 +261,13 @@ LANDING_HTML = """<!doctype html>
       border: 0;
       background: #000;
     }
+    .preview iframe {
+      display: block;
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      border: 0;
+      background: #000;
+    }
     .placeholder {
       aspect-ratio: 16 / 9;
       display: grid;
@@ -259,7 +314,7 @@ LANDING_HTML = """<!doctype html>
     </figure>
 
     <div class="actions">
-      <a href="/watch">Watch full replay</a>
+      <a href="/watch">%%WATCH_LABEL%%</a>
       <a href="/play">Play vs Agent</a>
     </div>
 
@@ -279,6 +334,13 @@ LANDING_HTML = """<!doctype html>
 
 
 def preview_markup(replay: dict) -> str:
+    hub = load_hub_state()
+    if live_game_active(hub):
+        url = play_redirect(hub["live_game_id"], hub.get("live_worker_path"))
+        return (
+            f'<iframe src="{url}" title="Live agent game" '
+            f'allow="autoplay; fullscreen" loading="lazy"></iframe>'
+        )
     clips = hero_clip_urls(replay)
     if not clips:
         return '<div class="placeholder">Preview loading...</div>'
@@ -302,9 +364,15 @@ def preview_markup(replay: dict) -> str:
 
 
 def render_landing(replay: dict) -> str:
+    _, mode = watch_target()
+    watch_label = {
+        "live": "Watch live",
+        "replay": "Watch last game",
+    }.get(mode, "Watch")
     return (
         LANDING_HTML.replace("%%RUN_NAME%%", str(replay.get("run_name", RUN_NAME)))
         .replace("%%PREVIEW%%", preview_markup(replay))
+        .replace("%%WATCH_LABEL%%", watch_label)
     )
 
 
@@ -329,17 +397,20 @@ class HubHandler(BaseHTTPRequestHandler):
             return
 
         if path in ("/watch", "/replay"):
-            gid = load_replay_state().get("game_id")
-            if not gid:
-                self._send(503, b'{"status":"warming","message":"replay generating"}')
+            target, mode = watch_target()
+            if not target:
+                self._send(503, b'{"status":"warming","message":"no game yet"}')
                 return
             self.send_response(302)
-            self.send_header("Location", f"/game/{gid}")
+            self.send_header("Location", target)
+            self.send_header("X-Showcase-Watch", mode)
             self.end_headers()
             return
 
         if path == "/status":
+            target, mode = watch_target()
             payload = {
+                "watch": {"url": target or None, "mode": mode},
                 "replay": load_replay_state(),
                 "hub": load_hub_state(),
                 "play_config": play_config(),
@@ -413,6 +484,72 @@ class HubHandler(BaseHTTPRequestHandler):
         pass
 
 
+def live_showcase_loop(policy: Path, ae: Path) -> None:
+    """Run continuous bot lobbies so /watch can spectate the current game."""
+    backoff = 15
+    while True:
+        try:
+            with _lock:
+                if _active_proc and _active_proc.poll() is None:
+                    time.sleep(5)
+                    continue
+
+            info = create_play_lobby()
+            game_id = info["gameID"]
+            worker_index = int(info["workerIndex"])
+            worker_path = info.get("workerPath") or f"w{worker_index}"
+            proc = launch_agent(
+                game_id, policy, ae, debug_port=LIVE_DEBUG_PORT,
+            )
+
+            hub_payload: dict = {
+                "live_game_id": game_id,
+                "live_worker_path": worker_path,
+                "live_status": "lobby",
+                "live_pid": proc.pid,
+                "run_name": RUN_NAME,
+                "started_at": utc_now(),
+                "worker_index": worker_index,
+                "worker_path": worker_path,
+            }
+            write_json(HUB_STATE, hub_payload)
+
+            try:
+                started = start_play_lobby(game_id, worker_index)
+                hub_payload["live_status"] = "countdown"
+                hub_payload["starts_at"] = started.get("startsAt")
+                write_json(HUB_STATE, hub_payload)
+            except Exception as exc:
+                log(f"live lobby start failed: {exc}")
+                proc.terminate()
+                raise
+
+            hub_payload["live_status"] = "playing"
+            write_json(HUB_STATE, hub_payload)
+            log(f"live showcase playing {game_id} -> {play_redirect(game_id, worker_path)}")
+
+            rc = proc.wait()
+            hub_payload["live_status"] = "ended"
+            hub_payload["ended_at"] = utc_now()
+            hub_payload["exit_code"] = rc
+            write_json(HUB_STATE, hub_payload)
+            log(f"live game {game_id} ended (rc={rc}); starting next")
+            backoff = 15
+        except Exception as exc:
+            log(f"live showcase error: {exc}")
+            write_json(
+                HUB_STATE,
+                {
+                    **load_hub_state(),
+                    "live_status": "error",
+                    "live_error": str(exc),
+                    "failed_at": utc_now(),
+                },
+            )
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 120)
+
+
 def main() -> None:
     port = int(os.environ.get("HUB_PORT", "8988"))
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -422,6 +559,15 @@ def main() -> None:
     policy = ensure_policy(RUN_NAME)
     HubHandler.policy_path = policy
     HubHandler.ae_path = ae
+
+    if LIVE_SHOWCASE:
+        threading.Thread(
+            target=live_showcase_loop,
+            args=(policy, ae),
+            daemon=True,
+            name="live-showcase",
+        ).start()
+        log("live showcase loop enabled")
 
     srv = ThreadingHTTPServer(("0.0.0.0", port), HubHandler)
     log(f"hub on :{port} (watch=/watch, play=/play)")
