@@ -224,6 +224,14 @@ def main() -> None:
     ap.add_argument("--resume", default=None)
     args = ap.parse_args()
 
+    # 3 memmaps per cached game x ~300 games, per process (workers inherit
+    # the parent's table on fork before opening their own): the default 1024
+    # soft ulimit is nowhere near enough.
+    import resource
+
+    _soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (_hard, _hard))
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.set_float32_matmul_precision("high")
 
