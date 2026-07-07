@@ -424,6 +424,30 @@ Two structural moves land the endgame:</p>
     (cu130 cp314t wheels exist), at which point thread-based feeding replaces the
     DataLoader-process workaround and the PPO collector/updater threads stop time-slicing.</li>
 </ul>
+<p><b>Round two (<code>8aa7fbd</code>): the whole BC sampler is Rust now.</b> The DataLoader
+process workers turned out to be a regression in production - 16 workers sat idle while the
+main process choked unpickling ~50MB raw batches off the IPC queues (stall 300s per 50-step
+window on bc2). The fix was to delete the abstraction, not tune it:</p>
+<ul>
+  <li><b>ofrs::Sampler</b> - <code>sample_batch(n)</code> does everything rl/bc_data.py did
+    per sample (zstd frame/entity/step decode, serde JSON, the full obs-v4 featurization,
+    label&rarr;head targets, legality forcing) in Rust, rayon across step draws, GIL held only
+    to hand back numpy dicts. Laptop: 639 &rarr; 2631 samples/s vs the Python path; parity
+    proven <i>exactly</i> (every array, 11.8k samples) by <code>scripts/test_ofrs_parity.py</code>.
+    <code>sample_windows(batch, k)</code> draws a whole seq micro-batch in parallel for the
+    temporal run. The trainer feeds from a plain thread pool again - no processes, no pickle.</li>
+  <li><b>vec.py IPC off pickle</b> - env workers ship a binary frame (u32 header-len ++ json ++
+    raw array buffers); the parent parses with <code>ofrs::unpack_arrays</code>. Numpy fallback
+    speaks the same protocol.</li>
+  <li><b>collate fully native</b> - the ~8 small per-key <code>np.stack</code> calls now go
+    through <code>ofrs::stack_f32/f16</code> (parallel copy, GIL released), so the PPO prefetch
+    thread's collate no longer serializes against the collector.</li>
+  <li><b>Measured on the pods:</b> bc2 14.9 &rarr; ~105 ex/s sustained (GPU 36% &rarr; ~90%,
+    OOM-tuned to micro-batch 24 x accum 4); bc3 seq 4.5 &rarr; ~10.5 ex/s (window draws remain
+    rejection-sampling-bound; next lever is a smarter end-picker, not more Rust); rl4 restarted
+    clean on the new IPC with <code>expandable_segments</code> after an OOM at update 267
+    (fragmentation after 1135s uptime, not the new code path).</li>
+</ul>
 
 <h3 id="tooling">Visualization &amp; tooling</h3>
 <p>Determinism is the superpower: the bridge mirrors the client's <code>createGameRunner()</code> init
