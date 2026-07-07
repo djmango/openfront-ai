@@ -18,7 +18,7 @@ FROM node:22-bookworm
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git ca-certificates curl ffmpeg caddy \
+    git ca-certificates curl caddy ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=py-deps /build/.venv /app/.venv
@@ -37,10 +37,14 @@ ENV DATA_DIR=/data
 ENV RUN_NAME=ppo_v4
 ENV STAGE=4
 ENV SEED=showcase0
+ENV SHOWCASE_SEEDS=showcase0,showcase1,showcase2
+ENV CLIP_MAX_SEC=90
 ENV REFRESH_HOURS=6
 ENV AE_CKPT=runs/ae_v31_d8c32/ae_v3.pt
 
-RUN mkdir -p /data/records /data/policy \
+RUN mkdir -p /data/records /data/policy /data/clips \
+    && /app/.venv/bin/playwright install-deps chromium \
+    && /app/.venv/bin/playwright install chromium \
     && chmod +x /app/docker/entrypoint.sh
 
 EXPOSE 8086

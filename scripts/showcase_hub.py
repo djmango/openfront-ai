@@ -20,7 +20,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from rl.showcase_util import ensure_ae, ensure_policy, preview_webm_for_state, utc_now, write_json
+from rl.showcase_util import ensure_ae, ensure_policy, hero_clip_urls, utc_now, write_json
 
 REPO = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -138,172 +138,130 @@ LANDING_HTML = """<!doctype html>
   <title>OpenFront RL Agent</title>
   <style>
     * { box-sizing: border-box; margin: 0; }
-    @keyframes drift {
-      0% { transform: translate(0, 0) scale(1); }
-      50% { transform: translate(-2%, 1%) scale(1.03); }
-      100% { transform: translate(0, 0) scale(1); }
-    }
-    @keyframes glow {
-      0%, 100% { box-shadow: 0 0 24px rgba(90,220,90,.25), 0 0 60px rgba(70,110,190,.15); }
-      50% { box-shadow: 0 0 36px rgba(90,220,90,.45), 0 0 80px rgba(70,110,190,.28); }
-    }
-    @keyframes rise {
-      from { opacity: 0; transform: translateY(18px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-    @keyframes scan {
-      0% { transform: translateY(-100%); }
-      100% { transform: translateY(100%); }
-    }
-    @keyframes pulse {
-      0%, 100% { opacity: .35; }
-      50% { opacity: .7; }
-    }
     body {
-      min-height: 100vh; color: #d2d6e0;
-      font: 16px/1.5 system-ui, sans-serif;
-      background: #07080f;
-      overflow-x: hidden;
+      line-height: 1.45;
+      font-size: 18px;
+      padding: 3rem 1.25rem 4rem;
+      color: #000;
+      background: #fff;
+      text-align: center;
     }
-    .bg {
-      position: fixed; inset: 0; z-index: 0; pointer-events: none;
-      background:
-        radial-gradient(ellipse 80% 60% at 20% 20%, rgba(70,110,190,.18), transparent 55%),
-        radial-gradient(ellipse 70% 50% at 80% 70%, rgba(42,90,42,.2), transparent 50%),
-        #07080f;
-    }
-    .grid {
-      position: fixed; inset: -50%;
-      background-image:
-        linear-gradient(rgba(255,255,255,.04) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(255,255,255,.04) 1px, transparent 1px);
-      background-size: 48px 48px;
-      animation: drift 18s ease-in-out infinite;
-      mask-image: radial-gradient(ellipse 70% 60% at 50% 45%, #000 20%, transparent 75%);
-    }
-    .wrap {
-      position: relative; z-index: 1;
-      min-height: 100vh;
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 2rem;
-      align-items: center;
-      max-width: 1100px;
+    .page {
+      max-width: 920px;
       margin: 0 auto;
-      padding: 2rem 1.25rem 2.5rem;
-    }
-    @media (min-width: 900px) {
-      .wrap { grid-template-columns: 1fr 1.15fr; padding: 3rem 2rem; }
-    }
-    .copy { animation: rise .7s ease both; }
-    .eyebrow {
-      display: inline-block;
-      font-size: .72rem; letter-spacing: .14em; text-transform: uppercase;
-      color: #5adc5a; margin-bottom: .75rem;
-      border: 1px solid rgba(90,220,90,.35);
-      padding: .35rem .6rem; border-radius: 999px;
-      background: rgba(42,90,42,.15);
     }
     h1 {
-      font-size: clamp(1.8rem, 4vw, 2.6rem);
-      line-height: 1.1; color: #fff; margin-bottom: .75rem;
-      letter-spacing: -.02em;
+      font-size: clamp(2.4rem, 7vw, 4rem);
+      font-weight: 800;
+      letter-spacing: -.03em;
+      line-height: 1.05;
+      margin-bottom: 1rem;
     }
-    .lead { color: #8b92a3; margin-bottom: 1.5rem; max-width: 34rem; }
-    .btns { display: flex; flex-wrap: wrap; gap: .75rem; }
-    a.btn {
-      display: inline-block; padding: .85rem 1.25rem; border-radius: 10px;
-      text-decoration: none; font-weight: 600; transition: transform .15s ease, filter .15s ease;
+    .lead {
+      font-size: clamp(1.1rem, 2.5vw, 1.35rem);
+      font-weight: 500;
+      max-width: 36rem;
+      margin: 0 auto 2rem;
+      color: #111;
     }
-    a.btn:hover { transform: translateY(-2px); filter: brightness(1.08); }
-    .watch { background: linear-gradient(135deg, #466ebe, #5a84d6); color: #fff; }
-    .play {
-      background: rgba(42,90,42,.55); color: #5adc5a;
-      border: 1px solid rgba(90,220,90,.55);
+    .lead a { font-weight: 600; }
+    .preview {
+      margin: 0 auto 2rem;
+      max-width: 860px;
+      border: 2px solid #000;
+      background: #000;
     }
-    .meta { margin-top: 1.25rem; font-size: .8rem; color: #505868; }
-    .stage {
-      animation: rise .9s .15s ease both;
-      position: relative;
-    }
-    .frame {
-      position: relative; border-radius: 16px; overflow: hidden;
-      border: 1px solid rgba(255,255,255,.08);
-      background: #0c0e16;
-      animation: glow 4s ease-in-out infinite;
+    .preview video {
+      display: block;
+      width: 100%;
       aspect-ratio: 16 / 10;
-    }
-    .frame::after {
-      content: ""; position: absolute; inset: 0; pointer-events: none;
-      background: linear-gradient(180deg, transparent 70%, rgba(7,8,15,.55));
-    }
-    .scanline {
-      position: absolute; inset: 0; pointer-events: none; opacity: .08;
-      background: linear-gradient(180deg, transparent, rgba(90,220,90,.9), transparent);
-      height: 30%; animation: scan 5s linear infinite;
-    }
-    video {
-      width: 100%; height: 100%; object-fit: cover; display: block;
-      background: #0c0e16;
-    }
-    .badge {
-      position: absolute; top: 12px; left: 12px; z-index: 2;
-      font-size: .68rem; letter-spacing: .12em; text-transform: uppercase;
-      color: #9be89b; background: rgba(0,0,0,.55);
-      border: 1px solid rgba(90,220,90,.35);
-      padding: .3rem .5rem; border-radius: 6px;
-      animation: pulse 2.4s ease-in-out infinite;
+      object-fit: cover;
+      border: 0;
+      background: #000;
     }
     .placeholder {
-      width: 100%; height: 100%; display: grid; place-items: center;
-      color: #5f6675; font-size: .9rem;
-      background: linear-gradient(135deg, #10131f, #0c1018);
+      aspect-ratio: 16 / 10;
+      display: grid;
+      place-items: center;
+      color: #888;
+      font-size: 1rem;
+      background: #111;
     }
-    .placeholder span {
-      width: 12px; height: 12px; border-radius: 50%;
-      background: #5adc5a; display: inline-block; margin-right: .5rem;
-      animation: pulse 1.2s ease-in-out infinite;
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 1rem 1.5rem;
+      margin-bottom: 1.25rem;
     }
+    .actions a {
+      font-size: 1.15rem;
+      font-weight: 700;
+      text-decoration: underline;
+      text-underline-offset: 4px;
+    }
+    .meta {
+      font-size: .95rem;
+      color: #666;
+      margin-bottom: 1.5rem;
+    }
+    .links {
+      font-size: 1rem;
+      color: #666;
+    }
+    .links a { font-weight: 600; }
+    .sep { margin: 0 .5rem; }
   </style>
 </head>
 <body>
-  <div class="bg"></div>
-  <div class="grid"></div>
-  <div class="wrap">
-    <section class="copy">
-      <div class="eyebrow">Live RL showcase</div>
-      <h1>OpenFront Agent</h1>
-      <p class="lead">Watch the latest checkpoint play in real time with the model
-         overlay, or jump into a 1v1 on a bot-filled map.</p>
-      <div class="btns">
-        <a class="btn watch" href="/watch">Watch full replay</a>
-        <a class="btn play" href="/play">Play vs Agent</a>
-      </div>
-      <p class="meta">policy: %%RUN_NAME%%</p>
-    </section>
-    <section class="stage">
-      <div class="frame">
-        <div class="badge">Agent playing</div>
-        <div class="scanline"></div>
-        %%PREVIEW%%
-      </div>
-    </section>
-  </div>
+  <main class="page">
+    <h1>OpenFront Agent</h1>
+    <p class="lead">A reinforcement learning agent that plays
+      <a href="https://openfront.io">OpenFront.io</a>, trained on the real
+      game engine with live model overlay. Play it 1v1.</p>
+
+    <figure class="preview">
+      %%PREVIEW%%
+    </figure>
+
+    <div class="actions">
+      <a href="/watch">Watch full replay</a>
+      <a href="/play">Play vs Agent</a>
+    </div>
+
+    <p class="meta">policy: %%RUN_NAME%%</p>
+
+    <p class="links">
+      <a href="https://skg.gg/pages/openfront-devlog/" target="_blank" rel="noopener">Devlog</a>
+      <span class="sep">·</span>
+      <a href="https://github.com/djmango/openfront-ai" target="_blank" rel="noopener">GitHub</a>
+    </p>
+  </main>
 </body>
 </html>
 """
 
 
 def preview_markup(replay: dict) -> str:
-    if preview_webm_for_state(replay):
+    clips = hero_clip_urls(replay)
+    if not clips:
+        return '<div class="placeholder">Generating showcase clips...</div>'
+    if len(clips) == 1:
         return (
-            '<video autoplay muted loop playsinline preload="auto" '
-            'src="/archive/preview.webm"></video>'
+            f'<video autoplay muted loop playsinline preload="auto" '
+            f'src="{clips[0]}"></video>'
         )
+    payload = json.dumps(clips)
     return (
-        '<div class="placeholder">'
-        '<div><span></span>Generating showcase preview…</div>'
-        "</div>"
+        f'<video id="hero-vid" autoplay muted playsinline preload="auto"></video>'
+        f"<script>(function(){{"
+        f"const clips={payload};"
+        f"const v=document.getElementById('hero-vid');"
+        f"let i=0;"
+        f"function play(n){{v.src=clips[n];v.play().catch(function(){{}});}}"
+        f"v.addEventListener('ended',function(){{i=(i+1)%clips.length;play(i);}});"
+        f"play(0);"
+        f"}})();</script>"
     )
 
 

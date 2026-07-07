@@ -42,24 +42,10 @@ def build_index(records_dir: Path) -> dict[str, Path]:
     return idx
 
 
-def preview_webm_path(state_path: Path | None, records_dir: Path) -> Path | None:
-    state = load_state(state_path)
-    record = state.get("record")
-    if record:
-        path = Path(record).with_suffix(".webm")
-        if path.is_file():
-            return path
-    preview = state.get("preview_webm")
-    if preview:
-        path = Path(preview)
-        if path.is_file():
-            return path
-    return None
-
-
 class Handler(BaseHTTPRequestHandler):
     index: dict[str, Path] = {}
     records_dir: Path = Path("records-rl")
+    clips_dir: Path | None = None
     state_path: Path | None = None
 
     def _send(self, code: int, body: bytes, ctype: str = "application/json") -> None:
@@ -108,12 +94,14 @@ class Handler(BaseHTTPRequestHandler):
             }
             self._send(200, json.dumps(payload).encode())
             return
-        if self.path == "/preview.webm":
-            preview = preview_webm_path(self.state_path, self.records_dir)
-            if preview is None:
-                self._send(404, b'{"error":"preview not ready"}')
+
+        m = re.fullmatch(r"/clips/([A-Za-z0-9_.-]+\.webm)", self.path)
+        if m and self.clips_dir is not None:
+            clip = self.clips_dir / m.group(1)
+            if clip.is_file():
+                self._send_file(clip, "video/webm")
             else:
-                self._send_file(preview, "video/webm")
+                self._send(404, b'{"error":"clip not found"}')
             return
 
         self._refresh_index()
@@ -153,11 +141,13 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=8987)
     ap.add_argument("--bind", default="127.0.0.1")
     ap.add_argument("--state", default=None, help="state.json from eval_daemon (for / and /status)")
+    ap.add_argument("--clips", default=None, help="pre-rendered landing clips directory")
     args = ap.parse_args()
 
     records_dir = Path(args.records)
     Handler.records_dir = records_dir
     Handler.state_path = Path(args.state) if args.state else None
+    Handler.clips_dir = Path(args.clips) if args.clips else None
     Handler.index = build_index(records_dir)
     print(f"serving {len(Handler.index)} record(s) on http://{args.bind}:{args.port}")
     for gid, f in Handler.index.items():
