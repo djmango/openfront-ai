@@ -86,14 +86,17 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
     0.07-0.17, entropy stuck near 8) while from-scratch v3 sailed past to stage 4. Final
     checkpoint (update 502, 771k steps) on HF as <code>ppo_v2c/policy.pt</code>. See
     <a href="#lessons">lessons</a>: warm-starting from a stale reward/curriculum hurt.</td></tr>
-  <tr><td><code>bc_v0_pilot</code></td><td>active</td>
-    <td>Outcome-conditioned BC on partial human sidecars (~50 games). Feedforward policy,
-    placement conditioning. The cache fix took it from 2.4 to ~40 ex/s; the earlier slowness
-    turned out to be a failed git pull, the pod was running pre-fix code.</td></tr>
-  <tr><td><code>bc_seq_v1</code></td><td>active</td>
-    <td>Temporal BC (--seq 8). Spent hours OOM crash-looping at batch 24 (a seq-8 window
-    multiplies activation memory 8x; one 19.9 GiB allocation on a 24 GiB card); training at
-    batch 8. Thin data so far: 11 games with sidecars on that pod, more replaying.</td></tr>
+  <tr><td><code>bc_v0_pilot</code></td><td>paused Jul 6 eve</td>
+    <td>Outcome-conditioned BC on partial human sidecars (~50 games). Stopped at step 3,850
+    (~185k samples) to fix the data pipeline: at ~34 ex/s the run was CPU-bound and the loss
+    curve was flat-noisy around 8-11 with acted-step accuracy ~0.6, too little throughput to
+    call it. Checkpoint on HF as <code>bc_v0_pilot/bc.pt</code>; resumes after the featurize
+    cache lands.</td></tr>
+  <tr><td><code>bc_seq_v1</code></td><td>paused Jul 6 eve</td>
+    <td>Temporal BC (--seq 8). Lost hours OOM crash-looping at batch 24 (a seq-8 window
+    multiplies activation memory 8x; one 19.9 GiB allocation on a 24 GiB card), then ~450
+    steps at batch 8 before the pipeline pause: too early to read. Only 11 games had sidecars
+    on that pod. No checkpoint yet (died before first save interval).</td></tr>
   <tr><td><code>ae_v31_d8c32</code></td><td><b>done, chosen for v4</b></td>
     <td>Compact v3.1: 32ch @ 1/8 latent. Uniform eval 88.2% human / 95.5% bot borders,
     one point behind d8 at half the latent footprint. On HF as <code>ae_v31_d8c32.pt</code>.</td></tr>

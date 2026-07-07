@@ -1,0 +1,22 @@
+{
+  "tile_acc": 0.9982,
+  "border_acc": 0.9554,
+  "City_precision": 1.0,
+  "City_recall": 1.0,
+  "City_true_cells": 5592,
+  "Port_precision": 0.9997,
+  "Port_recall": 1.0,
+  "Port_true_cells": 3480,
+  "Defense Post_precision": 0.9989,
+  "Defense Post_recall": 1.0,
+  "Defense Post_true_cells": 936,
+  "Missile Silo_precision": 0.9989,
+  "Missile Silo_recall": 1.0,
+  "Missile Silo_true_cells": 948,
+  "SAM Launcher_precision": 1.0,
+  "SAM Launcher_recall": 1.0,
+  "SAM Launcher_true_cells": 792,
+  "Factory_precision": 1.0,
+  "Factory_recall": 1.0,
+  "Factory_true_cells": 1028
+}
