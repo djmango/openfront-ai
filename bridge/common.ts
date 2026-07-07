@@ -3,7 +3,7 @@
  * multiplayer agent client): observation payload construction from a Game.
  */
 import * as zlib from "zlib";
-import { Game, UnitType } from "../openfront/src/core/game/Game";
+import { Game, Player, UnitType } from "../openfront/src/core/game/Game";
 
 export const STRUCTURES = [
   UnitType.City,
@@ -134,6 +134,29 @@ function entities(game: Game): object {
   return { players, alliances, units, attacks };
 }
 
+/** Any of the player's border tiles touches water (a boat could launch). */
+export function hasShoreBorder(game: Game, player: Player): boolean {
+  for (const t of player.borderTiles()) {
+    if (game.isShore(t)) return true;
+  }
+  return false;
+}
+
+/** Any of the player's border tiles touches conquerable neutral land
+ * (an expand attack would actually take tiles instead of fizzling). */
+export function bordersNeutralLand(game: Game, player: Player): boolean {
+  let found = false;
+  for (const t of player.borderTiles()) {
+    game.forEachNeighbor(t, (n) => {
+      if (game.isLand(n) && !game.hasOwner(n) && !game.isImpassable(n)) {
+        found = true;
+      }
+    });
+    if (found) return true;
+  }
+  return false;
+}
+
 /** Exact per-action legality from engine calls; Python builds masks. */
 export function legality(game: Game, clientID: string): object {
   const agent = game.playerByClientID(clientID) ?? null;
@@ -171,13 +194,29 @@ export function legality(game: Game, clientID: string): object {
         .filter((p) => !agent.hasEmbargoAgainst(p))
         .map((p) => p.smallID()),
       buildableTypes: buildable,
-      hasSilo: agent
-        .units(UnitType.MissileSilo)
-        .some((u) => !u.isUnderConstruction()),
+      // Mirrors TransportShipExecution.init(): a boat needs a free slot
+      // under boatMaxNumber and a shore to launch from. (Destination
+      // validity is checked per-intent in env.ts step().)
+      canBoat:
+        agent.units(UnitType.TransportShip).length <
+          game.config().boatMaxNumber() && hasShoreBorder(game, agent),
+      // An expand (attack with null target) only conquers when neutral
+      // land actually borders the player; otherwise it fizzles.
+      canExpand: bordersNeutralLand(game, agent),
+      // Mirrors nukeSpawn(): a silo on cooldown (or spawn immunity) makes
+      // every launch a silent no-op.
+      hasSilo:
+        !game.isSpawnImmunityActive() &&
+        agent
+          .units(UnitType.MissileSilo)
+          .some(
+            (u) =>
+              !u.isUnderConstruction() && u.isActive() && !u.isInCooldown(),
+          ),
       troops: Math.round(agent.troops()),
       gold: gold.toString(),
       attacks: agent.outgoingAttacks().map((a) => a.id()),
-      boats: agent.units(UnitType.Transport).map((u) => u.id()),
+      boats: agent.units(UnitType.TransportShip).map((u) => u.id()),
       warships: agent.units(UnitType.Warship).map((u) => u.id()),
       upgradable: agent
         .units()

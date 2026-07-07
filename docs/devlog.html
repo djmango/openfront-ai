@@ -170,6 +170,19 @@ encoder or BC warm start yet.</p>
     accuracy 71.8% vs 87.5% on bot data), retrained on a bot+human mix, then designed and ran the
     v3.1 ablation matrix in parallel. Latent resolution won. New encoder + benchmark table
     uploaded to HF.</li>
+  <li><b>Jul 7 early:</b> the phantom-boat audit. Replay sidecars showed the agent picking
+    <code>boat</code> on 43-78% of decisions (p(boat) up to 0.79, p(noop) 0.01) with nearly all of
+    them silently discarded by the engine - the cap is 3 transports in flight. Root cause: a
+    whole class of actions was "legal" per the mask but a guaranteed no-op at execution, and a
+    discarded intent was reward-identical to noop with occasional upside - a free lottery ticket
+    the policy learned to farm (ppo_v3's version was 61% <code>build</code> on random land). Fixed
+    everywhere at once: masks now match engine state (<code>canBoat</code> = boat slot free + own
+    shore, <code>canExpand</code> = neutral land actually borders, <code>hasSilo</code> now
+    respects silo cooldown + spawn immunity), the translator snaps tile picks to tiles that can
+    work (boats never target own/ally land, builds only own territory, ports own shore), and
+    whatever still slips through is counted by the bridge (<code>wasted</code>, exact engine
+    calls per intent) and penalized at W_WASTE=0.01 per discarded intent, so noop strictly
+    dominates doomed actions. New <code>episode/wasted</code> TB curve.</li>
   <li><b>Jul 6 eve:</b> v4: the whole policy stack moved to 1/8 resolution (d8c32 encoder, 8x8
     tile regions, 150x250 grid budget) - the clean cut, no space-to-depth shims. GPU-side
     featurization (ego pooling, fallout unpack, AE encode, local crop batched in
@@ -252,7 +265,10 @@ options):</p>
   <tr><td>quantity</td><td>troop fraction bucket</td></tr>
 </table>
 <p class="d">Masks come from exact engine legality calls each step; the policy can only pick what the
-engine would accept. Full intent table in DESIGN.md.</p>
+engine would accept. Where a tile argument can still fail at execution (boat destination
+unreachable by water, build site too close to another structure), the bridge counts the discarded
+intent and the env charges w_waste for it - the mask keeps the policy honest, the penalty keeps
+the engine honest. Full intent table in DESIGN.md.</p>
 
 <h3 id="reward">Reward</h3>
 <p>Iterated from raw land occupancy to a composite <b>strength index</b>:
@@ -266,6 +282,9 @@ tiny-island gold-stacking.</p>
     the dead rank behind everyone still alive</li>
   <li>win bonus <code>w_win = 30</code> (doubled when the curriculum became win-gated)</li>
   <li>small flat death penalty</li>
+  <li>wasted-intent penalty <code>w_waste = 0.01</code> per intent the engine silently discarded
+    (doomed boat, invalid build site, expand with no neutral border): without a price these are
+    noop-with-upside and the policy farms them (see <a href="#bugs">bugs</a>)</li>
 </ul>
 
 <h3 id="curriculum">Curriculum</h3>
@@ -425,6 +444,19 @@ from intents alone.</p>
     authoritative; kill the whole process group before editing checkpoints.</li>
   <li><b>Cropped-map index crash.</b> Transport/nuke target coords weren't bounds-checked against the
     16px-cropped grid; a boat targeting BlackSea's trimmed edge strip crashed the obs builder.</li>
+  <li><b>Phantom boats: "legal" actions that always no-op.</b> The boat mask was just
+    <code>troops &gt; 100</code>; the engine additionally requires a free boat slot (max 3), an own
+    shore to launch from, and a non-own/non-ally destination with a reachable shore - and
+    <em>silently discards</em> the intent otherwise, with troops never deducted. A discarded boat
+    was therefore reward-identical to noop but occasionally landed and grabbed land, so the
+    policy-gradient math correctly learned to spam it: 43-78% of decisions in v4 stage 2-3
+    replays, p(noop) driven to 0.01. Same shape in expand (fizzles without a neutral border),
+    build (61% of one v3 episode's decisions, snapped to random land the engine rejected), and
+    nukes (silo cooldown/spawn immunity ignored by the mask). The bridge comment said "illegal
+    tile picks become no-ops the policy learns to avoid" - but there was no signal to learn from:
+    the failure and the noop pay identically. Fix: honest masks + valid-tile snapping + a
+    per-discarded-intent penalty (Jul 7 timeline entry). Caught by computing the action mix from
+    replay debug sidecars, not from any training curve.</li>
   <li><b>Headless-browser quirks.</b> Vite binds IPv6 <code>::1</code> while headless Chromium
     resolves localhost to IPv4 (force <code>--host 127.0.0.1</code>); the client rejects software
     WebGL (needs <code>--use-angle=metal --enable-gpu --ignore-gpu-blocklist</code>).</li>
@@ -452,6 +484,11 @@ from intents alone.</p>
     convolution.</li>
   <li><b>Watch the agent play.</b> The replay tooling caught the win-detection bug and the camera
     problems; curves never would have.</li>
+  <li><b>An action that can silently fail is a free lottery ticket.</b> If a "legal" action's
+    failure mode is exactly a noop (no cost, no signal) and its success mode has upside, the
+    policy will rationally spam it forever and it will look like pathological behavior. Every
+    action needs one of: an honest mask, or a price on the discarded intent. "The policy will
+    learn to avoid illegal picks" is only true if avoiding them pays better than trying them.</li>
   <li><b>The loss curve lies; log the metric you care about.</b> The mixed-retrain loss looked flat
     for hours while border accuracy was still climbing. Overall tile accuracy is 99% saturated and
     borders are a sliver of pixels. Border accuracy cost one line to log natively (the mask already

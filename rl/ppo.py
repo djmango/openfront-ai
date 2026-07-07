@@ -306,6 +306,7 @@ def main() -> None:
                 writer.add_scalar("episode/place", info["place"], gs)
                 writer.add_scalar("episode/score", info["score"], gs)
                 writer.add_scalar("episode/won", float(info["won"]), gs)
+                writer.add_scalar("episode/wasted", info["wasted"], gs)
                 writer.add_scalar("curriculum/episode_stage", info["stage"], gs)
                 writer.add_scalar(
                     "curriculum/rehearsal", float(info["rehearsal"]), gs
