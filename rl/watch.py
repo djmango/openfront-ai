@@ -244,12 +244,13 @@ def main() -> None:
         f"{st.bots} bots, {st.difficulty}"
     )
 
-    device = "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     ae = load_ae(args.ckpt, device)
-    policy = Policy()
-    state = torch.load(args.policy, map_location="cpu", weights_only=False)
+    policy = Policy().to(device)
+    state = torch.load(args.policy, map_location=device, weights_only=False)
     policy.load_state_dict(state["model_state_dict"])
     policy.eval()
+    print(f"device: {device}")
     print(f"policy from update {state.get('update', '?')}, stage {state.get('stage', '?')}")
 
     env = OpenFrontEnv()
@@ -268,7 +269,7 @@ def main() -> None:
             break
         raw = builder.prepare(obs)
         o = encode_grids(ae, [raw], device)[0]
-        ot = {k: torch.from_numpy(o[k])[None] for k in OBS_KEYS}
+        ot = {k: torch.from_numpy(o[k])[None].to(device) for k in OBS_KEYS}
         choices, _, _ = policy.act(ot)
         obs = env.step(translator.translate(choices[0], obs), ticks=10)
     if obs["spawnPhase"]:
@@ -302,7 +303,7 @@ def main() -> None:
     for step in range(args.max_steps):
         raw = builder.prepare(obs)
         o = encode_grids(ae, [raw], device)[0]
-        ot = {k: torch.from_numpy(o[k])[None] for k in OBS_KEYS}
+        ot = {k: torch.from_numpy(o[k])[None].to(device) for k in OBS_KEYS}
         choices, _, _ = policy.act(ot, debug=args.debug)
         choice = choices[0]
         choice["_desc"] = describe(choice, obs)  # pre-step legality/troops

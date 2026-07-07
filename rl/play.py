@@ -104,12 +104,13 @@ def main() -> None:
     args = ap.parse_args()
     args.game = parse_game_id(args.game)
 
-    device = "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     ae = load_ae(args.ckpt, device)
-    policy = Policy()
-    state = torch.load(args.policy, map_location="cpu", weights_only=False)
+    policy = Policy().to(device)
+    state = torch.load(args.policy, map_location=device, weights_only=False)
     policy.load_state_dict(state["model_state_dict"])
     policy.eval()
+    print(f"device: {device}")
     print(f"policy loaded (update {state.get('update', '?')}); joining {args.game}")
 
     proc = subprocess.Popen(
@@ -173,7 +174,7 @@ def main() -> None:
             # random fallback keeps live games moving if the snap fails.
             raw = builder.prepare(obs)
             o = encode_grids(ae, [raw], device)[0]
-            ot = {k: torch.from_numpy(o[k])[None] for k in OBS_KEYS}
+            ot = {k: torch.from_numpy(o[k])[None].to(device) for k in OBS_KEYS}
             with torch.no_grad():
                 choices, _, _ = policy.act(ot)
             intents = translator.translate(choices[0], obs)
@@ -189,7 +190,7 @@ def main() -> None:
         else:
             raw = builder.prepare(obs)
             o = encode_grids(ae, [raw], device)[0]
-            ot = {k: torch.from_numpy(o[k])[None] for k in OBS_KEYS}
+            ot = {k: torch.from_numpy(o[k])[None].to(device) for k in OBS_KEYS}
             with torch.no_grad():
                 choices, _, _ = policy.act(ot, debug=args.debug_port > 0)
             choice = choices[0]
