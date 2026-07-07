@@ -1,45 +1,53 @@
-# OpenFront RL eval showcase: latest checkpoint replay + MODEL overlay.
-# Serves the real game client at :8086 with archive API under /archive.
-
-FROM node:22-bookworm AS openfront-deps
-WORKDIR /build
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-COPY openfront/package.json openfront/package-lock.json ./openfront/
-RUN cd openfront && npm ci --ignore-scripts
+# syntax=docker/dockerfile:1
+# OpenFront RL eval showcase: live agent games + archive replay + MODEL overlay.
 
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm AS py-deps
 WORKDIR /build
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev \
+ENV UV_LINK_MODE=copy
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev \
     && uv pip install --index-url https://download.pytorch.org/whl/cu124 'torch>=2.12.0' \
-    && /build/.venv/bin/python -m playwright --version
+    && .venv/bin/python -m playwright --version
 
-FROM node:22-bookworm
+FROM node:22-bookworm AS openfront-src
+WORKDIR /src
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY openfront.commit patches/client-replay-tooling.patch /tmp/
+ARG OPENFRONT_COMMIT
+RUN set -eux; \
+    commit="${OPENFRONT_COMMIT:-$(tr -d '[:space:]' < /tmp/openfront.commit)}"; \
+    git clone --filter=blob:none https://github.com/openfrontio/OpenFrontIO.git openfront; \
+    git -C openfront checkout "${commit}"; \
+    git apply --directory=openfront /tmp/client-replay-tooling.patch
+
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm AS runtime
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git ca-certificates curl caddy ffmpeg \
+        git ca-certificates curl ffmpeg caddy gnupg \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+        > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=py-deps /build/.venv /app/.venv
-COPY --from=py-deps /usr/local/bin/python3.12 /usr/local/bin/python3.12
-COPY --from=py-deps /usr/local/lib/python3.12 /usr/local/lib/python3.12
-COPY --from=py-deps /usr/local/lib/libpython3.12.so.1.0 /usr/local/lib/
-RUN ln -sf /usr/local/bin/python3.12 /usr/local/bin/python3
-COPY --from=openfront-deps /build/openfront/node_modules /app/openfront/node_modules
 
-COPY . /app
+COPY rl ./rl
+COPY bridge ./bridge
+COPY scripts ./scripts
+COPY docker ./docker
+COPY patches ./patches
+COPY pyproject.toml uv.lock openfront.commit ./
 
-# Live homelab mounts may already have the replay patch applied; clone a clean
-# openfront pin so `git apply` is deterministic in CI and on the homelab host.
-ARG OPENFRONT_COMMIT=22c873cf556918da1f8b46698166356b902d5246
-RUN rm -rf /app/openfront \
-    && git clone --filter=blob:none https://github.com/openfrontio/OpenFrontIO.git /app/openfront \
-    && git -C /app/openfront checkout "${OPENFRONT_COMMIT}"
-COPY --from=openfront-deps /build/openfront/node_modules /app/openfront/node_modules
-# openfront/.git is dockerignored; apply the replay patch from the repo root.
-RUN git apply --directory=openfront patches/client-replay-tooling.patch
+COPY --from=openfront-src /src/openfront ./openfront
+RUN --mount=type=cache,target=/root/.npm \
+    cd openfront && npm ci --ignore-scripts
 
 ENV PATH="/app/.venv/bin:/app/openfront/node_modules/.bin:${PATH}"
 ENV PYTHONPATH=/app
