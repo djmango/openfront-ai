@@ -528,6 +528,47 @@ that, and it hasn't reached matched sample counts yet.</p>
     have ofrs return pre-stacked batch arrays so the Python-side memcpy churn disappears.</li>
 </ul>
 
+<h3 id="reward-mdp">Reward MDP reference (Jul 7)</h3>
+<p>The dense + terminal reward is fully specified in <code>rl/curriculum.py</code> and applied in
+<code>rl/vec.py</code>. These panels are generated from the live constants by
+<code>scripts/make_reward_graphs.py</code> (re-run after any tweak):</p>
+<p>
+  <img src="graphs/reward_terminal.png" alt="terminal placement v4 vs v5" width="820"><br>
+  <img src="graphs/reward_dense.png" alt="dense reward: timeweight, delta asymmetry, heatmap, waste tax" width="820"><br>
+  <img src="graphs/reward_scenarios.png" alt="archetypal episode cumulative returns v4 vs v5" width="820"><br>
+  <img src="graphs/reward_strength.png" alt="strength index by play style" width="820">
+</p>
+<table>
+  <tr><th>constant</th><th>v4</th><th>v5 (current)</th><th>role</th></tr>
+  <tr><td><code>W_STR</code></td><td>0.02</td><td>0.02</td><td>dense: strength &times; timeweight each decision</td></tr>
+  <tr><td><code>W_DELTA</code></td><td>5.0 symmetric</td><td>gain 5.0 / loss 6.5</td><td>immediate credit for strength change; losses hurt more</td></tr>
+  <tr><td><code>PLACE_POW</code></td><td>0.7</td><td>1.5</td><td>terminal: <code>W_PLACE &times; rank<sup>-pow</sup></code></td></tr>
+  <tr><td><code>W_PLACE</code></td><td>15</td><td>15</td><td>terminal placement scale (1st alone = 15.0)</td></tr>
+  <tr><td><code>W_WIN</code></td><td>30</td><td>30</td><td>extra on engine win (on top of placement)</td></tr>
+  <tr><td><code>W_DEATH</code></td><td>1</td><td>1</td><td>flat penalty when eliminated</td></tr>
+  <tr><td><code>W_WASTE</code></td><td>0.01</td><td>0.01</td><td>per silently-discarded intent (boat/build spam)</td></tr>
+  <tr><td>timeweight</td><td>0.5&rarr;1.0</td><td>same</td><td>ramps over first 8000 engine ticks</td></tr>
+  <tr><td>strength blend</td><td>45/25/30</td><td>same</td><td>land / military / economy shares of alive totals</td></tr>
+</table>
+<ul>
+  <li><b>Terminal panel:</b> v5's sharper <code>PLACE_POW</code> is the main anti-safe-second lever -
+    2nd place drops from 9.2 to 5.3 before any win bonus. The win bonus (+30) still dominates a
+    outright win (45 total for 1st+win vs 5.3 for 2nd-only), but the agent has to actually win
+    to see it; placement alone now pushes harder for the top.</li>
+  <li><b>Dense panel:</b> most steps are small (strength ~0.1-0.3 at timeweight 1.0 gives
+    ~0.002-0.006/step); the delta term is where expansion and collapse show up (&plusmn;0.05
+    strength swing &asymp; &plusmn;0.25-0.33 per step). The heatmap is the tuning surface for
+    "how aggressive should expansion be?" Loss-aversion tilts the agent toward defending a lead.</li>
+  <li><b>Scenario panel:</b> synthetic strength traces (not real games) show total return under
+    the old vs new MDP. Safe-second timeout pays similarly in dense terms but v5 cuts the terminal;
+    expand-then-collapse gets punished twice (asymmetric deltas on the way down + worse placement).
+    Waste spam shows why <code>W_WASTE</code> exists: without it, doomed boats are free lottery
+    tickets.</li>
+  <li><b>Strength panel:</b> the composite index is not raw land - eco islands and military rushes
+    can score honestly. Tuning <code>K_LAND/K_MIL/K_ECO</code> shifts which strategies the dense
+    signal rewards mid-game.</li>
+</ul>
+
 <h3 id="tooling">Visualization &amp; tooling</h3>
 <p>Determinism is the superpower: the bridge mirrors the client's <code>createGameRunner()</code> init
 exactly (same PseudoRandom ID stream, no spawn timer), so agent games saved as GameRecords replay
