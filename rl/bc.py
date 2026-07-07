@@ -18,10 +18,10 @@ human action uses them (mirrors Policy.evaluate's masking).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -166,6 +166,41 @@ def seq_batch(sampler: BCSampler, batch: int, seq: int) -> list[dict]:
     return out[: batch * seq]
 
 
+def _first(b):
+    """collate_fn that unwraps DataLoader's batch-of-1 without touching the
+    numpy payloads (default_convert would tensorify them)."""
+    return b[0]
+
+
+class BCFeed(torch.utils.data.IterableDataset):
+    """Infinite stream of raw sample batches, one BCSampler per worker
+    process. Thread pools couldn't feed the GPU (the numpy featurization
+    between GIL-releasing zstd decodes serialized ~24 threads onto one
+    core); processes sidestep the GIL entirely and the cache-bc mmaps are
+    shared pages, so per-worker memory stays flat."""
+
+    def __init__(self, roots, holdout_every, noop_frac, spawn_frac, batch, seq):
+        self.roots = roots
+        self.holdout_every = holdout_every
+        self.noop_frac = noop_frac
+        self.spawn_frac = spawn_frac
+        self.batch = batch
+        self.seq = seq
+
+    def __iter__(self):
+        wi = torch.utils.data.get_worker_info()
+        sampler = BCSampler(
+            self.roots, holdout_every=self.holdout_every, holdout=False,
+            noop_frac=self.noop_frac, spawn_frac=self.spawn_frac,
+            seed=0 if wi is None else (wi.id + 1) * 7919,
+        )
+        while True:
+            if self.seq:
+                yield seq_batch(sampler, self.batch, self.seq)
+            else:
+                yield sampler.sample_batch(self.batch)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", nargs="+", default=["data-human"])
@@ -190,6 +225,13 @@ def main() -> None:
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    torch.set_float32_matmul_precision("high")
+
+    def amp():
+        if device == "cuda":
+            return torch.autocast("cuda", dtype=torch.bfloat16)
+        return contextlib.nullcontext()
+
     roots = [Path(d) for d in args.data]
     sampler = BCSampler(
         roots, holdout_every=args.holdout_every, holdout=False,
@@ -207,7 +249,9 @@ def main() -> None:
 
     ae = load_ae(args.ae, device)
     model = BCPolicy(seq=args.seq).to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    opt = torch.optim.AdamW(
+        model.parameters(), lr=args.lr, weight_decay=1e-4, fused=(device == "cuda")
+    )
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.steps)
     start_step = 0
     best_metric = -1.0
@@ -231,9 +275,16 @@ def main() -> None:
         draw = lambda s: seq_batch(s, args.batch, args.seq)  # noqa: E731
     else:
         draw = lambda s: s.sample_batch(args.batch)  # noqa: E731
-    # Threaded prefetch: gzip/json decode releases the GIL.
-    pool = ThreadPoolExecutor(max_workers=args.workers)
-    pending = [pool.submit(draw, sampler) for _ in range(4)]
+    # Process-based prefetch: each worker owns a BCSampler and streams whole
+    # raw batches; the main process only does GPU work.
+    feed = BCFeed(roots, args.holdout_every, args.noop_frac, args.spawn_frac,
+                  args.batch, args.seq)
+    loader = torch.utils.data.DataLoader(
+        feed, batch_size=1, collate_fn=_first,
+        num_workers=args.workers, prefetch_factor=4 if args.workers else None,
+        persistent_workers=bool(args.workers),
+    )
+    feed_it = iter(loader)
 
     t0 = time.time()
     for step in range(start_step + 1, args.steps + 1):
@@ -242,8 +293,7 @@ def main() -> None:
         # a real effective batch (batch * accum) per optimizer step.
         opt.zero_grad(set_to_none=True)
         for _ in range(args.accum):
-            raws = pending.pop(0).result()
-            pending.append(pool.submit(draw, sampler))
+            raws = next(feed_it)
             enc = encode_batch(ae, raws, device)
             if args.seq:
                 # collate keeps step-major flattening; choice/cond of last steps.
@@ -254,10 +304,11 @@ def main() -> None:
             else:
                 o, choice, cond = collate(enc, device)
 
-            out = model.forward_bc(o, cond)
-            loss, parts = bc_loss(
-                out, o if not args.seq else _last_o(o, args.seq, device), choice
-            )
+            with amp():
+                out = model.forward_bc(o, cond)
+                loss, parts = bc_loss(
+                    out, o if not args.seq else _last_o(o, args.seq, device), choice
+                )
             (loss / args.accum).backward()
         nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
@@ -289,7 +340,8 @@ def main() -> None:
                         last = torch.arange(args.seq - 1, len(eenc), args.seq, device=device)
                         ech = {k: v[last] for k, v in ech.items()}
                         econd = econd[last]
-                    eout = model.forward_bc(eo, econd)
+                    with amp():
+                        eout = model.forward_bc(eo, econd)
                     eo_h = _last_o(eo, args.seq, device) if args.seq else eo
                     for k, v in head_accuracy(eout, eo_h, ech).items():
                         agg.setdefault(k, []).append(v)
