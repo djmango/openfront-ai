@@ -98,6 +98,13 @@ def main() -> None:
                     help="entropy coef anneals linearly to this (v2c sat at "
                          "entropy ~8 under a flat 0.01, exploring forever)")
     ap.add_argument("--ent-anneal-updates", type=int, default=4000)
+    ap.add_argument("--ent-floor", type=float, default=3.5,
+                    help="adaptive entropy floor (0 = off): when mean policy "
+                         "entropy drops below this, the entropy coef scales "
+                         "up (x1.3/update, cap x30) until it recovers. "
+                         "ppo_v4 collapsed 9 -> 2.8 nats and stopped winning "
+                         "(deterministic safe-2nd); the schedule alone can't "
+                         "prevent that")
     ap.add_argument("--vf-coef", type=float, default=0.5)
     ap.add_argument("--max-episode-ticks", type=int, default=15000)
     ap.add_argument("--decision-ticks", type=int, default=10,
@@ -142,6 +149,7 @@ def main() -> None:
     )
     start_update = 0
     global_step = 0
+    ent_scale = 1.0  # adaptive entropy-floor multiplier (see --ent-floor)
     if args.init and not args.resume:
         # BC warm start: shared Policy weights from a BCPolicy checkpoint
         # (cond/temporal modules dropped), then fold the placement
@@ -194,6 +202,7 @@ def main() -> None:
         recent_scores.extend(state.get("recent_scores", []))
         start_update = int(state.get("update", 0))
         global_step = int(state.get("global_step", 0))
+        ent_scale = float(state.get("ent_scale", 1.0))
         print(
             f"resumed from {args.resume}: update {start_update}, "
             f"step {global_step}, stage {stage}, "
@@ -426,9 +435,11 @@ def main() -> None:
         old_logp = torch.from_numpy(data["logp"]).to(device)
 
         # Entropy anneal: linear from ent-coef to ent-coef-final so late
-        # training commits instead of exploring forever.
+        # training commits instead of exploring forever. The adaptive floor
+        # scale (updated after each update from measured entropy) multiplies
+        # the schedule so exploration can't collapse entirely.
         frac = min(1.0, update / max(1, args.ent_anneal_updates))
-        ent_coef = args.ent_coef + (args.ent_coef_final - args.ent_coef) * frac
+        ent_coef = (args.ent_coef + (args.ent_coef_final - args.ent_coef) * frac) * ent_scale
 
         B_total = T * N
         idx = np.arange(B_total)
@@ -476,6 +487,16 @@ def main() -> None:
                 ent_sum += float(ent.mean().item())
                 n_mb += 1
 
+        # Entropy floor controller: nudge the coef scale toward keeping
+        # measured entropy above the floor, with hysteresis so it doesn't
+        # oscillate. Multiplicative so it composes with the anneal.
+        if args.ent_floor > 0 and n_mb:
+            ent_mean = ent_sum / n_mb
+            if ent_mean < args.ent_floor:
+                ent_scale = min(ent_scale * 1.3, 30.0)
+            elif ent_mean > args.ent_floor * 1.4:
+                ent_scale = max(ent_scale / 1.3, 1.0)
+
         # Publish the updated weights to the acting snapshot.
         with act_lock, torch.no_grad():
             act_policy.load_state_dict(base_policy.state_dict())
@@ -496,6 +517,7 @@ def main() -> None:
         writer.add_scalar("loss/value", vl_sum / n_mb, global_step)
         writer.add_scalar("loss/entropy", ent_sum / n_mb, global_step)
         writer.add_scalar("loss/ent_coef", ent_coef, global_step)
+        writer.add_scalar("loss/ent_scale", ent_scale, global_step)
         writer.add_scalar("loss/lr", opt.param_groups[0]["lr"], global_step)
         writer.add_scalar("perf/game_ticks_per_s", tps, global_step)
         writer.add_scalar("perf/episodes_done", episodes_done, global_step)
@@ -508,6 +530,7 @@ def main() -> None:
             f"update {update:4d}  step {global_step:7d}  eps {episodes_done:4d}  "
             f"stage {stage}  roll-win {roll_win:.2f}  roll-score {roll:.2f}  "
             f"pg {pl_sum / n_mb:+.4f}  vf {vl_sum / n_mb:.4f}  ent {ent_sum / n_mb:.3f}  "
+            f"ecoef {ent_coef:.4f}  "
             f"{tps:.0f} game-ticks/s  "
             f"[roll {roll_s:.1f}s upd {upd_s:.1f}s wait {wait_s:.1f}s stall {stall_s:.1f}s]",
             flush=True,
@@ -547,6 +570,7 @@ def main() -> None:
                     "global_step": shared["global_step"],
                     "recent_wins": wins_snap,
                     "recent_scores": scores_snap,
+                    "ent_scale": ent_scale,
                     "args": vars(args),
                 },
                 tmp,

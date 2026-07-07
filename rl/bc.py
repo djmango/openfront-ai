@@ -275,10 +275,21 @@ def main() -> None:
     # Micro-batch pipeline: fetch + AE encode + collate for k+1 runs on a
     # worker thread during k's forward/backward (same surgery as PPO's
     # prefetch; the serialized loop left the GPU ~35% busy).
+    # prof: per-phase seconds inside the prefetch worker, read+reset by the
+    # 50-step log line - the instrument for the slow-decay hunt (bc_v4 fell
+    # 100 -> 25 ex/s over ~8h and a restart fully restored it).
+    prof = {"sample": 0.0, "encode": 0.0, "collate": 0.0}
+
     def prep_next() -> tuple:
+        t = time.time()
         raws = next_raws()
+        prof["sample"] += time.time() - t
+        t = time.time()
         enc = encode_batch(ae, raws, device)
+        prof["encode"] += time.time() - t
+        t = time.time()
         o, choice, cond = collate(enc, device)
+        prof["collate"] += time.time() - t
         if args.seq:
             # collate keeps step-major flattening; choice/cond of last steps.
             last = torch.arange(args.seq - 1, len(enc), args.seq, device=device)
@@ -316,11 +327,19 @@ def main() -> None:
             rate = 50 * args.batch * args.accum / (time.time() - t0)
             t0 = time.time()
             accs = head_accuracy(out, _last_o(o, args.seq, device) if args.seq else o, choice)
+            gpu = ""
+            if device == "cuda":
+                gpu = (f"  cuda {torch.cuda.memory_allocated() / 1e9:.1f}"
+                       f"/{torch.cuda.memory_reserved() / 1e9:.1f}GB")
             msg = (f"step {step:6d}  loss {float(loss):.4f}  "
                    f"act {accs.get('action', 0):.3f}  "
                    f"act! {accs.get('action_no_noop', 0):.3f}  "
                    f"tile {accs.get('tile_region', float('nan')):.3f}  "
-                   f"{rate:.1f} ex/s  stall {stall_s:.1f}s")
+                   f"{rate:.1f} ex/s  stall {stall_s:.1f}s  "
+                   f"[smp {prof['sample']:.1f} enc {prof['encode']:.1f} "
+                   f"col {prof['collate']:.1f}]{gpu}")
+            for k in prof:
+                prof[k] = 0.0
             stall_s = 0.0
             print(msg, flush=True)
             with log_path.open("a") as f:
