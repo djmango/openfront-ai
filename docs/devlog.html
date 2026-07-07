@@ -76,11 +76,15 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <code>ae_v3.pt</code> until the v3.1 winner is wired into <code>rl/obs.py</code>.</p>
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
-  <tr><td><code>ppo_v4</code></td><td>active (v4.1 code)</td>
+  <tr><td><code>ppo_v4</code></td><td>active (v4.2 code)</td>
     <td>The full v4 stack from scratch: d8c32 encoder at 1/8, learned spawns, local owner crop,
     eval loop. Stages 0→3 in ~2h, stage 4 by ~3.6h despite two restarts (OOM at minibatch 128,
-    then the throughput redeploys). Running the v4.1 async collector since Jul 6 ~11pm.
-    Checkpoint on HF as <code>ppo_v4/policy.pt</code>.</td></tr>
+    then the throughput redeploys). v4.1 async collector since Jul 6 ~11pm; <b>v4.2</b> (honest
+    boat/expand/nuke masks, valid-tile snapping, wasted-intent penalty - the phantom-boat fix)
+    resumed from the same checkpoint Jul 7 ~00:45, no retrain: no tensor shapes changed, only
+    mask semantics and a small reward term. Expect a transient dip while the value head absorbs
+    the reward shift; watch <code>episode/wasted</code> fall and the boat share of the action mix
+    normalize. Checkpoint on HF as <code>ppo_v4/policy.pt</code>.</td></tr>
   <tr><td><code>bc_v4</code></td><td>active</td>
     <td>Feedforward BC on the full 291-game cache-bc dataset (265 train / 26 holdout) with spawn
     supervision. ~56 ex/s GPU-bound at batch 24 x accum 4. Uploads <code>bc.pt</code> +
