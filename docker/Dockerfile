@@ -18,8 +18,11 @@ COPY openfront.commit patches/client-replay-tooling.patch /tmp/
 ARG OPENFRONT_COMMIT
 RUN set -eux; \
     commit="${OPENFRONT_COMMIT:-$(tr -d '[:space:]' < /tmp/openfront.commit)}"; \
-    git clone --filter=blob:none https://github.com/openfrontio/OpenFrontIO.git openfront; \
-    git -C openfront checkout "${commit}"; \
+    mkdir openfront; \
+    git -C openfront init; \
+    git -C openfront remote add origin https://github.com/openfrontio/OpenFrontIO.git; \
+    git -C openfront fetch --depth 1 origin "${commit}"; \
+    git -C openfront checkout FETCH_HEAD; \
     git apply --directory=openfront /tmp/client-replay-tooling.patch
 
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm AS runtime
