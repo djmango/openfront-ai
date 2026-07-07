@@ -472,6 +472,54 @@ window on bc2). The fix was to delete the abstraction, not tune it:</p>
     entropy-coef floor or schedule, and the v5 asymmetric strength shaping.</li>
 </ul>
 
+<h3 id="ppo-v5">PPO v5: breaking the safe-second attractor (Jul 7)</h3>
+<p>ppo_v4 was killed at update 433 (final checkpoint archived to HF) and <b>ppo_v5</b>
+launched on the same pod with three MDP/optimizer changes aimed squarely at the collapse,
+plus a BC warm start:</p>
+<ul>
+  <li><b>Adaptive entropy floor</b> (<code>--ent-floor 3.5</code>): a multiplicative
+    controller on the entropy coef (x1.3 per update when measured entropy is under the
+    floor, capped at x30, hysteresis at 1.4x floor). v4's entropy slid 9.2 &rarr; 2.8 at a
+    barely-annealed coef of 0.009 - the schedule alone cannot prevent collapse, only a
+    feedback loop can. The scale persists through checkpoints and multiplies the existing
+    anneal.</li>
+  <li><b>Sharper placement curve</b>: <code>PLACE_POW</code> 0.7 &rarr; 1.5. Terminal
+    rewards for 1st/2nd/3rd go from 45/9.2/6.9 to 45/5.3/2.9 - second place lost 42% of
+    its value, so "safe second" is no longer a comfortable optimum even before the win
+    bonus enters experience.</li>
+  <li><b>Loss-aversion delta shaping</b> (v5 wishlist): <code>W_DELTA</code> splits into
+    GAIN 5.0 / LOSS 6.5. v4 games showed hyper-expansion then collapse (103k tiles at
+    t8001, dead by t10711); symmetric shaping priced a lost tile the same as a gained one,
+    so defense was never worth learning.</li>
+  <li><b>BC warm start</b>: <code>INIT_BC=bc_v4</code> pulls <code>bc_best.pt</code>
+    (holdout 0.406) from HF, loads the 70 shared Policy tensors and folds the
+    winner-bucket conditioning into the head biases.</li>
+</ul>
+<p>Early read (30 min in): stage 0 cleared in ~25 updates, stage 2 by update 64 - v4 needed
+hours for the same ground. Entropy holds ~4.8 with the floor controller live
+(ecoef oscillating 0.010-0.048 as the controller breathes). Deliberately NOT in v5:
+the LSTM/temporal policy - bc3's seq-vs-feedforward comparison is the evidence gate for
+that, and it hasn't reached matched sample counts yet.</p>
+
+<h3 id="bc-decay-hunt">bc2 decay hunt + encode as the real feed cost (Jul 7)</h3>
+<ul>
+  <li><b>Instrumentation first:</b> bc.py now logs per-phase feed seconds
+    (<code>smp/enc/col</code>) plus CUDA allocated/reserved every 50 steps. First readings
+    overturned the "sampler accumulation" theory: <code>smp ~0s</code> (the Rust sampler is
+    essentially free), <code>col ~5s</code>, <code>enc 50-65s</code> per 50-step window -
+    <b>the frozen-AE encode is the entire feed cost</b>, and it shares the GPU with the
+    trainer.</li>
+  <li><b>bf16 autocast on the frozen AE encode</b> (rl/obs.py): free conv throughput -
+    the latents already ship as fp16 to PPO. bc2 recovered to ~85-93 ex/s; bc3's seq run
+    is fully encode-bound (enc 153s of a 163s window, 8 frames per sample) and sits at
+    GPU ~95%: the next real lever there is caching AE latents in cache-bc (the encoder is
+    finally frozen at d8c32, so the cache won't be invalidated - v4's reason to skip it
+    is gone).</li>
+  <li><b>Decay watch:</b> the phase breakdown + reserved-memory log will show whether a
+    recurrence is encode growth (GPU-side fragmentation/throttle) or sample growth. Note
+    the overnight decay happened <i>with</i> expandable_segments already on.</li>
+</ul>
+
 <h3 id="tooling">Visualization &amp; tooling</h3>
 <p>Determinism is the superpower: the bridge mirrors the client's <code>createGameRunner()</code> init
 exactly (same PseudoRandom ID stream, no spawn timer), so agent games saved as GameRecords replay
