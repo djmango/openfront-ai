@@ -11,6 +11,9 @@ if [ -d "$SRC/.git" ]; then
   git -C "$SRC" fetch origin master
   git -C "$SRC" reset --hard origin/master
   git -C "$SRC" submodule update --init --recursive
+  OPENFRONT_PIN="$(tr -d '[:space:]' < "$SRC/openfront.commit")"
+  git -C "$SRC/openfront" fetch origin "$OPENFRONT_PIN" 2>/dev/null || true
+  git -C "$SRC/openfront" checkout --force "$OPENFRONT_PIN"
 else
   git clone --recurse-submodules --branch master \
     https://github.com/djmango/openfront-ai.git "$SRC"

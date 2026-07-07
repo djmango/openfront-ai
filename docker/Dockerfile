@@ -29,6 +29,14 @@ RUN ln -sf /usr/local/bin/python3.12 /usr/local/bin/python3
 COPY --from=openfront-deps /build/openfront/node_modules /app/openfront/node_modules
 
 COPY . /app
+
+# Live homelab mounts may already have the replay patch applied; clone a clean
+# openfront pin so `git apply` is deterministic in CI and on the homelab host.
+ARG OPENFRONT_COMMIT=22c873cf556918da1f8b46698166356b902d5246
+RUN rm -rf /app/openfront \
+    && git clone --filter=blob:none https://github.com/openfrontio/OpenFrontIO.git /app/openfront \
+    && git -C /app/openfront checkout "${OPENFRONT_COMMIT}"
+COPY --from=openfront-deps /build/openfront/node_modules /app/openfront/node_modules
 # openfront/.git is dockerignored; apply the replay patch from the repo root.
 RUN git apply --directory=openfront patches/client-replay-tooling.patch
 
