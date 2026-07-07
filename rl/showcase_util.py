@@ -28,8 +28,10 @@ def ensure_ae(ae_path: Path) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     from huggingface_hub import hf_hub_download
 
-    name = dest.name
-    src = hf_hub_download("djmango/openfront-tile-autoencoder", name)
+    hf_name = __import__("os").environ.get("AE_HF_NAME")
+    if not hf_name:
+        hf_name = "ae_v31_d8c32.pt" if "ae_v31_d8c32" in str(ae_path) else dest.name
+    src = hf_hub_download("djmango/openfront-tile-autoencoder", hf_name)
     shutil.copy2(src, dest)
     return dest
 
