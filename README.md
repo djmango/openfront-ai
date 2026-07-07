@@ -214,22 +214,22 @@ all-zeros on 99.9%-empty grids).
 
 ### Watching the agent play
 
-`rl/watch.py` runs one greedy episode, renders a native-resolution WebM, and
-saves an engine `GameRecord` - the same format openfront.io archives - which
-the **real game client** can replay with the full UI:
+`rl/watch.py` runs one greedy episode and saves an engine `GameRecord` - the
+same format openfront.io archives - which the **real game client** replays with
+the full UI:
 
 ```bash
 uv run python -m rl.watch --policy runs/rl/ppo_v4/policy.pt --stage 4 \
-    --out replay.webm --record records-rl/game.json
+    --record records-rl/game.json
 openfront/node_modules/.bin/tsx scripts/verify_record.ts records-rl/game.json
 ```
 
-**Real-graphics video** - `scripts/render_client_replay.py` replays the
-record in the actual OpenFront client (headless Chromium): full game UI,
-terrain art, units, boats, nukes, leaderboard. Client hooks give the agent
-**AGENT** identity on the leaderboard, gold spawn ring, crown when first,
-"You Won!" modal. With a `.debug.json` sidecar (written by `rl.watch
---record`), the video also gets a live MODEL panel synced to the sim tick:
+**Client video** - `scripts/render_client_replay.py` replays the record in the
+actual OpenFront client (headless Chromium): full game UI, terrain art, units,
+boats, nukes, leaderboard. Client hooks give the agent **AGENT** identity on
+the leaderboard, gold spawn ring, crown when first, "You Won!" modal. With a
+`.debug.json` sidecar (written by `rl.watch --record`), the video also gets a
+live MODEL panel synced to the sim tick:
 
 ```bash
 uv run playwright install chromium   # one-time
