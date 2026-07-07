@@ -68,3 +68,18 @@ def write_json(path: Path, state: dict) -> None:
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def preview_webm_for_state(replay: dict) -> Path | None:
+    """Sidecar .webm next to the showcase GameRecord, if present."""
+    record = replay.get("record")
+    if record:
+        path = Path(record).with_suffix(".webm")
+        if path.is_file():
+            return path
+    preview = replay.get("preview_webm")
+    if preview:
+        path = Path(preview)
+        if path.is_file():
+            return path
+    return None

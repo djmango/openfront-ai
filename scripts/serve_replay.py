@@ -42,6 +42,21 @@ def build_index(records_dir: Path) -> dict[str, Path]:
     return idx
 
 
+def preview_webm_path(state_path: Path | None, records_dir: Path) -> Path | None:
+    state = load_state(state_path)
+    record = state.get("record")
+    if record:
+        path = Path(record).with_suffix(".webm")
+        if path.is_file():
+            return path
+    preview = state.get("preview_webm")
+    if preview:
+        path = Path(preview)
+        if path.is_file():
+            return path
+    return None
+
+
 class Handler(BaseHTTPRequestHandler):
     index: dict[str, Path] = {}
     records_dir: Path = Path("records-rl")
@@ -54,6 +69,16 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "*")
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_file(self, path: Path, ctype: str) -> None:
+        data = path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "public, max-age=300")
+        self.end_headers()
+        self.wfile.write(data)
 
     def do_OPTIONS(self) -> None:  # CORS preflight
         self._send(204, b"")
@@ -82,6 +107,13 @@ class Handler(BaseHTTPRequestHandler):
                 **load_state(self.state_path),
             }
             self._send(200, json.dumps(payload).encode())
+            return
+        if self.path == "/preview.webm":
+            preview = preview_webm_path(self.state_path, self.records_dir)
+            if preview is None:
+                self._send(404, b'{"error":"preview not ready"}')
+            else:
+                self._send_file(preview, "video/webm")
             return
 
         self._refresh_index()
