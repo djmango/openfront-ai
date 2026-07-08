@@ -7,6 +7,7 @@
 # carries optimizer state, curriculum stage, and step counters.
 #
 #   RUN_NAME=ppo_v2c ENVS=48 bash scripts/pod_train.sh
+#   RUN_NAME=ppo_v61 ENVS=384 NPROC=4 bash scripts/pod_train.sh  # multi-GPU DDP
 #
 # As a pod start command:
 #   bash -c "curl -fsSL https://raw.githubusercontent.com/djmango/openfront-ai/master/scripts/pod_train.sh | RUN_NAME=ppo_v2c bash"
@@ -14,7 +15,12 @@
 set -uo pipefail
 
 RUN_NAME="${RUN_NAME:-ppo_auto}"
+# ENVS must be divisible by NPROC (each rank owns ENVS/NPROC envs);
+# v6.1 fat-node target: ENVS=384 NPROC=4.
 ENVS="${ENVS:-48}"
+# GPUs: 1 -> plain python (single-process, identical to pre-v6.1);
+# >1 -> torchrun DDP, one rank per GPU.
+NPROC="${NPROC:-1}"
 STAGE="${STAGE:-0}"
 # OOM lever for late-curriculum maps: the 1/8 grid costs ~4x v3's conv
 # activations at World/Asia sizes; drop to 64 if stage 6+ OOMs.
@@ -165,9 +171,14 @@ while true; do
   # MALLOC_*: see pod_bc.sh - keeps large per-batch buffers on the reusable
   # heap instead of per-batch mmap/munmap (glibc caps its dynamic threshold
   # at 32MB; collated batches are bigger), preventing slow page-fault decay.
+  if [ "$NPROC" -gt 1 ]; then
+    LAUNCH="torchrun --standalone --nproc_per_node $NPROC -m"
+  else
+    LAUNCH="python -m"
+  fi
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH=. \
     MALLOC_MMAP_THRESHOLD_=268435456 MALLOC_TRIM_THRESHOLD_=268435456 \
-    python -m rl.ppo --envs "$ENVS" --updates 100000 --rollout 32 \
+    $LAUNCH rl.ppo --envs "$ENVS" --updates 100000 --rollout 32 \
     --minibatch "$MINIBATCH" --name "$RUN_NAME" --stage "$STAGE" $RESUME $INIT \
     2>&1 | tee -a "/tmp/train_$RUN_NAME.log"
   ELAPSED=$(( $(date +%s) - START_TS ))
