@@ -1,6 +1,6 @@
 [package]
 name = "ofrs"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 
 [lib]
@@ -14,7 +14,9 @@ zstd = "0.13"
 rayon = "1.10"
 half = "2"
 memmap2 = "0.9"
-serde_json = { version = "1", features = ["preserve_order"] }
+# float_roundtrip: correctly-rounded f64 parsing, needed for exact parity
+# with Python on quantity_frac labels (default parse can be off by 1 ULP).
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 rand = { version = "0.8", features = ["small_rng"] }
 md-5 = "0.10"
 

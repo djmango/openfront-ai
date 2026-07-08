@@ -11,14 +11,13 @@ pub const N_TRANSIENT: usize = 8;
 pub const N_STATIC: usize = 6;
 pub const P_FEAT: usize = 12;
 pub const N_SCALARS: usize = 8;
-pub const N_ACTIONS: usize = 14;
-pub const N_BUILD: usize = 6;
-pub const N_NUKE: usize = 3;
+pub const N_ACTIONS: usize = 21;
+pub const N_BUILD: usize = 7;
+pub const N_NUKE: usize = 5;
 pub const GW_MAX: i64 = 250;
 pub const IS_LAND_BIT: u8 = 7;
 pub const MAG_MASK: u8 = 0x1F;
 pub const IMPASSABLE_MAGNITUDE: u8 = 31;
-pub const QUANTITY_FRACS: [f64; 5] = [0.05, 0.10, 0.25, 0.50, 1.00];
 
 pub const A_NOOP: i64 = 0;
 pub const A_ATTACK: i64 = 1;
@@ -34,6 +33,13 @@ pub const A_DONATE_TROOPS: i64 = 10;
 pub const A_EMBARGO: i64 = 11;
 pub const A_RETREAT: i64 = 12;
 pub const A_SPAWN: i64 = 13;
+pub const A_UPGRADE_STRUCTURE: i64 = 14;
+pub const A_MOVE_WARSHIP: i64 = 15;
+pub const A_CANCEL_BOAT: i64 = 16;
+pub const A_DELETE_UNIT: i64 = 17;
+pub const A_EMBARGO_STOP: i64 = 18;
+pub const A_TARGET_PLAYER: i64 = 19;
+pub const A_ALLIANCE_EXTENSION: i64 = 20;
 
 pub fn action_index(name: &str) -> Option<i64> {
     Some(match name {
@@ -51,6 +57,13 @@ pub fn action_index(name: &str) -> Option<i64> {
         "embargo" => A_EMBARGO,
         "retreat" => A_RETREAT,
         "spawn" => A_SPAWN,
+        "upgrade_structure" => A_UPGRADE_STRUCTURE,
+        "move_warship" => A_MOVE_WARSHIP,
+        "cancel_boat" => A_CANCEL_BOAT,
+        "delete_unit" => A_DELETE_UNIT,
+        "embargo_stop" => A_EMBARGO_STOP,
+        "target_player" => A_TARGET_PLAYER,
+        "alliance_extension" => A_ALLIANCE_EXTENSION,
         _ => return None,
     })
 }
@@ -65,11 +78,25 @@ pub fn needs_player(a: i64) -> bool {
             | A_DONATE_GOLD
             | A_DONATE_TROOPS
             | A_EMBARGO
+            | A_RETREAT
+            | A_EMBARGO_STOP
+            | A_TARGET_PLAYER
+            | A_ALLIANCE_EXTENSION
     )
 }
 
 pub fn needs_tile(a: i64) -> bool {
-    matches!(a, A_BOAT | A_BUILD | A_LAUNCH_NUKE | A_SPAWN)
+    matches!(
+        a,
+        A_BOAT
+            | A_BUILD
+            | A_LAUNCH_NUKE
+            | A_SPAWN
+            | A_UPGRADE_STRUCTURE
+            | A_MOVE_WARSHIP
+            | A_CANCEL_BOAT
+            | A_DELETE_UNIT
+    )
 }
 
 pub fn needs_quantity(a: i64) -> bool {
@@ -84,17 +111,32 @@ pub fn build_index(unit: &str) -> Option<i64> {
         "Missile Silo" => 3,
         "SAM Launcher" => 4,
         "Factory" => 5,
+        "Warship" => 6,
         _ => return None,
     })
 }
 
-pub fn nuke_index(unit: &str) -> Option<i64> {
-    Some(match unit {
-        "Atom Bomb" => 0,
-        "Hydrogen Bomb" => 1,
-        "MIRV" => 2,
+/// 5-way nuke head: (unit, rocketDirectionUp). MIRV ignores the arc flag
+/// and gets a single row (mirrors rl/obs.py NUKE_TYPES).
+pub fn nuke_index(unit: &str, up: bool) -> Option<i64> {
+    Some(match (unit, up) {
+        ("Atom Bomb", true) => 0,
+        ("Atom Bomb", false) => 1,
+        ("Hydrogen Bomb", true) => 2,
+        ("Hydrogen Bomb", false) => 3,
+        ("MIRV", _) => 4,
         _ => return None,
     })
+}
+
+/// Both arc rows of a nuke unit (for buildableTypes -> legal_nuke).
+fn nuke_rows(unit: &str) -> &'static [usize] {
+    match unit {
+        "Atom Bomb" => &[0, 1],
+        "Hydrogen Bomb" => &[2, 3],
+        "MIRV" => &[4],
+        _ => &[],
+    }
 }
 
 /// UNIT_CLASSES order from ae/units.py; the first N_STATIC are the static
@@ -121,22 +163,13 @@ pub fn log_norm(x: f64) -> f32 {
     ((1.0 + x.max(0.0)).log10() / 8.0) as f32
 }
 
-pub fn quantity_bucket(amt: Option<f64>, avail: f64) -> i64 {
-    let amt = match amt {
-        Some(a) if avail > 0.0 => a,
-        _ => return 2,
-    };
-    let frac = (amt / avail).clamp(0.0, 1.0);
-    let mut best = 0usize;
-    let mut best_d = f64::INFINITY;
-    for (i, f) in QUANTITY_FRACS.iter().enumerate() {
-        let d = (frac - f).abs();
-        if d < best_d {
-            best_d = d;
-            best = i;
-        }
+/// Scalar 0-1 Beta-head target: fraction of available troops/gold actually
+/// committed. Mirrors rl/bc_data.py quantity_frac (None -> client default).
+pub fn quantity_frac(amt: Option<f64>, avail: f64) -> f64 {
+    match amt {
+        Some(a) if avail > 0.0 => (a / avail).clamp(0.0, 1.0),
+        _ => 0.25,
     }
-    best as i64
 }
 
 pub fn placement_bucket(p: f64) -> i64 {
@@ -278,6 +311,9 @@ pub struct Legal {
     pub donatable_gold: Vec<usize>,
     pub donatable_troops: Vec<usize>,
     pub embargoable: Vec<usize>,
+    pub stop_embargoable: Vec<usize>,
+    pub targetable: Vec<usize>,
+    pub extendable: Vec<usize>,
     pub can_expand: bool,
     pub can_boat: bool,
     pub troops: f64,
@@ -286,6 +322,10 @@ pub struct Legal {
     pub nuke_mask: [f32; N_NUKE],
     pub has_silo: bool,
     pub n_attacks: usize,
+    pub has_upgradable: bool,
+    pub has_warships: bool,
+    pub has_boats: bool,
+    pub has_deletable: bool,
 }
 
 /// Parse a legality `actions` object (bridge/common.ts legality()).
@@ -301,12 +341,13 @@ pub fn parse_legal(actions: &Value) -> Legal {
             if let Some(i) = build_index(t) {
                 build_mask[i as usize] = 1.0;
             }
-            if let Some(i) = nuke_index(t) {
-                nuke_mask[i as usize] = 1.0;
+            for &i in nuke_rows(t) {
+                nuke_mask[i] = 1.0;
             }
         }
     }
     let get = |k: &str| obj.get(k).cloned().unwrap_or(Value::Null);
+    let nonempty = |k: &str| get(k).as_array().is_some_and(|a| !a.is_empty());
     Legal {
         present: true,
         attackable: id_list(&get("attackable")),
@@ -316,6 +357,9 @@ pub fn parse_legal(actions: &Value) -> Legal {
         donatable_gold: id_list(&get("donatableGold")),
         donatable_troops: id_list(&get("donatableTroops")),
         embargoable: id_list(&get("embargoable")),
+        stop_embargoable: id_list(&get("stopEmbargoable")),
+        targetable: id_list(&get("targetable")),
+        extendable: id_list(&get("extendable")),
         can_expand: get("canExpand").as_bool().unwrap_or(true),
         can_boat: get("canBoat").as_bool().unwrap_or(true),
         troops: num(&get("troops")),
@@ -324,6 +368,10 @@ pub fn parse_legal(actions: &Value) -> Legal {
         nuke_mask,
         has_silo: get("hasSilo").as_bool().unwrap_or(false),
         n_attacks: get("attacks").as_array().map_or(0, |a| a.len()),
+        has_upgradable: nonempty("upgradable"),
+        has_warships: nonempty("warships"),
+        has_boats: nonempty("boats"),
+        has_deletable: nonempty("deletable"),
     }
 }
 
@@ -495,12 +543,28 @@ pub fn featurize(
         fill(A_DONATE_GOLD, &legal.donatable_gold);
         fill(A_DONATE_TROOPS, &legal.donatable_troops);
         fill(A_EMBARGO, &legal.embargoable);
+        fill(A_EMBARGO_STOP, &legal.stop_embargoable);
+        fill(A_TARGET_PLAYER, &legal.targetable);
+        fill(A_ALLIANCE_EXTENSION, &legal.extendable);
         act[A_EXPAND as usize] = legal.can_expand as u8 as f32;
         act[A_BOAT as usize] = (legal.can_boat && legal.troops > 100.0) as u8 as f32;
         act[A_BUILD as usize] = legal.build_mask.iter().any(|&x| x > 0.0) as u8 as f32;
         act[A_LAUNCH_NUKE as usize] =
             (legal.nuke_mask.iter().any(|&x| x > 0.0) && legal.has_silo) as u8 as f32;
-        act[A_RETREAT as usize] = (legal.n_attacks > 0) as u8 as f32;
+        // Targeted retreat: the player head picks WHICH attack to cancel
+        // (slot of its target; slot 0 covers terra-nullius expands).
+        if legal.n_attacks > 0 {
+            act[A_RETREAT as usize] = 1.0;
+            for a in &ents.attacks {
+                if me >= 0 && a.from == me as usize {
+                    ptarget[A_RETREAT as usize * MAX_SLOTS + slot_of(a.to)] = 1.0;
+                }
+            }
+        }
+        act[A_UPGRADE_STRUCTURE as usize] = legal.has_upgradable as u8 as f32;
+        act[A_MOVE_WARSHIP as usize] = legal.has_warships as u8 as f32;
+        act[A_CANCEL_BOAT as usize] = legal.has_boats as u8 as f32;
+        act[A_DELETE_UNIT as usize] = legal.has_deletable as u8 as f32;
     }
     let (legal_build, legal_nuke) = if alive && legal.present {
         (legal.build_mask, legal.nuke_mask)
