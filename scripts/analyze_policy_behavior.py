@@ -18,7 +18,7 @@ import torch
 from rl.curriculum import STAGES, placement, sample_episode, strengths
 from rl.env import OpenFrontEnv
 from rl.obs import ACTIONS, BUILD_TYPES, ObsBuilder, collate, encode_grids, load_ae
-from rl.policy import NEEDS_QUANTITY, QUANTITY_FRACS, Policy
+from rl.policy import NEEDS_QUANTITY, Policy
 from rl.ppo_translate import IntentTranslator, spawn_randomly
 
 STRUCT_TYPES = {"City", "Port", "Defense Post", "Missile Silo", "SAM Launcher", "Factory"}
@@ -95,8 +95,10 @@ def run_one(policy, ae, device: str, stage: int, seed: str, greedy: bool) -> dic
             actions[action] += 1
             if action == "build":
                 builds[BUILD_TYPES[choice.get("build_type", 0)]] += 1
-            if action in NEEDS_QUANTITY and "quantity" in choice:
-                quantities[f"{action}@{int(QUANTITY_FRACS[choice['quantity']] * 100)}%"] += 1
+            if action in NEEDS_QUANTITY and "quantity_frac" in choice:
+                # Decile-bucket the scalar Beta fraction for the summary.
+                decile = min(9, int(choice["quantity_frac"] * 10))
+                quantities[f"{action}@{decile * 10}-{decile * 10 + 10}%"] += 1
             intents = translator.translate(choice, obs)
             obs = env.step(intents, ticks=STAGES[stage].decision_ticks)
             wasted = int(obs.get("wasted", 0))
