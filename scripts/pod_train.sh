@@ -176,7 +176,11 @@ while true; do
   else
     LAUNCH="python -m"
   fi
+  # NCCL_NVLS_ENABLE=0: NVLS (NVLink SHARP multicast) needs cuMem multicast
+  # APIs that RunPod containers don't expose - NCCL init dies with CUDA
+  # error 401. Plain NVLink P2P is plenty at our collective sizes.
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH=. \
+    NCCL_NVLS_ENABLE=0 \
     MALLOC_MMAP_THRESHOLD_=268435456 MALLOC_TRIM_THRESHOLD_=268435456 \
     $LAUNCH rl.ppo --envs "$ENVS" --updates 100000 --rollout 32 \
     --minibatch "$MINIBATCH" --name "$RUN_NAME" --stage "$STAGE" $RESUME $INIT \
