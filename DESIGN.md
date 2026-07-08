@@ -198,9 +198,19 @@ layers (kept at grid resolution for pointer head 3, plus a pooled vector).
 Concatenate pooled spatial + pooled tokens + scalars -> trunk MLP (LSTM
 later if needed) -> action heads.
 
-### v7: full-state observation expansion
+### v7: full-state observation expansion + foveated two-stream resolution
 
-v6's transient/entity streams omitted several things a human player sees
+v7 is two observation changes shipping as one version (both break every
+checkpoint shape, so splitting them would cost a second from-scratch
+retrain for nothing): a **full-state expansion** (implemented) and a
+**foveated two-stream resolution** (designed, to build - see the
+subsection below). BC and PPO checkpoints are **not** compatible across
+this change (every shape constant below moved); full retrain from
+scratch. Per the BC moratorium (devlog, Jul 8), `ppo_v7` launches from
+scratch with no BC warm start and there is no `bc_v7`.
+
+**Part 1 - full-state expansion.** v6's transient/entity streams omitted
+several things a human player sees
 that only mattered once bots got good enough to punish blindness to them:
 other players' land attacks (only boat/nuke arrivals were visible), which
 unit owns which tile, troop counts in transit on boats, alliance expiry,
@@ -208,9 +218,8 @@ trade-ship destinations, per-unit health/cooldown, tile defense bonus,
 target-painting, income rate, the doomsday clock, and the rail network.
 v7 closes these gaps, entirely through the existing AE-bypass paths (raw
 grid channels, player-feature vectors, global scalars) - the frozen
-spatial AE (`ae/model_v3.py`) is untouched, so no AE retraining is
-needed. BC and PPO checkpoints are **not** compatible across this change
-(every shape constant below moved); full retrain from scratch.
+spatial AE (`ae/model_v3.py`) is untouched by this part, so it needs no
+AE retraining (the foveation part needs an AE /16 fine-tune; see below).
 
 - **Transient grid planes reworked and expanded** (`N_TRANSIENT`: 8 ->
   53; `C_GRID`: 43 -> 89). Previously transient planes were flat
@@ -265,6 +274,39 @@ needed. BC and PPO checkpoints are **not** compatible across this change
   live constants and falls back to the pure-Python sampler on mismatch,
   so training is always correct, just slower until the Rust side is
   ported.
+
+**Part 2 - foveated two-stream resolution.** The v3.1 AE ablation
+rejected *uniform* /16 latents (border accuracy 78.5% at /16 vs 89.3% at
+/8), but strategy-level context doesn't need pixel borders. The single
+/8 grid stream is replaced by two:
+
+- **Coarse global stream, /16 over the full map**: AE latents at /16
+  (fine-tuned head off the frozen `d8c32` encoder, not a from-scratch
+  AE) plus the transient/bypass channel stack region-averaged to /16.
+  Every tile of the map is always represented.
+- **Fine stream, /8, restricted to own territory + the border band**:
+  the full `C_GRID` channel stack, extending the existing exact-borders
+  local-crop machinery in `rl/obs.py`, plus a coverage-mask channel so
+  the trunk can tell "empty" from "outside the fovea". Cells outside
+  coverage are zeroed and masked out of fine-stream pointer logits.
+- **Two-level tile pointer heads**: near targets (attacks, expansion,
+  structure placement) refine on the fine stream; far targets (nuke aim
+  points, cross-map boat destinations) resolve at coarse-cell precision.
+  Coarse-cell softmax first, masked fine refinement where the picked
+  cell has fine coverage. Legality masks in `rl/env.py` follow the same
+  two-level structure.
+
+This cuts update, rollout, and (later, async Phase C) transport cost -
+~4x fewer global latent cells on the big maps that dominate late
+curriculum. Gates before `ppo_v7`: the AE /16 fine-tune must hit
+region-level fidelity (structure precision/recall ~1.0; borders are the
+fine stream's job, so the /16 head is not held to the /8 border bar),
+and `ppo_v7` must clear stages 0-3 in wall-clock comparable to the v6
+lineage with per-update cost on big-map stages measurably under v6.1's.
+Fallback: fine stream covering the whole map (= uniform /8, foveation
+off via config) must remain a supported degenerate case. Still rejected:
+raw full-res maps with no AE (~64x per-latent-cell update FLOPs);
+submanifold sparse conv stays an unscheduled stretch option.
 
 ## Environment bridge contract
 
