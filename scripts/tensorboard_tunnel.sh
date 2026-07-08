@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-POD="${1:-openfront-rl4}"
+POD="${1:-openfront-rl5}"
 LOCAL_PORT="${LOCAL_PORT:-19123}"
 REMOTE_PORT="${REMOTE_PORT:-19123}"
 

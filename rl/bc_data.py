@@ -44,7 +44,26 @@ try:
 except ImportError:  # pragma: no cover
     _loads = json.loads
 
-from rl.obs import ACTIONS, BUILD_TYPES, NUKE_TYPES, REGION, ObsBuilder
+from rl.obs import (
+    ACTIONS,
+    BUILD_TYPES,
+    N_SCALARS,
+    N_TRANSIENT,
+    NUKE_TYPES,
+    P_FEAT,
+    REGION,
+    ObsBuilder,
+)
+
+# rust/ofrs's Sampler (feat.rs) is a hand-ported, parity-tested mirror of
+# ObsBuilder.prepare() frozen at obs v4/v6's shapes. It has not been ported
+# to v7's ownership-aware transient planes / extra player+scalar features
+# yet, so BCSampler below only wires up the native fast path when the
+# schema still matches - otherwise every sample silently came back the
+# wrong shape (or, worse, right shape/wrong values). Falls back to the
+# (slower, always-correct) pure-Python sampler until feat.rs/sampler.rs get
+# a v7 port.
+_NATIVE_SAMPLER_SCHEMA = (12, 8, 8)  # (P_FEAT, N_TRANSIENT, N_SCALARS) feat.rs implements
 from rl.policy import NEEDS_PLAYER, NEEDS_QUANTITY, NEEDS_TILE
 
 N_PLACEMENT_BUCKETS = 8
@@ -100,8 +119,9 @@ class CachedGame:
     def step(self, i: int) -> dict:
         return _loads(self._d(self._steps, self._step_off, i, 1 << 26))
 
-    def frame(self, tick: int) -> tuple[np.ndarray, np.ndarray]:
-        """(owner slots uint8 (hr, wr), packed fallout (hr, wr/8))."""
+    def frame(self, tick: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """(owner slots uint8 (hr, wr), packed fallout (hr, wr/8), packed
+        defense bonus (hr, wr/8))."""
         from rl.native import decode_frame
 
         i = self._tick_row[tick]
@@ -222,18 +242,31 @@ class BCSampler:
         self._builders: dict[Path, ObsBuilder] = {}
         # Rust fast path (rust/ofrs sampler.rs): decode + featurize + labels
         # in native threads, ~10x a Python draw and GIL-free. Parity with
-        # this class is enforced by scripts/test_ofrs_parity.py.
+        # this class is enforced by scripts/test_ofrs_parity.py. Gated on
+        # schema match (see _NATIVE_SAMPLER_SCHEMA above) - do not remove
+        # this check without porting feat.rs/sampler.rs to the current
+        # rl/obs.py shapes first.
         self._native = None
-        try:
-            import ofrs
+        if (P_FEAT, N_TRANSIENT, N_SCALARS) == _NATIVE_SAMPLER_SCHEMA:
+            try:
+                import ofrs
 
-            self._native = ofrs.Sampler(
-                [str(r) for r in roots], holdout_every=holdout_every,
-                holdout=holdout, noop_frac=noop_frac, spawn_frac=spawn_frac,
-                seed=seed,
+                self._native = ofrs.Sampler(
+                    [str(r) for r in roots], holdout_every=holdout_every,
+                    holdout=holdout, noop_frac=noop_frac, spawn_frac=spawn_frac,
+                    seed=seed,
+                )
+            except ImportError:
+                pass
+        else:
+            print(
+                "BCSampler: rl/obs.py schema "
+                f"(P_FEAT={P_FEAT}, N_TRANSIENT={N_TRANSIENT}, N_SCALARS={N_SCALARS}) "
+                f"no longer matches the native sampler's frozen port {_NATIVE_SAMPLER_SCHEMA} "
+                "- using the pure-Python sampler (slower, always correct) until "
+                "rust/ofrs/src/{feat,sampler}.rs are ported.",
+                flush=True,
             )
-        except ImportError:
-            pass
 
     def _builder(self, game: CachedGame) -> ObsBuilder:
         if game.path not in self._builders:
@@ -258,7 +291,7 @@ class BCSampler:
 
     def _obs(self, game: CachedGame, tick: int, entities: dict, leg: dict,
              spawn: bool) -> dict:
-        owners, fallout_packed = game.frame(tick)
+        owners, fallout_packed, defense_bonus_packed = game.frame(tick)
         return {
             "tick": tick,
             "spawnPhase": spawn,
@@ -266,6 +299,7 @@ class BCSampler:
             "alive": not spawn,
             "owners_slots": owners,
             "fallout_packed": fallout_packed,
+            "defense_bonus_packed": defense_bonus_packed,
             "entities": entities,
             "legal": leg.get("legal", {"actions": {}}),
         }

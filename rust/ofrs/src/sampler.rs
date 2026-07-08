@@ -228,16 +228,27 @@ impl Game {
         serde_json::from_slice(&raw).map_err(|e| format!("ent json: {e}"))
     }
 
-    fn frame(&self, tick: i64) -> Result<(Vec<u8>, Vec<u8>), String> {
+    /// (owner slots, packed fallout, packed defense bonus). v7: frames.zst
+    /// (CACHE_FORMAT=2) gained the third plane; the sampler's own Feat/
+    /// featurize() port (feat.rs) still mirrors the frozen obs v4 schema and
+    /// does not consume defense bonus yet - see BCSampler's native-sampler
+    /// version guard in rl/bc_data.py, which disables this fast path until
+    /// feat.rs gets a v7 parity port.
+    fn frame(&self, tick: i64) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), String> {
         let i = *self.tick_row.get(&tick).ok_or("tick not in cache")?;
         let blob = &self.frames[self.frame_off[i]..self.frame_off[i + 1]];
         let hw = self.hr * self.wr;
-        let total = hw + self.hr * (self.wr / 8);
+        let plane = self.hr * (self.wr / 8);
+        let total = hw + 2 * plane;
         let raw = zstd::bulk::decompress(blob, total).map_err(|e| format!("frame zstd: {e}"))?;
         if raw.len() != total {
             return Err(format!("frame size {} != {total}", raw.len()));
         }
-        Ok((raw[..hw].to_vec(), raw[hw..].to_vec()))
+        Ok((
+            raw[..hw].to_vec(),
+            raw[hw..hw + plane].to_vec(),
+            raw[hw + plane..].to_vec(),
+        ))
     }
 
     fn placement(&self, cid: &str) -> f64 {
@@ -353,7 +364,7 @@ fn featurize_for(
     ents_v: &Value,
     legal: &Legal,
 ) -> Result<(Vec<u8>, Vec<u8>, Feat), String> {
-    let (owners, fallout) = game.frame(tick)?;
+    let (owners, fallout, _defense_bonus) = game.frame(tick)?;
     let ents = parse_ents(ents_v);
     let f = featurize(
         game.gh, game.gw, &game.lut, &game.land, &game.mag, &owners, tick, spawn, !spawn, me,

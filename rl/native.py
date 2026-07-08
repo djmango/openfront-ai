@@ -17,8 +17,12 @@ except ImportError:  # pragma: no cover - extension not built
 HAVE_NATIVE = _ofrs is not None
 
 
-def decode_frame(blob: bytes, hr: int, wr: int, dctx) -> tuple[np.ndarray, np.ndarray]:
-    """zstd frame blob -> (owner slots (hr, wr) u8, packed fallout (hr, wr/8) u8).
+def decode_frame(
+    blob: bytes, hr: int, wr: int, dctx
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """zstd frame blob -> (owner slots (hr, wr) u8, packed fallout (hr, wr/8)
+    u8, packed defense bonus (hr, wr/8) u8) (v7: CACHE_FORMAT=2, three
+    planes - regenerate stale caches with scripts/prefeaturize_bc.py).
 
     `dctx` is the caller's thread-local zstd decompressor, used only by the
     fallback path.
@@ -26,10 +30,12 @@ def decode_frame(blob: bytes, hr: int, wr: int, dctx) -> tuple[np.ndarray, np.nd
     if _ofrs is not None:
         return _ofrs.decode_frame(blob, hr, wr)
     hw = hr * wr
-    raw = dctx.decompress(blob, max_output_size=hw * 2)
+    plane = hr * (wr // 8)
+    raw = dctx.decompress(blob, max_output_size=hw + 2 * plane)
     slots = np.frombuffer(raw[:hw], dtype=np.uint8).reshape(hr, wr)
-    packed = np.frombuffer(raw[hw:], dtype=np.uint8).reshape(hr, -1)
-    return slots, packed
+    fallout = np.frombuffer(raw[hw : hw + plane], dtype=np.uint8).reshape(hr, -1)
+    defense_bonus = np.frombuffer(raw[hw + plane :], dtype=np.uint8).reshape(hr, -1)
+    return slots, fallout, defense_bonus
 
 
 def collate_grids(grids: list[np.ndarray], gh: int, gw: int) -> np.ndarray:

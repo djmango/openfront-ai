@@ -6,7 +6,8 @@ which capped BC training at ~34 ex/s. This pass converts each game with a
 bc.json.gz sidecar into cache-bc/:
 
   frames.zst    per-step zstd-1 frames: strided owner-slot uint8 (hr*wr)
-                ++ packbits fallout (hr*wr/8). ~0.3ms to decode.
+                ++ packbits fallout (hr*wr/8) ++ packbits defense bonus
+                (hr*wr/8) (v7: CACHE_FORMAT=2). ~0.3ms to decode.
   ents.zst      per-step zstd-1 orjson entity blobs, coordinates already
                 strided. ~0.1ms to decode.
   steps.zst     per-step zstd-1 orjson blobs of the bc step (legality per
@@ -49,8 +50,13 @@ from rl.obs import REGION
 
 OWNER_MASK = 0x0FFF
 FALLOUT_BIT = 13
+DEFENSE_BONUS_BIT = 14
 
-CACHE_FORMAT = 1
+# v7: frames.zst gained a third packed plane (defense bonus). Bumping this
+# doesn't by itself force a rebuild (the mtime check below is what decides
+# that) - delete stale cache-bc/ dirs, or touch every bc.json.gz sidecar,
+# to force a full re-featurize after this change.
+CACHE_FORMAT = 2
 
 
 def pick_stride(h: int, w: int) -> int | None:
@@ -120,10 +126,22 @@ def build_cache(game_dir: Path) -> str:
     if not bc_path.exists() or not (game_dir / "meta.json").exists():
         return f"no-sidecar {game_dir.name}"
     idx_path = cache / "index.json"
-    # Rebuild when the sidecar was regenerated (e.g. formatVersion upgrade).
-    if idx_path.exists() and idx_path.stat().st_mtime >= bc_path.stat().st_mtime:
-        return f"skip {game_dir.name}"
+    stale_format = False
     if idx_path.exists():
+        try:
+            stale_format = json.loads(idx_path.read_text()).get("format") != CACHE_FORMAT
+        except (json.JSONDecodeError, OSError):
+            stale_format = True
+    # Rebuild when the sidecar was regenerated (e.g. formatVersion upgrade)
+    # or the on-disk cache predates a CACHE_FORMAT bump (e.g. v7 added the
+    # defense-bonus plane).
+    if (
+        idx_path.exists()
+        and not stale_format
+        and idx_path.stat().st_mtime >= bc_path.stat().st_mtime
+    ):
+        return f"skip {game_dir.name}"
+    if idx_path.exists() and not stale_format:
         msg = refresh_labels(game_dir, cache)
         if msg is not None:
             return msg
@@ -172,7 +190,12 @@ def build_cache(game_dir: Path) -> str:
             fallout = np.packbits(
                 ((state >> FALLOUT_BIT) & 1).astype(np.uint8), axis=1
             )
-            blob = comp.compress(slots.tobytes() + fallout.tobytes())
+            defense_bonus = np.packbits(
+                ((state >> DEFENSE_BONUS_BIT) & 1).astype(np.uint8), axis=1
+            )
+            blob = comp.compress(
+                slots.tobytes() + fallout.tobytes() + defense_bonus.tobytes()
+            )
             ff.write(blob)
             frame_off[i + 1] = frame_off[i] + len(blob)
 

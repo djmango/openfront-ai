@@ -1012,7 +1012,7 @@ playable pure-BC baseline:</p>
     <code>ppo --init</code>). On HF as <code>v6_bc/policy.pt</code>.</li>
   <li>Play: <code>bash scripts/play_live.sh --run-name v6_bc</code> (now the script default).
     Or short PPO: <code>python -m rl.ppo --init runs/rl/v6_bc/policy.pt …</code> on a
-    <b>v6-shape</b> checkout - not against the in-progress v7 obs tree.</li>
+    <b>v6-shape</b> checkout (pre-v7 <code>C_GRID=43</code>) - not against the v7 obs tree.</li>
   <li>No <code>v7_bc</code> until a post-regen BC retrain; naming reserved.</li>
 </ul>
 <p class="d">Net: BC stays in the toolbox as a cheap prior, not as a research track. Next
@@ -1133,12 +1133,13 @@ doesn't show up in any code diff.</p>
 <p><b>Remaining before BC/PPO retrain can start:</b> prefeaturize the freshly re-replayed archive
 into a new <code>cache-bc/</code> (CPU-bound, so doing it on the homelab's 20 cores rather than a
 GPU pod), upload the refreshed <code>maps/</code>/<code>bc/</code>/<code>cache-bc/</code> tars to
-the <code>djmango/openfront-human-games</code> HF dataset repo, push the v7 code to
-<code>origin/master</code> (deliberately held back until the data is ready, since
-<code>pod_bc.sh</code>'s bootstrap does a <code>git reset --hard origin/master</code> on every
-restart - pushing early risks a pod resuming an old checkpoint against new-shape code and crashing
-on a tensor-shape mismatch), then launch fresh <code>bc_v7</code> and, once that converges,
-<code>ppo_v7</code> runs from scratch.</p>
+the <code>djmango/openfront-human-games</code> HF dataset repo, then <b>push</b> the already-
+committed v7 code to <code>origin/master</code> (push deliberately held back until the data is
+ready - <code>pod_train.sh</code>/<code>pod_bc.sh</code> bootstrap with
+<code>git reset --hard origin/master</code>, so pushing early would make rl5's next restart load
+v7 shapes against a v6.1 checkpoint and crash), then launch fresh <code>bc_v7</code> and, once
+that converges, <code>ppo_v7</code> from scratch. Until then: keep local master at v7 for the
+homelab regen; rl5 stays on the last pushed commit.</p>
 
 <h2 class="date" id="reference">Reference and open threads</h2>
 <p class="session">Tooling, bugs, lessons, infra, recipes, backlog.</p>

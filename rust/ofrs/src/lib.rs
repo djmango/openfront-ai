@@ -3,7 +3,8 @@
 //! Targets the two stable, allocation-heavy loops that profiled hot in
 //! Python and whose formats are frozen (cache-bc CACHE_FORMAT=1, obs v4):
 //!
-//!   decode_frame   zstd frame -> (owner slots, packed fallout), one copy
+//!   decode_frame   zstd frame -> (owner slots, packed fallout, packed
+//!                  defense bonus), one copy
 //!   collate_grids  pad+stack C-contiguous (C,h,w) arrays to (B,C,gh,gw)
 //!   collate_masks  pad+stack (h,w) arrays to (B,gh,gw)
 //!
@@ -24,34 +25,44 @@ use pyo3::types::{PyBytes, PyDict, PyList};
 use rayon::prelude::*;
 
 /// zstd-decompress one cache-bc frame blob and split it into the owner-slot
-/// grid (hr, wr) and the packbits fallout plane (hr, wr/8).
+/// grid (hr, wr), the packbits fallout plane (hr, wr/8), and the packbits
+/// defense-bonus plane (hr, wr/8) (v7: CACHE_FORMAT=2 - a v1 frame is
+/// `hw` bytes short and rejected below rather than silently misread).
 #[pyfunction]
 fn decode_frame<'py>(
     py: Python<'py>,
     blob: &Bound<'py, PyBytes>,
     hr: usize,
     wr: usize,
-) -> PyResult<(Bound<'py, PyArray2<u8>>, Bound<'py, PyArray2<u8>>)> {
+) -> PyResult<(
+    Bound<'py, PyArray2<u8>>,
+    Bound<'py, PyArray2<u8>>,
+    Bound<'py, PyArray2<u8>>,
+)> {
     let src = blob.as_bytes();
     let hw = hr * wr;
     let packed_w = wr / 8; // wr is a multiple of REGION=8
-    let total = hw + hr * packed_w;
+    let plane = hr * packed_w;
+    let total = hw + 2 * plane;
     let raw = py
         .allow_threads(|| zstd::bulk::decompress(src, total))
         .map_err(|e| PyValueError::new_err(format!("zstd: {e}")))?;
     if raw.len() != total {
         return Err(PyValueError::new_err(format!(
-            "frame size {} != {total}",
+            "frame size {} != {total} (stale CACHE_FORMAT=1 cache? re-run prefeaturize_bc.py)",
             raw.len()
         )));
     }
     let owners = PyArray1::from_slice(py, &raw[..hw])
         .reshape([hr, wr])
         .map_err(|e| PyValueError::new_err(format!("owners: {e}")))?;
-    let fallout = PyArray1::from_slice(py, &raw[hw..])
+    let fallout = PyArray1::from_slice(py, &raw[hw..hw + plane])
         .reshape([hr, packed_w])
         .map_err(|e| PyValueError::new_err(format!("fallout: {e}")))?;
-    Ok((owners, fallout))
+    let defense_bonus = PyArray1::from_slice(py, &raw[hw + plane..])
+        .reshape([hr, packed_w])
+        .map_err(|e| PyValueError::new_err(format!("defense_bonus: {e}")))?;
+    Ok((owners, fallout, defense_bonus))
 }
 
 struct Src {
