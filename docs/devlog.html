@@ -31,6 +31,7 @@
   <a href="#runs">Run ledger</a> ·
   <a href="#timeline">Timeline</a> ·
   <a href="#bc-verdict">BC verdict</a> ·
+  <a href="#webbot">Webbot</a> ·
   <a href="#v7-obs">July 8th, evening</a> ·
   <a href="#v6-night-scaling">July 8th, daytime</a> ·
   <a href="#v51-freeze">July 7th, evening</a> ·
@@ -57,23 +58,18 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 8th, 2026, evening</h2>
-  <p><b><a href="#v7-obs">v7: full-state observation expansion</a></b> is implemented (uncommitted,
-  not yet pushed): closes the remaining gaps between true engine state and what the policy sees -
-  other players' land attacks (with retreat state), who owns which unit, boat troop counts,
-  alliance-expiry timers, SAM/MIRV/Train units, trade-ship destinations, per-unit health/cooldown,
-  tile defense bonus, target-painting, income rates, the doomsday clock - entirely through the
-  existing AE-bypass paths, so the frozen spatial AE needs no retraining, but every BC/PPO shape
-  constant moved (<code>C_GRID</code> 43→89, <code>P_FEAT</code> 12→21, <code>N_SCALARS</code>
-  8→11) so checkpoints do not carry forward. Step one of the retrain, re-replaying all 303 human
-  games at their exact historical engine commits to relabel BC data with the new fields, is
-  running on the <b>homelab</b> (not a pod - see the <a href="#v7-ops">ops saga</a>) rather than
-  locally or on a pod, to keep it off the laptop and off billed GPU time.</p>
-  <p class="d" style="margin:.75rem 0 0"><code>ppo_v61</code> still climbing on rl5 (4x H100):
-  update ~976, stage 4, roll-win ~0.03-0.10 against the 0.55 gate, roll-score ~0.66-0.71 -
-  same safe-second wall as v6/v5.1. <code>bc_v6</code> frozen at step 35.6k and the bc3 A100
-  pod <b>terminated</b> (not just stopped) - see <a href="#bc-verdict">the BC verdict</a>.
-  Playable pure-BC baseline: <code>v6_bc</code> on HF
-  (<code>bash scripts/play_live.sh --run-name v6_bc</code>). Fleet is rl5 only ($11.96/hr).</p>
+  <p><b>Browser-side live play is deployed</b> on
+  <a href="https://openfrontai.skg.gg">openfrontai.skg.gg</a>: "Play vs Agent" no longer
+  spins up a server GPU/CPU <code>rl.play</code> process. A headless Chromium tab joins the
+  lobby and runs the AE encoder + policy via <code>onnxruntime-web</code> (WASM, Web Worker)
+  - same lobby, same MODEL overlay, inference on the client. See
+  <a href="#webbot">webbot</a>. First live bug after deploy: the bot re-rolled its spawn every
+  decision tick (engine <code>SpawnExecution</code> relinquish+re-place) until a bad pick left
+  it with 0 tiles - fixed by gating spawn on <code>!hasSpawned()</code>.</p>
+  <p class="d" style="margin:.75rem 0 0"><b><a href="#v7-obs">v7 obs expansion</a></b> is
+  implemented; BC re-replay of the 303 human games is running on the homelab.
+  <code>ppo_v61</code> still climbing on rl5 (4x H100). <code>bc_v6</code> frozen; playable
+  pure-BC baseline <code>v6_bc</code> on HF.</p>
 </div>
 <h3 id="status">Status snapshot (July 6th evening)</h3>
 <p>
@@ -933,6 +929,44 @@ section is a <i>different</i> v7 - a full-state observation expansion, planned a
 same day - that landed first because it's independent of the AE and needed no encoder work. The
 foveated two-stream resolution idea described here is still live, just pushed to whatever version
 number comes after the observation-expansion retrain lands.</p>
+
+<h2 class="date" id="webbot">July 8th, 2026 - evening: browser-side live play</h2>
+<p class="session">ONNX in the browser, headless Chromium agent, MODEL overlay restored, spawn
+re-roll bug.</p>
+
+<p>Live play on the homelab showcase no longer needs a server GPU/CPU model process. The pipeline:</p>
+<ul>
+  <li><code>scripts/export_onnx.py</code> exports the frozen AE encoder + policy to ONNX
+    (dynamic map axes; TransformerEncoder nested-tensor / MHA fast-path disabled so the trace
+    matches PyTorch numerically).</li>
+  <li><code>openfront/src/client/webbot/</code>: TypeScript ports of observation featurization
+    (<code>obsCore.ts</code> / <code>features.ts</code>), categorical+Beta sampling, and
+    intent translation, plus an <code>onnxruntime-web</code> session. Inference runs in a
+    dedicated Web Worker so the main-thread WebSocket ping loop stays alive (~5s forward pass
+    on World would otherwise trip the server's 60s ping timeout).</li>
+  <li>URL trigger: <code>?webbot=&lt;gameID&gt;</code> short-circuits the normal UI
+    (<code>Main.ts</code>) and joins the lobby as AgentRL. Bot identity is isolated to
+    <code>sessionStorage</code> so a human tab and a bot tab in the same browser don't fight
+    over <code>player_persistent_id</code>.</li>
+  <li><code>scripts/webbot_launcher.py</code>: headless Chromium (Playwright) opens that URL;
+    <code>showcase_hub.py</code>'s <code>/play</code> launches it instead of
+    <code>rl.play</code>. A small HTTP sidecar on <code>--debug-port</code> serves
+    <code>window.__webbotDebug</code> so the existing MODEL overlay keeps working.</li>
+  <li>Deploy: forked <code>djmango/OpenFrontIO</code> (upstream submodule we can't push to),
+    pinned via <code>openfront.commit</code> + Dockerfile remote URL, rebuilt the showcase
+    image on the homelab.</li>
+</ul>
+
+<p><b>First live bug (spawn re-roll loop).</b> During the spawn phase the action mask forced
+<code>spawn</code> every decision tick. Engine <code>SpawnExecution</code> treats every spawn
+intent as a re-roll: relinquish all tiles, then re-place. The bot teleported every ~10 ticks
+until a pick landed where <code>getSpawnTiles</code> returned empty
+(<code>SpawnExecution: cannot spawn AgentRL</code>), leaving it with 0 tiles →
+<code>isAlive()===false</code> → game over. Fix: gate spawn on
+<code>!player.hasSpawned()</code> (noop while waiting out the spawn timer), plus a translator
+guard that drops spawn intents once the agent already owns tiles. Python
+<code>rl.play</code> / PPO never hit this the same way because training episodes typically
+place once and the spawn phase ends quickly under the curriculum's start delay.</p>
 
 <h2 class="date" id="v7-obs">July 8th, 2026 - evening</h2>
 <p class="session">BC verdict + freeze, playable <code>v6_bc</code> baseline, and v7 full-state
