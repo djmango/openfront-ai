@@ -83,6 +83,37 @@ def scale_entities(entities: dict, ds: int) -> dict:
     return {**entities, "units": units}
 
 
+def refresh_labels(game_dir: Path, cache: Path) -> str | None:
+    """Label-only cache refresh: when the sidecar was regenerated (e.g. the
+    v6 action-label upgrade) the frames/ents/terrain/lut parts of the cache
+    are still valid - replays are deterministic and hash-verified, so the
+    snapshot ticks are identical. Rewrites steps.zst + the label-derived
+    index fields in place, which also works on pods that bootstrapped from
+    cache tars and never had the raw states/ dir. Returns None when the
+    ticks don't line up (caller falls back to a full rebuild)."""
+    idx = json.loads((cache / "index.json").read_text())
+    bc = _loads(gzip.decompress((game_dir / "bc.json.gz").read_bytes()))
+    spawn_ticks = [s["tick"] for s in bc.get("spawn_steps", [])]
+    step_ticks = [s["tick"] for s in bc["steps"]]
+    if spawn_ticks + step_ticks != idx["ticks"]:
+        return None
+
+    comp = zstd.ZstdCompressor(level=1)
+    step_off = np.zeros(len(bc["steps"]) + 1, dtype=np.int64)
+    with open(cache_tmp(cache, "steps.zst"), "wb") as sf:
+        for i, s in enumerate(bc["steps"]):
+            blob = comp.compress(_dumps(s))
+            sf.write(blob)
+            step_off[i + 1] = step_off[i] + len(blob)
+    idx["step_offsets"] = step_off.tolist()
+    idx["placements"] = bc["placements"]
+    idx["spawn_steps"] = bc.get("spawn_steps", [])
+    (cache / "index.json.tmp").write_text(json.dumps(idx))
+    for name in ("steps.zst", "index.json"):
+        (cache / f"{name}.tmp").rename(cache / name)
+    return f"refreshed {game_dir.name}: {len(bc['steps'])} steps"
+
+
 def build_cache(game_dir: Path) -> str:
     cache = game_dir / "cache-bc"
     bc_path = game_dir / "bc.json.gz"
@@ -92,6 +123,10 @@ def build_cache(game_dir: Path) -> str:
     # Rebuild when the sidecar was regenerated (e.g. formatVersion upgrade).
     if idx_path.exists() and idx_path.stat().st_mtime >= bc_path.stat().st_mtime:
         return f"skip {game_dir.name}"
+    if idx_path.exists():
+        msg = refresh_labels(game_dir, cache)
+        if msg is not None:
+            return msg
 
     meta = json.loads((game_dir / "meta.json").read_text())
     h, w = meta["height"], meta["width"]
