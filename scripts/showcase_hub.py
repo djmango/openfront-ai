@@ -170,6 +170,23 @@ def launch_agent(
     return subprocess.Popen(cmd, cwd=REPO)
 
 
+def launch_webbot_agent(game_id: str, worker_path: str) -> subprocess.Popen:
+    """Headless-browser agent: inference runs client-side (onnxruntime-web),
+    no server GPU/CPU model process needed. See scripts/webbot_launcher.py.
+    """
+    cmd = [
+        sys.executable,
+        "scripts/webbot_launcher.py",
+        "--host",
+        CLIENT_HOST,
+        "--game",
+        game_id,
+        "--worker-path",
+        worker_path,
+    ]
+    return subprocess.Popen(cmd, cwd=REPO)
+
+
 def proxy_debug(game_id: str) -> bytes | None:
     hub = load_hub_state()
     ports: list[int] = []
@@ -438,9 +455,6 @@ class HubHandler(BaseHTTPRequestHandler):
                 if _active_game and _active_proc and _active_proc.poll() is None:
                     log(f"reusing active lobby {_active_game}")
                     redirect = play_redirect(_active_game)
-                elif self.policy_path is None or self.ae_path is None:
-                    self._send(503, b'{"error":"policy not ready"}')
-                    return
                 else:
                     try:
                         info = create_play_lobby()
@@ -453,7 +467,7 @@ class HubHandler(BaseHTTPRequestHandler):
                     worker_index = int(info["workerIndex"])
                     worker_path = info.get("workerPath") or f"w{worker_index}"
                     _active_game = game_id
-                    _active_proc = launch_agent(game_id, self.policy_path, self.ae_path)
+                    _active_proc = launch_webbot_agent(game_id, worker_path)
 
                     hub_payload = {
                         "game_id": game_id,
