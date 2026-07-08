@@ -489,14 +489,19 @@ def _local_crops(
     y0 = (cy - LOCAL / 2).round().long().clamp(0, H - LOCAL)
     x0 = (cx - LOCAL / 2).round().long().clamp(0, W - LOCAL)
 
-    out = torch.empty(B, N_LOCAL, LOCAL, LOCAL, device=classmap.device)
-    for b in range(B):
-        cm = classmap[b, y0[b] : y0[b] + LOCAL, x0[b] : x0[b] + LOCAL]
-        out[b, 0] = cm == 1
-        out[b, 1] = cm == 2
-        out[b, 2] = cm == 3
-        out[b, 3] = land[b, y0[b] : y0[b] + LOCAL, x0[b] : x0[b] + LOCAL]
-    return out
+    # Batched gather (one kernel) instead of a per-sample Python loop: the
+    # loop profiled at ~0.9ms/sample - the single biggest cost of the
+    # cache-hit encode path once the AE was out of the picture.
+    ar = torch.arange(LOCAL, device=classmap.device)
+    yy = (y0[:, None] + ar)[:, :, None]  # (B, LOCAL, 1)
+    xx = (x0[:, None] + ar)[:, None, :]  # (B, 1, LOCAL)
+    bi = torch.arange(B, device=classmap.device)[:, None, None]
+    cm = classmap[bi, yy, xx]
+    ld = land[bi, yy, xx]
+    return torch.stack(
+        [(cm == 1).float(), (cm == 2).float(), (cm == 3).float(), ld.float()],
+        dim=1,
+    )
 
 
 # Reused per-thread staging buffers for the big full-res stacks below.
