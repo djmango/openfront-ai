@@ -30,6 +30,7 @@
   <a href="#now">Now</a> ·
   <a href="#runs">Run ledger</a> ·
   <a href="#timeline">Timeline</a> ·
+  <a href="#v51-freeze">July 7th, evening</a> ·
   <a href="#jul-7">July 7th</a> ·
   <a href="#jul-6-late">July 6th, late night</a> ·
   <a href="#jul-6-eve">July 6th, evening</a> ·
@@ -52,12 +53,15 @@
 </nav>
 
 <div class="now" id="now">
-  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 7th, 2026, midday</h2>
-  <p><code>ppo_v5</code> on rl4, running <b>v5.1</b>: structure-value rewards, per-stage win
-  gates (0.9 at stage 0 tapering to 0.3), curriculum reset to stage 0 with weights kept - it
-  must re-earn every stage under dominance gates (<a href="#v51-bc2fix">below</a>).
-  <code>bc_v4</code> on bc2 ~step 22k (holdout best 0.4525); feed decay <b>root-caused and fixed</b>
-  (<a href="#v51-bc2fix">mmap churn</a>). <code>bc_seq_v4</code> on bc3 ~step 5k (holdout 0.318).</p>
+  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 7th, 2026, evening</h2>
+  <p><code>ppo_v5</code> (v5.1) <b>frozen</b> at ~update 530, stage 4: the structure-value reward
+  and per-stage win gates worked - it re-earned stages 0-4 rapidly and cleared the stage-5 gate
+  <b>twice</b> - but both advances were lost to CUDA OOM crashes before checkpointing. OOM
+  root-caused and fixed (<a href="#oom-padding">collate padding</a>, not fragmentation), plus
+  checkpoint-on-advance. <b>v6 plan written</b> (<a href="#v6-plan">below</a>): 21 actions,
+  scalar quantity, 5-way nukes, warm start from frozen v5. <code>bc_v4</code> back at ~100 ex/s
+  after the <a href="#bcseq-verdict">malloc-threshold fix</a>; <code>bc_seq_v4</code> <b>killed</b>
+  (temporal BC loses at 8x the encode cost).</p>
   <p class="d" style="margin:.75rem 0 0">375k bot + 420k human snapshots · d8c32 encoder · 5.9M-param policy ·
   11 curriculum stages · encoder border accuracy 71.8% → 89.3% (human).</p>
 </div>
@@ -104,8 +108,8 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <code>ae_v3.pt</code> until the v3.1 winner is wired into <code>rl/obs.py</code>.</p>
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
-  <tr><td><code>ppo_v5</code></td><td>active (v5.1)</td>
-    <td>Launched July 7th morning. BC warm start from <code>bc_v4/bc_best.pt</code>, entropy floor (<code>--ent-floor 3.5</code>), PLACE_POW 1.5, loss-averse deltas (gain 5.0 / loss 6.5). Stages 0-4 in ~5.5h; roll-win 0.17 / score 0.85 on stage 4 by update 260. Relaunched midday as <b>v5.1</b>: structure-value share in the strength blend (<a href="#v51-bc2fix">denser rewards</a>), resumed from its own checkpoint. See <a href="#ppo-v5">PPO v5</a>.</td></tr>
+  <tr><td><code>ppo_v5</code></td><td><b>frozen</b> Jul 7 eve</td>
+    <td>Launched July 7th morning. BC warm start from <code>bc_v4/bc_best.pt</code>, entropy floor (<code>--ent-floor 3.5</code>), PLACE_POW 1.5, loss-averse deltas (gain 5.0 / loss 6.5). Stages 0-4 in ~5.5h; roll-win 0.17 / score 0.85 on stage 4 by update 260. Relaunched midday as <b>v5.1</b>: structure-value share in the strength blend (<a href="#v51-bc2fix">denser rewards</a>), resumed from its own checkpoint. See <a href="#ppo-v5">PPO v5</a>. <b>Frozen Jul 7 evening</b> at ~update 530, stage 4 (roll-win ~0.25 vs the 0.55 gate): re-earned stages 0-4 under dominance gates and cleared the stage-5 win gate twice, but both advances were lost to CUDA OOM before checkpointing. OOM root-caused and fixed post-freeze (<a href="#oom-padding">collate padding</a>, <code>36a8efb</code>). Weights are the v6 warm start. See <a href="#v51-freeze">the freeze postmortem</a>.</td></tr>
   <tr><td><code>ppo_v4</code></td><td><b>retired</b> Jul 7</td>
     <td>The full v4 stack from scratch: d8c32 encoder at 1/8, learned spawns, local owner crop,
     eval loop. Stages 0→3 in ~2h, stage 4 by ~3.6h despite two restarts (OOM at minibatch 128,
@@ -121,10 +125,14 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
     full-res stacks) and fixed with persistent staging buffers - see
     <a href="#v51-bc2fix">Jul 7 midday</a>. Uploads <code>bc.pt</code> +
     <code>bc_best.pt</code> to HF.</td></tr>
-  <tr><td><code>bc_seq_v4</code></td><td>active</td>
+  <tr><td><code>bc_seq_v4</code></td><td><b>killed</b> Jul 7 eve</td>
     <td>The temporal transformer experiment (--seq 8), judged properly this time: same cache-bc
     data as bc_v4, A100-80GB pod (bc3), batch 8 x accum 4 effective 32. Pod bootstraps from the
-    prebuilt cache-bc tars on HF (no raw download, no replay, no prefeaturize).</td></tr>
+    prebuilt cache-bc tars on HF (no raw download, no replay, no prefeaturize).
+    <b>Killed Jul 7 evening:</b> holdout action accuracy 0.48-0.60 vs the feedforward bc_v4's
+    0.65-0.70 at 8x the encode cost per sample; the A100 sat at ~0% utilization (~10 ex/s).
+    Temporal BC shelved until AE-latent caching makes sequence windows nearly free - see
+    <a href="#bcseq-verdict">the verdict</a>.</td></tr>
   <tr><td><code>ppo_v3</code></td><td><b>retired</b> Jul 6 night</td>
     <td>Curriculum v2 from scratch. Stage 4 (30 bots, Pangaea/Caucasus/BlackSea) by Jul 6
     evening, rolling win 0.6-0.7, roll-score 0.93. Local eval: 2W/2L over four stage-4 games,
@@ -641,6 +649,90 @@ doesn't). Two changes:</p>
   <li><b>Strength panel:</b> the composite index is not raw land - eco islands and military rushes
     can score honestly. Tuning <code>K_LAND/K_MIL/K_ECO</code> shifts which strategies the dense
     signal rewards mid-game.</li>
+</ul>
+
+<h2 class="date" id="v51-freeze">July 7th, 2026 - evening</h2>
+<p class="session">v5.1 freeze postmortem, the OOM root cause, temporal-BC verdict, v6 plan.</p>
+
+<h3 id="v51-verdict">ppo_v5.1 frozen: the MDP worked, the crashes ate the wins</h3>
+<p><code>ppo_v5</code> is <b>frozen</b> (run killed tonight; final state ~update 530, stage 4,
+roll-win ~0.25 against the 0.55 gate). The verdict on v5.1 is that the reward and gate design
+did their job: after the curriculum reset it re-earned stages 0-4 rapidly under the dominance
+gates, the structure-value reward (<code>K_BUILD</code>) is visibly expressed in play (see the
+<a href="#behavior">behavior analysis</a>), and it cleared the stage-5 win gate <b>twice</b>.
+Both advances were lost to CUDA OOM crashes before a checkpoint captured them - the run kept
+dying at exactly the moment it succeeded. The frozen weights become the v6 warm start.</p>
+
+<h3 id="oom-padding">OOM root cause: collate padding, not fragmentation (<code>36a8efb</code>)</h3>
+<ul>
+  <li><b>The real cause.</b> NOT fragmentation - <code>expandable_segments</code> was already on.
+    <code>collate()</code> pads every update minibatch to its largest grid, so one BetweenTwoSeas
+    sample (132x223 latent cells) padded all 128 samples to 29k cells, and
+    <code>loss.backward()</code> needed multi-GiB activation allocations - precisely at stage-5
+    entry, where the big maps first appear. The crash wasn't random; it was structural to
+    advancing.</li>
+  <li><b>The fix: zero padding waste.</b> Update minibatches are now split by native grid shape,
+    with a 1.6M latent-cell budget per forward/backward (<code>MAX_UPD_PIX</code> in
+    <code>rl/ppo.py</code>); sub-batch losses are weighted by sample fraction so the accumulated
+    gradients are numerically identical to the padded batch. Result: GPU 30.2 &rarr; ~25GB,
+    throughput ~353 &rarr; ~430 game-ticks/s, zero OOMs after deploy.</li>
+  <li><b>Checkpoint on curriculum advance</b> (same commit): a stage advance now flags an
+    immediate save at the end of the in-flight update instead of waiting out the 10-update
+    cadence. A cleared gate can no longer be lost to whatever kills the process next.</li>
+</ul>
+
+<h3 id="quantity-mix">The "always 20% attacks" mystery: resolved by measurement</h3>
+<p>Replays kept reading as if the agent always attacks with ~20% of its troops. New quantity-mix
+telemetry (TB + analyzer) settles it: the 5-bucket quantity head ({5,10,25,50,100}%) is alive
+and differentiated, favoring 10% and 25% attacks, with 100% almost never sampled - and a stream
+of 10-25% attacks <i>reads</i> as "about 20%". Coincidentally 20% is the engine default when
+<code>troops</code> is null, but our intents always carry explicit counts. Nothing was broken;
+the eyeball estimate landed on the mixture mean.</p>
+
+<h3 id="behavior">Behavior analysis: where the policy actually is</h3>
+<p><code>scripts/analyze_policy_behavior.py</code>, run on the rl4 GPU against the update-490
+checkpoint, 4 sampled episodes per stage:</p>
+<ul>
+  <li><b>Stage 3 win 3/4, stage 4 win 3/4.</b> The winning pattern: expand early, mass troops,
+    then snowball 200k &rarr; 900k tiles with streams of 10-25% boat+attack intents while
+    building continuously. One stage-4 win ended with 59 cities, 21 ports, 6 silos - the
+    structure reward is clearly expressed.</li>
+  <li><b>Stage 5: 0/4.</b> Dies tick 3,400-5,200 before establishing any economy (zero
+    structures in 3 of the 4 deaths), even on rehearsal Onion. The wall is the Easy &rarr;
+    Medium difficulty jump, not map size.</li>
+</ul>
+
+<h3 id="bcseq-verdict">bc_seq_v4 killed + the BC slow decay finally fixed (<code>9c030f7</code>)</h3>
+<ul>
+  <li><b>Temporal BC loses, decisively.</b> <code>bc_seq_v4</code> (temporal BC, seq=8) killed
+    on the bc3 A100: holdout action accuracy 0.48-0.60 vs the feedforward bc_v4's 0.65-0.70,
+    at 8x the encode cost per sample; the A100 sat at ~0% utilization (~10 ex/s). Lesson:
+    temporal BC is only worth revisiting after AE-latent caching makes sequence windows nearly
+    free.</li>
+  <li><b>BC slow-decay root cause, one level deeper.</b> glibc malloc's dynamic mmap threshold
+    caps at 32MB while batch buffers are 50-80MB, so every batch paid mmap/munmap plus
+    zero-page faults; <code>bc_v4</code> decayed 88 &rarr; 12 ex/s over ~5h, with the stall
+    moving to collate after the earlier obs.py staging fix. Fix:
+    <code>MALLOC_MMAP_THRESHOLD_=256MB</code> and <code>MALLOC_TRIM_THRESHOLD_=256MB</code> in
+    both pod launchers; <code>bc_v4</code> restarted at ~100 ex/s.</li>
+</ul>
+
+<h3 id="v6-plan">Next: v6 (plan written)</h3>
+<p>Highlights of the written plan:</p>
+<ul>
+  <li><b>Action space 14 &rarr; 21</b>, covering every mechanical human intent:
+    upgrade_structure, move_warship, cancel_boat, delete_unit, embargo_stop, target_player,
+    alliance_extension. Warship joins <code>BUILD_TYPES</code>.</li>
+  <li><b>Nuke head 3 &rarr; 5</b>: Atom/Hydrogen &times; arc direction + MIRV. The arc flips
+    the parabolic flight path for SAM evasion; MIRV ignores it.</li>
+  <li><b>Quantity head becomes a scalar</b>: a 0-1 Beta distribution replaces the 5-bucket
+    softmax.</li>
+  <li><b>BC sidecar re-replay</b> for new-action labels.</li>
+  <li><b>Extend-and-copy warm start</b> from frozen <code>ppo_v5</code>.</li>
+  <li><b>Per-update <code>state.json</code></b> to make the rolling win window
+    restart-proof.</li>
+  <li><b>AE-latent RAM-LRU cache</b> to make BC ~10x faster: encode is 90% of BC wall time,
+    re-computing a frozen deterministic function.</li>
 </ul>
 
 <h2 class="date" id="reference">Reference and open threads</h2>
