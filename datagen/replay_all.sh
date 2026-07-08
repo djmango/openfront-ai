@@ -8,7 +8,7 @@
 # Usage: datagen/replay_all.sh [records_dir] [out_dir] [parallelism]
 # BC=1 passes --bc (dump behavior-cloning sidecars; incremental over
 # already-replayed games). REBC=1 additionally passes --rebc to regenerate
-# existing sidecars (formatVersion 1 -> 2 upgrade for spawn supervision).
+# existing sidecars (e.g. formatVersion 2 -> 3 upgrade for v6 action labels).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
