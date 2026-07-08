@@ -410,28 +410,40 @@ class ObsBuilder:
 
 
 class ZCache:
-    """RAM LRU over frozen-AE latents, keyed (game, tick).
+    """RAM cache over frozen-AE latents, keyed (game, tick).
 
     The AE input (owners + terrain/fallout + static unit planes) is
     per-(game, tick) and the AE is frozen, so z is identical for every
     player sample at the same snapshot - BC re-encoded it per sample, per
-    epoch (~90% of wall). Latents are stored as contiguous fp16 numpy on
-    CPU RAM under a byte budget (--z-cache-gb). PPO must never use this:
-    its episodes are unique, and encode_grids only consults the cache for
-    raws that carry a "z_key" (only the BC samplers attach one).
+    epoch (~90% of wall). Latents are stored as fp16 numpy views into
+    1GiB slab arenas under a byte budget (--z-cache-gb); once the budget
+    is reached the cache stops inserting (with uniform random sampling
+    that equals LRU's hit rate, without any churn). PPO must never use
+    this: its episodes are unique, and encode_grids only consults the
+    cache for raws that carry a "z_key" (only the BC samplers attach one).
+
+    Slabs, not per-entry allocs: ~100k x 2.4MB mallocs interleaved with
+    the trainer's big transient batch buffers fragmented the glibc heap
+    within an hour (compact_stall climbing, collate 3.4s -> 25s per
+    window - the same decay 9c030f7 fought). Each slab sits above the
+    pinned MALLOC_MMAP_THRESHOLD, so it gets its own mmap and the heap
+    the batch buffers recycle stays compact.
 
     Also keeps a per-game land plane on the GPU (uint8): cache hits skip
     the terrain_static upload (AE-only input), but _local_crops still
     needs land - re-uploading 9.6MB fp32 per sample would eat most of the
     win, while all games together are ~0.7GB as uint8."""
 
-    def __init__(self, max_bytes: int):
-        from collections import OrderedDict
+    SLAB = 1 << 30
 
+    def __init__(self, max_bytes: int):
         self.max_bytes = max_bytes
-        self._d: "OrderedDict[tuple, np.ndarray]" = OrderedDict()
+        self._d: dict[tuple, np.ndarray] = {}
         self._land: dict[str, torch.Tensor] = {}
         self._lock = threading.Lock()
+        self._slab: np.ndarray | None = None
+        self._off = 0
+        self._slab_bytes = 0
         self.bytes = 0
         self.hits = 0
         self.misses = 0
@@ -442,7 +454,6 @@ class ZCache:
             if z is None:
                 self.misses += 1
                 return None
-            self._d.move_to_end(key)
             self.hits += 1
             return z
 
@@ -450,11 +461,22 @@ class ZCache:
         with self._lock:
             if key in self._d:
                 return
-            self._d[key] = z
+            nb = (z.nbytes + 15) & ~15  # keep slab offsets fp16-aligned
+            if self._slab is None or self._off + nb > self._slab.nbytes:
+                if self._slab_bytes + self.SLAB > self.max_bytes:
+                    return  # budget reached: cache saturates, never churns
+                self._slab = np.empty(self.SLAB, dtype=np.uint8)
+                self._slab_bytes += self.SLAB
+                self._off = 0
+            view = (
+                self._slab[self._off : self._off + z.nbytes]
+                .view(z.dtype)
+                .reshape(z.shape)
+            )
+            view[...] = z
+            self._off += nb
+            self._d[key] = view
             self.bytes += z.nbytes
-            while self.bytes > self.max_bytes and self._d:
-                _, old = self._d.popitem(last=False)
-                self.bytes -= old.nbytes
 
     def land(self, raw: dict, device: str) -> torch.Tensor:
         """(H, W) uint8 land plane on GPU, cached per game."""
