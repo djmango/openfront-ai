@@ -233,6 +233,11 @@ def main() -> None:
     ap.add_argument("--eval-every", type=int, default=500)
     ap.add_argument("--save-every", type=int, default=1000)
     ap.add_argument("--resume", default=None)
+    ap.add_argument("--init-extend", default=None,
+                    help="warm-start from a pre-v6 bc.pt via rl.ppo.init_extend: "
+                         "copies shape-matching tensors, extends grown heads "
+                         "(action 14->21, build +Warship, nuke 3->5), fresh "
+                         "Beta quantity head; skipped when --resume exists")
     args = ap.parse_args()
 
     # 3 memmaps per cached game x ~300 games, per process (workers inherit
@@ -278,6 +283,16 @@ def main() -> None:
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.steps)
     start_step = 0
     best_metric = -1.0
+    if args.init_extend and not args.resume:
+        # Same guard as rl.ppo: the supervisor passes --resume once a local
+        # bc.pt exists, so relaunches never re-extend from the old run.
+        from rl.ppo import init_extend
+
+        sd = torch.load(args.init_extend, map_location=device, weights_only=False)[
+            "model_state_dict"
+        ]
+        init_extend(model, sd)
+        print(f"init-extend warm start from {args.init_extend}")
     if args.resume and Path(args.resume).exists():
         ck = torch.load(args.resume, map_location=device, weights_only=False)
         model.load_state_dict(ck["model_state_dict"])
