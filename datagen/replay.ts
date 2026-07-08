@@ -585,6 +585,23 @@ export async function replayGame(
   };
 }
 
+// Whether an existing bc.json.gz is already at the current formatVersion, so
+// --rebc reruns (e.g. after a crash or restart) skip games instead of
+// re-replaying the whole dataset. The field is first in the serialized doc,
+// so peeking at the head of the gunzipped stream is enough.
+function bcIsCurrent(outDir: string): boolean {
+  try {
+    const buf = zlib.gunzipSync(
+      fs.readFileSync(path.join(outDir, "bc.json.gz")),
+    );
+    return /"formatVersion"\s*:\s*3\b/.test(
+      buf.subarray(0, 200).toString("utf8"),
+    );
+  } catch {
+    return false;
+  }
+}
+
 function loadRecord(file: string): GameRecord {
   const buf = fs.readFileSync(file);
   const json = file.endsWith(".gz")
@@ -637,8 +654,8 @@ async function main() {
     const outDir = path.join(outRoot, mapKey, gameID);
     const hasStates = fs.existsSync(path.join(outDir, "meta.json"));
     const hasBc = fs.existsSync(path.join(outDir, "bc.json.gz"));
-    if (hasStates && (!bc || (hasBc && !rebc))) {
-      continue; // already replayed (and bc-dumped, when requested)
+    if (hasStates && (!bc || (hasBc && (!rebc || bcIsCurrent(outDir))))) {
+      continue; // already replayed (and bc-dumped at the current format)
     }
     const started = Date.now();
     try {
