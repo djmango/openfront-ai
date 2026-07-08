@@ -10,6 +10,16 @@ Logs to TensorBoard (runs/rl/<name>).
 
 Usage:
   uv run python -m rl.ppo --envs 48 --updates 2000 --name ppo_v2 --stage 0
+
+Multi-GPU (v6.1): launch under torchrun; each rank owns an equal slice of
+the envs (own VecEnv + collector thread + rollout, pinned to its GPU) and
+runs the same minibatch loop on its rank-local data, syncing only
+gradients (one all-reduce per optimizer step). Rank 0 owns curriculum,
+the win window, checkpoints, state.json, and TensorBoard; episode results
+gather to it every update and stage changes broadcast back. WORLD_SIZE=1
+(plain python) is byte-for-byte the old single-process behavior.
+
+  torchrun --standalone --nproc_per_node 4 -m rl.ppo --envs 384 ...
 """
 
 import argparse
@@ -20,10 +30,12 @@ import queue
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
@@ -115,6 +127,19 @@ def init_extend(policy: Policy, sd: dict) -> None:
         print(f"init-extend: fresh {k}")
 
 
+class NullWriter:
+    """SummaryWriter stand-in for non-zero DDP ranks (rank 0 owns TB)."""
+
+    def add_scalar(self, *a, **k) -> None:
+        pass
+
+    def add_histogram(self, *a, **k) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
 def save_train_state(out_dir: Path, state: dict) -> None:
     """Atomic per-update sidecar so cheap training state (win window,
     stage, counters) never lags the 10-update weight cadence or vanishes
@@ -170,7 +195,9 @@ def main() -> None:
     ap.add_argument("--envs", type=int, default=8)
     ap.add_argument("--updates", type=int, default=1000)
     ap.add_argument("--rollout", type=int, default=32, help="steps per env per update")
-    ap.add_argument("--epochs", type=int, default=3)
+    ap.add_argument("--epochs", type=int, default=2,
+                    help="PPO epochs per rollout (v6.1: 3 -> 2 halves update "
+                         "time; watch loss/approx_kl + loss/clip_frac)")
     ap.add_argument("--minibatch", type=int, default=128)
     ap.add_argument("--lr", type=float, default=2.5e-4)
     ap.add_argument("--stage-lr-decay", type=float, default=0.85,
@@ -215,33 +242,62 @@ def main() -> None:
                          "(action 14->21, build 6->7, nuke 3->5 with the "
                          "arc rows seeded from the old per-type rows) and "
                          "leaves the Beta quantity head fresh")
-    ap.add_argument("--compile", action="store_true", help="torch.compile the policy")
+    ap.add_argument("--compile", action=argparse.BooleanOptionalAction, default=None,
+                    help="torch.compile the update path (policy.evaluate); "
+                         "default: on for CUDA, off for MPS/CPU")
     args = ap.parse_args()
 
-    device = (
-        "cuda" if torch.cuda.is_available()
-        else "mps" if torch.backends.mps.is_available() else "cpu"
-    )
-    print(f"device: {device}, envs: {args.envs}")
+    # DDP: torchrun sets RANK/WORLD_SIZE/LOCAL_RANK. Plain python (no
+    # torchrun) leaves world=1 and every dist branch below is skipped.
+    world = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    is_main = rank == 0
+    if world > 1:
+        # Long timeout: rank 0 runs the (minutes-long) eval passes alone
+        # while other ranks wait at the next collective.
+        dist.init_process_group(
+            "nccl" if torch.cuda.is_available() else "gloo",
+            timeout=timedelta(hours=2),
+        )
+
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+        device = f"cuda:{local_rank}"
+    elif torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
+    cuda = device.startswith("cuda")
+    if args.envs % world != 0:
+        raise SystemExit(f"--envs {args.envs} not divisible by WORLD_SIZE {world}")
+    n_local = args.envs // world
+    if is_main:
+        extra = f" ({world} ranks x {n_local})" if world > 1 else ""
+        print(f"device: {device}, envs: {args.envs}{extra}")
     torch.set_float32_matmul_precision("high")
 
     def amp():
-        if device == "cuda":
+        if cuda:
             return torch.autocast("cuda", dtype=torch.bfloat16)
         return contextlib.nullcontext()
 
     out_dir = Path("runs/rl") / args.name
-    writer = SummaryWriter(out_dir)
+    writer = SummaryWriter(out_dir) if is_main else NullWriter()
 
-    vec = VecEnv(args.envs, args.stage, args.max_episode_ticks, args.decision_ticks)
+    # Env slice for this rank: idx_offset keeps worker seeds (rng + game
+    # seed strings) globally unique, so ranks never replay identical
+    # episodes.
+    vec = VecEnv(
+        n_local, args.stage, args.max_episode_ticks, args.decision_ticks,
+        idx_offset=rank * n_local,
+    )
     stage = args.stage
     recent_scores: deque[float] = deque(maxlen=WINDOW)
     recent_wins: deque[float] = deque(maxlen=WINDOW)
     ae = load_ae(args.ckpt, device)
     base_policy = Policy().to(device)
-    opt = torch.optim.AdamW(
-        base_policy.parameters(), lr=args.lr, fused=(device == "cuda")
-    )
+    opt = torch.optim.AdamW(base_policy.parameters(), lr=args.lr, fused=cuda)
     start_update = 0
     global_step = 0
     ent_scale = 1.0  # adaptive entropy-floor multiplier (see --ent-floor)
@@ -327,11 +383,12 @@ def main() -> None:
                 recent_scores.extend(js.get("recent_scores", []))
                 print(f"state.json (update {start_update}) supersedes checkpoint")
         vec.set_stage(stage)
-        print(
-            f"resumed from {args.resume}: update {start_update}, "
-            f"step {global_step}, stage {stage}, "
-            f"win-window {len(recent_wins)}/{WINDOW}"
-        )
+        if is_main:
+            print(
+                f"resumed from {args.resume}: update {start_update}, "
+                f"step {global_step}, stage {stage}, "
+                f"win-window {len(recent_wins)}/{WINDOW}"
+            )
     # Post-resume grace: hold the entropy-floor controller for a while so
     # startup artifacts can't spike the coefficient (see ENT_GRACE_UPDATES).
     ent_grace_until = start_update + ENT_GRACE_UPDATES if args.resume else 0
@@ -344,12 +401,34 @@ def main() -> None:
 
     set_lr(stage)
 
-    # Compile after weights load; checkpoints always save base_policy's
-    # (unprefixed) state_dict.
-    policy = torch.compile(base_policy, dynamic=True) if args.compile else base_policy
+    if world > 1:
+        # Ranks must start bitwise-identical (fresh Policy() inits differ
+        # per process); after that, identical all-reduced grads + a
+        # deterministic elementwise optimizer keep them in sync forever.
+        with torch.no_grad():
+            for t in base_policy.state_dict().values():
+                if dist.get_backend() == "gloo" and t.device.type != "cpu":
+                    c = t.detach().cpu()
+                    dist.broadcast(c, 0)
+                    t.copy_(c)
+                else:
+                    dist.broadcast(t, 0)
 
-    T, N = args.rollout, args.envs
-    rng = np.random.default_rng(0)
+    # Compile the update path after weights load; checkpoints always save
+    # base_policy's (unprefixed) state_dict. Compiling the bound method is
+    # what actually captures evaluate() - torch.compile(module) only wraps
+    # forward(). Default on for CUDA, off elsewhere (MPS inductor support
+    # is flaky and bf16/compile only need to pay off on the pods).
+    do_compile = args.compile if args.compile is not None else cuda
+    evaluate = (
+        torch.compile(base_policy.evaluate, dynamic=True)
+        if do_compile else base_policy.evaluate
+    )
+    if is_main and do_compile:
+        print("torch.compile: update path (policy.evaluate) enabled")
+
+    T, N = args.rollout, n_local
+    rng = np.random.default_rng(rank)
     t0 = time.time()
     t0_step = global_step
 
@@ -365,7 +444,7 @@ def main() -> None:
         out = {}
         for k, v in np_dict.items():
             t = torch.from_numpy(v)
-            if device == "cuda":
+            if cuda:
                 n = t.numel()
                 buf = bufs.get(k)
                 if buf is None or buf.numel() < n or buf.dtype != t.dtype:
@@ -396,6 +475,9 @@ def main() -> None:
         "global_step": global_step,
         "episodes_done": episodes_done,
     }
+    # DDP: episode results buffered here by the collector, gathered to
+    # rank 0 at every update boundary (it owns the win window/curriculum).
+    pending_eps: list[dict] = []
 
     # Two env groups pipelined: while one group's Node processes step the
     # game, the GPU encodes + acts for the other group.
@@ -436,6 +518,13 @@ def main() -> None:
                 reward_buf[t, i] = r
                 done_buf[t, i] = float(d)
                 if info is None:
+                    continue
+                if world > 1:
+                    # Curriculum/win-window/TB are rank-0-only under DDP;
+                    # buffer for the update-boundary gather instead of
+                    # deciding locally (a rank sees only its env slice).
+                    with win_lock:
+                        pending_eps.append(info)
                     continue
                 shared["episodes_done"] += 1
                 writer.add_scalar("episode/reward", info["reward"], gs)
@@ -493,7 +582,9 @@ def main() -> None:
                 vec.send_group(groups[0], pack0[1])
             if pack1 is not None:
                 record(t, groups[1], pack1, vec.recv_group(groups[1]))
-            shared["global_step"] += N
+            # Count TOTAL env steps across ranks (every rank advances in
+            # lockstep, so this stays consistent without communication).
+            shared["global_step"] += N * world
 
         # Bootstrap values and GAE per env (values from the acting snapshot,
         # consistent with value_buf).
@@ -557,12 +648,74 @@ def main() -> None:
     # the (numpy, GIL-releasing) data work overlaps GPU forward/backward.
     mb_pool = ThreadPoolExecutor(max_workers=1)
 
+    def sync_episodes() -> None:
+        """DDP update-boundary sync: every rank's buffered episode results
+        gather to rank 0, which owns the win window and the advancement
+        decision; the (possibly advanced) stage broadcasts back so every
+        rank's vec.set_stage + lr move together. At most one rollout of
+        latency vs. the single-process mid-rollout advance."""
+        with win_lock:
+            eps = list(pending_eps)
+            pending_eps.clear()
+        gathered: list = [None] * world
+        dist.all_gather_object(gathered, eps)
+        advanced = False
+        if is_main:
+            gs = shared["global_step"]
+            for info in (e for rank_eps in gathered for e in rank_eps):
+                shared["episodes_done"] += 1
+                writer.add_scalar("episode/reward", info["reward"], gs)
+                writer.add_scalar("episode/length", info["length"], gs)
+                writer.add_scalar("episode/final_tiles", info["final_tiles"], gs)
+                writer.add_scalar("episode/final_tick", info["final_tick"], gs)
+                writer.add_scalar("episode/place", info["place"], gs)
+                writer.add_scalar("episode/score", info["score"], gs)
+                writer.add_scalar("episode/won", float(info["won"]), gs)
+                writer.add_scalar("episode/wasted", info["wasted"], gs)
+                writer.add_scalar("curriculum/episode_stage", info["stage"], gs)
+                writer.add_scalar(
+                    "curriculum/rehearsal", float(info["rehearsal"]), gs
+                )
+                with win_lock:
+                    if info["stage"] == shared["stage"] and not info["rehearsal"]:
+                        recent_scores.append(info["score"])
+                        recent_wins.append(float(info["won"]))
+                    if (
+                        len(recent_wins) == WINDOW
+                        and np.mean(recent_wins) > STAGES[shared["stage"]].win_at
+                        and shared["stage"] < len(STAGES) - 1
+                    ):
+                        shared["stage"] += 1
+                        recent_scores.clear()
+                        recent_wins.clear()
+                        advanced = True
+        payload = [shared["stage"], shared["episodes_done"], advanced]
+        dist.broadcast_object_list(payload, src=0)
+        new_stage, eps_done, advanced = payload
+        if is_main:
+            shared["episodes_done"] = eps_done
+        if advanced:
+            shared["stage"] = new_stage
+            shared["ckpt_advance"] = True
+            vec.set_stage(new_stage)
+            lr_now = set_lr(new_stage)
+            if is_main:
+                st = STAGES[new_stage]
+                print(
+                    f"=== curriculum advance -> stage {new_stage}: "
+                    f"maps={','.join(st.maps)} nations={st.nations} "
+                    f"bots={st.bots} {st.difficulty}  lr -> {lr_now:.2e}",
+                    flush=True,
+                )
+
     for update in range(start_update + 1, args.updates + 1):
         t_wait0 = time.time()
         data = rollout_q.get()
         if isinstance(data, BaseException):
             raise data
         wait_s = time.time() - t_wait0
+        if world > 1:
+            sync_episodes()
         all_obs = data["all_obs"]
         choice_t = data["choice_t"]
         action_counts = data["action_counts"]
@@ -581,7 +734,7 @@ def main() -> None:
 
         B_total = T * N
         idx = np.arange(B_total)
-        pl_sum = vl_sum = ent_sum = entq_sum = 0.0
+        pl_sum = vl_sum = ent_sum = entq_sum = kl_sum = clip_sum = 0.0
         n_mb = 0
         t_upd0 = time.time()
         stall_s = 0.0
@@ -613,7 +766,7 @@ def main() -> None:
                 if i_mb + 1 < len(mbs):
                     fut = mb_pool.submit(prep, mbs[i_mb + 1])
                 opt.zero_grad(set_to_none=True)
-                pg_mb = vl_mb = ent_mb = entq_mb = 0.0
+                pg_mb = vl_mb = ent_mb = entq_mb = kl_mb = clip_mb = 0.0
                 for sub, o_np in subs:
                     w_sub = len(sub) / len(mb)
                     # Alternating pinned buffer sets: the per-sub .item()
@@ -624,7 +777,7 @@ def main() -> None:
                     c_mb = {k: v[sub_t].to(device) for k, v in choice_t.items()}
                     sub_t = sub_t.to(device)
                     with amp():
-                        logp, ent, ent_q, value = policy.evaluate(o_mb, c_mb)
+                        logp, ent, ent_q, value = evaluate(o_mb, c_mb)
                     logp, ent, value = logp.float(), ent.float(), value.float()
                     ratio = (logp - old_logp[sub_t]).exp()
                     a_mb = adv_t[sub_t]
@@ -638,6 +791,13 @@ def main() -> None:
                     # samples that actually used the quantity head.
                     n_q = (c_mb["quantity_frac"] >= 0).float().sum().clamp(min=1.0)
                     ent_qm = ent_q.float().sum() / n_q
+                    with torch.no_grad():
+                        # Approx KL (mean old_logp - logp) and the fraction
+                        # of ratios the PPO clip actually touched: the
+                        # epochs 3->2 gate (KL should stay ~1e-2-ish and
+                        # clip-frac well under ~0.2).
+                        kl_m = (old_logp[sub_t] - logp).mean()
+                        clip_m = ((ratio - 1.0).abs() > args.clip).float().mean()
                     (
                         (
                             pg
@@ -651,13 +811,59 @@ def main() -> None:
                     vl_mb += float(vl.item()) * w_sub
                     ent_mb += float(ent_m.item()) * w_sub
                     entq_mb += float(ent_qm.item()) * w_sub
-                torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
+                    kl_mb += float(kl_m.item()) * w_sub
+                    clip_mb += float(clip_m.item()) * w_sub
+                if world > 1:
+                    # One flat all-reduce per optimizer step: each rank
+                    # accumulated grads from its own rollout's sub-batches;
+                    # averaging here is the only weight-affecting DDP sync
+                    # (clip + step then act on identical grads everywhere).
+                    # Every param participates, zero-filled where a rank's
+                    # minibatch left a head untouched (grad None): ranks
+                    # must flatten identical layouts, and the averaged grad
+                    # must land on all of them or their weights drift.
+                    params = list(base_policy.parameters())
+                    grads = [
+                        p.grad if p.grad is not None else torch.zeros_like(p)
+                        for p in params
+                    ]
+                    flat = torch._utils._flatten_dense_tensors(grads)
+                    if dist.get_backend() == "gloo" and flat.device.type != "cpu":
+                        c = flat.cpu()
+                        dist.all_reduce(c)
+                        flat = c.to(flat.device)
+                    else:
+                        dist.all_reduce(flat)
+                    flat /= world
+                    for p, r in zip(
+                        params, torch._utils._unflatten_dense_tensors(flat, grads)
+                    ):
+                        if p.grad is None:
+                            p.grad = r.clone()
+                        else:
+                            p.grad.copy_(r)
+                torch.nn.utils.clip_grad_norm_(base_policy.parameters(), 0.5)
                 opt.step()
                 pl_sum += pg_mb
                 vl_sum += vl_mb
                 ent_sum += ent_mb
                 entq_sum += entq_mb
+                kl_sum += kl_mb
+                clip_sum += clip_mb
                 n_mb += 1
+
+        if world > 1:
+            # Average the update stats across ranks: rank 0's logs then
+            # describe the whole fleet, and (crucially) the entropy-floor
+            # controller below sees the same number everywhere, keeping
+            # ent_scale - a loss coefficient - identical across ranks.
+            stats = torch.tensor(
+                [pl_sum, vl_sum, ent_sum, entq_sum, kl_sum, clip_sum],
+                device=device if dist.get_backend() != "gloo" else "cpu",
+            )
+            dist.all_reduce(stats)
+            stats /= world
+            pl_sum, vl_sum, ent_sum, entq_sum, kl_sum, clip_sum = stats.tolist()
 
         # Entropy floor controller: nudge the coef scale toward keeping
         # measured entropy above the floor, with hysteresis so it doesn't
@@ -692,6 +898,8 @@ def main() -> None:
         writer.add_scalar("loss/value", vl_sum / n_mb, global_step)
         writer.add_scalar("loss/entropy", ent_sum / n_mb, global_step)
         writer.add_scalar("loss/entropy_q", entq_sum / n_mb, global_step)
+        writer.add_scalar("loss/approx_kl", kl_sum / n_mb, global_step)
+        writer.add_scalar("loss/clip_frac", clip_sum / n_mb, global_step)
         writer.add_scalar("loss/ent_coef", ent_coef, global_step)
         writer.add_scalar("loss/ent_scale", ent_scale, global_step)
         writer.add_scalar("loss/lr", opt.param_groups[0]["lr"], global_step)
@@ -717,24 +925,27 @@ def main() -> None:
             writer.add_histogram(
                 "quantity/frac", np.asarray(all_fracs, dtype=np.float32), global_step
             )
-        print(
-            f"update {update:4d}  step {global_step:7d}  eps {episodes_done:4d}  "
-            f"stage {stage}  roll-win {roll_win:.2f}  roll-score {roll:.2f}  "
-            f"pg {pl_sum / n_mb:+.4f}  vf {vl_sum / n_mb:.4f}  ent {ent_sum / n_mb:.3f}  "
-            f"ecoef {ent_coef:.4f}  "
-            f"{tps:.0f} game-ticks/s  "
-            f"[roll {roll_s:.1f}s upd {upd_s:.1f}s wait {wait_s:.1f}s stall {stall_s:.1f}s]",
-            flush=True,
-        )
+        if is_main:
+            print(
+                f"update {update:4d}  step {global_step:7d}  eps {episodes_done:4d}  "
+                f"stage {stage}  roll-win {roll_win:.2f}  roll-score {roll:.2f}  "
+                f"pg {pl_sum / n_mb:+.4f}  vf {vl_sum / n_mb:.4f}  ent {ent_sum / n_mb:.3f}  "
+                f"kl {kl_sum / n_mb:.4f}  clip {clip_sum / n_mb:.3f}  "
+                f"ecoef {ent_coef:.4f}  "
+                f"{tps:.0f} game-ticks/s  "
+                f"[roll {roll_s:.1f}s upd {upd_s:.1f}s wait {wait_s:.1f}s stall {stall_s:.1f}s]",
+                flush=True,
+            )
 
-        if args.eval_every and update % args.eval_every == 0:
+        if is_main and args.eval_every and update % args.eval_every == 0:
             # Deployment-style number: fixed seeds, greedy actions. This is
             # the curve to compare local replay sessions against (the
             # rolling train win rate is exploration-sampled and its window
             # resets on ops churn).
             t_eval = time.time()
             ev = run_eval(
-                policy, ae, device, stage, args.eval_episodes, args.max_episode_ticks
+                base_policy, ae, device, stage, args.eval_episodes,
+                args.max_episode_ticks,
             )
             writer.add_scalar("eval/win", ev["win"], global_step)
             writer.add_scalar("eval/score", ev["score"], global_step)
@@ -751,25 +962,31 @@ def main() -> None:
             wins_snap = list(recent_wins)
             scores_snap = list(recent_scores)
         # Cheap restart-proof state, every update (weights are 10x rarer).
-        save_train_state(
-            out_dir,
-            {
-                "stage": stage,
-                "update": update,
-                "global_step": global_step,
-                "episodes_done": episodes_done,
-                "recent_wins": wins_snap,
-                "recent_scores": scores_snap,
-                "ent_scale": ent_scale,
-                "lr": opt.param_groups[0]["lr"],
-            },
-        )
+        # Rank 0 only: it owns the win window, so other ranks' copies are
+        # empty and must never clobber state.json.
+        if is_main:
+            save_train_state(
+                out_dir,
+                {
+                    "stage": stage,
+                    "update": update,
+                    "global_step": global_step,
+                    "episodes_done": episodes_done,
+                    "recent_wins": wins_snap,
+                    "recent_scores": scores_snap,
+                    "ent_scale": ent_scale,
+                    "lr": opt.param_groups[0]["lr"],
+                },
+            )
 
-        if (
+        # Popped on every rank (the flag is set on all of them at the DDP
+        # sync) so it can't go stale; only rank 0 writes the file.
+        ckpt_due = (
             update % 10 == 0
             or update == args.updates
             or shared.pop("ckpt_advance", False)
-        ):
+        )
+        if is_main and ckpt_due:
             tmp = out_dir / "policy.pt.tmp"
             torch.save(
                 {
@@ -812,6 +1029,8 @@ def main() -> None:
         rollout_q.get_nowait()  # unblock the collector if it's mid-put
     vec.close()
     writer.close()
+    if world > 1:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
