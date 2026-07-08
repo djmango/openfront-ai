@@ -26,6 +26,11 @@
  * (pre-execution), so BC can train the spawn-placement head on what the
  * player actually saw. Spawn-phase snapshots share the states/ dir (their
  * ticks precede all regular snapshots).
+ *
+ * formatVersion 3 (v6 action space) adds labels for upgrade_structure,
+ * move_warship, cancel_boat, delete_unit, embargo_stop, target_player,
+ * alliance_extension, Warship builds, targeted retreats (t = attacked
+ * player, 0 = terra nullius) and the nuke arc flag (up).
  */
 import * as fs from "fs";
 import * as path from "path";
@@ -69,9 +74,12 @@ interface ReplayResult {
 
 /** A human intent normalized to the policy's action space (rl/obs.py
  * ACTIONS). Player references become smallIDs; tiles become x/y. Intents
- * outside the modeled surface (emoji, warship moves, upgrades, ...) are
- * dropped. Quantity bucketing happens in Python where the actor's
- * troops/gold at the window start are known. */
+ * outside the modeled surface (emoji, quick chat, lobby admin) are
+ * dropped. Quantity stays a raw absolute amount; the scalar fraction
+ * (amt/available) is computed in Python where the actor's troops/gold at
+ * the window start are known. Unit-targeted intents (upgrade_structure,
+ * cancel_boat, delete_unit) resolve the unit id to its pre-turn x/y so
+ * the tile head can be supervised on the unit's location. */
 interface BCLabel {
   a: string;
   t?: number; // target smallID
@@ -79,6 +87,7 @@ interface BCLabel {
   y?: number;
   unit?: string;
   amt?: number | null;
+  up?: boolean; // nuke arc (rocketDirectionUp); absent for MIRV
 }
 
 const NUKE_UNITS = new Set(["Atom Bomb", "Hydrogen Bomb", "MIRV"]);
@@ -89,6 +98,7 @@ const STRUCTURE_UNITS = new Set([
   "Missile Silo",
   "SAM Launcher",
   "Factory",
+  "Warship",
 ]);
 
 function normalizeIntent(
@@ -107,6 +117,21 @@ function normalizeIntent(
     y: game.y(tile as never),
   });
 
+  // Unit-targeted intents carry a unit id; supervise the tile head with the
+  // unit's pre-turn position. Returns null when the unit is already gone.
+  const unitXY = (unitId: unknown): { x: number; y: number } | null => {
+    try {
+      const u = (
+        game as unknown as {
+          unit(id: number): { tile(): number } | undefined;
+        }
+      ).unit(unitId as number);
+      return u ? xy(u.tile()) : null;
+    } catch {
+      return null;
+    }
+  };
+
   switch (intent.type) {
     case "attack": {
       if (intent.targetID === null) {
@@ -120,12 +145,36 @@ function normalizeIntent(
     case "build_unit": {
       const unit = intent.unit as string;
       if (NUKE_UNITS.has(unit)) {
-        return { a: "launch_nuke", unit, ...xy(intent.tile) };
+        const label: BCLabel = { a: "launch_nuke", unit, ...xy(intent.tile) };
+        // rocketDirectionUp flips the parabolic flight arc (SAM evasion).
+        // Engine default is up when absent; MIRV ignores the flag.
+        if (unit !== "MIRV") {
+          label.up = (intent.rocketDirectionUp as boolean | undefined) ?? true;
+        }
+        return label;
       }
       if (STRUCTURE_UNITS.has(unit)) {
         return { a: "build", unit, ...xy(intent.tile) };
       }
       return null;
+    }
+    case "upgrade_structure": {
+      const pos = unitXY(intent.unitId);
+      return pos === null
+        ? null
+        : { a: "upgrade_structure", unit: intent.unit as string, ...pos };
+    }
+    case "move_warship":
+      // Moves every selected warship to one destination; the policy's
+      // region->water-tile scheme only needs the destination.
+      return { a: "move_warship", ...xy(intent.tile) };
+    case "cancel_boat": {
+      const pos = unitXY(intent.unitID);
+      return pos === null ? null : { a: "cancel_boat", ...pos };
+    }
+    case "delete_unit": {
+      const pos = unitXY(intent.unitId);
+      return pos === null ? null : { a: "delete_unit", ...pos };
     }
     case "allianceRequest": {
       const t = smallID(intent.recipient);
@@ -152,12 +201,38 @@ function normalizeIntent(
         : { a: "donate_troops", t, amt: intent.troops as number | null };
     }
     case "embargo": {
-      if (intent.action !== "start") return null;
       const t = smallID(intent.targetID);
-      return t === null ? null : { a: "embargo", t };
+      if (t === null) return null;
+      return intent.action === "stop"
+        ? { a: "embargo_stop", t }
+        : { a: "embargo", t };
     }
-    case "cancel_attack":
-      return { a: "retreat" };
+    case "targetPlayer": {
+      const t = smallID(intent.target);
+      return t === null ? null : { a: "target_player", t };
+    }
+    case "allianceExtension": {
+      const t = smallID(intent.recipient);
+      return t === null ? null : { a: "alliance_extension", t };
+    }
+    case "cancel_attack": {
+      // Targeted retreat: resolve the attack id to the player being
+      // attacked (t=0 for terra-nullius expands, matching the entities
+      // attacks[].to convention). t is omitted when the attack already
+      // resolved by the time the intent arrived.
+      const actor = game.playerByClientID(
+        intent.clientID as string,
+      );
+      const attack = actor
+        ?.outgoingAttacks()
+        .find((a) => a.id() === intent.attackID);
+      if (attack === undefined) return { a: "retreat" };
+      const target = attack.target();
+      return {
+        a: "retreat",
+        t: target.isPlayer() ? target.smallID() : 0,
+      };
+    }
     default:
       return null;
   }
@@ -270,6 +345,14 @@ export async function replayGame(
     terrain.teamGameSpawnAreas,
   );
   const executor = new Executor(game, info.gameID, undefined);
+
+  // bridge legality (bordersNeutralLand) calls game.isImpassable(), which
+  // only exists on newer engine commits. Older engines have no impassable
+  // terrain at all, so a constant-false polyfill is exact.
+  const gAny = game as unknown as Record<string, unknown>;
+  if (typeof gAny.isImpassable !== "function") {
+    gAny.isImpassable = () => false;
+  }
 
   // Mirrors GameRunner.init().
   if (gameConfig.gameType !== GameType.Singleplayer) {
@@ -459,7 +542,7 @@ export async function replayGame(
       return { ...s, labels };
     });
     const bcDoc = {
-      formatVersion: 2,
+      formatVersion: 3,
       snapshotEvery,
       placements: placements(game, record),
       steps,
@@ -525,7 +608,7 @@ async function main() {
   const limit = parseInt(getArg("limit", "0"), 10);
   const bc = args.includes("--bc");
   // Regenerate sidecars even where bc.json.gz exists (e.g. upgrading
-  // formatVersion 1 -> 2 for spawn supervision). States are reused.
+  // formatVersion 2 -> 3 for v6 action labels). States are reused.
   const rebc = args.includes("--rebc");
 
   const files = fs
