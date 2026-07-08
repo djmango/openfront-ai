@@ -54,7 +54,7 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 7th, 2026, evening</h2>
-  <p><code>ppo_v5</code> (v5.1) <b>frozen</b> at ~update 530, stage 4: the structure-value reward
+  <p><code>ppo_v5</code> (v5.1) <b>frozen</b> at update 550, stage 4: the structure-value reward
   and per-stage win gates worked - it re-earned stages 0-4 rapidly and cleared the stage-5 gate
   <b>twice</b> - but both advances were lost to CUDA OOM crashes before checkpointing. OOM
   root-caused and fixed (<a href="#oom-padding">collate padding</a>, not fragmentation), plus
@@ -109,7 +109,7 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
   <tr><td><code>ppo_v5</code></td><td><b>frozen</b> Jul 7 eve</td>
-    <td>Launched July 7th morning. BC warm start from <code>bc_v4/bc_best.pt</code>, entropy floor (<code>--ent-floor 3.5</code>), PLACE_POW 1.5, loss-averse deltas (gain 5.0 / loss 6.5). Stages 0-4 in ~5.5h; roll-win 0.17 / score 0.85 on stage 4 by update 260. Relaunched midday as <b>v5.1</b>: structure-value share in the strength blend (<a href="#v51-bc2fix">denser rewards</a>), resumed from its own checkpoint. See <a href="#ppo-v5">PPO v5</a>. <b>Frozen Jul 7 evening</b> at ~update 530, stage 4 (roll-win ~0.25 vs the 0.55 gate): re-earned stages 0-4 under dominance gates and cleared the stage-5 win gate twice, but both advances were lost to CUDA OOM before checkpointing. OOM root-caused and fixed post-freeze (<a href="#oom-padding">collate padding</a>, <code>36a8efb</code>). Weights are the v6 warm start. See <a href="#v51-freeze">the freeze postmortem</a>.</td></tr>
+    <td>Launched July 7th morning. BC warm start from <code>bc_v4/bc_best.pt</code>, entropy floor (<code>--ent-floor 3.5</code>), PLACE_POW 1.5, loss-averse deltas (gain 5.0 / loss 6.5). Stages 0-4 in ~5.5h; roll-win 0.17 / score 0.85 on stage 4 by update 260. Relaunched midday as <b>v5.1</b>: structure-value share in the strength blend (<a href="#v51-bc2fix">denser rewards</a>), resumed from its own checkpoint. See <a href="#ppo-v5">PPO v5</a>. <b>Frozen Jul 7 evening</b> at update 550 (global_step 1,725,216), stage 4 (roll-win ~0.25 vs the 0.55 gate): re-earned stages 0-4 under dominance gates and cleared the stage-5 win gate twice, but both advances were lost to CUDA OOM before checkpointing. OOM root-caused and fixed post-freeze (<a href="#oom-padding">collate padding</a>, <code>36a8efb</code>). Weights are the v6 warm start. See <a href="#v51-freeze">the freeze postmortem</a>.</td></tr>
   <tr><td><code>ppo_v4</code></td><td><b>retired</b> Jul 7</td>
     <td>The full v4 stack from scratch: d8c32 encoder at 1/8, learned spawns, local owner crop,
     eval loop. Stages 0→3 in ~2h, stage 4 by ~3.6h despite two restarts (OOM at minibatch 128,
@@ -655,8 +655,9 @@ doesn't). Two changes:</p>
 <p class="session">v5.1 freeze postmortem, the OOM root cause, temporal-BC verdict, v6 plan.</p>
 
 <h3 id="v51-verdict">ppo_v5.1 frozen: the MDP worked, the crashes ate the wins</h3>
-<p><code>ppo_v5</code> is <b>frozen</b> (run killed tonight; final state ~update 530, stage 4,
-roll-win ~0.25 against the 0.55 gate). The verdict on v5.1 is that the reward and gate design
+<p><code>ppo_v5</code> is <b>frozen</b> (run killed tonight; final snapshot at update 550,
+global_step 1,725,216, stage 4, roll-win ~0.25 against the 0.55 gate - it advanced from ~530
+during shutdown). The verdict on v5.1 is that the reward and gate design
 did their job: after the curriculum reset it re-earned stages 0-4 rapidly under the dominance
 gates, the structure-value reward (<code>K_BUILD</code>) is visibly expressed in play (see the
 <a href="#behavior">behavior analysis</a>), and it cleared the stage-5 win gate <b>twice</b>.
