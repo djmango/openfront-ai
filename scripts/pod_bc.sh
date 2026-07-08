@@ -20,11 +20,15 @@ BATCH="${BATCH:-96}"
 ACCUM="${ACCUM:-1}"
 STEPS="${STEPS:-60000}"
 WORKERS="${WORKERS:-16}"
+# AE-latent cache budget (rl/bc.py --z-cache-gb). SIZE TO THE CONTAINER'S
+# CGROUP LIMIT, not the host's free RAM: RunPod pods are memory-capped
+# (bc2: 116GiB despite 1TB on the host; the kernel oom-killed the trainer
+# at a 300GB budget). Leave ~40GB headroom for the trainer itself.
+Z_CACHE_GB="${Z_CACHE_GB:-80}"
 # Optional pre-v6 checkpoint to warm-start from (rl.bc --init-extend).
 # Safe to leave set across relaunches: rl.bc ignores it once --resume is
 # passed, and the loop below passes --resume as soon as bc.pt exists.
 INIT_EXTEND="${INIT_EXTEND:-}"
-Z_CACHE_GB="${Z_CACHE_GB:-300}"
 REPO_DIR=/workspace/openfront-ai
 # Keep the HF cache off the small container disk.
 export HF_HOME=/workspace/hf-cache
