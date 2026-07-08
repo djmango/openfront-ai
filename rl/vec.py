@@ -196,7 +196,13 @@ def _child(idx: int, stage_val, max_ticks: int, decision_ticks: int, conn) -> No
 
 
 class VecEnv:
-    def __init__(self, n: int, start_stage: int, max_episode_ticks: int, decision_ticks: int):
+    def __init__(
+        self, n: int, start_stage: int, max_episode_ticks: int,
+        decision_ticks: int, idx_offset: int = 0,
+    ):
+        # idx_offset shifts worker ids (DDP: rank r owns envs [r*n, r*n+n)),
+        # keeping per-worker rngs and game seed strings globally unique so
+        # ranks never play identical episodes.
         ctx = mp.get_context("spawn" if sys.platform == "darwin" else "fork")
         self.stage_val = ctx.Value("i", start_stage)
         self.pipes = []
@@ -206,7 +212,10 @@ class VecEnv:
             parent, child = ctx.Pipe()
             p = ctx.Process(
                 target=_child,
-                args=(i, self.stage_val, max_episode_ticks, decision_ticks, child),
+                args=(
+                    idx_offset + i, self.stage_val, max_episode_ticks,
+                    decision_ticks, child,
+                ),
                 daemon=True,
             )
             p.start()
