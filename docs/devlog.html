@@ -30,6 +30,7 @@
   <a href="#now">Now</a> ·
   <a href="#runs">Run ledger</a> ·
   <a href="#timeline">Timeline</a> ·
+  <a href="#v6-night-scaling">July 8th, daytime</a> ·
   <a href="#v51-freeze">July 7th, evening</a> ·
   <a href="#jul-7">July 7th</a> ·
   <a href="#jul-6-late">July 6th, late night</a> ·
@@ -53,15 +54,17 @@
 </nav>
 
 <div class="now" id="now">
-  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 7th, 2026, evening</h2>
-  <p><code>ppo_v5</code> (v5.1) <b>frozen</b> at update 550, stage 4: the structure-value reward
-  and per-stage win gates worked - it re-earned stages 0-4 rapidly and cleared the stage-5 gate
-  <b>twice</b> - but both advances were lost to CUDA OOM crashes before checkpointing. OOM
-  root-caused and fixed (<a href="#oom-padding">collate padding</a>, not fragmentation), plus
-  checkpoint-on-advance. <b>v6 plan written</b> (<a href="#v6-plan">below</a>): 21 actions,
-  scalar quantity, 5-way nukes, warm start from frozen v5. <code>bc_v4</code> back at ~100 ex/s
-  after the <a href="#bcseq-verdict">malloc-threshold fix</a>; <code>bc_seq_v4</code> <b>killed</b>
-  (temporal BC loses at 8x the encode cost).</p>
+  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 8th, 2026, daytime</h2>
+  <p><code>ppo_v6</code> <b>live on rl4</b> since ~11pm Jul 7 (21 actions, Beta scalar quantity,
+  5-way nukes, warm-started from frozen v5 via <code>--init-extend</code>): cleared stages 0-3
+  overnight, now at the stage-4 wall (roll-win 0.10 vs the 0.55 gate, roll-score 0.88 - dominates
+  games, weak at converting, the familiar <a href="#v6-first-night">safe-second shape</a>) with a
+  genuinely <b>new boat-heavy playstyle</b> and a healthy Beta quantity head on night one.
+  <code>bc_v6</code> fine-tune running on bc3 from the <a href="#v6-labels">re-replayed v6
+  labels</a>, already at bc_v4-final eval levels. The <a href="#cache-verdict">honest cache
+  verdict</a>: ~2x live, not the promised 10x - the GPU step was the second bottleneck. Today:
+  the <a href="#scaling-plan">100x scaling plan</a> - <b>ppo_v6.1 launching on a 4x H100 pod
+  (rl5)</b>, resuming v6's weights with bf16/compile, epochs 2, and a DDP learner.</p>
   <p class="d" style="margin:.75rem 0 0">375k bot + 420k human snapshots · d8c32 encoder · 5.9M-param policy ·
   11 curriculum stages · encoder border accuracy 71.8% → 89.3% (human).</p>
 </div>
@@ -108,6 +111,31 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <code>ae_v3.pt</code> until the v3.1 winner is wired into <code>rl/obs.py</code>.</p>
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
+  <tr><td><code>ppo_v6.1</code></td><td><b>launching</b> Jul 8</td>
+    <td>Phase A + B of the <a href="#scaling-plan">scaling plan</a> as one run: bf16 autocast +
+    <code>torch.compile</code> on the update path, epochs 4 &rarr; 2 with KL/clip-frac logging,
+    DDP learner over a 4x H100 SXM pod (<b>rl5</b>), envs scaled 96 &rarr; 384 with rollout
+    inference sharded across GPUs. <code>--resume</code> from <code>ppo_v6</code>'s latest
+    checkpoint + state.json (same action space, direct resume; stage continuity preserved).
+    Gate: &ge;4x rl4's throughput at stage 4 (~1600+ game-ticks/s vs 400), sane KL/clip-frac,
+    ckpt_advance + state.json working under DDP. rl4 decommissions once v6.1 is stable for a
+    few hours, after snapshotting <code>ppo_v6/policy_rl4_final.pt</code> to HF.</td></tr>
+  <tr><td><code>ppo_v6</code></td><td><b>running</b> (rl4)</td>
+    <td>Launched ~11pm Jul 7 on rl4 via <code>--init-extend</code> from frozen v5 (62 tensors
+    copied; action head 14 &rarr; 21, build 6 &rarr; 7, nuke 3 &rarr; 5 extended; Beta quantity
+    head fresh). Stages 0-3 cleared overnight under the dominance gates (0.8/0.75/0.65), stage 4
+    by morning; update ~743 at roll-win 0.10 vs the 0.55 gate, roll-score 0.88. Boat-dominated
+    playstyle, active <code>cancel_boat</code> hedging, Warships in the build mix - see
+    <a href="#v6-behavior">the behavior analysis</a>. To be resumed as <code>ppo_v6.1</code> on
+    rl5.</td></tr>
+  <tr><td><code>bc_v6</code></td><td><b>running</b> (bc3)</td>
+    <td>Feedforward BC fine-tune on the <a href="#v6-labels">re-replayed v6 labels</a>
+    (303 games, formatVersion 3), warm-started from <code>bc_v4</code>'s step-55k checkpoint
+    via its own <code>--init-extend</code> (<code>e6245da</code>). A100 (bc3), 110-118 ex/s at
+    57-66% z-cache hits; step ~30k by Jul 8 midday, holdout evals already at bc_v4-final
+    levels, quantity MAE 0.096. Speed fixes (<code>63d6e1a</code>) + bf16/compile/dynamic-batch
+    land on its next supervisor restart - see <a href="#cache-verdict">the cache
+    verdict</a>.</td></tr>
   <tr><td><code>ppo_v5</code></td><td><b>frozen</b> Jul 7 eve</td>
     <td>Launched July 7th morning. BC warm start from <code>bc_v4/bc_best.pt</code>, entropy floor (<code>--ent-floor 3.5</code>), PLACE_POW 1.5, loss-averse deltas (gain 5.0 / loss 6.5). Stages 0-4 in ~5.5h; roll-win 0.17 / score 0.85 on stage 4 by update 260. Relaunched midday as <b>v5.1</b>: structure-value share in the strength blend (<a href="#v51-bc2fix">denser rewards</a>), resumed from its own checkpoint. See <a href="#ppo-v5">PPO v5</a>. <b>Frozen Jul 7 evening</b> at update 550 (global_step 1,725,216), stage 4 (roll-win ~0.25 vs the 0.55 gate): re-earned stages 0-4 under dominance gates and cleared the stage-5 win gate twice, but both advances were lost to CUDA OOM before checkpointing. OOM root-caused and fixed post-freeze (<a href="#oom-padding">collate padding</a>, <code>36a8efb</code>). Weights are the v6 warm start. See <a href="#v51-freeze">the freeze postmortem</a>.</td></tr>
   <tr><td><code>ppo_v4</code></td><td><b>retired</b> Jul 7</td>
@@ -735,6 +763,130 @@ checkpoint, 4 sampled episodes per stage:</p>
   <li><b>AE-latent RAM-LRU cache</b> to make BC ~10x faster: encode is 90% of BC wall time,
     re-computing a frozen deterministic function.</li>
 </ul>
+
+<h2 class="date" id="v6-night-scaling">July 8th, 2026 - daytime</h2>
+<p class="session">v6 first night, the honest cache verdict, the v6 label pipeline, and the 100x scaling plan.</p>
+
+<h3 id="v6-first-night">ppo_v6 launched: stages 0-3 in one night, then the stage-4 wall</h3>
+<p><code>ppo_v6</code> went live on rl4 at ~11pm Jul 7, warm-started from frozen v5 via
+<code>--init-extend</code>: 62 tensors copied verbatim, the action head extended 14 &rarr; 21,
+build 6 &rarr; 7, nuke 3 &rarr; 5 (new logits initialized near zero so existing behavior is
+preserved), and the Beta quantity head fresh - the one component with no v5 ancestor. It cleared
+stages 0-3 overnight under the dominance gates (0.8 / 0.75 / 0.65 win) and hit stage 4 by
+morning. There it sits at the wall: update ~743, roll-win <b>0.10</b> against the 0.55 gate,
+roll-score <b>0.88</b> - it dominates games but is weak at converting them, the same safe-second
+pattern v5.1 showed at this stage. Entropy settled 8.9 &rarr; 7.6 over the night with the floor
+controller live - no collapse, the extended heads are being explored.</p>
+<p><b>Live-play stack verified against v6:</b> <code>scripts/play_live.sh</code> works
+end-to-end with the new action space - the agent joins a real lobby and plays full games.</p>
+
+<h3 id="v6-behavior">Behavior analysis: a genuinely new playstyle on night one</h3>
+<p><code>scripts/analyze_policy_behavior.py</code> against the update-190 checkpoint, 4 sampled
+episodes per stage: wins 100 / 75 / 75 / 25 / 0% on stages 0-4. The interesting part is not the
+win curve, it's that v6 is <i>not</i> playing like v5.1:</p>
+<ul>
+  <li><b>Boat-dominated:</b> boats are 54-73% of actions across stages (v5.1 mixed boats and
+    land attacks much more evenly), and <code>cancel_boat</code> - a brand-new action - is
+    already used as an active hedge, up to 14% of actions at stage 4: launch, reassess,
+    recall.</li>
+  <li><b>Warships are real:</b> 13% of builds, with <code>move_warship</code> following
+    coherently after them rather than firing at random.</li>
+  <li><b>Build mix shifted:</b> Defense Posts (48%) + Factories (22%) dominate, where v5.1
+    leaned cities/ports - consistent with the loss-averse deltas finally having a defensive
+    action vocabulary to express themselves through.</li>
+  <li><b>The Beta quantity head is healthy and differentiated on night one:</b> boats commit
+    20-50% of troops, attacks 10-30%, with contextual shifts rather than one fixed fraction -
+    the scalar head is doing on day one what the 5-bucket softmax took v5 its whole life to
+    approximate (<a href="#quantity-mix">the "always 20%" mystery</a>).</li>
+  <li><b>Nukes fully dormant:</b> 0 launches, 1 silo built all night. The 5-way nuke head has
+    yet to enter the policy's experience; worth watching once economies get bigger.</li>
+</ul>
+
+<h3 id="cache-verdict">The honest cache verdict: promised 10x, delivered ~2x</h3>
+<p>The <a href="#v6-plan">v6 plan</a> promised the AE-latent cache would make BC ~10x faster,
+on the theory that encode was 90% of wall time. Live numbers: bc2 peaked at 128-145 ex/s at
+33-48% cache hits, bc_v6 runs 110-118 ex/s at 57-66% hits - call it <b>~2x</b> over the ~60-100
+ex/s pre-cache baselines. The profiler found why: at BATCH=96 the GPU fwd/bwd step <i>itself</i>
+caps at ~196 ex/s, because conv FLOPs scale with the padded batch-max grid. Encode was only part
+of the story; the model step was always going to cap throughput near there, and the cache merely
+exposed it.</p>
+<ul>
+  <li><b>Fixes landed for the next restart</b> (<code>63d6e1a</code>): disk-persisted z-cache
+    (restarts stay warm instead of re-encoding from zero), a GPU-resident hit path (cache hits
+    never round-trip through host memory), and area-bucketed batches (batchmates share grid
+    sizes, so padding waste collapses - the <a href="#oom-padding">collate-padding lesson</a>
+    again, this time for throughput instead of OOM).</li>
+  <li><b>In flight today:</b> bf16 autocast + <code>torch.compile</code> per shape bucket +
+    dynamic area-based batch sizing (256+ effective) in <code>rl/bc.py</code>. Expected
+    compound on top of the ~196 ex/s cap: <b>~500-650 ex/s &asymp; 5-6x</b>. Measured by a
+    500-step A/B on bc3 after its natural supervisor restart.</li>
+  <li><b>Lesson: verify the ceiling before promising the multiplier - the second bottleneck is
+    always waiting behind the first.</b> "Encode is 90% of wall time" was true and still didn't
+    make 10x true, because removing it just promoted the model step to the new ceiling.</li>
+</ul>
+
+<h3 id="v6-labels">The v6 label pipeline: 303 games re-replayed, 8h &rarr; ~2.5h</h3>
+<p>The seven new v6 actions need BC labels, which means a full re-replay of the human archive:
+303 games to formatVersion 3 sidecars. First estimate was ~8 hours - because the replay driver
+ran 16 workers each batching 4 games, leaving a 128-core box ~95% idle. Fixed to 64 per-game
+workers plus a restart-safe <code>--rebc</code> skip that ignores already-refreshed games
+(<code>d1ff455</code>): <b>~2.5h wall</b> for the full archive.</p>
+<ul>
+  <li><b>One casualty:</b> an EIO crash on the mfs network volume during prefeaturize. Recovered
+    incrementally thanks to the skip logic - 212 games refreshed in the second pass, 0 empty
+    sidecars. The <code>cache-bc-v6</code> tars (29GB) are on HF, so no future pod ever replays
+    this archive again.</li>
+  <li><b><code>bc_v6</code> is the consumer:</b> fine-tuning on bc3 from <code>bc_v4</code>'s
+    step-55k checkpoint via its own <code>--init-extend</code> (<code>e6245da</code> - the PPO
+    head-extension machinery reused for BC). Step ~30k by midday, holdout evals already at
+    bc_v4-final levels, and the Beta quantity target trains to MAE 0.096 - the scalar labels
+    are cleaner than the old bucket argmax ever was.</li>
+</ul>
+
+<h3 id="scaling-plan">The scaling plan: BC to ~5x, PPO to 10x then 100x</h3>
+<p>Written today after profiling both trainers. Where the time actually goes: on BC the feed is
+solved and the GPU step is the ceiling (above); on PPO the rollout (52s) already hides inside
+the update (82s) via the async collector, and the engine is coasting (384 cores,
+<code>wait 0.0s</code>) - so <b>scaling means scaling the learner first</b>, then actors. PPO
+currently does ~400 game-ticks/s at stage 4 on one 32GB GPU; target ~4,000 (10x), stretch
+~40,000 (100x). Three phases, each shippable alone:</p>
+<ul>
+  <li><b>Phase A - learner code wins</b> (days, ~1.5-2x, no new hardware): bf16 autocast +
+    <code>torch.compile</code> on the update path, epochs 4 &rarr; 2 with minibatch retuning
+    (PPO tolerates this at our batch sizes; KL/clip-frac logging added so the gate is
+    measurable).</li>
+  <li><b>Phase B - one fat node</b> (a week, ~8-15x cumulative): DDP the update across a 4-8x
+    H100/A100 pod over the existing minibatch loop (the pixel-budget sub-batching already
+    shards cleanly), scale envs 96 &rarr; 384+ with rollout inference sharded across the same
+    GPUs. No algorithm change - pure scale, de-risking Phase C.</li>
+  <li><b>Phase C - async multi-node actor-learner</b> (2-4 weeks, the 100x path): evolve, not
+    rewrite - <code>rl/actor.py</code> (extracted rollout + bridge + encode, shipping
+    trajectories as zstd fp16 <i>latents</i>, ~1-2MB/step, version-tagged),
+    <code>rl/learner.py</code> (the existing update loop + staleness handling: PPO's own ratio
+    clipping + a hard version cutoff first, V-trace only if measured staleness demands it),
+    <code>rl/transport.py</code> (ZMQ push/pull, no broker). Actors stateless and
+    spot-friendly. Cost sketch: 4x H100 learner + 4 cheap actor pods &asymp; $16-20/hr chasing
+    ~30-60x. <b>Gated on v6.1 running stably for ~a week.</b></li>
+</ul>
+<p><b>Executing now: v6.1 = Phase A + Phase B together</b>, launched as one new run on a 4x H100
+pod (rl5) resuming <code>ppo_v6</code>'s weights - same action space, direct resume, stage
+continuity preserved. See the <a href="#runs">run ledger</a> for the verification gates.</p>
+<p><b>v7 direction (parallel, non-blocking): foveated two-stream observation.</b> Uniform /16
+resolution was rejected by the <a href="#ae31">old ablation</a> - border accuracy 89.3% at /8
+vs 78.5% at /16, "resolution is the constraint" - but that measured <i>uniform</i> resolution.
+Strategy-level context doesn't need pixel borders: v7 pairs a coarse /16 global stream (4x
+fewer cells on the maps that dominate late training) with a fine /8 stream restricted to own
+territory + the border band, extending the existing exact-borders local-crop machinery in
+<code>rl/obs.py</code>. Near tile targets resolve on the fine stream; far targets (nukes,
+cross-map boats) tolerate coarse regions. It cuts update AND rollout AND (later) transport
+cost - the single biggest code lever - but it changes the observation space and trunk input,
+so it needs an AE /16 fine-tune and an eval-parity gate (stage 4-6 win rate within noise)
+first. That's why it's v7's headline change, deliberately NOT in v6.1.</p>
+<p><b>Rejected outright:</b> feeding raw full-res maps into the policy (no AE) - it multiplies
+the measured bottleneck (per-latent-cell update FLOPs) ~64x, and weight pruning doesn't reduce
+dense conv time on GPUs. Submanifold sparse conv over active cells stays a stretch option
+(~3-5x ceiling, heavy complexity), unscheduled unless post-foveation profiling still shows dead
+compute.</p>
 
 <h2 class="date" id="reference">Reference and open threads</h2>
 <p class="session">Tooling, bugs, lessons, infra, recipes, backlog.</p>
