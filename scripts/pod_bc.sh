@@ -17,6 +17,12 @@ set -uo pipefail
 RUN_NAME="${RUN_NAME:-bc_v1}"
 SEQ="${SEQ:-0}"
 BATCH="${BATCH:-96}"
+# Dynamic area-based batch sizing (rl/bc.py --batch-cells): 0 derives the
+# latent-cell budget from BATCH at the largest curriculum grid, so BATCH
+# stays the reference size for the biggest maps and small-map buckets run
+# up to 4x BATCH. Set BC_COMPILE=0 to opt out of per-bucket torch.compile.
+BATCH_CELLS="${BATCH_CELLS:-0}"
+export BC_COMPILE="${BC_COMPILE:-1}"
 ACCUM="${ACCUM:-1}"
 STEPS="${STEPS:-60000}"
 WORKERS="${WORKERS:-16}"
@@ -194,7 +200,8 @@ while true; do
     MALLOC_ARENA_MAX=2 \
     MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=1073741824 \
     python -m rl.bc --data data-human --name "$RUN_NAME" --seq "$SEQ" \
-    --batch "$BATCH" --accum "$ACCUM" --steps "$STEPS" --workers "$WORKERS" \
+    --batch "$BATCH" --batch-cells "$BATCH_CELLS" \
+    --accum "$ACCUM" --steps "$STEPS" --workers "$WORKERS" \
     --z-cache-gb "$Z_CACHE_GB" --z-cache-dir "$Z_CACHE_DIR" \
     ${INIT_EXTEND:+--init-extend "$INIT_EXTEND"} $RESUME \
     2>&1 | tee -a "/tmp/bc_$RUN_NAME.log"
