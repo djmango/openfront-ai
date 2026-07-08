@@ -32,8 +32,11 @@ for bucket in "$RECORDS"/*/; do
     git -C openfront checkout -q "$commit" || { echo "cannot checkout $commit, skipping"; continue; }
   fi
   # Shard the bucket across parallel workers; replay.ts skips games that
-  # already have meta.json, so reruns are incremental.
-  ls "$bucket"*.json.gz | xargs -P "$JOBS" -n 4 sh -c '
+  # already have meta.json (and, with --rebc, an up-to-date bc.json.gz), so
+  # reruns are incremental. One game per worker: a single replay runs for
+  # many minutes, so batching (-n 4) serialized long games behind each other
+  # and left the box mostly idle on bucket tails.
+  ls "$bucket"*.json.gz | xargs -P "$JOBS" -n 1 sh -c '
     tmp=$(mktemp -d)
     for f in "$@"; do ln -s "$(realpath "$f")" "$tmp/"; done
     nice -n 15 '"$TSX"' datagen/replay.ts --records "$tmp" --out '"$OUT"' '"$BCFLAG"' 2>&1 | grep -Ev "not found|QuickChat|cannot build|cannot send|Constructor|Failed to find"
