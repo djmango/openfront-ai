@@ -33,9 +33,15 @@ import torch.nn.functional as F
 from rl.bc_data import BCSampler, N_PLACEMENT_BUCKETS
 from rl.obs import ACTIONS, N_ACTIONS, ZCache, encode_grids, load_ae
 from rl.obs import collate as obs_collate
-from rl.policy import MASKED_NEG, Policy, _global_to_local
+from rl.policy import (
+    MASKED_NEG,
+    QUANTITY_EPS,
+    Policy,
+    _global_to_local,
+    quantity_dist,
+)
 
-CHOICE_KEYS = ["action", "player_slot", "tile_region", "build_type", "nuke_type", "quantity"]
+CHOICE_KEYS = ["action", "player_slot", "tile_region", "build_type", "nuke_type"]
 OBS_KEYS = [
     "grid", "grid_valid", "legal_tile", "local", "players", "pmask", "scalars",
     "legal_actions", "legal_ptarget", "legal_build", "legal_nuke",
@@ -100,6 +106,10 @@ def collate(raws: list[dict], device: str) -> tuple[dict, dict, torch.Tensor]:
         k: torch.tensor([r["choice"][k] for r in raws], dtype=torch.long, device=device)
         for k in CHOICE_KEYS
     }
+    choice["quantity_frac"] = torch.tensor(
+        [r["choice"]["quantity_frac"] for r in raws],
+        dtype=torch.float32, device=device,
+    )
     tr = choice["tile_region"]
     choice["tile_region"] = torch.where(
         tr >= 0, _global_to_local(tr, o["grid"].shape[3]), tr
@@ -109,7 +119,8 @@ def collate(raws: list[dict], device: str) -> tuple[dict, dict, torch.Tensor]:
 
 
 def bc_loss(out: dict, o: dict, choice: dict) -> tuple[torch.Tensor, dict]:
-    """Masked CE per head; sub-heads only where the action uses them."""
+    """Masked CE per discrete head (sub-heads only where the action uses
+    them); Beta NLL for the scalar quantity head."""
     losses = {"action": F.cross_entropy(out["action"], choice["action"])}
 
     pmask = o["legal_ptarget"].gather(
@@ -122,10 +133,15 @@ def bc_loss(out: dict, o: dict, choice: dict) -> tuple[torch.Tensor, dict]:
         ("tile_region", out["tile"]),
         ("build_type", out["build"]),
         ("nuke_type", out["nuke"]),
-        ("quantity", out["quantity"]),
     ]:
         if (choice[head] >= 0).any():
             losses[head] = F.cross_entropy(logits, choice[head], ignore_index=-1)
+
+    q_used = choice["quantity_frac"] >= 0
+    if q_used.any():
+        d_q = quantity_dist(out["quantity"][q_used])
+        target = choice["quantity_frac"][q_used].float().clamp(1e-3, 1.0 - 1e-3)
+        losses["quantity_frac"] = -d_q.log_prob(target).mean()
     total = sum(losses.values())
     return total, {k: float(v.detach()) for k, v in losses.items()}
 
@@ -141,13 +157,20 @@ def head_accuracy(out: dict, o: dict, choice: dict) -> dict:
             (pred[acted] == choice["action"][acted]).float().mean()
         )
     for head, key in [("player", "player_slot"), ("tile", "tile_region"),
-                      ("build", "build_type"), ("nuke", "nuke_type"),
-                      ("quantity", "quantity")]:
+                      ("build", "build_type"), ("nuke", "nuke_type")]:
         used = choice[key] >= 0
         if used.any():
             accs[key] = float(
                 (out[head][used].argmax(-1) == choice[key][used]).float().mean()
             )
+    q_used = choice["quantity_frac"] >= 0
+    if q_used.any():
+        pred = quantity_dist(out["quantity"][q_used]).mean.clamp(
+            QUANTITY_EPS, 1.0 - QUANTITY_EPS
+        )
+        accs["quantity_mae"] = float(
+            (pred - choice["quantity_frac"][q_used]).abs().mean()
+        )
     return accs
 
 
