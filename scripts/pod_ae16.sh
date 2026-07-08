@@ -11,6 +11,9 @@ OUT="${OUT:-runs/ae_v31_d16c32}"
 STEPS="${STEPS:-20000}"
 BATCH="${BATCH:-64}"
 WORKERS="${WORKERS:-32}"
+mkdir -p /workspace
+exec > >(tee -a /workspace/pod_ae16_start.log) 2>&1
+trap 'rc=$?; echo "pod_ae16 exit rc=$rc; keeping container alive"; sleep infinity' EXIT
 
 if [ -n "${PUBLIC_KEY:-}" ]; then
   mkdir -p ~/.ssh && chmod 700 ~/.ssh
@@ -24,7 +27,6 @@ if ! pgrep -x sshd >/dev/null 2>&1; then
   /usr/sbin/sshd || true
 fi
 
-mkdir -p /workspace
 if [ ! -d "$REPO_DIR" ]; then
   git clone --recurse-submodules https://github.com/djmango/openfront-ai "$REPO_DIR"
 fi
