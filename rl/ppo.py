@@ -1,9 +1,10 @@
 """PPO over the headless engine with the frozen spatial encoder.
 
 Vectorized: N bridge processes stepped in parallel threads, frozen-AE
-encode and policy forward batched across envs on the GPU. Core action set
-(expand/attack/boat/build/nuke/diplomacy/retreat); not yet wired:
-upgrade_structure, delete_unit, move_warship, cancel_boat.
+encode and policy forward batched across envs on the GPU. v6 action set:
+full human intent coverage (expand/attack/boat/build/nuke/diplomacy/
+targeted retreat/upgrades/warships/cancels/embargo stop/target player/
+alliance extension) with a scalar Beta quantity head.
 
 Logs to TensorBoard (runs/rl/<name>).
 
@@ -13,6 +14,7 @@ Usage:
 
 import argparse
 import contextlib
+import json
 import os
 import queue
 import threading
@@ -29,10 +31,15 @@ from collections import deque
 
 from rl.curriculum import STAGES, WINDOW
 from rl.obs import ACTIONS, collate, encode_grids, load_ae
-from rl.policy import N_QUANTITY, QUANTITY_FRACS, Policy
+from rl.policy import Policy
 from rl.vec import VecEnv
 
-SUB_KEYS = ["player_slot", "tile_region", "build_type", "nuke_type", "quantity"]
+SUB_KEYS = ["player_slot", "tile_region", "build_type", "nuke_type"]
+# Entropy-floor adaptation is suppressed for this many updates after a
+# resume: synchronized env resets make the first rollouts spawn-phase-heavy
+# (masked action space -> artificially low measured entropy), which used to
+# spike the coefficient 3x on every restart.
+ENT_GRACE_UPDATES = 20
 # Latent-cell budget per update forward/backward. collate() pads a minibatch
 # to its largest grid, so one BetweenTwoSeas sample (132x223) pads 127
 # others to 29k cells each and backward tries multi-GiB activation allocs -
@@ -48,6 +55,73 @@ OBS_KEYS = [
     "grid", "grid_valid", "legal_tile", "local", "players", "pmask", "scalars",
     "legal_actions", "legal_ptarget", "legal_build", "legal_nuke",
 ]
+
+
+@torch.no_grad()
+def init_extend(policy: Policy, sd: dict) -> None:
+    """Warm start from a pre-v6 checkpoint whose heads are smaller.
+
+    Copies every shape-matching tensor verbatim. Grown heads keep the old
+    rows (new action/build indices append at the end) with fresh rows
+    initialized small; the nuke head maps old [Atom, Hydrogen, MIRV] onto
+    the new 5-way [Atom^, Atomv, Hydrogen^, Hydrogenv, MIRV] by duplicating
+    each type's row across both arcs. The Beta quantity head (2 params) is
+    incompatible with the old 5-bucket logits and starts fresh. Logs
+    exactly what happened to every tensor."""
+    nuke_row_map = [0, 0, 1, 1, 2]
+
+    def fresh_(t: torch.Tensor) -> torch.Tensor:
+        if t.dim() > 1:
+            torch.nn.init.normal_(t, std=0.01)
+        else:
+            t.zero_()
+        return t
+
+    own = policy.state_dict()
+    new_sd, copied, extended, fresh = {}, [], [], []
+    for k, v in own.items():
+        old = sd.get(k)
+        if old is not None:
+            old = old.to(v.device, v.dtype)
+        if old is not None and old.shape == v.shape:
+            new_sd[k] = old
+            copied.append(k)
+        elif (
+            old is not None
+            and k.split(".")[0] in ("head_action", "head_build")
+            and old.shape[1:] == v.shape[1:]
+            and old.shape[0] < v.shape[0]
+        ):
+            t = fresh_(v.clone())
+            t[: old.shape[0]] = old
+            new_sd[k] = t
+            extended.append(f"{k} ({old.shape[0]}->{v.shape[0]} rows)")
+        elif (
+            old is not None
+            and k.split(".")[0] == "head_nuke"
+            and old.shape[0] == 3
+            and v.shape[0] == 5
+        ):
+            new_sd[k] = old[nuke_row_map].clone()
+            extended.append(f"{k} (3->5 rows, per-type arc duplication)")
+        else:
+            new_sd[k] = fresh_(v.clone())
+            fresh.append(k)
+    policy.load_state_dict(new_sd, strict=True)
+    print(f"init-extend: {len(copied)} tensors copied verbatim")
+    for k in extended:
+        print(f"init-extend: extended {k}")
+    for k in fresh:
+        print(f"init-extend: fresh {k}")
+
+
+def save_train_state(out_dir: Path, state: dict) -> None:
+    """Atomic per-update sidecar so cheap training state (win window,
+    stage, counters) never lags the 10-update weight cadence or vanishes
+    in a crash."""
+    tmp = out_dir / "state.json.tmp"
+    tmp.write_text(json.dumps(state))
+    tmp.rename(out_dir / "state.json")
 
 
 @torch.no_grad()
@@ -116,6 +190,10 @@ def main() -> None:
                          "ppo_v4 collapsed 9 -> 2.8 nats and stopped winning "
                          "(deterministic safe-2nd); the schedule alone can't "
                          "prevent that")
+    ap.add_argument("--ent-coef-q", type=float, default=0.002,
+                    help="entropy coef for the Beta quantity head; separate "
+                         "because differential entropy can be negative and "
+                         "must stay out of the discrete-nats floor")
     ap.add_argument("--vf-coef", type=float, default=0.5)
     ap.add_argument("--max-episode-ticks", type=int, default=15000)
     ap.add_argument("--decision-ticks", type=int, default=10,
@@ -131,6 +209,12 @@ def main() -> None:
     ap.add_argument("--init-cond-bucket", type=int, default=7,
                     help="placement bucket to condition the BC prior on "
                          "(7 = winner tier)")
+    ap.add_argument("--init-extend", default=None,
+                    help="warm-start from a pre-v6 policy.pt: copies every "
+                         "shape-matching tensor, extends grown heads "
+                         "(action 14->21, build 6->7, nuke 3->5 with the "
+                         "arc rows seeded from the old per-type rows) and "
+                         "leaves the Beta quantity head fresh")
     ap.add_argument("--compile", action="store_true", help="torch.compile the policy")
     args = ap.parse_args()
 
@@ -197,6 +281,14 @@ def main() -> None:
             f"cond bucket {args.init_cond_bucket} folded, dropped {dropped}"
         )
 
+    if args.init_extend and not args.resume:
+        sd = torch.load(args.init_extend, map_location=device, weights_only=False)[
+            "model_state_dict"
+        ]
+        init_extend(base_policy, sd)
+        print(f"init-extend warm start from {args.init_extend}")
+
+    episodes_done = 0
     if args.resume:
         state = torch.load(args.resume, map_location=device, weights_only=False)
         base_policy.load_state_dict(state["model_state_dict"])
@@ -206,7 +298,6 @@ def main() -> None:
         # fresh runs (supervisors pass a stale --stage on every relaunch).
         if "stage" in state:
             stage = int(state["stage"])
-            vec.set_stage(stage)
         # Win-gate evidence survives restarts: without this, every relaunch
         # forced the agent to re-earn the whole advancement window.
         recent_wins.extend(state.get("recent_wins", []))
@@ -214,11 +305,36 @@ def main() -> None:
         start_update = int(state.get("update", 0))
         global_step = int(state.get("global_step", 0))
         ent_scale = float(state.get("ent_scale", 1.0))
+        # state.json is written EVERY update (weights only every 10): when
+        # it's newer than the checkpoint, its cheap state wins so the win
+        # window / stage / counters don't rewind up to 10 updates.
+        state_path = out_dir / "state.json"
+        if state_path.exists():
+            try:
+                js = json.loads(state_path.read_text())
+            except (OSError, ValueError) as e:
+                print(f"state.json unreadable ({e}); using checkpoint state")
+                js = None
+            if js and int(js.get("update", -1)) >= start_update:
+                stage = int(js.get("stage", stage))
+                start_update = int(js["update"])
+                global_step = int(js.get("global_step", global_step))
+                episodes_done = int(js.get("episodes_done", 0))
+                ent_scale = float(js.get("ent_scale", ent_scale))
+                recent_wins.clear()
+                recent_wins.extend(js.get("recent_wins", []))
+                recent_scores.clear()
+                recent_scores.extend(js.get("recent_scores", []))
+                print(f"state.json (update {start_update}) supersedes checkpoint")
+        vec.set_stage(stage)
         print(
             f"resumed from {args.resume}: update {start_update}, "
             f"step {global_step}, stage {stage}, "
             f"win-window {len(recent_wins)}/{WINDOW}"
         )
+    # Post-resume grace: hold the entropy-floor controller for a while so
+    # startup artifacts can't spike the coefficient (see ENT_GRACE_UPDATES).
+    ent_grace_until = start_update + ENT_GRACE_UPDATES if args.resume else 0
 
     def set_lr(current_stage: int) -> float:
         lr = args.lr * args.stage_lr_decay ** current_stage
@@ -234,7 +350,6 @@ def main() -> None:
 
     T, N = args.rollout, args.envs
     rng = np.random.default_rng(0)
-    episodes_done = 0
     t0 = time.time()
     t0_step = global_step
 
@@ -303,7 +418,7 @@ def main() -> None:
         reward_buf = np.zeros((T, N), dtype=np.float32)
         done_buf = np.zeros((T, N), dtype=np.float32)
         action_counts = np.zeros(len(ACTIONS))
-        quantity_counts = np.zeros(N_QUANTITY)
+        quantity_fracs: dict[int, list[float]] = {}  # action idx -> sampled fracs
 
         def record(t: int, idxs: list[int], pack: tuple, results: list) -> None:
             obs_list, choices, logp, value = pack
@@ -314,9 +429,9 @@ def main() -> None:
                 logp_buf[t, i] = logp[j]
                 value_buf[t, i] = value[j]
                 action_counts[choices[j]["action"]] += 1
-                q = choices[j].get("quantity")
+                q = choices[j].get("quantity_frac")
                 if q is not None:
-                    quantity_counts[q] += 1
+                    quantity_fracs.setdefault(choices[j]["action"], []).append(q)
                 r, d, info = results[j]
                 reward_buf[t, i] = r
                 done_buf[t, i] = float(d)
@@ -403,6 +518,9 @@ def main() -> None:
         choice_t = {"action": torch.tensor([c["action"] for c in all_choice])}
         for k in SUB_KEYS:
             choice_t[k] = torch.tensor([c.get(k, -1) for c in all_choice])
+        choice_t["quantity_frac"] = torch.tensor(
+            [c.get("quantity_frac", -1.0) for c in all_choice], dtype=torch.float32
+        )
         return {
             "all_obs": [o for row in obs_buf for o in row],
             "choice_t": choice_t,
@@ -410,7 +528,7 @@ def main() -> None:
             "adv": adv.reshape(-1),
             "returns": returns.reshape(-1),
             "action_counts": action_counts,
-            "quantity_counts": quantity_counts,
+            "quantity_fracs": quantity_fracs,
             "roll_s": time.time() - t_roll0,
         }
 
@@ -463,7 +581,7 @@ def main() -> None:
 
         B_total = T * N
         idx = np.arange(B_total)
-        pl_sum = vl_sum = ent_sum = 0.0
+        pl_sum = vl_sum = ent_sum = entq_sum = 0.0
         n_mb = 0
         t_upd0 = time.time()
         stall_s = 0.0
@@ -495,7 +613,7 @@ def main() -> None:
                 if i_mb + 1 < len(mbs):
                     fut = mb_pool.submit(prep, mbs[i_mb + 1])
                 opt.zero_grad(set_to_none=True)
-                pg_mb = vl_mb = ent_mb = 0.0
+                pg_mb = vl_mb = ent_mb = entq_mb = 0.0
                 for sub, o_np in subs:
                     w_sub = len(sub) / len(mb)
                     # Alternating pinned buffer sets: the per-sub .item()
@@ -506,7 +624,7 @@ def main() -> None:
                     c_mb = {k: v[sub_t].to(device) for k, v in choice_t.items()}
                     sub_t = sub_t.to(device)
                     with amp():
-                        logp, ent, value = policy.evaluate(o_mb, c_mb)
+                        logp, ent, ent_q, value = policy.evaluate(o_mb, c_mb)
                     logp, ent, value = logp.float(), ent.float(), value.float()
                     ratio = (logp - old_logp[sub_t]).exp()
                     a_mb = adv_t[sub_t]
@@ -516,21 +634,38 @@ def main() -> None:
                     ).mean()
                     vl = F.mse_loss(value, ret_t[sub_t])
                     ent_m = ent.mean()
-                    ((pg + args.vf_coef * vl - ent_coef * ent_m) * w_sub).backward()
+                    # Beta head differential entropy, averaged over the
+                    # samples that actually used the quantity head.
+                    n_q = (c_mb["quantity_frac"] >= 0).float().sum().clamp(min=1.0)
+                    ent_qm = ent_q.float().sum() / n_q
+                    (
+                        (
+                            pg
+                            + args.vf_coef * vl
+                            - ent_coef * ent_m
+                            - args.ent_coef_q * ent_qm
+                        )
+                        * w_sub
+                    ).backward()
                     pg_mb += float(pg.item()) * w_sub
                     vl_mb += float(vl.item()) * w_sub
                     ent_mb += float(ent_m.item()) * w_sub
+                    entq_mb += float(ent_qm.item()) * w_sub
                 torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
                 opt.step()
                 pl_sum += pg_mb
                 vl_sum += vl_mb
                 ent_sum += ent_mb
+                entq_sum += entq_mb
                 n_mb += 1
 
         # Entropy floor controller: nudge the coef scale toward keeping
         # measured entropy above the floor, with hysteresis so it doesn't
-        # oscillate. Multiplicative so it composes with the anneal.
-        if args.ent_floor > 0 and n_mb:
+        # oscillate. Multiplicative so it composes with the anneal. Held
+        # for ENT_GRACE_UPDATES after a resume (spawn-heavy startup rollouts
+        # read artificially low entropy). Discrete heads only: the Beta
+        # quantity head's differential entropy lives on another scale.
+        if args.ent_floor > 0 and n_mb and update > ent_grace_until:
             ent_mean = ent_sum / n_mb
             if ent_mean < args.ent_floor:
                 ent_scale = min(ent_scale * 1.3, 30.0)
@@ -556,6 +691,7 @@ def main() -> None:
         writer.add_scalar("loss/policy", pl_sum / n_mb, global_step)
         writer.add_scalar("loss/value", vl_sum / n_mb, global_step)
         writer.add_scalar("loss/entropy", ent_sum / n_mb, global_step)
+        writer.add_scalar("loss/entropy_q", entq_sum / n_mb, global_step)
         writer.add_scalar("loss/ent_coef", ent_coef, global_step)
         writer.add_scalar("loss/ent_scale", ent_scale, global_step)
         writer.add_scalar("loss/lr", opt.param_groups[0]["lr"], global_step)
@@ -566,14 +702,21 @@ def main() -> None:
         writer.add_scalar("curriculum/rolling_win", roll_win, global_step)
         for i, a in enumerate(ACTIONS):
             writer.add_scalar(f"actions/{a}", action_counts[i] / (T * N), global_step)
-        q_total = data["quantity_counts"].sum()
-        if q_total:
-            for i, f in enumerate(QUANTITY_FRACS):
-                writer.add_scalar(
-                    f"actions/quantity_{int(f * 100)}pct",
-                    data["quantity_counts"][i] / q_total,
-                    global_step,
-                )
+        # Sampled Beta quantity fractions: mean/std per action type plus a
+        # rollout-wide histogram (replaces the old per-bucket rates).
+        all_fracs: list[float] = []
+        for ai, fr in data["quantity_fracs"].items():
+            all_fracs.extend(fr)
+            writer.add_scalar(
+                f"quantity/{ACTIONS[ai]}_mean", float(np.mean(fr)), global_step
+            )
+            writer.add_scalar(
+                f"quantity/{ACTIONS[ai]}_std", float(np.std(fr)), global_step
+            )
+        if all_fracs:
+            writer.add_histogram(
+                "quantity/frac", np.asarray(all_fracs, dtype=np.float32), global_step
+            )
         print(
             f"update {update:4d}  step {global_step:7d}  eps {episodes_done:4d}  "
             f"stage {stage}  roll-win {roll_win:.2f}  roll-score {roll:.2f}  "
@@ -604,15 +747,30 @@ def main() -> None:
             )
             t0, t0_step = time.time(), global_step  # don't count eval in tps
 
+        with win_lock:
+            wins_snap = list(recent_wins)
+            scores_snap = list(recent_scores)
+        # Cheap restart-proof state, every update (weights are 10x rarer).
+        save_train_state(
+            out_dir,
+            {
+                "stage": stage,
+                "update": update,
+                "global_step": global_step,
+                "episodes_done": episodes_done,
+                "recent_wins": wins_snap,
+                "recent_scores": scores_snap,
+                "ent_scale": ent_scale,
+                "lr": opt.param_groups[0]["lr"],
+            },
+        )
+
         if (
             update % 10 == 0
             or update == args.updates
             or shared.pop("ckpt_advance", False)
         ):
             tmp = out_dir / "policy.pt.tmp"
-            with win_lock:
-                wins_snap = list(recent_wins)
-                scores_snap = list(recent_scores)
             torch.save(
                 {
                     "model_state_dict": base_policy.state_dict(),
