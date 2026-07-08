@@ -23,8 +23,10 @@ from rl.obs import (
     P_FEAT,
 )
 
-N_QUANTITY = 5  # {5, 10, 25, 50, 100}% of troops/gold
-QUANTITY_FRACS = [0.05, 0.10, 0.25, 0.50, 1.00]
+# v6: quantity is a scalar 0-1 fraction from a Beta head (2 params). The
+# 1+softplus parameterization keeps alpha,beta >= 1, so the density is
+# unimodal and bounded (no U-shaped spikes at 0/1).
+QUANTITY_EPS = 1e-4  # clamp samples/labels away from the Beta support edges
 
 NEEDS_PLAYER = {
     "attack",
@@ -34,11 +36,30 @@ NEEDS_PLAYER = {
     "donate_gold",
     "donate_troops",
     "embargo",
+    "retreat",  # which attack to cancel (target's slot; 0 = expand)
+    "embargo_stop",
+    "target_player",
+    "alliance_extension",
 }
-NEEDS_TILE = {"boat", "build", "launch_nuke", "spawn"}
+NEEDS_TILE = {
+    "boat",
+    "build",
+    "launch_nuke",
+    "spawn",
+    "upgrade_structure",
+    "move_warship",
+    "cancel_boat",
+    "delete_unit",
+}
 NEEDS_QUANTITY = {"attack", "expand", "boat", "donate_gold", "donate_troops"}
 
 MASKED_NEG = -1e9
+
+
+def quantity_dist(params: torch.Tensor) -> torch.distributions.Beta:
+    """(B, 2) raw head outputs -> Beta(alpha, beta), alpha/beta >= 1."""
+    ab = 1.0 + F.softplus(params.float())
+    return torch.distributions.Beta(ab[:, 0], ab[:, 1])
 
 
 def _local_to_global(local: torch.Tensor, gw: int) -> torch.Tensor:
@@ -115,7 +136,7 @@ class Policy(nn.Module):
         )
         self.head_build = nn.Linear(hidden, len(BUILD_TYPES))
         self.head_nuke = nn.Linear(hidden, len(NUKE_TYPES))
-        self.head_quantity = nn.Linear(hidden, N_QUANTITY)
+        self.head_quantity = nn.Linear(hidden, 2)  # Beta alpha/beta params
         self.head_value = nn.Linear(hidden, 1)
 
     def trunk_forward(self, o: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -190,11 +211,18 @@ class Policy(nn.Module):
             ("tile", out["tile"]),
             ("build", out["build"]),
             ("nuke", out["nuke"]),
-            ("quantity", out["quantity"]),
         ]:
             d = torch.distributions.Categorical(logits=logits)
             s = d.probs.argmax(-1) if greedy else d.sample()
             heads[name] = (s, d.log_prob(s))
+
+        # Scalar quantity: Beta sample (mean when greedy), clamped off the
+        # support edges so log_prob stays finite.
+        d_q = quantity_dist(out["quantity"])
+        q = (d_q.mean if greedy else d_q.sample()).clamp(
+            QUANTITY_EPS, 1.0 - QUANTITY_EPS
+        )
+        heads["quantity"] = (q, d_q.log_prob(q))
 
         needs_p = torch.tensor(
             [ACTIONS[i] in NEEDS_PLAYER for i in range(N_ACTIONS)], device=dev
@@ -228,7 +256,7 @@ class Policy(nn.Module):
             if is_nuke[b]:
                 c["nuke_type"] = int(heads["nuke"][0][b])
             if needs_q[b]:
-                c["quantity"] = int(heads["quantity"][0][b])
+                c["quantity_frac"] = float(heads["quantity"][0][b])
             if debug:
                 c["debug"] = {
                     "action_probs": d_act.probs[b].float().cpu().numpy(),
@@ -237,11 +265,19 @@ class Policy(nn.Module):
             choices.append(c)
         return choices, logp.float().cpu().numpy(), out["value"].float().cpu().numpy()
 
-    def evaluate(self, o: dict, choice: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def evaluate(
+        self, o: dict, choice: dict
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Batched logprob/entropy/value for PPO updates.
 
         choice tensors: action (B,), player_slot, tile_region, build_type,
-        nuke_type, quantity (B,) with -1 where unused.
+        nuke_type (B,) long with -1 where unused; quantity_frac (B,) float
+        with -1.0 where unused.
+
+        Returns (logp, ent, ent_q, value): ent is the summed DISCRETE head
+        entropy (nats); ent_q is the Beta head's differential entropy (can
+        be negative), kept separate so it gets its own coefficient and
+        stays out of the discrete entropy floor.
         """
         out = self.forward(o)
         B = out["action"].shape[0]
@@ -277,6 +313,16 @@ class Policy(nn.Module):
         sub("tile", "tile_region")
         sub("build", "build_type")
         sub("nuke", "nuke_type")
-        sub("quantity", "quantity")
 
-        return logp, ent, out["value"]
+        ent_q = torch.zeros(B, device=logp.device)
+        q_used = choice["quantity_frac"] >= 0
+        if q_used.any():
+            d_q = quantity_dist(out["quantity"][q_used])
+            target = choice["quantity_frac"][q_used].float().clamp(
+                QUANTITY_EPS, 1.0 - QUANTITY_EPS
+            )
+            idx = (q_used.nonzero(as_tuple=True)[0],)
+            logp = logp.index_put(idx, d_q.log_prob(target), accumulate=True)
+            ent_q = ent_q.index_put(idx, d_q.entropy(), accumulate=True)
+
+        return logp, ent, ent_q, out["value"]

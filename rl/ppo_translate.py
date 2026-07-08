@@ -11,7 +11,6 @@ from rl.obs import (
     REGION,
     ObsBuilder,
 )
-from rl.policy import QUANTITY_FRACS
 
 
 class IntentTranslator:
@@ -83,7 +82,11 @@ class IntentTranslator:
     def build_tile(self, region: int, obs: dict, unit: str) -> int | None:
         """Structure site inside the region: own territory (engine's
         validStructureSpawnTiles requires ownership); ports additionally
-        need own shore within the engine's port-spawn search radius."""
+        need own shore within the engine's port-spawn search radius.
+        Warships target water (the engine spawns them at the closest own
+        port sharing the target's water component)."""
+        if unit == "Warship":
+            return self.region_tile(region, self.land == 0)
         valid = self.passable & (self._owners(obs) == obs["me"])
         if unit == "Port":
             valid &= self.shore == 1
@@ -101,11 +104,37 @@ class IntentTranslator:
                 return p["pid"]
         return None
 
+    def region_center(self, region: int) -> tuple[int, int]:
+        """(y, x) tile coordinates of the region's center."""
+        from rl.curriculum import GW_MAX
+
+        gy, gx = divmod(region, max(GW_MAX, self.gw))
+        return gy * REGION + REGION // 2, gx * REGION + REGION // 2
+
+    def nearest_own_unit(
+        self, region: int, obs: dict, ids: list[int], types: set[str] | None = None
+    ) -> dict | None:
+        """Own unit closest to the region center, restricted to the given
+        engine unit ids (from the bridge legality lists) and optionally to
+        a type set. The tile head picks WHERE, this snaps to WHAT."""
+        idset = set(ids)
+        cands = [
+            u
+            for u in obs["entities"]["units"]
+            if u["owner"] == obs["me"]
+            and u.get("uid") in idset
+            and (types is None or u["type"] in types)
+        ]
+        if not cands:
+            return None
+        cy, cx = self.region_center(region)
+        return min(cands, key=lambda u: (u["y"] - cy) ** 2 + (u["x"] - cx) ** 2)
+
     def translate(self, choice: dict, obs: dict) -> list[dict]:
         name = ACTIONS[choice["action"]]
         legal = obs["legal"]["actions"]
         troops = legal.get("troops", 0)
-        frac = QUANTITY_FRACS[choice.get("quantity", 2)]
+        frac = min(1.0, max(0.01, float(choice.get("quantity_frac", 0.25))))
 
         if name == "noop":
             return []
@@ -136,10 +165,58 @@ class IntentTranslator:
             tile = self.region_tile(choice["tile_region"], self.passable)
             if tile is None:
                 return []
-            return [{"type": "build_unit", "unit": NUKE_TYPES[choice["nuke_type"]], "tile": tile}]
+            unit, up = NUKE_TYPES[choice["nuke_type"]]
+            intent = {"type": "build_unit", "unit": unit, "tile": tile}
+            if up is not None:  # MIRV has no arc
+                intent["rocketDirectionUp"] = up
+            return [intent]
         if name == "retreat":
+            # Targeted: cancel the newest non-retreating attack on the
+            # chosen player (slot 0 = terra-nullius expand); fall back to
+            # the newest attack overall.
             attacks = legal.get("attacks", [])
-            return [{"type": "cancel_attack", "attackID": attacks[-1]}] if attacks else []
+            if not attacks:
+                return []
+            slot = choice.get("player_slot", -1)
+            lut = self.builder.lut
+            aid = attacks[-1]
+            matches = [
+                a
+                for a in obs["entities"]["attacks"]
+                if a["from"] == obs["me"]
+                and not a.get("retreating")
+                and (int(lut[a["to"]]) if a["to"] else 0) == slot
+            ]
+            if matches:
+                aid = matches[-1]["aid"]
+            return [{"type": "cancel_attack", "attackID": aid}]
+        if name == "upgrade_structure":
+            u = self.nearest_own_unit(
+                choice["tile_region"], obs, legal.get("upgradable", [])
+            )
+            if u is None:
+                return []
+            return [{"type": "upgrade_structure", "unit": u["type"], "unitId": u["uid"]}]
+        if name == "move_warship":
+            ids = legal.get("warships", [])
+            tile = self.region_tile(choice["tile_region"], self.land == 0)
+            if not ids or tile is None:
+                return []
+            return [{"type": "move_warship", "unitIds": ids, "tile": tile}]
+        if name == "cancel_boat":
+            u = self.nearest_own_unit(
+                choice["tile_region"], obs, legal.get("boats", [])
+            )
+            if u is None:
+                return []
+            return [{"type": "cancel_boat", "unitID": u["uid"]}]
+        if name == "delete_unit":
+            u = self.nearest_own_unit(
+                choice["tile_region"], obs, legal.get("deletable", [])
+            )
+            if u is None:
+                return []
+            return [{"type": "delete_unit", "unitId": u["uid"]}]
 
         pid = self.slot_to_pid(choice.get("player_slot", -1), obs)
         if pid is None:
@@ -157,6 +234,12 @@ class IntentTranslator:
             return [{"type": "donate_troops", "recipient": pid, "troops": int(troops * frac)}]
         if name == "embargo":
             return [{"type": "embargo", "targetID": pid, "action": "start"}]
+        if name == "embargo_stop":
+            return [{"type": "embargo", "targetID": pid, "action": "stop"}]
+        if name == "target_player":
+            return [{"type": "targetPlayer", "target": pid}]
+        if name == "alliance_extension":
+            return [{"type": "allianceExtension", "recipient": pid}]
         return []
 
 

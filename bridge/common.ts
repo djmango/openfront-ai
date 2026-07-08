@@ -217,11 +217,40 @@ export function legality(game: Game, clientID: string): object {
       gold: gold.toString(),
       attacks: agent.outgoingAttacks().map((a) => a.id()),
       boats: agent.units(UnitType.TransportShip).map((u) => u.id()),
-      warships: agent.units(UnitType.Warship).map((u) => u.id()),
+      warships: agent
+        .units(UnitType.Warship)
+        .filter((u) => u.isActive())
+        .map((u) => u.id()),
+      // Exact upgrade legality (type upgradable + not constructing + owned)
+      // plus affordability - the upgrade costs the same as building anew.
       upgradable: agent
         .units()
-        .filter((u) => game.unitInfo(u.type()).upgradable)
+        .filter(
+          (u) =>
+            agent.canUpgradeUnit(u) &&
+            gold >= game.unitInfo(u.type()).cost(game, agent),
+        )
         .map((u) => u.id()),
+      // Mirrors DeleteUnitExecution: active unit standing on the player's
+      // own land territory, delete cooldown expired.
+      deletable: agent.canDeleteUnit()
+        ? agent
+            .units()
+            .filter((u) => {
+              if (!u.isActive() || !game.isLand(u.tile())) return false;
+              const o = game.owner(u.tile());
+              return o.isPlayer() && o.id() === agent.id();
+            })
+            .map((u) => u.id())
+        : [],
+      // Players the agent currently embargoes (embargo stop targets).
+      stopEmbargoable: agent.getEmbargoes().map((e) => e.target.smallID()),
+      // Alliances inside the extension window not yet agreed by the agent.
+      extendable: agent
+        .alliances()
+        .map((a) => a.other(agent))
+        .filter((p) => agent.allianceInfo(p)?.canExtend === true)
+        .map((p) => p.smallID()),
     },
   };
 }

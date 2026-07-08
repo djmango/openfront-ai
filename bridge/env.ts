@@ -227,6 +227,86 @@ class EnvSession {
         if (!bordersNeutralLand(this.game, agent)) {
           wasted++;
         }
+      } else if (intent.type === "upgrade_structure") {
+        // UpgradeStructureExecution: unit exists, owned, upgradable type,
+        // not constructing / marked for deletion.
+        const unit = this.game.unit(intent.unitId);
+        if (!unit || unit.owner() !== agent || !agent.canUpgradeUnit(unit)) {
+          wasted++;
+        }
+      } else if (intent.type === "move_warship") {
+        // MoveWarshipExecution: valid water position and at least one own
+        // active warship in the same water component.
+        const comp = this.game.getWaterComponent(intent.tile);
+        const ships = new Map(
+          agent.units(UnitType.Warship).map((u) => [u.id(), u]),
+        );
+        const movable =
+          comp !== null &&
+          intent.unitIds.some((id) => {
+            const w = ships.get(id);
+            return (
+              w !== undefined &&
+              w.isActive() &&
+              this.game.hasWaterComponent(w.tile(), comp)
+            );
+          });
+        if (!movable) wasted++;
+      } else if (intent.type === "cancel_boat") {
+        // BoatRetreatExecution: own in-flight transport with that id.
+        if (
+          !agent
+            .units(UnitType.TransportShip)
+            .some((u) => u.id() === intent.unitID)
+        ) {
+          wasted++;
+        }
+      } else if (intent.type === "delete_unit") {
+        // DeleteUnitExecution: own active unit on own land territory,
+        // delete cooldown expired, not spawn phase.
+        const unit = this.game.unit(intent.unitId);
+        const owner = unit ? this.game.owner(unit.tile()) : null;
+        if (
+          !unit ||
+          unit.owner() !== agent ||
+          !unit.isActive() ||
+          !this.game.isLand(unit.tile()) ||
+          !(owner?.isPlayer() && owner.id() === agent.id()) ||
+          this.game.inSpawnPhase() ||
+          !agent.canDeleteUnit()
+        ) {
+          wasted++;
+        }
+      } else if (intent.type === "cancel_attack") {
+        // RetreatExecution on a nonexistent attack id is a no-op.
+        if (!agent.outgoingAttacks().some((a) => a.id() === intent.attackID)) {
+          wasted++;
+        }
+      } else if (intent.type === "embargo") {
+        // EmbargoExecution: starting an existing embargo / stopping a
+        // nonexistent one changes nothing.
+        const target = this.game.hasPlayer(intent.targetID)
+          ? this.game.player(intent.targetID)
+          : null;
+        const has = target !== null && agent.hasEmbargoAgainst(target);
+        if (target === null || (intent.action === "start" ? has : !has)) {
+          wasted++;
+        }
+      } else if (intent.type === "targetPlayer") {
+        // TargetPlayerExecution gates on canTarget.
+        const target = this.game.hasPlayer(intent.target)
+          ? this.game.player(intent.target)
+          : null;
+        if (target === null || !agent.canTarget(target)) wasted++;
+      } else if (intent.type === "allianceExtension") {
+        // AllianceExtensionExecution needs an active alliance inside the
+        // extension window that the agent hasn't already agreed to extend.
+        const other = this.game.hasPlayer(intent.recipient)
+          ? this.game.player(intent.recipient)
+          : null;
+        if (other === null || agent.allianceInfo(other)?.canExtend !== true) {
+          wasted++;
+        }
       }
     }
     return wasted;

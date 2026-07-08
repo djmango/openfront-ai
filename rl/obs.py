@@ -69,13 +69,34 @@ ACTIONS = [
     "donate_gold",  # player target
     "donate_troops",  # player target
     "embargo",  # player target
-    "retreat",  # cancel newest attack
+    "retreat",  # player target: cancel attack on that player (slot 0 = expand)
     "spawn",  # tile target; only legal (and forced) during the spawn phase
+    # v6 additions (appended so v5 action indices stay stable)
+    "upgrade_structure",  # tile target -> nearest own upgradable structure
+    "move_warship",  # tile target: move all own warships to that water region
+    "cancel_boat",  # tile target -> nearest own in-flight transport
+    "delete_unit",  # tile target -> nearest own deletable structure
+    "embargo_stop",  # player target: lift an active embargo
+    "target_player",  # player target: mark for allies/bots
+    "alliance_extension",  # player target: renew an expiring alliance
 ]
 N_ACTIONS = len(ACTIONS)
 
-BUILD_TYPES = ["City", "Port", "Defense Post", "Missile Silo", "SAM Launcher", "Factory"]
-NUKE_TYPES = ["Atom Bomb", "Hydrogen Bomb", "MIRV"]
+BUILD_TYPES = [
+    "City", "Port", "Defense Post", "Missile Silo", "SAM Launcher", "Factory",
+    "Warship",
+]
+# 5-way nuke head: (engine unit, rocketDirectionUp). The arc flag flips the
+# parabolic flight path (SAM evasion); MIRV ignores it entirely
+# (MirvExecution never receives the flag), so it gets a single row.
+NUKE_TYPES = [
+    ("Atom Bomb", True),
+    ("Atom Bomb", False),
+    ("Hydrogen Bomb", True),
+    ("Hydrogen Bomb", False),
+    ("MIRV", None),
+]
+NUKE_UNITS = ["Atom Bomb", "Hydrogen Bomb", "MIRV"]
 
 
 def log_norm(x: float) -> float:
@@ -338,6 +359,11 @@ class ObsBuilder:
             fill("donate_gold", legal.get("donatableGold", []))
             fill("donate_troops", legal.get("donatableTroops", []))
             fill("embargo", legal.get("embargoable", []))
+            # v6 player-target actions. Old BC caches predate
+            # stopEmbargoable/extendable/deletable: missing key -> illegal.
+            fill("embargo_stop", legal.get("stopEmbargoable", []))
+            fill("target_player", legal.get("targetable", []))
+            fill("alliance_extension", legal.get("extendable", []))
             # canExpand/canBoat are exact engine-state checks from the
             # bridge (neutral border, boat cap + own shore). Default True
             # for old BC caches whose legality blobs predate the keys.
@@ -349,17 +375,30 @@ class ObsBuilder:
             )
             build_ok = [t for t in BUILD_TYPES if t in legal.get("buildableTypes", [])]
             act[ACTIONS.index("build")] = 1.0 if build_ok else 0.0
-            nukes_ok = [t for t in NUKE_TYPES if t in legal.get("buildableTypes", [])]
+            nukes_ok = [t for t in NUKE_UNITS if t in legal.get("buildableTypes", [])]
             act[ACTIONS.index("launch_nuke")] = (
                 1.0 if nukes_ok and legal.get("hasSilo") else 0.0
             )
-            act[ACTIONS.index("retreat")] = 1.0 if legal.get("attacks") else 0.0
+            # Targeted retreat: the player head picks WHICH attack to cancel
+            # (slot of its target; slot 0 covers terra-nullius expands).
+            if legal.get("attacks"):
+                act[ACTIONS.index("retreat")] = 1.0
+                r = ACTIONS.index("retreat")
+                for a in obs["entities"]["attacks"]:
+                    if a["from"] == obs["me"]:
+                        ptarget[r, int(lut[a["to"]]) if a["to"] else 0] = 1.0
+            act[ACTIONS.index("upgrade_structure")] = (
+                1.0 if legal.get("upgradable") else 0.0
+            )
+            act[ACTIONS.index("move_warship")] = 1.0 if legal.get("warships") else 0.0
+            act[ACTIONS.index("cancel_boat")] = 1.0 if legal.get("boats") else 0.0
+            act[ACTIONS.index("delete_unit")] = 1.0 if legal.get("deletable") else 0.0
         build_mask = np.array(
             [1.0 if t in legal.get("buildableTypes", []) else 0.0 for t in BUILD_TYPES],
             dtype=np.float32,
         ) if obs["alive"] and legal else np.zeros(len(BUILD_TYPES), dtype=np.float32)
         nuke_mask = np.array(
-            [1.0 if t in legal.get("buildableTypes", []) else 0.0 for t in NUKE_TYPES],
+            [1.0 if u in legal.get("buildableTypes", []) else 0.0 for u, _ in NUKE_TYPES],
             dtype=np.float32,
         ) if obs["alive"] and legal else np.zeros(len(NUKE_TYPES), dtype=np.float32)
         return {
