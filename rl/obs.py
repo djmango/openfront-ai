@@ -369,6 +369,66 @@ class ObsBuilder:
             "legal_nuke": nuke_mask,
         }
 
+
+class ZCache:
+    """RAM LRU over frozen-AE latents, keyed (game, tick).
+
+    The AE input (owners + terrain/fallout + static unit planes) is
+    per-(game, tick) and the AE is frozen, so z is identical for every
+    player sample at the same snapshot - BC re-encoded it per sample, per
+    epoch (~90% of wall). Latents are stored as contiguous fp16 numpy on
+    CPU RAM under a byte budget (--z-cache-gb). PPO must never use this:
+    its episodes are unique, and encode_grids only consults the cache for
+    raws that carry a "z_key" (only the BC samplers attach one).
+
+    Also keeps a per-game land plane on the GPU (uint8): cache hits skip
+    the terrain_static upload (AE-only input), but _local_crops still
+    needs land - re-uploading 9.6MB fp32 per sample would eat most of the
+    win, while all games together are ~0.7GB as uint8."""
+
+    def __init__(self, max_bytes: int):
+        from collections import OrderedDict
+
+        self.max_bytes = max_bytes
+        self._d: "OrderedDict[tuple, np.ndarray]" = OrderedDict()
+        self._land: dict[str, torch.Tensor] = {}
+        self._lock = threading.Lock()
+        self.bytes = 0
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key: tuple) -> np.ndarray | None:
+        with self._lock:
+            z = self._d.get(key)
+            if z is None:
+                self.misses += 1
+                return None
+            self._d.move_to_end(key)
+            self.hits += 1
+            return z
+
+    def put(self, key: tuple, z: np.ndarray) -> None:
+        with self._lock:
+            if key in self._d:
+                return
+            self._d[key] = z
+            self.bytes += z.nbytes
+            while self.bytes > self.max_bytes and self._d:
+                _, old = self._d.popitem(last=False)
+                self.bytes -= old.nbytes
+
+    def land(self, raw: dict, device: str) -> torch.Tensor:
+        """(H, W) uint8 land plane on GPU, cached per game."""
+        game = raw["z_key"][0]
+        t = self._land.get(game)
+        if t is None:
+            t = torch.from_numpy(
+                raw["terrain_static"][0].astype(np.uint8)
+            ).to(device)
+            self._land[game] = t
+        return t
+
+
 _BIT_SHIFTS: dict[str, torch.Tensor] = {}
 _warned_oversize = False
 
@@ -445,7 +505,11 @@ def _staged_stack(name: str, arrays: list[np.ndarray]) -> np.ndarray:
 
 @torch.no_grad()
 def encode_grids(
-    ae: SpatialAE, raws: list[dict], device: str, fp16: bool = False
+    ae: SpatialAE,
+    raws: list[dict],
+    device: str,
+    fp16: bool = False,
+    z_cache: ZCache | None = None,
 ) -> list[dict]:
     """Batched full-resolution featurization on the GPU: frozen-AE encode,
     ego ownership pooling, fallout unpacking, and the local owner crop.
@@ -459,12 +523,40 @@ def encode_grids(
     rollout-buffer / host->device cost (PPO's main-loop bottleneck). Values
     are safe in half precision: AE latents, {0..1} pooled fractions, and
     small integer unit counts. Consumers must cast back to float32 (or run
-    under autocast) after upload."""
+    under autocast) after upload.
+
+    z_cache (BC only): raws carrying a "z_key" reuse cached AE latents and
+    skip the encode plus the terrain/fallout/static uploads (AE-only
+    inputs); per-player work (ego, local crop) still runs per sample.
+    Duplicate keys within one batch (a BC step draw emits every actor at
+    the same snapshot) encode once. PPO passes neither key nor cache, so
+    its path is untouched."""
     from rl.curriculum import GH_MAX, GW_MAX
 
+    n = len(raws)
+    # Resolve cached latents: z_hit holds fp16 CPU latents; rep_of maps a
+    # duplicate in-batch miss to the index that will actually encode.
+    z_hit: dict[int, np.ndarray] = {}
+    rep_of: dict[int, int] = {}
+    if z_cache is not None:
+        seen: dict[tuple, int] = {}
+        for i, r in enumerate(raws):
+            k = r.get("z_key")
+            if k is None:
+                continue
+            z = z_cache.get(k)
+            if z is not None:
+                z_hit[i] = z
+            elif k in seen:
+                rep_of[i] = seen[k]
+            else:
+                seen[k] = i
+    encode_idx = [i for i in range(n) if i not in z_hit and i not in rep_of]
+    needed_reps = set(rep_of.values())
+
     groups: dict[tuple, list[int]] = {}
-    for i, r in enumerate(raws):
-        groups.setdefault(r["owners"].shape, []).append(i)
+    for i in encode_idx:
+        groups.setdefault(raws[i]["owners"].shape, []).append(i)
 
     # Cap the full-res pixel footprint of one encode chunk: enc_stem's
     # activations run ~32ch x B x H x W, so an unlucky batch of same-map
@@ -479,6 +571,7 @@ def encode_grids(
 
     grid_by_idx: dict[int, np.ndarray] = {}
     local_by_idx: dict[int, np.ndarray] = {}
+    z_gpu: dict[int, torch.Tensor] = {}
     for idxs in chunks:
         owners = torch.from_numpy(
             _staged_stack("owners", [raws[i]["owners"] for i in idxs])
@@ -508,6 +601,15 @@ def encode_grids(
         else:
             z = ae.encode(owners.long(), terrain, static)
 
+        if z_cache is not None:
+            z16 = z.half().cpu().numpy()
+            for j, i in enumerate(idxs):
+                k = raws[i].get("z_key")
+                if k is not None:
+                    z_cache.put(k, z16[j].copy())
+                if i in needed_reps:
+                    z_gpu[i] = z[j].float()
+
         classmap = torch.gather(
             clut, 1, owners.long().reshape(B, -1)
         ).reshape(B, H, W)
@@ -525,7 +627,60 @@ def encode_grids(
             grid_by_idx[i] = grid[j]
             local_by_idx[i] = local[j]
 
-    consumed = ("owners", "terrain_static", "fallout_packed", "static", "clut", "transient")
+    # Cache-hit / in-batch-duplicate path: no AE, no terrain/fallout/static
+    # upload - just owners+clut (per-player featurization) and the latent.
+    cached_idx = [i for i in range(n) if i in z_hit or i in rep_of]
+    groups_c: dict[tuple, list[int]] = {}
+    for i in cached_idx:
+        groups_c.setdefault(raws[i]["owners"].shape, []).append(i)
+    chunks_c: list[list[int]] = []
+    for (H, W), idxs in groups_c.items():
+        per = max(1, MAX_ENC_PIX // (H * W))
+        chunks_c.extend(idxs[k : k + per] for k in range(0, len(idxs), per))
+
+    for idxs in chunks_c:
+        owners = torch.from_numpy(
+            _staged_stack("owners", [raws[i]["owners"] for i in idxs])
+        ).to(device)
+        clut = torch.from_numpy(
+            np.stack([raws[i]["clut"] for i in idxs])
+        ).long().to(device)
+        land = torch.stack([z_cache.land(raws[i], device) for i in idxs]).float()
+
+        B, H, W = owners.shape
+        zs = torch.empty(
+            B, LATENT_C, H // REGION, W // REGION, device=device
+        )
+        hit_js = [j for j, i in enumerate(idxs) if i in z_hit]
+        if hit_js:
+            zs[hit_js] = torch.from_numpy(
+                _staged_stack("zhit", [z_hit[idxs[j]] for j in hit_js])
+            ).to(device).float()
+        for j, i in enumerate(idxs):
+            if i in rep_of:
+                zs[j] = z_gpu[rep_of[i]]
+
+        classmap = torch.gather(
+            clut, 1, owners.long().reshape(B, -1)
+        ).reshape(B, H, W)
+        ego = torch.stack(
+            [(classmap == c).float() for c in (1, 2, 3)], dim=1
+        )
+        ego = F.avg_pool2d(ego, REGION)
+
+        grid = torch.cat([zs, ego], dim=1)
+        local = _local_crops(classmap, land)
+        if fp16:
+            grid, local = grid.half(), local.half()
+        grid, local = grid.cpu().numpy(), local.cpu().numpy()
+        for j, i in enumerate(idxs):
+            grid_by_idx[i] = grid[j]
+            local_by_idx[i] = local[j]
+
+    consumed = (
+        "owners", "terrain_static", "fallout_packed", "static", "clut",
+        "transient", "z_key",
+    )
     dtype = np.float16 if fp16 else np.float32
     out = []
     global _warned_oversize

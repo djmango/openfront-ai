@@ -310,6 +310,9 @@ fn unpack_arrays<'py>(
 // state is function-local and the copies release the GIL anyway.
 #[pymodule(gil_used = false)]
 fn ofrs(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Lets deploy scripts detect a stale build (pod_bc.sh rebuilds when
+    // this doesn't match rust/ofrs/Cargo.toml).
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(decode_frame, m)?)?;
     m.add_function(wrap_pyfunction!(collate_grids_f32, m)?)?;
     m.add_function(wrap_pyfunction!(collate_grids_f16, m)?)?;
