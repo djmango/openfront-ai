@@ -4,9 +4,11 @@ Per DESIGN.md: the AE compresses the map; everything small reaches the
 policy raw. v4 layout (d8c32 encoder, everything at 1/8 resolution):
 
   grid:     (C_GRID, H/8, W/8) - frozen z_grid (32ch) + ego ownership
-            planes (3) + transient unit planes (8, exact) = 43ch
+            planes (3) + defense-bonus fraction (1, v7, exact bypass) +
+            transient unit planes (N_TRANSIENT, exact)
   local:    (N_LOCAL, LOCAL, LOCAL) raw owner-map crop centered on the
             agent's territory - exact borders where the agent acts most
+            (own/ally/enemy/land/defense-bonus, v7)
   players:  (MAX_SLOTS, P_FEAT) per-player bypass features (exact)
   pmask:    (MAX_SLOTS,) slot exists
   scalars:  (N_SCALARS,) own/global state
@@ -44,19 +46,52 @@ IMPASSABLE_MAGNITUDE = 31  # land tiles at this magnitude cannot be owned
 REGION = 8
 LATENT_C = 32  # d8c32; asserted against the checkpoint in load_ae()
 
-# Transient planes (exact bypass, rendered at 1/REGION): warship, transport,
-# transport-destination, trade ship, nuke, nuke-impact-point, samlock-nuke,
-# construction.
-N_TRANSIENT = 8
-C_GRID = LATENT_C + 3 + N_TRANSIENT
+# Transient planes (exact bypass, rendered at 1/REGION). v7: every *_BASE
+# below is an own/ally/enemy triplet (index BASE + {0,1,2}); a unit's class
+# comes straight from `clut[owner_slot]` (1 own, 2 ally, 3 enemy) - same
+# ego-relative classing the AE-bypass ownership planes already use. Values
+# are intensities (log_norm troops/health fraction/level fraction) where a
+# natural magnitude exists, else flat presence. The two TR_ATTACK_* channels
+# are shared across owners - the player-feature stream carries who/whom.
+TR_WARSHIP = 0  # position; value = health_fraction
+TR_TRANSPORT = 3  # position; value = log_norm(troops carried)
+TR_TRANSPORT_DEST = 6  # binary
+TR_TRADE = 9  # position; binary
+TR_TRADE_DEST = 12  # binary (previously missing)
+TR_NUKE = 15  # Atom/Hydrogen/MIRV position; binary
+TR_NUKE_IMPACT = 18  # binary
+TR_NUKE_SAMLOCK = 21  # nuke position, targeted by a SAM; binary
+TR_CONSTRUCTION = 24  # any structure under construction; binary
+TR_SAM_MISSILE = 27  # position; binary
+TR_SAM_MISSILE_IMPACT = 30  # binary
+TR_MIRV_WARHEAD = 33  # position; binary (independently-targetable sub-warheads)
+TR_MIRV_WARHEAD_IMPACT = 36  # binary
+TR_TRAIN = 39  # position; value = log_norm(cargo troops)
+TR_SILO_COOLDOWN = 42  # Missile Silo, currently in cooldown; binary
+TR_SAM_COOLDOWN = 45  # SAM Launcher, currently in cooldown; binary
+TR_STATION = 48  # City/Port/Factory with an active connected TrainStation
+TR_ATTACK_SRC = 51  # all active attacks' source tile; value = log_norm(troops)
+TR_ATTACK_RETREAT = 52  # same, retreating attacks only (overlays TR_ATTACK_SRC)
+N_TRANSIENT = 53
+# +1 region-averaged defense-bonus fraction channel, appended right after
+# the ego ownership planes (same bypass treatment - never touches the
+# frozen AE's input, which stays land+magnitude+fallout only).
+N_DEFENSE_BONUS = 1
+C_GRID = LATENT_C + 3 + N_DEFENSE_BONUS + N_TRANSIENT
 
-# Raw local owner-map crop (exact-borders bypass): own/ally/enemy/land
-# planes over a LOCAL x LOCAL tile window centered on own territory.
+# Raw local owner-map crop (exact-borders bypass): own/ally/enemy/land/
+# defense-bonus (v7) planes over a LOCAL x LOCAL tile window centered on
+# own territory.
 LOCAL = 64
-N_LOCAL = 4
+N_LOCAL = 5
 
-P_FEAT = 12
-N_SCALARS = 8
+# v7: +9 columns (global attack pressure out/in, retreating fraction,
+# alliance expiry countdown, target-marked flag, troop/gold income,
+# doomsday in-clock flag + ticks) - see ObsBuilder._player_feats.
+P_FEAT = 21
+# v7: +3 scalars (own troop/gold income, doomsday-clock-enabled flag) -
+# see ObsBuilder._scalars.
+N_SCALARS = 11
 
 ACTIONS = [
     "noop",
@@ -195,6 +230,24 @@ class ObsBuilder:
             fallout_packed = np.packbits(
                 obs["fallout"][:hr, :wr].astype(np.uint8), axis=1
             )
+        if "defense_bonus_packed" in obs:
+            defense_bonus_packed = obs["defense_bonus_packed"]
+        else:
+            defense_bonus_packed = np.packbits(
+                obs["defense_bonus"][:hr, :wr].astype(np.uint8), axis=1
+            )
+
+        # Slot -> ego class LUT (0 neutral/unowned, 1 own, 2 ally, 3 enemy);
+        # the GPU expands it over the full-res owner grid. Computed before
+        # the unit loop below so per-unit ownership (own/ally/enemy) reuses
+        # this exact classing instead of a second ally-membership check.
+        allies, ally_expiry = self._ally_slots(ents, me_slot, lut)
+        clut = np.full(MAX_SLOTS, 3, dtype=np.uint8)
+        clut[0] = 0
+        for s in allies:
+            clut[s] = 2
+        if me_slot > 0:
+            clut[me_slot] = 1
 
         static = np.zeros((NUM_STATIC, gh, gw), dtype=np.float32)
         transient = np.zeros((N_TRANSIENT, gh, gw), dtype=np.float32)
@@ -206,8 +259,18 @@ class ObsBuilder:
             gy, gx = u["y"] // REGION, u["x"] // REGION
             if not (0 <= gy < gh and 0 <= gx < gw):
                 continue
+            # Units are always player-owned; clut[0] (neutral) is a
+            # can't-happen fallback rendered as enemy so a bookkeeping edge
+            # case never gets silently dropped.
+            cls = int(clut[int(lut[u["owner"]])])
+            oc = cls - 1 if cls else 2
             if ci in static_pos and not u["constructing"]:
-                static[static_pos[ci], gy, gx] = 1.0
+                # Intensity instead of flat presence: how upgraded is this
+                # structure (soft-normalized - the engine has no hard level
+                # cap). max(): a region can hold >1 structure of a class.
+                level_frac = min(float(u.get("level") or 1) / 10.0, 1.0)
+                si = static_pos[ci]
+                static[si, gy, gx] = max(static[si, gy, gx], level_frac)
             # Targets can sit in the cropped edge strip (maps are trimmed to
             # multiples of REGION), so bounds-check them like unit positions.
             ty, tx = (
@@ -216,39 +279,78 @@ class ObsBuilder:
             target_ok = 0 <= ty < gh and 0 <= tx < gw
             t = u["type"]
             if t == "Warship":
-                transient[0, gy, gx] = 1.0
+                # .get(): old BC caches predate health/maxHealth.
+                health, max_health = u.get("health"), u.get("maxHealth")
+                hf = health / max_health if health is not None and max_health else 1.0
+                ch = TR_WARSHIP + oc
+                transient[ch, gy, gx] = max(transient[ch, gy, gx], hf)
             elif t == "Transport":
-                transient[1, gy, gx] = 1.0
+                ch = TR_TRANSPORT + oc
+                transient[ch, gy, gx] = max(transient[ch, gy, gx], log_norm(u["troops"]))
                 if target_ok:
-                    transient[2, ty, tx] = 1.0
+                    transient[TR_TRANSPORT_DEST + oc, ty, tx] = 1.0
             elif t == "Trade Ship":
-                transient[3, gy, gx] = 1.0
-            elif t in ("Atom Bomb", "Hydrogen Bomb", "MIRV"):
-                transient[4, gy, gx] = 1.0
+                transient[TR_TRADE + oc, gy, gx] = 1.0
                 if target_ok:
-                    transient[5, ty, tx] = 1.0
+                    transient[TR_TRADE_DEST + oc, ty, tx] = 1.0
+            elif t in ("Atom Bomb", "Hydrogen Bomb", "MIRV"):
+                transient[TR_NUKE + oc, gy, gx] = 1.0
+                if target_ok:
+                    transient[TR_NUKE_IMPACT + oc, ty, tx] = 1.0
                 if u["samLock"]:
-                    transient[6, gy, gx] = 1.0
+                    transient[TR_NUKE_SAMLOCK + oc, gy, gx] = 1.0
+            elif t == "SAMMissile":
+                transient[TR_SAM_MISSILE + oc, gy, gx] = 1.0
+                if target_ok:
+                    transient[TR_SAM_MISSILE_IMPACT + oc, ty, tx] = 1.0
+            elif t == "MIRV Warhead":
+                transient[TR_MIRV_WARHEAD + oc, gy, gx] = 1.0
+                if target_ok:
+                    transient[TR_MIRV_WARHEAD_IMPACT + oc, ty, tx] = 1.0
+            elif t == "Train":
+                ch = TR_TRAIN + oc
+                transient[ch, gy, gx] = max(transient[ch, gy, gx], log_norm(u["troops"]))
             if u["constructing"]:
-                transient[7, gy, gx] = 1.0
+                transient[TR_CONSTRUCTION + oc, gy, gx] = 1.0
+            if u.get("cooldown"):  # .get(): old BC caches predate cooldown
+                if t == "Missile Silo":
+                    transient[TR_SILO_COOLDOWN + oc, gy, gx] = 1.0
+                elif t == "SAM Launcher":
+                    transient[TR_SAM_COOLDOWN + oc, gy, gx] = 1.0
+            if u.get("station"):  # .get(): old BC caches predate station
+                transient[TR_STATION + oc, gy, gx] = 1.0
 
-        # Slot -> ego class LUT (0 neutral/unowned, 1 own, 2 ally, 3 enemy);
-        # the GPU expands it over the full-res owner grid.
-        allies = self._ally_slots(ents, me_slot, lut)
-        clut = np.full(MAX_SLOTS, 3, dtype=np.uint8)
-        clut[0] = 0
-        for s in allies:
-            clut[s] = 2
-        if me_slot > 0:
-            clut[me_slot] = 1
+        # Attack fronts (v7): source-tile intensity across ALL active
+        # attacks, not just ego's - the single biggest pre-v7 blind spot
+        # (third-party land wars were invisible). Shared across owners; the
+        # player-feature stream carries who's attacking whom. Broad-front
+        # expand attacks have no single source tile (srcX/srcY null) and
+        # are naturally skipped - there's no meaningful point to plot.
+        for a in ents["attacks"]:
+            # .get(): old BC caches predate srcX/srcY.
+            src_x, src_y = a.get("srcX"), a.get("srcY")
+            if src_x is None or src_y is None:
+                continue
+            gy, gx = src_y // REGION, src_x // REGION
+            if not (0 <= gy < gh and 0 <= gx < gw):
+                continue
+            val = log_norm(a["troops"])
+            transient[TR_ATTACK_SRC, gy, gx] = max(transient[TR_ATTACK_SRC, gy, gx], val)
+            if a["retreating"]:
+                transient[TR_ATTACK_RETREAT, gy, gx] = max(
+                    transient[TR_ATTACK_RETREAT, gy, gx], val
+                )
 
-        players, pmask = self._player_feats(ents, lut, me_slot, allies)
+        players, pmask = self._player_feats(
+            ents, lut, me_slot, allies, ally_expiry, obs["tick"]
+        )
         scalars = self._scalars(obs, ents, me_slot)
         masks = self._masks(obs, lut, spawn_phase)
         masks["legal_tile"] = self._legal_tile(owners, spawn_phase, gh, gw)
         return {
             "owners": owners,  # uint8 slots; full-res work happens on GPU
             "fallout_packed": fallout_packed,
+            "defense_bonus_packed": defense_bonus_packed,
             "terrain_static": self._terrain_static,  # (2, H, W); static per game
             "static": static,
             "transient": transient,
@@ -276,33 +378,66 @@ class ObsBuilder:
             .astype(np.float32)
         )
 
-    def _ally_slots(self, ents: dict, me_slot: int, lut: np.ndarray) -> set[int]:
+    def _ally_slots(
+        self, ents: dict, me_slot: int, lut: np.ndarray
+    ) -> tuple[set[int], dict[int, int]]:
         out = set()
-        for a, b, _exp in ents["alliances"]:
+        expiry: dict[int, int] = {}  # ally slot -> that alliance's expiresAt tick
+        for a, b, exp in ents["alliances"]:
             sa, sb = int(lut[a]), int(lut[b])
             if sa == me_slot:
                 out.add(sb)
+                expiry[sb] = exp
             elif sb == me_slot:
                 out.add(sa)
-        return out
+                expiry[sa] = exp
+        return out, expiry
 
     def _player_feats(
-        self, ents: dict, lut: np.ndarray, me_slot: int, allies: set[int]
+        self,
+        ents: dict,
+        lut: np.ndarray,
+        me_slot: int,
+        allies: set[int],
+        ally_expiry: dict[int, int],
+        tick: int,
     ) -> tuple[np.ndarray, np.ndarray]:
         feats = np.zeros((MAX_SLOTS, P_FEAT), dtype=np.float32)
         mask = np.zeros(MAX_SLOTS, dtype=np.float32)
         atk_between: dict[int, float] = {}
+        # v7: global attack pressure (vs anyone, not just ego) + retreating
+        # fraction, per attacking player - closes the third-party-attack
+        # gap the spatial TR_ATTACK_* channels also address (this carries
+        # how much per player; the grid carries where).
+        out_troops: dict[int, float] = {}
+        in_troops: dict[int, float] = {}
+        atk_total: dict[int, int] = {}
+        atk_retreating: dict[int, int] = {}
         for a in ents["attacks"]:
             sa, sb = int(lut[a["from"]]), int(lut[a["to"]]) if a["to"] else 0
             if sa == me_slot:
                 atk_between[sb] = atk_between.get(sb, 0.0) + a["troops"]
             elif sb == me_slot:
                 atk_between[sa] = atk_between.get(sa, 0.0) - a["troops"]
+            out_troops[sa] = out_troops.get(sa, 0.0) + a["troops"]
+            if sb:
+                in_troops[sb] = in_troops.get(sb, 0.0) + a["troops"]
+            atk_total[sa] = atk_total.get(sa, 0) + 1
+            if a["retreating"]:
+                atk_retreating[sa] = atk_retreating.get(sa, 0) + 1
+        # Target marks (v7): who ego or an ally has painted as a priority
+        # target - mirrors the existing embargo-by-ego column pattern.
+        marking_slots = allies | {me_slot}
+        marked: set[int] = set()
+        for p in ents["players"]:
+            if int(lut[p["id"]]) in marking_slots:
+                marked.update(int(lut[t]) for t in p.get("targets", []))
         for p in ents["players"]:
             slot = int(lut[p["id"]])
             if slot <= 0:
                 continue
             mask[slot] = 1.0
+            n_atk = atk_total.get(slot, 0)
             feats[slot] = [
                 1.0 if p["alive"] else 0.0,
                 log_norm(p["troops"]),
@@ -316,12 +451,25 @@ class ObsBuilder:
                 1.0 if atk_between.get(slot, 0.0) > 0 else 0.0,
                 len(p["reqsIn"]) / 4.0,
                 len(p["reqsOut"]) / 4.0,
+                # v7 additions below
+                log_norm(out_troops.get(slot, 0.0)),
+                log_norm(in_troops.get(slot, 0.0)),
+                atk_retreating.get(slot, 0) / n_atk if n_atk else 0.0,
+                max(0.0, min(1.0, (ally_expiry[slot] - tick) / 3000.0))
+                if slot in ally_expiry
+                else 0.0,
+                1.0 if slot in marked else 0.0,
+                log_norm(p.get("troopIncome", 0.0)),
+                log_norm(float(p.get("goldIncome", 0.0))),
+                1.0 if p.get("doomsday") else 0.0,
+                min(1.0, p.get("doomsdayTicks", 0) / 3000.0),
             ]
         return feats, mask
 
     def _scalars(self, obs: dict, ents: dict, me_slot: int) -> np.ndarray:
         legal = obs["legal"]["actions"]
         n_alive = sum(p["alive"] for p in ents["players"])
+        me_p = next((p for p in ents["players"] if p["id"] == obs["me"]), None)
         return np.array(
             [
                 obs["tick"] / 15000.0,
@@ -332,6 +480,11 @@ class ObsBuilder:
                 n_alive / 128.0,
                 len(legal.get("attacks", [])) / 8.0,
                 me_slot / MAX_SLOTS,
+                # v7: own income rate (matches DESIGN.md's aspirational
+                # global "income rate" scalar) + doomsday-clock-enabled flag.
+                log_norm(me_p.get("troopIncome", 0.0)) if me_p else 0.0,
+                log_norm(float(me_p.get("goldIncome", 0.0))) if me_p else 0.0,
+                1.0 if ents.get("doomsdayEnabled") else 0.0,
             ],
             dtype=np.float32,
         )
@@ -567,7 +720,7 @@ def _unpack_bits(packed: torch.Tensor, w: int) -> torch.Tensor:
 
 
 def _local_crops(
-    classmap: torch.Tensor, land: torch.Tensor
+    classmap: torch.Tensor, land: torch.Tensor, defense_bonus: torch.Tensor
 ) -> torch.Tensor:
     """(B, N_LOCAL, LOCAL, LOCAL) crops centered on own-territory centroid
     (map center when the agent owns nothing, e.g. the spawn phase)."""
@@ -577,6 +730,7 @@ def _local_crops(
         ph, pw = max(0, LOCAL - H), max(0, LOCAL - W)
         classmap = F.pad(classmap, (0, pw, 0, ph))
         land = F.pad(land, (0, pw, 0, ph))
+        defense_bonus = F.pad(defense_bonus, (0, pw, 0, ph))
         own = F.pad(own, (0, pw, 0, ph))
         B, H, W = classmap.shape
     counts = own.sum(dim=(1, 2))
@@ -598,8 +752,15 @@ def _local_crops(
     bi = torch.arange(B, device=classmap.device)[:, None, None]
     cm = classmap[bi, yy, xx]
     ld = land[bi, yy, xx]
+    db = defense_bonus[bi, yy, xx]
     return torch.stack(
-        [(cm == 1).float(), (cm == 2).float(), (cm == 3).float(), ld.float()],
+        [
+            (cm == 1).float(),
+            (cm == 2).float(),
+            (cm == 3).float(),
+            ld.float(),
+            db.float(),
+        ],
         dim=1,
     )
 
@@ -736,6 +897,11 @@ def encode_grids(
         packed = torch.from_numpy(
             _staged_stack("packed", [raws[i]["fallout_packed"] for i in idxs])
         ).to(device)
+        db_packed = torch.from_numpy(
+            _staged_stack(
+                "db_packed", [raws[i]["defense_bonus_packed"] for i in idxs]
+            )
+        ).to(device)
         static = torch.from_numpy(
             _staged_stack("static", [raws[i]["static"] for i in idxs])
         ).to(device)
@@ -746,6 +912,9 @@ def encode_grids(
         B, H, W = owners.shape
         fallout = _unpack_bits(packed, W)
         terrain = torch.cat([terr, fallout.unsqueeze(1)], dim=1)
+        # Defense bonus never reaches the (frozen) AE - exact bypass only,
+        # same treatment as ego ownership below.
+        defense_bonus = _unpack_bits(db_packed, W)
         # The frozen AE runs in bf16 on cuda: profiling showed the encode
         # phase dominating BC's feed thread (enc 60s vs smp 0s per window)
         # and it shares the GPU with the trainer's forward/backward.
@@ -771,9 +940,10 @@ def encode_grids(
             [(classmap == c).float() for c in (1, 2, 3)], dim=1
         )
         ego = F.avg_pool2d(ego, REGION)
+        db_pooled = F.avg_pool2d(defense_bonus.unsqueeze(1), REGION)
 
-        grid = torch.cat([z.float(), ego], dim=1)
-        local = _local_crops(classmap, terr[:, 0])
+        grid = torch.cat([z.float(), ego, db_pooled], dim=1)
+        local = _local_crops(classmap, terr[:, 0], defense_bonus)
         if torch_out:
             # Append transient planes here (GPU) so "grid" is complete and
             # never round-trips through the host.
@@ -808,8 +978,16 @@ def encode_grids(
             np.stack([raws[i]["clut"] for i in idxs])
         ).long().to(device)
         land = torch.stack([z_cache.land(raws[i], device) for i in idxs]).float()
+        db_packed = torch.from_numpy(
+            _staged_stack(
+                "db_packed", [raws[i]["defense_bonus_packed"] for i in idxs]
+            )
+        ).to(device)
 
         B, H, W = owners.shape
+        # Defense bonus changes every tick, unlike the cached AE latent -
+        # always decoded fresh (cheap: unpack + avg_pool, no AE involved).
+        defense_bonus = _unpack_bits(db_packed, W)
         zs = torch.empty(
             B, LATENT_C, H // REGION, W // REGION, device=device
         )
@@ -842,9 +1020,10 @@ def encode_grids(
             [(classmap == c).float() for c in (1, 2, 3)], dim=1
         )
         ego = F.avg_pool2d(ego, REGION)
+        db_pooled = F.avg_pool2d(defense_bonus.unsqueeze(1), REGION)
 
-        grid = torch.cat([zs, ego], dim=1)
-        local = _local_crops(classmap, land)
+        grid = torch.cat([zs, ego, db_pooled], dim=1)
+        local = _local_crops(classmap, land, defense_bonus)
         if torch_out:
             tr = torch.from_numpy(
                 _staged_stack("transient", [raws[i]["transient"] for i in idxs])
@@ -859,8 +1038,8 @@ def encode_grids(
             local_by_idx[i] = local[j]
 
     consumed = (
-        "owners", "terrain_static", "fallout_packed", "static", "clut",
-        "transient", "z_key",
+        "owners", "terrain_static", "fallout_packed", "defense_bonus_packed",
+        "static", "clut", "transient", "z_key",
     )
     dtype = np.float16 if fp16 else np.float32
     out = []

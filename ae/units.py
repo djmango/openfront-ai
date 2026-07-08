@@ -19,6 +19,12 @@ UNIT_CLASSES = [
     "Atom Bomb",
     "Hydrogen Bomb",
     "MIRV",
+    # v7: transient-only additions (never STATIC - the frozen AE stays
+    # untouched). Engine string values, not display names: SAMMissile has
+    # no space (UnitType.SAMMissile = "SAMMissile" in Game.ts).
+    "SAMMissile",
+    "MIRV Warhead",
+    "Train",
 ]
 UNIT_CLASS_INDEX = {name: i for i, name in enumerate(UNIT_CLASSES)}
 
@@ -39,4 +45,8 @@ TRANSIENT_CLASSES = [
     "Atom Bomb",
     "Hydrogen Bomb",
     "MIRV",
+    # v7
+    "SAMMissile",
+    "MIRV Warhead",
+    "Train",
 ]

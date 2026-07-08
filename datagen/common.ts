@@ -115,8 +115,20 @@ export async function loadFreshTerrain(
   };
 }
 
+/**
+ * replay.ts replays each records/<commit>/ bucket at the exact engine
+ * commit the game ran on (see replay_all.sh), so APIs added after a given
+ * game's commit must be feature-detected rather than called directly -
+ * mirrors the existing doomsdayClockConfig() guard in replay.ts.
+ */
+function hasFn<T extends object>(obj: T, name: keyof any): boolean {
+  return typeof (obj as unknown as Record<string, unknown>)[name as string] ===
+    "function";
+}
+
 /** Full entity state for one snapshot: everything the observation stack reads. */
 export function snapshotEntities(game: Game): object {
+  const config = game.config();
   const players = game.players().map((p) => ({
     id: p.smallID(),
     name: p.name(),
@@ -136,6 +148,18 @@ export function snapshotEntities(game: Game): object {
     relations: p
       .allRelationsSorted()
       .map((r) => [r.player.smallID(), r.relation]),
+    // Growth rates + Doomsday Clock state (v7); parity with obsCore.ts.
+    // Older engine commits (replayed from records/) predate these APIs.
+    troopIncome:
+      p.isAlive() && hasFn(config, "troopIncreaseRate")
+        ? config.troopIncreaseRate(p)
+        : 0,
+    goldIncome:
+      p.isAlive() && hasFn(config, "goldAdditionRate")
+        ? config.goldAdditionRate(p).toString()
+        : "0",
+    doomsday: hasFn(p, "inDoomsdayClock") ? p.inDoomsdayClock() : false,
+    doomsdayTicks: hasFn(p, "doomsdayClockTicks") ? p.doomsdayClockTicks() : 0,
   }));
 
   const alliances: number[][] = [];
@@ -167,8 +191,11 @@ export function snapshotEntities(game: Game): object {
         samLock: u.targetedBySAM(),
         level: u.level(),
         health: u.hasHealth() ? u.health() : null,
+        maxHealth:
+          u.hasHealth() && hasFn(u, "maxHealth") ? u.maxHealth() : null,
         constructing: u.isUnderConstruction(),
         cooldown: u.isInCooldown(),
+        station: hasFn(u, "hasTrainStation") ? u.hasTrainStation() : false,
         troops: Math.round(u.troops()),
       };
     }),
@@ -188,5 +215,13 @@ export function snapshotEntities(game: Game): object {
     }),
   );
 
-  return { players, alliances, units, attacks };
+  return {
+    players,
+    alliances,
+    units,
+    attacks,
+    doomsdayEnabled: hasFn(config, "doomsdayClockConfig")
+      ? config.doomsdayClockConfig().enabled
+      : false,
+  };
 }

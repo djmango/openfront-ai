@@ -158,10 +158,11 @@ Concatenated at the same resolution:
   destinations, trade ships, nukes + impact points + SAM locks,
   construction
 
-Total 43 channels at H/8 x W/8, any map size (curriculum budget 150x250 =
-Asia). As of v4 all full-resolution featurization (slot classing, ego
-pooling, fallout unpack, AE encode, local crop) runs batched on the GPU
-in `encode_grids`; env workers and the BC loader only touch small exact
+Total 43 channels at H/8 x W/8 as of v4 (v7 expands this to 89 - see
+below), any map size (curriculum budget 150x250 = Asia). As of v4 all
+full-resolution featurization (slot classing, ego pooling, fallout
+unpack, AE encode, local crop) runs batched on the GPU in
+`encode_grids`; env workers and the BC loader only touch small exact
 state.
 
 Plus the exact-borders bypass: a raw 64x64-tile local owner crop
@@ -196,6 +197,74 @@ embeddings (kept for pointer heads 2 and 4). Spatial stream -> 2-3 conv
 layers (kept at grid resolution for pointer head 3, plus a pooled vector).
 Concatenate pooled spatial + pooled tokens + scalars -> trunk MLP (LSTM
 later if needed) -> action heads.
+
+### v7: full-state observation expansion
+
+v6's transient/entity streams omitted several things a human player sees
+that only mattered once bots got good enough to punish blindness to them:
+other players' land attacks (only boat/nuke arrivals were visible), which
+unit owns which tile, troop counts in transit on boats, alliance expiry,
+trade-ship destinations, per-unit health/cooldown, tile defense bonus,
+target-painting, income rate, the doomsday clock, and the rail network.
+v7 closes these gaps, entirely through the existing AE-bypass paths (raw
+grid channels, player-feature vectors, global scalars) - the frozen
+spatial AE (`ae/model_v3.py`) is untouched, so no AE retraining is
+needed. BC and PPO checkpoints are **not** compatible across this change
+(every shape constant below moved); full retrain from scratch.
+
+- **Transient grid planes reworked and expanded** (`N_TRANSIENT`: 8 ->
+  53; `C_GRID`: 43 -> 89). Previously transient planes were flat
+  presence/log-troops with no ownership split. Now every unit-bearing
+  plane is ego-relative-split (own/ally/enemy, via the same `clut`
+  ego-classing used for static ownership) and intensity-encoded (health
+  fraction for warships, log-troops for transports/trade
+  ships/trains, static-structure level). New unit-type planes: SAM
+  Missile, MIRV Warhead, Train; a Trade Ship destination plane; Missile
+  Silo/SAM Launcher cooldown planes; an active-train-station flag on
+  City/Port/Factory; and attack-front planes (`TR_ATTACK_SRC`,
+  `TR_ATTACK_RETREAT`) rasterizing *every* active attack's boat/invasion
+  origin (any player, not just self) so land invasions - not just
+  boat/nuke arrivals - are visible on the map, including whether the
+  attack is retreating.
+- **Tile defense bonus** decoded from the engine's raw tile-state bit
+  (`DEFENSE_BONUS_BIT`, `rl/env.py`) and exposed two ways: a
+  region-averaged grid channel (`N_DEFENSE_BONUS`) and a 5th local-crop
+  plane (`N_LOCAL`: 4 -> 5), consistent with the exact-borders bypass
+  philosophy for anything the policy needs pixel-accurate.
+- **Player features** (`P_FEAT`: 12 -> 21) gain: global attack pressure
+  in/out (troops attacking from or into this player, vs. anyone - the
+  scalar-side complement to the attack-front grid planes), that
+  player's retreating-attack fraction, alliance-expiry countdown (ticks
+  to expire, only for alliances involving self), a target-marked flag
+  (painted by self or an ally - mirrors the existing embargo-by-self
+  column), and troop/gold income + doomsday-clock state
+  (in-clock flag, ticks).
+- **Global scalars** (`N_SCALARS`: 8 -> 11) gain self troop/gold income
+  and a doomsday-clock-enabled flag.
+- **New unit taxonomy** (`ae/units.py`): SAM Missile, MIRV Warhead, Train
+  added to `TRANSIENT_CLASSES` (rail network support stays lightweight -
+  trains render as a transient unit plane plus the active-station flag,
+  no separate graph/edge representation).
+- **Engine surface additions** (`obsCore.ts` for live play,
+  `datagen/common.ts` for replay - kept in parity): per-attack
+  `srcX`/`srcY` (boat/invasion origin, for the attack-front planes);
+  per-unit `health`/`maxHealth`/`cooldown`/`station`; per-player
+  `targets`/`troopIncome`/`goldIncome`/`doomsday`/`doomsdayTicks`; a
+  top-level `doomsdayEnabled` flag. `datagen/common.ts` feature-detects
+  every new engine method (`hasFn` helper) because `replay_all.sh`
+  replays archived games at the exact historical engine commit they ran
+  on, and these APIs postdate some of those commits.
+- **Backward compatibility during the BC data migration.** `rl/obs.py`
+  reads every new field with `.get()` + a zero/null default, so BC
+  training keeps working against not-yet-replayed archive data; the
+  cached-frame format also bumped (`CACHE_FORMAT` 1 -> 2, adds a packed
+  defense-bonus plane) with a stale-cache rebuild guard in
+  `scripts/prefeaturize_bc.py`. The Rust fast-path sampler
+  (`rust/ofrs/src/sampler.rs`) is frozen at the pre-v7 schema; `rl/bc_data.py`
+  compares its compiled-in `(P_FEAT, N_TRANSIENT, N_SCALARS)` against the
+  live constants and falls back to the pure-Python sampler on mismatch,
+  so training is always correct, just slower until the Rust side is
+  ported.
 
 ## Environment bridge contract
 

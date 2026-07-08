@@ -17,6 +17,7 @@ TSX = REPO_ROOT / "openfront" / "node_modules" / ".bin" / "tsx"
 
 OWNER_MASK = 0x0FFF
 FALLOUT_BIT = 13
+DEFENSE_BONUS_BIT = 14
 
 
 class OpenFrontEnv:
@@ -89,6 +90,7 @@ class OpenFrontEnv:
         )
         obs["owners"] = state & OWNER_MASK
         obs["fallout"] = (state >> FALLOUT_BIT) & 1
+        obs["defense_bonus"] = (state >> DEFENSE_BONUS_BIT) & 1
         self.me = obs["me"]
         return obs
 
