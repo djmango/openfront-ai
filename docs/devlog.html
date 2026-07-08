@@ -802,6 +802,31 @@ win curve, it's that v6 is <i>not</i> playing like v5.1:</p>
     yet to enter the policy's experience; worth watching once economies get bigger.</li>
 </ul>
 
+<h3 id="reward-outcome-only">Boat-churn and the outcome-only reward rule</h3>
+<p>The boat numbers above are not a playstyle, they're an exploit. 54-73% boats with
+<code>cancel_boat</code> at 14% of stage-4 actions is launch/recall <i>churn</i>: the agent
+sends boats out and calls them home in loops, and the roll-score 0.88 / win 0.10 split is the
+signature of learned busywork rather than closing out games. The rule this hardens into
+(<code>rl/curriculum.py</code> header): <b>punish illegal or wasted actions, reward outcomes
+(state), never individual actions.</b> Any reward attached to an action invites pairs of legal
+actions that cancel each other out and farm the shaping instead of the game.</p>
+<p>The audit found no explicit per-action bonus to delete - the MDP was already outcome-based
+(strength blend + deltas + terminal placement/win) plus the <code>W_WASTE</code> illegality tax,
+and no-ops were never penalized. The churn reward was hiding in <i>measurement</i>: the strength
+blend's military share read <code>player.troops()</code>, the home pool only, and the engine
+deducts troops from the pool the moment a boat or attack launches, refunding them (minus the 25%
+retreat malus) on recall. So "send boat" scored as a strength <i>loss</i> and
+"<code>cancel_boat</code>" as a <i>gain</i> - a per-action reward pair in disguise - and boats
+doubled as a free troop bank, since troops parked on them dodge the <code>maxTroops</code> regen
+throttle. Fix: <code>strengths()</code> now counts troops in the field (aboard transports,
+committed to outgoing attacks) toward the military share. Launching and recalling are
+reward-neutral state moves; only real losses - combat deaths, the retreat malus - move the
+blend. <code>W_WASTE</code> still prices intents the engine silently discards (a
+<code>cancel_boat</code> with no boat in flight stays wasted), constants and the
+<a href="#reward-mdp">reward-MDP table</a> are otherwise unchanged. Lands on rl5 at its next
+restart from master; watch the boat share of the action mix and the win conversion at
+stage 4.</p>
+
 <h3 id="cache-verdict">The honest cache verdict: promised 10x, delivered ~2x</h3>
 <p>The <a href="#v6-plan">v6 plan</a> promised the AE-latent cache would make BC ~10x faster,
 on the theory that encode was 90% of wall time. Live numbers: bc2 peaked at 128-145 ex/s at

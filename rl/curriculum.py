@@ -21,6 +21,10 @@ Reward design (v2):
   are otherwise reward-identical to noop but with occasional upside, so
   the policy farms them as free lottery tickets (v3/v4 replays: 40-80% of
   decisions were boats/builds that did nothing).
+- v6.2: troops in the field (aboard transports, committed to outgoing
+  attacks) count toward the military share, so launching/recalling a boat
+  is a reward-neutral state move instead of a fake loss/gain pair (see the
+  boat-churn note above strengths()).
 
 Curriculum (v2):
 - Each stage is a POOL of maps plus a bot count and difficulty; the map is
@@ -42,6 +46,15 @@ from dataclasses import dataclass
 
 import numpy as np
 
+# v6 reward lesson (boat-churn): punish illegal/wasted actions, reward
+# outcomes (state), NEVER individual actions. Any per-action reward or
+# penalty invites churn - pairs of legal actions that cancel each other
+# out farm the shaping instead of the game (v6 stage 4: boats were 54-73%
+# of actions with cancel_boat at 14%, roll-score 0.88 but win rate 0.10).
+# The only action-attached term below is W_WASTE, and it prices intents
+# the engine silently discards - illegality, not activity. There is no
+# no-op penalty: useful no-ops exist, and the outcome terms already make
+# acting beat idling.
 W_STR = 0.02
 # v5: asymmetric strength delta (loss-aversion shaping). v4 games showed
 # hyper-expansion followed by collapse; symmetric W_DELTA priced a lost
@@ -153,20 +166,40 @@ def strengths(entities: dict, land_total: int) -> dict[int, float]:
     """Composite strength per living player: blended land / military /
     economic / structural position. Land share is absolute (fraction of the
     map); troops, gold, and structure value are shares of what living
-    players hold."""
+    players hold.
+
+    v6.2: military counts troops in the field, not just the home pool.
+    The engine deducts troops from player.troops() the moment a boat or
+    attack launches and refunds them (minus the 25% retreat malus) on
+    recall - so pool-only accounting priced "send boat" as a strength LOSS
+    and "cancel_boat" as a GAIN, a per-action reward pair in disguise.
+    ppo_v6 farmed it: launch/recall loops, plus a free troop bank (troops
+    parked on boats dodge the maxTroops regen throttle). Counting
+    unit/attack troops makes launch and recall reward-neutral state moves;
+    only real losses (combat deaths, the retreat malus) move the blend."""
     alive = [p for p in entities["players"] if p["alive"]]
-    tot_troops = sum(p["troops"] for p in alive) + 1e-9
-    tot_gold = sum(float(p["gold"]) for p in alive) + 1e-9
+    fielded: dict[int, float] = {}
     sv: dict[int, float] = {}
     for u in entities.get("units", ()):
+        t = u.get("troops", 0)
+        if t:
+            fielded[u["owner"]] = fielded.get(u["owner"], 0.0) + t
         v = STRUCT_VALUE.get(u["type"])
         if v is not None and not u["constructing"]:
             sv[u["owner"]] = sv.get(u["owner"], 0.0) + v * max(1, u.get("level", 1))
+    for a in entities.get("attacks", ()):
+        fielded[a["from"]] = fielded.get(a["from"], 0.0) + a["troops"]
+
+    def troops(p: dict) -> float:
+        return p["troops"] + fielded.get(p["id"], 0.0)
+
+    tot_troops = sum(troops(p) for p in alive) + 1e-9
+    tot_gold = sum(float(p["gold"]) for p in alive) + 1e-9
     tot_sv = sum(sv.get(p["id"], 0.0) for p in alive) + 1e-9
     return {
         p["id"]: (
             K_LAND * (p["tiles"] / land_total)
-            + K_MIL * (p["troops"] / tot_troops)
+            + K_MIL * (troops(p) / tot_troops)
             + K_ECO * (float(p["gold"]) / tot_gold)
             + K_BUILD * (sv.get(p["id"], 0.0) / tot_sv)
         )
