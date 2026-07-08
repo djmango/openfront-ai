@@ -11,5 +11,6 @@ records-rl/
 replays/
 .DS_Store
 rust/ofrs/target/
+rust/target/
 rust/ofrs/Cargo.lock
 .venv-t/
