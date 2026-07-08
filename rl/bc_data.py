@@ -45,7 +45,7 @@ except ImportError:  # pragma: no cover
     _loads = json.loads
 
 from rl.obs import ACTIONS, BUILD_TYPES, NUKE_TYPES, REGION, ObsBuilder
-from rl.policy import NEEDS_PLAYER, NEEDS_QUANTITY, NEEDS_TILE
+from rl.policy import NEEDS_PLAYER, NEEDS_QUANTITY, NEEDS_TILE, QUANTITY_FRACS
 
 N_PLACEMENT_BUCKETS = 8
 
@@ -55,14 +55,13 @@ def placement_bucket(p: float) -> int:
     return min(N_PLACEMENT_BUCKETS - 1, int(p * N_PLACEMENT_BUCKETS))
 
 
-def quantity_frac(amt: float | None, avail: float) -> float:
-    """Scalar 0-1 target for the Beta quantity head: the fraction of the
-    available troops/gold the human actually committed. amt=None means the
-    client default slider (0.25). Clamping to the Beta support edges
-    happens in the loss."""
+def quantity_bucket(amt: float | None, avail: float) -> int:
+    """Nearest QUANTITY_FRACS bucket for an absolute amount; the client
+    default (amt=None) plays like the 25% slider."""
     if amt is None or avail <= 0:
-        return 0.25
-    return min(1.0, max(0.0, float(amt) / float(avail)))
+        return 2
+    frac = min(1.0, max(0.0, float(amt) / float(avail)))
+    return int(np.argmin([abs(frac - f) for f in QUANTITY_FRACS]))
 
 
 class CachedGame:
@@ -118,7 +117,7 @@ def label_to_choice(
     label: dict, game: CachedGame, entities: dict, client_smallid: int
 ) -> dict | None:
     """Map a normalized BC label to policy head targets. Unused heads are -1
-    (matches Policy.evaluate choice tensors; quantity_frac is a float)."""
+    (matches Policy.evaluate choice tensors)."""
     name = label["a"]
     if name not in ACTIONS:
         return None
@@ -128,21 +127,13 @@ def label_to_choice(
         "tile_region": -1,
         "build_type": -1,
         "nuke_type": -1,
-        "quantity_frac": -1.0,
+        "quantity": -1,
     }
     if name in NEEDS_PLAYER:
-        if name == "retreat":
-            # Targeted retreat: t is the cancelled attack's target (0 for a
-            # terra-nullius expand -> slot 0). Old sidecars carry no t; the
-            # player head just goes unsupervised there.
-            t = label.get("t")
-            if t is not None:
-                choice["player_slot"] = int(game.lut[t]) if t else 0
-        else:
-            slot = int(game.lut[label["t"]])
-            if slot <= 0:
-                return None
-            choice["player_slot"] = slot
+        slot = int(game.lut[label["t"]])
+        if slot <= 0:
+            return None
+        choice["player_slot"] = slot
     if name in NEEDS_TILE:
         gx = (label["x"] // game.ds) // REGION
         gy = (label["y"] // game.ds) // REGION
@@ -156,21 +147,13 @@ def label_to_choice(
     if name == "build":
         choice["build_type"] = BUILD_TYPES.index(label["unit"])
     if name == "launch_nuke":
-        # 5-way head: (unit, arc). MIRV maps to its single row whatever the
-        # recorded flag; missing flag (old sidecars) defaults to arc-up,
-        # matching the engine default.
-        up = bool(label.get("up", True))
-        unit = label["unit"]
-        if unit == "MIRV":
-            choice["nuke_type"] = NUKE_TYPES.index(("MIRV", None))
-        else:
-            choice["nuke_type"] = NUKE_TYPES.index((unit, up))
+        choice["nuke_type"] = NUKE_TYPES.index(label["unit"])
     if name in NEEDS_QUANTITY:
         me = next(
             (p for p in entities["players"] if p["id"] == client_smallid), None
         )
         avail = float(me["gold"]) if name == "donate_gold" else float(me["troops"]) if me else 0.0
-        choice["quantity_frac"] = quantity_frac(label.get("amt"), avail)
+        choice["quantity"] = quantity_bucket(label.get("amt"), avail)
     return choice
 
 
@@ -180,7 +163,7 @@ NOOP_CHOICE = {
     "tile_region": -1,
     "build_type": -1,
     "nuke_type": -1,
-    "quantity_frac": -1.0,
+    "quantity": -1,
 }
 
 
