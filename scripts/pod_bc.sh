@@ -20,6 +20,11 @@ BATCH="${BATCH:-96}"
 ACCUM="${ACCUM:-1}"
 STEPS="${STEPS:-60000}"
 WORKERS="${WORKERS:-16}"
+# Optional pre-v6 checkpoint to warm-start from (rl.bc --init-extend).
+# Safe to leave set across relaunches: rl.bc ignores it once --resume is
+# passed, and the loop below passes --resume as soon as bc.pt exists.
+INIT_EXTEND="${INIT_EXTEND:-}"
+Z_CACHE_GB="${Z_CACHE_GB:-300}"
 REPO_DIR=/workspace/openfront-ai
 # Keep the HF cache off the small container disk.
 export HF_HOME=/workspace/hf-cache
@@ -181,7 +186,9 @@ while true; do
     MALLOC_ARENA_MAX=2 \
     MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=1073741824 \
     python -m rl.bc --data data-human --name "$RUN_NAME" --seq "$SEQ" \
-    --batch "$BATCH" --accum "$ACCUM" --steps "$STEPS" --workers "$WORKERS" $RESUME \
+    --batch "$BATCH" --accum "$ACCUM" --steps "$STEPS" --workers "$WORKERS" \
+    --z-cache-gb "$Z_CACHE_GB" \
+    ${INIT_EXTEND:+--init-extend "$INIT_EXTEND"} $RESUME \
     2>&1 | tee -a "/tmp/bc_$RUN_NAME.log"
   ELAPSED=$(( $(date +%s) - START_TS ))
   if [ "$ELAPSED" -lt 120 ]; then
