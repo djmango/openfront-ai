@@ -34,7 +34,7 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 REPLAY_STATE = DATA_DIR / "state.json"
 HUB_STATE = DATA_DIR / "hub_state.json"
 AE_PATH = Path(os.environ.get("AE_CKPT", "runs/ae_v31_d8c32/ae_v3.pt"))
-RUN_NAME = os.environ.get("RUN_NAME", "ppo_v4")
+RUN_NAME = os.environ.get("RUN_NAME", "ppo_v6")
 CLIENT_HOST = os.environ.get("CLIENT_HOST", "127.0.0.1:9000")
 ADMIN_KEY = os.environ.get(
     "ADMIN_BOT_API_KEY",

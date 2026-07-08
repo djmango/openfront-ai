@@ -57,7 +57,7 @@ RUN --mount=type=cache,target=/root/.npm \
 ENV PATH="/app/.venv/bin:/app/openfront/node_modules/.bin:${PATH}"
 ENV PYTHONPATH=/app
 ENV DATA_DIR=/data
-ENV RUN_NAME=ppo_v4
+ENV RUN_NAME=ppo_v6
 ENV STAGE=4
 ENV SHOWCASE_WATCH_STAGE=4
 ENV SEED=showcase0
