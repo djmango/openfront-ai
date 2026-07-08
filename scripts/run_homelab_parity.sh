@@ -23,6 +23,7 @@ elif [[ "$PULL" == "1" ]]; then
   ssh "$HOST" bash -lc "cd ~/$REMOTE_DIR && git fetch origin && git pull --ff-only"
 fi
 
-REMOTE_CMD="cd ~/$REMOTE_DIR && OPENFRONT_REPO=~/openfront-ai PARITY_COMMIT=${PARITY_COMMIT} bash scripts/homelab_parity.sh"
+# Remote default shell is fish; pass one quoted string so bash -lc runs with a real cwd.
+REMOTE_CMD="cd ~/$REMOTE_DIR && OPENFRONT_REPO=\$HOME/openfront-ai PARITY_COMMIT=${PARITY_COMMIT} bash scripts/homelab_parity.sh"
 echo "[run_homelab_parity] host=$HOST commit=$PARITY_COMMIT"
-ssh "$HOST" bash -lc "$REMOTE_CMD"
+ssh "$HOST" "bash -lc '$REMOTE_CMD'"

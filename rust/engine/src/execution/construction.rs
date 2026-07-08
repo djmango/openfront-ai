@@ -1,6 +1,9 @@
 //! Structure construction (`ConstructionExecution.ts` subset for nation cities).
 
-use super::{city_execution::CityExecution, defense_post_execution::DefensePostExecution, ExecEnum, Execution};
+use super::{
+    city_execution::CityExecution, defense_post_execution::DefensePostExecution,
+    factory_execution::FactoryExecution, port_execution::PortExecution, ExecEnum, Execution,
+};
 use crate::core::schemas::unit_type;
 use crate::game::Game;
 use crate::map::TileRef;
@@ -17,6 +20,14 @@ fn complete_construction(game: &mut Game, small_id: u16, unit_type: &str, unit_i
         }
         unit_type::DEFENSE_POST => {
             game.add_execution(ExecEnum::DefensePost(DefensePostExecution::new(
+                small_id, unit_id,
+            )));
+        }
+        unit_type::PORT => {
+            game.add_execution(ExecEnum::Port(PortExecution::new(small_id, unit_id)));
+        }
+        unit_type::FACTORY => {
+            game.add_execution(ExecEnum::Factory(FactoryExecution::new(
                 small_id, unit_id,
             )));
         }
