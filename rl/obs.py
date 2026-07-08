@@ -771,23 +771,71 @@ def encode_grids(
     return out
 
 
-def collate(obs_list: list[dict], keys: list[str]) -> dict[str, np.ndarray]:
+def _staged_out(name: str, shape: tuple, dtype) -> np.ndarray:
+    """Persistent per-thread flat buffer reshaped to `shape` (contiguous).
+    Same rationale as _staged_stack: collate outputs run 60-200MB per
+    batch, and fresh mallocs that size mmap/munmap every batch (glibc
+    non-main arenas cap heap segments at 64MB regardless of
+    MALLOC_MMAP_THRESHOLD_), which degrades badly on fragmented hosts -
+    BC's col phase decayed 3.4s -> 14s per 50-step window on bc2."""
+    bufs = getattr(_staging, "outs", None)
+    if bufs is None:
+        bufs = _staging.outs = {}
+    numel = int(np.prod(shape))
+    key = (name, np.dtype(dtype).str)
+    buf = bufs.get(key)
+    if buf is None or buf.size < numel:
+        buf = np.empty(numel, dtype=dtype)
+        bufs[key] = buf
+    return buf[:numel].reshape(shape)
+
+
+def collate(
+    obs_list: list[dict], keys: list[str], staged: bool = False
+) -> dict[str, np.ndarray]:
     """Stack per-env obs dicts into batch arrays, zero-padding 'grid',
     'grid_valid', and 'legal_tile' to the largest grid in THIS batch (not
-    the curriculum-wide max - that wasted ~9x conv compute on small maps)."""
+    the curriculum-wide max - that wasted ~9x conv compute on small maps).
+
+    staged=True returns views into persistent per-thread buffers, valid
+    only until the caller's next collate on the same thread. Safe when
+    the arrays are uploaded to the GPU immediately (BC does; PPO keeps
+    rollout grids on the CPU, so it must NOT pass staged)."""
     from rl.native import collate_grids, collate_masks, stack
 
     out = {}
     gh = max(o["grid"].shape[1] for o in obs_list)
     gw = max(o["grid"].shape[2] for o in obs_list)
+    B = len(obs_list)
     for k in keys:
         if k == "grid":
             # dtype-preserving: ppo stores rollout grids as fp16 to halve
             # collate/PCIe cost; everyone else passes fp32 through unchanged
-            b = collate_grids([o["grid"] for o in obs_list], gh, gw)
+            if staged:
+                g0 = obs_list[0]["grid"]
+                b = _staged_out("col_grid", (B, g0.shape[0], gh, gw), g0.dtype)
+                b.fill(0)
+                for i, o in enumerate(obs_list):
+                    g = o["grid"]
+                    b[i, :, : g.shape[1], : g.shape[2]] = g
+            else:
+                b = collate_grids([o["grid"] for o in obs_list], gh, gw)
         elif k in ("grid_valid", "legal_tile"):
-            b = collate_masks([o[k] for o in obs_list], gh, gw)
+            if staged:
+                b = _staged_out(f"col_{k}", (B, gh, gw), np.float32)
+                b.fill(0)
+                for i, o in enumerate(obs_list):
+                    m = o[k]
+                    b[i, : m.shape[0], : m.shape[1]] = m
+            else:
+                b = collate_masks([o[k] for o in obs_list], gh, gw)
         else:
-            b = stack([o[k] for o in obs_list])
+            if staged:
+                a0 = np.asarray(obs_list[0][k])
+                b = _staged_out(f"col_{k}", (B, *a0.shape), a0.dtype)
+                for i, o in enumerate(obs_list):
+                    b[i] = o[k]
+            else:
+                b = stack([o[k] for o in obs_list])
         out[k] = b
     return out
