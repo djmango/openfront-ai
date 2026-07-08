@@ -24,11 +24,22 @@ use serde_json::Value;
 
 use crate::feat::{
     self, action_index, featurize, needs_player, needs_quantity, needs_tile, num,
-    parse_ents, parse_legal, placement_bucket, quantity_bucket, Feat, Legal, GW_MAX,
+    parse_ents, parse_legal, placement_bucket, quantity_frac, Feat, Legal, GW_MAX,
     IS_LAND_BIT, MAG_MASK, REGION,
 };
 
-const NOOP_CHOICE: [i64; 6] = [feat::A_NOOP, -1, -1, -1, -1, -1];
+/// Discrete heads (action, player_slot, tile_region, build_type, nuke_type)
+/// plus the scalar Beta-head target (-1.0 = unused).
+#[derive(Clone, Copy)]
+struct Choice {
+    heads: [i64; 5],
+    quantity_frac: f64,
+}
+
+const NOOP_CHOICE: Choice = Choice {
+    heads: [feat::A_NOOP, -1, -1, -1, -1],
+    quantity_frac: -1.0,
+};
 
 fn err<E: std::fmt::Display>(what: &str) -> impl Fn(E) -> PyErr + '_ {
     move |e| PyValueError::new_err(format!("{what}: {e}"))
@@ -242,7 +253,7 @@ pub struct Built {
     owners: Vec<u8>,
     fallout: Vec<u8>,
     feat: Feat,
-    choice: [i64; 6],
+    choice: Choice,
     cond: i64,
 }
 
@@ -251,16 +262,29 @@ fn label_to_choice(
     game: &Game,
     ents_players: &[(usize, f64, f64)], // (id, troops, gold)
     client_smallid: i64,
-) -> Option<[i64; 6]> {
+) -> Option<Choice> {
     let a = action_index(label["a"].as_str()?)?;
-    let mut choice = [a, -1, -1, -1, -1, -1];
+    let mut choice = Choice { heads: [a, -1, -1, -1, -1], quantity_frac: -1.0 };
     if needs_player(a) {
-        let t = label["t"].as_u64()? as usize;
-        let slot = *game.lut.get(t)? as i64;
-        if slot <= 0 {
-            return None;
+        if a == feat::A_RETREAT {
+            // Targeted retreat: t is the cancelled attack's target (0 = a
+            // terra-nullius expand -> slot 0); old sidecars carry no t and
+            // leave the player head unsupervised. Mirrors bc_data.py.
+            if let Some(t) = label.get("t").and_then(|v| v.as_u64()) {
+                choice.heads[1] = if t == 0 {
+                    0
+                } else {
+                    *game.lut.get(t as usize)? as i64
+                };
+            }
+        } else {
+            let t = label["t"].as_u64()? as usize;
+            let slot = *game.lut.get(t)? as i64;
+            if slot <= 0 {
+                return None;
+            }
+            choice.heads[1] = slot;
         }
-        choice[1] = slot;
     }
     if needs_tile(a) {
         let gx = (label["x"].as_i64()? / game.ds) / REGION as i64;
@@ -268,13 +292,16 @@ fn label_to_choice(
         if !(0 <= gy && gy < game.gh as i64 && 0 <= gx && gx < game.gw as i64) {
             return None;
         }
-        choice[2] = gy * GW_MAX + gx;
+        choice.heads[2] = gy * GW_MAX + gx;
     }
     if a == feat::A_BUILD {
-        choice[3] = feat::build_index(label["unit"].as_str()?)?;
+        choice.heads[3] = feat::build_index(label["unit"].as_str()?)?;
     }
     if a == feat::A_LAUNCH_NUKE {
-        choice[4] = feat::nuke_index(label["unit"].as_str()?)?;
+        // Missing arc flag (old sidecars) defaults to arc-up, the engine
+        // default; MIRV maps to its single row whatever the flag.
+        let up = label.get("up").and_then(|v| v.as_bool()).unwrap_or(true);
+        choice.heads[4] = feat::nuke_index(label["unit"].as_str()?, up)?;
     }
     if needs_quantity(a) {
         let me = ents_players
@@ -297,23 +324,24 @@ fn label_to_choice(
                 Some(num(v))
             }
         });
-        choice[5] = quantity_bucket(amt, avail);
+        choice.quantity_frac = quantity_frac(amt, avail);
     }
     Some(choice)
 }
 
 /// Force the labeled option into the legality masks (the human did it, so it
 /// was legal; our reconstruction can be narrower). Mirrors bc_data.py.
-fn force_legal(feat: &mut Feat, choice: &[i64; 6]) {
-    feat.legal_actions[choice[0] as usize] = 1.0;
-    if choice[1] >= 0 {
-        feat.legal_ptarget[choice[0] as usize * feat::MAX_SLOTS + choice[1] as usize] = 1.0;
+fn force_legal(feat: &mut Feat, choice: &Choice) {
+    let h = &choice.heads;
+    feat.legal_actions[h[0] as usize] = 1.0;
+    if h[1] >= 0 {
+        feat.legal_ptarget[h[0] as usize * feat::MAX_SLOTS + h[1] as usize] = 1.0;
     }
-    if choice[3] >= 0 {
-        feat.legal_build[choice[3] as usize] = 1.0;
+    if h[3] >= 0 {
+        feat.legal_build[h[3] as usize] = 1.0;
     }
-    if choice[4] >= 0 {
-        feat.legal_nuke[choice[4] as usize] = 1.0;
+    if h[4] >= 0 {
+        feat.legal_nuke[h[4] as usize] = 1.0;
     }
 }
 
@@ -449,8 +477,8 @@ fn spawn_sample(
     let (owners, fallout, mut f) =
         featurize_for(game, step.tick, true, label.me, &ents_v, &legal)?;
     let mut choice = NOOP_CHOICE;
-    choice[0] = feat::A_SPAWN;
-    choice[2] = gy * GW_MAX + gx;
+    choice.heads[0] = feat::A_SPAWN;
+    choice.heads[2] = gy * GW_MAX + gx;
     // The human did spawn there: force the region into the mask.
     f.legal_tile[gy as usize * game.gw + gx as usize] = 1.0;
     Ok(vec![Built {
@@ -640,15 +668,15 @@ impl Sampler {
         d.set_item("legal_tile", arrf(b.feat.legal_tile, [gh, gw])?)?;
         let ch = PyDict::new(py);
         for (k, v) in [
-            ("action", b.choice[0]),
-            ("player_slot", b.choice[1]),
-            ("tile_region", b.choice[2]),
-            ("build_type", b.choice[3]),
-            ("nuke_type", b.choice[4]),
-            ("quantity", b.choice[5]),
+            ("action", b.choice.heads[0]),
+            ("player_slot", b.choice.heads[1]),
+            ("tile_region", b.choice.heads[2]),
+            ("build_type", b.choice.heads[3]),
+            ("nuke_type", b.choice.heads[4]),
         ] {
             ch.set_item(k, v)?;
         }
+        ch.set_item("quantity_frac", b.choice.quantity_frac)?;
         d.set_item("choice", ch)?;
         d.set_item("cond", b.cond)?;
         // AE-latent cache identity (rl.obs.ZCache): the AE input is fully
