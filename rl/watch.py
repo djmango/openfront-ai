@@ -18,7 +18,7 @@ import torch
 from rl.curriculum import STAGES
 from rl.env import OpenFrontEnv
 from rl.obs import ACTIONS, ObsBuilder, encode_grids, load_ae
-from rl.policy import QUANTITY_FRACS, Policy
+from rl.policy import Policy
 from rl.ppo import OBS_KEYS
 from rl.ppo_translate import IntentTranslator, my_tiles, spawn_randomly
 
@@ -38,11 +38,12 @@ def describe(choice: dict, obs: dict) -> str:
     if "build_type" in choice:
         parts.append(BUILD_TYPES[choice["build_type"]])
     if "nuke_type" in choice:
-        parts.append(NUKE_TYPES[choice["nuke_type"]])
-    if "quantity" in choice:
-        frac = QUANTITY_FRACS[choice["quantity"]]
+        unit, up = NUKE_TYPES[choice["nuke_type"]]
+        parts.append(unit if up is None else f"{unit} {'up' if up else 'down'}")
+    if "quantity_frac" in choice:
+        frac = choice["quantity_frac"]
         troops = int(obs["legal"]["actions"].get("troops", 0) * frac)
-        parts.append(f"{int(frac * 100)}% ({troops:,})")
+        parts.append(f"{frac * 100:.0f}% ({troops:,})")
     return " ".join(parts)
 
 
