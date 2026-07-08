@@ -28,12 +28,14 @@ STEPS="${STEPS:-60000}"
 WORKERS="${WORKERS:-16}"
 # AE-latent cache budget (rl/bc.py --z-cache-gb). With the default
 # disk-backed slabs (--z-cache-dir auto -> runs/bc/zcache) the budget is
-# DISK, not RAM: file pages are kernel-reclaimable, so this can be sized
-# to the full dataset (~440GB fp16) even on cgroup-capped pods (bc2:
-# 116GiB cap; bc3: 250GB cap - anonymous slabs got the trainer
-# OOM-killed there). Pure-RAM budgets (Z_CACHE_DIR="") are clamped to
-# the cgroup limit in rl/bc.py.
-Z_CACHE_GB="${Z_CACHE_GB:-450}"
+# DISK, not RAM: file pages are kernel-reclaimable, so cgroup RAM caps
+# don't bound it. It IS bounded by the /workspace volume QUOTA, which the
+# mfs mount hides from df/statvfs (it reports the whole cluster fs) - a
+# 450GB budget filled bc3's 120GB volume and every relaunch died with
+# EDQUOT on the first write. Size this to (volume quota - data-human -
+# ~15GB headroom); no code guard can detect the quota. Pure-RAM budgets
+# (Z_CACHE_DIR="") are clamped to the cgroup limit in rl/bc.py.
+Z_CACHE_GB="${Z_CACHE_GB:-60}"
 Z_CACHE_DIR="${Z_CACHE_DIR:-auto}"
 # Optional pre-v6 checkpoint to warm-start from (rl.bc --init-extend).
 # Safe to leave set across relaunches: rl.bc ignores it once --resume is
