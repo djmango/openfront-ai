@@ -14,6 +14,7 @@ WORKERS="${WORKERS:-32}"
 mkdir -p /workspace
 exec > >(tee -a /workspace/pod_ae16_start.log) 2>&1
 trap 'rc=$?; echo "pod_ae16 exit rc=$rc; keeping container alive"; sleep infinity' EXIT
+ulimit -n 1048576 || true
 
 if [ -n "${PUBLIC_KEY:-}" ]; then
   mkdir -p ~/.ssh && chmod 700 ~/.ssh
