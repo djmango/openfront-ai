@@ -100,7 +100,7 @@ pub fn land_bfs_nearest_shore(
     )
 }
 
-/// Stamp BFS on land tiles. Returns true if a matching tile was found.
+/// TS `SpatialQuery.bfsNearest` at engine commit `0c4c7d7993c9`: full-range BFS + sort.
 pub fn land_bfs_nearest(
     map: &GameMap,
     scratch: &mut BfsScratch,
@@ -108,29 +108,15 @@ pub fn land_bfs_nearest(
     max_dist: u32,
     mut pred: impl FnMut(TileRef) -> bool,
 ) -> Option<TileRef> {
-    let stamp = scratch.next_stamp();
-    let mut best: Option<(TileRef, u32)> = None;
-    let mut q = VecDeque::from([(from, 0u32)]);
-    scratch.seen[from as usize] = stamp;
-
-    while let Some((t, _)) = q.pop_front() {
-        if pred(t) {
-            let dist = map.manhattan_dist(from, t);
-            if best.map(|(_, bd)| dist < bd).unwrap_or(true) {
-                best = Some((t, dist));
-            }
-        }
-        map.for_each_neighbor4(t, |n| {
-            if scratch.seen[n as usize] != stamp
-                && map.is_land(n)
-                && map.manhattan_dist(from, n) <= max_dist
-            {
-                scratch.seen[n as usize] = stamp;
-                q.push_back((n, 0));
-            }
-        });
+    let tiles = map.bfs_with_scratch(scratch, from, |gm, t| {
+        gm.manhattan_dist(from, t) <= max_dist
+    });
+    let mut candidates: Vec<TileRef> = tiles.into_iter().filter(|&t| pred(t)).collect();
+    if candidates.is_empty() {
+        return None;
     }
-    best.map(|(t, _)| t)
+    candidates.sort_by_key(|&t| map.manhattan_dist(from, t));
+    Some(candidates[0])
 }
 
 /// Stamp BFS water path; writes into `path_out` and returns true on success.
@@ -269,13 +255,15 @@ fn magnitude_penalty(mag: u8) -> u32 {
     }
 }
 
-fn count_water_neighbors(map: &GameMap, tile: TileRef) -> u32 {
+fn count_water_neighbors_ts(map: &GameMap, tile: TileRef) -> u32 {
+    let mut buf = [0u32; 4];
+    let n = map.neighbors4_ts(tile, &mut buf);
     let mut count = 0u32;
-    map.for_each_neighbor4(tile, |n| {
-        if map.is_water(n) {
+    for i in 0..n {
+        if map.is_water(buf[i]) {
             count += 1;
         }
-    });
+    }
     count
 }
 
@@ -284,44 +272,47 @@ pub fn coerce_shore_to_water(map: &GameMap, tile: TileRef) -> Option<TileRef> {
     if map.is_water(tile) {
         return Some(tile);
     }
+    let mut buf = [0u32; 4];
+    let n = map.neighbors4_ts(tile, &mut buf);
     let mut best: Option<TileRef> = None;
     let mut max_score = -1i32;
-    map.for_each_neighbor4(tile, |n| {
-        if !map.is_water(n) {
-            return;
+    for i in 0..n {
+        let neighbor = buf[i];
+        if !map.is_water(neighbor) {
+            continue;
         }
-        let score = count_water_neighbors(map, n) as i32;
+        let score = count_water_neighbors_ts(map, neighbor) as i32;
         if score > max_score {
             max_score = score;
-            best = Some(n);
+            best = Some(neighbor);
         }
-    });
+    }
     best
 }
 
-struct AstarHeap {
+pub(crate) struct AstarHeap {
     f: Vec<u32>,
     tile: Vec<TileRef>,
 }
 
 impl AstarHeap {
-    fn new(cap: usize) -> Self {
+    pub(crate) fn new(cap: usize) -> Self {
         Self {
             f: Vec::with_capacity(cap),
             tile: Vec::with_capacity(cap),
         }
     }
 
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.f.clear();
         self.tile.clear();
     }
 
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.f.is_empty()
     }
 
-    fn push(&mut self, tile: TileRef, priority: u32) {
+    pub(crate) fn push(&mut self, tile: TileRef, priority: u32) {
         let mut i = self.f.len();
         self.f.push(0);
         self.tile.push(0);
@@ -338,7 +329,7 @@ impl AstarHeap {
         self.tile[i] = tile;
     }
 
-    fn pop(&mut self) -> TileRef {
+    pub(crate) fn pop(&mut self) -> TileRef {
         let top = self.tile[0];
         let last_f = self.f.pop().unwrap();
         let last_tile = self.tile.pop().unwrap();
@@ -566,10 +557,34 @@ pub fn bounded_water_path(
         map.ref_xy(lx + min_x, ly + min_y)
     };
 
-    let goal_local = to_local(goal)?;
+    let to_local_clamped = |tile: TileRef| -> Option<usize> {
+        let mut x = map.x(tile);
+        let mut y = map.y(tile);
+        x = x.clamp(min_x, max_x);
+        y = y.clamp(min_y, max_y);
+        Some(((y - min_y) * bounds_w + (x - min_x)) as usize)
+    };
+
+    let goal_local = to_local_clamped(goal)?;
+    if goal_local >= num_local {
+        return None;
+    }
+    let s0 = starts[0];
+    let start_x = map.x(s0);
+    let start_y = map.y(s0);
+    let dx_goal = goal_x as i32 - start_x as i32;
+    let dy_goal = goal_y as i32 - start_y as i32;
+    let cross_norm = (dx_goal.abs() + dy_goal.abs()).max(1) as u32;
+    let cross_tie = |nx: u32, ny: u32| -> u32 {
+        let dx_n = nx as i32 - goal_x as i32;
+        let dy_n = ny as i32 - goal_y as i32;
+        let cross = (dx_goal * dy_n - dy_goal * dx_n).unsigned_abs();
+        ((cross * (COST_SCALE - 1)) / cross_norm / cross_norm) as u32
+    };
+
     heap.clear();
     for &s in starts {
-        let Some(start_local) = to_local(s) else {
+        let Some(start_local) = to_local_clamped(s) else {
             continue;
         };
         g[start_local] = 0;
@@ -633,7 +648,8 @@ pub fn bounded_water_path(
                 let h = heuristic_weight
                     * BASE_COST
                     * (nlx.abs_diff(goal_x) + nly.abs_diff(goal_y));
-                heap.push(n_local as TileRef, tentative + h);
+                let f = tentative + h + cross_tie(nlx, nly);
+                heap.push(n_local as TileRef, f);
             }
         };
 
@@ -715,6 +731,187 @@ fn bounded_magnitude_penalty(magnitude: u8) -> u32 {
     }
 }
 
+/// TS `SmoothingWaterTransformer` on a mini-map water path.
+fn smooth_water_path(map: &GameMap, path: &[TileRef]) -> Vec<TileRef> {
+    if path.len() <= 2 {
+        return path.to_vec();
+    }
+    let mut smoothed = los_smooth_water(map, path, 2);
+    smoothed = refine_water_endpoints(map, &smoothed);
+    los_smooth_water(map, &smoothed, 3)
+}
+
+fn los_smooth_water(map: &GameMap, path: &[TileRef], min_magnitude: u8) -> Vec<TileRef> {
+    let mut result = vec![path[0]];
+    let mut current = 0usize;
+    while current < path.len().saturating_sub(1) {
+        let mut lo = current + 1;
+        let mut hi = path.len() - 1;
+        let mut farthest = lo;
+        while lo <= hi {
+            let mid = (lo + hi) / 2;
+            if water_can_see(map, path[current], path[mid], min_magnitude) {
+                farthest = mid;
+                lo = mid + 1;
+            } else {
+                hi = mid.saturating_sub(1);
+            }
+        }
+        if farthest > current + 1 {
+            if let Some(trace) = water_trace_line(map, path[current], path[farthest]) {
+                for &t in trace.iter().skip(1).take(trace.len().saturating_sub(2)) {
+                    result.push(t);
+                }
+            }
+        }
+        current = farthest;
+        if current < path.len().saturating_sub(1) {
+            result.push(path[current]);
+        }
+    }
+    if let Some(&last) = path.last() {
+        result.push(last);
+    }
+    result
+}
+
+fn refine_water_endpoints(map: &GameMap, path: &[TileRef]) -> Vec<TileRef> {
+    if path.len() <= 2 {
+        return path.to_vec();
+    }
+    const REFINE_DIST: u32 = 50;
+    const PADDING: u32 = 10;
+    let mut result = path.to_vec();
+
+    let start_end = tile_at_path_distance(map, path, 0, REFINE_DIST, true);
+    if start_end > 1 {
+        if let Some(seg) = bounded_segment_path(map, path[0], path[start_end], PADDING) {
+            if !seg.is_empty() {
+                result = seg[..seg.len().saturating_sub(1)]
+                    .iter()
+                    .copied()
+                    .chain(result[start_end..].iter().copied())
+                    .collect();
+            }
+        }
+    }
+
+    let end_start = tile_at_path_distance(map, &result, result.len() - 1, REFINE_DIST, false);
+    if end_start + 2 < result.len() {
+        if let Some(mut seg) =
+            bounded_segment_path(map, *result.last().unwrap(), result[end_start], PADDING)
+        {
+            if !seg.is_empty() {
+                seg.reverse();
+                result = result[..=end_start]
+                    .iter()
+                    .copied()
+                    .chain(seg.iter().copied())
+                    .collect();
+            }
+        }
+    }
+    result
+}
+
+fn tile_at_path_distance(map: &GameMap, path: &[TileRef], start: usize, dist: u32, forward: bool) -> usize {
+    let mut cum = 0u32;
+    let mut idx = start;
+    if forward {
+        while idx + 1 < path.len() && cum < dist {
+            cum += map.manhattan_dist(path[idx], path[idx + 1]);
+            idx += 1;
+        }
+    } else {
+        while idx > 0 && cum < dist {
+            cum += map.manhattan_dist(path[idx], path[idx - 1]);
+            idx -= 1;
+        }
+    }
+    idx
+}
+
+fn bounded_segment_path(map: &GameMap, from: TileRef, to: TileRef, padding: u32) -> Option<Vec<TileRef>> {
+    let x0 = map.x(from);
+    let y0 = map.y(from);
+    let x1 = map.x(to);
+    let y1 = map.y(to);
+    let min_x = x0.min(x1).saturating_sub(padding);
+    let max_x = (x0.max(x1) + padding).min(map.width - 1);
+    let min_y = y0.min(y1).saturating_sub(padding);
+    let max_y = (y0.max(y1) + padding).min(map.height - 1);
+    bounded_water_path(map, &[from], to, min_x, max_x, min_y, max_y)
+}
+
+fn water_can_see(map: &GameMap, from: TileRef, to: TileRef, min_magnitude: u8) -> bool {
+    water_trace_line(map, from, to)
+        .map(|trace| {
+            trace.iter().all(|&t| {
+                map.is_water(t) && (map.terrain_byte(t) & 0x1f) >= min_magnitude
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn water_trace_line(map: &GameMap, from: TileRef, to: TileRef) -> Option<Vec<TileRef>> {
+    let w = map.width;
+    let mut x0 = map.x(from);
+    let mut y0 = map.y(from);
+    let x1 = map.x(to);
+    let y1 = map.y(to);
+    let dx = (x1 as i32 - x0 as i32).unsigned_abs();
+    let dy = (y1 as i32 - y0 as i32).unsigned_abs();
+    let sx = if x0 < x1 { 1i32 } else { -1i32 };
+    let sy = if y0 < y1 { 1i32 } else { -1i32 };
+    let mut err = dx as i32 - dy as i32;
+    let mut tiles = Vec::new();
+    for _ in 0..100_000 {
+        let tile = map.ref_xy(x0, y0);
+        if !map.is_water(tile) {
+            return None;
+        }
+        tiles.push(tile);
+        if x0 == x1 && y0 == y1 {
+            return Some(tiles);
+        }
+        let e2 = 2 * err;
+        let should_move_x = e2 > -(dy as i32);
+        let should_move_y = e2 < dx as i32;
+        if should_move_x && should_move_y {
+            x0 = (x0 as i32 + sx) as u32;
+            err -= dy as i32;
+            let intermediate = map.ref_xy(x0, y0);
+            if !map.is_water(intermediate) {
+                x0 = (x0 as i32 - sx) as u32;
+                err += dy as i32;
+                y0 = (y0 as i32 + sy) as u32;
+                err += dx as i32;
+                let alt = map.ref_xy(x0, y0);
+                if !map.is_water(alt) {
+                    return None;
+                }
+                tiles.push(alt);
+                x0 = (x0 as i32 + sx) as u32;
+                err -= dy as i32;
+            } else {
+                tiles.push(intermediate);
+                y0 = (y0 as i32 + sy) as u32;
+                err += dx as i32;
+            }
+        } else {
+            if should_move_x {
+                x0 = (x0 as i32 + sx) as u32;
+                err -= dy as i32;
+            }
+            if should_move_y {
+                y0 = (y0 as i32 + sy) as u32;
+                err += dx as i32;
+            }
+        }
+    }
+    None
+}
+
 /// TS `MiniMapTransformer` upscale (scale factor 2).
 fn upscale_cells(cells: &[(u32, u32)], scale: u32) -> Vec<(u32, u32)> {
     if cells.is_empty() {
@@ -737,8 +934,8 @@ fn upscale_cells(cells: &[(u32, u32)], scale: u32) -> Vec<(u32, u32)> {
         }
         for step in 1..steps {
             smooth.push((
-                (current.0 as i32 + (dx * step as i32) / steps as i32) as u32,
-                (current.1 as i32 + (dy * step as i32) / steps as i32) as u32,
+                (current.0 as f64 + (dx as f64 * step as f64) / steps as f64).round() as u32,
+                (current.1 as f64 + (dy as f64 * step as f64) / steps as f64).round() as u32,
             ));
         }
     }
@@ -758,13 +955,9 @@ fn fix_path_extremes(
     cell_src: Option<TileRef>,
     cell_dst: TileRef,
 ) -> Vec<TileRef> {
+    // TS `MiniMapTransformer.fixExtremes` uses `indexOf` (tile-ref equality).
     if let Some(src) = cell_src {
-        let sx = full.x(src);
-        let sy = full.y(src);
-        if let Some(idx) = path
-            .iter()
-            .position(|&t| full.x(t) == sx && full.y(t) == sy)
-        {
+        if let Some(idx) = path.iter().position(|&t| t == src) {
             if idx != 0 {
                 path = path[idx..].to_vec();
             }
@@ -772,19 +965,57 @@ fn fix_path_extremes(
             path.insert(0, src);
         }
     }
-    let dx = full.x(cell_dst);
-    let dy = full.y(cell_dst);
-    if let Some(idx) = path
-        .iter()
-        .position(|&t| full.x(t) == dx && full.y(t) == dy)
-    {
+    if let Some(idx) = path.iter().position(|&t| t == cell_dst) {
         if idx + 1 != path.len() {
             path.truncate(idx + 1);
         }
     } else {
         path.push(cell_dst);
     }
-    path
+    collapse_consecutive_dupes(path)
+}
+
+/// Ensure each consecutive pair is 4-neighbor adjacent (TS stepper assumption).
+fn densify_path_adjacent(map: &GameMap, path: Vec<TileRef>) -> Vec<TileRef> {
+    if path.len() <= 1 {
+        return path;
+    }
+    let mut out = vec![path[0]];
+    for &to in &path[1..] {
+        let from = *out.last().unwrap();
+        if from == to {
+            continue;
+        }
+        if map.manhattan_dist(from, to) == 1 {
+            out.push(to);
+            continue;
+        }
+        if let Some(trace) = water_trace_line(map, from, to) {
+            for &t in trace.iter().skip(1) {
+                if out.last() != Some(&t) {
+                    out.push(t);
+                }
+            }
+        } else {
+            out.push(to);
+        }
+    }
+    out
+}
+
+/// Upscale/interpolation can emit the same TileRef twice in a row; TS paths do
+/// not keep those duplicates and they stall transport steppers by one tick.
+fn collapse_consecutive_dupes(path: Vec<TileRef>) -> Vec<TileRef> {
+    if path.is_empty() {
+        return path;
+    }
+    let mut out = Vec::with_capacity(path.len());
+    for t in path {
+        if out.last() != Some(&t) {
+            out.push(t);
+        }
+    }
+    out
 }
 
 fn closest_full_source(full: &GameMap, froms: &[TileRef], path_start: TileRef) -> Option<TileRef> {
@@ -793,35 +1024,88 @@ fn closest_full_source(full: &GameMap, froms: &[TileRef], path_start: TileRef) -
     }
     let px = full.x(path_start);
     let py = full.y(path_start);
-    froms
-        .iter()
-        .min_by_key(|&&f| {
-            let fx = full.x(f);
-            let fy = full.y(f);
-            fx.abs_diff(px) + fy.abs_diff(py)
-        })
-        .copied()
+    let mut best: Option<TileRef> = None;
+    let mut best_dist = u32::MAX;
+    for &f in froms {
+        let dist = full.x(f).abs_diff(px) + full.y(f).abs_diff(py);
+        if dist < best_dist {
+            best_dist = dist;
+            best = Some(f);
+        }
+    }
+    best
 }
 
-/// Shore coercing + mini-map A* + upscale (TS simple `PathFinding.Water` chain).
+fn try_short_water_path_multi(
+    map: &GameMap,
+    starts: &[TileRef],
+    goal: TileRef,
+    out: &mut Vec<TileRef>,
+) -> bool {
+    const SHORT_PATH_THRESHOLD: u32 = 120;
+    const PADDING: u32 = 10;
+    let candidates: Vec<TileRef> = starts
+        .iter()
+        .copied()
+        .filter(|&s| map.manhattan_dist(s, goal) <= SHORT_PATH_THRESHOLD)
+        .collect();
+    if candidates.is_empty() {
+        return false;
+    }
+    let goal_x = map.x(goal);
+    let goal_y = map.y(goal);
+    let mut min_x = goal_x;
+    let mut max_x = goal_x;
+    let mut min_y = goal_y;
+    let mut max_y = goal_y;
+    for s in &candidates {
+        let sx = map.x(*s);
+        let sy = map.y(*s);
+        min_x = min_x.min(sx);
+        max_x = max_x.max(sx);
+        min_y = min_y.min(sy);
+        max_y = max_y.max(sy);
+    }
+    if let Some(path) = bounded_water_path(
+        map,
+        &candidates,
+        goal,
+        min_x.saturating_sub(PADDING),
+        (max_x + PADDING).min(map.width - 1),
+        min_y.saturating_sub(PADDING),
+        (max_y + PADDING).min(map.height - 1),
+    ) {
+        *out = path;
+        true
+    } else {
+        false
+    }
+}
+
+/// Shore coercing + mini-map path (simple A* or HPA) + upscale chain.
 fn minimap_inner_path(
     mini_map: &GameMap,
     mini_astar: &mut WaterAstarScratch,
+    mut hpa: Option<&mut crate::water_hpa::WaterHierarchical>,
     mini_froms: &[TileRef],
     mini_to: TileRef,
     mini_path_out: &mut Vec<TileRef>,
 ) -> bool {
     mini_path_out.clear();
     let mut water_starts = Vec::with_capacity(mini_froms.len());
-    let mut water_to_orig: std::collections::HashMap<TileRef, TileRef> =
+    let mut water_to_orig: std::collections::HashMap<TileRef, Option<TileRef>> =
         std::collections::HashMap::new();
     for &mf in mini_froms {
         let Some(water) = coerce_shore_to_water(mini_map, mf) else {
             continue;
         };
-        if !mini_map.is_water(mf) {
-            water_to_orig.insert(water, mf);
-        }
+        let orig = if mini_map.is_water(mf) {
+            None
+        } else {
+            Some(mf)
+        };
+        // TS ShoreCoercingTransformer Map always overwrites, including null originals.
+        water_to_orig.insert(water, orig);
         water_starts.push(water);
     }
     if water_starts.is_empty() {
@@ -837,17 +1121,58 @@ fn minimap_inner_path(
         Some(mini_to)
     };
 
-    if water_starts.len() == 1 && water_starts[0] == goal_water {
-        mini_path_out.push(mini_to);
-        return true;
+    // TS `ComponentCheckTransformer`  -  filter sources to destination component.
+    if let Some(hpa) = hpa.as_ref() {
+        let to_comp = hpa.graph.get_component_id(goal_water);
+        water_starts.retain(|&s| hpa.graph.get_component_id(s) == to_comp);
+        if water_starts.is_empty() {
+            return false;
+        }
     }
 
-    if !astar_water_path_into(mini_map, mini_astar, &water_starts, goal_water, mini_path_out) {
+    let graph_large = hpa
+        .as_ref()
+        .is_some_and(|h| h.graph.node_count() >= 100);
+
+    // Match TS sharedWaterChain: use HPA only when graph has 100+ nodes.
+    let use_hpa = graph_large;
+
+    let found = if water_starts.len() == 1 && water_starts[0] == goal_water {
+        // TS AStar.Water(W,W) → [water], then ShoreCoercing restores shores below.
+        mini_path_out.push(goal_water);
+        true
+    } else if use_hpa {
+        let hpa = hpa.as_mut().unwrap();
+        match hpa.find_path(mini_map, &water_starts, goal_water) {
+            Some(p) => {
+                *mini_path_out = p;
+                true
+            }
+            None => try_short_water_path_multi(mini_map, &water_starts, goal_water, mini_path_out)
+                || astar_water_path_into(
+                    mini_map,
+                    mini_astar,
+                    &water_starts,
+                    goal_water,
+                    mini_path_out,
+                ),
+        }
+    } else if !astar_water_path_into(mini_map, mini_astar, &water_starts, goal_water, mini_path_out) {
+        false
+    } else {
+        true
+    };
+    if !found {
         return false;
     }
 
+    if graph_large {
+        let smoothed = smooth_water_path(mini_map, mini_path_out);
+        *mini_path_out = smoothed;
+    }
+
     if let Some(&first_water) = mini_path_out.first() {
-        if let Some(&orig) = water_to_orig.get(&first_water) {
+        if let Some(&Some(orig)) = water_to_orig.get(&first_water) {
             mini_path_out.insert(0, orig);
         }
     }
@@ -875,6 +1200,7 @@ pub fn transport_path_multi_into(
     full: &GameMap,
     mini: &GameMap,
     mini_astar: &mut WaterAstarScratch,
+    mut hpa: Option<&mut crate::water_hpa::WaterHierarchical>,
     froms: &[TileRef],
     to: TileRef,
     path_out: &mut Vec<TileRef>,
@@ -889,15 +1215,16 @@ pub fn transport_path_multi_into(
         .collect();
     let mini_to = to_mini_ref(full, mini, to);
     let mut mini_path = Vec::with_capacity(64);
-    if !minimap_inner_path(mini, mini_astar, &mini_froms, mini_to, &mut mini_path) {
+    if !minimap_inner_path(mini, mini_astar, hpa, &mini_froms, mini_to, &mut mini_path) {
         return false;
     }
     let upscaled = upscale_mini_path(full, mini, &mini_path);
     if upscaled.is_empty() {
         return false;
     }
+    // TS `MiniMapTransformer.findPath`  -  closest source to upscaled[0], no mini-shore filter.
     let cell_src = closest_full_source(full, froms, upscaled[0]);
-    *path_out = fix_path_extremes(full, upscaled, cell_src, to);
+    *path_out = densify_path_adjacent(full, fix_path_extremes(full, upscaled, cell_src, to));
     !path_out.is_empty()
 }
 
@@ -906,11 +1233,12 @@ pub fn transport_path_into(
     full: &GameMap,
     mini: &GameMap,
     mini_astar: &mut WaterAstarScratch,
+    mut hpa: Option<&mut crate::water_hpa::WaterHierarchical>,
     from: TileRef,
     to: TileRef,
     path_out: &mut Vec<TileRef>,
 ) -> bool {
-    transport_path_multi_into(full, mini, mini_astar, &[from], to, path_out)
+    transport_path_multi_into(full, mini, mini_astar, hpa, &[from], to, path_out)
 }
 
 /// Back-compat alias for tests.

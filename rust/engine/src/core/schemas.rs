@@ -101,6 +101,8 @@ pub struct GameConfig {
     pub disable_alliances: Option<bool>,
     #[serde(default)]
     pub spawn_immunity_duration: Option<u32>,
+    #[serde(default)]
+    pub starting_gold: Option<u64>,
 }
 
 impl GameConfig {

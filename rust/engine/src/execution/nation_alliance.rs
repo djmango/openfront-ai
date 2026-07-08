@@ -1,6 +1,7 @@
 //! Nation alliance behavior (TS `NationAllianceBehavior.ts` - RNG parity only).
 
 use super::nation_emoji::{NationEmojiState, send_emoji};
+use super::{AllianceExtensionExecution, AllianceRequestExecution, ExecEnum};
 use crate::game::{Game, PlayerType, Relation};
 use crate::prng::PseudoRandom;
 
@@ -9,29 +10,8 @@ const EMOJI_SCARED_OF_THREAT_LEN: i32 = 2;
 const EMOJI_LOVE_LEN: i32 = 3;
 const EMOJI_HANDSHAKE_LEN: i32 = 1;
 
-pub fn handle_alliance_requests(game: &Game, random: &mut PseudoRandom, small_id: u16, emoji: &mut NationEmojiState) {
-    if game.wire.disable_alliances() {
-        return;
-    }
-
-    let spawn_cutoff = game.wire.num_spawn_phase_turns() + 1;
-    for req in game.incoming_alliance_requests(small_id) {
-        if req.created_at <= spawn_cutoff {
-            continue;
-        }
-        let _decision = get_alliance_decision(
-            game,
-            random,
-            small_id,
-            req.requestor_small_id,
-            true,
-            emoji,
-        );
-    }
-}
-
-pub fn handle_alliance_extension_requests(
-    game: &Game,
+pub fn handle_alliance_requests(
+    game: &mut Game,
     random: &mut PseudoRandom,
     small_id: u16,
     emoji: &mut NationEmojiState,
@@ -40,20 +20,61 @@ pub fn handle_alliance_extension_requests(
         return;
     }
 
-    for ext in game.alliance_extension_candidates(small_id) {
-        let _ = get_alliance_decision(
+    let spawn_cutoff = game.wire.num_spawn_phase_turns() + 1;
+    let tick = game.ticks();
+    let requests = game.incoming_alliance_requests(small_id);
+    for req in requests {
+        if req.created_at <= spawn_cutoff {
+            game.reject_alliance_request(req.requestor_small_id, small_id);
+            continue;
+        }
+        if get_alliance_decision(
+            game,
+            random,
+            small_id,
+            req.requestor_small_id,
+            true,
+            emoji,
+        ) {
+            game.accept_alliance_request(req.requestor_small_id, small_id, tick);
+        } else {
+            game.reject_alliance_request(req.requestor_small_id, small_id);
+        }
+    }
+}
+
+pub fn handle_alliance_extension_requests(
+    game: &mut Game,
+    random: &mut PseudoRandom,
+    small_id: u16,
+    emoji: &mut NationEmojiState,
+) {
+    if game.wire.disable_alliances() {
+        return;
+    }
+
+    let extensions = game.alliance_extension_candidates(small_id);
+    for ext in extensions {
+        if get_alliance_decision(
             game,
             random,
             small_id,
             ext.other_small_id,
             true,
             emoji,
-        );
+        ) {
+            let Some(other) = game.player_by_small_id(ext.other_small_id) else {
+                continue;
+            };
+            game.add_execution(ExecEnum::AllianceExtension(
+                AllianceExtensionExecution::new(small_id, other.id.clone()),
+            ));
+        }
     }
 }
 
 pub fn maybe_send_alliance_requests(
-    game: &Game,
+    game: &mut Game,
     random: &mut PseudoRandom,
     small_id: u16,
     bordering_enemies: &[u16],
@@ -63,7 +84,7 @@ pub fn maybe_send_alliance_requests(
         return;
     }
 
-    let difficulty = game.wire.game_config().difficulty.as_str();
+    let difficulty = game.wire.game_config().difficulty.clone();
     for &enemy_sid in bordering_enemies {
         if !random.chance(30) {
             continue;
@@ -79,7 +100,11 @@ pub fn maybe_send_alliance_requests(
         if !game.can_send_alliance_request(small_id, enemy_sid) {
             continue;
         }
-        let _ = get_alliance_decision(game, random, small_id, enemy_sid, false, emoji);
+        if get_alliance_decision(game, random, small_id, enemy_sid, false, emoji) {
+            game.add_execution(ExecEnum::AllianceRequest(
+                AllianceRequestExecution::new(small_id, enemy.id.clone()),
+            ));
+        }
     }
 }
 
@@ -224,14 +249,14 @@ fn is_alliance_partner_threat(game: &Game, small_id: u16, other_small_id: u16) -
         "Medium" => other.troops as f64 > player.troops as f64 * 2.5,
         "Hard" => {
             other.troops > player.troops
-                && game.wire.max_troops(other.player_type, other.tiles_owned)
-                    > game.wire.max_troops(player.player_type, player.tiles_owned) * 2.0
+                && game.max_troops_for(other.small_id)
+                    > game.max_troops_for(player.small_id) * 2.0
         }
         "Impossible" => {
             let other_has_more_troops = other.troops as f64 > player.troops as f64 * 1.5;
             let other_has_more_max_troops = other.troops > player.troops
-                && game.wire.max_troops(other.player_type, other.tiles_owned)
-                    > game.wire.max_troops(player.player_type, player.tiles_owned) * 1.5;
+                && game.max_troops_for(other.small_id)
+                    > game.max_troops_for(player.small_id) * 1.5;
             let other_has_more_tiles = other.troops > player.troops
                 && other.tiles_owned > (player.tiles_owned as f64 * 1.5) as i32;
             other_has_more_troops || other_has_more_max_troops || other_has_more_tiles

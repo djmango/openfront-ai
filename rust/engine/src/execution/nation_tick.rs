@@ -9,11 +9,16 @@ use crate::prng::PseudoRandom;
 use std::collections::HashSet;
 
 const UNDER_ATTACK_THREAT_RATIO: f64 = 0.35;
+const HIGH_STARTING_GOLD_THRESHOLD: i64 = 3_000_000;
+/// TS `HIGH_GOLD_STRUCTURE_COOLDOWN_TICKS`  -  gap before placing structure N (high-gold nations only).
+const HIGH_GOLD_STRUCTURE_COOLDOWN_TICKS: [u32; 5] = [0, 0, 250, 150, 100];
+const TEAM_POST_SAVE_UP_PHASE_TICKS: u32 = 150;
 
 #[derive(Debug, Default)]
 pub struct NationStructureState {
     pub placements_count: u32,
-    pub last_structure_tick: u32,
+    pub last_structure_tick: Option<u32>,
+    pub post_save_up_start_tick: Option<u32>,
 }
 
 #[derive(Debug, Default)]
@@ -21,6 +26,13 @@ pub struct NationBehaviorState {
     pub structure: NationStructureState,
     pub embargo_malus_applied: HashSet<String>,
     pub emoji: NationEmojiState,
+    /// TS `NationNukeBehavior.isHydroNation`  -  `random.chance(3)` at behavior init.
+    pub is_hydro_nation: bool,
+}
+
+/// TS `NationExecution.initializeBehaviors` RNG: `NationNukeBehavior` field init.
+pub fn initialize_nation_behaviors(random: &mut PseudoRandom, state: &mut NationBehaviorState) {
+    state.is_hydro_nation = random.chance(3);
 }
 
 /// TS `NationWarshipBehavior.trackShipsAndRetaliate` - no-op until warships are ported.
@@ -35,6 +47,13 @@ fn consider_mirv(game: &Game, random: &mut PseudoRandom, small_id: u16) -> bool 
     if game.unit_count(small_id, unit_type::MISSILE_SILO) == 0 {
         return false;
     }
+    // TS `NationMIRVBehavior.considerMIRV`  -  no RNG draw when gold is insufficient.
+    if game
+        .player_by_small_id(small_id)
+        .is_none_or(|p| p.gold < game.wire.mirv_cost())
+    {
+        return false;
+    }
     let hesitation = match game.wire.game_config().difficulty.as_str() {
         "Easy" => 20,
         "Medium" => 12,
@@ -45,7 +64,7 @@ fn consider_mirv(game: &Game, random: &mut PseudoRandom, small_id: u16) -> bool 
     random.chance(hesitation)
 }
 
-fn handle_structures(game: &Game, random: &mut PseudoRandom, small_id: u16, state: &mut NationStructureState) {
+fn handle_structures(game: &mut Game, random: &mut PseudoRandom, small_id: u16, state: &mut NationStructureState) {
     if state.placements_count > 0 && !game.wire.is_unit_disabled(unit_type::DEFENSE_POST) {
         if try_build_defense_post(game, random, small_id) {
             return;
@@ -54,38 +73,68 @@ fn handle_structures(game: &Game, random: &mut PseudoRandom, small_id: u16, stat
             return;
         }
     }
-    if is_on_structure_cooldown(game, state) {
+    if is_on_structure_cooldown(game, small_id, state) {
+        return;
+    }
+    if is_in_post_save_up_blocked_phase(game, small_id, state) {
         return;
     }
     let built = do_handle_structures(game, random, small_id);
     if built {
-        state.last_structure_tick = game.ticks();
+        state.last_structure_tick = Some(game.ticks());
         state.placements_count += 1;
     }
 }
 
-fn try_build_defense_post(game: &Game, random: &mut PseudoRandom, small_id: u16) -> bool {
-    let difficulty = game.wire.game_config().difficulty.as_str();
-    if difficulty == "Easy" {
-        return false;
-    }
-    if difficulty == "Medium" && !random.chance(2) {
-        return false;
-    }
-    let incoming = game.incoming_land_troops(small_id);
-    if incoming <= 0.0 {
-        return false;
-    }
-    let Some(p) = game.player_by_small_id(small_id) else {
+fn has_high_starting_gold(game: &Game) -> bool {
+    game.wire.starting_gold() >= HIGH_STARTING_GOLD_THRESHOLD
+}
+
+fn is_on_structure_cooldown(game: &Game, _small_id: u16, state: &NationStructureState) -> bool {
+    let Some(last) = state.last_structure_tick else {
         return false;
     };
-    if p.troops <= 0 {
+    if !has_high_starting_gold(game) {
         return false;
     }
-    if incoming / (p.troops as f64) < UNDER_ATTACK_THREAT_RATIO {
+    let idx = state.placements_count as usize;
+    let required_gap = HIGH_GOLD_STRUCTURE_COOLDOWN_TICKS
+        .get(idx)
+        .copied()
+        .unwrap_or(0);
+    if required_gap == 0 {
         return false;
     }
-    false
+    game.ticks().saturating_sub(last) < required_gap
+}
+
+fn is_in_post_save_up_blocked_phase(
+    game: &Game,
+    small_id: u16,
+    state: &mut NationStructureState,
+) -> bool {
+    if game.wire.is_unit_disabled(unit_type::MISSILE_SILO) {
+        return false;
+    }
+    let save_up = super::nation_structures::save_up_target(game);
+    if save_up == 0 {
+        return false;
+    }
+    let gold = game.player_by_small_id(small_id).map(|p| p.gold).unwrap_or(0);
+    if state.post_save_up_start_tick.is_none() {
+        if gold < save_up {
+            return false;
+        }
+        state.post_save_up_start_tick = Some(game.ticks());
+    }
+    let elapsed = game
+        .ticks()
+        .saturating_sub(state.post_save_up_start_tick.unwrap_or(0));
+    elapsed % (TEAM_POST_SAVE_UP_PHASE_TICKS * 2) >= TEAM_POST_SAVE_UP_PHASE_TICKS
+}
+
+fn try_build_defense_post(game: &mut Game, random: &mut PseudoRandom, small_id: u16) -> bool {
+    super::nation_structures::try_build_defense_post(game, random, small_id)
 }
 
 fn defense_post_needed(game: &Game, small_id: u16) -> bool {
@@ -109,23 +158,8 @@ fn defense_post_needed(game: &Game, small_id: u16) -> bool {
     false
 }
 
-fn is_on_structure_cooldown(game: &Game, state: &NationStructureState) -> bool {
-    if state.placements_count == 0 {
-        return false;
-    }
-    let rate = match game.wire.game_config().difficulty.as_str() {
-        "Easy" => 80,
-        "Medium" => 60,
-        "Hard" => 45,
-        "Impossible" => 30,
-        _ => 60,
-    };
-    game.ticks().saturating_sub(state.last_structure_tick) < rate
-}
-
-fn do_handle_structures(game: &Game, random: &mut PseudoRandom, small_id: u16) -> bool {
-    let _ = (game, random, small_id);
-    false
+fn do_handle_structures(game: &mut Game, random: &mut PseudoRandom, small_id: u16) -> bool {
+    super::nation_structures::do_handle_structures(game, random, small_id)
 }
 
 fn maybe_spawn_warship(game: &Game, random: &mut PseudoRandom, small_id: u16) -> bool {
@@ -154,16 +188,8 @@ fn handle_embargoes_to_hostile_nations(_game: &mut Game, _small_id: u16) {}
 
 fn counter_warship_infestation(_game: &Game, _random: &mut PseudoRandom, _small_id: u16) {}
 
-fn maybe_send_nuke(game: &Game, random: &mut PseudoRandom, small_id: u16) {
-    if game.wire.is_unit_disabled(unit_type::ATOM_BOMB)
-        && game.wire.is_unit_disabled(unit_type::HYDROGEN_BOMB)
-    {
-        return;
-    }
-    if game.unit_count(small_id, unit_type::MISSILE_SILO) == 0 {
-        return;
-    }
-    let _ = random.chance(100);
+fn maybe_send_nuke(_game: &Game, _random: &mut PseudoRandom, _small_id: u16) {
+    // TS `NationNukeBehavior.maybeSendNuke`  -  no RNG until a target is found.
 }
 
 pub fn tick_nation_post_spawn(

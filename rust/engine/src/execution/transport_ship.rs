@@ -4,7 +4,7 @@ use super::Execution;
 use crate::core::schemas::unit_type::TRANSPORT;
 use crate::game::Game;
 use crate::map::TileRef;
-use crate::spatial::{closest_shore_by_water, target_transport_tile};
+use crate::spatial::{can_build_transport_ship, target_transport_tile};
 
 pub struct TransportShipExecution {
     owner_small_id: u16,
@@ -50,6 +50,11 @@ impl TransportShipExecution {
         }
         self.path.clear();
         self.path.extend_from_slice(game.planned_water_path());
+        // TS `TransportShipExecution.init`: path always starts at `src`.
+        if self.path.is_empty() || self.path.first() != Some(&from) {
+            self.path.insert(0, from);
+        }
+        // TS PathFinderStepper keeps duplicate consecutive nodes; one step per tick.
         self.path_idx = 0;
         if self.path.first() == Some(&from) {
             self.path_idx = 1;
@@ -67,9 +72,13 @@ impl TransportShipExecution {
         if self.path_idx > 0 {
             let expected = self.path[self.path_idx - 1];
             if from != expected {
-                self.path.clear();
-                self.path_idx = 0;
-                return self.next_path_tile(game, from, to);
+                if let Some(pos) = self.path.iter().position(|&t| t == from) {
+                    self.path_idx = pos + 1;
+                } else {
+                    self.path.clear();
+                    self.path_idx = 0;
+                    return self.next_path_tile(game, from, to);
+                }
             }
         }
         if self.path_idx >= self.path.len() {
@@ -118,7 +127,8 @@ impl Execution for TransportShipExecution {
         };
         self.dst = Some(dst);
 
-        let Some(src) = closest_shore_by_water(game, self.owner_small_id, dst) else {
+        // TS `attacker.canBuild(TransportShip, this.dst)`  -  re-targets from dst tile.
+        let Some(src) = can_build_transport_ship(game, self.owner_small_id, dst) else {
             self.active = false;
             return;
         };

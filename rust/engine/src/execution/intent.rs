@@ -1,4 +1,8 @@
-use super::{ExecEnum, MarkDisconnectedExecution, NoOpExecution, SpawnExecution, TransportShipExecution};
+use super::{
+    AllianceExtensionExecution, AllianceRejectExecution, AllianceRequestExecution,
+    BreakAllianceExecution, ConstructionExecution, DonateTroopsExecution, ExecEnum, MarkDisconnectedExecution,
+    NoOpExecution, RetreatExecution, SpawnExecution, TransportShipExecution, UpgradeStructureExecution,
+};
 use crate::execution::AttackExecution;
 use crate::game::{Game, PlayerInfo};
 use crate::record::StampedIntent;
@@ -30,6 +34,9 @@ pub fn intent_to_execution(game: &Game, game_id: &str, intent: &StampedIntent) -
                     player_type: p.player_type,
                     client_id: Some(client_id.clone()),
                     id: p.id.clone(),
+                    clan_tag: None,
+                    friends: Vec::new(),
+                    team: p.team.clone(),
                 };
                 ExecEnum::Spawn(SpawnExecution::new(game_id.to_string(), info, Some(tile)))
             } else {
@@ -62,12 +69,139 @@ pub fn intent_to_execution(game: &Game, game_id: &str, intent: &StampedIntent) -
                 ExecEnum::NoOp(NoOpExecution)
             }
         }
+        "build_unit" => {
+            let tile = intent.fields.get("tile").and_then(Value::as_u64).unwrap_or(0) as u32;
+            let unit = intent
+                .fields
+                .get("unit")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if let Some(p) = game.player_by_client_id(client_id) {
+                ExecEnum::Construction(ConstructionExecution::new(p.small_id, unit, tile))
+            } else {
+                ExecEnum::NoOp(NoOpExecution)
+            }
+        }
+        "upgrade_structure" => {
+            let unit_id = intent
+                .fields
+                .get("unitId")
+                .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|n| n as i64)))
+                .unwrap_or(0) as i32;
+            if let Some(p) = game.player_by_client_id(client_id) {
+                ExecEnum::UpgradeStructure(UpgradeStructureExecution::new(
+                    p.small_id,
+                    unit_id,
+                ))
+            } else {
+                ExecEnum::NoOp(NoOpExecution)
+            }
+        }
+        "allianceRequest" => {
+            let recipient = intent
+                .fields
+                .get("recipient")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if let Some(p) = game.player_by_client_id(client_id) {
+                ExecEnum::AllianceRequest(AllianceRequestExecution::new(
+                    p.small_id,
+                    recipient,
+                ))
+            } else {
+                ExecEnum::NoOp(NoOpExecution)
+            }
+        }
+        "allianceReject" => {
+            let requestor = intent
+                .fields
+                .get("requestor")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if let Some(p) = game.player_by_client_id(client_id) {
+                ExecEnum::AllianceReject(AllianceRejectExecution::new(
+                    requestor,
+                    p.small_id,
+                ))
+            } else {
+                ExecEnum::NoOp(NoOpExecution)
+            }
+        }
+        "breakAlliance" => {
+            let recipient = intent
+                .fields
+                .get("recipient")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if let Some(p) = game.player_by_client_id(client_id) {
+                ExecEnum::BreakAlliance(BreakAllianceExecution::new(
+                    p.small_id,
+                    recipient,
+                ))
+            } else {
+                ExecEnum::NoOp(NoOpExecution)
+            }
+        }
+        "allianceExtension" => {
+            let recipient = intent
+                .fields
+                .get("recipient")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if let Some(p) = game.player_by_client_id(client_id) {
+                ExecEnum::AllianceExtension(AllianceExtensionExecution::new(
+                    p.small_id,
+                    recipient,
+                ))
+            } else {
+                ExecEnum::NoOp(NoOpExecution)
+            }
+        }
+        "donate_troops" => {
+            let recipient = intent
+                .fields
+                .get("recipient")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let troops = intent.fields.get("troops").and_then(|v| {
+                v.as_f64()
+                    .or_else(|| v.as_i64().map(|n| n as f64))
+                    .or_else(|| v.as_u64().map(|n| n as f64))
+            });
+            if let Some(p) = game.player_by_client_id(client_id) {
+                ExecEnum::DonateTroops(DonateTroopsExecution::new(
+                    p.small_id,
+                    recipient,
+                    troops,
+                ))
+            } else {
+                ExecEnum::NoOp(NoOpExecution)
+            }
+        }
+        "cancel_attack" => {
+            let attack_id = intent
+                .fields
+                .get("attackID")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if let Some(p) = game.player_by_client_id(client_id) {
+                ExecEnum::Retreat(RetreatExecution::new(p.small_id, attack_id))
+            } else {
+                ExecEnum::NoOp(NoOpExecution)
+            }
+        }
         _ => ExecEnum::NoOp(NoOpExecution),
     }
 }
 
 pub fn turn_to_executions(
-    game: &mut Game,
+    game: &Game,
     game_id: &str,
     intents: &[StampedIntent],
 ) -> Vec<ExecEnum> {
@@ -82,9 +216,11 @@ pub fn turn_to_executions(
             if let Some((owner, target, troops)) =
                 AttackExecution::from_intent(&intent.client_id, game, troops, target)
             {
-                game.add_land_attack(owner, target, troops);
+                // TS `createExecs`: one execution per intent, in turn order.
+                out.push(ExecEnum::Attack(AttackExecution::new(
+                    owner, target, troops,
+                )));
             } else {
-                // TS `createExec` - missing player still appends a NoOp execution.
                 out.push(ExecEnum::NoOp(NoOpExecution));
             }
             continue;

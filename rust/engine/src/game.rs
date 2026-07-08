@@ -3,7 +3,8 @@
 use crate::core::config::Config as WireConfig;
 use crate::execution::{ExecEnum, Execution, HashUpdate, WinUpdate};
 use crate::hash::game_hash;
-use crate::map::{GameMap, TileRef};
+use crate::core::team_assignment::{assign_teams, populate_player_teams, BOT_TEAM, HUMANS_TEAM, NATIONS_TEAM};
+use crate::map::{GameMap, SpawnArea, TileRef};
 use crate::prng::PseudoRandom;
 use crate::util::simple_hash;
 use std::collections::HashMap;
@@ -13,6 +14,9 @@ pub struct PlayerInfo {
     pub player_type: PlayerType,
     pub client_id: Option<String>,
     pub id: String,
+    pub clan_tag: Option<String>,
+    pub friends: Vec<String>,
+    pub team: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -20,6 +24,9 @@ pub struct Unit {
     pub id: i32,
     pub unit_type: String,
     pub tile: i32,
+    pub under_construction: bool,
+    /// TS `UnitImpl.level()`  -  defaults to 1; affects `maxTroops` for cities.
+    pub level: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +51,16 @@ pub struct Player {
     pub marked_traitor_tick: i32,
     pub relations: HashMap<u16, i32>,
     pub is_disconnected: bool,
+    /// TS `numUnitsConstructed`  -  incremented on build and upgrade.
+    pub units_constructed: HashMap<String, u32>,
+    /// TS `PlayerImpl._pseudo_random`  -  attack IDs and nation RNG streams.
+    pub id_prng: PseudoRandom,
+    /// TS `PlayerImpl._team`  -  colored team in Team mode.
+    pub team: Option<String>,
+    /// TS `PlayerImpl._outgoingAttacks`  -  land attack ids (registry keys).
+    pub outgoing_land_attacks: Vec<String>,
+    /// TS `PlayerImpl._incomingAttacks`  -  land attack ids targeting this player.
+    pub incoming_land_attacks: Vec<String>,
 }
 
 impl Default for Player {
@@ -68,6 +85,11 @@ impl Default for Player {
             marked_traitor_tick: -1,
             relations: HashMap::new(),
             is_disconnected: false,
+            units_constructed: HashMap::new(),
+            id_prng: PseudoRandom::new(0),
+            team: None,
+            outgoing_land_attacks: Vec::new(),
+            incoming_land_attacks: Vec::new(),
         }
     }
 }
@@ -98,6 +120,32 @@ pub struct IncomingAttack {
 pub struct IncomingAllianceRequest {
     pub requestor_small_id: u16,
     pub created_at: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AllianceRequestStatus {
+    Pending,
+    Accepted,
+    Rejected,
+}
+
+#[derive(Debug, Clone)]
+pub struct AllianceRequestState {
+    pub requestor_small_id: u16,
+    pub recipient_small_id: u16,
+    pub created_at: u32,
+    pub status: AllianceRequestStatus,
+}
+
+#[derive(Debug, Clone)]
+pub struct AllianceState {
+    pub id: u32,
+    pub requestor_small_id: u16,
+    pub recipient_small_id: u16,
+    pub created_at: u32,
+    pub expires_at: u32,
+    pub extension_requested_requestor: bool,
+    pub extension_requested_recipient: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -144,14 +192,23 @@ pub struct Game {
     pub water_component: Vec<u32>,
     pub(crate) bfs: crate::water::BfsScratch,
     pub(crate) water_astar: crate::water::WaterAstarScratch,
-    mini_water_astar: crate::water::WaterAstarScratch,
+    pub(crate) mini_water_astar: crate::water::WaterAstarScratch,
+    pub(crate) mini_water_hpa: Option<crate::water_hpa::WaterHierarchical>,
+    water_graph_version: u32,
     path_buf: Vec<TileRef>,
     next_unit_id: i32,
     pub hash_enabled: bool,
     pub tribe_batch: crate::bot::TribeBatch,
     pub nation_batch: crate::execution::NationBatch,
+    pub alliance_requests: Vec<AllianceRequestState>,
+    pub alliances: Vec<AllianceState>,
+    pub next_alliance_id: u32,
     /// Same-tick inits not yet appended to `execs` (TS `outgoingAttacks()` batch ordering).
     init_merge_batch: Option<*mut Vec<ExecEnum>>,
+    /// TS `GameImpl.playerTeams`  -  colored teams for Team mode spawn areas.
+    pub player_teams: Vec<String>,
+    /// TS `GameImpl._teamGameSpawnAreas`.
+    pub team_spawn_areas: Option<HashMap<String, Vec<SpawnArea>>>,
 }
 
 impl Default for Game {
@@ -175,6 +232,7 @@ impl Default for Game {
             player_teams: None,
             disable_alliances: None,
             spawn_immunity_duration: None,
+            starting_gold: None,
         };
         Self {
             game_id: String::new(),
@@ -213,12 +271,19 @@ impl Default for Game {
             bfs: crate::water::BfsScratch::new(1),
             water_astar: crate::water::WaterAstarScratch::new(1),
             mini_water_astar: crate::water::WaterAstarScratch::new(1),
+            mini_water_hpa: None,
+            water_graph_version: 0,
             path_buf: Vec::new(),
             next_unit_id: 1,
             hash_enabled: true,
             tribe_batch: crate::bot::TribeBatch::new(),
             nation_batch: crate::execution::NationBatch::new(),
+            alliance_requests: Vec::new(),
+            alliances: Vec::new(),
+            next_alliance_id: 1,
             init_merge_batch: None,
+            player_teams: Vec::new(),
+            team_spawn_areas: None,
         }
     }
 }
@@ -230,11 +295,16 @@ impl Game {
         wire: WireConfig,
         map: GameMap,
         mini_map: GameMap,
+        team_spawn_areas: Option<HashMap<String, Vec<SpawnArea>>>,
     ) -> Self {
         let seed = simple_hash(&game_id);
         let tile_count = (map.width * map.height) as usize;
         let mini_count = (mini_map.width * mini_map.height) as usize;
         let water_component = crate::water::build_water_components(&map);
+        let mini_water_hpa = crate::water_hpa::WaterHierarchical::new(&mini_map, true);
+        let water_graph_version = 0u32;
+        let game_mode = wire.game_config().game_mode.clone();
+        let player_teams_cfg = wire.game_config().player_teams.clone();
         Self {
             game_id,
             config,
@@ -246,15 +316,135 @@ impl Game {
             bfs: crate::water::BfsScratch::new(tile_count),
             water_astar: crate::water::WaterAstarScratch::new(tile_count),
             mini_water_astar: crate::water::WaterAstarScratch::new(mini_count),
+            mini_water_hpa: Some(mini_water_hpa),
+            water_graph_version,
             path_buf: Vec::with_capacity(256),
             tribe_batch: crate::bot::TribeBatch::new(),
             nation_batch: crate::execution::NationBatch::new(),
+            team_spawn_areas,
+            player_teams: populate_player_teams(&game_mode, player_teams_cfg.as_ref(), 0, 0),
             ..Default::default()
         }
     }
 
+    pub fn init_player_teams(&mut self, num_humans: usize, num_nations: usize) {
+        let game_mode = self.wire.game_config().game_mode.clone();
+        let player_teams_cfg = self.wire.game_config().player_teams.clone();
+        self.player_teams =
+            populate_player_teams(&game_mode, player_teams_cfg.as_ref(), num_humans, num_nations);
+    }
+
+    /// TS `GameImpl.teamSpawnArea`.
+    pub fn team_spawn_area(&self, team: &str) -> Option<&SpawnArea> {
+        let areas = self.team_spawn_areas.as_ref()?;
+        let num_teams = self.player_teams.len();
+        let team_areas = areas.get(&num_teams.to_string())?;
+        let team_index = self.player_teams.iter().position(|t| t == team)?;
+        team_areas.get(team_index)
+    }
+
+    fn maybe_assign_team(&self, player_type: PlayerType) -> Option<String> {
+        if self.wire.game_config().game_mode != "Team" {
+            return None;
+        }
+        if player_type == PlayerType::Bot {
+            return Some(BOT_TEAM.to_string());
+        }
+        let teams = &self.player_teams;
+        if teams.is_empty() {
+            return None;
+        }
+        None
+    }
+
+    pub fn assign_teams_for_players(&mut self, players: &mut [PlayerInfo]) {
+        if self.wire.game_config().game_mode != "Team" {
+            return;
+        }
+        if self
+            .wire
+            .game_config()
+            .player_teams
+            .as_ref()
+            .is_some_and(|c| c.is_humans_vs_nations())
+        {
+            for p in players.iter_mut() {
+                p.team = Some(match p.player_type {
+                    PlayerType::Nation => NATIONS_TEAM.into(),
+                    _ => HUMANS_TEAM.into(),
+                });
+            }
+            return;
+        }
+        let assignments = assign_teams(players, &self.player_teams);
+        for p in players.iter_mut() {
+            if let Some(team) = assignments.0.get(&p.id) {
+                if team == "kicked" {
+                    p.team = None;
+                } else {
+                    p.team = Some(team.clone());
+                }
+            }
+        }
+    }
+
+    /// Player indices in TS `assignTeams` Map insertion order.
+    pub fn assign_teams_insertion_order(&self, players: &[PlayerInfo]) -> Vec<usize> {
+        if self.wire.game_config().game_mode != "Team" {
+            return (0..players.len()).collect();
+        }
+        if self
+            .wire
+            .game_config()
+            .player_teams
+            .as_ref()
+            .is_some_and(|c| c.is_humans_vs_nations())
+        {
+            let mut nation_idxs = Vec::new();
+            let mut other_idxs = Vec::new();
+            for (i, p) in players.iter().enumerate() {
+                if p.player_type == PlayerType::Nation {
+                    nation_idxs.push(i);
+                } else {
+                    other_idxs.push(i);
+                }
+            }
+            return other_idxs.into_iter().chain(nation_idxs).collect();
+        }
+        assign_teams(players, &self.player_teams).1
+    }
+
     pub fn register_tribe(&mut self, small_id: u16, player_id: &str) {
         self.tribe_batch.register(small_id, player_id);
+    }
+
+    pub fn get_water_component(&self, tile: TileRef) -> Option<u32> {
+        let hpa = self.mini_water_hpa.as_ref()?;
+        let mini_x = self.map.x(tile) / 2;
+        let mini_y = self.map.y(tile) / 2;
+        let mini_tile = self.mini_map.ref_xy(mini_x, mini_y);
+
+        if self.mini_map.is_water(mini_tile) {
+            return Some(hpa.graph.get_component_id(mini_tile));
+        }
+        // TS `WaterManager.getWaterComponent`  -  miniMap.neighbors order (N,S,W,E).
+        let mut one_hop = [TileRef::MAX; 4];
+        let n1 = self.mini_map.neighbors4_ts(mini_tile, &mut one_hop);
+        for i in 0..n1 {
+            if self.mini_map.is_water(one_hop[i]) {
+                return Some(hpa.graph.get_component_id(one_hop[i]));
+            }
+        }
+        for i in 0..n1 {
+            let mut two_hop = [TileRef::MAX; 4];
+            let n2 = self.mini_map.neighbors4_ts(one_hop[i], &mut two_hop);
+            for j in 0..n2 {
+                if self.mini_map.is_water(two_hop[j]) {
+                    return Some(hpa.graph.get_component_id(two_hop[j]));
+                }
+            }
+        }
+        None
     }
 
     pub fn plan_water_path(&mut self, from: TileRef, to: TileRef) -> bool {
@@ -262,6 +452,7 @@ impl Game {
             &self.map,
             &self.mini_map,
             &mut self.mini_water_astar,
+            self.mini_water_hpa.as_mut(),
             from,
             to,
             &mut self.path_buf,
@@ -273,6 +464,7 @@ impl Game {
             &self.map,
             &self.mini_map,
             &mut self.mini_water_astar,
+            self.mini_water_hpa.as_mut(),
             froms,
             to,
             &mut self.path_buf,
@@ -531,10 +723,15 @@ impl Game {
 
     pub fn add_from_info(&mut self, info: &PlayerInfo) -> u16 {
         let troops = self.wire.start_manpower(info.player_type);
+        let gold = self.wire.starting_gold();
         let small_id = self.next_player_id;
         self.next_player_id += 1;
         let client_id = info.client_id.clone().unwrap_or_default();
         let id_hash = simple_hash(&info.id);
+        let team = info
+            .team
+            .clone()
+            .or_else(|| self.maybe_assign_team(info.player_type));
         let idx = self.players.len();
         self.players.push(Player {
             id: info.id.clone(),
@@ -544,7 +741,10 @@ impl Game {
             id_hash,
             player_type: info.player_type,
             troops,
+            gold,
             border_tiles: Vec::new(),
+            id_prng: PseudoRandom::new(id_hash),
+            team,
             ..Default::default()
         });
         if !client_id.is_empty() {
@@ -604,14 +804,11 @@ impl Game {
             .player_by_small_id_mut(small_id)
             .map(|p| std::mem::take(&mut p.owned_tiles))
             .unwrap_or_default();
-        let refresh_borders = !self.spawn_phase;
         for t in tiles {
             if self.map.owner_id(t) == small_id {
                 self.map.set_owner_id(t, 0);
             }
-            if refresh_borders {
-                self.refresh_borders_around(t);
-            }
+            self.refresh_borders_around(t);
         }
         if let Some(p) = self.player_by_small_id_mut(small_id) {
             p.tiles_owned = 0;
@@ -721,7 +918,44 @@ impl Game {
     }
 
     pub fn conquer(&mut self, small_id: u16, tile: TileRef) {
-        self.conquer_one(small_id, tile, !self.spawn_phase);
+        self.conquer_one(small_id, tile, true);
+    }
+
+    /// TS `GameImpl.conquerPlayer`  -  ship transfer on disconnected teammate wipe.
+    pub fn conquer_player(&mut self, conqueror_small_id: u16, conquered_small_id: u16) {
+        let (disconnected, same_team) = {
+            let Some(conquered) = self.player_by_small_id(conquered_small_id) else {
+                return;
+            };
+            let conqueror_team = self
+                .player_by_small_id(conqueror_small_id)
+                .and_then(|p| p.team.clone());
+            (
+                conquered.is_disconnected,
+                conqueror_team.is_some() && conqueror_team == conquered.team.clone(),
+            )
+        };
+
+        if !disconnected || !same_team {
+            return;
+        }
+
+        let ships: Vec<i32> = self
+            .player_by_small_id(conquered_small_id)
+            .map(|p| {
+                p.units
+                    .iter()
+                    .filter(|u| {
+                        u.unit_type == crate::core::schemas::unit_type::WARSHIP
+                            || u.unit_type == crate::core::schemas::unit_type::TRANSPORT
+                    })
+                    .map(|u| u.id)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for unit_id in ships {
+            self.capture_unit(conquered_small_id, conqueror_small_id, unit_id);
+        }
     }
 
     /// Bulk conquer for spawn hops - per-tile border refresh (TS `GameImpl.conquer`).
@@ -748,6 +982,7 @@ impl Game {
             }
         }
         self.map.set_owner_id(tile, small_id);
+        self.map.set_fallout(tile, false);
         if let Some(p) = self.player_by_small_id_mut(small_id) {
             p.tiles_owned += 1;
             p.owned_tiles.push(tile);
@@ -858,8 +1093,37 @@ impl Game {
             .collect()
     }
 
+    pub fn exec_labels(&self) -> Vec<String> {
+        self.execs.iter().map(|e| e.debug_label()).collect()
+    }
+
     pub fn add_execution(&mut self, exec: ExecEnum) {
         self.uninit.push(exec);
+    }
+
+    pub fn order_retreat(&mut self, owner_small_id: u16, attack_id: &str) {
+        for exec in &mut self.execs {
+            if let ExecEnum::Attack(atk) = exec {
+                if atk.owner_small_id() == owner_small_id
+                    && atk.attack_id() == attack_id
+                    && atk.attack_live()
+                {
+                    atk.order_retreat();
+                    return;
+                }
+            }
+        }
+    }
+
+    pub fn execute_retreat(&mut self, owner_small_id: u16, attack_id: &str) {
+        for exec in &mut self.execs {
+            if let ExecEnum::Attack(atk) = exec {
+                if atk.owner_small_id() == owner_small_id && atk.attack_id() == attack_id {
+                    atk.execute_retreat();
+                    return;
+                }
+            }
+        }
     }
 
     pub fn add_land_attack(
@@ -888,6 +1152,27 @@ impl Game {
         ));
     }
 
+    pub fn active_attacks_debug(&self) -> Vec<(u16, u16, f64, bool, bool, usize, usize)> {
+        use crate::execution::ExecEnum;
+        self.execs
+            .iter()
+            .filter_map(|e| {
+                let ExecEnum::Attack(atk) = e else {
+                    return None;
+                };
+                Some((
+                    atk.owner_small_id(),
+                    atk.target_small_id(),
+                    atk.troops(),
+                    atk.is_active(),
+                    atk.attack_live(),
+                    atk.border_tile_count(),
+                    atk.to_conquer_len(),
+                ))
+            })
+            .collect()
+    }
+
     pub fn add_transport_attack(&mut self, owner_small_id: u16, target_tile: TileRef, troops: f64) {
         self.add_execution(ExecEnum::TransportShip(
             crate::execution::TransportShipExecution::new(owner_small_id, target_tile, troops),
@@ -905,7 +1190,146 @@ impl Game {
             .unwrap_or(0)
     }
 
+    /// TS `unitsOwned(type)`  -  includes construction; completed units count by level.
+    pub fn units_owned_count(&self, small_id: u16, unit_type: &str) -> u32 {
+        self.player_by_small_id(small_id)
+            .map(|p| {
+                p.units
+                    .iter()
+                    .filter(|u| u.unit_type == unit_type)
+                    .map(|u| {
+                        if u.under_construction {
+                            1
+                        } else {
+                            u.level.max(1) as u32
+                        }
+                    })
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
+    pub fn units_constructed_count(&self, small_id: u16, unit_type: &str) -> u32 {
+        self.player_by_small_id(small_id)
+            .and_then(|p| p.units_constructed.get(unit_type).copied())
+            .unwrap_or(0)
+    }
+
+    fn record_unit_constructed(&mut self, small_id: u16, unit_type: &str) {
+        if let Some(p) = self.player_by_small_id_mut(small_id) {
+            *p.units_constructed.entry(unit_type.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    /// TS `costWrapper` unit count for structure pricing.
+    pub fn structure_cost_units(&self, small_id: u16, unit_type: &str) -> u32 {
+        self.wire
+            .cost_types_for(unit_type)
+            .iter()
+            .map(|t| {
+                self.units_owned_count(small_id, t)
+                    .min(self.units_constructed_count(small_id, t))
+            })
+            .sum()
+    }
+
+    pub fn structure_cost(&self, small_id: u16, unit_type: &str) -> i64 {
+        let n = self.structure_cost_units(small_id, unit_type);
+        self.wire.structure_cost(unit_type, n)
+    }
+
+    /// Sum of completed city levels for `maxTroops`.
+    pub fn completed_city_level_sum(&self, small_id: u16) -> i64 {
+        use crate::core::schemas::unit_type::CITY;
+        self.player_by_small_id(small_id)
+            .map(|p| {
+                p.units
+                    .iter()
+                    .filter(|u| u.unit_type == CITY && !u.under_construction)
+                    .map(|u| u.level.max(1) as i64)
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
+    pub fn max_troops_for(&self, small_id: u16) -> f64 {
+        let Some(p) = self.player_by_small_id(small_id) else {
+            return 0.0;
+        };
+        let city_levels = self.completed_city_level_sum(small_id);
+        self.wire
+            .max_troops(p.player_type, p.tiles_owned, city_levels)
+    }
+
+    pub fn troop_increase_rate_for(&self, small_id: u16) -> i32 {
+        let Some(p) = self.player_by_small_id(small_id) else {
+            return 0;
+        };
+        let city_levels = self.completed_city_level_sum(small_id);
+        self.wire.troop_increase_rate(
+            p.player_type,
+            p.troops,
+            p.tiles_owned,
+            city_levels,
+        )
+    }
+
+    pub fn can_upgrade_unit(&self, small_id: u16, unit_id: i32) -> bool {
+        let Some(p) = self.player_by_small_id(small_id) else {
+            return false;
+        };
+        if !p.alive {
+            return false;
+        }
+        let Some(u) = p.units.iter().find(|u| u.id == unit_id) else {
+            return false;
+        };
+        if u.under_construction {
+            return false;
+        }
+        if !crate::execution::upgrade_structure::is_upgradable_type(&u.unit_type) {
+            return false;
+        }
+        if self.wire.is_unit_disabled(&u.unit_type) {
+            return false;
+        }
+        let cost = self.structure_cost(small_id, &u.unit_type);
+        p.gold >= cost
+    }
+
+    pub fn upgrade_unit(&mut self, small_id: u16, unit_id: i32) -> bool {
+        if !self.can_upgrade_unit(small_id, unit_id) {
+            return false;
+        }
+        let cost = self.structure_cost(small_id, {
+            let p = self.player_by_small_id(small_id).unwrap();
+            let u = p.units.iter().find(|u| u.id == unit_id).unwrap();
+            u.unit_type.as_str()
+        });
+        let unit_type = {
+            let p = self.player_by_small_id(small_id).unwrap();
+            p.units
+                .iter()
+                .find(|u| u.id == unit_id)
+                .unwrap()
+                .unit_type
+                .clone()
+        };
+        if let Some(p) = self.player_by_small_id_mut(small_id) {
+            p.gold -= cost;
+            if let Some(u) = p.units.iter_mut().find(|u| u.id == unit_id) {
+                u.level += 1;
+            }
+        }
+        self.record_unit_constructed(small_id, &unit_type);
+        true
+    }
+
     pub fn build_unit(&mut self, small_id: u16, unit_type: &str, tile: TileRef) -> i32 {
+        let cost = self.structure_cost(small_id, unit_type);
+        if let Some(p) = self.player_by_small_id_mut(small_id) {
+            p.gold -= cost;
+        }
         let id = self.next_unit_id;
         self.next_unit_id += 1;
         if let Some(p) = self.player_by_small_id_mut(small_id) {
@@ -913,14 +1337,31 @@ impl Game {
                 id,
                 unit_type: unit_type.to_string(),
                 tile: tile as i32,
+                under_construction: false,
+                level: 1,
             });
         }
+        self.record_unit_constructed(small_id, unit_type);
         id
     }
 
     pub fn remove_unit(&mut self, small_id: u16, unit_id: i32) {
         if let Some(p) = self.player_by_small_id_mut(small_id) {
             p.units.retain(|u| u.id != unit_id);
+        }
+    }
+
+    pub fn capture_unit(&mut self, from_small_id: u16, to_small_id: u16, unit_id: i32) {
+        let mut captured = None;
+        if let Some(p) = self.player_by_small_id_mut(from_small_id) {
+            if let Some(idx) = p.units.iter().position(|u| u.id == unit_id) {
+                captured = Some(p.units.remove(idx));
+            }
+        }
+        if let Some(unit) = captured {
+            if let Some(p) = self.player_by_small_id_mut(to_small_id) {
+                p.units.push(unit);
+            }
         }
     }
 
@@ -955,44 +1396,102 @@ impl Game {
         false
     }
 
+    /// TS `PlayerImpl.createAttack`  -  register before cancel/merge in `AttackExecution.init`.
+    pub fn register_land_attack(
+        &mut self,
+        attack_id: &str,
+        owner_small_id: u16,
+        target_small_id: u16,
+    ) {
+        if let Some(p) = self.player_by_small_id_mut(owner_small_id) {
+            p.outgoing_land_attacks.push(attack_id.to_string());
+        }
+        if target_small_id != 0
+            && target_small_id != owner_small_id
+            && target_small_id != self.terra_nullius_id()
+        {
+            if let Some(p) = self.player_by_small_id_mut(target_small_id) {
+                p.incoming_land_attacks.push(attack_id.to_string());
+            }
+        }
+    }
+
+    /// TS `AttackImpl.delete()`  -  drop from player registries.
+    pub fn unregister_land_attack(
+        &mut self,
+        attack_id: &str,
+        owner_small_id: u16,
+        target_small_id: u16,
+    ) {
+        if let Some(p) = self.player_by_small_id_mut(owner_small_id) {
+            p.outgoing_land_attacks.retain(|id| id != attack_id);
+        }
+        if let Some(p) = self.player_by_small_id_mut(target_small_id) {
+            p.incoming_land_attacks.retain(|id| id != attack_id);
+        }
+    }
+
+    fn find_land_attack_exec_mut(&mut self, attack_id: &str) -> Option<*mut crate::execution::AttackExecution> {
+        let batch_ptr = self.init_merge_batch;
+        if let Some(ptr) = batch_ptr {
+            let batch = unsafe { &mut *ptr };
+            for exec in batch.iter_mut() {
+                if let ExecEnum::Attack(atk) = exec {
+                    if atk.attack_id() == attack_id && atk.attack_live() {
+                        return Some(atk as *mut _);
+                    }
+                }
+            }
+        }
+        for exec in &mut self.execs {
+            if let ExecEnum::Attack(atk) = exec {
+                if atk.attack_id() == attack_id && atk.attack_live() {
+                    return Some(atk as *mut _);
+                }
+            }
+        }
+        None
+    }
+
     /// TS `AttackExecution.init` - cancel opposing mutual attacks.
     pub fn cancel_opposing_land_attacks(
         &mut self,
         owner_small_id: u16,
         target_small_id: u16,
+        current_attack_id: &str,
         troops: &mut f64,
         active: &mut bool,
     ) {
         if !*active {
             return;
         }
-        let exec_count = self.execs.len();
-        for i in 0..exec_count {
-            let should_cancel = matches!(
-                &self.execs[i],
-                ExecEnum::Attack(atk)
-                    if atk.is_active()
-                        && atk.attack_live()
-                        && atk.is_initialized()
-                        && atk.owner_small_id() == target_small_id
-                        && atk.target_small_id() == owner_small_id
-                        && atk.source_tile().is_none()
-            );
-            if !should_cancel {
+        let incoming_ids: Vec<String> = self
+            .player_by_small_id(owner_small_id)
+            .map(|p| p.incoming_land_attacks.clone())
+            .unwrap_or_default();
+        for id in incoming_ids {
+            if id == current_attack_id {
                 continue;
             }
+            let Some(ptr) = self.find_land_attack_exec_mut(&id) else {
+                continue;
+            };
+            let incoming_attacker = unsafe { (*ptr).owner_small_id() };
+            if incoming_attacker != target_small_id {
+                continue;
+            }
+            let incoming_troops = unsafe { (*ptr).troops() };
+            if incoming_troops > *troops {
+                unsafe {
+                    (*ptr).set_troops(incoming_troops - *troops);
+                }
+                *active = false;
+                return;
+            }
+            *troops -= incoming_troops;
             let game = self as *mut Game;
             unsafe {
-                if let ExecEnum::Attack(incoming) = &mut self.execs[i] {
-                    let incoming_troops = incoming.troops();
-                    if incoming_troops > *troops {
-                        incoming.set_troops(incoming_troops - *troops);
-                        *active = false;
-                        return;
-                    }
-                    *troops -= incoming_troops;
-                    incoming.kill_attack();
-                }
+                (*ptr).kill_attack(&mut *game);
             }
         }
     }
@@ -1002,56 +1501,102 @@ impl Game {
         &mut self,
         owner_small_id: u16,
         target_small_id: u16,
+        current_attack_id: &str,
         troops: &mut f64,
     ) {
-        if let Some(ptr) = self.init_merge_batch {
-            let batch = unsafe { &mut *ptr };
-            for exec in batch.iter_mut() {
-                let should_merge = matches!(
-                    exec,
-                    ExecEnum::Attack(atk)
-                        if atk.is_active()
-                            && atk.attack_live()
-                            && atk.is_initialized()
-                            && atk.owner_small_id() == owner_small_id
-                            && atk.target_small_id() == target_small_id
-                            && atk.source_tile().is_none()
-                );
-                if !should_merge {
-                    continue;
-                }
-                if let ExecEnum::Attack(outgoing) = exec {
-                    *troops += outgoing.troops();
-                    outgoing.kill_attack();
-                }
-            }
-        }
-
-        let exec_count = self.execs.len();
-        for i in 0..exec_count {
-            let should_merge = matches!(
-                &self.execs[i],
-                ExecEnum::Attack(atk)
-                    if atk.is_active()
-                        && atk.attack_live()
-                        && atk.is_initialized()
-                        && atk.owner_small_id() == owner_small_id
-                        && atk.target_small_id() == target_small_id
-                        && atk.source_tile().is_none()
-            );
-            if !should_merge {
+        let outgoing_ids: Vec<String> = self
+            .player_by_small_id(owner_small_id)
+            .map(|p| p.outgoing_land_attacks.clone())
+            .unwrap_or_default();
+        for id in outgoing_ids {
+            if id == current_attack_id {
                 continue;
             }
+            let Some(ptr) = self.find_land_attack_exec_mut(&id) else {
+                continue;
+            };
+            let (same_owner, same_target) = unsafe {
+                (
+                    (*ptr).owner_small_id() == owner_small_id,
+                    (*ptr).target_small_id() == target_small_id,
+                )
+            };
+            if !same_owner || !same_target {
+                continue;
+            }
+            let extra = unsafe { (*ptr).troops() };
+            *troops += extra;
+            let game = self as *mut Game;
             unsafe {
-                if let ExecEnum::Attack(outgoing) = &mut self.execs[i] {
-                    *troops += outgoing.troops();
-                    outgoing.kill_attack();
-                }
+                (*ptr).kill_attack(&mut *game);
             }
         }
     }
 
-    /// Largest incoming land attack from candidate attackers (TS cluster `getCapturingPlayer`).
+    /// Largest incoming land attack from candidates (TS cluster `getCapturingPlayer`).
+    /// Includes boat/expansion attacks (`source_tile` set).
+    pub fn largest_incoming_land_attack(
+        &self,
+        defender_small_id: u16,
+        attackers: &[u16],
+    ) -> Option<u16> {
+        let mut largest_attack = 0.0f64;
+        let mut largest_attacker: Option<u16> = None;
+        for exec in &self.execs {
+            let ExecEnum::Attack(atk) = exec else {
+                continue;
+            };
+            if !atk.is_active() || !atk.attack_live() || !atk.is_initialized() {
+                continue;
+            }
+            if atk.target_small_id() != defender_small_id {
+                continue;
+            }
+            let attacker = atk.owner_small_id();
+            if !attackers.contains(&attacker) {
+                continue;
+            }
+            if atk.troops() > largest_attack {
+                largest_attack = atk.troops();
+                largest_attacker = Some(attacker);
+            }
+        }
+        largest_attacker
+    }
+
+    /// TS cluster `getCapturingPlayer` attack scan: neighbors Map order, then `outgoingAttacks`.
+    pub fn largest_incoming_land_attack_from_neighbors(
+        &self,
+        defender_small_id: u16,
+        attackers: &[u16],
+        neighbor_order: &[(u16, u32)],
+    ) -> Option<u16> {
+        let mut largest_attack = 0.0f64;
+        let mut largest_attacker: Option<u16> = None;
+        for (attacker, _) in neighbor_order {
+            if !attackers.contains(attacker) {
+                continue;
+            }
+            for exec in &self.execs {
+                let ExecEnum::Attack(atk) = exec else {
+                    continue;
+                };
+                if !atk.is_active() || !atk.attack_live() || !atk.is_initialized() {
+                    continue;
+                }
+                if atk.owner_small_id() != *attacker || atk.target_small_id() != defender_small_id {
+                    continue;
+                }
+                if atk.troops() > largest_attack {
+                    largest_attack = atk.troops();
+                    largest_attacker = Some(*attacker);
+                }
+            }
+        }
+        largest_attacker
+    }
+
+    /// Largest incoming land attack from candidate attackers (TS `AiAttackBehavior.findIncomingAttackPlayer`).
     pub fn largest_land_attack_from(
         &self,
         defender_small_id: u16,
@@ -1138,17 +1683,13 @@ impl Game {
 
     pub fn incoming_attacks(&self, defender_small_id: u16) -> Vec<IncomingAttack> {
         let mut out = Vec::new();
-        for exec in &self.execs {
-            let ExecEnum::Attack(atk) = exec else {
+        let Some(defender) = self.player_by_small_id(defender_small_id) else {
+            return out;
+        };
+        for id in &defender.incoming_land_attacks {
+            let Some(attacker) = self.land_attack_owner(id) else {
                 continue;
             };
-            if !atk.is_active() || !atk.attack_live() || !atk.is_initialized() || atk.source_tile().is_some() {
-                continue;
-            }
-            if atk.target_small_id() != defender_small_id {
-                continue;
-            }
-            let attacker = atk.owner_small_id();
             if attacker == defender_small_id || attacker == 0 {
                 continue;
             }
@@ -1157,30 +1698,69 @@ impl Game {
                     continue;
                 }
             }
+            let Some(troops) = self.land_attack_troops(id) else {
+                continue;
+            };
+            if self.land_attack_source_tile(id).is_some() {
+                continue;
+            }
             out.push(IncomingAttack {
                 attacker_small_id: attacker,
-                troops: atk.troops(),
+                troops,
             });
         }
         out
     }
 
+    fn land_attack_owner(&self, attack_id: &str) -> Option<u16> {
+        for exec in &self.execs {
+            let ExecEnum::Attack(atk) = exec else {
+                continue;
+            };
+            if atk.attack_id() == attack_id && atk.attack_live() && atk.is_initialized() {
+                return Some(atk.owner_small_id());
+            }
+        }
+        None
+    }
+
+    fn land_attack_troops(&self, attack_id: &str) -> Option<f64> {
+        for exec in &self.execs {
+            let ExecEnum::Attack(atk) = exec else {
+                continue;
+            };
+            if atk.attack_id() == attack_id && atk.attack_live() && atk.is_initialized() {
+                return Some(atk.troops());
+            }
+        }
+        None
+    }
+
+    fn land_attack_source_tile(&self, attack_id: &str) -> Option<TileRef> {
+        for exec in &self.execs {
+            let ExecEnum::Attack(atk) = exec else {
+                continue;
+            };
+            if atk.attack_id() == attack_id && atk.attack_live() && atk.is_initialized() {
+                return atk.source_tile();
+            }
+        }
+        None
+    }
+
     pub fn outgoing_land_troops(&self, attacker_small_id: u16) -> f64 {
-        self.execs
-            .iter()
-            .filter_map(|e| match e {
-                ExecEnum::Attack(atk)
-                    if atk.is_active()
-                        && atk.attack_live()
-                        && atk.is_initialized()
-                        && atk.owner_small_id() == attacker_small_id
-                        && atk.source_tile().is_none() =>
-                {
-                    Some(atk.troops())
+        let Some(attacker) = self.player_by_small_id(attacker_small_id) else {
+            return 0.0;
+        };
+        let mut total = 0.0;
+        for id in &attacker.outgoing_land_attacks {
+            if let Some(troops) = self.land_attack_troops(id) {
+                if self.land_attack_source_tile(id).is_none() {
+                    total += troops;
                 }
-                _ => None,
-            })
-            .sum()
+            }
+        }
+        total
     }
 
     pub fn num_land_tiles(&self) -> u32 {
@@ -1222,16 +1802,209 @@ impl Game {
         }
     }
 
-    pub fn is_allied_with(&self, _a: u16, _b: u16) -> bool {
-        false
+    pub fn is_allied_with(&self, a: u16, b: u16) -> bool {
+        if a == b {
+            return false;
+        }
+        self.alliances.iter().any(|al| {
+            al.expires_at > self.ticks
+                && ((al.requestor_small_id == a && al.recipient_small_id == b)
+                    || (al.requestor_small_id == b && al.recipient_small_id == a))
+        })
+    }
+
+    pub fn pending_alliance_request(
+        &self,
+        requestor: u16,
+        recipient: u16,
+    ) -> Option<&AllianceRequestState> {
+        self.alliance_requests.iter().find(|r| {
+            r.status == AllianceRequestStatus::Pending
+                && r.requestor_small_id == requestor
+                && r.recipient_small_id == recipient
+        })
+    }
+
+    pub fn create_alliance_request(
+        &mut self,
+        requestor: u16,
+        recipient: u16,
+        tick: u32,
+    ) -> bool {
+        if self.wire.disable_alliances() {
+            return false;
+        }
+        if self.is_allied_with(requestor, recipient) {
+            return false;
+        }
+        if self
+            .alliance_requests
+            .iter()
+            .any(|r| {
+                r.status == AllianceRequestStatus::Pending
+                    && r.requestor_small_id == requestor
+                    && r.recipient_small_id == recipient
+            })
+        {
+            return false;
+        }
+        if self
+            .alliance_requests
+            .iter()
+            .any(|r| {
+                r.status == AllianceRequestStatus::Pending
+                    && r.requestor_small_id == recipient
+                    && r.recipient_small_id == requestor
+            })
+        {
+            self.accept_alliance_pair(recipient, requestor, tick);
+            return true;
+        }
+        self.alliance_requests.push(AllianceRequestState {
+            requestor_small_id: requestor,
+            recipient_small_id: recipient,
+            created_at: tick,
+            status: AllianceRequestStatus::Pending,
+        });
+        true
+    }
+
+    fn accept_alliance_pair(&mut self, requestor: u16, recipient: u16, tick: u32) {
+        self.alliance_requests.retain(|r| {
+            !((r.requestor_small_id == requestor
+                && r.recipient_small_id == recipient
+                && r.status == AllianceRequestStatus::Pending)
+                || (r.requestor_small_id == recipient
+                    && r.recipient_small_id == requestor
+                    && r.status == AllianceRequestStatus::Pending))
+        });
+        let id = self.next_alliance_id;
+        self.next_alliance_id += 1;
+        let duration = self.wire.alliance_duration();
+        self.alliances.push(AllianceState {
+            id,
+            requestor_small_id: requestor,
+            recipient_small_id: recipient,
+            created_at: tick,
+            expires_at: tick + duration,
+            extension_requested_requestor: false,
+            extension_requested_recipient: false,
+        });
+        self.update_relation(requestor, recipient, 100);
+        self.update_relation(recipient, requestor, 100);
+    }
+
+    pub fn accept_alliance_request(&mut self, requestor: u16, recipient: u16, tick: u32) {
+        if !self
+            .alliance_requests
+            .iter()
+            .any(|r| {
+                r.status == AllianceRequestStatus::Pending
+                    && r.requestor_small_id == requestor
+                    && r.recipient_small_id == recipient
+            })
+        {
+            return;
+        }
+        self.accept_alliance_pair(requestor, recipient, tick);
+    }
+
+    pub fn reject_alliance_request(&mut self, requestor: u16, recipient: u16) {
+        for r in &mut self.alliance_requests {
+            if r.status == AllianceRequestStatus::Pending
+                && r.requestor_small_id == requestor
+                && r.recipient_small_id == recipient
+            {
+                r.status = AllianceRequestStatus::Rejected;
+            }
+        }
+    }
+
+    pub fn break_alliance_between(&mut self, breaker: u16, other: u16) {
+        if !self.is_allied_with(breaker, other) {
+            return;
+        }
+        if !self.is_traitor(other) {
+            self.mark_traitor(breaker);
+        }
+        self.alliances.retain(|al| {
+            !((al.requestor_small_id == breaker && al.recipient_small_id == other)
+                || (al.requestor_small_id == other && al.recipient_small_id == breaker))
+        });
+        self.update_relation(breaker, other, -100);
+    }
+
+    pub fn expire_alliances_for(&mut self, small_id: u16) {
+        let tick = self.ticks;
+        let expired: Vec<(u16, u16)> = self
+            .alliances
+            .iter()
+            .filter(|al| {
+                al.expires_at <= tick
+                    && (al.requestor_small_id == small_id || al.recipient_small_id == small_id)
+            })
+            .map(|al| (al.requestor_small_id, al.recipient_small_id))
+            .collect();
+        for (a, b) in expired {
+            self.alliances.retain(|al| {
+                !((al.requestor_small_id == a && al.recipient_small_id == b)
+                    || (al.requestor_small_id == b && al.recipient_small_id == a))
+            });
+        }
+    }
+
+    pub fn add_alliance_extension_request(&mut self, from: u16, to: u16) {
+        let tick = self.ticks;
+        let duration = self.wire.alliance_duration();
+        let Some(idx) = self.alliances.iter().position(|al| {
+            al.expires_at > tick
+                && ((al.requestor_small_id == from && al.recipient_small_id == to)
+                    || (al.requestor_small_id == to && al.recipient_small_id == from))
+        }) else {
+            return;
+        };
+        let al = &mut self.alliances[idx];
+        if al.requestor_small_id == from {
+            al.extension_requested_requestor = true;
+        } else {
+            al.extension_requested_recipient = true;
+        }
+        let both = al.extension_requested_requestor && al.extension_requested_recipient;
+        if both {
+            al.extension_requested_requestor = false;
+            al.extension_requested_recipient = false;
+            al.expires_at = tick + duration;
+        }
+    }
+
+    pub fn mark_traitor(&mut self, small_id: u16) {
+        let tick = self.ticks as i32;
+        if let Some(p) = self.player_by_small_id_mut(small_id) {
+            p.marked_traitor_tick = tick;
+        }
     }
 
     pub fn is_on_same_team(&self, _a: u16, _winner: &str) -> bool {
         false
     }
 
-    pub fn players_on_same_team(&self, _a: u16, _b: u16) -> bool {
-        false
+    pub fn players_on_same_team(&self, a: u16, b: u16) -> bool {
+        let Some(pa) = self.player_by_small_id(a) else {
+            return false;
+        };
+        let Some(pb) = self.player_by_small_id(b) else {
+            return false;
+        };
+        let Some(ta) = pa.team.as_deref() else {
+            return false;
+        };
+        let Some(tb) = pb.team.as_deref() else {
+            return false;
+        };
+        if ta == BOT_TEAM || tb == BOT_TEAM {
+            return false;
+        }
+        ta == tb
     }
 
     pub fn is_friendly(&self, a: u16, b: u16) -> bool {
@@ -1302,16 +2075,52 @@ impl Game {
         remaining.max(0)
     }
 
-    pub fn allied_small_ids(&self, _small_id: u16) -> Vec<u16> {
-        Vec::new()
+    pub fn allied_small_ids(&self, small_id: u16) -> Vec<u16> {
+        self.alliances
+            .iter()
+            .filter(|al| al.expires_at > self.ticks)
+            .filter_map(|al| {
+                if al.requestor_small_id == small_id {
+                    Some(al.recipient_small_id)
+                } else if al.recipient_small_id == small_id {
+                    Some(al.requestor_small_id)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
-    pub fn alliance_count(&self, _small_id: u16) -> usize {
-        0
+    pub fn alliance_count(&self, small_id: u16) -> usize {
+        self.allied_small_ids(small_id).len()
     }
 
     pub fn can_send_emoji(&self, sender_small_id: u16, recipient: Option<u16>) -> bool {
         if recipient.is_some_and(|r| r == sender_small_id) {
+            return false;
+        }
+        true
+    }
+
+    pub fn can_donate_troops(&self, sender_small_id: u16, recipient_small_id: u16) -> bool {
+        if sender_small_id == recipient_small_id {
+            return false;
+        }
+        let Some(sender) = self.player_by_small_id(sender_small_id) else {
+            return false;
+        };
+        let Some(recipient) = self.player_by_small_id(recipient_small_id) else {
+            return false;
+        };
+        if !sender.alive || !recipient.alive || sender.tiles_owned == 0 {
+            return false;
+        }
+        if !self.is_friendly(sender_small_id, recipient_small_id) {
+            return false;
+        }
+        if recipient.player_type == crate::game::PlayerType::Human
+            && !self.wire.game_config().donate_troops
+        {
             return false;
         }
         true
@@ -1339,12 +2148,40 @@ impl Game {
         true
     }
 
-    pub fn incoming_alliance_requests(&self, _small_id: u16) -> Vec<IncomingAllianceRequest> {
-        Vec::new()
+    pub fn incoming_alliance_requests(&self, small_id: u16) -> Vec<IncomingAllianceRequest> {
+        self.alliance_requests
+            .iter()
+            .filter(|r| {
+                r.status == AllianceRequestStatus::Pending && r.recipient_small_id == small_id
+            })
+            .map(|r| IncomingAllianceRequest {
+                requestor_small_id: r.requestor_small_id,
+                created_at: r.created_at,
+            })
+            .collect()
     }
 
-    pub fn alliance_extension_candidates(&self, _small_id: u16) -> Vec<AllianceExtensionCandidate> {
-        Vec::new()
+    pub fn alliance_extension_candidates(&self, small_id: u16) -> Vec<AllianceExtensionCandidate> {
+        let mut out = Vec::new();
+        for al in &self.alliances {
+            if al.expires_at <= self.ticks {
+                continue;
+            }
+            let other = if al.requestor_small_id == small_id {
+                al.recipient_small_id
+            } else if al.recipient_small_id == small_id {
+                al.requestor_small_id
+            } else {
+                continue;
+            };
+            let only_one = al.extension_requested_requestor ^ al.extension_requested_recipient;
+            if only_one {
+                out.push(AllianceExtensionCandidate {
+                    other_small_id: other,
+                });
+            }
+        }
+        out
     }
 
     pub fn too_close_to_existing_spawn(&self, center: TileRef, min_dist: u32) -> bool {
@@ -1374,26 +2211,7 @@ impl Game {
         found
     }
 
-    /// TS appends all inited execs after `removeInactiveExecutions`, so attacks stay
-    /// after `PlayerExecution`. Rust pushes attacks mid-init for merge parity, then
-    /// `retain` compacts them forward - restore attack-at-end ordering each tick.
-    fn move_land_attacks_to_end(execs: &mut Vec<ExecEnum>) {
-        let drained: Vec<_> = execs.drain(..).collect();
-        let mut attacks = Vec::new();
-        for e in drained {
-            let is_land_attack = matches!(
-                &e,
-                ExecEnum::Attack(a) if a.is_active() && a.source_tile().is_none()
-            );
-            if is_land_attack {
-                attacks.push(e);
-            } else {
-                execs.push(e);
-            }
-        }
-        execs.extend(attacks);
-    }
-
+    /// TS `GameImpl.executeNextTick`  -  one pass over `execs` in insertion order.
     pub fn execute_next_tick(&mut self) -> TickUpdates {
         let tick = self.ticks;
 
@@ -1401,20 +2219,6 @@ impl Game {
         let exec_len = self.execs.len();
         for i in 0..exec_len {
             let exec = &mut self.execs[i];
-            if exec.is_spawn_timer()
-                && (!self.spawn_phase || exec.active_during_spawn())
-                && exec.is_active()
-            {
-                unsafe {
-                    exec.tick(&mut *game, tick);
-                }
-            }
-        }
-        for i in 0..exec_len {
-            let exec = &mut self.execs[i];
-            if exec.is_spawn_timer() {
-                continue;
-            }
             if (!self.spawn_phase || exec.active_during_spawn()) && exec.is_active() {
                 unsafe {
                     exec.tick(&mut *game, tick);
@@ -1436,7 +2240,6 @@ impl Game {
                     exec.init(&mut *game, tick);
                 }
                 self.init_merge_batch = None;
-                // TS always appends inited execs; `removeInactiveExecutions` compacts later.
                 inited.push(exec);
             } else {
                 still_uninit.push(exec);

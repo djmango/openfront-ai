@@ -19,7 +19,7 @@ pub fn within(value: f64, min: f64, max: f64) -> f64 {
 
 /// TS `Util.sigmoid`.
 pub fn sigmoid(x: f64, decay_rate: f64, midpoint: f64) -> f64 {
-    1.0 / (1.0 + (decay_rate * (x - midpoint)).exp())
+    1.0 / (1.0 + (-decay_rate * (x - midpoint)).exp())
 }
 
 /// TS `Util.toInt` as i32 for troop math.
