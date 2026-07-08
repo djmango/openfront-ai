@@ -20,11 +20,15 @@ BATCH="${BATCH:-96}"
 ACCUM="${ACCUM:-1}"
 STEPS="${STEPS:-60000}"
 WORKERS="${WORKERS:-16}"
-# AE-latent cache budget (rl/bc.py --z-cache-gb). SIZE TO THE CONTAINER'S
-# CGROUP LIMIT, not the host's free RAM: RunPod pods are memory-capped
-# (bc2: 116GiB despite 1TB on the host; the kernel oom-killed the trainer
-# at a 300GB budget). Leave ~40GB headroom for the trainer itself.
-Z_CACHE_GB="${Z_CACHE_GB:-80}"
+# AE-latent cache budget (rl/bc.py --z-cache-gb). With the default
+# disk-backed slabs (--z-cache-dir auto -> runs/bc/zcache) the budget is
+# DISK, not RAM: file pages are kernel-reclaimable, so this can be sized
+# to the full dataset (~440GB fp16) even on cgroup-capped pods (bc2:
+# 116GiB cap; bc3: 250GB cap - anonymous slabs got the trainer
+# OOM-killed there). Pure-RAM budgets (Z_CACHE_DIR="") are clamped to
+# the cgroup limit in rl/bc.py.
+Z_CACHE_GB="${Z_CACHE_GB:-450}"
+Z_CACHE_DIR="${Z_CACHE_DIR:-auto}"
 # Optional pre-v6 checkpoint to warm-start from (rl.bc --init-extend).
 # Safe to leave set across relaunches: rl.bc ignores it once --resume is
 # passed, and the loop below passes --resume as soon as bc.pt exists.
@@ -191,7 +195,7 @@ while true; do
     MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=1073741824 \
     python -m rl.bc --data data-human --name "$RUN_NAME" --seq "$SEQ" \
     --batch "$BATCH" --accum "$ACCUM" --steps "$STEPS" --workers "$WORKERS" \
-    --z-cache-gb "$Z_CACHE_GB" \
+    --z-cache-gb "$Z_CACHE_GB" --z-cache-dir "$Z_CACHE_DIR" \
     ${INIT_EXTEND:+--init-extend "$INIT_EXTEND"} $RESUME \
     2>&1 | tee -a "/tmp/bc_$RUN_NAME.log"
   ELAPSED=$(( $(date +%s) - START_TS ))

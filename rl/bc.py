@@ -99,15 +99,35 @@ def collate(raws: list[dict], device: str) -> tuple[dict, dict, torch.Tensor]:
     labels use the global GW_MAX stride, so convert them to this batch's
     local flat index to match the tile head's flattening.
 
+    Tensor grids (encode_grids torch_out=True) are padded/stacked directly
+    on the device - the numpy path spent ~10s per 50-step window moving
+    grids GPU -> host staging -> GPU again.
+
     staged: batch arrays are views into persistent per-thread buffers -
     fine when .to(device) copies them out immediately (cuda), and it
     removes the 60-200MB/batch alloc churn that decayed on bc2. On CPU
     .to() is a no-op alias, so staging would corrupt in-flight batches."""
     staged = device != "cpu"
-    o = {
-        k: torch.from_numpy(v).to(device)
-        for k, v in obs_collate(raws, OBS_KEYS, staged=staged).items()
-    }
+    if torch.is_tensor(raws[0]["grid"]):
+        gh = max(r["grid"].shape[1] for r in raws)
+        gw = max(r["grid"].shape[2] for r in raws)
+        g0 = raws[0]["grid"]
+        grid = g0.new_zeros(len(raws), g0.shape[0], gh, gw)
+        for i, r in enumerate(raws):
+            g = r["grid"]
+            grid[i, :, : g.shape[1], : g.shape[2]] = g
+        np_keys = [k for k in OBS_KEYS if k not in ("grid", "local")]
+        o = {
+            k: torch.from_numpy(v).to(device)
+            for k, v in obs_collate(raws, np_keys, staged=staged).items()
+        }
+        o["grid"] = grid.float()
+        o["local"] = torch.stack([r["local"] for r in raws]).float()
+    else:
+        o = {
+            k: torch.from_numpy(v).to(device)
+            for k, v in obs_collate(raws, OBS_KEYS, staged=staged).items()
+        }
     choice = {
         k: torch.tensor([r["choice"][k] for r in raws], dtype=torch.long, device=device)
         for k in CHOICE_KEYS
@@ -183,7 +203,7 @@ def head_accuracy(out: dict, o: dict, choice: dict) -> dict:
 def encode_batch(
     ae, raws: list[dict], device: str, z_cache: ZCache | None = None
 ) -> list[dict]:
-    enc = encode_grids(ae, raws, device, z_cache=z_cache)
+    enc = encode_grids(ae, raws, device, z_cache=z_cache, torch_out=True)
     for e, r in zip(enc, raws):
         e["choice"], e["cond"] = r["choice"], r["cond"]
     return enc
@@ -227,9 +247,15 @@ def main() -> None:
     ap.add_argument("--holdout-every", type=int, default=10)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--z-cache-gb", type=float, default=300.0,
-                    help="RAM LRU budget (GB) for frozen-AE latents keyed "
+                    help="byte budget (GB) for frozen-AE latents keyed "
                          "(game, tick); 0 disables. The full human dataset "
-                         "is ~260GB of fp16 latents, so 300 never evicts")
+                         "is ~440GB of fp16 latents (378k train keys)")
+    ap.add_argument("--z-cache-dir", default="auto",
+                    help="disk-persist the latent slabs (memmap + index) so "
+                         "restarts start warm and the pages are kernel-"
+                         "reclaimable (a pure-RAM cache OOMs cgroup-capped "
+                         "pods). 'auto': runs/bc/zcache when the budget is "
+                         ">= 8GB, else off. '' disables")
     ap.add_argument("--eval-every", type=int, default=500)
     ap.add_argument("--save-every", type=int, default=1000)
     ap.add_argument("--resume", default=None)
@@ -275,7 +301,25 @@ def main() -> None:
     # AE-latent cache: encode is ~90% of feed-thread wall and the AE input
     # is per-(game, tick) - see rl.obs.ZCache. BC-only (PPO episodes are
     # unique; its raws never carry z_key).
-    z_cache = ZCache(int(args.z_cache_gb * 1e9)) if args.z_cache_gb > 0 else None
+    z_cache = None
+    if args.z_cache_gb > 0:
+        budget = int(args.z_cache_gb * 1e9)
+        zdir = args.z_cache_dir
+        if zdir == "auto":
+            zdir = "runs/bc/zcache" if args.z_cache_gb >= 8 else ""
+        if not zdir:
+            # Anonymous slabs must fit the container's memory cgroup or the
+            # OOM killer takes the trainer (bc3: 250GB cap ate a 400GB
+            # budget). Disk-backed slabs are exempt: file pages reclaim.
+            lim = _cgroup_mem_limit()
+            if lim is not None and budget > lim - int(60e9):
+                budget = max(0, lim - int(60e9))
+                print(f"z-cache: budget clamped to {budget / 1e9:.0f}GB "
+                      f"(cgroup limit {lim / 1e9:.0f}GB)")
+        z_cache = ZCache(budget, disk_dir=zdir or None) if budget > 0 else None
+        if z_cache is not None and len(z_cache):
+            print(f"z-cache: restored {len(z_cache)} latents "
+                  f"({z_cache.bytes / 1e9:.0f}GB) from {zdir}")
     model = BCPolicy(seq=args.seq).to(device)
     opt = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=1e-4, fused=(device == "cuda")
@@ -322,9 +366,32 @@ def main() -> None:
     sample_pool = ThreadPoolExecutor(max_workers=args.workers)
     raw_q: list = [sample_pool.submit(draw, sampler) for _ in range(8)]
 
-    def next_raws():
-        raw_q.append(sample_pool.submit(draw, sampler))
-        return raw_q.pop(0).result()
+    # Area-bucketed batching (feedforward only; seq windows must stay
+    # contiguous): collate pads every batch to its max grid, and with
+    # uniform map sampling E[max area of 96 draws] is ~2x the mean area -
+    # half the conv-tower FLOPs go into padding. Regrouping a pool of 8
+    # batches by grid area keeps big maps with big maps; the sort is
+    # stable so same-snapshot samples stay adjacent (z dedupe unaffected).
+    import random as _random
+
+    _bucket_rng = _random.Random(0)
+    bucket_q: list[list[dict]] = []
+
+    def next_raws() -> list[dict]:
+        if args.seq:
+            raw_q.append(sample_pool.submit(draw, sampler))
+            return raw_q.pop(0).result()
+        if not bucket_q:
+            pool: list[dict] = []
+            for _ in range(len(raw_q)):
+                raw_q.append(sample_pool.submit(draw, sampler))
+                pool.extend(raw_q.pop(0).result())
+            pool.sort(key=lambda r: r["owners"].shape[0] * r["owners"].shape[1])
+            bucket_q.extend(
+                pool[k : k + args.batch] for k in range(0, len(pool), args.batch)
+            )
+            _bucket_rng.shuffle(bucket_q)  # no systematic small->large ramp
+        return bucket_q.pop(0)
 
     # Micro-batch pipeline: fetch + AE encode + collate for k+1 runs on a
     # worker thread during k's forward/backward (same surgery as PPO's
@@ -482,6 +549,14 @@ def main() -> None:
                         print(f"hf sync failed: {e}", flush=True)
 
                 threading.Thread(target=_hf_push, daemon=True).start()
+
+
+def _cgroup_mem_limit() -> int | None:
+    try:
+        s = Path("/sys/fs/cgroup/memory.max").read_text().strip()
+        return None if s == "max" else int(s)
+    except (OSError, ValueError):
+        return None
 
 
 def _last_o(o: dict, seq: int, device: str) -> dict:

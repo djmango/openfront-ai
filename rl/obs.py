@@ -23,7 +23,9 @@ ships once per episode; dynamic fallout ships every step as packed bits
 saw frozen fallout after an episode's first step).
 """
 
+import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -410,7 +412,7 @@ class ObsBuilder:
 
 
 class ZCache:
-    """RAM cache over frozen-AE latents, keyed (game, tick).
+    """Cache over frozen-AE latents, keyed (game, tick).
 
     The AE input (owners + terrain/fallout + static unit planes) is
     per-(game, tick) and the AE is frozen, so z is identical for every
@@ -429,6 +431,16 @@ class ZCache:
     pinned MALLOC_MMAP_THRESHOLD, so it gets its own mmap and the heap
     the batch buffers recycle stays compact.
 
+    disk_dir: slabs become file-backed memmaps plus an append-only
+    index.jsonl, giving (a) warm restarts - a relaunch reopens the store
+    and starts at the previous run's hit rate instead of re-encoding for
+    hours, and (b) survival on cgroup-capped pods: the full human dataset
+    is ~440GB of fp16 latents but bc3's container is capped at 250GB -
+    anonymous slabs get the trainer OOM-killed before the cache is even
+    two-thirds full, while file-backed pages are kernel-reclaimable, so
+    the hot set stays in RAM and the cold tail pages in from disk.
+    Writes go through the page cache (no sync I/O on the put path).
+
     Also keeps a per-game land plane on the GPU (uint8): cache hits skip
     the terrain_static upload (AE-only input), but _local_crops still
     needs land - re-uploading 9.6MB fp32 per sample would eat most of the
@@ -436,17 +448,61 @@ class ZCache:
 
     SLAB = 1 << 30
 
-    def __init__(self, max_bytes: int):
+    def __init__(self, max_bytes: int, disk_dir: str | Path | None = None):
         self.max_bytes = max_bytes
         self._d: dict[tuple, np.ndarray] = {}
         self._land: dict[str, torch.Tensor] = {}
         self._lock = threading.Lock()
-        self._slab: np.ndarray | None = None
+        self._slabs: list[np.ndarray] = []
         self._off = 0
-        self._slab_bytes = 0
         self.bytes = 0
         self.hits = 0
         self.misses = 0
+        self._dir = Path(disk_dir) if disk_dir else None
+        self._index_f = None
+        if self._dir is not None:
+            self._dir.mkdir(parents=True, exist_ok=True)
+            self._load_disk()
+            # Line-buffered: an OOM-killed run loses at most the last line
+            # (the loader skips a torn tail and overwrites orphaned bytes).
+            self._index_f = (self._dir / "index.jsonl").open("a", buffering=1)
+
+    def _load_disk(self) -> None:
+        idx = self._dir / "index.jsonl"
+        paths = sorted(self._dir.glob("slab*.bin"))
+        if not idx.exists() or not paths:
+            return
+        self._slabs = [np.memmap(p, dtype=np.uint8, mode="r+") for p in paths]
+        ends = [0] * len(self._slabs)
+        with idx.open() as f:
+            for line in f:
+                try:
+                    k, s, off, shape, dt = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    break  # torn tail line from a killed writer
+                if s >= len(self._slabs):
+                    break
+                nb = int(np.prod(shape)) * np.dtype(dt).itemsize
+                self._d[(k[0], int(k[1]))] = (
+                    self._slabs[s][off : off + nb].view(np.dtype(dt)).reshape(shape)
+                )
+                ends[s] = max(ends[s], off + ((nb + 15) & ~15))
+                self.bytes += nb
+        self._off = ends[-1]
+
+    def _new_slab(self) -> bool:
+        if (len(self._slabs) + 1) * self.SLAB > self.max_bytes:
+            return False  # budget reached: cache saturates, never churns
+        if self._dir is not None:
+            s = np.memmap(
+                self._dir / f"slab{len(self._slabs):04d}.bin",
+                dtype=np.uint8, mode="w+", shape=(self.SLAB,),
+            )
+        else:
+            s = np.empty(self.SLAB, dtype=np.uint8)
+        self._slabs.append(s)
+        self._off = 0
+        return True
 
     def get(self, key: tuple) -> np.ndarray | None:
         with self._lock:
@@ -462,21 +518,26 @@ class ZCache:
             if key in self._d:
                 return
             nb = (z.nbytes + 15) & ~15  # keep slab offsets fp16-aligned
-            if self._slab is None or self._off + nb > self._slab.nbytes:
-                if self._slab_bytes + self.SLAB > self.max_bytes:
-                    return  # budget reached: cache saturates, never churns
-                self._slab = np.empty(self.SLAB, dtype=np.uint8)
-                self._slab_bytes += self.SLAB
-                self._off = 0
+            if not self._slabs or self._off + nb > self.SLAB:
+                if not self._new_slab():
+                    return
             view = (
-                self._slab[self._off : self._off + z.nbytes]
+                self._slabs[-1][self._off : self._off + z.nbytes]
                 .view(z.dtype)
                 .reshape(z.shape)
             )
             view[...] = z
+            if self._index_f is not None:
+                self._index_f.write(json.dumps(
+                    [list(key), len(self._slabs) - 1, self._off,
+                     list(z.shape), z.dtype.str]
+                ) + "\n")
             self._off += nb
             self._d[key] = view
             self.bytes += z.nbytes
+
+    def __len__(self) -> int:
+        return len(self._d)
 
     def land(self, raw: dict, device: str) -> torch.Tensor:
         """(H, W) uint8 land plane on GPU, cached per game."""
@@ -554,7 +615,9 @@ def _local_crops(
 _staging = threading.local()
 
 
-def _staged_stack(name: str, arrays: list[np.ndarray]) -> np.ndarray:
+def _staged_stack(
+    name: str, arrays: list[np.ndarray], parallel: bool = False
+) -> np.ndarray:
     bufs = getattr(_staging, "bufs", None)
     if bufs is None:
         bufs = _staging.bufs = {}
@@ -565,8 +628,25 @@ def _staged_stack(name: str, arrays: list[np.ndarray]) -> np.ndarray:
         buf = np.empty((n, *arrays[0].shape), arrays[0].dtype)
         bufs[key] = buf
     out = buf[:n]
-    np.stack(arrays, out=out)
+    if parallel and n > 1:
+        # Sources may be cold disk-backed memmaps (ZCache disk_dir): the
+        # copies page-fault, so overlap the I/O instead of faulting serially.
+        list(_copy_pool().map(
+            lambda t: np.copyto(out[t[0]], t[1]), enumerate(arrays)
+        ))
+    else:
+        np.stack(arrays, out=out)
     return out
+
+
+_COPY_POOL: ThreadPoolExecutor | None = None
+
+
+def _copy_pool() -> ThreadPoolExecutor:
+    global _COPY_POOL
+    if _COPY_POOL is None:
+        _COPY_POOL = ThreadPoolExecutor(max_workers=8)
+    return _COPY_POOL
 
 
 @torch.no_grad()
@@ -576,6 +656,7 @@ def encode_grids(
     device: str,
     fp16: bool = False,
     z_cache: ZCache | None = None,
+    torch_out: bool = False,
 ) -> list[dict]:
     """Batched full-resolution featurization on the GPU: frozen-AE encode,
     ego ownership pooling, fallout unpacking, and the local owner crop.
@@ -596,7 +677,14 @@ def encode_grids(
     inputs); per-player work (ego, local crop) still runs per sample.
     Duplicate keys within one batch (a BC step draw emits every actor at
     the same snapshot) encode once. PPO passes neither key nor cache, so
-    its path is untouched."""
+    its path is untouched.
+
+    torch_out=True (BC trainer): "grid" and "local" come back as device
+    tensors instead of numpy - the numpy path downloads ~300MB of grids
+    per 96-batch only for collate to stack and re-upload them, which was
+    the single biggest cost of the cache-hit feed path. Callers must use
+    a collate that understands tensor grids (rl.bc.collate does); PPO
+    keeps numpy (its rollout buffer lives on the CPU)."""
     from rl.curriculum import GH_MAX, GW_MAX
 
     n = len(raws)
@@ -672,7 +760,7 @@ def encode_grids(
             for j, i in enumerate(idxs):
                 k = raws[i].get("z_key")
                 if k is not None:
-                    z_cache.put(k, z16[j].copy())
+                    z_cache.put(k, z16[j])  # put copies into its slab
                 if i in needed_reps:
                     z_gpu[i] = z[j].float()
 
@@ -686,9 +774,17 @@ def encode_grids(
 
         grid = torch.cat([z.float(), ego], dim=1)
         local = _local_crops(classmap, terr[:, 0])
+        if torch_out:
+            # Append transient planes here (GPU) so "grid" is complete and
+            # never round-trips through the host.
+            tr = torch.from_numpy(
+                _staged_stack("transient", [raws[i]["transient"] for i in idxs])
+            ).to(device)
+            grid = torch.cat([grid, tr], dim=1)
         if fp16:
             grid, local = grid.half(), local.half()
-        grid, local = grid.cpu().numpy(), local.cpu().numpy()
+        if not torch_out:
+            grid, local = grid.cpu().numpy(), local.cpu().numpy()
         for j, i in enumerate(idxs):
             grid_by_idx[i] = grid[j]
             local_by_idx[i] = local[j]
@@ -717,11 +813,24 @@ def encode_grids(
         zs = torch.empty(
             B, LATENT_C, H // REGION, W // REGION, device=device
         )
-        hit_js = [j for j, i in enumerate(idxs) if i in z_hit]
-        if hit_js:
-            zs[hit_js] = torch.from_numpy(
-                _staged_stack("zhit", [z_hit[idxs[j]] for j in hit_js])
+        # One host->device upload per unique key, not per sample: a step
+        # draw emits ~10 players per snapshot, and with a disk-backed
+        # cache each redundant copy would also be a cold page-fault read.
+        hit_groups: dict[tuple, list[int]] = {}
+        for j, i in enumerate(idxs):
+            if i in z_hit:
+                hit_groups.setdefault(raws[i]["z_key"], []).append(j)
+        if hit_groups:
+            keys = list(hit_groups)
+            zu = torch.from_numpy(
+                _staged_stack(
+                    "zhit", [z_hit[idxs[hit_groups[k][0]]] for k in keys],
+                    parallel=z_cache._dir is not None,
+                )
             ).to(device).float()
+            for u, k in enumerate(keys):
+                for j in hit_groups[k]:
+                    zs[j] = zu[u]
         for j, i in enumerate(idxs):
             if i in rep_of:
                 zs[j] = z_gpu[rep_of[i]]
@@ -736,9 +845,15 @@ def encode_grids(
 
         grid = torch.cat([zs, ego], dim=1)
         local = _local_crops(classmap, land)
+        if torch_out:
+            tr = torch.from_numpy(
+                _staged_stack("transient", [raws[i]["transient"] for i in idxs])
+            ).to(device)
+            grid = torch.cat([grid, tr], dim=1)
         if fp16:
             grid, local = grid.half(), local.half()
-        grid, local = grid.cpu().numpy(), local.cpu().numpy()
+        if not torch_out:
+            grid, local = grid.cpu().numpy(), local.cpu().numpy()
         for j, i in enumerate(idxs):
             grid_by_idx[i] = grid[j]
             local_by_idx[i] = local[j]
@@ -752,7 +867,10 @@ def encode_grids(
     global _warned_oversize
     for i, r in enumerate(raws):
         o = {k: v for k, v in r.items() if k not in consumed}
-        grid = np.concatenate([grid_by_idx[i], r["transient"].astype(dtype)])
+        if torch_out:
+            grid = grid_by_idx[i]  # transient already appended on device
+        else:
+            grid = np.concatenate([grid_by_idx[i], r["transient"].astype(dtype)])
         gh, gw = grid.shape[1], grid.shape[2]
         if (gh > GH_MAX or gw > GW_MAX) and not _warned_oversize:
             # Training can't get here (curriculum and the BC stride picker
