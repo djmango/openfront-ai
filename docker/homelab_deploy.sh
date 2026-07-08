@@ -32,7 +32,7 @@ docker run -d \
   -p 127.0.0.1:8086:8086 \
   -p "[::1]:8086:8086" \
   -v "$DATA:/data" \
-  -e RUN_NAME="${RUN_NAME:-ppo_v4}" \
+  -e RUN_NAME="${RUN_NAME:-ppo_v6}" \
   -e STAGE="${STAGE:-4}" \
   -e SHOWCASE_WATCH_STAGE="${SHOWCASE_WATCH_STAGE:-4}" \
   -e SHOWCASE_MAPS="${SHOWCASE_MAPS:-Onion,Pangaea,Caucasus,BlackSea,BetweenTwoSeas,World,Asia}" \
