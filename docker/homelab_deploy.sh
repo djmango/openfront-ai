@@ -10,6 +10,7 @@ echo "[1/5] sync openfront-ai master"
 if [ -d "$SRC/.git" ]; then
   git -C "$SRC" fetch origin master
   git -C "$SRC" reset --hard origin/master
+  git -C "$SRC" submodule sync --recursive
   git -C "$SRC" submodule update --init --recursive
   OPENFRONT_PIN="$(tr -d '[:space:]' < "$SRC/openfront.commit")"
   git -C "$SRC/openfront" fetch origin "$OPENFRONT_PIN" 2>/dev/null || true
