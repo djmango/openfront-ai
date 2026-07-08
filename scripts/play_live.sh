@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Play against the RL agent in a live local OpenFront lobby.
 #
-#   bash scripts/play_live.sh                 # dev server already up; prompt for lobby ID
+#   bash scripts/play_live.sh                 # default: v6_bc (pure BC prior)
+#   bash scripts/play_live.sh --run-name ppo_v61
 #   bash scripts/play_live.sh --restart       # kill vite + game server, restart, then play
 #   bash scripts/play_live.sh --game <ID>     # skip the lobby ID prompt
 #
@@ -12,6 +13,8 @@
 #
 # The MODEL overlay panel (the agent's live decisions) appears automatically
 # in the browser; disable with localStorage.setItem("rlDebugOverlay", "0").
+# Note: v6_bc / ppo_v6* need a v6-shape checkout (C_GRID=43). The in-progress
+# v7 obs tree will refuse to load these checkpoints.
 
 set -euo pipefail
 
@@ -19,9 +22,12 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_DIR"
 
 HOST="${HOST:-localhost:9000}"
-RUN_NAME="${RUN_NAME:-ppo_v2c}"
+# v6_bc = pure BC prior (bc_v6/bc_best folded into a playable Policy, winner
+# bucket). Use RUN_NAME=ppo_v61 (or ppo_v6) for the RL agents. v7 obs shapes
+# break BC weight loading, so there is no v7_bc until a fresh BC retrain.
+RUN_NAME="${RUN_NAME:-v6_bc}"
 POLICY="${POLICY:-runs/rl/$RUN_NAME/policy.pt}"
-AE="${AE:-runs/ae_v3/ae_v3.pt}"
+AE="${AE:-runs/ae_v31_d8c32/ae_v3.pt}"
 GAME=""
 RESTART=0
 
@@ -70,13 +76,16 @@ ensure_ae() {
   fi
   mkdir -p "$(dirname "$AE")"
   echo "fetching AE checkpoint -> $AE"
-  uv run python - <<'PY'
+  AE="$AE" uv run python - <<'PY'
 from huggingface_hub import hf_hub_download
+import os
 import shutil
 from pathlib import Path
-dest = Path("runs/ae_v3/ae_v3.pt")
+dest = Path(os.environ["AE"])
 dest.parent.mkdir(parents=True, exist_ok=True)
-p = hf_hub_download("djmango/openfront-tile-autoencoder", "ae_v3.pt")
+# Prefer the d8c32 encoder the v4+ policies were trained against.
+name = "ae_v31_d8c32.pt" if "ae_v31" in dest.as_posix() else "ae_v3.pt"
+p = hf_hub_download("djmango/openfront-tile-autoencoder", name)
 shutil.copy(p, dest)
 print(f"saved {dest}")
 PY

@@ -30,6 +30,8 @@
   <a href="#now">Now</a> ·
   <a href="#runs">Run ledger</a> ·
   <a href="#timeline">Timeline</a> ·
+  <a href="#bc-verdict">BC verdict</a> ·
+  <a href="#v7-obs">July 8th, evening</a> ·
   <a href="#v6-night-scaling">July 8th, daytime</a> ·
   <a href="#v51-freeze">July 7th, evening</a> ·
   <a href="#jul-7">July 7th</a> ·
@@ -54,19 +56,24 @@
 </nav>
 
 <div class="now" id="now">
-  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 8th, 2026, daytime</h2>
-  <p><code>ppo_v6</code> <b>live on rl4</b> since ~11pm Jul 7 (21 actions, Beta scalar quantity,
-  5-way nukes, warm-started from frozen v5 via <code>--init-extend</code>): cleared stages 0-3
-  overnight, now at the stage-4 wall (roll-win 0.10 vs the 0.55 gate, roll-score 0.88 - dominates
-  games, weak at converting, the familiar <a href="#v6-first-night">safe-second shape</a>) with a
-  genuinely <b>new boat-heavy playstyle</b> and a healthy Beta quantity head on night one.
-  <code>bc_v6</code> fine-tune running on bc3 from the <a href="#v6-labels">re-replayed v6
-  labels</a>, already at bc_v4-final eval levels. The <a href="#cache-verdict">honest cache
-  verdict</a>: ~2x live, not the promised 10x - the GPU step was the second bottleneck. Today:
-  the <a href="#scaling-plan">100x scaling plan</a> - <b>ppo_v6.1 launching on a 4x H100 pod
-  (rl5)</b>, resuming v6's weights with bf16/compile, epochs 2, and a DDP learner.</p>
-  <p class="d" style="margin:.75rem 0 0">375k bot + 420k human snapshots · d8c32 encoder · 5.9M-param policy ·
-  11 curriculum stages · encoder border accuracy 71.8% → 89.3% (human).</p>
+  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 8th, 2026, evening</h2>
+  <p><b><a href="#v7-obs">v7: full-state observation expansion</a></b> is implemented (uncommitted,
+  not yet pushed): closes the remaining gaps between true engine state and what the policy sees -
+  other players' land attacks (with retreat state), who owns which unit, boat troop counts,
+  alliance-expiry timers, SAM/MIRV/Train units, trade-ship destinations, per-unit health/cooldown,
+  tile defense bonus, target-painting, income rates, the doomsday clock - entirely through the
+  existing AE-bypass paths, so the frozen spatial AE needs no retraining, but every BC/PPO shape
+  constant moved (<code>C_GRID</code> 43→89, <code>P_FEAT</code> 12→21, <code>N_SCALARS</code>
+  8→11) so checkpoints do not carry forward. Step one of the retrain, re-replaying all 303 human
+  games at their exact historical engine commits to relabel BC data with the new fields, is
+  running on the <b>homelab</b> (not a pod - see the <a href="#v7-ops">ops saga</a>) rather than
+  locally or on a pod, to keep it off the laptop and off billed GPU time.</p>
+  <p class="d" style="margin:.75rem 0 0"><code>ppo_v61</code> still climbing on rl5 (4x H100):
+  update ~976, stage 4, roll-win ~0.03-0.10 against the 0.55 gate, roll-score ~0.66-0.71 -
+  same safe-second wall as v6/v5.1. <code>bc_v6</code> frozen at step 35.6k and the bc3 A100
+  pod <b>terminated</b> (not just stopped) - see <a href="#bc-verdict">the BC verdict</a>.
+  Playable pure-BC baseline: <code>v6_bc</code> on HF
+  (<code>bash scripts/play_live.sh --run-name v6_bc</code>). Fleet is rl5 only ($11.96/hr).</p>
 </div>
 <h3 id="status">Status snapshot (July 6th evening)</h3>
 <p>
@@ -128,14 +135,23 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
     playstyle, active <code>cancel_boat</code> hedging, Warships in the build mix - see
     <a href="#v6-behavior">the behavior analysis</a>. To be resumed as <code>ppo_v6.1</code> on
     rl5.</td></tr>
-  <tr><td><code>bc_v6</code></td><td><b>running</b> (bc3)</td>
+  <tr><td><code>v6_bc</code></td><td><b>playable</b></td>
+    <td>Pure BC prior for live play / short PPO warm-start experiments: <code>bc_v6/bc_best.pt</code>
+    folded into a v6-shape <code>Policy</code> (winner placement bucket, same fold as
+    <code>ppo --init</code>). On HF as <code>v6_bc/policy.pt</code>. Play with
+    <code>bash scripts/play_live.sh --run-name v6_bc</code>. There is no <code>v7_bc</code> -
+    v7's obs-shape change (<code>C_GRID</code> 43→89 etc.) makes BC weights unloadable; a fresh
+    BC retrain is required after the homelab archive regen finishes. See
+    <a href="#bc-verdict">the BC verdict</a>.</td></tr>
+  <tr><td><code>bc_v6</code></td><td><b>frozen</b> Jul 8 eve @ step 35.6k</td>
     <td>Feedforward BC fine-tune on the <a href="#v6-labels">re-replayed v6 labels</a>
-    (303 games, formatVersion 3), warm-started from <code>bc_v4</code>'s step-55k checkpoint
-    via its own <code>--init-extend</code> (<code>e6245da</code>). A100 (bc3), 110-118 ex/s at
-    57-66% z-cache hits; step ~30k by Jul 8 midday, holdout evals already at bc_v4-final
-    levels, quantity MAE 0.096. Speed fixes (<code>63d6e1a</code>) + bf16/compile/dynamic-batch
-    land on its next supervisor restart - see <a href="#cache-verdict">the cache
-    verdict</a>.</td></tr>
+    (303 games, formatVersion 3), warm-started from <code>bc_v4</code> via
+    <code>--init-extend</code>. A100 (bc3). Peaked ~155 ex/s with z-cache; stalled after an
+    EDQUOT crash loop (disk z-cache budget 450GB on a 120GB volume - mfs hides the quota in
+    <code>df</code>; fixed in <code>732b6c5</code> by defaulting <code>Z_CACHE_GB=60</code>).
+    Learning was flat: action acc 0.60→0.62 over 35k steps. Killed rather than grind to 60k;
+    bc3 pod terminated. Ckpt on HF as <code>bc_v6/</code>. See
+    <a href="#bc-verdict">the BC verdict</a>.</td></tr>
   <tr><td><code>ppo_v5</code></td><td><b>frozen</b> Jul 7 eve</td>
     <td>Launched July 7th morning. BC warm start from <code>bc_v4/bc_best.pt</code>, entropy floor (<code>--ent-floor 3.5</code>), PLACE_POW 1.5, loss-averse deltas (gain 5.0 / loss 6.5). Stages 0-4 in ~5.5h; roll-win 0.17 / score 0.85 on stage 4 by update 260. Relaunched midday as <b>v5.1</b>: structure-value share in the strength blend (<a href="#v51-bc2fix">denser rewards</a>), resumed from its own checkpoint. See <a href="#ppo-v5">PPO v5</a>. <b>Frozen Jul 7 evening</b> at update 550 (global_step 1,725,216), stage 4 (roll-win ~0.25 vs the 0.55 gate): re-earned stages 0-4 under dominance gates and cleared the stage-5 win gate twice, but both advances were lost to CUDA OOM before checkpointing. OOM root-caused and fixed post-freeze (<a href="#oom-padding">collate padding</a>, <code>36a8efb</code>). Weights are the v6 warm start. See <a href="#v51-freeze">the freeze postmortem</a>.</td></tr>
   <tr><td><code>ppo_v4</code></td><td><b>retired</b> Jul 7</td>
@@ -912,6 +928,183 @@ the measured bottleneck (per-latent-cell update FLOPs) ~64x, and weight pruning 
 dense conv time on GPUs. Submanifold sparse conv over active cells stays a stretch option
 (~3-5x ceiling, heavy complexity), unscheduled unless post-foveation profiling still shows dead
 compute.</p>
+<p class="d"><b>Naming note:</b> the "v7" tag above turned out to be reused. This page's next
+section is a <i>different</i> v7 - a full-state observation expansion, planned and shipped the
+same day - that landed first because it's independent of the AE and needed no encoder work. The
+foveated two-stream resolution idea described here is still live, just pushed to whatever version
+number comes after the observation-expansion retrain lands.</p>
+
+<h2 class="date" id="v7-obs">July 8th, 2026 - evening</h2>
+<p class="session">BC verdict + freeze, playable <code>v6_bc</code> baseline, and v7 full-state
+observation expansion (plan, implementation, BC-regen ops saga).</p>
+
+<h3 id="bc-verdict">BC was never really great - freeze, kill, keep a playable prior</h3>
+<p>Honest read across the whole BC line (<code>bc_v1</code>…<code>bc_v6</code>, plus the
+killed temporal <code>bc_seq_v4</code>):</p>
+<ul>
+  <li><b>Ceiling is low.</b> Feedforward holdout action accuracy saturates around
+    <b>0.60-0.70</b> and then stops moving. <code>bc_v6</code> spent ~35k steps (of a planned
+    60k) moving action acc from 0.60 → 0.62 and loss from 8.41 → 7.55 - two percentage points
+    of action accuracy for a full A100 day. Temporal BC was worse (0.48-0.60) at 8x the encode
+    cost. The human archive is small (~300 games), noisy, and heavily no-op / UI-default
+    (quantity bucket 25% dominates because the client slider defaults there), so the prior
+    learns "looks like a human clicking around" more than "wins games."</li>
+  <li><b>As a PPO warm start it helped once, then stopped being the bottleneck.</b>
+    <code>ppo_v5</code> cleared early curriculum stages fast off <code>bc_v4/bc_best</code>,
+    which is the real win - BC buys a legal-action prior and a non-random spawn, not a
+    mid-game strategy. Every later plateau (safe-second on stage 4, boat-churn, passivity
+    after the fielded-troops fix) was a <i>reward / curriculum / obs</i> problem, not a
+    "BC wasn't accurate enough" problem. Grinding BC from 0.62 → 0.65 would not have moved
+    those.</li>
+  <li><b>Infra cost dominated the learning signal.</b> The z-cache was supposed to be 10x and
+    delivered ~2x (<a href="#cache-verdict">cache verdict</a>); glibc mmap churn, CUDA OOM on
+    padded large-map batches, and finally an EDQUOT loop (disk z-cache budget 450GB on a
+    120GB volume - mfs reports cluster free space in <code>df</code>, so the quota is
+    invisible until writes fail; <code>732b6c5</code> defaults <code>Z_CACHE_GB=60</code>)
+    ate more calendar time than the accuracy curve justified.</li>
+  <li><b>v7 makes the current BC weights unloadable anyway.</b> The evening's obs expansion
+    moves <code>C_GRID</code> 43→89 / <code>P_FEAT</code> 12→21 / <code>N_SCALARS</code> 8→11
+    (<a href="#v7-scope">v7 scope</a>), so there is no warm-start path from
+    <code>bc_v6</code> into v7. A fresh <code>bc_v7</code> only makes sense <i>after</i> the
+    homelab archive regen + prefeaturize finishes - and even then, only as a short warm-start
+    prior, not a multi-day accuracy grind.</li>
+</ul>
+<p><b>What we did:</b> froze <code>bc_v6</code> at step 35,600 (ckpt already on HF as
+<code>bc_v6/</code>), <b>terminated</b> the bc3 A100 pod (fleet = rl5 only), and published a
+playable pure-BC baseline:</p>
+<ul>
+  <li><code>v6_bc</code> = <code>bc_v6/bc_best.pt</code> folded into a v6-shape
+    <code>Policy</code> with the winner placement bucket (same fold as
+    <code>ppo --init</code>). On HF as <code>v6_bc/policy.pt</code>.</li>
+  <li>Play: <code>bash scripts/play_live.sh --run-name v6_bc</code> (now the script default).
+    Or short PPO: <code>python -m rl.ppo --init runs/rl/v6_bc/policy.pt …</code> on a
+    <b>v6-shape</b> checkout - not against the in-progress v7 obs tree.</li>
+  <li>No <code>v7_bc</code> until a post-regen BC retrain; naming reserved.</li>
+</ul>
+<p class="d">Net: BC stays in the toolbox as a cheap prior, not as a research track. Next
+accuracy wins come from obs (v7), reward (outcome-only / fielded troops), and scale (rl5 DDP) -
+not from another week of imitating 300 human games.</p>
+
+<h3 id="v7-scope">Closing the remaining blind spots</h3>
+<p>v6's transient/entity streams omitted several things a human player sees that only started to
+matter once the bots got good enough to punish blindness to them. A plan was written and then
+implemented end to end in one session:</p>
+<ul>
+  <li><b>Other players' land attacks</b> - previously only boat/nuke arrivals showed up on the
+    grid; ground invasions between two bots were invisible. New attack-front planes
+    (<code>TR_ATTACK_SRC</code>, <code>TR_ATTACK_RETREAT</code>) rasterize <i>every</i> active
+    attack's origin, any player, with <code>log(troops)</code> intensity, plus whether it's
+    retreating.</li>
+  <li><b>Unit ownership on the map</b> - every transient unit plane is now ego-relative-split
+    (own/ally/enemy) using the same <code>clut</code> ego-classing the static ownership grid
+    already used, instead of one undifferentiated presence plane per unit type.</li>
+  <li><b>Troop counts on boats</b>, via intensity-encoded (not just binary) Transport/Warship/Train
+    planes.</li>
+  <li><b>Alliance-expiry timers</b> - a countdown scalar per ally, ticks-to-expire normalized over
+    a 3000-tick window.</li>
+  <li><b>New unit types</b>: SAM Missile, MIRV Warhead, Train, each a first-class transient plane;
+    Missile Silo/SAM Launcher cooldown planes; an active-train-station flag on City/Port/Factory
+    (rail network stays lightweight - no separate graph/edge representation, just the flag and the
+    unit plane).</li>
+  <li><b>Trade-ship destinations</b>, <b>per-unit health/cooldown</b>, <b>tile defense bonus</b>
+    (decoded from the engine's raw tile-state bit, exposed both as a region-averaged grid channel
+    and a 5th local-crop plane alongside the existing exact-borders bypass), <b>target-painting</b>
+    (a marked flag, mirrors the existing embargo-by-self column), <b>troop/gold income rates</b>,
+    and the <b>doomsday clock</b> (in-clock flag + ticks, both per-player and a global
+    clock-enabled scalar).</li>
+</ul>
+<p><b>Architecture: every addition goes through the existing bypass, none through the AE.</b> The
+frozen spatial AE (<code>ae/model_v3.py</code>) compresses only the map (ownership + terrain +
+static structures); everything above is either small-and-exact (player features, global scalars)
+or already-transient (unit planes), so it rides the same raw-channel/vector paths v3 established
+for nukes-in-flight and diplomacy. <b>Consequence: no AE retrain, but no BC/PPO checkpoint
+survives either</b> - every shape constant moved (<code>N_TRANSIENT</code> 8→53,
+<code>C_GRID</code> 43→89, <code>P_FEAT</code> 12→21, <code>N_SCALARS</code> 8→11,
+<code>N_LOCAL</code> 4→5), so this is a from-scratch BC+PPO retrain, not a warm start.</p>
+
+<h3 id="v7-compat">Engine surface + backward-compatible replay</h3>
+<p><code>obsCore.ts</code> (live play) and <code>datagen/common.ts</code> (replay) both gained the
+same new fields, kept in parity, plus a <code>hasFn</code> feature-detection helper in
+<code>datagen/common.ts</code>: <code>replay_all.sh</code> checks out the archive's <i>exact
+historical engine commit</i> per bucket before replaying, and several of the new APIs
+(<code>maxHealth()</code>, <code>troopIncreaseRate()</code>, <code>inDoomsdayClock()</code>,
+<code>hasTrainStation()</code>) postdate some of those commits. Calling a method that doesn't
+exist yet at that commit would crash the replay instead of just omitting the field, so every new
+accessor is guarded and defaults sanely for old commits. The same defensive pattern runs on the
+read side: <code>rl/obs.py</code> pulls every new field with <code>.get()</code> + a zero/null
+default, so training keeps working against not-yet-re-replayed archive data during the migration
+window. The cached-frame format bumped (<code>CACHE_FORMAT</code> 1→2, adds a packed
+defense-bonus plane) with a stale-cache rebuild guard in <code>scripts/prefeaturize_bc.py</code>,
+and the Rust fast-path sampler (<code>rust/ofrs/src/sampler.rs</code>) stays frozen at the pre-v7
+schema - <code>rl/bc_data.py</code> compares its compiled-in <code>(P_FEAT, N_TRANSIENT,
+N_SCALARS)</code> against the live Python constants and falls back to the pure-Python sampler on
+mismatch, so training is always correct, just slower until the Rust side is ported to match.</p>
+
+<h3 id="v7-ops" style="scroll-margin-top:0">BC-regen ops saga: three infra bugs before the first
+game replayed</h3>
+<p>Re-replaying the human archive (303 games, three engine-commit buckets) to backfill the new BC
+fields should have been routine - the same <code>datagen/replay_all.sh</code> pipeline as the v6
+label regen. Getting it running cleanly surfaced three unrelated environment bugs:</p>
+<ul>
+  <li><b>Submodule remote mismatch.</b> <code>.gitmodules</code> points the <code>openfront</code>
+    submodule at the <code>djmango/OpenFrontIO</code> fork, but the working repo's local
+    <code>origin</code> had long since been repointed at the upstream
+    <code>openfrontio/OpenFrontIO</code> - and at least one archived game's engine commit only
+    exists on upstream's <code>v32</code> branch, not the fork. A fresh clone (on the homelab)
+    follows <code>.gitmodules</code> literally, so <code>git checkout &lt;historical-commit&gt;</code>
+    failed with "pathspec did not match any file(s)", silently leaving the submodule on the wrong
+    commit - the replay then ran the wrong engine version against an old game and desynced at tick
+    90. Fix: <code>git remote set-url origin</code> to the upstream URL on every fresh checkout of
+    this repo, matching what the primary dev machine already runs. Worth eventually reconciling
+    <code>.gitmodules</code> itself so new clones don't repeat this.</li>
+  <li><b>macOS AppleDouble junk survives tar transfer.</b> Copying the untracked
+    <code>webbot/</code> directories (needed because the submodule's working tree loses them on
+    every historical checkout) via <code>tar</code>/<code>scp</code> from a Mac carried
+    <code>._*</code> resource-fork shadow files into the Linux submodule tree - harmless to the
+    TypeScript build but noisy in <code>git status</code>; swept with a plain
+    <code>find -name '._*' -delete</code>.</li>
+  <li><b>The homelab's login shell is <code>fish</code>, not <code>bash</code>.</b> Bash heredocs
+    and <code>&amp;&amp;</code> chains piped through a bare <code>ssh host 'command'</code> run
+    under the remote <i>login</i> shell, so anything beyond trivial one-liners needs
+    <code>ssh host bash -s &lt;&lt;'EOF' ... EOF</code> (stdin piped to an explicit bash) instead -
+    the more common <code>ssh host bash -c "..."</code> also breaks past a couple of nesting
+    levels of quoting once tmux is in the mix.</li>
+</ul>
+<p>Earlier in the session, before settling on the homelab, the same job was attempted in an
+isolated git worktree on the primary dev machine to avoid touching the main repo's in-progress
+submodule state; that surfaced a fourth, homelab-irrelevant issue - the local Shell tool's
+background-process backgrounding has a hard ~15-18 minute lifetime independent of
+<code>&amp;</code>/<code>disown</code>, which doesn't matter once the job runs inside a detached
+<code>tmux</code> session on a persistent remote host instead.</p>
+<p><b>Once past those three bugs:</b> a single-game validation replay passed clean (hash-verified,
+10,751 ticks), and the full backfill launched in a <code>tmux</code> session on the homelab (20
+vCPU, 47GB RAM - <code>replay_all.sh</code> defaults its worker count to <code>nproc</code>,
+one game per worker). Steady-state load ~18-25/20 cores. In progress as of this entry: bucket 1 of
+3, single-digit desync failures expected and tolerated (the pipeline skips a failed game rather
+than blocking the batch) - one seen so far out of the first ~16 games, consistent with the
+occasional non-deterministic edge case rather than a systemic issue.</p>
+
+<h3 id="v7-pods">Found two GPU pods already running; kept one</h3>
+<p>Checking readiness for the BC/PPO retrain surfaced <code>openfront-bc3</code> (1x A100) and
+<code>openfront-rl5</code> (4x H100, <code>ppo_v61</code>) both still billing. <code>bc3</code> was
+mid-restart into a torch.compile / EDQUOT crash loop on the stale <code>bc_v6</code> run -
+already low-value (flat learning curve, see <a href="#bc-verdict">BC verdict</a>) and about to
+be obsoleted by the v7 shape change regardless, so it was <b>terminated</b> after archiving
+<code>bc_v6/</code> + publishing the playable <code>v6_bc</code> prior.
+<code>rl5</code> is mid-flight on real progress (<code>ppo_v61</code>, update ~976, stage 4)
+and shares no state with the v7 retrain, so it stays running untouched - stopping a live,
+valuable, unrelated run to save ~$12/hr would be the wrong trade. General lesson for this kind of
+work: <b>check what's already running and billing before assuming a clean slate</b> - the pod list
+doesn't show up in any code diff.</p>
+<p><b>Remaining before BC/PPO retrain can start:</b> prefeaturize the freshly re-replayed archive
+into a new <code>cache-bc/</code> (CPU-bound, so doing it on the homelab's 20 cores rather than a
+GPU pod), upload the refreshed <code>maps/</code>/<code>bc/</code>/<code>cache-bc/</code> tars to
+the <code>djmango/openfront-human-games</code> HF dataset repo, push the v7 code to
+<code>origin/master</code> (deliberately held back until the data is ready, since
+<code>pod_bc.sh</code>'s bootstrap does a <code>git reset --hard origin/master</code> on every
+restart - pushing early risks a pod resuming an old checkpoint against new-shape code and crashing
+on a tensor-shape mismatch), then launch fresh <code>bc_v7</code> and, once that converges,
+<code>ppo_v7</code> runs from scratch.</p>
 
 <h2 class="date" id="reference">Reference and open threads</h2>
 <p class="session">Tooling, bugs, lessons, infra, recipes, backlog.</p>
