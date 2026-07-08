@@ -20,6 +20,11 @@ BATCH="${BATCH:-96}"
 ACCUM="${ACCUM:-1}"
 STEPS="${STEPS:-60000}"
 WORKERS="${WORKERS:-16}"
+# AE-latent cache budget (rl/bc.py --z-cache-gb). SIZE TO THE CONTAINER'S
+# CGROUP LIMIT, not the host's free RAM: RunPod pods are memory-capped
+# (bc2: 116GiB despite 1TB on the host; the kernel oom-killed the trainer
+# at a 300GB budget). Leave ~40GB headroom for the trainer itself.
+Z_CACHE_GB="${Z_CACHE_GB:-80}"
 REPO_DIR=/workspace/openfront-ai
 # Keep the HF cache off the small container disk.
 export HF_HOME=/workspace/hf-cache
@@ -181,7 +186,8 @@ while true; do
     MALLOC_ARENA_MAX=2 \
     MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=1073741824 \
     python -m rl.bc --data data-human --name "$RUN_NAME" --seq "$SEQ" \
-    --batch "$BATCH" --accum "$ACCUM" --steps "$STEPS" --workers "$WORKERS" $RESUME \
+    --batch "$BATCH" --accum "$ACCUM" --steps "$STEPS" --workers "$WORKERS" \
+    --z-cache-gb "$Z_CACHE_GB" $RESUME \
     2>&1 | tee -a "/tmp/bc_$RUN_NAME.log"
   ELAPSED=$(( $(date +%s) - START_TS ))
   if [ "$ELAPSED" -lt 120 ]; then
