@@ -170,7 +170,12 @@ def launch_agent(
     return subprocess.Popen(cmd, cwd=REPO)
 
 
-def launch_webbot_agent(game_id: str, worker_path: str) -> subprocess.Popen:
+def launch_webbot_agent(
+    game_id: str,
+    worker_path: str,
+    *,
+    debug_port: int = DEBUG_PORT,
+) -> subprocess.Popen:
     """Headless-browser agent: inference runs client-side (onnxruntime-web),
     no server GPU/CPU model process needed. See scripts/webbot_launcher.py.
     """
@@ -183,6 +188,8 @@ def launch_webbot_agent(game_id: str, worker_path: str) -> subprocess.Popen:
         game_id,
         "--worker-path",
         worker_path,
+        "--debug-port",
+        str(debug_port),
     ]
     return subprocess.Popen(cmd, cwd=REPO)
 
