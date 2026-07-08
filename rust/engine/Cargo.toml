@@ -1,0 +1,25 @@
+
+[package]
+name = "openfront-engine"
+version.workspace = true
+edition.workspace = true
+description = "OpenFront game engine (Rust port, hash-gated)"
+
+[lib]
+name = "openfront_engine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "openfront-replay"
+path = "src/bin/replay.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+base64 = "0.22"
+flate2 = "1"
+
+[dev-dependencies]
+pretty_assertions = "1"

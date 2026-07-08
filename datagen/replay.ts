@@ -29,6 +29,7 @@
  */
 import * as fs from "fs";
 import * as path from "path";
+import { fileURLToPath } from "url";
 import * as zlib from "zlib";
 import {
   Game,
@@ -213,7 +214,7 @@ function placements(
   return out;
 }
 
-async function replayGame(
+export async function replayGame(
   record: GameRecord,
   outDir: string,
   snapshotEvery: number,
@@ -580,7 +581,13 @@ async function main() {
   console.log(`replay done: ${ok} ok, ${failed} failed, ${todo.length} total`);
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+const isMain =
+  process.argv[1] &&
+  fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
+
+if (isMain) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
