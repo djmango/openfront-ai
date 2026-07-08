@@ -91,10 +91,16 @@ def collate(raws: list[dict], device: str) -> tuple[dict, dict, torch.Tensor]:
     """Stack encoded raws into policy input, choice targets, cond buckets.
     Grids are padded to this batch's max (rl.obs.collate); tile_region
     labels use the global GW_MAX stride, so convert them to this batch's
-    local flat index to match the tile head's flattening."""
+    local flat index to match the tile head's flattening.
+
+    staged: batch arrays are views into persistent per-thread buffers -
+    fine when .to(device) copies them out immediately (cuda), and it
+    removes the 60-200MB/batch alloc churn that decayed on bc2. On CPU
+    .to() is a no-op alias, so staging would corrupt in-flight batches."""
+    staged = device != "cpu"
     o = {
         k: torch.from_numpy(v).to(device)
-        for k, v in obs_collate(raws, OBS_KEYS).items()
+        for k, v in obs_collate(raws, OBS_KEYS, staged=staged).items()
     }
     choice = {
         k: torch.tensor([r["choice"][k] for r in raws], dtype=torch.long, device=device)
