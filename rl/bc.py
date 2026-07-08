@@ -31,7 +31,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from rl.bc_data import BCSampler, N_PLACEMENT_BUCKETS
-from rl.obs import ACTIONS, N_ACTIONS, ZCache, encode_grids, load_ae
+from rl.obs import ACTIONS, REGION, ZCache, encode_grids, load_ae
 from rl.obs import collate as obs_collate
 from rl.policy import (
     MASKED_NEG,
@@ -42,6 +42,10 @@ from rl.policy import (
 )
 
 CHOICE_KEYS = ["action", "player_slot", "tile_region", "build_type", "nuke_type"]
+# Grid dims are padded up to multiples of this (latent cells) in collate so
+# torch.compile sees a small, stable set of (gh, gw) buckets instead of a
+# fresh shape (= a fresh graph) for every batch's max-of-draws padding.
+PAD_Q = 16
 OBS_KEYS = [
     "grid", "grid_valid", "legal_tile", "local", "players", "pmask", "scalars",
     "legal_actions", "legal_ptarget", "legal_build", "legal_nuke",
@@ -109,8 +113,14 @@ def collate(raws: list[dict], device: str) -> tuple[dict, dict, torch.Tensor]:
     .to() is a no-op alias, so staging would corrupt in-flight batches."""
     staged = device != "cpu"
     if torch.is_tensor(raws[0]["grid"]):
-        gh = max(r["grid"].shape[1] for r in raws)
-        gw = max(r["grid"].shape[2] for r in raws)
+        # Grid dims quantized up to multiples of PAD_Q: with the area-packed
+        # batches this collapses the (B, gh, gw) shape space to a small set
+        # of stable buckets, so the per-bucket torch.compile graphs actually
+        # get reused instead of recompiling on every novel max-of-two-maps
+        # padding combo. Padding cells are zero in grid/grid_valid/legal_tile
+        # (masked out downstream), so results are unchanged.
+        gh = -(-max(r["grid"].shape[1] for r in raws) // PAD_Q) * PAD_Q
+        gw = -(-max(r["grid"].shape[2] for r in raws) // PAD_Q) * PAD_Q
         g0 = raws[0]["grid"]
         grid = g0.new_zeros(len(raws), g0.shape[0], gh, gw)
         for i, r in enumerate(raws):
@@ -121,6 +131,12 @@ def collate(raws: list[dict], device: str) -> tuple[dict, dict, torch.Tensor]:
             k: torch.from_numpy(v).to(device)
             for k, v in obs_collate(raws, np_keys, staged=staged).items()
         }
+        # obs_collate padded the spatial masks to the batch max, not the
+        # quantized max; grow them to match the grid (zeros = masked).
+        for k in ("grid_valid", "legal_tile"):
+            m = o[k]
+            if m.shape[-2:] != (gh, gw):
+                o[k] = F.pad(m, (0, gw - m.shape[-1], 0, gh - m.shape[-2]))
         o["grid"] = grid.float()
         o["local"] = torch.stack([r["local"] for r in raws]).float()
     else:
@@ -238,6 +254,13 @@ def main() -> None:
     ap.add_argument("--accum", type=int, default=1,
                     help="gradient accumulation: effective batch = batch * accum "
                          "(seq runs OOM above micro-batch ~8 on 24GB cards)")
+    ap.add_argument("--batch-cells", type=int, default=0,
+                    help="latent-cell budget per micro-batch for dynamic "
+                         "area-based batch sizing (feedforward only; spirit "
+                         "of rl.ppo.MAX_UPD_PIX). 0 = batch * GH_MAX * GW_MAX: "
+                         "--batch stays the reference size at the biggest "
+                         "curriculum grid and smaller maps scale up inversely "
+                         "with area, capped at 4x batch")
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--seq", type=int, default=0)
     ap.add_argument("--noop-frac", type=float, default=0.15)
@@ -321,6 +344,22 @@ def main() -> None:
             print(f"z-cache: restored {len(z_cache)} latents "
                   f"({z_cache.bytes / 1e9:.0f}GB) from {zdir}")
     model = BCPolicy(seq=args.seq).to(device)
+    # Per-shape-bucket torch.compile: dynamic=False specializes one graph
+    # per (B, gh, gw). collate's PAD_Q quantization plus the deterministic
+    # bucket batch sizes below keep that set small (~a few dozen), so raise
+    # dynamo's recompile caps accordingly. Eval keeps the eager path: its
+    # batches are unbucketed (mixed shapes, first-eval would compile a pile
+    # of one-off graphs for 8 batches every 500 steps).
+    forward_eval = model.forward_bc
+    if (device == "cuda" and not args.seq
+            and os.environ.get("BC_COMPILE", "1") != "0"):
+        from torch import _dynamo
+
+        _dynamo.config.cache_size_limit = 256
+        if hasattr(_dynamo.config, "accumulated_cache_size_limit"):
+            _dynamo.config.accumulated_cache_size_limit = 1024
+        model.forward_bc = torch.compile(model.forward_bc, dynamic=False)
+        print("torch.compile: per-bucket graphs (BC_COMPILE=0 to disable)")
     opt = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=1e-4, fused=(device == "cuda")
     )
@@ -366,30 +405,52 @@ def main() -> None:
     sample_pool = ThreadPoolExecutor(max_workers=args.workers)
     raw_q: list = [sample_pool.submit(draw, sampler) for _ in range(8)]
 
-    # Area-bucketed batching (feedforward only; seq windows must stay
-    # contiguous): collate pads every batch to its max grid, and with
-    # uniform map sampling E[max area of 96 draws] is ~2x the mean area -
-    # half the conv-tower FLOPs go into padding. Regrouping a pool of 8
-    # batches by grid area keeps big maps with big maps; the sort is
-    # stable so same-snapshot samples stay adjacent (z dedupe unaffected).
+    # Shape-bucketed, area-sized batching (feedforward only; seq windows
+    # must stay contiguous). collate pads every batch to its max grid, and
+    # with uniform map sampling E[max area of 96 draws] is ~2x the mean
+    # area - half the conv-tower FLOPs go into padding. Samples are
+    # regrouped by their PAD_Q-quantized latent shape (known pre-encode:
+    # owners is full-res, latent dims = owners.shape // REGION), and each
+    # bucket's batch size scales inversely with its padded area under a
+    # fixed latent-cell budget (--batch-cells; same spirit as
+    # rl.ppo.MAX_UPD_PIX): --batch at the biggest curriculum grid, up to
+    # 4x --batch on small maps. Deterministic per-bucket sizes mean the
+    # compiled forward sees one stable (B, gh, gw) per bucket. Leftovers
+    # below a bucket's size carry over to the next pool refill, so every
+    # emitted batch is exactly full; append order is preserved, keeping
+    # same-snapshot samples adjacent (z dedupe unaffected).
     import random as _random
 
+    from rl.curriculum import GH_MAX, GW_MAX
+
+    cells_budget = args.batch_cells or args.batch * GH_MAX * GW_MAX
+    batch_cap = 4 * args.batch
     _bucket_rng = _random.Random(0)
     bucket_q: list[list[dict]] = []
+    carry: dict[tuple[int, int], list[dict]] = {}
+
+    def bucket_of(r: dict) -> tuple[int, int]:
+        gh = r["owners"].shape[0] // REGION
+        gw = r["owners"].shape[1] // REGION
+        return (-(-gh // PAD_Q) * PAD_Q, -(-gw // PAD_Q) * PAD_Q)
+
+    def bucket_size(key: tuple[int, int]) -> int:
+        return min(batch_cap, max(1, cells_budget // (key[0] * key[1])))
 
     def next_raws() -> list[dict]:
         if args.seq:
             raw_q.append(sample_pool.submit(draw, sampler))
             return raw_q.pop(0).result()
-        if not bucket_q:
-            pool: list[dict] = []
+        while not bucket_q:
             for _ in range(len(raw_q)):
                 raw_q.append(sample_pool.submit(draw, sampler))
-                pool.extend(raw_q.pop(0).result())
-            pool.sort(key=lambda r: r["owners"].shape[0] * r["owners"].shape[1])
-            bucket_q.extend(
-                pool[k : k + args.batch] for k in range(0, len(pool), args.batch)
-            )
+                for r in raw_q.pop(0).result():
+                    carry.setdefault(bucket_of(r), []).append(r)
+            for key, buf in carry.items():
+                b = bucket_size(key)
+                while len(buf) >= b:
+                    bucket_q.append(buf[:b])
+                    del buf[:b]
             _bucket_rng.shuffle(bucket_q)  # no systematic small->large ramp
         return bucket_q.pop(0)
 
@@ -423,6 +484,7 @@ def main() -> None:
 
     t0 = time.time()
     stall_s = 0.0
+    n_ex = 0  # examples since the last log (batch size varies per bucket)
     zc_prev = (0, 0)  # (hits, misses) at the last 50-step log
     for step in range(start_step + 1, args.steps + 1):
         # Gradient accumulation: seq runs multiply activation memory by the
@@ -433,6 +495,7 @@ def main() -> None:
             t_w = time.time()
             o, choice, cond = fut.result()
             stall_s += time.time() - t_w
+            n_ex += cond.shape[0]
             fut = pf.submit(prep_next)
 
             with amp():
@@ -446,7 +509,8 @@ def main() -> None:
         sched.step()
 
         if step % 50 == 0:
-            rate = 50 * args.batch * args.accum / (time.time() - t0)
+            rate = n_ex / (time.time() - t0)
+            n_ex = 0
             t0 = time.time()
             accs = head_accuracy(out, _last_o(o, args.seq, device) if args.seq else o, choice)
             gpu = ""
@@ -488,7 +552,7 @@ def main() -> None:
                         ech = {k: v[last] for k, v in ech.items()}
                         econd = econd[last]
                     with amp():
-                        eout = model.forward_bc(eo, econd)
+                        eout = forward_eval(eo, econd)
                     eo_h = _last_o(eo, args.seq, device) if args.seq else eo
                     for k, v in head_accuracy(eout, eo_h, ech).items():
                         agg.setdefault(k, []).append(v)
