@@ -31,11 +31,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from rl.bc_data import BCSampler, N_PLACEMENT_BUCKETS
-from rl.obs import ACTIONS, N_ACTIONS, encode_grids, load_ae
+from rl.obs import ACTIONS, N_ACTIONS, ZCache, encode_grids, load_ae
 from rl.obs import collate as obs_collate
-from rl.policy import MASKED_NEG, Policy, _global_to_local
+from rl.policy import (
+    MASKED_NEG,
+    QUANTITY_EPS,
+    Policy,
+    _global_to_local,
+    quantity_dist,
+)
 
-CHOICE_KEYS = ["action", "player_slot", "tile_region", "build_type", "nuke_type", "quantity"]
+CHOICE_KEYS = ["action", "player_slot", "tile_region", "build_type", "nuke_type"]
 OBS_KEYS = [
     "grid", "grid_valid", "legal_tile", "local", "players", "pmask", "scalars",
     "legal_actions", "legal_ptarget", "legal_build", "legal_nuke",
@@ -100,6 +106,10 @@ def collate(raws: list[dict], device: str) -> tuple[dict, dict, torch.Tensor]:
         k: torch.tensor([r["choice"][k] for r in raws], dtype=torch.long, device=device)
         for k in CHOICE_KEYS
     }
+    choice["quantity_frac"] = torch.tensor(
+        [r["choice"]["quantity_frac"] for r in raws],
+        dtype=torch.float32, device=device,
+    )
     tr = choice["tile_region"]
     choice["tile_region"] = torch.where(
         tr >= 0, _global_to_local(tr, o["grid"].shape[3]), tr
@@ -109,7 +119,8 @@ def collate(raws: list[dict], device: str) -> tuple[dict, dict, torch.Tensor]:
 
 
 def bc_loss(out: dict, o: dict, choice: dict) -> tuple[torch.Tensor, dict]:
-    """Masked CE per head; sub-heads only where the action uses them."""
+    """Masked CE per discrete head (sub-heads only where the action uses
+    them); Beta NLL for the scalar quantity head."""
     losses = {"action": F.cross_entropy(out["action"], choice["action"])}
 
     pmask = o["legal_ptarget"].gather(
@@ -122,10 +133,15 @@ def bc_loss(out: dict, o: dict, choice: dict) -> tuple[torch.Tensor, dict]:
         ("tile_region", out["tile"]),
         ("build_type", out["build"]),
         ("nuke_type", out["nuke"]),
-        ("quantity", out["quantity"]),
     ]:
         if (choice[head] >= 0).any():
             losses[head] = F.cross_entropy(logits, choice[head], ignore_index=-1)
+
+    q_used = choice["quantity_frac"] >= 0
+    if q_used.any():
+        d_q = quantity_dist(out["quantity"][q_used])
+        target = choice["quantity_frac"][q_used].float().clamp(1e-3, 1.0 - 1e-3)
+        losses["quantity_frac"] = -d_q.log_prob(target).mean()
     total = sum(losses.values())
     return total, {k: float(v.detach()) for k, v in losses.items()}
 
@@ -141,18 +157,27 @@ def head_accuracy(out: dict, o: dict, choice: dict) -> dict:
             (pred[acted] == choice["action"][acted]).float().mean()
         )
     for head, key in [("player", "player_slot"), ("tile", "tile_region"),
-                      ("build", "build_type"), ("nuke", "nuke_type"),
-                      ("quantity", "quantity")]:
+                      ("build", "build_type"), ("nuke", "nuke_type")]:
         used = choice[key] >= 0
         if used.any():
             accs[key] = float(
                 (out[head][used].argmax(-1) == choice[key][used]).float().mean()
             )
+    q_used = choice["quantity_frac"] >= 0
+    if q_used.any():
+        pred = quantity_dist(out["quantity"][q_used]).mean.clamp(
+            QUANTITY_EPS, 1.0 - QUANTITY_EPS
+        )
+        accs["quantity_mae"] = float(
+            (pred - choice["quantity_frac"][q_used]).abs().mean()
+        )
     return accs
 
 
-def encode_batch(ae, raws: list[dict], device: str) -> list[dict]:
-    enc = encode_grids(ae, raws, device)
+def encode_batch(
+    ae, raws: list[dict], device: str, z_cache: ZCache | None = None
+) -> list[dict]:
+    enc = encode_grids(ae, raws, device, z_cache=z_cache)
     for e, r in zip(enc, raws):
         e["choice"], e["cond"] = r["choice"], r["cond"]
     return enc
@@ -195,6 +220,10 @@ def main() -> None:
                          "(needs formatVersion-2 sidecars)")
     ap.add_argument("--holdout-every", type=int, default=10)
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--z-cache-gb", type=float, default=300.0,
+                    help="RAM LRU budget (GB) for frozen-AE latents keyed "
+                         "(game, tick); 0 disables. The full human dataset "
+                         "is ~260GB of fp16 latents, so 300 never evicts")
     ap.add_argument("--eval-every", type=int, default=500)
     ap.add_argument("--save-every", type=int, default=1000)
     ap.add_argument("--resume", default=None)
@@ -232,6 +261,10 @@ def main() -> None:
           f"holdout games: {len(eval_sampler.games) if eval_sampler else 0}")
 
     ae = load_ae(args.ae, device)
+    # AE-latent cache: encode is ~90% of feed-thread wall and the AE input
+    # is per-(game, tick) - see rl.obs.ZCache. BC-only (PPO episodes are
+    # unique; its raws never carry z_key).
+    z_cache = ZCache(int(args.z_cache_gb * 1e9)) if args.z_cache_gb > 0 else None
     model = BCPolicy(seq=args.seq).to(device)
     opt = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=1e-4, fused=(device == "cuda")
@@ -285,7 +318,7 @@ def main() -> None:
         raws = next_raws()
         prof["sample"] += time.time() - t
         t = time.time()
-        enc = encode_batch(ae, raws, device)
+        enc = encode_batch(ae, raws, device, z_cache)
         prof["encode"] += time.time() - t
         t = time.time()
         o, choice, cond = collate(enc, device)
@@ -302,6 +335,7 @@ def main() -> None:
 
     t0 = time.time()
     stall_s = 0.0
+    zc_prev = (0, 0)  # (hits, misses) at the last 50-step log
     for step in range(start_step + 1, args.steps + 1):
         # Gradient accumulation: seq runs multiply activation memory by the
         # window length, so they train at a small micro-batch but still get
@@ -331,13 +365,20 @@ def main() -> None:
             if device == "cuda":
                 gpu = (f"  cuda {torch.cuda.memory_allocated() / 1e9:.1f}"
                        f"/{torch.cuda.memory_reserved() / 1e9:.1f}GB")
+            zc = ""
+            if z_cache is not None:
+                dh = z_cache.hits - zc_prev[0]
+                dm = z_cache.misses - zc_prev[1]
+                zc_prev = (z_cache.hits, z_cache.misses)
+                zc = (f"  zc {100 * dh / max(1, dh + dm):.0f}% "
+                      f"{z_cache.bytes / 1e9:.0f}GB")
             msg = (f"step {step:6d}  loss {float(loss):.4f}  "
                    f"act {accs.get('action', 0):.3f}  "
                    f"act! {accs.get('action_no_noop', 0):.3f}  "
                    f"tile {accs.get('tile_region', float('nan')):.3f}  "
                    f"{rate:.1f} ex/s  stall {stall_s:.1f}s  "
                    f"[smp {prof['sample']:.1f} enc {prof['encode']:.1f} "
-                   f"col {prof['collate']:.1f}]{gpu}")
+                   f"col {prof['collate']:.1f}]{zc}{gpu}")
             for k in prof:
                 prof[k] = 0.0
             stall_s = 0.0
@@ -352,7 +393,7 @@ def main() -> None:
             with torch.no_grad():
                 for _ in range(8):
                     eraws = draw(eval_sampler)
-                    eenc = encode_batch(ae, eraws, device)
+                    eenc = encode_batch(ae, eraws, device, z_cache)
                     eo, ech, econd = collate(eenc, device)
                     if args.seq:
                         last = torch.arange(args.seq - 1, len(eenc), args.seq, device=device)

@@ -73,6 +73,9 @@ struct SpawnStep {
 }
 
 pub struct Game {
+    // Dir name: the (game, tick) identity for the Python-side AE-latent
+    // cache (rl.obs.ZCache); matches CachedGame.path.name.
+    name: String,
     ds: i64,
     hr: usize,
     wr: usize,
@@ -170,6 +173,11 @@ impl Game {
             .unwrap_or_default();
 
         Ok(Game {
+            name: dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string(),
             ds: idx["ds"].as_i64().unwrap_or(1),
             hr,
             wr,
@@ -230,6 +238,7 @@ impl Game {
 /// very end.
 pub struct Built {
     game: usize,
+    tick: i64,
     owners: Vec<u8>,
     fallout: Vec<u8>,
     feat: Feat,
@@ -405,6 +414,7 @@ fn step_samples(
         };
         out.push(Built {
             game: gi,
+            tick,
             owners,
             fallout,
             feat: f,
@@ -445,6 +455,7 @@ fn spawn_sample(
     f.legal_tile[gy as usize * game.gw + gx as usize] = 1.0;
     Ok(vec![Built {
         game: gi,
+        tick: step.tick,
         owners,
         fallout,
         feat: f,
@@ -485,6 +496,7 @@ fn one_sample(
     }
     Ok(Some(Built {
         game: gi,
+        tick,
         owners,
         fallout,
         feat: f,
@@ -639,6 +651,9 @@ impl Sampler {
         }
         d.set_item("choice", ch)?;
         d.set_item("cond", b.cond)?;
+        // AE-latent cache identity (rl.obs.ZCache): the AE input is fully
+        // determined by (game, tick) for cached BC data.
+        d.set_item("z_key", (g.name.as_str(), b.tick))?;
         Ok(d)
     }
 }

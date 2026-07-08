@@ -56,14 +56,19 @@ fi
 command -v tmux >/dev/null 2>&1 || apt-get install -y tmux >/dev/null
 pip install -q tensorboard huggingface_hub orjson zstandard 2>/dev/null | tail -0 || true
 
-# --- optional Rust hot paths (rl/native.py falls back to numpy if absent) ---
-if ! python -c "import ofrs" 2>/dev/null; then
+# --- optional Rust hot paths (rl/native.py falls back to numpy if absent).
+# Rebuild whenever the installed module is older than rust/ofrs/Cargo.toml
+# (a stale ofrs would e.g. silently drop z_key -> 0% AE-latent-cache hits).
+OFRS_WANT=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/ofrs/Cargo.toml | head -1)
+OFRS_HAVE=$(python -c "import ofrs; print(getattr(ofrs, '__version__', '0'))" 2>/dev/null || echo none)
+if [ "$OFRS_HAVE" != "$OFRS_WANT" ]; then
   if ! command -v cargo >/dev/null 2>&1; then
     curl -sSf https://sh.rustup.rs | sh -s -- -y -q >/dev/null 2>&1 || true
   fi
   . "$HOME/.cargo/env" 2>/dev/null || true
   if command -v cargo >/dev/null 2>&1; then
-    pip install -q ./rust/ofrs && echo "ofrs native paths built" || echo "ofrs build failed; using numpy fallbacks"
+    pip install -q ./rust/ofrs && echo "ofrs native paths built ($OFRS_WANT)" \
+      || echo "ofrs build failed; using numpy fallbacks"
   else
     echo "no rust toolchain; using numpy fallbacks"
   fi
