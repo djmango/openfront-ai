@@ -431,7 +431,7 @@ impl AttackExecution {
         self.border_tiles.clear();
         if let Some(border) = game.border_tiles_of(self.owner_small_id) {
             let tick = game.ticks();
-            for &tile in border {
+            for tile in border.iter() {
                 self.add_neighbors(game, tile, tick);
             }
         }

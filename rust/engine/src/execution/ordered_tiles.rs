@@ -3,7 +3,7 @@
 use crate::map::TileRef;
 use std::collections::HashSet;
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct OrderedTiles {
     tiles: Vec<TileRef>,
     set: HashSet<TileRef>,
@@ -38,6 +38,10 @@ impl OrderedTiles {
 
     pub fn iter(&self) -> impl Iterator<Item = TileRef> + '_ {
         self.tiles.iter().copied()
+    }
+
+    pub fn as_slice(&self) -> &[TileRef] {
+        &self.tiles
     }
 
     pub fn remove(&mut self, tile: TileRef) {

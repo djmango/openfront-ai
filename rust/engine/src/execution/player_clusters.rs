@@ -103,7 +103,7 @@ fn calculate_clusters(game: &Game, small_id: u16) -> Vec<OrderedTiles> {
     let mut visited = HashSet::new();
     let mut clusters = Vec::new();
     // TS iterates `player.borderTiles()` Set insertion order.
-    for &start in border {
+    for start in border.iter() {
         if visited.contains(&start) {
             continue;
         }

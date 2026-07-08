@@ -2,7 +2,7 @@
 # Hash-verify human records with engine commit pin (TS parity oracle).
 set -euo pipefail
 WORKTREE="${OPENFRONT_WORKTREE:-$(cd "$(dirname "$0")/.." && pwd)}"
-export OPENFRONT_REPO="${OPENFRONT_REPO:-/Users/djmango/github/openfront-ai}"
+export OPENFRONT_REPO="${OPENFRONT_REPO:-/Users/djmango/github/openfront-ai-rust-fast}"
 LIMIT="${1:-5}"
 BIN="$WORKTREE/rust/target/release/openfront-replay"
 if [[ ! -x "$BIN" ]]; then

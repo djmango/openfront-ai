@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn hash_checkpoints_280_to_320() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai".into());
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/jby2gMJF.json.gz");
         let bytes = load_record_bytes(&path).unwrap();
@@ -220,7 +220,7 @@ mod tests {
     #[test]
     fn export_tick_state_json() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai".into());
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
         let repo = std::path::Path::new(&repo_root);
         let target: u32 = std::env::var("EXPORT_TICK")
             .ok()
@@ -315,7 +315,7 @@ mod tests {
     #[ignore]
     fn multi_record_parity_report() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai".into());
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
         let repo = std::path::Path::new(&repo_root);
         let paths = list_record_paths(repo);
         eprintln!(
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn bootstrap_nation_ids_3qnu() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai".into());
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/3QNU4eJa.json.gz");
         let bytes = std::fs::read(&path).unwrap();
@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn parity_single_record() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai".into());
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
         let repo = std::path::Path::new(&repo_root);
         let rel = std::env::var("PARITY_RECORD")
             .unwrap_or_else(|_| "records/0c4c7d7993c9/3QNU4eJa.json.gz".into());
@@ -433,7 +433,7 @@ mod tests {
     fn export_transport_path_json() {
         use crate::spatial::{can_build_transport_ship, target_transport_tile};
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai".into());
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
         let repo = std::path::Path::new(&repo_root);
         let target: u32 = std::env::var("EXPORT_TICK")
             .ok()
@@ -495,7 +495,7 @@ mod tests {
     #[test]
     fn export_record_hash_at_turn() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai".into());
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
         let repo = std::path::Path::new(&repo_root);
         let target: u32 = std::env::var("EXPORT_TICK")
             .ok()
@@ -553,7 +553,7 @@ mod tests {
     #[test]
     fn debug_attack_7mv_turn_353_354() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai".into());
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/7MVmc1cR.json.gz");
         let a_sid = replay_to_tick(repo, &path, 352)
@@ -580,7 +580,7 @@ mod tests {
     #[test]
     fn compare_owned_tiles_7mv_turn_353() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai".into());
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/7MVmc1cR.json.gz");
         let game = replay_to_tick(repo, &path, 353);
@@ -606,7 +606,7 @@ mod tests {
     #[test]
     fn export_exec_order() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai".into());
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
         let repo = std::path::Path::new(&repo_root);
         let target: u32 = std::env::var("EXPORT_TICK")
             .ok()
@@ -626,7 +626,7 @@ mod tests {
     #[test]
     fn export_player_border_tiles() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai".into());
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
         let repo = std::path::Path::new(&repo_root);
         let target: u32 = std::env::var("EXPORT_TICK")
             .ok()
@@ -649,7 +649,7 @@ mod tests {
     #[test]
     fn export_map_owner_blob() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai".into());
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
         let repo = std::path::Path::new(&repo_root);
         let target: u32 = std::env::var("EXPORT_TICK")
             .ok()
@@ -674,7 +674,7 @@ mod tests {
     #[test]
     fn debug_6k4_tile_690794_turn_237() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai".into());
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/6k4SnLrH.json.gz");
         let tile: crate::map::TileRef = 690794;
@@ -708,7 +708,7 @@ mod tests {
     #[test]
     fn map_tile_accounting_6k4_turn_195() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai".into());
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/6k4SnLrH.json.gz");
         for target in [193u32, 194u32, 195u32] {
@@ -748,7 +748,7 @@ mod tests {
     #[test]
     fn border_adjacency_7mv_turn_353() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai".into());
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/7MVmc1cR.json.gz");
         let game = replay_to_tick(repo, &path, 353);
@@ -772,7 +772,7 @@ mod tests {
     #[test]
     fn compare_attack_logic_turn_317() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai".into());
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/jby2gMJF.json.gz");
         let game = replay_to_tick(repo, &path, 317);

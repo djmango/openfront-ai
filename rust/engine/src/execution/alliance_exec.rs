@@ -19,6 +19,14 @@ impl AllianceRequestExecution {
             initialized: false,
         }
     }
+
+    pub fn requestor_small_id(&self) -> u16 {
+        self.requestor_small_id
+    }
+
+    pub fn recipient_id(&self) -> &str {
+        &self.recipient_id
+    }
 }
 
 impl Execution for AllianceRequestExecution {

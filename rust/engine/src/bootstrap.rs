@@ -170,7 +170,7 @@ mod tests {
     #[test]
     fn hxwdr5pk_assign_teams_count() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai".into());
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
         let path = std::path::Path::new(&repo_root).join("records/0c4c7d7993c9/HxWdr5PK.json.gz");
         let bytes = std::fs::read(&path).unwrap();
         let mut dec = flate2::read::GzDecoder::new(bytes.as_slice());
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn hxwdr5pk_registers_all_humans() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai".into());
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
         let path = std::path::Path::new(&repo_root).join("records/0c4c7d7993c9/HxWdr5PK.json.gz");
         let bytes = std::fs::read(&path).unwrap();
         let raw = if path.extension().and_then(|e| e.to_str()) == Some("gz") {

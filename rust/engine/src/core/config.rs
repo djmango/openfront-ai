@@ -117,6 +117,10 @@ impl Config {
         20 * 10
     }
 
+    pub fn alliance_request_cooldown(&self) -> u32 {
+        30 * 10
+    }
+
     pub fn alliance_duration(&self) -> u32 {
         300 * 10
     }

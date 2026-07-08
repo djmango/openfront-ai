@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Track native Rust port coverage vs TS engine core.
 set -euo pipefail
-TS_CORE="${OPENFRONT_REPO:-/Users/djmango/github/openfront-ai}/openfront/src/core"
+TS_CORE="${OPENFRONT_REPO:-/Users/djmango/github/openfront-ai-rust-fast}/openfront/src/core"
 RUST_ENGINE="$(cd "$(dirname "$0")/../rust/engine/src" && pwd)"
 
 ts_files=$(find "$TS_CORE" -name '*.ts' | wc -l | tr -d ' ')

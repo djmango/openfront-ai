@@ -39,18 +39,34 @@ pub fn has_trigger_ratio(game: &Game, small_id: u16, trigger_ratio: f64) -> bool
     attacker.troops as f64 / max_troops >= trigger_ratio
 }
 
+pub fn has_land_border_tn(game: &Game, small_id: u16) -> bool {
+    let Some(border) = game.border_tiles_of(small_id) else {
+        return false;
+    };
+    let mut nbuf = [TileRef::MAX; 4];
+    for border_tile in border.iter() {
+        let n = game.map.neighbors4_ts(border_tile, &mut nbuf);
+        for i in 0..n {
+            let neighbor = nbuf[i];
+            if game.is_land(neighbor) && !game.has_owner(neighbor) && !game.has_fallout(neighbor) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn sampled_shore_tiles(game: &Game, small_id: u16) -> Vec<TileRef> {
+    let shores: Vec<TileRef> = game
+        .border_tiles_of(small_id)
+        .map(|border| border.iter().filter(|t| game.is_shore(*t)).collect())
+        .unwrap_or_default();
+    shores.into_iter().step_by(10).collect()
+}
+
 fn has_shore_reachable_tn(game: &Game, small_id: u16) -> bool {
     let directions: [(i32, i32); 4] = [(0, -1), (0, 1), (-1, 0), (1, 0)];
-    let mut found = false;
-    let mut i = 0usize;
-    game.for_each_border_tile(small_id, |border| {
-        if found || !game.is_shore(border) {
-            return;
-        }
-        i += 1;
-        if i % 10 != 1 {
-            return;
-        }
+    for border in sampled_shore_tiles(game, small_id) {
         let bx = game.x(border) as i32;
         let by = game.y(border) as i32;
         for (dx, dy) in directions {
@@ -70,26 +86,11 @@ fn has_shore_reachable_tn(game: &Game, small_id: u16) -> bool {
             }
             let tile = game.ref_xy(nx as u32, ny as u32);
             if game.is_land(tile) && !game.has_owner(tile) && !game.has_fallout(tile) {
-                found = true;
+                return true;
             }
         }
-    });
-    found
-}
-
-pub fn has_land_border_tn(game: &Game, small_id: u16) -> bool {
-    let mut found = false;
-    game.for_each_border_tile(small_id, |tile| {
-        if found {
-            return;
-        }
-        game.map.for_each_neighbor4(tile, |neighbor| {
-            if game.is_land(neighbor) && !game.has_owner(neighbor) && !game.has_fallout(neighbor) {
-                found = true;
-            }
-        });
-    });
-    found
+    }
+    false
 }
 
 pub fn has_non_nuked_tn(game: &Game, small_id: u16) -> bool {
@@ -351,25 +352,95 @@ pub fn send_boat_attack_to_player(
 
 fn collect_bordering_players(game: &Game, small_id: u16) -> Vec<u16> {
     let mut seen = HashSet::new();
-    game.for_each_border_tile(small_id, |tile| {
-        game.map.for_each_neighbor4(tile, |neighbor| {
-            if !game.is_land(neighbor) {
-                return;
+    let mut ordered: Vec<u16> = Vec::new();
+    let mut push = |sid: u16| {
+        if sid != small_id && sid != 0 && seen.insert(sid) {
+            ordered.push(sid);
+        }
+    };
+
+    // TS `AiAttackBehavior.maybeAttack`: borderTiles flatMap neighbors() order.
+    if let Some(border) = game.border_tiles_of(small_id) {
+        let mut nbuf = [TileRef::MAX; 4];
+        for border_tile in border.iter() {
+            let n = game.map.neighbors4_ts(border_tile, &mut nbuf);
+            for i in 0..n {
+                let neighbor = nbuf[i];
+                if !game.is_land(neighbor) {
+                    continue;
+                }
+                let owner = game.map.owner_id(neighbor);
+                push(owner);
             }
-            let owner = game.map.owner_id(neighbor);
-            if owner != small_id && owner != 0 {
-                seen.insert(owner);
-            }
-        });
-    });
-    for sid in nearby_player_small_ids(game, small_id) {
-        if sid != small_id && sid != 0 {
-            seen.insert(sid);
         }
     }
-    let mut out: Vec<u16> = seen.into_iter().collect();
-    out.sort_by_key(|&sid| game.player_by_small_id(sid).map(|p| p.troops).unwrap_or(0));
-    out
+
+    // TS `PlayerImpl.nearby()` players only (shore-reachable included).
+    for sid in nearby_players_ts_order(game, small_id) {
+        push(sid);
+    }
+
+    ordered.sort_by_key(|&sid| game.player_by_small_id(sid).map(|p| p.troops).unwrap_or(0));
+    ordered
+}
+
+/// TS `PlayerImpl.nearby()` player small IDs in Set insertion order.
+fn nearby_players_ts_order(game: &Game, small_id: u16) -> Vec<u16> {
+    let mut seen = HashSet::new();
+    let mut ordered: Vec<u16> = Vec::new();
+    let mut push = |sid: u16| {
+        if sid != small_id && sid != 0 && seen.insert(sid) {
+            ordered.push(sid);
+        }
+    };
+
+    if let Some(border) = game.border_tiles_of(small_id) {
+        let mut nbuf = [TileRef::MAX; 4];
+        for border_tile in border.iter() {
+            let n = game.map.neighbors4_ts(border_tile, &mut nbuf);
+            for i in 0..n {
+                let neighbor = nbuf[i];
+                if !game.is_land(neighbor) {
+                    continue;
+                }
+                push(game.map.owner_id(neighbor));
+            }
+        }
+    }
+
+    let directions: [(i32, i32); 4] = [(0, -1), (0, 1), (-1, 0), (1, 0)];
+    let shores: Vec<TileRef> = game
+        .border_tiles_of(small_id)
+        .map(|border| border.iter().filter(|&t| game.is_shore(t)).collect())
+        .unwrap_or_default();
+    for i in (0..shores.len()).step_by(10) {
+        let border = shores[i];
+        let bx = game.x(border) as i32;
+        let by = game.y(border) as i32;
+        for (dx, dy) in directions {
+            let x1 = bx + dx;
+            let y1 = by + dy;
+            if !game.is_valid_coord(x1, y1) {
+                continue;
+            }
+            let t1 = game.ref_xy(x1 as u32, y1 as u32);
+            if !game.is_water(t1) {
+                continue;
+            }
+            let nx = bx + dx * 5;
+            let ny = by + dy * 5;
+            if !game.is_valid_coord(nx, ny) {
+                continue;
+            }
+            let tile = game.ref_xy(nx as u32, ny as u32);
+            if !game.is_land(tile) || game.has_fallout(tile) {
+                continue;
+            }
+            push(game.map.owner_id(tile));
+        }
+    }
+
+    ordered
 }
 
 fn bordering_enemies_by_troops(game: &Game, small_id: u16) -> Vec<u16> {
@@ -1142,7 +1213,7 @@ pub fn nation_maybe_attack(
     difficulty: &str,
     mut emoji: Option<&mut super::nation_emoji::NationEmojiState>,
 ) {
-    if has_nearby_terra_nullius(game, attacker_small_id) {
+    if has_non_nuked_tn(game, attacker_small_id) {
         if send_tn_attack(game, attacker_small_id, expand_ratio) {
             return;
         }
