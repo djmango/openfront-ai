@@ -24,9 +24,11 @@ gather to it every update and stage changes broadcast back. WORLD_SIZE=1
 
 import argparse
 import contextlib
+import faulthandler
 import json
 import os
 import queue
+import signal
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -188,6 +190,10 @@ def run_eval(
 
 
 def main() -> None:
+    # kill -USR1 <rank pid> dumps every thread's Python stack to stderr.
+    # RunPod containers drop CAP_SYS_PTRACE, so py-spy/gdb can't attach;
+    # this is the only way to see where a hung rank actually sits.
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", type=int, default=0, help="starting curriculum stage")
     ap.add_argument("--ckpt", default="runs/ae_v31_d8c32/ae_v3.pt")
@@ -417,9 +423,15 @@ def main() -> None:
     # Compile the update path after weights load; checkpoints always save
     # base_policy's (unprefixed) state_dict. Compiling the bound method is
     # what actually captures evaluate() - torch.compile(module) only wraps
-    # forward(). Default on for CUDA, off elsewhere (MPS inductor support
-    # is flaky and bf16/compile only need to pay off on the pods).
-    do_compile = args.compile if args.compile is not None else cuda
+    # forward(). Default on for single-process CUDA, off elsewhere (MPS
+    # inductor support is flaky and bf16/compile only need to pay off on
+    # the pods). Off under DDP: 4 CUDA ranks compiling evaluate
+    # (dynamic=True) at the first minibatch deadlocked the v6.1 launch -
+    # two ranks spun in dynamo tracing for 25+ CPU-min while the other two
+    # blocked inside dynamo run_node with zero CPU, GPUs idle for 1h+
+    # (faulthandler stacks; ranks share /tmp/torchinductor_root and its
+    # locks). --compile still forces it on for experiments.
+    do_compile = args.compile if args.compile is not None else (cuda and world == 1)
     evaluate = (
         torch.compile(base_policy.evaluate, dynamic=True)
         if do_compile else base_policy.evaluate
