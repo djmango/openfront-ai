@@ -25,6 +25,9 @@ def main() -> None:
     ap.add_argument("--batches", type=int, default=20)
     ap.add_argument("--collate", action="store_true",
                     help="also time obs collate on the warm pass")
+    ap.add_argument("--train", action="store_true",
+                    help="also time BCPolicy fwd/bwd on the encoded batches "
+                         "(the GPU-bound ceiling once encode is cached)")
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -62,6 +65,45 @@ def main() -> None:
     run("warm(hits)", cache)
     cache.hits = cache.misses = 0
     run("warm(hits)", cache)
+
+    if args.train:
+        import contextlib
+
+        import torch.nn as nn
+
+        from rl.bc import BCPolicy, bc_loss, collate as bc_collate, encode_batch
+
+        model = BCPolicy().to(device)
+        opt = torch.optim.AdamW(model.parameters(), lr=3e-4, fused=(device == "cuda"))
+        amp = (
+            torch.autocast("cuda", dtype=torch.bfloat16)
+            if device == "cuda"
+            else contextlib.nullcontext()
+        )
+        prepped = [
+            bc_collate(encode_batch(ae, [dict(r) for r in b], device, cache), device)
+            for b in batches
+        ]
+        for o, choice, cond in prepped[:2]:  # warmup
+            with amp:
+                out = model.forward_bc(o, cond)
+                loss, _ = bc_loss(out, o, choice)
+            loss.backward()
+            opt.step()
+            opt.zero_grad(set_to_none=True)
+        torch.cuda.synchronize()
+        t0 = time.time()
+        for o, choice, cond in prepped:
+            with amp:
+                out = model.forward_bc(o, cond)
+                loss, _ = bc_loss(out, o, choice)
+            loss.backward()
+            opt.step()
+            opt.zero_grad(set_to_none=True)
+        torch.cuda.synchronize()
+        dt = time.time() - t0
+        print(f"train-step : {dt:.2f}s  {n / dt:.1f} ex/s (fwd/bwd/opt only, "
+              f"batch {args.batch})", flush=True)
 
 
 if __name__ == "__main__":
