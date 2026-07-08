@@ -20,7 +20,7 @@ RUN set -eux; \
     commit="${OPENFRONT_COMMIT:-$(tr -d '[:space:]' < /tmp/openfront.commit)}"; \
     mkdir openfront; \
     git -C openfront init; \
-    git -C openfront remote add origin https://github.com/openfrontio/OpenFrontIO.git; \
+    git -C openfront remote add origin https://github.com/djmango/OpenFrontIO.git; \
     git -C openfront fetch --depth 1 origin "${commit}"; \
     git -C openfront checkout FETCH_HEAD; \
     git apply --directory=openfront /tmp/client-replay-tooling.patch
