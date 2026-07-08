@@ -169,19 +169,16 @@ while true; do
   fi
   echo "=== $(date -u +%FT%TZ) launching $RUN_NAME (seq=$SEQ accum=$ACCUM) $RESUME ==="
   START_TS=$(date +%s)
-  # MALLOC_*: recurring batch buffers (collate/stack outputs, ~60-160MB at
-  # batch 24, more at 96) must come from a reusable heap, or every batch
-  # pays mmap/munmap + zero-page faults that degrade as physical memory
-  # fragments - the slow decay (bc_v4: 88 -> 12 ex/s over ~5h; col 3.4s ->
-  # 14s per window even after 9c030f7's 256MB threshold). Two knobs:
-  #   ARENA_MAX=1  the collate runs on worker threads, and glibc non-main
-  #                arenas are built from 64MB heap segments - anything
-  #                bigger falls back to mmap NO MATTER the threshold. One
-  #                arena = the brk-backed main heap serves every thread.
-  #   1GiB thresholds  clear the largest recurring buffer so it stays on
-  #                that heap, and don't trim it back to the kernel.
+  # MALLOC_*: recurring batch buffers must come from a reusable heap, or
+  # every batch pays mmap/munmap + zero-page faults that degrade as
+  # physical memory fragments - the slow decay (bc_v4: 88 -> 12 ex/s over
+  # ~5h; col 3.4s -> 14s per window even after 9c030f7's 256MB threshold).
+  # The real fix is in code (persistent staged buffers for collate/stack
+  # outputs, slab-allocated z-cache); the thresholds keep whatever mid-size
+  # transients remain on the heap. ARENA_MAX stays at 2: 1 serialized the
+  # 16 rayon sampler threads on one malloc lock (smp 0 -> 12s per window).
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH=. \
-    MALLOC_ARENA_MAX=1 \
+    MALLOC_ARENA_MAX=2 \
     MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=1073741824 \
     python -m rl.bc --data data-human --name "$RUN_NAME" --seq "$SEQ" \
     --batch "$BATCH" --accum "$ACCUM" --steps "$STEPS" --workers "$WORKERS" $RESUME \
