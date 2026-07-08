@@ -1,5 +1,7 @@
 use super::Execution;
+use crate::core::schemas::unit_type;
 use crate::game::Game;
+use crate::map::TileRef;
 use crate::util::simple_hash;
 
 const TICKS_PER_CLUSTER_CALC: u32 = 20;
@@ -44,6 +46,8 @@ impl Execution for PlayerExecution {
             return;
         }
 
+        reconcile_structure_ownership(game, self.small_id);
+
         // TS `isAlive()` is `_tiles.size > 0` - no income after elimination.
         if p.tiles_owned == 0 {
             if !spawn {
@@ -60,14 +64,14 @@ impl Execution for PlayerExecution {
             return;
         }
 
-        let inc = game
-            .wire
-            .troop_increase_rate(p.player_type, p.troops, p.tiles_owned);
+        let inc = game.troop_increase_rate_for(self.small_id);
         let gold = game.wire.gold_addition_rate(p.player_type);
         if let Some(pm) = game.player_by_small_id_mut(self.small_id) {
             pm.troops += inc;
             pm.gold += gold;
         }
+
+        game.expire_alliances_for(self.small_id);
 
         crate::execution::player_clusters::maybe_remove_clusters(game, self.small_id, tick);
     }
@@ -78,5 +82,47 @@ impl Execution for PlayerExecution {
 
     fn active_during_spawn(&self) -> bool {
         false
+    }
+}
+
+fn is_structure(ty: &str) -> bool {
+    matches!(
+        ty,
+        unit_type::CITY
+            | unit_type::DEFENSE_POST
+            | unit_type::SAM_LAUNCHER
+            | unit_type::MISSILE_SILO
+            | unit_type::PORT
+            | unit_type::FACTORY
+    )
+}
+
+/// TS `PlayerExecution.tick` structure ownership reconciliation.
+fn reconcile_structure_ownership(game: &mut Game, small_id: u16) {
+    let units: Vec<(i32, String, TileRef)> = game
+        .player_by_small_id(small_id)
+        .map(|p| {
+            p.units
+                .iter()
+                .filter(|u| is_structure(&u.unit_type))
+                .map(|u| (u.id, u.unit_type.clone(), u.tile as TileRef))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    for (unit_id, utype, tile) in units {
+        let owner = game.map.owner_id(tile);
+        if owner == 0 {
+            game.remove_unit(small_id, unit_id);
+            continue;
+        }
+        if owner == small_id {
+            continue;
+        }
+        if utype == unit_type::DEFENSE_POST {
+            game.remove_unit(small_id, unit_id);
+        } else {
+            game.capture_unit(small_id, owner, unit_id);
+        }
     }
 }

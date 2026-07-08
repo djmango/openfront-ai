@@ -1,6 +1,7 @@
 //! Multi-tick land attack (TS `AttackExecution.ts` subset for hash parity).
 
 use super::flat_heap::FlatBinaryHeap;
+use super::ordered_tiles::OrderedTiles;
 use super::Execution;
 use crate::game::{Game, PlayerType};
 use crate::map::{TerrainType, TileRef};
@@ -14,10 +15,13 @@ pub struct AttackExecution {
     target_small_id: u16,
     target_is_player: bool,
     to_conquer: FlatBinaryHeap,
-    border_tiles: Vec<TileRef>,
+    border_tiles: OrderedTiles,
     source_tile: Option<TileRef>,
     remove_troops: bool,
     random: PseudoRandom,
+    attack_id: String,
+    retreating: bool,
+    retreated: bool,
     active: bool,
     /// TS `Attack.isActive()` - false after `delete()` while exec stays active one tick.
     attack_live: bool,
@@ -47,10 +51,13 @@ impl AttackExecution {
             target_small_id: 0,
             target_is_player: false,
             to_conquer: FlatBinaryHeap::new(1024),
-            border_tiles: Vec::new(),
+            border_tiles: OrderedTiles::default(),
             source_tile,
             remove_troops: source_tile.is_none(),
             random: PseudoRandom::new(123),
+            attack_id: String::new(),
+            retreating: false,
+            retreated: false,
             active: true,
             attack_live: true,
             initialized: false,
@@ -131,6 +138,11 @@ impl Execution for AttackExecution {
         }
         self.troops = start;
 
+        if let Some(p) = game.player_by_small_id_mut(self.owner_small_id) {
+            self.attack_id = p.id_prng.next_id();
+        }
+        game.register_land_attack(&self.attack_id, self.owner_small_id, self.target_small_id);
+
         if let Some(src) = self.source_tile {
             self.add_neighbors(game, src, game.ticks());
         } else {
@@ -141,15 +153,22 @@ impl Execution for AttackExecution {
             game.cancel_opposing_land_attacks(
                 self.owner_small_id,
                 self.target_small_id,
+                &self.attack_id,
                 &mut self.troops,
                 &mut self.active,
             );
             if !self.active {
+                game.unregister_land_attack(
+                    &self.attack_id,
+                    self.owner_small_id,
+                    self.target_small_id,
+                );
                 return;
             }
             game.merge_outgoing_land_attacks(
                 self.owner_small_id,
                 self.target_small_id,
+                &self.attack_id,
                 &mut self.troops,
             );
         }
@@ -176,9 +195,18 @@ impl Execution for AttackExecution {
             return;
         }
 
+        if self.retreated {
+            let malus = if self.target_is_player { 25.0 } else { 0.0 };
+            self.retreat(game, malus);
+            return;
+        }
+        if self.retreating {
+            return;
+        }
+
         if self.target_is_player {
             if game.is_friendly(self.owner_small_id, self.target_small_id) {
-                self.retreat(game, 0.0);
+                self.retreat(game, 25.0);
                 return;
             }
         }
@@ -209,7 +237,7 @@ impl Execution for AttackExecution {
 
         while num_tiles_per_tick > 0.0 {
             if troop_count < 1.0 {
-                self.kill_attack();
+                self.kill_attack(game);
                 self.active = false;
                 return;
             }
@@ -289,6 +317,18 @@ impl Execution for AttackExecution {
 }
 
 impl AttackExecution {
+    pub fn attack_id(&self) -> &str {
+        &self.attack_id
+    }
+
+    pub fn order_retreat(&mut self) {
+        self.retreating = true;
+    }
+
+    pub fn execute_retreat(&mut self) {
+        self.retreated = true;
+    }
+
     pub fn is_initialized(&self) -> bool {
         self.initialized
     }
@@ -321,8 +361,23 @@ impl AttackExecution {
         self.attack_live
     }
 
+    pub fn border_tile_count(&self) -> usize {
+        self.border_tiles.len()
+    }
+
+    pub fn to_conquer_len(&self) -> usize {
+        self.to_conquer.len()
+    }
+
     /// TS `Attack.delete()` - remove from outgoing/incoming registries, defer exec cleanup.
-    pub fn kill_attack(&mut self) {
+    pub fn kill_attack(&mut self, game: &mut Game) {
+        if self.attack_live {
+            game.unregister_land_attack(
+                &self.attack_id,
+                self.owner_small_id,
+                self.target_small_id,
+            );
+        }
         self.attack_live = false;
     }
 
@@ -367,28 +422,27 @@ impl AttackExecution {
             game.add_troops(self.owner_small_id, survivors);
         }
         self.troops = 0.0;
-        self.kill_attack();
+        self.kill_attack(game);
         self.active = false;
     }
 
     fn refresh_to_conquer(&mut self, game: &Game) {
         self.to_conquer.clear();
         self.border_tiles.clear();
-        game.for_each_border_tile(self.owner_small_id, |tile| {
-            self.add_neighbors(game, tile, game.ticks());
-        });
+        if let Some(border) = game.border_tiles_of(self.owner_small_id) {
+            let tick = game.ticks();
+            for &tile in border {
+                self.add_neighbors(game, tile, tick);
+            }
+        }
     }
 
     fn add_border_tile(&mut self, tile: TileRef) {
-        if !self.border_tiles.contains(&tile) {
-            self.border_tiles.push(tile);
-        }
+        self.border_tiles.insert(tile);
     }
 
     fn remove_border_tile(&mut self, tile: TileRef) {
-        if let Some(i) = self.border_tiles.iter().position(|&t| t == tile) {
-            self.border_tiles.remove(i);
-        }
+        self.border_tiles.remove(tile);
     }
 
     fn handle_dead_defender(&mut self, game: &mut Game) {
@@ -403,6 +457,8 @@ impl AttackExecution {
         }
         let target_small = self.target_small_id;
         let owner_small = self.owner_small_id;
+
+        game.conquer_player(owner_small, target_small);
 
         for _ in 0..10 {
             let tiles: Vec<TileRef> = game
@@ -473,9 +529,12 @@ impl AttackExecution {
                 _ => 0.0,
             };
 
-            let priority = (self.random.next_int(0, 7) as f32 + 10.0)
-                * (1.0 - num_owned_by_me as f32 * 0.5 + mag as f32 / 2.0)
-                + tick as f32;
+            let priority = {
+                let p = (self.random.next_int(0, 7) as f64 + 10.0)
+                    * (1.0 - num_owned_by_me as f64 * 0.5 + mag as f64 / 2.0)
+                    + tick as f64;
+                p as f32
+            };
             self.to_conquer.enqueue(neighbor, priority);
         });
     }

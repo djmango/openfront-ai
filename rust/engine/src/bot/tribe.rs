@@ -42,6 +42,9 @@ impl TribeExecution {
             active: true,
         }
     }
+    pub fn small_id(&self) -> u16 {
+        self.small_id
+    }
 }
 
 impl Execution for TribeExecution {

@@ -36,12 +36,7 @@ impl Execution for SpawnExecution {
             return;
         }
         self.active = false;
-        let tile = if game.config.random_spawn {
-            None
-        } else {
-            self.tile
-        };
-        execute_player_spawn(game, &self.player_info, tile, &mut self.random);
+        execute_player_spawn(game, &self.player_info, self.tile, &mut self.random);
     }
 
     fn is_active(&self) -> bool {

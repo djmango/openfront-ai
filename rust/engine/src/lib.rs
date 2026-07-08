@@ -21,6 +21,7 @@ pub mod session;
 pub mod spatial;
 pub mod util;
 pub mod water;
+pub mod water_hpa;
 
 pub use backend::Backend;
 pub use game::Game;

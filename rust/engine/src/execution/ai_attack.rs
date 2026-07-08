@@ -8,9 +8,7 @@ use std::collections::HashSet;
 
 pub fn land_attack_troops(game: &Game, small_id: u16, reserve_or_expand_ratio: f64) -> Option<f64> {
     let attacker = game.player_by_small_id(small_id)?;
-    let max_troops = game
-        .wire
-        .max_troops(attacker.player_type, attacker.tiles_owned);
+    let max_troops = game.max_troops_for(attacker.small_id);
     let target_troops = max_troops * reserve_or_expand_ratio;
     let troops = attacker.troops as f64 - target_troops;
     if troops < 1.0 {
@@ -23,9 +21,7 @@ pub fn has_reserve_ratio(game: &Game, small_id: u16, reserve_ratio: f64) -> bool
     let Some(attacker) = game.player_by_small_id(small_id) else {
         return false;
     };
-    let max_troops = game
-        .wire
-        .max_troops(attacker.player_type, attacker.tiles_owned);
+    let max_troops = game.max_troops_for(attacker.small_id);
     if max_troops <= 0.0 {
         return false;
     }
@@ -36,9 +32,7 @@ pub fn has_trigger_ratio(game: &Game, small_id: u16, trigger_ratio: f64) -> bool
     let Some(attacker) = game.player_by_small_id(small_id) else {
         return false;
     };
-    let max_troops = game
-        .wire
-        .max_troops(attacker.player_type, attacker.tiles_owned);
+    let max_troops = game.max_troops_for(attacker.small_id);
     if max_troops <= 0.0 {
         return false;
     }
@@ -458,7 +452,7 @@ fn find_very_weak_enemy(game: &Game, bordering: &[u16]) -> Option<u16> {
         let Some(enemy) = game.player_by_small_id(sid) else {
             continue;
         };
-        let max = game.wire.max_troops(enemy.player_type, enemy.tiles_owned);
+        let max = game.max_troops_for(enemy.small_id);
         if (enemy.troops as f64) < max * 0.15 {
             return Some(sid);
         }
@@ -1018,9 +1012,7 @@ fn nation_bot_attack_troops(
 ) -> Option<f64> {
     let attacker = game.player_by_small_id(attacker_small_id)?;
     let target = game.player_by_small_id(target_small_id)?;
-    let max_troops = game
-        .wire
-        .max_troops(attacker.player_type, attacker.tiles_owned);
+    let max_troops = game.max_troops_for(attacker.small_id);
     let target_reserve = max_troops * reserve_ratio;
     let max_send = attacker.troops as f64 - target_reserve - bot_attack_troops_sent;
     if max_send < 1.0 {

@@ -113,6 +113,14 @@ impl Config {
         self.game_config.disable_alliances.unwrap_or(false)
     }
 
+    pub fn alliance_request_duration(&self) -> u32 {
+        20 * 10
+    }
+
+    pub fn alliance_duration(&self) -> u32 {
+        300 * 10
+    }
+
     pub fn num_spawn_phase_turns(&self) -> u32 {
         if self.game_config.game_type == "Singleplayer" {
             return 100;
@@ -157,14 +165,122 @@ impl Config {
         }
     }
 
+    /// TS `startingGold(playerInfo)` - lobby creator bonus omitted (not in records).
+    pub fn starting_gold(&self) -> i64 {
+        self.game_config.starting_gold.unwrap_or(0) as i64
+    }
+
+    pub fn structure_min_dist(&self) -> u32 {
+        15
+    }
+
+    pub fn radius_port_spawn(&self) -> u32 {
+        20
+    }
+
+    pub fn atom_bomb_outer_range(&self) -> u32 {
+        30
+    }
+
+    pub fn city_construction_ticks(&self) -> u32 {
+        self.construction_ticks(crate::core::schemas::unit_type::CITY)
+    }
+
+    /// TS `unitInfo(...).constructionDuration`.
+    pub fn construction_ticks(&self, unit_type: &str) -> u32 {
+        use crate::core::schemas::unit_type;
+        if self.game_config.instant_build {
+            return 0;
+        }
+        match unit_type {
+            unit_type::CITY | unit_type::FACTORY => 20,
+            unit_type::DEFENSE_POST | unit_type::PORT => 50,
+            unit_type::SAM_LAUNCHER => 300,
+            unit_type::MISSILE_SILO => 100,
+            _ => 0,
+        }
+    }
+
+    /// TS `unitInfo` structure cost from `costWrapper` unit count.
+    pub fn structure_cost(&self, unit_type: &str, cost_units: u32) -> i64 {
+        use crate::core::schemas::unit_type;
+        match unit_type {
+            unit_type::CITY | unit_type::PORT | unit_type::FACTORY => {
+                ((2f64.powi(cost_units as i32) * 125_000.0) as i64).min(1_000_000)
+            }
+            unit_type::SAM_LAUNCHER => {
+                ((cost_units as i64 + 1) * 1_500_000).min(3_000_000)
+            }
+            unit_type::MISSILE_SILO => 1_000_000,
+            unit_type::DEFENSE_POST => {
+                let n = cost_units as i64;
+                ((n + 1) * 50_000).min(250_000)
+            }
+            _ => 0,
+        }
+    }
+
+    /// Types summed for `costWrapper` pricing.
+    pub fn cost_types_for(&self, unit_type: &str) -> &'static [&'static str] {
+        use crate::core::schemas::unit_type;
+        match unit_type {
+            unit_type::CITY => &[unit_type::CITY],
+            unit_type::PORT | unit_type::FACTORY => &[unit_type::PORT, unit_type::FACTORY],
+            unit_type::SAM_LAUNCHER => &[unit_type::SAM_LAUNCHER],
+            unit_type::MISSILE_SILO => &[unit_type::MISSILE_SILO],
+            unit_type::DEFENSE_POST => &[unit_type::DEFENSE_POST],
+            _ => &[],
+        }
+    }
+
+    /// TS `unitInfo(City).cost` for first city (numUnits=0).
+    pub fn city_cost(&self, cities_owned: u32) -> i64 {
+        self.structure_cost(crate::core::schemas::unit_type::CITY, cities_owned)
+    }
+
+    /// TS `unitInfo(MIRV).cost` with zero launches (record parity default).
+    pub fn mirv_cost(&self) -> i64 {
+        25_000_000
+    }
+
+    pub fn hydrogen_bomb_cost(&self) -> i64 {
+        5_000_000
+    }
+
+    pub fn atom_bomb_cost(&self) -> i64 {
+        750_000
+    }
+
+    pub fn sam_launcher_cost(&self) -> i64 {
+        1_500_000
+    }
+
+    pub fn unit_cost(&self, small_id: u16, unit_type: &str) -> i64 {
+        use crate::core::schemas::unit_type;
+        match unit_type {
+            unit_type::CITY => {
+                let owned = 0; // caller should pass via dedicated path
+                let _ = small_id;
+                self.city_cost(owned)
+            }
+            _ => 0,
+        }
+    }
+
     pub fn min_distance_between_players(&self) -> u32 {
         30
     }
 
-    /// TS `maxTroops()` - cities omitted until units are ported.
-    pub fn max_troops(&self, player_type: crate::game::PlayerType, tiles_owned: i32) -> f64 {
+    /// TS `maxTroops()`.
+    pub fn max_troops(
+        &self,
+        player_type: crate::game::PlayerType,
+        tiles_owned: i32,
+        city_level_sum: i64,
+    ) -> f64 {
         use crate::game::PlayerType;
-        let mut max = 2.0 * ((tiles_owned as f64).powf(0.6) * 1000.0 + 50_000.0);
+        let mut max = 2.0 * ((tiles_owned as f64).powf(0.6) * 1000.0 + 50_000.0)
+            + city_level_sum as f64 * self.city_troop_increase();
         match player_type {
             PlayerType::Bot => max /= 3.0,
             PlayerType::Human => {
@@ -185,15 +301,20 @@ impl Config {
         max
     }
 
+    pub fn city_troop_increase(&self) -> f64 {
+        250_000.0
+    }
+
     /// TS `troopIncreaseRate()`.
     pub fn troop_increase_rate(
         &self,
         player_type: crate::game::PlayerType,
         troops: i32,
         tiles_owned: i32,
+        city_level_sum: i64,
     ) -> i32 {
         use crate::game::PlayerType;
-        let max = self.max_troops(player_type, tiles_owned);
+        let max = self.max_troops(player_type, tiles_owned, city_level_sum);
         let mut to_add = 10.0 + (troops as f64).powf(0.73) / 4.0;
         let ratio = 1.0 - troops as f64 / max;
         to_add *= ratio;
@@ -209,8 +330,8 @@ impl Config {
                 _ => 0.95,
             };
         }
-        let capped = (troops as f64 + to_add).min(max);
-        crate::util::to_int(capped) - troops
+        let capped_delta = (troops as f64 + to_add).min(max) - troops as f64;
+        crate::util::to_int(capped_delta)
     }
 
     /// TS `attackAmount()`.

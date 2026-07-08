@@ -1,8 +1,11 @@
 //! Concrete execution enum - avoids `Box<dyn Execution>` vtable dispatch on the tick hot path.
 
 use super::{
-    AttackExecution, Execution, MarkDisconnectedExecution, NationExecution, NoOpExecution,
-    PlayerExecution, SpawnExecution, SpawnTimerExecution, TransportShipExecution,
+    AllianceExtensionExecution, AllianceRejectExecution, AllianceRequestExecution,
+    AttackExecution, BreakAllianceExecution, CityExecution, ConstructionExecution,
+    DefensePostExecution, DonateTroopsExecution,
+    Execution, MarkDisconnectedExecution, NationExecution, NoOpExecution, PlayerExecution,
+    RetreatExecution, SpawnExecution, SpawnTimerExecution, TransportShipExecution, UpgradeStructureExecution,
     WinCheckExecution,
 };
 use crate::bot::TribeExecution;
@@ -16,6 +19,16 @@ pub enum ExecEnum {
     NoOp(NoOpExecution),
     MarkDisconnected(MarkDisconnectedExecution),
     TransportShip(TransportShipExecution),
+    Construction(ConstructionExecution),
+    City(CityExecution),
+    DefensePost(DefensePostExecution),
+    UpgradeStructure(UpgradeStructureExecution),
+    AllianceRequest(AllianceRequestExecution),
+    AllianceReject(AllianceRejectExecution),
+    BreakAlliance(BreakAllianceExecution),
+    AllianceExtension(AllianceExtensionExecution),
+    DonateTroops(DonateTroopsExecution),
+    Retreat(RetreatExecution),
     TribeMassSpawn(crate::bot::TribeMassSpawn),
     Player(PlayerExecution),
     Tribe(TribeExecution),
@@ -32,6 +45,16 @@ impl Execution for ExecEnum {
             ExecEnum::NoOp(e) => e.init(game, tick),
             ExecEnum::MarkDisconnected(e) => e.init(game, tick),
             ExecEnum::TransportShip(e) => e.init(game, tick),
+            ExecEnum::Construction(e) => e.init(game, tick),
+            ExecEnum::City(e) => e.init(game, tick),
+            ExecEnum::DefensePost(e) => e.init(game, tick),
+            ExecEnum::UpgradeStructure(e) => e.init(game, tick),
+            ExecEnum::AllianceRequest(e) => e.init(game, tick),
+            ExecEnum::AllianceReject(e) => e.init(game, tick),
+            ExecEnum::BreakAlliance(e) => e.init(game, tick),
+            ExecEnum::AllianceExtension(e) => e.init(game, tick),
+            ExecEnum::DonateTroops(e) => e.init(game, tick),
+            ExecEnum::Retreat(e) => e.init(game, tick),
             ExecEnum::TribeMassSpawn(e) => e.init(game, tick),
             ExecEnum::Player(e) => e.init(game, tick),
             ExecEnum::Tribe(e) => e.init(game, tick),
@@ -48,6 +71,16 @@ impl Execution for ExecEnum {
             ExecEnum::NoOp(e) => e.tick(game, tick),
             ExecEnum::MarkDisconnected(e) => e.tick(game, tick),
             ExecEnum::TransportShip(e) => e.tick(game, tick),
+            ExecEnum::Construction(e) => e.tick(game, tick),
+            ExecEnum::City(e) => e.tick(game, tick),
+            ExecEnum::DefensePost(e) => e.tick(game, tick),
+            ExecEnum::UpgradeStructure(e) => e.tick(game, tick),
+            ExecEnum::AllianceRequest(e) => e.tick(game, tick),
+            ExecEnum::AllianceReject(e) => e.tick(game, tick),
+            ExecEnum::BreakAlliance(e) => e.tick(game, tick),
+            ExecEnum::AllianceExtension(e) => e.tick(game, tick),
+            ExecEnum::DonateTroops(e) => e.tick(game, tick),
+            ExecEnum::Retreat(e) => e.tick(game, tick),
             ExecEnum::TribeMassSpawn(e) => e.tick(game, tick),
             ExecEnum::Player(e) => e.tick(game, tick),
             ExecEnum::Tribe(e) => e.tick(game, tick),
@@ -64,6 +97,16 @@ impl Execution for ExecEnum {
             ExecEnum::NoOp(e) => e.is_active(),
             ExecEnum::MarkDisconnected(e) => e.is_active(),
             ExecEnum::TransportShip(e) => e.is_active(),
+            ExecEnum::Construction(e) => e.is_active(),
+            ExecEnum::City(e) => e.is_active(),
+            ExecEnum::DefensePost(e) => e.is_active(),
+            ExecEnum::UpgradeStructure(e) => e.is_active(),
+            ExecEnum::AllianceRequest(e) => e.is_active(),
+            ExecEnum::AllianceReject(e) => e.is_active(),
+            ExecEnum::BreakAlliance(e) => e.is_active(),
+            ExecEnum::AllianceExtension(e) => e.is_active(),
+            ExecEnum::DonateTroops(e) => e.is_active(),
+            ExecEnum::Retreat(e) => e.is_active(),
             ExecEnum::TribeMassSpawn(e) => e.is_active(),
             ExecEnum::Player(e) => e.is_active(),
             ExecEnum::Tribe(e) => e.is_active(),
@@ -80,6 +123,16 @@ impl Execution for ExecEnum {
             ExecEnum::NoOp(e) => e.active_during_spawn(),
             ExecEnum::MarkDisconnected(e) => e.active_during_spawn(),
             ExecEnum::TransportShip(e) => e.active_during_spawn(),
+            ExecEnum::Construction(e) => e.active_during_spawn(),
+            ExecEnum::City(e) => e.active_during_spawn(),
+            ExecEnum::DefensePost(e) => e.active_during_spawn(),
+            ExecEnum::UpgradeStructure(e) => e.active_during_spawn(),
+            ExecEnum::AllianceRequest(e) => e.active_during_spawn(),
+            ExecEnum::AllianceReject(e) => e.active_during_spawn(),
+            ExecEnum::BreakAlliance(e) => e.active_during_spawn(),
+            ExecEnum::AllianceExtension(e) => e.active_during_spawn(),
+            ExecEnum::DonateTroops(e) => e.active_during_spawn(),
+            ExecEnum::Retreat(e) => e.active_during_spawn(),
             ExecEnum::TribeMassSpawn(e) => e.active_during_spawn(),
             ExecEnum::Player(e) => e.active_during_spawn(),
             ExecEnum::Tribe(e) => e.active_during_spawn(),
@@ -98,6 +151,41 @@ impl Execution for ExecEnum {
         match self {
             ExecEnum::Attack(e) => Some(e),
             _ => None,
+        }
+    }
+}
+
+impl ExecEnum {
+    /// Stable label for parity exec-order dumps.
+    pub fn debug_label(&self) -> String {
+        match self {
+            ExecEnum::Spawn(_) => "Spawn".into(),
+            ExecEnum::Attack(e) => {
+                format!(
+                    "Attack({}->{})",
+                    e.owner_small_id(),
+                    e.target_small_id()
+                )
+            }
+            ExecEnum::SpawnTimer(_) => "SpawnTimer".into(),
+            ExecEnum::WinCheck(_) => "WinCheck".into(),
+            ExecEnum::NoOp(_) => "NoOp".into(),
+            ExecEnum::MarkDisconnected(_) => "MarkDisconnected".into(),
+            ExecEnum::TransportShip(_) => "TransportShipExecution".into(),
+            ExecEnum::Construction(_) => "ConstructionExecution".into(),
+            ExecEnum::City(_) => "CityExecution".into(),
+            ExecEnum::DefensePost(_) => "DefensePostExecution".into(),
+            ExecEnum::UpgradeStructure(_) => "UpgradeStructureExecution".into(),
+            ExecEnum::AllianceRequest(_) => "AllianceRequestExecution".into(),
+            ExecEnum::AllianceReject(_) => "AllianceReject".into(),
+            ExecEnum::BreakAlliance(_) => "BreakAlliance".into(),
+            ExecEnum::AllianceExtension(_) => "AllianceExtension".into(),
+            ExecEnum::DonateTroops(_) => "DonateTroops".into(),
+            ExecEnum::Retreat(_) => "Retreat".into(),
+            ExecEnum::TribeMassSpawn(_) => "TribeMassSpawn".into(),
+            ExecEnum::Player(e) => format!("Player({})", e.small_id()),
+            ExecEnum::Tribe(e) => format!("Tribe({})", e.small_id()),
+            ExecEnum::Nation(_) => "Nation".into(),
         }
     }
 }

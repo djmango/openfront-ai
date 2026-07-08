@@ -2,7 +2,7 @@
 
 use crate::game::Game;
 use crate::map::TileRef;
-use crate::water::{bounded_water_path, land_bfs_nearest_shore, water_component_at};
+use crate::water::{bounded_water_path, land_bfs_nearest_shore};
 
 const REFINE_MAX_SEARCH_AREA: u32 = 100 * 100;
 const CANDIDATE_RADIUS: u32 = 20;
@@ -52,11 +52,11 @@ fn refine_start_tile(game: &mut Game, path: &[TileRef], shores: &[TileRef]) -> T
         let wp = path[mid];
         let wp_x = game.map.x(wp);
         let wp_y = game.map.y(wp);
-        let min_x = cand_min_x.min(wp_x).saturating_sub(PADDING);
-        let max_x = cand_max_x.max(wp_x) + PADDING;
-        let min_y = cand_min_y.min(wp_y).saturating_sub(PADDING);
-        let max_y = cand_max_y.max(wp_y) + PADDING;
-        let area = (max_x - min_x + 1) * (max_y - min_y + 1);
+        let min_x = (cand_min_x.min(wp_x) as i32) - PADDING as i32;
+        let max_x = (cand_max_x.max(wp_x) + PADDING) as i32;
+        let min_y = (cand_min_y.min(wp_y) as i32) - PADDING as i32;
+        let max_y = (cand_max_y.max(wp_y) + PADDING) as i32;
+        let area = ((max_x - min_x + 1) * (max_y - min_y + 1)) as u32;
         if area <= REFINE_MAX_SEARCH_AREA {
             best_waypoint_idx = mid;
             lo = mid + 1;
@@ -94,22 +94,53 @@ fn refine_start_tile(game: &mut Game, path: &[TileRef], shores: &[TileRef]) -> T
     best_tile
 }
 
+pub fn closest_tile(game: &Game, refs: &[TileRef], tile: TileRef) -> (Option<TileRef>, u32) {
+    let mut min_distance = u32::MAX;
+    let mut min_ref = None;
+    for &r in refs {
+        let distance = game.manhattan_dist(r, tile);
+        if distance < min_distance {
+            min_distance = distance;
+            min_ref = Some(r);
+        }
+    }
+    (min_ref, min_distance)
+}
+
+/// TS `closestTwoTiles`  -  sweep sorted by x (not brute force).
 pub fn closest_two_tiles(game: &Game, xs: &[TileRef], ys: &[TileRef]) -> Option<(TileRef, TileRef)> {
     if xs.is_empty() || ys.is_empty() {
         return None;
     }
-    let mut best = (xs[0], ys[0]);
-    let mut best_dist = game.manhattan_dist(best.0, best.1);
-    for &x in xs {
-        for &y in ys {
-            let d = game.manhattan_dist(x, y);
-            if d < best_dist {
-                best_dist = d;
-                best = (x, y);
-            }
+    let mut x_sorted: Vec<TileRef> = xs.to_vec();
+    let mut y_sorted: Vec<TileRef> = ys.to_vec();
+    x_sorted.sort_by_key(|t| game.map.x(*t));
+    y_sorted.sort_by_key(|t| game.map.x(*t));
+
+    let mut i = 0usize;
+    let mut j = 0usize;
+    let mut min_distance = u32::MAX;
+    let mut result = (x_sorted[0], y_sorted[0]);
+
+    while i < x_sorted.len() && j < y_sorted.len() {
+        let current_x = x_sorted[i];
+        let current_y = y_sorted[j];
+        let distance = game.manhattan_dist(current_x, current_y);
+        if distance < min_distance {
+            min_distance = distance;
+            result = (current_x, current_y);
+        }
+        if i == x_sorted.len() - 1 {
+            j += 1;
+        } else if j == y_sorted.len() - 1 {
+            i += 1;
+        } else if game.map.x(current_x) < game.map.x(current_y) {
+            i += 1;
+        } else {
+            j += 1;
         }
     }
-    Some(best)
+    Some(result)
 }
 
 pub fn shore_border_tiles(game: &Game, small_id: u16) -> Vec<TileRef> {
@@ -131,12 +162,12 @@ pub fn closest_shore_by_water(game: &mut Game, owner_small_id: u16, target: Tile
     if !game.is_water(target) && !game.is_shore(target) {
         return None;
     }
-    let target_comp = water_component_at(&game.map, &game.water_component, target)?;
+    let target_comp = game.get_water_component(target)?;
 
     let mut shores: Vec<TileRef> = Vec::with_capacity(32);
     game.for_each_border_tile(owner_small_id, |t| {
-        if game.is_shore(t) && game.map.owner_id(t) == owner_small_id {
-            if water_component_at(&game.map, &game.water_component, t) == Some(target_comp) {
+        if game.is_shore(t) && game.is_land(t) && game.map.owner_id(t) == owner_small_id {
+            if game.get_water_component(t) == Some(target_comp) {
                 shores.push(t);
             }
         }

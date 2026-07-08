@@ -124,6 +124,7 @@ impl NationBatch {
 
             if !n.behaviors_initialized {
                 n.behaviors_initialized = true;
+                super::nation_tick::initialize_nation_behaviors(&mut n.random, &mut n.behavior);
                 let troops = game
                     .player_by_small_id(small_id)
                     .map(|p| p.troops as f64 / 2.0)

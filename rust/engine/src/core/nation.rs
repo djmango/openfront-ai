@@ -273,6 +273,7 @@ mod tests {
             player_teams: None,
             disable_alliances: None,
             spawn_immunity_duration: None,
+            starting_gold: None,
         }
     }
 

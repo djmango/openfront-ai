@@ -34,6 +34,8 @@ pub struct PlayerRecord {
     pub username: String,
     #[serde(default)]
     pub clan_tag: Option<String>,
+    #[serde(default)]
+    pub friends: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

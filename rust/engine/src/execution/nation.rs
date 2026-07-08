@@ -105,6 +105,29 @@ impl Execution for NationExecution {
                 return;
             }
 
+            // TS NationExecution: if spawn cell is outside team area, random spawn instead.
+            if let Some(p) = game.player_by_id(&player_id) {
+                if let Some(team) = p.team.as_deref() {
+                    if let Some(area) = game.team_spawn_area(team) {
+                        if let Some(cell) = self.nation.spawn_cell {
+                            let in_area = cell[0] >= area.x as i32
+                                && cell[0] < (area.x + area.width) as i32
+                                && cell[1] >= area.y as i32
+                                && cell[1] < (area.y + area.height) as i32;
+                            if !in_area {
+                                game.add_execution(ExecEnum::Spawn(SpawnExecution::new(
+                                    self.game_id.clone(),
+                                    self.nation.player_info.clone(),
+                                    None,
+                                )));
+                                self.spawn_exec_added = true;
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+
             let Some(tile) = self.random_spawn_land(game) else {
                 return;
             };
@@ -114,9 +137,7 @@ impl Execution for NationExecution {
                 self.nation.player_info.clone(),
                 Some(tile),
             )));
-            if !game.has_spawned(small_id) {
-                self.spawn_exec_added = true;
-            }
+            self.spawn_exec_added = true;
             return;
         }
 
@@ -134,6 +155,7 @@ impl Execution for NationExecution {
 
         if !self.behaviors_initialized {
             self.behaviors_initialized = true;
+            super::nation_tick::initialize_nation_behaviors(&mut self.random, &mut self.behavior);
             let troops = game
                 .player_by_small_id(small_id)
                 .map(|p| p.troops as f64 / 2.0)
@@ -180,11 +202,19 @@ impl NationExecution {
                 continue;
             }
             let tile = game.ref_xy(x as u32, y as u32);
-            if !game.is_land(tile) || game.has_owner(tile) {
+            if !game.is_land(tile) || game.has_owner(tile) || game.is_impassable(tile) {
                 continue;
             }
             if game.terrain_type(tile) == TerrainType::Mountain && self.random.chance(2) {
                 continue;
+            }
+            if std::env::var("SPAWN_DEBUG").ok().as_deref() == Some(self.nation.player_info.id.as_str()) {
+                eprintln!(
+                    "nation_spawn_land {} tile={} tries={}",
+                    self.nation.player_info.id,
+                    tile,
+                    tries
+                );
             }
             return Some(tile);
         }

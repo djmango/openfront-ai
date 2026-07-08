@@ -3,11 +3,11 @@
 use crate::game::Game;
 use crate::map::TileRef;
 use crate::util::simple_hash;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 const TICKS_PER_CLUSTER_CALC: u32 = 20;
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct BBox {
     min_x: u32,
     min_y: u32,
@@ -15,14 +15,48 @@ struct BBox {
     max_y: u32,
 }
 
-fn bbox_from_tiles(game: &Game, tiles: &HashSet<TileRef>) -> BBox {
+/// TS `Set<TileRef>` insertion order  -  iteration and `values().next()` depend on it.
+#[derive(Clone, Default)]
+struct OrderedTiles {
+    tiles: Vec<TileRef>,
+    set: HashSet<TileRef>,
+}
+
+impl OrderedTiles {
+    fn insert(&mut self, t: TileRef) -> bool {
+        if self.set.insert(t) {
+            self.tiles.push(t);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn contains(&self, t: TileRef) -> bool {
+        self.set.contains(&t)
+    }
+
+    fn len(&self) -> usize {
+        self.tiles.len()
+    }
+
+    fn first(&self) -> Option<TileRef> {
+        self.tiles.first().copied()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = TileRef> + '_ {
+        self.tiles.iter().copied()
+    }
+}
+
+fn bbox_from_tiles(game: &Game, tiles: &OrderedTiles) -> BBox {
     let mut bb = BBox {
         min_x: u32::MAX,
         min_y: u32::MAX,
         max_x: 0,
         max_y: 0,
     };
-    for &t in tiles {
+    for t in tiles.iter() {
         let x = game.map.x(t);
         let y = game.map.y(t);
         bb.min_x = bb.min_x.min(x);
@@ -45,8 +79,8 @@ fn flood_border_cluster(
     border: &[TileRef],
     start: TileRef,
     visited: &mut HashSet<TileRef>,
-) -> HashSet<TileRef> {
-    let mut cluster = HashSet::new();
+) -> OrderedTiles {
+    let mut cluster = OrderedTiles::default();
     let mut stack = vec![start];
     while let Some(t) = stack.pop() {
         if visited.contains(&t) || !border.contains(&t) {
@@ -59,7 +93,7 @@ fn flood_border_cluster(
     cluster
 }
 
-fn calculate_clusters(game: &Game, small_id: u16) -> Vec<HashSet<TileRef>> {
+fn calculate_clusters(game: &Game, small_id: u16) -> Vec<OrderedTiles> {
     let Some(border) = game.border_tiles_of(small_id) else {
         return vec![];
     };
@@ -68,12 +102,13 @@ fn calculate_clusters(game: &Game, small_id: u16) -> Vec<HashSet<TileRef>> {
     }
     let mut visited = HashSet::new();
     let mut clusters = Vec::new();
+    // TS iterates `player.borderTiles()` Set insertion order.
     for &start in border {
         if visited.contains(&start) {
             continue;
         }
         let cluster = flood_border_cluster(game, border.as_slice(), start, &mut visited);
-        if !cluster.is_empty() {
+        if !cluster.tiles.is_empty() {
             clusters.push(cluster);
         }
     }
@@ -83,14 +118,14 @@ fn calculate_clusters(game: &Game, small_id: u16) -> Vec<HashSet<TileRef>> {
 fn surrounded_by_same_enemy(
     game: &Game,
     small_id: u16,
-    cluster: &HashSet<TileRef>,
+    cluster: &OrderedTiles,
     cluster_bb: BBox,
 ) -> Option<u16> {
     let mut enemy: Option<u16> = None;
     let mut enemy_bb = BBox::default();
     let mut enemy_init = false;
 
-    for &tile in cluster {
+    for tile in cluster.iter() {
         if game.map.is_ocean_shore(tile) || game.map.is_on_edge_of_map(tile) {
             return None;
         }
@@ -147,12 +182,12 @@ fn surrounded_by_same_enemy(
     }
 }
 
-fn is_surrounded(game: &Game, small_id: u16, cluster: &HashSet<TileRef>) -> bool {
+fn is_surrounded(game: &Game, small_id: u16, cluster: &OrderedTiles) -> bool {
     let mut has_enemy = false;
     let mut enemy_bb = BBox::default();
     let mut enemy_init = false;
 
-    for &tr in cluster {
+    for tr in cluster.iter() {
         if game.is_shore(tr) || game.map.is_on_edge_of_map(tr) {
             return false;
         }
@@ -195,9 +230,10 @@ fn is_surrounded(game: &Game, small_id: u16, cluster: &HashSet<TileRef>) -> bool
     inscribed(enemy_bb, cluster_bb)
 }
 
-fn get_capturing_player(game: &Game, small_id: u16, cluster: &HashSet<TileRef>) -> Option<u16> {
-    let mut neighbors: HashMap<u16, u32> = HashMap::new();
-    for &t in cluster {
+fn get_capturing_player(game: &Game, small_id: u16, cluster: &OrderedTiles) -> Option<u16> {
+    // TS iterates cluster Set insertion order; Map keeps first-seen neighbor order.
+    let mut neighbors: Vec<(u16, u32)> = Vec::new();
+    for t in cluster.iter() {
         game.map.for_each_neighbor4(t, |n| {
             let owner = game.map.owner_id(n);
             if owner == 0 || owner == small_id {
@@ -206,27 +242,39 @@ fn get_capturing_player(game: &Game, small_id: u16, cluster: &HashSet<TileRef>) 
             if game.is_friendly(owner, small_id) {
                 return;
             }
-            *neighbors.entry(owner).or_insert(0) += 1;
+            if let Some(entry) = neighbors.iter_mut().find(|(sid, _)| *sid == owner) {
+                entry.1 += 1;
+            } else {
+                neighbors.push((owner, 1));
+            }
         });
     }
     if neighbors.is_empty() {
         return None;
     }
-    let attackers: Vec<u16> = neighbors.keys().copied().collect();
-    if let Some(attacker) = game.largest_land_attack_from(small_id, &attackers) {
+    let attackers: Vec<u16> = neighbors.iter().map(|(sid, _)| *sid).collect();
+    if let Some(attacker) = game.largest_incoming_land_attack_from_neighbors(
+        small_id,
+        &attackers,
+        &neighbors,
+    ) {
         return Some(attacker);
     }
-    neighbors
-        .into_iter()
-        .max_by_key(|(_, c)| *c)
-        .map(|(sid, _)| sid)
+    // TS `getMode`: first neighbor with strictly greatest count wins ties.
+    let mut best: Option<(u16, u32)> = None;
+    for (sid, count) in neighbors {
+        if best.map(|(_, c)| count > c).unwrap_or(true) {
+            best = Some((sid, count));
+        }
+    }
+    best.map(|(sid, _)| sid)
 }
 
-fn flood_owned(game: &Game, small_id: u16, start: TileRef) -> HashSet<TileRef> {
-    let mut result = HashSet::new();
+fn flood_owned(game: &Game, small_id: u16, start: TileRef) -> OrderedTiles {
+    let mut result = OrderedTiles::default();
     let mut stack = vec![start];
     while let Some(t) = stack.pop() {
-        if result.contains(&t) || game.map.owner_id(t) != small_id {
+        if result.contains(t) || game.map.owner_id(t) != small_id {
             continue;
         }
         result.insert(t);
@@ -235,8 +283,8 @@ fn flood_owned(game: &Game, small_id: u16, start: TileRef) -> HashSet<TileRef> {
     result
 }
 
-fn remove_cluster(game: &mut Game, small_id: u16, cluster: &HashSet<TileRef>) {
-    for &t in cluster {
+fn remove_cluster(game: &mut Game, small_id: u16, cluster: &OrderedTiles) {
+    for t in cluster.iter() {
         if game.map.owner_id(t) != small_id {
             return;
         }
@@ -244,23 +292,18 @@ fn remove_cluster(game: &mut Game, small_id: u16, cluster: &HashSet<TileRef>) {
     let Some(captor) = get_capturing_player(game, small_id, cluster) else {
         return;
     };
-    let Some(first) = cluster.iter().next().copied() else {
+    let Some(first) = cluster.first() else {
         return;
     };
     let tiles = flood_owned(game, small_id, first);
     let wipe_all = game
         .player_by_small_id(small_id)
         .is_some_and(|p| p.tiles_owned == tiles.len() as i32);
-    for &t in &tiles {
-        game.conquer(captor, t);
-    }
     if wipe_all {
-        if let Some(p) = game.player_by_small_id_mut(small_id) {
-            p.alive = false;
-            p.tiles_owned = 0;
-            p.border_tiles.clear();
-            p.owned_tiles.clear();
-        }
+        game.conquer_player(captor, small_id);
+    }
+    for t in tiles.iter() {
+        game.conquer(captor, t);
     }
 }
 
@@ -291,7 +334,7 @@ pub fn maybe_remove_clusters(game: &mut Game, small_id: u16, tick: u32) {
     if tick.saturating_sub(last_calc) <= TICKS_PER_CLUSTER_CALC && tiles_owned >= 100 {
         return;
     }
-    if tiles_owned >= 100 && last_change < last_calc {
+    if last_change < last_calc {
         return;
     }
 

@@ -285,6 +285,30 @@ impl GameMap {
         }
     }
 
+    /// TS `GameMap.neighbors4` / `forEachNeighbor` order: north, south, west, east.
+    pub fn neighbors4_ts(&self, t: TileRef, buf: &mut [TileRef; 4]) -> usize {
+        let w = self.width;
+        let x = self.x(t);
+        let mut n = 0usize;
+        if t >= w {
+            buf[n] = t - w;
+            n += 1;
+        }
+        if t < (self.height - 1) * w {
+            buf[n] = t + w;
+            n += 1;
+        }
+        if x > 0 {
+            buf[n] = t - 1;
+            n += 1;
+        }
+        if x + 1 < w {
+            buf[n] = t + 1;
+            n += 1;
+        }
+        n
+    }
+
     pub fn has_owner(&self, t: TileRef) -> bool {
         self.owner_id(t) > 0
     }

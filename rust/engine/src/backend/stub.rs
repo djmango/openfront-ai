@@ -54,13 +54,16 @@ impl StubSession {
             bots,
             ..Default::default()
         };
-        let mut game = Game::new(game_id.clone(), config, wire, map.clone(), map);
+        let mut game = Game::new(game_id.clone(), config, wire, map.clone(), map, None);
         let mut prng = PseudoRandom::new(simple_hash(&format!("rl-{seed}")) + 1);
         game.add_from_info(&PlayerInfo {
             name: "Agent".into(),
             player_type: PlayerType::Human,
             client_id: Some(AGENT_CLIENT_ID.into()),
             id: prng.next_id(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
         });
         game.add_execution(ExecEnum::SpawnTimer(SpawnTimerExecution::new()));
         let mut spawner = TribeSpawner::new(&game_id);

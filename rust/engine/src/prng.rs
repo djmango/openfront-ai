@@ -2,7 +2,7 @@
 
 const POW36_8: f64 = 2_821_109_907_456.0; // 36^8
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PseudoRandom {
     s0: i32,
     s1: i32,

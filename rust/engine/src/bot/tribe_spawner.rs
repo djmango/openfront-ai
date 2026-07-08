@@ -35,6 +35,9 @@ impl TribeSpawner {
                         player_type: PlayerType::Bot,
                         client_id: None,
                         id: self.random.next_id(),
+                        clan_tag: None,
+                        friends: Vec::new(),
+                        team: None,
                     },
                     None,
                 )
