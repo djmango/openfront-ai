@@ -24,6 +24,7 @@ elif [[ "$PULL" == "1" ]]; then
 fi
 
 # Remote default shell is fish; pass one quoted string so bash -lc runs with a real cwd.
-REMOTE_CMD="cd ~/$REMOTE_DIR && OPENFRONT_REPO=\$HOME/openfront-ai PARITY_COMMIT=${PARITY_COMMIT} bash scripts/homelab_parity.sh"
+# OPENFRONT_REPO defaults to the rust-fast tree itself (dedicated openfront submodule).
+REMOTE_CMD="cd ~/$REMOTE_DIR && OPENFRONT_REPO=~/$REMOTE_DIR PARITY_COMMIT=${PARITY_COMMIT} bash scripts/homelab_parity.sh"
 echo "[run_homelab_parity] host=$HOST commit=$PARITY_COMMIT"
 ssh "$HOST" "bash -lc '$REMOTE_CMD'"

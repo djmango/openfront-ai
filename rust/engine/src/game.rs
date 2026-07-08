@@ -1,6 +1,7 @@
 //! Core game state + tick driver.
 
 use crate::core::config::Config as WireConfig;
+use crate::execution::ordered_tiles::OrderedTiles;
 use crate::execution::{ExecEnum, Execution, HashUpdate, WinUpdate};
 use crate::hash::game_hash;
 use crate::core::team_assignment::{assign_teams, populate_player_teams, BOT_TEAM, HUMANS_TEAM, NATIONS_TEAM};
@@ -44,7 +45,7 @@ pub struct Player {
     pub alive: bool,
     pub spawn_tile: Option<TileRef>,
     pub units: Vec<Unit>,
-    pub border_tiles: Vec<TileRef>,
+    pub border_tiles: OrderedTiles,
     pub owned_tiles: Vec<TileRef>,
     pub last_cluster_calc: u32,
     pub last_tile_change: u32,
@@ -78,7 +79,7 @@ impl Default for Player {
             alive: true,
             spawn_tile: None,
             units: vec![],
-            border_tiles: Vec::new(),
+            border_tiles: OrderedTiles::default(),
             owned_tiles: Vec::new(),
             last_cluster_calc: 0,
             last_tile_change: 0,
@@ -742,7 +743,7 @@ impl Game {
             player_type: info.player_type,
             troops,
             gold,
-            border_tiles: Vec::new(),
+            border_tiles: OrderedTiles::default(),
             id_prng: PseudoRandom::new(id_hash),
             team,
             ..Default::default()
@@ -844,7 +845,7 @@ impl Game {
 
     fn collect_border_tiles(&self, small_id: u16) -> Vec<TileRef> {
         self.border_tiles_of(small_id)
-            .map(|tiles| tiles.clone())
+            .map(|tiles| tiles.as_slice().to_vec())
             .unwrap_or_default()
     }
 
@@ -863,7 +864,7 @@ impl Game {
         0
     }
 
-    pub fn border_tiles_of(&self, small_id: u16) -> Option<&Vec<TileRef>> {
+    pub fn border_tiles_of(&self, small_id: u16) -> Option<&OrderedTiles> {
         self.player_by_small_id(small_id)
             .map(|p| &p.border_tiles)
     }
@@ -876,13 +877,9 @@ impl Game {
         let is_br = self.is_border(tile);
         if let Some(p) = self.player_by_small_id_mut(owner) {
             if is_br {
-                if !p.border_tiles.contains(&tile) {
-                    p.border_tiles.push(tile);
-                }
+                p.border_tiles.insert(tile);
             } else {
-                if let Some(i) = p.border_tiles.iter().position(|&t| t == tile) {
-                    p.border_tiles.remove(i);
-                }
+                p.border_tiles.remove(tile);
             }
         }
     }
@@ -974,9 +971,7 @@ impl Game {
         if prev > 0 {
             if let Some(p) = self.player_by_small_id_mut(prev) {
                 p.tiles_owned = (p.tiles_owned - 1).max(0);
-                if let Some(i) = p.border_tiles.iter().position(|&t| t == tile) {
-                    p.border_tiles.remove(i);
-                }
+                p.border_tiles.remove(tile);
                 p.owned_tiles.retain(|&t| t != tile);
                 p.last_tile_change = tick;
             }
@@ -1477,6 +1472,12 @@ impl Game {
                 continue;
             };
             let incoming_attacker = unsafe { (*ptr).owner_small_id() };
+            if self
+                .player_by_small_id(incoming_attacker)
+                .is_none_or(|p| p.tiles_owned == 0)
+            {
+                continue;
+            }
             if incoming_attacker != target_small_id {
                 continue;
             }
@@ -2127,25 +2128,56 @@ impl Game {
     }
 
     pub fn can_send_alliance_request(&self, sender_small_id: u16, recipient_small_id: u16) -> bool {
+        if self.wire.disable_alliances() {
+            return false;
+        }
         if sender_small_id == recipient_small_id {
             return false;
         }
-        if !self
-            .player_by_small_id(sender_small_id)
-            .is_some_and(|p| p.alive)
-        {
+        let Some(sender) = self.player_by_small_id(sender_small_id) else {
+            return false;
+        };
+        let Some(recipient) = self.player_by_small_id(recipient_small_id) else {
+            return false;
+        };
+        if sender.is_disconnected || recipient.is_disconnected {
             return false;
         }
-        if !self
-            .player_by_small_id(recipient_small_id)
-            .is_some_and(|p| p.alive)
-        {
+        if sender.tiles_owned == 0 || recipient.tiles_owned == 0 {
             return false;
         }
         if self.is_friendly(sender_small_id, recipient_small_id) {
             return false;
         }
-        true
+        if self.alliance_requests.iter().any(|r| {
+            r.status == AllianceRequestStatus::Pending
+                && r.requestor_small_id == sender_small_id
+                && r.recipient_small_id == recipient_small_id
+        }) {
+            return false;
+        }
+        if self.alliance_requests.iter().any(|r| {
+            r.status == AllianceRequestStatus::Pending
+                && r.requestor_small_id == recipient_small_id
+                && r.recipient_small_id == sender_small_id
+        }) {
+            return true;
+        }
+        let cooldown = self.wire.alliance_request_cooldown();
+        let recent = self
+            .alliance_requests
+            .iter()
+            .filter(|r| {
+                r.requestor_small_id == sender_small_id
+                    && r.recipient_small_id == recipient_small_id
+                    && r.status != AllianceRequestStatus::Pending
+            })
+            .map(|r| r.created_at)
+            .max();
+        match recent {
+            None => true,
+            Some(created) => self.ticks.saturating_sub(created) >= cooldown,
+        }
     }
 
     pub fn incoming_alliance_requests(&self, small_id: u16) -> Vec<IncomingAllianceRequest> {

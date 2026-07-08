@@ -28,7 +28,7 @@ fn border_bbox(game: &Game, small_id: u16) -> Option<Bbox> {
     let mut min_y = u32::MAX;
     let mut max_x = 0u32;
     let mut max_y = 0u32;
-    for &t in &p.border_tiles {
+    for t in p.border_tiles.iter() {
         let x = game.map.x(t);
         let y = game.map.y(t);
         min_x = min_x.min(x);
@@ -107,7 +107,7 @@ fn city_value(game: &Game, small_id: u16, tile: TileRef, use_connection_score: b
     let mut w = game.map.magnitude(tile) as u32;
     if let Some(p) = game.player_by_small_id(small_id) {
         if !p.border_tiles.is_empty() {
-            let (_, dist) = closest_tile(game, &p.border_tiles, tile);
+            let (_, dist) = closest_tile(game, p.border_tiles.as_slice(), tile);
             if dist != u32::MAX {
                 w += dist.min(border_spacing);
             } else {

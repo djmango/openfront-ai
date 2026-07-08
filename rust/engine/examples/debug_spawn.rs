@@ -7,7 +7,7 @@ use openfront_engine::util::simple_hash;
 
 fn main() {
     let repo = std::env::var("OPENFRONT_REPO")
-        .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai".into());
+        .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
     let path = std::path::Path::new(&repo).join("records/0c4c7d7993c9/jby2gMJF.json.gz");
     let bytes = std::fs::read(&path).unwrap();
     let mut dec = flate2::read::GzDecoder::new(&bytes[..]);

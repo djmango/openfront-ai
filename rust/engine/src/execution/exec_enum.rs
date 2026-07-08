@@ -194,7 +194,13 @@ impl ExecEnum {
             ExecEnum::Factory(_) => "FactoryExecution".into(),
             ExecEnum::TrainStation(_) => "TrainStationExecution".into(),
             ExecEnum::UpgradeStructure(_) => "UpgradeStructureExecution".into(),
-            ExecEnum::AllianceRequest(_) => "AllianceRequestExecution".into(),
+            ExecEnum::AllianceRequest(e) => {
+                format!(
+                    "AllianceRequestExecution({}->{})",
+                    e.requestor_small_id(),
+                    e.recipient_id()
+                )
+            }
             ExecEnum::AllianceReject(_) => "AllianceReject".into(),
             ExecEnum::BreakAlliance(_) => "BreakAlliance".into(),
             ExecEnum::AllianceExtension(_) => "AllianceExtension".into(),
