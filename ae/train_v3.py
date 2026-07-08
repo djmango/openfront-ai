@@ -215,6 +215,12 @@ def main() -> None:
     ap.add_argument("--unit-pos-weight", type=float, default=20.0)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--out", default="runs/ae_v3")
+    ap.add_argument(
+        "--init",
+        default=None,
+        help="optional checkpoint to partially initialize matching tensors "
+             "(v7: seed latent_down=16 from ae_v31_d8c32)",
+    )
     args = ap.parse_args()
 
     device = (
@@ -246,6 +252,25 @@ def main() -> None:
         upsample_decoder=args.upsample_decoder,
         latent_down=args.latent_down,
     ).to(device)
+    if args.init:
+        src = torch.load(args.init, map_location="cpu", weights_only=False)
+        own = model.state_dict()
+        copied, skipped = [], []
+        new_sd = {}
+        for k, v in own.items():
+            old = src["model_state_dict"].get(k)
+            if old is not None and old.shape == v.shape:
+                new_sd[k] = old.to(v.dtype)
+                copied.append(k)
+            else:
+                new_sd[k] = v
+                skipped.append(k)
+        model.load_state_dict(new_sd, strict=True)
+        print(
+            f"init {args.init}: copied {len(copied)} tensors, "
+            f"fresh {len(skipped)} tensors",
+            flush=True,
+        )
     print(f"model: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M params")
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
 

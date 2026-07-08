@@ -66,10 +66,14 @@
   <a href="#webbot">webbot</a>. First live bug after deploy: the bot re-rolled its spawn every
   decision tick (engine <code>SpawnExecution</code> relinquish+re-place) until a bad pick left
   it with 0 tiles - fixed by gating spawn on <code>!hasSpawned()</code>.</p>
-  <p class="d" style="margin:.75rem 0 0"><b><a href="#v7-obs">v7 obs expansion</a></b> is
-  implemented; BC re-replay of the 303 human games is running on the homelab.
-  <code>ppo_v61</code> still climbing on rl5 (4x H100). <code>bc_v6</code> frozen; playable
-  pure-BC baseline <code>v6_bc</code> on HF.</p>
+  <p class="d" style="margin:.75rem 0 0"><b><a href="#v7-obs">v7</a></b> scope amended late
+  evening: full-state obs expansion (implemented) <b>plus</b> the
+  <a href="#v7-fovea">foveated two-stream resolution</a> (to build) ship as one version, one
+  from-scratch retrain. <b>BC is on moratorium</b> (<a href="#bc-moratorium">why</a>):
+  no <code>bc_v7</code>, <code>ppo_v7</code> launches from scratch. BC re-replay of the 303
+  human games keeps running on the homelab (raw sidecars are cheap and shape-agnostic), but it
+  no longer gates anything. <code>ppo_v61</code> still climbing on rl5 (4x H100).
+  <code>bc_v6</code> frozen; playable pure-BC baseline <code>v6_bc</code> on HF.</p>
 </div>
 <h3 id="status">Status snapshot (July 6th evening)</h3>
 <p>
@@ -135,10 +139,10 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
     <td>Pure BC prior for live play / short PPO warm-start experiments: <code>bc_v6/bc_best.pt</code>
     folded into a v6-shape <code>Policy</code> (winner placement bucket, same fold as
     <code>ppo --init</code>). On HF as <code>v6_bc/policy.pt</code>. Play with
-    <code>bash scripts/play_live.sh --run-name v6_bc</code>. There is no <code>v7_bc</code> -
-    v7's obs-shape change (<code>C_GRID</code> 43→89 etc.) makes BC weights unloadable; a fresh
-    BC retrain is required after the homelab archive regen finishes. See
-    <a href="#bc-verdict">the BC verdict</a>.</td></tr>
+    <code>bash scripts/play_live.sh --run-name v6_bc</code>. There is no <code>bc_v7</code> and
+    none is planned: BC is on <a href="#bc-moratorium">moratorium</a> until a controlled
+    experiment proves the warm start earns its cost. <code>ppo_v7</code> launches from scratch.
+    See <a href="#bc-verdict">the BC verdict</a>.</td></tr>
   <tr><td><code>bc_v6</code></td><td><b>frozen</b> Jul 8 eve @ step 35.6k</td>
     <td>Feedforward BC fine-tune on the <a href="#v6-labels">re-replayed v6 labels</a>
     (303 games, formatVersion 3), warm-started from <code>bc_v4</code> via
@@ -924,11 +928,13 @@ the measured bottleneck (per-latent-cell update FLOPs) ~64x, and weight pruning 
 dense conv time on GPUs. Submanifold sparse conv over active cells stays a stretch option
 (~3-5x ceiling, heavy complexity), unscheduled unless post-foveation profiling still shows dead
 compute.</p>
-<p class="d"><b>Naming note:</b> the "v7" tag above turned out to be reused. This page's next
-section is a <i>different</i> v7 - a full-state observation expansion, planned and shipped the
-same day - that landed first because it's independent of the AE and needed no encoder work. The
-foveated two-stream resolution idea described here is still live, just pushed to whatever version
-number comes after the observation-expansion retrain lands.</p>
+<p class="d"><b>Naming note (resolved late Jul 8):</b> the "v7" tag briefly meant two different
+things - the foveation idea above, and the same-day full-state observation expansion in
+<a href="#v7-obs">the next section</a>. Since no v7 run had launched, the scope was merged
+rather than split: <b>v7 = obs expansion + foveation, one version, one from-scratch retrain</b>.
+Both changes break every checkpoint anyway, so shipping them separately would have cost two
+retrains and two BC-cache formats for no benefit. See <a href="#v7-fovea">the amended v7
+scope</a>.</p>
 
 <h2 class="date" id="webbot">July 8th, 2026 - evening: browser-side live play</h2>
 <p class="session">ONNX in the browser, headless Chromium agent, MODEL overlay restored, spawn
@@ -999,9 +1005,7 @@ killed temporal <code>bc_seq_v4</code>):</p>
   <li><b>v7 makes the current BC weights unloadable anyway.</b> The evening's obs expansion
     moves <code>C_GRID</code> 43→89 / <code>P_FEAT</code> 12→21 / <code>N_SCALARS</code> 8→11
     (<a href="#v7-scope">v7 scope</a>), so there is no warm-start path from
-    <code>bc_v6</code> into v7. A fresh <code>bc_v7</code> only makes sense <i>after</i> the
-    homelab archive regen + prefeaturize finishes - and even then, only as a short warm-start
-    prior, not a multi-day accuracy grind.</li>
+    <code>bc_v6</code> into v7.</li>
 </ul>
 <p><b>What we did:</b> froze <code>bc_v6</code> at step 35,600 (ckpt already on HF as
 <code>bc_v6/</code>), <b>terminated</b> the bc3 A100 pod (fleet = rl5 only), and published a
@@ -1013,13 +1017,31 @@ playable pure-BC baseline:</p>
   <li>Play: <code>bash scripts/play_live.sh --run-name v6_bc</code> (now the script default).
     Or short PPO: <code>python -m rl.ppo --init runs/rl/v6_bc/policy.pt …</code> on a
     <b>v6-shape</b> checkout (pre-v7 <code>C_GRID=43</code>) - not against the v7 obs tree.</li>
-  <li>No <code>v7_bc</code> until a post-regen BC retrain; naming reserved.</li>
+  <li>No <code>bc_v7</code>; see the moratorium below.</li>
 </ul>
-<p class="d">Net: BC stays in the toolbox as a cheap prior, not as a research track. Next
-accuracy wins come from obs (v7), reward (outcome-only / fielded troops), and scale (rl5 DDP) -
-not from another week of imitating 300 human games.</p>
+<p id="bc-moratorium"><b>BC moratorium (decided late Jul 8): no further BC runs until further
+notice.</b> The trigger for the moratorium is honesty about evidence: the one claimed BC win -
+<code>ppo_v5</code> clearing early curriculum fast off a BC warm start - was never isolated
+from the reward/curriculum changes that shipped alongside it. Before any <code>bc_v7</code> is
+even considered, the <i>existing</i> BC artifact has to prove it does something useful. The
+unfreeze experiment is cheap and fully specified: on a <b>v6-shape</b> checkout, run two short
+PPO starts under identical seeds/config - <code>ppo --init runs/rl/v6_bc/policy.pt</code> vs
+from-scratch - and compare wall-clock to clear stages 0-3 and stage-4 roll-win at a fixed
+step budget. If the warm start doesn't show a clear, repeatable advantage, BC stays a frozen
+toolbox item indefinitely. Consequences now: <code>ppo_v7</code> launches <b>from scratch with
+no BC warm start</b>; the homelab archive re-replay keeps running (raw sidecars are cheap,
+shape-agnostic, and useful for eval/analysis regardless), but the BC-specific prefeaturize +
+<code>cache-bc/</code> upload steps are <b>deferred</b>, not queued.</p>
+<p class="d">Net: BC stays in the toolbox as a cheap prior hypothesis, not as a research track.
+Next accuracy wins come from obs (v7, now including <a href="#v7-fovea">foveation</a>), reward
+(outcome-only / fielded troops), and scale (rl5 DDP) - not from another week of imitating 300
+human games.</p>
 
-<h3 id="v7-scope">Closing the remaining blind spots</h3>
+<h3 id="v7-scope">Closing the remaining blind spots (v7 part 1: full-state expansion)</h3>
+<p class="d"><b>Scope note (amended late Jul 8):</b> v7 is now two changes shipping as one
+version - this full-state expansion (implemented, below) and the
+<a href="#v7-fovea">foveated two-stream resolution</a> (designed, to build). Both break every
+checkpoint shape, so merging them costs nothing and saves a second from-scratch retrain.</p>
 <p>v6's transient/entity streams omitted several things a human player sees that only started to
 matter once the bots got good enough to punish blindness to them. A plan was written and then
 implemented end to end in one session:</p>
@@ -1051,10 +1073,12 @@ implemented end to end in one session:</p>
 frozen spatial AE (<code>ae/model_v3.py</code>) compresses only the map (ownership + terrain +
 static structures); everything above is either small-and-exact (player features, global scalars)
 or already-transient (unit planes), so it rides the same raw-channel/vector paths v3 established
-for nukes-in-flight and diplomacy. <b>Consequence: no AE retrain, but no BC/PPO checkpoint
-survives either</b> - every shape constant moved (<code>N_TRANSIENT</code> 8→53,
+for nukes-in-flight and diplomacy. <b>Consequence: this part needs no AE retrain, but no BC/PPO
+checkpoint survives</b> - every shape constant moved (<code>N_TRANSIENT</code> 8→53,
 <code>C_GRID</code> 43→89, <code>P_FEAT</code> 12→21, <code>N_SCALARS</code> 8→11,
-<code>N_LOCAL</code> 4→5), so this is a from-scratch BC+PPO retrain, not a warm start.</p>
+<code>N_LOCAL</code> 4→5), so v7 is a from-scratch retrain, not a warm start (PPO only -
+BC is on <a href="#bc-moratorium">moratorium</a>). Note the foveation half of v7
+<i>does</i> need an AE fine-tune; see below.</p>
 
 <h3 id="v7-compat">Engine surface + backward-compatible replay</h3>
 <p><code>obsCore.ts</code> (live play) and <code>datagen/common.ts</code> (replay) both gained the
@@ -1073,6 +1097,77 @@ and the Rust fast-path sampler (<code>rust/ofrs/src/sampler.rs</code>) stays fro
 schema - <code>rl/bc_data.py</code> compares its compiled-in <code>(P_FEAT, N_TRANSIENT,
 N_SCALARS)</code> against the live Python constants and falls back to the pure-Python sampler on
 mismatch, so training is always correct, just slower until the Rust side is ported to match.</p>
+
+<h3 id="v7-fovea">Foveated two-stream resolution (v7 part 2: designed, to build)</h3>
+<p><b>Decision (late Jul 8): the foveated observation is part of v7, not deferred to a later
+version.</b> The original plan (see the <a href="#v6-night-scaling">daytime scaling entry</a>)
+treated foveation as a follow-on because it changes the observation space and trunk input - but
+the full-state expansion above <i>already</i> breaks every checkpoint shape and forces a
+from-scratch retrain. Deferring foveation would mean a second from-scratch retrain and a second
+BC-cache format a few weeks later for zero benefit. Nothing is wasted by merging now: no v7 run
+has launched, the v7 code push is still held back, and prefeaturize hasn't started (and is
+deferred anyway under the <a href="#bc-moratorium">BC moratorium</a>).</p>
+<p><b>Why it's worth it.</b> The <a href="#ae31">v3.1 ablation</a> rejected <i>uniform</i> /16
+latents - border accuracy 78.5% at /16 vs 89.3% at /8, "resolution is the constraint" - but that
+measured uniform resolution everywhere. Strategy-level context doesn't need pixel borders: what
+needs /8 precision is own territory and the contested border band; what's three map-widths away
+only needs to exist as a region. Foveation keeps the /8 fidelity exactly where the ablation said
+it matters and pays /16 everywhere else. On the giant maps that dominate late curriculum stages
+this is ~4x fewer global latent cells, and it cuts <b>update AND rollout AND (later, Phase C)
+transport</b> cost - the single biggest code lever identified in the scaling plan, bigger than
+anything left in Phase A.</p>
+<p><b>Design - two grid streams replacing the single /8 stream:</b></p>
+<ul>
+  <li><b>Coarse global stream, /16 over the full map:</b> AE latents at /16 plus the same
+    transient/bypass channel stack as today, region-averaged to /16. Every tile of the map is
+    represented; nothing is ever fully invisible.</li>
+  <li><b>Fine stream, /8, restricted to own territory + the border band:</b> extends the
+    existing exact-borders local-crop machinery in <code>rl/obs.py</code> (the same philosophy
+    that already gives the policy pixel-exact borders and the 5-plane local crop). Carries the
+    full <code>C_GRID=89</code> channel stack at /8, plus one <b>coverage-mask channel</b> so
+    the trunk can tell "empty" from "outside the fovea". Cells outside coverage are zeroed and
+    masked out of any fine-stream pointer logits.</li>
+  <li><b>Tile pointer heads go two-level:</b> near targets (attacks, expansion, structure
+    placement - the actions the ablation showed need precision) resolve on the fine stream;
+    far targets (nuke aim points, cross-map boat destinations) resolve on the coarse stream,
+    where a /16 region is already the honest precision of those actions. Concretely: the tile
+    head picks a coarse cell first, then refines within the fine stream when the picked cell
+    has fine coverage - one softmax over coarse cells, one masked refinement over the covered
+    fine cells. Exact head wiring is the main open implementation question; the mask
+    plumbing (<code>rl/env.py</code> legality masks per region) must follow whichever wiring
+    wins.</li>
+</ul>
+<p><b>What it requires:</b></p>
+<ul>
+  <li><b>AE /16 fine-tune.</b> The frozen encoder (<code>d8c32</code>) is /8-native. The coarse
+    stream needs a /16 head - fine-tuned from d8c32 (a downsampling stage + short fine-tune, not
+    a from-scratch AE), trained on the same bot+human mix. Quality gate below.</li>
+  <li><b>Obs plumbing in <code>rl/obs.py</code> + the bridge:</b> emit both streams; the fine
+    stream's bounding box / coverage set is derived from ownership + border dilation, recomputed
+    per decision step (it already is, for local crops). Bridge serialization gains the coarse
+    stream; step payload <i>shrinks</i> on big maps.</li>
+  <li><b>Trunk/conv input change:</b> two spatial encoders (share conv weights where shapes
+    allow) pooled and concatenated - the same fusion pattern as today, one more stream.</li>
+</ul>
+<p><b>Gates before <code>ppo_v7</code> launches on this:</b></p>
+<ul>
+  <li><b>AE quality gate:</b> the fine stream keeps d8c32's measured quality by construction
+    (same encoder, same /8). The /16 fine-tune must hit region-level fidelity - structure
+    precision/recall ~1.0 and ownership-region accuracy comparable to <code>ae_v3_mix</code>'s
+    /16 numbers - but is explicitly NOT held to the 89.3% border bar; borders live on the fine
+    stream now. Benchmark table goes to HF next to the d8 one.</li>
+  <li><b>Early-curriculum sanity:</b> the original plan's eval-parity gate (swap obs under a
+    trained policy, stage 4-6 win rate within noise) can't run - v7 is from scratch, there is no
+    trained v7-shape policy to swap under. The honest replacement: <code>ppo_v7</code> must
+    clear stages 0-3 in wall-clock comparable to the v6 lineage (which did it in ~2h on 1 GPU),
+    and per-update cost on the big-map stages must come in measurably under v6.1's. If either
+    fails, the fallback is running v7 with the fine stream covering the whole map (= v7 obs at
+    uniform /8, foveation off via config), which must remain a supported degenerate case.</li>
+</ul>
+<p><b>Still rejected</b> (unchanged from the daytime entry): raw full-res maps into the policy
+with no AE (~64x the measured per-latent-cell update FLOPs; pruning doesn't reduce dense conv
+time on GPUs), and submanifold sparse conv stays an unscheduled stretch option (~3-5x ceiling,
+heavy complexity) unless post-foveation profiling still shows dead compute.</p>
 
 <h3 id="v7-ops" style="scroll-margin-top:0">BC-regen ops saga: three infra bugs before the first
 game replayed</h3>
@@ -1130,16 +1225,22 @@ and shares no state with the v7 retrain, so it stays running untouched - stoppin
 valuable, unrelated run to save ~$12/hr would be the wrong trade. General lesson for this kind of
 work: <b>check what's already running and billing before assuming a clean slate</b> - the pod list
 doesn't show up in any code diff.</p>
-<p><b>Remaining before BC/PPO retrain can start:</b> prefeaturize the freshly re-replayed archive
-into a new <code>cache-bc/</code> (CPU-bound, so doing it on the homelab's 20 cores rather than a
-GPU pod), upload the refreshed <code>maps/</code>/<code>bc/</code>/<code>cache-bc/</code> tars to
-the <code>djmango/openfront-human-games</code> HF dataset repo, then <b>push</b> the already-
-committed v7 code to <code>origin/master</code> (push deliberately held back until the data is
-ready - <code>pod_train.sh</code>/<code>pod_bc.sh</code> bootstrap with
-<code>git reset --hard origin/master</code>, so pushing early would make rl5's next restart load
-v7 shapes against a v6.1 checkpoint and crash), then launch fresh <code>bc_v7</code> and, once
-that converges, <code>ppo_v7</code> from scratch. Until then: keep local master at v7 for the
-homelab regen; rl5 stays on the last pushed commit.</p>
+<p><b>Remaining before <code>ppo_v7</code> can start (amended late Jul 8 for the merged
+scope + BC moratorium):</b> the path no longer runs through BC data at all. In order:
+(1) implement the <a href="#v7-fovea">foveated two-stream obs</a> (coarse /16 stream, fine-stream
+coverage mask, two-level tile head, bridge serialization); (2) run the AE /16 fine-tune off
+<code>d8c32</code> and pass its quality gate; (3) <b>push</b> the combined v7 code to
+<code>origin/master</code> - push still deliberately held back, because
+<code>pod_train.sh</code>/<code>pod_bc.sh</code> bootstrap with
+<code>git reset --hard origin/master</code> and rl5's next restart would load v7 shapes against
+a v6.1 checkpoint and crash; the push therefore coincides with deciding rl5's fate (freeze
+<code>ppo_v61</code> or pin its pod to the pre-v7 commit); (4) launch <code>ppo_v7</code>
+<b>from scratch, no BC warm start</b>. The homelab archive re-replay keeps running to completion
+(the refreshed <code>maps/</code>/<code>bc/</code> sidecars get uploaded to
+<code>djmango/openfront-human-games</code> for archival/eval value), but prefeaturize +
+<code>cache-bc/</code> are deferred under the <a href="#bc-moratorium">moratorium</a> and no
+longer gate anything. Until the push: local master stays at v7 for the homelab regen; rl5 stays
+on the last pushed commit.</p>
 
 <h2 class="date" id="reference">Reference and open threads</h2>
 <p class="session">Tooling, bugs, lessons, infra, recipes, backlog.</p>
@@ -1329,7 +1430,10 @@ from the raw cache IS that idea, done right).</p>
     <code>--bc --rebc</code> (formatVersion 2) carry spawn labels; old v1 sidecars still train
     everything else. Re-replay the archive on a pod to unlock BC spawn supervision everywhere.</li>
   <li><b>BC warm start:</b> does initializing PPO from human imitation beat the 1v1 curriculum
-    bootstrap, or compound with it?</li>
+    bootstrap, or compound with it? <i>Formalized Jul 8 as the
+    <a href="#bc-moratorium">BC moratorium</a>'s unfreeze experiment: v6-shape A/B,
+    <code>--init v6_bc</code> vs from scratch, identical seeds/config. Until it runs and wins,
+    no new BC runs.</i></li>
   <li><b>Warm-start refreshes:</b> future same-architecture encoder updates on new data should
     resume from the current checkpoint (and checkpoint optimizer state, see billing-restart scar)
     instead of 40k fresh steps.</li>

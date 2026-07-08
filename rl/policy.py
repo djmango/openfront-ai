@@ -16,6 +16,7 @@ from rl.obs import (
     ACTIONS,
     BUILD_TYPES,
     C_GRID,
+    C_GRID_FINE,
     N_ACTIONS,
     N_LOCAL,
     N_SCALARS,
@@ -51,6 +52,13 @@ NEEDS_TILE = {
     "cancel_boat",
     "delete_unit",
 }
+REFINE_TILE = {
+    "spawn",
+    "build",
+    "upgrade_structure",
+    "cancel_boat",
+    "delete_unit",
+}
 NEEDS_QUANTITY = {"attack", "expand", "boat", "donate_gold", "donate_troops"}
 
 MASKED_NEG = -1e9
@@ -83,6 +91,42 @@ def _global_to_local(region: torch.Tensor, gw: int) -> torch.Tensor:
     return (r // GW_MAX) * gw + (r % GW_MAX)
 
 
+def _fine_local_to_global(
+    local: torch.Tensor, gw: int, origin: torch.Tensor
+) -> torch.Tensor:
+    from rl.curriculum import GW_MAX
+
+    gy = local // gw + origin[:, 0].long()
+    gx = local % gw + origin[:, 1].long()
+    return gy * GW_MAX + gx
+
+
+def _coarse_local_to_global(local: torch.Tensor, gw: int) -> torch.Tensor:
+    from rl.curriculum import GW_MAX
+
+    cy, cx = local // gw, local % gw
+    return (cy * 2) * GW_MAX + (cx * 2)
+
+
+def _global_to_fine_local(
+    region: torch.Tensor, gw: int, origin: torch.Tensor
+) -> torch.Tensor:
+    from rl.curriculum import GW_MAX
+
+    r = region.clamp(min=0)
+    gy = r // GW_MAX - origin[:, 0].long()
+    gx = r % GW_MAX - origin[:, 1].long()
+    return gy * gw + gx
+
+
+def _global_to_coarse_local(region: torch.Tensor, gw: int) -> torch.Tensor:
+    from rl.curriculum import GW_MAX
+
+    r = region.clamp(min=0)
+    gy, gx = r // GW_MAX, r % GW_MAX
+    return (gy // 2) * gw + (gx // 2)
+
+
 class ResBlock(nn.Module):
     def __init__(self, c: int):
         super().__init__()
@@ -104,8 +148,13 @@ class Policy(nn.Module):
         lc: int = 64,
     ):
         super().__init__()
-        self.grid_net = nn.Sequential(
+        self.grid_coarse_net = nn.Sequential(
             nn.Conv2d(C_GRID, gc, 3, padding=1),
+            nn.SiLU(),
+            *[ResBlock(gc) for _ in range(blocks)],
+        )
+        self.grid_fine_net = nn.Sequential(
+            nn.Conv2d(C_GRID_FINE, gc, 3, padding=1),
             nn.SiLU(),
             *[ResBlock(gc) for _ in range(blocks)],
         )
@@ -126,12 +175,15 @@ class Policy(nn.Module):
             num_layers=2,
         )
         self.trunk = nn.Sequential(
-            nn.Linear(gc + pc + lc + N_SCALARS, hidden), nn.SiLU(),
+            nn.Linear(2 * gc + pc + lc + N_SCALARS, hidden), nn.SiLU(),
             nn.Linear(hidden, hidden), nn.SiLU(),
         )
         self.head_action = nn.Linear(hidden, N_ACTIONS)
         self.head_player_q = nn.Linear(hidden, pc)  # query against player embs
-        self.head_tile = nn.Sequential(
+        self.head_tile_coarse = nn.Sequential(
+            nn.Conv2d(gc + hidden, 256, 1), nn.SiLU(), nn.Conv2d(256, 1, 1)
+        )
+        self.head_tile_fine = nn.Sequential(
             nn.Conv2d(gc + hidden, 256, 1), nn.SiLU(), nn.Conv2d(256, 1, 1)
         )
         self.head_build = nn.Linear(hidden, len(BUILD_TYPES))
@@ -139,11 +191,46 @@ class Policy(nn.Module):
         self.head_quantity = nn.Linear(hidden, 2)  # Beta alpha/beta params
         self.head_value = nn.Linear(hidden, 1)
 
-    def trunk_forward(self, o: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        g = self.grid_net(o["grid"])  # (B, gc, GH, GW)
-        gv = o["grid_valid"].unsqueeze(1)  # (B, 1, GH, GW)
-        g = g * gv  # zero padded regions so they don't leak into the pool
-        g_pool = g.sum(dim=(2, 3)) / gv.sum(dim=(2, 3)).clamp(min=1)
+    def _ensure_foveated(self, o: dict) -> dict:
+        """Legacy obs dicts become full-map fine + pooled coarse inputs."""
+        if "grid_fine" in o:
+            return o
+        fine_cov = o["grid_valid"]
+        o = dict(o)
+        if o["grid"].shape[1] == C_GRID_FINE:
+            o["grid_fine"] = o["grid"]
+            base_grid = o["grid"][:, :C_GRID]
+        else:
+            o["grid_fine"] = torch.cat([o["grid"], fine_cov.unsqueeze(1)], dim=1)
+            base_grid = o["grid"]
+        o["grid_fine_valid"] = fine_cov
+        o["fine_coverage"] = fine_cov
+        o["fine_origin"] = torch.zeros(
+            o["grid"].shape[0], 2, dtype=torch.long, device=o["grid"].device
+        )
+        o["legal_tile_fine"] = o["legal_tile"]
+        o["grid_coarse"] = F.avg_pool2d(
+            base_grid, 2, stride=2, ceil_mode=True, count_include_pad=False
+        )
+        o["grid_coarse_valid"] = F.max_pool2d(
+            o["grid_valid"].unsqueeze(1), 2, stride=2, ceil_mode=True
+        ).squeeze(1)
+        o["legal_tile_coarse"] = F.max_pool2d(
+            o["legal_tile"].unsqueeze(1), 2, stride=2, ceil_mode=True
+        ).squeeze(1)
+        return o
+
+    def trunk_forward(self, o: dict) -> tuple[torch.Tensor, dict, torch.Tensor]:
+        o = self._ensure_foveated(o)
+        gc_map = self.grid_coarse_net(o["grid_coarse"])
+        gc_valid = o["grid_coarse_valid"].unsqueeze(1)
+        gc_map = gc_map * gc_valid
+        gc_pool = gc_map.sum(dim=(2, 3)) / gc_valid.sum(dim=(2, 3)).clamp(min=1)
+
+        gf_map = self.grid_fine_net(o["grid_fine"])
+        gf_valid = o["grid_fine_valid"].unsqueeze(1)
+        gf_map = gf_map * gf_valid
+        gf_pool = gf_map.sum(dim=(2, 3)) / gf_valid.sum(dim=(2, 3)).clamp(min=1)
 
         p = self.player_tf(
             self.player_in(o["players"]),
@@ -153,26 +240,28 @@ class Policy(nn.Module):
         p_pool = (p * m).sum(1) / m.sum(1).clamp(min=1)
 
         l_pool = self.local_net(o["local"])
-        h = self.trunk(torch.cat([g_pool, p_pool, l_pool, o["scalars"]], dim=-1))
-        return h, g, p
+        h = self.trunk(torch.cat([gc_pool, gf_pool, p_pool, l_pool, o["scalars"]], dim=-1))
+        return h, {"coarse": gc_map, "fine": gf_map}, p
 
-    def heads(self, h: torch.Tensor, g: torch.Tensor, p: torch.Tensor, o: dict) -> dict:
+    def heads(self, h: torch.Tensor, g: dict, p: torch.Tensor, o: dict) -> dict:
+        o = self._ensure_foveated(o)
         act_logits = self.head_action(h) + (o["legal_actions"] - 1) * -MASKED_NEG
 
         q = self.head_player_q(h)  # (B, pc)
         player_logits = torch.einsum("bd,bsd->bs", q, p)  # (B, S)
 
-        hm = h[:, :, None, None].expand(-1, -1, g.shape[2], g.shape[3])
-        tile_logits = self.head_tile(torch.cat([g, hm], dim=1)).flatten(1)
-        # legal_tile is all-ones normally and the valid-spawn-region mask
-        # during the spawn phase; padding is zero in both it and grid_valid.
-        tile_mask = o["grid_valid"] * o["legal_tile"]
-        tile_logits = tile_logits + (tile_mask.flatten(1) - 1) * -MASKED_NEG
+        gc_map, gf_map = g["coarse"], g["fine"]
+        hc = h[:, :, None, None].expand(-1, -1, gc_map.shape[2], gc_map.shape[3])
+        hf = h[:, :, None, None].expand(-1, -1, gf_map.shape[2], gf_map.shape[3])
+        tile_coarse = self.head_tile_coarse(torch.cat([gc_map, hc], dim=1)).flatten(1)
+        tile_fine = self.head_tile_fine(torch.cat([gf_map, hf], dim=1)).flatten(1)
 
         return {
             "action": act_logits,
             "player": player_logits,
-            "tile": tile_logits,
+            "tile_coarse": tile_coarse,
+            "tile_fine": tile_fine,
+            "tile": tile_fine,
             "build": self.head_build(h) + (o["legal_build"] - 1) * -MASKED_NEG,
             "nuke": self.head_nuke(h) + (o["legal_nuke"] - 1) * -MASKED_NEG,
             "quantity": self.head_quantity(h),
@@ -182,6 +271,61 @@ class Policy(nn.Module):
     def forward(self, o: dict) -> dict:
         h, g, p = self.trunk_forward(o)
         return self.heads(h, g, p, o)
+
+    def _fine_to_coarse_mask(self, o: dict, cgh: int, cgw: int) -> torch.Tensor:
+        """Which coarse cells contain at least one legal covered fine cell."""
+        B, fh, fw = o["legal_tile_fine"].shape
+        out = o["legal_tile_fine"].new_zeros(B, cgh, cgw)
+        for b in range(B):
+            yy, xx = torch.nonzero(o["legal_tile_fine"][b] > 0, as_tuple=True)
+            if yy.numel() == 0:
+                continue
+            gy = yy + o["fine_origin"][b, 0].long()
+            gx = xx + o["fine_origin"][b, 1].long()
+            out[b, gy // 2, gx // 2] = 1.0
+        return out * o["grid_coarse_valid"]
+
+    def _coarse_logits_for_action(
+        self, out: dict, o: dict, action: torch.Tensor
+    ) -> torch.Tensor:
+        base = o["grid_coarse_valid"] * o["legal_tile_coarse"]
+        refine_action = torch.tensor(
+            [ACTIONS[i] in REFINE_TILE for i in range(N_ACTIONS)],
+            device=action.device,
+        )[action]
+        fine_coarse = self._fine_to_coarse_mask(
+            o, o["grid_coarse_valid"].shape[1], o["grid_coarse_valid"].shape[2]
+        )
+        # If a degenerate sample has no fine legal cells, fall back to the
+        # coarse mask instead of constructing an all-masked categorical.
+        has_fine = fine_coarse.flatten(1).sum(1) > 0
+        use_fine = refine_action & has_fine
+        mask = torch.where(use_fine[:, None, None], fine_coarse, base)
+        return out["tile_coarse"] + (mask.flatten(1) - 1) * -MASKED_NEG
+
+    def _fine_logits_for_coarse(
+        self, out: dict, o: dict, coarse: torch.Tensor
+    ) -> torch.Tensor:
+        B, fh, fw = o["legal_tile_fine"].shape
+        cgw = o["grid_coarse_valid"].shape[2]
+        cy, cx = coarse // cgw, coarse % cgw
+        yy = torch.arange(fh, device=coarse.device)[None, :, None]
+        xx = torch.arange(fw, device=coarse.device)[None, None, :]
+        gy = yy + o["fine_origin"][:, 0, None, None].long()
+        gx = xx + o["fine_origin"][:, 1, None, None].long()
+        mask = (
+            (gy // 2 == cy[:, None, None])
+            & (gx // 2 == cx[:, None, None])
+        ).float()
+        mask = mask * o["legal_tile_fine"] * o["grid_fine_valid"]
+        fallback = o["legal_tile_fine"] * o["grid_fine_valid"]
+        fallback = torch.where(
+            fallback.flatten(1).sum(1)[:, None, None] > 0,
+            fallback,
+            o["grid_fine_valid"],
+        )
+        mask = torch.where(mask.flatten(1).sum(1)[:, None, None] > 0, mask, fallback)
+        return out["tile_fine"] + (mask.flatten(1) - 1) * -MASKED_NEG
 
     @torch.no_grad()
     def act(
@@ -193,6 +337,7 @@ class Policy(nn.Module):
         With debug=True each choice carries a "debug" dict (masked action
         probabilities + value estimate) for visualization; strip it before
         piping choices anywhere."""
+        o = self._ensure_foveated(o)
         out = self.forward(o)
         B = out["action"].shape[0]
         dev = out["action"].device
@@ -201,6 +346,7 @@ class Policy(nn.Module):
         a = d_act.probs.argmax(-1) if greedy else d_act.sample()
         logp = d_act.log_prob(a)
 
+        o = self._ensure_foveated(o)
         # Player head mask depends on the sampled action.
         pmask = o["legal_ptarget"].gather(
             1, a[:, None, None].expand(-1, 1, MAX_SLOTS)
@@ -208,7 +354,6 @@ class Policy(nn.Module):
         heads = {}
         for name, logits in [
             ("player", out["player"] + (pmask - 1) * -MASKED_NEG),
-            ("tile", out["tile"]),
             ("build", out["build"]),
             ("nuke", out["nuke"]),
         ]:
@@ -230,6 +375,9 @@ class Policy(nn.Module):
         needs_t = torch.tensor(
             [ACTIONS[i] in NEEDS_TILE for i in range(N_ACTIONS)], device=dev
         )[a]
+        refine_t = torch.tensor(
+            [ACTIONS[i] in REFINE_TILE for i in range(N_ACTIONS)], device=dev
+        )[a]
         needs_q = torch.tensor(
             [ACTIONS[i] in NEEDS_QUANTITY for i in range(N_ACTIONS)], device=dev
         )[a]
@@ -237,7 +385,23 @@ class Policy(nn.Module):
         is_nuke = a == ACTIONS.index("launch_nuke")
 
         logp = logp + torch.where(needs_p, heads["player"][1], 0.0)
-        logp = logp + torch.where(needs_t, heads["tile"][1], 0.0)
+
+        coarse_logits = self._coarse_logits_for_action(out, o, a)
+        d_coarse = torch.distributions.Categorical(logits=coarse_logits)
+        coarse = d_coarse.probs.argmax(-1) if greedy else d_coarse.sample()
+        coarse_lp = d_coarse.log_prob(coarse)
+        fine_logits = self._fine_logits_for_coarse(out, o, coarse)
+        d_fine = torch.distributions.Categorical(logits=fine_logits)
+        fine = d_fine.probs.argmax(-1) if greedy else d_fine.sample()
+        fine_lp = d_fine.log_prob(fine)
+        tile_lp = torch.where(refine_t, coarse_lp + fine_lp, coarse_lp)
+        tile_region = torch.where(
+            refine_t,
+            _fine_local_to_global(fine, o["grid_fine"].shape[3], o["fine_origin"]),
+            _coarse_local_to_global(coarse, o["grid_coarse"].shape[3]),
+        )
+
+        logp = logp + torch.where(needs_t, tile_lp, 0.0)
         logp = logp + torch.where(is_build, heads["build"][1], 0.0)
         logp = logp + torch.where(is_nuke, heads["nuke"][1], 0.0)
         logp = logp + torch.where(needs_q, heads["quantity"][1], 0.0)
@@ -248,9 +412,7 @@ class Policy(nn.Module):
             if needs_p[b]:
                 c["player_slot"] = int(heads["player"][0][b])
             if needs_t[b]:
-                c["tile_region"] = int(
-                    _local_to_global(heads["tile"][0][b], o["grid"].shape[3])
-                )
+                c["tile_region"] = int(tile_region[b])
             if is_build[b]:
                 c["build_type"] = int(heads["build"][0][b])
             if is_nuke[b]:
@@ -307,10 +469,35 @@ class Policy(nn.Module):
             1, choice["action"].clamp(min=0)[:, None, None].expand(-1, 1, MAX_SLOTS)
         ).squeeze(1)
         sub("player", "player_slot", pmask)
-        choice = {**choice, "tile_region": _global_to_local(
-            choice["tile_region"], o["grid"].shape[3]
-        ).where(choice["tile_region"] >= 0, choice["tile_region"])}
-        sub("tile", "tile_region")
+        t_used = choice["tile_region"] >= 0
+        if t_used.any():
+            coarse_target = _global_to_coarse_local(
+                choice["tile_region"], o["grid_coarse"].shape[3]
+            )
+            coarse_logits = self._coarse_logits_for_action(
+                out, o, choice["action"].clamp(min=0)
+            )
+            dd = torch.distributions.Categorical(logits=coarse_logits[t_used])
+            lp = dd.log_prob(coarse_target[t_used])
+            idx = t_used.nonzero(as_tuple=True)[0]
+            logp = logp.index_put((idx,), lp, accumulate=True)
+            ent = ent.index_put((idx,), dd.entropy(), accumulate=True)
+
+            refine = torch.tensor(
+                [ACTIONS[i] in REFINE_TILE for i in range(N_ACTIONS)],
+                device=choice["action"].device,
+            )[choice["action"].clamp(min=0)] & t_used
+            if refine.any():
+                fine_target = _global_to_fine_local(
+                    choice["tile_region"], o["grid_fine"].shape[3], o["fine_origin"]
+                )
+                fine_logits = self._fine_logits_for_coarse(out, o, coarse_target)
+                dd = torch.distributions.Categorical(logits=fine_logits[refine])
+                idx = refine.nonzero(as_tuple=True)[0]
+                logp = logp.index_put(
+                    (idx,), dd.log_prob(fine_target[refine]), accumulate=True
+                )
+                ent = ent.index_put((idx,), dd.entropy(), accumulate=True)
         sub("build", "build_type")
         sub("nuke", "nuke_type")
 

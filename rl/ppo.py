@@ -44,7 +44,7 @@ from torch.utils.tensorboard import SummaryWriter
 from collections import deque
 
 from rl.curriculum import STAGES, WINDOW
-from rl.obs import ACTIONS, collate, encode_grids, load_ae
+from rl.obs import ACTIONS, COARSE_REGION, collate, encode_grids, load_ae
 from rl.policy import Policy
 from rl.vec import VecEnv
 
@@ -66,7 +66,9 @@ ENT_GRACE_UPDATES = 20
 # compute entirely.
 MAX_UPD_PIX = 1_600_000
 OBS_KEYS = [
-    "grid", "grid_valid", "legal_tile", "local", "players", "pmask", "scalars",
+    "grid_fine", "grid_fine_valid", "fine_coverage", "fine_origin",
+    "legal_tile_fine", "grid_coarse", "grid_coarse_valid", "legal_tile_coarse",
+    "local", "players", "pmask", "scalars",
     "legal_actions", "legal_ptarget", "legal_build", "legal_nuke",
 ]
 
@@ -153,7 +155,7 @@ def save_train_state(out_dir: Path, state: dict) -> None:
 
 @torch.no_grad()
 def run_eval(
-    policy, ae, device: str, stage: int, episodes: int, max_ticks: int
+    policy, ae, coarse_ae, device: str, stage: int, episodes: int, max_ticks: int
 ) -> dict:
     """Deployment-style eval: fresh fixed-seed envs (worker i always plays
     seed w{i}-ep0 at this stage), greedy actions, one episode per env.
@@ -166,7 +168,7 @@ def run_eval(
             pending = [i for i in range(episodes) if i not in results]
             if not pending:
                 break
-            obs_list = encode_grids(ae, vec.obs_group(pending), device)
+            obs_list = encode_grids(ae, vec.obs_group(pending), device, coarse_ae=coarse_ae)
             ot = {
                 k: torch.from_numpy(v).to(device)
                 for k, v in collate(obs_list, OBS_KEYS).items()
@@ -197,6 +199,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", type=int, default=0, help="starting curriculum stage")
     ap.add_argument("--ckpt", default="runs/ae_v31_d8c32/ae_v3.pt")
+    ap.add_argument("--coarse-ckpt", default=None,
+                    help="optional native /16 AE checkpoint for v7 foveated coarse stream")
     ap.add_argument("--name", default="ppo_v1")
     ap.add_argument("--envs", type=int, default=8)
     ap.add_argument("--updates", type=int, default=1000)
@@ -302,6 +306,10 @@ def main() -> None:
     recent_scores: deque[float] = deque(maxlen=WINDOW)
     recent_wins: deque[float] = deque(maxlen=WINDOW)
     ae = load_ae(args.ckpt, device)
+    coarse_ae = (
+        load_ae(args.coarse_ckpt, device, expected_down=COARSE_REGION)
+        if args.coarse_ckpt else None
+    )
     base_policy = Policy().to(device)
     opt = torch.optim.AdamW(base_policy.parameters(), lr=args.lr, fused=cuda)
     start_update = 0
@@ -334,9 +342,10 @@ def main() -> None:
                     base_policy.head_quantity, base_policy.head_value,
                 ):
                     head.bias += head.weight @ c
-                conv = base_policy.head_tile[0]  # Conv2d(gc + hidden, ., 1)
-                gc_in = conv.in_channels - c.shape[0]
-                conv.bias += conv.weight[:, gc_in:, 0, 0] @ c
+                for tile_head in (base_policy.head_tile_coarse, base_policy.head_tile_fine):
+                    conv = tile_head[0]  # Conv2d(gc + hidden, ., 1)
+                    gc_in = conv.in_channels - c.shape[0]
+                    conv.bias += conv.weight[:, gc_in:, 0, 0] @ c
         dropped = sorted({k.split(".")[0] for k in sd if k not in own})
         print(
             f"warm start from {args.init}: {len(shared)} tensors, "
@@ -497,7 +506,9 @@ def main() -> None:
     groups = (list(range(half)), list(range(half, N)))
 
     def act_group(idxs: list[int]) -> tuple:
-        obs_list = encode_grids(ae, vec.obs_group(idxs), device, fp16=True)
+        obs_list = encode_grids(
+            ae, vec.obs_group(idxs), device, fp16=True, coarse_ae=coarse_ae
+        )
         ot = to_device(collate(obs_list, OBS_KEYS), f"act{idxs[0]}")
         with act_lock, torch.no_grad(), amp():
             choices, logp, value = act_policy.act(ot)
@@ -600,7 +611,7 @@ def main() -> None:
 
         # Bootstrap values and GAE per env (values from the acting snapshot,
         # consistent with value_buf).
-        obs_last = encode_grids(ae, vec.obs(), device)
+        obs_last = encode_grids(ae, vec.obs(), device, coarse_ae=coarse_ae)
         with act_lock, torch.no_grad(), amp():
             ot = {
                 k: (torch.from_numpy(v).to(device))
@@ -755,10 +766,13 @@ def main() -> None:
             # Shape-grouped, pixel-budgeted sub-batches (see MAX_UPD_PIX).
             by_shape: dict[tuple, list[int]] = {}
             for i in mb:
-                by_shape.setdefault(all_obs[i]["grid"].shape[1:], []).append(int(i))
+                by_shape.setdefault(
+                    (all_obs[i]["grid_fine"].shape[1:], all_obs[i]["grid_coarse"].shape[1:]),
+                    [],
+                ).append(int(i))
             subs = []
-            for (h, w), idxs in by_shape.items():
-                per = max(1, MAX_UPD_PIX // (h * w))
+            for ((fh, fw), (ch, cw)), idxs in by_shape.items():
+                per = max(1, MAX_UPD_PIX // (fh * fw + ch * cw))
                 for k in range(0, len(idxs), per):
                     part = idxs[k : k + per]
                     subs.append(
@@ -956,7 +970,7 @@ def main() -> None:
             # resets on ops churn).
             t_eval = time.time()
             ev = run_eval(
-                base_policy, ae, device, stage, args.eval_episodes,
+                base_policy, ae, coarse_ae, device, stage, args.eval_episodes,
                 args.max_episode_ticks,
             )
             writer.add_scalar("eval/win", ev["win"], global_step)

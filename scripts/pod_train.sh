@@ -34,6 +34,11 @@ INIT_BC="${INIT_BC:-}"
 # --init-extend whenever --resume is passed, so crash relaunches can't
 # re-extend and wipe progress.
 INIT_EXTEND="${INIT_EXTEND:-}"
+# Optional v7 foveation coarse AE. Existing runs leave this unset and keep
+# using pooled-/8 coarse features; ppo_v7 should point at a latent_down=16
+# checkpoint (downloaded from HF when COARSE_AE_HF_FILE is set).
+COARSE_AE="${COARSE_AE:-}"
+COARSE_AE_HF_FILE="${COARSE_AE_HF_FILE:-}"
 REPO_DIR=/workspace/openfront-ai
 
 # When run as the pod start command this replaces the image's /start.sh,
@@ -101,6 +106,17 @@ import shutil
 p = hf_hub_download('djmango/openfront-tile-autoencoder', 'ae_v31_d8c32.pt')
 shutil.copy(p, 'runs/ae_v31_d8c32/ae_v3.pt')
 print('fetched AE checkpoint (v3.1 d8c32)')
+"
+fi
+
+if [ -n "$COARSE_AE_HF_FILE" ] && [ -n "$COARSE_AE" ] && [ ! -f "$COARSE_AE" ]; then
+  mkdir -p "$(dirname "$COARSE_AE")"
+  python -c "
+from huggingface_hub import hf_hub_download
+import shutil
+p = hf_hub_download('djmango/openfront-tile-autoencoder', '$COARSE_AE_HF_FILE')
+shutil.copy(p, '$COARSE_AE')
+print('fetched coarse AE checkpoint $COARSE_AE_HF_FILE')
 "
 fi
 
@@ -176,6 +192,10 @@ while true; do
   else
     LAUNCH="python -m"
   fi
+  COARSE_ARG=""
+  if [ -n "$COARSE_AE" ]; then
+    COARSE_ARG="--coarse-ckpt $COARSE_AE"
+  fi
   # NCCL_NVLS_ENABLE=0: NVLS (NVLink SHARP multicast) needs cuMem multicast
   # APIs that RunPod containers don't expose - NCCL init dies with CUDA
   # error 401. Plain NVLink P2P is plenty at our collective sizes.
@@ -183,7 +203,7 @@ while true; do
     NCCL_NVLS_ENABLE=0 \
     MALLOC_MMAP_THRESHOLD_=268435456 MALLOC_TRIM_THRESHOLD_=268435456 \
     $LAUNCH rl.ppo --envs "$ENVS" --updates 100000 --rollout 32 \
-    --minibatch "$MINIBATCH" --name "$RUN_NAME" --stage "$STAGE" $RESUME $INIT \
+    --minibatch "$MINIBATCH" --name "$RUN_NAME" --stage "$STAGE" $COARSE_ARG $RESUME $INIT \
     2>&1 | tee -a "/tmp/train_$RUN_NAME.log"
   ELAPSED=$(( $(date +%s) - START_TS ))
   if [ "$ELAPSED" -lt 120 ]; then

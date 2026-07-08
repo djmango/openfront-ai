@@ -1,11 +1,16 @@
 """Observation builder: frozen spatial-AE latent + exact bypass features.
 
 Per DESIGN.md: the AE compresses the map; everything small reaches the
-policy raw. v4 layout (d8c32 encoder, everything at 1/8 resolution):
+policy raw. v7 foveated layout:
 
-  grid:     (C_GRID, H/8, W/8) - frozen z_grid (32ch) + ego ownership
-            planes (3) + defense-bonus fraction (1, v7, exact bypass) +
-            transient unit planes (N_TRANSIENT, exact)
+  grid_coarse:
+            (C_GRID, ceil(H/16), ceil(W/16)) global context. Today this is
+            derived by pooling the d8c32 /8 grid 2x; once the /16 AE
+            fine-tune lands it becomes the native /16 latent stream.
+  grid_fine:
+            (C_GRID + 1, h_f, w_f) cropped /8 fovea over own territory +
+            border band; final channel is coverage mask so "outside fovea"
+            is distinct from empty.
   local:    (N_LOCAL, LOCAL, LOCAL) raw owner-map crop centered on the
             agent's territory - exact borders where the agent acts most
             (own/ally/enemy/land/defense-bonus, v7)
@@ -13,8 +18,7 @@ policy raw. v4 layout (d8c32 encoder, everything at 1/8 resolution):
   pmask:    (MAX_SLOTS,) slot exists
   scalars:  (N_SCALARS,) own/global state
   legal_*:  action masks (exact, from the bridge), including legal_tile
-            (H/8, W/8) - all-ones normally, valid spawn regions during
-            the spawn phase
+            fine/coarse tile masks derived from the same /8 legality grid.
 
 Split of labor (v4): prepare() is cheap numpy over SMALL state (entity
 planes, player features, masks). All full-resolution work - slot classing,
@@ -42,9 +46,12 @@ MAGNITUDE_MASK = 0x1F
 MAGNITUDE_NORM = 31.0
 IMPASSABLE_MAGNITUDE = 31  # land tiles at this magnitude cannot be owned
 
-# v4 spatial resolution: one latent cell / tile-pointer region per 8x8 tiles.
+# Fine spatial resolution: one latent cell / tile-pointer region per 8x8 tiles.
 REGION = 8
 LATENT_C = 32  # d8c32; asserted against the checkpoint in load_ae()
+COARSE_FACTOR = 2
+COARSE_REGION = REGION * COARSE_FACTOR
+FOVEA_RADIUS = 6  # /8 regions around own territory, enough to cover borders
 
 # Transient planes (exact bypass, rendered at 1/REGION). v7: every *_BASE
 # below is an own/ally/enemy triplet (index BASE + {0,1,2}); a unit's class
@@ -78,6 +85,7 @@ N_TRANSIENT = 53
 # frozen AE's input, which stays land+magnitude+fallout only).
 N_DEFENSE_BONUS = 1
 C_GRID = LATENT_C + 3 + N_DEFENSE_BONUS + N_TRANSIENT
+C_GRID_FINE = C_GRID + 1  # + coverage mask channel
 
 # Raw local owner-map crop (exact-borders bypass): own/ally/enemy/land/
 # defense-bonus (v7) planes over a LOCAL x LOCAL tile window centered on
@@ -140,7 +148,12 @@ def log_norm(x: float) -> float:
     return float(np.log10(1.0 + max(0.0, x)) / 8.0)
 
 
-def load_ae(ckpt_path: str | Path, device: str = "cpu") -> SpatialAE:
+def load_ae(
+    ckpt_path: str | Path,
+    device: str = "cpu",
+    expected_down: int = REGION,
+    expected_c: int = LATENT_C,
+) -> SpatialAE:
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     a = ckpt["args"]
     ae = SpatialAE(
@@ -151,10 +164,10 @@ def load_ae(ckpt_path: str | Path, device: str = "cpu") -> SpatialAE:
     ).to(device)
     ae.load_state_dict(ckpt["model_state_dict"])
     ae.eval()
-    if ae.latent_down != REGION or ae.latent_c != LATENT_C:
+    if ae.latent_down != expected_down or ae.latent_c != expected_c:
         raise ValueError(
             f"encoder {ckpt_path} is {ae.latent_c}ch @ 1/{ae.latent_down}; "
-            f"v4 expects {LATENT_C}ch @ 1/{REGION} (ae_v31_d8c32)"
+            f"expected {expected_c}ch @ 1/{expected_down}"
         )
     return ae
 
@@ -719,6 +732,49 @@ def _unpack_bits(packed: torch.Tensor, w: int) -> torch.Tensor:
     return bits.reshape(packed.shape[0], packed.shape[1], w).float()
 
 
+def _coarsen_mask(mask: np.ndarray) -> np.ndarray:
+    """Any-valid 2x2 pooling from /8 tile regions to /16 coarse cells."""
+    h, w = mask.shape
+    ph, pw = h % COARSE_FACTOR, w % COARSE_FACTOR
+    if ph or pw:
+        mask = np.pad(mask, ((0, (COARSE_FACTOR - ph) % COARSE_FACTOR),
+                             (0, (COARSE_FACTOR - pw) % COARSE_FACTOR)))
+    return mask.reshape(
+        mask.shape[0] // COARSE_FACTOR, COARSE_FACTOR,
+        mask.shape[1] // COARSE_FACTOR, COARSE_FACTOR,
+    ).max(axis=(1, 3)).astype(np.float32)
+
+
+def _fine_coverage(
+    classmap: torch.Tensor, land: torch.Tensor, legal_tile: np.ndarray
+) -> tuple[torch.Tensor, tuple[int, int, int, int]]:
+    """Own-territory + border-band coverage on the /8 grid.
+
+    Returns a cropped coverage mask and its full-grid box (y0, x0, y1, x1).
+    During spawn (no owned territory yet), coverage follows legal spawn
+    regions so the policy can place anywhere valid.
+    """
+    own = F.avg_pool2d((classmap == 1).float().unsqueeze(0).unsqueeze(0), REGION)[0, 0] > 0
+    land8 = F.avg_pool2d(land.float().unsqueeze(0).unsqueeze(0), REGION)[0, 0] > 0
+    if own.any():
+        k = 2 * FOVEA_RADIUS + 1
+        cov = F.max_pool2d(
+            own.float().unsqueeze(0).unsqueeze(0), k, stride=1,
+            padding=FOVEA_RADIUS,
+        )[0, 0] > 0
+        cov = cov & land8
+    else:
+        cov = torch.from_numpy(legal_tile > 0).to(classmap.device)
+        if not cov.any():
+            cov = land8
+    if not cov.any():
+        cov = torch.ones_like(land8, dtype=torch.bool)
+    ys, xs = torch.nonzero(cov, as_tuple=True)
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    return cov[y0:y1, x0:x1].float(), (y0, x0, y1, x1)
+
+
 def _local_crops(
     classmap: torch.Tensor, land: torch.Tensor, defense_bonus: torch.Tensor
 ) -> torch.Tensor:
@@ -818,6 +874,7 @@ def encode_grids(
     fp16: bool = False,
     z_cache: ZCache | None = None,
     torch_out: bool = False,
+    coarse_ae: SpatialAE | None = None,
 ) -> list[dict]:
     """Batched full-resolution featurization on the GPU: frozen-AE encode,
     ego ownership pooling, fallout unpacking, and the local owner crop.
@@ -836,6 +893,11 @@ def encode_grids(
     z_cache (BC only): raws carrying a "z_key" reuse cached AE latents and
     skip the encode plus the terrain/fallout/static uploads (AE-only
     inputs); per-player work (ego, local crop) still runs per sample.
+    coarse_ae: optional native /16 encoder for the global coarse stream.
+    Local smoke tests may leave this unset, in which case the coarse stream
+    is 2x pooled from the /8 grid; production v7 runs should pass the
+    fine-tuned /16 checkpoint.
+
     Duplicate keys within one batch (a BC step draw emits every actor at
     the same snapshot) encode once. PPO passes neither key nor cache, so
     its path is untouched.
@@ -884,7 +946,11 @@ def encode_grids(
         per = max(1, MAX_ENC_PIX // (H * W))
         chunks.extend(idxs[k : k + per] for k in range(0, len(idxs), per))
 
-    grid_by_idx: dict[int, np.ndarray] = {}
+    coarse_by_idx: dict[int, np.ndarray | torch.Tensor] = {}
+    fine_by_idx: dict[int, np.ndarray | torch.Tensor] = {}
+    fine_valid_by_idx: dict[int, np.ndarray] = {}
+    legal_fine_by_idx: dict[int, np.ndarray] = {}
+    origin_by_idx: dict[int, np.ndarray] = {}
     local_by_idx: dict[int, np.ndarray] = {}
     z_gpu: dict[int, torch.Tensor] = {}
     for idxs in chunks:
@@ -921,8 +987,28 @@ def encode_grids(
         if owners.is_cuda:
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 z = ae.encode(owners.long(), terrain, static)
+                zc = (
+                    coarse_ae.encode(
+                        owners.long(), terrain,
+                        F.max_pool2d(
+                            static.float(), COARSE_FACTOR, stride=COARSE_FACTOR,
+                            ceil_mode=True,
+                        ),
+                    )
+                    if coarse_ae is not None else None
+                )
         else:
             z = ae.encode(owners.long(), terrain, static)
+            zc = (
+                coarse_ae.encode(
+                    owners.long(), terrain,
+                    F.max_pool2d(
+                        static.float(), COARSE_FACTOR, stride=COARSE_FACTOR,
+                        ceil_mode=True,
+                    ),
+                )
+                if coarse_ae is not None else None
+            )
 
         if z_cache is not None:
             z16 = z.half().cpu().numpy()
@@ -942,22 +1028,51 @@ def encode_grids(
         ego = F.avg_pool2d(ego, REGION)
         db_pooled = F.avg_pool2d(defense_bonus.unsqueeze(1), REGION)
 
-        grid = torch.cat([z.float(), ego, db_pooled], dim=1)
+        tr = torch.from_numpy(
+            _staged_stack("transient", [raws[i]["transient"] for i in idxs])
+        ).to(device)
+        grid = torch.cat([z.float(), ego, db_pooled, tr], dim=1)
+        if zc is not None:
+            ego_c = F.avg_pool2d(
+                ego, COARSE_FACTOR, stride=COARSE_FACTOR,
+                ceil_mode=True, count_include_pad=False,
+            )
+            db_c = F.avg_pool2d(
+                db_pooled, COARSE_FACTOR, stride=COARSE_FACTOR,
+                ceil_mode=True, count_include_pad=False,
+            )
+            tr_c = F.max_pool2d(
+                tr, COARSE_FACTOR, stride=COARSE_FACTOR, ceil_mode=True,
+            )
+            coarse_grid = torch.cat([zc.float(), ego_c, db_c, tr_c], dim=1)
+        else:
+            coarse_grid = F.avg_pool2d(
+                grid, COARSE_FACTOR, stride=COARSE_FACTOR,
+                ceil_mode=True, count_include_pad=False,
+            )
         local = _local_crops(classmap, terr[:, 0], defense_bonus)
-        if torch_out:
-            # Append transient planes here (GPU) so "grid" is complete and
-            # never round-trips through the host.
-            tr = torch.from_numpy(
-                _staged_stack("transient", [raws[i]["transient"] for i in idxs])
-            ).to(device)
-            grid = torch.cat([grid, tr], dim=1)
-        if fp16:
-            grid, local = grid.half(), local.half()
-        if not torch_out:
-            grid, local = grid.cpu().numpy(), local.cpu().numpy()
         for j, i in enumerate(idxs):
-            grid_by_idx[i] = grid[j]
-            local_by_idx[i] = local[j]
+            cov, (y0, x0, y1, x1) = _fine_coverage(
+                classmap[j], terr[j, 0], raws[i]["legal_tile"]
+            )
+            fine = torch.cat([grid[j, :, y0:y1, x0:x1] * cov, cov.unsqueeze(0)], dim=0)
+            coarse = coarse_grid[j]
+            if fp16:
+                fine, coarse = fine.half(), coarse.half()
+            if torch_out:
+                fine_by_idx[i] = fine
+                coarse_by_idx[i] = coarse
+                local_by_idx[i] = local[j].half() if fp16 else local[j]
+            else:
+                fine_by_idx[i] = fine.cpu().numpy()
+                coarse_by_idx[i] = coarse.cpu().numpy()
+                local_by_idx[i] = (local[j].half() if fp16 else local[j]).cpu().numpy()
+            cov_np = cov.float().cpu().numpy()
+            fine_valid_by_idx[i] = cov_np
+            legal_fine_by_idx[i] = (
+                raws[i]["legal_tile"][y0:y1, x0:x1].astype(np.float32) * cov_np
+            )
+            origin_by_idx[i] = np.array([y0, x0], dtype=np.int64)
 
     # Cache-hit / in-batch-duplicate path: no AE, no terrain/fallout/static
     # upload - just owners+clut (per-player featurization) and the latent.
@@ -988,6 +1103,28 @@ def encode_grids(
         # Defense bonus changes every tick, unlike the cached AE latent -
         # always decoded fresh (cheap: unpack + avg_pool, no AE involved).
         defense_bonus = _unpack_bits(db_packed, W)
+        zc = None
+        if coarse_ae is not None:
+            terr = torch.from_numpy(
+                _staged_stack("terr", [raws[i]["terrain_static"] for i in idxs])
+            ).to(device)
+            packed = torch.from_numpy(
+                _staged_stack("packed", [raws[i]["fallout_packed"] for i in idxs])
+            ).to(device)
+            static = torch.from_numpy(
+                _staged_stack("static", [raws[i]["static"] for i in idxs])
+            ).to(device)
+            fallout = _unpack_bits(packed, W)
+            terrain = torch.cat([terr, fallout.unsqueeze(1)], dim=1)
+            static_c = F.max_pool2d(
+                static.float(), COARSE_FACTOR, stride=COARSE_FACTOR,
+                ceil_mode=True,
+            )
+            if owners.is_cuda:
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    zc = coarse_ae.encode(owners.long(), terrain, static_c)
+            else:
+                zc = coarse_ae.encode(owners.long(), terrain, static_c)
         zs = torch.empty(
             B, LATENT_C, H // REGION, W // REGION, device=device
         )
@@ -1022,20 +1159,51 @@ def encode_grids(
         ego = F.avg_pool2d(ego, REGION)
         db_pooled = F.avg_pool2d(defense_bonus.unsqueeze(1), REGION)
 
-        grid = torch.cat([zs, ego, db_pooled], dim=1)
+        tr = torch.from_numpy(
+            _staged_stack("transient", [raws[i]["transient"] for i in idxs])
+        ).to(device)
+        grid = torch.cat([zs, ego, db_pooled, tr], dim=1)
+        if zc is not None:
+            ego_c = F.avg_pool2d(
+                ego, COARSE_FACTOR, stride=COARSE_FACTOR,
+                ceil_mode=True, count_include_pad=False,
+            )
+            db_c = F.avg_pool2d(
+                db_pooled, COARSE_FACTOR, stride=COARSE_FACTOR,
+                ceil_mode=True, count_include_pad=False,
+            )
+            tr_c = F.max_pool2d(
+                tr, COARSE_FACTOR, stride=COARSE_FACTOR, ceil_mode=True,
+            )
+            coarse_grid = torch.cat([zc.float(), ego_c, db_c, tr_c], dim=1)
+        else:
+            coarse_grid = F.avg_pool2d(
+                grid, COARSE_FACTOR, stride=COARSE_FACTOR,
+                ceil_mode=True, count_include_pad=False,
+            )
         local = _local_crops(classmap, land, defense_bonus)
-        if torch_out:
-            tr = torch.from_numpy(
-                _staged_stack("transient", [raws[i]["transient"] for i in idxs])
-            ).to(device)
-            grid = torch.cat([grid, tr], dim=1)
-        if fp16:
-            grid, local = grid.half(), local.half()
-        if not torch_out:
-            grid, local = grid.cpu().numpy(), local.cpu().numpy()
         for j, i in enumerate(idxs):
-            grid_by_idx[i] = grid[j]
-            local_by_idx[i] = local[j]
+            cov, (y0, x0, y1, x1) = _fine_coverage(
+                classmap[j], land[j], raws[i]["legal_tile"]
+            )
+            fine = torch.cat([grid[j, :, y0:y1, x0:x1] * cov, cov.unsqueeze(0)], dim=0)
+            coarse = coarse_grid[j]
+            if fp16:
+                fine, coarse = fine.half(), coarse.half()
+            if torch_out:
+                fine_by_idx[i] = fine
+                coarse_by_idx[i] = coarse
+                local_by_idx[i] = local[j].half() if fp16 else local[j]
+            else:
+                fine_by_idx[i] = fine.cpu().numpy()
+                coarse_by_idx[i] = coarse.cpu().numpy()
+                local_by_idx[i] = (local[j].half() if fp16 else local[j]).cpu().numpy()
+            cov_np = cov.float().cpu().numpy()
+            fine_valid_by_idx[i] = cov_np
+            legal_fine_by_idx[i] = (
+                raws[i]["legal_tile"][y0:y1, x0:x1].astype(np.float32) * cov_np
+            )
+            origin_by_idx[i] = np.array([y0, x0], dtype=np.int64)
 
     consumed = (
         "owners", "terrain_static", "fallout_packed", "defense_bonus_packed",
@@ -1046,23 +1214,34 @@ def encode_grids(
     global _warned_oversize
     for i, r in enumerate(raws):
         o = {k: v for k, v in r.items() if k not in consumed}
-        if torch_out:
-            grid = grid_by_idx[i]  # transient already appended on device
-        else:
-            grid = np.concatenate([grid_by_idx[i], r["transient"].astype(dtype)])
-        gh, gw = grid.shape[1], grid.shape[2]
-        if (gh > GH_MAX or gw > GW_MAX) and not _warned_oversize:
+        fine = fine_by_idx[i]
+        coarse = coarse_by_idx[i]
+        fgh, fgw = fine.shape[1], fine.shape[2]
+        cgh, cgw = coarse.shape[1], coarse.shape[2]
+        full_gh, full_gw = r["legal_tile"].shape
+        if (full_gh > GH_MAX or full_gw > GW_MAX) and not _warned_oversize:
             # Training can't get here (curriculum and the BC stride picker
             # both respect the budget); live play on a huge map can, and the
             # net runs fine there - just out of distribution.
             _warned_oversize = True
             print(
-                f"warning: grid {gh}x{gw} exceeds curriculum max "
+                f"warning: grid {full_gh}x{full_gw} exceeds curriculum max "
                 f"{GH_MAX}x{GW_MAX}; policy is out of distribution",
                 flush=True,
             )
-        o["grid"] = grid
-        o["grid_valid"] = np.ones((gh, gw), dtype=np.float32)
+        o["grid_fine"] = fine
+        o["grid_fine_valid"] = fine_valid_by_idx[i]
+        o["fine_coverage"] = fine_valid_by_idx[i]
+        o["fine_origin"] = origin_by_idx[i]
+        o["legal_tile_fine"] = legal_fine_by_idx[i]
+        o["grid_coarse"] = coarse
+        o["grid_coarse_valid"] = np.ones((cgh, cgw), dtype=np.float32)
+        o["legal_tile_coarse"] = _coarsen_mask(r["legal_tile"])
+        # Legacy aliases keep analysis/BC utilities importable; PPO v7 uses
+        # the explicit fine/coarse keys above.
+        o["grid"] = fine
+        o["grid_valid"] = fine_valid_by_idx[i]
+        o["legal_tile"] = legal_fine_by_idx[i]
         o["local"] = local_by_idx[i]
         out.append(o)
     return out
@@ -1101,23 +1280,30 @@ def collate(
     from rl.native import collate_grids, collate_masks, stack
 
     out = {}
-    gh = max(o["grid"].shape[1] for o in obs_list)
-    gw = max(o["grid"].shape[2] for o in obs_list)
     B = len(obs_list)
+    grid_keys = {"grid", "grid_fine", "grid_coarse"}
+    mask_keys = {
+        "grid_valid", "legal_tile", "grid_fine_valid", "fine_coverage",
+        "legal_tile_fine", "grid_coarse_valid", "legal_tile_coarse",
+    }
     for k in keys:
-        if k == "grid":
+        if k in grid_keys:
+            gh = max(o[k].shape[1] for o in obs_list)
+            gw = max(o[k].shape[2] for o in obs_list)
             # dtype-preserving: ppo stores rollout grids as fp16 to halve
             # collate/PCIe cost; everyone else passes fp32 through unchanged
             if staged:
-                g0 = obs_list[0]["grid"]
-                b = _staged_out("col_grid", (B, g0.shape[0], gh, gw), g0.dtype)
+                g0 = obs_list[0][k]
+                b = _staged_out(f"col_{k}", (B, g0.shape[0], gh, gw), g0.dtype)
                 b.fill(0)
                 for i, o in enumerate(obs_list):
-                    g = o["grid"]
+                    g = o[k]
                     b[i, :, : g.shape[1], : g.shape[2]] = g
             else:
-                b = collate_grids([o["grid"] for o in obs_list], gh, gw)
-        elif k in ("grid_valid", "legal_tile"):
+                b = collate_grids([o[k] for o in obs_list], gh, gw)
+        elif k in mask_keys:
+            gh = max(o[k].shape[0] for o in obs_list)
+            gw = max(o[k].shape[1] for o in obs_list)
             if staged:
                 b = _staged_out(f"col_{k}", (B, gh, gw), np.float32)
                 b.fill(0)
