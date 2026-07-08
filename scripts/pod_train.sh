@@ -22,6 +22,12 @@ MINIBATCH="${MINIBATCH:-128}"
 # INIT_BC=bc_v4 warm-starts a FRESH run from that BC run's checkpoint on HF
 # (ignored once the run has its own policy.pt; --init defers to --resume).
 INIT_BC="${INIT_BC:-}"
+# INIT_EXTEND=/path/to/policy.pt warm-starts a FRESH run from a pre-v6
+# checkpoint via --init-extend (head growth). Same resume-wins semantics:
+# skipped once the run has its own policy.pt, and rl/ppo.py ignores
+# --init-extend whenever --resume is passed, so crash relaunches can't
+# re-extend and wipe progress.
+INIT_EXTEND="${INIT_EXTEND:-}"
 REPO_DIR=/workspace/openfront-ai
 
 # When run as the pod start command this replaces the image's /start.sh,
@@ -131,6 +137,13 @@ else:
 "
   fi
   INIT="--init runs/bc/$INIT_BC/bc_init.pt"
+fi
+if [ -n "$INIT_EXTEND" ]; then
+  if [ ! -f "$INIT_EXTEND" ]; then
+    echo "FATAL: INIT_EXTEND=$INIT_EXTEND does not exist"
+    exit 1
+  fi
+  INIT="$INIT --init-extend $INIT_EXTEND"
 fi
 
 # --- tensorboard on the pod's exposed http port ---
