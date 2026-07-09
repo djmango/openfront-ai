@@ -257,6 +257,9 @@ pub fn try_send_player_attack(
     attacker_small_id: u16,
     target_small_id: u16,
     reserve_ratio: f64,
+    expand_ratio: f64,
+    bot_attack_troops_sent: &mut f64,
+    difficulty: &str,
     emoji: Option<&mut super::nation_emoji::NationEmojiState>,
 ) -> bool {
     try_send_player_attack_forced(
@@ -265,6 +268,9 @@ pub fn try_send_player_attack(
         attacker_small_id,
         target_small_id,
         reserve_ratio,
+        expand_ratio,
+        bot_attack_troops_sent,
+        difficulty,
         emoji,
         false,
     )
@@ -276,12 +282,44 @@ fn try_send_player_attack_forced(
     attacker_small_id: u16,
     target_small_id: u16,
     reserve_ratio: f64,
+    expand_ratio: f64,
+    bot_attack_troops_sent: &mut f64,
+    difficulty: &str,
     emoji: Option<&mut super::nation_emoji::NationEmojiState>,
     force: bool,
 ) -> bool {
     if !should_attack(game, random, attacker_small_id, target_small_id, force) {
         return false;
     }
+
+    // TS `AiAttackBehavior.calculateAttackTroops`: whenever the target is a Bot
+    // and the attacker is not itself a Bot, troop sizing always goes through
+    // `calculateBotAttackTroops` (target.troops() * 4, capped) with the
+    // expand-ratio reserve when the bot owns structures - regardless of which
+    // strategy (retaliate/weakest/traitor/hated/afk/betray/island/...)
+    // triggered the attack, not just the dedicated `attackBots()` strategy.
+    let attacker_is_bot = game
+        .player_by_small_id(attacker_small_id)
+        .is_some_and(|p| p.player_type == PlayerType::Bot);
+    let target_is_bot = game
+        .player_by_small_id(target_small_id)
+        .is_some_and(|p| p.player_type == PlayerType::Bot);
+    if target_is_bot && !attacker_is_bot {
+        let target_reserve_ratio = if player_has_structure_units(game, target_small_id) {
+            expand_ratio
+        } else {
+            reserve_ratio
+        };
+        return try_send_nation_bot_attack(
+            game,
+            attacker_small_id,
+            target_small_id,
+            target_reserve_ratio,
+            bot_attack_troops_sent,
+            difficulty,
+        );
+    }
+
     let is_nation = game
         .player_by_small_id(attacker_small_id)
         .is_some_and(|p| p.player_type == PlayerType::Nation);
@@ -609,6 +647,9 @@ fn nation_try_attack_player(
     attacker_small_id: u16,
     target_small_id: u16,
     reserve_ratio: f64,
+    expand_ratio: f64,
+    bot_attack_troops_sent: &mut f64,
+    difficulty: &str,
     emoji: Option<&mut super::nation_emoji::NationEmojiState>,
     force: bool,
 ) -> bool {
@@ -619,6 +660,9 @@ fn nation_try_attack_player(
             attacker_small_id,
             target_small_id,
             reserve_ratio,
+            expand_ratio,
+            bot_attack_troops_sent,
+            difficulty,
             Some(state),
             force,
         ),
@@ -628,6 +672,9 @@ fn nation_try_attack_player(
             attacker_small_id,
             target_small_id,
             reserve_ratio,
+            expand_ratio,
+            bot_attack_troops_sent,
+            difficulty,
             None,
             force,
         ),
@@ -682,6 +729,7 @@ fn nation_attack_best_target(
             random,
             attacker_small_id,
             reserve_ratio,
+            expand_ratio,
             bot_attack_troops_sent,
             difficulty,
         ) {
@@ -708,6 +756,7 @@ fn nation_attack_best_target(
                 random,
                 attacker_small_id,
                 reserve_ratio,
+                expand_ratio,
                 bot_attack_troops_sent,
                 difficulty,
             ) {
@@ -720,6 +769,9 @@ fn nation_attack_best_target(
                     attacker_small_id,
                     attacker,
                     reserve_ratio,
+                    expand_ratio,
+                    bot_attack_troops_sent,
+                    difficulty,
                     emoji.as_deref_mut(),
                     true,
                 );
@@ -729,6 +781,9 @@ fn nation_attack_best_target(
                 random,
                 attacker_small_id,
                 reserve_ratio,
+                expand_ratio,
+                bot_attack_troops_sent,
+                difficulty,
                 bordering,
                 emoji.as_deref_mut(),
             )
@@ -739,6 +794,7 @@ fn nation_attack_best_target(
                 random,
                 attacker_small_id,
                 reserve_ratio,
+                expand_ratio,
                 bot_attack_troops_sent,
                 difficulty,
             ) {
@@ -756,6 +812,9 @@ fn nation_attack_best_target(
                     attacker_small_id,
                     attacker,
                     reserve_ratio,
+                    expand_ratio,
+                    bot_attack_troops_sent,
+                    difficulty,
                     emoji.as_deref_mut(),
                     true,
                 );
@@ -765,6 +824,9 @@ fn nation_attack_best_target(
                 random,
                 attacker_small_id,
                 reserve_ratio,
+                expand_ratio,
+                bot_attack_troops_sent,
+                difficulty,
                 bordering,
                 emoji.as_deref_mut(),
             ) {
@@ -775,6 +837,9 @@ fn nation_attack_best_target(
                 random,
                 attacker_small_id,
                 reserve_ratio,
+                expand_ratio,
+                bot_attack_troops_sent,
+                difficulty,
                 bordering,
                 emoji.as_deref_mut(),
             ) {
@@ -785,6 +850,9 @@ fn nation_attack_best_target(
                 random,
                 attacker_small_id,
                 reserve_ratio,
+                expand_ratio,
+                bot_attack_troops_sent,
+                difficulty,
                 bordering,
                 emoji.as_deref_mut(),
             ) {
@@ -795,6 +863,9 @@ fn nation_attack_best_target(
                 random,
                 attacker_small_id,
                 reserve_ratio,
+                expand_ratio,
+                bot_attack_troops_sent,
+                difficulty,
                 bordering,
                 emoji.as_deref_mut(),
             ) {
@@ -805,6 +876,9 @@ fn nation_attack_best_target(
                 random,
                 attacker_small_id,
                 reserve_ratio,
+                expand_ratio,
+                bot_attack_troops_sent,
+                difficulty,
                 bordering,
                 emoji.as_deref_mut(),
             ) {
@@ -815,6 +889,9 @@ fn nation_attack_best_target(
                 random,
                 attacker_small_id,
                 reserve_ratio,
+                expand_ratio,
+                bot_attack_troops_sent,
+                difficulty,
                 bordering,
                 emoji.as_deref_mut(),
             )
@@ -825,6 +902,7 @@ fn nation_attack_best_target(
                 random,
                 attacker_small_id,
                 reserve_ratio,
+                expand_ratio,
                 bot_attack_troops_sent,
                 difficulty,
             ) {
@@ -837,6 +915,9 @@ fn nation_attack_best_target(
                     attacker_small_id,
                     attacker,
                     reserve_ratio,
+                    expand_ratio,
+                    bot_attack_troops_sent,
+                    difficulty,
                     emoji.as_deref_mut(),
                     true,
                 );
@@ -846,6 +927,9 @@ fn nation_attack_best_target(
                 random,
                 attacker_small_id,
                 reserve_ratio,
+                expand_ratio,
+                bot_attack_troops_sent,
+                difficulty,
                 bordering,
                 emoji.as_deref_mut(),
             )
@@ -858,6 +942,9 @@ fn nation_strategy_weakest(
     random: &mut PseudoRandom,
     sid: u16,
     reserve_ratio: f64,
+    expand_ratio: f64,
+    bot_attack_troops_sent: &mut f64,
+    difficulty: &str,
     bordering: &[u16],
     emoji: Option<&mut super::nation_emoji::NationEmojiState>,
 ) -> bool {
@@ -868,7 +955,18 @@ fn nation_strategy_weakest(
             .map(|p| p.troops)
             .unwrap_or(0);
         if target_troops < attacker_troops {
-            return nation_try_attack_player(game, random, sid, weakest, reserve_ratio, emoji, false);
+            return nation_try_attack_player(
+                game,
+                random,
+                sid,
+                weakest,
+                reserve_ratio,
+                expand_ratio,
+                bot_attack_troops_sent,
+                difficulty,
+                emoji,
+                false,
+            );
         }
     }
     false
@@ -879,6 +977,9 @@ fn nation_strategy_betray(
     random: &mut PseudoRandom,
     sid: u16,
     reserve_ratio: f64,
+    expand_ratio: f64,
+    bot_attack_troops_sent: &mut f64,
+    difficulty: &str,
     bordering_enemies: &[u16],
     emoji: Option<&mut super::nation_emoji::NationEmojiState>,
 ) -> bool {
@@ -886,7 +987,18 @@ fn nation_strategy_betray(
     let bordering_count = bordering_enemies.len() + friends.len();
     for &friend in &friends {
         if super::nation_alliance::maybe_betray(game, random, sid, friend, bordering_count) {
-            return nation_try_attack_player(game, random, sid, friend, reserve_ratio, emoji, true);
+            return nation_try_attack_player(
+                game,
+                random,
+                sid,
+                friend,
+                reserve_ratio,
+                expand_ratio,
+                bot_attack_troops_sent,
+                difficulty,
+                emoji,
+                true,
+            );
         }
     }
     false
@@ -897,6 +1009,9 @@ fn nation_strategy_hated(
     random: &mut PseudoRandom,
     sid: u16,
     reserve_ratio: f64,
+    expand_ratio: f64,
+    bot_attack_troops_sent: &mut f64,
+    difficulty: &str,
     _: &[u16],
     emoji: Option<&mut super::nation_emoji::NationEmojiState>,
 ) -> bool {
@@ -918,7 +1033,18 @@ fn nation_strategy_hated(
                 continue;
             }
         }
-        return nation_try_attack_player(game, random, sid, other, reserve_ratio, emoji, false);
+        return nation_try_attack_player(
+            game,
+            random,
+            sid,
+            other,
+            reserve_ratio,
+            expand_ratio,
+            bot_attack_troops_sent,
+            difficulty,
+            emoji,
+            false,
+        );
     }
     false
 }
@@ -928,6 +1054,9 @@ fn nation_strategy_afk(
     random: &mut PseudoRandom,
     sid: u16,
     reserve_ratio: f64,
+    expand_ratio: f64,
+    bot_attack_troops_sent: &mut f64,
+    difficulty: &str,
     bordering: &[u16],
     emoji: Option<&mut super::nation_emoji::NationEmojiState>,
 ) -> bool {
@@ -942,7 +1071,18 @@ fn nation_strategy_afk(
         if p.troops >= attacker_troops * 3 {
             continue;
         }
-        return nation_try_attack_player(game, random, sid, enemy, reserve_ratio, emoji, false);
+        return nation_try_attack_player(
+            game,
+            random,
+            sid,
+            enemy,
+            reserve_ratio,
+            expand_ratio,
+            bot_attack_troops_sent,
+            difficulty,
+            emoji,
+            false,
+        );
     }
     false
 }
@@ -952,6 +1092,9 @@ fn nation_strategy_traitor(
     random: &mut PseudoRandom,
     sid: u16,
     reserve_ratio: f64,
+    expand_ratio: f64,
+    bot_attack_troops_sent: &mut f64,
+    difficulty: &str,
     bordering: &[u16],
     emoji: Option<&mut super::nation_emoji::NationEmojiState>,
 ) -> bool {
@@ -965,7 +1108,18 @@ fn nation_strategy_traitor(
                 continue;
             }
         }
-        return nation_try_attack_player(game, random, sid, enemy, reserve_ratio, emoji, false);
+        return nation_try_attack_player(
+            game,
+            random,
+            sid,
+            enemy,
+            reserve_ratio,
+            expand_ratio,
+            bot_attack_troops_sent,
+            difficulty,
+            emoji,
+            false,
+        );
     }
     false
 }
@@ -975,6 +1129,9 @@ fn nation_strategy_island(
     random: &mut PseudoRandom,
     sid: u16,
     reserve_ratio: f64,
+    expand_ratio: f64,
+    bot_attack_troops_sent: &mut f64,
+    difficulty: &str,
     bordering: &[u16],
     emoji: Option<&mut super::nation_emoji::NationEmojiState>,
 ) -> bool {
@@ -982,7 +1139,18 @@ fn nation_strategy_island(
         return false;
     }
     if let Some(enemy) = find_nearest_island_enemy(game, random, sid) {
-        return nation_try_attack_player(game, random, sid, enemy, reserve_ratio, emoji, false);
+        return nation_try_attack_player(
+            game,
+            random,
+            sid,
+            enemy,
+            reserve_ratio,
+            expand_ratio,
+            bot_attack_troops_sent,
+            difficulty,
+            emoji,
+            false,
+        );
     }
     false
 }
@@ -1163,6 +1331,7 @@ fn attack_bots(
     random: &mut PseudoRandom,
     attacker_small_id: u16,
     reserve_ratio: f64,
+    expand_ratio: f64,
     bot_attack_troops_sent: &mut f64,
     difficulty: &str,
 ) -> bool {
@@ -1195,11 +1364,18 @@ fn attack_bots(
     let parallelism = bot_attack_max_parallelism(random, difficulty);
     let mut sent = false;
     for target in sorted.into_iter().take(parallelism) {
+        // TS `calculateAttackTroops`: keep less in reserve (use `expandRatio`)
+        // when the bot target owns structures, so we recapture them ASAP.
+        let target_reserve_ratio = if player_has_structure_units(game, target) {
+            expand_ratio
+        } else {
+            reserve_ratio
+        };
         if try_send_nation_bot_attack(
             game,
             attacker_small_id,
             target,
-            reserve_ratio,
+            target_reserve_ratio,
             bot_attack_troops_sent,
             difficulty,
         ) {
@@ -1305,6 +1481,14 @@ pub fn tribe_maybe_attack(
     expand_ratio: f64,
     neighbors_terra_nullius: &mut bool,
 ) {
+    // Tribe attackers are always Bot-typed, so the target-is-bot special
+    // casing in `try_send_player_attack(_forced)` never triggers here (TS
+    // `calculateAttackTroops` only takes that branch when the attacker isn't
+    // a Bot) - `bot_attack_troops_sent`/`difficulty` are unused placeholders.
+    let mut bot_attack_troops_sent = 0.0;
+    let difficulty_owned = game.wire.game_config().difficulty.clone();
+    let difficulty = difficulty_owned.as_str();
+
     // TS `TribeExecution.maybeAttack()`: roll a traitor-neighbor attack first.
     // Odds are 1/6 if we're (still) allied with the traitor, 1/3 otherwise; on
     // success the alliance (if any) is broken before the attack is sent.
@@ -1312,7 +1496,17 @@ pub fn tribe_maybe_attack(
         let odds = if game.is_friendly(attacker_small_id, traitor) { 6 } else { 3 };
         if random.chance(odds) {
             game.break_alliance_between(attacker_small_id, traitor);
-            if try_send_player_attack(game, random, attacker_small_id, traitor, reserve_ratio, None) {
+            if try_send_player_attack(
+                game,
+                random,
+                attacker_small_id,
+                traitor,
+                reserve_ratio,
+                expand_ratio,
+                &mut bot_attack_troops_sent,
+                difficulty,
+                None,
+            ) {
                 return;
             }
         }
@@ -1342,6 +1536,9 @@ pub fn tribe_maybe_attack(
             attacker_small_id,
             attacker,
             reserve_ratio,
+            expand_ratio,
+            &mut bot_attack_troops_sent,
+            difficulty,
             None,
             true,
         ) {
@@ -1351,7 +1548,17 @@ pub fn tribe_maybe_attack(
 
     if let Some(traitor) = get_neighbor_traitor_to_attack(game, random, attacker_small_id) {
         if random.chance(3) {
-            if try_send_player_attack(game, random, attacker_small_id, traitor, reserve_ratio, None) {
+            if try_send_player_attack(
+                game,
+                random,
+                attacker_small_id,
+                traitor,
+                reserve_ratio,
+                expand_ratio,
+                &mut bot_attack_troops_sent,
+                difficulty,
+                None,
+            ) {
                 return;
             }
         }
@@ -1371,7 +1578,17 @@ pub fn tribe_maybe_attack(
                 continue;
             }
         }
-        if try_send_player_attack(game, random, attacker_small_id, target_sid, reserve_ratio, None) {
+        if try_send_player_attack(
+            game,
+            random,
+            attacker_small_id,
+            target_sid,
+            reserve_ratio,
+            expand_ratio,
+            &mut bot_attack_troops_sent,
+            difficulty,
+            None,
+        ) {
             return;
         }
     }
