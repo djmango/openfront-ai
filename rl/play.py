@@ -23,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import numpy as np
 import torch
 
-from rl.env import FALLOUT_BIT, OWNER_MASK, REPO_ROOT, TSX
+from rl.env import DEFENSE_BONUS_BIT, FALLOUT_BIT, OWNER_MASK, REPO_ROOT, TSX
 from rl.obs import ACTIONS, ObsBuilder, encode_grids, load_ae
 from rl.policy import Policy
 from rl.ppo import OBS_KEYS
@@ -87,6 +87,7 @@ def decode_tiles(obs: dict, width: int, height: int) -> dict:
     state = np.frombuffer(raw, dtype="<u2").reshape(height, width)
     obs["owners"] = state & OWNER_MASK
     obs["fallout"] = (state >> FALLOUT_BIT) & 1
+    obs["defense_bonus"] = (state >> DEFENSE_BONUS_BIT) & 1
     del obs["tiles"]
     return obs
 

@@ -41,6 +41,70 @@ def chromium_args() -> list[str]:
     return ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
 
 
+# Local-dev Chromium console is flooded with ad/CORS/cosmetics noise that
+# has nothing to do with the bot. Keep only webbot status + real failures.
+_NOISE = (
+    "CORS policy",
+    "Access to fetch",
+    "Access to XMLHttpRequest",
+    "cloudflareinsights",
+    "optable.co",
+    "playwire",
+    "PubAdsService",
+    "Audigent",
+    "googletag",
+    "prebid",
+    "Turnstile",
+    "id5id",
+    "Lit is in dev mode",
+    "web-share",
+    "cosmetics",
+    "getNews",
+    "profane_words",
+    "ERR_CONNECTION_REFUSED",
+    "ERR_CERT_DATE_INVALID",
+    "ERR_CONNECTION_CLOSED",
+    "Failed to load resource",
+    "[vite]",
+    "Refresh failed",
+    "No JWT found",
+    "Refreshing jwt",
+    "homepage ads",
+    "gutter ads",
+    "Ramp.js",
+    "Confiant",
+    "CrazyGames",
+    "destroyUnits",
+    "Closing host lobby",
+    "Error checking lobby",
+    "Not running on CrazyGames",
+    "shouldRefresh is false",
+    # Nation/bot spawn failures on crowded maps (not AgentRL).
+    "SpawnExecution: cannot spawn",
+    "cannot spawn ",
+)
+
+
+def _console_interesting(text: str) -> bool:
+    if any(n in text for n in _NOISE):
+        return False
+    # webbot/main.ts logs as `[webbot] ...`; pageerror handler is always kept.
+    t = text.lower()
+    return (
+        text.startswith("[webbot]")
+        or "[webbot]" in text
+        or "pageerror" in t
+        or "game ended" in t
+        or "loading models" in t
+        or "invalid string" in t
+        or "[webbot] spawn" in t
+        or "websocket closed" in t
+        or "connection refused" in t
+        or "host left" in t
+        or "lobby full" in t
+    )
+
+
 class _DebugState:
     def __init__(self) -> None:
         self.body = b'{"actions":[],"log":[]}'
@@ -84,13 +148,26 @@ def main() -> None:
     ap.add_argument("--name", default="AgentRL")
     ap.add_argument("--greedy", action="store_true")
     ap.add_argument("--debug-port", type=int, default=0)
+    ap.add_argument("--headed", action="store_true",
+                    help="open a visible Chromium window (default: headless)")
+    ap.add_argument("--verbose", action="store_true",
+                    help="print every browser console line (default: filter ad/CORS noise)")
     args = ap.parse_args()
 
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
 
-    prefix = f"/{args.worker_path}" if args.worker_path else ""
-    url = f"http://{args.host}{prefix}/game/{args.game}?webbot={args.game}&name={args.name}"
+    if not __import__("re").fullmatch(r"[A-Za-z0-9]{8}", args.game):
+        raise SystemExit(
+            f"bad --game {args.game!r}: need an 8-char lobby ID "
+            "(did a worker path like 'w1' get passed by mistake?)"
+        )
+
+    # Hit "/" with ?webbot= - NOT /wN/game/<id>. Transport resolves the
+    # worker from gameID itself (ClientEnv.workerPath). --worker-path is
+    # kept for logging only.
+    _ = args.worker_path  # unused; Transport derives worker from gameID
+    url = f"http://{args.host}/?webbot={args.game}&name={args.name}"
     if args.greedy:
         url += "&greedy=1"
 
@@ -108,19 +185,48 @@ def main() -> None:
     if args.debug_port:
         debug_srv = make_debug_server(args.game, debug_state, args.debug_port)
         threading.Thread(target=debug_srv.serve_forever, daemon=True).start()
-        print(f"[webbot_launcher] debug feed on :{args.debug_port}/debug/{args.game}", flush=True)
+        print(f"[webbot] debug feed :{args.debug_port}/debug/{args.game}", flush=True)
+
+    def on_console(m) -> None:
+        text = m.text
+        if args.verbose or _console_interesting(text):
+            print(f"[webbot:{args.game}] {text}", flush=True)
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True, args=chromium_args())
+        browser = pw.chromium.launch(headless=not args.headed, args=chromium_args())
         page = browser.new_page(viewport={"width": 1280, "height": 800})
-        page.on("console", lambda m: print(f"[webbot:{args.game}] {m.text}", flush=True))
+        # Block third-party ad/telemetry so local join isn't fighting CORS.
+        page.route(
+            "**/*",
+            lambda route: (
+                route.abort()
+                if any(
+                    h in route.request.url
+                    for h in (
+                        "optable.co",
+                        "cloudflareinsights.com",
+                        "googlesyndication",
+                        "googletagservices",
+                        "doubleclick.net",
+                        "amazon-adsystem",
+                        "playwire",
+                        "audigent",
+                        "id5-sync",
+                        "prebid",
+                    )
+                )
+                else route.continue_()
+            ),
+        )
+        page.on("console", on_console)
         page.on("pageerror", lambda e: print(f"[webbot:{args.game}] pageerror: {e}", flush=True))
         page.on("crash", lambda: print(f"[webbot:{args.game}] page crashed", flush=True))
 
-        print(f"[webbot_launcher] navigating {url}", flush=True)
+        print(f"[webbot] joining {url}", flush=True)
         page.goto(url, wait_until="domcontentloaded", timeout=30_000)
 
         t0 = time.time()
+        last_status = ""
         try:
             while not stop:
                 if page.is_closed():
@@ -131,6 +237,13 @@ def main() -> None:
                     if done is not None:
                         print(f"[webbot:{args.game}] game ended: {json.dumps(done)}", flush=True)
                         break
+                    # Console events are flaky under Vite/HMR; poll the overlay.
+                    status = page.evaluate(
+                        "document.getElementById('webbot-overlay')?.querySelector('div')?.textContent ?? ''"
+                    )
+                    if status and status != last_status:
+                        print(f"[webbot:{args.game}] {status}", flush=True)
+                        last_status = status
                     if debug_srv is not None:
                         payload = page.evaluate("JSON.stringify(window.__webbotDebug ?? {actions:[],log:[]})")
                         debug_state.set(payload.encode())
