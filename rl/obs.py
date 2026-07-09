@@ -745,49 +745,131 @@ def _coarsen_mask(mask: np.ndarray) -> np.ndarray:
     ).max(axis=(1, 3)).astype(np.float32)
 
 
-def _coarse_content(landfrac: torch.Tensor) -> tuple[np.ndarray, np.ndarray]:
-    """(has_land, has_water) per /16 coarse cell from the /8 land fraction.
-    Used to prune coarse tile picks per action (boats/nukes target land,
-    warship moves target water) - see Policy._coarse_logits_for_action."""
-    def pool(m: torch.Tensor) -> np.ndarray:
-        return F.max_pool2d(
-            m.float()[None, None], COARSE_FACTOR, stride=COARSE_FACTOR,
-            ceil_mode=True,
-        )[0, 0].cpu().numpy()
+def _fine_coverage_batch(
+    classmap: torch.Tensor, land: torch.Tensor, legal_tiles: list[np.ndarray]
+) -> tuple[
+    list[np.ndarray], list[tuple[int, int, int, int]], np.ndarray, np.ndarray
+]:
+    """Batched own-territory + border-band coverage on the /8 grid, plus
+    the per-/16-cell (has_land, has_water) content masks (used to prune
+    coarse tile picks per action - see Policy._coarse_logits_for_action).
 
-    return pool(landfrac > 0), pool(landfrac < 0.999)
+    One kernel per op for the whole chunk and one host transfer per array:
+    the per-sample predecessor's .any()/nonzero()/int() calls cost 5+ GPU
+    syncs per sample and dominated rollout at 256 envs/rank (stack-sample
+    profiled). The box search runs on the host copy instead.
 
-
-def _fine_coverage(
-    classmap: torch.Tensor, land: torch.Tensor, legal_tile: np.ndarray
-) -> tuple[torch.Tensor, tuple[int, int, int, int], torch.Tensor]:
-    """Own-territory + border-band coverage on the /8 grid.
-
-    Returns a cropped coverage mask, its full-grid box (y0, x0, y1, x1),
-    and the /8 land fraction (for _coarse_content). During spawn (no owned
-    territory yet), coverage follows legal spawn regions so the policy can
-    place anywhere valid.
+    During spawn (no owned territory yet), coverage follows legal spawn
+    regions so the policy can place anywhere valid.
     """
-    own = F.avg_pool2d((classmap == 1).float().unsqueeze(0).unsqueeze(0), REGION)[0, 0] > 0
-    landfrac = F.avg_pool2d(land.float().unsqueeze(0).unsqueeze(0), REGION)[0, 0]
+    own = F.avg_pool2d((classmap == 1).float().unsqueeze(1), REGION)[:, 0] > 0
+    landfrac = F.avg_pool2d(land.float().unsqueeze(1), REGION)[:, 0]
     land8 = landfrac > 0
-    if own.any():
-        k = 2 * FOVEA_RADIUS + 1
-        cov = F.max_pool2d(
-            own.float().unsqueeze(0).unsqueeze(0), k, stride=1,
-            padding=FOVEA_RADIUS,
-        )[0, 0] > 0
-        cov = cov & land8
-    else:
-        cov = torch.from_numpy(legal_tile > 0).to(classmap.device)
-        if not cov.any():
-            cov = land8
-    if not cov.any():
-        cov = torch.ones_like(land8, dtype=torch.bool)
-    ys, xs = torch.nonzero(cov, as_tuple=True)
-    y0, y1 = int(ys.min()), int(ys.max()) + 1
-    x0, x1 = int(xs.min()), int(xs.max()) + 1
-    return cov[y0:y1, x0:x1].float(), (y0, x0, y1, x1), landfrac
+    k = 2 * FOVEA_RADIUS + 1
+    cov = F.max_pool2d(
+        own.float().unsqueeze(1), k, stride=1, padding=FOVEA_RADIUS
+    )[:, 0] > 0
+    cov = cov & land8
+    has_land = F.max_pool2d(
+        land8.float().unsqueeze(1), COARSE_FACTOR, stride=COARSE_FACTOR,
+        ceil_mode=True,
+    )[:, 0]
+    has_water = F.max_pool2d(
+        (landfrac < 0.999).float().unsqueeze(1), COARSE_FACTOR,
+        stride=COARSE_FACTOR, ceil_mode=True,
+    )[:, 0]
+    own_any = own.flatten(1).any(1)
+    cov_np = cov.cpu().numpy()
+    land8_np = land8.cpu().numpy()
+    own_any_np = own_any.cpu().numpy()
+    has_land_np = has_land.cpu().numpy()
+    has_water_np = has_water.cpu().numpy()
+
+    covs: list[np.ndarray] = []
+    boxes: list[tuple[int, int, int, int]] = []
+    for j in range(cov_np.shape[0]):
+        if own_any_np[j]:
+            c = cov_np[j]
+        else:
+            c = legal_tiles[j] > 0
+            if not c.any():
+                c = land8_np[j]
+        if not c.any():
+            c = np.ones_like(land8_np[j])
+        ys, xs = np.nonzero(c)
+        y0, y1 = int(ys.min()), int(ys.max()) + 1
+        x0, x1 = int(xs.min()), int(xs.max()) + 1
+        covs.append(c[y0:y1, x0:x1].astype(np.float32))
+        boxes.append((y0, x0, y1, x1))
+    return covs, boxes, has_land_np, has_water_np
+
+
+def _emit_foveated(
+    idxs: list[int],
+    raws: list[dict],
+    classmap: torch.Tensor,
+    land: torch.Tensor,
+    grid: torch.Tensor,
+    coarse_grid: torch.Tensor,
+    local: torch.Tensor,
+    fp16: bool,
+    torch_out: bool,
+    fine_by_idx: dict,
+    coarse_by_idx: dict,
+    local_by_idx: dict,
+    fine_valid_by_idx: dict,
+    legal_fine_by_idx: dict,
+    origin_by_idx: dict,
+    has_land_by_idx: dict,
+    has_water_by_idx: dict,
+) -> None:
+    """Per-sample foveated outputs for one encode chunk, from batched
+    coverage. The numpy path (PPO) downloads the chunk's grids in three
+    whole-batch transfers and does the fine crop on the host - the
+    per-sample GPU slice + .cpu() pattern this replaces cost 3 transfers
+    and several syncs per sample and dominated rollout time."""
+    covs, boxes, has_land, has_water = _fine_coverage_batch(
+        classmap, land, [raws[i]["legal_tile"] for i in idxs]
+    )
+    if torch_out:
+        for j, i in enumerate(idxs):
+            y0, x0, y1, x1 = boxes[j]
+            cov_t = torch.from_numpy(covs[j]).to(grid.device)
+            fine = torch.cat(
+                [grid[j, :, y0:y1, x0:x1] * cov_t, cov_t.unsqueeze(0)], dim=0
+            )
+            coarse = coarse_grid[j]
+            if fp16:
+                fine, coarse = fine.half(), coarse.half()
+            fine_by_idx[i] = fine
+            coarse_by_idx[i] = coarse
+            local_by_idx[i] = local[j].half() if fp16 else local[j]
+            fine_valid_by_idx[i] = covs[j]
+            legal_fine_by_idx[i] = (
+                raws[i]["legal_tile"][y0:y1, x0:x1].astype(np.float32) * covs[j]
+            )
+            origin_by_idx[i] = np.array([y0, x0], dtype=np.int64)
+            has_land_by_idx[i] = has_land[j]
+            has_water_by_idx[i] = has_water[j]
+        return
+    grid_np = (grid.half() if fp16 else grid).cpu().numpy()
+    coarse_np = (coarse_grid.half() if fp16 else coarse_grid).cpu().numpy()
+    local_np = (local.half() if fp16 else local).cpu().numpy()
+    for j, i in enumerate(idxs):
+        y0, x0, y1, x1 = boxes[j]
+        cov = covs[j].astype(grid_np.dtype)  # 0/1 mask: exact in fp16
+        fine_by_idx[i] = np.concatenate(
+            [grid_np[j, :, y0:y1, x0:x1] * cov, cov[None]], axis=0
+        )
+        coarse_by_idx[i] = coarse_np[j]
+        local_by_idx[i] = local_np[j]
+        fine_valid_by_idx[i] = covs[j]
+        legal_fine_by_idx[i] = (
+            raws[i]["legal_tile"][y0:y1, x0:x1].astype(np.float32) * covs[j]
+        )
+        origin_by_idx[i] = np.array([y0, x0], dtype=np.int64)
+        has_land_by_idx[i] = has_land[j]
+        has_water_by_idx[i] = has_water[j]
 
 
 def _local_crops(
@@ -1068,29 +1150,12 @@ def encode_grids(
                 ceil_mode=True, count_include_pad=False,
             )
         local = _local_crops(classmap, terr[:, 0], defense_bonus)
-        for j, i in enumerate(idxs):
-            cov, (y0, x0, y1, x1), landfrac = _fine_coverage(
-                classmap[j], terr[j, 0], raws[i]["legal_tile"]
-            )
-            has_land_by_idx[i], has_water_by_idx[i] = _coarse_content(landfrac)
-            fine = torch.cat([grid[j, :, y0:y1, x0:x1] * cov, cov.unsqueeze(0)], dim=0)
-            coarse = coarse_grid[j]
-            if fp16:
-                fine, coarse = fine.half(), coarse.half()
-            if torch_out:
-                fine_by_idx[i] = fine
-                coarse_by_idx[i] = coarse
-                local_by_idx[i] = local[j].half() if fp16 else local[j]
-            else:
-                fine_by_idx[i] = fine.cpu().numpy()
-                coarse_by_idx[i] = coarse.cpu().numpy()
-                local_by_idx[i] = (local[j].half() if fp16 else local[j]).cpu().numpy()
-            cov_np = cov.float().cpu().numpy()
-            fine_valid_by_idx[i] = cov_np
-            legal_fine_by_idx[i] = (
-                raws[i]["legal_tile"][y0:y1, x0:x1].astype(np.float32) * cov_np
-            )
-            origin_by_idx[i] = np.array([y0, x0], dtype=np.int64)
+        _emit_foveated(
+            idxs, raws, classmap, terr[:, 0], grid, coarse_grid, local,
+            fp16, torch_out, fine_by_idx, coarse_by_idx, local_by_idx,
+            fine_valid_by_idx, legal_fine_by_idx, origin_by_idx,
+            has_land_by_idx, has_water_by_idx,
+        )
 
     # Cache-hit / in-batch-duplicate path: no AE, no terrain/fallout/static
     # upload - just owners+clut (per-player featurization) and the latent.
@@ -1200,29 +1265,12 @@ def encode_grids(
                 ceil_mode=True, count_include_pad=False,
             )
         local = _local_crops(classmap, land, defense_bonus)
-        for j, i in enumerate(idxs):
-            cov, (y0, x0, y1, x1), landfrac = _fine_coverage(
-                classmap[j], land[j], raws[i]["legal_tile"]
-            )
-            has_land_by_idx[i], has_water_by_idx[i] = _coarse_content(landfrac)
-            fine = torch.cat([grid[j, :, y0:y1, x0:x1] * cov, cov.unsqueeze(0)], dim=0)
-            coarse = coarse_grid[j]
-            if fp16:
-                fine, coarse = fine.half(), coarse.half()
-            if torch_out:
-                fine_by_idx[i] = fine
-                coarse_by_idx[i] = coarse
-                local_by_idx[i] = local[j].half() if fp16 else local[j]
-            else:
-                fine_by_idx[i] = fine.cpu().numpy()
-                coarse_by_idx[i] = coarse.cpu().numpy()
-                local_by_idx[i] = (local[j].half() if fp16 else local[j]).cpu().numpy()
-            cov_np = cov.float().cpu().numpy()
-            fine_valid_by_idx[i] = cov_np
-            legal_fine_by_idx[i] = (
-                raws[i]["legal_tile"][y0:y1, x0:x1].astype(np.float32) * cov_np
-            )
-            origin_by_idx[i] = np.array([y0, x0], dtype=np.int64)
+        _emit_foveated(
+            idxs, raws, classmap, land, grid, coarse_grid, local,
+            fp16, torch_out, fine_by_idx, coarse_by_idx, local_by_idx,
+            fine_valid_by_idx, legal_fine_by_idx, origin_by_idx,
+            has_land_by_idx, has_water_by_idx,
+        )
 
     consumed = (
         "owners", "terrain_static", "fallout_packed", "defense_bonus_packed",
