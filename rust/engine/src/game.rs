@@ -2460,6 +2460,7 @@ impl Game {
             // path (`GameImpl.acceptAllianceRequest`) never touches embargoes in TS.
             self.end_temporary_embargo(requestor, recipient);
             self.end_temporary_embargo(recipient, requestor);
+            self.cancel_nukes_between_new_allies(requestor, recipient);
             return true;
         }
         self.alliance_requests.push(AllianceRequestState {
@@ -2469,6 +2470,39 @@ impl Game {
             status: AllianceRequestStatus::Pending,
         });
         true
+    }
+
+    fn cancel_nukes_between_new_allies(&mut self, first: u16, second: u16) {
+        use crate::core::schemas::unit_type::{ATOM_BOMB, HYDROGEN_BOMB};
+
+        let mut neutralized = Vec::new();
+        for (launcher, ally) in [(first, second), (second, first)] {
+            let threatening = self
+                .player_by_small_id(launcher)
+                .map(|player| {
+                    player
+                        .units
+                        .iter()
+                        .filter(|unit| {
+                            matches!(unit.unit_type.as_str(), ATOM_BOMB | HYDROGEN_BOMB)
+                                && unit.target_tile.is_some_and(|target| {
+                                    crate::execution::nuke_execution::would_nuke_break_alliance(
+                                        self,
+                                        target,
+                                        &unit.unit_type,
+                                        ally,
+                                    )
+                                })
+                        })
+                        .map(|unit| unit.id)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            neutralized.extend(threatening.into_iter().map(|unit_id| (launcher, unit_id)));
+        }
+        for (launcher, unit_id) in neutralized {
+            self.remove_unit(launcher, unit_id);
+        }
     }
 
     fn accept_alliance_pair(&mut self, requestor: u16, recipient: u16, tick: u32) {
@@ -3003,6 +3037,7 @@ fn decay_relation(value: f64) -> f64 {
 #[cfg(test)]
 mod relation_tests {
     use super::{clamp_relation, decay_relation, Game, PlayerInfo, PlayerType, Relation};
+    use crate::core::schemas::unit_type;
 
     fn add_human(game: &mut Game, id: &str) -> u16 {
         game.add_from_info(&PlayerInfo {
@@ -3062,6 +3097,41 @@ mod relation_tests {
         assert!(game.is_allied_with(first, second));
         assert_eq!(game.relation(first, second), Relation::Friendly);
         assert_eq!(game.relation(second, first), Relation::Friendly);
+    }
+
+    #[test]
+    fn only_cross_request_acceptance_cancels_nukes_threatening_new_allies() {
+        fn add_threatening_nuke(game: &mut Game, launcher: u16, target: u16) -> i32 {
+            game.build_unit(target, unit_type::CITY, 0);
+            let nuke = game.build_unit(launcher, unit_type::ATOM_BOMB, 0);
+            game.unit_mut(launcher, nuke).unwrap().target_tile = Some(0);
+            nuke
+        }
+
+        let mut manual = Game::default();
+        let manual_first = add_human(&mut manual, "manual-first");
+        let manual_second = add_human(&mut manual, "manual-second");
+        let manual_nuke = add_threatening_nuke(&mut manual, manual_first, manual_second);
+        assert!(manual.create_alliance_request(manual_first, manual_second, 10));
+        manual.accept_alliance_request(manual_first, manual_second, 11);
+        assert!(manual.unit_exists(manual_first, manual_nuke));
+
+        let mut reciprocal = Game::default();
+        let reciprocal_first = add_human(&mut reciprocal, "reciprocal-first");
+        let reciprocal_second = add_human(&mut reciprocal, "reciprocal-second");
+        let reciprocal_nuke =
+            add_threatening_nuke(&mut reciprocal, reciprocal_first, reciprocal_second);
+        assert!(reciprocal.create_alliance_request(
+            reciprocal_first,
+            reciprocal_second,
+            10
+        ));
+        assert!(reciprocal.create_alliance_request(
+            reciprocal_second,
+            reciprocal_first,
+            11
+        ));
+        assert!(!reciprocal.unit_exists(reciprocal_first, reciprocal_nuke));
     }
 }
 

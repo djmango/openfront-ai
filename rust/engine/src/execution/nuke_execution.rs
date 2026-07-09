@@ -401,6 +401,23 @@ fn maybe_break_alliances(game: &mut Game, nuker_sid: u16, dst: TileRef, nuke_typ
     }
 }
 
+pub(crate) fn would_nuke_break_alliance(
+    game: &Game,
+    dst: TileRef,
+    nuke_type: &str,
+    ally_small_id: u16,
+) -> bool {
+    let (inner, outer) = game.wire.nuke_magnitudes(nuke_type);
+    list_nuke_break_alliance(
+        game,
+        dst,
+        inner,
+        outer,
+        game.wire.nuke_alliance_break_threshold(),
+    )
+    .contains(&ally_small_id)
+}
+
 fn list_nuke_break_alliance(
     game: &Game,
     dst: TileRef,
