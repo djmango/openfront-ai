@@ -198,7 +198,13 @@ pub fn can_build_transport_ship(
         return None;
     }
     let dst = target_transport_tile(game, tile)?;
-    if game.map.owner_id(tile) == owner_small_id {
+    let target_owner = game.map.owner_id(tile);
+    if target_owner == owner_small_id {
+        return None;
+    }
+    if target_owner != game.terra_nullius_id()
+        && !game.can_attack_player(owner_small_id, target_owner)
+    {
         return None;
     }
     closest_shore_by_water(game, owner_small_id, dst)
