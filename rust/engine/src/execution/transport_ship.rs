@@ -18,6 +18,13 @@ pub struct TransportShipExecution {
     active: bool,
     initialized: bool,
     last_move_tick: u32,
+    // TS `TransportShipExecution.target` is snapshotted once in `init()` from
+    // `mg.owner(this.ref)` and reused verbatim when the boat lands, even though
+    // the actual landing tile (`dst`, chosen by `targetTransportTile` as the
+    // closest shore tile of that same owner) can change hands by the time the
+    // multi-tick voyage completes. Mirror that by freezing the owner of
+    // `ref_tile` here instead of re-reading `dst`'s owner at landing time.
+    target_small_id: Option<u16>,
 }
 
 impl TransportShipExecution {
@@ -34,6 +41,7 @@ impl TransportShipExecution {
             active: true,
             initialized: false,
             last_move_tick: 0,
+            target_small_id: None,
         }
     }
 
@@ -120,6 +128,7 @@ impl Execution for TransportShipExecution {
                 return;
             }
         }
+        self.target_small_id = Some(ref_owner);
 
         let Some(dst) = target_transport_tile(game, self.ref_tile) else {
             self.active = false;
@@ -207,15 +216,19 @@ impl Execution for TransportShipExecution {
 
 impl TransportShipExecution {
     fn land(&mut self, game: &mut Game, dst: TileRef, uid: i32, troops: f64) {
-        let target_owner = game.map.owner_id(dst);
-        if target_owner == self.owner_small_id {
+        // TS `TransportShipExecution.tick`: the "already own it" check compares
+        // against the *current* owner of `dst`, but the subsequent attack target
+        // is the `target` snapshotted in `init()` (owner of `ref_tile`), not
+        // `dst`'s live owner.
+        let live_dst_owner = game.map.owner_id(dst);
+        if live_dst_owner == self.owner_small_id {
             game.add_troops(self.owner_small_id, troops * 0.75);
-        } else if target_owner == 0 || target_owner == game.terra_nullius_id() {
-            game.conquer(self.owner_small_id, dst);
-            game.add_land_attack_from(self.owner_small_id, None, Some(troops), Some(dst));
         } else {
             game.conquer(self.owner_small_id, dst);
-            if let Some(def) = game.player_by_small_id(target_owner) {
+            let target_owner = self.target_small_id.unwrap_or(live_dst_owner);
+            if target_owner == 0 || target_owner == game.terra_nullius_id() {
+                game.add_land_attack_from(self.owner_small_id, None, Some(troops), Some(dst));
+            } else if let Some(def) = game.player_by_small_id(target_owner) {
                 let target_id = def.id.clone();
                 game.add_land_attack_from(
                     self.owner_small_id,
