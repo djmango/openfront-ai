@@ -1,9 +1,9 @@
 use super::{
     AllianceExtensionExecution, AllianceRejectExecution, AllianceRequestExecution,
-    BreakAllianceExecution, ConstructionExecution, DonateGoldExecution, DonateTroopsExecution,
-    EmbargoAllExecution, EmbargoExecution, ExecEnum, MarkDisconnectedExecution, NoOpExecution,
-    RetreatExecution, SpawnExecution, TargetPlayerExecution, TransportShipExecution,
-    UpgradeStructureExecution,
+    BoatRetreatExecution, BreakAllianceExecution, ConstructionExecution, DonateGoldExecution,
+    DonateTroopsExecution, EmbargoAllExecution, EmbargoExecution, ExecEnum,
+    MarkDisconnectedExecution, NoOpExecution, RetreatExecution, SpawnExecution,
+    TargetPlayerExecution, TransportShipExecution, UpgradeStructureExecution,
 };
 use crate::execution::AttackExecution;
 use crate::game::{Game, PlayerInfo};
@@ -55,6 +55,18 @@ pub fn intent_to_execution(game: &Game, game_id: &str, intent: &StampedIntent) -
                     tile,
                     troops,
                 ))
+            } else {
+                ExecEnum::NoOp(NoOpExecution)
+            }
+        }
+        "cancel_boat" => {
+            let unit_id = intent
+                .fields
+                .get("unitID")
+                .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|n| n as i64)))
+                .unwrap_or(0) as i32;
+            if let Some(p) = game.player_by_client_id(client_id) {
+                ExecEnum::BoatRetreat(BoatRetreatExecution::new(p.small_id, unit_id))
             } else {
                 ExecEnum::NoOp(NoOpExecution)
             }
