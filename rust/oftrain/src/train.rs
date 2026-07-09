@@ -57,6 +57,7 @@ use tch::{nn, Device, Kind, Tensor};
 use crate::batch::{self, ChoiceScalars};
 use crate::gpu_util::GpuUtilSampler;
 use crate::policy::{self, PolicyNet};
+use crate::engine::EngineKind;
 use crate::vecenv::{EnvWorker, EpisodeInfo, PreparedObs};
 
 pub struct Config {
@@ -87,6 +88,9 @@ pub struct Config {
     pub epochs: usize,
     pub minibatches: usize,
     pub device: Device,
+    /// Which simulation backend envs run against (Node bridge or the
+    /// in-process native engine).
+    pub engine: EngineKind,
     pub log_every: u64,
     pub ckpt_every: u64,
     pub ckpt_dir: String,
@@ -114,13 +118,18 @@ struct Worker {
     handle: JoinHandle<()>,
 }
 
-fn spawn_worker(idx: usize, stage: usize, max_ticks: i64) -> Result<(Worker, PreparedObs)> {
+fn spawn_worker(
+    idx: usize,
+    stage: usize,
+    max_ticks: i64,
+    engine: EngineKind,
+) -> Result<(Worker, PreparedObs)> {
     let (choice_tx, choice_rx) = mpsc::channel::<Choice>();
     let (stage_tx, stage_rx) = mpsc::channel::<usize>();
     let (obs_tx, obs_rx) = mpsc::channel();
     let (init_tx, init_rx) = mpsc::channel::<Result<PreparedObs, String>>();
     let handle = std::thread::Builder::new().name(format!("env{idx}")).spawn(move || {
-        let mut w = match EnvWorker::new(idx, stage, max_ticks) {
+        let mut w = match EnvWorker::new(idx, stage, max_ticks, engine) {
             Ok(w) => w,
             Err(e) => {
                 let _ = init_tx.send(Err(format!("{e:#}")));
@@ -586,7 +595,7 @@ pub fn run(cfg: Config) -> Result<()> {
         let mut cur_obs = Vec::with_capacity(cfg.num_envs);
         for local_i in 0..cfg.num_envs {
             let idx = gi * cfg.num_envs + local_i;
-            let (w, obs) = spawn_worker(idx, cfg.stage, cfg.max_episode_ticks)?;
+            let (w, obs) = spawn_worker(idx, cfg.stage, cfg.max_episode_ticks, cfg.engine)?;
             workers.push(w);
             cur_obs.push(obs);
         }
