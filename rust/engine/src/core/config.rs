@@ -425,6 +425,34 @@ impl Config {
         self.train_station_max_range() as f64 * 1.4142
     }
 
+    /// TS `tradeShipShortRangeDebuff()`.
+    pub fn trade_ship_short_range_debuff(&self) -> f64 {
+        300.0
+    }
+
+    /// TS `proximityBonusPortsNb(totalPorts)`.
+    pub fn proximity_bonus_ports_nb(&self, total_ports: usize) -> f64 {
+        crate::util::within(total_ports as f64 / 3.0, 4.0, total_ports as f64)
+    }
+
+    /// TS `Config.tradeShipGold(dist, player)` - sigmoid-based gold reward; the
+    /// per-player `goldMultiplierFor` override (`hostCheats`) isn't modeled, matching
+    /// `gold_multiplier()` above.
+    pub fn trade_ship_gold(&self, dist: f64) -> i64 {
+        let debuff = self.trade_ship_short_range_debuff();
+        let base_gold = 75_000.0 / (1.0 + (-0.03 * (dist - debuff)).exp()) + 50.0 * dist;
+        (base_gold * self.gold_multiplier()).floor() as i64
+    }
+
+    /// TS `Config.tradeShipSpawnRate(rejections, numTradeShips)` - probability of
+    /// spawn is `1 / tradeShipSpawnRate(...)`.
+    pub fn trade_ship_spawn_rate(&self, rejections: i64, num_trade_ships: i64) -> i64 {
+        let decay_rate = std::f64::consts::LN_2 / 50.0;
+        let base_spawn_rate = 1.0 - crate::util::sigmoid(num_trade_ships as f64, decay_rate, 400.0);
+        let rejection_modifier = 1.0 / (rejections as f64 + 1.0);
+        ((100.0 * rejection_modifier) / base_spawn_rate).floor() as i64
+    }
+
     /// TS `trainSpawnRate(numPlayerFactories)` - hyperbolic decay, midpoint at 10 factories.
     pub fn train_spawn_rate(&self, num_player_factories: i32) -> i32 {
         (num_player_factories + 10) * 15
