@@ -75,7 +75,7 @@ pub struct Player {
     /// relies on that insertion order as the tie-break after its stable sort-by-value, so a
     /// plain `HashMap` here (whose iteration order is randomly per-process-seeded) makes
     /// tie-broken attack-target selection genuinely nondeterministic across runs.
-    pub relations: OrderedMap<u16, i32>,
+    pub relations: OrderedMap<u16, f64>,
     /// TS `PlayerImpl.embargoes` (`Map<PlayerID, Embargo>`) - insertion order doesn't affect
     /// any RNG/numeric outcome (only independent per-target lookups/expiry), but `OrderedMap`
     /// is used anyway for consistency with `relations` above.
@@ -2132,34 +2132,34 @@ impl Game {
         self.map.num_land_tiles
     }
 
-    fn relation_value(&self, a: u16, b: u16) -> i32 {
+    fn relation_value(&self, a: u16, b: u16) -> f64 {
         self.player_by_small_id(a)
             .and_then(|p| p.relations.get(&b).copied())
-            .unwrap_or(0)
+            .unwrap_or(0.0)
     }
 
     /// TS `PlayerImpl.allRelationsSorted()`  -  sort-by-value (stable), tie-broken by
     /// insertion order, filtered to relations with still-alive players.
-    pub fn all_relations_sorted(&self, sid: u16) -> Vec<(u16, i32)> {
+    pub fn all_relations_sorted(&self, sid: u16) -> Vec<(u16, f64)> {
         let Some(p) = self.player_by_small_id(sid) else {
             return Vec::new();
         };
-        let mut out: Vec<(u16, i32)> = p
+        let mut out: Vec<(u16, f64)> = p
             .relations
             .iter()
             .filter(|(other, _)| self.player_by_small_id(*other).is_some_and(|o| o.alive))
             .map(|(other, &v)| (other, v))
             .collect();
-        out.sort_by_key(|(_, v)| *v);
+        out.sort_by(|(_, a), (_, b)| a.total_cmp(b));
         out
     }
 
-    fn relation_from_value(value: i32) -> Relation {
-        if value < -50 {
+    fn relation_from_value(value: f64) -> Relation {
+        if value < -50.0 {
             Relation::Hostile
-        } else if value < 0 {
+        } else if value < 0.0 {
             Relation::Distrustful
-        } else if value < 50 {
+        } else if value < 50.0 {
             Relation::Neutral
         } else {
             Relation::Friendly
@@ -2172,8 +2172,19 @@ impl Game {
 
     pub fn update_relation(&mut self, a: u16, b: u16, delta: i32) {
         if let Some(p) = self.player_by_small_id_mut(a) {
-            let entry = p.relations.entry_or_insert(b, 0);
-            *entry = clamp_relation(*entry + delta);
+            let entry = p.relations.entry_or_insert(b, 0.0);
+            *entry = clamp_relation(*entry + delta as f64);
+        }
+    }
+
+    pub fn decay_relations(&mut self, small_id: u16) {
+        if let Some(p) = self.player_by_small_id_mut(small_id) {
+            let others: Vec<u16> = p.relations.keys().collect();
+            for other in others {
+                if let Some(value) = p.relations.get_mut(&other) {
+                    *value = decay_relation(*value);
+                }
+            }
         }
     }
 
@@ -2953,19 +2964,38 @@ impl Game {
     }
 }
 
-fn clamp_relation(value: i32) -> i32 {
-    value.clamp(-100, 100)
+fn clamp_relation(value: f64) -> f64 {
+    value.clamp(-100.0, 100.0)
+}
+
+fn decay_relation(value: f64) -> f64 {
+    const DELTA: f64 = 0.05;
+    let decayed = value - value.signum() * DELTA;
+    if decayed.abs() < DELTA * 2.0 {
+        0.0
+    } else {
+        decayed
+    }
 }
 
 #[cfg(test)]
 mod relation_tests {
-    use super::clamp_relation;
+    use super::{clamp_relation, decay_relation};
 
     #[test]
     fn relation_updates_are_bounded_like_typescript() {
-        assert_eq!(clamp_relation(120), 100);
-        assert_eq!(clamp_relation(-145), -100);
-        assert_eq!(clamp_relation(35), 35);
+        assert_eq!(clamp_relation(120.0), 100.0);
+        assert_eq!(clamp_relation(-145.0), -100.0);
+        assert_eq!(clamp_relation(35.0), 35.0);
+    }
+
+    #[test]
+    fn relation_decay_moves_scores_toward_neutral() {
+        assert_eq!(decay_relation(100.0), 99.95);
+        assert_eq!(decay_relation(-100.0), -99.95);
+        assert_eq!(decay_relation(0.1), 0.0);
+        assert_eq!(decay_relation(-0.1), 0.0);
+        assert_eq!(decay_relation(0.0), 0.0);
     }
 }
 
