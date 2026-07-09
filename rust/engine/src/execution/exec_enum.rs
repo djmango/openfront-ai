@@ -9,7 +9,7 @@ use super::{
     MarkDisconnectedExecution, NationExecution, NoOpExecution, PlayerExecution,
     RecomputeRailClusterExecution, RetreatExecution, SpawnExecution, SpawnTimerExecution,
     TargetPlayerExecution, TradeShipExecution, TrainExecution, TrainStationExecution,
-    TransportShipExecution, UpgradeStructureExecution, WinCheckExecution,
+    TransportShipExecution, UpgradeStructureExecution, WarshipExecution, WinCheckExecution,
 };
 use crate::bot::TribeExecution;
 use crate::game::Game;
@@ -52,6 +52,7 @@ pub enum ExecEnum {
     SamLauncher(SamLauncherExecution),
     SamMissile(SamMissileExecution),
     TargetPlayer(TargetPlayerExecution),
+    Warship(WarshipExecution),
 }
 
 impl Execution for ExecEnum {
@@ -94,6 +95,7 @@ impl Execution for ExecEnum {
             ExecEnum::SamLauncher(e) => e.init(game, tick),
             ExecEnum::SamMissile(e) => e.init(game, tick),
             ExecEnum::TargetPlayer(e) => e.init(game, tick),
+            ExecEnum::Warship(e) => e.init(game, tick),
         }
     }
 
@@ -136,6 +138,7 @@ impl Execution for ExecEnum {
             ExecEnum::SamLauncher(e) => e.tick(game, tick),
             ExecEnum::SamMissile(e) => e.tick(game, tick),
             ExecEnum::TargetPlayer(e) => e.tick(game, tick),
+            ExecEnum::Warship(e) => e.tick(game, tick),
         }
     }
 
@@ -178,6 +181,7 @@ impl Execution for ExecEnum {
             ExecEnum::SamLauncher(e) => e.is_active(),
             ExecEnum::SamMissile(e) => e.is_active(),
             ExecEnum::TargetPlayer(e) => e.is_active(),
+            ExecEnum::Warship(e) => e.is_active(),
         }
     }
 
@@ -220,6 +224,7 @@ impl Execution for ExecEnum {
             ExecEnum::SamLauncher(e) => e.active_during_spawn(),
             ExecEnum::SamMissile(e) => e.active_during_spawn(),
             ExecEnum::TargetPlayer(e) => e.active_during_spawn(),
+            ExecEnum::Warship(e) => e.active_during_spawn(),
         }
     }
 
@@ -291,6 +296,7 @@ impl ExecEnum {
             ExecEnum::SamLauncher(_) => "SAMLauncherExecution".into(),
             ExecEnum::SamMissile(_) => "SAMMissileExecution".into(),
             ExecEnum::TargetPlayer(_) => "TargetPlayerExecution".into(),
+            ExecEnum::Warship(_) => "WarshipExecution".into(),
         }
     }
 }
