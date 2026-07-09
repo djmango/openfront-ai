@@ -163,22 +163,22 @@ impl Execution for AttackExecution {
             self.refresh_to_conquer(game);
         }
 
-        if self.source_tile.is_none() {
-            game.cancel_opposing_land_attacks(
+        game.cancel_opposing_land_attacks(
+            self.owner_small_id,
+            self.target_small_id,
+            &self.attack_id,
+            &mut self.troops,
+            &mut self.active,
+        );
+        if !self.active {
+            game.unregister_land_attack(
+                &self.attack_id,
                 self.owner_small_id,
                 self.target_small_id,
-                &self.attack_id,
-                &mut self.troops,
-                &mut self.active,
             );
-            if !self.active {
-                game.unregister_land_attack(
-                    &self.attack_id,
-                    self.owner_small_id,
-                    self.target_small_id,
-                );
-                return;
-            }
+            return;
+        }
+        if self.source_tile.is_none() {
             game.merge_outgoing_land_attacks(
                 self.owner_small_id,
                 self.target_small_id,
@@ -365,6 +365,58 @@ mod tests {
 
         assert_eq!(game.player_by_small_id(1).unwrap().troops, 1_400);
         assert!(!attack.is_active());
+    }
+
+    #[test]
+    fn boat_landed_attack_cancels_opposing_land_attack() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        game.add_player(Player {
+            id: "attacker".to_string(),
+            small_id: 1,
+            player_type: PlayerType::Bot,
+            troops: 1_000,
+            tiles_owned: 1,
+            id_prng: PseudoRandom::new(1),
+            ..Default::default()
+        });
+        game.add_player(Player {
+            id: "defender".to_string(),
+            small_id: 2,
+            player_type: PlayerType::Bot,
+            troops: 1_000,
+            tiles_owned: 1,
+            id_prng: PseudoRandom::new(2),
+            ..Default::default()
+        });
+        game.add_execution(crate::execution::ExecEnum::Attack(AttackExecution::new(
+            1,
+            Some("defender".to_string()),
+            Some(100.0),
+        )));
+        game.add_execution(crate::execution::ExecEnum::Attack(
+            AttackExecution::new_with_source(
+                2,
+                Some("attacker".to_string()),
+                Some(40.0),
+                Some(0),
+            ),
+        ));
+
+        game.execute_next_tick();
+
+        let attacks = game.active_attacks_debug();
+        assert_eq!(attacks.len(), 2);
+        assert_eq!(attacks[0].0, 1);
+        assert_eq!(attacks[0].1, 2);
+        assert!(
+            (attacks[0].2 - 60.0).abs() < f64::EPSILON,
+            "unexpected attacks: {attacks:?}"
+        );
+        assert!(attacks[0].4);
+        assert_eq!(attacks[1].0, 2);
+        assert_eq!(attacks[1].1, 1);
+        assert!(!attacks[1].3);
     }
 }
 
