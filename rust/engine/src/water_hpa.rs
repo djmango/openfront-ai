@@ -760,7 +760,6 @@ impl BoundedWaterAstar {
         let land_mask = 1u8 << BOUNDED_LAND_BIT;
         let goal_x = map.x(goal);
         let goal_y = map.y(goal);
-        let goal_local = ((goal_y - min_y) * bounds_w + (goal_x - min_x)) as usize;
 
         let to_local = |tile: TileRef, clamp: bool| -> Option<usize> {
             let mut x = map.x(tile);
@@ -779,6 +778,17 @@ impl BoundedWaterAstar {
             let ly = (local as u32) / bounds_w;
             map.ref_xy(lx + min_x, ly + min_y)
         };
+
+        // TS `AStar.WaterBounded.searchBounded`: `toLocal(goal, true)` clamps the
+        // goal into bounds. Without clamping, a goal one tile outside (e.g. x =
+        // min_x - 1) underflows u32 subtraction and wraps `goal_local` to the
+        // opposite edge of the cluster, producing a teleport when the real
+        // destination is later appended. That desynced transport-ship paths
+        // (HxWdr5PK tick 190 and many other early TINY failures).
+        let goal_local = to_local(goal, true)?;
+        if goal_local >= num_local {
+            return None;
+        }
 
         let s0 = starts[0];
         let start_x = map.x(s0);
