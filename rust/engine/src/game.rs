@@ -32,6 +32,22 @@ pub struct Unit {
     /// TS `UnitImpl._hasTrainStation` - set true immediately when a `TrainStationExecution`
     /// is constructed for this unit (City/Port/Factory).
     pub has_train_station: bool,
+    /// TS `UnitImpl._missileTimerQueue`  -  ticks at which Missile Silo / SAM Launcher
+    /// missiles were launched; used for reload cooldown tracking.
+    pub missile_timer_queue: Vec<u32>,
+    /// TS `UnitImpl` `targetTile` param  -  destination tile for nukes/MIRVs.
+    pub target_tile: Option<TileRef>,
+    /// TS `UnitImpl` `trajectory` param  -  precomputed (tile, targetable) pairs for
+    /// Atom Bomb / Hydrogen Bomb / MIRV Warhead, consulted by SAM interception logic.
+    pub trajectory: Vec<TileRef>,
+    pub trajectory_targetable: Vec<bool>,
+    pub trajectory_index: u32,
+    /// TS `UnitImpl._targetedBySAM`.
+    pub targeted_by_sam: bool,
+    /// TS `UnitImpl._targetable`  -  live in-range check, recomputed each nuke move tick.
+    /// Defaults to `true` in TS; set explicitly on nuke/MIRV-warhead spawn since other unit
+    /// types never read this field.
+    pub targetable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -232,6 +248,8 @@ pub struct Game {
         std::cell::RefCell<HashMap<u16, Option<std::collections::HashSet<u32>>>>,
     /// TS `GameImpl._railNetwork` (`RailNetworkImpl`) - stations, railroads, clusters.
     pub rail_network: crate::rail::RailNetwork,
+    /// TS `StatsImpl._numMirvLaunched`  -  global count feeding escalating MIRV cost.
+    pub mirvs_launched: u32,
 }
 
 impl Default for Game {
@@ -311,6 +329,7 @@ impl Default for Game {
             shared_water_cache_tick: std::cell::RefCell::new(None),
             shared_water_cache: std::cell::RefCell::new(HashMap::new()),
             rail_network: crate::rail::RailNetwork::default(),
+            mirvs_launched: 0,
         }
     }
 }
@@ -844,6 +863,24 @@ impl Game {
         }
     }
 
+    /// TS `GameImpl.relinquish(tile)`  -  drop a single tile back to Terra Nullius
+    /// (used by `NukeExecution` detonation). No-op if the tile is unowned.
+    pub fn relinquish_tile(&mut self, tile: TileRef) {
+        let owner = self.map.owner_id(tile);
+        if owner == 0 {
+            return;
+        }
+        let tick = self.ticks;
+        if let Some(p) = self.player_by_small_id_mut(owner) {
+            p.tiles_owned = (p.tiles_owned - 1).max(0);
+            p.border_tiles.remove(tile);
+            p.owned_tiles.retain(|&t| t != tile);
+            p.last_tile_change = tick;
+        }
+        self.map.set_owner_id(tile, 0);
+        self.refresh_borders_around(tile);
+    }
+
     pub fn players_in_order(&self) -> &[Player] {
         &self.players
     }
@@ -1277,6 +1314,39 @@ impl Game {
             .map(|u| u.unit_type.clone())
     }
 
+    pub fn unit_mut(&mut self, small_id: u16, unit_id: i32) -> Option<&mut Unit> {
+        self.player_by_small_id_mut(small_id)
+            .and_then(|p| p.units.iter_mut().find(|u| u.id == unit_id))
+    }
+
+    pub fn unit(&self, small_id: u16, unit_id: i32) -> Option<&Unit> {
+        self.player_by_small_id(small_id)
+            .and_then(|p| p.units.iter().find(|u| u.id == unit_id))
+    }
+
+    /// TS `UnitImpl.launch()`  -  push the current tick onto the missile timer queue.
+    pub fn unit_launch(&mut self, small_id: u16, unit_id: i32) {
+        let tick = self.ticks;
+        if let Some(u) = self.unit_mut(small_id, unit_id) {
+            u.missile_timer_queue.push(tick);
+        }
+    }
+
+    /// TS `UnitImpl.reloadMissile()`  -  pop the oldest queued launch.
+    pub fn unit_reload_missile(&mut self, small_id: u16, unit_id: i32) {
+        if let Some(u) = self.unit_mut(small_id, unit_id) {
+            if !u.missile_timer_queue.is_empty() {
+                u.missile_timer_queue.remove(0);
+            }
+        }
+    }
+
+    /// TS `UnitImpl.isInCooldown()`  -  timer queue full at `level()` slots.
+    pub fn unit_is_in_cooldown(&self, small_id: u16, unit_id: i32) -> bool {
+        self.unit(small_id, unit_id)
+            .is_some_and(|u| u.missile_timer_queue.len() as i32 == u.level.max(1))
+    }
+
     pub fn set_has_train_station(&mut self, small_id: u16, unit_id: i32, val: bool) {
         if let Some(p) = self.player_by_small_id_mut(small_id) {
             if let Some(u) = p.units.iter_mut().find(|u| u.id == unit_id) {
@@ -1405,6 +1475,11 @@ impl Game {
     }
 
     pub fn structure_cost(&self, small_id: u16, unit_type: &str) -> i64 {
+        use crate::core::schemas::unit_type as ut;
+        if unit_type == ut::MIRV {
+            // TS `unitInfo(MIRV).cost` - escalates with the global launch count.
+            return 25_000_000 + self.mirvs_launched as i64 * 15_000_000;
+        }
         let n = self.structure_cost_units(small_id, unit_type);
         self.wire.structure_cost(unit_type, n)
     }
@@ -1511,6 +1586,7 @@ impl Game {
                 under_construction: false,
                 level: 1,
                 has_train_station: false,
+                ..Default::default()
             });
         }
         self.record_unit_constructed(small_id, unit_type);
@@ -2004,6 +2080,20 @@ impl Game {
         }
     }
 
+    /// TS `Player.removeGold` - returns the amount actually removed (clamped
+    /// to the sender's balance).
+    pub fn remove_gold(&mut self, small_id: u16, amount: i64) -> i64 {
+        if amount <= 0 {
+            return 0;
+        }
+        let Some(p) = self.player_by_small_id_mut(small_id) else {
+            return 0;
+        };
+        let actual_removed = p.gold.min(amount);
+        p.gold -= actual_removed;
+        actual_removed
+    }
+
     pub fn is_allied_with(&self, a: u16, b: u16) -> bool {
         if a == b {
             return false;
@@ -2134,6 +2224,23 @@ impl Game {
                 || (al.requestor_small_id == other && al.recipient_small_id == breaker))
         });
         self.update_relation(breaker, other, -100);
+    }
+
+    /// TS `GameImpl.breakAlliance` - marks `breaker` a traitor (unless `other` already is)
+    /// and detaches the alliance, WITHOUT any relation change. Used by `NukeExecution`,
+    /// which applies its own (differently-directed) relation update afterward.
+    pub fn break_alliance_silently(&mut self, breaker: u16, other: u16) -> bool {
+        if !self.is_allied_with(breaker, other) {
+            return false;
+        }
+        if !self.is_traitor(other) {
+            self.mark_traitor(breaker);
+        }
+        self.alliances.retain(|al| {
+            !((al.requestor_small_id == breaker && al.recipient_small_id == other)
+                || (al.requestor_small_id == other && al.recipient_small_id == breaker))
+        });
+        true
     }
 
     pub fn expire_alliances_for(&mut self, small_id: u16) {
@@ -2339,6 +2446,30 @@ impl Game {
         }
         if recipient.player_type == crate::game::PlayerType::Human
             && !self.wire.game_config().donate_troops
+        {
+            return false;
+        }
+        true
+    }
+
+    pub fn can_donate_gold(&self, sender_small_id: u16, recipient_small_id: u16) -> bool {
+        if sender_small_id == recipient_small_id {
+            return false;
+        }
+        let Some(sender) = self.player_by_small_id(sender_small_id) else {
+            return false;
+        };
+        let Some(recipient) = self.player_by_small_id(recipient_small_id) else {
+            return false;
+        };
+        if !sender.alive || !recipient.alive || sender.tiles_owned == 0 {
+            return false;
+        }
+        if !self.is_friendly(sender_small_id, recipient_small_id) {
+            return false;
+        }
+        if recipient.player_type == crate::game::PlayerType::Human
+            && !self.wire.game_config().donate_gold
         {
             return false;
         }

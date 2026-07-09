@@ -1133,6 +1133,7 @@ fn maybe_spawn_structure(
         small_id,
         unit_type_name,
         tile,
+        true,
     )));
     true
 }
@@ -1409,6 +1410,7 @@ pub fn try_build_defense_post(game: &mut Game, random: &mut PseudoRandom, small_
             small_id,
             unit_type::DEFENSE_POST,
             tile,
+            true,
         )));
         return true;
     }

@@ -235,6 +235,9 @@ impl Config {
                 let n = cost_units as i64;
                 ((n + 1) * 50_000).min(250_000)
             }
+            unit_type::ATOM_BOMB => 750_000,
+            unit_type::HYDROGEN_BOMB => 5_000_000,
+            unit_type::MIRV_WARHEAD => 0,
             _ => 0,
         }
     }
@@ -454,6 +457,82 @@ impl Config {
 
     pub fn fallout_defense_modifier(&self, fallout_ratio: f64) -> f64 {
         5.0 - fallout_ratio * 2.0
+    }
+
+    /// TS `SiloCooldown()`.
+    pub fn silo_cooldown(&self) -> u32 {
+        90
+    }
+
+    /// TS `SAMCooldown()`.
+    pub fn sam_cooldown(&self) -> u32 {
+        90
+    }
+
+    /// TS `waterNukes()`  -  not present in any pinned record's `gameConfig`; default false.
+    pub fn water_nukes(&self) -> bool {
+        false
+    }
+
+    /// TS `nukeMagnitudes(unitType)` -> `(inner, outer)`.
+    pub fn nuke_magnitudes(&self, unit_type: &str) -> (f64, f64) {
+        use crate::core::schemas::unit_type;
+        match unit_type {
+            unit_type::MIRV_WARHEAD => (12.0, 18.0),
+            unit_type::ATOM_BOMB => (12.0, 30.0),
+            unit_type::HYDROGEN_BOMB => (80.0, 100.0),
+            _ => (12.0, 30.0),
+        }
+    }
+
+    /// TS `nukeAllianceBreakThreshold()`.
+    pub fn nuke_alliance_break_threshold(&self) -> f64 {
+        100.0
+    }
+
+    /// TS `defaultNukeSpeed()`.
+    pub fn default_nuke_speed(&self) -> f64 {
+        10.0
+    }
+
+    /// TS `defaultNukeTargetableRange()`.
+    pub fn default_nuke_targetable_range(&self) -> f64 {
+        150.0
+    }
+
+    /// TS `maxSamRange()`.
+    pub fn max_sam_range(&self) -> f64 {
+        150.0
+    }
+
+    /// TS `samRange(level)`.
+    pub fn sam_range(&self, level: i32) -> f64 {
+        self.max_sam_range() - 480.0 / (level as f64 + 5.0)
+    }
+
+    /// TS `defaultSamMissileSpeed()`.
+    pub fn default_sam_missile_speed(&self) -> f64 {
+        12.0
+    }
+
+    /// TS `nukeDeathFactor(nukeType, humans, tilesOwned, maxTroops)`.
+    pub fn nuke_death_factor(
+        &self,
+        nuke_type: &str,
+        humans: f64,
+        tiles_owned: f64,
+        max_troops: f64,
+    ) -> f64 {
+        use crate::core::schemas::unit_type;
+        if nuke_type != unit_type::MIRV_WARHEAD {
+            return (5.0 * humans) / tiles_owned.max(1.0);
+        }
+        let target_troops = 0.03 * max_troops;
+        let excess_troops = (humans - target_troops).max(0.0);
+        let scaling_factor = 500.0;
+        let steepness = 2.0;
+        let normalized_excess = excess_troops / max_troops;
+        scaling_factor * (1.0 - (-steepness * normalized_excess).exp())
     }
 
     /// TS `attackLogic()` terra-nullius branch.

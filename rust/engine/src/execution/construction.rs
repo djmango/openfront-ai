@@ -2,7 +2,10 @@
 
 use super::{
     city_execution::CityExecution, defense_post_execution::DefensePostExecution,
-    factory_execution::FactoryExecution, port_execution::PortExecution, ExecEnum, Execution,
+    factory_execution::FactoryExecution, mirv_execution::MirvExecution,
+    missile_silo_execution::MissileSiloExecution, nuke_execution::NukeExecution,
+    port_execution::PortExecution, sam_launcher_execution::SamLauncherExecution, ExecEnum,
+    Execution,
 };
 use crate::core::schemas::unit_type;
 use crate::game::Game;
@@ -31,28 +34,54 @@ fn complete_construction(game: &mut Game, small_id: u16, unit_type: &str, unit_i
                 small_id, unit_id,
             )));
         }
+        unit_type::MISSILE_SILO => {
+            game.add_execution(ExecEnum::MissileSilo(MissileSiloExecution::new(
+                small_id, unit_id,
+            )));
+        }
+        unit_type::SAM_LAUNCHER => {
+            game.add_execution(ExecEnum::SamLauncher(SamLauncherExecution::new(
+                small_id, unit_id,
+            )));
+        }
         _ => {}
     }
+}
+
+/// TS `ConstructionExecution.isStructure()` - Atom Bomb / Hydrogen Bomb / MIRV are *not*
+/// structures: they charge gold and resolve their own spawn tile lazily inside
+/// `NukeExecution`/`MirvExecution`'s own first tick instead of being built here.
+fn is_structure(unit_type: &str) -> bool {
+    use crate::core::schemas::unit_type as ut;
+    matches!(
+        unit_type,
+        ut::PORT | ut::MISSILE_SILO | ut::DEFENSE_POST | ut::SAM_LAUNCHER | ut::CITY | ut::FACTORY
+    )
 }
 
 pub struct ConstructionExecution {
     small_id: u16,
     unit_type: String,
     tile: TileRef,
+    rocket_direction_up: bool,
     unit_id: Option<i32>,
     ticks_until_complete: u32,
     active: bool,
+    /// Set once the non-structure (nuke/MIRV) delegate execution has been dispatched.
+    delegated: bool,
 }
 
 impl ConstructionExecution {
-    pub fn new(small_id: u16, unit_type: &str, tile: TileRef) -> Self {
+    pub fn new(small_id: u16, unit_type: &str, tile: TileRef, rocket_direction_up: bool) -> Self {
         Self {
             small_id,
             unit_type: unit_type.to_string(),
             tile,
+            rocket_direction_up,
             unit_id: None,
             ticks_until_complete: 0,
             active: true,
+            delegated: false,
         }
     }
 }
@@ -71,6 +100,29 @@ impl Execution for ConstructionExecution {
 
     fn tick(&mut self, game: &mut Game, _: u32) {
         if !self.active {
+            return;
+        }
+
+        if !self.delegated && !is_structure(&self.unit_type) {
+            self.delegated = true;
+            self.active = false;
+            match self.unit_type.as_str() {
+                unit_type::ATOM_BOMB | unit_type::HYDROGEN_BOMB => {
+                    game.add_execution(ExecEnum::Nuke(NukeExecution::new(
+                        &self.unit_type,
+                        self.small_id,
+                        self.tile,
+                        None,
+                        -1.0,
+                        0,
+                        self.rocket_direction_up,
+                    )));
+                }
+                unit_type::MIRV => {
+                    game.add_execution(ExecEnum::Mirv(MirvExecution::new(self.small_id, self.tile)));
+                }
+                _ => {}
+            }
             return;
         }
 
