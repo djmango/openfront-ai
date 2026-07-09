@@ -1,10 +1,12 @@
 //! Warship spawn and patrol movement (`WarshipExecution.ts` subset).
 
 use super::Execution;
-use crate::core::schemas::unit_type::{PORT, WARSHIP};
+use crate::core::schemas::unit_type::{PORT, TRANSPORT, WARSHIP};
+use crate::execution::{ExecEnum, ShellExecution};
 use crate::game::Game;
 use crate::map::TileRef;
 use crate::prng::PseudoRandom;
+use std::collections::HashSet;
 
 pub struct WarshipExecution {
     owner_small_id: u16,
@@ -14,6 +16,8 @@ pub struct WarshipExecution {
     target_tile: Option<TileRef>,
     path: Vec<TileRef>,
     path_idx: usize,
+    last_shell_attack: u32,
+    already_sent_shell: HashSet<(u16, i32)>,
     active: bool,
 }
 
@@ -27,6 +31,8 @@ impl WarshipExecution {
             target_tile: None,
             path: Vec::with_capacity(128),
             path_idx: 0,
+            last_shell_attack: 0,
+            already_sent_shell: HashSet::new(),
             active: true,
         }
     }
@@ -87,6 +93,62 @@ impl WarshipExecution {
         self.path_idx = usize::from(self.path.first() == Some(&from));
         true
     }
+
+    fn target(&self, game: &Game, from: TileRef) -> Option<(u16, i32, &'static str)> {
+        let types = [TRANSPORT, WARSHIP];
+        let mut best: Option<(u16, i32, &'static str, usize, f64)> = None;
+        for (owner, unit_id, _, dist_squared) in game.nearby_structures_any(from, 130, &types) {
+            if owner == self.owner_small_id
+                || !game.can_attack_player(self.owner_small_id, owner)
+                || self.already_sent_shell.contains(&(owner, unit_id))
+            {
+                continue;
+            }
+            let Some(unit_type) = game.unit_type_of(owner, unit_id) else {
+                continue;
+            };
+            let (unit_type, priority) = if unit_type == TRANSPORT {
+                (TRANSPORT, 0)
+            } else if unit_type == WARSHIP {
+                (WARSHIP, 1)
+            } else {
+                continue;
+            };
+            if best.as_ref().is_none_or(|candidate| {
+                priority < candidate.3
+                    || (priority == candidate.3 && dist_squared < candidate.4)
+            }) {
+                best = Some((owner, unit_id, unit_type, priority, dist_squared));
+            }
+        }
+        best.map(|(owner, unit_id, unit_type, _, _)| (owner, unit_id, unit_type))
+    }
+
+    fn shoot_target(
+        &mut self,
+        game: &mut Game,
+        tick: u32,
+        from: TileRef,
+        unit_id: i32,
+        target: (u16, i32, &'static str),
+    ) {
+        if tick - self.last_shell_attack <= 20 {
+            return;
+        }
+        if target.2 != TRANSPORT {
+            self.last_shell_attack = tick;
+        }
+        game.add_execution(ExecEnum::Shell(ShellExecution::new(
+            from,
+            self.owner_small_id,
+            unit_id,
+            target.0,
+            target.1,
+        )));
+        if target.2 == TRANSPORT {
+            self.already_sent_shell.insert((target.0, target.1));
+        }
+    }
 }
 
 impl Execution for WarshipExecution {
@@ -102,7 +164,7 @@ impl Execution for WarshipExecution {
         self.unit_id = Some(game.build_unit(self.owner_small_id, WARSHIP, spawn));
     }
 
-    fn tick(&mut self, game: &mut Game, _tick: u32) {
+    fn tick(&mut self, game: &mut Game, tick: u32) {
         let Some(unit_id) = self.unit_id else {
             self.active = false;
             return;
@@ -111,6 +173,9 @@ impl Execution for WarshipExecution {
             self.active = false;
             return;
         };
+        if let Some(target) = self.target(game, from) {
+            self.shoot_target(game, tick, from, unit_id, target);
+        }
 
         if self.target_tile.is_none() {
             self.target_tile = self.random_target(game, from);

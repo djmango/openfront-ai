@@ -6,7 +6,7 @@ use super::{
     ConstructionExecution, DefensePostExecution, DonateGoldExecution, DonateTroopsExecution,
     EmbargoAllExecution, EmbargoExecution, Execution, FactoryExecution, MirvExecution,
     MissileSiloExecution, NukeExecution, PortExecution, SamLauncherExecution, SamMissileExecution,
-    MarkDisconnectedExecution, NationExecution, NoOpExecution, PlayerExecution,
+    MarkDisconnectedExecution, NationExecution, NoOpExecution, PlayerExecution, ShellExecution,
     RecomputeRailClusterExecution, RetreatExecution, SpawnExecution, SpawnTimerExecution,
     TargetPlayerExecution, TradeShipExecution, TrainExecution, TrainStationExecution,
     TransportShipExecution, UpgradeStructureExecution, WarshipExecution, WinCheckExecution,
@@ -51,6 +51,7 @@ pub enum ExecEnum {
     MissileSilo(MissileSiloExecution),
     SamLauncher(SamLauncherExecution),
     SamMissile(SamMissileExecution),
+    Shell(ShellExecution),
     TargetPlayer(TargetPlayerExecution),
     Warship(WarshipExecution),
 }
@@ -94,6 +95,7 @@ impl Execution for ExecEnum {
             ExecEnum::MissileSilo(e) => e.init(game, tick),
             ExecEnum::SamLauncher(e) => e.init(game, tick),
             ExecEnum::SamMissile(e) => e.init(game, tick),
+            ExecEnum::Shell(e) => e.init(game, tick),
             ExecEnum::TargetPlayer(e) => e.init(game, tick),
             ExecEnum::Warship(e) => e.init(game, tick),
         }
@@ -137,6 +139,7 @@ impl Execution for ExecEnum {
             ExecEnum::MissileSilo(e) => e.tick(game, tick),
             ExecEnum::SamLauncher(e) => e.tick(game, tick),
             ExecEnum::SamMissile(e) => e.tick(game, tick),
+            ExecEnum::Shell(e) => e.tick(game, tick),
             ExecEnum::TargetPlayer(e) => e.tick(game, tick),
             ExecEnum::Warship(e) => e.tick(game, tick),
         }
@@ -180,6 +183,7 @@ impl Execution for ExecEnum {
             ExecEnum::MissileSilo(e) => e.is_active(),
             ExecEnum::SamLauncher(e) => e.is_active(),
             ExecEnum::SamMissile(e) => e.is_active(),
+            ExecEnum::Shell(e) => e.is_active(),
             ExecEnum::TargetPlayer(e) => e.is_active(),
             ExecEnum::Warship(e) => e.is_active(),
         }
@@ -223,6 +227,7 @@ impl Execution for ExecEnum {
             ExecEnum::MissileSilo(e) => e.active_during_spawn(),
             ExecEnum::SamLauncher(e) => e.active_during_spawn(),
             ExecEnum::SamMissile(e) => e.active_during_spawn(),
+            ExecEnum::Shell(e) => e.active_during_spawn(),
             ExecEnum::TargetPlayer(e) => e.active_during_spawn(),
             ExecEnum::Warship(e) => e.active_during_spawn(),
         }
@@ -295,6 +300,7 @@ impl ExecEnum {
             ExecEnum::MissileSilo(_) => "MissileSiloExecution".into(),
             ExecEnum::SamLauncher(_) => "SAMLauncherExecution".into(),
             ExecEnum::SamMissile(_) => "SAMMissileExecution".into(),
+            ExecEnum::Shell(_) => "ShellExecution".into(),
             ExecEnum::TargetPlayer(_) => "TargetPlayerExecution".into(),
             ExecEnum::Warship(_) => "WarshipExecution".into(),
         }

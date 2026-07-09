@@ -27,6 +27,8 @@ pub struct Unit {
     pub unit_type: String,
     pub tile: i32,
     pub under_construction: bool,
+    /// TS `UnitImpl._health`; units without configured health use the TS fallback max of 1.
+    pub health: i32,
     /// TS `UnitImpl.level()`  -  defaults to 1; affects `maxTroops` for cities.
     pub level: i32,
     /// TS `UnitImpl._hasTrainStation` - set true immediately when a `TrainStationExecution`
@@ -1704,6 +1706,11 @@ impl Game {
                 unit_type: unit_type.to_string(),
                 tile: tile as i32,
                 under_construction: false,
+                health: if unit_type == crate::core::schemas::unit_type::WARSHIP {
+                    1000
+                } else {
+                    1
+                },
                 level: 1,
                 has_train_station: false,
                 ..Default::default()
