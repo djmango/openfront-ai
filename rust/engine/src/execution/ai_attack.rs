@@ -575,6 +575,23 @@ fn find_very_weak_enemy(game: &Game, bordering: &[u16]) -> Option<u16> {
     None
 }
 
+fn player_center_tile(game: &Game, small_id: u16) -> Option<TileRef> {
+    let border = game.border_tiles_of(small_id)?;
+    let mut tiles = border.iter();
+    let first = tiles.next()?;
+    let (mut min_x, mut max_x) = (game.x(first), game.x(first));
+    let (mut min_y, mut max_y) = (game.y(first), game.y(first));
+    for tile in tiles {
+        let x = game.x(tile);
+        let y = game.y(tile);
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+    }
+    Some(game.ref_xy(min_x + (max_x - min_x) / 2, min_y + (max_y - min_y) / 2))
+}
+
 fn find_nearest_island_enemy(
     game: &mut Game,
     random: &mut PseudoRandom,
@@ -601,15 +618,28 @@ fn find_nearest_island_enemy(
         return None;
     }
 
-    let player_ids: Vec<u16> = game
+    let attacker_troops = game.player_by_small_id(attacker_small_id)?.troops;
+    let is_ffa = game.wire.game_config().game_mode != "Team";
+    let attacker_center = player_center_tile(game, attacker_small_id)?;
+    let mut sorted_players: Vec<(u16, u32)> = game
         .players_in_order()
         .iter()
-        .filter(|p| p.small_id != attacker_small_id && p.alive)
-        .map(|p| p.small_id)
+        .filter(|p| {
+            p.small_id != attacker_small_id
+                && p.alive
+                && !game.is_friendly(attacker_small_id, p.small_id)
+                && (!is_ffa || p.troops < attacker_troops)
+        })
+        .filter_map(|p| {
+            let center = player_center_tile(game, p.small_id)?;
+            Some((p.small_id, game.manhattan_dist(attacker_center, center)))
+        })
         .collect();
-    let mut candidates: Vec<(u16, u32)> = Vec::new();
-    for target_sid in player_ids {
-        let attacker_shores = shore_border_tiles(game, attacker_small_id);
+    sorted_players.sort_by_key(|(_, distance)| *distance);
+
+    let attacker_shores = shore_border_tiles(game, attacker_small_id);
+    let mut reachable_players = Vec::with_capacity(2);
+    for (target_sid, _) in sorted_players {
         let target_shores = shore_border_tiles(game, target_sid);
         let Some((_src, dst)) = closest_two_tiles(game, &attacker_shores, &target_shores) else {
             continue;
@@ -617,27 +647,18 @@ fn find_nearest_island_enemy(
         if can_build_transport_ship(game, attacker_small_id, dst).is_none() {
             continue;
         }
-        let dist = {
-            let a_tile = game
-                .player_by_small_id(attacker_small_id)
-                .and_then(|p| p.spawn_tile.or(p.owned_tiles.first().copied()))
-                .unwrap_or(0);
-            let b_tile = game
-                .player_by_small_id(target_sid)
-                .and_then(|p| p.spawn_tile.or(p.owned_tiles.first().copied()))
-                .unwrap_or(0);
-            game.manhattan_dist(a_tile, b_tile)
-        };
-        candidates.push((target_sid, dist));
+        reachable_players.push(target_sid);
+        if reachable_players.len() >= 2 {
+            break;
+        }
     }
-    if candidates.is_empty() {
+    if reachable_players.is_empty() {
         return None;
     }
-    candidates.sort_by_key(|(_, d)| *d);
-    if candidates.len() >= 2 && random.chance(3) {
-        Some(candidates[1].0)
+    if reachable_players.len() >= 2 && random.chance(3) {
+        Some(reachable_players[1])
     } else {
-        Some(candidates[0].0)
+        Some(reachable_players[0])
     }
 }
 
