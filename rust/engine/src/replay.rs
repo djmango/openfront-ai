@@ -1645,6 +1645,45 @@ mod tests {
     }
 
     #[test]
+    fn warship_hunts_and_captures_trade_ship_in_rn7wbz1y() {
+        let repo_root = std::env::var("OPENFRONT_REPO")
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+        let repo = std::path::Path::new(&repo_root);
+        let path = repo.join("records/0c4c7d7993c9/rN7wbZ1Y.json.gz");
+
+        let before = replay_to_tick(repo, &path, 720);
+        let before_ship = before
+            .player_by_id("xgfz7usc")
+            .and_then(|player| player.units.iter().find(|unit| unit.id == 1468))
+            .expect("warship 1468 before piracy pursuit");
+        assert_eq!(before_ship.tile, 3_811_208);
+        assert!(before
+            .player_by_id("0s73rd8u")
+            .is_some_and(|player| player.units.iter().any(|unit| unit.id == 1187)));
+
+        let pursuing = replay_to_tick(repo, &path, 721);
+        let pursuing_ship = pursuing
+            .player_by_id("xgfz7usc")
+            .and_then(|player| player.units.iter().find(|unit| unit.id == 1468))
+            .expect("warship 1468 pursuing trade ship 1187");
+        assert_eq!(pursuing_ship.tile, 3_811_206);
+
+        let captured = replay_to_tick(repo, &path, 729);
+        let captor = captured
+            .player_by_id("xgfz7usc")
+            .expect("trade ship captor at turn 729");
+        let captured_trade_ship = captor
+            .units
+            .iter()
+            .find(|unit| unit.id == 1187)
+            .expect("captured trade ship 1187");
+        assert_eq!(captured_trade_ship.tile, 3_797_992);
+        assert!(!captured
+            .player_by_id("0s73rd8u")
+            .is_some_and(|player| player.units.iter().any(|unit| unit.id == 1187)));
+    }
+
+    #[test]
     fn manual_boat_retreat_matches_giq_through_turn_450() {
         let repo_root = std::env::var("OPENFRONT_REPO")
             .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());

@@ -50,6 +50,8 @@ pub struct Unit {
     /// Defaults to `true` in TS; set explicitly on nuke/MIRV-warhead spawn since other unit
     /// types never read this field.
     pub targetable: bool,
+    /// Last tick a trade ship moved along shoreline and was protected from piracy.
+    pub last_safe_from_pirates_tick: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -1700,6 +1702,7 @@ impl Game {
         }
         let id = self.next_unit_id;
         self.next_unit_id += 1;
+        let ticks = self.ticks;
         if let Some(p) = self.player_by_small_id_mut(small_id) {
             p.units.push(Unit {
                 id,
@@ -1713,6 +1716,13 @@ impl Game {
                 },
                 level: 1,
                 has_train_station: false,
+                last_safe_from_pirates_tick: if unit_type
+                    == crate::core::schemas::unit_type::TRADE_SHIP
+                {
+                    ticks as i32
+                } else {
+                    0
+                },
                 ..Default::default()
             });
         }
@@ -2276,6 +2286,32 @@ impl Game {
         self.execs.iter().filter_map(|e| match e {
             ExecEnum::TransportShip(t) => Some(t),
             _ => None,
+        })
+    }
+
+    pub fn trade_ship_destination_owner(&self, ship_unit_id: i32) -> Option<u16> {
+        let destination_port = self.execs.iter().find_map(|execution| match execution {
+            ExecEnum::TradeShip(trade) if trade.ship_unit_id() == Some(ship_unit_id) => {
+                Some(trade.destination_port_unit_id())
+            }
+            _ => None,
+        })?;
+        self.find_unit_owner(destination_port)
+    }
+
+    pub fn trade_ship_is_safe_from_pirates(&self, owner: u16, unit_id: i32) -> bool {
+        self.unit(owner, unit_id)
+            .is_some_and(|unit| self.ticks as i32 - unit.last_safe_from_pirates_tick < 20)
+    }
+
+    pub fn warship_is_docked(&self, owner: u16, unit_id: i32) -> bool {
+        self.execs.iter().any(|execution| match execution {
+            ExecEnum::Warship(warship) => {
+                warship.owner_small_id() == owner
+                    && warship.unit_id() == Some(unit_id)
+                    && warship.is_docked()
+            }
+            _ => false,
         })
     }
 

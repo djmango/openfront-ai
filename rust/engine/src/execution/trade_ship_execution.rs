@@ -20,6 +20,7 @@ pub struct TradeShipExecution {
     path_idx: usize,
     path_dst: Option<TileRef>,
     tiles_traveled: u32,
+    was_captured: bool,
     active: bool,
 }
 
@@ -34,8 +35,17 @@ impl TradeShipExecution {
             path_idx: 0,
             path_dst: None,
             tiles_traveled: 0,
+            was_captured: false,
             active: true,
         }
+    }
+
+    pub fn ship_unit_id(&self) -> Option<i32> {
+        self.ship_unit_id
+    }
+
+    pub fn destination_port_unit_id(&self) -> i32 {
+        self.dst_port_unit_id
     }
 
     fn refresh_path(&mut self, game: &mut Game, from: TileRef, to: TileRef) -> bool {
@@ -78,12 +88,19 @@ impl TradeShipExecution {
         Some(next)
     }
 
-    /// TS `TradeShipExecution.complete` (not-captured branch: both ends get paid).
+    /// TS `TradeShipExecution.complete`.
     fn complete(&mut self, game: &mut Game) {
         self.active = false;
         let Some(uid) = self.ship_unit_id else { return };
-        game.remove_unit(self.orig_owner_small_id, uid);
+        let Some(ship_owner) = game.find_unit_owner(uid) else {
+            return;
+        };
+        game.remove_unit(ship_owner, uid);
         let gold = game.wire.trade_ship_gold(self.tiles_traveled as f64);
+        if self.was_captured {
+            game.add_gold(ship_owner, gold);
+            return;
+        }
         if let Some(src_owner) = game.find_unit_owner(self.src_port_unit_id) {
             game.add_gold(src_owner, gold);
         }
@@ -126,36 +143,75 @@ impl Execution for TradeShipExecution {
         }
         let uid = self.ship_unit_id.unwrap();
 
-        let Some(cur_tile) = game.unit_tile_of(self.orig_owner_small_id, uid) else {
+        let Some(ship_owner) = game.find_unit_owner(uid) else {
+            self.active = false;
+            return;
+        };
+        if ship_owner != self.orig_owner_small_id {
+            self.was_captured = true;
+        }
+        let Some(cur_tile) = game.unit_tile_of(ship_owner, uid) else {
             self.active = false;
             return;
         };
 
         // TS: `!this._dstPort.isActive()` (port destroyed/demolished since spawn).
-        let Some(dst_owner) = game.find_unit_owner(self.dst_port_unit_id) else {
-            game.remove_unit(self.orig_owner_small_id, uid);
+        let mut dst_owner = game.find_unit_owner(self.dst_port_unit_id);
+
+        // TS: `dstPortOwner.id() === srcPort.owner().id()` - the src port (possibly
+        // captured via land conquest since spawn) now belongs to the dst owner too.
+        if dst_owner.is_some() && game.find_unit_owner(self.src_port_unit_id) == dst_owner {
+            game.remove_unit(ship_owner, uid);
+            self.active = false;
+            return;
+        }
+
+        if !self.was_captured && dst_owner.is_none_or(|owner| !game.can_trade(ship_owner, owner)) {
+            game.remove_unit(ship_owner, uid);
+            self.active = false;
+            return;
+        }
+
+        if self.was_captured && dst_owner != Some(ship_owner) {
+            let component = game.get_water_component(cur_tile);
+            let nearest_port = game.player_by_small_id(ship_owner).and_then(|owner| {
+                owner
+                    .units
+                    .iter()
+                    .filter(|unit| {
+                        unit.unit_type == unit_type::PORT
+                            && !unit.under_construction
+                            && component.is_some_and(|component| {
+                                game.has_water_component(unit.tile as TileRef, component)
+                            })
+                    })
+                    .min_by_key(|unit| game.manhattan_dist(unit.tile as TileRef, cur_tile))
+                    .map(|unit| unit.id)
+            });
+            let Some(port_id) = nearest_port else {
+                game.remove_unit(ship_owner, uid);
+                self.active = false;
+                return;
+            };
+            if self.dst_port_unit_id != port_id {
+                self.dst_port_unit_id = port_id;
+                self.path.clear();
+                self.path_idx = 0;
+                self.path_dst = None;
+            }
+            dst_owner = Some(ship_owner);
+        }
+
+        let Some(dst_owner) = dst_owner else {
+            game.remove_unit(ship_owner, uid);
             self.active = false;
             return;
         };
         let Some(dst_tile) = game.unit_tile_of(dst_owner, self.dst_port_unit_id) else {
-            game.remove_unit(self.orig_owner_small_id, uid);
+            game.remove_unit(ship_owner, uid);
             self.active = false;
             return;
         };
-
-        // TS: `dstPortOwner.id() === srcPort.owner().id()` - the src port (possibly
-        // captured via land conquest since spawn) now belongs to the dst owner too.
-        if game.find_unit_owner(self.src_port_unit_id) == Some(dst_owner) {
-            game.remove_unit(self.orig_owner_small_id, uid);
-            self.active = false;
-            return;
-        }
-
-        if !game.can_trade(self.orig_owner_small_id, dst_owner) {
-            game.remove_unit(self.orig_owner_small_id, uid);
-            self.active = false;
-            return;
-        }
 
         if cur_tile == dst_tile {
             self.complete(game);
@@ -166,7 +222,13 @@ impl Execution for TradeShipExecution {
             self.complete(game);
             return;
         };
-        game.move_unit(self.orig_owner_small_id, uid, next);
+        if game.map.is_water(next) && game.map.is_shoreline(next) {
+            let tick = game.ticks() as i32;
+            if let Some(ship) = game.unit_mut(ship_owner, uid) {
+                ship.last_safe_from_pirates_tick = tick;
+            }
+        }
+        game.move_unit(ship_owner, uid, next);
         self.tiles_traveled += 1;
     }
 
