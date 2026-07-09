@@ -1,0 +1,27 @@
+[package]
+name = "oftrain"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "oftrain"
+path = "src/main.rs"
+
+[build-dependencies]
+
+[dependencies]
+ofcore = { path = "../ofcore" }
+tch = "0.24"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+clap = { version = "4", features = ["derive"] }
+rand = { version = "0.8", features = ["small_rng"] }
+rand_distr = "0.4"
+anyhow = "1"
+flate2 = "1"
+base64 = "0.22"
+crossbeam-channel = "0.5"
+
+[features]
+default = []
+download-libtorch = ["tch/download-libtorch"]
