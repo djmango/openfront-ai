@@ -2,7 +2,8 @@ use super::{
     AllianceExtensionExecution, AllianceRejectExecution, AllianceRequestExecution,
     BreakAllianceExecution, ConstructionExecution, DonateGoldExecution, DonateTroopsExecution,
     EmbargoAllExecution, EmbargoExecution, ExecEnum, MarkDisconnectedExecution, NoOpExecution,
-    RetreatExecution, SpawnExecution, TransportShipExecution, UpgradeStructureExecution,
+    RetreatExecution, SpawnExecution, TargetPlayerExecution, TransportShipExecution,
+    UpgradeStructureExecution,
 };
 use crate::execution::AttackExecution;
 use crate::game::{Game, PlayerInfo};
@@ -241,6 +242,19 @@ pub fn intent_to_execution(game: &Game, game_id: &str, intent: &StampedIntent) -
                 .unwrap_or(false);
             if let Some(p) = game.player_by_client_id(client_id) {
                 ExecEnum::EmbargoAll(EmbargoAllExecution::new(p.small_id, action_start))
+            } else {
+                ExecEnum::NoOp(NoOpExecution)
+            }
+        }
+        "targetPlayer" => {
+            let target = intent
+                .fields
+                .get("target")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if let Some(p) = game.player_by_client_id(client_id) {
+                ExecEnum::TargetPlayer(TargetPlayerExecution::new(p.small_id, target))
             } else {
                 ExecEnum::NoOp(NoOpExecution)
             }

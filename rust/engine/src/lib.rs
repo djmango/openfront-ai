@@ -18,6 +18,7 @@ pub mod prng;
 pub mod rail;
 pub mod record;
 pub mod replay;
+pub mod rl;
 pub mod session;
 pub mod spatial;
 pub mod util;
