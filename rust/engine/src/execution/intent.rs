@@ -1,7 +1,8 @@
 use super::{
     AllianceExtensionExecution, AllianceRejectExecution, AllianceRequestExecution,
-    BreakAllianceExecution, ConstructionExecution, DonateTroopsExecution, ExecEnum, MarkDisconnectedExecution,
-    NoOpExecution, RetreatExecution, SpawnExecution, TransportShipExecution, UpgradeStructureExecution,
+    BreakAllianceExecution, ConstructionExecution, DonateGoldExecution, DonateTroopsExecution, ExecEnum,
+    MarkDisconnectedExecution, NoOpExecution, RetreatExecution, SpawnExecution, TransportShipExecution,
+    UpgradeStructureExecution,
 };
 use crate::execution::AttackExecution;
 use crate::game::{Game, PlayerInfo};
@@ -76,8 +77,19 @@ pub fn intent_to_execution(game: &Game, game_id: &str, intent: &StampedIntent) -
                 .get("unit")
                 .and_then(Value::as_str)
                 .unwrap_or("");
+            // TS `NukeExecution` constructor default param - `undefined` (field absent) means `true`.
+            let rocket_direction_up = intent
+                .fields
+                .get("rocketDirectionUp")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
             if let Some(p) = game.player_by_client_id(client_id) {
-                ExecEnum::Construction(ConstructionExecution::new(p.small_id, unit, tile))
+                ExecEnum::Construction(ConstructionExecution::new(
+                    p.small_id,
+                    unit,
+                    tile,
+                    rocket_direction_up,
+                ))
             } else {
                 ExecEnum::NoOp(NoOpExecution)
             }
@@ -179,6 +191,24 @@ pub fn intent_to_execution(game: &Game, game_id: &str, intent: &StampedIntent) -
                     recipient,
                     troops,
                 ))
+            } else {
+                ExecEnum::NoOp(NoOpExecution)
+            }
+        }
+        "donate_gold" => {
+            let recipient = intent
+                .fields
+                .get("recipient")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let gold = intent.fields.get("gold").and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_f64().map(|n| n as i64))
+                    .or_else(|| v.as_u64().map(|n| n as i64))
+            });
+            if let Some(p) = game.player_by_client_id(client_id) {
+                ExecEnum::DonateGold(DonateGoldExecution::new(p.small_id, recipient, gold))
             } else {
                 ExecEnum::NoOp(NoOpExecution)
             }

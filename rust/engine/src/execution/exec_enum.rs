@@ -3,11 +3,12 @@
 use super::{
     AllianceExtensionExecution, AllianceRejectExecution, AllianceRequestExecution,
     AttackExecution, BreakAllianceExecution, CityExecution, ConstructionExecution,
-    DefensePostExecution, DonateTroopsExecution, FactoryExecution, PortExecution,
-    Execution, MarkDisconnectedExecution, NationExecution, NoOpExecution, PlayerExecution,
-    RecomputeRailClusterExecution, RetreatExecution, SpawnExecution, SpawnTimerExecution,
-    TrainExecution, TrainStationExecution, TransportShipExecution, UpgradeStructureExecution,
-    WinCheckExecution,
+    DefensePostExecution, DonateGoldExecution, DonateTroopsExecution, FactoryExecution, MirvExecution,
+    MissileSiloExecution, NukeExecution, PortExecution, SamLauncherExecution,
+    SamMissileExecution, Execution, MarkDisconnectedExecution, NationExecution, NoOpExecution,
+    PlayerExecution, RecomputeRailClusterExecution, RetreatExecution, SpawnExecution,
+    SpawnTimerExecution, TrainExecution, TrainStationExecution, TransportShipExecution,
+    UpgradeStructureExecution, WinCheckExecution,
 };
 use crate::bot::TribeExecution;
 use crate::game::Game;
@@ -34,11 +35,17 @@ pub enum ExecEnum {
     BreakAlliance(BreakAllianceExecution),
     AllianceExtension(AllianceExtensionExecution),
     DonateTroops(DonateTroopsExecution),
+    DonateGold(DonateGoldExecution),
     Retreat(RetreatExecution),
     TribeMassSpawn(crate::bot::TribeMassSpawn),
     Player(PlayerExecution),
     Tribe(TribeExecution),
     Nation(NationExecution),
+    Nuke(NukeExecution),
+    Mirv(MirvExecution),
+    MissileSilo(MissileSiloExecution),
+    SamLauncher(SamLauncherExecution),
+    SamMissile(SamMissileExecution),
 }
 
 impl Execution for ExecEnum {
@@ -65,11 +72,17 @@ impl Execution for ExecEnum {
             ExecEnum::BreakAlliance(e) => e.init(game, tick),
             ExecEnum::AllianceExtension(e) => e.init(game, tick),
             ExecEnum::DonateTroops(e) => e.init(game, tick),
+            ExecEnum::DonateGold(e) => e.init(game, tick),
             ExecEnum::Retreat(e) => e.init(game, tick),
             ExecEnum::TribeMassSpawn(e) => e.init(game, tick),
             ExecEnum::Player(e) => e.init(game, tick),
             ExecEnum::Tribe(e) => e.init(game, tick),
             ExecEnum::Nation(e) => e.init(game, tick),
+            ExecEnum::Nuke(e) => e.init(game, tick),
+            ExecEnum::Mirv(e) => e.init(game, tick),
+            ExecEnum::MissileSilo(e) => e.init(game, tick),
+            ExecEnum::SamLauncher(e) => e.init(game, tick),
+            ExecEnum::SamMissile(e) => e.init(game, tick),
         }
     }
 
@@ -96,11 +109,17 @@ impl Execution for ExecEnum {
             ExecEnum::BreakAlliance(e) => e.tick(game, tick),
             ExecEnum::AllianceExtension(e) => e.tick(game, tick),
             ExecEnum::DonateTroops(e) => e.tick(game, tick),
+            ExecEnum::DonateGold(e) => e.tick(game, tick),
             ExecEnum::Retreat(e) => e.tick(game, tick),
             ExecEnum::TribeMassSpawn(e) => e.tick(game, tick),
             ExecEnum::Player(e) => e.tick(game, tick),
             ExecEnum::Tribe(e) => e.tick(game, tick),
             ExecEnum::Nation(e) => e.tick(game, tick),
+            ExecEnum::Nuke(e) => e.tick(game, tick),
+            ExecEnum::Mirv(e) => e.tick(game, tick),
+            ExecEnum::MissileSilo(e) => e.tick(game, tick),
+            ExecEnum::SamLauncher(e) => e.tick(game, tick),
+            ExecEnum::SamMissile(e) => e.tick(game, tick),
         }
     }
 
@@ -127,11 +146,17 @@ impl Execution for ExecEnum {
             ExecEnum::BreakAlliance(e) => e.is_active(),
             ExecEnum::AllianceExtension(e) => e.is_active(),
             ExecEnum::DonateTroops(e) => e.is_active(),
+            ExecEnum::DonateGold(e) => e.is_active(),
             ExecEnum::Retreat(e) => e.is_active(),
             ExecEnum::TribeMassSpawn(e) => e.is_active(),
             ExecEnum::Player(e) => e.is_active(),
             ExecEnum::Tribe(e) => e.is_active(),
             ExecEnum::Nation(e) => e.is_active(),
+            ExecEnum::Nuke(e) => e.is_active(),
+            ExecEnum::Mirv(e) => e.is_active(),
+            ExecEnum::MissileSilo(e) => e.is_active(),
+            ExecEnum::SamLauncher(e) => e.is_active(),
+            ExecEnum::SamMissile(e) => e.is_active(),
         }
     }
 
@@ -158,11 +183,17 @@ impl Execution for ExecEnum {
             ExecEnum::BreakAlliance(e) => e.active_during_spawn(),
             ExecEnum::AllianceExtension(e) => e.active_during_spawn(),
             ExecEnum::DonateTroops(e) => e.active_during_spawn(),
+            ExecEnum::DonateGold(e) => e.active_during_spawn(),
             ExecEnum::Retreat(e) => e.active_during_spawn(),
             ExecEnum::TribeMassSpawn(e) => e.active_during_spawn(),
             ExecEnum::Player(e) => e.active_during_spawn(),
             ExecEnum::Tribe(e) => e.active_during_spawn(),
             ExecEnum::Nation(e) => e.active_during_spawn(),
+            ExecEnum::Nuke(e) => e.active_during_spawn(),
+            ExecEnum::Mirv(e) => e.active_during_spawn(),
+            ExecEnum::MissileSilo(e) => e.active_during_spawn(),
+            ExecEnum::SamLauncher(e) => e.active_during_spawn(),
+            ExecEnum::SamMissile(e) => e.active_during_spawn(),
         }
     }
 
@@ -218,11 +249,17 @@ impl ExecEnum {
             ExecEnum::BreakAlliance(_) => "BreakAlliance".into(),
             ExecEnum::AllianceExtension(_) => "AllianceExtension".into(),
             ExecEnum::DonateTroops(_) => "DonateTroops".into(),
+            ExecEnum::DonateGold(_) => "DonateGold".into(),
             ExecEnum::Retreat(_) => "Retreat".into(),
             ExecEnum::TribeMassSpawn(_) => "TribeMassSpawn".into(),
             ExecEnum::Player(e) => format!("Player({})", e.small_id()),
             ExecEnum::Tribe(e) => format!("Tribe({})", e.small_id()),
             ExecEnum::Nation(_) => "Nation".into(),
+            ExecEnum::Nuke(_) => "NukeExecution".into(),
+            ExecEnum::Mirv(_) => "MirvExecution".into(),
+            ExecEnum::MissileSilo(_) => "MissileSiloExecution".into(),
+            ExecEnum::SamLauncher(_) => "SAMLauncherExecution".into(),
+            ExecEnum::SamMissile(_) => "SAMMissileExecution".into(),
         }
     }
 }
