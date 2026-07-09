@@ -575,10 +575,17 @@ pub fn find_stations_path(game: &Game, rn: &RailNetwork, from: u32, to: u32) -> 
 }
 
 /// TS `Railroad.getOrientedRailroad` - oriented tiles for a `from -> to` hop along the graph.
+/// TS `TrainStation.getRailroadTo` looks up a `Map<TrainStation, Railroad>` keyed by
+/// neighbor, which `addRailroad` overwrites on every call - so when two railroads connect
+/// the same station pair (e.g. two nearby rails both split by one new station), the
+/// *most recently added* edge wins, not the first. Iterate `st.railroads` back-to-front
+/// (append-only, so last-added is scanned first) to match that overwrite semantics.
 pub fn oriented_railroad_tiles(rn: &RailNetwork, from: u32, to: u32) -> Option<Vec<TileRef>> {
     let st = rn.stations.get(&from)?;
-    for &rid in &st.railroads {
-        let r = rn.railroads.get(&rid)?;
+    for &rid in st.railroads.iter().rev() {
+        let Some(r) = rn.railroads.get(&rid) else {
+            continue;
+        };
         if r.from == to || r.to == to {
             return Some(if r.to == to {
                 r.tiles.clone()
