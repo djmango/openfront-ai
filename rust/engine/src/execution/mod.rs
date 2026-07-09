@@ -102,7 +102,7 @@ pub use sam_launcher_execution::SamLauncherExecution;
 pub use sam_missile_execution::SamMissileExecution;
 pub use noop::NoOpExecution;
 pub use player::PlayerExecution;
-pub use retreat::RetreatExecution;
+pub use retreat::{BoatRetreatExecution, RetreatExecution};
 pub use spawn::SpawnExecution;
 pub use spawn_timer::SpawnTimerExecution;
 pub use target_player::TargetPlayerExecution;

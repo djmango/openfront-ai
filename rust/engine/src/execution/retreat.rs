@@ -48,3 +48,32 @@ impl Execution for RetreatExecution {
         self.active
     }
 }
+
+pub struct BoatRetreatExecution {
+    owner_small_id: u16,
+    unit_id: i32,
+    active: bool,
+}
+
+impl BoatRetreatExecution {
+    pub fn new(owner_small_id: u16, unit_id: i32) -> Self {
+        Self {
+            owner_small_id,
+            unit_id,
+            active: true,
+        }
+    }
+}
+
+impl Execution for BoatRetreatExecution {
+    fn init(&mut self, _game: &mut Game, _tick: u32) {}
+
+    fn tick(&mut self, game: &mut Game, _tick: u32) {
+        game.order_boat_retreat(self.owner_small_id, self.unit_id);
+        self.active = false;
+    }
+
+    fn is_active(&self) -> bool {
+        self.active
+    }
+}

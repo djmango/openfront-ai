@@ -1285,6 +1285,23 @@ impl Game {
         }
     }
 
+    pub fn order_boat_retreat(&mut self, owner_small_id: u16, unit_id: i32) {
+        let owns_unit = self
+            .player_by_small_id(owner_small_id)
+            .is_some_and(|p| p.units.iter().any(|u| u.id == unit_id));
+        if !owns_unit {
+            return;
+        }
+        for exec in &mut self.execs {
+            if let ExecEnum::TransportShip(transport) = exec {
+                if transport.unit_id() == Some(unit_id) {
+                    transport.request_retreat();
+                    return;
+                }
+            }
+        }
+    }
+
     pub fn add_land_attack(
         &mut self,
         owner_small_id: u16,

@@ -4,7 +4,7 @@ use super::Execution;
 use crate::core::schemas::unit_type::TRANSPORT;
 use crate::game::Game;
 use crate::map::TileRef;
-use crate::spatial::{can_build_transport_ship, target_transport_tile};
+use crate::spatial::{can_build_transport_ship, closest_shore_by_water, target_transport_tile};
 
 pub struct TransportShipExecution {
     owner_small_id: u16,
@@ -18,6 +18,8 @@ pub struct TransportShipExecution {
     active: bool,
     initialized: bool,
     last_move_tick: u32,
+    retreating: bool,
+    retreat_destination_resolved: bool,
     // TS `TransportShipExecution.target` is snapshotted once in `init()` from
     // `mg.owner(this.ref)` and reused verbatim when the boat lands, even though
     // the actual landing tile (`dst`, chosen by `targetTransportTile` as the
@@ -41,6 +43,8 @@ impl TransportShipExecution {
             active: true,
             initialized: false,
             last_move_tick: 0,
+            retreating: false,
+            retreat_destination_resolved: false,
             target_small_id: None,
         }
     }
@@ -54,6 +58,10 @@ impl TransportShipExecution {
     /// natively it lives here, read by the RL obs units list).
     pub fn carried_troops(&self) -> f64 {
         self.troops.unwrap_or(0.0)
+    }
+
+    pub fn request_retreat(&mut self) {
+        self.retreating = true;
     }
 
     fn unit_tile(&self, game: &Game) -> Option<TileRef> {
@@ -190,7 +198,7 @@ impl Execution for TransportShipExecution {
         }
         self.last_move_tick = tick;
 
-        let Some(dst) = self.dst else {
+        let Some(mut dst) = self.dst else {
             self.active = false;
             return;
         };
@@ -203,6 +211,18 @@ impl Execution for TransportShipExecution {
             return;
         };
         let troops = self.troops.unwrap_or(0.0);
+
+        if self.retreating && !self.retreat_destination_resolved {
+            let Some(retreat_dst) = closest_shore_by_water(game, self.owner_small_id, from) else {
+                game.add_troops(self.owner_small_id, troops);
+                game.remove_unit(self.owner_small_id, uid);
+                self.active = false;
+                return;
+            };
+            self.dst = Some(retreat_dst);
+            dst = retreat_dst;
+            self.retreat_destination_resolved = true;
+        }
 
         if from == dst {
             self.land(game, dst, uid, troops);
