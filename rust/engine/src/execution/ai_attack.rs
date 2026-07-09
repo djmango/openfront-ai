@@ -1162,11 +1162,64 @@ fn has_nearby_terra_nullius(game: &Game, small_id: u16) -> bool {
     has_shore_reachable_tn(game, small_id)
 }
 
-fn attack_with_random_boat(game: &mut Game, random: &mut PseudoRandom, small_id: u16, bordering_enemies: &[u16]) -> bool {
-    if game.wire.is_unit_disabled(crate::core::schemas::unit_type::TRANSPORT) {
+fn random_boat_attack_troops(game: &Game, attacker_small_id: u16, target_small_id: u16) -> f64 {
+    let Some(attacker) = game.player_by_small_id(attacker_small_id) else {
+        return 0.0;
+    };
+    let mut troops = attacker.troops as f64 / 5.0;
+    if target_small_id == game.terra_nullius_id()
+        || attacker.player_type == PlayerType::Bot
+        || game.wire.game_config().game_mode == "Team"
+    {
+        return troops;
+    }
+
+    let retain_fraction = match game.wire.game_config().difficulty.as_str() {
+        "Hard" => 0.75,
+        "Impossible" => 0.9,
+        _ => return troops,
+    };
+    let max_neighbor_troops = nearby_players_ts_order(game, attacker_small_id)
+        .into_iter()
+        .filter_map(|sid| game.player_by_small_id(sid))
+        .filter(|p| {
+            p.player_type != PlayerType::Bot && !game.is_friendly(attacker_small_id, p.small_id)
+        })
+        .map(|p| p.troops)
+        .max()
+        .unwrap_or(0);
+    if max_neighbor_troops > 0 {
+        let min_retained = (max_neighbor_troops as f64 * retain_fraction).ceil();
+        troops = troops.min((attacker.troops as f64 - min_retained).max(0.0));
+    }
+
+    let incoming = game.incoming_land_troops(attacker_small_id);
+    if incoming > 0.0 {
+        troops = troops.max(incoming.min(attacker.troops as f64 / 5.0));
+    } else if game
+        .player_by_small_id(target_small_id)
+        .is_some_and(|target| troops < target.troops as f64 * 0.2)
+    {
+        return 0.0;
+    }
+    troops
+}
+
+fn attack_with_random_boat(
+    game: &mut Game,
+    random: &mut PseudoRandom,
+    small_id: u16,
+    bordering_enemies: &[u16],
+) -> bool {
+    if game
+        .wire
+        .is_unit_disabled(crate::core::schemas::unit_type::TRANSPORT)
+    {
         return false;
     }
-    if game.unit_count(small_id, crate::core::schemas::unit_type::TRANSPORT) >= game.wire.boat_max_number() {
+    if game.unit_count(small_id, crate::core::schemas::unit_type::TRANSPORT)
+        >= game.wire.boat_max_number()
+    {
         return false;
     }
 
@@ -1178,6 +1231,7 @@ fn attack_with_random_boat(game: &mut Game, random: &mut PseudoRandom, small_id:
 
     // High-interest: unowned land, then player targets.
     for high_interest in [true, false] {
+        let mut unreachable_players = HashSet::new();
         for _ in 0..500 {
             let bx = game.x(src) as i32;
             let by = game.y(src) as i32;
@@ -1194,6 +1248,19 @@ fn attack_with_random_boat(game: &mut Game, random: &mut PseudoRandom, small_id:
             if owner == small_id {
                 continue;
             }
+            if owner != game.terra_nullius_id() {
+                if unreachable_players.contains(&owner) || bordering_enemies.contains(&owner) {
+                    continue;
+                }
+                if game.wire.game_config().game_mode != "Team"
+                    && game.player_by_small_id(owner).is_some_and(|target| {
+                        game.player_by_small_id(small_id)
+                            .is_some_and(|attacker| target.troops > attacker.troops)
+                    })
+                {
+                    continue;
+                }
+            }
             if high_interest {
                 if owner != 0
                     && game
@@ -1202,16 +1269,16 @@ fn attack_with_random_boat(game: &mut Game, random: &mut PseudoRandom, small_id:
                 {
                     continue;
                 }
-            } else if owner == 0 {
+            } else if owner != game.terra_nullius_id() && game.is_friendly(small_id, owner) {
                 continue;
             }
             if can_build_transport_ship(game, small_id, tile).is_none() {
+                if owner != game.terra_nullius_id() {
+                    unreachable_players.insert(owner);
+                }
                 continue;
             }
-            let troops = game
-                .player_by_small_id(small_id)
-                .map(|p| game.wire.boat_attack_amount(p.troops))
-                .unwrap_or(0.0);
+            let troops = random_boat_attack_troops(game, small_id, owner);
             if troops < 1.0 {
                 return false;
             }
