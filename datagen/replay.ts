@@ -37,6 +37,8 @@ import * as path from "path";
 import { fileURLToPath } from "url";
 import * as zlib from "zlib";
 import { createHash } from "crypto";
+import { spawn } from "child_process";
+import { availableParallelism } from "os";
 import {
   Game,
   GameMapType,
@@ -829,20 +831,31 @@ async function writeOutcomeOracle(
   recordsDir: string,
   cacheFile: string,
   parityCommit: string,
+  limit: number,
+  jobs: number,
+  timeoutSeconds: number,
 ): Promise<void> {
-  const files = fs
+  const allFiles = fs
     .readdirSync(recordsDir, { recursive: true })
     .map(String)
     .filter((file) => file.endsWith(".json") || file.endsWith(".json.gz"))
     .map((file) => path.join(recordsDir, file))
     .sort();
-  const recordHasher = createHash("sha256");
-  for (const file of files) {
-    recordHasher.update(path.relative(recordsDir, file));
-    recordHasher.update("\0");
-    recordHasher.update(fs.readFileSync(file));
-    recordHasher.update("\0");
+  const files = limit > 0 ? allFiles.slice(0, limit) : allFiles;
+  if (files.length === 0) {
+    throw new Error(`no records found in ${recordsDir}`);
   }
+  const recordHasher = createHash("sha256");
+  const records = files.map((file) => {
+    const relativePath = path.relative(recordsDir, file);
+    const bytes = fs.readFileSync(file);
+    const recordHash = createHash("sha256").update(bytes).digest("hex");
+    recordHasher.update(relativePath);
+    recordHasher.update("\0");
+    recordHasher.update(bytes);
+    recordHasher.update("\0");
+    return { file, relativePath, recordHash };
+  });
   const recordSetHash = recordHasher.digest("hex");
   const oracleFingerprint = createHash("sha256")
     .update(fs.readFileSync(fileURLToPath(import.meta.url)))
@@ -873,17 +886,143 @@ async function writeOutcomeOracle(
     // A missing or stale cache is regenerated below.
   }
 
-  const originalLog = console.log;
-  console.log = () => undefined;
-  const outcomes: GameOutcome[] = [];
-  try {
-    for (const file of files) {
-      outcomes.push(await replayOutcome(loadRecord(file)));
+  type OutcomeShard = {
+    schemaVersion: number;
+    parityCommit: string;
+    oracleFingerprint: string;
+    relativePath: string;
+    recordHash: string;
+    outcome: GameOutcome;
+  };
+  const shardDir = `${cacheFile}.records`;
+  fs.mkdirSync(shardDir, { recursive: true });
+  const shardPath = (relativePath: string): string =>
+    path.join(
+      shardDir,
+      `${createHash("sha256").update(relativePath).digest("hex")}.json`,
+    );
+  const readShard = (
+    relativePath: string,
+    recordHash: string,
+  ): OutcomeShard | null => {
+    try {
+      const shard = JSON.parse(
+        fs.readFileSync(shardPath(relativePath), "utf8"),
+      ) as OutcomeShard;
+      return shard.schemaVersion === OUTCOME_SCHEMA_VERSION &&
+        shard.parityCommit === parityCommit &&
+        shard.oracleFingerprint === oracleFingerprint &&
+        shard.relativePath === relativePath &&
+        shard.recordHash === recordHash
+        ? shard
+        : null;
+    } catch {
+      return null;
     }
-  } finally {
-    console.log = originalLog;
-  }
-  outcomes.sort((a, b) =>
+  };
+  const writeShard = (shard: OutcomeShard): void => {
+    const destination = shardPath(shard.relativePath);
+    const temporary = `${destination}.${process.pid}.tmp`;
+    fs.writeFileSync(temporary, `${JSON.stringify(shard, null, 2)}\n`);
+    fs.renameSync(temporary, destination);
+  };
+
+  const outcomes = new Map<string, GameOutcome>();
+  const pending = records.filter(({ relativePath, recordHash }) => {
+    const shard = readShard(relativePath, recordHash);
+    if (shard === null) return true;
+    outcomes.set(relativePath, shard.outcome);
+    return false;
+  });
+  console.error(
+    `[outcome-oracle] ${outcomes.size}/${records.length} records cached; ` +
+      `${pending.length} pending with ${jobs} worker(s)`,
+  );
+
+  let cursor = 0;
+  let completed = outcomes.size;
+  const runRecord = async (record: (typeof records)[number]): Promise<void> => {
+    const resultFile = `${shardPath(record.relativePath)}.${process.pid}.result`;
+    const childArgs = [
+      ...process.execArgv,
+      fileURLToPath(import.meta.url),
+      "--outcome-oracle-record",
+      record.file,
+      "--outcome-result",
+      resultFile,
+    ];
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(process.execPath, childArgs, {
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      let stderr = "";
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk: string) => {
+        stderr = `${stderr}${chunk}`.slice(-8192);
+      });
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(
+          new Error(
+            `${record.relativePath} exceeded ${timeoutSeconds}s timeout`,
+          ),
+        );
+      }, timeoutSeconds * 1000);
+      child.on("error", (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      child.on("exit", (code, signal) => {
+        clearTimeout(timer);
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(
+            new Error(
+              `${record.relativePath} exited ${code ?? signal}: ${stderr.trim()}`,
+            ),
+          );
+        }
+      });
+    });
+    let outcome: GameOutcome;
+    try {
+      outcome = JSON.parse(fs.readFileSync(resultFile, "utf8")) as GameOutcome;
+    } finally {
+      fs.rmSync(resultFile, { force: true });
+    }
+    writeShard({
+      schemaVersion: OUTCOME_SCHEMA_VERSION,
+      parityCommit,
+      oracleFingerprint,
+      relativePath: record.relativePath,
+      recordHash: record.recordHash,
+      outcome,
+    });
+    outcomes.set(record.relativePath, outcome);
+    completed += 1;
+    console.error(
+      `[outcome-oracle] completed ${completed}/${records.length}: ${record.relativePath}`,
+    );
+  };
+  const worker = async (): Promise<void> => {
+    while (cursor < pending.length) {
+      const record = pending[cursor++];
+      await runRecord(record);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(jobs, pending.length) }, () => worker()),
+  );
+
+  const orderedOutcomes = records.map(({ relativePath }) => {
+    const outcome = outcomes.get(relativePath);
+    if (outcome === undefined) {
+      throw new Error(`missing completed outcome for ${relativePath}`);
+    }
+    return outcome;
+  });
+  orderedOutcomes.sort((a, b) =>
     a.gameId < b.gameId ? -1 : a.gameId > b.gameId ? 1 : 0,
   );
   const cache = {
@@ -891,14 +1030,14 @@ async function writeOutcomeOracle(
     parityCommit,
     recordSetHash,
     oracleFingerprint,
-    outcomes,
+    outcomes: orderedOutcomes,
   };
   fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
-  const temporary = `${cacheFile}.tmp`;
+  const temporary = `${cacheFile}.${process.pid}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify(cache, null, 2)}\n`);
   fs.renameSync(temporary, cacheFile);
   console.error(
-    `[outcome-oracle] cached ${outcomes.length} records at ${cacheFile}`,
+    `[outcome-oracle] cached ${orderedOutcomes.length} records at ${cacheFile}`,
   );
 }
 
@@ -909,6 +1048,27 @@ async function main() {
     return i >= 0 && args[i + 1] !== undefined ? args[i + 1] : fallback;
   };
 
+  if (args.includes("--outcome-oracle-record")) {
+    const recordFile = getArg("outcome-oracle-record", "");
+    const resultFile = getArg("outcome-result", "");
+    if (recordFile === "" || resultFile === "") {
+      throw new Error(
+        "--outcome-oracle-record requires a record and --outcome-result",
+      );
+    }
+    const originalLog = console.log;
+    console.log = () => undefined;
+    try {
+      const outcome = await replayOutcome(loadRecord(recordFile));
+      const temporary = `${resultFile}.tmp`;
+      fs.writeFileSync(temporary, `${JSON.stringify(outcome)}\n`);
+      fs.renameSync(temporary, resultFile);
+    } finally {
+      console.log = originalLog;
+    }
+    return;
+  }
+
   if (args.includes("--outcome-oracle")) {
     const recordsDir = getArg("records", "records");
     const cacheFile = getArg(
@@ -916,7 +1076,26 @@ async function main() {
       path.join(".cache", "outcome-oracle.json"),
     );
     const parityCommit = getArg("parity-commit", path.basename(recordsDir));
-    await writeOutcomeOracle(recordsDir, cacheFile, parityCommit);
+    const limit = parseInt(getArg("limit", "0"), 10);
+    const jobs = parseInt(
+      getArg("jobs", String(Math.min(4, availableParallelism()))),
+      10,
+    );
+    const timeoutSeconds = parseInt(
+      getArg("record-timeout-seconds", "1800"),
+      10,
+    );
+    if (limit < 0 || jobs < 1 || timeoutSeconds < 1) {
+      throw new Error("--limit must be >= 0; --jobs and timeout must be >= 1");
+    }
+    await writeOutcomeOracle(
+      recordsDir,
+      cacheFile,
+      parityCommit,
+      limit,
+      jobs,
+      timeoutSeconds,
+    );
     return;
   }
 

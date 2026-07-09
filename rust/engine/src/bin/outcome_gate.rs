@@ -23,6 +23,8 @@ struct Args {
     expected_records: usize,
     #[arg(long, default_value_t = OUTCOME_REQUIRED_PASSES)]
     required_passes: usize,
+    #[arg(long)]
+    limit: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -73,7 +75,7 @@ struct GateReport {
     records: Vec<RecordReport>,
 }
 
-fn record_paths(records: &Path) -> Result<Vec<PathBuf>, String> {
+fn record_paths(records: &Path, limit: Option<usize>) -> Result<Vec<PathBuf>, String> {
     let mut paths = std::fs::read_dir(records)
         .map_err(|e| format!("read records directory {}: {e}", records.display()))?
         .filter_map(Result::ok)
@@ -85,6 +87,9 @@ fn record_paths(records: &Path) -> Result<Vec<PathBuf>, String> {
         })
         .collect::<Vec<_>>();
     paths.sort();
+    if let Some(limit) = limit {
+        paths.truncate(limit);
+    }
     Ok(paths)
 }
 
@@ -134,7 +139,7 @@ fn run(args: Args) -> Result<GateReport, String> {
         .into_iter()
         .map(|outcome| (outcome.game_id.clone(), outcome))
         .collect();
-    let paths = record_paths(&args.records)?;
+    let paths = record_paths(&args.records, args.limit)?;
     let mut records = Vec::with_capacity(paths.len());
     let mut categories = CategoryCounts::default();
     let mut diagnostics = CategoryCounts::default();
@@ -235,5 +240,24 @@ fn main() {
     println!("{}", serde_json::to_string_pretty(&report).unwrap());
     if !report.summary.gate_pass {
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn record_limit_is_applied_after_stable_sorting() {
+        let dir = std::env::temp_dir().join(format!("outcome-gate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("z.json.gz"), []).unwrap();
+        std::fs::write(dir.join("a.json"), []).unwrap();
+        std::fs::write(dir.join("ignored.txt"), []).unwrap();
+
+        let paths = record_paths(&dir, Some(1)).unwrap();
+
+        assert_eq!(paths, vec![dir.join("a.json")]);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
