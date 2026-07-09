@@ -6,6 +6,7 @@ use crate::game::Game;
 use crate::map::TileRef;
 use crate::prng::PseudoRandom;
 use crate::spatial::closest_tile;
+use std::collections::HashMap;
 
 const CITY_PERCEIVED_COST_INCREASE_PER_OWNED: f64 = 1.0;
 const SAVE_UP_HYDROGEN_COUNT: i64 = 5;
@@ -239,8 +240,18 @@ pub fn can_build_land_structure(game: &Game, small_id: u16, tile: TileRef) -> Op
     land_based_structure_spawn(game, small_id, tile)
 }
 
-fn shared_water_components(game: &Game, small_id: u16) -> Option<std::collections::HashSet<u32>> {
-    let mut mine = std::collections::HashSet::new();
+/// TS `SharedWaterCache.TTL_TICKS`  -  rebuilt at most once every 3s (30 ticks).
+const SHARED_WATER_CACHE_TTL_TICKS: i64 = 30;
+
+/// Which water bodies (lake component ids, plus a `u32::MAX` sentinel for ocean) a
+/// player's coastline touches, keyed by small id. Bots are excluded (TS `SharedWaterCache`
+/// treats them as never having a trade partner and never being one).
+fn player_water_touch(
+    game: &Game,
+    small_id: u16,
+) -> (bool, std::collections::HashSet<u32>) {
+    let mut has_ocean = false;
+    let mut lakes = std::collections::HashSet::new();
     game.for_each_border_tile(small_id, |border| {
         if !game.is_shore(border) {
             return;
@@ -250,46 +261,71 @@ fn shared_water_components(game: &Game, small_id: u16) -> Option<std::collection
                 return;
             }
             if game.map.is_ocean(n) {
-                mine.insert(u32::MAX);
+                has_ocean = true;
                 return;
             }
             if let Some(c) = game.get_water_component(n) {
-                mine.insert(c);
+                lakes.insert(c);
             }
         });
     });
-    if mine.is_empty() {
-        return None;
-    }
+    (has_ocean, lakes)
+}
 
-    let mut shared = std::collections::HashSet::new();
-    for other in game.players_in_order() {
-        if other.small_id == small_id || !other.alive {
+/// TS `SharedWaterCache.build`  -  ocean is always shared once touched (no partner
+/// requirement); a lake is shared only if some other non-bot, alive player also
+/// touches it (mirrors `canTrade`, which is always true since embargoes aren't modeled).
+fn build_shared_water_cache(
+    game: &Game,
+) -> HashMap<u16, Option<std::collections::HashSet<u32>>> {
+    let mut touch: HashMap<u16, (bool, std::collections::HashSet<u32>)> = HashMap::new();
+    let mut lake_partners: HashMap<u32, Vec<u16>> = HashMap::new();
+    for p in game.players_alive() {
+        if p.player_type == crate::game::PlayerType::Bot {
             continue;
         }
-        game.for_each_border_tile(other.small_id, |border| {
-            if !game.is_shore(border) {
-                return;
+        let (has_ocean, lakes) = player_water_touch(game, p.small_id);
+        for &c in &lakes {
+            lake_partners.entry(c).or_default().push(p.small_id);
+        }
+        touch.insert(p.small_id, (has_ocean, lakes));
+    }
+
+    let mut result = HashMap::new();
+    for (small_id, (has_ocean, lakes)) in &touch {
+        let mut shared = std::collections::HashSet::new();
+        if *has_ocean {
+            shared.insert(u32::MAX);
+        }
+        for c in lakes {
+            if let Some(partners) = lake_partners.get(c) {
+                if partners.iter().any(|other| other != small_id) {
+                    shared.insert(*c);
+                }
             }
-            game.map.for_each_neighbor4(border, |n| {
-                if !game.is_water(n) {
-                    return;
-                }
-                if game.map.is_ocean(n) && mine.contains(&u32::MAX) {
-                    shared.insert(u32::MAX);
-                } else if let Some(c) = game.get_water_component(n) {
-                    if mine.contains(&c) {
-                        shared.insert(c);
-                    }
-                }
-            });
-        });
+        }
+        result.insert(*small_id, if shared.is_empty() { None } else { Some(shared) });
     }
-    if shared.is_empty() {
-        None
-    } else {
-        Some(shared)
+    result
+}
+
+pub fn shared_water_components(game: &Game, small_id: u16) -> Option<std::collections::HashSet<u32>> {
+    let tick = game.ticks() as i64;
+    let needs_rebuild = {
+        let last = game.shared_water_cache_tick.borrow();
+        last.is_none_or(|t| tick - t >= SHARED_WATER_CACHE_TTL_TICKS)
+    };
+    if needs_rebuild {
+        let fresh: HashMap<u16, Option<std::collections::HashSet<u32>>> =
+            build_shared_water_cache(game);
+        *game.shared_water_cache.borrow_mut() = fresh;
+        *game.shared_water_cache_tick.borrow_mut() = Some(tick);
     }
+    game.shared_water_cache
+        .borrow()
+        .get(&small_id)
+        .cloned()
+        .unwrap_or(None)
 }
 
 fn rand_coastal_tile_array(
