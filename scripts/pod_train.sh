@@ -232,13 +232,23 @@ PY
   # NCCL_NVLS_ENABLE=0: NVLS (NVLink SHARP multicast) needs cuMem multicast
   # APIs that RunPod containers don't expose - NCCL init dies with CUDA
   # error 401. Plain NVLink P2P is plenty at our collective sizes.
+  # Append straight to the log (no tee pipe): when a rank dies by signal,
+  # its orphaned env workers inherit the stdout pipe and tee never sees
+  # EOF - the loop hung on a SIGSEGV'd rank for exactly this reason.
+  # Direct redirect also makes $RC the trainer's real exit code instead of
+  # tee's. Follow along with: tail -f /tmp/train_<run>.log
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH=. \
     NCCL_NVLS_ENABLE=0 \
     MALLOC_MMAP_THRESHOLD_=268435456 MALLOC_TRIM_THRESHOLD_=268435456 \
     $LAUNCH rl.ppo --envs "$ENVS_RUN" --updates 100000 --rollout "$ROLLOUT" \
     --minibatch "$MINIBATCH_RUN" --name "$RUN_NAME" --stage "$STAGE" $COARSE_ARG $RESUME $INIT \
     $PPO_EXTRA \
-    2>&1 | tee -a "/tmp/train_$RUN_NAME.log"
+    >> "/tmp/train_$RUN_NAME.log" 2>&1
+  RC=$?
+  # Reap orphaned env workers (multiprocessing daemon cleanup never runs
+  # when a rank dies by signal) so they can't leak envs across restarts.
+  pkill -9 -f "rl[.]ppo --envs" 2>/dev/null
+  sleep 2
   ELAPSED=$(( $(date +%s) - START_TS ))
   if [ "$ELAPSED" -lt 120 ]; then
     FAST_EXITS=$((FAST_EXITS + 1))
@@ -246,7 +256,7 @@ PY
     FAST_EXITS=0
   fi
   BACKOFF=$(( FAST_EXITS >= 2 ? (FAST_EXITS >= 4 ? 600 : 60) : 10 ))
-  echo "=== trainer exited ($?) after ${ELAPSED}s; fast-exits=$FAST_EXITS, restarting in ${BACKOFF}s ===" \
+  echo "=== trainer exited ($RC) after ${ELAPSED}s; fast-exits=$FAST_EXITS, restarting in ${BACKOFF}s ===" \
     | tee -a "/tmp/train_$RUN_NAME.log"
   sleep "$BACKOFF"
 done
