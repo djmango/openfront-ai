@@ -106,16 +106,37 @@ fn should_use_connectivity_score(random: &mut PseudoRandom, difficulty: &str) ->
     random.next_int(0, 100) < chance
 }
 
-fn city_value(game: &Game, small_id: u16, tile: TileRef, use_connection_score: bool) -> u32 {
+fn city_value_with_connectivity(
+    base_value: f64,
+    connectivity_score: f64,
+    structure_spacing: u32,
+    use_connection_score: bool,
+) -> f64 {
+    if use_connection_score {
+        base_value + connectivity_score * structure_spacing as f64
+    } else {
+        base_value
+    }
+}
+
+fn city_value(
+    game: &Game,
+    small_id: u16,
+    tile: TileRef,
+    use_connection_score: bool,
+    reachable_stations: &[ReachableStation],
+    min_range_sq: f64,
+    station_range_sq: f64,
+) -> f64 {
     let (border_spacing, structure_spacing) = spacing_constants(game);
-    let mut w = game.map.magnitude(tile) as u32;
+    let mut w = game.map.magnitude(tile) as f64;
     if let Some(p) = game.player_by_small_id(small_id) {
         if !p.border_tiles.is_empty() {
             let (_, dist) = closest_tile(game, p.border_tiles.as_slice(), tile);
             if dist != u32::MAX {
-                w += dist.min(border_spacing);
+                w += dist.min(border_spacing) as f64;
             } else {
-                w += border_spacing;
+                w += border_spacing as f64;
             }
         }
         let city_tiles: Vec<TileRef> = p
@@ -127,7 +148,7 @@ fn city_value(game: &Game, small_id: u16, tile: TileRef, use_connection_score: b
         if !city_tiles.is_empty() {
             if let Some((city, _)) = crate::spatial::closest_two_tiles(game, &city_tiles, &[tile]) {
                 let d = game.manhattan_dist(city, tile);
-                w += d.min(structure_spacing);
+                w += d.min(structure_spacing) as f64;
             }
         }
         let factory_tiles: Vec<TileRef> = p
@@ -141,12 +162,27 @@ fn city_value(game: &Game, small_id: u16, tile: TileRef, use_connection_score: b
                 crate::spatial::closest_two_tiles(game, &factory_tiles, &[tile])
             {
                 let d = game.manhattan_dist(factory, tile);
-                w += d.min(structure_spacing);
+                w += d.min(structure_spacing) as f64;
             }
         }
     }
-    let _ = use_connection_score;
-    w
+    let connectivity_score = if use_connection_score {
+        compute_connectivity_score(
+            game,
+            tile,
+            reachable_stations,
+            min_range_sq,
+            station_range_sq,
+        )
+    } else {
+        0.0
+    };
+    city_value_with_connectivity(
+        w,
+        connectivity_score,
+        structure_spacing,
+        use_connection_score,
+    )
 }
 
 /// A station reachable for rail-connectivity scoring (TS `buildReachableStations` entry).
@@ -776,7 +812,12 @@ fn structure_spawn_tile(
     // SAMLauncher (and SAMLauncher's own coverage-weighting draw) must not take that draw,
     // since RNG draw order/count must match TS exactly.
     enum ValueCtx {
-        City { use_connection_score: bool },
+        City {
+            use_connection_score: bool,
+            reachable_stations: Vec<ReachableStation>,
+            min_range_sq: f64,
+            station_range_sq: f64,
+        },
         Factory(FactoryValueCtx),
         MissileSilo { border_tiles: Vec<TileRef>, other_tiles: Vec<TileRef>, border_spacing: u32, structure_spacing: u32 },
         Sam(SamValueCtx),
@@ -786,7 +827,17 @@ fn structure_spawn_tile(
     let ctx = match unit_type_name {
         unit_type::CITY => {
             let use_connection_score = should_use_connectivity_score(random, difficulty);
-            ValueCtx::City { use_connection_score }
+            let reachable_stations = if use_connection_score {
+                build_reachable_stations(game, small_id)
+            } else {
+                Vec::new()
+            };
+            ValueCtx::City {
+                use_connection_score,
+                reachable_stations,
+                min_range_sq: (game.wire.train_station_min_range() as f64).powi(2),
+                station_range_sq: (game.wire.train_station_max_range() as f64).powi(2),
+            }
         }
         unit_type::FACTORY => {
             let use_connection_score = should_use_connectivity_score(random, difficulty);
@@ -830,9 +881,20 @@ fn structure_spawn_tile(
     let mut best_value = 0f64;
     for t in tiles {
         let v = match &ctx {
-            ValueCtx::City { use_connection_score } => {
-                city_value(game, small_id, t, *use_connection_score) as f64
-            }
+            ValueCtx::City {
+                use_connection_score,
+                reachable_stations,
+                min_range_sq,
+                station_range_sq,
+            } => city_value(
+                game,
+                small_id,
+                t,
+                *use_connection_score,
+                reachable_stations,
+                *min_range_sq,
+                *station_range_sq,
+            ),
             ValueCtx::Factory(fctx) => factory_value(game, fctx, t),
             ValueCtx::MissileSilo { border_tiles, other_tiles, border_spacing, structure_spacing } => {
                 missile_silo_value(game, border_tiles, other_tiles, *border_spacing, *structure_spacing, t)
@@ -1384,6 +1446,19 @@ mod tests {
         assert!(samples
             .iter()
             .all(|sample| (center - radius..=center + radius).contains(sample)));
+    }
+
+    #[test]
+    fn city_connectivity_weight_can_change_candidate_ranking() {
+        let spacing = 100;
+        let disconnected = city_value_with_connectivity(120.0, 0.0, spacing, true);
+        let connected = city_value_with_connectivity(100.0, 0.5, spacing, true);
+
+        assert!(connected > disconnected);
+        assert_eq!(
+            city_value_with_connectivity(100.0, 0.5, spacing, false),
+            100.0
+        );
     }
 }
 
