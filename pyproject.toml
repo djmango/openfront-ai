@@ -13,3 +13,10 @@ dependencies = [
     "torch>=2.12.0",
     "zstandard>=0.25.0",
 ]
+
+[dependency-groups]
+dev = [
+    "onnx>=1.21.0",
+    "onnxruntime>=1.26.0",
+    "onnxscript>=0.7.0",
+]

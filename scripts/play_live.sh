@@ -1,20 +1,14 @@
 #!/usr/bin/env bash
-# Play against the RL agent in a live local OpenFront lobby.
+# Join a local OpenFront lobby as AgentRL via the in-browser webbot (ONNX).
 #
-#   bash scripts/play_live.sh                 # default: v6_bc (pure BC prior)
-#   bash scripts/play_live.sh --run-name ppo_v61
-#   bash scripts/play_live.sh --restart       # kill vite + game server, restart, then play
-#   bash scripts/play_live.sh --game <ID>     # skip the lobby ID prompt
+#   bash scripts/play_live.sh --game '<lobby URL or 8-char ID>'
+#   bash scripts/play_live.sh --restart --game '<URL>'
+#   bash scripts/play_live.sh --headed --game '<URL>'   # visible Chromium
 #
-# Before clicking Start in the browser:
-#   - set Start Delay to 60+ seconds (host modal, default is 3)
-#   - lower Bots / Nations for a fair fight (default is 400)
-#   - wait until "AgentRL" appears in the lobby, then Start Game
-#
-# The MODEL overlay panel (the agent's live decisions) appears automatically
-# in the browser; disable with localStorage.setItem("rlDebugOverlay", "0").
-# Note: v6_bc / ppo_v6* need a v6-shape checkout (C_GRID=43). The in-progress
-# v7 obs tree will refuse to load these checkpoints.
+# Lobby: private, fewer bots, Asia/World/BlackSea (not Levant). Spawn phase
+# is patched to 15s; game auto-starts when AgentRL joins (uses Start Delay).
+# MODEL overlay:
+#   localStorage.setItem("rlDebugHost", "http://localhost:8988")
 
 set -euo pipefail
 
@@ -22,129 +16,254 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_DIR"
 
 HOST="${HOST:-localhost:9000}"
-# v6_bc = pure BC prior (bc_v6/bc_best folded into a playable Policy, winner
-# bucket). Use RUN_NAME=ppo_v61 (or ppo_v6) for the RL agents. v7 obs shapes
-# break BC weight loading, so there is no v7_bc until a fresh BC retrain.
 RUN_NAME="${RUN_NAME:-v6_bc}"
 POLICY="${POLICY:-runs/rl/$RUN_NAME/policy.pt}"
 AE="${AE:-runs/ae_v31_d8c32/ae_v3.pt}"
+ONNX_DIR="${ONNX_DIR:-openfront/resources/webbot/models}"
+DEBUG_PORT="${DEBUG_PORT:-8988}"
 GAME=""
+WORKER_PATH=""
 RESTART=0
+HEADED=0
 
 usage() {
-  sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --restart) RESTART=1 ;;
-    --game) GAME="${2:?--game requires a lobby ID}"; shift ;;
-    --policy) POLICY="$2"; shift ;;
+    --headed) HEADED=1 ;;
+    --game) GAME="${2:?}"; shift ;;
     --run-name) RUN_NAME="$2"; POLICY="runs/rl/$RUN_NAME/policy.pt"; shift ;;
-    --host) HOST="$2"; shift ;;
+    --policy) POLICY="$2"; shift ;;
     --ae) AE="$2"; shift ;;
+    --host) HOST="$2"; shift ;;
+    --debug-port) DEBUG_PORT="$2"; shift ;;
+    --worker-path) WORKER_PATH="$2"; shift ;;
     -h|--help) usage 0 ;;
     *) echo "unknown arg: $1" >&2; usage 1 ;;
   esac
   shift
 done
 
-stop_dev_server() {
+# Parse lobby URL/ID. Capture game ID before any second =~ (BASH_REMATCH
+# is overwritten by each match - that bug once joined game "w1").
+if [[ -n "$GAME" ]]; then
+  raw="$GAME"
+  if [[ "$raw" =~ /game/([A-Za-z0-9]{8}) ]]; then
+    GAME="${BASH_REMATCH[1]}"
+    if [[ -z "$WORKER_PATH" && "$raw" =~ /(w[0-9]+)/game/ ]]; then
+      WORKER_PATH="${BASH_REMATCH[1]}"
+    fi
+  else
+    GAME="${raw//[$'\t\r\n ']}"
+  fi
+fi
+
+kill_dev_servers() {
   pkill -f "tsx src/server/Server.ts" 2>/dev/null || true
-  pkill -f "openfront.*vite" 2>/dev/null || true
   pkill -f "node_modules/.bin/vite" 2>/dev/null || true
+  pkill -f "concurrently.*start:client" 2>/dev/null || true
+  # Vite without strictPort used to fall back to :9001 when :9000 was busy.
+  for p in 9000 9001; do
+    pids=$(lsof -tiTCP:"$p" -sTCP:LISTEN 2>/dev/null || true)
+    [[ -n "$pids" ]] && kill $pids 2>/dev/null || true
+  done
   sleep 1
 }
 
 wait_for_server() {
+  # Prefer the hostname as given (vite often binds ::1 only; 127.0.0.1 fails).
   echo "waiting for http://$HOST ..."
-  for _ in $(seq 1 60); do
-    if curl -sf "http://$HOST" >/dev/null 2>&1; then
-      echo "dev server ready at http://$HOST"
-      return 0
-    fi
+  for _ in $(seq 1 90); do
+    curl -sf "http://$HOST" >/dev/null 2>&1 && { echo "ready"; return 0; }
     sleep 1
   done
-  echo "timed out waiting for dev server (see /tmp/openfront-dev.log)" >&2
+  echo "timed out (see /tmp/openfront-dev.log)" >&2
   exit 1
 }
 
-ensure_ae() {
-  if [[ -f "$AE" ]]; then
-    return
-  fi
-  mkdir -p "$(dirname "$AE")"
-  echo "fetching AE checkpoint -> $AE"
-  AE="$AE" uv run python - <<'PY'
-from huggingface_hub import hf_hub_download
-import os
-import shutil
-from pathlib import Path
-dest = Path(os.environ["AE"])
-dest.parent.mkdir(parents=True, exist_ok=True)
-# Prefer the d8c32 encoder the v4+ policies were trained against.
-name = "ae_v31_d8c32.pt" if "ae_v31" in dest.as_posix() else "ae_v3.pt"
-p = hf_hub_download("djmango/openfront-tile-autoencoder", name)
-shutil.copy(p, dest)
-print(f"saved {dest}")
-PY
-}
-
-ensure_policy() {
-  if [[ -f "$POLICY" ]]; then
-    return
-  fi
-  mkdir -p "$(dirname "$POLICY")"
-  echo "fetching policy from Hugging Face (djmango/openfront-rl/$RUN_NAME/policy.pt) -> $POLICY"
-  RUN_NAME="$RUN_NAME" POLICY="$POLICY" uv run python - <<'PY'
-import os
-import shutil
-from pathlib import Path
-
-from huggingface_hub import hf_hub_download
-
-run = os.environ["RUN_NAME"]
-dest = Path(os.environ["POLICY"])
-dest.parent.mkdir(parents=True, exist_ok=True)
-p = hf_hub_download("djmango/openfront-rl", f"{run}/policy.pt")
-shutil.copy(p, dest)
-print(f"saved {dest}")
-PY
+start_dev_server() {
+  echo "starting server (log: /tmp/openfront-dev.log) ..."
+  # Don't auto-open a second browser tab; host lobby is already open.
+  (cd openfront && SKIP_BROWSER_OPEN=true npm run dev > /tmp/openfront-dev.log 2>&1 &)
 }
 
 if [[ "$RESTART" -eq 1 ]]; then
-  echo "stopping existing dev server ..."
-  stop_dev_server
-  echo "starting dev server (log: /tmp/openfront-dev.log) ..."
-  (cd openfront && npm run dev > /tmp/openfront-dev.log 2>&1 &)
+  kill_dev_servers
+  start_dev_server
+elif ! curl -sf "http://$HOST" >/dev/null 2>&1; then
+  # Stale vite on :9001 with nothing on :9000 looks "down" - clear both.
+  kill_dev_servers
+  start_dev_server
+elif lsof -tiTCP:9001 -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "duplicate vite on :9001 detected; restarting single server ..."
+  kill_dev_servers
+  start_dev_server
 fi
-
 wait_for_server
 
-ensure_ae
-ensure_policy
+# Pin openfront to the fork commit that has webbot/. Upstream HEAD has no
+# webbot/, and something (IDE submodule sync) keeps resetting us there.
+WEBBOT_COMMIT="${WEBBOT_COMMIT:-7225742fc1c822ee6c4e74f0eafabaa156e8e7e2}"
+want="$(git -C openfront rev-parse "$WEBBOT_COMMIT" 2>/dev/null || true)"
+cur="$(git -C openfront rev-parse HEAD 2>/dev/null || true)"
+need_restart=0
+if [[ -z "$want" || "$cur" != "$want" || ! -f openfront/src/client/webbot/main.ts ]]; then
+  echo "pinning openfront to webbot commit ${WEBBOT_COMMIT:0:9} (was ${cur:0:9}) ..."
+  if ! git -C openfront cat-file -e "${WEBBOT_COMMIT}^{commit}" 2>/dev/null; then
+    git -C openfront remote get-url fork >/dev/null 2>&1 \
+      || git -C openfront remote add fork https://github.com/djmango/OpenFrontIO.git
+    git -C openfront fetch fork --quiet
+  fi
+  mkdir -p /tmp/webbot-models-bak
+  cp -f openfront/resources/webbot/models/*.onnx /tmp/webbot-models-bak/ 2>/dev/null || true
+  git -C openfront checkout -f "$WEBBOT_COMMIT"
+  mkdir -p openfront/resources/webbot/models
+  cp -f /tmp/webbot-models-bak/*.onnx openfront/resources/webbot/models/ 2>/dev/null || true
+  need_restart=1
+fi
+if [[ ! -f openfront/src/client/webbot/main.ts ]]; then
+  echo "still no webbot/ after pin - aborting" >&2
+  exit 1
+fi
+# Multiplayer spawn phase: 300 ticks (~30s) -> 150 ticks (15s) for webbot tests.
+spawn_patched="$(python3 - <<'PY'
+from pathlib import Path
+p = Path("openfront/src/core/configuration/Config.ts")
+t = p.read_text()
+old = """  numSpawnPhaseTurns(): number {
+    if (this._gameConfig.gameType === GameType.Singleplayer) {
+      return 100;
+    }
+    if (this.isRandomSpawn()) {
+      return 150;
+    }
+    return 300;
+  }"""
+new = """  numSpawnPhaseTurns(): number {
+    if (this._gameConfig.gameType === GameType.Singleplayer) {
+      return 100;
+    }
+    if (this.isRandomSpawn()) {
+      return 150;
+    }
+    // Local webbot testing: 15s spawn window (150 ticks @ 10/s). Upstream is 300.
+    return 150;
+  }"""
+if old in t:
+    p.write_text(t.replace(old, new, 1))
+    print("1")
+elif "return 150;" in t and "Local webbot testing: 15s" in t:
+    print("0")
+elif "return 50;" in t and "numSpawnPhaseTurns" in t:
+    # Upgrade older 5s patch.
+    t2 = t.replace(
+        """    // Local webbot testing: 5s spawn window (50 ticks @ 10/s). Upstream is 300.
+    return 50;""",
+        """    // Local webbot testing: 15s spawn window (150 ticks @ 10/s). Upstream is 300.
+    return 150;""",
+        1,
+    )
+    if t2 != t:
+        p.write_text(t2)
+        print("1")
+    else:
+        print("-1")
+else:
+    print("-1")
+PY
+)"
+if [[ "$spawn_patched" == "1" ]]; then
+  echo "patched spawn phase to 15s (150 ticks)"
+  need_restart=1
+elif [[ "$spawn_patched" == "-1" ]]; then
+  echo "WARN: numSpawnPhaseTurns pattern not found" >&2
+fi
+if [[ "$need_restart" -eq 1 ]]; then
+  kill_dev_servers
+  start_dev_server
+  wait_for_server
+fi
+
+# Ensure policy + ONNX (re-export if policy is newer than the onnx).
+mkdir -p "$ONNX_DIR"
+if [[ ! -f "$POLICY" ]]; then
+  mkdir -p "$(dirname "$POLICY")"
+  echo "fetching $RUN_NAME/policy.pt from HF ..."
+  RUN_NAME="$RUN_NAME" POLICY="$POLICY" uv run python - <<'PY'
+import os, shutil
+from pathlib import Path
+from huggingface_hub import hf_hub_download
+dest = Path(os.environ["POLICY"])
+shutil.copy(hf_hub_download("djmango/openfront-rl", f"{os.environ['RUN_NAME']}/policy.pt"), dest)
+print(f"saved {dest}")
+PY
+fi
+if [[ ! -f "$AE" ]]; then
+  mkdir -p "$(dirname "$AE")"
+  AE="$AE" uv run python - <<'PY'
+import os, shutil
+from pathlib import Path
+from huggingface_hub import hf_hub_download
+dest = Path(os.environ["AE"])
+shutil.copy(hf_hub_download("djmango/openfront-tile-autoencoder", "ae_v31_d8c32.pt"), dest)
+print(f"saved {dest}")
+PY
+fi
+if [[ ! -f "$ONNX_DIR/policy.onnx" || "$POLICY" -nt "$ONNX_DIR/policy.onnx" ]]; then
+  echo "exporting ONNX ($POLICY) -> $ONNX_DIR ..."
+  # Export against the checkpoint's obs shapes (v6 worktree if C_GRID=43).
+  export_root="$REPO_DIR"
+  v6="$(cd "$REPO_DIR/.." && pwd)/openfront-ai-v6"
+  if [[ -d "$v6/rl" ]]; then
+    ckpt_c=$(uv run python - "$POLICY" <<'PY'
+import sys, torch
+print(int(torch.load(sys.argv[1], map_location="cpu", weights_only=False)["model_state_dict"]["grid_net.0.weight"].shape[1]))
+PY
+)
+    [[ "$ckpt_c" == "43" ]] && export_root="$v6"
+  fi
+  PYTHONPATH="$export_root:$REPO_DIR" uv run python "$REPO_DIR/scripts/export_onnx.py" \
+    --ae "$AE" --policy "$POLICY" --out "$ONNX_DIR"
+fi
 
 if [[ -z "$GAME" ]]; then
   cat <<'EOF'
 
-Browser steps (do these before pressing Enter):
-  1. Create Lobby (private)
-  2. Set Start Delay to 60+ seconds  (default is 3 - not enough time to launch the bot)
-  3. Lower Bots / Nations            (default 400 is brutal)
-  4. Copy the lobby ID (top right)
-
-Public lobbies on the home screen auto-start in ~5s in dev - use a private lobby instead.
+Create a private lobby (fewer bots, Asia/World/BlackSea). Spawn phase is 15s;
+game auto-starts when AgentRL joins. Paste the URL/ID.
 
 EOF
-  read -r -p "lobby ID: " GAME
+  read -r -p "lobby: " raw
+  if [[ "$raw" =~ /game/([A-Za-z0-9]{8}) ]]; then
+    GAME="${BASH_REMATCH[1]}"
+    if [[ -z "$WORKER_PATH" && "$raw" =~ /(w[0-9]+)/game/ ]]; then
+      WORKER_PATH="${BASH_REMATCH[1]}"
+    fi
+  else
+    GAME="${raw//[$'\t\r\n ']}"
+  fi
 fi
 
-if [[ -z "$GAME" ]]; then
-  echo "no lobby ID provided" >&2
+if [[ ! "$GAME" =~ ^[A-Za-z0-9]{8}$ ]]; then
+  echo "bad lobby ID: $GAME" >&2
   exit 1
 fi
 
-echo "joining lobby $GAME as AgentRL (policy: $POLICY)"
-echo "wait for AgentRL in the lobby, then click Start Game."
-exec uv run python -m rl.play --policy "$POLICY" --ckpt "$AE" --game "$GAME" --host "$HOST"
+echo "joining $GAME as AgentRL (webbot / $RUN_NAME)"
+echo "game auto-starts when AgentRL joins (Start Delay from lobby)."
+echo "overlay: localStorage.setItem(\"rlDebugHost\", \"http://localhost:$DEBUG_PORT\")"
+
+uv run playwright install chromium >/dev/null 2>&1 || true
+args=(
+  --host "$HOST"
+  --game "$GAME"
+  --debug-port "$DEBUG_PORT"
+  --name AgentRL
+)
+[[ -n "$WORKER_PATH" ]] && args+=(--worker-path "$WORKER_PATH")
+[[ "$HEADED" -eq 1 ]] && args+=(--headed)
+exec uv run python scripts/webbot_launcher.py "${args[@]}"
