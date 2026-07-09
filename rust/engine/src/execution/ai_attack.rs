@@ -901,9 +901,10 @@ fn nation_strategy_hated(
     let Some(attacker) = game.player_by_small_id(sid) else {
         return false;
     };
-    let mut relations: Vec<(u16, i32)> = attacker.relations.iter().map(|(&k, &v)| (k, v)).collect();
-    relations.sort_by_key(|(_, v)| *v);
-    for (other, _) in relations {
+    let attacker_troops = attacker.troops;
+    // TS `PlayerImpl.allRelationsSorted()`: stable sort by relation value, tie-broken by
+    // insertion order (and filtered to alive players) - not `HashMap` iteration order.
+    for (other, _) in game.all_relations_sorted(sid) {
         if game.relation(sid, other) != Relation::Hostile {
             continue;
         }
@@ -911,7 +912,7 @@ fn nation_strategy_hated(
             continue;
         }
         if let Some(p) = game.player_by_small_id(other) {
-            if p.troops > attacker.troops * 3 {
+            if p.troops > attacker_troops * 3 {
                 continue;
             }
         }
