@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["ofrs", "ofcore", "oftrain"]
+members = ["engine", "ofenv", "ofrs", "ofcore", "oftrain"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
 
 [profile.release]
 lto = true

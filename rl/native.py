@@ -38,6 +38,10 @@ def decode_frame(
     return slots, fallout, defense_bonus
 
 
+def _c_contig(a: np.ndarray) -> np.ndarray:
+    return a if a.flags.c_contiguous else np.ascontiguousarray(a)
+
+
 def collate_grids(grids: list[np.ndarray], gh: int, gw: int) -> np.ndarray:
     """Pad+stack (C, h, w) arrays (all same C and dtype) to (B, C, gh, gw)."""
     if _ofrs is not None and grids[0].dtype in (np.float32, np.float16):
@@ -46,7 +50,7 @@ def collate_grids(grids: list[np.ndarray], gh: int, gw: int) -> np.ndarray:
             if grids[0].dtype == np.float32
             else _ofrs.collate_grids_f16
         )
-        return fn([np.ascontiguousarray(g) for g in grids], gh, gw)
+        return fn([_c_contig(g) for g in grids], gh, gw)
     b = np.zeros((len(grids), grids[0].shape[0], gh, gw), dtype=grids[0].dtype)
     for i, g in enumerate(grids):
         b[i, :, : g.shape[1], : g.shape[2]] = g
@@ -103,9 +107,7 @@ def unpack_arrays(payload: bytes) -> tuple[dict, dict[str, np.ndarray]]:
 def collate_masks(masks: list[np.ndarray], gh: int, gw: int) -> np.ndarray:
     """Pad+stack (h, w) float32 arrays to (B, gh, gw)."""
     if _ofrs is not None:
-        return _ofrs.collate_masks(
-            [np.ascontiguousarray(m, dtype=np.float32) for m in masks], gh, gw
-        )
+        return _ofrs.collate_masks([_c_contig(m.astype(np.float32, copy=False)) for m in masks], gh, gw)
     b = np.zeros((len(masks), gh, gw), dtype=np.float32)
     for i, v in enumerate(masks):
         b[i, : v.shape[0], : v.shape[1]] = v
