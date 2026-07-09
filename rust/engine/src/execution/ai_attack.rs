@@ -1277,6 +1277,23 @@ pub fn nation_maybe_attack(
     }
 }
 
+/// TS `AiAttackBehavior.getNeighborTraitorToAttack()`: a random traitor among
+/// non-friendly nearby players (in `PlayerImpl.nearby()`/Set-insertion order).
+fn get_neighbor_traitor_to_attack(
+    game: &Game,
+    random: &mut PseudoRandom,
+    small_id: u16,
+) -> Option<u16> {
+    if game.wire.disable_alliances() {
+        return None;
+    }
+    let traitors: Vec<u16> = nearby_players_ts_order(game, small_id)
+        .into_iter()
+        .filter(|&sid| !game.is_friendly(small_id, sid) && game.is_traitor(sid))
+        .collect();
+    random.rand_element(&traitors)
+}
+
 pub fn tribe_maybe_attack(
     game: &mut Game,
     random: &mut PseudoRandom,
@@ -1286,6 +1303,36 @@ pub fn tribe_maybe_attack(
     expand_ratio: f64,
     neighbors_terra_nullius: &mut bool,
 ) {
+    // TS `TribeExecution.maybeAttack()`: roll a traitor-neighbor attack first.
+    // Odds are 1/6 if we're (still) allied with the traitor, 1/3 otherwise; on
+    // success the alliance (if any) is broken before the attack is sent.
+    if let Some(traitor) = get_neighbor_traitor_to_attack(game, random, attacker_small_id) {
+        let odds = if game.is_friendly(attacker_small_id, traitor) { 6 } else { 3 };
+        if random.chance(odds) {
+            game.break_alliance_between(attacker_small_id, traitor);
+            if try_send_player_attack(game, random, attacker_small_id, traitor, reserve_ratio, None) {
+                return;
+            }
+        }
+    }
+
+    if *neighbors_terra_nullius {
+        if has_nearby_terra_nullius(game, attacker_small_id) {
+            if send_tn_attack(game, attacker_small_id, expand_ratio) {
+                return;
+            }
+        } else {
+            *neighbors_terra_nullius = false;
+        }
+    }
+
+    // TS `AiAttackBehavior.attackRandomTarget()`: trigger-ratio gate first, then
+    // retaliation against the largest incoming attacker, then another traitor
+    // roll (odds 1/3, unconditional on alliance), then a random shuffled pick.
+    if !has_trigger_ratio(game, attacker_small_id, trigger_ratio) {
+        return;
+    }
+
     if let Some(attacker) = find_incoming_attacker(game, attacker_small_id) {
         if try_send_player_attack_forced(
             game,
@@ -1300,32 +1347,23 @@ pub fn tribe_maybe_attack(
         }
     }
 
-    if *neighbors_terra_nullius {
-        if has_nearby_terra_nullius(game, attacker_small_id) {
-            if send_tn_attack(game, attacker_small_id, expand_ratio) {
+    if let Some(traitor) = get_neighbor_traitor_to_attack(game, random, attacker_small_id) {
+        if random.chance(3) {
+            if try_send_player_attack(game, random, attacker_small_id, traitor, reserve_ratio, None) {
                 return;
             }
-        } else {
-            *neighbors_terra_nullius = false;
         }
     }
 
-    if !has_trigger_ratio(game, attacker_small_id, trigger_ratio) {
-        return;
-    }
-
-    let neighbors = nearby_player_small_ids(game, attacker_small_id);
-    let shuffled = random.shuffle_array(
-        &neighbors
-            .iter()
-            .copied()
-            .filter(|&sid| sid != attacker_small_id && sid != 0)
-            .collect::<Vec<_>>(),
-    );
+    let neighbors = nearby_players_ts_order(game, attacker_small_id);
+    let shuffled = random.shuffle_array(&neighbors);
     for target_sid in shuffled {
         let Some(target) = game.player_by_small_id(target_sid) else {
             continue;
         };
+        if game.is_friendly(attacker_small_id, target_sid) {
+            continue;
+        }
         if target.player_type == PlayerType::Nation || target.player_type == PlayerType::Human {
             if random.chance(2) {
                 continue;
