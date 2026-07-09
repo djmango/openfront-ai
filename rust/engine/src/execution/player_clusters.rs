@@ -74,6 +74,13 @@ fn inscribed(outer: BBox, inner: BBox) -> bool {
         && outer.max_y >= inner.max_y
 }
 
+/// TS `floodFillWithGen`  -  a tile is marked visited/inserted the moment it
+/// is *discovered* as a neighbor (inside the `visit` callback), not when it
+/// is later popped off the stack. Marking on pop (the naive DFS approach)
+/// still visits every reachable tile, but can enqueue a tile multiple times
+/// before its first pop, which reorders the resulting `OrderedTiles`
+/// insertion sequence relative to TS's `Set` build-up whenever a tile has
+/// more than one already-queued discoverer.
 fn flood_border_cluster(
     game: &Game,
     border: &[TileRef],
@@ -81,14 +88,23 @@ fn flood_border_cluster(
     visited: &mut HashSet<TileRef>,
 ) -> OrderedTiles {
     let mut cluster = OrderedTiles::default();
-    let mut stack = vec![start];
+    let mut stack = Vec::new();
+
+    if !visited.contains(&start) && border.contains(&start) {
+        visited.insert(start);
+        cluster.insert(start);
+        stack.push(start);
+    }
+
     while let Some(t) = stack.pop() {
-        if visited.contains(&t) || !border.contains(&t) {
-            continue;
-        }
-        visited.insert(t);
-        cluster.insert(t);
-        game.map.for_each_neighbor8(t, |n| stack.push(n));
+        game.map.for_each_neighbor8(t, |n| {
+            if visited.contains(&n) || !border.contains(&n) {
+                return;
+            }
+            visited.insert(n);
+            cluster.insert(n);
+            stack.push(n);
+        });
     }
     cluster
 }
@@ -272,13 +288,21 @@ fn get_capturing_player(game: &Game, small_id: u16, cluster: &OrderedTiles) -> O
 
 fn flood_owned(game: &Game, small_id: u16, start: TileRef) -> OrderedTiles {
     let mut result = OrderedTiles::default();
-    let mut stack = vec![start];
+    let mut stack = Vec::new();
+
+    if game.map.owner_id(start) == small_id {
+        result.insert(start);
+        stack.push(start);
+    }
+
     while let Some(t) = stack.pop() {
-        if result.contains(t) || game.map.owner_id(t) != small_id {
-            continue;
-        }
-        result.insert(t);
-        game.map.for_each_neighbor4(t, |n| stack.push(n));
+        game.map.for_each_neighbor4(t, |n| {
+            if result.contains(n) || game.map.owner_id(n) != small_id {
+                return;
+            }
+            result.insert(n);
+            stack.push(n);
+        });
     }
     result
 }
