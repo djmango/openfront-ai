@@ -2524,14 +2524,17 @@ impl Game {
         if !self.is_allied_with(breaker, other) {
             return;
         }
-        if !self.is_traitor(other) {
+        if !self.is_traitor(other)
+            && !self
+                .player_by_small_id(other)
+                .is_some_and(|player| player.is_disconnected)
+        {
             self.mark_traitor(breaker);
         }
         self.alliances.retain(|al| {
             !((al.requestor_small_id == breaker && al.recipient_small_id == other)
                 || (al.requestor_small_id == other && al.recipient_small_id == breaker))
         });
-        self.update_relation(breaker, other, -100);
     }
 
     /// TS `GameImpl.breakAlliance` - marks `breaker` a traitor (unless `other` already is)
