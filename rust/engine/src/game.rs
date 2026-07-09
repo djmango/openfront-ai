@@ -2185,7 +2185,9 @@ impl Game {
         if self.player_by_small_id(b).map_or(false, |p| p.is_disconnected) {
             return false;
         }
-        self.is_allied_with(a, b)
+        // TS `Player.isFriendly`: teammates count as friendly even without a
+        // formal alliance (e.g. lets teammates donate troops/gold to each other).
+        self.players_on_same_team(a, b) || self.is_allied_with(a, b)
     }
 
     pub fn ticks_since_start(&self) -> u32 {
