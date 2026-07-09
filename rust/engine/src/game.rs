@@ -2120,6 +2120,14 @@ impl Game {
         }
     }
 
+    /// TS `GameImpl.removeAlliancesByPlayerSilently` - drop every alliance
+    /// involving `small_id` with no relation/traitor side effects (used on
+    /// player death, where the player is gone regardless).
+    pub fn remove_all_alliances_for(&mut self, small_id: u16) {
+        self.alliances
+            .retain(|al| al.requestor_small_id != small_id && al.recipient_small_id != small_id);
+    }
+
     pub fn add_alliance_extension_request(&mut self, from: u16, to: u16) {
         let tick = self.ticks;
         let duration = self.wire.alliance_duration();

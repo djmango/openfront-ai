@@ -54,6 +54,7 @@ impl Execution for PlayerExecution {
                 if let Some(pm) = game.player_by_small_id_mut(self.small_id) {
                     pm.alive = false;
                 }
+                remove_on_death(game, self.small_id);
                 self.active = false;
             }
             return;
@@ -83,6 +84,38 @@ impl Execution for PlayerExecution {
     fn active_during_spawn(&self) -> bool {
         false
     }
+}
+
+/// TS `PlayerExecution.removeOnDeath` - once a player has no tiles, drop
+/// their gold, delete every unit except in-flight nukes (which keep
+/// simulating/detonating against their last target), and silently detach
+/// all alliances.
+fn remove_on_death(game: &mut Game, small_id: u16) {
+    if let Some(pm) = game.player_by_small_id_mut(small_id) {
+        pm.gold = 0;
+    }
+    let unit_ids: Vec<i32> = game
+        .player_by_small_id(small_id)
+        .map(|p| {
+            p.units
+                .iter()
+                .filter(|u| {
+                    !matches!(
+                        u.unit_type.as_str(),
+                        unit_type::ATOM_BOMB
+                            | unit_type::HYDROGEN_BOMB
+                            | unit_type::MIRV
+                            | unit_type::MIRV_WARHEAD
+                    )
+                })
+                .map(|u| u.id)
+                .collect()
+        })
+        .unwrap_or_default();
+    for unit_id in unit_ids {
+        game.remove_unit(small_id, unit_id);
+    }
+    game.remove_all_alliances_for(small_id);
 }
 
 fn is_structure(ty: &str) -> bool {
