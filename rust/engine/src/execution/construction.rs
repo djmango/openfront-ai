@@ -5,7 +5,7 @@ use super::{
     factory_execution::FactoryExecution, mirv_execution::MirvExecution,
     missile_silo_execution::MissileSiloExecution, nuke_execution::NukeExecution,
     port_execution::PortExecution, sam_launcher_execution::SamLauncherExecution, ExecEnum,
-    Execution,
+    Execution, WarshipExecution,
 };
 use crate::core::schemas::unit_type;
 use crate::game::Game;
@@ -120,6 +120,12 @@ impl Execution for ConstructionExecution {
                 }
                 unit_type::MIRV => {
                     game.add_execution(ExecEnum::Mirv(MirvExecution::new(self.small_id, self.tile)));
+                }
+                unit_type::WARSHIP => {
+                    game.add_execution(ExecEnum::Warship(WarshipExecution::new(
+                        self.small_id,
+                        self.tile,
+                    )));
                 }
                 _ => {}
             }

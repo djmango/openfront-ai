@@ -72,6 +72,7 @@ pub mod target_player;
 pub mod trade_ship_execution;
 pub mod transport_ship;
 pub mod upgrade_structure;
+pub mod warship;
 pub mod win_check;
 
 pub use attack::AttackExecution;
@@ -109,4 +110,5 @@ pub use target_player::TargetPlayerExecution;
 pub use trade_ship_execution::TradeShipExecution;
 pub use transport_ship::TransportShipExecution;
 pub use upgrade_structure::UpgradeStructureExecution;
+pub use warship::WarshipExecution;
 pub use win_check::WinCheckExecution;
