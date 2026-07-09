@@ -923,8 +923,11 @@ impl RailSpatialGrid {
         let (c0x, c0y) = Self::cell_of(x - r, y - r);
         let (c1x, c1y) = Self::cell_of(x + r, y + r);
         let mut out = Vec::new();
-        for cy in c0y..=c1y {
-            for cx in c0x..=c1x {
+        // TS `RailSpatialGrid.query` iterates `cx` outer, `cy` inner - matching that order
+        // matters because callers (e.g. `connectToExistingRails`) use encounter order, not a
+        // distance sort, to decide which cluster a new station joins first.
+        for cx in c0x..=c1x {
+            for cy in c0y..=c1y {
                 if let Some(v) = self.cells.get(&(cx, cy)) {
                     for &rid in v {
                         if !out.contains(&rid) {
