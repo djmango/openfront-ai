@@ -2173,7 +2173,7 @@ impl Game {
     pub fn update_relation(&mut self, a: u16, b: u16, delta: i32) {
         if let Some(p) = self.player_by_small_id_mut(a) {
             let entry = p.relations.entry_or_insert(b, 0);
-            *entry += delta;
+            *entry = clamp_relation(*entry + delta);
         }
     }
 
@@ -2950,6 +2950,22 @@ impl Game {
                 winner: w.clone(),
             }),
         }
+    }
+}
+
+fn clamp_relation(value: i32) -> i32 {
+    value.clamp(-100, 100)
+}
+
+#[cfg(test)]
+mod relation_tests {
+    use super::clamp_relation;
+
+    #[test]
+    fn relation_updates_are_bounded_like_typescript() {
+        assert_eq!(clamp_relation(120), 100);
+        assert_eq!(clamp_relation(-145), -100);
+        assert_eq!(clamp_relation(35), 35);
     }
 }
 
