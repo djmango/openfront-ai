@@ -363,14 +363,17 @@ impl Config {
         }
     }
 
-    /// TS `goldAdditionRate()` - multiplier omitted until cities/ports affect income.
+    /// TS `Config.goldMultiplier()` - `hostCheats.goldMultiplier` (lobby-creator-only
+    /// override) isn't modeled since no pinned record uses `hostCheats`.
+    pub fn gold_multiplier(&self) -> f64 {
+        self.game_config.gold_multiplier.unwrap_or(1.0)
+    }
+
+    /// TS `goldAdditionRate()`.
     pub fn gold_addition_rate(&self, player_type: crate::game::PlayerType) -> i64 {
         use crate::game::PlayerType;
-        if player_type == PlayerType::Bot {
-            50
-        } else {
-            100
-        }
+        let base_rate: f64 = if player_type == PlayerType::Bot { 50.0 } else { 100.0 };
+        (base_rate * self.gold_multiplier()).floor() as i64
     }
 
     /// TS `attackTilesPerTick()`.
@@ -416,8 +419,7 @@ impl Config {
         (num_player_factories + 10) * 15
     }
 
-    /// TS `trainGold(rel, citiesVisited, player)` - `goldMultiplierFor` omitted (host-cheat
-    /// gold multiplier not modeled; matches `goldAdditionRate`'s existing simplification).
+    /// TS `trainGold(rel, citiesVisited, player)`.
     pub fn train_gold(&self, rel: TrainRelation, cities_visited: u32) -> i64 {
         let cities_visited = cities_visited.saturating_sub(9);
         let base_gold: f64 = match rel {
@@ -427,7 +429,7 @@ impl Config {
         };
         let dist_penalty = cities_visited as f64 * 5_000.0;
         let gold = (base_gold - dist_penalty).max(5_000.0);
-        crate::util::to_int(gold) as i64
+        (gold * self.gold_multiplier()).floor() as i64
     }
 
     pub fn traitor_defense_debuff(&self) -> f64 {

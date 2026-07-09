@@ -103,6 +103,8 @@ pub struct GameConfig {
     pub spawn_immunity_duration: Option<u32>,
     #[serde(default)]
     pub starting_gold: Option<u64>,
+    #[serde(default)]
+    pub gold_multiplier: Option<f64>,
 }
 
 impl GameConfig {
