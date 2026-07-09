@@ -292,7 +292,7 @@ impl Execution for AttackExecution {
 
             num_tiles_per_tick -= tiles_used;
             troop_count -= attacker_loss;
-            self.troops = troop_count;
+            self.set_troops(troop_count);
 
             if self.target_is_player {
                 game.remove_troops(self.target_small_id, defender_loss);
@@ -300,7 +300,7 @@ impl Execution for AttackExecution {
             game.conquer(self.owner_small_id, tile_to_conquer);
             self.handle_dead_defender(game);
         }
-        self.troops = troop_count;
+        self.set_troops(troop_count);
     }
 
     fn is_active(&self) -> bool {
@@ -349,8 +349,14 @@ impl AttackExecution {
         self.source_tile
     }
 
+    /// TS `Attack.setTroops()` clamps to non-negative. Without this, a tick
+    /// that overshoots troop_count into negative territory leaves the attack
+    /// permanently stuck with negative troops (the top-of-loop `troop_count <
+    /// 1.0` guard never re-fires once `num_tiles_per_tick` hits zero), and that
+    /// negative balance later gets silently absorbed into a merged attack's
+    /// troop count, desyncing from TS which never lets it go negative.
     pub fn set_troops(&mut self, troops: f64) {
-        self.troops = troops;
+        self.troops = troops.max(0.0);
     }
 
     pub fn deactivate(&mut self) {
