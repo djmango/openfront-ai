@@ -1,7 +1,7 @@
 //! Warship spawn and patrol movement (`WarshipExecution.ts` subset).
 
 use super::Execution;
-use crate::core::schemas::unit_type::{PORT, TRANSPORT, WARSHIP};
+use crate::core::schemas::unit_type::{PORT, TRADE_SHIP, TRANSPORT, WARSHIP};
 use crate::execution::{ExecEnum, ShellExecution};
 use crate::game::Game;
 use crate::map::TileRef;
@@ -21,10 +21,25 @@ pub struct WarshipExecution {
     retreat_port: Option<TileRef>,
     retreating: bool,
     docked: bool,
+    hunt_target_tile: Option<TileRef>,
+    hunt_path: Vec<TileRef>,
+    hunt_path_idx: usize,
     active: bool,
 }
 
 impl WarshipExecution {
+    pub fn owner_small_id(&self) -> u16 {
+        self.owner_small_id
+    }
+
+    pub fn unit_id(&self) -> Option<i32> {
+        self.unit_id
+    }
+
+    pub fn is_docked(&self) -> bool {
+        self.docked
+    }
+
     pub fn new(owner_small_id: u16, patrol_tile: TileRef) -> Self {
         Self {
             owner_small_id,
@@ -39,6 +54,9 @@ impl WarshipExecution {
             retreat_port: None,
             retreating: false,
             docked: false,
+            hunt_target_tile: None,
+            hunt_path: Vec::new(),
+            hunt_path_idx: 0,
             active: true,
         }
     }
@@ -100,10 +118,17 @@ impl WarshipExecution {
         true
     }
 
-    fn target(&self, game: &Game, from: TileRef) -> Option<(u16, i32, &'static str)> {
-        let types = [TRANSPORT, WARSHIP];
+    fn target(
+        &self,
+        game: &Game,
+        from: TileRef,
+        include_trade_ships: bool,
+    ) -> Option<(u16, i32, &'static str)> {
+        let types = [TRANSPORT, WARSHIP, TRADE_SHIP];
         let mut best: Option<(u16, i32, &'static str, usize, f64)> = None;
-        for (owner, unit_id, _, dist_squared) in game.nearby_structures_any(from, 130, &types) {
+        for (owner, unit_id, unit_tile, dist_squared) in
+            game.nearby_structures_any(from, 130, &types)
+        {
             if owner == self.owner_small_id
                 || !game.can_attack_player(self.owner_small_id, owner)
                 || self.already_sent_shell.contains(&(owner, unit_id))
@@ -113,21 +138,111 @@ impl WarshipExecution {
             let Some(unit_type) = game.unit_type_of(owner, unit_id) else {
                 continue;
             };
+            if unit_type == WARSHIP && game.warship_is_docked(owner, unit_id) {
+                continue;
+            }
             let (unit_type, priority) = if unit_type == TRANSPORT {
                 (TRANSPORT, 0)
             } else if unit_type == WARSHIP {
                 (WARSHIP, 1)
+            } else if unit_type == TRADE_SHIP {
+                if !include_trade_ships {
+                    continue;
+                }
+                let owner_has_port = game
+                    .player_by_small_id(self.owner_small_id)
+                    .is_some_and(|owner| owner.units.iter().any(|unit| unit.unit_type == PORT));
+                let destination_owner = game.trade_ship_destination_owner(unit_id);
+                let same_water_component = game
+                    .get_water_component(from)
+                    .is_some_and(|component| game.has_water_component(unit_tile, component));
+                if !owner_has_port
+                    || game.trade_ship_is_safe_from_pirates(owner, unit_id)
+                    || destination_owner.is_none_or(|destination| {
+                        destination == self.owner_small_id
+                            || game.is_friendly(destination, self.owner_small_id)
+                    })
+                    || !same_water_component
+                    || game.map.euclidean_dist_squared(self.patrol_tile, unit_tile) > 100 * 100
+                {
+                    continue;
+                }
+                (TRADE_SHIP, 2)
             } else {
                 continue;
             };
             if best.as_ref().is_none_or(|candidate| {
-                priority < candidate.3
-                    || (priority == candidate.3 && dist_squared < candidate.4)
+                priority < candidate.3 || (priority == candidate.3 && dist_squared < candidate.4)
             }) {
                 best = Some((owner, unit_id, unit_type, priority, dist_squared));
             }
         }
         best.map(|(owner, unit_id, unit_type, _, _)| (owner, unit_id, unit_type))
+    }
+
+    fn best_neighbor_toward(&self, game: &Game, from: TileRef, target: TileRef) -> Option<TileRef> {
+        let mut best = None;
+        let mut best_distance = game.manhattan_dist(from, target);
+        game.map.for_each_neighbor4(from, |neighbor| {
+            if !game.is_water(neighbor) {
+                return;
+            }
+            let distance = game.manhattan_dist(neighbor, target);
+            if distance < best_distance {
+                best_distance = distance;
+                best = Some(neighbor);
+            }
+        });
+        best
+    }
+
+    fn hunt_trade_ship(
+        &mut self,
+        game: &mut Game,
+        unit_id: i32,
+        target_owner: u16,
+        target_unit_id: i32,
+    ) {
+        for _ in 0..2 {
+            let Some(from) = game.unit_tile_of(self.owner_small_id, unit_id) else {
+                return;
+            };
+            let Some(target_tile) = game.unit_tile_of(target_owner, target_unit_id) else {
+                return;
+            };
+            let distance = game.manhattan_dist(from, target_tile);
+            if distance <= 5 {
+                game.capture_unit(target_owner, self.owner_small_id, target_unit_id);
+                self.hunt_target_tile = None;
+                self.hunt_path.clear();
+                self.hunt_path_idx = 0;
+                return;
+            }
+            if distance <= 20 {
+                if let Some(next) = self.best_neighbor_toward(game, from, target_tile) {
+                    game.move_unit(self.owner_small_id, unit_id, next);
+                    continue;
+                }
+            }
+            let path_matches_from =
+                self.hunt_path_idx > 0 && self.hunt_path.get(self.hunt_path_idx - 1) == Some(&from);
+            if self.hunt_target_tile != Some(target_tile) || !path_matches_from {
+                if !game.plan_water_path(from, target_tile) {
+                    return;
+                }
+                self.hunt_path.clear();
+                self.hunt_path.extend_from_slice(game.planned_water_path());
+                if self.hunt_path.first() != Some(&from) {
+                    self.hunt_path.insert(0, from);
+                }
+                self.hunt_path_idx = 1;
+                self.hunt_target_tile = Some(target_tile);
+            }
+            if let Some(&next) = self.hunt_path.get(self.hunt_path_idx) {
+                self.hunt_path_idx += 1;
+                game.move_unit(self.owner_small_id, unit_id, next);
+            }
+        }
     }
 
     fn shoot_target(
@@ -224,7 +339,7 @@ impl WarshipExecution {
             return self.retreat(game, from, unit_id);
         }
 
-        if let Some(target) = self.target(game, from) {
+        if let Some(target) = self.target(game, from, false) {
             self.shoot_target(game, game.ticks(), from, unit_id, target);
         }
         if game.map.euclidean_dist_squared(from, port) <= 25 {
@@ -324,7 +439,11 @@ impl Execution for WarshipExecution {
                 }
             }
         }
-        if let Some(target) = self.target(game, from) {
+        if let Some(target) = self.target(game, from, true) {
+            if target.2 == TRADE_SHIP {
+                self.hunt_trade_ship(game, unit_id, target.0, target.1);
+                return;
+            }
             self.shoot_target(game, tick, from, unit_id, target);
         }
 
