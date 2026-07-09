@@ -609,14 +609,20 @@ fn perceived_structure_cost(game: &Game, small_id: u16, structure_type: &str) ->
     ((real as f64) * multiplier).ceil() as i64
 }
 
-/// TS `findBestStructureToUpgrade` (subset).
+/// TS `findBestStructureToUpgrade`.
+///
+/// Prefers structures protected by a SAM launcher; in 50% of cases (when not
+/// already picking randomly) picks the second/third best instead of the best,
+/// for variety. The per-candidate tie-break draw (`next_int(0, 5)`) happens
+/// even when there's only one candidate, so RNG draw count must not be
+/// short-circuited here even in the trivial single-candidate case.
 fn find_best_structure_to_upgrade(
     game: &Game,
     random: &mut PseudoRandom,
     small_id: u16,
     unit_type_name: &str,
 ) -> Option<i32> {
-    let upgradable: Vec<i32> = game
+    let upgradable: Vec<(i32, TileRef, i32)> = game
         .player_by_small_id(small_id)
         .map(|p| {
             p.units
@@ -624,7 +630,7 @@ fn find_best_structure_to_upgrade(
                 .filter(|u| u.unit_type == unit_type_name)
                 .filter(|u| !u.under_construction)
                 .filter(|u| game.can_upgrade_unit(small_id, u.id))
-                .map(|u| u.id)
+                .map(|u| (u.id, u.tile as TileRef, u.level))
                 .collect()
         })
         .unwrap_or_default();
@@ -640,9 +646,54 @@ fn find_best_structure_to_upgrade(
         _ => 40,
     };
     if random.next_int(0, 100) < random_chance {
-        return random.rand_element(&upgradable);
+        return random.rand_element(&upgradable).map(|(id, _, _)| id);
     }
-    Some(upgradable[0])
+
+    let sam_launchers: Vec<(TileRef, i32)> = game
+        .player_by_small_id(small_id)
+        .map(|p| {
+            p.units
+                .iter()
+                .filter(|u| u.unit_type == unit_type::SAM_LAUNCHER)
+                .map(|u| (u.tile as TileRef, u.level))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut scored: Vec<((i32, TileRef, i32), f64)> = upgradable
+        .iter()
+        .map(|&(id, tile, level)| {
+            let mut score = 0.0;
+            for &(sam_tile, sam_level) in &sam_launchers {
+                let sam_range = sam_range_for_level(sam_level);
+                let sam_range_squared = sam_range * sam_range;
+                let dist_squared = game.map.euclidean_dist_squared(tile, sam_tile) as f64;
+                if dist_squared <= sam_range_squared {
+                    score += 10.0;
+                    if sam_level > 1 {
+                        score += (sam_level - 1) as f64 * 7.5;
+                    }
+                }
+            }
+            score += random.next_int(0, 5) as f64;
+            ((id, tile, level), score)
+        })
+        .collect();
+    if scored.is_empty() {
+        return None;
+    }
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+    if scored.len() >= 2 && random.chance(2) {
+        let pick_index = if scored.len() >= 3 { random.next_int(1, 3) as usize } else { 1 };
+        return Some(scored[pick_index].0.0);
+    }
+    Some(scored[0].0.0)
+}
+
+/// TS `Config.samRange`.
+fn sam_range_for_level(level: i32) -> f64 {
+    150.0 - 480.0 / (level as f64 + 5.0)
 }
 
 fn maybe_upgrade_structure_of_type(
