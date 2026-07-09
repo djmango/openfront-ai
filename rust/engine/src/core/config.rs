@@ -4,6 +4,15 @@ use super::schemas::{DoomsdayClockSpeed, GameConfig};
 use crate::record::GameRecord;
 use serde_json::Value;
 
+/// TS `rel(player, other)` result used by `trainGold`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrainRelation {
+    SelfTrade,
+    Team,
+    Ally,
+    Other,
+}
+
 /// Resolved Doomsday Clock settings (TS `DOOMSDAY_CLOCK_DEFAULTS` + wire overrides).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoomsdayClockResolved {
@@ -379,6 +388,40 @@ impl Config {
         } else {
             num_adjacent * 2.0
         }
+    }
+
+    /// TS `trainStationMinRange()`.
+    pub fn train_station_min_range(&self) -> u32 {
+        15
+    }
+
+    /// TS `trainStationMaxRange()`.
+    pub fn train_station_max_range(&self) -> u32 {
+        110
+    }
+
+    /// TS `railroadMaxSize()`.
+    pub fn railroad_max_size(&self) -> f64 {
+        self.train_station_max_range() as f64 * 1.4142
+    }
+
+    /// TS `trainSpawnRate(numPlayerFactories)` - hyperbolic decay, midpoint at 10 factories.
+    pub fn train_spawn_rate(&self, num_player_factories: i32) -> i32 {
+        (num_player_factories + 10) * 15
+    }
+
+    /// TS `trainGold(rel, citiesVisited, player)` - `goldMultiplierFor` omitted (host-cheat
+    /// gold multiplier not modeled; matches `goldAdditionRate`'s existing simplification).
+    pub fn train_gold(&self, rel: TrainRelation, cities_visited: u32) -> i64 {
+        let cities_visited = cities_visited.saturating_sub(9);
+        let base_gold: f64 = match rel {
+            TrainRelation::SelfTrade => 10_000.0,
+            TrainRelation::Ally => 35_000.0,
+            TrainRelation::Team | TrainRelation::Other => 25_000.0,
+        };
+        let dist_penalty = cities_visited as f64 * 5_000.0;
+        let gold = (base_gold - dist_penalty).max(5_000.0);
+        crate::util::to_int(gold) as i64
     }
 
     pub fn traitor_defense_debuff(&self) -> f64 {

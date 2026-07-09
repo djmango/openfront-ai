@@ -6,7 +6,8 @@ use crate::core::nation::create_nations_for_game;
 use crate::core::schemas::GameConfig as WireGameConfig;
 use crate::core::terrain::{load_fresh_terrain, GameMapSize};
 use crate::execution::{
-    ExecEnum, NationExecution, NationRuntime, SpawnExecution, SpawnTimerExecution, WinCheckExecution,
+    ExecEnum, NationExecution, NationRuntime, RecomputeRailClusterExecution, SpawnExecution,
+    SpawnTimerExecution, WinCheckExecution,
 };
 use crate::game::{Game, GameConfig, PlayerInfo, PlayerType};
 use crate::prng::PseudoRandom;
@@ -157,6 +158,12 @@ pub fn game_from_record(repo_root: &Path, record: &GameRecord) -> Result<Game, S
     }
 
     game.add_execution(ExecEnum::WinCheck(WinCheckExecution::new()));
+
+    if !cfg.is_unit_disabled(crate::core::schemas::unit_type::FACTORY) {
+        game.add_execution(ExecEnum::RecomputeRailCluster(
+            RecomputeRailClusterExecution::new(),
+        ));
+    }
 
     Ok(game)
 }
