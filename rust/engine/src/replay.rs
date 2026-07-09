@@ -3,8 +3,10 @@
 use crate::backend::Backend;
 use crate::execution::intent::turn_to_executions;
 use crate::execution::{ExecEnum, SpawnTimerExecution, WinCheckExecution};
-use crate::game::Game;
+use crate::game::{Game, Player, PlayerType};
 use crate::record::GameRecord;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone)]
 pub struct ReplayOptions {
@@ -18,6 +20,299 @@ pub struct ReplayResult {
     pub reason: Option<String>,
     pub ticks: u32,
     pub hashes_checked: u32,
+}
+
+pub const OUTCOME_SCHEMA_VERSION: u32 = 1;
+pub const OUTCOME_REQUIRED_PASSES: usize = 55;
+pub const OUTCOME_EXPECTED_RECORDS: usize = 78;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OutcomeRankingEntry {
+    pub identity: String,
+    pub name: String,
+    pub team: Option<String>,
+    pub tiles: i32,
+    pub alive: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GameOutcome {
+    pub schema_version: u32,
+    pub game_id: String,
+    pub winner: Option<String>,
+    pub terminal_tick: Option<u32>,
+    pub terminal_reason: Option<String>,
+    pub winner_land_share: Option<f64>,
+    pub final_tick: u32,
+    pub land_tiles_without_fallout: u32,
+    pub final_ranking: Vec<OutcomeRankingEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutcomeOracleCache {
+    pub schema_version: u32,
+    pub parity_commit: String,
+    pub record_set_hash: String,
+    pub outcomes: Vec<GameOutcome>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OutcomeComparison {
+    pub pass: bool,
+    pub category: String,
+    pub diagnostics: Vec<String>,
+    pub winner_match: bool,
+    pub timing_match: bool,
+    pub land_share_match: bool,
+    pub tick_delta_ratio: Option<f64>,
+    pub land_share_delta: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct TerminalCandidate {
+    winner: String,
+    tick: u32,
+    reason: &'static str,
+}
+
+pub fn normalize_winner_value(winner: &Value) -> Option<String> {
+    let parts = winner.as_array()?;
+    let kind = parts.first()?.as_str()?;
+    let value = parts.get(1)?.as_str()?;
+    match kind {
+        "player" | "team" | "nation" => Some(format!("{kind}:{value}")),
+        _ => None,
+    }
+}
+
+fn player_identity(player: &Player) -> String {
+    if player.client_id.is_empty() {
+        format!("nation:{}", player.name)
+    } else {
+        format!("player:{}", player.client_id)
+    }
+}
+
+fn land_tiles_without_fallout(game: &Game) -> u32 {
+    game.num_land_tiles()
+        .saturating_sub(game.num_tiles_with_fallout())
+        .max(1)
+}
+
+fn terminal_candidate(game: &Game) -> Option<TerminalCandidate> {
+    if game.in_spawn_phase() || game.ticks() % 10 != 0 {
+        return None;
+    }
+    let elapsed_seconds = game.ticks_since_start() / 10;
+    let max_timer_reached = game
+        .wire
+        .game_config()
+        .max_timer_value
+        .is_some_and(|minutes| elapsed_seconds >= minutes.saturating_mul(60));
+    let hard_limit_reached = elapsed_seconds >= 170 * 60;
+    let denominator = land_tiles_without_fallout(game) as f64;
+
+    if game.wire.game_config().game_mode == "Team" {
+        let mut team_tiles: Vec<(String, i32)> = Vec::new();
+        for player in game.players_alive() {
+            let Some(team) = player.team.as_ref() else {
+                continue;
+            };
+            if let Some((_, tiles)) = team_tiles.iter_mut().find(|(name, _)| name == team) {
+                *tiles += player.tiles_owned;
+            } else {
+                team_tiles.push((team.clone(), player.tiles_owned));
+            }
+        }
+        team_tiles.sort_by(|a, b| b.1.cmp(&a.1));
+        let (team, tiles) = team_tiles.first()?;
+        if team == crate::core::team_assignment::BOT_TEAM {
+            return None;
+        }
+        let land_reached = (*tiles as f64 / denominator) * 100.0 > 95.0;
+        let reason = if land_reached {
+            "land_share"
+        } else if max_timer_reached {
+            "max_timer"
+        } else if hard_limit_reached {
+            "hard_time_limit"
+        } else {
+            return None;
+        };
+        return Some(TerminalCandidate {
+            winner: format!("team:{team}"),
+            tick: game.ticks(),
+            reason,
+        });
+    }
+
+    let mut players: Vec<&Player> = game.players_alive().collect();
+    players.sort_by(|a, b| b.tiles_owned.cmp(&a.tiles_owned));
+    let leader = *players.first()?;
+    if game.wire.game_config().ranked_type.as_deref() == Some("1v1") {
+        let humans: Vec<&Player> = players
+            .iter()
+            .copied()
+            .filter(|p| p.player_type == PlayerType::Human && !p.is_disconnected)
+            .collect();
+        if humans.len() == 1 {
+            return Some(TerminalCandidate {
+                winner: player_identity(humans[0]),
+                tick: game.ticks(),
+                reason: "one_v_one",
+            });
+        }
+    }
+    let land_reached = (leader.tiles_owned as f64 / denominator) * 100.0 > 80.0;
+    let reason = if land_reached {
+        "land_share"
+    } else if max_timer_reached {
+        "max_timer"
+    } else if hard_limit_reached {
+        "hard_time_limit"
+    } else {
+        return None;
+    };
+    Some(TerminalCandidate {
+        winner: player_identity(leader),
+        tick: game.ticks(),
+        reason,
+    })
+}
+
+fn winner_land_share(game: &Game, winner: &str) -> Option<f64> {
+    let denominator = land_tiles_without_fallout(game) as f64;
+    if let Some(team) = winner.strip_prefix("team:") {
+        let tiles: i32 = game
+            .all_players()
+            .iter()
+            .filter(|p| p.team.as_deref() == Some(team))
+            .map(|p| p.tiles_owned)
+            .sum();
+        return Some(tiles as f64 / denominator);
+    }
+    let player = game
+        .all_players()
+        .iter()
+        .find(|p| player_identity(p) == winner)?;
+    Some(player.tiles_owned as f64 / denominator)
+}
+
+fn outcome_from_game(game: &Game, terminal: Option<TerminalCandidate>) -> GameOutcome {
+    let mut final_ranking: Vec<OutcomeRankingEntry> = game
+        .all_players()
+        .iter()
+        .map(|p| OutcomeRankingEntry {
+            identity: player_identity(p),
+            name: p.name.clone(),
+            team: p.team.clone(),
+            tiles: p.tiles_owned,
+            alive: p.alive,
+        })
+        .collect();
+    final_ranking.sort_by(|a, b| {
+        b.tiles
+            .cmp(&a.tiles)
+            .then_with(|| a.identity.cmp(&b.identity))
+    });
+    let winner = terminal.as_ref().map(|t| t.winner.clone());
+    GameOutcome {
+        schema_version: OUTCOME_SCHEMA_VERSION,
+        game_id: game.game_id.clone(),
+        winner_land_share: winner
+            .as_deref()
+            .and_then(|identity| winner_land_share(game, identity)),
+        winner,
+        terminal_tick: terminal.as_ref().map(|t| t.tick),
+        terminal_reason: terminal.as_ref().map(|t| t.reason.to_string()),
+        final_tick: game.ticks(),
+        land_tiles_without_fallout: land_tiles_without_fallout(game),
+        final_ranking,
+    }
+}
+
+pub fn replay_outcome_native(
+    repo_root: &std::path::Path,
+    record_path: &std::path::Path,
+) -> Result<GameOutcome, String> {
+    let bytes = load_record_bytes(record_path).map_err(|e| format!("read record: {e}"))?;
+    let record = GameRecord::from_json_bytes(&bytes)
+        .map_err(|e| format!("parse record: {e}"))?
+        .decompress();
+    let root = engine_root(repo_root);
+    let mut game =
+        crate::bootstrap::game_from_record(&root, &record).map_err(|e| format!("bootstrap: {e}"))?;
+    let mut terminal = None;
+    for turn in &record.turns {
+        let gid = game.game_id.clone();
+        for execution in turn_to_executions(&mut game, &gid, &turn.intents) {
+            game.add_execution(execution);
+        }
+        game.execute_next_tick();
+        if terminal.is_none() {
+            terminal = terminal_candidate(&game);
+        }
+    }
+    Ok(outcome_from_game(&game, terminal))
+}
+
+pub fn compare_outcomes(expected: &GameOutcome, actual: &GameOutcome) -> OutcomeComparison {
+    let mut diagnostics = Vec::new();
+    let missing_winner = expected.winner.is_none() || actual.winner.is_none();
+    let winner_match = !missing_winner && expected.winner == actual.winner;
+    if missing_winner {
+        diagnostics.push("missing_winner".to_string());
+    } else if !winner_match {
+        diagnostics.push("wrong_winner".to_string());
+    }
+
+    let tick_delta_ratio = match (expected.terminal_tick, actual.terminal_tick) {
+        (Some(expected_tick), Some(actual_tick)) if expected_tick > 0 => {
+            Some(expected_tick.abs_diff(actual_tick) as f64 / expected_tick as f64)
+        }
+        (Some(0), Some(0)) => Some(0.0),
+        _ => None,
+    };
+    let timing_match = tick_delta_ratio.is_some_and(|delta| delta <= 0.20);
+    if !missing_winner && winner_match && !timing_match {
+        diagnostics.push("timing_mismatch".to_string());
+    }
+
+    let land_share_delta = match (expected.winner_land_share, actual.winner_land_share) {
+        (Some(expected_share), Some(actual_share)) => Some((expected_share - actual_share).abs()),
+        _ => None,
+    };
+    let land_share_match = land_share_delta.is_some_and(|delta| delta <= 0.10);
+    if !missing_winner && winner_match && !land_share_match {
+        diagnostics.push("land_share_mismatch".to_string());
+    }
+
+    let pass = winner_match && timing_match && land_share_match;
+    let category = if pass {
+        "pass"
+    } else if missing_winner {
+        "missing_winner"
+    } else if !winner_match {
+        "wrong_winner"
+    } else if !timing_match {
+        "timing_mismatch"
+    } else {
+        "land_share_mismatch"
+    };
+    OutcomeComparison {
+        pass,
+        category: category.to_string(),
+        diagnostics,
+        winner_match,
+        timing_match,
+        land_share_match,
+        tick_delta_ratio,
+        land_share_delta,
+    }
 }
 
 pub fn replay_record(record_path: &std::path::Path, opts: &ReplayOptions) -> ReplayResult {
@@ -162,8 +457,129 @@ fn replay_stub(record: &GameRecord) -> ReplayResult {
 mod tests {
     use super::*;
     use crate::execution::intent::turn_to_executions;
+    use crate::game::Player;
     use crate::hash::game_hash;
     use crate::map::TileRef;
+
+    fn sample_outcome(
+        winner: Option<&str>,
+        terminal_tick: Option<u32>,
+        winner_land_share: Option<f64>,
+    ) -> GameOutcome {
+        GameOutcome {
+            schema_version: OUTCOME_SCHEMA_VERSION,
+            game_id: "game".to_string(),
+            winner: winner.map(str::to_string),
+            terminal_tick,
+            terminal_reason: Some("land_share".to_string()),
+            winner_land_share,
+            final_tick: terminal_tick.unwrap_or(100),
+            land_tiles_without_fallout: 100,
+            final_ranking: Vec::new(),
+        }
+    }
+
+    fn tick_to_ten(game: &mut Game) {
+        game.end_spawn_phase();
+        for _ in 0..10 {
+            game.execute_next_tick();
+        }
+    }
+
+    #[test]
+    fn outcome_winner_identity_normalization() {
+        assert_eq!(
+            normalize_winner_value(&serde_json::json!(["player", "client-1"])),
+            Some("player:client-1".to_string())
+        );
+        assert_eq!(
+            normalize_winner_value(&serde_json::json!(["team", "Blue", "client-1"])),
+            Some("team:Blue".to_string())
+        );
+        assert_eq!(
+            normalize_winner_value(&serde_json::json!(["nation", "Brazil"])),
+            Some("nation:Brazil".to_string())
+        );
+        assert_eq!(normalize_winner_value(&serde_json::json!(["unknown", "x"])), None);
+    }
+
+    #[test]
+    fn outcome_tolerances_are_inclusive() {
+        let expected = sample_outcome(Some("player:a"), Some(100), Some(0.50));
+        let boundary = sample_outcome(Some("player:a"), Some(120), Some(0.60));
+        assert!(compare_outcomes(&expected, &boundary).pass);
+
+        let outside = sample_outcome(Some("player:a"), Some(121), Some(0.601));
+        let comparison = compare_outcomes(&expected, &outside);
+        assert!(!comparison.pass);
+        assert_eq!(
+            comparison.diagnostics,
+            vec!["timing_mismatch", "land_share_mismatch"]
+        );
+    }
+
+    #[test]
+    fn outcome_no_winner_is_not_a_pass() {
+        let expected = sample_outcome(None, None, None);
+        let actual = sample_outcome(None, None, None);
+        let comparison = compare_outcomes(&expected, &actual);
+        assert!(!comparison.pass);
+        assert_eq!(comparison.category, "missing_winner");
+        assert_eq!(comparison.diagnostics, vec!["missing_winner"]);
+    }
+
+    #[test]
+    fn outcome_detects_ffa_terminal_condition() {
+        let mut game = Game::default();
+        game.add_player(Player {
+            id: "player-id".to_string(),
+            client_id: "client-id".to_string(),
+            name: "Player".to_string(),
+            small_id: 1,
+            tiles_owned: 1,
+            ..Default::default()
+        });
+        tick_to_ten(&mut game);
+        let terminal = terminal_candidate(&game).expect("FFA winner");
+        assert_eq!(terminal.winner, "player:client-id");
+        assert_eq!(terminal.tick, 10);
+        assert_eq!(terminal.reason, "land_share");
+    }
+
+    #[test]
+    fn outcome_detects_team_terminal_condition() {
+        let mut game = Game::default();
+        let wire = serde_json::json!({
+            "gameMap": "Onion",
+            "difficulty": "Medium",
+            "donateGold": false,
+            "donateTroops": false,
+            "gameType": "Public",
+            "gameMode": "Team",
+            "gameMapSize": "Normal",
+            "nations": "disabled",
+            "bots": 0,
+            "infiniteGold": false,
+            "infiniteTroops": false,
+            "instantBuild": false,
+            "randomSpawn": false
+        });
+        game.wire = crate::core::config::Config::from_value(&wire, false).unwrap();
+        game.add_player(Player {
+            id: "player-id".to_string(),
+            client_id: "client-id".to_string(),
+            name: "Player".to_string(),
+            small_id: 1,
+            tiles_owned: 1,
+            team: Some("Blue".to_string()),
+            ..Default::default()
+        });
+        tick_to_ten(&mut game);
+        let terminal = terminal_candidate(&game).expect("team winner");
+        assert_eq!(terminal.winner, "team:Blue");
+        assert_eq!(terminal.tick, 10);
+        assert_eq!(terminal.reason, "land_share");
+    }
 
     fn load_record_bytes(path: &std::path::Path) -> Result<Vec<u8>, String> {
         super::load_record_bytes(path)

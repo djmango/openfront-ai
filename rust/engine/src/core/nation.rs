@@ -275,6 +275,8 @@ mod tests {
             spawn_immunity_duration: None,
             starting_gold: None,
             gold_multiplier: None,
+            max_timer_value: None,
+            ranked_type: None,
         }
     }
 
