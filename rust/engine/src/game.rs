@@ -2450,6 +2450,10 @@ impl Game {
             })
         {
             self.accept_alliance_pair(recipient, requestor, tick);
+            // TS `AllianceRequestExecution.init`: only simultaneous cross-requests
+            // improve relations. A later manual `AllianceRequest.accept()` does not.
+            self.update_relation(requestor, recipient, 100);
+            self.update_relation(recipient, requestor, 100);
             // TS `AllianceRequestExecution.init`'s cross-request auto-accept branch clears
             // any *automatically created* (temporary) embargoes between the pair; this is
             // scoped to this branch specifically - `accept_alliance_request`'s manual accept
@@ -2488,8 +2492,6 @@ impl Game {
             extension_requested_requestor: false,
             extension_requested_recipient: false,
         });
-        self.update_relation(requestor, recipient, 100);
-        self.update_relation(recipient, requestor, 100);
     }
 
     pub fn accept_alliance_request(&mut self, requestor: u16, recipient: u16, tick: u32) {
@@ -2997,7 +2999,19 @@ fn decay_relation(value: f64) -> f64 {
 
 #[cfg(test)]
 mod relation_tests {
-    use super::{clamp_relation, decay_relation};
+    use super::{clamp_relation, decay_relation, Game, PlayerInfo, PlayerType, Relation};
+
+    fn add_human(game: &mut Game, id: &str) -> u16 {
+        game.add_from_info(&PlayerInfo {
+            name: id.into(),
+            player_type: PlayerType::Human,
+            client_id: Some(id.into()),
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        })
+    }
 
     #[test]
     fn relation_updates_are_bounded_like_typescript() {
@@ -3013,6 +3027,38 @@ mod relation_tests {
         assert_eq!(decay_relation(0.1), 0.0);
         assert_eq!(decay_relation(-0.1), 0.0);
         assert_eq!(decay_relation(0.0), 0.0);
+    }
+
+    #[test]
+    fn manual_alliance_accept_does_not_change_relations() {
+        let mut game = Game::default();
+        let requestor = add_human(&mut game, "requestor");
+        let recipient = add_human(&mut game, "recipient");
+        game.update_relation(requestor, recipient, -20);
+        game.update_relation(recipient, requestor, -30);
+
+        assert!(game.create_alliance_request(requestor, recipient, 10));
+        game.accept_alliance_request(requestor, recipient, 11);
+
+        assert!(game.is_allied_with(requestor, recipient));
+        assert_eq!(game.relation_value(requestor, recipient), -20.0);
+        assert_eq!(game.relation_value(recipient, requestor), -30.0);
+    }
+
+    #[test]
+    fn cross_alliance_requests_improve_relations() {
+        let mut game = Game::default();
+        let first = add_human(&mut game, "first");
+        let second = add_human(&mut game, "second");
+        game.update_relation(first, second, -20);
+        game.update_relation(second, first, -30);
+
+        assert!(game.create_alliance_request(first, second, 10));
+        assert!(game.create_alliance_request(second, first, 11));
+
+        assert!(game.is_allied_with(first, second));
+        assert_eq!(game.relation(first, second), Relation::Friendly);
+        assert_eq!(game.relation(second, first), Relation::Friendly);
     }
 }
 
