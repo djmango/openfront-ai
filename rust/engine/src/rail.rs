@@ -112,18 +112,25 @@ impl RailNetwork {
             .collect()
     }
 
+    /// TS `Cluster.addStation` + `TrainStation.setCluster`. TS adds the station to the new
+    /// cluster's `stations` Set *first*, then unconditionally removes it from whatever
+    /// cluster it previously pointed to (`this.cluster.removeStation`) - even if that's the
+    /// *same* cluster we just added it to. When a new station connects to two neighbors that
+    /// both resolve to the same cluster within one `connectToNearbyStations` call, the second
+    /// `addStation` call re-triggers this remove-after-add and the station ends up with
+    /// `cluster` pointing at the cluster but absent from its `stations` set. This is real TS
+    /// behavior we must reproduce byte-for-byte, so the removal below is unconditional (no
+    /// `prev_id != cluster_id` guard) and happens *after* the add, matching TS's exact order.
     fn cluster_add_station(&mut self, cluster_id: u32, station_id: u32) {
-        let prev = self.stations.get(&station_id).and_then(|s| s.cluster);
-        if let Some(prev_id) = prev {
-            if prev_id != cluster_id {
-                if let Some(c) = self.clusters.get_mut(&prev_id) {
-                    c.stations.retain(|&s| s != station_id);
-                }
-            }
-        }
         if let Some(c) = self.clusters.get_mut(&cluster_id) {
             if !c.stations.contains(&station_id) {
                 c.stations.push(station_id);
+            }
+        }
+        let prev = self.stations.get(&station_id).and_then(|s| s.cluster);
+        if let Some(prev_id) = prev {
+            if let Some(c) = self.clusters.get_mut(&prev_id) {
+                c.stations.retain(|&s| s != station_id);
             }
         }
         if let Some(st) = self.stations.get_mut(&station_id) {
