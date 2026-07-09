@@ -71,6 +71,10 @@ pub struct Player {
     pub outgoing_land_attacks: Vec<String>,
     /// TS `PlayerImpl._incomingAttacks`  -  land attack ids targeting this player.
     pub incoming_land_attacks: Vec<String>,
+    /// TS `StatsImpl` `attacks[ATTACK_INDEX_SENT]`  -  net troops sent in attacks
+    /// (increased on attack init, decreased on genuine order-retreat cancels).
+    /// Used only for `GameImpl.conquerPlayer`'s "never attacked" gold-skip check.
+    pub attacks_sent_net: i64,
 }
 
 impl Default for Player {
@@ -100,6 +104,7 @@ impl Default for Player {
             team: None,
             outgoing_land_attacks: Vec::new(),
             incoming_land_attacks: Vec::new(),
+            attacks_sent_net: 0,
         }
     }
 }
@@ -251,6 +256,7 @@ impl Default for Game {
             disable_alliances: None,
             spawn_immunity_duration: None,
             starting_gold: None,
+            gold_multiplier: None,
         };
         Self {
             game_id: String::new(),
@@ -938,40 +944,69 @@ impl Game {
         self.conquer_one(small_id, tile, true);
     }
 
-    /// TS `GameImpl.conquerPlayer`  -  ship transfer on disconnected teammate wipe.
+    /// TS `GameImpl.conquerPlayer`  -  ship transfer on disconnected teammate wipe,
+    /// plus gold transfer from conquered to conqueror (skipped for humans who
+    /// never sent an attack, e.g. AFK spawn-camped players).
     pub fn conquer_player(&mut self, conqueror_small_id: u16, conquered_small_id: u16) {
-        let (disconnected, same_team) = {
-            let Some(conquered) = self.player_by_small_id(conquered_small_id) else {
-                return;
-            };
-            let conqueror_team = self
-                .player_by_small_id(conqueror_small_id)
-                .and_then(|p| p.team.clone());
-            (
-                conquered.is_disconnected,
-                conqueror_team.is_some() && conqueror_team == conquered.team.clone(),
-            )
-        };
-
-        if !disconnected || !same_team {
+        let Some((disconnected, conquered_team)) = self
+            .player_by_small_id(conquered_small_id)
+            .map(|p| (p.is_disconnected, p.team.clone()))
+        else {
             return;
+        };
+        let conqueror_team = self
+            .player_by_small_id(conqueror_small_id)
+            .and_then(|p| p.team.clone());
+        let same_team = conqueror_team.is_some() && conqueror_team == conquered_team;
+
+        if disconnected && same_team {
+            let ships: Vec<i32> = self
+                .player_by_small_id(conquered_small_id)
+                .map(|p| {
+                    p.units
+                        .iter()
+                        .filter(|u| {
+                            u.unit_type == crate::core::schemas::unit_type::WARSHIP
+                                || u.unit_type == crate::core::schemas::unit_type::TRANSPORT
+                        })
+                        .map(|u| u.id)
+                        .collect()
+                })
+                .unwrap_or_default();
+            for unit_id in ships {
+                self.capture_unit(conquered_small_id, conqueror_small_id, unit_id);
+            }
         }
 
-        let ships: Vec<i32> = self
+        let Some((conquered_gold, conquered_type, attacks_sent_net)) = self
             .player_by_small_id(conquered_small_id)
-            .map(|p| {
-                p.units
-                    .iter()
-                    .filter(|u| {
-                        u.unit_type == crate::core::schemas::unit_type::WARSHIP
-                            || u.unit_type == crate::core::schemas::unit_type::TRANSPORT
-                    })
-                    .map(|u| u.id)
-                    .collect()
-            })
-            .unwrap_or_default();
-        for unit_id in ships {
-            self.capture_unit(conquered_small_id, conqueror_small_id, unit_id);
+            .map(|p| (p.gold, p.player_type, p.attacks_sent_net))
+        else {
+            return;
+        };
+        let skip_gold_transfer =
+            attacks_sent_net == 0 && conquered_type == PlayerType::Human;
+        if skip_gold_transfer {
+            return;
+        }
+        let gold_captured = match conquered_type {
+            PlayerType::Bot | PlayerType::Nation => conquered_gold,
+            PlayerType::Human => conquered_gold / 2,
+        };
+        if let Some(p) = self.player_by_small_id_mut(conqueror_small_id) {
+            p.gold += gold_captured;
+        }
+        if let Some(p) = self.player_by_small_id_mut(conquered_small_id) {
+            p.gold -= conquered_gold;
+        }
+    }
+
+    /// TS `StatsImpl.attack`/`attackCancel` (SENT bucket only)  -  tracks net
+    /// troops a player has sent in attacks, used by `conquerPlayer`'s
+    /// never-attacked gold-skip check.
+    pub fn adjust_attacks_sent(&mut self, small_id: u16, delta: f64) {
+        if let Some(p) = self.player_by_small_id_mut(small_id) {
+            p.attacks_sent_net += delta.round() as i64;
         }
     }
 
