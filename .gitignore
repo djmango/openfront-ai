@@ -6,10 +6,12 @@ runs/
 data-human/
 records/
 records-rl/
+/records
 *.webm
 !assets/*.webm
 replays/
 .DS_Store
 rust/ofrs/target/
+rust/target/
 rust/ofrs/Cargo.lock
 .venv-t/

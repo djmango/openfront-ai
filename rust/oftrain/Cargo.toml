@@ -21,9 +21,8 @@ anyhow = "1"
 flate2 = "1"
 base64 = "0.22"
 crossbeam-channel = "0.5"
-# In-process native engine (the `rust-ofrs-fast` worktree must be checked
-# out as a sibling of this repo; see DEVLOG "native engine integration").
-openfront-engine = { path = "../../../openfront-ai-rust-fast/rust/engine", optional = true }
+# In-process native engine (same workspace since the rust-ofrs-fast merge).
+openfront-engine = { path = "../engine", optional = true }
 
 [features]
 default = []
