@@ -1555,6 +1555,30 @@ mod tests {
     }
 
     #[test]
+    fn warship_shells_match_transport_and_warship_targets() {
+        let repo_root = std::env::var("OPENFRONT_REPO")
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+        let repo = std::path::Path::new(&repo_root);
+        for (record_id, turn_number) in [("x7pvCXU3", 500), ("rN7wbZ1Y", 620)] {
+            let path = repo.join(format!("records/0c4c7d7993c9/{record_id}.json.gz"));
+            let bytes = load_record_bytes(&path).unwrap();
+            let record = GameRecord::from_json_bytes(&bytes).unwrap().decompress();
+            let expected = record
+                .turns
+                .iter()
+                .find(|turn| turn.turn_number == turn_number)
+                .and_then(|turn| turn.hash)
+                .unwrap_or_else(|| panic!("archived hash at turn {turn_number}"));
+            let game = replay_to_tick(repo, &path, turn_number);
+            assert_eq!(
+                game_hash(&game),
+                expected,
+                "{record_id} at turn {turn_number}"
+            );
+        }
+    }
+
+    #[test]
     fn manual_boat_retreat_matches_giq_through_turn_450() {
         let repo_root = std::env::var("OPENFRONT_REPO")
             .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
