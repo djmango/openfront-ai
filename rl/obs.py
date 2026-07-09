@@ -745,17 +745,32 @@ def _coarsen_mask(mask: np.ndarray) -> np.ndarray:
     ).max(axis=(1, 3)).astype(np.float32)
 
 
+def _coarse_content(landfrac: torch.Tensor) -> tuple[np.ndarray, np.ndarray]:
+    """(has_land, has_water) per /16 coarse cell from the /8 land fraction.
+    Used to prune coarse tile picks per action (boats/nukes target land,
+    warship moves target water) - see Policy._coarse_logits_for_action."""
+    def pool(m: torch.Tensor) -> np.ndarray:
+        return F.max_pool2d(
+            m.float()[None, None], COARSE_FACTOR, stride=COARSE_FACTOR,
+            ceil_mode=True,
+        )[0, 0].cpu().numpy()
+
+    return pool(landfrac > 0), pool(landfrac < 0.999)
+
+
 def _fine_coverage(
     classmap: torch.Tensor, land: torch.Tensor, legal_tile: np.ndarray
-) -> tuple[torch.Tensor, tuple[int, int, int, int]]:
+) -> tuple[torch.Tensor, tuple[int, int, int, int], torch.Tensor]:
     """Own-territory + border-band coverage on the /8 grid.
 
-    Returns a cropped coverage mask and its full-grid box (y0, x0, y1, x1).
-    During spawn (no owned territory yet), coverage follows legal spawn
-    regions so the policy can place anywhere valid.
+    Returns a cropped coverage mask, its full-grid box (y0, x0, y1, x1),
+    and the /8 land fraction (for _coarse_content). During spawn (no owned
+    territory yet), coverage follows legal spawn regions so the policy can
+    place anywhere valid.
     """
     own = F.avg_pool2d((classmap == 1).float().unsqueeze(0).unsqueeze(0), REGION)[0, 0] > 0
-    land8 = F.avg_pool2d(land.float().unsqueeze(0).unsqueeze(0), REGION)[0, 0] > 0
+    landfrac = F.avg_pool2d(land.float().unsqueeze(0).unsqueeze(0), REGION)[0, 0]
+    land8 = landfrac > 0
     if own.any():
         k = 2 * FOVEA_RADIUS + 1
         cov = F.max_pool2d(
@@ -772,7 +787,7 @@ def _fine_coverage(
     ys, xs = torch.nonzero(cov, as_tuple=True)
     y0, y1 = int(ys.min()), int(ys.max()) + 1
     x0, x1 = int(xs.min()), int(xs.max()) + 1
-    return cov[y0:y1, x0:x1].float(), (y0, x0, y1, x1)
+    return cov[y0:y1, x0:x1].float(), (y0, x0, y1, x1), landfrac
 
 
 def _local_crops(
@@ -952,6 +967,8 @@ def encode_grids(
     legal_fine_by_idx: dict[int, np.ndarray] = {}
     origin_by_idx: dict[int, np.ndarray] = {}
     local_by_idx: dict[int, np.ndarray] = {}
+    has_land_by_idx: dict[int, np.ndarray] = {}
+    has_water_by_idx: dict[int, np.ndarray] = {}
     z_gpu: dict[int, torch.Tensor] = {}
     for idxs in chunks:
         owners = torch.from_numpy(
@@ -1052,9 +1069,10 @@ def encode_grids(
             )
         local = _local_crops(classmap, terr[:, 0], defense_bonus)
         for j, i in enumerate(idxs):
-            cov, (y0, x0, y1, x1) = _fine_coverage(
+            cov, (y0, x0, y1, x1), landfrac = _fine_coverage(
                 classmap[j], terr[j, 0], raws[i]["legal_tile"]
             )
+            has_land_by_idx[i], has_water_by_idx[i] = _coarse_content(landfrac)
             fine = torch.cat([grid[j, :, y0:y1, x0:x1] * cov, cov.unsqueeze(0)], dim=0)
             coarse = coarse_grid[j]
             if fp16:
@@ -1183,9 +1201,10 @@ def encode_grids(
             )
         local = _local_crops(classmap, land, defense_bonus)
         for j, i in enumerate(idxs):
-            cov, (y0, x0, y1, x1) = _fine_coverage(
+            cov, (y0, x0, y1, x1), landfrac = _fine_coverage(
                 classmap[j], land[j], raws[i]["legal_tile"]
             )
+            has_land_by_idx[i], has_water_by_idx[i] = _coarse_content(landfrac)
             fine = torch.cat([grid[j, :, y0:y1, x0:x1] * cov, cov.unsqueeze(0)], dim=0)
             coarse = coarse_grid[j]
             if fp16:
@@ -1237,6 +1256,8 @@ def encode_grids(
         o["grid_coarse"] = coarse
         o["grid_coarse_valid"] = np.ones((cgh, cgw), dtype=np.float32)
         o["legal_tile_coarse"] = _coarsen_mask(r["legal_tile"])
+        o["coarse_has_land"] = has_land_by_idx[i]
+        o["coarse_has_water"] = has_water_by_idx[i]
         # Legacy aliases keep analysis/BC utilities importable; PPO v7 uses
         # the explicit fine/coarse keys above.
         o["grid"] = fine
@@ -1285,6 +1306,7 @@ def collate(
     mask_keys = {
         "grid_valid", "legal_tile", "grid_fine_valid", "fine_coverage",
         "legal_tile_fine", "grid_coarse_valid", "legal_tile_coarse",
+        "coarse_has_land", "coarse_has_water",
     }
     for k in keys:
         if k in grid_keys:

@@ -50,10 +50,17 @@ from rl.vec import VecEnv
 
 SUB_KEYS = ["player_slot", "tile_region", "build_type", "nuke_type"]
 # Entropy-floor adaptation is suppressed for this many updates after a
-# resume: synchronized env resets make the first rollouts spawn-phase-heavy
-# (masked action space -> artificially low measured entropy), which used to
-# spike the coefficient 3x on every restart.
+# start (fresh or resume): synchronized env resets make the first rollouts
+# spawn-phase-heavy (masked action space -> artificially low measured
+# entropy), which used to spike the coefficient 3x on every restart.
 ENT_GRACE_UPDATES = 20
+# Cap on the adaptive entropy-floor multiplier. The old cap of 30 let the
+# entropy term dwarf the policy gradient (~1.1 vs ~0.01-0.03 in the loss):
+# ppo_v7 ratcheted to the cap in 13 updates when stage-0 commitment dipped
+# entropy below the floor, then sat there for 100+ updates because the old
+# controller only decayed above floor*1.4 - a dead band the bonus itself
+# kept entropy inside (3.7-3.9 vs release at 4.9). See the decay rule below.
+ENT_SCALE_MAX = 5.0
 # Latent-cell budget per update forward/backward. collate() pads a minibatch
 # to its largest grid, so one BetweenTwoSeas sample (132x223) pads 127
 # others to 29k cells each and backward tries multi-GiB activation allocs -
@@ -68,6 +75,7 @@ MAX_UPD_PIX = 1_600_000
 OBS_KEYS = [
     "grid_fine", "grid_fine_valid", "fine_coverage", "fine_origin",
     "legal_tile_fine", "grid_coarse", "grid_coarse_valid", "legal_tile_coarse",
+    "coarse_has_land", "coarse_has_water",
     "local", "players", "pmask", "scalars",
     "legal_actions", "legal_ptarget", "legal_build", "legal_nuke",
 ]
@@ -220,13 +228,17 @@ def main() -> None:
                     help="entropy coef anneals linearly to this (v2c sat at "
                          "entropy ~8 under a flat 0.01, exploring forever)")
     ap.add_argument("--ent-anneal-updates", type=int, default=4000)
-    ap.add_argument("--ent-floor", type=float, default=3.5,
+    ap.add_argument("--ent-floor", type=float, default=2.5,
                     help="adaptive entropy floor (0 = off): when mean policy "
                          "entropy drops below this, the entropy coef scales "
-                         "up (x1.3/update, cap x30) until it recovers. "
-                         "ppo_v4 collapsed 9 -> 2.8 nats and stopped winning "
-                         "(deterministic safe-2nd); the schedule alone can't "
-                         "prevent that")
+                         "up (x1.3/update, cap ENT_SCALE_MAX) until it "
+                         "recovers. ppo_v4 collapsed 9 -> 2.8 nats and "
+                         "stopped winning (deterministic safe-2nd). 3.5 was "
+                         "tuned for the pre-v7 single full-grid tile softmax; "
+                         "v7's two-level head is structurally lower-entropy "
+                         "(coarse has 1/4 the cells, refinement <= ln 4) and "
+                         "a WINNING stage-0 policy sat at 3.3-3.5, so 3.5 "
+                         "actively fought commitment")
     ap.add_argument("--ent-coef-q", type=float, default=0.002,
                     help="entropy coef for the Beta quantity head; separate "
                          "because differential entropy can be negative and "
@@ -404,9 +416,14 @@ def main() -> None:
                 f"step {global_step}, stage {stage}, "
                 f"win-window {len(recent_wins)}/{WINDOW}"
             )
-    # Post-resume grace: hold the entropy-floor controller for a while so
+    # Startup grace: hold the entropy-floor controller for a while so
     # startup artifacts can't spike the coefficient (see ENT_GRACE_UPDATES).
-    ent_grace_until = start_update + ENT_GRACE_UPDATES if args.resume else 0
+    # Applies to fresh starts too - from-scratch launches have the same
+    # spawn-heavy first rollouts the resume guard was built for.
+    ent_grace_until = start_update + ENT_GRACE_UPDATES
+    # Clamp a resumed scale to the (possibly lowered) cap so a run that
+    # pegged under the old cap doesn't stay there after a code update.
+    ent_scale = min(ent_scale, ENT_SCALE_MAX)
 
     def set_lr(current_stage: int) -> float:
         lr = args.lr * args.stage_lr_decay ** current_stage
@@ -900,9 +917,14 @@ def main() -> None:
         if args.ent_floor > 0 and n_mb and update > ent_grace_until:
             ent_mean = ent_sum / n_mb
             if ent_mean < args.ent_floor:
-                ent_scale = min(ent_scale * 1.3, 30.0)
+                ent_scale = min(ent_scale * 1.3, ENT_SCALE_MAX)
             elif ent_mean > args.ent_floor * 1.4:
                 ent_scale = max(ent_scale / 1.3, 1.0)
+            else:
+                # Anywhere above the floor decays (slowly): without this,
+                # a scale pushed up by a transient dip is trapped forever
+                # when the bonus holds entropy inside [floor, floor*1.4).
+                ent_scale = max(ent_scale / 1.05, 1.0)
 
         # Publish the updated weights to the acting snapshot.
         with act_lock, torch.no_grad():
