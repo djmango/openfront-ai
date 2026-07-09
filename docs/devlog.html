@@ -1259,6 +1259,17 @@ fought commitment.</p>
   <li><b>Webbot parity:</b> the browser translator got the same span-2 + shore-preference
     fix (<code>openfront</code> submodule), since master's webbot serves v7 exports.</li>
 </ul>
+<p><b>Env fleet auto-sizing (same night):</b> post-fix GPU util read 20-40% on the 4x H200s
+with CPU load 17/128 - the box was barely working. Rollout runs on a collector thread fully
+overlapped with the update, so with roll ~16s vs upd ~68s the 384 envs sat idle ~75% of every
+cycle. The trainer now writes a <code>suggested_envs</code> hint into <code>state.json</code>
+every update (current envs scaled by the EMA'd upd/roll ratio, damped to &le;2.5x per restart,
+capped at 8/core and 2048), and <code>pod_train.sh ENVS=auto</code> re-reads it at every
+relaunch - restarts are the only point the fleet can resize, so the loop self-tunes across
+them. <code>MINIBATCH=auto</code> scales with the fleet (ROLLOUT&times;ENVS/12) so optimizer
+steps/update stay constant and bigger fleets mean bigger kernels, not more per-step overhead.
+ppo_v7 relaunched at envs 768 / minibatch 2048 (cold default; history takes over from
+here).</p>
 
 <h3 id="v7-ops" style="scroll-margin-top:0">BC-regen ops saga: three infra bugs before the first
 game replayed</h3>

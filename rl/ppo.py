@@ -748,6 +748,13 @@ def main() -> None:
                     flush=True,
                 )
 
+    # Phase-time EMAs feeding the env auto-sizing hint (see pod_train.sh
+    # ENVS=auto). Smoothed so one slow update or a map change doesn't whip
+    # the suggestion around.
+    roll_ema: float | None = None
+    upd_ema: float | None = None
+    suggested_envs = args.envs
+
     for update in range(start_update + 1, args.updates + 1):
         t_wait0 = time.time()
         data = rollout_q.get()
@@ -935,6 +942,22 @@ def main() -> None:
         stage = shared["stage"]
         episodes_done = shared["episodes_done"]
         tps = (global_step - t0_step) * STAGES[stage].decision_ticks / (time.time() - t0)
+
+        # Env auto-sizing hint. The collector thread overlaps rollouts with
+        # the update, so whenever roll < upd the env fleet idles for the
+        # difference - more envs raise samples/update (and game-ticks/s) at
+        # near-zero marginal wall-clock until rollout catches up. Suggest
+        # envs scaled by the measured upd/roll ratio, damped per restart
+        # (<= 2.5x growth, >= 0.5x shrink) and capped by CPU (each env is
+        # one Node process) and a hard ceiling. Consumed by pod_train.sh at
+        # relaunch (ENVS=auto) - env count can't change mid-run.
+        roll_ema = roll_s if roll_ema is None else 0.9 * roll_ema + 0.1 * roll_s
+        upd_ema = upd_s if upd_ema is None else 0.9 * upd_ema + 0.1 * upd_s
+        factor = max(0.5, min(upd_ema / max(roll_ema, 1e-6), 2.5))
+        cap = min(8 * (os.cpu_count() or 8), 2048)
+        suggested_envs = min(int(args.envs * factor), cap)
+        suggested_envs = max(suggested_envs - suggested_envs % (2 * world), 2 * world)
+        writer.add_scalar("perf/suggested_envs", suggested_envs, global_step)
         with win_lock:
             roll = float(np.mean(recent_scores)) if recent_scores else 0.0
             roll_win = float(np.mean(recent_wins)) if recent_wins else 0.0
@@ -1024,6 +1047,13 @@ def main() -> None:
                     "recent_scores": scores_snap,
                     "ent_scale": ent_scale,
                     "lr": opt.param_groups[0]["lr"],
+                    "envs": args.envs,
+                    "suggested_envs": suggested_envs,
+                    "perf": {
+                        "roll_s": round(roll_ema, 2),
+                        "upd_s": round(upd_ema, 2),
+                        "tps": round(tps, 1),
+                    },
                 },
             )
 
