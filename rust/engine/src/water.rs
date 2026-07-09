@@ -843,14 +843,67 @@ fn bounded_segment_path(map: &GameMap, from: TileRef, to: TileRef, padding: u32)
     bounded_water_path(map, &[from], to, min_x, max_x, min_y, max_y)
 }
 
+// TS `SmoothingWaterTransformer.canSee` - inline Bresenham with magnitude-aware
+// diagonal handling: when the x-first intermediate tile has magnitude < min_magnitude,
+// try the y-first alternative rather than failing immediately. This matches TS exactly.
 fn water_can_see(map: &GameMap, from: TileRef, to: TileRef, min_magnitude: u8) -> bool {
-    water_trace_line(map, from, to)
-        .map(|trace| {
-            trace.iter().all(|&t| {
-                map.is_water(t) && (map.terrain_byte(t) & 0x1f) >= min_magnitude
-            })
-        })
-        .unwrap_or(false)
+    let mut x0 = map.x(from);
+    let mut y0 = map.y(from);
+    let x1 = map.x(to);
+    let y1 = map.y(to);
+    let dx = (x1 as i32 - x0 as i32).unsigned_abs();
+    let dy = (y1 as i32 - y0 as i32).unsigned_abs();
+    let sx = if x0 < x1 { 1i32 } else { -1i32 };
+    let sy = if y0 < y1 { 1i32 } else { -1i32 };
+    let mut err = dx as i32 - dy as i32;
+    for _ in 0..100_000 {
+        let tile = map.ref_xy(x0, y0);
+        if !map.is_water(tile) {
+            return false;
+        }
+        if (map.terrain_byte(tile) & 0x1f) < min_magnitude {
+            return false;
+        }
+        if x0 == x1 && y0 == y1 {
+            return true;
+        }
+        let e2 = 2 * err;
+        let should_move_x = e2 > -(dy as i32);
+        let should_move_y = e2 < dx as i32;
+        if should_move_x && should_move_y {
+            let nx = (x0 as i32 + sx) as u32;
+            let intermediate = map.ref_xy(nx, y0);
+            let int_mag = map.terrain_byte(intermediate) & 0x1f;
+            if !map.is_water(intermediate) || int_mag < min_magnitude {
+                // x-first fails magnitude check, try y-first alternative (matches TS)
+                let ny = (y0 as i32 + sy) as u32;
+                err += dx as i32;
+                let alt = map.ref_xy(x0, ny);
+                let alt_mag = map.terrain_byte(alt) & 0x1f;
+                if !map.is_water(alt) || alt_mag < min_magnitude {
+                    return false;
+                }
+                x0 = nx;
+                err -= dy as i32;
+                y0 = ny;
+            } else {
+                x0 = nx;
+                err -= dy as i32;
+                y0 = (y0 as i32 + sy) as u32;
+                err += dx as i32;
+            }
+        } else {
+            if should_move_x {
+                x0 = (x0 as i32 + sx) as u32;
+                err -= dy as i32;
+            }
+            if should_move_y {
+                y0 = (y0 as i32 + sy) as u32;
+                err += dx as i32;
+            }
+        }
+    }
+    false
 }
 
 fn water_trace_line(map: &GameMap, from: TileRef, to: TileRef) -> Option<Vec<TileRef>> {
@@ -1224,7 +1277,13 @@ pub fn transport_path_multi_into(
     }
     // TS `MiniMapTransformer.findPath`  -  closest source to upscaled[0], no mini-shore filter.
     let cell_src = closest_full_source(full, froms, upscaled[0]);
-    *path_out = densify_path_adjacent(full, fix_path_extremes(full, upscaled, cell_src, to));
+    // TS `MiniMapTransformer` does NOT densify to 4-adjacency; the upscaled cells are
+    // already interpolated to be adjacent for cardinal minimap steps, and the source/
+    // destination fix can add a diagonal step (when both x and y are odd) that TS
+    // traverses in one move. Densifying that diagonal into two cardinal steps puts
+    // native one tick behind TS, explaining the recurring hash diffs of exactly
+    // one map-width (e.g. 2200). Use the path as-is to match TS behaviour.
+    *path_out = fix_path_extremes(full, upscaled, cell_src, to);
     !path_out.is_empty()
 }
 

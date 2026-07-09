@@ -2012,6 +2012,13 @@ impl Game {
         if a == b {
             return true;
         }
+        // Match TS `isFriendly`: disconnected players are never considered friendly,
+        // even if allied. This keeps `bordering_enemies` and `bordering_friends` lists
+        // in sync with TS so that RNG consumption in `maybe_send_alliance_requests`
+        // (and attack strategies) is identical between the two engines.
+        if self.player_by_small_id(b).map_or(false, |p| p.is_disconnected) {
+            return false;
+        }
         self.is_allied_with(a, b)
     }
 

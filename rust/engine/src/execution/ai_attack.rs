@@ -350,6 +350,10 @@ pub fn send_boat_attack_to_player(
     true
 }
 
+pub fn collect_bordering_players_pub(game: &Game, small_id: u16) -> Vec<u16> {
+    collect_bordering_players(game, small_id)
+}
+
 fn collect_bordering_players(game: &Game, small_id: u16) -> Vec<u16> {
     let mut seen = HashSet::new();
     let mut ordered: Vec<u16> = Vec::new();

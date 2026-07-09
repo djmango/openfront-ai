@@ -158,7 +158,7 @@ async function main() {
   process.stdout.write(
     JSON.stringify({
       tick: game.ticks(),
-      hash: game.hash(),
+      hash: (game as any).hash?.() ?? null,
       totalTiles,
       totalTroops,
       players,
