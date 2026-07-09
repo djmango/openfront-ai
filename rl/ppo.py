@@ -788,15 +788,25 @@ def main() -> None:
 
         def prep(mb: np.ndarray) -> list[tuple[np.ndarray, dict]]:
             # Shape-grouped, pixel-budgeted sub-batches (see MAX_UPD_PIX).
+            # v7's grid_fine is a per-sample coverage CROP whose shape drifts
+            # every step as territory grows - exact-shape grouping (fine for
+            # the old per-map grids) splintered minibatches into hundreds of
+            # single-digit sub-batches and made the update pure kernel-launch
+            # overhead. Bucket fine dims up to multiples of 8 instead:
+            # collate() zero-pads within the bucket (identical to what any
+            # mixed batch already does; the policy masks padded cells), at
+            # <= ~40% padded compute worst-case vs. a >10x sub-batch fanout.
             by_shape: dict[tuple, list[int]] = {}
             for i in mb:
-                by_shape.setdefault(
-                    (all_obs[i]["grid_fine"].shape[1:], all_obs[i]["grid_coarse"].shape[1:]),
-                    [],
-                ).append(int(i))
+                fh, fw = all_obs[i]["grid_fine"].shape[1:]
+                key = (
+                    -(-fh // 8) * 8, -(-fw // 8) * 8,
+                    all_obs[i]["grid_coarse"].shape[1:],
+                )
+                by_shape.setdefault(key, []).append(int(i))
             subs = []
-            for ((fh, fw), (ch, cw)), idxs in by_shape.items():
-                per = max(1, MAX_UPD_PIX // (fh * fw + ch * cw))
+            for (bfh, bfw, (ch, cw)), idxs in by_shape.items():
+                per = max(1, MAX_UPD_PIX // (bfh * bfw + ch * cw))
                 for k in range(0, len(idxs), per):
                     part = idxs[k : k + per]
                     subs.append(
