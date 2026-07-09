@@ -1025,6 +1025,15 @@ fn fix_path_extremes(
     } else {
         path.push(cell_dst);
     }
+    // NOTE: TS `MiniMapTransformer.fixExtremes` does not dedupe consecutive
+    // nodes; a duplicate tile makes `PathFinderStepper.next` stall the ship
+    // for one tick. Tried removing this dedupe to match that exactly, but it
+    // regressed the full 78-record gate (many more early desyncs around
+    // tick 310-350), so the underlying mini-path must be producing more
+    // duplicate nodes than TS's equivalent computation in the common case.
+    // Keep the dedupe until the mini-path/HPA stitching duplicate source is
+    // found and fixed to match TS bit-for-bit (see water_hpa.rs / A* /
+    // cluster-stitching), then revisit.
     collapse_consecutive_dupes(path)
 }
 
@@ -1056,8 +1065,8 @@ fn densify_path_adjacent(map: &GameMap, path: Vec<TileRef>) -> Vec<TileRef> {
     out
 }
 
-/// Upscale/interpolation can emit the same TileRef twice in a row; TS paths do
-/// not keep those duplicates and they stall transport steppers by one tick.
+/// Upscale/interpolation can emit the same TileRef twice in a row; collapse
+/// them so the transport stepper does not stall on a spurious duplicate.
 fn collapse_consecutive_dupes(path: Vec<TileRef>) -> Vec<TileRef> {
     if path.is_empty() {
         return path;
