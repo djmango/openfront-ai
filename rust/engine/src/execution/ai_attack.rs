@@ -179,11 +179,17 @@ pub fn send_boat_attack_to_nearby_tn(game: &mut Game, small_id: u16) -> bool {
         return false;
     }
 
+    // TS `sendBoatAttackToNearbyTerraNullius`: on the *first* tile passing the
+    // geometric + canBuildTransportShip checks, compute troops and either send
+    // the attack or give up entirely (it does not keep searching after that).
+    // We can't call `can_build_transport_ship` (needs `&mut Game`) from inside
+    // the `for_each_border_tile` closure (needs `&Game`), so first collect the
+    // ordered list of geometric candidates, then re-check them in order.
     let directions: [(i32, i32); 4] = [(0, -1), (0, 1), (-1, 0), (1, 0)];
     let mut shore_i = 0usize;
-    let mut candidate: Option<TileRef> = None;
+    let mut candidates: Vec<TileRef> = Vec::new();
     game.for_each_border_tile(small_id, |border| {
-        if candidate.is_some() || !game.is_shore(border) {
+        if !game.is_shore(border) {
             return;
         }
         shore_i += 1;
@@ -193,9 +199,6 @@ pub fn send_boat_attack_to_nearby_tn(game: &mut Game, small_id: u16) -> bool {
         let bx = game.x(border) as i32;
         let by = game.y(border) as i32;
         for (dx, dy) in directions {
-            if candidate.is_some() {
-                break;
-            }
             let x1 = bx + dx;
             let y1 = by + dy;
             if !game.is_valid_coord(x1, y1) {
@@ -212,15 +215,12 @@ pub fn send_boat_attack_to_nearby_tn(game: &mut Game, small_id: u16) -> bool {
             }
             let tile = game.ref_xy(nx as u32, ny as u32);
             if game.is_land(tile) && !game.has_owner(tile) && !game.has_fallout(tile) {
-                candidate = Some(tile);
+                candidates.push(tile);
             }
         }
     });
 
-    let Some(dst) = candidate else {
-        return false;
-    };
-    if can_build_transport_ship(game, small_id, dst).is_none() {
+    let Some(&dst) = candidates.iter().find(|&&t| can_build_transport_ship(game, small_id, t).is_some()) else {
         return false;
     };
     // TS `sendBoatAttackToNearbyTerraNullius`: `troops = this.player.troops() / 5`
