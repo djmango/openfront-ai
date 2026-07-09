@@ -1,11 +1,12 @@
 //! Nation structure spawning (`NationStructureBehavior.ts` city subset).
 
+use crate::core::config::TrainRelation;
 use crate::core::schemas::unit_type;
 use crate::execution::{ExecEnum, construction::ConstructionExecution};
 use crate::game::Game;
 use crate::map::TileRef;
 use crate::prng::PseudoRandom;
-use crate::spatial::closest_tile;
+use crate::spatial::{closest_tile, closest_two_tiles};
 use std::collections::HashMap;
 
 const CITY_PERCEIVED_COST_INCREASE_PER_OWNED: f64 = 1.0;
@@ -143,6 +144,334 @@ fn city_value(game: &Game, small_id: u16, tile: TileRef, use_connection_score: b
         }
     }
     let _ = use_connection_score;
+    w
+}
+
+/// A station reachable for rail-connectivity scoring (TS `buildReachableStations` entry).
+struct ReachableStation {
+    tile: TileRef,
+    cluster: Option<u32>,
+    weight: f64,
+}
+
+/// TS `NationStructureBehavior.buildReachableStations`  -  own structures weighted by
+/// "self" trade gold, non-bot neighbor structures weighted by team/ally/other trade gold.
+/// Embargoes aren't modeled (mirrors `canTrade`'s existing simplification elsewhere in this
+/// file), so every non-bot neighbor is eligible.
+fn build_reachable_stations(game: &Game, small_id: u16) -> Vec<ReachableStation> {
+    let rn = &game.rail_network;
+    let max_trade_gold = (game.wire.train_gold(TrainRelation::Ally, 0) as f64).max(1.0);
+    let mut result = Vec::new();
+
+    let station_types = [unit_type::CITY, unit_type::PORT, unit_type::FACTORY];
+
+    let self_weight = game.wire.train_gold(TrainRelation::SelfTrade, 0) as f64 / max_trade_gold;
+    if let Some(p) = game.player_by_small_id(small_id) {
+        for u in &p.units {
+            if !station_types.contains(&u.unit_type.as_str()) {
+                continue;
+            }
+            if let Some(station_id) = rn.find_station_by_unit(u.id) {
+                let cluster = rn.stations.get(&station_id).and_then(|s| s.cluster);
+                result.push(ReachableStation { tile: u.tile as TileRef, cluster, weight: self_weight });
+            }
+        }
+    }
+
+    for neighbor_id in crate::execution::ai_attack::nearby_player_small_ids(game, small_id) {
+        let Some(neighbor) = game.player_by_small_id(neighbor_id) else { continue };
+        if neighbor.player_type == crate::game::PlayerType::Bot {
+            continue;
+        }
+        let rel = if game.players_on_same_team(small_id, neighbor_id) {
+            TrainRelation::Team
+        } else if game.is_allied_with(small_id, neighbor_id) {
+            TrainRelation::Ally
+        } else {
+            TrainRelation::Other
+        };
+        let weight = game.wire.train_gold(rel, 0) as f64 / max_trade_gold;
+        for u in &neighbor.units {
+            if !station_types.contains(&u.unit_type.as_str()) {
+                continue;
+            }
+            if let Some(station_id) = rn.find_station_by_unit(u.id) {
+                let cluster = rn.stations.get(&station_id).and_then(|s| s.cluster);
+                result.push(ReachableStation { tile: u.tile as TileRef, cluster, weight });
+            }
+        }
+    }
+
+    result
+}
+
+/// TS `NationStructureBehavior.computeConnectivityScore`  -  per-cluster max weight of any
+/// in-range station, plus individual weights of in-range isolated (clusterless) stations.
+fn compute_connectivity_score(
+    game: &Game,
+    tile: TileRef,
+    stations: &[ReachableStation],
+    min_range_sq: f64,
+    station_range_sq: f64,
+) -> f64 {
+    // TS iterates a `Map<Cluster, number>` in insertion order when summing; since float
+    // addition isn't associative, an unordered `HashMap` here could sum in a different
+    // order and produce a different last-bit result. Use an insertion-order Vec instead
+    // (cluster counts per candidate tile are small, so linear lookup is cheap).
+    let mut clusters_in_range: Vec<(u32, f64)> = Vec::new();
+    let mut isolated_weight = 0.0;
+    for st in stations {
+        let dist = game.map.euclidean_dist_squared(tile, st.tile) as f64;
+        if dist < min_range_sq || dist > station_range_sq {
+            continue;
+        }
+        if let Some(c) = st.cluster {
+            if let Some(entry) = clusters_in_range.iter_mut().find(|(cid, _)| *cid == c) {
+                if st.weight > entry.1 {
+                    entry.1 = st.weight;
+                }
+            } else {
+                clusters_in_range.push((c, st.weight));
+            }
+        } else {
+            isolated_weight += st.weight;
+        }
+    }
+    let mut score = isolated_weight;
+    for (_, v) in &clusters_in_range {
+        score += v;
+    }
+    score
+}
+
+/// Context precomputed once per `structureSpawnTile` call (TS `factoryValue()` closure).
+struct FactoryValueCtx {
+    border_tiles: Vec<TileRef>,
+    other_factory_tiles: Vec<TileRef>,
+    city_tiles: Vec<TileRef>,
+    border_spacing: u32,
+    structure_spacing: u32,
+    station_range: u32,
+    station_range_sq: f64,
+    use_connection_score: bool,
+    reachable_stations: Vec<ReachableStation>,
+    min_range_sq: f64,
+}
+
+fn build_factory_value_ctx(game: &Game, small_id: u16, use_connection_score: bool) -> FactoryValueCtx {
+    let (border_spacing, structure_spacing) = spacing_constants(game);
+    let station_range = game.wire.train_station_max_range();
+    let station_range_sq = (station_range as f64).powi(2);
+    let min_range_sq = (game.wire.train_station_min_range() as f64).powi(2);
+    let (border_tiles, other_factory_tiles, city_tiles) = game
+        .player_by_small_id(small_id)
+        .map(|p| {
+            (
+                p.border_tiles.as_slice().to_vec(),
+                p.units
+                    .iter()
+                    .filter(|u| u.unit_type == unit_type::FACTORY)
+                    .map(|u| u.tile as TileRef)
+                    .collect(),
+                p.units
+                    .iter()
+                    .filter(|u| u.unit_type == unit_type::CITY)
+                    .map(|u| u.tile as TileRef)
+                    .collect(),
+            )
+        })
+        .unwrap_or_default();
+    let reachable_stations = if use_connection_score {
+        build_reachable_stations(game, small_id)
+    } else {
+        Vec::new()
+    };
+    FactoryValueCtx {
+        border_tiles,
+        other_factory_tiles,
+        city_tiles,
+        border_spacing,
+        structure_spacing,
+        station_range,
+        station_range_sq,
+        use_connection_score,
+        reachable_stations,
+        min_range_sq,
+    }
+}
+
+/// TS `NationStructureBehavior.factoryValue`.
+fn factory_value(game: &Game, ctx: &FactoryValueCtx, tile: TileRef) -> f64 {
+    let mut w = game.map.magnitude(tile) as f64;
+
+    let (_, border_dist) = closest_tile(game, &ctx.border_tiles, tile);
+    w += border_dist.min(ctx.border_spacing) as f64;
+
+    let others: Vec<TileRef> = ctx
+        .other_factory_tiles
+        .iter()
+        .copied()
+        .filter(|&t| t != tile)
+        .collect();
+    if let Some((other, _)) = closest_two_tiles(game, &others, &[tile]) {
+        let d = game.manhattan_dist(other, tile);
+        // TS caps same-type factory spacing by `stationRange`, not `structureSpacing`.
+        w += d.min(ctx.station_range) as f64;
+    }
+
+    if let Some((city, _)) = closest_two_tiles(game, &ctx.city_tiles, &[tile]) {
+        let d = game.manhattan_dist(city, tile);
+        w += d.min(ctx.structure_spacing) as f64;
+    }
+
+    if !ctx.use_connection_score {
+        return w;
+    }
+
+    w += compute_connectivity_score(
+        game,
+        tile,
+        &ctx.reachable_stations,
+        ctx.min_range_sq,
+        ctx.station_range_sq,
+    ) * ctx.structure_spacing as f64;
+
+    w
+}
+
+/// TS `NationStructureBehavior.missileSiloValue`.
+fn missile_silo_value(
+    game: &Game,
+    border_tiles: &[TileRef],
+    other_silo_tiles: &[TileRef],
+    border_spacing: u32,
+    structure_spacing: u32,
+    tile: TileRef,
+) -> f64 {
+    let mut w = game.map.magnitude(tile) as f64;
+
+    let (_, border_dist) = closest_tile(game, border_tiles, tile);
+    w += border_dist.min(border_spacing) as f64;
+
+    let others: Vec<TileRef> = other_silo_tiles.iter().copied().filter(|&t| t != tile).collect();
+    if let Some((other, _)) = closest_two_tiles(game, &others, &[tile]) {
+        let d = game.manhattan_dist(other, tile);
+        w += d.min(structure_spacing) as f64;
+    }
+
+    w
+}
+
+/// Context precomputed once per `structureSpawnTile` call (TS `samLauncherValue()` closure).
+struct SamValueCtx {
+    border_tiles: Vec<TileRef>,
+    other_sam_tiles: Vec<TileRef>,
+    border_spacing: u32,
+    structure_spacing: u32,
+    difficulty_is_easy: bool,
+    protect_entries: Vec<(TileRef, f64)>,
+    range_sq: f64,
+    use_coverage_weighting: bool,
+    structure_coverage: Option<HashMap<TileRef, f64>>,
+}
+
+fn build_sam_value_ctx(game: &Game, random: &mut PseudoRandom, small_id: u16, difficulty: &str) -> SamValueCtx {
+    let (border_spacing, structure_spacing) = spacing_constants(game);
+    let weight_by_level = difficulty == "Hard" || difficulty == "Impossible";
+
+    let mut protect_entries: Vec<(TileRef, f64)> = Vec::new();
+    let mut existing_sams: Vec<(TileRef, i32)> = Vec::new();
+    let border_tiles = game
+        .player_by_small_id(small_id)
+        .map(|p| p.border_tiles.as_slice().to_vec())
+        .unwrap_or_default();
+    if let Some(p) = game.player_by_small_id(small_id) {
+        for u in &p.units {
+            match u.unit_type.as_str() {
+                unit_type::CITY | unit_type::FACTORY | unit_type::MISSILE_SILO | unit_type::PORT => {
+                    let weight = if weight_by_level { u.level as f64 } else { 1.0 };
+                    protect_entries.push((u.tile as TileRef, weight));
+                }
+                unit_type::SAM_LAUNCHER => existing_sams.push((u.tile as TileRef, u.level)),
+                _ => {}
+            }
+        }
+    }
+    let other_sam_tiles: Vec<TileRef> = existing_sams.iter().map(|&(t, _)| t).collect();
+
+    // TS `Config.defaultSamRange()`.
+    const DEFAULT_SAM_RANGE: f64 = 70.0;
+    let range_sq = DEFAULT_SAM_RANGE * DEFAULT_SAM_RANGE;
+
+    let difficulty_is_easy = difficulty == "Easy";
+    // TS short-circuits: `difficulty !== Easy && nextInt(0, 100) < 25` - no draw on Easy.
+    let use_coverage_weighting = !difficulty_is_easy && random.next_int(0, 100) < 25;
+
+    let structure_coverage = if use_coverage_weighting {
+        let mut coverage = HashMap::new();
+        for &(entry_tile, _weight) in &protect_entries {
+            let mut score = 0.0;
+            for &(sam_tile, sam_level) in &existing_sams {
+                let sam_range = sam_range_for_level(sam_level);
+                let dist = game.map.euclidean_dist_squared(entry_tile, sam_tile) as f64;
+                if dist <= sam_range * sam_range {
+                    score += sam_level as f64;
+                }
+            }
+            coverage.insert(entry_tile, score);
+        }
+        Some(coverage)
+    } else {
+        None
+    };
+
+    SamValueCtx {
+        border_tiles,
+        other_sam_tiles,
+        border_spacing,
+        structure_spacing,
+        difficulty_is_easy,
+        protect_entries,
+        range_sq,
+        use_coverage_weighting,
+        structure_coverage,
+    }
+}
+
+/// TS `NationStructureBehavior.samLauncherValue`.
+fn sam_launcher_value(game: &Game, ctx: &SamValueCtx, tile: TileRef) -> f64 {
+    let mut w = game.map.magnitude(tile) as f64;
+
+    let (_, border_dist) = closest_tile(game, &ctx.border_tiles, tile);
+    w += border_dist.min(ctx.border_spacing) as f64;
+
+    let others: Vec<TileRef> = ctx.other_sam_tiles.iter().copied().filter(|&t| t != tile).collect();
+    if let Some((other, _)) = closest_two_tiles(game, &others, &[tile]) {
+        let d = game.manhattan_dist(other, tile);
+        w += d.min(ctx.structure_spacing) as f64;
+    }
+
+    if !ctx.difficulty_is_easy {
+        for &(entry_tile, weight) in &ctx.protect_entries {
+            let dist_sq = game.map.euclidean_dist_squared(tile, entry_tile) as f64;
+            if dist_sq > ctx.range_sq {
+                continue;
+            }
+            if ctx.use_coverage_weighting {
+                let coverage = ctx
+                    .structure_coverage
+                    .as_ref()
+                    .and_then(|m| m.get(&entry_tile))
+                    .copied()
+                    .unwrap_or(0.0);
+                let coverage_weight = 1.0 / (1.0 + coverage);
+                w += ctx.structure_spacing as f64 * weight * coverage_weight;
+            } else {
+                w += ctx.structure_spacing as f64 * weight;
+            }
+        }
+    }
+
     w
 }
 
@@ -427,28 +756,78 @@ fn structure_spawn_tile(
         return None;
     }
     let difficulty = game.wire.game_config().difficulty.as_str();
-    let use_connection_score = should_use_connectivity_score(random, difficulty);
-    let mut best: Option<TileRef> = None;
-    let mut best_value = 0u32;
     let debug = std::env::var("STRUCTURE_DEBUG")
         .ok()
         .is_some_and(|id| game.player_by_small_id(small_id).is_some_and(|p| p.id == id));
+
+    // TS `structureSpawnTileValue`  -  each branch builds its own closure/context. Only
+    // City and Factory draw a `shouldUseConnectivityScore` random number; MissileSilo and
+    // SAMLauncher (and SAMLauncher's own coverage-weighting draw) must not take that draw,
+    // since RNG draw order/count must match TS exactly.
+    enum ValueCtx {
+        City { use_connection_score: bool },
+        Factory(FactoryValueCtx),
+        MissileSilo { border_tiles: Vec<TileRef>, other_tiles: Vec<TileRef>, border_spacing: u32, structure_spacing: u32 },
+        Sam(SamValueCtx),
+        None,
+    }
+
+    let ctx = match unit_type_name {
+        unit_type::CITY => {
+            let use_connection_score = should_use_connectivity_score(random, difficulty);
+            ValueCtx::City { use_connection_score }
+        }
+        unit_type::FACTORY => {
+            let use_connection_score = should_use_connectivity_score(random, difficulty);
+            ValueCtx::Factory(build_factory_value_ctx(game, small_id, use_connection_score))
+        }
+        unit_type::MISSILE_SILO => {
+            let (border_spacing, structure_spacing) = spacing_constants(game);
+            let (border_tiles, other_tiles) = game
+                .player_by_small_id(small_id)
+                .map(|p| {
+                    (
+                        p.border_tiles.as_slice().to_vec(),
+                        p.units
+                            .iter()
+                            .filter(|u| u.unit_type == unit_type::MISSILE_SILO)
+                            .map(|u| u.tile as TileRef)
+                            .collect(),
+                    )
+                })
+                .unwrap_or_default();
+            ValueCtx::MissileSilo { border_tiles, other_tiles, border_spacing, structure_spacing }
+        }
+        unit_type::SAM_LAUNCHER => {
+            ValueCtx::Sam(build_sam_value_ctx(game, random, small_id, difficulty))
+        }
+        _ => ValueCtx::None,
+    };
+
     if debug {
         if let Some(bbox) = border_bbox(game, small_id) {
             eprintln!("  bbox min=({}, {}) max=({}, {})", bbox.min_x, bbox.min_y, bbox.max_x, bbox.max_y);
         }
         eprintln!(
-            "structure_spawn {:?} tiles_in={} use_conn={}",
+            "structure_spawn {:?} tiles_in={}",
             game.player_by_small_id(small_id).map(|p| p.id.as_str()),
             tiles.len(),
-            use_connection_score
         );
     }
+
+    let mut best: Option<TileRef> = None;
+    let mut best_value = 0f64;
     for t in tiles {
-        let v = if unit_type_name == unit_type::CITY {
-            city_value(game, small_id, t, use_connection_score)
-        } else {
-            0
+        let v = match &ctx {
+            ValueCtx::City { use_connection_score } => {
+                city_value(game, small_id, t, *use_connection_score) as f64
+            }
+            ValueCtx::Factory(fctx) => factory_value(game, fctx, t),
+            ValueCtx::MissileSilo { border_tiles, other_tiles, border_spacing, structure_spacing } => {
+                missile_silo_value(game, border_tiles, other_tiles, *border_spacing, *structure_spacing, t)
+            }
+            ValueCtx::Sam(sctx) => sam_launcher_value(game, sctx, t),
+            ValueCtx::None => 0.0,
         };
         if debug && best.is_none() {
             eprintln!("  sample tile={} v={} can={}", t, v, can_build_structure(game, small_id, unit_type_name, t));
