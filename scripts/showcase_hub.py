@@ -131,6 +131,34 @@ def play_redirect(game_id: str, worker_path: str | None = None) -> str:
     return f"/{wp}/game/{game_id}"
 
 
+def wait_for_webbot_join(
+    game_id: str, worker_path: str, *, timeout_s: float = 20.0
+) -> bool:
+    """Poll the public lobby-info route until the webbot's client shows up.
+
+    launch_webbot_agent() only *starts* a subprocess - cold Chromium boot +
+    page load + ONNX init can take several seconds. If we arm the game-start
+    countdown immediately (the old behavior), it can fire before the webbot's
+    "join" message ever reaches the server, so gameStartInfo.players ends up
+    empty and the bot spends the whole match retrying a spawn that can never
+    land (server logs "player with clientID ... not found" forever). Block
+    here instead so the countdown only starts once the bot is actually in
+    the lobby.
+    """
+    url = f"http://{CLIENT_HOST}/{worker_path}/api/game/{game_id}"
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=3) as resp:
+                info = json.loads(resp.read().decode())
+            if len(info.get("clients", [])) > 0:
+                return True
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return False
+
+
 def start_play_lobby(game_id: str, worker_index: int) -> dict:
     """Arm the lobby countdown via the admin bot on the owning game worker."""
     base = f"http://127.0.0.1:{WORKER_BASE_PORT + worker_index}"
@@ -486,6 +514,11 @@ class HubHandler(BaseHTTPRequestHandler):
                         "worker_path": worker_path,
                     }
                     try:
+                        if not wait_for_webbot_join(game_id, worker_path):
+                            log(
+                                f"webbot didn't join {game_id} within timeout; "
+                                "arming countdown anyway"
+                            )
                         started = start_play_lobby(game_id, worker_index)
                         hub_payload["status"] = "countdown"
                         hub_payload["starts_at"] = started.get("startsAt")
