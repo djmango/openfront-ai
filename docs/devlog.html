@@ -63,8 +63,12 @@
   <code>ae_v31_d16c32</code>. rl5 / <code>ppo_v61</code> killed once v7 cleared stage 0 stably.
   First mid-run patch already shipped: coarse-head tile picks (boat/nuke/warship) only ever
   searched the top-left quarter of the chosen /16 cell - see
-  <a href="#v7-boatfix">the coarse-boat fix</a>. Hot-deployed with a checkpoint resume, v4.2
-  style.</p>
+  <a href="#v7-boatfix">the coarse-boat fix</a>. A follow-up <a href="#v7-audit">audit</a>
+  found the real stage-1 killer: the entropy-floor controller pegged at its 30x cap in a
+  dead band, drowning the policy gradient for 100+ updates. Fixed (controller + cap + floor
+  recalibrated for the v7 head), plus a vectorized update path, act/evaluate logprob
+  consistency, and land/water coarse pick pruning. Both hot-deployed with checkpoint
+  resumes, v4.2 style.</p>
   <p><b>Browser-side live play is deployed</b> on
   <a href="https://openfrontai.skg.gg">openfrontai.skg.gg</a>: "Play vs Agent" no longer
   spins up a server GPU/CPU <code>rl.play</code> process. A headless Chromium tab joins the
@@ -1216,6 +1220,45 @@ incentive hole was closed in v4.2 and stayed closed.</p>
 by the crash loop with <code>--resume</code> from the last checkpoint. Watch items:
 <code>episode/wasted</code> falling, boat share of the action mix normalizing, stage-1
 roll-win resuming its climb.</p>
+
+<h3 id="v7-audit" style="scroll-margin-top:0">Jul 9 audit: the entropy controller was the real
+stage-1 killer</h3>
+<p>A systematic pass over the training paths after the boat fix found the actual reason
+stage-1 roll-win decayed to 0.00 - and it wasn't boats. <b>The adaptive entropy-floor
+controller was pegged at its 30x cap and structurally unable to come down.</b> The log tells
+it cleanly: at updates 17-22 the policy started <i>winning</i> stage 0 (roll-win 0.40 &rarr;
+0.85), which naturally dropped entropy to 3.3-3.5 - just under the 3.5 floor. The controller
+read commitment as collapse and ratcheted the coefficient 1.3x/update, 0.013 &rarr; 0.298 in
+13 updates. The huge bonus then held entropy at 3.7-3.9: above the floor, but below the
+floor&times;1.4 = 4.9 release threshold - <b>a dead band the bonus itself kept entropy
+inside</b>, so the scale never decayed. For 100+ updates the entropy term (~1.1) dwarfed the
+policy gradient (~0.01-0.03); the optimizer was actively keeping the policy random.</p>
+<p>Root causes and fixes (all in <code>rl/ppo.py</code>):
+(1) <b>dead band</b>: the scale now decays slowly (/1.05 per update) anywhere above the
+floor, not just above floor&times;1.4;
+(2) <b>cap 30 &rarr; 5</b> (<code>ENT_SCALE_MAX</code>), and a resumed scale is clamped to
+the new cap so the pegged run recovers on redeploy;
+(3) <b>no startup grace for fresh runs</b>: the spawn-heavy-rollout grace only applied to
+resumes - now unconditional;
+(4) <b>floor 3.5 &rarr; 2.5</b>: 3.5 was tuned for the pre-v7 single full-grid tile softmax.
+v7's two-level head is structurally lower-entropy (coarse has 1/4 the cells, refinement
+&le; ln 4), and a <i>winning</i> stage-0 policy sat at 3.3-3.5 - the old floor actively
+fought commitment.</p>
+<p>Also shipped in the same pass:</p>
+<ul>
+  <li><b>Update-path throughput:</b> <code>_fine_to_coarse_mask</code> ran a per-sample
+    Python loop with a GPU-syncing <code>nonzero()</code> inside every evaluate() minibatch
+    (~24k syncs/update; upd 70-100s vs roll 14s). Replaced with a batched scatter.</li>
+  <li><b>act/evaluate logprob consistency:</b> when the fine mask falls back (no legal fine
+    cells anywhere), the sampled fine cell can live outside the sampled coarse cell;
+    act() now scores the coarse factor of the cell evaluate() will reconstruct
+    (identical in all non-degenerate cases). Verified by 200-trial sampled parity test.</li>
+  <li><b>Per-action coarse content masks:</b> new <code>coarse_has_land/water</code> obs
+    keys prune coarse tile picks - boats/nukes can no longer point at pure-ocean /16 cells,
+    warship moves at landlocked ones. Less doomed-pick space to learn away by penalty.</li>
+  <li><b>Webbot parity:</b> the browser translator got the same span-2 + shore-preference
+    fix (<code>openfront</code> submodule), since master's webbot serves v7 exports.</li>
+</ul>
 
 <h3 id="v7-ops" style="scroll-margin-top:0">BC-regen ops saga: three infra bugs before the first
 game replayed</h3>

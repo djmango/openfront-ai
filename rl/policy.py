@@ -223,6 +223,9 @@ class Policy(nn.Module):
         o["legal_tile_coarse"] = F.max_pool2d(
             o["legal_tile"].unsqueeze(1), 2, stride=2, ceil_mode=True
         ).squeeze(1)
+        # No land/water info in legacy obs: no content pruning.
+        o["coarse_has_land"] = torch.ones_like(o["grid_coarse_valid"])
+        o["coarse_has_water"] = torch.ones_like(o["grid_coarse_valid"])
         return o
 
     def trunk_forward(self, o: dict) -> tuple[torch.Tensor, dict, torch.Tensor]:
@@ -278,22 +281,49 @@ class Policy(nn.Module):
         return self.heads(h, g, p, o)
 
     def _fine_to_coarse_mask(self, o: dict, cgh: int, cgw: int) -> torch.Tensor:
-        """Which coarse cells contain at least one legal covered fine cell."""
+        """Which coarse cells contain at least one legal covered fine cell.
+
+        Vectorized scatter: the per-sample nonzero() loop this replaces ran
+        one GPU sync per sample inside every evaluate() minibatch (~24k
+        syncs/update) and dominated the update phase."""
         B, fh, fw = o["legal_tile_fine"].shape
-        out = o["legal_tile_fine"].new_zeros(B, cgh, cgw)
-        for b in range(B):
-            yy, xx = torch.nonzero(o["legal_tile_fine"][b] > 0, as_tuple=True)
-            if yy.numel() == 0:
-                continue
-            gy = yy + o["fine_origin"][b, 0].long()
-            gx = xx + o["fine_origin"][b, 1].long()
-            out[b, gy // 2, gx // 2] = 1.0
-        return out * o["grid_coarse_valid"]
+        dev = o["legal_tile_fine"].device
+        gy = (
+            torch.arange(fh, device=dev)[None, :, None]
+            + o["fine_origin"][:, 0, None, None].long()
+        ) // 2
+        gx = (
+            torch.arange(fw, device=dev)[None, None, :]
+            + o["fine_origin"][:, 1, None, None].long()
+        ) // 2
+        # Padded fine rows/cols can map past the coarse grid; their
+        # legal_tile_fine is 0, so clamping the index is harmless.
+        idx = (gy * cgw + gx).clamp(max=cgh * cgw - 1)
+        out = o["legal_tile_fine"].new_zeros(B, cgh * cgw)
+        out.scatter_add_(1, idx.reshape(B, -1), o["legal_tile_fine"].reshape(B, -1))
+        return (out.view(B, cgh, cgw) > 0).float() * o["grid_coarse_valid"]
 
     def _coarse_logits_for_action(
         self, out: dict, o: dict, action: torch.Tensor
     ) -> torch.Tensor:
         base = o["grid_coarse_valid"] * o["legal_tile_coarse"]
+        # Content pruning for coarse-granularity targets: boats and nukes
+        # target land, warship moves target water. Without this the coarse
+        # head can point boats at pure-ocean cells, which translate to
+        # nothing and read as noop-with-penalty - space the policy would
+        # otherwise have to learn to avoid pick by pick.
+        if "coarse_has_land" in o:
+            needs_land = torch.tensor(
+                [ACTIONS[i] in ("boat", "launch_nuke") for i in range(N_ACTIONS)],
+                device=action.device,
+            )[action]
+            needs_water = action == ACTIONS.index("move_warship")
+            base = base * torch.where(
+                needs_land[:, None, None], o["coarse_has_land"], 1.0
+            )
+            base = base * torch.where(
+                needs_water[:, None, None], o["coarse_has_water"], 1.0
+            )
         refine_action = torch.tensor(
             [ACTIONS[i] in REFINE_TILE for i in range(N_ACTIONS)],
             device=action.device,
@@ -394,15 +424,30 @@ class Policy(nn.Module):
         coarse_logits = self._coarse_logits_for_action(out, o, a)
         d_coarse = torch.distributions.Categorical(logits=coarse_logits)
         coarse = d_coarse.probs.argmax(-1) if greedy else d_coarse.sample()
-        coarse_lp = d_coarse.log_prob(coarse)
         fine_logits = self._fine_logits_for_coarse(out, o, coarse)
         d_fine = torch.distributions.Categorical(logits=fine_logits)
         fine = d_fine.probs.argmax(-1) if greedy else d_fine.sample()
         fine_lp = d_fine.log_prob(fine)
+        fine_global = _fine_local_to_global(
+            fine, o["grid_fine"].shape[3], o["fine_origin"]
+        )
+        # Logprob consistency with evaluate(): only the fine GLOBAL region
+        # is stored, and evaluate() reconstructs the coarse factor as the
+        # sampled fine cell's parent. Normally that IS the sampled coarse
+        # cell (the fine mask is restricted to it), but when the fine mask
+        # falls back (no legal fine cells anywhere) the sampled fine cell
+        # can live in a different coarse cell - score THAT cell here so
+        # rollout and update logprobs match.
+        eff_coarse = torch.where(
+            refine_t,
+            _global_to_coarse_local(fine_global, o["grid_coarse"].shape[3]),
+            coarse,
+        )
+        coarse_lp = d_coarse.log_prob(eff_coarse)
         tile_lp = torch.where(refine_t, coarse_lp + fine_lp, coarse_lp)
         tile_region = torch.where(
             refine_t,
-            _fine_local_to_global(fine, o["grid_fine"].shape[3], o["fine_origin"]),
+            fine_global,
             _coarse_local_to_global(coarse, o["grid_coarse"].shape[3]),
         )
 
