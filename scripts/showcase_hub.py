@@ -132,7 +132,7 @@ def play_redirect(game_id: str, worker_path: str | None = None) -> str:
 
 
 def wait_for_webbot_join(
-    game_id: str, worker_path: str, *, timeout_s: float = 20.0
+    game_id: str, worker_path: str, *, timeout_s: float = 40.0
 ) -> bool:
     """Poll the public lobby-info route until the webbot's client shows up.
 
