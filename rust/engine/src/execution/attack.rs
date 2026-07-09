@@ -127,8 +127,13 @@ impl Execution for AttackExecution {
             game.wire
                 .attack_amount(owner_type, owner_troops)
         });
-        start = start.min(owner_troops as f64);
+        // TS `AttackExecution.init` only clamps `startTroops` to the owner's
+        // current troops inside `if (this.removeTroops)`. Boat-landed attacks
+        // (`removeTroops == false`) carry troops already deducted from the
+        // owner at boat departure, so clamping against the owner's unrelated
+        // current troop pool here would wrongly shrink them.
         if self.remove_troops {
+            start = start.min(owner_troops as f64);
             game.remove_troops(self.owner_small_id, start);
         }
         self.troops = start;
