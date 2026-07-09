@@ -613,7 +613,7 @@ impl<'a> AbstractGraphBuilder<'a> {
         max_x: u32,
         min_y: u32,
         max_y: u32,
-    ) -> HashMap<usize, u32> {
+    ) -> Vec<(usize, u32)> {
         let from_x = self.map.x(from);
         let from_y = self.map.y(from);
         let mut tile_to_node_id = HashMap::new();
@@ -625,7 +625,11 @@ impl<'a> AbstractGraphBuilder<'a> {
             max_manhattan = max_manhattan.max(dx + dy);
         }
         let max_distance = max_manhattan * 4;
-        let mut reachable = HashMap::new();
+        // Discovery order matters: this must match the TS oracle's `Map` (which
+        // iterates in insertion order) so that edges are created/updated in the
+        // same order as TS. A `HashMap` here would iterate in a randomized,
+        // per-process order and make edge tie-breaking non-deterministic.
+        let mut reachable: Vec<(usize, u32)> = Vec::new();
         let mut found_count = 0usize;
         let target_len = target_nodes.len();
         let width = self.map.width;
@@ -657,7 +661,7 @@ impl<'a> AbstractGraphBuilder<'a> {
                 continue;
             }
             if let Some(&node_id) = tile_to_node_id.get(&node) {
-                reachable.insert(node_id, dist);
+                reachable.push((node_id, dist));
                 found_count += 1;
                 if found_count == target_len {
                     break;
