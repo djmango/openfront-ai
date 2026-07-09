@@ -817,7 +817,9 @@ def main() -> None:
         sub_i = 0
         for _ in range(args.epochs):
             rng.shuffle(idx)
-            mbs = np.split(idx, max(1, B_total // args.minibatch))
+            # array_split: minibatch need not divide B_total (auto-sized
+            # minibatches rarely do); sizes differ by at most one sample.
+            mbs = np.array_split(idx, max(1, B_total // args.minibatch))
             fut = mb_pool.submit(prep, mbs[0])
             for i_mb, mb in enumerate(mbs):
                 t_w = time.time()
