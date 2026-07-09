@@ -1270,6 +1270,17 @@ them. <code>MINIBATCH=auto</code> scales with the fleet (ROLLOUT&times;ENVS/12) 
 steps/update stay constant and bigger fleets mean bigger kernels, not more per-step overhead.
 ppo_v7 relaunched at envs 768 / minibatch 2048 (cold default; history takes over from
 here).</p>
+<p><b>The real update-time culprit (found while scaling):</b> more envs alone made updates
+WORSE (68s &rarr; 160s at 768) - v7's <code>grid_fine</code> is a per-sample coverage crop
+whose shape drifts every step, and the update's exact-shape sub-batch grouping (fine for the
+old per-map grids) splintered each minibatch into hundreds of single-digit sub-batches: the
+update was kernel-launch overhead, not compute. Fine dims now bucket up to multiples of 8
+(collate zero-pads within the bucket, policy masks padded cells): &gt;20x fewer sub-batches
+for bounded padding waste. A latent <code>np.split</code> abort also surfaced (auto minibatch
+rarely divides B_total evenly) - now <code>array_split</code>. <b>Result at envs 1024 /
+minibatch 2730:</b> update 68s &rarr; ~33s, game-ticks/s <b>2,650 &rarr; ~10,800 (4x)</b>,
+GPU util 20-40% &rarr; 36-72% at 380-460W. Rollout (~48s) is now the long pole; the
+auto-sizer will trim the fleet toward balance on future restarts.</p>
 
 <h3 id="v7-ops" style="scroll-margin-top:0">BC-regen ops saga: three infra bugs before the first
 game replayed</h3>
