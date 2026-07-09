@@ -1276,6 +1276,12 @@ fn count_defense_posts_near_front(game: &Game, small_id: u16, front_tiles: &[Til
     count
 }
 
+fn sample_front_coordinate(random: &mut PseudoRandom, center: i32, radius: i32) -> i32 {
+    // TS passes `center + radius + 1` because `nextInt` excludes its upper
+    // bound. Keep both edges of the intended interval reachable.
+    random.next_int(center - radius, center + radius + 1)
+}
+
 fn sample_tiles_near_front(
     game: &Game,
     random: &mut PseudoRandom,
@@ -1331,8 +1337,8 @@ fn sample_tiles_near_front(
         };
         let ax = game.map.x(anchor) as i32;
         let ay = game.map.y(anchor) as i32;
-        let x = random.next_int(ax - search_radius, ax + search_radius);
-        let y = random.next_int(ay - search_radius, ay + search_radius);
+        let x = sample_front_coordinate(random, ax, search_radius);
+        let y = sample_front_coordinate(random, ay, search_radius);
         if !game.is_valid_coord(x, y) {
             continue;
         }
@@ -1358,6 +1364,27 @@ fn sample_tiles_near_front(
             .collect();
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defense_post_sampling_includes_positive_radius_edge() {
+        let center = 100;
+        let radius = 7;
+        let mut random = PseudoRandom::new(0);
+        let samples: Vec<_> = (0..10_000)
+            .map(|_| sample_front_coordinate(&mut random, center, radius))
+            .collect();
+
+        assert!(samples.contains(&(center - radius)));
+        assert!(samples.contains(&(center + radius)));
+        assert!(samples
+            .iter()
+            .all(|sample| (center - radius..=center + radius).contains(sample)));
+    }
 }
 
 /// TS `NationStructureBehavior.tryBuildDefensePost`.
