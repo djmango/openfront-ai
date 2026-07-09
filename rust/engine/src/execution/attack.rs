@@ -220,7 +220,10 @@ impl Execution for AttackExecution {
 
         if self.target_is_player {
             if game.is_friendly(self.owner_small_id, self.target_small_id) {
-                self.retreat(game, 25.0);
+                // TS only applies the 25% malus to an explicitly canceled
+                // player attack. An alliance formed after launch causes an
+                // automatic retreat with every remaining troop returned.
+                self.retreat(game, 0.0);
                 return;
             }
         }
@@ -327,6 +330,41 @@ impl Execution for AttackExecution {
 
     fn as_attack(&mut self) -> Option<&mut AttackExecution> {
         Some(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::Player;
+
+    #[test]
+    fn alliance_formed_mid_attack_returns_all_remaining_troops() {
+        let mut game = Game::default();
+        game.add_player(Player {
+            id: "attacker".to_string(),
+            small_id: 1,
+            troops: 1_000,
+            team: Some("Blue".to_string()),
+            ..Default::default()
+        });
+        game.add_player(Player {
+            id: "target".to_string(),
+            small_id: 2,
+            team: Some("Blue".to_string()),
+            ..Default::default()
+        });
+
+        let mut attack = AttackExecution::new(1, Some("target".to_string()), Some(400.0));
+        attack.initialized = true;
+        attack.target_is_player = true;
+        attack.target_small_id = 2;
+        attack.troops = 400.0;
+
+        attack.tick(&mut game, 1);
+
+        assert_eq!(game.player_by_small_id(1).unwrap().troops, 1_400);
+        assert!(!attack.is_active());
     }
 }
 
