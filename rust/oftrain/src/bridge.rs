@@ -14,6 +14,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use flate2::read::GzDecoder;
 use serde_json::{json, Value};
 
+use crate::engine::{decode_tiles, GameEngine, RawObs};
+
 /// Cap on buffered stderr lines per bridge; only kept so a crash/hang can
 /// be diagnosed (the Node engine's own `console.*` calls land here - see
 /// bridge/env.ts's stdout==pure-JSONL redirect). Previously stderr was
@@ -22,59 +24,18 @@ use serde_json::{json, Value};
 /// engine-bridge crash loop undiagnosable without `py-spy`/`faulthandler`.
 const STDERR_TAIL_LINES: usize = 200;
 
-pub const OWNER_MASK: u16 = 0x0FFF;
-pub const FALLOUT_BIT: u16 = 13;
-pub const DEFENSE_BONUS_BIT: u16 = 14;
-
-/// Decoded observation: `head` is the raw JSON header (tick, width,
-/// height, spawnPhase, winner, me, alive, entities, legal, wasted), plus
-/// derived tile arrays split out of the binary `tilesBin` frame.
-pub struct RawObs {
-    pub head: Value,
-    pub owners: Vec<u16>, // raw small-ids, NOT slotted
-    pub fallout: Vec<u8>,
-    pub defense_bonus: Vec<u8>,
-}
-
-impl RawObs {
-    pub fn tick(&self) -> i64 {
-        self.head["tick"].as_i64().unwrap_or(0)
-    }
-    pub fn spawn_phase(&self) -> bool {
-        self.head["spawnPhase"].as_bool().unwrap_or(false)
-    }
-    pub fn me(&self) -> i64 {
-        self.head["me"].as_i64().unwrap_or(-1)
-    }
-    pub fn alive(&self) -> bool {
-        self.head["alive"].as_bool().unwrap_or(false)
-    }
-    pub fn winner(&self) -> &Value {
-        &self.head["winner"]
-    }
-    pub fn wasted(&self) -> i64 {
-        self.head["wasted"].as_i64().unwrap_or(0)
-    }
-    pub fn legal_actions(&self) -> &Value {
-        &self.head["legal"]["actions"]
-    }
-    pub fn entities(&self) -> &Value {
-        &self.head["entities"]
-    }
-}
-
 pub struct Bridge {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
-    pub width: usize,
-    pub height: usize,
+    width: usize,
+    height: usize,
     /// Untrimmed raw terrain bytes (height x width), set on reset().
-    pub terrain: Vec<u8>,
+    terrain: Vec<u8>,
 }
 
-fn repo_root() -> Result<PathBuf> {
+pub(crate) fn repo_root() -> Result<PathBuf> {
     // rust/oftrain/src/bridge.rs -> repo root is 3 dirs up from the crate.
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let root = manifest_dir
@@ -181,23 +142,21 @@ impl Bridge {
 
     fn decode(&self, mut head: Value, tiles_raw: Vec<u8>) -> RawObs {
         let n = self.width * self.height;
-        debug_assert_eq!(tiles_raw.len(), n * 2);
-        let mut owners = vec![0u16; n];
-        let mut fallout = vec![0u8; n];
-        let mut defense_bonus = vec![0u8; n];
-        for i in 0..n {
-            let state = u16::from_le_bytes([tiles_raw[i * 2], tiles_raw[i * 2 + 1]]);
-            owners[i] = state & OWNER_MASK;
-            fallout[i] = ((state >> FALLOUT_BIT) & 1) as u8;
-            defense_bonus[i] = ((state >> DEFENSE_BONUS_BIT) & 1) as u8;
-        }
+        let (owners, fallout, defense_bonus) = decode_tiles(&tiles_raw, n);
         if let Some(obj) = head.as_object_mut() {
             obj.remove("terrain");
         }
         RawObs { head, owners, fallout, defense_bonus }
     }
 
-    pub fn reset(
+    #[allow(dead_code)] // debug/replay tooling, not used by the training loop
+    pub fn save_record(&mut self, path: &str) -> Result<Value> {
+        Ok(self.rpc(&json!({"op": "save_record", "path": path}))?.0)
+    }
+}
+
+impl GameEngine for Bridge {
+    fn reset(
         &mut self,
         map_name: &str,
         seed: &str,
@@ -224,16 +183,24 @@ impl Bridge {
         Ok(self.decode(head, tiles))
     }
 
-    pub fn step(&mut self, intents: &[Value], ticks: u32) -> Result<RawObs> {
+    fn step(&mut self, intents: &[Value], ticks: u32) -> Result<RawObs> {
         let (head, tiles) = self.rpc(&json!({"op": "step", "intents": intents, "ticks": ticks}))?;
         Ok(self.decode(head, tiles))
     }
 
-    pub fn save_record(&mut self, path: &str) -> Result<Value> {
-        Ok(self.rpc(&json!({"op": "save_record", "path": path}))?.0)
+    fn width(&self) -> usize {
+        self.width
     }
 
-    pub fn close(&mut self) {
+    fn height(&self) -> usize {
+        self.height
+    }
+
+    fn terrain(&self) -> &[u8] {
+        &self.terrain
+    }
+
+    fn close(&mut self) {
         let _ = self.rpc(&json!({"op": "close"}));
         let _ = self.child.kill();
         let _ = self.child.wait();

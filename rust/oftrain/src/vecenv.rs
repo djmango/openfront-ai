@@ -16,7 +16,7 @@ use ofcore::curriculum::{
 use ofcore::feat::{self, ACTIONS, IS_LAND_BIT, MAG_MASK, REGION};
 use ofcore::translate::{translate, Choice, IntentTranslator};
 
-use crate::bridge::Bridge;
+use crate::engine::{self, EngineKind, GameEngine, RawObs};
 
 pub struct EpisodeInfo {
     pub reward: f64,
@@ -55,7 +55,7 @@ pub struct PreparedObs {
 
 pub struct EnvWorker {
     pub idx: usize,
-    bridge: Bridge,
+    bridge: Box<dyn GameEngine>,
     stages: Vec<Stage>,
     stage: usize,
     max_episode_ticks: i64,
@@ -65,7 +65,7 @@ pub struct EnvWorker {
     ep_reward: f64,
     ep_len: i64,
     ep_wasted: i64,
-    obs: Option<crate::bridge::RawObs>,
+    obs: Option<RawObs>,
     lut: Vec<u8>,
     translator: Option<IntentTranslator>,
     land_total: i64,
@@ -80,8 +80,8 @@ pub struct EnvWorker {
 }
 
 impl EnvWorker {
-    pub fn new(idx: usize, stage: usize, max_episode_ticks: i64) -> Result<Self> {
-        let bridge = Bridge::spawn()?;
+    pub fn new(idx: usize, stage: usize, max_episode_ticks: i64, engine: EngineKind) -> Result<Self> {
+        let bridge = engine::create(engine)?;
         let mut w = EnvWorker {
             idx,
             bridge,
@@ -125,16 +125,18 @@ impl EnvWorker {
         let seed = format!("w{}-ep{}", self.idx, self.episode);
         let obs = self.bridge.reset(&map_name, &seed, bots, difficulty, nations_val)?;
 
-        let width = self.bridge.width;
-        let hr = self.bridge.height - self.bridge.height % REGION;
+        let width = self.bridge.width();
+        let height = self.bridge.height();
+        let hr = height - height % REGION;
         let wr = width - width % REGION;
         self.hr = hr;
         self.wr = wr;
+        let terrain = self.bridge.terrain();
         let mut land = vec![0u8; hr * wr];
         let mut mag = vec![0u8; hr * wr];
         for y in 0..hr {
             for x in 0..wr {
-                let t = self.bridge.terrain[y * width + x];
+                let t = terrain[y * width + x];
                 land[y * wr + x] = (t >> IS_LAND_BIT) & 1;
                 mag[y * wr + x] = t & MAG_MASK;
             }
@@ -142,7 +144,7 @@ impl EnvWorker {
         self.land = land;
         self.mag = mag;
         self.land_total = (self.land.iter().map(|&l| l as i64).sum::<i64>()).max(1);
-        self.translator = Some(IntentTranslator::new(&self.bridge.terrain, width, hr, wr));
+        self.translator = Some(IntentTranslator::new(self.bridge.terrain(), width, hr, wr));
         self.lut.clear();
         self.prev_strength = 0.0;
         self.spawn_steps = 0;
