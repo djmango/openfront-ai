@@ -52,6 +52,11 @@ NEEDS_TILE = {
     "cancel_boat",
     "delete_unit",
 }
+# Actions whose tile pick is refined to the fine /8 grid. Everything else
+# in NEEDS_TILE (boat, launch_nuke, move_warship) stays at coarse /16
+# granularity: the emitted region index is the coarse cell's top-left /8
+# region, and IntentTranslator searches the whole 2x2 block (span=2).
+# Keep those translate() call sites in sync when editing this set.
 REFINE_TILE = {
     "spawn",
     "build",

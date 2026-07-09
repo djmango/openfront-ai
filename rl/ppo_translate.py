@@ -37,17 +37,22 @@ class IntentTranslator:
         self.gw = builder.wr // REGION
         self.rng = np.random.default_rng(0)
 
-    def region_tile(self, region: int, valid: np.ndarray | None = None) -> int | None:
+    def region_tile(
+        self, region: int, valid: np.ndarray | None = None, span: int = 1
+    ) -> int | None:
         # Region indices address the padded policy grid, whose width is
         # GW_MAX or the map's own grid width if larger (see encode_grids).
+        # span=2 widens the search to a 2x2 region block: coarse-head picks
+        # (actions outside policy.REFINE_TILE) index the top-left /8 region
+        # of a /16 coarse cell, and the intended target is the whole cell.
         from rl.curriculum import GW_MAX
 
         gy, gx = divmod(region, max(GW_MAX, self.gw))
         if gy >= self.gh or gx >= self.gw:
             return None  # padded region; masked, but stay safe
         sl = (
-            slice(gy * REGION, (gy + 1) * REGION),
-            slice(gx * REGION, (gx + 1) * REGION),
+            slice(gy * REGION, (gy + span) * REGION),
+            slice(gx * REGION, (gx + span) * REGION),
         )
         block = self.land[sl] if valid is None else valid[sl]
         ys, xs = np.nonzero(block)
@@ -77,7 +82,14 @@ class IntentTranslator:
             ally = b if a == me else a if b == me else None
             if ally is not None:
                 valid &= self._owners(obs) != ally
-        return self.region_tile(region, valid)
+        # The engine resolves the destination via targetTransportTile ->
+        # closestShore(owner(dst), dst, maxDist=50): a shoreline candidate
+        # is guaranteed to resolve, an inland one only if its owner has
+        # shore within 50 tiles by land. Prefer shore, fall back to any.
+        tile = self.region_tile(region, valid & (self.shore == 1), span=2)
+        if tile is None:
+            tile = self.region_tile(region, valid, span=2)
+        return tile
 
     def build_tile(self, region: int, obs: dict, unit: str) -> int | None:
         """Structure site inside the region: own territory (engine's
@@ -162,7 +174,7 @@ class IntentTranslator:
                 return []
             return [{"type": "build_unit", "unit": unit, "tile": tile}]
         if name == "launch_nuke":
-            tile = self.region_tile(choice["tile_region"], self.passable)
+            tile = self.region_tile(choice["tile_region"], self.passable, span=2)
             if tile is None:
                 return []
             unit, up = NUKE_TYPES[choice["nuke_type"]]
@@ -199,7 +211,7 @@ class IntentTranslator:
             return [{"type": "upgrade_structure", "unit": u["type"], "unitId": u["uid"]}]
         if name == "move_warship":
             ids = legal.get("warships", [])
-            tile = self.region_tile(choice["tile_region"], self.land == 0)
+            tile = self.region_tile(choice["tile_region"], self.land == 0, span=2)
             if not ids or tile is None:
                 return []
             return [{"type": "move_warship", "unitIds": ids, "tile": tile}]
