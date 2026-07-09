@@ -604,6 +604,34 @@ mod tests {
     }
 
     #[test]
+    fn debug_player86_state() {
+        let repo_root = std::env::var("OPENFRONT_REPO")
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+        let repo = std::path::Path::new(&repo_root);
+        let path = repo.join("records/0c4c7d7993c9/3QNU4eJa.json.gz");
+        // Replay to tick 191 (state just before tick 191 runs)
+        let game = replay_to_tick(repo, &path, 191);
+        let p86 = game.player_by_small_id(86).unwrap();
+        eprintln!("Player 86: id={} client_id={} type={:?} troops={} tiles={} disconnected={}", p86.id, p86.client_id, p86.player_type, p86.troops, p86.tiles_owned, p86.is_disconnected);
+        // Print alliances
+        for al in &game.alliances {
+            if al.requestor_small_id == 86 || al.recipient_small_id == 86 {
+                let other_id = if al.requestor_small_id == 86 { al.recipient_small_id } else { al.requestor_small_id };
+                let other = game.player_by_small_id(other_id).unwrap();
+                eprintln!("  Alliance with: id={} disconnected={} troops={}", other.id, other.is_disconnected, other.troops);
+            }
+        }
+        // Print bordering players
+        let bordering = crate::execution::ai_attack::collect_bordering_players_pub(&game, 86);
+        eprintln!("Bordering players ({}): ", bordering.len());
+        for sid in &bordering {
+            let p = game.player_by_small_id(*sid).unwrap();
+            let friendly = game.is_friendly(86, *sid);
+            eprintln!("  sid={} id={} disconnected={} friendly={} troops={}", sid, p.id, p.is_disconnected, friendly, p.troops);
+        }
+    }
+
+    #[test]
     fn export_exec_order() {
         let repo_root = std::env::var("OPENFRONT_REPO")
             .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
@@ -790,5 +818,102 @@ mod tests {
             (tiles_used - 10.746250332845003).abs() < 0.01,
             "tiles_used {tiles_used}"
         );
+    }
+
+    #[test]
+    fn trace_alliance_exec_86_wnep5pzi() {
+        let repo_root = std::env::var("OPENFRONT_REPO")
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+        let repo = std::path::Path::new(&repo_root);
+        let path = repo.join("records/0c4c7d7993c9/3QNU4eJa.json.gz");
+
+        let bytes = load_record_bytes(&path).unwrap();
+        let rec = GameRecord::from_json_bytes(&bytes).unwrap().decompress();
+        let mut game = crate::bootstrap::game_from_record(repo, &rec).unwrap();
+
+        // Replay up to tick 191
+        for turn in rec.turns.iter() {
+            if turn.turn_number > 191 {
+                break;
+            }
+            let gid = game.game_id.clone();
+            for e in turn_to_executions(&mut game, &gid, &turn.intents) {
+                game.add_execution(e);
+            }
+            game.execute_next_tick();
+        }
+
+        let wnep5pzi_sid = game.player_by_id("wnep5pzi").map(|p| p.small_id).unwrap_or(9999);
+        eprintln!("wnep5pzi small_id={wnep5pzi_sid}");
+
+        // Print state at tick 191 (before tick 192 runs)
+        let all_reqs_86: Vec<String> = game.alliance_requests.iter()
+            .filter(|r| r.requestor_small_id == 86 || r.recipient_small_id == 86)
+            .map(|r| format!("{}->{}:{:?}(at={})", r.requestor_small_id, r.recipient_small_id, r.status, r.created_at))
+            .collect();
+        eprintln!("tick=191 all alliance_requests involving 86: {all_reqs_86:?}");
+
+        let all_reqs_343: Vec<String> = game.alliance_requests.iter()
+            .filter(|r| r.requestor_small_id == wnep5pzi_sid || r.recipient_small_id == wnep5pzi_sid)
+            .map(|r| format!("{}->{}:{:?}(at={})", r.requestor_small_id, r.recipient_small_id, r.status, r.created_at))
+            .collect();
+        eprintln!("tick=191 all alliance_requests involving 343: {all_reqs_343:?}");
+
+        let alliances_86: Vec<String> = game.alliances.iter()
+            .filter(|a| a.requestor_small_id == 86 || a.recipient_small_id == 86)
+            .map(|a| format!("{}<->{}(expires={})", a.requestor_small_id, a.recipient_small_id, a.expires_at))
+            .collect();
+        eprintln!("tick=191 alliances involving 86: {alliances_86:?}");
+
+        let can_send = game.can_send_alliance_request(86, wnep5pzi_sid);
+        eprintln!("tick=191 can_send_alliance_request(86, {wnep5pzi_sid})={can_send}");
+
+        for turn in rec.turns.iter() {
+            if turn.turn_number < 192 || turn.turn_number > 225 {
+                continue;
+            }
+            let tick = turn.turn_number;
+
+            let pre_reqs: Vec<String> = game.alliance_requests.iter()
+                .filter(|r| r.requestor_small_id == 86 || r.recipient_small_id == 86
+                    || r.requestor_small_id == wnep5pzi_sid || r.recipient_small_id == wnep5pzi_sid)
+                .map(|r| format!("{}->{}:{:?}(at={})", r.requestor_small_id, r.recipient_small_id, r.status, r.created_at))
+                .collect();
+            if !pre_reqs.is_empty() {
+                eprintln!("tick={tick} PRE  req_state: {pre_reqs:?}");
+            }
+
+            let gid = game.game_id.clone();
+            for e in turn_to_executions(&mut game, &gid, &turn.intents) {
+                game.add_execution(e);
+            }
+            game.execute_next_tick();
+
+            let alliance_execs: Vec<(usize, String)> = game.exec_labels().into_iter().enumerate()
+                .filter(|(_, l)| l.contains("AllianceRequest")
+                    && (l.contains("wnep5pzi") || l.contains(&format!("({}->", 86)) || l.contains(&format!("->{})", 86))))
+                .collect();
+            if !alliance_execs.is_empty() {
+                eprintln!("tick={tick} POST alliance execs: {alliance_execs:?}");
+            }
+
+            let post_reqs: Vec<String> = game.alliance_requests.iter()
+                .filter(|r| r.requestor_small_id == 86 || r.recipient_small_id == 86
+                    || r.requestor_small_id == wnep5pzi_sid || r.recipient_small_id == wnep5pzi_sid)
+                .map(|r| format!("{}->{}:{:?}(at={})", r.requestor_small_id, r.recipient_small_id, r.status, r.created_at))
+                .collect();
+            if !post_reqs.is_empty() {
+                eprintln!("tick={tick} POST req_state: {post_reqs:?}");
+            }
+
+            let alliances_86_wnep5pzi: Vec<String> = game.alliances.iter()
+                .filter(|a| (a.requestor_small_id == 86 && a.recipient_small_id == wnep5pzi_sid)
+                    || (a.requestor_small_id == wnep5pzi_sid && a.recipient_small_id == 86))
+                .map(|a| format!("alliance {}<->{} expires={}", a.requestor_small_id, a.recipient_small_id, a.expires_at))
+                .collect();
+            if !alliances_86_wnep5pzi.is_empty() {
+                eprintln!("tick={tick} POST alliance: {alliances_86_wnep5pzi:?}");
+            }
+        }
     }
 }

@@ -6,6 +6,7 @@ runs/
 data-human/
 records/
 records-rl/
+/records
 *.webm
 !assets/*.webm
 replays/

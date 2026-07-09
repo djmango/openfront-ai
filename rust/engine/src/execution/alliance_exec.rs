@@ -50,6 +50,17 @@ impl Execution for AllianceRequestExecution {
         }
         if !game.create_alliance_request(self.requestor_small_id, recipient_small_id, tick) {
             self.active = false;
+            return;
+        }
+        // TS explicitly checks for a cross-request before calling createAllianceRequest and
+        // sets active=false when one is found. Rust's create_alliance_request handles
+        // cross-requests internally (via accept_alliance_pair) and returns true, so we
+        // mirror TS by deactivating when no pending request was actually created.
+        if game
+            .pending_alliance_request(self.requestor_small_id, recipient_small_id)
+            .is_none()
+        {
+            self.active = false;
         }
     }
 

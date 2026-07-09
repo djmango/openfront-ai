@@ -72,6 +72,17 @@ impl Execution for TribeExecution {
             return;
         }
 
+        // Mirror TS TribeExecution.acceptAllAllianceRequests():
+        // BOT tribes unconditionally accept every incoming alliance request.
+        let incoming: Vec<u16> = game
+            .incoming_alliance_requests(self.small_id)
+            .into_iter()
+            .map(|r| r.requestor_small_id)
+            .collect();
+        for requestor in incoming {
+            game.accept_alliance_request(requestor, self.small_id, tick);
+        }
+
         tribe_maybe_attack(
             game,
             &mut self.random,
