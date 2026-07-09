@@ -133,9 +133,9 @@ async function main() {
     game.executeNextTick();
   }
 
-  const players = [...game.players()]
-    .filter((p) => p.isPlayer())
-    .map((p) => ({
+  const players = [...(game as any).allPlayers()]
+    .filter((p: any) => p.isPlayer())
+    .map((p: any) => ({
       id: p.id(),
       playerType: p.type(),
       tilesOwned: p.numTilesOwned(),
@@ -155,12 +155,14 @@ async function main() {
   const totalTiles = players.reduce((s, p) => s + p.tilesOwned, 0);
   const totalTroops = players.reduce((s, p) => s + p.troops, 0);
 
+  const order = (game as any).allPlayers().map((p: any) => p.id());
   process.stdout.write(
     JSON.stringify({
       tick: game.ticks(),
       hash: (game as any).hash?.() ?? null,
       totalTiles,
       totalTroops,
+      order,
       players,
     }),
   );

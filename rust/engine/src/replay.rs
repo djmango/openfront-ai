@@ -604,6 +604,116 @@ mod tests {
     }
 
     #[test]
+    fn export_state_json() {
+        let repo_root = std::env::var("OPENFRONT_REPO")
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+        let repo = std::path::Path::new(&repo_root);
+        let target: u32 = std::env::var("EXPORT_TICK")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(302);
+        let path = std::env::var("EXPORT_RECORD")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| repo.join("records/0c4c7d7993c9/tCFq6nPn.json.gz"));
+        let game = replay_to_tick(repo, &path, target);
+        let mut players: Vec<serde_json::Value> = game
+            .all_players()
+            .iter()
+            .filter(|p| !p.id.is_empty())
+            .map(|p| {
+                let unit_hash: f64 = p.units.iter().map(crate::hash::unit_hash_js).sum();
+                let unit_list: Vec<serde_json::Value> = p
+                    .units
+                    .iter()
+                    .map(|u| {
+                        serde_json::json!({
+                            "type": u.unit_type,
+                            "tile": u.tile,
+                            "id": u.id,
+                            "hash": crate::hash::unit_hash_js(u),
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "id": p.id,
+                    "playerType": match p.player_type {
+                        crate::game::PlayerType::Human => "HUMAN",
+                        crate::game::PlayerType::Bot => "BOT",
+                        crate::game::PlayerType::Nation => "NATION",
+                    },
+                    "tilesOwned": p.tiles_owned,
+                    "troops": p.troops,
+                    "units": p.units.len(),
+                    "unitHash": unit_hash,
+                    "unitList": unit_list,
+                    "idHash": p.id_hash,
+                })
+            })
+            .collect();
+        players.sort_by(|a, b| {
+            b["tilesOwned"]
+                .as_i64()
+                .unwrap_or(0)
+                .cmp(&a["tilesOwned"].as_i64().unwrap_or(0))
+        });
+        let total_tiles: i64 = players.iter().map(|p| p["tilesOwned"].as_i64().unwrap_or(0)).sum();
+        let total_troops: i64 = players.iter().map(|p| p["troops"].as_i64().unwrap_or(0)).sum();
+        let order: Vec<&str> = game
+            .all_players()
+            .iter()
+            .filter(|p| !p.id.is_empty())
+            .map(|p| p.id.as_str())
+            .collect();
+        let out = serde_json::json!({
+            "tick": game.ticks(),
+            "hash": crate::hash::game_hash(&game),
+            "totalTiles": total_tiles,
+            "totalTroops": total_troops,
+            "order": order,
+            "players": players,
+        });
+        println!("{}", serde_json::to_string(&out).unwrap());
+    }
+
+    #[test]
+    fn debug_transport_src_pick() {
+        let repo_root = std::env::var("OPENFRONT_REPO")
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+        let repo = std::path::Path::new(&repo_root);
+        let path = repo.join("records/0c4c7d7993c9/MdPDuVXZ.json.gz");
+        let mut game = replay_to_tick(repo, &path, 328);
+        let sid = game.player_by_id("1tho292q").unwrap().small_id;
+        let ref_tile: crate::map::TileRef = 874208;
+        let dst = crate::spatial::target_transport_tile(&mut game, ref_tile).unwrap();
+        eprintln!(
+            "dst tile={} x={} y={}",
+            dst,
+            game.map.x(dst),
+            game.map.y(dst)
+        );
+        let mut shores: Vec<crate::map::TileRef> = Vec::new();
+        game.for_each_border_tile(sid, |t| {
+            if game.is_shore(t) && game.is_land(t) && game.map.owner_id(t) == sid {
+                if game.get_water_component(t) == game.get_water_component(dst) {
+                    shores.push(t);
+                }
+            }
+        });
+        eprintln!("shores.len()={}", shores.len());
+        for &s in shores.iter().take(20) {
+            eprintln!("  shore={} x={} y={}", s, game.map.x(s), game.map.y(s));
+        }
+        game.plan_water_path_multi(&shores, dst);
+        let path = game.planned_water_path().to_vec();
+        eprintln!("path.len()={}", path.len());
+        for (i, &t) in path.iter().take(10).enumerate() {
+            eprintln!("  path[{}]={} x={} y={}", i, t, game.map.x(t), game.map.y(t));
+        }
+        let src = crate::spatial::can_build_transport_ship(&mut game, sid, ref_tile);
+        eprintln!("chosen src={:?}", src.map(|t| (t, game.map.x(t), game.map.y(t))));
+    }
+
+    #[test]
     fn debug_player86_state() {
         let repo_root = std::env::var("OPENFRONT_REPO")
             .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
