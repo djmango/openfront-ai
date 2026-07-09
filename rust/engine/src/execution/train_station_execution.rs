@@ -62,7 +62,7 @@ impl TrainStationExecution {
         let Some(cluster) = game.rail_network.station_cluster(station_id) else {
             return;
         };
-        if !game.rail_network.cluster_has_any_trade_destination(cluster) {
+        if !rail::cluster_has_any_trade_destination(game, cluster, self.small_id) {
             return;
         }
         if !self.should_spawn_train(game) {
@@ -70,7 +70,7 @@ impl TrainStationExecution {
         }
         let destination = {
             let random = self.random.as_mut().unwrap();
-            game.rail_network.cluster_random_trade_destination(cluster, random)
+            rail::cluster_random_trade_destination(game, cluster, self.small_id, random)
         };
         let Some(destination) = destination else {
             return;

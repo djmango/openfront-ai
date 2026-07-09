@@ -1,8 +1,8 @@
 use super::{
     AllianceExtensionExecution, AllianceRejectExecution, AllianceRequestExecution,
-    BreakAllianceExecution, ConstructionExecution, DonateGoldExecution, DonateTroopsExecution, ExecEnum,
-    MarkDisconnectedExecution, NoOpExecution, RetreatExecution, SpawnExecution, TransportShipExecution,
-    UpgradeStructureExecution,
+    BreakAllianceExecution, ConstructionExecution, DonateGoldExecution, DonateTroopsExecution,
+    EmbargoAllExecution, EmbargoExecution, ExecEnum, MarkDisconnectedExecution, NoOpExecution,
+    RetreatExecution, SpawnExecution, TransportShipExecution, UpgradeStructureExecution,
 };
 use crate::execution::AttackExecution;
 use crate::game::{Game, PlayerInfo};
@@ -209,6 +209,38 @@ pub fn intent_to_execution(game: &Game, game_id: &str, intent: &StampedIntent) -
             });
             if let Some(p) = game.player_by_client_id(client_id) {
                 ExecEnum::DonateGold(DonateGoldExecution::new(p.small_id, recipient, gold))
+            } else {
+                ExecEnum::NoOp(NoOpExecution)
+            }
+        }
+        "embargo" => {
+            let target_id = intent
+                .fields
+                .get("targetID")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let action_start = intent
+                .fields
+                .get("action")
+                .and_then(Value::as_str)
+                .map(|a| a == "start")
+                .unwrap_or(false);
+            if let Some(p) = game.player_by_client_id(client_id) {
+                ExecEnum::Embargo(EmbargoExecution::new(p.small_id, target_id, action_start))
+            } else {
+                ExecEnum::NoOp(NoOpExecution)
+            }
+        }
+        "embargo_all" => {
+            let action_start = intent
+                .fields
+                .get("action")
+                .and_then(Value::as_str)
+                .map(|a| a == "start")
+                .unwrap_or(false);
+            if let Some(p) = game.player_by_client_id(client_id) {
+                ExecEnum::EmbargoAll(EmbargoAllExecution::new(p.small_id, action_start))
             } else {
                 ExecEnum::NoOp(NoOpExecution)
             }

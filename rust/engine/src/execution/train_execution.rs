@@ -149,10 +149,17 @@ impl TrainExecution {
             && rail::station_active(game, &game.rail_network, self.stations[0])
     }
 
-    fn can_trade_with_destination(&self) -> bool {
-        // `tradeAvailable` is unconditionally true (no embargo model); only requires a
-        // valid next hop.
+    /// TS `TrainExecution.canTradeWithDestination` - `stations[1].tradeAvailable(this.player)`.
+    fn can_trade_with_destination(&self, game: &Game) -> bool {
         self.stations.len() > 1
+            && game
+                .rail_network
+                .stations
+                .get(&self.stations[1])
+                .is_some_and(|st| {
+                    st.owner_small_id == self.owner_small_id
+                        || game.can_trade(st.owner_small_id, self.owner_small_id)
+                })
     }
 
     fn save_traversed_tiles(&mut self, from: usize, speed: usize) {
@@ -198,7 +205,7 @@ impl TrainExecution {
     }
 
     fn get_next_tile(&mut self, game: &mut Game) -> Option<u32> {
-        if self.current_railroad_tiles.is_empty() || !self.can_trade_with_destination() {
+        if self.current_railroad_tiles.is_empty() || !self.can_trade_with_destination(game) {
             return None;
         }
         self.save_traversed_tiles(self.current_tile, self.speed);

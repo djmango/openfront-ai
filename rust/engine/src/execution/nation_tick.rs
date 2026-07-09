@@ -4,7 +4,7 @@ use super::ai_attack::nation_maybe_attack;
 use super::nation_alliance::{handle_alliance_extension_requests, handle_alliance_requests};
 use super::nation_emoji::{NationEmojiState, maybe_send_casual_emoji};
 use crate::core::schemas::unit_type;
-use crate::game::Game;
+use crate::game::{Game, PlayerType, Relation};
 use crate::prng::PseudoRandom;
 use std::collections::HashSet;
 
@@ -38,7 +38,30 @@ pub fn initialize_nation_behaviors(random: &mut PseudoRandom, state: &mut Nation
 /// TS `NationWarshipBehavior.trackShipsAndRetaliate` - no-op until warships are ported.
 fn track_ships_and_retaliate(_game: &Game, _random: &mut PseudoRandom, _small_id: u16) {}
 
-fn update_relations_from_embargos(_game: &mut Game, _state: &mut NationBehaviorState, _small_id: u16) {}
+/// TS `NationExecution.updateRelationsFromEmbargos` - applies (and later reverts) a relation
+/// malus for every other player that currently has an active embargo against this nation.
+/// `state.embargo_malus_applied` mirrors the TS `embargoMalusApplied: Set<PlayerID>` instance
+/// field, tracking which pairs already have the malus applied so it's neither double-applied
+/// nor double-reverted.
+fn update_relations_from_embargos(game: &mut Game, state: &mut NationBehaviorState, small_id: u16) {
+    const EMBARGO_MALUS: i32 = -20;
+    let others: Vec<(u16, String)> = game
+        .all_players()
+        .iter()
+        .filter(|p| p.small_id != small_id)
+        .map(|p| (p.small_id, p.id.clone()))
+        .collect();
+    for (other_small_id, other_id) in others {
+        let has_embargo = game.has_embargo_against(other_small_id, small_id);
+        if has_embargo && !state.embargo_malus_applied.contains(&other_id) {
+            game.update_relation(small_id, other_small_id, EMBARGO_MALUS);
+            state.embargo_malus_applied.insert(other_id);
+        } else if !has_embargo && state.embargo_malus_applied.contains(&other_id) {
+            game.update_relation(small_id, other_small_id, -EMBARGO_MALUS);
+            state.embargo_malus_applied.remove(&other_id);
+        }
+    }
+}
 
 fn consider_mirv(game: &Game, random: &mut PseudoRandom, small_id: u16) -> bool {
     if game.wire.is_unit_disabled(unit_type::MIRV) {
@@ -186,7 +209,53 @@ fn maybe_spawn_warship(game: &Game, random: &mut PseudoRandom, small_id: u16) ->
     false
 }
 
-fn handle_embargoes_to_hostile_nations(_game: &mut Game, _small_id: u16) {}
+/// TS `NationExecution.handleEmbargoesToHostileNations`.
+fn handle_embargoes_to_hostile_nations(game: &mut Game, small_id: u16) {
+    let tick = game.ticks();
+    let difficulty = game.wire.game_config().difficulty.clone();
+    let is_higher_difficulty = difficulty == "Hard" || difficulty == "Impossible";
+    let team_game = game.wire.game_config().game_mode == "Team";
+
+    let others: Vec<(u16, bool)> = game
+        .all_players()
+        .iter()
+        .filter(|p| p.small_id != small_id)
+        .map(|p| (p.small_id, p.player_type == PlayerType::Bot))
+        .collect();
+
+    for (other_small_id, other_is_bot) in others {
+        // In team games on higher difficulties, refuse to trade with anyone not on this
+        // nation's team (mirrors the "stop trading with all" button).
+        if team_game
+            && is_higher_difficulty
+            && !other_is_bot
+            && !game.players_on_same_team(small_id, other_small_id)
+        {
+            if !game.has_embargo_against(small_id, other_small_id) {
+                game.add_embargo(small_id, other_small_id, false, tick);
+            }
+            continue;
+        }
+
+        let relation = game.relation(small_id, other_small_id);
+        let has_embargo = game.has_embargo_against(small_id, other_small_id);
+        // When player is hostile starts embargo. Do not stop until neutral again.
+        if relation <= Relation::Hostile
+            && !has_embargo
+            && !game.players_on_same_team(small_id, other_small_id)
+        {
+            game.add_embargo(small_id, other_small_id, false, tick);
+        } else if relation >= Relation::Neutral
+            && has_embargo
+            && difficulty != "Hard"
+            && difficulty != "Impossible"
+        {
+            game.stop_embargo(small_id, other_small_id);
+        } else if relation >= Relation::Friendly && has_embargo && difficulty != "Impossible" {
+            game.stop_embargo(small_id, other_small_id);
+        }
+    }
+}
 
 fn counter_warship_infestation(_game: &Game, _random: &mut PseudoRandom, _small_id: u16) {}
 

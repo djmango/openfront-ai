@@ -76,6 +76,12 @@ pub struct Player {
     /// plain `HashMap` here (whose iteration order is randomly per-process-seeded) makes
     /// tie-broken attack-target selection genuinely nondeterministic across runs.
     pub relations: OrderedMap<u16, i32>,
+    /// TS `PlayerImpl.embargoes` (`Map<PlayerID, Embargo>`) - insertion order doesn't affect
+    /// any RNG/numeric outcome (only independent per-target lookups/expiry), but `OrderedMap`
+    /// is used anyway for consistency with `relations` above.
+    pub embargoes: OrderedMap<u16, EmbargoState>,
+    /// TS `PlayerImpl.lastEmbargoAllTick` - defaults to -1 (never).
+    pub last_embargo_all_tick: i32,
     pub is_disconnected: bool,
     /// TS `numUnitsConstructed`  -  incremented on build and upgrade.
     pub units_constructed: HashMap<String, u32>,
@@ -114,6 +120,8 @@ impl Default for Player {
             last_tile_change: 0,
             marked_traitor_tick: -1,
             relations: OrderedMap::new(),
+            embargoes: OrderedMap::new(),
+            last_embargo_all_tick: -1,
             is_disconnected: false,
             units_constructed: HashMap::new(),
             id_prng: PseudoRandom::new(0),
@@ -182,6 +190,13 @@ pub struct AllianceState {
 #[derive(Debug, Clone)]
 pub struct AllianceExtensionCandidate {
     pub other_small_id: u16,
+}
+
+/// TS `Embargo` (`Game.ts`) - `createdAt`/`isTemporary` stored per-target on `Player.embargoes`.
+#[derive(Debug, Clone, Copy)]
+pub struct EmbargoState {
+    pub created_at: u32,
+    pub is_temporary: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -2074,6 +2089,86 @@ impl Game {
         }
     }
 
+    /// TS `PlayerImpl.hasEmbargoAgainst` - `a` has an active embargo against `b`.
+    pub fn has_embargo_against(&self, a: u16, b: u16) -> bool {
+        self.player_by_small_id(a)
+            .is_some_and(|p| p.embargoes.contains_key(&b))
+    }
+
+    /// TS `PlayerImpl.canTrade` - false if either side embargoes the other (checked both
+    /// directions), or if `a == b`.
+    pub fn can_trade(&self, a: u16, b: u16) -> bool {
+        if a == b {
+            return false;
+        }
+        !(self.has_embargo_against(b, a) || self.has_embargo_against(a, b))
+    }
+
+    /// TS `PlayerImpl.addEmbargo` - `a` embargoes `b`. A no-op if `a` already has a
+    /// non-temporary embargo against `b` (a permanent embargo is never downgraded/refreshed).
+    pub fn add_embargo(&mut self, a: u16, b: u16, is_temporary: bool, tick: u32) {
+        if let Some(p) = self.player_by_small_id_mut(a) {
+            if let Some(existing) = p.embargoes.get(&b) {
+                if !existing.is_temporary {
+                    return;
+                }
+            }
+            p.embargoes.set(
+                b,
+                EmbargoState {
+                    created_at: tick,
+                    is_temporary,
+                },
+            );
+        }
+    }
+
+    /// TS `PlayerImpl.stopEmbargo` - `a` removes its embargo against `b`, if any.
+    pub fn stop_embargo(&mut self, a: u16, b: u16) {
+        if let Some(p) = self.player_by_small_id_mut(a) {
+            p.embargoes.remove(&b);
+        }
+    }
+
+    /// TS `PlayerImpl.endTemporaryEmbargo` - removes `a`'s embargo against `b` unless it's a
+    /// permanent (non-temporary) one, which is left in place.
+    pub fn end_temporary_embargo(&mut self, a: u16, b: u16) {
+        let keep = self
+            .player_by_small_id(a)
+            .and_then(|p| p.embargoes.get(&b))
+            .is_some_and(|e| !e.is_temporary);
+        if keep {
+            return;
+        }
+        self.stop_embargo(a, b);
+    }
+
+    /// TS `PlayerImpl.canEmbargoAll` - cooldown gate, then requires at least one eligible
+    /// (non-self, non-Bot, non-teammate) player to exist.
+    pub fn can_embargo_all(&self, small_id: u16) -> bool {
+        let Some(p) = self.player_by_small_id(small_id) else {
+            return false;
+        };
+        if (self.ticks as i64) - (p.last_embargo_all_tick as i64)
+            < self.wire.embargo_all_cooldown() as i64
+        {
+            return false;
+        }
+        self.all_players().iter().any(|other| {
+            other.small_id != small_id
+                && other.player_type != PlayerType::Bot
+                && !self.players_on_same_team(small_id, other.small_id)
+        })
+    }
+
+    /// TS `PlayerImpl.recordEmbargoAll`.
+    pub fn record_embargo_all(&mut self, small_id: u16) {
+        let tick = self.ticks;
+        if let Some(p) = self.player_by_small_id_mut(small_id) {
+            p.last_embargo_all_tick = tick as i32;
+        }
+    }
+
     pub fn add_gold(&mut self, small_id: u16, amount: i64) {
         if let Some(p) = self.player_by_small_id_mut(small_id) {
             p.gold += amount;
@@ -2150,6 +2245,12 @@ impl Game {
             })
         {
             self.accept_alliance_pair(recipient, requestor, tick);
+            // TS `AllianceRequestExecution.init`'s cross-request auto-accept branch clears
+            // any *automatically created* (temporary) embargoes between the pair; this is
+            // scoped to this branch specifically - `accept_alliance_request`'s manual accept
+            // path (`GameImpl.acceptAllianceRequest`) never touches embargoes in TS.
+            self.end_temporary_embargo(requestor, recipient);
+            self.end_temporary_embargo(recipient, requestor);
             return true;
         }
         self.alliance_requests.push(AllianceRequestState {
@@ -2259,6 +2360,25 @@ impl Game {
                 !((al.requestor_small_id == a && al.recipient_small_id == b)
                     || (al.requestor_small_id == b && al.recipient_small_id == a))
             });
+        }
+    }
+
+    /// TS `PlayerExecution.tick`'s temporary-embargo expiry loop.
+    pub fn expire_temporary_embargoes_for(&mut self, small_id: u16) {
+        let tick = self.ticks;
+        let duration = self.wire.temporary_embargo_duration();
+        let expired: Vec<u16> = self
+            .player_by_small_id(small_id)
+            .map(|p| {
+                p.embargoes
+                    .iter()
+                    .filter(|(_, e)| e.is_temporary && tick.saturating_sub(e.created_at) > duration)
+                    .map(|(target, _)| target)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for target in expired {
+            self.stop_embargo(small_id, target);
         }
     }
 

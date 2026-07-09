@@ -134,6 +134,14 @@ impl Config {
         300 * 10
     }
 
+    pub fn embargo_all_cooldown(&self) -> u32 {
+        10 * 10
+    }
+
+    pub fn temporary_embargo_duration(&self) -> u32 {
+        300 * 10
+    }
+
     pub fn num_spawn_phase_turns(&self) -> u32 {
         if self.game_config.game_type == "Singleplayer" {
             return 100;
