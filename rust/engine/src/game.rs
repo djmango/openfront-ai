@@ -744,7 +744,7 @@ impl Game {
 
     pub fn add_from_info(&mut self, info: &PlayerInfo) -> u16 {
         let troops = self.wire.start_manpower(info.player_type);
-        let gold = self.wire.starting_gold();
+        let gold = self.wire.starting_gold(info.player_type);
         let small_id = self.next_player_id;
         self.next_player_id += 1;
         let client_id = info.client_id.clone().unwrap_or_default();
