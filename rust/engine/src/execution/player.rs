@@ -37,6 +37,7 @@ impl Execution for PlayerExecution {
         if !self.active {
             return;
         }
+        game.decay_relations(self.small_id);
         let spawn = game.in_spawn_phase();
         let Some(p) = game.player_by_small_id(self.small_id).cloned() else {
             self.active = false;
