@@ -98,11 +98,6 @@ impl Execution for AttackExecution {
         let owner_type = owner.player_type;
         let owner_troops = owner.troops;
 
-        if !owner.alive {
-            self.active = false;
-            return;
-        }
-
         if let Some(ref tid) = self.target_player_id {
             if !game.has_player(tid) {
                 self.active = false;
