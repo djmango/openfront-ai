@@ -1,0 +1,12 @@
+[package]
+name = "ofcore"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "ofcore"
+crate-type = ["lib"]
+
+[dependencies]
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+rand = { version = "0.8", features = ["small_rng"] }

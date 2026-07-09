@@ -556,7 +556,7 @@ fn sample_window_native(
     if n < 1 {
         return Ok(vec![]);
     }
-    let want_actor = rng.gen::<f64>() > noop_frac;
+    let want_actor = rng.r#gen::<f64>() > noop_frac;
     let mut ends: Vec<usize> = (0..n).collect();
     for i in (1..ends.len()).rev() {
         ends.swap(i, rng.gen_range(0..=i));
@@ -706,7 +706,7 @@ fn sample_step_native(
 ) -> Result<Vec<Built>, String> {
     let mut rng = SmallRng::seed_from_u64(seed);
     for _ in 0..64 {
-        let out = if !spawn_games.is_empty() && rng.gen::<f64>() < spawn_frac {
+        let out = if !spawn_games.is_empty() && rng.r#gen::<f64>() < spawn_frac {
             spawn_sample(games, spawn_games[rng.gen_range(0..spawn_games.len())], &mut rng)?
         } else {
             let gi = rng.gen_range(0..games.len());
