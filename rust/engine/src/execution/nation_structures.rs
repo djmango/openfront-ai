@@ -1162,7 +1162,7 @@ pub fn do_handle_structures(
         && !game.wire.is_unit_disabled(unit_type::ATOM_BOMB)
         && missile_silos_enabled
         && !game.wire.is_unit_disabled(unit_type::SAM_LAUNCHER)
-        && game.wire.starting_gold() >= HIGH_STARTING_GOLD_THRESHOLD
+        && game.wire.starting_gold(crate::game::PlayerType::Nation) >= HIGH_STARTING_GOLD_THRESHOLD
         && maybe_spawn_structure(game, random, small_id, unit_type::SAM_LAUNCHER)
     {
         return true;

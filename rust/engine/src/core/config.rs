@@ -179,7 +179,13 @@ impl Config {
     }
 
     /// TS `startingGold(playerInfo)` - lobby creator bonus omitted (not in records).
-    pub fn starting_gold(&self) -> i64 {
+    /// Raw `Bot` players always get 0 starting gold in TS; only `Nation`/`Human` get the
+    /// configured amount.
+    pub fn starting_gold(&self, player_type: crate::game::PlayerType) -> i64 {
+        use crate::game::PlayerType;
+        if player_type == PlayerType::Bot {
+            return 0;
+        }
         self.game_config.starting_gold.unwrap_or(0) as i64
     }
 

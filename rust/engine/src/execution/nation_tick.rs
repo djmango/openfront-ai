@@ -87,7 +87,9 @@ fn handle_structures(game: &mut Game, random: &mut PseudoRandom, small_id: u16, 
 }
 
 fn has_high_starting_gold(game: &Game) -> bool {
-    game.wire.starting_gold() >= HIGH_STARTING_GOLD_THRESHOLD
+    // Only ever called for `Nation` players (nation AI), which always get the configured
+    // starting gold (unlike raw `Bot` players, who always get 0).
+    game.wire.starting_gold(crate::game::PlayerType::Nation) >= HIGH_STARTING_GOLD_THRESHOLD
 }
 
 fn is_on_structure_cooldown(game: &Game, _small_id: u16, state: &NationStructureState) -> bool {
