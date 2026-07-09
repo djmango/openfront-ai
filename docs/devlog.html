@@ -58,17 +58,21 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 9th, 2026</h2>
-  <p><b><code>ppo_v7</code> is live</b>: the <a href="#v7-fovea">foveated two-stream</a> policy
-  training from scratch on a 4x H200 pod (openfront-v7), coarse /16 stream on the fine-tuned
-  <code>ae_v31_d16c32</code>. rl5 / <code>ppo_v61</code> killed once v7 cleared stage 0 stably.
-  First mid-run patch already shipped: coarse-head tile picks (boat/nuke/warship) only ever
-  searched the top-left quarter of the chosen /16 cell - see
-  <a href="#v7-boatfix">the coarse-boat fix</a>. A follow-up <a href="#v7-audit">audit</a>
-  found the real stage-1 killer: the entropy-floor controller pegged at its 30x cap in a
-  dead band, drowning the policy gradient for 100+ updates. Fixed (controller + cap + floor
-  recalibrated for the v7 head), plus a vectorized update path, act/evaluate logprob
-  consistency, and land/water coarse pick pruning. Both hot-deployed with checkpoint
-  resumes, v4.2 style.</p>
+  <p><b><code>ppo_v7</code> is killed</b> (update 355, checkpoint synced to HF) after a
+  <a href="#gpu-util-killed">GPU utilization push</a> hit a hard ceiling around 70-72%: env
+  auto-sizing, update sub-batch bucketing, and batching the foveated coverage/content masks
+  took throughput 2,650 &rarr; ~10-13k game-ticks/s (4-5x), but the remaining gap is the
+  Node.js game-engine subprocess bridge itself, not anything left to squeeze in Python. Next:
+  port <code>rl/vec.py</code>'s engine bridge to Rust (shared-memory/FFI instead of pipes)
+  before resuming training - see <a href="#native">the existing Rust hot-path work</a> for
+  precedent. 4x H200 pod being torn down; no GPU spend during the port.</p>
+  <p>Prior to the util push: the <a href="#v7-fovea">foveated two-stream</a> policy trained
+  from scratch on that pod, coarse /16 stream on the fine-tuned <code>ae_v31_d16c32</code>.
+  rl5 / <code>ppo_v61</code> was killed once v7 cleared stage 0 stably. Two mid-run fixes
+  shipped and held up: the <a href="#v7-boatfix">coarse-boat translator fix</a> (coarse-head
+  tile picks only searched the top-left quarter of the chosen /16 cell) and the
+  <a href="#v7-audit">entropy-controller audit</a> (pegged at its 30x cap in a dead band,
+  drowning the policy gradient for 100+ updates).</p>
   <p><b>Browser-side live play is deployed</b> on
   <a href="https://openfrontai.skg.gg">openfrontai.skg.gg</a>: "Play vs Agent" no longer
   spins up a server GPU/CPU <code>rl.play</code> process. A headless Chromium tab joins the
@@ -129,13 +133,17 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <code>ae_v3.pt</code> until the v3.1 winner is wired into <code>rl/obs.py</code>.</p>
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
-  <tr><td><code>ppo_v7</code></td><td><b>running</b> (openfront-v7, 4x H200)</td>
+  <tr><td><code>ppo_v7</code></td><td><b>killed</b> Jul 9 (openfront-v7, 4x H200)</td>
     <td>From scratch on the merged <a href="#v7-obs">v7 obs</a>: full-state expansion +
     <a href="#v7-fovea">foveated two-stream</a> (fine /8 over own territory + border band,
     coarse /16 global via <code>ae_v31_d16c32</code>). Launched Jul 8 late; cleared stage 0 in
-    22 updates, ~2650-3400 game-ticks/s on stages 0-1. Mid-run
-    <a href="#v7-boatfix">coarse-boat translator fix</a> hot-deployed Jul 9 with a checkpoint
-    resume. Supersedes the v6 lineage; rl5 killed.</td></tr>
+    22 updates. Two mid-run fixes held up: <a href="#v7-boatfix">coarse-boat translator</a> and
+    the <a href="#v7-audit">entropy-controller audit</a>. A <a href="#gpu-util-killed">GPU
+    utilization push</a> took throughput 2,650 &rarr; ~10-13k game-ticks/s (env auto-sizing +
+    sub-batch bucketing + batched coverage masks) but plateaued at ~70% GPU util, hard-bounded
+    by the Node.js engine subprocess bridge. <b>Killed at update 355</b> (stage 1, step 5.32M)
+    to port <code>rl/vec.py</code> to Rust rather than keep squeezing Python; checkpoint synced
+    to HF. Supersedes the v6 lineage; rl5 killed.</td></tr>
   <tr><td><code>ppo_v6.1</code></td><td><b>killed</b> Jul 8 late</td>
     <td>Phase A + B of the <a href="#scaling-plan">scaling plan</a> as one run: bf16 autocast +
     <code>torch.compile</code> on the update path, epochs 4 &rarr; 2 with KL/clip-frac logging,
@@ -1354,6 +1362,60 @@ a v6.1 checkpoint and crash; the push therefore coincides with deciding rl5's fa
 <code>cache-bc/</code> are deferred under the <a href="#bc-moratorium">moratorium</a> and no
 longer gate anything. Until the push: local master stays at v7 for the homelab regen; rl5 stays
 on the last pushed commit.</p>
+
+<h3 id="gpu-util-killed">GPU utilization push: 20% &rarr; 72%, then killed to move the hot path
+to Rust</h3>
+<p><b>Starting point:</b> <code>ppo_v7</code> on the 4x H200 pod was pegged at 20-40% GPU
+(140-195W of a ~700W card) with only 384 envs and CPU load ~13/128. The rollout/update loop is
+sequential and only the update touches the GPU heavily, so an idle CPU phase (rollout) was
+starving the accelerator every cycle.</p>
+<p><b>What actually moved the needle, in order:</b></p>
+<ol>
+  <li><b>Env fleet auto-sizing.</b> Rollout runs on a collector thread fully overlapped with the
+  update; envs idle whenever roll &lt; upd. The trainer now writes a <code>suggested_envs</code>
+  hint into <code>state.json</code> every update (EMA'd upd/roll ratio, damped &le;2.5x per
+  restart, capped 8/core), and <code>pod_train.sh ENVS=auto</code>/<code>MINIBATCH=auto</code>
+  adopt it at every crash-loop restart.</li>
+  <li><b>Sub-batch bucketing.</b> Scaling envs alone made updates <i>worse</i> (68s &rarr; 160s):
+  v7's <code>grid_fine</code> is a per-sample coverage crop whose shape drifts every step, and the
+  update's exact-shape grouping splintered each minibatch into hundreds of single-digit
+  sub-batches - pure kernel-launch overhead. Bucketing fine dims to multiples of 8 cut that
+  &gt;20x.</li>
+  <li><b>Crash-loop unhang.</b> A rank that dies by signal (SIGSEGV/SIGABRT) left orphaned env
+  worker processes holding the log pipe open, so the restart loop's <code>tee</code> never saw
+  EOF and the run sat dead in "restarting" indefinitely - this is what actually ended the
+  session (see below). Fixed with a direct redirect + explicit reap, but not in time to save this
+  run.</li>
+  <li><b>Batched coverage/content masks.</b> Stack-sampled the main rank's Python stacks (RunPod
+  drops <code>CAP_SYS_PTRACE</code>, so <code>py-spy</code> can't attach; used
+  <code>faulthandler</code> + <code>SIGUSR1</code> instead) and found <code>_fine_coverage</code>
+  running <code>.any()</code>/<code>nonzero()</code>/<code>int()</code> per sample - 5+ GPU syncs
+  and 3 host transfers <i>each</i>, ~2.5k syncs per act batch at 256 envs/rank. Rewrote as one
+  batched kernel per op plus a host-side box search, verified bit-identical against the old path.</li>
+</ol>
+<p><b>Result:</b> envs 384 &rarr; 1024, update time 68s &rarr; ~25-30s, game-ticks/s
+2,650 &rarr; ~10,000-13,000 (4-5x), GPU utilization 20-40% &rarr; peaks of 72% (avg still
+12-50%, noisy across the 4 ranks). <b>Never reached the 90% target.</b></p>
+<p><b>Why it plateaued below 90%, and why that's a dead end in Python:</b> even after killing
+every measured Python-side sync, the rollout half of the loop is still bound by
+<code>VecEnv</code>'s Node.js game-engine subprocesses talking to the trainer over pipes -
+that's wall-clock the GPU cannot touch no matter how the featurizer or update batching are
+tuned. Every fix so far has been "find the next accidental sync/serialization in the Python
+glue"; there's no more slack to cut on that side, and each fix has been getting smaller
+(auto-sizing and bucketing were 2-4x each, batched coverage was incremental). The single-GPU
+control run (<code>NPROC=1</code>) that was supposed to establish the true non-DDP baseline
+never got readings before the pod's tmux session died with the rank's SIGSEGV and the crash loop
+hung (bug #3 above) - so the DDP-vs-single-GPU question is still open, but at this point it's
+moot: <b>the environment step/serialize path itself, not DDP or the featurizer, is the actual
+ceiling</b>, and that only moves by rewriting <code>rl/vec.py</code>'s engine bridge (currently
+Node.js subprocesses + JSON/pipe IPC) in Rust with a real shared-memory or FFI hot path instead
+of pipes. This is the plan going forward - see the game engine's existing
+<code>rust/ofrs</code> native-path precedent (<a href="#native">escaping the GIL</a>) - rather
+than continuing to squeeze the Python side.</p>
+<p><b>Run status: <code>ppo_v7</code> killed</b> at update 355 (stage 1, step 5.32M,
+roll-win 0.25). Final checkpoint + <code>state.json</code> synced to
+<code>djmango/openfront-rl</code> on HF before teardown - resumable once the Rust-backed vec env
+lands. The 4x H200 pod is being torn down; no GPU spend while the port is in progress.</p>
 
 <h2 class="date" id="reference">Reference and open threads</h2>
 <p class="session">Tooling, bugs, lessons, infra, recipes, backlog.</p>
