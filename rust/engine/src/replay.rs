@@ -604,6 +604,44 @@ mod tests {
     }
 
     #[test]
+    fn dbg_border_ocean() {
+        let repo_root = std::env::var("OPENFRONT_REPO")
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+        let repo = std::path::Path::new(&repo_root);
+        let target: u32 = std::env::var("EXPORT_TICK")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(210);
+        let path = std::env::var("EXPORT_RECORD")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| repo.join("records/0c4c7d7993c9/3QNU4eJa.json.gz"));
+        let target_id = std::env::var("EXPORT_PLAYER").unwrap_or_else(|_| "tf6l7nfm".into());
+        let game = replay_to_tick(repo, &path, target);
+        let p = game
+            .all_players()
+            .iter()
+            .find(|p| p.id == target_id)
+            .expect("player not found");
+        let small_id = p.small_id;
+        let mut border: Vec<(u32, u32, bool, bool)> = Vec::new();
+        game.for_each_border_tile(small_id, |t| {
+            let shore = game.is_shore(t);
+            let mut touches_ocean = false;
+            game.map.for_each_neighbor4(t, |n| {
+                if game.is_water(n) && game.map.is_ocean(n) {
+                    touches_ocean = true;
+                }
+            });
+            border.push((game.map.x(t), game.map.y(t), shore, touches_ocean));
+        });
+        border.sort();
+        eprintln!("player {target_id} small_id={small_id} border_count={}", border.len());
+        let ocean_touching: Vec<_> = border.iter().filter(|(_, _, _, o)| *o).collect();
+        eprintln!("ocean_touching_border_tiles={ocean_touching:?}");
+        eprintln!("all_border_tiles={border:?}");
+    }
+
+    #[test]
     fn export_state_json() {
         let repo_root = std::env::var("OPENFRONT_REPO")
             .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
@@ -631,6 +669,7 @@ mod tests {
                             "tile": u.tile,
                             "id": u.id,
                             "hash": crate::hash::unit_hash_js(u),
+                            "level": u.level,
                         })
                     })
                     .collect();
@@ -643,10 +682,13 @@ mod tests {
                     },
                     "tilesOwned": p.tiles_owned,
                     "troops": p.troops,
+                    "gold": p.gold.to_string(),
                     "units": p.units.len(),
                     "unitHash": unit_hash,
                     "unitList": unit_list,
                     "idHash": p.id_hash,
+                    "sharedWater": crate::execution::nation_structures::shared_water_components(&game, p.small_id)
+                        .map(|s| s.into_iter().collect::<Vec<_>>()),
                 })
             })
             .collect();
@@ -676,14 +718,123 @@ mod tests {
     }
 
     #[test]
+    fn debug_raw_mini_path() {
+        let repo_root = std::env::var("OPENFRONT_REPO")
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+        let repo = std::path::Path::new(&repo_root);
+        let record = std::env::var("EXPORT_RECORD")
+            .unwrap_or_else(|_| "records/0c4c7d7993c9/MdPDuVXZ.json.gz".into());
+        let path = std::path::PathBuf::from(&record);
+        let path = if path.is_absolute() { path } else { repo.join(path) };
+        let tick: u32 = std::env::var("EXPORT_TICK")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(328);
+        let player_id = std::env::var("DEBUG_PLAYER_ID").unwrap_or_else(|_| "1tho292q".into());
+        let ref_tile: crate::map::TileRef = std::env::var("DEBUG_REF_TILE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(874208);
+        let mut game = replay_to_tick(repo, &path, tick);
+        let sid = game.player_by_id(&player_id).unwrap().small_id;
+        let dst = crate::spatial::target_transport_tile(&mut game, ref_tile).unwrap();
+        let mut shores: Vec<crate::map::TileRef> = Vec::new();
+        game.for_each_border_tile(sid, |t| {
+            if game.is_shore(t) && game.is_land(t) && game.map.owner_id(t) == sid {
+                if game.get_water_component(t) == game.get_water_component(dst) {
+                    shores.push(t);
+                }
+            }
+        });
+        let mini_shores: Vec<crate::map::TileRef> = shores
+            .iter()
+            .map(|&s| game.mini_map.ref_xy(game.map.x(s) / 2, game.map.y(s) / 2))
+            .collect();
+        let mini_dst = game.mini_map.ref_xy(game.map.x(dst) / 2, game.map.y(dst) / 2);
+        let mini_map = game.mini_map.clone();
+        let hpa = game.mini_water_hpa.as_mut().unwrap();
+        eprintln!("=== MARKER before hpa.find_path ===");
+        let raw = hpa.find_path(&mini_map, &mini_shores, mini_dst).unwrap_or_default();
+        eprintln!("rawMini.len()={}", raw.len());
+        for (i, &t) in raw.iter().enumerate() {
+            eprintln!("  rawMini[{}]={} x={} y={}", i, t, mini_map.x(t), mini_map.y(t));
+        }
+        let smoothed = crate::water::smooth_water_path_pub(&mini_map, &raw);
+        eprintln!("smoothedMini.len()={}", smoothed.len());
+        for (i, &t) in smoothed.iter().enumerate() {
+            eprintln!("  smoothedMini[{}]={} x={} y={}", i, t, mini_map.x(t), mini_map.y(t));
+        }
+        if let Ok(spec) = std::env::var("DUMP_TRACE") {
+            let mut parts = spec.split(',');
+            let from: crate::map::TileRef = parts.next().unwrap().parse().unwrap();
+            let to: crate::map::TileRef = parts.next().unwrap().parse().unwrap();
+            let trace = crate::water::water_trace_line_pub(&mini_map, from, to);
+            eprintln!("trace.len()={:?}", trace.as_ref().map(|t| t.len()));
+            for (i, &t) in trace.unwrap_or_default().iter().enumerate() {
+                eprintln!("  trace[{}]={} x={} y={}", i, t, mini_map.x(t), mini_map.y(t));
+            }
+        }
+        for spec in std::env::var("DUMP_MINI_TERRAIN").unwrap_or_default().split(',') {
+            if spec.is_empty() {
+                continue;
+            }
+            let mut parts = spec.split(':');
+            let tx: u32 = parts.next().unwrap().parse().unwrap();
+            let ty: u32 = parts.next().unwrap().parse().unwrap();
+            let t = mini_map.ref_xy(tx, ty);
+            eprintln!(
+                "mini terrain x={} y={} byte={} magnitude={} isWater={}",
+                tx, ty, mini_map.terrain_byte(t), mini_map.terrain_byte(t) & 0x1f, mini_map.is_water(t)
+            );
+        }
+    }
+
+    #[test]
+    fn debug_player_client_id() {
+        let repo_root = std::env::var("OPENFRONT_REPO")
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+        let repo = std::path::Path::new(&repo_root);
+        let record = std::env::var("EXPORT_RECORD")
+            .unwrap_or_else(|_| "records/0c4c7d7993c9/1MFxEdwr.json.gz".into());
+        let path = std::path::PathBuf::from(&record);
+        let path = if path.is_absolute() { path } else { repo.join(path) };
+        let tick: u32 = std::env::var("EXPORT_TICK")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(379);
+        let game = replay_to_tick(repo, &path, tick);
+        for pid in std::env::var("PLAYER_IDS")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.is_empty())
+        {
+            match game.player_by_id(pid) {
+                Some(p) => eprintln!("id={pid} -> client_id={} small_id={}", p.client_id, p.small_id),
+                None => eprintln!("id={pid} -> NOT FOUND"),
+            }
+        }
+    }
+
+    #[test]
     fn debug_transport_src_pick() {
         let repo_root = std::env::var("OPENFRONT_REPO")
             .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
         let repo = std::path::Path::new(&repo_root);
-        let path = repo.join("records/0c4c7d7993c9/MdPDuVXZ.json.gz");
-        let mut game = replay_to_tick(repo, &path, 328);
-        let sid = game.player_by_id("1tho292q").unwrap().small_id;
-        let ref_tile: crate::map::TileRef = 874208;
+        let record = std::env::var("EXPORT_RECORD")
+            .unwrap_or_else(|_| "records/0c4c7d7993c9/MdPDuVXZ.json.gz".into());
+        let path = std::path::PathBuf::from(&record);
+        let path = if path.is_absolute() { path } else { repo.join(path) };
+        let tick: u32 = std::env::var("EXPORT_TICK")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(328);
+        let player_id = std::env::var("DEBUG_PLAYER_ID").unwrap_or_else(|_| "1tho292q".into());
+        let ref_tile: crate::map::TileRef = std::env::var("DEBUG_REF_TILE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(874208);
+        let mut game = replay_to_tick(repo, &path, tick);
+        let sid = game.player_by_id(&player_id).unwrap().small_id;
         let dst = crate::spatial::target_transport_tile(&mut game, ref_tile).unwrap();
         eprintln!(
             "dst tile={} x={} y={}",
@@ -700,13 +851,16 @@ mod tests {
             }
         });
         eprintln!("shores.len()={}", shores.len());
-        for &s in shores.iter().take(20) {
-            eprintln!("  shore={} x={} y={}", s, game.map.x(s), game.map.y(s));
+        for (i, &s) in shores.iter().enumerate() {
+            eprintln!("  shore[{}]={} x={} y={}", i, s, game.map.x(s), game.map.y(s));
         }
+        eprintln!("=== MARKER before plan_water_path_multi ===");
         game.plan_water_path_multi(&shores, dst);
         let path = game.planned_water_path().to_vec();
         eprintln!("path.len()={}", path.len());
-        for (i, &t) in path.iter().take(10).enumerate() {
+        let full_dump = std::env::var("DUMP_FULL_PATH").ok().as_deref() == Some("1");
+        let n = if full_dump { path.len() } else { 10 };
+        for (i, &t) in path.iter().take(n).enumerate() {
             eprintln!("  path[{}]={} x={} y={}", i, t, game.map.x(t), game.map.y(t));
         }
         let src = crate::spatial::can_build_transport_ship(&mut game, sid, ref_tile);

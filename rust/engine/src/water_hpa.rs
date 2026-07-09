@@ -742,6 +742,13 @@ impl BoundedWaterAstar {
         min_y: u32,
         max_y: u32,
     ) -> Option<Vec<TileRef>> {
+        if std::env::var("DEBUG_LOCAL_BOUNDED").is_ok() {
+            eprintln!(
+                "[native local] starts={:?} goal={} (x={},y={}) bounds=[{},{}]x[{},{}]",
+                starts.iter().map(|&s| (s, map.x(s), map.y(s))).collect::<Vec<_>>(),
+                goal, map.x(goal), map.y(goal), min_x, max_x, min_y, max_y
+            );
+        }
         self.stamp = self.stamp.wrapping_add(1);
         if self.stamp == 0 {
             self.closed_stamp.fill(0);
@@ -1150,10 +1157,27 @@ impl WaterHierarchical {
         if node_to_source.is_empty() {
             return None;
         }
+        if std::env::var("DEBUG_WATER_MULTI").is_ok() {
+            eprintln!("[native] target_node.id={} tile={}", target_node.id, target_node.tile);
+            for &nid in &node_ids {
+                let src = node_to_source[&nid];
+                let node = self.graph.get_node(nid).unwrap();
+                eprintln!(
+                    "[native] node_id={} tile={} x={} y={} <- source={} (x={},y={})",
+                    nid, node.tile, node.x, node.y, src, map.x(src), map.y(src)
+                );
+            }
+        }
         let node_path = self
             .abstract_astar
             .find_path_multi(&self.graph, &node_ids, target_node.id)?;
         let winning_source = node_to_source.get(&node_path[0])?;
+        if std::env::var("DEBUG_WATER_MULTI").is_ok() {
+            eprintln!(
+                "[native] winning node_path[0]={} winning_source={} (x={},y={}) node_path.len()={}",
+                node_path[0], winning_source, map.x(*winning_source), map.y(*winning_source), node_path.len()
+            );
+        }
         self.find_path_single(map, *winning_source, target)
     }
 
