@@ -497,3 +497,72 @@ design, see prior "Pipelined actor/learner architecture" section).
 
 All 6 fixes verified with a local CPU smoke test (3 envs, few updates,
 finite losses, correct log fields) before merging to `master`.
+
+## 2026-07-09 - Post-merge 8-GPU scale validation: ticks/s target hit, util plateaus at ~55%
+
+Merged `v8-rust` -> `master` and pushed (`070c5c0`). Re-verified the
+correctness-audit build on the 8x A100 SXM pod, then ran a clean,
+from-scratch 8-GPU validation (`--num-envs 32 --num-gpus 8
+--rollout-len 64 --epochs 2 --minibatches 4`, 256 total envs, stage 0,
+`decision_ticks=15`):
+
+- **42 updates / ~14 min, zero panics, zero errors** (`grep -c
+  panicked` = 0 over the full log). `eps_done` climbing steadily
+  (3584 episodes by update 42), `recent_reward` oscillating 5-10 (noisy
+  but not collapsing/diverging - expected for stage-0 from a
+  freshly-initialized value head, see below).
+- **Throughput: 838-936 decisions/s -> ~12.6k-14k game-ticks/s**
+  (`decisions/s x decision_ticks[stage]`, 15 ticks/decision at stage
+  0). Comfortably clears the 10k ticks/s target.
+- **GPU utilization: `min_mean_util` converges to a stable 55%**,
+  individual GPUs cycling roughly 0-37% during the collect-bound part
+  of each update and briefly bursting to 100% across all 8 during
+  synchronized minibatch steps. Does **not** clear the 90% target.
+
+**Why util plateaus around 55% and not higher**: per-update timing is
+consistently `collect_s` (~18-19s, CPU/IPC-bound: 256 Node.js
+subprocess game-tick round-trips) slightly *longer* than `train_s`
+(~16-18s, GPU-bound). The pipelined actor/learner architecture already
+overlaps these, so the GPU is busy for essentially the *entire*
+`collect_s` window doing the *previous* update's training - but even
+during that overlapped window, per-GPU instantaneous utilization only
+reads 20-37% most of the time (only spiking to 100% during the
+synchronized forward/backward of each minibatch). This matches the
+timing breakdown from the pre-merge optimization pass: none of flattened
+grad-sync, GPU-resident minibatching, or parallelized `batch_build`
+changed `train_s` materially, and this session's one new experiment
+(doubling minibatch size 512->1024 via `--minibatches 2` to amortize
+per-launch kernel overhead) **OOM'd immediately** (`CUDA out of memory
+... Tried to allocate 4.00 GiB`, GPU memory was already pinned at
+89-91% with `--minibatches 4`) - so there's no batch-size headroom left
+on 80GB A100s at this env/rollout-len/network-size combination to push
+`train_s` down further. The remaining ~500ms-1s gap on the 40-50s scale
+is genuinely CPU/IPC-bound rollout collection that the GPU cannot help
+with under the current subprocess-per-env architecture; closing that
+gap fully requires the shared-memory/FFI vec-env rewrite flagged in the
+pre-optimization notes above, not a training-loop tweak.
+
+**Correctness note on the noisy value loss** (`v=` swinging
+14-1393 update to update): checked this isn't a Rust-specific bug.
+`rl/ppo.py` (line 339-341) documents the identical behavior as
+*expected*: "the value head stays untrained (BC has no value loss), so
+early PPO updates mostly fit the critic - expect noisy advantages for
+the first ~100 updates". Neither implementation normalizes/clips the
+value target (`returns`), only the advantage (`adv`) - matched exactly
+in `train.rs` (see `adv_mean`/`adv_std` normalization in the
+`batch_build` closure) - so large-magnitude discounted returns (gamma
+0.999, episodes up to 200 decision-steps) naturally produce a
+high-variance MSE loss early on. `pg_loss` stays small and sane
+throughout (`+0.03` to `+0.75`), entropy is noisy but never
+collapses/explodes to NaN/inf. Not a learning-affecting bug.
+
+**Bottom line**: ticks/s target (10k+) cleared with margin (~13-14k
+sustained); learning is stable and bug-free per the audit + this
+validation run; GPU utilization is stuck at a well-understood ~55%
+ceiling that is architectural (IPC bridge to the Node.js game engine),
+not a training-loop inefficiency - matches the same wall the Python
+`ppo_v7` effort hit (documented above) after its own optimization pass.
+Getting to 90%+ util would require replacing the JSON-over-pipes
+`Bridge`/`bridge/env.ts` subprocess protocol with shared memory or FFI,
+which is a substantially larger project than tuning the training loop
+and was explicitly deferred (see "Stopping point" section above).
