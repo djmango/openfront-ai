@@ -659,28 +659,44 @@ pub fn run(cfg: Config) -> Result<()> {
         // learner on `pending` (this update's, already-collected data).
         // See module doc for why this is safe (disjoint state) and what
         // it's fixing (GPU idling during collection).
-        let collect_start = Instant::now();
-        let train_start_inner = Instant::now();
         // Linear anneal ent_coef -> ent_coef_final so late training commits
         // instead of exploring forever (matches `rl/ppo.py`; the adaptive
         // entropy-floor multiplier on top of this schedule is not ported -
         // see DEVLOG).
         let frac = (update as f64 / cfg.ent_anneal_updates.max(1) as f64).min(1.0);
         let ent_coef_now = (cfg.ent_coef as f64 + (cfg.ent_coef_final as f64 - cfg.ent_coef as f64) * frac) as f32;
-        let (train_result, next_pending) = std::thread::scope(|s| {
+        // `collect_dt`/`train_dt` used to both be measured from
+        // (effectively) the same start instant to the same point *after*
+        // this whole scope returns - since the scope can't return until
+        // both the (synchronous, main-thread) `train_update` call *and*
+        // every collector thread's `.join()` have completed, they always
+        // read out nearly identical wall-clock values regardless of which
+        // phase actually dominates, making it impossible to tell collect-
+        // vs-train-bound apart from the log (this is why 8-GPU runs showed
+        // `collect_s == train_s == update_s` on every line - not a real
+        // tie, just an instrumentation bug). Fix: time `train_update`
+        // itself (the main thread's own synchronous work) directly, and
+        // separately time from just before spawning the collectors to
+        // just after every one of them has joined - if collection is the
+        // long pole, `collect_dt` will now correctly read higher than
+        // `train_dt` (the `.join()` calls after `train_update` returns
+        // will block, adding to `collect_dt` but not `train_dt`).
+        let collect_start = Instant::now();
+        let (train_result, next_pending, train_dt) = std::thread::scope(|s| {
             let collect_handles: Vec<_> =
                 actors.iter_mut().map(|actor| s.spawn(move || collect_rollout(actor, cfg_ref))).collect();
 
+            let train_t0 = Instant::now();
             let train_result = train_update(&mut learners, &pending, cfg_ref, &mut rng, ent_coef_now);
+            let train_dt = train_t0.elapsed().as_secs_f64();
 
             let next_pending: Result<Vec<RolloutResult>> =
                 collect_handles.into_iter().map(|h| h.join().expect("collector thread panicked")).collect();
-            (train_result, next_pending)
+            (train_result, next_pending, train_dt)
         });
-        let train_dt = train_start_inner.elapsed().as_secs_f64();
+        let collect_dt = collect_start.elapsed().as_secs_f64();
         let last_losses = train_result?;
         let next_pending = next_pending?;
-        let collect_dt = collect_start.elapsed().as_secs_f64();
 
         let mut advanced = false;
         for result in &next_pending {
