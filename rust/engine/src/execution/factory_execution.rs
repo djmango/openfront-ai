@@ -1,6 +1,7 @@
-//! Factory structure behavior (`FactoryExecution.ts` subset - rail network deferred).
+//! Factory structure behavior (`FactoryExecution.ts`).
 
 use super::{train_station_execution::TrainStationExecution, ExecEnum, Execution};
+use crate::core::schemas::unit_type;
 use crate::game::Game;
 
 pub struct FactoryExecution {
@@ -19,6 +20,37 @@ impl FactoryExecution {
             station_created: false,
         }
     }
+
+    /// TS `FactoryExecution.createStation` - factory always becomes a spawning station and
+    /// pulls any currently-nearby City/Port/Factory (without a station yet) in as passive
+    /// (non-spawning) stations too.
+    fn create_station(&self, game: &mut Game) {
+        let Some(tile) = game.unit_tile_of(self.small_id, self.unit_id) else {
+            return;
+        };
+        let range = game.wire.train_station_max_range();
+        let structures = game.nearby_structures_any(
+            tile,
+            range,
+            &[unit_type::CITY, unit_type::PORT, unit_type::FACTORY],
+        );
+
+        game.set_has_train_station(self.small_id, self.unit_id, true);
+        game.add_execution(ExecEnum::TrainStation(TrainStationExecution::new(
+            self.small_id,
+            self.unit_id,
+            true,
+        )));
+        for (osid, ouid, _, _) in structures {
+            if game.unit_has_train_station(osid, ouid) {
+                continue;
+            }
+            game.set_has_train_station(osid, ouid, true);
+            game.add_execution(ExecEnum::TrainStation(TrainStationExecution::new(
+                osid, ouid, false,
+            )));
+        }
+    }
 }
 
 impl Execution for FactoryExecution {
@@ -29,11 +61,7 @@ impl Execution for FactoryExecution {
             return;
         }
         if !self.station_created {
-            game.add_execution(ExecEnum::TrainStation(TrainStationExecution::new(
-                self.small_id,
-                self.unit_id,
-                true,
-            )));
+            self.create_station(game);
             self.station_created = true;
         }
         let still_active = game

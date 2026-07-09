@@ -28,6 +28,9 @@ pub struct Unit {
     pub under_construction: bool,
     /// TS `UnitImpl.level()`  -  defaults to 1; affects `maxTroops` for cities.
     pub level: i32,
+    /// TS `UnitImpl._hasTrainStation` - set true immediately when a `TrainStationExecution`
+    /// is constructed for this unit (City/Port/Factory).
+    pub has_train_station: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -210,6 +213,14 @@ pub struct Game {
     pub player_teams: Vec<String>,
     /// TS `GameImpl._teamGameSpawnAreas`.
     pub team_spawn_areas: Option<HashMap<String, Vec<SpawnArea>>>,
+    /// TS `SharedWaterCache` port: rebuilt at most once every 30 ticks (`None` = never built).
+    /// `RefCell` so callers deep in read-only structure-planning code (mirroring TS's lazy
+    /// `SharedWaterCache.get`) don't need to thread `&mut Game` through the whole call chain.
+    pub(crate) shared_water_cache_tick: std::cell::RefCell<Option<i64>>,
+    pub(crate) shared_water_cache:
+        std::cell::RefCell<HashMap<u16, Option<std::collections::HashSet<u32>>>>,
+    /// TS `GameImpl._railNetwork` (`RailNetworkImpl`) - stations, railroads, clusters.
+    pub rail_network: crate::rail::RailNetwork,
 }
 
 impl Default for Game {
@@ -285,6 +296,9 @@ impl Default for Game {
             init_merge_batch: None,
             player_teams: Vec::new(),
             team_spawn_areas: None,
+            shared_water_cache_tick: std::cell::RefCell::new(None),
+            shared_water_cache: std::cell::RefCell::new(HashMap::new()),
+            rail_network: crate::rail::RailNetwork::default(),
         }
     }
 }
@@ -1185,6 +1199,110 @@ impl Game {
             .unwrap_or(0)
     }
 
+    /// TS `PlayerImpl.unitCount(type)` - sums `unit.level()`, not just count.
+    pub fn unit_level_sum(&self, small_id: u16, unit_type: &str) -> i32 {
+        self.player_by_small_id(small_id)
+            .map(|p| {
+                p.units
+                    .iter()
+                    .filter(|u| u.unit_type == unit_type)
+                    .map(|u| u.level)
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
+    pub fn unit_tile_of(&self, small_id: u16, unit_id: i32) -> Option<TileRef> {
+        self.player_by_small_id(small_id)
+            .and_then(|p| p.units.iter().find(|u| u.id == unit_id))
+            .map(|u| u.tile as TileRef)
+    }
+
+    pub fn unit_level_of(&self, small_id: u16, unit_id: i32) -> i32 {
+        self.player_by_small_id(small_id)
+            .and_then(|p| p.units.iter().find(|u| u.id == unit_id))
+            .map(|u| u.level)
+            .unwrap_or(1)
+    }
+
+    pub fn unit_exists(&self, small_id: u16, unit_id: i32) -> bool {
+        self.player_by_small_id(small_id)
+            .is_some_and(|p| p.units.iter().any(|u| u.id == unit_id))
+    }
+
+    pub fn unit_type_of(&self, small_id: u16, unit_id: i32) -> Option<String> {
+        self.player_by_small_id(small_id)
+            .and_then(|p| p.units.iter().find(|u| u.id == unit_id))
+            .map(|u| u.unit_type.clone())
+    }
+
+    pub fn set_has_train_station(&mut self, small_id: u16, unit_id: i32, val: bool) {
+        if let Some(p) = self.player_by_small_id_mut(small_id) {
+            if let Some(u) = p.units.iter_mut().find(|u| u.id == unit_id) {
+                u.has_train_station = val;
+            }
+        }
+    }
+
+    pub fn unit_has_train_station(&self, small_id: u16, unit_id: i32) -> bool {
+        self.player_by_small_id(small_id)
+            .and_then(|p| p.units.iter().find(|u| u.id == unit_id))
+            .is_some_and(|u| u.has_train_station)
+    }
+
+    /// TS `UnitGrid.hasUnitNearby` - scans across ALL players (not owner-filtered).
+    pub fn has_unit_nearby_any(&self, tile: TileRef, range: u32, unit_type: &str) -> bool {
+        let tx = self.map.x(tile) as i64;
+        let ty = self.map.y(tile) as i64;
+        let range_sq = (range as i64) * (range as i64);
+        for p in &self.players {
+            for u in &p.units {
+                if u.unit_type != unit_type || u.under_construction {
+                    continue;
+                }
+                let ux = self.map.x(u.tile as TileRef) as i64;
+                let uy = self.map.y(u.tile as TileRef) as i64;
+                let dx = ux - tx;
+                let dy = uy - ty;
+                if dx * dx + dy * dy <= range_sq {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// TS `UnitGrid.nearbyUnits(tile, range, types)` - scans across ALL players.
+    /// Returns `(owner_small_id, unit_id, tile, dist_squared)`, unsorted (caller sorts if needed).
+    pub fn nearby_structures_any(
+        &self,
+        tile: TileRef,
+        range: u32,
+        types: &[&str],
+    ) -> Vec<(u16, i32, TileRef, f64)> {
+        let tx = self.map.x(tile) as i64;
+        let ty = self.map.y(tile) as i64;
+        let range_sq = (range as i64) * (range as i64);
+        let mut out = Vec::new();
+        for p in &self.players {
+            for u in &p.units {
+                if u.under_construction || !types.iter().any(|t| *t == u.unit_type) {
+                    continue;
+                }
+                let ux = self.map.x(u.tile as TileRef) as i64;
+                let uy = self.map.y(u.tile as TileRef) as i64;
+                let dx = ux - tx;
+                let dy = uy - ty;
+                let d2 = dx * dx + dy * dy;
+                if d2 > range_sq {
+                    continue;
+                }
+                out.push((p.small_id, u.id, u.tile as TileRef, d2 as f64));
+            }
+        }
+        out
+    }
+
     /// TS `unitsOwned(type)`  -  includes construction; completed units count by level.
     pub fn units_owned_count(&self, small_id: u16, unit_type: &str) -> u32 {
         self.player_by_small_id(small_id)
@@ -1334,6 +1452,7 @@ impl Game {
                 tile: tile as i32,
                 under_construction: false,
                 level: 1,
+                has_train_station: false,
             });
         }
         self.record_unit_constructed(small_id, unit_type);
@@ -1341,8 +1460,16 @@ impl Game {
     }
 
     pub fn remove_unit(&mut self, small_id: u16, unit_id: i32) {
+        let had_station = self
+            .player_by_small_id(small_id)
+            .and_then(|p| p.units.iter().find(|u| u.id == unit_id))
+            .is_some_and(|u| u.has_train_station);
         if let Some(p) = self.player_by_small_id_mut(small_id) {
             p.units.retain(|u| u.id != unit_id);
+        }
+        // TS `GameImpl.removeUnit` - drop the train station from the rail network too.
+        if had_station {
+            crate::rail::remove_station(self, unit_id);
         }
     }
 

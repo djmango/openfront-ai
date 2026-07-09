@@ -15,6 +15,7 @@ pub mod hash;
 pub mod map;
 pub mod obs;
 pub mod prng;
+pub mod rail;
 pub mod record;
 pub mod replay;
 pub mod session;
