@@ -52,6 +52,7 @@ pub mod construction;
 pub mod nation_structures;
 pub mod nation_tick;
 pub mod noop;
+pub mod ordered_map;
 pub mod ordered_tiles;
 pub mod player;
 pub mod player_clusters;

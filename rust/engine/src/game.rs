@@ -1,6 +1,7 @@
 //! Core game state + tick driver.
 
 use crate::core::config::Config as WireConfig;
+use crate::execution::ordered_map::OrderedMap;
 use crate::execution::ordered_tiles::OrderedTiles;
 use crate::execution::{ExecEnum, Execution, HashUpdate, WinUpdate};
 use crate::hash::game_hash;
@@ -53,7 +54,12 @@ pub struct Player {
     pub last_cluster_calc: u32,
     pub last_tile_change: u32,
     pub marked_traitor_tick: i32,
-    pub relations: HashMap<u16, i32>,
+    /// TS `PlayerImpl.relations` is a `Map<Player, number>`, which iterates in insertion
+    /// order (re-setting an existing key's value does not move it). `allRelationsSorted()`
+    /// relies on that insertion order as the tie-break after its stable sort-by-value, so a
+    /// plain `HashMap` here (whose iteration order is randomly per-process-seeded) makes
+    /// tie-broken attack-target selection genuinely nondeterministic across runs.
+    pub relations: OrderedMap<u16, i32>,
     pub is_disconnected: bool,
     /// TS `numUnitsConstructed`  -  incremented on build and upgrade.
     pub units_constructed: HashMap<String, u32>,
@@ -87,7 +93,7 @@ impl Default for Player {
             last_cluster_calc: 0,
             last_tile_change: 0,
             marked_traitor_tick: -1,
-            relations: HashMap::new(),
+            relations: OrderedMap::new(),
             is_disconnected: false,
             units_constructed: HashMap::new(),
             id_prng: PseudoRandom::new(0),
@@ -1273,22 +1279,34 @@ impl Game {
     }
 
     /// TS `UnitGrid.nearbyUnits(tile, range, types)` - scans across ALL players.
-    /// Returns `(owner_small_id, unit_id, tile, dist_squared)`, unsorted (caller sorts if needed).
+    /// Returns `(owner_small_id, unit_id, tile, dist_squared)`.
+    ///
+    /// Order matters even for callers that re-sort by distance afterward: JS `Array.sort` (and
+    /// Rust's `sort_by`) are stable, so ties fall back to this pre-sort order, and some callers
+    /// (`FactoryExecution.createStation`) use the raw order with no sort at all. TS's `UnitGrid`
+    /// enumerates its 100x100-tile cells row-major (`cy` outer, `cx` inner), then `types` in the
+    /// given array order, then insertion order within each cell/type `Set` - which for immobile
+    /// structures is creation order, i.e. our monotonic global `unit_id`. Replicate that
+    /// ordering by sorting on an equivalent key instead of building a real spatial grid.
     pub fn nearby_structures_any(
         &self,
         tile: TileRef,
         range: u32,
         types: &[&str],
     ) -> Vec<(u16, i32, TileRef, f64)> {
+        const UNIT_GRID_CELL_SIZE: i64 = 100;
         let tx = self.map.x(tile) as i64;
         let ty = self.map.y(tile) as i64;
         let range_sq = (range as i64) * (range as i64);
-        let mut out = Vec::new();
+        let mut out: Vec<(u16, i32, TileRef, f64, i64, i64, usize)> = Vec::new();
         for p in &self.players {
             for u in &p.units {
-                if u.under_construction || !types.iter().any(|t| *t == u.unit_type) {
+                if u.under_construction {
                     continue;
                 }
+                let Some(type_idx) = types.iter().position(|t| *t == u.unit_type) else {
+                    continue;
+                };
                 let ux = self.map.x(u.tile as TileRef) as i64;
                 let uy = self.map.y(u.tile as TileRef) as i64;
                 let dx = ux - tx;
@@ -1297,10 +1315,15 @@ impl Game {
                 if d2 > range_sq {
                     continue;
                 }
-                out.push((p.small_id, u.id, u.tile as TileRef, d2 as f64));
+                let cell_x = ux.div_euclid(UNIT_GRID_CELL_SIZE);
+                let cell_y = uy.div_euclid(UNIT_GRID_CELL_SIZE);
+                out.push((p.small_id, u.id, u.tile as TileRef, d2 as f64, cell_y, cell_x, type_idx));
             }
         }
-        out
+        out.sort_by(|a, b| {
+            (a.4, a.5, a.6, a.1).cmp(&(b.4, b.5, b.6, b.1))
+        });
+        out.into_iter().map(|(sid, uid, t, d2, ..)| (sid, uid, t, d2)).collect()
     }
 
     /// TS `unitsOwned(type)`  -  includes construction; completed units count by level.
@@ -1901,6 +1924,22 @@ impl Game {
             .unwrap_or(0)
     }
 
+    /// TS `PlayerImpl.allRelationsSorted()`  -  sort-by-value (stable), tie-broken by
+    /// insertion order, filtered to relations with still-alive players.
+    pub fn all_relations_sorted(&self, sid: u16) -> Vec<(u16, i32)> {
+        let Some(p) = self.player_by_small_id(sid) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(u16, i32)> = p
+            .relations
+            .iter()
+            .filter(|(other, _)| self.player_by_small_id(*other).is_some_and(|o| o.alive))
+            .map(|(other, &v)| (other, v))
+            .collect();
+        out.sort_by_key(|(_, v)| *v);
+        out
+    }
+
     fn relation_from_value(value: i32) -> Relation {
         if value < -50 {
             Relation::Hostile
@@ -1919,7 +1958,7 @@ impl Game {
 
     pub fn update_relation(&mut self, a: u16, b: u16, delta: i32) {
         if let Some(p) = self.player_by_small_id_mut(a) {
-            let entry = p.relations.entry(b).or_insert(0);
+            let entry = p.relations.entry_or_insert(b, 0);
             *entry += delta;
         }
     }
