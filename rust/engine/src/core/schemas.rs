@@ -105,6 +105,10 @@ pub struct GameConfig {
     pub starting_gold: Option<u64>,
     #[serde(default)]
     pub gold_multiplier: Option<f64>,
+    #[serde(default)]
+    pub max_timer_value: Option<u32>,
+    #[serde(default)]
+    pub ranked_type: Option<String>,
 }
 
 impl GameConfig {

@@ -36,6 +36,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import * as zlib from "zlib";
+import { createHash } from "crypto";
 import {
   Game,
   GameMapType,
@@ -56,7 +57,6 @@ import { PseudoRandom } from "../openfront/src/core/PseudoRandom";
 import { createRequire } from "module";
 import { GameRecord, GameStartInfo } from "../openfront/src/core/Schemas";
 import { decompressGameRecord, simpleHash } from "../openfront/src/core/Util";
-import { legality } from "../bridge/common";
 import { loadFreshTerrain, snapshotEntities } from "./common";
 
 // The engine submodule gets checked out at whatever commit each game ran on
@@ -70,6 +70,216 @@ interface ReplayResult {
   ticks: number;
   snapshots: number;
   hashesChecked: number;
+}
+
+const OUTCOME_SCHEMA_VERSION = 1;
+
+interface OutcomeRankingEntry {
+  identity: string;
+  name: string;
+  team: string | null;
+  tiles: number;
+  alive: boolean;
+}
+
+export interface GameOutcome {
+  schemaVersion: number;
+  gameId: string;
+  winner: string | null;
+  terminalTick: number | null;
+  terminalReason: string | null;
+  winnerLandShare: number | null;
+  finalTick: number;
+  landTilesWithoutFallout: number;
+  finalRanking: OutcomeRankingEntry[];
+}
+
+function normalizeWinner(winner: unknown): string | null {
+  if (!Array.isArray(winner) || winner.length < 2) return null;
+  const kind = String(winner[0]);
+  if (kind !== "player" && kind !== "team" && kind !== "nation") return null;
+  return `${kind}:${String(winner[1])}`;
+}
+
+function playerIdentity(player: {
+  clientID(): string | null;
+  name(): string;
+}): string {
+  const clientID = player.clientID();
+  return clientID === null ? `nation:${player.name()}` : `player:${clientID}`;
+}
+
+function terminalReason(game: Game, winner: string): string {
+  const config = game.config().gameConfig();
+  const players = game.players();
+  if (
+    config.rankedType === "1v1" &&
+    players.filter((p) => p.type() === PlayerType.Human && !p.isDisconnected())
+      .length === 1
+  ) {
+    return "one_v_one";
+  }
+  const denominator = Math.max(
+    1,
+    game.numLandTiles() - game.numTilesWithFallout(),
+  );
+  const winnerTiles = winner.startsWith("team:")
+    ? players
+        .filter((p) => p.team() === winner.slice("team:".length))
+        .reduce((sum, p) => sum + p.numTilesOwned(), 0)
+    : (players.find((p) => playerIdentity(p) === winner)?.numTilesOwned() ?? 0);
+  if (
+    (winnerTiles / denominator) * 100 >
+    game.config().percentageTilesOwnedToWin()
+  ) {
+    return "land_share";
+  }
+  const elapsedSeconds = game.elapsedGameSeconds();
+  if (
+    config.maxTimerValue != null &&
+    elapsedSeconds >= config.maxTimerValue * 60
+  ) {
+    return "max_timer";
+  }
+  return "hard_time_limit";
+}
+
+function finalWinnerLandShare(
+  game: Game,
+  winner: string | null,
+): number | null {
+  if (winner === null) return null;
+  const denominator = Math.max(
+    1,
+    game.numLandTiles() - game.numTilesWithFallout(),
+  );
+  if (winner.startsWith("team:")) {
+    const team = winner.slice("team:".length);
+    return (
+      game
+        .players()
+        .filter((p) => p.team() === team)
+        .reduce((sum, p) => sum + p.numTilesOwned(), 0) / denominator
+    );
+  }
+  const player = game.players().find((p) => playerIdentity(p) === winner);
+  return player === undefined ? null : player.numTilesOwned() / denominator;
+}
+
+/** Replay every recorded intent and capture outcome metrics without treating
+ * archived hash mismatches as terminal. */
+export async function replayOutcome(record: GameRecord): Promise<GameOutcome> {
+  const info: GameStartInfo = record.info;
+  const gameConfig = info.config;
+  const mapType = gameConfig.gameMap as GameMapType;
+  if (!Object.values(GameMapType).includes(mapType)) {
+    throw new Error(`unknown map ${gameConfig.gameMap}`);
+  }
+  const config = new Config(gameConfig, null, false);
+  const terrain = await loadFreshTerrain(mapType, gameConfig.gameMapSize);
+  const random = new PseudoRandom(simpleHash(info.gameID));
+  const humans = info.players.map(
+    (p) =>
+      new PlayerInfo(
+        p.username,
+        PlayerType.Human,
+        p.clientID,
+        random.nextID(),
+        p.isLobbyCreator ?? false,
+        p.clanTag,
+        p.friends ?? [],
+      ),
+  );
+  const nations = createNationsForGame(
+    info,
+    terrain.nations,
+    terrain.additionalNations,
+    humans.length,
+    random,
+  );
+  const game: Game = createGame(
+    humans,
+    nations,
+    terrain.gameMap,
+    terrain.miniGameMap,
+    config,
+    terrain.teamGameSpawnAreas,
+  );
+  const executor = new Executor(game, info.gameID, undefined);
+  if (gameConfig.gameType !== GameType.Singleplayer) {
+    game.addExecution(new SpawnTimerExecution());
+  }
+  if (config.spawnNations()) {
+    game.addExecution(...executor.nationExecutions());
+  }
+  if (config.isRandomSpawn()) {
+    game.addExecution(...executor.spawnPlayers());
+  }
+  if (config.bots() > 0) {
+    game.addExecution(...executor.spawnTribes(config.bots()));
+  }
+  game.addExecution(new WinCheckExecution());
+  const cfgAny = config as unknown as {
+    doomsdayClockConfig?: () => { enabled: boolean };
+  };
+  if (cfgAny.doomsdayClockConfig?.().enabled) {
+    const { DoomsdayClockExecution } = dynRequire(
+      "../openfront/src/core/execution/DoomsdayClockExecution",
+    );
+    game.addExecution(new DoomsdayClockExecution());
+  }
+  if (!config.isUnitDisabled(UnitType.Factory)) {
+    game.addExecution(new RecomputeRailClusterExecution(game.railNetwork()));
+  }
+
+  let winner: string | null = null;
+  let terminalTick: number | null = null;
+  let reason: string | null = null;
+  for (const turn of record.turns) {
+    game.addExecution(...executor.createExecs(turn));
+    const updates = game.executeNextTick();
+    if (winner === null) {
+      const winUpdates = updates[GameUpdateType.Win] as
+        | { winner: unknown }[]
+        | undefined;
+      if (winUpdates && winUpdates.length > 0) {
+        winner = normalizeWinner(winUpdates[0].winner);
+        if (winner !== null) {
+          terminalTick = game.ticks();
+          reason = terminalReason(game, winner);
+        }
+      }
+    }
+  }
+
+  const finalRanking: OutcomeRankingEntry[] = game
+    .allPlayers()
+    .map((player) => ({
+      identity: playerIdentity(player),
+      name: player.name(),
+      team: player.team(),
+      tiles: player.numTilesOwned(),
+      alive: player.isAlive(),
+    }))
+    .sort(
+      (a, b) =>
+        b.tiles - a.tiles ||
+        (a.identity < b.identity ? -1 : a.identity > b.identity ? 1 : 0),
+    );
+  return {
+    schemaVersion: OUTCOME_SCHEMA_VERSION,
+    gameId: info.gameID,
+    winner,
+    terminalTick,
+    terminalReason: reason,
+    winnerLandShare: finalWinnerLandShare(game, winner),
+    finalTick: game.ticks(),
+    landTilesWithoutFallout: Math.max(
+      1,
+      game.numLandTiles() - game.numTilesWithFallout(),
+    ),
+    finalRanking,
+  };
 }
 
 /** A human intent normalized to the policy's action space (rl/obs.py
@@ -296,6 +506,9 @@ export async function replayGame(
   bc: boolean,
   writeStates: boolean,
 ): Promise<ReplayResult> {
+  const legality = bc
+    ? (await import("../bridge/common")).legality
+    : (null as never);
   const info: GameStartInfo = record.info;
   const gameConfig = info.config;
 
@@ -612,12 +825,100 @@ function loadRecord(file: string): GameRecord {
   return decompressGameRecord(JSON.parse(json) as GameRecord);
 }
 
+async function writeOutcomeOracle(
+  recordsDir: string,
+  cacheFile: string,
+  parityCommit: string,
+): Promise<void> {
+  const files = fs
+    .readdirSync(recordsDir, { recursive: true })
+    .map(String)
+    .filter((file) => file.endsWith(".json") || file.endsWith(".json.gz"))
+    .map((file) => path.join(recordsDir, file))
+    .sort();
+  const recordHasher = createHash("sha256");
+  for (const file of files) {
+    recordHasher.update(path.relative(recordsDir, file));
+    recordHasher.update("\0");
+    recordHasher.update(fs.readFileSync(file));
+    recordHasher.update("\0");
+  }
+  const recordSetHash = recordHasher.digest("hex");
+  const oracleFingerprint = createHash("sha256")
+    .update(fs.readFileSync(fileURLToPath(import.meta.url)))
+    .update("\0")
+    .update(parityCommit)
+    .digest("hex");
+  try {
+    const cached = JSON.parse(fs.readFileSync(cacheFile, "utf8")) as {
+      schemaVersion?: number;
+      parityCommit?: string;
+      recordSetHash?: string;
+      oracleFingerprint?: string;
+      outcomes?: unknown[];
+    };
+    if (
+      cached.schemaVersion === OUTCOME_SCHEMA_VERSION &&
+      cached.parityCommit === parityCommit &&
+      cached.recordSetHash === recordSetHash &&
+      cached.oracleFingerprint === oracleFingerprint &&
+      cached.outcomes?.length === files.length
+    ) {
+      console.error(
+        `[outcome-oracle] cache hit: ${files.length} records at ${cacheFile}`,
+      );
+      return;
+    }
+  } catch {
+    // A missing or stale cache is regenerated below.
+  }
+
+  const originalLog = console.log;
+  console.log = () => undefined;
+  const outcomes: GameOutcome[] = [];
+  try {
+    for (const file of files) {
+      outcomes.push(await replayOutcome(loadRecord(file)));
+    }
+  } finally {
+    console.log = originalLog;
+  }
+  outcomes.sort((a, b) =>
+    a.gameId < b.gameId ? -1 : a.gameId > b.gameId ? 1 : 0,
+  );
+  const cache = {
+    schemaVersion: OUTCOME_SCHEMA_VERSION,
+    parityCommit,
+    recordSetHash,
+    oracleFingerprint,
+    outcomes,
+  };
+  fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+  const temporary = `${cacheFile}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(cache, null, 2)}\n`);
+  fs.renameSync(temporary, cacheFile);
+  console.error(
+    `[outcome-oracle] cached ${outcomes.length} records at ${cacheFile}`,
+  );
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const getArg = (name: string, fallback: string): string => {
     const i = args.indexOf(`--${name}`);
     return i >= 0 && args[i + 1] !== undefined ? args[i + 1] : fallback;
   };
+
+  if (args.includes("--outcome-oracle")) {
+    const recordsDir = getArg("records", "records");
+    const cacheFile = getArg(
+      "cache",
+      path.join(".cache", "outcome-oracle.json"),
+    );
+    const parityCommit = getArg("parity-commit", path.basename(recordsDir));
+    await writeOutcomeOracle(recordsDir, cacheFile, parityCommit);
+    return;
+  }
 
   const recordsDir = getArg("records", "records");
   const outRoot = getArg("out", "data-human");

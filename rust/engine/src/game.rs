@@ -302,6 +302,8 @@ impl Default for Game {
             spawn_immunity_duration: None,
             starting_gold: None,
             gold_multiplier: None,
+            max_timer_value: None,
+            ranked_type: None,
         };
         Self {
             game_id: String::new(),
