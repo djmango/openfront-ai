@@ -90,7 +90,9 @@ impl PortExecution {
                 continue;
             }
             for u in p.units.iter() {
-                if u.unit_type != unit_type::PORT || u.under_construction {
+                // TS `tradingPorts`: `p.units(UnitType.Port)` is unfiltered by
+                // active/under-construction status, unlike most other port lookups.
+                if u.unit_type != unit_type::PORT {
                     continue;
                 }
                 let tile = u.tile as TileRef;
@@ -167,27 +169,12 @@ impl Execution for PortExecution {
         if ports.is_empty() {
             return;
         }
-        let (dst_small_id, dst_unit_id) = self
+        let (_dst_small_id, dst_unit_id) = self
             .random
             .as_mut()
             .expect("PortExecution not initialized")
             .rand_element(&ports)
             .unwrap();
-        if std::env::var("DBG_TRADE_SHIP").is_ok() {
-            let owner_id = game
-                .player_by_small_id(self.small_id)
-                .map(|p| p.id.clone())
-                .unwrap_or_default();
-            let dst_id = game
-                .player_by_small_id(dst_small_id)
-                .map(|p| p.id.clone())
-                .unwrap_or_default();
-            eprintln!(
-                "DBG_TRADE_SHIP tick={} owner={}({}) port_tile={} candidates_weighted_len={} chosen_dst={}({}) dst_tile={} dst_unit_id={}",
-                tick, owner_id, self.small_id, port_tile, ports.len(), dst_id, dst_small_id,
-                game.unit_tile_of(dst_small_id, dst_unit_id).unwrap_or(0), dst_unit_id
-            );
-        }
         game.add_execution(ExecEnum::TradeShip(TradeShipExecution::new(
             self.small_id,
             self.unit_id,
