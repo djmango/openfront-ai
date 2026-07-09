@@ -11,6 +11,8 @@ use std::collections::HashMap;
 
 const CITY_PERCEIVED_COST_INCREASE_PER_OWNED: f64 = 1.0;
 const SAVE_UP_HYDROGEN_COUNT: i64 = 5;
+/// TS `HIGH_STARTING_GOLD_THRESHOLD` (also duplicated in `nation_tick.rs` for cooldown gating).
+const HIGH_STARTING_GOLD_THRESHOLD: i64 = 3_000_000;
 /// TS `UPGRADE_DENSITY_THRESHOLD`  -  prefer upgrading over new builds when exceeded.
 const UPGRADE_DENSITY_THRESHOLD: f64 = 1.0 / 1500.0;
 
@@ -1132,7 +1134,12 @@ fn maybe_spawn_structure(
 }
 
 /// TS `NationStructureBehavior.doHandleStructures`.
-pub fn do_handle_structures(game: &mut Game, random: &mut PseudoRandom, small_id: u16) -> bool {
+pub fn do_handle_structures(
+    game: &mut Game,
+    random: &mut PseudoRandom,
+    small_id: u16,
+    placements_count: u32,
+) -> bool {
     let cities_disabled = game.wire.is_unit_disabled(unit_type::CITY);
     let city_count = if cities_disabled {
         game.player_by_small_id(small_id)
@@ -1146,6 +1153,20 @@ pub fn do_handle_structures(game: &mut Game, random: &mut PseudoRandom, small_id
     let nukes_enabled = !game.wire.is_unit_disabled(unit_type::ATOM_BOMB)
         || !game.wire.is_unit_disabled(unit_type::HYDROGEN_BOMB)
         || !game.wire.is_unit_disabled(unit_type::MIRV);
+
+    // TS `doHandleStructures`  -  high-starting-gold Hard/Impossible nations build a
+    // SAM launcher as their very first structure (bypasses city-count-based ordering).
+    let difficulty = game.wire.game_config().difficulty.clone();
+    if placements_count == 0
+        && (difficulty == "Hard" || difficulty == "Impossible")
+        && !game.wire.is_unit_disabled(unit_type::ATOM_BOMB)
+        && missile_silos_enabled
+        && !game.wire.is_unit_disabled(unit_type::SAM_LAUNCHER)
+        && game.wire.starting_gold() >= HIGH_STARTING_GOLD_THRESHOLD
+        && maybe_spawn_structure(game, random, small_id, unit_type::SAM_LAUNCHER)
+    {
+        return true;
+    }
 
     if !cities_disabled
         && game.units_owned_count(small_id, unit_type::CITY) == 0
