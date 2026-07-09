@@ -274,6 +274,7 @@ mod tests {
             disable_alliances: None,
             spawn_immunity_duration: None,
             starting_gold: None,
+            gold_multiplier: None,
         }
     }
 
