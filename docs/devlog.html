@@ -57,7 +57,14 @@
 </nav>
 
 <div class="now" id="now">
-  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 8th, 2026, evening</h2>
+  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 9th, 2026</h2>
+  <p><b><code>ppo_v7</code> is live</b>: the <a href="#v7-fovea">foveated two-stream</a> policy
+  training from scratch on a 4x H200 pod (openfront-v7), coarse /16 stream on the fine-tuned
+  <code>ae_v31_d16c32</code>. rl5 / <code>ppo_v61</code> killed once v7 cleared stage 0 stably.
+  First mid-run patch already shipped: coarse-head tile picks (boat/nuke/warship) only ever
+  searched the top-left quarter of the chosen /16 cell - see
+  <a href="#v7-boatfix">the coarse-boat fix</a>. Hot-deployed with a checkpoint resume, v4.2
+  style.</p>
   <p><b>Browser-side live play is deployed</b> on
   <a href="https://openfrontai.skg.gg">openfrontai.skg.gg</a>: "Play vs Agent" no longer
   spins up a server GPU/CPU <code>rl.play</code> process. A headless Chromium tab joins the
@@ -72,8 +79,8 @@
   from-scratch retrain. <b>BC is on moratorium</b> (<a href="#bc-moratorium">why</a>):
   no <code>bc_v7</code>, <code>ppo_v7</code> launches from scratch. BC re-replay of the 303
   human games keeps running on the homelab (raw sidecars are cheap and shape-agnostic), but it
-  no longer gates anything. <code>ppo_v61</code> still climbing on rl5 (4x H100).
-  <code>bc_v6</code> frozen; playable pure-BC baseline <code>v6_bc</code> on HF.</p>
+  no longer gates anything. <code>bc_v6</code> frozen; playable pure-BC baseline
+  <code>v6_bc</code> on HF.</p>
 </div>
 <h3 id="status">Status snapshot (July 6th evening)</h3>
 <p>
@@ -118,7 +125,14 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <code>ae_v3.pt</code> until the v3.1 winner is wired into <code>rl/obs.py</code>.</p>
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
-  <tr><td><code>ppo_v6.1</code></td><td><b>launching</b> Jul 8</td>
+  <tr><td><code>ppo_v7</code></td><td><b>running</b> (openfront-v7, 4x H200)</td>
+    <td>From scratch on the merged <a href="#v7-obs">v7 obs</a>: full-state expansion +
+    <a href="#v7-fovea">foveated two-stream</a> (fine /8 over own territory + border band,
+    coarse /16 global via <code>ae_v31_d16c32</code>). Launched Jul 8 late; cleared stage 0 in
+    22 updates, ~2650-3400 game-ticks/s on stages 0-1. Mid-run
+    <a href="#v7-boatfix">coarse-boat translator fix</a> hot-deployed Jul 9 with a checkpoint
+    resume. Supersedes the v6 lineage; rl5 killed.</td></tr>
+  <tr><td><code>ppo_v6.1</code></td><td><b>killed</b> Jul 8 late</td>
     <td>Phase A + B of the <a href="#scaling-plan">scaling plan</a> as one run: bf16 autocast +
     <code>torch.compile</code> on the update path, epochs 4 &rarr; 2 with KL/clip-frac logging,
     DDP learner over a 4x H100 SXM pod (<b>rl5</b>), envs scaled 96 &rarr; 384 with rollout
@@ -126,7 +140,9 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
     checkpoint + state.json (same action space, direct resume; stage continuity preserved).
     Gate: &ge;4x rl4's throughput at stage 4 (~1600+ game-ticks/s vs 400), sane KL/clip-frac,
     ckpt_advance + state.json working under DDP. rl4 decommissions once v6.1 is stable for a
-    few hours, after snapshotting <code>ppo_v6/policy_rl4_final.pt</code> to HF.</td></tr>
+    few hours, after snapshotting <code>ppo_v6/policy_rl4_final.pt</code> to HF.
+    <b>Killed Jul 8 late</b> once <code>ppo_v7</code> was stable - superseded by the v7 obs;
+    final checkpoint synced to HF.</td></tr>
   <tr><td><code>ppo_v6</code></td><td><b>running</b> (rl4)</td>
     <td>Launched ~11pm Jul 7 on rl4 via <code>--init-extend</code> from frozen v5 (62 tensors
     copied; action head 14 &rarr; 21, build 6 &rarr; 7, nuke 3 &rarr; 5 extended; Beta quantity
@@ -1168,6 +1184,38 @@ anything left in Phase A.</p>
 with no AE (~64x the measured per-latent-cell update FLOPs; pruning doesn't reduce dense conv
 time on GPUs), and submanifold sparse conv stays an unscheduled stretch option (~3-5x ceiling,
 heavy complexity) unless post-foveation profiling still shows dead compute.</p>
+
+<h3 id="v7-boatfix" style="scroll-margin-top:0">v7's first mid-run fix: coarse tile picks only
+searched a quarter of their cell</h3>
+<p><b>Symptom (Jul 8 late):</b> ppo_v7 on stage 1 showed boat-heavy noise again - lots of
+boats the engine discards, no boat-and-cancel play. Familiar smell (the v4 phantom-boat
+exploit, the v6 boat-churn), but the mechanism this time was new, and it was a genuine bug in
+the foveation change, not a reward hole.</p>
+<p><b>Root cause:</b> in the two-level tile head, only precision actions
+(<code>REFINE_TILE</code>: spawn/build/upgrade/cancel_boat/delete) refine down to the fine /8
+grid. Boat, nuke, and warship targets stop at the coarse /16 pick, and
+<code>_coarse_local_to_global</code> maps that cell to its <b>top-left /8 region</b> - which
+the translator then treated as the whole target, searching just that 8x8-tile quadrant for a
+valid destination. Three quarters of every coarse cell was unreachable by boat, ever. Picks
+whose valid tiles sat in the other quadrants either snapped to nothing (translator-side
+wasted penalty, noop-equivalent) or forced the policy toward whatever cells happened to have
+targets in the lucky quadrant. The policy cannot learn its way around this: the information
+that a cell's target sits in the wrong quadrant isn't in the action space.</p>
+<p><b>Fix (translator-only, no tensor shapes touched):</b> <code>region_tile</code> gains a
+<code>span</code> parameter; boat/nuke/warship snaps search the full 2x2 region block
+(<code>span=2</code>), matching the /16 granularity the head actually decided at. Refine
+actions keep exact /8 snapping. Bonus fix while in there: <code>boat_tile</code> now prefers
+<b>shoreline</b> candidates (the engine resolves destinations via
+<code>targetTransportTile &rarr; closestShore(owner, dst, 50)</code>, so a shore pick always
+resolves; inland only works when the owner has shore within 50 tiles by land), falling back
+to any valid tile. Fewer boats die at <code>canBuild</code>. The remaining engine-side
+reject (water-component reachability) stays priced by the wasted-intent penalty, and
+translator-failed snaps were already counted as wasted in <code>vec.py</code> - that
+incentive hole was closed in v4.2 and stayed closed.</p>
+<p><b>Deploy:</b> v4.2-style hot patch - repo synced on the pod, trainer killed, relaunched
+by the crash loop with <code>--resume</code> from the last checkpoint. Watch items:
+<code>episode/wasted</code> falling, boat share of the action mix normalizing, stage-1
+roll-win resuming its climb.</p>
 
 <h3 id="v7-ops" style="scroll-margin-top:0">BC-regen ops saga: three infra bugs before the first
 game replayed</h3>
