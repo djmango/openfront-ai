@@ -79,7 +79,7 @@ fn handle_structures(game: &mut Game, random: &mut PseudoRandom, small_id: u16, 
     if is_in_post_save_up_blocked_phase(game, small_id, state) {
         return;
     }
-    let built = do_handle_structures(game, random, small_id);
+    let built = do_handle_structures(game, random, small_id, state.placements_count);
     if built {
         state.last_structure_tick = Some(game.ticks());
         state.placements_count += 1;
@@ -158,8 +158,8 @@ fn defense_post_needed(game: &Game, small_id: u16) -> bool {
     false
 }
 
-fn do_handle_structures(game: &mut Game, random: &mut PseudoRandom, small_id: u16) -> bool {
-    super::nation_structures::do_handle_structures(game, random, small_id)
+fn do_handle_structures(game: &mut Game, random: &mut PseudoRandom, small_id: u16, placements_count: u32) -> bool {
+    super::nation_structures::do_handle_structures(game, random, small_id, placements_count)
 }
 
 fn maybe_spawn_warship(game: &Game, random: &mut PseudoRandom, small_id: u16) -> bool {
