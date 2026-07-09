@@ -204,6 +204,9 @@ def main() -> None:
     # RunPod containers drop CAP_SYS_PTRACE, so py-spy/gdb can't attach;
     # this is the only way to see where a hung rank actually sits.
     faulthandler.register(signal.SIGUSR1, all_threads=True)
+    # ...and dump on SIGSEGV/SIGABRT too: a rank once died -11 with zero
+    # trace and took the whole DDP group with it.
+    faulthandler.enable(all_threads=True)
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", type=int, default=0, help="starting curriculum stage")
     ap.add_argument("--ckpt", default="runs/ae_v31_d8c32/ae_v3.pt")
