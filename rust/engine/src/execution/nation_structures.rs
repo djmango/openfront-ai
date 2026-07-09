@@ -692,14 +692,18 @@ fn rand_coastal_tile_array(
             tiles.push(border);
         }
     });
-    if tiles.is_empty() {
-        return Vec::new();
+    // TS `arraySampler`: if there are at most `n` candidates, return them all
+    // (in border-tile order) with *no* RNG draws; otherwise sample `n` of them
+    // without replacement via `PseudoRandom.randFromSet` (index draw against
+    // the shrinking remaining pool, in original order).
+    if tiles.len() <= n {
+        return tiles;
     }
+    let mut remaining = tiles;
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
-        if let Some(t) = random.rand_element(&tiles) {
-            out.push(t);
-        }
+        let idx = random.next_int(0, remaining.len() as i32) as usize;
+        out.push(remaining.remove(idx));
     }
     out
 }
