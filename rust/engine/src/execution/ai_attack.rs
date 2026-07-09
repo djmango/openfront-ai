@@ -223,9 +223,11 @@ pub fn send_boat_attack_to_nearby_tn(game: &mut Game, small_id: u16) -> bool {
     if can_build_transport_ship(game, small_id, dst).is_none() {
         return false;
     };
+    // TS `sendBoatAttackToNearbyTerraNullius`: `troops = this.player.troops() / 5`
+    // - unlike `Config.boatAttackAmount()`, this is NOT floored.
     let troops = game
         .player_by_small_id(small_id)
-        .map(|p| game.wire.boat_attack_amount(p.troops))
+        .map(|p| p.troops as f64 / 5.0)
         .unwrap_or(0.0);
     if troops < 1.0 {
         return false;
