@@ -1,6 +1,9 @@
 mod batch;
 mod bridge;
+mod engine;
 mod gpu_util;
+#[cfg(feature = "native-engine")]
+mod native;
 mod policy;
 mod train;
 mod vecenv;
@@ -81,6 +84,12 @@ struct Args {
     #[arg(long, default_value = "cpu")]
     device: String,
 
+    /// Simulation backend: "node" (JSONL subprocess per env) or "native"
+    /// (in-process Rust engine; requires the `native-engine` feature and
+    /// passing parity gates - see DEVLOG).
+    #[arg(long, default_value = "node")]
+    engine: engine::EngineKind,
+
     #[arg(long, default_value_t = 1)]
     log_every: u64,
 
@@ -129,6 +138,7 @@ fn main() -> anyhow::Result<()> {
         epochs: args.epochs,
         minibatches: args.minibatches,
         device,
+        engine: args.engine,
         log_every: args.log_every,
         ckpt_every: args.ckpt_every,
         ckpt_dir: args.ckpt_dir,
