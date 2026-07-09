@@ -1603,6 +1603,48 @@ mod tests {
     }
 
     #[test]
+    fn docked_warship_gets_active_healing_in_rn7wbz1y() {
+        let repo_root = std::env::var("OPENFRONT_REPO")
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+        let repo = std::path::Path::new(&repo_root);
+        let path = repo.join("records/0c4c7d7993c9/rN7wbZ1Y.json.gz");
+
+        let before = replay_to_tick(repo, &path, 671);
+        let before_ship = before
+            .player_by_id("xgfz7usc")
+            .and_then(|player| player.units.iter().find(|unit| unit.id == 1369))
+            .expect("warship 1369 upon docking");
+        assert_eq!(before_ship.health, 460);
+        assert_eq!(before_ship.tile, 3_820_018);
+
+        let after = replay_to_tick(repo, &path, 672);
+        let after_ship = after
+            .player_by_id("xgfz7usc")
+            .and_then(|player| player.units.iter().find(|unit| unit.id == 1369))
+            .expect("warship 1369 after docked healing");
+        assert_eq!(after_ship.health, 466);
+        assert_eq!(after_ship.tile, 3_820_018);
+
+        let settled = replay_to_tick(repo, &path, 690);
+        let settled_player = settled
+            .player_by_id("xgfz7usc")
+            .expect("docked warship owner at turn 690");
+        let settled_ship = settled_player
+            .units
+            .iter()
+            .find(|unit| unit.id == 1369)
+            .expect("warship 1369 while docked");
+        assert_eq!(settled_ship.health, 174);
+        let shell = settled_player
+            .units
+            .iter()
+            .find(|unit| unit.id == 1563)
+            .expect("last shell fired before docking");
+        assert_eq!(shell.tile, 3_800_207);
+        assert!(!settled_player.units.iter().any(|unit| unit.id == 1564));
+    }
+
+    #[test]
     fn manual_boat_retreat_matches_giq_through_turn_450() {
         let repo_root = std::env::var("OPENFRONT_REPO")
             .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());

@@ -20,6 +20,7 @@ pub struct WarshipExecution {
     already_sent_shell: HashSet<(u16, i32)>,
     retreat_port: Option<TileRef>,
     retreating: bool,
+    docked: bool,
     active: bool,
 }
 
@@ -37,6 +38,7 @@ impl WarshipExecution {
             already_sent_shell: HashSet::new(),
             retreat_port: None,
             retreating: false,
+            docked: false,
             active: true,
         }
     }
@@ -182,6 +184,24 @@ impl WarshipExecution {
             .map(|unit| unit.tile as TileRef)
     }
 
+    fn heal_at_dock(&self, game: &mut Game, unit_id: i32) {
+        let healing = self
+            .retreat_port
+            .and_then(|port| {
+                game.player_by_small_id(self.owner_small_id)?
+                    .units
+                    .iter()
+                    .find(|unit| unit.unit_type == PORT && unit.tile as TileRef == port)
+                    .map(|unit| unit.level * 5)
+            })
+            .unwrap_or(0);
+        if healing > 0 {
+            if let Some(unit) = game.unit_mut(self.owner_small_id, unit_id) {
+                unit.health = (unit.health + healing).min(1000);
+            }
+        }
+    }
+
     fn retreat(&mut self, game: &mut Game, from: TileRef, unit_id: i32) -> bool {
         let Some(port) = self.retreat_port else {
             self.retreating = false;
@@ -208,6 +228,10 @@ impl WarshipExecution {
             self.shoot_target(game, game.ticks(), from, unit_id, target);
         }
         if game.map.euclidean_dist_squared(from, port) <= 25 {
+            self.docked = true;
+            self.target_tile = None;
+            self.path.clear();
+            self.path_idx = 0;
             return true;
         }
         if self.target_tile != Some(port) {
@@ -256,6 +280,34 @@ impl Execution for WarshipExecution {
             .map(|unit| unit.health)
             .unwrap_or(0);
         self.heal_near_port(game, from, unit_id);
+
+        if self.docked {
+            let port_exists = self.retreat_port.is_some_and(|port| {
+                game.player_by_small_id(self.owner_small_id)
+                    .is_some_and(|owner| {
+                        owner
+                            .units
+                            .iter()
+                            .any(|unit| unit.unit_type == PORT && unit.tile as TileRef == port)
+                    })
+            });
+            if !port_exists {
+                self.docked = false;
+                self.retreating = false;
+                self.retreat_port = None;
+            } else {
+                self.heal_at_dock(game, unit_id);
+                let fully_healed = game
+                    .unit(self.owner_small_id, unit_id)
+                    .is_none_or(|unit| unit.health >= 1000);
+                if !fully_healed {
+                    return;
+                }
+                self.docked = false;
+                self.retreating = false;
+                self.retreat_port = None;
+            }
+        }
 
         if self.retreating && self.retreat(game, from, unit_id) {
             return;
