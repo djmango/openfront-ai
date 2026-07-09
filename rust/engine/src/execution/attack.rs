@@ -339,6 +339,11 @@ impl AttackExecution {
         self.retreating = true;
     }
 
+    /// TS `Attack.retreating()` - read by the RL obs attacks list.
+    pub fn retreating(&self) -> bool {
+        self.retreating
+    }
+
     pub fn execute_retreat(&mut self) {
         self.retreated = true;
     }

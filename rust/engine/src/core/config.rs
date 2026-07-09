@@ -364,6 +364,35 @@ impl Config {
         crate::util::to_int(capped_delta)
     }
 
+    /// Unrounded TS `troopIncreaseRate()` - the RL obs emits the raw float
+    /// (`bridge/common.ts` sends `config.troopIncreaseRate(p)` un-truncated).
+    pub fn troop_increase_rate_raw(
+        &self,
+        player_type: crate::game::PlayerType,
+        troops: i32,
+        tiles_owned: i32,
+        city_level_sum: i64,
+    ) -> f64 {
+        use crate::game::PlayerType;
+        let max = self.max_troops(player_type, tiles_owned, city_level_sum);
+        let mut to_add = 10.0 + (troops as f64).powf(0.73) / 4.0;
+        let ratio = 1.0 - troops as f64 / max;
+        to_add *= ratio;
+        if player_type == PlayerType::Bot {
+            to_add *= 0.5;
+        }
+        if player_type == PlayerType::Nation {
+            to_add *= match self.game_config.difficulty.as_str() {
+                "Easy" => 0.9,
+                "Medium" => 0.95,
+                "Hard" => 1.0,
+                "Impossible" => 1.05,
+                _ => 0.95,
+            };
+        }
+        (troops as f64 + to_add).min(max) - troops as f64
+    }
+
     /// TS `attackAmount()`.
     pub fn attack_amount(&self, player_type: crate::game::PlayerType, troops: i32) -> f64 {
         use crate::game::PlayerType;

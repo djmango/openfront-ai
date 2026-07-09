@@ -72,7 +72,7 @@ impl StubSession {
         }
         game.add_execution(ExecEnum::WinCheck(WinCheckExecution::new()));
         let session = Self { game };
-        let head = build_obs_head(&session.game, AGENT_CLIENT_ID);
+        let head = build_obs_head(&session.game, AGENT_CLIENT_ID, Value::Null);
         let terrain = terrain_bytes(&session.game);
         let tiles = tile_bytes_le(&session.game);
         Ok((session, head, terrain, tiles))
@@ -98,7 +98,7 @@ impl StubSession {
             }
             self.game.execute_next_tick();
         }
-        let mut head = build_obs_head(&self.game, AGENT_CLIENT_ID);
+        let mut head = build_obs_head(&self.game, AGENT_CLIENT_ID, Value::Null);
         if let Some(obj) = head.as_object_mut() {
             obj.insert("wasted".into(), Value::from(wasted));
         }

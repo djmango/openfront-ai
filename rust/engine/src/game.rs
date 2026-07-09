@@ -97,6 +97,12 @@ pub struct Player {
     /// (increased on attack init, decreased on genuine order-retreat cancels).
     /// Used only for `GameImpl.conquerPlayer`'s "never attacked" gold-skip check.
     pub attacks_sent_net: i64,
+    /// TS `PlayerImpl.targets_`  -  (target small_id, tick painted). Read through
+    /// `Game::player_targets` (targetDuration filter) / `Game::can_target`
+    /// (targetCooldown filter); entries are never removed, matching TS.
+    pub target_marks: Vec<(u16, u32)>,
+    /// TS `PlayerImpl.lastDeleteUnitTick` - defaults to -1 (never deleted).
+    pub last_delete_unit_tick: i32,
 }
 
 impl Default for Player {
@@ -129,6 +135,8 @@ impl Default for Player {
             outgoing_land_attacks: Vec::new(),
             incoming_land_attacks: Vec::new(),
             attacks_sent_net: 0,
+            target_marks: Vec::new(),
+            last_delete_unit_tick: -1,
         }
     }
 }
@@ -250,6 +258,10 @@ pub struct Game {
     pub alliances: Vec<AllianceState>,
     pub next_alliance_id: u32,
     /// Same-tick inits not yet appended to `execs` (TS `outgoingAttacks()` batch ordering).
+    /// SAFETY (`unsafe impl Send` below): only ever `Some` inside the
+    /// dynamic extent of `execute_next_tick` (points at a stack local there,
+    /// set/cleared in the same call), so a `Game` moved between threads
+    /// between ticks never carries a live pointer.
     init_merge_batch: Option<*mut Vec<ExecEnum>>,
     /// TS `GameImpl.playerTeams`  -  colored teams for Team mode spawn areas.
     pub player_teams: Vec<String>,
@@ -348,6 +360,10 @@ impl Default for Game {
         }
     }
 }
+
+// SAFETY: see `init_merge_batch` - the only non-Send field is a raw pointer
+// that is guaranteed null outside `execute_next_tick`'s own stack frame.
+unsafe impl Send for Game {}
 
 impl Game {
     pub fn new(
@@ -1595,6 +1611,16 @@ impl Game {
         )
     }
 
+    /// Unrounded variant for the RL obs (`troopIncome` is a raw float in TS).
+    pub fn troop_increase_rate_raw_for(&self, small_id: u16) -> f64 {
+        let Some(p) = self.player_by_small_id(small_id) else {
+            return 0.0;
+        };
+        let city_levels = self.completed_city_level_sum(small_id);
+        self.wire
+            .troop_increase_rate_raw(p.player_type, p.troops, p.tiles_owned, city_levels)
+    }
+
     pub fn can_upgrade_unit(&self, small_id: u16, unit_id: i32) -> bool {
         let Some(p) = self.player_by_small_id(small_id) else {
             return false;
@@ -2147,6 +2173,95 @@ impl Game {
             let entry = p.relations.entry_or_insert(b, 0);
             *entry += delta;
         }
+    }
+
+    /// TS `Config.targetDuration()` - how long a target mark stays visible.
+    pub const TARGET_DURATION_TICKS: u32 = 10 * 10;
+    /// TS `Config.targetCooldown()` - min ticks between a player's own marks.
+    pub const TARGET_COOLDOWN_TICKS: u32 = 15 * 10;
+    /// TS `Config.deleteUnitCooldown()`.
+    pub const DELETE_UNIT_COOLDOWN_TICKS: u32 = 30 * 10;
+
+    /// TS `PlayerImpl.targets()` - marks painted within `targetDuration`.
+    pub fn player_targets(&self, small_id: u16) -> Vec<u16> {
+        let Some(p) = self.player_by_small_id(small_id) else {
+            return Vec::new();
+        };
+        p.target_marks
+            .iter()
+            .filter(|(_, tick)| self.ticks - tick < Self::TARGET_DURATION_TICKS)
+            .map(|(t, _)| *t)
+            .collect()
+    }
+
+    /// TS `PlayerImpl.canTarget(other)`.
+    pub fn can_target(&self, a: u16, b: u16) -> bool {
+        if a == b || self.is_friendly(a, b) {
+            return false;
+        }
+        let Some(p) = self.player_by_small_id(a) else {
+            return false;
+        };
+        !p.target_marks
+            .iter()
+            .any(|(_, tick)| self.ticks - tick < Self::TARGET_COOLDOWN_TICKS)
+    }
+
+    /// TS `PlayerImpl.target(other)` - paint a mark at the current tick.
+    pub fn add_target_mark(&mut self, a: u16, b: u16) {
+        let tick = self.ticks;
+        if let Some(p) = self.player_by_small_id_mut(a) {
+            p.target_marks.push((b, tick));
+        }
+    }
+
+    /// TS `PlayerImpl.canDeleteUnit()`.
+    pub fn can_delete_unit(&self, small_id: u16) -> bool {
+        self.player_by_small_id(small_id).is_some_and(|p| {
+            self.ticks as i64 - p.last_delete_unit_tick as i64
+                >= Self::DELETE_UNIT_COOLDOWN_TICKS as i64
+        })
+    }
+
+    /// Live land attacks (TS `player.outgoingAttacks()` across all players):
+    /// the attack state lives inside `AttackExecution`s on the exec list.
+    pub fn live_attacks(&self) -> impl Iterator<Item = &crate::execution::AttackExecution> {
+        self.execs.iter().filter_map(|e| match e {
+            ExecEnum::Attack(a) if a.attack_live() => Some(a),
+            _ => None,
+        })
+    }
+
+    /// Live transport-ship executions (carried troops for the units obs).
+    pub fn live_transports(
+        &self,
+    ) -> impl Iterator<Item = &crate::execution::TransportShipExecution> {
+        self.execs.iter().filter_map(|e| match e {
+            ExecEnum::TransportShip(t) => Some(t),
+            _ => None,
+        })
+    }
+
+    /// Pending outgoing alliance requests (TS `player.outgoingAllianceRequests()`).
+    pub fn outgoing_alliance_requests(&self, small_id: u16) -> Vec<u16> {
+        self.alliance_requests
+            .iter()
+            .filter(|r| {
+                r.status == AllianceRequestStatus::Pending && r.requestor_small_id == small_id
+            })
+            .map(|r| r.recipient_small_id)
+            .collect()
+    }
+
+    /// Active alliances involving `small_id` (TS `player.alliances()`).
+    pub fn player_alliances(&self, small_id: u16) -> Vec<&AllianceState> {
+        self.alliances
+            .iter()
+            .filter(|al| {
+                al.expires_at > self.ticks
+                    && (al.requestor_small_id == small_id || al.recipient_small_id == small_id)
+            })
+            .collect()
     }
 
     /// TS `PlayerImpl.hasEmbargoAgainst` - `a` has an active embargo against `b`.

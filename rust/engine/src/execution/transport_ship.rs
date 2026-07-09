@@ -45,6 +45,17 @@ impl TransportShipExecution {
         }
     }
 
+    /// Unit id of the in-flight boat (None until init spawns it).
+    pub fn unit_id(&self) -> Option<i32> {
+        self.unit_id
+    }
+
+    /// Carried troops (TS `unit.troops()` for transports lives on the unit;
+    /// natively it lives here, read by the RL obs units list).
+    pub fn carried_troops(&self) -> f64 {
+        self.troops.unwrap_or(0.0)
+    }
+
     fn unit_tile(&self, game: &Game) -> Option<TileRef> {
         let uid = self.unit_id?;
         let p = game.player_by_small_id(self.owner_small_id)?;
