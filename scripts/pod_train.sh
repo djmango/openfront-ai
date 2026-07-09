@@ -25,6 +25,7 @@ STAGE="${STAGE:-0}"
 # OOM lever for late-curriculum maps: the 1/8 grid costs ~4x v3's conv
 # activations at World/Asia sizes; drop to 64 if stage 6+ OOMs.
 MINIBATCH="${MINIBATCH:-128}"
+PPO_EXTRA="${PPO_EXTRA:-}"
 # INIT_BC=bc_v4 warm-starts a FRESH run from that BC run's checkpoint on HF
 # (ignored once the run has its own policy.pt; --init defers to --resume).
 INIT_BC="${INIT_BC:-}"
@@ -204,6 +205,7 @@ while true; do
     MALLOC_MMAP_THRESHOLD_=268435456 MALLOC_TRIM_THRESHOLD_=268435456 \
     $LAUNCH rl.ppo --envs "$ENVS" --updates 100000 --rollout 32 \
     --minibatch "$MINIBATCH" --name "$RUN_NAME" --stage "$STAGE" $COARSE_ARG $RESUME $INIT \
+    $PPO_EXTRA \
     2>&1 | tee -a "/tmp/train_$RUN_NAME.log"
   ELAPSED=$(( $(date +%s) - START_TS ))
   if [ "$ELAPSED" -lt 120 ]; then
