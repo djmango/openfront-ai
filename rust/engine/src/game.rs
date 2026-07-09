@@ -508,6 +508,45 @@ impl Game {
         None
     }
 
+    /// TS `WaterManager.hasWaterComponent` - like `get_water_component` but a
+    /// membership test (used by trade-ship routing to check whether a
+    /// candidate port shares any of a source port's adjacent water bodies).
+    pub fn has_water_component(&self, tile: TileRef, component: u32) -> bool {
+        let Some(hpa) = self.mini_water_hpa.as_ref() else {
+            // TS: permissive fallback for tests with disableNavMesh.
+            return true;
+        };
+        let mini_x = self.map.x(tile) / 2;
+        let mini_y = self.map.y(tile) / 2;
+        let mini_tile = self.mini_map.ref_xy(mini_x, mini_y);
+
+        if self.mini_map.is_water(mini_tile) && hpa.graph.get_component_id(mini_tile) == component
+        {
+            return true;
+        }
+        let mut one_hop = [TileRef::MAX; 4];
+        let n1 = self.mini_map.neighbors4_ts(mini_tile, &mut one_hop);
+        for i in 0..n1 {
+            if self.mini_map.is_water(one_hop[i])
+                && hpa.graph.get_component_id(one_hop[i]) == component
+            {
+                return true;
+            }
+        }
+        for i in 0..n1 {
+            let mut two_hop = [TileRef::MAX; 4];
+            let n2 = self.mini_map.neighbors4_ts(one_hop[i], &mut two_hop);
+            for j in 0..n2 {
+                if self.mini_map.is_water(two_hop[j])
+                    && hpa.graph.get_component_id(two_hop[j]) == component
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     pub fn plan_water_path(&mut self, from: TileRef, to: TileRef) -> bool {
         crate::water::transport_path_into(
             &self.map,
@@ -1309,6 +1348,27 @@ impl Game {
         self.player_by_small_id(small_id)
             .and_then(|p| p.units.iter().find(|u| u.id == unit_id))
             .map(|u| u.tile as TileRef)
+    }
+
+    /// TS `GameImpl.unitCount(type)` - sums `unit.level()` across *all* players
+    /// (dead included, matching `this._players.values()`), not just alive ones.
+    pub fn unit_level_sum_global(&self, unit_type: &str) -> i32 {
+        self.players
+            .iter()
+            .flat_map(|p| p.units.iter())
+            .filter(|u| u.unit_type == unit_type && !u.under_construction)
+            .map(|u| u.level)
+            .sum()
+    }
+
+    /// Find which player (if any) currently owns a unit by id. Used by trade
+    /// ships/ports, which track counterpart structures by id across possible
+    /// land-conquest ownership changes rather than a frozen owner reference.
+    pub fn find_unit_owner(&self, unit_id: i32) -> Option<u16> {
+        self.players
+            .iter()
+            .find(|p| p.units.iter().any(|u| u.id == unit_id))
+            .map(|p| p.small_id)
     }
 
     pub fn unit_level_of(&self, small_id: u16, unit_id: i32) -> i32 {
