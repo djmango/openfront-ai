@@ -524,6 +524,13 @@ pub fn bounded_water_path(
     if starts.is_empty() {
         return None;
     }
+    if std::env::var("DEBUG_LOCAL_BOUNDED").is_ok() {
+        eprintln!(
+            "[native local2] starts={:?} goal={} (x={},y={}) bounds=[{},{}]x[{},{}]",
+            starts.iter().map(|&s| (s, map.x(s), map.y(s))).collect::<Vec<_>>(),
+            goal, map.x(goal), map.y(goal), min_x, max_x, min_y, max_y
+        );
+    }
     let width = map.width;
     let bounds_w = max_x - min_x + 1;
     let bounds_h = max_y - min_y + 1;
@@ -732,16 +739,31 @@ fn bounded_magnitude_penalty(magnitude: u8) -> u32 {
 }
 
 /// TS `SmoothingWaterTransformer` on a mini-map water path.
+pub fn smooth_water_path_pub(map: &GameMap, path: &[TileRef]) -> Vec<TileRef> {
+    smooth_water_path(map, path)
+}
+
+pub fn water_trace_line_pub(map: &GameMap, from: TileRef, to: TileRef) -> Option<Vec<TileRef>> {
+    water_trace_line(map, from, to)
+}
+
 fn smooth_water_path(map: &GameMap, path: &[TileRef]) -> Vec<TileRef> {
     if path.len() <= 2 {
         return path.to_vec();
     }
     let mut smoothed = los_smooth_water(map, path, 2);
     smoothed = refine_water_endpoints(map, &smoothed);
+    if std::env::var("DEBUG_REFINE_ENDPOINTS").is_ok() {
+        eprintln!("[native pass2 output] len={}", smoothed.len());
+        for (i, &t) in smoothed.iter().enumerate() {
+            eprintln!("  pass2[{}]={} x={} y={}", i, t, map.x(t), map.y(t));
+        }
+    }
     los_smooth_water(map, &smoothed, 3)
 }
 
 fn los_smooth_water(map: &GameMap, path: &[TileRef], min_magnitude: u8) -> Vec<TileRef> {
+    let debug = std::env::var("DEBUG_LOS_SMOOTH").is_ok();
     let mut result = vec![path[0]];
     let mut current = 0usize;
     while current < path.len().saturating_sub(1) {
@@ -756,6 +778,13 @@ fn los_smooth_water(map: &GameMap, path: &[TileRef], min_magnitude: u8) -> Vec<T
             } else {
                 hi = mid.saturating_sub(1);
             }
+        }
+        if debug {
+            eprintln!(
+                "[native los minMag={}] current={} farthest={} from={} (x={},y={}) to={} (x={},y={})",
+                min_magnitude, current, farthest, path[current], map.x(path[current]), map.y(path[current]),
+                path[farthest], map.x(path[farthest]), map.y(path[farthest])
+            );
         }
         if farthest > current + 1 {
             if let Some(trace) = water_trace_line(map, path[current], path[farthest]) {
@@ -803,7 +832,7 @@ fn refine_water_endpoints(map: &GameMap, path: &[TileRef]) -> Vec<TileRef> {
         {
             if !seg.is_empty() {
                 seg.reverse();
-                result = result[..=end_start]
+                result = result[..end_start]
                     .iter()
                     .copied()
                     .chain(seg.iter().copied())

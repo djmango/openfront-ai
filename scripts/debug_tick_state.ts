@@ -140,6 +140,7 @@ async function main() {
       playerType: p.type(),
       tilesOwned: p.numTilesOwned(),
       troops: p.troops(),
+      gold: p.gold().toString(),
       units: p.units().length,
       unitHash: p.units().reduce((s, u) => s + u.hash(), 0),
       unitList: p.units().map((u) => ({
@@ -147,8 +148,13 @@ async function main() {
         tile: u.tile(),
         id: u.id(),
         hash: u.hash(),
+        level: u.level(),
       })),
       idHash: simpleHash(p.id()),
+      sharedWater: (() => {
+        const s = (game as any).sharedWaterComponents?.(p);
+        return s ? [...s] : null;
+      })(),
     }))
     .sort((a, b) => b.tilesOwned - a.tilesOwned);
 
