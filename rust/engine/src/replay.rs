@@ -1579,6 +1579,30 @@ mod tests {
     }
 
     #[test]
+    fn damaged_warship_heals_and_retreats_in_rn7wbz1y() {
+        let repo_root = std::env::var("OPENFRONT_REPO")
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+        let repo = std::path::Path::new(&repo_root);
+        let path = repo.join("records/0c4c7d7993c9/rN7wbZ1Y.json.gz");
+
+        let before = replay_to_tick(repo, &path, 659);
+        let before_ship = before
+            .player_by_id("ommet66i")
+            .and_then(|player| player.units.iter().find(|unit| unit.id == 913))
+            .expect("warship 913 before shell impact");
+        assert_eq!(before_ship.health, 725);
+        assert_eq!(before_ship.tile, 2_026_488);
+
+        let after = replay_to_tick(repo, &path, 660);
+        let after_ship = after
+            .player_by_id("ommet66i")
+            .and_then(|player| player.units.iter().find(|unit| unit.id == 913))
+            .expect("warship 913 after shell impact");
+        assert_eq!(after_ship.health, 726);
+        assert_eq!(after_ship.tile, 2_024_288);
+    }
+
+    #[test]
     fn manual_boat_retreat_matches_giq_through_turn_450() {
         let repo_root = std::env::var("OPENFRONT_REPO")
             .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());

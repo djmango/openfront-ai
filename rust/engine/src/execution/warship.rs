@@ -18,6 +18,8 @@ pub struct WarshipExecution {
     path_idx: usize,
     last_shell_attack: u32,
     already_sent_shell: HashSet<(u16, i32)>,
+    retreat_port: Option<TileRef>,
+    retreating: bool,
     active: bool,
 }
 
@@ -33,6 +35,8 @@ impl WarshipExecution {
             path_idx: 0,
             last_shell_attack: 0,
             already_sent_shell: HashSet::new(),
+            retreat_port: None,
+            retreating: false,
             active: true,
         }
     }
@@ -149,6 +153,80 @@ impl WarshipExecution {
             self.already_sent_shell.insert((target.0, target.1));
         }
     }
+
+    fn heal_near_port(&self, game: &mut Game, from: TileRef, unit_id: i32) {
+        let near_port = game
+            .player_by_small_id(self.owner_small_id)
+            .is_some_and(|owner| {
+                owner.units.iter().any(|unit| {
+                    unit.unit_type == PORT
+                        && game.map.euclidean_dist_squared(from, unit.tile as TileRef) <= 150 * 150
+                })
+            });
+        if near_port {
+            if let Some(unit) = game.unit_mut(self.owner_small_id, unit_id) {
+                unit.health = (unit.health + 1).min(1000);
+            }
+        }
+    }
+
+    fn nearest_port(&self, game: &Game, from: TileRef) -> Option<TileRef> {
+        let component = game.get_water_component(from)?;
+        game.player_by_small_id(self.owner_small_id)?
+            .units
+            .iter()
+            .filter(|unit| {
+                unit.unit_type == PORT && game.has_water_component(unit.tile as TileRef, component)
+            })
+            .min_by_key(|unit| game.map.euclidean_dist_squared(from, unit.tile as TileRef))
+            .map(|unit| unit.tile as TileRef)
+    }
+
+    fn retreat(&mut self, game: &mut Game, from: TileRef, unit_id: i32) -> bool {
+        let Some(port) = self.retreat_port else {
+            self.retreating = false;
+            return false;
+        };
+        let port_exists = game
+            .player_by_small_id(self.owner_small_id)
+            .is_some_and(|owner| {
+                owner
+                    .units
+                    .iter()
+                    .any(|unit| unit.unit_type == PORT && unit.tile as TileRef == port)
+            });
+        if !port_exists {
+            self.retreat_port = self.nearest_port(game, from);
+            if self.retreat_port.is_none() {
+                self.retreating = false;
+                return false;
+            }
+            return self.retreat(game, from, unit_id);
+        }
+
+        if let Some(target) = self.target(game, from) {
+            self.shoot_target(game, game.ticks(), from, unit_id, target);
+        }
+        if game.map.euclidean_dist_squared(from, port) <= 25 {
+            return true;
+        }
+        if self.target_tile != Some(port) {
+            self.target_tile = Some(port);
+            if !self.refresh_path(game, from, port) {
+                self.retreating = false;
+                self.retreat_port = None;
+                self.target_tile = None;
+                return false;
+            }
+        }
+        if self.path_idx >= self.path.len() {
+            return true;
+        }
+        let next = self.path[self.path_idx];
+        self.path_idx += 1;
+        game.move_unit(self.owner_small_id, unit_id, next);
+        true
+    }
 }
 
 impl Execution for WarshipExecution {
@@ -173,6 +251,27 @@ impl Execution for WarshipExecution {
             self.active = false;
             return;
         };
+        let health_before_healing = game
+            .unit(self.owner_small_id, unit_id)
+            .map(|unit| unit.health)
+            .unwrap_or(0);
+        self.heal_near_port(game, from, unit_id);
+
+        if self.retreating && self.retreat(game, from, unit_id) {
+            return;
+        }
+        if health_before_healing < 750 {
+            if let Some(port) = self.nearest_port(game, from) {
+                self.retreating = true;
+                self.retreat_port = Some(port);
+                self.target_tile = None;
+                self.path.clear();
+                self.path_idx = 0;
+                if self.retreat(game, from, unit_id) {
+                    return;
+                }
+            }
+        }
         if let Some(target) = self.target(game, from) {
             self.shoot_target(game, tick, from, unit_id, target);
         }
