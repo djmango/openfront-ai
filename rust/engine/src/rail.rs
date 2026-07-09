@@ -202,40 +202,6 @@ impl RailNetwork {
         -1
     }
 
-    pub fn cluster_has_any_trade_destination(&self, cluster_id: u32) -> bool {
-        self.clusters.get(&cluster_id).is_some_and(|c| {
-            c.stations
-                .iter()
-                .any(|sid| self.stations.get(sid).is_some_and(|s| is_trade_type(&s.unit_type)))
-        })
-    }
-
-    /// TS `Cluster.randomTradeDestination` - reservoir sampling. Embargoes are not modeled in
-    /// this engine (see `nation_tick::update_relations_from_embargos`), so `tradeAvailable` is
-    /// unconditionally true here; only the RNG consumption order/count must match TS exactly.
-    pub fn cluster_random_trade_destination(
-        &self,
-        cluster_id: u32,
-        random: &mut PseudoRandom,
-    ) -> Option<u32> {
-        let cluster = self.clusters.get(&cluster_id)?;
-        let mut selected = None;
-        let mut eligible_seen: i32 = 0;
-        for &sid in &cluster.stations {
-            let Some(st) = self.stations.get(&sid) else {
-                continue;
-            };
-            if !is_trade_type(&st.unit_type) {
-                continue;
-            }
-            eligible_seen += 1;
-            if random.next_int(0, eligible_seen) == 0 {
-                selected = Some(sid);
-            }
-        }
-        selected
-    }
-
     pub fn station_cluster(&self, station_id: u32) -> Option<u32> {
         self.stations.get(&station_id).and_then(|s| s.cluster)
     }
@@ -254,6 +220,54 @@ pub fn station_active(game: &Game, rn: &RailNetwork, station_id: u32) -> bool {
     rn.stations
         .get(&station_id)
         .is_some_and(|st| game.unit_exists(st.owner_small_id, st.unit_id))
+}
+
+/// TS `TrainStation.tradeAvailable` - a destination station is available to `source_owner`
+/// if it's the same owner (self-trade), or neither side embargoes the other.
+fn station_trade_available(game: &Game, station: &Station, source_owner: u16) -> bool {
+    station.owner_small_id == source_owner || game.can_trade(station.owner_small_id, source_owner)
+}
+
+/// TS `Cluster.hasAnyTradeDestination`.
+pub fn cluster_has_any_trade_destination(game: &Game, cluster_id: u32, source_owner: u16) -> bool {
+    let rn = &game.rail_network;
+    rn.clusters.get(&cluster_id).is_some_and(|c| {
+        c.stations.iter().any(|sid| {
+            rn.stations.get(sid).is_some_and(|s| {
+                is_trade_type(&s.unit_type) && station_trade_available(game, s, source_owner)
+            })
+        })
+    })
+}
+
+/// TS `Cluster.randomTradeDestination` - reservoir sampling over stations eligible for trade
+/// with `source_owner` (i.e. `TrainStation.tradeAvailable`).
+pub fn cluster_random_trade_destination(
+    game: &Game,
+    cluster_id: u32,
+    source_owner: u16,
+    random: &mut PseudoRandom,
+) -> Option<u32> {
+    let rn = &game.rail_network;
+    let cluster = rn.clusters.get(&cluster_id)?;
+    let mut selected = None;
+    let mut eligible_seen: i32 = 0;
+    for &sid in &cluster.stations {
+        let Some(st) = rn.stations.get(&sid) else {
+            continue;
+        };
+        if !is_trade_type(&st.unit_type) {
+            continue;
+        }
+        if !station_trade_available(game, st, source_owner) {
+            continue;
+        }
+        eligible_seen += 1;
+        if random.next_int(0, eligible_seen) == 0 {
+            selected = Some(sid);
+        }
+    }
+    selected
 }
 
 /// TS `RailNetworkImpl.connectStation` - registers a new station, then either snaps it onto

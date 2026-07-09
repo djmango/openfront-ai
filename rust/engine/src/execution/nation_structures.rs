@@ -157,9 +157,8 @@ struct ReachableStation {
 }
 
 /// TS `NationStructureBehavior.buildReachableStations`  -  own structures weighted by
-/// "self" trade gold, non-bot neighbor structures weighted by team/ally/other trade gold.
-/// Embargoes aren't modeled (mirrors `canTrade`'s existing simplification elsewhere in this
-/// file), so every non-bot neighbor is eligible.
+/// "self" trade gold, non-bot non-embargoed neighbor structures weighted by team/ally/other
+/// trade gold.
 fn build_reachable_stations(game: &Game, small_id: u16) -> Vec<ReachableStation> {
     let rn = &game.rail_network;
     let max_trade_gold = (game.wire.train_gold(TrainRelation::Ally, 0) as f64).max(1.0);
@@ -183,6 +182,9 @@ fn build_reachable_stations(game: &Game, small_id: u16) -> Vec<ReachableStation>
     for neighbor_id in crate::execution::ai_attack::nearby_player_small_ids(game, small_id) {
         let Some(neighbor) = game.player_by_small_id(neighbor_id) else { continue };
         if neighbor.player_type == crate::game::PlayerType::Bot {
+            continue;
+        }
+        if !game.can_trade(small_id, neighbor_id) {
             continue;
         }
         let rel = if game.players_on_same_team(small_id, neighbor_id) {
@@ -604,8 +606,8 @@ fn player_water_touch(
 }
 
 /// TS `SharedWaterCache.build`  -  ocean is always shared once touched (no partner
-/// requirement); a lake is shared only if some other non-bot, alive player also
-/// touches it (mirrors `canTrade`, which is always true since embargoes aren't modeled).
+/// requirement); a lake is shared only if some other non-bot, alive player who can still
+/// trade with this one (no mutual embargo) also touches it.
 fn build_shared_water_cache(
     game: &Game,
 ) -> HashMap<u16, Option<std::collections::HashSet<u32>>> {
@@ -630,7 +632,10 @@ fn build_shared_water_cache(
         }
         for c in lakes {
             if let Some(partners) = lake_partners.get(c) {
-                if partners.iter().any(|other| other != small_id) {
+                if partners
+                    .iter()
+                    .any(|other| other != small_id && game.can_trade(*small_id, *other))
+                {
                     shared.insert(*c);
                 }
             }

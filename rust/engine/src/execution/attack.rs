@@ -80,7 +80,7 @@ impl AttackExecution {
 }
 
 impl Execution for AttackExecution {
-    fn init(&mut self, game: &mut Game, _: u32) {
+    fn init(&mut self, game: &mut Game, tick: u32) {
         if !self.active || self.initialized {
             return;
         }
@@ -104,20 +104,31 @@ impl Execution for AttackExecution {
                 return;
             }
             let def = game.player_by_id(tid).unwrap();
-            if def.small_id == self.owner_small_id {
+            let def_small_id = def.small_id;
+            let def_type = def.player_type;
+            if def_small_id == self.owner_small_id {
                 self.active = false;
                 return;
             }
-            if game.is_friendly(self.owner_small_id, def.small_id) {
+            if game.is_friendly(self.owner_small_id, def_small_id) {
                 self.active = false;
                 return;
             }
-            if !game.can_attack_player(self.owner_small_id, def.small_id) {
+            // TS `AttackExecution.init`: unconditional automatic temporary embargo (applied
+            // before the `canAttackPlayer` gate below, regardless of its outcome) when
+            // neither side is a raider Bot ("Don't let bots embargo since they can't trade
+            // anyway"). Also rejects any pending alliance request the target has outstanding
+            // toward the attacker.
+            if owner_type != PlayerType::Bot && def_type != PlayerType::Bot {
+                game.add_embargo(def_small_id, self.owner_small_id, true, tick);
+                game.reject_alliance_request(def_small_id, self.owner_small_id);
+            }
+            if !game.can_attack_player(self.owner_small_id, def_small_id) {
                 self.active = false;
                 return;
             }
             self.target_is_player = true;
-            self.target_small_id = def.small_id;
+            self.target_small_id = def_small_id;
         } else {
             self.target_is_player = false;
             self.target_small_id = game.terra_nullius_id();

@@ -73,6 +73,7 @@ impl Execution for PlayerExecution {
         }
 
         game.expire_alliances_for(self.small_id);
+        game.expire_temporary_embargoes_for(self.small_id);
 
         crate::execution::player_clusters::maybe_remove_clusters(game, self.small_id, tick);
     }
