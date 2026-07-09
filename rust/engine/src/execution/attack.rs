@@ -137,6 +137,9 @@ impl Execution for AttackExecution {
             game.remove_troops(self.owner_small_id, start);
         }
         self.troops = start;
+        // TS `stats().attack(owner, target, startTroops)` - recorded before
+        // opposing-attack cancellation/merge, using the pre-merge start amount.
+        game.adjust_attacks_sent(self.owner_small_id, start);
 
         if let Some(p) = game.player_by_small_id_mut(self.owner_small_id) {
             self.attack_id = p.id_prng.next_id();
@@ -426,6 +429,12 @@ impl AttackExecution {
         let survivors = (troops - deaths).max(0.0);
         if survivors >= 1.0 {
             game.add_troops(self.owner_small_id, survivors);
+        }
+        // TS `stats().attackCancel(...)` only fires for genuine order-retreats
+        // (`Attack.retreated()`), not the auto-retreats used to end an attack
+        // that ran out of tiles/troops or hit a since-allied target.
+        if self.retreated {
+            game.adjust_attacks_sent(self.owner_small_id, -survivors);
         }
         self.troops = 0.0;
         self.kill_attack(game);
