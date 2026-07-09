@@ -15,15 +15,23 @@
 set -uo pipefail
 
 RUN_NAME="${RUN_NAME:-ppo_auto}"
-# ENVS must be divisible by NPROC (each rank owns ENVS/NPROC envs);
-# v6.1 fat-node target: ENVS=384 NPROC=4.
+# ENVS must be divisible by NPROC (each rank owns ENVS/NPROC envs).
+# ENVS=auto sizes the fleet from measured history: the trainer writes a
+# suggested_envs hint into state.json every update (scaled by the observed
+# update/rollout time ratio - rollout is fully overlapped, so envs idle
+# whenever roll < upd), and each relaunch of the loop below re-reads it.
+# Cold start (no state.json yet) defaults to 6 envs/core, capped at 1024.
 ENVS="${ENVS:-48}"
 # GPUs: 1 -> plain python (single-process, identical to pre-v6.1);
 # >1 -> torchrun DDP, one rank per GPU.
 NPROC="${NPROC:-1}"
 STAGE="${STAGE:-0}"
+ROLLOUT="${ROLLOUT:-32}"
 # OOM lever for late-curriculum maps: the 1/8 grid costs ~4x v3's conv
 # activations at World/Asia sizes; drop to 64 if stage 6+ OOMs.
+# MINIBATCH=auto keeps optimizer steps/update constant as ENVS scales
+# (ROLLOUT*ENVS/12, i.e. 12 minibatches x epochs), so bigger fleets mean
+# bigger kernels instead of more per-step overhead.
 MINIBATCH="${MINIBATCH:-128}"
 PPO_EXTRA="${PPO_EXTRA:-}"
 # INIT_BC=bc_v4 warm-starts a FRESH run from that BC run's checkpoint on HF
@@ -177,13 +185,37 @@ fi
 
 # --- crash-proof training loop (with crash-loop backoff: an auto-restart
 # that relaunches into the same wall every 10s is not auto-recovery) ---
+ulimit -n 65535 2>/dev/null || true
 FAST_EXITS=0
 while true; do
   RESUME=""
   if [ -f "runs/rl/$RUN_NAME/policy.pt" ]; then
     RESUME="--resume runs/rl/$RUN_NAME/policy.pt"
   fi
-  echo "=== $(date -u +%FT%TZ) launching $RUN_NAME $RESUME ==="
+  # Resolve auto sizing fresh each iteration: a restart is the only point
+  # where the env fleet can be resized, so adopt the latest measured hint.
+  if [ "$ENVS" = "auto" ]; then
+    ENVS_RUN=$(python - "$RUN_NAME" "$NPROC" <<'PY'
+import json, os, sys
+run, nproc = sys.argv[1], int(sys.argv[2])
+envs = min(6 * (os.cpu_count() or 8), 1024)  # cold default
+try:
+    envs = int(json.load(open(f"runs/rl/{run}/state.json"))["suggested_envs"])
+except Exception:
+    pass
+print(max(envs - envs % (2 * nproc), 2 * nproc))
+PY
+)
+  else
+    ENVS_RUN="$ENVS"
+  fi
+  if [ "$MINIBATCH" = "auto" ]; then
+    MINIBATCH_RUN=$(( ROLLOUT * ENVS_RUN / 12 ))
+    [ "$MINIBATCH_RUN" -lt 512 ] && MINIBATCH_RUN=512
+  else
+    MINIBATCH_RUN="$MINIBATCH"
+  fi
+  echo "=== $(date -u +%FT%TZ) launching $RUN_NAME envs=$ENVS_RUN minibatch=$MINIBATCH_RUN $RESUME ==="
   START_TS=$(date +%s)
   # MALLOC_*: see pod_bc.sh - keeps large per-batch buffers on the reusable
   # heap instead of per-batch mmap/munmap (glibc caps its dynamic threshold
@@ -203,8 +235,8 @@ while true; do
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONPATH=. \
     NCCL_NVLS_ENABLE=0 \
     MALLOC_MMAP_THRESHOLD_=268435456 MALLOC_TRIM_THRESHOLD_=268435456 \
-    $LAUNCH rl.ppo --envs "$ENVS" --updates 100000 --rollout 32 \
-    --minibatch "$MINIBATCH" --name "$RUN_NAME" --stage "$STAGE" $COARSE_ARG $RESUME $INIT \
+    $LAUNCH rl.ppo --envs "$ENVS_RUN" --updates 100000 --rollout "$ROLLOUT" \
+    --minibatch "$MINIBATCH_RUN" --name "$RUN_NAME" --stage "$STAGE" $COARSE_ARG $RESUME $INIT \
     $PPO_EXTRA \
     2>&1 | tee -a "/tmp/train_$RUN_NAME.log"
   ELAPSED=$(( $(date +%s) - START_TS ))
