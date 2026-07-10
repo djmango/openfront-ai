@@ -379,8 +379,8 @@ fn is_alliance_partner_similarly_strong(
         return false;
     };
 
-    let player_outgoing = game.outgoing_land_troops(small_id);
-    let other_outgoing = game.outgoing_land_troops(other_small_id);
+    let player_outgoing = game.outgoing_attack_troops(small_id);
+    let other_outgoing = game.outgoing_attack_troops(other_small_id);
     let player_total = player.troops as f64 + player_outgoing;
     let other_total = other.troops as f64 + other_outgoing;
 
