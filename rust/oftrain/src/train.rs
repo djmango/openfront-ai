@@ -726,8 +726,17 @@ pub fn run(cfg: Config) -> Result<()> {
         let next_pending = next_pending?;
 
         let mut advanced = false;
+        let debug_eps = std::env::var("OFTRAIN_DEBUG_EPISODES").is_ok();
         for result in &next_pending {
             for info in &result.ep_infos {
+                if debug_eps {
+                    eprintln!(
+                        "[ep] reward={:.3} len={} tiles={:.1} tick={} place={}/{} score={:.3} won={} wasted={} stage={} rehearsal={} map={}",
+                        info.reward, info.length, info.final_tiles, info.final_tick,
+                        info.place, info.n_players, info.score, info.won, info.wasted,
+                        info.stage, info.rehearsal, info.map
+                    );
+                }
                 ep_rewards.push(info.reward);
                 ep_lengths.push(info.length);
                 if info.stage == curr_stage && !info.rehearsal {
@@ -736,6 +745,9 @@ pub fn run(cfg: Config) -> Result<()> {
                     }
                     recent_wins.push_back(if info.won { 1.0 } else { 0.0 });
                     let win_rate = recent_wins.iter().sum::<f64>() / recent_wins.len() as f64;
+                    if debug_eps {
+                        eprintln!("[win_rate] {:.3} (window={}/{})", win_rate, recent_wins.len(), ofcore::curriculum::WINDOW);
+                    }
                     if recent_wins.len() == ofcore::curriculum::WINDOW
                         && win_rate > stages[curr_stage].win_at
                         && curr_stage < stages.len() - 1
