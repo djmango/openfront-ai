@@ -114,6 +114,13 @@ impl GameMap {
         self.terrain[t as usize]
     }
 
+    /// Raw terrain byte plane, one entry per tile. Lets callers that want
+    /// every tile (e.g. `session::terrain_bytes`) copy the whole buffer at
+    /// memcpy speed instead of looping `terrain_byte(i)` one tile at a time.
+    pub fn terrain_bytes(&self) -> &[u8] {
+        &self.terrain
+    }
+
     pub fn is_valid_coord(&self, x: i32, y: i32) -> bool {
         x >= 0 && y >= 0 && (x as u32) < self.width && (y as u32) < self.height
     }
