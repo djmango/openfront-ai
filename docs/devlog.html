@@ -30,6 +30,7 @@
   <a href="#now">Now</a> ·
   <a href="#rust-port">Rust port</a> ·
   <a href="#v8-plan">ppo_v8 plan</a> ·
+  <a href="#parity-handoff">Parity handoff</a> ·
   <a href="#runs">Run ledger</a> ·
   <a href="#timeline">Timeline</a> ·
   <a href="#bc-verdict">BC verdict</a> ·
@@ -1945,6 +1946,98 @@ sweep.</p>
   fully unattended for the first day, until the resume/crash-recovery path has actually been proven
   under a real crash, not just the smoke test in the prerequisites.</li>
 </ul>
+
+<h2 class="date" id="parity-handoff">Jul 10, 2026 - evening: parity push handoff (in-flight when this was written)</h2>
+<p class="session">Status snapshot for whoever picks this up next - some of this is mid-flight. Goal:
+push native-vs-TS outcome parity from the "curriculum-relevant parity is genuinely good, higher bot
+counts have a residual gap" state (see <a href="#rust-six-done">earlier today</a>) toward 90-95%.</p>
+
+<h3 id="parity-done">Landed today, on master (all merged and pushed)</h3>
+<ol>
+  <li><b>Root-caused the tick-1498 "double attack" divergence</b> (branch
+  <code>agent/bot-ai-parity-double-attack</code>, merged in <code>750f1bc</code>): native's
+  <code>find_incoming_land_attacker</code> excluded boat-landed incoming attacks and was missing
+  alive/friendly checks that TS's <code>AiAttackBehavior.findIncomingAttackPlayer</code> applies -
+  native missed a real retaliation opportunity TS correctly found, so the two engines sent two
+  *different* single attacks with different troop-cost formulas (not literally "two attacks by one
+  engine" as the symptom first suggested). A second, independent instance of the same bug class:
+  <code>nearby_players_ts_order</code> incorrectly dropped TerraNullius, changing a shuffled-target
+  array's length. Both fixed; byte-identical prefix in the 50-bot BlackSea test game grew from
+  tick ~1497 to ~1646.</li>
+  <li><b>Systemic order/PRNG audit</b> (branch <code>agent/pr-order-bugs-hunt</code>, merged in
+  <code>532a321</code>): systematically checked every neighbor/border-iteration call site, every
+  <code>HashSet</code> usage that's later iterated (TS <code>Set</code>s preserve insertion order;
+  Rust <code>HashSet</code>s don't - a structural category the earlier neighbor-order investigation
+  didn't check), 20+ PRNG draw sites, and the per-tick execution-loop order. Found and fixed: a
+  missing <code>is_impassable</code> filter, <code>attack_bots</code> sorting only by density
+  instead of TS's primary <code>ownsStructures</code> key, <code>get_attack_front_tiles</code>
+  discarding border-tile insertion order (feeding a PRNG-driven sampler), undercounted outgoing
+  attack troops, and an entirely missing Hard/Impossible-only weak-ally-betrayal branch.</li>
+  <li><b>Found and fixed a test-harness bug, not an engine bug</b> (branch
+  <code>agent/bot-ai-parity-rate</code>, merged in <code>6ba2fff</code>) - this one matters a lot:
+  the curriculum-parity gate (<code>scripts/run_curriculum_parity_gate.sh</code>) was reusing the
+  *other* gate's frozen <code>PARITY_COMMIT</code> (pinned for the 78-record archived-real-games
+  dataset, where that pin is correct and necessary) for its own freshly-synthesized records, which
+  have no archival tie to any commit at all. That frozen commit predates upstream TS's own
+  neighbor-iteration-order fix - the TS-side counterpart of the exact bug the first investigation
+  fixed on the native side. Every curriculum-parity number measured up to this point (including the
+  "22/40, 55%" and "14/40" and "6/48" figures logged earlier today) was comparing current, already-
+  fixed native against <i>stale, pre-fix TS</i> - native was right, the oracle wasn't. Concretely:
+  the <code>bots=0</code> bucket's "native wins 30-40% faster" pattern, which looked like a genuine
+  rate bug and got a full investigation, turned out to be 100% a harness artifact - after the fix,
+  win-tick ratio across 6 seeds went from 0.975-1.679 to 1.0002 for all 6. Fixed: the script now
+  pins to whatever commit the superproject's own <code>openfront</code> gitlink points at.</li>
+</ol>
+
+<h3 id="parity-inflight">In-flight when this was written: the first TRUE baseline</h3>
+<p>Every curriculum-parity number logged before today's harness fix (<code>agent/bot-ai-parity-rate</code>)
+is now known to be measured against a stale oracle and should be <b>disregarded</b> - it's not
+comparable to anything post-fix. A corrected run (<code>curriculum-parity-v4</code>, 6 games/bucket
+x 8 buckets = 48 records, 20000-tick horizon so games reach genuine dominance rather than a
+timer-cutoff snapshot) was kicked off and was still running when this section was written -
+check for it:</p>
+<pre>tail -f /tmp/curr_v4.log   # progress (stderr)
+cat /tmp/curr_v4.out       # full report once done (stdout)</pre>
+<p>Early signal before this session ended: <b><code>bots=0</code> went 6/6 (100%) pass</b> on the
+corrected run, vs. the stale-oracle run's spurious 50%/17% timing-mismatch noise - strong
+confirmation the harness fix is real and the earlier bot-AI fixes are working. The rest of the
+buckets (5/10/30/50/80/120/150) hadn't finished comparing yet. <b>If the background job died or was
+never resumed, relaunch it</b> (records are already generated and cached, so a bare rerun without
+<code>--regenerate</code> reuses them and just re-runs the native-vs-TS comparison, which is the
+faster part):</p>
+<pre>CURRICULUM_PARITY_LABEL=curriculum-parity-v4 \
+CURRICULUM_RECORDS_DIR=/Users/djmango/github/openfront-ai/records/curriculum-parity-v4 \
+CURRICULUM_RECORD_TIMEOUT_SECONDS=900 \
+bash scripts/run_curriculum_parity_gate.sh</pre>
+
+<h3 id="parity-next">Next steps once the corrected baseline is in</h3>
+<ol>
+  <li><b>Read the actual numbers first.</b> Bucket-by-bucket pass rate + the
+  <code>avg_tiles_ratio</code>/<code>avg_land_share_delta</code> columns (see
+  <code>scripts/analyze_curriculum_parity.py</code>) tell you whether remaining failures are still
+  "genuine dominance reached, disagree on exact winner in a close race" (the pattern seen at 30+
+  bots before the harness fix) or something new/worse. Don't assume the old failure characterization
+  still holds post-fix - re-diagnose from the fresh non-pass record dump.</li>
+  <li><b>If 30+ bots still show the "wrong narrow leader in a crowded field" pattern</b>, that's
+  the remaining frontier. Use the tick-dump tooling (<code>scripts/gen_selfplay_record.ts</code> +
+  <code>rust/engine/src/bin/tick_dump.rs</code> + <code>scripts/dump_ts_tick_state.ts</code> +
+  <code>scripts/compare_tick_dumps.py</code> - see the three <code>docs/bot-ai-parity-*/README.md</code>
+  reports for methodology) on a moderate bot count (~30-50, fast iteration) to bisect the first
+  divergence tick on a *fresh* game/seed, since the ones already bisected are likely fixed now.
+  Expect another round of "small, individually-plausible-looking divergence, systemically
+  compounds" bugs in the same family as the four found today - PRNG-consumption-order and
+  insertion-order bugs are the highest-value category based on today's hit rate.</li>
+  <li><b>Consider whether 90-95% is the right bar for the highest bot-count buckets specifically.</b>
+  Very-crowded near-simultaneous-dominance races (many nations converging on ~100% land share within
+  a few hundred ticks of each other) may be inherently sensitive to arbitrarily small state
+  differences in a way that's expensive to fully close - if the 0-30-bot buckets (which cover most
+  of the RL curriculum's early/mid stages) get clean while 80-150 (late curriculum only) keeps a
+  residual gap, that may be an acceptable place to stop rather than chasing diminishing returns -
+  make that call with real numbers in hand, not preemptively.</li>
+  <li><b>Once satisfied, this all feeds back into the <a href="#v8-plan">ppo_v8 launch plan</a></b> -
+  the plan's model-size/foveation decision is still open, and stronger parity data at the bot counts
+  the curriculum actually uses removes one more source of uncertainty before pressing go.</li>
+</ol>
 
 <h2 class="date" id="reference">Reference and open threads</h2>
 <p class="session">Tooling, bugs, lessons, infra, recipes, backlog.</p>
