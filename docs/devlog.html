@@ -28,6 +28,7 @@
 
 <nav class="toc">
   <a href="#now">Now</a> ·
+  <a href="#rust-port">Rust port</a> ·
   <a href="#runs">Run ledger</a> ·
   <a href="#timeline">Timeline</a> ·
   <a href="#bc-verdict">BC verdict</a> ·
@@ -57,15 +58,25 @@
 </nav>
 
 <div class="now" id="now">
-  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 9th, 2026</h2>
-  <p><b><code>ppo_v7</code> is killed</b> (update 355, checkpoint synced to HF) after a
-  <a href="#gpu-util-killed">GPU utilization push</a> hit a hard ceiling around 70-72%: env
-  auto-sizing, update sub-batch bucketing, and batching the foveated coverage/content masks
-  took throughput 2,650 &rarr; ~10-13k game-ticks/s (4-5x), but the remaining gap is the
-  Node.js game-engine subprocess bridge itself, not anything left to squeeze in Python. Next:
-  port <code>rl/vec.py</code>'s engine bridge to Rust (shared-memory/FFI instead of pipes)
-  before resuming training - see <a href="#native">the existing Rust hot-path work</a> for
-  precedent. 4x H200 pod being torn down; no GPU spend during the port.</p>
+  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 10th, 2026</h2>
+  <p><b>The Rust port is real and merged to master</b> (<a href="#rust-port">full session</a>):
+  PPO trainer on tch-rs, the game engine itself running <i>in-process</i> as native Rust (no
+  Node, no pipes, no JSON IPC), ~19 outcome-parity fixes landed, engine stepping at 130-150k
+  ticks/s standalone (~10x the old IPC ceiling), and <b>81-82% sustained GPU utilization</b>
+  (honest time-averaged, not snapshot) through a 150-update A100 stability run. The sweep
+  taught a law: utilization tracks the train/collect compute ratio, so cheaper networks buy
+  throughput and cost util% - decisions/s/$ is the real metric. Pod torn down after
+  validation.</p>
+  <p><b>The blocker is no longer speed, it's learning:</b> every episode in every config
+  truncates at the tick limit with <code>won=false</code> - the 80%-of-map FFA win condition is
+  unreachable for a policy that plateaus at half the map with collapsed entropy, so the
+  curriculum never advances past stage 0 (<a href="#rust-stall">details</a>). Fix the entropy
+  schedule / expansion reward / early-stage win semantics before spending on scale - the
+  ordered plan is in <a href="#rust-next">next steps</a>.</p>
+  <p class="d" style="margin:.75rem 0 0">Previous: <b><code>ppo_v7</code> killed</b> (update
+  355, checkpoint on HF) after the <a href="#gpu-util-killed">Python GPU-utilization push</a>
+  plateaued at 70-72% against the Node subprocess bridge - the wall that motivated this whole
+  port.</p>
   <p>Prior to the util push: the <a href="#v7-fovea">foveated two-stream</a> policy trained
   from scratch on that pod, coarse /16 stream on the fine-tuned <code>ae_v31_d16c32</code>.
   rl5 / <code>ppo_v61</code> was killed once v7 cleared stage 0 stably. Two mid-run fixes
@@ -1416,6 +1427,165 @@ than continuing to squeeze the Python side.</p>
 roll-win 0.25). Final checkpoint + <code>state.json</code> synced to
 <code>djmango/openfront-rl</code> on HF before teardown - resumable once the Rust-backed vec env
 lands. The 4x H200 pod is being torn down; no GPU spend while the port is in progress.</p>
+
+<h2 class="date" id="rust-port">July 9th-10th, 2026 - the Rust port: trainer, native engine, and the utilization ceiling that moved</h2>
+<p class="session">PPO trainer ported to Rust/tch, then the game engine itself went native in-process.
+IPC is dead. Sustained GPU util 55% &rarr; 82% on a single A100, engine ticks 12-14k &rarr; 130-150k/s
+standalone. And one honest learning-signal finding that matters more than any of the speed numbers.</p>
+
+<h3 id="rust-trainer">The trainer port (<code>rust/oftrain</code>, tch-rs/libtorch)</h3>
+<p>Full port of the PPO training path (<code>rl/ppo.py</code> + <code>rl/vec.py</code> +
+<code>rl/obs.py</code> + curriculum + translator + policy) to a Rust cargo workspace:
+<code>ofcore</code> (Python-free featurization/curriculum/translate), <code>oftrain</code>
+(bridge client, threaded vec-env - one OS thread per env, no GIL so no multiprocessing/pickle -
+tch policy net, PPO loop, checkpointing, <code>nvidia-smi</code>-polling util sampler). BC
+warm-start and AE training explicitly out of scope; policy sees raw pooled grid planes instead
+of an AE latent for now.</p>
+<p>Two libtorch linking footguns worth never re-deriving: (1) <code>tch 0.24</code> is
+hard-pinned to torch 2.11.0 - and not just by version string: its C++ shim <i>calls ATen ops
+that don't exist in older torch headers</i>, so it fails to compile (not link) against a pod's
+stock torch 2.8. Fix both locally and on pods: dedicated venv with pinned
+<code>torch==2.11.0</code> (CUDA pods: <code>+cu128</code> wheel), <code>LIBTORCH</code>
+pointed at it. (2) The big one: <b>CUDA silently not linked.</b> Nothing in our Rust references
+a <code>torch_cuda</code> symbol directly (kernels self-register via static initializers), so
+the linker's <code>--as-needed</code> drops <code>libtorch_cuda.so</code> entirely -
+<code>Device::Cuda(0)</code> "works" and then every real op panics. Known upstream (tch-rs
+#907/#1015). Fix: <code>oftrain/build.rs</code> re-asserts
+<code>-Wl,--no-as-needed -ltorch_cuda -lc10_cuda</code> from the <i>binary</i> crate;
+<code>readelf -d</code> to verify. Plus the returning NVRTC cameo: <code>lgamma</code> (Beta
+quantity head) needs <code>libnvrtc-builtins</code> from the separate nvidia pip package on
+<code>LD_LIBRARY_PATH</code>.</p>
+
+<h3 id="rust-gpu-rounds">Rounds 1-3 on RunPod: the utilization number that lied, then the one that didn't</h3>
+<p>First A100 runs looked great - "98-100% GPU util" - until scaling to 4 and 8 GPUs exposed
+that those were <i>instantaneous snapshots at the logging moment</i>, not time-averaged
+utilization. The honest metric (<code>min_mean_util</code>, cumulative time-average across the
+run) said 36-41%: the GPU burst to 100% during the update and sat idle through the whole
+CPU/IPC-bound rollout. Same trap the Python <a href="#gpu-util-killed">ppo_v7 push</a> fell
+into from the other side. Fixes that actually moved it: <b>pipelined actor/learner</b>
+(collect rollout N+1 on background threads with a frozen actor copy while the learner trains on
+N - classic one-step-lag IMPALA-style overlap, done with scoped threads and disjoint
+actor/learner struct borrows), GPU-resident minibatching (build full batch tensors once,
+<code>index_select</code> on-device per minibatch), flattened gradient sync for multi-GPU
+(manual replica averaging, "poor man's DDP" - 4-GPU scaled ~5x over 1-GPU). Result: 66-68%
+sustained, 330 &rarr; 560 decisions/s, and a measured dead end: <code>fwdbwd</code> was ~1s per
+512-sample minibatch of genuine saturated compute, and the rollout side was pinned to the
+wall-clock of <b>Node.js subprocesses talking JSON over pipes</b> - the exact same ceiling
+Python hit. One instrumentation bug worth remembering: timing both phases from the same join
+point made <code>collect_s == train_s</code> on every line - time the inner work directly, and
+let the join cost land on the phase that actually waits.</p>
+
+<h3 id="rust-native">Going native: the engine moves in-process</h3>
+<p>Instead of optimizing the pipe protocol (shared memory/FFI to the same Node engine - real
+work, throwaway destination), the call was to go all-in on the <b>native Rust engine port</b>
+(<code>rust/engine</code>, the <code>rust-ofrs-fast</code> workstream): the environment becomes
+a plain Rust object (<code>RlSession</code> mirroring <code>bridge/env.ts</code>'s
+reset/step/countWasted), and <code>oftrain</code> grows a <code>GameEngine</code> trait with
+two backends - <code>Node</code> (the old bridge, kept for A/B) and <code>Native</code>
+(in-process, zero IPC). Porting the RL surface meant porting the full observation head
+(<code>obsCore.ts</code> entities/legality field-for-field), the TS percentage-based FFA win
+check (80% of <i>total map tiles</i>, checked every 10 ticks - not last-alive), missing intent
+executions (<code>targetPlayer</code>), and spawn-phase termination for singleplayer. One Rust
+wart: <code>Game</code> held a raw pointer for the execution list, making it
+<code>!Send</code>; documented <code>unsafe impl Send</code> after confirming single-thread
+ownership per session.</p>
+
+<h3 id="rust-parity">The outcome-parity campaign: hash parity was the wrong bar</h3>
+<p>Exact hash parity (every tick, every record, bit-identical) was costing more than it bought
+for RL purposes - what training needs is <i>outcome</i> parity: same winner, similar terminal
+conditions. New gate: replay all 78 archived human-game records through both engines, compare
+winner identity, terminal tick (&plusmn;20%), winner land share (&plusmn;10%); target 55/78
+(70%). The TS side became a <b>cached oracle</b> (one-time expensive TS replay per record,
+resumable per-record shards, parallel child processes, fingerprinted by record-set hash +
+parity commit) so iterating on the native side never re-pays the TS cost. Then a long
+divergence-fixing grind, one root cause per commit, ~19 landed: win-condition semantics (FFA
+ordering, team aggregation, timers, bot suppression), random-boat target filtering and troop
+caps, nation defense-post sampling bounds, alliance-triggered attack retreats returning all
+troops, relation clamping to TS bounds + per-tick decay toward neutral + cross-alliance-only
+boosts, reciprocal alliance requests canceling in-flight nukes, manual boat retreat execution,
+island invasion target selection, city rail-connectivity placement scoring, and the warship
+suite (construction, patrol, shell targeting/flight, damaged/docked healing lifecycle, trade
+piracy + post-piracy patrol replan). The full-78 gate run is grinding in a pinned worktree as
+of this writing; per-cluster spot checks pass.</p>
+
+<h3 id="rust-perf">Native hot path: 4.9x single-thread, ~10x the old IPC ceiling</h3>
+<p>Standalone benchmark (<code>rust/engine/examples/bench_rl_session.rs</code>, no policy, no
+IPC): raw <code>RlSession</code> stepping went 9.3k &rarr; 45k ticks/s single-threaded, 51-58k
+&rarr; 130-152k ticks/s across 8 threads. The embarrassing hot spot: a scalar per-tile loop
+re-encoding the full tile plane to bytes on <i>every step</i>, eaten immediately by a decode
+back to <code>u16</code> on the trainer side - ~78% of step time paying for a serialization
+format whose only consumer no longer exists. Fixes: memcpy-fast-path encoding (unit-tested
+byte-identical), <code>Value::Array</code> built straight from iterators (no intermediate
+Vecs), and a zero-copy <code>tile_state() -&gt; &amp;[u16]</code> accessor so the native
+backend skips bytes entirely. Correctness pinned by bit-identical obs JSON on fixed seeds
+before/after, and parity tests failing <i>identically</i> (same tick, same hash) on base vs.
+optimized - pre-existing oracle staleness, not regression. A rayon batched-stepping path exists
+behind a <code>parallel</code> feature but plain thread-sharding measured 20-40% faster -
+memory-bandwidth-bound, not scheduler-bound.</p>
+
+<h3 id="rust-a100">A100 validation: 82% sustained, and the law the sweep taught us</h3>
+<p>Fresh 1x A100 SXM pod, <code>--engine native</code>, 64 envs x 32 rollout, full policy:
+<b>81-82% sustained time-averaged utilization</b> (the honest metric), flat through a
+150-update / ~30min stability run, zero crashes, ~173 steps/s, <code>collect_s &asymp;
+train_s</code> - collection and training genuinely overlapped and balanced. Every config swept
+told the same story from a different angle: 96 envs &rarr; 76-78% (collection scales linearly,
+no fixed overhead to amortize); 128 envs + foveation &rarr; 58-64% <i>despite</i> fitting more
+envs (cheaper obs = less GPU work = balance tips back to collection-bound); 192 envs + small
+policy (GC=128/BLOCKS=2) &rarr; highest raw throughput of anything tried (~285 steps/s) at the
+<i>lowest</i> utilization (37%); 256 envs full-res &rarr; OOM (the 250x150x63 obs batch alone
+is ~77GB at that scale - real ceiling, not fragmentation). <b>The law: in this pipelined
+architecture, utilization tracks the ratio of GPU-bound train compute to CPU-bound collect
+compute - anything that makes the network cheaper buys throughput and <i>costs</i>
+utilization.</b> Chasing the util percentage with a bigger network would be goodharting;
+decisions/s/$ is the metric that matters, and the small-policy config wins it by a mile
+<i>if</i> it learns as well per sample. Also landed flag-gated and GPU-verified: <code>--amp</code>
+(manual bf16 - tch has no bf16 autocast; halves activation memory, needs a clean same-minibatch
+A/B for speed), <code>--foveate</code> (real 48x48 crop centered on own-tile centroid, fully
+vectorized coordinate math, two broadcasting bugs caught by a dedicated unit test),
+<code>--gc/--blocks</code>, <code>--pinned-h2d</code>. Confirmed unreachable in tch-rs 0.24 and
+correctly skipped, not hacked: channels-last, fused/foreach optimizer, CUDA graphs.</p>
+
+<h3 id="rust-stall">The finding that outranks the speed work: stage 0 never wins</h3>
+<p>New <code>OFTRAIN_DEBUG_EPISODES</code> diagnostic dumped per-episode results and exposed
+that <b>every</b> episode in <b>every</b> config runs to tick-limit truncation: place 1/2,
+~50 tiles, <code>won=false</code>, so the curriculum win-window never fills and training is
+permanently stuck at stage 0. Not an engine bug and not a PPO-sign bug (win-check math, entropy
+bonus sign, grad clipping all audited correct, hyperparameters match <code>rl/ppo.py</code>):
+the FFA win condition requires <b>80% of all map tiles</b>, and the policy plateaus around half
+the map, stops expanding into neutral land, and its entropy collapses from ~7 to &lt;0.05
+within 2-5 updates on this low-variance, nearly-solved 2-player stage - then never recovers
+across 150 updates. Inherited characteristic of the ported curriculum/reward design
+(<code>ent_coef=0.01</code> is <code>rl/ppo.py</code>'s own default), but at Rust speeds it's
+now <i>the</i> blocker: the pipeline can push samples 10x faster at a policy that isn't going
+anywhere. Fix candidates: higher/slower-annealing entropy coefficient for early stages, reward
+shaping that keeps paying for expansion into neutral land after the opponent is matched, or
+stage-0 win semantics that are actually reachable (e.g. relative-strength or
+opponent-elimination based).</p>
+
+<h3 id="rust-next">Next best steps, in order of expected value</h3>
+<ol>
+  <li><b>Fix the stage-0 learning stall first.</b> All the throughput in the world multiplied
+  by zero learning is zero. Entropy schedule + expansion-shaped reward + reachable early-stage
+  win condition; verify with <code>OFTRAIN_DEBUG_EPISODES</code> that wins actually fire and
+  the curriculum advances past stage 0/1 before spending another pod-dollar on scale.</li>
+  <li><b>Then re-ask the size question with learning curves, not util%.</b> Small policy
+  (2.6M params) at 285 steps/s vs full (11.2M) at 173: if small learns comparably per sample,
+  it's ~1.65x more learning per hour at a third of the memory - and foveation re-enters as a
+  pure win once the metric is learning/hour instead of utilization.</li>
+  <li><b>Clean AMP A/B</b> (same minibatch count, bf16 on/off): if train-side speedup is real
+  it directly raises the collect/train balance point and unlocks higher env counts within
+  memory.</li>
+  <li><b>Profile the collection phase</b> now that engine ticking is ~10x too fast to be the
+  bottleneck: collection scaled linearly with env count, so the cost is per-step obs
+  decode/featurize/act - the next 82&rarr;90%+ move is either actor/learner CUDA stream
+  separation or moving featurization onto the GPU, not more engine speed.</li>
+  <li><b>Land the outcome gate at &ge;55/78</b> (run is in flight), then make
+  <code>--engine native</code> the default and demote the Node bridge to a parity-testing
+  tool.</li>
+  <li><b>Only then scale to 4-8 GPUs</b> - the multi-GPU plumbing (replica grad-averaging)
+  already works; scaling before the learning stall is fixed just reproduces a stalled policy
+  faster and more expensively.</li>
+</ol>
 
 <h2 class="date" id="reference">Reference and open threads</h2>
 <p class="session">Tooling, bugs, lessons, infra, recipes, backlog.</p>
