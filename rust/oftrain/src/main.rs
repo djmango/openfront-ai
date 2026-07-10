@@ -151,6 +151,17 @@ struct Args {
 
     #[arg(long, default_value = "checkpoints")]
     ckpt_dir: String,
+
+    /// Resume from a previously-saved checkpoint (e.g.
+    /// `checkpoints/latest.ot`). Restores weights and training state
+    /// (curriculum stage, entropy-floor scale, learning rate, total env
+    /// steps, win-rate window, update counter) from the `.state.json`
+    /// sidecar saved alongside it - see `train::TrainState`. AdamW's
+    /// momentum/variance state is not restored (tch-rs exposes no
+    /// optimizer state_dict save/load) and rebuilds over the first few
+    /// dozen updates post-resume.
+    #[arg(long)]
+    resume: Option<String>,
 }
 
 fn parse_device(s: &str) -> Device {
@@ -201,6 +212,7 @@ fn main() -> anyhow::Result<()> {
         log_every: args.log_every,
         ckpt_every: args.ckpt_every,
         ckpt_dir: args.ckpt_dir,
+        resume: args.resume,
     };
     train::run(cfg)
 }
