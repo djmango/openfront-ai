@@ -80,6 +80,44 @@ struct Args {
     #[arg(long, default_value_t = 4)]
     minibatches: usize,
 
+    /// Manual bf16 mixed precision for the policy net's conv towers
+    /// (grid towers, local net, tile heads); logits/loss/optimizer state
+    /// stay f32. tch-rs 0.24's `autocast()` has no dtype selector (always
+    /// picks fp16 on CUDA), so this is a hand-rolled cast-in/cast-out path
+    /// instead - see `policy.rs`/DEVLOG. Works (slower) on CPU too, so
+    /// it's smoke-testable without a GPU.
+    #[arg(long, default_value_t = false)]
+    amp: bool,
+
+    /// Real foveated crop: the fine-grid branch becomes a fixed
+    /// `policy::FOVEATE_SIZE`x`FOVEATE_SIZE` window centered on the agent's
+    /// own-tile centroid instead of the whole map (coarse branch is
+    /// unaffected - always the full map). Off by default, matching the
+    /// existing legacy fallback (fine == whole map) - see `policy.rs`
+    /// module doc / `PolicyNet::foveate`.
+    #[arg(long, default_value_t = false)]
+    foveate: bool,
+
+    /// GridTower channel width override (default from `policy::GC` = 256).
+    /// Applies to both the coarse and fine grid towers. Smaller values
+    /// (e.g. 128) trade capacity for speed - see `--blocks`.
+    #[arg(long, default_value_t = policy::GC)]
+    gc: i64,
+
+    /// GridTower residual-block count override (default from
+    /// `policy::BLOCKS` = 4). Smaller values (e.g. 2) trade capacity for
+    /// speed - see `--gc`.
+    #[arg(long, default_value_t = policy::BLOCKS)]
+    blocks: i64,
+
+    /// Pin the CPU-side observation/choice tensors' backing memory and use
+    /// non-blocking H2D copies for the batch-build CPU->GPU upload (see
+    /// `batch::to_device_maybe_pinned`). No-op unless `--device`/shards
+    /// are CUDA - not exercisable end-to-end on this Mac's CPU-only
+    /// libtorch build, see DEVLOG/final report for how this was verified.
+    #[arg(long, default_value_t = false)]
+    pinned_h2d: bool,
+
     /// "cpu", "cuda", or "cuda:N".
     #[arg(long, default_value = "cpu")]
     device: String,
@@ -137,6 +175,11 @@ fn main() -> anyhow::Result<()> {
         stage_lr_decay: args.stage_lr_decay,
         epochs: args.epochs,
         minibatches: args.minibatches,
+        amp: args.amp,
+        foveate: args.foveate,
+        gc: args.gc,
+        blocks: args.blocks,
+        pinned_h2d: args.pinned_h2d,
         device,
         engine: args.engine,
         log_every: args.log_every,
