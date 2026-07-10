@@ -1296,17 +1296,28 @@ fn get_attack_front_tiles(game: &Game, small_id: u16, attackers: &[u16]) -> Vec<
     if attacker_set.is_empty() {
         return Vec::new();
     }
+    // TS `getAttackFrontTiles`: iterates `player.borderTiles()` (Set
+    // insertion order) and pushes each border tile at most once, on the
+    // *first* matching neighbor (`return` inside the neighbor loop). The
+    // resulting `frontTiles` order feeds PRNG-driven `sampleTilesNearFront`
+    // draws, so it must preserve border-tile insertion order, not a
+    // numerically-sorted/deduped list.
     let mut front = Vec::new();
     game.for_each_border_tile(small_id, |border| {
+        let mut matched = false;
         game.map.for_each_neighbor4(border, |n| {
+            if matched {
+                return;
+            }
             let owner = game.map.owner_id(n);
             if owner != 0 && attacker_set.contains(&owner) {
-                front.push(border);
+                matched = true;
             }
         });
+        if matched {
+            front.push(border);
+        }
     });
-    front.sort_unstable();
-    front.dedup();
     front
 }
 
