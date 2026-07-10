@@ -19,6 +19,8 @@ pub mod rail;
 pub mod record;
 pub mod replay;
 pub mod rl;
+#[cfg(feature = "parallel")]
+pub mod rl_batch;
 pub mod session;
 pub mod spatial;
 pub mod util;
