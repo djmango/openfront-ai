@@ -29,6 +29,7 @@
 <nav class="toc">
   <a href="#now">Now</a> ·
   <a href="#rust-port">Rust port</a> ·
+  <a href="#v8-plan">ppo_v8 plan</a> ·
   <a href="#runs">Run ledger</a> ·
   <a href="#timeline">Timeline</a> ·
   <a href="#bc-verdict">BC verdict</a> ·
@@ -87,6 +88,13 @@
   win hypothesized), and a 4-GPU sanity check (256 envs, ~520 steps/s, curriculum advanced
   there too). Nothing left blocking a real training run - see
   <a href="#rust-next">next steps</a>.</p>
+  <p><b>An 8-GPU <code>ppo_v8</code> launch plan is written</b> (<a href="#v8-plan">full
+  runbook</a>) but <b>deliberately not started yet</b> - it names one real remaining gap
+  (checkpoint resume/HF-sync doesn't exist in the Rust trainer at all, and pod1's unexplained
+  stop this session lost 166 updates with no way to recover them), config decisions frozen with
+  their rationale (full policy, AMP on, foveation off pending a longer A/B), sizing math for 8
+  GPUs, and monitoring/stop-condition gates. Next actual step is building the resume/sync path,
+  then executing the plan.</p>
   <p class="d" style="margin:.75rem 0 0">Previous: <b><code>ppo_v7</code> killed</b> (update
   355, checkpoint on HF) after the <a href="#gpu-util-killed">Python GPU-utilization push</a>
   plateaued at 70-72% against the Node subprocess bridge - the wall that motivated this whole
@@ -1764,6 +1772,132 @@ today's changes.</p>
   confirmed working (this session's 4-GPU sanity check advanced the curriculum too), just
   hasn't been pushed further yet.</li>
 </ol>
+
+<h2 class="date" id="v8-plan">Jul 10, 2026 - <code>ppo_v8</code> launch plan (8x A100, written now, <b>not started</b>)</h2>
+<p class="session">Everything upstream of "press go" is validated: native engine, stall fixes, curriculum-relevant
+parity, AMP. This is the concrete runbook for the first real (not smoke-test) run, sized for 8 GPUs.
+Explicitly <b>not executed yet</b> - writing it down first so launch is a checklist, not a series of
+decisions made live on an $12/hr clock.</p>
+
+<h3 id="v8-prereqs">Must-fix before launch (real gaps, not nice-to-haves)</h3>
+<ol>
+  <li><b>Checkpoint resume does not exist yet.</b> <code>oftrain</code> saves
+  (<code>VarStore::save</code> every <code>--ckpt-every</code> updates) but has no load-on-startup path
+  at all - confirmed by grepping <code>train.rs</code> for "load"/"resume", zero hits. The Python trainer
+  (<code>pod_train.sh</code>) auto-resumed from <code>djmango/openfront-rl</code> on HF and this exact
+  gap is why the pod1 validation run's unexplained stop on 2026-07-10 lost all 166 updates of progress
+  with no way to pick it back up. An 8-GPU run costs ~$12/hr - any unattended crash without resume is a
+  100% loss of everything since the last checkpoint, not just downtime. <b>Build before launch:</b>
+  (a) a <code>--resume &lt;path&gt;</code> flag that loads a saved <code>VarStore</code> plus the
+  optimizer/curriculum-stage/update-counter state needed to continue correctly (stage index and
+  <code>ent_scale</code> at minimum - both are load-bearing for correct behavior, not just weights), (b)
+  periodic sync of checkpoints + a small `state.json` (update count, stage, ent_scale, total_env_steps) to
+  <code>djmango/openfront-rl</code> on HF, mirroring the Python pattern, (c) a restart-loop wrapper script
+  (this repo's <code>pod_train.sh</code> is Python-specific end-to-end - needs a Rust-flavored
+  equivalent) that relaunches with <code>--resume</code> pointed at the latest sync on any crash.</li>
+  <li><b>Decide and freeze the model-size/foveation question</b> (currently open per the next-steps
+  above) <i>before</i> spending 8-GPU-hours on it - changing GC/BLOCKS/foveate mid-run means the saved
+  checkpoint's weights no longer load into a differently-shaped network, so this has to be right at
+  launch, not adjustable later without losing progress. Recommendation below defaults to the safer
+  choice (full policy, no foveation) pending that longer A/B.</li>
+  <li><b>Smoke-test <code>--resume</code> itself</b> once built: kill a short single-GPU run mid-flight,
+  resume it, confirm stage/entropy-scale/win-rate-window state survives and training continues sanely
+  (not from scratch, not double-counting curriculum wins) - this is exactly the kind of thing that's
+  cheap to get wrong and expensive to discover wrong on an 8-GPU multi-day run.</li>
+</ol>
+
+<h3 id="v8-config">Config decisions and why</h3>
+<table>
+<tr><th>Decision</th><th>Choice</th><th>Why</th></tr>
+<tr><td>Engine</td><td><code>--engine native</code> (default)</td><td>~10x faster ticking than the Node
+bridge; curriculum-relevant parity (bots 0-10, stages 0-3ish) validated good on 2026-07-10.</td></tr>
+<tr><td>Model size</td><td>Full policy (<code>--gc 256 --blocks 4</code>, the defaults - don't pass
+<code>--gc</code>/<code>--blocks</code>)</td><td>2026-07-10's A/B: small policy (2.6M params) is
+faster per-step but learned more slowly/rockier at equal wall-clock; full policy reached curriculum
+stage 2 first. Revisit only after the seed-matched, to-convergence A/B in the prerequisites above.</td></tr>
+<tr><td>Foveation</td><td>Off (default)</td><td>Same reasoning - untested at scale, don't want it
+confounding the first real run.</td></tr>
+<tr><td>AMP</td><td><b>On</b> (<code>--amp</code>)</td><td>Clean, unconfounded 2026-07-10 A/B: 37%
+faster fwdbwd, +40% steps/s, no NaN. Only lever here with zero open questions - turn it on.</td></tr>
+<tr><td>Entropy floor</td><td>On, default 2.5 (don't pass <code>--ent-floor 0</code>)</td><td>This is
+the fix that made stage-0 winnable at all - do not disable it.</td></tr>
+<tr><td>Episode budget</td><td>Default 15000 (don't override lower)</td><td>3000 was the other stall
+bug - don't reintroduce it.</td></tr>
+<tr><td>Starting stage</td><td><code>--stage 0</code></td><td>Fresh start; no BC warm-start in this
+port (out of scope, see top of DEVLOG.md).</td></tr>
+<tr><td>Pinned H2D</td><td>On (<code>--pinned-h2d</code>)</td><td>Verified inert-when-off/byte-identical
+on CPU, real (if unmeasured at scale) potential win on CUDA, no observed downside - low risk to enable.
+</td></tr>
+</table>
+
+<h3 id="v8-sizing">Sizing for 8 GPUs</h3>
+<p>Single-GPU ceiling found 2026-07-09: 64 envs x 32 rollout (2048 samples/update) fits at 46% GPU
+memory and sustains 81-82% utilization; 256 envs at the same config OOMs (~77GB just for the
+observation batch tensor, before activations). AMP roughly halves activation memory but the raw
+observation-batch storage is the dominant cost and isn't shrunk by AMP alone, so <b>don't scale envs
+up to compensate for AMP's savings without re-testing for OOM first</b> - keep per-GPU envs at the
+proven-safe 64 for the initial launch.</p>
+<p>The multi-GPU architecture is data-parallel replicas (each GPU shard runs its own independent copy
+of the policy + its own 64 envs, gradients averaged across shards every update - "poor man's DDP", no
+cross-GPU memory sharing), so per-GPU memory pressure at 8 GPUs is identical to 1 GPU. Confirmed
+working at 4 GPUs on 2026-07-10 (256 total envs, ~520-550 steps/s, 64% sustained util, curriculum
+advanced). Launch config:</p>
+<pre>--engine native --num-envs 64 --num-gpus 8 --rollout-len 32 --epochs 2 --minibatches 8 \
+--amp --pinned-h2d --stage 0 --device cuda:0 --ckpt-every 50 --log-every 1 \
+--resume &lt;latest checkpoint if any&gt;</pre>
+<p>= 512 total envs across 8 shards. Expect steps/s roughly 2x the 4-GPU number (~1000-1100) if scaling
+stays similarly sub-linear (4-GPU was ~3.4x single-GPU, not the full 4x - per-shard-thread overhead);
+sustained util likely similar-or-slightly-lower than 4-GPU's 64% (more shards = more overhead), which
+is fine per the established "utilization% isn't the metric, decisions/s/$ is" rule from 2026-07-09's
+sweep.</p>
+
+<h3 id="v8-runbook">Launch runbook (once prereqs are done)</h3>
+<ol>
+  <li>Provision: <code>runpodctl create pod --gpuType "NVIDIA A100-SXM4-80GB" --gpuCount 8
+  --containerDiskSize 60 --volumeSize 200 --vcpu 64 --mem 500 --startSSH --ports "22/tcp"
+  --secureCloud</code> (bump vcpu/mem/volume vs the single/4-GPU pods used this week - 512 envs
+  means ~512+ Rust OS threads plus whatever the native engine itself spawns per session).</li>
+  <li>Rust toolchain (<code>rustup</code>), <code>git clone --recurse-submodules</code>, then the
+  CUDA-linked libtorch venv: <code>python3 -m venv rust/.libtorch-venv &amp;&amp; pip install
+  torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128</code> (must be exactly 2.11.0 -
+  tch 0.24's C++ shim calls ATen ops that don't exist in the pod's stock torch 2.8, fails to
+  <i>compile</i> not just link - see 2026-07-09/10 entry), then <code>rust/.cargo/config.toml</code>
+  pointing <code>LIBTORCH</code>/<code>LD_LIBRARY_PATH</code> at that venv's <code>torch/lib</code> +
+  <code>nvidia/cuda_nvrtc/lib</code>.</li>
+  <li><code>cargo build --release -p oftrain --features native-engine</code>, then
+  <code>readelf -d target/release/oftrain | grep NEEDED | grep torch</code> to confirm
+  <code>libtorch_cuda.so</code> is actually linked (the silent-CUDA-not-linked footgun from
+  2026-07-09) before spending any GPU-hours.</li>
+  <li>Launch with the command above, <code>OFTRAIN_DEBUG_EPISODES=1</code> for the first stretch to
+  visually confirm wins are firing and the win-rate window is filling correctly, then it can be
+  dropped for the steady-state run (it's a stderr firehose at 512 envs).</li>
+  <li>Use <code>PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True</code> (fragmentation mitigation,
+  used throughout this week's testing, no observed downside).</li>
+</ol>
+
+<h3 id="v8-monitor">Monitoring, gates, and stop conditions</h3>
+<ul>
+  <li><b>Every checkpoint (--ckpt-every):</b> confirm it actually synced to HF (once the resume/sync
+  prerequisite is built) - a checkpoint that only exists on the pod's local disk isn't a safety net.</li>
+  <li><b>Curriculum stage index:</b> the single clearest learning-progress signal - it should be
+  monotonically increasing over hours, not stuck. Stuck for a long time at any one stage (no fixed
+  threshold yet - use judgment, but "stuck" means many multiples of the 2026-07-10 stage-0-&gt;2 pace of
+  ~2200s/166 updates on 1 GPU, adjusted for the 8-GPU throughput multiplier) is a stop-and-investigate
+  signal, not a push-through signal - it was a real bug the last three times a stage looked stuck.</li>
+  <li><b>Entropy (<code>ent</code> in the log):</b> should stay in the low single digits, not collapse
+  toward 0 and stay there for many updates (the pre-fix failure mode) - if it does despite the floor
+  controller, that's a stop-and-investigate signal, not something to wait out.</li>
+  <li><b><code>ecoef</code>:</b> watching it spike (entropy-floor engaging) and decay back down is
+  healthy; pinned at the 5.0x cap for a long stretch means the floor controller is fighting a losing
+  battle and something upstream (LR, clip range, reward scale) may need attention.</li>
+  <li><b>min_mean_util / steps/s:</b> sanity-check against the sizing section's expectations, but per
+  the 2026-07-09 finding, don't chase a utilization number for its own sake - decisions/s and
+  curriculum-stage progress are what matter.</li>
+  <li><b>Cost:</b> 8x A100 SXM ballparks ~$12/hr on RunPod (matches the 8-GPU pod pricing from
+  2026-07-09's session) - budget/time-box the run and check in on progress rather than leaving it
+  fully unattended for the first day, until the resume/crash-recovery path has actually been proven
+  under a real crash, not just the smoke test in the prerequisites.</li>
+</ul>
 
 <h2 class="date" id="reference">Reference and open threads</h2>
 <p class="session">Tooling, bugs, lessons, infra, recipes, backlog.</p>
