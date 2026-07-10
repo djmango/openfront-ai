@@ -661,3 +661,173 @@ plus targeted unit tests for the riskier coordinate math.
   implementation would need static-shape buffers and warmup-iteration
   discipline on top of the missing bindings, so this is intentionally
   left undone rather than hacked around with something fragile.
+
+## 2026-07-09/10 - Native engine throughput + GPU validation on a 1x A100 pod
+
+Merged two parallel workstreams into `master` (`agent/native-rl-perf`,
+`agent/oftrain-gpu-opt` - the AMP/foveate/model-size/pinned-H2D work above),
+then validated the combined result end-to-end on a fresh single A100 SXM
+RunPod pod.
+
+### Native engine hot-path optimization (`agent/native-rl-perf`)
+
+Standalone benchmark (`rust/engine/examples/bench_rl_session.rs`, no policy
+network, no IPC) measuring raw `RlSession` reset+step throughput:
+
+| envs | threads | ticks/s before | ticks/s after | speedup |
+|---|---|---|---|---|
+| 64 | 1 | 9,304 | 45,225 | 4.9x |
+| 256 | 8 | 57,764 | 131,656 | 2.3x |
+| 512 | 8 | 51,493 | 151,661 | 2.9x |
+
+Root cause of the "before" cost: `obs::tile_bytes_le` (a scalar per-tile loop
+re-encoding the full tile plane into a `Vec<u8>` on *every* `step()`, even
+though the native trainer immediately decodes those bytes back to `u16`) was
+~78% of per-step time; `entities()`/`legality()` building `Vec`s before
+wrapping in `Value::Array` was most of the rest. Fixes: memcpy-based
+terrain/tile byte encoding with a `ptr::copy_nonoverlapping` fast path
+(unit-tested for byte-for-byte equivalence with the scalar reference), a
+`value_array()` helper that builds `Value::Array` directly from iterators
+(no intermediate `Vec`), and - the biggest single win - `RlSession` growing a
+zero-copy `tile_state() -> &[u16]` accessor so the native `oftrain` backend
+skips the byte-encode/byte-decode round trip entirely (`NativeEngine` in
+`oftrain/src/native.rs` reads tile state straight from the session). An
+optional `rayon`-based batched-stepping path was added behind a `parallel`
+Cargo feature but not wired in by default - plain `std::thread` sharding (one
+OS thread per shard of envs, as `oftrain` already does) measured 20-40%
+faster than a shared rayon pool for this workload, consistent with it being
+memory-bandwidth-bound rather than scheduler-bound. Correctness: bit-identical
+observation JSON before/after on a fixed seed, and the existing exact-parity
+replay tests fail identically (same tick, same hash) on both the unmodified
+base commit and this branch - confirmed unrelated pre-existing oracle
+staleness, not a regression. Net: native engine ticking is no longer
+anywhere close to the bottleneck (10x+ the old ~12-14k ticks/s Node-subprocess-
+IPC ceiling even before this optimization pass).
+
+### GPU pod setup (1x A100 SXM4 80GB, RunPod, torch 2.11.0+cu128)
+
+- `tch 0.24`'s C++ shim (`torch_api_generated.cpp`) doesn't just check a
+  version *string* - it calls ATen ops (`hash_tensor`, `_use_miopen_ctc_loss`,
+  etc.) that don't exist in the pod's stock `torch==2.8.0+cu128`, so it fails
+  to *compile*, not just link, even with
+  `LIBTORCH_USE_PYTORCH=1`/`LIBTORCH_BYPASS_VERSION_CHECK=1` set. Fix: same
+  approach as the Mac (`rust/scripts/setup_libtorch.sh`), but with a CUDA
+  wheel - a dedicated venv (`rust/.libtorch-venv`) with
+  `pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128`
+  (this version has a `+cu128` build published), `rust/.cargo/config.toml`
+  pointing `LIBTORCH` at that venv's `torch/` dir plus `LD_LIBRARY_PATH`
+  including both `torch/lib` and the venv's
+  `nvidia/cuda_nvrtc/lib` (same NVRTC footgun as before, just `cu12` package
+  names instead of `cu13` this time). `readelf -d target/release/oftrain`
+  confirmed `libtorch_cuda.so` NEEDED post-build.
+
+### Sustained GPU utilization result
+
+`--engine native --num-envs 64 --rollout-len 32 --epochs 2 --minibatches 8`,
+default (full, non-foveated) policy, no AMP: **sustained 81-82%
+`min_mean_util`** (time-averaged since start, not instantaneous peaks),
+climbing from a cold-start ~20% and plateauing by ~update 15, held flat
+through a full 150-update / ~30-minute stability run with zero crashes and
+finite losses throughout (steps/s ~172-177 the whole time). This is a real
+improvement over the previous Python/Node-IPC ceiling documented above
+(~55-70%), though it falls short of the 90%+ target. `collect_s ≈ train_s`
+essentially every update at this size (confirmed via the same
+collect-includes-join / train-is-inner-timer instrumentation from
+2026-07-09) - i.e. rollout collection and GPU training are genuinely
+overlapping and roughly balanced, not one-sided.
+
+Swept envs/flags looking for a better operating point; the direction of
+every result was consistent and informative even though none beat the 64-env
+default:
+- **64 envs, default policy**: 81-82% util, ~173 steps/s (best result).
+- **96 envs, default policy**: 76-78% util, ~170 steps/s - collection time
+  scaled roughly linearly with env count (12s -> 18s for 1.5x envs), so the
+  collection-phase cost is genuinely proportional to work done, not a fixed
+  per-call dispatch overhead that more envs would amortize.
+- **128 envs, `--foveate`**: only 58-64% util despite fitting far more envs
+  in memory - shrinking the observation also shrinks the GPU-bound training
+  compute, which shifts the collect/train balance *back* toward
+  collection-bound (lower util) even though decisions/s is flat-to-similar.
+- **192 envs, `--gc 128 --blocks 2`** (small policy, 2.6M params): highest
+  raw throughput seen (~285 steps/s) but only 37% util, for the same reason -
+  less GPU compute per step tips the balance toward the CPU/engine-bound
+  collection phase.
+- **256 envs, default policy (no foveate)**: OOM (the full 250x150x63
+  observation batch for 256envs x 32 rollout = 8192 samples is itself
+  ~77GB before any activations - `PYTORCH_CUDA_ALLOC_CONF=expandable_segments`
+  didn't help, this is a real allocation ceiling not fragmentation).
+- **128 envs, `--amp`, 16 minibatches**: no OOM (33% GPU mem vs 46-70% without
+  AMP - it does meaningfully cut memory), but `train_s` was *higher* than the
+  8-env-config baseline in this particular run, confounded by the minibatch
+  count change; not a clean AMP-only A/B, needs a same-minibatch-count rerun
+  to attribute cleanly.
+
+Takeaway: for *this* pipelined single-process-per-GPU architecture, GPU
+utilization tracks the ratio of GPU-bound training compute to CPU-bound
+collection compute, not env count or raw decisions/s in isolation - anything
+that makes the network cheaper (foveation, smaller policy) pays for itself in
+throughput but *costs* utilization by shrinking the numerator. Getting past
+~82% on a single GPU now likely needs either genuinely overlapping streams for
+actor/learner kernels (the same conclusion the 2026-07-09 entry reached) or
+deepening the env/rollout ratio further while keeping the full policy size,
+not swapping in a cheaper model.
+
+### Learning-progress finding (not a code bug, a curriculum/exploration one)
+
+`OFTRAIN_DEBUG_EPISODES=1` (new diagnostic env var, `train.rs`) dumps
+per-episode reward/win/placement and the curriculum win-rate window. On
+curriculum stage 0 (`Onion` map, 0 bots, 1 nation opponent,
+`win_at=0.9`), every episode across every config tested ran to the full
+`max_ticks` (~3000-tick truncation, never an explicit elimination win),
+placed 1st of 2 (`score=1.000`) at ~47-52 tiles, and `won` was `false` every
+time - so the curriculum-advance win-rate window never fills with a win and
+training is stuck at stage 0 in every run above. Traced this to the FFA win
+check requiring **80% of total map tiles** (`PERCENTAGE_TILES_TO_WIN_FFA`,
+`win_check.rs`), not 80% of the opponent's tiles - the policy plateaus at
+roughly half the map and stops expanding into neutral land once entropy
+collapses (see below), so it never gets close to the threshold. Verified this
+isn't an engine or sign bug: the win-check math, the PPO entropy-bonus sign
+(`loss = pg_loss + vf_coef*v_loss - ent_coef*ent_loss`, correctly *subtracting*
+the entropy term so gradient descent pushes entropy up), and gradient-norm
+clipping (`clip_grad_norm(0.5)`, matching `rl/ppo.py`) all check out as
+correct and match the ported Python baseline's hyperparameters
+(`ent_coef=0.01` default). What's actually happening: this specific
+curriculum stage has very low reward variance (a small, close-to-solved
+2-player map), so PPO's advantage estimates are small and the shared network
+trunk drifts toward a low-entropy, locally-stable policy within the first
+handful of updates - entropy was observed collapsing from ~7 (near-uniform)
+to <0.05 within 2-5 updates in every full-policy run tested, and stayed
+there for the rest of a 150-update run without recovering. This is a
+pre-existing characteristic of the ported curriculum/reward design (not
+something introduced by today's native-engine or throughput changes - the
+entropy-coefficient default is inherited unchanged from `rl/ppo.py`), but it
+means training will not progress past stage 0 as currently tuned. Flagging
+for follow-up rather than fixing now (out of scope for a throughput task):
+likely needs a higher/slower-annealing `ent_coef` for early stages, or reward
+shaping that keeps rewarding continued expansion into neutral land instead of
+flattening out once the opponent is roughly matched.
+
+### Status against the 8 "best next steps"
+
+1. **Native engine benchmark + optimize** - done, 5-10x standalone ticks/s.
+2. **`--engine native` GPU run, profiled** - done, see above.
+3. **BF16 AMP** - implemented and runs on GPU without NaN; not yet cleanly
+   isolated as a same-minibatch-count A/B (confounded run above).
+4. **Real foveated crop** - implemented, runs on GPU, lets far more envs fit
+   in memory, but *reduces* sustained utilization for the reason above.
+5. **Smaller policy variant** - implemented, runs on GPU, highest raw
+   decisions/s of any config tried, but lowest utilization for the same
+   reason.
+6. **Epoch count** - already exposed, both 1 and 2 confirmed to run.
+7. **Low-risk GPU kernel opts** - pinned-H2D implemented and runs
+   (no crash); channels-last/fused-optimizer/CUDA-graphs confirmed
+   genuinely unreachable in tch-rs 0.24 (documented above), correctly
+   skipped rather than hacked around.
+8. **Scale to 4-8 GPUs once wins stack** - not started this session: the
+   single-GPU sweep above shows utilization is currently bounded by the
+   collect/train compute ratio rather than by anything that scaling GPU
+   count would fix, so multi-GPU scaling was deferred until either (a) the
+   AMP A/B is redone cleanly to see if it's a net win, or (b) the
+   actor/learner CUDA-stream-overlap work from 2026-07-09 is picked back up
+   - scaling a config that's still ~18% away from the target would just
+   reproduce the same ceiling on more GPUs at higher cost.
