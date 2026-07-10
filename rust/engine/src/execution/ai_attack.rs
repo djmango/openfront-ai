@@ -48,7 +48,11 @@ pub fn has_land_border_tn(game: &Game, small_id: u16) -> bool {
         let n = game.map.neighbors4_ts(border_tile, &mut nbuf);
         for i in 0..n {
             let neighbor = nbuf[i];
-            if game.is_land(neighbor) && !game.has_owner(neighbor) && !game.has_fallout(neighbor) {
+            if game.is_land(neighbor)
+                && !game.is_impassable(neighbor)
+                && !game.has_owner(neighbor)
+                && !game.has_fallout(neighbor)
+            {
                 return true;
             }
         }
@@ -85,7 +89,11 @@ fn has_shore_reachable_tn(game: &Game, small_id: u16) -> bool {
                 continue;
             }
             let tile = game.ref_xy(nx as u32, ny as u32);
-            if game.is_land(tile) && !game.has_owner(tile) && !game.has_fallout(tile) {
+            if game.is_land(tile)
+                && !game.is_impassable(tile)
+                && !game.has_owner(tile)
+                && !game.has_fallout(tile)
+            {
                 return true;
             }
         }
@@ -214,7 +222,11 @@ pub fn send_boat_attack_to_nearby_tn(game: &mut Game, small_id: u16) -> bool {
                 continue;
             }
             let tile = game.ref_xy(nx as u32, ny as u32);
-            if game.is_land(tile) && !game.has_owner(tile) && !game.has_fallout(tile) {
+            if game.is_land(tile)
+                && !game.is_impassable(tile)
+                && !game.has_owner(tile)
+                && !game.has_fallout(tile)
+            {
                 candidates.push(tile);
             }
         }
@@ -410,7 +422,7 @@ fn collect_bordering_players(game: &Game, small_id: u16) -> Vec<u16> {
             let n = game.map.neighbors4_ts(border_tile, &mut nbuf);
             for i in 0..n {
                 let neighbor = nbuf[i];
-                if !game.is_land(neighbor) {
+                if !game.is_land(neighbor) || game.is_impassable(neighbor) {
                     continue;
                 }
                 let owner = game.map.owner_id(neighbor);
@@ -444,7 +456,7 @@ fn nearby_players_ts_order(game: &Game, small_id: u16) -> Vec<u16> {
             let n = game.map.neighbors4_ts(border_tile, &mut nbuf);
             for i in 0..n {
                 let neighbor = nbuf[i];
-                if !game.is_land(neighbor) {
+                if !game.is_land(neighbor) || game.is_impassable(neighbor) {
                     continue;
                 }
                 push(game.map.owner_id(neighbor));
@@ -477,7 +489,7 @@ fn nearby_players_ts_order(game: &Game, small_id: u16) -> Vec<u16> {
                 continue;
             }
             let tile = game.ref_xy(nx as u32, ny as u32);
-            if !game.is_land(tile) || game.has_fallout(tile) {
+            if !game.is_land(tile) || game.is_impassable(tile) || game.has_fallout(tile) {
                 continue;
             }
             push(game.map.owner_id(tile));
