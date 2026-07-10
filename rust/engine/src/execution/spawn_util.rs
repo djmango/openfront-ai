@@ -13,12 +13,15 @@ struct Spawn {
 }
 
 /// Run one spawn hop (shared by `SpawnExecution` and `TribeMassSpawn`).
+/// Returns whether a spawn was actually placed (TS `SpawnExecution.tick`
+/// returns early without ending the spawn phase when `getSpawnTiles`
+/// fails, so callers need to know).
 pub fn execute_player_spawn(
     game: &mut Game,
     player_info: &PlayerInfo,
     tile: Option<TileRef>,
     random: &mut PseudoRandom,
-) {
+) -> bool {
     let small_id = if game.has_player(&player_info.id) {
         game.player_by_id(&player_info.id).map(|p| p.small_id)
     } else {
@@ -26,17 +29,17 @@ pub fn execute_player_spawn(
     };
 
     let Some(small_id) = small_id else {
-        return;
+        return false;
     };
 
     if game.config.random_spawn && game.has_spawned(small_id) {
-        return;
+        return false;
     }
 
     game.relinquish_player_tiles(small_id);
 
     let Some(spawn) = find_spawn(game, &player_info.id, tile, random) else {
-        return;
+        return false;
     };
 
     game.conquer_spawn_tiles(small_id, &spawn.tiles);
@@ -52,6 +55,7 @@ pub fn execute_player_spawn(
     }
 
     game.set_spawn_tile(small_id, spawn.center);
+    true
 }
 
 fn find_spawn(
