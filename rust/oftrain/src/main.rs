@@ -32,7 +32,10 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     stage: usize,
 
-    #[arg(long, default_value_t = 3000)]
+    /// Matches `rl/ppo.py --max-episode-ticks` (default 15000). The port
+    /// originally shipped 3000, which truncated every stage-0 episode
+    /// before the 80%-ownership win condition was reachable - see devlog.
+    #[arg(long, default_value_t = 15000)]
     max_episode_ticks: i64,
 
     /// Steps collected per env before each PPO update.
@@ -66,6 +69,12 @@ struct Args {
 
     #[arg(long, default_value_t = 4000)]
     ent_anneal_updates: u64,
+
+    /// Adaptive entropy floor (port of `rl/ppo.py --ent-floor`, 0 = off):
+    /// when mean policy entropy drops below this, the entropy coef scales
+    /// up (x1.3/update, cap 5.0) until it recovers.
+    #[arg(long, default_value_t = 2.5)]
+    ent_floor: f32,
 
     #[arg(long, default_value_t = 0.002)]
     entq_coef: f32,
@@ -171,6 +180,7 @@ fn main() -> anyhow::Result<()> {
         ent_coef: args.ent_coef,
         ent_coef_final: args.ent_coef_final,
         ent_anneal_updates: args.ent_anneal_updates,
+        ent_floor: args.ent_floor,
         entq_coef: args.entq_coef,
         stage_lr_decay: args.stage_lr_decay,
         epochs: args.epochs,
