@@ -14,11 +14,41 @@
 #
 # Env overrides: CURRICULUM_RECORDS_DIR, CURRICULUM_GAMES_PER_BUCKET,
 # CURRICULUM_TICKS, CURRICULUM_MAX_TIMER, CURRICULUM_PARITY_LABEL,
-# CURRICULUM_JOBS, CURRICULUM_RECORD_TIMEOUT_SECONDS.
+# CURRICULUM_JOBS, CURRICULUM_RECORD_TIMEOUT_SECONDS, CURRICULUM_BUCKETS
+# (comma-separated bot counts, e.g. "0,5" - passed through to
+# gen_curriculum_parity.ts's --buckets, for fast targeted re-checks of one
+# bucket instead of paying for all 8), CURRICULUM_PARITY_COMMIT.
 set -euo pipefail
 
 ROOT="$(dirname "$(dirname "$(realpath "$0")")")"
 source "$ROOT/scripts/parity_env.sh" >&2
+
+# Unlike run_outcome_gate.sh/run_parity_gate.sh, this gate has NO dependency
+# on the frozen archived-game PARITY_COMMIT (records/0c4c7d7993c9/ is real
+# captured gameplay tied to that exact historical commit; the records here
+# are freshly synthesized every run, with no archival tie to any specific
+# commit). Reusing parity_env.sh's frozen PARITY_COMMIT default here was a
+# real bug: it silently pinned the TS side of this gate to a commit that
+# predates upstream TS's own `neighbors4`/`forEachNeighbor` order-unification
+# fix (openfront commit 22d5aba5a, "standardize cardinal-neighbor iteration
+# on neighbors() N,S,W,E order", #4495) - the SAME class of bug (and, for
+# `AttackExecution.addNeighbors`, literally the same functions) that
+# docs/bot-ai-parity-investigation/ already root-caused and fixed on the
+# native side by matching native's `for_each_neighbor4` to N,S,W,E. Native
+# already matches current upstream TS; the stale oracle commit did not, so
+# every synthetic self-play game compared native against out-of-date TS
+# neighbor-order behavior instead of current TS behavior, producing a
+# systematic (and entirely spurious) native-vs-TS rate divergence - see
+# docs/bot-ai-parity-rate/README.md for the full tick-level bisection.
+#
+# Override PARITY_COMMIT here (before ensure_parity_openfront.sh pins the
+# checkout) to whatever openfront commit THIS superproject checkout actually
+# has pinned via .gitmodules/the gitlink - i.e. "current master", not a
+# frozen historical snapshot - so this gate always tracks whatever TS commit
+# native is meant to mirror, even as that pin advances over time. Override
+# with CURRICULUM_PARITY_COMMIT if a specific commit is needed instead.
+export PARITY_COMMIT="${CURRICULUM_PARITY_COMMIT:-$(git -C "$ROOT" rev-parse HEAD:openfront 2>/dev/null || echo "$PARITY_COMMIT")}"
+
 bash "$ROOT/scripts/ensure_parity_openfront.sh" >&2
 
 RECORDS_DIR="${CURRICULUM_RECORDS_DIR:-$ROOT/records/curriculum-parity-v1}"
@@ -36,12 +66,17 @@ mkdir -p "$CACHE_ROOT"
 if [[ "${1:-}" == "--regenerate" || ! -d "$RECORDS_DIR" ]]; then
   echo "[curriculum_parity] generating self-play records -> $RECORDS_DIR" >&2
   rm -rf "$RECORDS_DIR" "$RECORDS_DIR.manifest.json" "$CACHE_FILE" "$CACHE_FILE.records"
+  GEN_ARGS=(
+    --out "$RECORDS_DIR"
+    --games-per-bucket "$GAMES_PER_BUCKET"
+    --ticks "$TICKS"
+    --max-timer "$MAX_TIMER"
+  )
+  if [[ -n "${CURRICULUM_BUCKETS:-}" ]]; then
+    GEN_ARGS+=(--buckets "$CURRICULUM_BUCKETS")
+  fi
   pushd "$ROOT" >/dev/null
-  "$ROOT/openfront/node_modules/.bin/tsx" "$ROOT/datagen/gen_curriculum_parity.ts" \
-    --out "$RECORDS_DIR" \
-    --games-per-bucket "$GAMES_PER_BUCKET" \
-    --ticks "$TICKS" \
-    --max-timer "$MAX_TIMER" 1>&2
+  "$ROOT/openfront/node_modules/.bin/tsx" "$ROOT/datagen/gen_curriculum_parity.ts" "${GEN_ARGS[@]}" 1>&2
   popd >/dev/null
 fi
 
