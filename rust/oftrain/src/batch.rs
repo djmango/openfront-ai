@@ -12,7 +12,27 @@ use tch::{Device, Kind, Tensor};
 use crate::policy::{self, Obs};
 use crate::vecenv::PreparedObs;
 
-pub fn build_obs(items: &[&PreparedObs], device: Device) -> Obs {
+/// `--pinned-h2d`: host->device upload for one freshly-built CPU tensor.
+/// When `pinned && device` is CUDA, pins the CPU tensor's backing memory
+/// for `device` (`Tensor::pin_memory`, needs a page-locked allocation so
+/// the CUDA driver can DMA out of it) and issues a non-blocking copy
+/// (`to_device_`'s `non_blocking=true`, ATen's `aten::to.device` op) so
+/// the H2D copy can overlap with other CUDA-stream work instead of the
+/// calling thread blocking on a synchronous `cudaMemcpy`. Falls back to
+/// the original plain `to_device` when `pinned` is off or `device` isn't
+/// CUDA - pinning is meaningless (and untestable - this Mac's libtorch
+/// build has no CUDA support at all) without a real CUDA device, so this
+/// keeps the CPU-only path byte-for-byte unchanged from before this flag
+/// existed.
+fn to_device_maybe_pinned(t: &Tensor, device: Device, pinned: bool) -> Tensor {
+    if pinned && device.is_cuda() {
+        t.pin_memory(device).to_device_(device, t.kind(), true, false)
+    } else {
+        t.to_device(device)
+    }
+}
+
+pub fn build_obs(items: &[&PreparedObs], device: Device, pinned_h2d: bool) -> Obs {
     let b = items.len();
     let (gh, gw) = (items[0].gh, items[0].gw);
     for (i, it) in items.iter().enumerate() {
@@ -44,7 +64,8 @@ pub fn build_obs(items: &[&PreparedObs], device: Device) -> Obs {
     }
 
     let t = |v: Vec<f32>, shape: &[i64]| -> Tensor {
-        Tensor::from_slice(&v).view(shape).to_kind(Kind::Float).to_device(device)
+        let cpu = Tensor::from_slice(&v).view(shape).to_kind(Kind::Float);
+        to_device_maybe_pinned(&cpu, device, pinned_h2d)
     };
     let bi = b as i64;
     let (ghi, gwi) = (gh as i64, gw as i64);
@@ -79,19 +100,78 @@ pub struct ChoiceScalars {
     pub quantity_frac: f32, // -1.0 unused
 }
 
-pub fn build_choice_batch(items: &[ChoiceScalars], device: Device) -> policy::ChoiceBatch {
+pub fn build_choice_batch(items: &[ChoiceScalars], device: Device, pinned_h2d: bool) -> policy::ChoiceBatch {
     let action: Vec<i64> = items.iter().map(|c| c.action).collect();
     let player_slot: Vec<i64> = items.iter().map(|c| c.player_slot).collect();
     let tile_region: Vec<i64> = items.iter().map(|c| c.tile_region).collect();
     let build_type: Vec<i64> = items.iter().map(|c| c.build_type).collect();
     let nuke_type: Vec<i64> = items.iter().map(|c| c.nuke_type).collect();
     let quantity_frac: Vec<f32> = items.iter().map(|c| c.quantity_frac).collect();
+    let up = |t: Tensor| to_device_maybe_pinned(&t, device, pinned_h2d);
     policy::ChoiceBatch {
-        action: Tensor::from_slice(&action).to_device(device),
-        player_slot: Tensor::from_slice(&player_slot).to_device(device),
-        tile_region: Tensor::from_slice(&tile_region).to_device(device),
-        build_type: Tensor::from_slice(&build_type).to_device(device),
-        nuke_type: Tensor::from_slice(&nuke_type).to_device(device),
-        quantity_frac: Tensor::from_slice(&quantity_frac).to_device(device),
+        action: up(Tensor::from_slice(&action)),
+        player_slot: up(Tensor::from_slice(&player_slot)),
+        tile_region: up(Tensor::from_slice(&tile_region)),
+        build_type: up(Tensor::from_slice(&build_type)),
+        nuke_type: up(Tensor::from_slice(&nuke_type)),
+        quantity_frac: up(Tensor::from_slice(&quantity_frac)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! `--pinned-h2d` only changes behavior when `device.is_cuda()` (see
+    //! `to_device_maybe_pinned`), which this CPU-only dev environment
+    //! can't exercise - these tests instead pin down that turning the
+    //! flag on for a CPU device is a no-op producing byte-identical
+    //! tensors to the flag being off, so the plumbing is provably inert
+    //! (not just untested) until it's A/B'd on a real CUDA box.
+    use super::*;
+
+    fn tiny_prepared_obs(gh: usize, gw: usize) -> PreparedObs {
+        PreparedObs {
+            grid: vec![0.5f32; policy::C_GRID as usize * gh * gw],
+            legal_tile: vec![1.0f32; gh * gw],
+            gh,
+            gw,
+            players: vec![0.1f32; feat::MAX_SLOTS * feat::P_FEAT],
+            pmask: [1.0f32; feat::MAX_SLOTS],
+            scalars: [0.2f32; feat::N_SCALARS],
+            me_slot: 0,
+            legal_actions: [1.0f32; feat::N_ACTIONS],
+            legal_ptarget: vec![1.0f32; feat::N_ACTIONS * feat::MAX_SLOTS],
+            legal_build: [1.0f32; feat::N_BUILD],
+            legal_nuke: [1.0f32; feat::N_NUKE],
+            local: vec![0.3f32; 5 * policy::LOCAL as usize * policy::LOCAL as usize],
+        }
+    }
+
+    #[test]
+    fn pinned_h2d_flag_is_noop_on_cpu() {
+        let items = vec![tiny_prepared_obs(4, 5), tiny_prepared_obs(4, 5)];
+        let refs: Vec<&PreparedObs> = items.iter().collect();
+        let plain = build_obs(&refs, Device::Cpu, false);
+        let pinned = build_obs(&refs, Device::Cpu, true);
+        assert_eq!(
+            Vec::<f32>::try_from(plain.grid.reshape([-1])).unwrap(),
+            Vec::<f32>::try_from(pinned.grid.reshape([-1])).unwrap()
+        );
+        assert_eq!(plain.grid.size(), pinned.grid.size());
+        assert_eq!(
+            Vec::<f32>::try_from(plain.legal_tile.reshape([-1])).unwrap(),
+            Vec::<f32>::try_from(pinned.legal_tile.reshape([-1])).unwrap()
+        );
+
+        let choices = vec![
+            ChoiceScalars { action: 1, player_slot: -1, tile_region: 3, build_type: -1, nuke_type: -1, quantity_frac: -1.0 },
+            ChoiceScalars { action: 2, player_slot: 0, tile_region: -1, build_type: 1, nuke_type: -1, quantity_frac: 0.5 },
+        ];
+        let plain_c = build_choice_batch(&choices, Device::Cpu, false);
+        let pinned_c = build_choice_batch(&choices, Device::Cpu, true);
+        assert_eq!(Vec::<i64>::try_from(&plain_c.action).unwrap(), Vec::<i64>::try_from(&pinned_c.action).unwrap());
+        assert_eq!(
+            Vec::<f32>::try_from(&plain_c.quantity_frac).unwrap(),
+            Vec::<f32>::try_from(&pinned_c.quantity_frac).unwrap()
+        );
     }
 }
