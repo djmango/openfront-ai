@@ -88,13 +88,19 @@
   win hypothesized), and a 4-GPU sanity check (256 envs, ~520 steps/s, curriculum advanced
   there too). Nothing left blocking a real training run - see
   <a href="#rust-next">next steps</a>.</p>
-  <p><b>An 8-GPU <code>ppo_v8</code> launch plan is written</b> (<a href="#v8-plan">full
-  runbook</a>) but <b>deliberately not started yet</b> - it names one real remaining gap
-  (checkpoint resume/HF-sync doesn't exist in the Rust trainer at all, and pod1's unexplained
-  stop this session lost 166 updates with no way to recover them), config decisions frozen with
-  their rationale (full policy, AMP on, foveation off pending a longer A/B), sizing math for 8
-  GPUs, and monitoring/stop-condition gates. Next actual step is building the resume/sync path,
-  then executing the plan.</p>
+  <p><b>The <code>ppo_v8</code> must-fix prerequisites are done</b> (<a href="#v8-prereqs">details</a>):
+  checkpoint resume (<code>--resume</code>, weights + curriculum stage + entropy-scale + step counters,
+  smoke-tested end to end), HF sync + a crash-loop wrapper (<code>scripts/pod_train_v8.sh</code>), and -
+  found while smoke-testing resume against a stage-2 state - <b>the actual bug that likely killed
+  yesterday's pod1 validation run</b>: the observation batcher assumed every env shares one grid
+  resolution, which is false for every curriculum stage past stage 1 (multiple differently-sized maps)
+  and even earlier stages via rehearsal sampling. Fixed (pad to batch max, real
+  <code>grid_valid</code> mask - <a href="#v8-batch-fix">writeup</a>). Also surfaced a real residual
+  risk while investigating: the proven-safe 64-envs/GPU sizing only covers roughly stage 0-5 -
+  <code>Asia</code>/<code>World</code> (entering at stage 6) are ~9x more grid cells than
+  <code>Onion</code>, so expect to need fewer envs once training gets there; resume makes that a cheap
+  relaunch-with-smaller-config event rather than a lost run. <b>Still not started</b> - model-size/
+  foveation is still an open decision, and launching is the next actual step once that's settled.</p>
   <p class="d" style="margin:.75rem 0 0">Previous: <b><code>ppo_v7</code> killed</b> (update
   355, checkpoint on HF) after the <a href="#gpu-util-killed">Python GPU-utilization push</a>
   plateaued at 70-72% against the Node subprocess bridge - the wall that motivated this whole
@@ -1779,32 +1785,71 @@ parity, AMP. This is the concrete runbook for the first real (not smoke-test) ru
 Explicitly <b>not executed yet</b> - writing it down first so launch is a checklist, not a series of
 decisions made live on an $12/hr clock.</p>
 
-<h3 id="v8-prereqs">Must-fix before launch (real gaps, not nice-to-haves)</h3>
+<h3 id="v8-prereqs">Prerequisites - done as of Jul 10, afternoon</h3>
 <ol>
-  <li><b>Checkpoint resume does not exist yet.</b> <code>oftrain</code> saves
-  (<code>VarStore::save</code> every <code>--ckpt-every</code> updates) but has no load-on-startup path
-  at all - confirmed by grepping <code>train.rs</code> for "load"/"resume", zero hits. The Python trainer
-  (<code>pod_train.sh</code>) auto-resumed from <code>djmango/openfront-rl</code> on HF and this exact
-  gap is why the pod1 validation run's unexplained stop on 2026-07-10 lost all 166 updates of progress
-  with no way to pick it back up. An 8-GPU run costs ~$12/hr - any unattended crash without resume is a
-  100% loss of everything since the last checkpoint, not just downtime. <b>Build before launch:</b>
-  (a) a <code>--resume &lt;path&gt;</code> flag that loads a saved <code>VarStore</code> plus the
-  optimizer/curriculum-stage/update-counter state needed to continue correctly (stage index and
-  <code>ent_scale</code> at minimum - both are load-bearing for correct behavior, not just weights), (b)
-  periodic sync of checkpoints + a small `state.json` (update count, stage, ent_scale, total_env_steps) to
-  <code>djmango/openfront-rl</code> on HF, mirroring the Python pattern, (c) a restart-loop wrapper script
-  (this repo's <code>pod_train.sh</code> is Python-specific end-to-end - needs a Rust-flavored
-  equivalent) that relaunches with <code>--resume</code> pointed at the latest sync on any crash.</li>
-  <li><b>Decide and freeze the model-size/foveation question</b> (currently open per the next-steps
-  above) <i>before</i> spending 8-GPU-hours on it - changing GC/BLOCKS/foveate mid-run means the saved
-  checkpoint's weights no longer load into a differently-shaped network, so this has to be right at
-  launch, not adjustable later without losing progress. Recommendation below defaults to the safer
-  choice (full policy, no foveation) pending that longer A/B.</li>
-  <li><b>Smoke-test <code>--resume</code> itself</b> once built: kill a short single-GPU run mid-flight,
-  resume it, confirm stage/entropy-scale/win-rate-window state survives and training continues sanely
-  (not from scratch, not double-counting curriculum wins) - this is exactly the kind of thing that's
-  cheap to get wrong and expensive to discover wrong on an 8-GPU multi-day run.</li>
+  <li><b>Checkpoint resume: implemented.</b> <code>--resume &lt;path&gt;</code> loads the
+  <code>VarStore</code> weights plus a <code>&lt;ckpt&gt;.state.json</code> sidecar (curriculum stage,
+  entropy-floor scale, learning rate, total env steps, win-rate window, update counter) written
+  atomically (tmp+rename, matching <code>rl/ppo.py</code>'s <code>policy.pt.tmp</code> pattern) alongside
+  every checkpoint. Every save also refreshes a fixed-name <code>latest.ot</code>/<code>.state.json</code>
+  pointer so a wrapper never has to parse filenames. <b>Known, documented gap:</b> AdamW's momentum/
+  variance state is <i>not</i> restored - tch-rs 0.24 exposes no optimizer <code>state_dict</code>
+  save/load at all (checked the crate source directly) - so it rebuilds over the first few dozen
+  post-resume updates. Deliberate, not silent.
+  <br/>Smoke-tested end to end: short run &rarr; checkpoint &rarr; resume confirms the update counter and
+  <code>decisions_total</code> continue (not reset to 0), and a synthetic mid-curriculum state
+  (<code>stage=2, ent_scale=3.5, lr_now=1.5e-4</code>) injected into the sidecar correctly reaches the
+  training loop (<code>ecoef</code> in the log reflects the resumed scale exactly:
+  <code>0.01 &times; 3.5 = 0.035</code>).</li>
+  <li><b>HF sync + restart-loop wrapper: implemented</b> (<code>scripts/pod_train_v8.sh</code>, the
+  Rust-flavored <code>pod_train.sh</code> equivalent) - bootstraps repo/toolchain/CUDA-libtorch-venv/
+  build, verifies <code>libtorch_cuda.so</code> is actually linked before spending GPU-hours, seeds
+  <code>--resume</code> from a local-or-HF checkpoint, crash-loops with backoff, and background-syncs
+  <code>latest.ot</code>/<code>.state.json</code> to <code>djmango/openfront-rl</code> every 10 minutes.</li>
+  <li><b>Found and fixed a real crash bug while smoke-testing resume</b> - see
+  <a href="#v8-batch-fix">below</a>, this is likely what actually killed the pod1 validation run.</li>
+  <li><b>Model-size/foveation decision:</b> still open (unchanged from the earlier next-steps list) -
+  the plan below defaults to the safe choice (full policy, no foveation) pending a longer seed-matched
+  A/B, exactly as before.</li>
 </ol>
+
+<h3 id="v8-batch-fix">The bug that (probably) actually killed pod1's validation run</h3>
+<p>Testing <code>--resume</code> against a synthetic stage-2 state (<code>maps=[Onion, Pangaea]</code>,
+matching exactly what pod1 had just advanced to before it went quiet) reproduced an immediate panic:
+<code>obs 2 grid shape mismatch (v1 requires uniform batch shape)</code>. <code>batch.rs</code>'s
+<code>build_obs</code> assumed every env in a batch shares one grid resolution - true only for
+single-map stages with no rehearsal draw. <b>Every curriculum stage past stage 1 samples multiple maps
+of different native sizes, and even single-map early stages mix in differently-sized past-stage maps
+via rehearsal sampling</b> - so a mixed-shape batch isn't a rare edge case, it's the guaranteed outcome
+of training past stage 1 for more than a few minutes. This fully explains why the run "stopped cleanly
+with no error" right after the stage 0 &rarr; 1 &rarr; 2 advance logged.</p>
+<p>Fix: pad every item to the batch's max <code>(gh, gw)</code>, top-left aligned, zero-fill.
+<code>grid_valid</code> (previously always an all-ones placeholder - the code comment already said so)
+is now 1 only over each item's real region. This needed no architecture change:
+<code>policy.rs</code> already multiplies <code>grid_valid</code> into every tile-legality mask and the
+foveation coverage math, so padded cells were already correctly excludable from action selection by
+design - only the batcher itself needed to stop assuming uniformity. Same-shape batches (still the
+common case for early stages) take an unchanged fast path. New regression test
+(<code>mixed_shape_batch_pads_instead_of_panicking</code>) pins down padding placement and the
+<code>grid_valid</code> mask precisely. Stress-tested with a real 20-update run at stage 3
+(<code>Pangaea</code>+<code>Caucasus</code>, naturally sampling both) - no crash, no NaN.</p>
+
+<h3 id="v8-map-scale">A second finding while investigating: the sizing math only covers early stages</h3>
+<p>The "64 envs/GPU" ceiling from 2026-07-09 was established entirely on <code>Onion</code> (the
+smallest map, 512x512 native &rarr; 64x64 after <code>/REGION</code> alignment). Checked the other
+curriculum maps' actual dimensions: <code>Asia</code> is 2000x1200 &rarr; 250x150 - exactly
+<code>GW_MAX</code>/<code>GH_MAX</code>, and <b>9.2x more grid cells than Onion</b>. Stage 6 onward
+(<code>bots=50+</code>) mixes in <code>World</code>/<code>Asia</code>; since the padding fix above
+makes batches size themselves to the largest map actually sampled, a batch containing even one
+Asia-scale episode costs ~9x the raw grid memory of an all-Onion batch - and the intermediate
+conv-tower activations (GC=256 channels vs 63 input channels) scale by the same spatial factor on top
+of a channel multiplier, so the realistic multiplier is higher than 9.2x, not lower. <b>The 64-envs/GPU
+figure is only proven safe through roughly stage 5; expect to need fewer envs (or foveation, which
+caps the fine-grid cost regardless of map size) once training reaches stage 6+.</b> This is exactly the
+kind of thing checkpoint resume now makes cheap to handle reactively: if stage 6+ OOMs, relaunch with a
+smaller <code>--num-envs</code> and it resumes from the last synced checkpoint with nothing lost - no
+need to get this perfectly right preemptively. Added as an explicit watch item in the monitoring
+section below.</p>
 
 <h3 id="v8-config">Config decisions and why</h3>
 <table>
@@ -1857,28 +1902,30 @@ sweep.</p>
   --containerDiskSize 60 --volumeSize 200 --vcpu 64 --mem 500 --startSSH --ports "22/tcp"
   --secureCloud</code> (bump vcpu/mem/volume vs the single/4-GPU pods used this week - 512 envs
   means ~512+ Rust OS threads plus whatever the native engine itself spawns per session).</li>
-  <li>Rust toolchain (<code>rustup</code>), <code>git clone --recurse-submodules</code>, then the
-  CUDA-linked libtorch venv: <code>python3 -m venv rust/.libtorch-venv &amp;&amp; pip install
-  torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128</code> (must be exactly 2.11.0 -
-  tch 0.24's C++ shim calls ATen ops that don't exist in the pod's stock torch 2.8, fails to
-  <i>compile</i> not just link - see 2026-07-09/10 entry), then <code>rust/.cargo/config.toml</code>
-  pointing <code>LIBTORCH</code>/<code>LD_LIBRARY_PATH</code> at that venv's <code>torch/lib</code> +
-  <code>nvidia/cuda_nvrtc/lib</code>.</li>
-  <li><code>cargo build --release -p oftrain --features native-engine</code>, then
-  <code>readelf -d target/release/oftrain | grep NEEDED | grep torch</code> to confirm
-  <code>libtorch_cuda.so</code> is actually linked (the silent-CUDA-not-linked footgun from
-  2026-07-09) before spending any GPU-hours.</li>
-  <li>Launch with the command above, <code>OFTRAIN_DEBUG_EPISODES=1</code> for the first stretch to
-  visually confirm wins are firing and the win-rate window is filling correctly, then it can be
-  dropped for the steady-state run (it's a stderr firehose at 512 envs).</li>
-  <li>Use <code>PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True</code> (fragmentation mitigation,
-  used throughout this week's testing, no observed downside).</li>
+  <li>Everything else - repo clone, Rust toolchain, the CUDA-linked libtorch venv (must be exactly
+  torch 2.11.0 - tch 0.24's C++ shim calls ATen ops that don't exist in the pod's stock torch 2.8,
+  fails to <i>compile</i> not just link), build, the <code>readelf</code> CUDA-link check, resume-seed
+  from HF, and the crash-loop - is now one command:
+  <pre>RUN_NAME=ppo_v8 NUM_GPUS=8 bash scripts/pod_train_v8.sh</pre>
+  or as the pod's start command:
+  <pre>bash -c "curl -fsSL https://raw.githubusercontent.com/djmango/openfront-ai/master/scripts/pod_train_v8.sh | RUN_NAME=ppo_v8 NUM_GPUS=8 bash"</pre></li>
+  <li>Set <code>EXTRA_ARGS</code> to override the frozen config decisions above if deliberately
+  deviating (default is <code>--amp --pinned-h2d</code>); <code>OFTRAIN_DEBUG_EPISODES=1</code> isn't
+  wired into the wrapper (it's a stderr firehose at 512 envs) - for the first stretch, tail
+  <code>/tmp/train_ppo_v8.log</code> and run the binary manually with that env var set for a short
+  supervised burst before trusting the unattended wrapper.</li>
 </ol>
 
 <h3 id="v8-monitor">Monitoring, gates, and stop conditions</h3>
 <ul>
-  <li><b>Every checkpoint (--ckpt-every):</b> confirm it actually synced to HF (once the resume/sync
-  prerequisite is built) - a checkpoint that only exists on the pod's local disk isn't a safety net.</li>
+  <li><b>Every checkpoint (--ckpt-every):</b> confirm it actually synced to HF (the wrapper's
+  background loop logs <code>[hf-sync] synced latest checkpoint</code> every
+  <code>HF_SYNC_INTERVAL_SECONDS</code>) - a checkpoint that only exists on the pod's local disk isn't
+  a safety net.</li>
+  <li><b>Approaching stage 6 (bots=50, World/Asia enter the map pool):</b> watch GPU memory% closely
+  for an OOM as batches start sizing themselves to Asia-scale (~9x Onion's grid cells, see above) - if
+  it OOMs, just relaunch with a smaller <code>NUM_ENVS</code>; the wrapper's crash-loop + resume means
+  this is a config tweak and a restart, not a lost run.</li>
   <li><b>Curriculum stage index:</b> the single clearest learning-progress signal - it should be
   monotonically increasing over hours, not stuck. Stuck for a long time at any one stage (no fixed
   threshold yet - use judgment, but "stuck" means many multiples of the 2026-07-10 stage-0-&gt;2 pace of
