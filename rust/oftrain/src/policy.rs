@@ -186,6 +186,20 @@ fn beta_entropy(a: &Tensor, b: &Tensor) -> Tensor {
     lbeta - (a - 1.0) * da - (b - 1.0) * db + (ab - 2.0) * dab
 }
 
+/// Manual mixed-precision conv2d: casts the layer's (f32, VarStore-owned)
+/// weight/bias to bf16 on the fly and runs the conv in bf16, without ever
+/// mutating the stored f32 parameters (those stay f32 for the optimizer -
+/// see module doc / `--amp` in `main.rs`). `x` is expected to already be
+/// bf16 (callers cast once at the tower's input boundary and keep the
+/// whole chain in bf16, matching how real autocast keeps a run of
+/// non-numerically-sensitive ops - conv/silu/add here - all in the reduced
+/// dtype instead of round-tripping through f32 after every op).
+fn conv2d_bf16(conv: &nn::Conv2D, x: &Tensor, stride: [i64; 2], padding: [i64; 2]) -> Tensor {
+    let ws = conv.ws.to_kind(Kind::BFloat16);
+    let bs = conv.bs.as_ref().map(|b| b.to_kind(Kind::BFloat16));
+    x.conv2d(&ws, bs.as_ref(), stride, padding, [1i64, 1], 1)
+}
+
 struct ResBlock {
     conv1: nn::Conv2D,
     conv2: nn::Conv2D,
@@ -196,9 +210,14 @@ impl ResBlock {
         let cfg = nn::ConvConfig { padding: 1, ..Default::default() };
         ResBlock { conv1: nn::conv2d(p / "conv1", c, c, 3, cfg), conv2: nn::conv2d(p / "conv2", c, c, 3, cfg) }
     }
-    fn forward(&self, x: &Tensor) -> Tensor {
-        let h = self.conv1.forward(x).silu();
-        (x + self.conv2.forward(&h)).silu()
+    fn forward(&self, x: &Tensor, amp: bool) -> Tensor {
+        if amp {
+            let h = conv2d_bf16(&self.conv1, x, [1, 1], [1, 1]).silu();
+            (x + conv2d_bf16(&self.conv2, &h, [1, 1], [1, 1])).silu()
+        } else {
+            let h = self.conv1.forward(x).silu();
+            (x + self.conv2.forward(&h)).silu()
+        }
     }
 }
 
@@ -214,12 +233,25 @@ impl GridTower {
         let blocks = (0..blocks).map(|i| ResBlock::new(&(p / "block" / i), gc)).collect();
         GridTower { stem, blocks }
     }
-    fn forward(&self, x: &Tensor) -> Tensor {
-        let mut h = self.stem.forward(x).silu();
-        for b in &self.blocks {
-            h = b.forward(&h);
+    /// `amp=true` runs the whole tower (stem + every residual block) in
+    /// bf16, casting in once at the input and back to f32 once at the
+    /// output (see `conv2d_bf16`); `amp=false` is the byte-for-byte
+    /// original f32 path.
+    fn forward(&self, x: &Tensor, amp: bool) -> Tensor {
+        if amp {
+            let xb = x.to_kind(Kind::BFloat16);
+            let mut h = conv2d_bf16(&self.stem, &xb, [1, 1], [1, 1]).silu();
+            for b in &self.blocks {
+                h = b.forward(&h, true);
+            }
+            h.to_kind(Kind::Float)
+        } else {
+            let mut h = self.stem.forward(x).silu();
+            for b in &self.blocks {
+                h = b.forward(&h, false);
+            }
+            h
         }
-        h
     }
 }
 
@@ -238,11 +270,19 @@ impl LocalNet {
             c3: nn::conv2d(p / "c3", 64, LC, 3, cfg(1)),
         }
     }
-    fn forward(&self, x: &Tensor) -> Tensor {
-        let h = self.c1.forward(x).silu();
-        let h = self.c2.forward(&h).silu();
-        let h = self.c3.forward(&h).silu();
-        h.adaptive_avg_pool2d([1, 1]).flatten(1, -1)
+    fn forward(&self, x: &Tensor, amp: bool) -> Tensor {
+        if amp {
+            let xb = x.to_kind(Kind::BFloat16);
+            let h = conv2d_bf16(&self.c1, &xb, [2, 2], [1, 1]).silu();
+            let h = conv2d_bf16(&self.c2, &h, [2, 2], [1, 1]).silu();
+            let h = conv2d_bf16(&self.c3, &h, [2, 2], [1, 1]).silu();
+            h.adaptive_avg_pool2d([1, 1]).flatten(1, -1).to_kind(Kind::Float)
+        } else {
+            let h = self.c1.forward(x).silu();
+            let h = self.c2.forward(&h).silu();
+            let h = self.c3.forward(&h).silu();
+            h.adaptive_avg_pool2d([1, 1]).flatten(1, -1)
+        }
     }
 }
 
@@ -309,10 +349,16 @@ pub struct PolicyNet {
     head_quantity: nn::Linear,
     head_value: nn::Linear,
     device: Device,
+    /// `--amp`: run the conv-heavy submodules (grid towers, local net,
+    /// tile heads) in manually-managed bf16 instead of f32 (see
+    /// `conv2d_bf16`'s doc comment - tch-rs 0.24 has no dtype-selectable
+    /// autocast context, see DEVLOG). Weights/optimizer state/final
+    /// logits stay f32 regardless.
+    amp: bool,
 }
 
 impl PolicyNet {
-    pub fn new(vs: &nn::Path) -> Self {
+    pub fn new(vs: &nn::Path, amp: bool) -> Self {
         let conv1 = |p: &nn::Path, ci, co| nn::conv2d(p, ci, co, 1, Default::default());
         PolicyNet {
             grid_coarse_net: GridTower::new(&(vs / "grid_coarse"), C_GRID, GC, BLOCKS),
@@ -337,6 +383,7 @@ impl PolicyNet {
             head_quantity: nn::linear(vs / "head_quantity", HIDDEN, 2, Default::default()),
             head_value: nn::linear(vs / "head_value", HIDDEN, 1, Default::default()),
             device: vs.device(),
+            amp,
         }
     }
 
@@ -365,13 +412,13 @@ impl PolicyNet {
     fn trunk_forward(&self, o: &Obs) -> (Tensor, Tensor, Tensor, Tensor, Tensor) {
         let (grid_fine, grid_coarse, gc_valid, _legal_tile_coarse, _hl, _hw) = Self::foveate(o);
 
-        let gc_map = self.grid_coarse_net.forward(&grid_coarse);
+        let gc_map = self.grid_coarse_net.forward(&grid_coarse, self.amp);
         let gc_valid_b = gc_valid.unsqueeze(1);
         let gc_map = &gc_map * &gc_valid_b;
         let gc_pool = gc_map.sum_dim_intlist([2, 3].as_slice(), false, Kind::Float)
             / gc_valid_b.sum_dim_intlist([2, 3].as_slice(), false, Kind::Float).clamp_min(1.0);
 
-        let gf_map = self.grid_fine_net.forward(&grid_fine);
+        let gf_map = self.grid_fine_net.forward(&grid_fine, self.amp);
         let gf_valid_b = o.grid_valid.unsqueeze(1);
         let gf_map = &gf_map * &gf_valid_b;
         let gf_pool = gf_map.sum_dim_intlist([2, 3].as_slice(), false, Kind::Float)
@@ -385,18 +432,29 @@ impl PolicyNet {
         let m = o.pmask.unsqueeze(-1);
         let p_pool = (&p * &m).sum_dim_intlist(1i64, false, Kind::Float) / m.sum_dim_intlist(1i64, false, Kind::Float).clamp_min(1.0);
 
-        let l_pool = self.local_net.forward(&o.local);
+        let l_pool = self.local_net.forward(&o.local, self.amp);
         let cat = Tensor::cat(&[&gc_pool, &gf_pool, &p_pool, &l_pool, &o.scalars], -1);
         let h = self.trunk1.forward(&cat).silu();
         let h = self.trunk2.forward(&h).silu();
         (h, gc_map, gf_map, p, grid_coarse)
     }
 
-    fn tile_head(head: &(nn::Conv2D, nn::Conv2D), map: &Tensor, h: &Tensor) -> Tensor {
+    fn tile_head(head: &(nn::Conv2D, nn::Conv2D), map: &Tensor, h: &Tensor, amp: bool) -> Tensor {
         let (b, _, gh, gw) = map.size4().unwrap();
         let hb = h.unsqueeze(-1).unsqueeze(-1).expand([b, HIDDEN, gh, gw], false);
         let cat = Tensor::cat(&[map, &hb], 1);
-        head.1.forward(&head.0.forward(&cat).silu()).flatten(1, -1)
+        // 1x1 convs over the full grid (up to GW_MAX x GH_MAX cells, GC +
+        // HIDDEN input channels) - real compute, not just a cheap
+        // per-pixel lookup, so worth running under the same bf16 path as
+        // the towers; output cast back to f32 before it becomes the
+        // tile logits (see `--amp` doc on `PolicyNet::amp`).
+        if amp {
+            let cat_b = cat.to_kind(Kind::BFloat16);
+            let mid = conv2d_bf16(&head.0, &cat_b, [1, 1], [0, 0]).silu();
+            conv2d_bf16(&head.1, &mid, [1, 1], [0, 0]).flatten(1, -1).to_kind(Kind::Float)
+        } else {
+            head.1.forward(&head.0.forward(&cat).silu()).flatten(1, -1)
+        }
     }
 
     /// Full forward pass. Returns raw head tensors; callers combine with
@@ -406,8 +464,8 @@ impl PolicyNet {
         let act_logits = self.head_action.forward(&h) + (&o.legal_actions - 1.0) * (-MASKED_NEG);
         let q = self.head_player_q.forward(&h); // (B, PC)
         let player_logits = q.unsqueeze(1).matmul(&p.transpose(-2, -1)).squeeze_dim(1); // (B, S)
-        let tile_coarse = Self::tile_head(&self.head_tile_coarse, &gc_map, &h);
-        let tile_fine = Self::tile_head(&self.head_tile_fine, &gf_map, &h);
+        let tile_coarse = Self::tile_head(&self.head_tile_coarse, &gc_map, &h, self.amp);
+        let tile_fine = Self::tile_head(&self.head_tile_fine, &gf_map, &h, self.amp);
         let build = self.head_build.forward(&h) + (&o.legal_build - 1.0) * (-MASKED_NEG);
         let nuke = self.head_nuke.forward(&h) + (&o.legal_nuke - 1.0) * (-MASKED_NEG);
         let quantity = self.head_quantity.forward(&h);
@@ -659,4 +717,91 @@ fn sample_beta_host(a: &Tensor, b: &Tensor) -> Tensor {
         out.push(d.sample(&mut rng) as f32);
     }
     Tensor::from_slice(&out).view(a.size().as_slice()).to_device(dev)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Fast, small-scale (tiny synthetic grids, not a real map) forward/
+    //! backward correctness tests for the `--amp`/`--foveate`/`--gc`/
+    //! `--blocks` code paths - deliberately bypassing the Node engine
+    //! bridge entirely so these run in milliseconds regardless of engine
+    //! availability. This is the practical way to smoke-test `--amp` on
+    //! CPU at all: a real-map-scale (up to GH_MAX x GW_MAX, GC=256,
+    //! BLOCKS=4) forward pass under manually-cast bf16 was measured to be
+    //! *dramatically* slower than f32 on this CPU (no accelerated CPU
+    //! bf16 GEMM/conv kernel in this libtorch build - still correct, just
+    //! not practically smoke-testable end-to-end without a GPU; see
+    //! DEVLOG) - a single tiny-grid batch keeps the same code path
+    //! exercised while keeping wall-clock trivial.
+    use super::*;
+
+    fn synthetic_obs(device: Device, b: i64, gh: i64, gw: i64) -> Obs {
+        let ms = MAX_SLOTS;
+        let na = N_ACTIONS;
+        let opts = (Kind::Float, device);
+        Obs {
+            grid: Tensor::rand([b, C_GRID, gh, gw], opts),
+            grid_valid: Tensor::ones([b, gh, gw], opts),
+            legal_tile: Tensor::ones([b, gh, gw], opts),
+            players: Tensor::rand([b, ms, P_FEAT], opts),
+            pmask: Tensor::ones([b, ms], opts),
+            local: Tensor::rand([b, N_LOCAL, LOCAL, LOCAL], opts),
+            scalars: Tensor::rand([b, N_SCALARS], opts),
+            legal_actions: Tensor::ones([b, na], opts),
+            legal_ptarget: Tensor::ones([b, na, ms], opts),
+            legal_build: Tensor::ones([b, N_BUILD], opts),
+            legal_nuke: Tensor::ones([b, N_NUKE], opts),
+        }
+    }
+
+    fn assert_finite(t: &Tensor, what: &str) {
+        let all_finite = t.isfinite().all().double_value(&[]);
+        assert!(all_finite != 0.0, "{what} has non-finite values: {t:?}");
+    }
+
+    /// Exercises `act()` (no_grad) + `evaluate()` + `backward()` for a
+    /// given `PolicyNet` config, asserting every returned tensor and the
+    /// summed loss stay finite. Shared by the amp/foveate/model-size
+    /// tests below so each only has to say what's different about it.
+    fn check_policy_finite(policy: &PolicyNet, o: &Obs) {
+        let (a, player, tile, build, nuke, qty, logp, value) = tch::no_grad(|| policy.act(o, false));
+        for (name, t) in [
+            ("act.logp", &logp),
+            ("act.value", &value),
+            ("act.qty", &qty),
+        ] {
+            assert_finite(t, name);
+        }
+
+        let choice = ChoiceBatch {
+            action: a,
+            player_slot: player,
+            tile_region: tile,
+            build_type: build,
+            nuke_type: nuke,
+            quantity_frac: qty,
+        };
+        let (logp2, ent, ent_q, value2) = policy.evaluate(o, &choice);
+        assert_finite(&logp2, "evaluate.logp");
+        assert_finite(&ent, "evaluate.ent");
+        assert_finite(&ent_q, "evaluate.ent_q");
+        assert_finite(&value2, "evaluate.value");
+
+        let loss = logp2.mean(Kind::Float) + ent.mean(Kind::Float) + ent_q.mean(Kind::Float)
+            + value2.mean(Kind::Float);
+        loss.backward();
+        let loss_v = loss.double_value(&[]);
+        assert!(loss_v.is_finite(), "loss not finite: {loss_v}");
+    }
+
+    #[test]
+    fn amp_and_f32_paths_finite() {
+        tch::manual_seed(0);
+        for &amp in &[false, true] {
+            let vs = nn::VarStore::new(Device::Cpu);
+            let policy = PolicyNet::new(&vs.root(), amp);
+            let o = synthetic_obs(Device::Cpu, 2, 6, 6);
+            check_policy_finite(&policy, &o);
+        }
+    }
 }

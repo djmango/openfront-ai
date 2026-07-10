@@ -80,6 +80,15 @@ struct Args {
     #[arg(long, default_value_t = 4)]
     minibatches: usize,
 
+    /// Manual bf16 mixed precision for the policy net's conv towers
+    /// (grid towers, local net, tile heads); logits/loss/optimizer state
+    /// stay f32. tch-rs 0.24's `autocast()` has no dtype selector (always
+    /// picks fp16 on CUDA), so this is a hand-rolled cast-in/cast-out path
+    /// instead - see `policy.rs`/DEVLOG. Works (slower) on CPU too, so
+    /// it's smoke-testable without a GPU.
+    #[arg(long, default_value_t = false)]
+    amp: bool,
+
     /// "cpu", "cuda", or "cuda:N".
     #[arg(long, default_value = "cpu")]
     device: String,
@@ -137,6 +146,7 @@ fn main() -> anyhow::Result<()> {
         stage_lr_decay: args.stage_lr_decay,
         epochs: args.epochs,
         minibatches: args.minibatches,
+        amp: args.amp,
         device,
         engine: args.engine,
         log_every: args.log_every,
