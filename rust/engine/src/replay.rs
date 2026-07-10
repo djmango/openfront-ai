@@ -1684,6 +1684,28 @@ mod tests {
     }
 
     #[test]
+    fn warship_replans_patrol_after_trade_hunt_in_rn7wbz1y() {
+        let repo_root = std::env::var("OPENFRONT_REPO")
+            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+        let repo = std::path::Path::new(&repo_root);
+        let path = repo.join("records/0c4c7d7993c9/rN7wbZ1Y.json.gz");
+
+        let before = replay_to_tick(repo, &path, 746);
+        let before_ship = before
+            .player_by_id("xgfz7usc")
+            .and_then(|player| player.units.iter().find(|unit| unit.id == 1468))
+            .expect("warship 1468 before resuming patrol");
+        assert_eq!(before_ship.tile, 3_835_404);
+
+        let after = replay_to_tick(repo, &path, 747);
+        let after_ship = after
+            .player_by_id("xgfz7usc")
+            .and_then(|player| player.units.iter().find(|unit| unit.id == 1468))
+            .expect("warship 1468 after patrol replanning");
+        assert_eq!(after_ship.tile, 3_837_604);
+    }
+
+    #[test]
     fn manual_boat_retreat_matches_giq_through_turn_450() {
         let repo_root = std::env::var("OPENFRONT_REPO")
             .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
