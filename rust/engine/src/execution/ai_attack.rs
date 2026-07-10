@@ -109,7 +109,8 @@ pub fn nearby_land_player_small_ids(game: &Game, small_id: u16) -> Vec<u16> {
     let mut seen = HashSet::new();
     game.for_each_border_tile(small_id, |tile| {
         game.map.for_each_neighbor4(tile, |neighbor| {
-            if !game.is_land(neighbor) {
+            // TS `PlayerImpl.nearby()`: `map.isLand(n) && !map.isImpassable(n)`.
+            if !game.is_land(neighbor) || game.is_impassable(neighbor) {
                 return;
             }
             let owner = game.map.owner_id(neighbor);
@@ -127,7 +128,8 @@ pub fn nearby_player_small_ids(game: &Game, small_id: u16) -> Vec<u16> {
     let mut seen = HashSet::new();
     game.for_each_border_tile(small_id, |tile| {
         game.map.for_each_neighbor4(tile, |neighbor| {
-            if !game.is_land(neighbor) {
+            // TS `PlayerImpl.nearby()`: `map.isLand(n) && !map.isImpassable(n)`.
+            if !game.is_land(neighbor) || game.is_impassable(neighbor) {
                 return;
             }
             let owner = game.map.owner_id(neighbor);
@@ -165,7 +167,7 @@ pub fn nearby_player_small_ids(game: &Game, small_id: u16) -> Vec<u16> {
                 continue;
             }
             let tile = game.ref_xy(nx as u32, ny as u32);
-            if !game.is_land(tile) || game.has_fallout(tile) {
+            if !game.is_land(tile) || game.is_impassable(tile) || game.has_fallout(tile) {
                 continue;
             }
             let owner = game.map.owner_id(tile);
