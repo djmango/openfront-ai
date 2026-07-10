@@ -1,0 +1,1616 @@
+{
+  "rows": [
+    {
+      "tick": 50,
+      "nativeTotalOwned": 3042,
+      "tsTotalOwned": 3042,
+      "nativeInSpawn": true,
+      "tsInSpawn": true,
+      "worstEntity": null
+    },
+    {
+      "tick": 100,
+      "nativeTotalOwned": 3042,
+      "tsTotalOwned": 3042,
+      "nativeInSpawn": true,
+      "tsInSpawn": true,
+      "worstEntity": null
+    },
+    {
+      "tick": 150,
+      "nativeTotalOwned": 3042,
+      "tsTotalOwned": 3042,
+      "nativeInSpawn": true,
+      "tsInSpawn": true,
+      "worstEntity": null
+    },
+    {
+      "tick": 200,
+      "nativeTotalOwned": 3042,
+      "tsTotalOwned": 3042,
+      "nativeInSpawn": true,
+      "tsInSpawn": true,
+      "worstEntity": null
+    },
+    {
+      "tick": 250,
+      "nativeTotalOwned": 3042,
+      "tsTotalOwned": 3042,
+      "nativeInSpawn": true,
+      "tsInSpawn": true,
+      "worstEntity": null
+    },
+    {
+      "tick": 300,
+      "nativeTotalOwned": 3018,
+      "tsTotalOwned": 3018,
+      "nativeInSpawn": true,
+      "tsInSpawn": true,
+      "worstEntity": null
+    },
+    {
+      "tick": 350,
+      "nativeTotalOwned": 18432,
+      "tsTotalOwned": 18432,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": null
+    },
+    {
+      "tick": 400,
+      "nativeTotalOwned": 42450,
+      "tsTotalOwned": 42450,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": null
+    },
+    {
+      "tick": 450,
+      "nativeTotalOwned": 63778,
+      "tsTotalOwned": 63778,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": null
+    },
+    {
+      "tick": 500,
+      "nativeTotalOwned": 92906,
+      "tsTotalOwned": 92906,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": null
+    },
+    {
+      "tick": 550,
+      "nativeTotalOwned": 126828,
+      "tsTotalOwned": 126828,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": null
+    },
+    {
+      "tick": 600,
+      "nativeTotalOwned": 162632,
+      "tsTotalOwned": 162632,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": null
+    },
+    {
+      "tick": 650,
+      "nativeTotalOwned": 201857,
+      "tsTotalOwned": 201857,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": null
+    },
+    {
+      "tick": 700,
+      "nativeTotalOwned": 243769,
+      "tsTotalOwned": 243769,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": null
+    },
+    {
+      "tick": 750,
+      "nativeTotalOwned": 289306,
+      "tsTotalOwned": 289306,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": null
+    },
+    {
+      "tick": 800,
+      "nativeTotalOwned": 336821,
+      "tsTotalOwned": 336821,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": null
+    },
+    {
+      "tick": 850,
+      "nativeTotalOwned": 382408,
+      "tsTotalOwned": 382408,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": null
+    },
+    {
+      "tick": 900,
+      "nativeTotalOwned": 435828,
+      "tsTotalOwned": 435828,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": null
+    },
+    {
+      "tick": 950,
+      "nativeTotalOwned": 491929,
+      "tsTotalOwned": 491929,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": null
+    },
+    {
+      "tick": 1000,
+      "nativeTotalOwned": 547883,
+      "tsTotalOwned": 547883,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": null
+    },
+    {
+      "tick": 1050,
+      "nativeTotalOwned": 605533,
+      "tsTotalOwned": 605533,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": null
+    },
+    {
+      "tick": 1100,
+      "nativeTotalOwned": 664540,
+      "tsTotalOwned": 664540,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": null
+    },
+    {
+      "tick": 1150,
+      "nativeTotalOwned": 718619,
+      "tsTotalOwned": 718619,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": null
+    },
+    {
+      "tick": 1200,
+      "nativeTotalOwned": 777890,
+      "tsTotalOwned": 777890,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": null
+    },
+    {
+      "tick": 1250,
+      "nativeTotalOwned": 829947,
+      "tsTotalOwned": 829947,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": null
+    },
+    {
+      "tick": 1300,
+      "nativeTotalOwned": 873472,
+      "tsTotalOwned": 873472,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": null
+    },
+    {
+      "tick": 1350,
+      "nativeTotalOwned": 924512,
+      "tsTotalOwned": 924512,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": null
+    },
+    {
+      "tick": 1400,
+      "nativeTotalOwned": 969200,
+      "tsTotalOwned": 969200,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": null
+    },
+    {
+      "tick": 1450,
+      "nativeTotalOwned": 1008150,
+      "tsTotalOwned": 1008150,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": null
+    },
+    {
+      "tick": 1500,
+      "nativeTotalOwned": 1044388,
+      "tsTotalOwned": 1044388,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Parthian Monkdom",
+        "nativeTiles": 12479,
+        "tsTiles": 12465,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.0011218847664075647
+      }
+    },
+    {
+      "tick": 1550,
+      "nativeTotalOwned": 1073706,
+      "tsTotalOwned": 1073706,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Parthian Monkdom",
+        "nativeTiles": 12581,
+        "tsTiles": 12394,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.014863683332008585
+      }
+    },
+    {
+      "tick": 1600,
+      "nativeTotalOwned": 1097056,
+      "tsTotalOwned": 1097056,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Romanov Protectorate",
+        "nativeTiles": 7664,
+        "tsTiles": 7222,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.05767223382045929
+      }
+    },
+    {
+      "tick": 1650,
+      "nativeTotalOwned": 1118270,
+      "tsTotalOwned": 1118270,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Romanov Protectorate",
+        "nativeTiles": 7723,
+        "tsTiles": 7171,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.07147481548621003
+      }
+    },
+    {
+      "tick": 1700,
+      "nativeTotalOwned": 1135311,
+      "tsTotalOwned": 1135283,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Romanov Protectorate",
+        "nativeTiles": 7791,
+        "tsTiles": 7294,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.0637915543575921
+      }
+    },
+    {
+      "tick": 1750,
+      "nativeTotalOwned": 1141567,
+      "tsTotalOwned": 1141567,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Taino Supremacy",
+        "nativeTiles": 4338,
+        "tsTiles": 6564,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.3391224862888483
+      }
+    },
+    {
+      "tick": 1800,
+      "nativeTotalOwned": 1146765,
+      "tsTotalOwned": 1146765,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Taino Supremacy",
+        "nativeTiles": 0,
+        "tsTiles": 6564,
+        "nativeAlive": false,
+        "tsAlive": true,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 1850,
+      "nativeTotalOwned": 1152475,
+      "tsTotalOwned": 1152475,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Taino Supremacy",
+        "nativeTiles": 0,
+        "tsTiles": 6564,
+        "nativeAlive": false,
+        "tsAlive": true,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 1900,
+      "nativeTotalOwned": 1156439,
+      "tsTotalOwned": 1156320,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Taino Supremacy",
+        "nativeTiles": 0,
+        "tsTiles": 6564,
+        "nativeAlive": false,
+        "tsAlive": true,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 1950,
+      "nativeTotalOwned": 1159556,
+      "tsTotalOwned": 1159437,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Taino Supremacy",
+        "nativeTiles": 0,
+        "tsTiles": 6564,
+        "nativeAlive": false,
+        "tsAlive": true,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 2000,
+      "nativeTotalOwned": 1162158,
+      "tsTotalOwned": 1162039,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Songhai Sisterhood",
+        "nativeTiles": 3979,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 2050,
+      "nativeTotalOwned": 1163747,
+      "tsTotalOwned": 1163628,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Songhai Sisterhood",
+        "nativeTiles": 3761,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 2100,
+      "nativeTotalOwned": 1163747,
+      "tsTotalOwned": 1163628,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Songhai Sisterhood",
+        "nativeTiles": 3672,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 2150,
+      "nativeTotalOwned": 1163747,
+      "tsTotalOwned": 1163628,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Songhai Sisterhood",
+        "nativeTiles": 3672,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 2200,
+      "nativeTotalOwned": 1163747,
+      "tsTotalOwned": 1163628,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Songhai Sisterhood",
+        "nativeTiles": 3672,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 2250,
+      "nativeTotalOwned": 1163747,
+      "tsTotalOwned": 1163628,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Songhai Sisterhood",
+        "nativeTiles": 3883,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 2300,
+      "nativeTotalOwned": 1163747,
+      "tsTotalOwned": 1163628,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Hittite Horde",
+        "nativeTiles": 308,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 2350,
+      "nativeTotalOwned": 1163747,
+      "tsTotalOwned": 1163686,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Hittite Horde",
+        "nativeTiles": 308,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 2400,
+      "nativeTotalOwned": 1163747,
+      "tsTotalOwned": 1163686,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Hittite Horde",
+        "nativeTiles": 196,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 2450,
+      "nativeTotalOwned": 1163747,
+      "tsTotalOwned": 1163686,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Abbasid Guild",
+        "nativeTiles": 8166,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 2500,
+      "nativeTotalOwned": 1163747,
+      "tsTotalOwned": 1163686,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Abbasid Guild",
+        "nativeTiles": 6840,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 2550,
+      "nativeTotalOwned": 1163747,
+      "tsTotalOwned": 1163686,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Abbasid Guild",
+        "nativeTiles": 5134,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 2600,
+      "nativeTotalOwned": 1163805,
+      "tsTotalOwned": 1163686,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Abbasid Guild",
+        "nativeTiles": 2651,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 2650,
+      "nativeTotalOwned": 1163805,
+      "tsTotalOwned": 1163686,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Abbasid Guild",
+        "nativeTiles": 560,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 2700,
+      "nativeTotalOwned": 1163805,
+      "tsTotalOwned": 1163686,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Abbasid Guild",
+        "nativeTiles": 560,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 2750,
+      "nativeTotalOwned": 1163805,
+      "tsTotalOwned": 1163686,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Abbasid Guild",
+        "nativeTiles": 560,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 2800,
+      "nativeTotalOwned": 1163805,
+      "tsTotalOwned": 1163686,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Abbasid Guild",
+        "nativeTiles": 560,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 2850,
+      "nativeTotalOwned": 1163805,
+      "tsTotalOwned": 1163686,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Abbasid Guild",
+        "nativeTiles": 563,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 2900,
+      "nativeTotalOwned": 1163805,
+      "tsTotalOwned": 1163686,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Abbasid Guild",
+        "nativeTiles": 613,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 2950,
+      "nativeTotalOwned": 1163832,
+      "tsTotalOwned": 1163686,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Abbasid Guild",
+        "nativeTiles": 663,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 3000,
+      "nativeTotalOwned": 1163906,
+      "tsTotalOwned": 1163686,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Abbasid Guild",
+        "nativeTiles": 713,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 3050,
+      "nativeTotalOwned": 1163906,
+      "tsTotalOwned": 1163686,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Abbasid Guild",
+        "nativeTiles": 564,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 3100,
+      "nativeTotalOwned": 1163906,
+      "tsTotalOwned": 1163730,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Abbasid Guild",
+        "nativeTiles": 253,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 3150,
+      "nativeTotalOwned": 1163906,
+      "tsTotalOwned": 1163866,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Almoravid Tribunal",
+        "nativeTiles": 4651,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 3200,
+      "nativeTotalOwned": 1164041,
+      "tsTotalOwned": 1163866,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Almoravid Tribunal",
+        "nativeTiles": 4651,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 3250,
+      "nativeTotalOwned": 1164086,
+      "tsTotalOwned": 1163866,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Almoravid Tribunal",
+        "nativeTiles": 4651,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 3300,
+      "nativeTotalOwned": 1164086,
+      "tsTotalOwned": 1163866,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Almoravid Tribunal",
+        "nativeTiles": 4957,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 3350,
+      "nativeTotalOwned": 1164086,
+      "tsTotalOwned": 1163866,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Afghan Archduchy",
+        "nativeTiles": 2686,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 3400,
+      "nativeTotalOwned": 1164086,
+      "tsTotalOwned": 1163866,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Afghan Archduchy",
+        "nativeTiles": 2786,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 3450,
+      "nativeTotalOwned": 1164086,
+      "tsTotalOwned": 1163866,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Afghan Archduchy",
+        "nativeTiles": 2281,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 3500,
+      "nativeTotalOwned": 1164086,
+      "tsTotalOwned": 1163866,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Afghan Archduchy",
+        "nativeTiles": 167,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 3550,
+      "nativeTotalOwned": 1164086,
+      "tsTotalOwned": 1163866,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Afghan Archduchy",
+        "nativeTiles": 145,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 3600,
+      "nativeTotalOwned": 1164086,
+      "tsTotalOwned": 1163866,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Afghan Archduchy",
+        "nativeTiles": 145,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 3650,
+      "nativeTotalOwned": 1164086,
+      "tsTotalOwned": 1163866,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Afghan Archduchy",
+        "nativeTiles": 145,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 3700,
+      "nativeTotalOwned": 1164086,
+      "tsTotalOwned": 1163887,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Afghan Archduchy",
+        "nativeTiles": 145,
+        "tsTiles": 0,
+        "nativeAlive": true,
+        "tsAlive": false,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 3750,
+      "nativeTotalOwned": 1164086,
+      "tsTotalOwned": 1164071,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Cham State",
+        "nativeTiles": 0,
+        "tsTiles": 4765,
+        "nativeAlive": false,
+        "tsAlive": true,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 3800,
+      "nativeTotalOwned": 1164086,
+      "tsTotalOwned": 1164086,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Cham State",
+        "nativeTiles": 0,
+        "tsTiles": 4765,
+        "nativeAlive": false,
+        "tsAlive": true,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 3850,
+      "nativeTotalOwned": 1164086,
+      "tsTotalOwned": 1164086,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Cham State",
+        "nativeTiles": 0,
+        "tsTiles": 2951,
+        "nativeAlive": false,
+        "tsAlive": true,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 3900,
+      "nativeTotalOwned": 1164086,
+      "tsTotalOwned": 1164086,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Cham State",
+        "nativeTiles": 0,
+        "tsTiles": 336,
+        "nativeAlive": false,
+        "tsAlive": true,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 3950,
+      "nativeTotalOwned": 1164086,
+      "tsTotalOwned": 1164086,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Georgia",
+        "nativeTiles": 57476,
+        "tsTiles": 99213,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.42068075756201306
+      }
+    },
+    {
+      "tick": 4000,
+      "nativeTotalOwned": 1164086,
+      "tsTotalOwned": 1164086,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Georgia",
+        "nativeTiles": 57476,
+        "tsTiles": 99023,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.41956919099603124
+      }
+    },
+    {
+      "tick": 4050,
+      "nativeTotalOwned": 1164086,
+      "tsTotalOwned": 1164086,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Georgia",
+        "nativeTiles": 57476,
+        "tsTiles": 98202,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.4147166045498055
+      }
+    },
+    {
+      "tick": 4100,
+      "nativeTotalOwned": 1164086,
+      "tsTotalOwned": 1164086,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Georgia",
+        "nativeTiles": 57476,
+        "tsTiles": 97623,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.41124530080001637
+      }
+    },
+    {
+      "tick": 4150,
+      "nativeTotalOwned": 1164086,
+      "tsTotalOwned": 1164086,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Georgia",
+        "nativeTiles": 57476,
+        "tsTiles": 97213,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.4087622025860739
+      }
+    },
+    {
+      "tick": 4200,
+      "nativeTotalOwned": 1164086,
+      "tsTotalOwned": 1164086,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Georgia",
+        "nativeTiles": 57476,
+        "tsTiles": 97134,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.40828134329894783
+      }
+    },
+    {
+      "tick": 4250,
+      "nativeTotalOwned": 1164086,
+      "tsTotalOwned": 1164086,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Georgia",
+        "nativeTiles": 57476,
+        "tsTiles": 96125,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.4020702210663199
+      }
+    },
+    {
+      "tick": 4300,
+      "nativeTotalOwned": 1164086,
+      "tsTotalOwned": 1164086,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Georgia",
+        "nativeTiles": 57476,
+        "tsTiles": 95441,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.3977850190169843
+      }
+    },
+    {
+      "tick": 4350,
+      "nativeTotalOwned": 1164086,
+      "tsTotalOwned": 1164086,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Georgia",
+        "nativeTiles": 57476,
+        "tsTiles": 94574,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.392264258675746
+      }
+    },
+    {
+      "tick": 4400,
+      "nativeTotalOwned": 1164402,
+      "tsTotalOwned": 1164086,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 60233,
+        "tsTiles": 107307,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.43868526750351794
+      }
+    },
+    {
+      "tick": 4450,
+      "nativeTotalOwned": 1164973,
+      "tsTotalOwned": 1164090,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 57526,
+        "tsTiles": 107361,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.46418159294343386
+      }
+    },
+    {
+      "tick": 4500,
+      "nativeTotalOwned": 1165206,
+      "tsTotalOwned": 1164126,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 58177,
+        "tsTiles": 107417,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.4584004394090321
+      }
+    },
+    {
+      "tick": 4550,
+      "nativeTotalOwned": 1165206,
+      "tsTotalOwned": 1164126,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 55619,
+        "tsTiles": 109677,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.49288364926101186
+      }
+    },
+    {
+      "tick": 4600,
+      "nativeTotalOwned": 1165206,
+      "tsTotalOwned": 1164126,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 46403,
+        "tsTiles": 111865,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.5851875027935458
+      }
+    },
+    {
+      "tick": 4650,
+      "nativeTotalOwned": 1165206,
+      "tsTotalOwned": 1164126,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 38323,
+        "tsTiles": 113750,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.6630945054945055
+      }
+    },
+    {
+      "tick": 4700,
+      "nativeTotalOwned": 1165206,
+      "tsTotalOwned": 1164126,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 32636,
+        "tsTiles": 114301,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.714473189210943
+      }
+    },
+    {
+      "tick": 4750,
+      "nativeTotalOwned": 1165206,
+      "tsTotalOwned": 1164126,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 30926,
+        "tsTiles": 115284,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.7317407445959543
+      }
+    },
+    {
+      "tick": 4800,
+      "nativeTotalOwned": 1165206,
+      "tsTotalOwned": 1164126,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 29365,
+        "tsTiles": 116064,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.7469930383236835
+      }
+    },
+    {
+      "tick": 4850,
+      "nativeTotalOwned": 1165206,
+      "tsTotalOwned": 1164126,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 27097,
+        "tsTiles": 116460,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.7673278378842521
+      }
+    },
+    {
+      "tick": 4900,
+      "nativeTotalOwned": 1165206,
+      "tsTotalOwned": 1164126,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 22398,
+        "tsTiles": 116807,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.8082477933685481
+      }
+    },
+    {
+      "tick": 4950,
+      "nativeTotalOwned": 1165206,
+      "tsTotalOwned": 1162627,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 16568,
+        "tsTiles": 118445,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.8601207311410359
+      }
+    },
+    {
+      "tick": 5000,
+      "nativeTotalOwned": 1165206,
+      "tsTotalOwned": 1162627,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 11495,
+        "tsTiles": 118591,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.9030702161209535
+      }
+    },
+    {
+      "tick": 5050,
+      "nativeTotalOwned": 1165206,
+      "tsTotalOwned": 1162989,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 7208,
+        "tsTiles": 118598,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.9392232584023339
+      }
+    },
+    {
+      "tick": 5100,
+      "nativeTotalOwned": 1165206,
+      "tsTotalOwned": 1164126,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 3492,
+        "tsTiles": 118598,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.9705559958852594
+      }
+    },
+    {
+      "tick": 5150,
+      "nativeTotalOwned": 1165206,
+      "tsTotalOwned": 1164165,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 1240,
+        "tsTiles": 118599,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.9895445998701506
+      }
+    },
+    {
+      "tick": 5200,
+      "nativeTotalOwned": 1165206,
+      "tsTotalOwned": 1164165,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 256,
+        "tsTiles": 119300,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.9978541492036882
+      }
+    },
+    {
+      "tick": 5250,
+      "nativeTotalOwned": 1165206,
+      "tsTotalOwned": 1164165,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 72,
+        "tsTiles": 120184,
+        "nativeAlive": true,
+        "tsAlive": true,
+        "relDiff": 0.999400918591493
+      }
+    },
+    {
+      "tick": 5300,
+      "nativeTotalOwned": 1165206,
+      "tsTotalOwned": 1164165,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 0,
+        "tsTiles": 120592,
+        "nativeAlive": false,
+        "tsAlive": true,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 5350,
+      "nativeTotalOwned": 1165206,
+      "tsTotalOwned": 1164165,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 0,
+        "tsTiles": 120490,
+        "nativeAlive": false,
+        "tsAlive": true,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 5400,
+      "nativeTotalOwned": 1165206,
+      "tsTotalOwned": 1164165,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 0,
+        "tsTiles": 119884,
+        "nativeAlive": false,
+        "tsAlive": true,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 5450,
+      "nativeTotalOwned": 1165206,
+      "tsTotalOwned": 1164165,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 0,
+        "tsTiles": 120544,
+        "nativeAlive": false,
+        "tsAlive": true,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 5500,
+      "nativeTotalOwned": 1165206,
+      "tsTotalOwned": 1164165,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 0,
+        "tsTiles": 120953,
+        "nativeAlive": false,
+        "tsAlive": true,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 5550,
+      "nativeTotalOwned": 1165206,
+      "tsTotalOwned": 1164126,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 0,
+        "tsTiles": 121478,
+        "nativeAlive": false,
+        "tsAlive": true,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 5600,
+      "nativeTotalOwned": 1165206,
+      "tsTotalOwned": 1162895,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 0,
+        "tsTiles": 121656,
+        "nativeAlive": false,
+        "tsAlive": true,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 5650,
+      "nativeTotalOwned": 1165331,
+      "tsTotalOwned": 1162173,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 0,
+        "tsTiles": 121680,
+        "nativeAlive": false,
+        "tsAlive": true,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 5700,
+      "nativeTotalOwned": 1165602,
+      "tsTotalOwned": 1162526,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 0,
+        "tsTiles": 123340,
+        "nativeAlive": false,
+        "tsAlive": true,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 5750,
+      "nativeTotalOwned": 1165652,
+      "tsTotalOwned": 1164274,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 0,
+        "tsTiles": 124426,
+        "nativeAlive": false,
+        "tsAlive": true,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 5800,
+      "nativeTotalOwned": 1165652,
+      "tsTotalOwned": 1164632,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 0,
+        "tsTiles": 125103,
+        "nativeAlive": false,
+        "tsAlive": true,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 5850,
+      "nativeTotalOwned": 1165652,
+      "tsTotalOwned": 1165399,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 0,
+        "tsTiles": 124759,
+        "nativeAlive": false,
+        "tsAlive": true,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 5900,
+      "nativeTotalOwned": 1165652,
+      "tsTotalOwned": 1165399,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 0,
+        "tsTiles": 124776,
+        "nativeAlive": false,
+        "tsAlive": true,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 5950,
+      "nativeTotalOwned": 1165652,
+      "tsTotalOwned": 1164379,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 0,
+        "tsTiles": 124832,
+        "nativeAlive": false,
+        "tsAlive": true,
+        "relDiff": 1.0
+      }
+    },
+    {
+      "tick": 6000,
+      "nativeTotalOwned": 1165829,
+      "tsTotalOwned": 1164379,
+      "nativeInSpawn": false,
+      "tsInSpawn": false,
+      "worstEntity": {
+        "identity": "nation:Ukraine",
+        "nativeTiles": 0,
+        "tsTiles": 125061,
+        "nativeAlive": false,
+        "tsAlive": true,
+        "relDiff": 1.0
+      }
+    }
+  ],
+  "firstDivergence": {
+    "tick": 1750,
+    "nativeTotalOwned": 1141567,
+    "tsTotalOwned": 1141567,
+    "nativeInSpawn": false,
+    "tsInSpawn": false,
+    "worstEntity": {
+      "identity": "nation:Taino Supremacy",
+      "nativeTiles": 4338,
+      "tsTiles": 6564,
+      "nativeAlive": true,
+      "tsAlive": true,
+      "relDiff": 0.3391224862888483
+    }
+  }
+}
