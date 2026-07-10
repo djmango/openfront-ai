@@ -394,24 +394,29 @@ pub struct PolicyNet {
 }
 
 impl PolicyNet {
-    pub fn new(vs: &nn::Path, amp: bool, foveate: bool) -> Self {
+    /// `gc`/`blocks` override the `GC`/`BLOCKS` module defaults (see
+    /// `--gc`/`--blocks` in `main.rs`) - lets a smaller `GridTower` (e.g.
+    /// GC=128, BLOCKS=2) be benchmarked without a code change. Both grid
+    /// towers (coarse + fine) and the tile heads scale with `gc`; `trunk1`'s
+    /// input width scales with `gc` too since it pools both towers' outputs.
+    pub fn new(vs: &nn::Path, amp: bool, foveate: bool, gc: i64, blocks: i64) -> Self {
         let conv1 = |p: &nn::Path, ci, co| nn::conv2d(p, ci, co, 1, Default::default());
         PolicyNet {
-            grid_coarse_net: GridTower::new(&(vs / "grid_coarse"), C_GRID, GC, BLOCKS),
-            grid_fine_net: GridTower::new(&(vs / "grid_fine"), C_GRID_FINE, GC, BLOCKS),
+            grid_coarse_net: GridTower::new(&(vs / "grid_coarse"), C_GRID, gc, blocks),
+            grid_fine_net: GridTower::new(&(vs / "grid_fine"), C_GRID_FINE, gc, blocks),
             local_net: LocalNet::new(&(vs / "local")),
             player_in: nn::linear(vs / "player_in", P_FEAT, PC, Default::default()),
             tf_layers: (0..TF_LAYERS).map(|i| EncoderLayer::new(&(vs / "tf" / i), PC, TF_FF)).collect(),
-            trunk1: nn::linear(vs / "trunk1", 2 * GC + PC + LC + N_SCALARS, HIDDEN, Default::default()),
+            trunk1: nn::linear(vs / "trunk1", 2 * gc + PC + LC + N_SCALARS, HIDDEN, Default::default()),
             trunk2: nn::linear(vs / "trunk2", HIDDEN, HIDDEN, Default::default()),
             head_action: nn::linear(vs / "head_action", HIDDEN, N_ACTIONS, Default::default()),
             head_player_q: nn::linear(vs / "head_player_q", HIDDEN, PC, Default::default()),
             head_tile_coarse: (
-                conv1(&(vs / "htc1"), GC + HIDDEN, 256),
+                conv1(&(vs / "htc1"), gc + HIDDEN, 256),
                 conv1(&(vs / "htc2"), 256, 1),
             ),
             head_tile_fine: (
-                conv1(&(vs / "htf1"), GC + HIDDEN, 256),
+                conv1(&(vs / "htf1"), gc + HIDDEN, 256),
                 conv1(&(vs / "htf2"), 256, 1),
             ),
             head_build: nn::linear(vs / "head_build", HIDDEN, N_BUILD, Default::default()),
@@ -1208,7 +1213,7 @@ mod tests {
         tch::manual_seed(0);
         for &amp in &[false, true] {
             let vs = nn::VarStore::new(Device::Cpu);
-            let policy = PolicyNet::new(&vs.root(), amp, false);
+            let policy = PolicyNet::new(&vs.root(), amp, false, GC, BLOCKS);
             let o = synthetic_obs(Device::Cpu, 2, 6, 6);
             check_policy_finite(&policy, &o);
         }
@@ -1222,7 +1227,7 @@ mod tests {
     fn foveate_crop_finite() {
         tch::manual_seed(1);
         let vs = nn::VarStore::new(Device::Cpu);
-        let policy = PolicyNet::new(&vs.root(), false, true);
+        let policy = PolicyNet::new(&vs.root(), false, true, GC, BLOCKS);
         let o = synthetic_obs(Device::Cpu, 2, FOVEATE_SIZE * 2, FOVEATE_SIZE * 2 + 4);
         check_policy_finite(&policy, &o);
     }
@@ -1234,7 +1239,7 @@ mod tests {
     fn foveate_crop_smaller_than_window_finite() {
         tch::manual_seed(2);
         let vs = nn::VarStore::new(Device::Cpu);
-        let policy = PolicyNet::new(&vs.root(), false, true);
+        let policy = PolicyNet::new(&vs.root(), false, true, GC, BLOCKS);
         let o = synthetic_obs(Device::Cpu, 2, 6, 8);
         check_policy_finite(&policy, &o);
     }
@@ -1245,8 +1250,19 @@ mod tests {
     fn foveate_and_amp_finite() {
         tch::manual_seed(3);
         let vs = nn::VarStore::new(Device::Cpu);
-        let policy = PolicyNet::new(&vs.root(), true, true);
+        let policy = PolicyNet::new(&vs.root(), true, true, GC, BLOCKS);
         let o = synthetic_obs(Device::Cpu, 2, FOVEATE_SIZE * 2, FOVEATE_SIZE * 2);
+        check_policy_finite(&policy, &o);
+    }
+
+    /// `--gc`/`--blocks` overrides (a smaller policy variant) build and
+    /// run correctly.
+    #[test]
+    fn small_model_variant_finite() {
+        tch::manual_seed(4);
+        let vs = nn::VarStore::new(Device::Cpu);
+        let policy = PolicyNet::new(&vs.root(), false, false, 128, 2);
+        let o = synthetic_obs(Device::Cpu, 2, 6, 6);
         check_policy_finite(&policy, &o);
     }
 
