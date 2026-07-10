@@ -28,6 +28,32 @@ EXPECTED_RECORDS="${OUTCOME_EXPECTED_RECORDS:-$([[ "$OUTCOME_LIMIT" -gt 0 ]] && 
 REQUIRED_PASSES="${OUTCOME_REQUIRED_PASSES:-$([[ "$OUTCOME_LIMIT" -gt 0 ]] && echo 0 || echo 55)}"
 mkdir -p "$(dirname "$CACHE_FILE")"
 
+# The TS-side replay (below) is the expensive part - real engine sim of
+# every record, ~1hr+ cold. If nobody's cached oracle for this exact
+# PARITY_COMMIT exists locally, try pulling one from the shared HF dataset
+# before paying to regenerate it; `datagen/replay.ts --outcome-oracle`
+# validates schemaVersion+recordSetHash itself and only fills in gaps, so a
+# stale/partial/wrong-commit download is harmless - it just gets ignored or
+# topped up.
+if [[ ! -s "$CACHE_FILE" && "${OUTCOME_SKIP_HF_FETCH:-0}" != "1" ]] && command -v python3 >/dev/null 2>&1; then
+  echo "[run_outcome_gate] no local oracle cache, trying HF (djmango/openfront-human-games:outcome-oracle/$PARITY_COMMIT.json)..." >&2
+  python3 - "$PARITY_COMMIT" "$CACHE_FILE" >&2 <<'PYEOF' || echo "[run_outcome_gate] HF fetch failed/unavailable, will regenerate" >&2
+import sys
+from pathlib import Path
+try:
+    from huggingface_hub import hf_hub_download
+except ImportError:
+    sys.exit(1)
+commit, dest = sys.argv[1], Path(sys.argv[2])
+path = hf_hub_download(
+    "djmango/openfront-human-games", f"outcome-oracle/{commit}.json", repo_type="dataset"
+)
+dest.parent.mkdir(parents=True, exist_ok=True)
+dest.write_bytes(Path(path).read_bytes())
+print(f"[run_outcome_gate] fetched cached oracle from HF -> {dest}")
+PYEOF
+fi
+
 pushd "$ROOT" >/dev/null
 "$ROOT/openfront/node_modules/.bin/tsx" "$ROOT/datagen/replay.ts" \
   --outcome-oracle \
