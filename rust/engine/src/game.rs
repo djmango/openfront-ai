@@ -2166,6 +2166,14 @@ impl Game {
         None
     }
 
+    /// Sum of this player's active outgoing attacks, land AND boat-landed
+    /// (TS `NationAllianceBehavior.isAlliancePartnerSimilarlyStrong`'s
+    /// `player.outgoingAttacks().reduce((sum, a) => sum + a.troops(), 0)` -
+    /// `PlayerImpl.outgoingAttacks()` returns `_outgoingAttacks` unfiltered,
+    /// with no `sourceTile()` check). Despite the "land" in this function's
+    /// name (kept for git-history continuity, mirroring
+    /// `find_incoming_land_attacker`), it must NOT exclude boat-landed
+    /// attacks.
     pub fn outgoing_land_troops(&self, attacker_small_id: u16) -> f64 {
         let Some(attacker) = self.player_by_small_id(attacker_small_id) else {
             return 0.0;
@@ -2173,9 +2181,7 @@ impl Game {
         let mut total = 0.0;
         for id in &attacker.outgoing_land_attacks {
             if let Some(troops) = self.land_attack_troops(id) {
-                if self.land_attack_source_tile(id).is_none() {
-                    total += troops;
-                }
+                total += troops;
             }
         }
         total
