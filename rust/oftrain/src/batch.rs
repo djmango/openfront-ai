@@ -1,10 +1,20 @@
 //! Stacks `Vec<PreparedObs>` (host f32 arrays, one per env) into GPU/CPU
-//! tensors (`policy::Obs`). v1 assumes every env in a batch shares the
-//! same grid resolution (gh, gw) - true as long as `EnvWorker`s in a run
-//! share a curriculum stage with a single map (see `policy.rs` module
-//! doc); panics with a clear message otherwise rather than silently
-//! producing garbage. Padding-to-max-shape for mixed-map batches is a
-//! follow-up once multi-map curriculum stages are exercised.
+//! tensors (`policy::Obs`). Envs in one batch do NOT all share the same
+//! grid resolution (gh, gw) in general - every curriculum stage past
+//! stage 1 samples from multiple maps of different native sizes
+//! (`ofcore::curriculum::stages()`), and even a single-map stage mixes in
+//! differently-sized *past*-stage maps via rehearsal sampling
+//! (`REHEARSAL_P`) - so a mixed-shape batch isn't an edge case, it's the
+//! common case as soon as training reaches stage 2. `build_obs` pads
+//! every item up to the batch's max (gh, gw) (top-left aligned, zero-fill)
+//! and sets `grid_valid` to 0 over the padded region instead of the old
+//! all-ones placeholder - `policy.rs` already multiplies `grid_valid`
+//! into every tile-legality mask and the foveation coverage math (see its
+//! module doc), so padded cells are already excluded from action
+//! selection; the network's fully-convolutional towers see zero-padding
+//! at the border like any other edge, no architecture change needed. The
+//! common same-shape-batch case (most single-map early stages, no
+//! rehearsal hit) takes a fast path with no per-item copy loop.
 
 use ofcore::feat;
 use tch::{Device, Kind, Tensor};
@@ -34,13 +44,14 @@ fn to_device_maybe_pinned(t: &Tensor, device: Device, pinned: bool) -> Tensor {
 
 pub fn build_obs(items: &[&PreparedObs], device: Device, pinned_h2d: bool) -> Obs {
     let b = items.len();
-    let (gh, gw) = (items[0].gh, items[0].gw);
-    for (i, it) in items.iter().enumerate() {
-        assert_eq!((it.gh, it.gw), (gh, gw), "obs {i} grid shape mismatch (v1 requires uniform batch shape)");
-    }
+    let gh = items.iter().map(|it| it.gh).max().unwrap_or(0);
+    let gw = items.iter().map(|it| it.gw).max().unwrap_or(0);
+    let uniform = items.iter().all(|it| it.gh == gh && it.gw == gw);
+    let c_grid = policy::C_GRID as usize;
 
-    let mut grid = Vec::with_capacity(b * policy::C_GRID as usize * gh * gw);
+    let mut grid = Vec::with_capacity(b * c_grid * gh * gw);
     let mut legal_tile = Vec::with_capacity(b * gh * gw);
+    let mut grid_valid = Vec::with_capacity(b * gh * gw);
     let mut players = Vec::with_capacity(b * feat::MAX_SLOTS * feat::P_FEAT);
     let mut pmask = Vec::with_capacity(b * feat::MAX_SLOTS);
     let mut local = Vec::with_capacity(b * 5 * policy::LOCAL as usize * policy::LOCAL as usize);
@@ -51,8 +62,40 @@ pub fn build_obs(items: &[&PreparedObs], device: Device, pinned_h2d: bool) -> Ob
     let mut legal_nuke = Vec::with_capacity(b * feat::N_NUKE);
 
     for it in items {
-        grid.extend_from_slice(&it.grid);
-        legal_tile.extend_from_slice(&it.legal_tile);
+        if uniform {
+            // Fast path: no per-cell copy, just append the already-correctly-
+            // shaped contiguous plane (this is the common case - most
+            // stages' maps end up the same padded (gh, gw) after
+            // `ofcore::feat::REGION` alignment, and single-map early
+            // stages before any rehearsal hit always take it).
+            grid.extend_from_slice(&it.grid);
+            legal_tile.extend_from_slice(&it.legal_tile);
+            grid_valid.extend(std::iter::repeat(1.0f32).take(gh * gw));
+        } else {
+            // Top-left-aligned zero-pad into the batch's max (gh, gw).
+            // `it.grid` is (C_GRID, it.gh, it.gw) row-major; pad each
+            // channel plane independently since the padded width differs
+            // per-row-block, not just appended at the end.
+            let mut g = vec![0.0f32; c_grid * gh * gw];
+            for c in 0..c_grid {
+                for y in 0..it.gh {
+                    let src_off = c * it.gh * it.gw + y * it.gw;
+                    let dst_off = c * gh * gw + y * gw;
+                    g[dst_off..dst_off + it.gw].copy_from_slice(&it.grid[src_off..src_off + it.gw]);
+                }
+            }
+            grid.extend_from_slice(&g);
+            let mut lt = vec![0.0f32; gh * gw];
+            let mut gv = vec![0.0f32; gh * gw];
+            for y in 0..it.gh {
+                let src_off = y * it.gw;
+                let dst_off = y * gw;
+                lt[dst_off..dst_off + it.gw].copy_from_slice(&it.legal_tile[src_off..src_off + it.gw]);
+                gv[dst_off..dst_off + it.gw].fill(1.0);
+            }
+            legal_tile.extend_from_slice(&lt);
+            grid_valid.extend_from_slice(&gv);
+        }
         players.extend_from_slice(&it.players);
         pmask.extend_from_slice(&it.pmask);
         local.extend_from_slice(&it.local);
@@ -75,7 +118,7 @@ pub fn build_obs(items: &[&PreparedObs], device: Device, pinned_h2d: bool) -> Ob
 
     Obs {
         grid: t(grid, &[bi, policy::C_GRID, ghi, gwi]),
-        grid_valid: Tensor::ones([bi, ghi, gwi], (Kind::Float, device)),
+        grid_valid: t(grid_valid, &[bi, ghi, gwi]),
         legal_tile: t(legal_tile, &[bi, ghi, gwi]),
         players: t(players, &[bi, ms, feat::P_FEAT as i64]),
         pmask: t(pmask, &[bi, ms]),
@@ -173,5 +216,60 @@ mod tests {
             Vec::<f32>::try_from(&plain_c.quantity_frac).unwrap(),
             Vec::<f32>::try_from(&pinned_c.quantity_frac).unwrap()
         );
+    }
+
+    /// Regression test for the exact crash this padding fix replaces: two
+    /// envs in one batch on differently-sized maps (any curriculum stage
+    /// past stage 1, or any stage hit by rehearsal sampling into a
+    /// different-shaped past map) used to panic
+    /// ("obs N grid shape mismatch (v1 requires uniform batch shape)")
+    /// instead of training. Verifies the smaller item is zero-padded
+    /// top-left-aligned into the batch max shape and `grid_valid` is 1
+    /// only over its real region.
+    #[test]
+    fn mixed_shape_batch_pads_instead_of_panicking() {
+        let small = tiny_prepared_obs(2, 3); // filled with 0.5/1.0 by the helper
+        let mut big = tiny_prepared_obs(4, 5);
+        // Distinct fill so we can tell "big's real data" apart from "small's
+        // real data" apart from "zero padding" unambiguously.
+        big.grid.iter_mut().for_each(|v| *v = 9.0);
+        big.legal_tile.iter_mut().for_each(|v| *v = 9.0);
+
+        let items = vec![&small, &big];
+        let obs = build_obs(&items, Device::Cpu, false);
+
+        assert_eq!(obs.grid.size(), [2, policy::C_GRID, 4, 5]);
+        assert_eq!(obs.grid_valid.size(), [2, 4, 5]);
+
+        let gv: Vec<f32> = Vec::try_from(obs.grid_valid.reshape([-1])).unwrap();
+        let gv = |b: usize, y: usize, x: usize| gv[b * 4 * 5 + y * 5 + x];
+        // Item 0 (small, real 2x3): valid inside, zero outside.
+        for y in 0..4 {
+            for x in 0..5 {
+                assert_eq!(gv(0, y, x), if y < 2 && x < 3 { 1.0 } else { 0.0 }, "item0 valid[{y}][{x}]");
+            }
+        }
+        // Item 1 (big, real 4x5 == the batch max): valid everywhere.
+        for y in 0..4 {
+            for x in 0..5 {
+                assert_eq!(gv(1, y, x), 1.0, "item1 valid[{y}][{x}]");
+            }
+        }
+
+        let grid: Vec<f32> = Vec::try_from(obs.grid.reshape([-1])).unwrap();
+        let plane = 4 * 5;
+        let grid_at = |b: usize, c: usize, y: usize, x: usize| grid[b * policy::C_GRID as usize * plane + c * plane + y * 5 + x];
+        // Item 0's real cells keep their value (0.5); padded cells are 0.
+        assert_eq!(grid_at(0, 0, 0, 0), 0.5);
+        assert_eq!(grid_at(0, 0, 1, 2), 0.5);
+        assert_eq!(grid_at(0, 0, 0, 3), 0.0); // outside small's gw=3
+        assert_eq!(grid_at(0, 0, 3, 0), 0.0); // outside small's gh=2
+        // Item 1 fills the whole max shape, no padding needed.
+        assert_eq!(grid_at(1, 0, 3, 4), 9.0);
+
+        let lt: Vec<f32> = Vec::try_from(obs.legal_tile.reshape([-1])).unwrap();
+        assert_eq!(lt[0 * plane + 0 * 5 + 0], 1.0); // small's real cell
+        assert_eq!(lt[0 * plane + 3 * 5 + 4], 0.0); // padded corner
+        assert_eq!(lt[1 * plane + 3 * 5 + 4], 9.0); // big's real corner
     }
 }
