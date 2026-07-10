@@ -87,6 +87,11 @@ pub struct Config {
     pub stage_lr_decay: f64,
     pub epochs: usize,
     pub minibatches: usize,
+    /// `--amp`: manual bf16 mixed precision for the policy net's conv
+    /// towers (see `policy::PolicyNet::amp` doc). CPU-safe (bf16 works on
+    /// CPU, just slower - useful for correctness smoke tests without a
+    /// GPU), off by default.
+    pub amp: bool,
     pub device: Device,
     /// Which simulation backend envs run against (Node bridge or the
     /// in-process native engine).
@@ -600,7 +605,7 @@ pub fn run(cfg: Config) -> Result<()> {
             cur_obs.push(obs);
         }
         let mut learner_vs = nn::VarStore::new(device);
-        let learner_policy = PolicyNet::new(&learner_vs.root());
+        let learner_policy = PolicyNet::new(&learner_vs.root(), cfg.amp);
         if let Some(hub) = &hub_vs {
             learner_vs.copy(hub)?;
         } else {
@@ -610,7 +615,7 @@ pub fn run(cfg: Config) -> Result<()> {
                 // parameters (VarStore::copy handles the cross-device
                 // transfer).
                 let mut snapshot = nn::VarStore::new(Device::Cpu);
-                let _ = PolicyNet::new(&snapshot.root());
+                let _ = PolicyNet::new(&snapshot.root(), cfg.amp);
                 snapshot.copy(&learner_vs)?;
                 snapshot
             });
@@ -618,7 +623,7 @@ pub fn run(cfg: Config) -> Result<()> {
         let opt = nn::AdamW::default().build(&learner_vs, cfg.lr)?;
 
         let mut actor_vs = nn::VarStore::new(device);
-        let actor_policy = PolicyNet::new(&actor_vs.root());
+        let actor_policy = PolicyNet::new(&actor_vs.root(), cfg.amp);
         actor_vs.copy(&learner_vs)?;
 
         actors.push(ActorShard { device, workers, cur_obs, vs: actor_vs, policy: actor_policy });
