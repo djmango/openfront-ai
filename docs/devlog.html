@@ -67,12 +67,16 @@
   taught a law: utilization tracks the train/collect compute ratio, so cheaper networks buy
   throughput and cost util% - decisions/s/$ is the real metric. Pod torn down after
   validation.</p>
-  <p><b>The blocker is no longer speed, it's learning:</b> every episode in every config
-  truncates at the tick limit with <code>won=false</code> - the 80%-of-map FFA win condition is
-  unreachable for a policy that plateaus at half the map with collapsed entropy, so the
-  curriculum never advances past stage 0 (<a href="#rust-stall">details</a>). Fix the entropy
-  schedule / expansion reward / early-stage win semantics before spending on scale - the
-  ordered plan is in <a href="#rust-next">next steps</a>.</p>
+  <p><b>The stage-0 learning stall is root-caused and fixed</b>
+  (<a href="#rust-stall-solved">investigation</a>): not a tuning problem - three silent port
+  omissions. The episode budget shipped at 3000 ticks vs Python's 15000, the adaptive
+  entropy-floor controller (<code>--ent-floor</code>, on by default in Python) was never
+  ported, and - the big one - the native engine's <code>SpawnExecution</code> dropped TS's
+  singleplayer <code>endSpawnPhase()</code> call, so <b>every native RL episode ran entirely
+  inside the spawn phase</b>: empty legality, uniform entropy, no real game. Yesterday's
+  throughput numbers survive; its learning observations were measuring spawn-phase noise. All
+  three fixed on master; next pod run validates wins fire and the curriculum advances
+  (<a href="#rust-next">ordered next steps</a>).</p>
   <p class="d" style="margin:.75rem 0 0">Previous: <b><code>ppo_v7</code> killed</b> (update
   355, checkpoint on HF) after the <a href="#gpu-util-killed">Python GPU-utilization push</a>
   plateaued at 70-72% against the Node subprocess bridge - the wall that motivated this whole
@@ -1562,13 +1566,65 @@ shaping that keeps paying for expansion into neutral land after the opponent is 
 stage-0 win semantics that are actually reachable (e.g. relative-strength or
 opponent-elimination based).</p>
 
+<h3 id="rust-stall-solved">Jul 10, ~2am: the stall investigated and root-caused - three bugs, none of them the theory</h3>
+<p>The "curriculum/exploration tuning problem" framing above didn't survive contact with one
+question: <i>the Python trainer won stage 0 on this exact curriculum, so what's actually
+different?</i> A node-vs-native A/B (same Rust trainer, 12 CPU updates each, per-episode
+diagnostics on) plus a line-by-line diff against <code>rl/ppo.py</code> found three concrete
+divergences, in ascending order of embarrassment:</p>
+<ol>
+  <li><b>Episode budget: 3000 ticks vs Python's 15000.</b> The Rust CLI default silently
+  shipped at 3000 <code>max_episode_ticks</code>; Python's is 15000. Every "plateaued at half
+  the map" episode was truncated at a fifth of the budget the Python wins were earned under.
+  The 80%-ownership win was never <i>reachable</i>, entirely independent of policy quality.
+  Fixed: default now 15000.</li>
+  <li><b>The entropy-floor controller was never ported.</b> <code>rl/ppo.py --ent-floor</code>
+  (default 2.5, on by default!) scales the entropy coef up 1.3x/update (cap 5x) whenever
+  measured entropy dips below the floor, with hysteresis and startup grace. The Rust port had
+  only the linear anneal - so the collapse to ~0 nats that Python's controller exists
+  specifically to catch just... ran to completion, every run. Fixed: controller ported
+  faithfully (including the "decay anywhere above the floor" rule that keeps a transient spike
+  from trapping the scale), driven by minibatch-<i>mean</i> entropy like Python rather than a
+  last-minibatch snapshot.</li>
+  <li><b>The native engine never left the spawn phase.</b> The big one, and the answer to "is
+  it our bridge?": in TS singleplayer, <code>GameRunner</code> adds no spawn timer - the spawn
+  phase ends when <code>SpawnExecution</code> sees the human place a spawn
+  (<code>endSpawnPhase()</code>). The native <code>SpawnExecution</code> port dropped exactly
+  that call (the replay path has a timer, so replays/parity never noticed), so <b>every native
+  RL episode spent its entire life in the spawn phase</b>: legality returned
+  <code>{actions: {}}</code> (policy entropy pinned at ln-uniform ~6.9 over everything, Beta
+  quantity head literally never active), <code>vecenv</code>'s random-spawn fallback fired
+  every step (which is also why native episodes burned ~2x ticks per decision), and no real
+  game - no PlayerExecutions, no win check - ever ran. The tell in retrospect: node-engine
+  logs showed <code>ent&asymp;2-3.8, entq&asymp;-0.1</code> while native showed
+  <code>ent=6.916, entq=+0.000</code> from the very first update. <b>Every native-engine GPU
+  number from yesterday (the 82% included) was measured on spawn-phase noise.</b> The
+  throughput conclusions survive (the compute mix barely changes); the learning conclusions
+  were never about learning at all. Fixed: <code>execute_player_spawn</code> reports success
+  and singleplayer+human spawns end the phase, matching TS.</li>
+</ol>
+<p>Post-fix A/B, same 12-update CPU config: native now behaves like node in kind - entropy
+3.2 vs 3.8, quantity head active on both (entq -0.33 vs -0.10), episodes at the same tick
+cadence, mean reward 13.9 vs 10.9 and 1st-place 17/24 vs 10/24 (native's nations look somewhat
+softer than node's - the outcome gate, still grinding through all 78 records in its pinned
+worktree, is the instrument that quantifies exactly this). Neither leg wins inside 2000-tick
+test episodes with 12 updates of a tiny CPU net - wins need the real budget and a real
+training run, which is the very next thing to spend a pod on. Engine unit tests: identical
+pass/fail (47/35, all failures pre-existing missing-fixture paths) before and after the spawn
+fix.</p>
+<p>Lesson worth writing down: all three bugs were <i>silent defaults and omissions in a
+port</i>, not logic errors - the code that existed was correct, the problem was code and
+config that didn't exist. Port audits should diff the <i>flag surface and controller
+inventory</i> against the original, not just the math that made it across.</p>
+
 <h3 id="rust-next">Next best steps, in order of expected value</h3>
 <ol>
-  <li><b>Fix the stage-0 learning stall first.</b> All the throughput in the world multiplied
-  by zero learning is zero. Entropy schedule + expansion-shaped reward + reachable early-stage
-  win condition; verify with <code>OFTRAIN_DEBUG_EPISODES</code> that wins actually fire and
-  the curriculum advances past stage 0/1 before spending another pod-dollar on scale.</li>
-  <li><b>Then re-ask the size question with learning curves, not util%.</b> Small policy
+  <li><b>Validate the stall fixes end-to-end (now unblocked).</b> Single-GPU pod,
+  <code>--engine native</code>, full 15000-tick budget, entropy floor on: confirm with
+  <code>OFTRAIN_DEBUG_EPISODES</code> that stage-0 wins actually fire, the win-rate window
+  fills, and the curriculum advances. This was blocked on the three bugs above; it no longer
+  is.</li>
+  <li><b>Re-ask the model-size question with learning curves, not util%.</b> Small policy
   (2.6M params) at 285 steps/s vs full (11.2M) at 173: if small learns comparably per sample,
   it's ~1.65x more learning per hour at a third of the memory - and foveation re-enters as a
   pure win once the metric is learning/hour instead of utilization.</li>
@@ -1579,12 +1635,12 @@ opponent-elimination based).</p>
   bottleneck: collection scaled linearly with env count, so the cost is per-step obs
   decode/featurize/act - the next 82&rarr;90%+ move is either actor/learner CUDA stream
   separation or moving featurization onto the GPU, not more engine speed.</li>
-  <li><b>Land the outcome gate at &ge;55/78</b> (run is in flight), then make
-  <code>--engine native</code> the default and demote the Node bridge to a parity-testing
-  tool.</li>
+  <li><b>Land the outcome gate at &ge;55/78</b> (run is in flight; also quantifies the
+  softer-nations signal from the post-fix A/B), then make <code>--engine native</code> the
+  default and demote the Node bridge to a parity-testing tool.</li>
   <li><b>Only then scale to 4-8 GPUs</b> - the multi-GPU plumbing (replica grad-averaging)
-  already works; scaling before the learning stall is fixed just reproduces a stalled policy
-  faster and more expensively.</li>
+  already works; scaling before learning is verified just reproduces a broken policy faster
+  and more expensively.</li>
 </ol>
 
 <h2 class="date" id="reference">Reference and open threads</h2>
