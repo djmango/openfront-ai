@@ -92,6 +92,10 @@ pub struct Config {
     /// CPU, just slower - useful for correctness smoke tests without a
     /// GPU), off by default.
     pub amp: bool,
+    /// `--foveate`: real foveated crop for the fine-grid branch (see
+    /// `policy::PolicyNet::foveate` doc). Off by default (legacy
+    /// whole-map-as-fine fallback).
+    pub foveate: bool,
     pub device: Device,
     /// Which simulation backend envs run against (Node bridge or the
     /// in-process native engine).
@@ -605,7 +609,7 @@ pub fn run(cfg: Config) -> Result<()> {
             cur_obs.push(obs);
         }
         let mut learner_vs = nn::VarStore::new(device);
-        let learner_policy = PolicyNet::new(&learner_vs.root(), cfg.amp);
+        let learner_policy = PolicyNet::new(&learner_vs.root(), cfg.amp, cfg.foveate);
         if let Some(hub) = &hub_vs {
             learner_vs.copy(hub)?;
         } else {
@@ -615,7 +619,7 @@ pub fn run(cfg: Config) -> Result<()> {
                 // parameters (VarStore::copy handles the cross-device
                 // transfer).
                 let mut snapshot = nn::VarStore::new(Device::Cpu);
-                let _ = PolicyNet::new(&snapshot.root(), cfg.amp);
+                let _ = PolicyNet::new(&snapshot.root(), cfg.amp, cfg.foveate);
                 snapshot.copy(&learner_vs)?;
                 snapshot
             });
@@ -623,7 +627,7 @@ pub fn run(cfg: Config) -> Result<()> {
         let opt = nn::AdamW::default().build(&learner_vs, cfg.lr)?;
 
         let mut actor_vs = nn::VarStore::new(device);
-        let actor_policy = PolicyNet::new(&actor_vs.root(), cfg.amp);
+        let actor_policy = PolicyNet::new(&actor_vs.root(), cfg.amp, cfg.foveate);
         actor_vs.copy(&learner_vs)?;
 
         actors.push(ActorShard { device, workers, cur_obs, vs: actor_vs, policy: actor_policy });

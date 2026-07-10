@@ -89,6 +89,15 @@ struct Args {
     #[arg(long, default_value_t = false)]
     amp: bool,
 
+    /// Real foveated crop: the fine-grid branch becomes a fixed
+    /// `policy::FOVEATE_SIZE`x`FOVEATE_SIZE` window centered on the agent's
+    /// own-tile centroid instead of the whole map (coarse branch is
+    /// unaffected - always the full map). Off by default, matching the
+    /// existing legacy fallback (fine == whole map) - see `policy.rs`
+    /// module doc / `PolicyNet::foveate`.
+    #[arg(long, default_value_t = false)]
+    foveate: bool,
+
     /// "cpu", "cuda", or "cuda:N".
     #[arg(long, default_value = "cpu")]
     device: String,
@@ -147,6 +156,7 @@ fn main() -> anyhow::Result<()> {
         epochs: args.epochs,
         minibatches: args.minibatches,
         amp: args.amp,
+        foveate: args.foveate,
         device,
         engine: args.engine,
         log_every: args.log_every,
