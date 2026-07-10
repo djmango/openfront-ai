@@ -109,7 +109,8 @@ pub fn nearby_land_player_small_ids(game: &Game, small_id: u16) -> Vec<u16> {
     let mut seen = HashSet::new();
     game.for_each_border_tile(small_id, |tile| {
         game.map.for_each_neighbor4(tile, |neighbor| {
-            if !game.is_land(neighbor) {
+            // TS `PlayerImpl.nearby()`: `map.isLand(n) && !map.isImpassable(n)`.
+            if !game.is_land(neighbor) || game.is_impassable(neighbor) {
                 return;
             }
             let owner = game.map.owner_id(neighbor);
@@ -127,7 +128,8 @@ pub fn nearby_player_small_ids(game: &Game, small_id: u16) -> Vec<u16> {
     let mut seen = HashSet::new();
     game.for_each_border_tile(small_id, |tile| {
         game.map.for_each_neighbor4(tile, |neighbor| {
-            if !game.is_land(neighbor) {
+            // TS `PlayerImpl.nearby()`: `map.isLand(n) && !map.isImpassable(n)`.
+            if !game.is_land(neighbor) || game.is_impassable(neighbor) {
                 return;
             }
             let owner = game.map.owner_id(neighbor);
@@ -165,7 +167,7 @@ pub fn nearby_player_small_ids(game: &Game, small_id: u16) -> Vec<u16> {
                 continue;
             }
             let tile = game.ref_xy(nx as u32, ny as u32);
-            if !game.is_land(tile) || game.has_fallout(tile) {
+            if !game.is_land(tile) || game.is_impassable(tile) || game.has_fallout(tile) {
                 continue;
             }
             let owner = game.map.owner_id(tile);
@@ -1449,7 +1451,12 @@ fn attack_bots(
     bot_attack_troops_sent: &mut f64,
     difficulty: &str,
 ) -> bool {
-    let bots: Vec<u16> = nearby_player_small_ids(game, attacker_small_id)
+    // TS `attackBots`: source list is `this.player.nearby()` (Set insertion
+    // order), not a numerically-sorted id list - the stable sort below uses
+    // that order as its tie-break, so this must use `nearby_players_ts_order`
+    // (not `nearby_player_small_ids`, which sorts by raw id) or ties resolve
+    // to a different bot than TS picks.
+    let bots: Vec<u16> = nearby_players_ts_order(game, attacker_small_id)
         .into_iter()
         .filter(|&sid| {
             game.player_by_small_id(sid).is_some_and(|p| {
@@ -1463,7 +1470,20 @@ fn attack_bots(
 
     *bot_attack_troops_sent = 0.0;
     let mut sorted = bots;
+    // TS `attackBots`: primary key is `ownsStructures` (structure-owning bots
+    // sorted first), density (troops/tiles) ascending only breaks ties within
+    // the same hasStructures group. `sort_by` is stable, matching JS's
+    // guaranteed-stable `Array.prototype.sort`.
     sorted.sort_by(|&a, &b| {
+        let a_has_structures = player_has_structure_units(game, a);
+        let b_has_structures = player_has_structure_units(game, b);
+        if a_has_structures != b_has_structures {
+            return if a_has_structures {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            };
+        }
         let da = {
             let p = game.player_by_small_id(a).unwrap();
             p.troops as f64 / p.tiles_owned.max(1) as f64

@@ -379,8 +379,8 @@ fn is_alliance_partner_similarly_strong(
         return false;
     };
 
-    let player_outgoing = game.outgoing_land_troops(small_id);
-    let other_outgoing = game.outgoing_land_troops(other_small_id);
+    let player_outgoing = game.outgoing_attack_troops(small_id);
+    let other_outgoing = game.outgoing_attack_troops(other_small_id);
     let player_total = player.troops as f64 + player_outgoing;
     let other_total = other.troops as f64 + other_outgoing;
 
@@ -413,6 +413,18 @@ pub fn maybe_betray(
     let Some(target) = game.player_by_small_id(target_small_id) else {
         return false;
     };
+
+    // TS: "Betray very weak players (for example MIRVed ones)" - checked
+    // first, before the Easy/Medium troop-ratio betrayal below.
+    if !matches!(difficulty, "Easy" | "Medium") {
+        let target_max_troops = game.max_troops_for(target_small_id);
+        let target_outgoing = game.outgoing_attack_troops(target_small_id);
+        if (target.troops as f64 + target_outgoing) < target_max_troops * 0.2
+            && target.troops < attacker.troops
+        {
+            return true;
+        }
+    }
 
     if matches!(difficulty, "Easy" | "Medium")
         && !(difficulty == "Easy" && target.player_type == PlayerType::Human)

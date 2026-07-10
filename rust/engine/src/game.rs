@@ -2174,15 +2174,18 @@ impl Game {
         None
     }
 
-    /// Sum of this player's active outgoing attacks, land AND boat-landed
-    /// (TS `NationAllianceBehavior.isAlliancePartnerSimilarlyStrong`'s
-    /// `player.outgoingAttacks().reduce((sum, a) => sum + a.troops(), 0)` -
-    /// `PlayerImpl.outgoingAttacks()` returns `_outgoingAttacks` unfiltered,
-    /// with no `sourceTile()` check). Despite the "land" in this function's
-    /// name (kept for git-history continuity, mirroring
-    /// `find_incoming_land_attacker`), it must NOT exclude boat-landed
-    /// attacks.
-    pub fn outgoing_land_troops(&self, attacker_small_id: u16) -> f64 {
+    /// TS `Player.outgoingAttacks().reduce((sum, a) => sum + a.troops(), 0)`.
+    /// Sums troops for *every* outgoing attack, land AND boat-landed -
+    /// `PlayerImpl.outgoingAttacks()` returns `_outgoingAttacks` completely
+    /// unfiltered, no `sourceTile()` check. Backs
+    /// `NationAllianceBehavior.isAlliancePartnerSimilarlyStrong`'s native
+    /// mirror (nation_alliance.rs) and the weak-ally betrayal check
+    /// (`maybe_betray`); a source-tile filter here would silently undercount
+    /// a player's committed troops in both. Independently found and fixed
+    /// by two parallel investigations - see docs/bot-ai-parity-double-attack/
+    /// and the pr-order-bugs-hunt report for two different call sites this
+    /// mattered for.
+    pub fn outgoing_attack_troops(&self, attacker_small_id: u16) -> f64 {
         let Some(attacker) = self.player_by_small_id(attacker_small_id) else {
             return 0.0;
         };
