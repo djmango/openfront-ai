@@ -53,6 +53,8 @@ CARGO_ARGS=(
   --parity-commit "$PARITY_COMMIT"
   --expected-records "$EXPECTED_RECORDS"
   --required-passes "$REQUIRED_PASSES"
+  --jobs "$OUTCOME_JOBS"
+  --record-timeout-seconds "$OUTCOME_RECORD_TIMEOUT_SECONDS"
 )
 if [[ "$OUTCOME_LIMIT" -gt 0 ]]; then
   CARGO_ARGS+=(--limit "$OUTCOME_LIMIT")
