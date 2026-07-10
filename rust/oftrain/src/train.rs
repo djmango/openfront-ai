@@ -100,6 +100,11 @@ pub struct Config {
     /// `policy::BLOCKS` defaults).
     pub gc: i64,
     pub blocks: i64,
+    /// `--pinned-h2d`: pin the CPU-side observation/choice tensors' backing
+    /// memory and use non-blocking H2D copies for the batch-build
+    /// CPU->GPU upload (see `batch::to_device_maybe_pinned`). No-op unless
+    /// `device`/shard devices are CUDA.
+    pub pinned_h2d: bool,
     pub device: Device,
     /// Which simulation backend envs run against (Node bridge or the
     /// in-process native engine).
@@ -247,7 +252,7 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
 
     for _ in 0..cfg.rollout_len {
         let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
-        let obs_t = batch::build_obs(&obs_refs, actor.device);
+        let obs_t = batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d);
         let (a, player, tile, build, nuke, qty, logp, value) = tch::no_grad(|| actor.policy.act(&obs_t, false));
 
         let a_v: Vec<i64> = (&a).try_into()?;
@@ -316,7 +321,7 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
 
     let bootstrap_v: Vec<f32> = {
         let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
-        let obs_t = batch::build_obs(&obs_refs, actor.device);
+        let obs_t = batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d);
         let v = tch::no_grad(|| actor.policy.value_only(&obs_t));
         (&v).try_into()?
     };
@@ -473,8 +478,8 @@ fn train_update(
                             obs_flat.push(&s.obs);
                         }
                     }
-                    let obs = batch::build_obs(&obs_flat, device);
-                    let choice = batch::build_choice_batch(&choice_flat, device);
+                    let obs = batch::build_obs(&obs_flat, device, cfg.pinned_h2d);
+                    let choice = batch::build_choice_batch(&choice_flat, device, cfg.pinned_h2d);
                     let adv = Tensor::from_slice(&adv_flat).to_device(device);
                     let ret = Tensor::from_slice(&ret_flat).to_device(device);
                     let old_logp = Tensor::from_slice(&old_logp_flat).to_device(device);

@@ -110,6 +110,14 @@ struct Args {
     #[arg(long, default_value_t = policy::BLOCKS)]
     blocks: i64,
 
+    /// Pin the CPU-side observation/choice tensors' backing memory and use
+    /// non-blocking H2D copies for the batch-build CPU->GPU upload (see
+    /// `batch::to_device_maybe_pinned`). No-op unless `--device`/shards
+    /// are CUDA - not exercisable end-to-end on this Mac's CPU-only
+    /// libtorch build, see DEVLOG/final report for how this was verified.
+    #[arg(long, default_value_t = false)]
+    pinned_h2d: bool,
+
     /// "cpu", "cuda", or "cuda:N".
     #[arg(long, default_value = "cpu")]
     device: String,
@@ -171,6 +179,7 @@ fn main() -> anyhow::Result<()> {
         foveate: args.foveate,
         gc: args.gc,
         blocks: args.blocks,
+        pinned_h2d: args.pinned_h2d,
         device,
         engine: args.engine,
         log_every: args.log_every,
