@@ -566,3 +566,98 @@ Getting to 90%+ util would require replacing the JSON-over-pipes
 `Bridge`/`bridge/env.ts` subprocess protocol with shared memory or FFI,
 which is a substantially larger project than tuning the training loop
 and was explicitly deferred (see "Stopping point" section above).
+
+## 2026-07-10 - AMP, real foveated crop, model-size overrides, pinned H2D (all flag-gated, CPU-verified)
+
+Landed a batch of independently A/B-able changes on top of the 2026-07-09
+work above, per-item, each behind its own CLI flag (default preserves
+prior behavior exactly). Built/tested against this Mac's CPU-only
+libtorch (`rust/scripts/setup_libtorch.sh`) - no GPU numbers here, those
+need the A100 pod; every item below is instead checked for finite
+losses / no NaN / no panic on a short real-engine (Node bridge) rollout,
+plus targeted unit tests for the riskier coordinate math.
+
+- **`--amp`** (manual bf16 mixed precision): tch-rs 0.24 has no
+  dtype-selectable autocast context (its `autocast()` always picks fp16
+  on CUDA, no bf16 option), so this hand-casts conv weights/activations
+  to bf16 at each tower's input boundary and casts back to f32 at the
+  output (`policy::conv2d_bf16`) - optimizer state and logits/loss stay
+  f32. CPU-correctness-verified via a *unit test on tiny synthetic
+  tensors* rather than an end-to-end smoke run: a real-map-scale (up to
+  GH_MAX x GW_MAX, GC=256, BLOCKS=4) bf16 forward pass measured
+  *dramatically* slower than f32 on this CPU (no accelerated CPU bf16
+  conv/GEMM kernel in this libtorch build) - correct, just not
+  end-to-end-smoke-testable without a GPU.
+- **`--foveate`** (real foveated crop): replaces the legacy
+  whole-map-as-fine fallback with an actual fixed `FOVEATE_SIZE`=48
+  window, gathered (not resized) from the full grid and centered on the
+  agent's own-tile centroid (falls back to map center before the agent
+  owns anything). All the crop/coordinate math (`crop_origin`,
+  `crop_and_pad`, `place_crop`, and the `_cropped` coordinate-mapping
+  helpers in `policy.rs`) is fully vectorized (batched tensor ops, no
+  per-sample host loop), so it should stay cheap at real batch sizes on
+  GPU rather than becoming a new bottleneck. This was the highest-risk
+  item - hand-derived the local<->global<->coarse coordinate math by
+  hand and caught/fixed two real broadcasting bugs (an accidental (B,)
+  vs (B,1) outer-product instead of elementwise subtract, and comparing
+  local crop-frame coordinates against un-translated absolute
+  coordinates) via a dedicated non-random coordinate-math unit test
+  before trusting the finite-loss smoke tests alone.
+- **`--gc`/`--blocks`** (model-size override): threaded through
+  `PolicyNet::new` instead of hardcoding the `GC`/`BLOCKS` module
+  constants; verified both the default (GC=256/BLOCKS=4, 11.2M params)
+  and a small variant (`--gc 128 --blocks 2`, 2.6M params) build and
+  train on a short CPU rollout.
+- **`--epochs`**: already existed (`main.rs`/`train.rs`, default 2,
+  matching `rl/ppo.py`) - no change needed; confirmed both 1 and 2 run
+  correctly.
+- **`--pinned-h2d`** (pinned memory + non-blocking H2D): tch-rs 0.24
+  directly exposes both needed primitives - `Tensor::pin_memory(device)`
+  and `Tensor::to_device_(device, dtype, non_blocking, copy)` (the
+  `non_blocking` arg maps to ATen's `aten::to.device` op) - so
+  `batch::to_device_maybe_pinned` uses them for the batch-build CPU->GPU
+  upload with no unsafe/raw-FFI workaround needed. No-op unless the
+  target device is CUDA (this Mac's libtorch build has none to test
+  against), so verified instead that turning the flag on for
+  `Device::Cpu` produces byte-identical tensors to the flag off (i.e.
+  it's provably inert off-CUDA, not just untested).
+- **Channels-last memory format - skipped, infeasible in tch-rs 0.24**:
+  no `MemoryFormat` type, no `to_memory_format`/`channels_last`-style
+  method anywhere in tch-rs 0.24's generated tensor API or in
+  torch-sys 0.24's C bindings (confirmed by grepping both crates'
+  source for `memory_format`/`channels_last` - zero hits). PyTorch's
+  ATen op for this (`aten::to.memory_format` / the `memory_format`
+  kwarg other `to`/`contiguous` overloads take) exists in libtorch
+  itself but tch-rs's codegen never bound it. Not safely reachable
+  without patching tch-rs's C shim (`torch-sys`) to add a new binding,
+  which is out of scope here.
+- **Fused/foreach optimizer step - skipped, no actionable gap found**:
+  `nn::AdamW`/`Optimizer` (`tch::nn::optimizer`) is a thin wrapper
+  around libtorch's native C++ `torch::optim::AdamW` class - `step()` is
+  already a single call into that C++ object, so there's no
+  Python-object-style per-parameter marshalling overhead to remove (this
+  whole stack is Rust->C++ FFI, no Python in the loop at all). The
+  *real* fused/foreach multi-tensor kernels (`torch._fused_adamw_`,
+  `_foreach_*`) are implemented as ATen ops that only PyTorch's *Python*
+  `torch.optim.AdamW(fused=True)`/`(foreach=True)` code paths call into;
+  the C++-side `torch::optim` classes tch-rs wraps don't have a fused/
+  foreach flag at all, and tch-rs 0.24's codegen doesn't bind
+  `_foreach_*`/`_fused_adamw_` either (confirmed: zero matches for
+  `_foreach_`/`fused_adamw` in `tch-0.24.0/src/wrappers/tensor_generated.rs`,
+  consistent with the 2026-07-09 finding above that `_foreach_` ops
+  aren't exposed). Getting real fused-optimizer throughput would need
+  either patching tch-rs to bind those ops and reimplementing AdamW's
+  step in Rust against them, or driving libtorch's own JIT-scripted
+  fused path - both out of scope as a "low-risk" item.
+- **CUDA graph capture - skipped, not reachable from tch-rs 0.24**:
+  same conclusion as the AMP/pinned-memory investigation - torch-sys
+  0.24's bindings don't expose `at::cuda::CUDAGraph`/
+  `torch::cuda::graph_pool_handle` or any stream-capture API at all (this
+  matches the earlier tch-rs API surface exploration for this task: no
+  CUDA graph bindings found). Capturing a graph safely also requires
+  every captured op's tensors to have fixed addresses/shapes across
+  replays (no dynamic map-size-dependent shapes, no host-side branching
+  like the curriculum/reward-shaping code in this loop) - a real
+  implementation would need static-shape buffers and warmup-iteration
+  discipline on top of the missing bindings, so this is intentionally
+  left undone rather than hacked around with something fragile.
