@@ -6,6 +6,9 @@ use openfront_engine::replay::{
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[derive(Parser)]
 #[command(name = "openfront-outcome-gate")]
@@ -25,6 +28,19 @@ struct Args {
     required_passes: usize,
     #[arg(long)]
     limit: Option<usize>,
+    /// Records are fully independent full-game replays (real archived
+    /// multiplayer games - dozens of players/bots/nations, thousands of
+    /// ticks - a very different compute profile from the tiny RL toy
+    /// games the engine's ticks/s benchmark measures), so this is
+    /// embarrassingly parallel. Was hardcoded sequential before, which is
+    /// why a 78-record run took hours single-threaded with zero progress
+    /// output.
+    #[arg(long, default_value_t = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))]
+    jobs: usize,
+    /// Per-record wall-clock cap so one pathological record can't stall
+    /// the whole gate silently (there was no timeout at all before this).
+    #[arg(long, default_value_t = 300)]
+    record_timeout_seconds: u64,
 }
 
 #[derive(Serialize)]
@@ -140,70 +156,136 @@ fn run(args: Args) -> Result<GateReport, String> {
         .map(|outcome| (outcome.game_id.clone(), outcome))
         .collect();
     let paths = record_paths(&args.records, args.limit)?;
-    let mut records = Vec::with_capacity(paths.len());
+    let total_paths = paths.len();
+    let jobs = args.jobs.max(1);
+    let timeout = Duration::from_secs(args.record_timeout_seconds);
+    eprintln!(
+        "[outcome_gate] comparing {total_paths} records across {jobs} worker thread(s), \
+         per-record timeout {}s",
+        timeout.as_secs()
+    );
+
+    let next_idx = Arc::new(AtomicUsize::new(0));
+    let done = Arc::new(AtomicUsize::new(0));
+    let paths = Arc::new(paths);
+    let oracle_by_id = Arc::new(oracle_by_id);
+    let repo = Arc::new(args.repo.clone());
+    let start = Instant::now();
+
+    let mut results: Vec<Option<RecordReport>> = (0..total_paths).map(|_| None).collect();
+    std::thread::scope(|scope| {
+        let (tx, rx) = std::sync::mpsc::channel::<(usize, RecordReport)>();
+        for _ in 0..jobs.min(total_paths.max(1)) {
+            let tx = tx.clone();
+            let next_idx = Arc::clone(&next_idx);
+            let done = Arc::clone(&done);
+            let paths = Arc::clone(&paths);
+            let oracle_by_id = Arc::clone(&oracle_by_id);
+            let repo = Arc::clone(&repo);
+            scope.spawn(move || loop {
+                let idx = next_idx.fetch_add(1, Ordering::Relaxed);
+                if idx >= paths.len() {
+                    return;
+                }
+                let path = paths[idx].clone();
+                let game_id = game_id_from_path(&path);
+                let record = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                let expected = oracle_by_id.get(&game_id).cloned();
+
+                // Run the actual replay on its own thread with a bounded
+                // wait, so one pathologically slow/hung record (e.g. a
+                // very long real multiplayer game) can't stall the whole
+                // gate forever with no signal - it just gets recorded as
+                // a timeout and the pool moves on.
+                let (replay_tx, replay_rx) = std::sync::mpsc::channel();
+                let repo_for_replay = Arc::clone(&repo);
+                let path_for_replay = path.clone();
+                let record_t0 = Instant::now();
+                std::thread::spawn(move || {
+                    let actual = replay_outcome_native(&repo_for_replay, &path_for_replay);
+                    let _ = replay_tx.send(actual);
+                });
+                let actual = match replay_rx.recv_timeout(timeout) {
+                    Ok(actual) => actual,
+                    Err(_) => Err(format!(
+                        "replay exceeded {}s timeout (still running when abandoned)",
+                        timeout.as_secs()
+                    )),
+                };
+                let record_dt = record_t0.elapsed().as_secs_f64();
+
+                let report = match (expected, actual) {
+                    (Some(expected), Ok(actual)) => {
+                        let comparison = compare_outcomes(&expected, &actual);
+                        let category = comparison.category.clone();
+                        RecordReport {
+                            game_id: game_id.clone(),
+                            record: record.clone(),
+                            category,
+                            diagnostics: comparison.diagnostics.clone(),
+                            expected: Some(expected),
+                            actual: Some(actual),
+                            comparison: Some(comparison),
+                            error: None,
+                        }
+                    }
+                    (None, _) => RecordReport {
+                        game_id: game_id.clone(),
+                        record: record.clone(),
+                        category: "replay_error".to_string(),
+                        diagnostics: vec!["replay_error".to_string()],
+                        expected: None,
+                        actual: None,
+                        comparison: None,
+                        error: Some("record missing from TypeScript oracle".to_string()),
+                    },
+                    (Some(expected), Err(error)) => RecordReport {
+                        game_id: game_id.clone(),
+                        record: record.clone(),
+                        category: "replay_error".to_string(),
+                        diagnostics: vec!["replay_error".to_string()],
+                        expected: Some(expected),
+                        actual: None,
+                        comparison: None,
+                        error: Some(error),
+                    },
+                };
+                let n_done = done.fetch_add(1, Ordering::Relaxed) + 1;
+                eprintln!(
+                    "[outcome_gate] {n_done}/{total_paths} {record} -> {} ({record_dt:.1}s)",
+                    report.category
+                );
+                if tx.send((idx, report)).is_err() {
+                    return;
+                }
+            });
+        }
+        drop(tx);
+        for (idx, report) in rx {
+            results[idx] = Some(report);
+        }
+    });
+    eprintln!(
+        "[outcome_gate] all {total_paths} records compared in {:.1}s",
+        start.elapsed().as_secs_f64()
+    );
+
+    let mut records: Vec<RecordReport> = results.into_iter().flatten().collect();
+    records.sort_by(|a, b| a.record.cmp(&b.record));
     let mut categories = CategoryCounts::default();
     let mut diagnostics = CategoryCounts::default();
-
-    for path in paths {
-        let game_id = game_id_from_path(&path);
-        let record = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("")
-            .to_string();
-        let expected = oracle_by_id.get(&game_id).cloned();
-        let actual = replay_outcome_native(&args.repo, &path);
-        let report = match (expected, actual) {
-            (Some(expected), Ok(actual)) => {
-                let comparison = compare_outcomes(&expected, &actual);
-                increment(&mut categories, &comparison.category);
-                for diagnostic in &comparison.diagnostics {
-                    increment(&mut diagnostics, diagnostic);
-                }
-                if comparison.pass {
-                    increment(&mut diagnostics, "pass");
-                }
-                RecordReport {
-                    game_id,
-                    record,
-                    category: comparison.category.clone(),
-                    diagnostics: comparison.diagnostics.clone(),
-                    expected: Some(expected),
-                    actual: Some(actual),
-                    comparison: Some(comparison),
-                    error: None,
-                }
-            }
-            (None, _) => {
-                increment(&mut categories, "replay_error");
-                increment(&mut diagnostics, "replay_error");
-                RecordReport {
-                    game_id,
-                    record,
-                    category: "replay_error".to_string(),
-                    diagnostics: vec!["replay_error".to_string()],
-                    expected: None,
-                    actual: None,
-                    comparison: None,
-                    error: Some("record missing from TypeScript oracle".to_string()),
-                }
-            }
-            (Some(expected), Err(error)) => {
-                increment(&mut categories, "replay_error");
-                increment(&mut diagnostics, "replay_error");
-                RecordReport {
-                    game_id,
-                    record,
-                    category: "replay_error".to_string(),
-                    diagnostics: vec!["replay_error".to_string()],
-                    expected: Some(expected),
-                    actual: None,
-                    comparison: None,
-                    error: Some(error),
-                }
-            }
-        };
-        records.push(report);
+    for report in &records {
+        increment(&mut categories, &report.category);
+        for diagnostic in &report.diagnostics {
+            increment(&mut diagnostics, diagnostic);
+        }
+        if report.category == "pass" {
+            increment(&mut diagnostics, "pass");
+        }
     }
     let total = records.len();
     let pass = categories.pass;
