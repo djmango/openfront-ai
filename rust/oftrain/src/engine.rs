@@ -51,7 +51,9 @@ impl RawObs {
 }
 
 /// Splits a raw little-endian u16 tile-state buffer into the owner /
-/// fallout / defense-bonus planes. Shared by every backend.
+/// fallout / defense-bonus planes. Shared by every backend that has to
+/// cross a byte-stream boundary to get tile state (the Node bridge and
+/// daemon backends both hand over a raw wire frame here).
 pub fn decode_tiles(tiles_raw: &[u8], n: usize) -> (Vec<u16>, Vec<u8>, Vec<u8>) {
     debug_assert_eq!(tiles_raw.len(), n * 2);
     let mut owners = vec![0u16; n];
@@ -62,6 +64,26 @@ pub fn decode_tiles(tiles_raw: &[u8], n: usize) -> (Vec<u16>, Vec<u8>, Vec<u8>) 
         owners[i] = state & OWNER_MASK;
         fallout[i] = ((state >> FALLOUT_BIT) & 1) as u8;
         defense_bonus[i] = ((state >> DEFENSE_BONUS_BIT) & 1) as u8;
+    }
+    (owners, fallout, defense_bonus)
+}
+
+/// Same split as [`decode_tiles`], but for backends that never left
+/// process (the native engine): decodes straight from the packed `&[u16]`
+/// state buffer, skipping both the little-endian byte encode on the
+/// engine side and the byte-pair reassembly this function does. Same bit
+/// layout, so this is the exact same field extraction with one fewer
+/// (redundant, in-process) serialization round trip.
+pub fn decode_tiles_u16(state: &[u16], n: usize) -> (Vec<u16>, Vec<u8>, Vec<u8>) {
+    debug_assert_eq!(state.len(), n);
+    let mut owners = vec![0u16; n];
+    let mut fallout = vec![0u8; n];
+    let mut defense_bonus = vec![0u8; n];
+    for i in 0..n {
+        let s = state[i];
+        owners[i] = s & OWNER_MASK;
+        fallout[i] = ((s >> FALLOUT_BIT) & 1) as u8;
+        defense_bonus[i] = ((s >> DEFENSE_BONUS_BIT) & 1) as u8;
     }
     (owners, fallout, defense_bonus)
 }
