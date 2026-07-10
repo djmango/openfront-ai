@@ -2147,16 +2147,19 @@ impl Game {
         None
     }
 
-    pub fn outgoing_land_troops(&self, attacker_small_id: u16) -> f64 {
+    /// TS `Player.outgoingAttacks().reduce((sum, a) => sum + a.troops(), 0)`.
+    /// Sums troops for *every* outgoing attack (land-sourced or still-en-route
+    /// by boat) - `_outgoingAttacks` in TS has no source-tile filter, so a
+    /// Rust-side filter here silently undercounts a player's committed
+    /// troops in strength comparisons (alliance-partner strength, betrayal).
+    pub fn outgoing_attack_troops(&self, attacker_small_id: u16) -> f64 {
         let Some(attacker) = self.player_by_small_id(attacker_small_id) else {
             return 0.0;
         };
         let mut total = 0.0;
         for id in &attacker.outgoing_land_attacks {
             if let Some(troops) = self.land_attack_troops(id) {
-                if self.land_attack_source_tile(id).is_none() {
-                    total += troops;
-                }
+                total += troops;
             }
         }
         total
