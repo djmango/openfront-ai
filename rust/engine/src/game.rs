@@ -2025,7 +2025,18 @@ impl Game {
         largest_attacker
     }
 
-    /// Largest non-friendly incoming land attacker (TS `AiAttackBehavior.findIncomingAttackPlayer`).
+    /// Largest non-friendly incoming attacker, land OR boat-landed (TS
+    /// `AiAttackBehavior.findIncomingAttackPlayer`, which reads
+    /// `player.incomingAttacks()` - a plain filter over `_incomingAttacks` by
+    /// `attacker().isAlive()` with NO `sourceTile()` check - then filters out
+    /// friendly attackers, then (only for non-Bot defenders) attackers that
+    /// are themselves Bots). Despite the "land" in this function's name (kept
+    /// for git-history continuity), it must NOT exclude boat-landed attacks
+    /// (`source_tile().is_some()`): TS counts those as ordinary incoming
+    /// attacks for retaliation purposes. A dedicated land-only sum exists
+    /// separately as `incoming_land_troops` for the one TS call site
+    /// (`NationStructureBehavior.defensePostNeeded`) that filters
+    /// `sourceTile() === null` explicitly.
     pub fn find_incoming_land_attacker(
         &self,
         defender_small_id: u16,
@@ -2037,7 +2048,7 @@ impl Game {
             let ExecEnum::Attack(atk) = exec else {
                 continue;
             };
-            if !atk.is_active() || !atk.attack_live() || !atk.is_initialized() || atk.source_tile().is_some() {
+            if !atk.is_active() || !atk.attack_live() || !atk.is_initialized() {
                 continue;
             }
             if atk.target_small_id() != defender_small_id {
@@ -2045,6 +2056,14 @@ impl Game {
             }
             let attacker = atk.owner_small_id();
             if attacker == defender_small_id || attacker == 0 {
+                continue;
+            }
+            if let Some(p) = self.player_by_small_id(attacker) {
+                if !p.alive {
+                    continue;
+                }
+            }
+            if self.is_friendly(defender_small_id, attacker) {
                 continue;
             }
             if defender_type != PlayerType::Bot {
@@ -2080,7 +2099,15 @@ impl Game {
             .sum()
     }
 
-    pub fn incoming_attacks(&self, defender_small_id: u16) -> Vec<IncomingAttack> {
+    /// TS `PlayerImpl.incomingAttacks()`: all active incoming attacks (land
+    /// AND boat-landed) from alive attackers, with `land_only=true` applying
+    /// the additional `.filter((a) => a.sourceTile() === null)` some callers
+    /// chain on top (e.g. `NationStructureBehavior.tryBuildDefensePost` /
+    /// `defensePostNeeded`). Callers that use the plain, unfiltered
+    /// `player.incomingAttacks()` (e.g. `NationEmojiBehavior.
+    /// checkOverwhelmedByAttacks` / `checkVerySmallAttack`) must pass
+    /// `land_only=false`.
+    pub fn incoming_attacks(&self, defender_small_id: u16, land_only: bool) -> Vec<IncomingAttack> {
         let mut out = Vec::new();
         let Some(defender) = self.player_by_small_id(defender_small_id) else {
             return out;
@@ -2100,7 +2127,7 @@ impl Game {
             let Some(troops) = self.land_attack_troops(id) else {
                 continue;
             };
-            if self.land_attack_source_tile(id).is_some() {
+            if land_only && self.land_attack_source_tile(id).is_some() {
                 continue;
             }
             out.push(IncomingAttack {
@@ -2147,6 +2174,14 @@ impl Game {
         None
     }
 
+    /// Sum of this player's active outgoing attacks, land AND boat-landed
+    /// (TS `NationAllianceBehavior.isAlliancePartnerSimilarlyStrong`'s
+    /// `player.outgoingAttacks().reduce((sum, a) => sum + a.troops(), 0)` -
+    /// `PlayerImpl.outgoingAttacks()` returns `_outgoingAttacks` unfiltered,
+    /// with no `sourceTile()` check). Despite the "land" in this function's
+    /// name (kept for git-history continuity, mirroring
+    /// `find_incoming_land_attacker`), it must NOT exclude boat-landed
+    /// attacks.
     pub fn outgoing_land_troops(&self, attacker_small_id: u16) -> f64 {
         let Some(attacker) = self.player_by_small_id(attacker_small_id) else {
             return 0.0;
@@ -2154,9 +2189,7 @@ impl Game {
         let mut total = 0.0;
         for id in &attacker.outgoing_land_attacks {
             if let Some(troops) = self.land_attack_troops(id) {
-                if self.land_attack_source_tile(id).is_none() {
-                    total += troops;
-                }
+                total += troops;
             }
         }
         total

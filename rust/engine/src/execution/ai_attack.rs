@@ -440,12 +440,26 @@ fn collect_bordering_players(game: &Game, small_id: u16) -> Vec<u16> {
     ordered
 }
 
-/// TS `PlayerImpl.nearby()` player small IDs in Set insertion order.
+/// TS `PlayerImpl.nearby()` small IDs (players AND `TerraNullius`, small ID
+/// `0`) in `Set` insertion order. TS's `nearby()` unconditionally
+/// `ns.add(this.mg.playerBySmallID(owner))` for every non-self bordering/
+/// shore-reachable owner, INCLUDING owner `0` (`TerraNullius`) - callers
+/// that need a players-only view filter it themselves (e.g.
+/// `getNeighborTraitorToAttack`'s `n.isPlayer()` type guard,
+/// `TribeExecution.maybeAttack`'s shuffled loop's `if (!neighbor.isPlayer())
+/// continue`). Do NOT filter out `0` here: several callers (notably the
+/// tribe random-target shuffle) rely on `TerraNullius` occupying a slot in
+/// this list so the shuffle consumes the same number of PRNG draws, and in
+/// the same relative order, as TS - dropping it here silently changes every
+/// subsequent shuffled pick for this entity. Safe for the other 3
+/// call sites: they each already drop small ID `0` via
+/// `game.player_by_small_id(0) == None` (`filter_map`/`Option` chains) or an
+/// equivalent player-only filter.
 fn nearby_players_ts_order(game: &Game, small_id: u16) -> Vec<u16> {
     let mut seen = HashSet::new();
     let mut ordered: Vec<u16> = Vec::new();
     let mut push = |sid: u16| {
-        if sid != small_id && sid != 0 && seen.insert(sid) {
+        if sid != small_id && seen.insert(sid) {
             ordered.push(sid);
         }
     };

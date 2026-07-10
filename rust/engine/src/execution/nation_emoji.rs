@@ -52,7 +52,7 @@ fn check_overwhelmed_by_attacks(
         return;
     }
 
-    let incoming = game.incoming_attacks(small_id);
+    let incoming = game.incoming_attacks(small_id, false);
     if incoming.is_empty() {
         return;
     }
@@ -77,7 +77,7 @@ fn check_very_small_attack(
         return;
     }
 
-    let incoming = game.incoming_attacks(small_id);
+    let incoming = game.incoming_attacks(small_id, false);
     if incoming.is_empty() {
         return;
     }
