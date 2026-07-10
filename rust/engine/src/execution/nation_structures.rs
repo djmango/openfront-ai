@@ -1475,7 +1475,7 @@ pub fn try_build_defense_post(game: &mut Game, random: &mut PseudoRandom, small_
         return false;
     }
 
-    let attacks = game.incoming_attacks(small_id);
+    let attacks = game.incoming_attacks(small_id, true);
     if attacks.is_empty() {
         return false;
     }
