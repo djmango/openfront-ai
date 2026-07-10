@@ -87,6 +87,24 @@ pub struct Config {
     pub stage_lr_decay: f64,
     pub epochs: usize,
     pub minibatches: usize,
+    /// `--amp`: manual bf16 mixed precision for the policy net's conv
+    /// towers (see `policy::PolicyNet::amp` doc). CPU-safe (bf16 works on
+    /// CPU, just slower - useful for correctness smoke tests without a
+    /// GPU), off by default.
+    pub amp: bool,
+    /// `--foveate`: real foveated crop for the fine-grid branch (see
+    /// `policy::PolicyNet::foveate` doc). Off by default (legacy
+    /// whole-map-as-fine fallback).
+    pub foveate: bool,
+    /// `--gc`/`--blocks`: GridTower size overrides (see `policy::GC`/
+    /// `policy::BLOCKS` defaults).
+    pub gc: i64,
+    pub blocks: i64,
+    /// `--pinned-h2d`: pin the CPU-side observation/choice tensors' backing
+    /// memory and use non-blocking H2D copies for the batch-build
+    /// CPU->GPU upload (see `batch::to_device_maybe_pinned`). No-op unless
+    /// `device`/shard devices are CUDA.
+    pub pinned_h2d: bool,
     pub device: Device,
     /// Which simulation backend envs run against (Node bridge or the
     /// in-process native engine).
@@ -234,7 +252,7 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
 
     for _ in 0..cfg.rollout_len {
         let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
-        let obs_t = batch::build_obs(&obs_refs, actor.device);
+        let obs_t = batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d);
         let (a, player, tile, build, nuke, qty, logp, value) = tch::no_grad(|| actor.policy.act(&obs_t, false));
 
         let a_v: Vec<i64> = (&a).try_into()?;
@@ -303,7 +321,7 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
 
     let bootstrap_v: Vec<f32> = {
         let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
-        let obs_t = batch::build_obs(&obs_refs, actor.device);
+        let obs_t = batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d);
         let v = tch::no_grad(|| actor.policy.value_only(&obs_t));
         (&v).try_into()?
     };
@@ -460,8 +478,8 @@ fn train_update(
                             obs_flat.push(&s.obs);
                         }
                     }
-                    let obs = batch::build_obs(&obs_flat, device);
-                    let choice = batch::build_choice_batch(&choice_flat, device);
+                    let obs = batch::build_obs(&obs_flat, device, cfg.pinned_h2d);
+                    let choice = batch::build_choice_batch(&choice_flat, device, cfg.pinned_h2d);
                     let adv = Tensor::from_slice(&adv_flat).to_device(device);
                     let ret = Tensor::from_slice(&ret_flat).to_device(device);
                     let old_logp = Tensor::from_slice(&old_logp_flat).to_device(device);
@@ -600,7 +618,7 @@ pub fn run(cfg: Config) -> Result<()> {
             cur_obs.push(obs);
         }
         let mut learner_vs = nn::VarStore::new(device);
-        let learner_policy = PolicyNet::new(&learner_vs.root());
+        let learner_policy = PolicyNet::new(&learner_vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
         if let Some(hub) = &hub_vs {
             learner_vs.copy(hub)?;
         } else {
@@ -610,7 +628,7 @@ pub fn run(cfg: Config) -> Result<()> {
                 // parameters (VarStore::copy handles the cross-device
                 // transfer).
                 let mut snapshot = nn::VarStore::new(Device::Cpu);
-                let _ = PolicyNet::new(&snapshot.root());
+                let _ = PolicyNet::new(&snapshot.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
                 snapshot.copy(&learner_vs)?;
                 snapshot
             });
@@ -618,7 +636,7 @@ pub fn run(cfg: Config) -> Result<()> {
         let opt = nn::AdamW::default().build(&learner_vs, cfg.lr)?;
 
         let mut actor_vs = nn::VarStore::new(device);
-        let actor_policy = PolicyNet::new(&actor_vs.root());
+        let actor_policy = PolicyNet::new(&actor_vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
         actor_vs.copy(&learner_vs)?;
 
         actors.push(ActorShard { device, workers, cur_obs, vs: actor_vs, policy: actor_policy });
