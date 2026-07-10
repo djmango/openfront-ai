@@ -60,6 +60,14 @@ use crate::policy::{self, PolicyNet};
 use crate::engine::EngineKind;
 use crate::vecenv::{EnvWorker, EpisodeInfo, PreparedObs};
 
+/// Port of `rl/ppo.py`'s entropy-floor controller constants: hold the
+/// controller for the first N updates (spawn-heavy startup rollouts read
+/// artificially low entropy), and cap the multiplicative scale so the
+/// entropy term can't dwarf the policy gradient (the old Python cap of 30
+/// did exactly that - see the Jul 9 v7 audit in the devlog).
+const ENT_GRACE_UPDATES: u64 = 20;
+const ENT_SCALE_MAX: f64 = 5.0;
+
 pub struct Config {
     /// Envs per shard (per device). Total envs = num_envs * devices().len().
     pub num_envs: usize,
@@ -76,12 +84,18 @@ pub struct Config {
     pub clip: f32,
     pub vf_coef: f32,
     /// Entropy coefficient anneals linearly `ent_coef -> ent_coef_final`
-    /// over `ent_anneal_updates` (matches `rl/ppo.py`'s schedule; the
-    /// adaptive entropy-floor multiplier on top of this is not ported -
-    /// see DEVLOG).
+    /// over `ent_anneal_updates` (matches `rl/ppo.py`'s schedule), with
+    /// the adaptive entropy-floor multiplier (`ent_floor`) on top.
     pub ent_coef: f32,
     pub ent_coef_final: f32,
     pub ent_anneal_updates: u64,
+    /// Adaptive entropy floor (port of `rl/ppo.py --ent-floor`, 0 = off):
+    /// when mean discrete-head policy entropy drops below this, the
+    /// entropy coef scales up (x1.3/update, cap `ENT_SCALE_MAX`) until it
+    /// recovers. Without it the policy collapses to near-zero entropy
+    /// within a handful of updates on low-variance early stages and never
+    /// recovers (observed on every A100 run before this was ported).
+    pub ent_floor: f32,
     pub entq_coef: f32,
     /// `lr * stage_lr_decay ^ stage`, applied on curriculum advance.
     pub stage_lr_decay: f64,
@@ -397,7 +411,12 @@ fn train_update(
     let t_len = cfg.rollout_len;
     let total = t_len * n;
     let minibatch_size = (total / cfg.minibatches.max(1)).max(1);
-    let mut last_losses = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    // Sums over every (epoch, minibatch) pair, averaged across shards -
+    // returned as means, matching `rl/ppo.py`'s `*_sum / n_mb` (whose
+    // entropy mean drives the entropy-floor controller; last-minibatch
+    // snapshots read artificially noisy/low).
+    let mut loss_sums = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    let mut n_mb: usize = 0;
 
     // Per-shard full-rollout tensors, built once (CPU repack + one
     // host->device upload) and resident on that shard's device for the
@@ -567,7 +586,14 @@ fn train_update(
                     .collect();
                 handles.into_iter().map(|h| h.join().expect("backward thread panicked")).collect()
             });
-            last_losses = per_shard_losses[0];
+            let n_shards = per_shard_losses.len() as f64;
+            for (pg, v, ent, entq) in &per_shard_losses {
+                loss_sums.0 += pg / n_shards;
+                loss_sums.1 += v / n_shards;
+                loss_sums.2 += ent / n_shards;
+                loss_sums.3 += entq / n_shards;
+            }
+            n_mb += 1;
             let fwdbwd_dt = mb_t0.elapsed().as_secs_f64();
 
             // DDP-equivalent sync: average grads across shards (no-op for
@@ -589,7 +615,8 @@ fn train_update(
         }
     }
 
-    Ok(last_losses)
+    let d = n_mb.max(1) as f64;
+    Ok((loss_sums.0 / d, loss_sums.1 / d, loss_sums.2 / d, loss_sums.3 / d))
 }
 
 pub fn run(cfg: Config) -> Result<()> {
@@ -669,6 +696,10 @@ pub fn run(cfg: Config) -> Result<()> {
     let mut curr_stage = cfg.stage;
     let mut recent_wins: std::collections::VecDeque<f64> = std::collections::VecDeque::with_capacity(ofcore::curriculum::WINDOW);
     let mut lr_now = cfg.lr;
+    // Adaptive entropy-floor multiplier (port of `rl/ppo.py`'s
+    // `ent_scale`): multiplicative on top of the linear anneal, nudged
+    // after each update from that update's measured mean entropy.
+    let mut ent_scale: f64 = 1.0;
 
     // Prime the pipeline: collect the very first rollout (using the
     // actors' initial, freshly-copied-from-learner weights) before the
@@ -687,11 +718,11 @@ pub fn run(cfg: Config) -> Result<()> {
         // See module doc for why this is safe (disjoint state) and what
         // it's fixing (GPU idling during collection).
         // Linear anneal ent_coef -> ent_coef_final so late training commits
-        // instead of exploring forever (matches `rl/ppo.py`; the adaptive
-        // entropy-floor multiplier on top of this schedule is not ported -
-        // see DEVLOG).
+        // instead of exploring forever, times the adaptive entropy-floor
+        // scale (both match `rl/ppo.py`).
         let frac = (update as f64 / cfg.ent_anneal_updates.max(1) as f64).min(1.0);
-        let ent_coef_now = (cfg.ent_coef as f64 + (cfg.ent_coef_final as f64 - cfg.ent_coef as f64) * frac) as f32;
+        let ent_coef_now =
+            ((cfg.ent_coef as f64 + (cfg.ent_coef_final as f64 - cfg.ent_coef as f64) * frac) * ent_scale) as f32;
         // `collect_dt`/`train_dt` used to both be measured from
         // (effectively) the same start instant to the same point *after*
         // this whole scope returns - since the scope can't return until
@@ -724,6 +755,28 @@ pub fn run(cfg: Config) -> Result<()> {
         let collect_dt = collect_start.elapsed().as_secs_f64();
         let last_losses = train_result?;
         let next_pending = next_pending?;
+
+        // Entropy floor controller (port of `rl/ppo.py`): nudge the coef
+        // scale toward keeping measured mean entropy above the floor, with
+        // hysteresis so it doesn't oscillate. Multiplicative so it composes
+        // with the anneal. Held for ENT_GRACE_UPDATES at startup
+        // (spawn-heavy startup rollouts read artificially low entropy).
+        // Discrete heads only: the Beta quantity head's differential
+        // entropy lives on another scale.
+        if cfg.ent_floor > 0.0 && update > ENT_GRACE_UPDATES {
+            let ent_mean = last_losses.2;
+            let floor = cfg.ent_floor as f64;
+            if ent_mean < floor {
+                ent_scale = (ent_scale * 1.3).min(ENT_SCALE_MAX);
+            } else if ent_mean > floor * 1.4 {
+                ent_scale = (ent_scale / 1.3).max(1.0);
+            } else {
+                // Anywhere above the floor decays (slowly): without this,
+                // a scale pushed up by a transient dip is trapped forever
+                // when the bonus holds entropy inside [floor, floor*1.4).
+                ent_scale = (ent_scale / 1.05).max(1.0);
+            }
+        }
 
         let mut advanced = false;
         let debug_eps = std::env::var("OFTRAIN_DEBUG_EPISODES").is_ok();
