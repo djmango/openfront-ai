@@ -414,6 +414,18 @@ pub fn maybe_betray(
         return false;
     };
 
+    // TS: "Betray very weak players (for example MIRVed ones)" - checked
+    // first, before the Easy/Medium troop-ratio betrayal below.
+    if !matches!(difficulty, "Easy" | "Medium") {
+        let target_max_troops = game.max_troops_for(target_small_id);
+        let target_outgoing = game.outgoing_attack_troops(target_small_id);
+        if (target.troops as f64 + target_outgoing) < target_max_troops * 0.2
+            && target.troops < attacker.troops
+        {
+            return true;
+        }
+    }
+
     if matches!(difficulty, "Easy" | "Medium")
         && !(difficulty == "Easy" && target.player_type == PlayerType::Human)
         && attacker.troops >= target.troops * 10
