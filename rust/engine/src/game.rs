@@ -2025,7 +2025,18 @@ impl Game {
         largest_attacker
     }
 
-    /// Largest non-friendly incoming land attacker (TS `AiAttackBehavior.findIncomingAttackPlayer`).
+    /// Largest non-friendly incoming attacker, land OR boat-landed (TS
+    /// `AiAttackBehavior.findIncomingAttackPlayer`, which reads
+    /// `player.incomingAttacks()` - a plain filter over `_incomingAttacks` by
+    /// `attacker().isAlive()` with NO `sourceTile()` check - then filters out
+    /// friendly attackers, then (only for non-Bot defenders) attackers that
+    /// are themselves Bots). Despite the "land" in this function's name (kept
+    /// for git-history continuity), it must NOT exclude boat-landed attacks
+    /// (`source_tile().is_some()`): TS counts those as ordinary incoming
+    /// attacks for retaliation purposes. A dedicated land-only sum exists
+    /// separately as `incoming_land_troops` for the one TS call site
+    /// (`NationStructureBehavior.defensePostNeeded`) that filters
+    /// `sourceTile() === null` explicitly.
     pub fn find_incoming_land_attacker(
         &self,
         defender_small_id: u16,
@@ -2037,7 +2048,7 @@ impl Game {
             let ExecEnum::Attack(atk) = exec else {
                 continue;
             };
-            if !atk.is_active() || !atk.attack_live() || !atk.is_initialized() || atk.source_tile().is_some() {
+            if !atk.is_active() || !atk.attack_live() || !atk.is_initialized() {
                 continue;
             }
             if atk.target_small_id() != defender_small_id {
@@ -2045,6 +2056,14 @@ impl Game {
             }
             let attacker = atk.owner_small_id();
             if attacker == defender_small_id || attacker == 0 {
+                continue;
+            }
+            if let Some(p) = self.player_by_small_id(attacker) {
+                if !p.alive {
+                    continue;
+                }
+            }
+            if self.is_friendly(defender_small_id, attacker) {
                 continue;
             }
             if defender_type != PlayerType::Bot {
