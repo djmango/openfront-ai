@@ -98,6 +98,18 @@ struct Args {
     #[arg(long, default_value_t = false)]
     foveate: bool,
 
+    /// GridTower channel width override (default from `policy::GC` = 256).
+    /// Applies to both the coarse and fine grid towers. Smaller values
+    /// (e.g. 128) trade capacity for speed - see `--blocks`.
+    #[arg(long, default_value_t = policy::GC)]
+    gc: i64,
+
+    /// GridTower residual-block count override (default from
+    /// `policy::BLOCKS` = 4). Smaller values (e.g. 2) trade capacity for
+    /// speed - see `--gc`.
+    #[arg(long, default_value_t = policy::BLOCKS)]
+    blocks: i64,
+
     /// "cpu", "cuda", or "cuda:N".
     #[arg(long, default_value = "cpu")]
     device: String,
@@ -157,6 +169,8 @@ fn main() -> anyhow::Result<()> {
         minibatches: args.minibatches,
         amp: args.amp,
         foveate: args.foveate,
+        gc: args.gc,
+        blocks: args.blocks,
         device,
         engine: args.engine,
         log_every: args.log_every,
