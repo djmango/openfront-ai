@@ -82,6 +82,10 @@ impl Config {
         self.game_config.random_spawn
     }
 
+    pub fn game_type(&self) -> &str {
+        &self.game_config.game_type
+    }
+
     pub fn is_unit_disabled(&self, unit_type: &str) -> bool {
         self.game_config
             .disabled_units
