@@ -16,9 +16,7 @@ use crate::execution::{
 };
 use crate::game::{Game, GameConfig, PlayerInfo, PlayerType};
 use crate::map::TileRef;
-use crate::obs::{
-    borders_neutral_land, build_obs_head, can_extend_alliance, tile_bytes_le,
-};
+use crate::obs::{borders_neutral_land, build_obs_head, can_extend_alliance};
 use crate::prng::PseudoRandom;
 use crate::record::StampedIntent;
 use crate::session::{seed_to_game_id, terrain_bytes, AGENT_CLIENT_ID};
@@ -34,7 +32,10 @@ pub struct RlSession {
 
 impl RlSession {
     /// Mirrors `bridge/env.ts::EnvSession.reset()`. Returns the session plus
-    /// the obs head, raw terrain bytes, and the binary tile-state frame.
+    /// the obs head and raw terrain bytes; the binary tile-state frame is
+    /// not built here - in-process callers should read `tile_state()`
+    /// directly (see its doc comment) instead of paying for a byte
+    /// encoding that only exists for out-of-process backends.
     pub fn reset(
         repo_root: &Path,
         map_key: &str,
@@ -42,7 +43,7 @@ impl RlSession {
         bots: u32,
         difficulty: &str,
         nations: Value,
-    ) -> Result<(Self, Value, Vec<u8>, Vec<u8>), String> {
+    ) -> Result<(Self, Value, Vec<u8>), String> {
         let map_dir = repo_root
             .join("openfront/resources/maps")
             .join(map_key.to_lowercase());
@@ -150,18 +151,29 @@ impl RlSession {
         // spawns via step().
         game.execute_next_tick();
 
-        let mut session = Self { game, game_id };
+        let session = Self { game, game_id };
         let head = build_obs_head(&session.game, AGENT_CLIENT_ID, Value::Null);
         let terrain_raw = terrain_bytes(&session.game);
-        let tiles = tile_bytes_le(&session.game);
-        let _ = &mut session; // session.game mutated above via execute_next_tick
-        Ok((session, head, terrain_raw, tiles))
+        Ok((session, head, terrain_raw))
+    }
+
+    /// Zero-copy view of the packed per-tile state buffer (owner id in the
+    /// low 12 bits, fallout/defense-bonus flag bits above), valid
+    /// immediately after `reset`/`step`. In-process callers (the native
+    /// trainer backend) decode straight from this `&[u16]` instead of
+    /// round-tripping through `obs::tile_bytes_le`'s little-endian byte
+    /// encoding, which exists only for backends that must cross a process
+    /// boundary (the Node bridge/daemon).
+    pub fn tile_state(&self) -> &[u16] {
+        self.game.tile_state_buffer()
     }
 
     /// Mirrors `bridge/env.ts::EnvSession.step()`: count wasted intents
     /// against pre-step state, submit one turn, run `ticks` engine ticks
-    /// (breaking on a win update), return head + tiles.
-    pub fn step(&mut self, intents: &[Value], ticks: u32) -> (Value, Vec<u8>) {
+    /// (breaking on a win update), return the obs head. Read the
+    /// post-step tile state via `tile_state()` (no bytes are built here -
+    /// see its doc comment).
+    pub fn step(&mut self, intents: &[Value], ticks: u32) -> Value {
         let wasted = self.count_wasted(intents);
         if !intents.is_empty() {
             let stamped: Vec<StampedIntent> = intents
@@ -193,7 +205,7 @@ impl RlSession {
         if let Some(obj) = head.as_object_mut() {
             obj.insert("wasted".into(), Value::from(wasted));
         }
-        (head, tile_bytes_le(&self.game))
+        head
     }
 
     /// Port of `bridge/env.ts::EnvSession.countWasted()` - intents the engine
