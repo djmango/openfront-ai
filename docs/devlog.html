@@ -1946,6 +1946,104 @@ sweep.</p>
   under a real crash, not just the smoke test in the prerequisites.</li>
 </ul>
 
+<h2 class="date" id="autoscale">July 10th, 2026 - auto-scaling env workers to a GPU-utilization set point (mechanics validated, GPU-driven convergence not)</h2>
+<p class="session">Note on where this entry lives: the task that produced it was written against
+<code>rust/DEVLOG.md</code>, which by the time this branch's worktree was created had already been
+reduced to a "moved, see here" pointer and then deleted outright in the very next commit (both same-day,
+both from the concurrent engine-parity thread's work in this repo). Filing the entry here instead,
+matching that removal commit's own instruction to "write new entries" in this file.</p>
+<p>Opt-in (<code>--auto-scale-envs</code>, off by default) automatic growth of the per-shard env-worker
+count toward a target GPU-utilization set point (<code>--target-gpu-util</code>, default 0.95), instead
+of the manual trial-and-error that found <code>--num-envs 4</code> giving ~40% (dipping to ~1%,
+IPC-latency-bound) vs <code>--num-envs 64</code> giving 98-100% on the same A100 box (see the
+<a href="#rust-gpu-rounds">rounds 1-3</a> entry above). New module <code>oftrain/src/autoscale.rs</code>:
+a pure, `tch`-free, unit-tested decision function
+<code>next_env_count(current, gpu_util_frac, target, min, max, step)</code> with a 3-point hysteresis band
+(only grow when utilization reads below <code>target - 0.03</code>; hold inside the band or above target)
+so noise in a single sample near the target doesn't cause resize churn every
+<code>--autoscale-check-every</code> (default 5) updates, plus <code>cpu_env_cap_per_shard</code> (logical
+CPUs minus a small reserved margin, divided across shards) backing <code>--max-envs 0</code>'s "derive
+automatically" default. Twelve unit tests pin the boundaries: below/at/above target, already at min/max,
+<code>gpu_util_frac=None</code>, a zero step, and the nonsensical <code>min &gt; max</code> case (resolved
+by raising max to min rather than left as something that could later hang or panic).</p>
+<h3 id="autoscale-design">Design decisions: grow-only, and the <code>cfg.num_envs</code> correctness fix</h3>
+<p><b>Scale-down: not implemented (v1).</b> Low GPU utilization realistically means "this run started with
+too few envs for this box" - a one-time mis-sizing to correct, not an ongoing overshoot signal the way
+memory pressure would be - so there's no symmetric case v1 needs to react to. Shrinking safely also means
+tearing down <code>EnvWorker</code> threads/bridge subprocesses mid-run without leaving shards at different
+env counts for even one update (see below); real complexity with no concrete driving need yet. Documented
+as a deliberate scope cut in the module doc, not a silent gap - if real runs show oscillation worth
+reacting to (thermal throttling, GPU contention from another process), the function signature already
+carries everything a shrink decision would need.</p>
+<p><b>The actual correctness risk, and how it was fixed.</b> <code>train_update</code> previously did
+<code>let n = cfg.num_envs;</code> and used that fixed <code>n</code> to size every GAE/minibatch buffer
+and index every per-env slot in the rollout. Growing <code>ActorShard.workers</code>/<code>cur_obs</code>
+at runtime (which is exactly what auto-scaling does) while <code>train_update</code> keeps trusting the
+<i>original</i> config value would have silently misindexed or corrupted those buffers the very next
+update after any scale-up - the kind of bug that doesn't panic, just quietly reads garbage. Audited every
+<code>cfg.num_envs</code> read in the crate (<code>rg 'num_envs' oftrain/src</code>): most are
+doc-comments/logging (left alone), but two were real sizing/indexing uses. Fix: <code>train_update</code>
+now derives <code>n</code> from the actual collected rollout's buffer width
+(<code>pending[0].buffer[0].len()</code>) instead of the config, guarded by a
+<code>debug_assert_eq!</code> inside each shard's own batch-build thread that would trip immediately if a
+future change ever let shards' env counts drift apart. <code>collect_rollout</code> itself turned out to
+already be correct - it was already deriving its per-call env count from
+<code>actor.workers.len()</code>, not the config - so growth is picked up there for free with no change
+needed. The other real one: the update loop's <code>total_env_steps</code>/<code>steps/s</code> stats used
+a startup-time <code>total_envs</code> constant that would have silently under-reported throughput after
+any scale-up; now derived per-update from the actual collected rollout widths
+(<code>live_total_envs</code>).</p>
+<p><b>Why growth is uniform across shards, not per-shard-independent.</b> Growing every shard by the same
+amount, spawning all of one growth step's new workers <i>before</i> committing any of them, and rolling
+back the whole attempt (closing any partially-spawned workers, keeping the old count) if even one
+<code>spawn_worker</code> call fails anywhere - this keeps the "every shard has the same env count" property
+always true by construction, which is exactly what lets <code>train_update</code> use one shared <code>n</code>
+derived from shard 0's data for every shard's minibatch/index-tensor math without per-shard bookkeeping. The
+alternative (independent per-shard counts) would need heterogeneous per-shard batch sizes threaded through
+the minibatch-index-tensor logic for a case (a spawn failing on exactly one shard) that should be rare and
+is now just refused outright instead of partially applied. The resize itself is placed at the one safe point
+in the loop: after this update's <code>pending</code>/<code>next_pending</code> swap, before the next
+iteration spawns its <code>collect_rollout</code> calls - never mid-rollout, where <code>collect_rollout</code>'s
+already-cached <code>n = actor.workers.len()</code> from the top of that call would desync from a worker list
+growing underneath it.</p>
+<h3 id="autoscale-validated">What was actually validated (CPU-only sandbox, no GPU or CUDA device present)</h3>
+<p><code>cargo build --release -p oftrain --features native-engine</code> succeeds; <code>cargo test -p
+oftrain</code> passes all 20 tests (12 new in <code>autoscale.rs</code> plus the 8 pre-existing
+<code>policy</code>/<code>batch</code> tests, unaffected); <code>cargo clippy -p oftrain --features
+native-engine --no-deps</code> shows the identical warning set before and after this change (a full
+non-<code>--no-deps</code> clippy run fails identically on unmodified master too - pre-existing
+<code>deny</code>-level lints in the untouched <code>ofcore</code>/<code>engine</code> crates, confirmed by
+stashing this diff and re-running). A plain CPU smoke test (<code>--device cpu --engine native --num-envs 4
+--auto-scale-envs --max-envs 8 --autoscale-check-every 1 --updates 3</code>) ran clean with the
+<code>[autoscale] enabled: ...</code> banner and no crash/hang, correctly taking the no-GPU-signal branch
+(hold steady, no resize) every update since a CPU-only device never starts a <code>GpuUtilSampler</code> -
+exactly the designed degrade path, not a heuristic scaling-without-a-GPU-signal fallback (see the module
+doc's rationale for why CPU headroom is used only as a ceiling, never as the growth signal itself). To
+actually exercise the growth code path end to end without a GPU, temporarily patched one line to force
+<code>gpu_util_frac = Some(0.1)</code> (reverted before committing, no trace left in the diff) and re-ran:
+real new <code>EnvWorker</code> threads spawned and joined the shard cleanly, <code>4 -&gt; 8 -&gt; 12</code>
+across two growth steps then correctly held at the <code>--max-envs 12</code> ceiling, and
+<code>decisions_total</code> tracked the growing env count exactly right update over update
+(<code>24, 72, 144, 216, 288</code> for rollout-len 6 at 4/4/8/12/12/12 envs respectively) with no crash and
+no misindexing - direct evidence the <code>cfg.num_envs</code> fix above actually works, not just that it
+compiles. A 2-shard CPU run (<code>--num-envs 2 --num-gpus 2</code>) with autoscale on also completed clean,
+confirming the uniform-growth bookkeeping doesn't break plain multi-shard CPU mode. Also checked: setting
+<code>--max-envs</code> below <code>--num-envs</code> logs a clear warning and clamps instead of hanging or
+panicking.</p>
+<p><b>What is explicitly NOT validated: real GPU-driven convergence.</b> Every test above ran with
+<code>gpu_util_frac</code> either <code>None</code> (real no-GPU degrade path) or hand-forced to a fixed
+value (mechanics-only, no real utilization signal, no real training-induced load pattern). Whether the
+grow-on-low-utilization decision actually converges toward the 95% target the way the manual
+<code>--num-envs 4</code> vs <code>64</code> comparison suggests it should - and how fast, and whether the
+default hysteresis band/step size (3 points, +4 envs) are sane for a real training loop's utilization
+noise - is completely unconfirmed. Next step, on an actual CUDA pod:
+<code>--engine native --device cuda --num-envs 4 --auto-scale-envs --min-envs 4 --max-envs 64
+--autoscale-check-every 5 --autoscale-step 4 --rollout-len 32 --updates 100</code>, watching the
+<code>[autoscale]</code> log lines and <code>min_mean_util%</code> to confirm the count climbs from 4
+toward the previously-manual 64 and utilization tracks it up toward the 95% target instead of
+oscillating, stalling short, or overshooting the CPU-derived cap before the GPU signal even gets a
+chance to matter.</p>
+
 <h2 class="date" id="reference">Reference and open threads</h2>
 <p class="session">Tooling, bugs, lessons, infra, recipes, backlog.</p>
 <h3 id="tooling">Visualization &amp; tooling</h3>
