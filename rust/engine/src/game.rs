@@ -2099,7 +2099,15 @@ impl Game {
             .sum()
     }
 
-    pub fn incoming_attacks(&self, defender_small_id: u16) -> Vec<IncomingAttack> {
+    /// TS `PlayerImpl.incomingAttacks()`: all active incoming attacks (land
+    /// AND boat-landed) from alive attackers, with `land_only=true` applying
+    /// the additional `.filter((a) => a.sourceTile() === null)` some callers
+    /// chain on top (e.g. `NationStructureBehavior.tryBuildDefensePost` /
+    /// `defensePostNeeded`). Callers that use the plain, unfiltered
+    /// `player.incomingAttacks()` (e.g. `NationEmojiBehavior.
+    /// checkOverwhelmedByAttacks` / `checkVerySmallAttack`) must pass
+    /// `land_only=false`.
+    pub fn incoming_attacks(&self, defender_small_id: u16, land_only: bool) -> Vec<IncomingAttack> {
         let mut out = Vec::new();
         let Some(defender) = self.player_by_small_id(defender_small_id) else {
             return out;
@@ -2119,7 +2127,7 @@ impl Game {
             let Some(troops) = self.land_attack_troops(id) else {
                 continue;
             };
-            if self.land_attack_source_tile(id).is_some() {
+            if land_only && self.land_attack_source_tile(id).is_some() {
                 continue;
             }
             out.push(IncomingAttack {
