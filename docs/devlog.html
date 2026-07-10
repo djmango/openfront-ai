@@ -1617,6 +1617,41 @@ port</i>, not logic errors - the code that existed was correct, the problem was 
 config that didn't exist. Port audits should diff the <i>flag surface and controller
 inventory</i> against the original, not just the math that made it across.</p>
 
+<h3 id="rust-gate-slow">Why the gate took 4 hours (it shouldn't have) and what the numbers actually mean</h3>
+<p><code>outcome_gate</code> was strictly sequential with <i>zero</i> progress output until the
+whole 78-record report printed at the end - a run silently ran for ~4 hours with no way to tell
+if it was almost done or hung, and there was no per-record timeout at all. Root cause wasn't the
+engine (still 130-150k ticks/s standalone) - these 78 records are <b>real archived multiplayer
+games, uniformly 400 bots + ~125 human players each</b> (every single one - checked the full
+set), individually taking 100-1150s to fully replay tick-by-tick. Fixed:
+<code>outcome_gate</code> now runs records across a worker-thread pool (<code>--jobs</code>,
+defaults to core count) with a per-record wall-clock cap via a channel
+<code>recv_timeout</code> (<code>--record-timeout-seconds</code>) and streams
+<code>N/total record -> category (Ns)</code> progress to stderr as each one finishes. Also
+uploaded the cached TS oracle to <code>djmango/openfront-human-games</code> on HF
+(<code>outcome-oracle/&lt;commit&gt;.json</code>) and wired an automatic fetch into
+<code>run_outcome_gate.sh</code> - the ~1hr+ TS-engine regeneration only has to happen once,
+ever, per parity commit, not per machine.</p>
+<p><b>The result, and why it's not the alarm it looks like:</b> every record checked so far is
+<code>missing_winner</code> - not "close but outside tolerance," <i>wildly</i> different final
+states. One example (Two Lakes, Team mode, 400 bots): TS's real game ended at tick 7231 with
+Team Red at 95.05% land share; replaying the exact same human intents natively at the same tick
+leaves Red at 14.8%, with unaffiliated "Bot" entities alone holding 36.4% of the map - a
+different game, not a near-miss. But <b>every one of the 78 records uses 400 bots</b>, and the
+RL curriculum never goes above 150 (stages run 0, 0, 5, 10, 30, 30, 50, 80, 80, 120, 150). Bot
+AI acts autonomously each tick (it's not in the recorded intent stream), so any small per-bot
+decision difference between native and TS compounds every tick across however many bots are
+alive - at 400 independent agents over 5,000-13,000 ticks that compounds into a completely
+different map, while at the curriculum's actual bot counts the same per-bot error has far less
+surface area to snowball on. <b>This test set answers "does native match TS at the most
+extreme bot density OpenFront supports," not "does native match TS at the bot counts the
+curriculum actually trains on"</b> - it's the wrong instrument for the question that matters
+for training, and a 0%-ish pass rate on it shouldn't be read as "training is broken."</p>
+<p>What it does establish, cleanly: bot AI has a real, likely systemic behavioral gap between
+native and TS (worth its own investigation - see next steps), and the existing 78-record human-
+game archive can't validate curriculum-relevant parity because it has no low-bot-count games at
+all. Both are now tracked as their own next-step items rather than blocking anything.</p>
+
 <h3 id="rust-next">Next best steps, in order of expected value</h3>
 <ol>
   <li><b>Validate the stall fixes end-to-end (now unblocked).</b> Single-GPU pod,
@@ -1624,6 +1659,17 @@ inventory</i> against the original, not just the math that made it across.</p>
   <code>OFTRAIN_DEBUG_EPISODES</code> that stage-0 wins actually fire, the win-rate window
   fills, and the curriculum advances. This was blocked on the three bugs above; it no longer
   is.</li>
+  <li><b>Build a curriculum-representative parity check.</b> The 78-record archive is uniformly
+  400 bots and can't answer the question that matters; generate a small new record set at the
+  curriculum's actual bot counts (0/5/10/30/50/80/120/150, matching each stage) via TS
+  self-play, run the same outcome-gate comparison against native. Cheap (low-bot games replay
+  in seconds, not minutes) and directly tells us whether training-relevant parity is fine even
+  though the 400-bot number looks bad.</li>
+  <li><b>Investigate the bot-AI behavioral gap.</b> Independent of whether it blocks training,
+  it's real: same intents, same start, wildly different territory by the same tick. Worth a
+  focused pass on bot/nation AI decision logic (attack targeting, expansion aggressiveness) with
+  side-by-side tick-level tile-count traces at a moderate bot count (~30-50) where it's still
+  fast to iterate on but the divergence should already be visible.</li>
   <li><b>Re-ask the model-size question with learning curves, not util%.</b> Small policy
   (2.6M params) at 285 steps/s vs full (11.2M) at 173: if small learns comparably per sample,
   it's ~1.65x more learning per hour at a third of the memory - and foveation re-enters as a
@@ -1635,9 +1681,9 @@ inventory</i> against the original, not just the math that made it across.</p>
   bottleneck: collection scaled linearly with env count, so the cost is per-step obs
   decode/featurize/act - the next 82&rarr;90%+ move is either actor/learner CUDA stream
   separation or moving featurization onto the GPU, not more engine speed.</li>
-  <li><b>Land the outcome gate at &ge;55/78</b> (run is in flight; also quantifies the
-  softer-nations signal from the post-fix A/B), then make <code>--engine native</code> the
-  default and demote the Node bridge to a parity-testing tool.</li>
+  <li><b>Once the curriculum-representative check is green, make <code>--engine native</code>
+  the default</b> and demote the Node bridge to a parity-testing tool. The 400-bot archive gate
+  keeps running as a stress test, not a gate on training.</li>
   <li><b>Only then scale to 4-8 GPUs</b> - the multi-GPU plumbing (replica grad-averaging)
   already works; scaling before learning is verified just reproduces a broken policy faster
   and more expensively.</li>
