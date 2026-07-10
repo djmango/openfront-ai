@@ -277,18 +277,25 @@ impl GameMap {
     pub fn for_each_neighbor4(&self, t: TileRef, mut f: impl FnMut(TileRef)) {
         let w = self.width;
         let x = self.x(t);
-        // TS `GameMap.neighbors4` order: west, east, north, south.
-        if x > 0 {
-            f(t - 1);
-        }
-        if x + 1 < w {
-            f(t + 1);
-        }
+        // TS `GameMap.neighbors4` order: north, south, west, east (see
+        // `neighbors4_ts` below, which returns the same order via an
+        // out-buffer). This was previously west/east/north/south, which
+        // silently desynced every neighbor-order-sensitive PRNG/priority
+        // computation downstream of this function (e.g. AttackExecution's
+        // per-tile `random.next_int` draws in `execution/attack.rs`) from
+        // the very first tick attacks became active - see the bot-AI
+        // parity investigation devlog entry for tick-level evidence.
         if t >= w {
             f(t - w);
         }
         if t < (self.height - 1) * w {
             f(t + w);
+        }
+        if x > 0 {
+            f(t - 1);
+        }
+        if x + 1 < w {
+            f(t + 1);
         }
     }
 
