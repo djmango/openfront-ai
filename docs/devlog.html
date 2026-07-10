@@ -67,16 +67,26 @@
   taught a law: utilization tracks the train/collect compute ratio, so cheaper networks buy
   throughput and cost util% - decisions/s/$ is the real metric. Pod torn down after
   validation.</p>
-  <p><b>The stage-0 learning stall is root-caused and fixed</b>
-  (<a href="#rust-stall-solved">investigation</a>): not a tuning problem - three silent port
-  omissions. The episode budget shipped at 3000 ticks vs Python's 15000, the adaptive
-  entropy-floor controller (<code>--ent-floor</code>, on by default in Python) was never
-  ported, and - the big one - the native engine's <code>SpawnExecution</code> dropped TS's
-  singleplayer <code>endSpawnPhase()</code> call, so <b>every native RL episode ran entirely
-  inside the spawn phase</b>: empty legality, uniform entropy, no real game. Yesterday's
-  throughput numbers survive; its learning observations were measuring spawn-phase noise. All
-  three fixed on master; next pod run validates wins fire and the curriculum advances
-  (<a href="#rust-next">ordered next steps</a>).</p>
+  <p><b>The stage-0 learning stall is fixed and validated end to end</b>
+  (<a href="#rust-stall-solved">root cause</a>, <a href="#rust-six-done">validation</a>): three
+  silent port omissions (3000 vs Python's 15000-tick episode budget, the never-ported adaptive
+  entropy-floor controller, and the native engine's <code>SpawnExecution</code> missing TS's
+  singleplayer <code>endSpawnPhase()</code> call - every native RL episode was running entirely
+  inside the spawn phase). All three fixed, and on a real A100 run the curriculum now advances
+  stage 0 &rarr; 1 &rarr; 2 within ~2200s. <code>--engine native</code> is now the default.</p>
+  <p><b>Outcome parity got a real fix too:</b> a subagent pair built a curriculum-bot-count
+  parity check (the 78-record archive is uniformly 400 bots, useless for this) and root-caused
+  a genuine bug via tick-level tracing - <code>GameMap::for_each_neighbor4</code> iterated
+  neighbors in the wrong order, silently desyncing PRNG draws in every conquest computation.
+  Fixed; tile-attribution error dropped 46%. Curriculum-relevant parity (bots 0-10) is now
+  genuinely good - real wins, right magnitude, occasional coin-flip on exact winner identity in
+  tight multi-way races. Higher bot counts (30+) still have a smaller residual gap, tracked as
+  a next step, not a blocker.</p>
+  <p>Also: clean AMP A/B (0.505s &rarr; 0.318s per minibatch, real 37% win, no confounds), a
+  model-size re-ask (both sizes learn, full policy more smoothly at this budget - not the clean
+  win hypothesized), and a 4-GPU sanity check (256 envs, ~520 steps/s, curriculum advanced
+  there too). Nothing left blocking a real training run - see
+  <a href="#rust-next">next steps</a>.</p>
   <p class="d" style="margin:.75rem 0 0">Previous: <b><code>ppo_v7</code> killed</b> (update
   355, checkpoint on HF) after the <a href="#gpu-util-killed">Python GPU-utilization push</a>
   plateaued at 70-72% against the Node subprocess bridge - the wall that motivated this whole
@@ -1652,41 +1662,107 @@ native and TS (worth its own investigation - see next steps), and the existing 7
 game archive can't validate curriculum-relevant parity because it has no low-bot-count games at
 all. Both are now tracked as their own next-step items rather than blocking anything.</p>
 
-<h3 id="rust-next">Next best steps, in order of expected value</h3>
+<h3 id="rust-six-done">Jul 10, afternoon: all six next steps, done in parallel - the stall is fixed, native is default, here's what's real and what's not</h3>
+<p class="session">Two subagents (curriculum-representative parity + bot-AI tick-level investigation), three A100 pods
+(stall-fix validation, model-size A/B, clean AMP A/B), one 4-GPU sanity check. Every item landed
+real evidence, not vibes.</p>
+
+<h4>1-2. Curriculum-representative parity + bot-AI root cause (done together, they compound)</h4>
+<p>First pass at curriculum-bot-count parity (0/5/10/30/50/80/120/150, `datagen/gen_curriculum_parity.ts`,
+`scripts/run_curriculum_parity_gate.sh`) used the same 4500-tick/6-min-timer budget as the archive and
+landed 22/40 (55%) with every failure a narrow-margin <code>wrong_winner</code> in a crowded field, not a
+systemic miss - a completely different failure mode from the 400-bot catastrophe. But that generator
+had every game hit the exact same <code>max_timer</code> cutoff at tick ~3910 regardless of bot count -
+i.e. every "outcome" was a coin-flip snapshot of an unfinished race, not a genuine win. Reran with a much
+longer horizon (20000 ticks / 40min timer) so games can actually resolve: <b>0/5/10 bots (the curriculum's
+first 5-6 stages) now hit real, complete dominance in both engines</b> (land shares 0.93-1.0, not
+snapshots) - 0 bots 2/2 exact match, 5/10 bots near-misses where both engines agree on a genuine winner
+and near-identical land share, just occasionally disagreeing on <i>which</i> nation among several that
+converge to ~100% simultaneously. 30+ bots still shows real winner-identity divergence even at full
+dominance.</p>
+<p>In parallel, a tick-level side-by-side trace (new `tick_dump` binary + TS dump script) at ~50 bots
+found the <b>actual bug</b>: first divergence appeared at tick 303 - two nations with byte-identical
+troop counts landed 1 tile apart, pointing at conquest-order/PRNG mechanics rather than a formula error.
+Root cause: <code>GameMap::for_each_neighbor4</code> iterated neighbors west/east/north/south instead of
+TS's north/south/west/east - silently shifting which specific tile received which PRNG draw during every
+border-tile conquest-priority computation, in every attack, everywhere in the engine, for as long as it's
+existed. Fixed, plus two related missing <code>is_impassable</code> filters in attack/bot-AI decision
+code (one of which was a real invariant violation - impassable tiles could become "owned"). Effect:
+first divergence moved from tick ~303 to ~1497 (5x later, and everything in between is now
+byte-identical), total tile-attribution error at tick 6000 dropped 46% (756k -> 410k). This is now on
+master and is what the parity numbers above already reflect.</p>
+<p><b>Bottom line: curriculum-relevant parity (bots 0-10, stages 0-3ish) is good - real wins, right
+magnitude, occasional coin-flip on exact winner identity in tight races. Higher bot counts (30+) still
+have a real, if much smaller than before, systemic gap worth continued attention as training reaches
+those stages, but nothing here blocks starting or continuing training now.</b></p>
+
+<h4>3. Stall-fix validation - confirmed, end to end, on a real A100</h4>
+<p>Single-GPU pod, <code>--engine native</code>, full 15000-tick budget, entropy floor on, all three
+2026-07-10 fixes in place. Result: entropy holds 2-5 nats the whole run (entropy-floor controller
+visibly engaging - <code>ecoef</code> climbs to 0.02-0.05 when entropy dips, decays back down otherwise),
+the quantity head stays active (<code>entq</code> nonzero throughout, never pinned at 0.000), win rate
+climbs into the 80-100% range in bursts, and <b>the curriculum advanced twice</b> - stage 0 (Onion, 0
+bots) &rarr; stage 1 &rarr; stage 2 (Onion+Pangaea, 5 bots) - within ~2200s / 166 updates. This is the
+thing that was completely impossible before yesterday's fixes (every episode timed out at 1/5 budget with
+zero win-rate signal, forever). The run stopped cleanly sometime after update 166 with no error in the
+log and the GPU idle/released - not a crash we could find a cause for, but not before it had already
+proven the thing we needed proven.</p>
+
+<h4>4. Model size re-asked with learning curves, not just throughput</h4>
+<p>Full policy (11.2M params, GC=256/BLOCKS=4) vs small (2.6M params, GC=128/BLOCKS=2), identical
+64-env/rollout-32 config, run in parallel on separate pods for the same wall-clock. Small is genuinely
+faster per step (~280-380 steps/s vs full's ~150-160, matching yesterday's throughput numbers) but its
+learning curve was <i>rockier</i>: it dipped to a 0% win-rate window partway through (full policy dipped
+too, recovered faster) before eventually also reaching stage 2. Both networks are capable of learning
+this task; full policy got there first and more smoothly at this wall-clock budget despite the throughput
+disadvantage. <b>Verdict: not the clean "smaller = more learning/hour" win hypothesized - model size
+trades throughput for stability/sample-efficiency here, and the net effect on learning-per-hour needs a
+longer, cleaner run (both to full convergence, same seed) to call definitively.</b> Foveation's case is
+similarly still open - same throughput-vs-capacity tradeoff logic applies.</p>
+
+<h4>5. Clean AMP A/B</h4>
+<p>Same config, same minibatch count (8), only <code>--amp</code> flipped, 8 updates each, on a fresh
+pod so nothing else could confound it. <b><code>fwdbwd_s</code>: 0.505s -&gt; 0.318s per minibatch (37%
+faster)</b>, steps/s 154.9 -&gt; 217.3 (+40%), no NaN, losses in the same healthy range as the non-AMP
+run. This is a clean, real win - worth turning on by default for future training once the model-size
+question above is settled (AMP's memory savings also directly relax the env-count ceiling that caused
+the 256-env OOM on 2026-07-09).</p>
+
+<h4>6. Native the default; multi-GPU confirmed working</h4>
+<p><code>--engine native</code> is now the default (<code>--engine node</code> still available as the
+parity-testing fallback) - justified by items 1-3 above: curriculum-relevant parity is real, the stall is
+fixed, and native is still ~10x faster ticking regardless. Also ran a 4-GPU sanity check (256 total envs,
+native engine, all fixes in place): shards scale correctly across all 4 GPUs (81-100% per-GPU during
+compute), ~520-550 steps/s (~3.4x single-GPU), 64% sustained min_mean_util (lower than single-GPU's
+76-82%, matching the known per-shard-thread-overhead pattern from earlier multi-GPU work), and it also
+advanced the curriculum (stage 0 -&gt; 1) before being torn down. Nothing broke moving to multi-GPU with
+today's changes.</p>
+
+<h3 id="rust-next">Remaining next steps, in order of expected value</h3>
 <ol>
-  <li><b>Validate the stall fixes end-to-end (now unblocked).</b> Single-GPU pod,
-  <code>--engine native</code>, full 15000-tick budget, entropy floor on: confirm with
-  <code>OFTRAIN_DEBUG_EPISODES</code> that stage-0 wins actually fire, the win-rate window
-  fills, and the curriculum advances. This was blocked on the three bugs above; it no longer
-  is.</li>
-  <li><b>Build a curriculum-representative parity check.</b> The 78-record archive is uniformly
-  400 bots and can't answer the question that matters; generate a small new record set at the
-  curriculum's actual bot counts (0/5/10/30/50/80/120/150, matching each stage) via TS
-  self-play, run the same outcome-gate comparison against native. Cheap (low-bot games replay
-  in seconds, not minutes) and directly tells us whether training-relevant parity is fine even
-  though the 400-bot number looks bad.</li>
-  <li><b>Investigate the bot-AI behavioral gap.</b> Independent of whether it blocks training,
-  it's real: same intents, same start, wildly different territory by the same tick. Worth a
-  focused pass on bot/nation AI decision logic (attack targeting, expansion aggressiveness) with
-  side-by-side tick-level tile-count traces at a moderate bot count (~30-50) where it's still
-  fast to iterate on but the divergence should already be visible.</li>
-  <li><b>Re-ask the model-size question with learning curves, not util%.</b> Small policy
-  (2.6M params) at 285 steps/s vs full (11.2M) at 173: if small learns comparably per sample,
-  it's ~1.65x more learning per hour at a third of the memory - and foveation re-enters as a
-  pure win once the metric is learning/hour instead of utilization.</li>
-  <li><b>Clean AMP A/B</b> (same minibatch count, bf16 on/off): if train-side speedup is real
-  it directly raises the collect/train balance point and unlocks higher env counts within
-  memory.</li>
+  <li><b>Kick off a real training run.</b> Everything that was blocking one is resolved:
+  native is default, the stall is fixed and validated, parity is good at the bot counts that
+  matter early, AMP is a clean win. Turn on <code>--amp</code>, pick full policy (safer choice
+  per the model-size A/B above) or small policy (if willing to accept rockier-but-faster), and
+  let it run for real instead of 150-400-update smoke tests - single GPU first, watch the
+  curriculum advance past stage 2, *then* scale.</li>
+  <li><b>Settle model size / foveation with a longer, cleaner A/B.</b> Today's runs showed both
+  sizes can learn but weren't run to convergence or matched by seed - re-run full vs small (and
+  foveated) to the same wall-clock or update budget with a fixed seed and compare
+  updates-to-stage-N, not just steps/s.</li>
+  <li><b>Investigate the pod1 validation run's silent stop</b> (stopped cleanly after update 166,
+  no error in the log, GPU released) - probably benign (pod inactivity policy, disconnect) but
+  worth confirming before relying on multi-hour unattended runs.</li>
+  <li><b>Keep chipping at bot-AI parity for 30+ bots</b> as training reaches those curriculum
+  stages - the neighbor-order fix closed most of the gap but a smaller residual (troop-level,
+  first appearing ~tick 1498 in the tick-level trace) remains undiagnosed.</li>
   <li><b>Profile the collection phase</b> now that engine ticking is ~10x too fast to be the
   bottleneck: collection scaled linearly with env count, so the cost is per-step obs
-  decode/featurize/act - the next 82&rarr;90%+ move is either actor/learner CUDA stream
+  decode/featurize/act - the next 76&rarr;90%+ util move is either actor/learner CUDA stream
   separation or moving featurization onto the GPU, not more engine speed.</li>
-  <li><b>Once the curriculum-representative check is green, make <code>--engine native</code>
-  the default</b> and demote the Node bridge to a parity-testing tool. The 400-bot archive gate
-  keeps running as a stress test, not a gate on training.</li>
-  <li><b>Only then scale to 4-8 GPUs</b> - the multi-GPU plumbing (replica grad-averaging)
-  already works; scaling before learning is verified just reproduces a broken policy faster
-  and more expensively.</li>
+  <li><b>Scale to 8 GPUs</b> once a real run is underway and stable on 1-4 - the plumbing is
+  confirmed working (this session's 4-GPU sanity check advanced the curriculum too), just
+  hasn't been pushed further yet.</li>
 </ol>
 
 <h2 class="date" id="reference">Reference and open threads</h2>
