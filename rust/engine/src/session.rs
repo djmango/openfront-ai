@@ -68,12 +68,7 @@ impl EnvSession {
 }
 
 pub(crate) fn terrain_bytes(game: &crate::game::Game) -> Vec<u8> {
-    let n = (game.width() * game.height()) as usize;
-    let mut out = vec![0u8; n];
-    for i in 0..n {
-        out[i] = game.terrain_byte(i as u32);
-    }
-    out
+    game.map.terrain_bytes().to_vec()
 }
 
 pub(crate) fn seed_to_game_id(seed: &str) -> String {
