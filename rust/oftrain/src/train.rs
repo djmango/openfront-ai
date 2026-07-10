@@ -126,6 +126,57 @@ pub struct Config {
     pub log_every: u64,
     pub ckpt_every: u64,
     pub ckpt_dir: String,
+    /// `--resume`: path to a previously-saved `.ot` weights file (its
+    /// training-state sidecar is found by swapping the `.ot` extension for
+    /// `.state.json` - see `TrainState`). Restores weights, curriculum
+    /// stage, entropy-floor scale, learning rate, total env steps, and the
+    /// win-rate window; the update counter resumes from where it left off.
+    /// AdamW's momentum/variance state is NOT restored (tch-rs exposes no
+    /// optimizer state_dict save/load - see module doc) and rebuilds over
+    /// the first few dozen post-resume updates, a deliberate, documented
+    /// gap rather than a silent one.
+    pub resume: Option<String>,
+}
+
+/// Restart-proof training state, saved as a JSON sidecar next to every
+/// weights checkpoint (`<ckpt>.state.json` alongside `<ckpt>.ot`) - port of
+/// `rl/ppo.py`'s `state.json`/embedded-checkpoint-state pattern. Small and
+/// cheap enough to write every checkpoint without it being the bottleneck.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TrainState {
+    pub update: u64,
+    pub stage: usize,
+    pub ent_scale: f64,
+    pub lr_now: f64,
+    pub total_env_steps: u64,
+    pub recent_wins: Vec<f64>,
+}
+
+fn state_sidecar_path(ckpt_path: &str) -> String {
+    match ckpt_path.strip_suffix(".ot") {
+        Some(stem) => format!("{stem}.state.json"),
+        None => format!("{ckpt_path}.state.json"),
+    }
+}
+
+/// Atomic write (tmp file + rename) so a kill mid-save can never leave a
+/// torn/half-written checkpoint or state file behind - matches
+/// `rl/ppo.py`'s `policy.pt.tmp` -> `policy.pt` rename pattern.
+fn save_atomic(path: &str, write: impl FnOnce(&str) -> Result<()>) -> Result<()> {
+    let tmp = format!("{path}.tmp");
+    write(&tmp)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+fn save_checkpoint(vs: &nn::VarStore, path: &str, state: &TrainState) -> Result<()> {
+    save_atomic(path, |tmp| Ok(vs.save(tmp)?))?;
+    let state_path = state_sidecar_path(path);
+    save_atomic(&state_path, |tmp| {
+        std::fs::write(tmp, serde_json::to_string_pretty(state)?)?;
+        Ok(())
+    })?;
+    Ok(())
 }
 
 impl Config {
@@ -621,6 +672,45 @@ fn train_update(
 
 pub fn run(cfg: Config) -> Result<()> {
     std::fs::create_dir_all(&cfg.ckpt_dir)?;
+
+    // Resume: load weights + training state before anything else needs
+    // them - env workers need the resumed curriculum stage at spawn time,
+    // and every shard copies from `hub_vs` below, so it has to be seeded
+    // with the resumed weights (not shard 0's freshly-initialized ones)
+    // before the shard loop runs.
+    let mut resumed_state: Option<TrainState> = None;
+    let mut hub_vs: Option<nn::VarStore> = if let Some(resume_path) = &cfg.resume {
+        let mut snapshot = nn::VarStore::new(Device::Cpu);
+        let _ = PolicyNet::new(&snapshot.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
+        snapshot.load(resume_path)?;
+        let state_path = state_sidecar_path(resume_path);
+        resumed_state = match std::fs::read_to_string(&state_path) {
+            Ok(s) => Some(serde_json::from_str(&s)?),
+            Err(e) => {
+                println!(
+                    "[train] WARNING: resuming weights from {resume_path} but no readable state \
+                     sidecar at {state_path} ({e}); starting update/stage/entropy-scale counters \
+                     from scratch with the resumed weights"
+                );
+                None
+            }
+        };
+        println!(
+            "[train] resumed weights from {resume_path}{}",
+            resumed_state
+                .as_ref()
+                .map(|s| format!(
+                    " (state: update={} stage={} ent_scale={:.3} lr_now={:.2e} total_env_steps={})",
+                    s.update, s.stage, s.ent_scale, s.lr_now, s.total_env_steps
+                ))
+                .unwrap_or_default()
+        );
+        Some(snapshot)
+    } else {
+        None
+    };
+    let start_stage = resumed_state.as_ref().map(|s| s.stage).unwrap_or(cfg.stage);
+
     let devices = cfg.devices();
     let total_envs = cfg.num_envs * devices.len();
     println!(
@@ -628,19 +718,18 @@ pub fn run(cfg: Config) -> Result<()> {
         total_envs,
         devices.len(),
         devices,
-        cfg.stage,
+        start_stage,
         cfg.max_episode_ticks
     );
 
     let mut actors: Vec<ActorShard> = Vec::with_capacity(devices.len());
     let mut learners: Vec<LearnerShard> = Vec::with_capacity(devices.len());
-    let mut hub_vs: Option<nn::VarStore> = None;
     for (gi, &device) in devices.iter().enumerate() {
         let mut workers = Vec::with_capacity(cfg.num_envs);
         let mut cur_obs = Vec::with_capacity(cfg.num_envs);
         for local_i in 0..cfg.num_envs {
             let idx = gi * cfg.num_envs + local_i;
-            let (w, obs) = spawn_worker(idx, cfg.stage, cfg.max_episode_ticks, cfg.engine)?;
+            let (w, obs) = spawn_worker(idx, start_stage, cfg.max_episode_ticks, cfg.engine)?;
             workers.push(w);
             cur_obs.push(obs);
         }
@@ -660,7 +749,8 @@ pub fn run(cfg: Config) -> Result<()> {
                 snapshot
             });
         }
-        let opt = nn::AdamW::default().build(&learner_vs, cfg.lr)?;
+        let lr_init = resumed_state.as_ref().map(|s| s.lr_now).unwrap_or(cfg.lr);
+        let opt = nn::AdamW::default().build(&learner_vs, lr_init)?;
 
         let mut actor_vs = nn::VarStore::new(device);
         let actor_policy = PolicyNet::new(&actor_vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
@@ -681,7 +771,7 @@ pub fn run(cfg: Config) -> Result<()> {
     let mut ep_rewards: Vec<f64> = Vec::new();
     let mut ep_lengths: Vec<i64> = Vec::new();
     let train_start = Instant::now();
-    let mut total_env_steps: u64 = 0;
+    let mut total_env_steps: u64 = resumed_state.as_ref().map(|s| s.total_env_steps).unwrap_or(0);
     let cfg_ref = &cfg;
 
     // Curriculum advancement (port of `rl/ppo.py`'s win-rate gate, see
@@ -693,13 +783,17 @@ pub fn run(cfg: Config) -> Result<()> {
     // stage to every env worker thread (see `spawn_worker`'s `stage_rx`)
     // plus decays the learning rate on every shard's optimizer.
     let stages = ofcore::curriculum::stages();
-    let mut curr_stage = cfg.stage;
-    let mut recent_wins: std::collections::VecDeque<f64> = std::collections::VecDeque::with_capacity(ofcore::curriculum::WINDOW);
-    let mut lr_now = cfg.lr;
+    let mut curr_stage = start_stage;
+    let mut recent_wins: std::collections::VecDeque<f64> = resumed_state
+        .as_ref()
+        .map(|s| s.recent_wins.iter().copied().collect())
+        .unwrap_or_else(|| std::collections::VecDeque::with_capacity(ofcore::curriculum::WINDOW));
+    let mut lr_now = resumed_state.as_ref().map(|s| s.lr_now).unwrap_or(cfg.lr);
     // Adaptive entropy-floor multiplier (port of `rl/ppo.py`'s
     // `ent_scale`): multiplicative on top of the linear anneal, nudged
     // after each update from that update's measured mean entropy.
-    let mut ent_scale: f64 = 1.0;
+    let mut ent_scale: f64 = resumed_state.as_ref().map(|s| s.ent_scale).unwrap_or(1.0);
+    let start_update = resumed_state.as_ref().map(|s| s.update).unwrap_or(0);
 
     // Prime the pipeline: collect the very first rollout (using the
     // actors' initial, freshly-copied-from-learner weights) before the
@@ -709,7 +803,7 @@ pub fn run(cfg: Config) -> Result<()> {
         handles.into_iter().map(|h| h.join().expect("collector thread panicked")).collect::<Result<Vec<_>>>()
     })?;
 
-    for update in 0..cfg.updates {
+    for update in start_update..cfg.updates {
         let update_start = Instant::now();
 
         // Overlap: collect update `update+1`'s rollout on every shard's
@@ -887,13 +981,35 @@ pub fn run(cfg: Config) -> Result<()> {
         }
 
         if cfg.ckpt_every > 0 && (update % cfg.ckpt_every == 0) && update > 0 {
+            let state = TrainState {
+                update: update + 1, // resume must start at the *next* update, not repeat this one
+                stage: curr_stage,
+                ent_scale,
+                lr_now,
+                total_env_steps,
+                recent_wins: recent_wins.iter().copied().collect(),
+            };
             let path = format!("{}/policy_update{}.ot", cfg.ckpt_dir, update);
-            learners[0].vs.save(&path)?;
-            println!("[train] checkpoint saved: {path}");
+            save_checkpoint(&learners[0].vs, &path, &state)?;
+            // Fixed-name pointer at the latest checkpoint so a restart-loop
+            // wrapper (or a fresh pod after total disk loss) always has one
+            // unambiguous thing to resume from, without parsing filenames -
+            // matches `rl/ppo.py`'s single always-current `policy.pt`.
+            save_checkpoint(&learners[0].vs, &format!("{}/latest.ot", cfg.ckpt_dir), &state)?;
+            println!("[train] checkpoint saved: {path} (update={})", state.update);
         }
     }
 
-    learners[0].vs.save(format!("{}/policy_final.ot", cfg.ckpt_dir))?;
+    let final_state = TrainState {
+        update: cfg.updates,
+        stage: curr_stage,
+        ent_scale,
+        lr_now,
+        total_env_steps,
+        recent_wins: recent_wins.iter().copied().collect(),
+    };
+    save_checkpoint(&learners[0].vs, &format!("{}/policy_final.ot", cfg.ckpt_dir), &final_state)?;
+    save_checkpoint(&learners[0].vs, &format!("{}/latest.ot", cfg.ckpt_dir), &final_state)?;
     for actor in actors {
         for w in actor.workers {
             drop(w.choice_tx);
