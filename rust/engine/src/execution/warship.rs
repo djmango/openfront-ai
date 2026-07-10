@@ -458,6 +458,14 @@ impl Execution for WarshipExecution {
             }
         }
 
+        if self.path_idx > 0 && self.path.get(self.path_idx - 1) != Some(&from) {
+            let target = self.target_tile.expect("patrol target set above");
+            if !self.refresh_path(game, from, target) {
+                self.target_tile = None;
+                return;
+            }
+        }
+
         if self.path_idx >= self.path.len() {
             self.target_tile = None;
             return;
