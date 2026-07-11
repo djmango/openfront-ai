@@ -19,10 +19,23 @@ if [[ -z "$want" ]]; then
   echo "[ensure_parity_openfront] fetching ${PARITY_COMMIT}..."
   git remote get-url fork >/dev/null 2>&1 \
     || git remote add fork https://github.com/djmango/OpenFrontIO.git
-  git fetch --depth 1 fork "$PARITY_COMMIT" 2>/dev/null \
-    || git fetch --depth 1 origin "$PARITY_COMMIT" 2>/dev/null \
-    || git fetch fork "$PARITY_COMMIT" \
-    || git fetch origin "$PARITY_COMMIT"
+  # GitHub's smart-HTTP fetch only accepts a *full* 40-char SHA for an
+  # arbitrary (non-tip) commit want - a short prefix is treated as a ref
+  # name lookup and fails with "couldn't find remote ref" even though the
+  # object is perfectly reachable. On a cold submodule cache (no local
+  # object yet to expand the prefix from), resolve it to the full SHA via
+  # GitHub's REST API first so the fetch has something it'll actually serve.
+  if ! git fetch --depth 1 fork "$PARITY_COMMIT" 2>/dev/null \
+      && ! git fetch --depth 1 origin "$PARITY_COMMIT" 2>/dev/null; then
+    full_sha="$(curl -sf "https://api.github.com/repos/djmango/OpenFrontIO/commits/${PARITY_COMMIT}" \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])' 2>/dev/null || true)"
+    if [[ -n "$full_sha" ]]; then
+      git fetch --depth 1 fork "$full_sha" 2>/dev/null \
+        || git fetch --depth 1 origin "$full_sha"
+    else
+      git fetch fork "$PARITY_COMMIT" || git fetch origin "$PARITY_COMMIT"
+    fi
+  fi
   want="$(git rev-parse --short=12 "${PARITY_COMMIT}^{commit}")"
 fi
 
