@@ -129,8 +129,11 @@ impl WarshipExecution {
         for (owner, unit_id, unit_tile, dist_squared) in
             game.nearby_structures_any(from, 130, &types)
         {
+            // TS `WarshipExecution` filters targets with `canAttackPlayer(owner, true)`
+            // (treatAFKFriendly) so a disconnected team mate's ships are never
+            // shelled - they only change hands via conquest (`conquer_player`).
             if owner == self.owner_small_id
-                || !game.can_attack_player(self.owner_small_id, owner)
+                || !game.can_attack_player_ex(self.owner_small_id, owner, true)
                 || self.already_sent_shell.contains(&(owner, unit_id))
             {
                 continue;
@@ -481,5 +484,78 @@ impl Execution for WarshipExecution {
 
     fn active_during_spawn(&self) -> bool {
         false
+    }
+}
+
+// Ported from Disconnected.test.ts's "Disconnected team member interactions"
+// (the two Warship-vs-teammate-ships cases). Full end-to-end coverage would
+// need a real water map (patrol/pathfinding, ports, spawn tiles) that no
+// native test currently constructs - `target()`'s own filtering is what the
+// TS tests actually assert on, so exercise it directly instead.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::schemas::unit_type;
+    use crate::game::{Player, PlayerType};
+
+    fn team_setup() -> (Game, u16, u16) {
+        let mut game = Game::default();
+        // `PlayerType::Nation` (rather than `Human`) sidesteps spawn-immunity
+        // gating in `can_attack_player_ex` (only Human attackers respect it),
+        // which is orthogonal to the AFK-friendly team check under test here.
+        game.add_player(Player {
+            id: "p1".to_string(),
+            small_id: 1,
+            player_type: PlayerType::Nation,
+            team: Some("CLAN".to_string()),
+            ..Default::default()
+        });
+        game.add_player(Player {
+            id: "p2".to_string(),
+            small_id: 2,
+            player_type: PlayerType::Nation,
+            team: Some("CLAN".to_string()),
+            ..Default::default()
+        });
+        (game, 1, 2)
+    }
+
+    #[test]
+    fn warship_does_not_target_disconnected_team_mates_transport_ship() {
+        let (mut game, p1, p2) = team_setup();
+        let warship_tile = game.ref_xy(5, 5);
+        let transport_tile = game.ref_xy(5, 6);
+        game.build_unit(p1, unit_type::WARSHIP, warship_tile);
+        let transport_id = game.build_unit(p2, unit_type::TRANSPORT, transport_tile);
+        game.player_by_small_id_mut(p2).unwrap().is_disconnected = true;
+
+        let exec = WarshipExecution::new(p1, warship_tile);
+        assert!(exec.target(&game, warship_tile, true).is_none());
+        // Sanity check: without the team relation, the same transport ship
+        // would be a valid target (proves the assertion above is actually
+        // exercising the AFK-friendly team check, not e.g. range/type filters).
+        game.player_by_small_id_mut(p2).unwrap().team = None;
+        assert_eq!(
+            exec.target(&game, warship_tile, true),
+            Some((p2, transport_id, unit_type::TRANSPORT))
+        );
+    }
+
+    #[test]
+    fn disconnected_team_mates_warship_does_not_target_teams_transport_ship() {
+        let (mut game, p1, p2) = team_setup();
+        let warship_tile = game.ref_xy(5, 5);
+        let transport_tile = game.ref_xy(5, 6);
+        game.build_unit(p2, unit_type::WARSHIP, warship_tile);
+        let transport_id = game.build_unit(p1, unit_type::TRANSPORT, transport_tile);
+        game.player_by_small_id_mut(p2).unwrap().is_disconnected = true;
+
+        let exec = WarshipExecution::new(p2, warship_tile);
+        assert!(exec.target(&game, warship_tile, true).is_none());
+        game.player_by_small_id_mut(p2).unwrap().team = None;
+        assert_eq!(
+            exec.target(&game, warship_tile, true),
+            Some((p1, transport_id, unit_type::TRANSPORT))
+        );
     }
 }

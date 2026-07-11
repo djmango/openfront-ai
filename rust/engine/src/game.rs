@@ -2768,6 +2768,15 @@ impl Game {
     }
 
     pub fn is_friendly(&self, a: u16, b: u16) -> bool {
+        self.is_friendly_ex(a, b, false)
+    }
+
+    /// TS `PlayerImpl.isFriendly(other, treatAFKFriendly)`. `treat_afk_friendly`
+    /// keeps a disconnected teammate/ally friendly instead of the normal
+    /// disconnected-is-never-friendly rule - used by `WarshipExecution`'s
+    /// target filter so warships don't shoot at a disconnected team mate's
+    /// ships (they're still captured on conquest, just not shelled first).
+    pub fn is_friendly_ex(&self, a: u16, b: u16, treat_afk_friendly: bool) -> bool {
         if a == b {
             return true;
         }
@@ -2775,7 +2784,9 @@ impl Game {
         // even if allied. This keeps `bordering_enemies` and `bordering_friends` lists
         // in sync with TS so that RNG consumption in `maybe_send_alliance_requests`
         // (and attack strategies) is identical between the two engines.
-        if self.player_by_small_id(b).map_or(false, |p| p.is_disconnected) {
+        if !treat_afk_friendly
+            && self.player_by_small_id(b).map_or(false, |p| p.is_disconnected)
+        {
             return false;
         }
         // TS `Player.isFriendly`: teammates count as friendly even without a
@@ -2814,7 +2825,17 @@ impl Game {
     }
 
     pub fn can_attack_player(&self, attacker_small_id: u16, defender_small_id: u16) -> bool {
-        if self.is_friendly(attacker_small_id, defender_small_id) {
+        self.can_attack_player_ex(attacker_small_id, defender_small_id, false)
+    }
+
+    /// TS `PlayerImpl.canAttackPlayer(player, treatAFKFriendly)`.
+    pub fn can_attack_player_ex(
+        &self,
+        attacker_small_id: u16,
+        defender_small_id: u16,
+        treat_afk_friendly: bool,
+    ) -> bool {
+        if self.is_friendly_ex(attacker_small_id, defender_small_id, treat_afk_friendly) {
             return false;
         }
         let attacker_type = self
