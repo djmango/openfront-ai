@@ -388,6 +388,146 @@ mod tests {
     }
 
     #[test]
+    fn randomly_selects_from_pool_with_variety_across_seeds() {
+        let manifest = make_manifest_nations(2);
+        let pool_names = [
+            "ExtraA", "ExtraB", "ExtraC", "ExtraD", "ExtraE", "ExtraF", "ExtraG", "ExtraH",
+        ];
+        let extras = make_additional_nations(&pool_names);
+        let cfg = make_config(NationsConfig::Count(4), "Singleplayer", "Free For All", "Normal");
+
+        let mut seen: HashSet<String> = HashSet::new();
+        for seed in 1..=25i32 {
+            let mut rng = PseudoRandom::new(seed);
+            let nations = create_nations_for_game(&cfg, &manifest, &extras, 0, &mut rng);
+            assert_eq!(nations.len(), 4);
+            let names = nation_names(&nations);
+            let from_pool: Vec<String> =
+                names.into_iter().filter(|n| n.starts_with("Extra")).collect();
+            assert_eq!(from_pool.len(), 2);
+            for n in &from_pool {
+                assert!(pool_names.contains(&n.as_str()));
+            }
+            seen.extend(from_pool);
+        }
+        assert!(seen.len() > 2, "expected pool draws to vary across seeds, got {seen:?}");
+    }
+
+    #[test]
+    fn falls_back_to_generated_names_when_pool_too_small() {
+        let manifest = make_manifest_nations(1);
+        let extras = make_additional_nations(&["ExtraA", "ExtraB"]);
+        let cfg = make_config(NationsConfig::Count(5), "Singleplayer", "Free For All", "Normal");
+        let mut rng = PseudoRandom::new(42);
+        let nations = create_nations_for_game(&cfg, &manifest, &extras, 0, &mut rng);
+        let names = nation_names(&nations);
+        assert_eq!(names.len(), 5);
+        assert_eq!(names.iter().filter(|n| n.starts_with("Manifest")).count(), 1);
+
+        let from_pool = names
+            .iter()
+            .filter(|n| extras.iter().any(|e| &e.name == *n))
+            .count();
+        assert_eq!(from_pool, 2);
+
+        let generated = names
+            .iter()
+            .filter(|n| !n.starts_with("Manifest") && !extras.iter().any(|e| &e.name == *n))
+            .count();
+        assert_eq!(generated, 2);
+    }
+
+    #[test]
+    fn falls_back_to_generated_names_when_pool_empty() {
+        let manifest = make_manifest_nations(2);
+        let cfg = make_config(NationsConfig::Count(4), "Singleplayer", "Free For All", "Normal");
+        let mut rng = PseudoRandom::new(11);
+        let nations = create_nations_for_game(&cfg, &manifest, &[], 0, &mut rng);
+        assert_eq!(nations.len(), 4);
+        assert_eq!(
+            nation_names(&nations)
+                .iter()
+                .filter(|n| n.starts_with("Manifest"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn uses_coordinates_from_additional_nations_when_provided() {
+        let manifest = make_manifest_nations(1);
+        let extras = vec![
+            Nation {
+                name: "WithCoords".into(),
+                flag: None,
+                coordinates: Some([42, 99]),
+            },
+            Nation {
+                name: "WithoutCoords".into(),
+                flag: None,
+                coordinates: None,
+            },
+        ];
+        let cfg = make_config(NationsConfig::Count(3), "Singleplayer", "Free For All", "Normal");
+        let mut rng = PseudoRandom::new(5);
+        let nations = create_nations_for_game(&cfg, &manifest, &extras, 0, &mut rng);
+
+        let with_coords = nations
+            .iter()
+            .find(|n| n.nation.name == "WithCoords")
+            .expect("WithCoords should be present");
+        let without_coords = nations
+            .iter()
+            .find(|n| n.nation.name == "WithoutCoords")
+            .expect("WithoutCoords should be present");
+        assert_eq!(with_coords.nation.coordinates, Some([42, 99]));
+        assert_eq!(without_coords.nation.coordinates, None);
+    }
+
+    #[test]
+    fn uses_coordinates_from_manifest_nations_when_provided() {
+        let manifest = vec![
+            Nation {
+                name: "WithCoords".into(),
+                flag: None,
+                coordinates: Some([10, 20]),
+            },
+            Nation {
+                name: "WithoutCoords".into(),
+                flag: None,
+                coordinates: None,
+            },
+        ];
+        let cfg = make_config(NationsConfig::Count(2), "Singleplayer", "Free For All", "Normal");
+        let mut rng = PseudoRandom::new(5);
+        let nations = create_nations_for_game(&cfg, &manifest, &[], 0, &mut rng);
+        assert_eq!(nations.len(), 2);
+
+        let with_coords = nations
+            .iter()
+            .find(|n| n.nation.name == "WithCoords")
+            .expect("WithCoords should be present");
+        let without_coords = nations
+            .iter()
+            .find(|n| n.nation.name == "WithoutCoords")
+            .expect("WithoutCoords should be present");
+        assert_eq!(with_coords.nation.coordinates, Some([10, 20]));
+        assert_eq!(without_coords.nation.coordinates, None);
+    }
+
+    #[test]
+    fn produces_unique_nation_names_overall() {
+        let manifest = make_manifest_nations(3);
+        let extras = make_additional_nations(&["Ex1", "Ex2", "Ex3"]);
+        let cfg = make_config(NationsConfig::Count(8), "Singleplayer", "Free For All", "Normal");
+        let mut rng = PseudoRandom::new(99);
+        let nations = create_nations_for_game(&cfg, &manifest, &extras, 0, &mut rng);
+        let names = nation_names(&nations);
+        assert_eq!(names.len(), 8);
+        assert_eq!(names.iter().collect::<HashSet<_>>().len(), 8);
+    }
+
+    #[test]
     fn parses_wire_config_with_nations_count() {
         let v = json!({
             "gameMap": "World",
