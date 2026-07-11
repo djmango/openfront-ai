@@ -493,6 +493,309 @@ mod tests {
         assert_eq!(game.player_by_small_id(1).unwrap().gold, 0);
         assert_eq!(game.player_by_small_id(2).unwrap().gold, 100);
     }
+
+    fn add_human(game: &mut Game, id: &str) -> u16 {
+        game.add_from_info(&crate::game::PlayerInfo {
+            name: id.into(),
+            player_type: PlayerType::Human,
+            client_id: Some(id.into()),
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        })
+    }
+
+    // Ported from Attack.test.ts's "Should prevent player from attacking
+    // allied player": `AttackExecution::init`'s `is_friendly` gate blocks the
+    // attack outright, so no attack ever becomes live on either side.
+    #[test]
+    fn attacking_an_allied_player_is_blocked() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let a = add_human(&mut game, "a");
+        let b = add_human(&mut game, "b");
+        assert!(game.create_alliance_request(a, b, 0));
+        game.accept_alliance_request(a, b, 0);
+        assert!(game.is_allied_with(a, b));
+
+        let mut attack = AttackExecution::new(a, Some("b".to_string()), Some(10.0));
+        let tick = game.ticks();
+        attack.init(&mut game, tick);
+
+        assert!(!attack.is_active());
+    }
+
+    // Ported from Attack.test.ts's "Should cancel alliance requests if the
+    // recipient attacks": B attacking A revokes A's pending outgoing request
+    // toward B, via the `reject_alliance_request` call in
+    // `AttackExecution::init` (see the call site's comment further up this
+    // file - this is the land-attack half of the same rule
+    // `TransportShipExecution::init` mirrors for boats).
+    #[test]
+    fn attacking_a_player_cancels_their_pending_alliance_request_toward_the_attacker() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let a = add_human(&mut game, "a");
+        let b = add_human(&mut game, "b");
+        assert!(game.create_alliance_request(a, b, 0));
+        assert_eq!(game.incoming_alliance_requests(b).len(), 1);
+
+        let mut attack = AttackExecution::new(b, Some("a".to_string()), Some(10.0));
+        let tick = game.ticks();
+        attack.init(&mut game, tick);
+
+        assert_eq!(game.outgoing_alliance_requests(a).len(), 0);
+        assert_eq!(game.incoming_alliance_requests(b).len(), 0);
+    }
+
+    // Ported from Attack.test.ts's "Should cancel the proper alliance
+    // request among many": B attacking A only revokes A's request to B, not
+    // C's unrelated request to B.
+    #[test]
+    fn attacking_cancels_only_the_matching_alliance_request_among_many() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let a = add_human(&mut game, "a");
+        let b = add_human(&mut game, "b");
+        let c = add_human(&mut game, "c");
+        assert!(game.create_alliance_request(a, b, 0));
+        assert!(game.create_alliance_request(c, b, 0));
+        assert_eq!(game.incoming_alliance_requests(b).len(), 2);
+
+        let mut attack = AttackExecution::new(b, Some("a".to_string()), Some(10.0));
+        let tick = game.ticks();
+        attack.init(&mut game, tick);
+
+        assert_eq!(game.outgoing_alliance_requests(a).len(), 0);
+        assert_eq!(game.incoming_alliance_requests(b).len(), 1);
+    }
+}
+
+// Ported from Attack.test.ts's "Attack immunity" describe block. TS's
+// `TestConfig.setNationSpawnImmunityDuration` overrides
+// `nationSpawnImmunityDuration()` purely for faster tests - production
+// `Config.nationSpawnImmunityDuration()` always returns the fixed default (50
+// ticks) regardless of game config, exactly like native's
+// `WireConfig::nation_spawn_immunity_duration()`. So nation-immunity tests
+// here use the real default duration instead of TS's shortened test-only
+// value; human spawn-immunity tests use `spawn_immunity_duration`, which IS
+// wire-configurable in production, via the same `GameConfig` override pattern
+// `alliance_accept_nukes_tests` (in `game.rs`) uses for its custom map.
+#[cfg(test)]
+mod immunity_tests {
+    use super::*;
+    use crate::game::PlayerInfo;
+
+    const IMMUNITY_TICKS: u32 = 10;
+
+    fn game_with_spawn_immunity(ticks: u32) -> Game {
+        let mut game = Game::default();
+        let wire_cfg = crate::core::schemas::GameConfig {
+            game_map: "Onion".into(),
+            difficulty: "Medium".into(),
+            donate_gold: false,
+            donate_troops: false,
+            game_type: "Singleplayer".into(),
+            game_mode: "Free For All".into(),
+            game_map_size: "Normal".into(),
+            nations: crate::core::schemas::NationsConfig::Mode("default".into()),
+            bots: 0,
+            infinite_gold: false,
+            infinite_troops: false,
+            instant_build: false,
+            random_spawn: false,
+            doomsday_clock: None,
+            disabled_units: None,
+            player_teams: None,
+            disable_alliances: None,
+            spawn_immunity_duration: Some(ticks),
+            starting_gold: None,
+            gold_multiplier: None,
+            max_timer_value: None,
+            ranked_type: None,
+        };
+        game.wire = crate::core::config::Config::new(wire_cfg, false);
+        game.end_spawn_phase();
+        game
+    }
+
+    fn add(game: &mut Game, id: &str, player_type: PlayerType) -> u16 {
+        game.add_from_info(&PlayerInfo {
+            name: id.into(),
+            player_type,
+            client_id: Some(id.into()),
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        })
+    }
+
+    #[test]
+    fn human_cannot_attack_human_during_spawn_immunity() {
+        let mut game = game_with_spawn_immunity(IMMUNITY_TICKS);
+        let a = add(&mut game, "a", PlayerType::Human);
+        add(&mut game, "b", PlayerType::Human);
+
+        let mut attack = AttackExecution::new(a, Some("b".to_string()), Some(10.0));
+        let tick = game.ticks();
+        attack.init(&mut game, tick);
+
+        assert!(!attack.is_active());
+    }
+
+    #[test]
+    fn human_can_attack_human_after_spawn_immunity_ends() {
+        let mut game = game_with_spawn_immunity(IMMUNITY_TICKS);
+        let a = add(&mut game, "a", PlayerType::Human);
+        add(&mut game, "b", PlayerType::Human);
+        for _ in 0..IMMUNITY_TICKS + 1 {
+            game.execute_next_tick();
+        }
+
+        let mut attack = AttackExecution::new(a, Some("b".to_string()), Some(10.0));
+        let tick = game.ticks();
+        attack.init(&mut game, tick);
+
+        assert!(attack.is_active());
+    }
+
+    // Ported from "Ensure a player can't attack during all the immunity
+    // phase": checks the exact boundary tick, not just well before/after it.
+    // Goes through `add_execution`+`execute_next_tick` (rather than a direct
+    // `.init()` call like the other tests here) so the attack's init runs at
+    // the same pre-increment tick TS's `executeNextTick` uses, matching the
+    // TS test's own tick-by-tick comments exactly.
+    #[test]
+    fn human_cannot_attack_until_the_immunity_window_fully_elapses() {
+        use crate::execution::ExecEnum;
+
+        let mut game = game_with_spawn_immunity(IMMUNITY_TICKS);
+        let a = add(&mut game, "a", PlayerType::Human);
+        add(&mut game, "b", PlayerType::Human);
+        for _ in 0..IMMUNITY_TICKS - 2 {
+            game.execute_next_tick();
+        }
+
+        game.add_execution(ExecEnum::Attack(AttackExecution::new(
+            a,
+            Some("b".to_string()),
+            Some(10.0),
+        )));
+        game.execute_next_tick(); // ticks == IMMUNITY_TICKS - 1 now
+        assert_eq!(
+            game.active_attacks_debug()
+                .iter()
+                .filter(|t| t.0 == a && t.3)
+                .count(),
+            0
+        );
+
+        game.execute_next_tick(); // ticks == IMMUNITY_TICKS now
+        game.add_execution(ExecEnum::Attack(AttackExecution::new(
+            a,
+            Some("b".to_string()),
+            Some(10.0),
+        )));
+        game.execute_next_tick();
+        assert_eq!(
+            game.active_attacks_debug()
+                .iter()
+                .filter(|t| t.0 == a && t.3)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn bot_can_attack_human_during_spawn_immunity() {
+        let mut game = game_with_spawn_immunity(IMMUNITY_TICKS);
+        let bot = add(&mut game, "bot", PlayerType::Bot);
+        add(&mut game, "human", PlayerType::Human);
+
+        let mut attack = AttackExecution::new(bot, Some("human".to_string()), Some(10.0));
+        let tick = game.ticks();
+        attack.init(&mut game, tick);
+
+        assert!(attack.is_active());
+    }
+
+    #[test]
+    fn nation_can_attack_human_during_pvp_immunity() {
+        let mut game = game_with_spawn_immunity(IMMUNITY_TICKS);
+        let nation = add(&mut game, "nation", PlayerType::Nation);
+        add(&mut game, "human", PlayerType::Human);
+
+        let mut attack = AttackExecution::new(nation, Some("human".to_string()), Some(10.0));
+        let tick = game.ticks();
+        attack.init(&mut game, tick);
+
+        assert!(attack.is_active());
+    }
+
+    #[test]
+    fn nation_can_attack_nation_during_pvp_immunity() {
+        let mut game = game_with_spawn_immunity(IMMUNITY_TICKS);
+        let a = add(&mut game, "nation_a", PlayerType::Nation);
+        add(&mut game, "nation_b", PlayerType::Nation);
+
+        let mut attack = AttackExecution::new(a, Some("nation_b".to_string()), Some(10.0));
+        let tick = game.ticks();
+        attack.init(&mut game, tick);
+
+        assert!(attack.is_active());
+    }
+
+    // Ported from "Nation cannot attack allied human during PVP immunity":
+    // a nation bypasses immunity but not the ordinary friendliness gate.
+    #[test]
+    fn nation_cannot_attack_an_allied_human_during_pvp_immunity() {
+        let mut game = game_with_spawn_immunity(IMMUNITY_TICKS);
+        let nation = add(&mut game, "nation", PlayerType::Nation);
+        let human = add(&mut game, "human", PlayerType::Human);
+        assert!(game.create_alliance_request(nation, human, 0));
+        game.accept_alliance_request(nation, human, 0);
+        assert!(game.is_allied_with(nation, human));
+
+        let mut attack = AttackExecution::new(nation, Some("human".to_string()), Some(10.0));
+        let tick = game.ticks();
+        attack.init(&mut game, tick);
+
+        assert!(!attack.is_active());
+    }
+
+    #[test]
+    fn human_cannot_attack_nation_during_nation_spawn_immunity() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let human = add(&mut game, "human", PlayerType::Human);
+        add(&mut game, "nation", PlayerType::Nation);
+
+        let mut attack = AttackExecution::new(human, Some("nation".to_string()), Some(10.0));
+        let tick = game.ticks();
+        attack.init(&mut game, tick);
+
+        assert!(!attack.is_active());
+    }
+
+    #[test]
+    fn human_can_attack_nation_after_nation_spawn_immunity_ends() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let human = add(&mut game, "human", PlayerType::Human);
+        add(&mut game, "nation", PlayerType::Nation);
+        let duration = game.wire.nation_spawn_immunity_duration();
+        for _ in 0..duration + 1 {
+            game.execute_next_tick();
+        }
+
+        let mut attack = AttackExecution::new(human, Some("nation".to_string()), Some(10.0));
+        let tick = game.ticks();
+        attack.init(&mut game, tick);
+
+        assert!(attack.is_active());
+    }
 }
 
 impl AttackExecution {
