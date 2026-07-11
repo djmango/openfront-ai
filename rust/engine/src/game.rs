@@ -3255,6 +3255,178 @@ mod relation_tests {
     }
 }
 
+// Ported from PlayerAllianceList.test.ts. TS maintains a per-player,
+// incrementally-updated `Alliance` object list (`Player.alliances()`) as a
+// performance optimization over scanning the game's global alliance
+// collection; native has no equivalent per-player list at all - it's a flat
+// `Vec<AllianceState>` on `Game`, queried on demand. These tests therefore
+// verify the same *observable* invariants the TS list is meant to uphold
+// (both sides see the same alliance, breaking/expiring updates both sides,
+// multiple alliances tracked independently, death clears everything) via
+// `Game::player_alliances`/`allied_small_ids`/`alliance_count`/
+// `is_allied_with` instead of asserting on a `player.alliances()`-shaped API
+// that doesn't exist natively.
+#[cfg(test)]
+mod player_alliance_list_tests {
+    use super::{Game, PlayerInfo, PlayerType};
+    use crate::execution::alliance_exec::{AllianceRequestExecution, BreakAllianceExecution};
+    use crate::execution::ExecEnum;
+
+    fn add_human(game: &mut Game, id: &str) -> u16 {
+        let sid = game.add_from_info(&PlayerInfo {
+            name: id.into(),
+            player_type: PlayerType::Human,
+            client_id: Some(id.into()),
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        });
+        game.player_by_small_id_mut(sid).unwrap().tiles_owned = 1;
+        sid
+    }
+
+    fn ally(game: &mut Game, a: u16, a_id: &str, b: u16, b_id: &str) {
+        game.add_execution(ExecEnum::AllianceRequest(AllianceRequestExecution::new(
+            a,
+            b_id.into(),
+        )));
+        game.execute_next_tick();
+        game.add_execution(ExecEnum::AllianceRequest(AllianceRequestExecution::new(
+            b,
+            a_id.into(),
+        )));
+        game.execute_next_tick();
+    }
+
+    fn break_alliance(game: &mut Game, a: u16, b_id: &str) {
+        game.add_execution(ExecEnum::BreakAlliance(BreakAllianceExecution::new(
+            a,
+            b_id.into(),
+        )));
+        game.execute_next_tick();
+        game.execute_next_tick();
+    }
+
+    #[test]
+    fn forming_an_alliance_is_visible_and_symmetric_for_both_participants() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let player1 = add_human(&mut game, "player1");
+        let player2 = add_human(&mut game, "player2");
+        assert_eq!(game.alliance_count(player1), 0);
+        assert_eq!(game.alliance_count(player2), 0);
+
+        ally(&mut game, player1, "player1", player2, "player2");
+
+        assert_eq!(game.alliance_count(player1), 1);
+        assert_eq!(game.alliance_count(player2), 1);
+        assert_eq!(game.allied_small_ids(player1), vec![player2]);
+        assert_eq!(game.allied_small_ids(player2), vec![player1]);
+    }
+
+    #[test]
+    fn alliance_state_agrees_with_is_allied_with() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let player1 = add_human(&mut game, "player1");
+        let player2 = add_human(&mut game, "player2");
+        let player3 = add_human(&mut game, "player3");
+
+        ally(&mut game, player1, "player1", player2, "player2");
+
+        assert!(game.is_allied_with(player1, player2));
+        assert!(!game.is_allied_with(player1, player3));
+        assert_eq!(game.alliance_count(player3), 0);
+    }
+
+    #[test]
+    fn breaking_an_alliance_removes_it_from_both_sides() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let player1 = add_human(&mut game, "player1");
+        let player2 = add_human(&mut game, "player2");
+        ally(&mut game, player1, "player1", player2, "player2");
+        assert_eq!(game.alliance_count(player1), 1);
+
+        break_alliance(&mut game, player1, "player2");
+
+        assert_eq!(game.alliance_count(player1), 0);
+        assert_eq!(game.alliance_count(player2), 0);
+        assert!(!game.is_allied_with(player1, player2));
+    }
+
+    #[test]
+    fn expiring_an_alliance_removes_it_from_both_sides() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let player1 = add_human(&mut game, "player1");
+        let player2 = add_human(&mut game, "player2");
+        ally(&mut game, player1, "player1", player2, "player2");
+        assert_eq!(game.alliance_count(player1), 1);
+
+        // TS `Alliance.expire()` force-expires a single alliance immediately,
+        // bypassing the normal duration wait; native has no per-alliance handle
+        // to call, so this simulates it by directly rewinding that alliance's
+        // `expires_at` (the same field `expire_alliances_for` checks against
+        // `game.ticks`) before running the normal expiry sweep.
+        let tick = game.ticks;
+        for al in &mut game.alliances {
+            if al.requestor_small_id == player1 || al.recipient_small_id == player1 {
+                al.expires_at = tick;
+            }
+        }
+        game.expire_alliances_for(player1);
+
+        assert_eq!(game.alliance_count(player1), 0);
+        assert_eq!(game.alliance_count(player2), 0);
+        assert!(!game.is_allied_with(player1, player2));
+    }
+
+    #[test]
+    fn a_player_tracks_multiple_alliances_independently() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let player1 = add_human(&mut game, "player1");
+        let player2 = add_human(&mut game, "player2");
+        let player3 = add_human(&mut game, "player3");
+        ally(&mut game, player1, "player1", player2, "player2");
+        ally(&mut game, player1, "player1", player3, "player3");
+
+        assert_eq!(game.alliance_count(player1), 2);
+        let mut others = game.allied_small_ids(player1);
+        others.sort();
+        let mut expected = vec![player2, player3];
+        expected.sort();
+        assert_eq!(others, expected);
+
+        break_alliance(&mut game, player1, "player2");
+
+        assert_eq!(game.alliance_count(player1), 1);
+        assert_eq!(game.allied_small_ids(player1), vec![player3]);
+        assert_eq!(game.alliance_count(player2), 0);
+        assert_eq!(game.alliance_count(player3), 1);
+    }
+
+    #[test]
+    fn remove_all_alliances_for_clears_the_player_and_every_partner() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let player1 = add_human(&mut game, "player1");
+        let player2 = add_human(&mut game, "player2");
+        let player3 = add_human(&mut game, "player3");
+        ally(&mut game, player1, "player1", player2, "player2");
+        ally(&mut game, player1, "player1", player3, "player3");
+        assert_eq!(game.alliance_count(player1), 2);
+
+        game.remove_all_alliances_for(player1);
+
+        assert_eq!(game.alliance_count(player1), 0);
+        assert_eq!(game.alliance_count(player2), 0);
+        assert_eq!(game.alliance_count(player3), 0);
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct TickUpdates {
     pub hash: Option<HashUpdate>,
