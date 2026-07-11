@@ -825,6 +825,43 @@ fn nation_attack_best_target(
                     true,
                 );
             }
+            // TS Easy order is [nuked, bots, retaliate, assist, betray, hated,
+            // weakest]. `assist` (TS `AiAttackBehavior.assistAllies`, ally
+            // target-following) has no native port yet - see DEVLOG; the
+            // remaining strategies were previously missing from this arm
+            // entirely (this file already implements `betray`/`hated`, used
+            // by the Medium arm below, just never wired in here), which made
+            // Easy nations skip straight from `retaliate` to `weakest`
+            // whenever TS would have taken a `betray`/`hated` branch instead
+            // - a real behavior divergence, not just an unlikely edge case
+            // (root-caused via a bots=5 curriculum-parity bisection, see
+            // docs/bot-ai-parity-*/ for the methodology).
+            if nation_strategy_betray(
+                game,
+                random,
+                attacker_small_id,
+                reserve_ratio,
+                expand_ratio,
+                bot_attack_troops_sent,
+                difficulty,
+                bordering,
+                emoji.as_deref_mut(),
+            ) {
+                return true;
+            }
+            if nation_strategy_hated(
+                game,
+                random,
+                attacker_small_id,
+                reserve_ratio,
+                expand_ratio,
+                bot_attack_troops_sent,
+                difficulty,
+                bordering,
+                emoji.as_deref_mut(),
+            ) {
+                return true;
+            }
             nation_strategy_weakest(
                 game,
                 random,
@@ -1068,6 +1105,9 @@ fn nation_strategy_hated(
         return false;
     };
     let attacker_troops = attacker.troops;
+    // TS `hated`: `if (this.isFFA() && other.troops() > this.player.troops() * 3) continue;`
+    // - the troop-cap guard only applies in FFA, not team games.
+    let is_ffa = game.wire.game_config().game_mode != "Team";
     // TS `PlayerImpl.allRelationsSorted()`: stable sort by relation value, tie-broken by
     // insertion order (and filtered to alive players) - not `HashMap` iteration order.
     for (other, _) in game.all_relations_sorted(sid) {
@@ -1077,9 +1117,11 @@ fn nation_strategy_hated(
         if game.is_friendly(sid, other) {
             continue;
         }
-        if let Some(p) = game.player_by_small_id(other) {
-            if p.troops > attacker_troops * 3 {
-                continue;
+        if is_ffa {
+            if let Some(p) = game.player_by_small_id(other) {
+                if p.troops > attacker_troops * 3 {
+                    continue;
+                }
             }
         }
         return nation_try_attack_player(
