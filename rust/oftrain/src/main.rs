@@ -1,3 +1,4 @@
+mod autoscale;
 mod batch;
 mod bridge;
 mod engine;
@@ -162,6 +163,56 @@ struct Args {
     /// dozen updates post-resume.
     #[arg(long)]
     resume: Option<String>,
+
+    /// Opt-in: automatically grow `--num-envs` at runtime toward the
+    /// `--target-gpu-util` set point instead of relying on manual
+    /// trial-and-error (see the "V8 Rust PPO Trainer" devlog entry that
+    /// found `--num-envs 4` gave ~40% util vs 64's 98-100% on the same
+    /// A100 box, by hand). Off by default so existing training behavior/
+    /// configs are unaffected. See `autoscale.rs` for the decision logic
+    /// (grow-only in this version - see its module doc for why) and
+    /// `train::run`'s update loop for where it's checked.
+    #[arg(long, default_value_t = false)]
+    auto_scale_envs: bool,
+
+    /// Target GPU utilization set point for `--auto-scale-envs`, as a 0-1
+    /// fraction (0.95 = 95%), compared against `GpuSnapshot::min_mean_util`
+    /// (the worst GPU's running mean - see `gpu_util.rs`) converted to the
+    /// same 0-1 scale. No effect without `--auto-scale-envs`.
+    #[arg(long, default_value_t = 0.95)]
+    target_gpu_util: f64,
+
+    /// Floor for `--auto-scale-envs`: never scale below this many envs per
+    /// shard. Unset defaults to `--num-envs` (never scale below whatever
+    /// the run was started with). No effect without `--auto-scale-envs`.
+    #[arg(long)]
+    min_envs: Option<usize>,
+
+    /// Ceiling for `--auto-scale-envs`, per shard (same "per shard" unit
+    /// as `--num-envs`/`--min-envs`). 0 (the default) means "derive
+    /// automatically" from CPU headroom (see `autoscale::cpu_env_cap_per_shard`:
+    /// logical CPUs minus a small reserved margin, divided across
+    /// `--num-gpus` shards) - each env worker is one OS thread plus, for
+    /// `--engine node`, its own Node bridge subprocess, so this exists to
+    /// keep autoscale from oversubscribing the CPU chasing GPU headroom
+    /// that IPC/engine-tick latency won't actually let it use. No effect
+    /// without `--auto-scale-envs`.
+    #[arg(long, default_value_t = 0)]
+    max_envs: usize,
+
+    /// How often (in PPO updates) `--auto-scale-envs` re-evaluates GPU
+    /// utilization and possibly resizes. Checking every update would let
+    /// one noisy sample cause needless resize churn; too rarely leaves the
+    /// GPU under-fed longer than necessary after startup.
+    #[arg(long, default_value_t = 5)]
+    autoscale_check_every: u64,
+
+    /// Envs added per `--auto-scale-envs` growth step (per shard). Small
+    /// steps converge more slowly but overshoot the target less; see
+    /// `autoscale::next_env_count`'s hysteresis band for the other half of
+    /// the anti-thrashing story.
+    #[arg(long, default_value_t = 4)]
+    autoscale_step: usize,
 }
 
 fn parse_device(s: &str) -> Device {
@@ -213,6 +264,14 @@ fn main() -> anyhow::Result<()> {
         ckpt_every: args.ckpt_every,
         ckpt_dir: args.ckpt_dir,
         resume: args.resume,
+        auto_scale_envs: args.auto_scale_envs,
+        target_gpu_util: args.target_gpu_util,
+        // Never scale below whatever the run was explicitly started with
+        // unless the user gave an explicit floor of their own.
+        min_envs: args.min_envs.unwrap_or(args.num_envs),
+        max_envs: args.max_envs,
+        autoscale_check_every: args.autoscale_check_every,
+        autoscale_step: args.autoscale_step,
     };
     train::run(cfg)
 }
