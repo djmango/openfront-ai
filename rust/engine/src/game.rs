@@ -1289,6 +1289,47 @@ impl Game {
         }
     }
 
+    /// TS `NukeExecution.detonate`'s per-impacted-tile casualty spread to forces
+    /// already deployed: the SAME `nukeDeathFactor` rate applied to the impacted
+    /// player's home troops (just above this call at each call site) is also applied
+    /// to every live outgoing land attack and in-flight transport ship that player
+    /// owns, regardless of that attack/ship's own location. Native previously only
+    /// reduced the home troop pool, leaving attacks/boats already under way
+    /// completely unaffected by a nuke landing on the home territory that spawned them.
+    pub fn apply_nuke_deaths_to_deployed_forces(
+        &mut self,
+        owner_small_id: u16,
+        nuke_type: &str,
+        num_tiles_left: f64,
+        max_troops: f64,
+    ) {
+        let execs = &mut self.execs;
+        let wire = &self.wire;
+        for exec in execs {
+            match exec {
+                ExecEnum::Attack(atk)
+                    if atk.owner_small_id() == owner_small_id
+                        && atk.attack_live()
+                        && atk.is_initialized() =>
+                {
+                    let troops = atk.troops();
+                    let deaths =
+                        wire.nuke_death_factor(nuke_type, troops, num_tiles_left, max_troops);
+                    atk.set_troops(troops - deaths);
+                }
+                ExecEnum::TransportShip(t)
+                    if t.owner_small_id() == owner_small_id && t.unit_id().is_some() =>
+                {
+                    let troops = t.carried_troops();
+                    let deaths =
+                        wire.nuke_death_factor(nuke_type, troops, num_tiles_left, max_troops);
+                    t.set_carried_troops(troops - deaths);
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub fn order_boat_retreat(&mut self, owner_small_id: u16, unit_id: i32) {
         let owns_unit = self
             .player_by_small_id(owner_small_id)
@@ -1351,6 +1392,19 @@ impl Game {
                 ))
             })
             .collect()
+    }
+
+    /// Test-only scaffolding: appends an already-fully-constructed execution
+    /// straight into the live `execs` list, bypassing `add_execution`'s
+    /// `uninit` -> `init()` pipeline entirely. Lets tests build an exec (e.g.
+    /// a `TransportShipExecution` with a real `unit_id`/carried troops set
+    /// directly via its own module's private-field access) that represents
+    /// mid-flight state `init()` itself can't reach without real map
+    /// geometry `Game::default()` doesn't provide, then exercise later-tick
+    /// logic (like nuke blast casualties) against it directly.
+    #[cfg(test)]
+    pub(crate) fn push_exec_for_test(&mut self, exec: crate::execution::ExecEnum) {
+        self.execs.push(exec);
     }
 
     pub fn add_transport_attack(&mut self, owner_small_id: u16, target_tile: TileRef, troops: f64) {
@@ -3211,6 +3265,318 @@ mod relation_tests {
             11
         ));
         assert!(!reciprocal.unit_exists(reciprocal_first, reciprocal_nuke));
+    }
+}
+
+// Ported from PlayerAllianceList.test.ts. TS maintains a per-player,
+// incrementally-updated `Alliance` object list (`Player.alliances()`) as a
+// performance optimization over scanning the game's global alliance
+// collection; native has no equivalent per-player list at all - it's a flat
+// `Vec<AllianceState>` on `Game`, queried on demand. These tests therefore
+// verify the same *observable* invariants the TS list is meant to uphold
+// (both sides see the same alliance, breaking/expiring updates both sides,
+// multiple alliances tracked independently, death clears everything) via
+// `Game::player_alliances`/`allied_small_ids`/`alliance_count`/
+// `is_allied_with` instead of asserting on a `player.alliances()`-shaped API
+// that doesn't exist natively.
+#[cfg(test)]
+mod player_alliance_list_tests {
+    use super::{Game, PlayerInfo, PlayerType};
+    use crate::execution::alliance_exec::{AllianceRequestExecution, BreakAllianceExecution};
+    use crate::execution::ExecEnum;
+
+    fn add_human(game: &mut Game, id: &str) -> u16 {
+        let sid = game.add_from_info(&PlayerInfo {
+            name: id.into(),
+            player_type: PlayerType::Human,
+            client_id: Some(id.into()),
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        });
+        game.player_by_small_id_mut(sid).unwrap().tiles_owned = 1;
+        sid
+    }
+
+    fn ally(game: &mut Game, a: u16, a_id: &str, b: u16, b_id: &str) {
+        game.add_execution(ExecEnum::AllianceRequest(AllianceRequestExecution::new(
+            a,
+            b_id.into(),
+        )));
+        game.execute_next_tick();
+        game.add_execution(ExecEnum::AllianceRequest(AllianceRequestExecution::new(
+            b,
+            a_id.into(),
+        )));
+        game.execute_next_tick();
+    }
+
+    fn break_alliance(game: &mut Game, a: u16, b_id: &str) {
+        game.add_execution(ExecEnum::BreakAlliance(BreakAllianceExecution::new(
+            a,
+            b_id.into(),
+        )));
+        game.execute_next_tick();
+        game.execute_next_tick();
+    }
+
+    #[test]
+    fn forming_an_alliance_is_visible_and_symmetric_for_both_participants() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let player1 = add_human(&mut game, "player1");
+        let player2 = add_human(&mut game, "player2");
+        assert_eq!(game.alliance_count(player1), 0);
+        assert_eq!(game.alliance_count(player2), 0);
+
+        ally(&mut game, player1, "player1", player2, "player2");
+
+        assert_eq!(game.alliance_count(player1), 1);
+        assert_eq!(game.alliance_count(player2), 1);
+        assert_eq!(game.allied_small_ids(player1), vec![player2]);
+        assert_eq!(game.allied_small_ids(player2), vec![player1]);
+    }
+
+    #[test]
+    fn alliance_state_agrees_with_is_allied_with() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let player1 = add_human(&mut game, "player1");
+        let player2 = add_human(&mut game, "player2");
+        let player3 = add_human(&mut game, "player3");
+
+        ally(&mut game, player1, "player1", player2, "player2");
+
+        assert!(game.is_allied_with(player1, player2));
+        assert!(!game.is_allied_with(player1, player3));
+        assert_eq!(game.alliance_count(player3), 0);
+    }
+
+    #[test]
+    fn breaking_an_alliance_removes_it_from_both_sides() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let player1 = add_human(&mut game, "player1");
+        let player2 = add_human(&mut game, "player2");
+        ally(&mut game, player1, "player1", player2, "player2");
+        assert_eq!(game.alliance_count(player1), 1);
+
+        break_alliance(&mut game, player1, "player2");
+
+        assert_eq!(game.alliance_count(player1), 0);
+        assert_eq!(game.alliance_count(player2), 0);
+        assert!(!game.is_allied_with(player1, player2));
+    }
+
+    #[test]
+    fn expiring_an_alliance_removes_it_from_both_sides() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let player1 = add_human(&mut game, "player1");
+        let player2 = add_human(&mut game, "player2");
+        ally(&mut game, player1, "player1", player2, "player2");
+        assert_eq!(game.alliance_count(player1), 1);
+
+        // TS `Alliance.expire()` force-expires a single alliance immediately,
+        // bypassing the normal duration wait; native has no per-alliance handle
+        // to call, so this simulates it by directly rewinding that alliance's
+        // `expires_at` (the same field `expire_alliances_for` checks against
+        // `game.ticks`) before running the normal expiry sweep.
+        let tick = game.ticks;
+        for al in &mut game.alliances {
+            if al.requestor_small_id == player1 || al.recipient_small_id == player1 {
+                al.expires_at = tick;
+            }
+        }
+        game.expire_alliances_for(player1);
+
+        assert_eq!(game.alliance_count(player1), 0);
+        assert_eq!(game.alliance_count(player2), 0);
+        assert!(!game.is_allied_with(player1, player2));
+    }
+
+    #[test]
+    fn a_player_tracks_multiple_alliances_independently() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let player1 = add_human(&mut game, "player1");
+        let player2 = add_human(&mut game, "player2");
+        let player3 = add_human(&mut game, "player3");
+        ally(&mut game, player1, "player1", player2, "player2");
+        ally(&mut game, player1, "player1", player3, "player3");
+
+        assert_eq!(game.alliance_count(player1), 2);
+        let mut others = game.allied_small_ids(player1);
+        others.sort();
+        let mut expected = vec![player2, player3];
+        expected.sort();
+        assert_eq!(others, expected);
+
+        break_alliance(&mut game, player1, "player2");
+
+        assert_eq!(game.alliance_count(player1), 1);
+        assert_eq!(game.allied_small_ids(player1), vec![player3]);
+        assert_eq!(game.alliance_count(player2), 0);
+        assert_eq!(game.alliance_count(player3), 1);
+    }
+
+    #[test]
+    fn remove_all_alliances_for_clears_the_player_and_every_partner() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let player1 = add_human(&mut game, "player1");
+        let player2 = add_human(&mut game, "player2");
+        let player3 = add_human(&mut game, "player3");
+        ally(&mut game, player1, "player1", player2, "player2");
+        ally(&mut game, player1, "player1", player3, "player3");
+        assert_eq!(game.alliance_count(player1), 2);
+
+        game.remove_all_alliances_for(player1);
+
+        assert_eq!(game.alliance_count(player1), 0);
+        assert_eq!(game.alliance_count(player2), 0);
+        assert_eq!(game.alliance_count(player3), 0);
+    }
+}
+
+// Ported from AllianceAcceptNukes.test.ts. That TS test forces the
+// nuke-cancellation weight check to fire regardless of tile-ownership shape
+// by monkeypatching `nukeAllianceBreakThreshold` to 0; native hardcodes this
+// threshold at TS's own default (100, see `WireConfig::nuke_alliance_break_threshold`)
+// with no per-instance override, so these tests instead use the
+// threshold-independent "nuke targets a tile with a structure owned by the
+// ally" inclusion path in `Util.listNukeBreakAlliance` (mirrored natively by
+// `list_nuke_break_alliance`'s `nearby_structures_any` branch) - same
+// approach as `nuke_execution.rs`'s
+// `nuke_at_a_players_structure_revokes_the_nukers_pending_alliance_request`.
+// This also needs >1 distinct tile (to give the "only nukes between allied
+// players" test two different nuke targets), so unlike every other test in
+// this file it builds its own tiny synthetic map instead of using
+// `Game::default()`'s degenerate 1x1 one.
+#[cfg(test)]
+mod alliance_accept_nukes_tests {
+    use super::{Game, GameConfig, PlayerInfo, PlayerType};
+    use crate::core::config::Config as WireConfig;
+    use crate::core::schemas::unit_type;
+    use crate::map::{GameMap, MapMeta};
+
+    // Wide enough that two targets placed far apart don't both fall within a
+    // single atom bomb's outer blast radius (30 tiles, see
+    // `WireConfig::nuke_magnitudes`) of each other - otherwise a City near one
+    // target would spuriously count as "in range" of a nuke aimed at the other.
+    const MAP_WIDTH: u32 = 100;
+
+    fn small_land_map_game() -> Game {
+        let meta = MapMeta {
+            width: MAP_WIDTH,
+            height: 1,
+            num_land_tiles: MAP_WIDTH,
+        };
+        let terrain = vec![0x80u8; MAP_WIDTH as usize];
+        let map = GameMap::from_terrain_bytes(&meta, &terrain).unwrap();
+        let mini_map = GameMap::from_terrain_bytes(&meta, &terrain).unwrap();
+        let wire_cfg = crate::core::schemas::GameConfig {
+            game_map: "Onion".into(),
+            difficulty: "Medium".into(),
+            donate_gold: false,
+            donate_troops: false,
+            game_type: "Singleplayer".into(),
+            game_mode: "Free For All".into(),
+            game_map_size: "Normal".into(),
+            nations: crate::core::schemas::NationsConfig::Mode("default".into()),
+            bots: 0,
+            infinite_gold: false,
+            infinite_troops: false,
+            instant_build: false,
+            random_spawn: false,
+            doomsday_clock: None,
+            disabled_units: None,
+            player_teams: None,
+            disable_alliances: None,
+            spawn_immunity_duration: None,
+            starting_gold: None,
+            gold_multiplier: None,
+            max_timer_value: None,
+            ranked_type: None,
+        };
+        let mut game = Game::new(
+            String::new(),
+            GameConfig::default(),
+            WireConfig::new(wire_cfg, false),
+            map,
+            mini_map,
+            None,
+        );
+        game.end_spawn_phase();
+        game
+    }
+
+    fn add_human(game: &mut Game, id: &str) -> u16 {
+        let sid = game.add_from_info(&PlayerInfo {
+            name: id.into(),
+            player_type: PlayerType::Human,
+            client_id: Some(id.into()),
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        });
+        game.player_by_small_id_mut(sid).unwrap().tiles_owned = 1;
+        sid
+    }
+
+    #[test]
+    fn accepting_an_alliance_destroys_in_flight_nukes_between_the_new_allies() {
+        let mut game = small_land_map_game();
+        let player1 = add_human(&mut game, "player1");
+        let player2 = add_human(&mut game, "player2");
+
+        let target = game.map.ref_xy(1, 0);
+        game.build_unit(player2, unit_type::CITY, target);
+        let nuke = game.build_unit(player1, unit_type::ATOM_BOMB, game.map.ref_xy(0, 0));
+        game.unit_mut(player1, nuke).unwrap().target_tile = Some(target);
+
+        assert!(!game.is_allied_with(player1, player2));
+
+        assert!(game.create_alliance_request(player1, player2, game.ticks()));
+        assert!(game.create_alliance_request(player2, player1, game.ticks()));
+
+        assert!(game.is_allied_with(player1, player2));
+        assert!(!game.unit_exists(player1, nuke));
+    }
+
+    #[test]
+    fn accepting_an_alliance_destroys_only_nukes_targeting_the_new_ally() {
+        let mut game = small_land_map_game();
+        let player1 = add_human(&mut game, "player1");
+        let player2 = add_human(&mut game, "player2");
+        let player3 = add_human(&mut game, "player3");
+
+        let target2 = game.map.ref_xy(1, 0);
+        let target3 = game.map.ref_xy(90, 0);
+        game.build_unit(player2, unit_type::CITY, target2);
+        game.build_unit(player3, unit_type::CITY, target3);
+
+        let nuke_to_2 = game.build_unit(player1, unit_type::ATOM_BOMB, game.map.ref_xy(0, 0));
+        game.unit_mut(player1, nuke_to_2).unwrap().target_tile = Some(target2);
+        let nuke_to_3 = game.build_unit(player1, unit_type::ATOM_BOMB, game.map.ref_xy(0, 0));
+        game.unit_mut(player1, nuke_to_3).unwrap().target_tile = Some(target3);
+
+        assert!(!game.is_allied_with(player1, player2));
+
+        // Both requests created in the same call, mirroring the TS test's "both
+        // added in the same tick" setup.
+        assert!(game.create_alliance_request(player1, player2, game.ticks()));
+        assert!(game.create_alliance_request(player2, player1, game.ticks()));
+
+        assert!(game.is_allied_with(player1, player2));
+        assert!(!game.unit_exists(player1, nuke_to_2));
+        assert!(game.unit_exists(player1, nuke_to_3));
+        assert_eq!(
+            game.unit_mut(player1, nuke_to_3).unwrap().target_tile,
+            Some(target3)
+        );
     }
 }
 

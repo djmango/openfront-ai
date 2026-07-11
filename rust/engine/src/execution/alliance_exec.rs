@@ -230,7 +230,10 @@ impl Execution for AllianceExtensionExecution {
 
 #[cfg(test)]
 mod tests {
-    use super::{BreakAllianceExecution, Execution};
+    use super::{
+        AllianceExtensionExecution, AllianceRejectExecution, AllianceRequestExecution,
+        BreakAllianceExecution, Execution,
+    };
     use crate::execution::ExecEnum;
     use crate::game::{Game, PlayerInfo, PlayerType};
 
@@ -244,6 +247,87 @@ mod tests {
             friends: Vec::new(),
             team: None,
         })
+    }
+
+    // Ported from AllianceRequestExecution.test.ts "Can create alliance by
+    // counter-request".
+    #[test]
+    fn counter_request_creates_alliance_for_both_sides() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let player1 = add_human(&mut game, "player1");
+        let player2 = add_human(&mut game, "player2");
+        game.player_by_small_id_mut(player1).unwrap().tiles_owned = 1;
+        game.player_by_small_id_mut(player2).unwrap().tiles_owned = 1;
+
+        game.add_execution(ExecEnum::AllianceRequest(AllianceRequestExecution::new(
+            player1,
+            "player2".into(),
+        )));
+        game.execute_next_tick();
+
+        game.add_execution(ExecEnum::AllianceRequest(AllianceRequestExecution::new(
+            player2,
+            "player1".into(),
+        )));
+        game.execute_next_tick();
+
+        assert!(game.is_allied_with(player1, player2));
+        assert!(game.is_allied_with(player2, player1));
+    }
+
+    // Ported from AllianceRequestExecution.test.ts "Can reject alliance request".
+    #[test]
+    fn reject_clears_outgoing_request_without_forming_alliance() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let player1 = add_human(&mut game, "player1");
+        let player2 = add_human(&mut game, "player2");
+        game.player_by_small_id_mut(player1).unwrap().tiles_owned = 1;
+        game.player_by_small_id_mut(player2).unwrap().tiles_owned = 1;
+
+        game.add_execution(ExecEnum::AllianceRequest(AllianceRequestExecution::new(
+            player1,
+            "player2".into(),
+        )));
+        game.execute_next_tick();
+
+        game.add_execution(ExecEnum::AllianceReject(AllianceRejectExecution::new(
+            "player1".into(),
+            player2,
+        )));
+        game.execute_next_tick();
+
+        assert!(!game.is_allied_with(player1, player2));
+        assert!(!game.is_allied_with(player2, player1));
+        assert_eq!(game.outgoing_alliance_requests(player1).len(), 0);
+    }
+
+    // Ported from AllianceRequestExecution.test.ts "Alliance request expires".
+    #[test]
+    fn unanswered_request_expires_after_configured_duration() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let player1 = add_human(&mut game, "player1");
+        let player2 = add_human(&mut game, "player2");
+        game.player_by_small_id_mut(player1).unwrap().tiles_owned = 1;
+        game.player_by_small_id_mut(player2).unwrap().tiles_owned = 1;
+
+        game.add_execution(ExecEnum::AllianceRequest(AllianceRequestExecution::new(
+            player1,
+            "player2".into(),
+        )));
+        game.execute_next_tick();
+
+        assert_eq!(game.outgoing_alliance_requests(player1).len(), 1);
+
+        for _ in 0..(game.wire.alliance_request_duration() + 1) {
+            game.execute_next_tick();
+        }
+
+        assert_eq!(game.outgoing_alliance_requests(player1).len(), 0);
+        assert!(!game.is_allied_with(player1, player2));
+        assert!(!game.is_allied_with(player2, player1));
     }
 
     fn relation_value(game: &Game, from: u16, to: u16) -> f64 {
@@ -294,5 +378,100 @@ mod tests {
         assert!(!execution.is_active());
         assert!(!game.is_allied_with(requestor, recipient));
         assert_eq!(relation_value(&game, recipient, requestor), 0.0);
+    }
+
+    fn alliance_expires_at(game: &Game, a: u16, b: u16) -> u32 {
+        game.player_alliances(a)
+            .iter()
+            .find(|al| al.requestor_small_id == b || al.recipient_small_id == b)
+            .map(|al| al.expires_at)
+            .expect("alliance should exist")
+    }
+
+    // Ported from AllianceExtensionExecution.test.ts "Successfully extends
+    // existing alliance between Humans" (the "...between Human and non-Human"
+    // case is identical for native, since `AllianceExtensionExecution` and
+    // `Game::add_alliance_extension_request` don't special-case player type -
+    // not re-tested separately).
+    #[test]
+    fn extension_only_applies_once_both_sides_have_requested_it() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let player1 = add_human(&mut game, "player1");
+        let player2 = add_human(&mut game, "player2");
+        assert!(game.create_alliance_request(player1, player2, game.ticks()));
+        assert!(game.create_alliance_request(player2, player1, game.ticks()));
+        assert!(game.is_allied_with(player1, player2));
+
+        let expiration_before = alliance_expires_at(&game, player1, player2);
+
+        game.add_execution(ExecEnum::AllianceExtension(
+            AllianceExtensionExecution::new(player1, "player2".into()),
+        ));
+        game.execute_next_tick();
+        assert_eq!(
+            alliance_expires_at(&game, player1, player2),
+            expiration_before
+        );
+
+        game.add_execution(ExecEnum::AllianceExtension(
+            AllianceExtensionExecution::new(player2, "player1".into()),
+        ));
+        game.execute_next_tick();
+
+        assert!(alliance_expires_at(&game, player1, player2) > expiration_before);
+    }
+
+    // Ported from AllianceExtensionExecution.test.ts "Fails gracefully if no
+    // alliance exists".
+    #[test]
+    fn extension_request_without_an_existing_alliance_is_a_no_op() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let player1 = add_human(&mut game, "player1");
+        let player2 = add_human(&mut game, "player2");
+
+        game.add_execution(ExecEnum::AllianceExtension(
+            AllianceExtensionExecution::new(player1, "player2".into()),
+        ));
+        game.execute_next_tick();
+
+        assert!(!game.is_allied_with(player1, player2));
+        assert!(!game.is_allied_with(player2, player1));
+    }
+
+    // Ported from the state-machine intent behind AllianceExtensionExecution
+    // .test.ts's "Sends message to other player when one player requests
+    // renewal" (the message-display assertions themselves have no native
+    // equivalent - `Game::display_message` doesn't exist natively, matching the
+    // documented UI-only dead-code carve-out in
+    // docs/bot-ai-parity-nation-relations/README.md). What IS gameplay-relevant
+    // and ported here: a second extension request from the SAME player must
+    // not by itself extend the alliance (still needs the other side's
+    // agreement) - i.e. `extension_requested_requestor` isn't toggled off by a
+    // repeat call from the requestor.
+    #[test]
+    fn repeated_extension_request_from_the_same_player_does_not_self_extend() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let player1 = add_human(&mut game, "player1");
+        let player2 = add_human(&mut game, "player2");
+        assert!(game.create_alliance_request(player1, player2, game.ticks()));
+        assert!(game.create_alliance_request(player2, player1, game.ticks()));
+        let expiration_before = alliance_expires_at(&game, player1, player2);
+
+        game.add_execution(ExecEnum::AllianceExtension(
+            AllianceExtensionExecution::new(player1, "player2".into()),
+        ));
+        game.execute_next_tick();
+        game.add_execution(ExecEnum::AllianceExtension(
+            AllianceExtensionExecution::new(player1, "player2".into()),
+        ));
+        game.execute_next_tick();
+
+        assert_eq!(
+            alliance_expires_at(&game, player1, player2),
+            expiration_before
+        );
     }
 }
