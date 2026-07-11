@@ -74,6 +74,40 @@ impl TransportShipExecution {
         self.retreating = true;
     }
 
+    /// TS `Unit.targetTile()` for a transport ship - `self.dst` doubles as both the initial
+    /// attack destination and (once retreating) the resolved retreat shore tile, exactly like
+    /// TS reassigns the same `targetTile` field in both cases. Read by
+    /// `NationWarshipBehavior.trackIncomingTransportsAndRetaliate` (`warship_ai.rs`) to
+    /// find enemy transports heading toward this nation's territory - the shared `Unit.target_tile`
+    /// field is never populated for this unit type natively (only nukes/MIRVs set it), so this
+    /// exec-local getter is the only place that state actually lives.
+    pub fn target_tile(&self) -> Option<TileRef> {
+        self.dst
+    }
+
+    /// TS `Unit.transportShipState().isRetreating`.
+    pub fn is_retreating(&self) -> bool {
+        self.retreating
+    }
+
+    /// Test-only constructor for an in-flight transport ship whose backing `Unit` already
+    /// exists, bypassing `init()`'s real pathfinding (see `WarshipExecution::new_for_test`'s
+    /// doc comment for the same rationale - used by `warship_ai.rs`'s incoming-transport tests).
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        owner_small_id: u16,
+        unit_id: i32,
+        target_tile: TileRef,
+        retreating: bool,
+    ) -> Self {
+        let mut exec = Self::new(owner_small_id, target_tile, 0.0);
+        exec.unit_id = Some(unit_id);
+        exec.dst = Some(target_tile);
+        exec.initialized = true;
+        exec.retreating = retreating;
+        exec
+    }
+
     fn unit_tile(&self, game: &Game) -> Option<TileRef> {
         let uid = self.unit_id?;
         let p = game.player_by_small_id(self.owner_small_id)?;

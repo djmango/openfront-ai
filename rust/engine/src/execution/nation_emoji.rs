@@ -333,7 +333,10 @@ pub fn maybe_send_attack_emoji(
     );
 }
 
-fn maybe_send_emoji(
+/// TS `NationEmojiBehavior.maybeSendEmoji` - time/type-gated `send_emoji`. Exposed (not just
+/// used internally by this module's own casual-emoji checks) for `warship_ai.rs`'s
+/// `maybeRetaliateWithWarship` port, TS's only other caller of `maybeSendEmoji`.
+pub fn maybe_send_emoji(
     random: &mut PseudoRandom,
     game: &Game,
     small_id: u16,
