@@ -246,3 +246,321 @@ pub fn assign_teams_with_max_size(
 
     (result, insertion_order)
 }
+
+// Ported from `TeamAssignment.test.ts`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn teams() -> Vec<String> {
+        vec!["Red".into(), "Blue".into()]
+    }
+
+    fn player(id: &str, clan: Option<&str>) -> PlayerInfo {
+        PlayerInfo {
+            name: format!("Player {id}"),
+            player_type: PlayerType::Human,
+            client_id: None,
+            id: id.into(),
+            clan_tag: clan.map(str::to_string),
+            friends: Vec::new(),
+            team: None,
+        }
+    }
+
+    fn player_with_friends(
+        id: &str,
+        friends: &[&str],
+        clan: Option<&str>,
+        client_id: &str,
+    ) -> PlayerInfo {
+        PlayerInfo {
+            name: format!("Player {id}"),
+            player_type: PlayerType::Human,
+            client_id: Some(client_id.into()),
+            id: id.into(),
+            clan_tag: clan.map(str::to_string),
+            friends: friends.iter().map(|s| s.to_string()).collect(),
+            team: None,
+        }
+    }
+
+    fn team_of<'a>(result: &'a HashMap<String, String>, p: &PlayerInfo) -> &'a str {
+        result.get(&p.id).map(String::as_str).unwrap_or("<unassigned>")
+    }
+
+    #[test]
+    fn assigns_players_alternately_when_no_clans_are_present() {
+        let players = vec![
+            player("1", None),
+            player("2", None),
+            player("3", None),
+            player("4", None),
+        ];
+        let (result, _) = assign_teams(&players, &teams());
+
+        assert_eq!(team_of(&result, &players[0]), "Red");
+        assert_eq!(team_of(&result, &players[1]), "Blue");
+        assert_eq!(team_of(&result, &players[2]), "Red");
+        assert_eq!(team_of(&result, &players[3]), "Blue");
+    }
+
+    #[test]
+    fn keeps_clan_members_together_on_the_same_team() {
+        let players = vec![
+            player("1", Some("CLANA")),
+            player("2", Some("CLANA")),
+            player("3", Some("CLANB")),
+            player("4", Some("CLANB")),
+        ];
+        let (result, _) = assign_teams(&players, &teams());
+
+        assert_eq!(team_of(&result, &players[0]), "Red");
+        assert_eq!(team_of(&result, &players[1]), "Red");
+        assert_eq!(team_of(&result, &players[2]), "Blue");
+        assert_eq!(team_of(&result, &players[3]), "Blue");
+    }
+
+    #[test]
+    fn handles_mixed_clan_and_non_clan_players() {
+        let players = vec![
+            player("1", Some("CLANA")),
+            player("2", Some("CLANA")),
+            player("3", None),
+            player("4", None),
+        ];
+        let (result, _) = assign_teams(&players, &teams());
+
+        assert_eq!(team_of(&result, &players[0]), "Red");
+        assert_eq!(team_of(&result, &players[1]), "Red");
+        assert_eq!(team_of(&result, &players[2]), "Blue");
+        assert_eq!(team_of(&result, &players[3]), "Blue");
+    }
+
+    #[test]
+    fn kicks_players_when_teams_are_full() {
+        let players = vec![
+            player("1", Some("CLANA")),
+            player("2", Some("CLANA")),
+            player("3", Some("CLANA")),
+            player("4", Some("CLANA")),
+            player("5", Some("CLANB")),
+            player("6", Some("CLANB")),
+        ];
+        let (result, _) = assign_teams(&players, &teams());
+
+        assert_eq!(team_of(&result, &players[0]), "Red");
+        assert_eq!(team_of(&result, &players[1]), "Red");
+        assert_eq!(team_of(&result, &players[2]), "Red");
+        assert_eq!(team_of(&result, &players[3]), "kicked");
+        assert_eq!(team_of(&result, &players[4]), "Blue");
+        assert_eq!(team_of(&result, &players[5]), "Blue");
+    }
+
+    #[test]
+    fn handles_an_empty_player_list() {
+        let (result, _) = assign_teams(&[], &teams());
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn handles_a_single_player() {
+        let players = vec![player("1", None)];
+        let (result, _) = assign_teams(&players, &teams());
+        assert_eq!(team_of(&result, &players[0]), "Red");
+    }
+
+    #[test]
+    fn handles_multiple_clans_with_different_sizes() {
+        let players = vec![
+            player("1", Some("CLANA")),
+            player("2", Some("CLANA")),
+            player("3", Some("CLANA")),
+            player("4", Some("CLANB")),
+            player("5", Some("CLANB")),
+            player("6", Some("CLANC")),
+        ];
+        let (result, _) = assign_teams(&players, &teams());
+
+        assert_eq!(team_of(&result, &players[0]), "Red");
+        assert_eq!(team_of(&result, &players[1]), "Red");
+        assert_eq!(team_of(&result, &players[2]), "Red");
+        assert_eq!(team_of(&result, &players[3]), "Blue");
+        assert_eq!(team_of(&result, &players[4]), "Blue");
+        assert_eq!(team_of(&result, &players[5]), "Blue");
+    }
+
+    #[test]
+    fn distributes_players_among_a_larger_number_of_teams() {
+        let players = vec![
+            player("1", Some("CLANA")),
+            player("2", Some("CLANA")),
+            player("3", Some("CLANA")),
+            player("4", Some("CLANB")),
+            player("5", Some("CLANB")),
+            player("6", Some("CLANC")),
+            player("7", None),
+            player("8", None),
+            player("9", None),
+            player("10", None),
+            player("11", None),
+            player("12", None),
+            player("13", None),
+            player("14", None),
+        ];
+        let big_teams: Vec<String> = ["Red", "Blue", "Yellow", "Green", "Purple", "Orange", "Teal"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (result, _) = assign_teams(&players, &big_teams);
+
+        assert_eq!(team_of(&result, &players[0]), "Red");
+        assert_eq!(team_of(&result, &players[1]), "Red");
+        assert_eq!(team_of(&result, &players[2]), "kicked");
+        assert_eq!(team_of(&result, &players[3]), "Blue");
+        assert_eq!(team_of(&result, &players[4]), "Blue");
+        assert_eq!(team_of(&result, &players[5]), "Yellow");
+        assert_eq!(team_of(&result, &players[6]), "Green");
+        assert_eq!(team_of(&result, &players[7]), "Purple");
+        assert_eq!(team_of(&result, &players[8]), "Orange");
+        assert_eq!(team_of(&result, &players[9]), "Teal");
+        assert_eq!(team_of(&result, &players[10]), "Yellow");
+        assert_eq!(team_of(&result, &players[11]), "Green");
+        assert_eq!(team_of(&result, &players[12]), "Purple");
+        assert_eq!(team_of(&result, &players[13]), "Orange");
+    }
+
+    #[test]
+    fn keeps_two_friends_on_the_same_team() {
+        let players = vec![
+            player_with_friends("1", &["2"], None, "1"),
+            player_with_friends("2", &["1"], None, "2"),
+            player_with_friends("3", &[], None, "3"),
+            player_with_friends("4", &[], None, "4"),
+        ];
+        let (result, _) = assign_teams(&players, &teams());
+
+        let team0 = team_of(&result, &players[0]);
+        assert_eq!(team_of(&result, &players[1]), team0);
+        assert_ne!(team_of(&result, &players[2]), team0);
+        assert_ne!(team_of(&result, &players[3]), team0);
+    }
+
+    #[test]
+    fn groups_a_chain_of_friends_transitively() {
+        // 6 players, 2 teams -> maxTeamSize = 3 (enough room for a 3-friend chain).
+        let players = vec![
+            player_with_friends("1", &["2"], None, "1"),
+            player_with_friends("2", &["3"], None, "2"),
+            player_with_friends("3", &[], None, "3"),
+            player_with_friends("4", &[], None, "4"),
+            player_with_friends("5", &[], None, "5"),
+            player_with_friends("6", &[], None, "6"),
+        ];
+        let (result, _) = assign_teams(&players, &teams());
+
+        let team0 = team_of(&result, &players[0]);
+        assert_eq!(team_of(&result, &players[1]), team0);
+        assert_eq!(team_of(&result, &players[2]), team0);
+    }
+
+    #[test]
+    fn treats_one_directional_friendship_as_a_group() {
+        let players = vec![
+            player_with_friends("1", &["2"], None, "1"),
+            player_with_friends("2", &[], None, "2"), // doesn't list 1 back
+            player_with_friends("3", &[], None, "3"),
+            player_with_friends("4", &[], None, "4"),
+        ];
+        let (result, _) = assign_teams(&players, &teams());
+
+        assert_eq!(
+            team_of(&result, &players[0]),
+            team_of(&result, &players[1])
+        );
+    }
+
+    #[test]
+    fn merges_friend_and_clan_groups_when_they_overlap() {
+        // 1 and 2 share clan CLANA, 2 is friends with 3 (no clan) -> all three end up on
+        // the same team. 6 players, maxTeamSize = 3.
+        let players = vec![
+            player_with_friends("1", &[], Some("CLANA"), "1"),
+            player_with_friends("2", &["3"], Some("CLANA"), "2"),
+            player_with_friends("3", &[], None, "3"),
+            player_with_friends("4", &[], None, "4"),
+            player_with_friends("5", &[], None, "5"),
+            player_with_friends("6", &[], None, "6"),
+        ];
+        let (result, _) = assign_teams(&players, &teams());
+
+        let team0 = team_of(&result, &players[0]);
+        assert_eq!(team_of(&result, &players[1]), team0);
+        assert_eq!(team_of(&result, &players[2]), team0);
+    }
+
+    #[test]
+    fn spills_friend_group_overflow_to_other_teams_without_kicking() {
+        // 4-player friend group + 2 strangers, maxTeamSize = ceil(6/2) = 3. Friend
+        // overflow spills to the other team rather than getting kicked.
+        let players = vec![
+            player_with_friends("1", &["2", "3", "4"], None, "1"),
+            player_with_friends("2", &[], None, "2"),
+            player_with_friends("3", &[], None, "3"),
+            player_with_friends("4", &[], None, "4"),
+            player_with_friends("5", &[], None, "5"),
+            player_with_friends("6", &[], None, "6"),
+        ];
+        let (result, _) = assign_teams(&players, &teams());
+
+        assert_eq!(team_of(&result, &players[0]), "Red");
+        assert_eq!(team_of(&result, &players[1]), "Red");
+        assert_eq!(team_of(&result, &players[2]), "Red");
+        assert_eq!(team_of(&result, &players[3]), "Blue");
+        assert_eq!(team_of(&result, &players[4]), "Blue");
+        assert_eq!(team_of(&result, &players[5]), "Blue");
+    }
+
+    #[test]
+    fn keys_friend_grouping_on_client_id_not_player_info_id() {
+        // clientID and PlayerInfo.id are distinct. The friends list references clientIDs
+        // ("client-2", "client-1"). If grouping ever regressed to keying on
+        // PlayerInfo.id ("player-1"/"player-2"), no edges would form and these two would
+        // land on opposite teams.
+        let players = vec![
+            player_with_friends("player-1", &["client-2"], None, "client-1"),
+            player_with_friends("player-2", &["client-1"], None, "client-2"),
+            player_with_friends("player-3", &[], None, "client-3"),
+            player_with_friends("player-4", &[], None, "client-4"),
+        ];
+        let (result, _) = assign_teams(&players, &teams());
+
+        let team0 = team_of(&result, &players[0]);
+        assert_eq!(team_of(&result, &players[1]), team0);
+        assert_ne!(team_of(&result, &players[2]), team0);
+        assert_ne!(team_of(&result, &players[3]), team0);
+    }
+
+    #[test]
+    fn still_kicks_when_every_team_is_forced_to_capacity() {
+        // 5 friends in a clique, 2 teams. Default maxTeamSize = ceil(5/2) = 3 gives
+        // capacity 6 >= 5, so nobody would be kicked - force capacity down via the
+        // explicit max_team_size override (TS `assignTeams(players, teams, 2)`; the real
+        // engine's only call site never overrides this, see `assign_teams_with_max_size`'s
+        // doc comment) to confirm kicks resume once capacity is genuinely insufficient.
+        let players = vec![
+            player_with_friends("1", &["2", "3", "4", "5"], None, "1"),
+            player_with_friends("2", &[], None, "2"),
+            player_with_friends("3", &[], None, "3"),
+            player_with_friends("4", &[], None, "4"),
+            player_with_friends("5", &[], None, "5"),
+        ];
+        let (result, _) = assign_teams_with_max_size(&players, &teams(), Some(2));
+
+        let kicked = players
+            .iter()
+            .filter(|p| team_of(&result, p) == "kicked")
+            .count();
+        assert_eq!(kicked, 1);
+    }
+}
