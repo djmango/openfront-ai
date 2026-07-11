@@ -566,6 +566,44 @@ mod tests {
         assert!(!game.is_allied_with(nuker, target));
         assert!(!game.is_allied_with(target, nuker));
     }
+
+    // Ported from Attack.test.ts's "Can't send nuke during immunity phase":
+    // TS `PlayerImpl.nukeSpawn` refuses to spawn any nuke while
+    // `mg.isSpawnImmunityActive()` (a global window, not per-player - see
+    // `Game::is_spawn_immunity_active`), independent of `canAttackPlayer`'s
+    // separate per-defender-type immunity check exercised by `attack.rs`'s
+    // `immunity_tests`. Native's `nuke_spawn` (called from `can_build_nuke`)
+    // already had this gate; this is new coverage for it, not a fix.
+    #[test]
+    fn cannot_build_a_nuke_during_spawn_immunity_but_can_after_it_ends() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        // `Human`, not `Bot`: bots run autonomous tribe AI on every tick
+        // (spending gold on their own builds) that would otherwise interfere
+        // with the plain gold-balance check this test cares about.
+        let owner = game.add_from_info(&PlayerInfo {
+            name: "owner".into(),
+            player_type: PlayerType::Human,
+            client_id: Some("owner".into()),
+            id: "owner".into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        });
+        if let Some(p) = game.player_by_small_id_mut(owner) {
+            p.gold = 10_000_000;
+            p.tiles_owned = 1;
+        }
+        let dst = game.map.ref_xy(0, 0);
+        game.build_unit(owner, unit_type::MISSILE_SILO, dst);
+
+        assert!(can_build_nuke(&game, owner, unit_type::ATOM_BOMB, dst).is_none());
+
+        for _ in 0..game.wire.spawn_immunity_duration() + 1 {
+            game.execute_next_tick();
+        }
+        assert!(can_build_nuke(&game, owner, unit_type::ATOM_BOMB, dst).is_some());
+    }
 }
 
 fn list_nuke_break_alliance(
