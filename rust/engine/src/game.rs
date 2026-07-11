@@ -57,6 +57,10 @@ pub struct Unit {
     /// TS `WarshipState.veterancyProgress` - partial progress toward the next veterancy
     /// level from transport kills/trade captures; see `Game::record_kill`'s doc comment.
     pub veterancy_progress: i32,
+    /// TS `UnitImpl._deletionAt` - tick at which a voluntary `DeleteUnitExecution` may
+    /// finalize this unit's deletion, or `None` if not pending. Cleared on capture
+    /// (`Game::capture_unit`, TS `UnitImpl.setOwner`'s `clearPendingDeletion()`).
+    pub deletion_at: Option<i32>,
 }
 
 #[derive(Debug, Clone)]
@@ -1988,7 +1992,10 @@ impl Game {
                 captured = Some(p.units.remove(idx));
             }
         }
-        if let Some(unit) = captured {
+        if let Some(mut unit) = captured {
+            // TS `UnitImpl.setOwner()`'s `clearPendingDeletion()` - a captured unit resets
+            // any voluntary-deletion mark from its previous owner.
+            unit.deletion_at = None;
             if let Some(p) = self.player_by_small_id_mut(to_small_id) {
                 p.units.push(unit);
             }
@@ -2510,6 +2517,8 @@ impl Game {
     pub const TARGET_COOLDOWN_TICKS: u32 = 15 * 10;
     /// TS `Config.deleteUnitCooldown()`.
     pub const DELETE_UNIT_COOLDOWN_TICKS: u32 = 30 * 10;
+    /// TS `Config.deletionMarkDuration()`.
+    pub const DELETION_MARK_DURATION_TICKS: u32 = 30 * 10;
 
     /// TS `PlayerImpl.targets()` - marks painted within `targetDuration`.
     pub fn player_targets(&self, small_id: u16) -> Vec<u16> {
@@ -2549,6 +2558,35 @@ impl Game {
         self.player_by_small_id(small_id).is_some_and(|p| {
             self.ticks as i64 - p.last_delete_unit_tick as i64
                 >= Self::DELETE_UNIT_COOLDOWN_TICKS as i64
+        })
+    }
+
+    /// TS `PlayerImpl.recordDeleteUnit()`.
+    pub fn record_delete_unit(&mut self, small_id: u16) {
+        let tick = self.ticks as i32;
+        if let Some(p) = self.player_by_small_id_mut(small_id) {
+            p.last_delete_unit_tick = tick;
+        }
+    }
+
+    /// TS `UnitImpl.markForDeletion()`. No-op if the unit doesn't exist (TS's
+    /// `!this.isActive()` guard - a nonexistent unit is native's equivalent of inactive).
+    pub fn mark_unit_for_deletion(&mut self, small_id: u16, unit_id: i32) {
+        let deadline = (self.ticks + Self::DELETION_MARK_DURATION_TICKS) as i32;
+        if let Some(u) = self.unit_mut(small_id, unit_id) {
+            u.deletion_at = Some(deadline);
+        }
+    }
+
+    /// TS `UnitImpl.isMarkedForDeletion()`.
+    pub fn is_unit_marked_for_deletion(&self, small_id: u16, unit_id: i32) -> bool {
+        self.unit(small_id, unit_id).is_some_and(|u| u.deletion_at.is_some())
+    }
+
+    /// TS `UnitImpl.isOverdueDeletion()`.
+    pub fn is_unit_overdue_deletion(&self, small_id: u16, unit_id: i32) -> bool {
+        self.unit(small_id, unit_id).is_some_and(|u| {
+            u.deletion_at.is_some_and(|at| self.ticks as i64 - at as i64 > 0)
         })
     }
 

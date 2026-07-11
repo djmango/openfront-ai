@@ -1,6 +1,7 @@
 use super::{
     AllianceExtensionExecution, AllianceRejectExecution, AllianceRequestExecution,
-    BoatRetreatExecution, BreakAllianceExecution, ConstructionExecution, DonateGoldExecution,
+    BoatRetreatExecution, BreakAllianceExecution, ConstructionExecution, DeleteUnitExecution,
+    DonateGoldExecution,
     DonateTroopsExecution, EmbargoAllExecution, EmbargoExecution, ExecEnum,
     MarkDisconnectedExecution, NoOpExecution, RetreatExecution, SpawnExecution,
     TargetPlayerExecution, TransportShipExecution, UpgradeStructureExecution,
@@ -118,6 +119,18 @@ pub fn intent_to_execution(game: &Game, game_id: &str, intent: &StampedIntent) -
                     p.small_id,
                     unit_id,
                 ))
+            } else {
+                ExecEnum::NoOp(NoOpExecution)
+            }
+        }
+        "delete_unit" => {
+            let unit_id = intent
+                .fields
+                .get("unitId")
+                .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|n| n as i64)))
+                .unwrap_or(0) as i32;
+            if let Some(p) = game.player_by_client_id(client_id) {
+                ExecEnum::DeleteUnit(DeleteUnitExecution::new(p.small_id, unit_id))
             } else {
                 ExecEnum::NoOp(NoOpExecution)
             }

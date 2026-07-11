@@ -3,7 +3,8 @@
 use super::{
     AllianceExtensionExecution, AllianceRejectExecution, AllianceRequestExecution,
     AttackExecution, BoatRetreatExecution, BreakAllianceExecution, CityExecution,
-    ConstructionExecution, DefensePostExecution, DonateGoldExecution, DonateTroopsExecution,
+    ConstructionExecution, DefensePostExecution, DeleteUnitExecution, DonateGoldExecution,
+    DonateTroopsExecution,
     DoomsdayClockExecution, EmbargoAllExecution, EmbargoExecution, Execution, FactoryExecution,
     MirvExecution, MissileSiloExecution, NukeExecution, PortExecution, SamLauncherExecution,
     SamMissileExecution,
@@ -56,6 +57,7 @@ pub enum ExecEnum {
     TargetPlayer(TargetPlayerExecution),
     Warship(WarshipExecution),
     DoomsdayClock(DoomsdayClockExecution),
+    DeleteUnit(DeleteUnitExecution),
 }
 
 impl Execution for ExecEnum {
@@ -101,6 +103,7 @@ impl Execution for ExecEnum {
             ExecEnum::TargetPlayer(e) => e.init(game, tick),
             ExecEnum::Warship(e) => e.init(game, tick),
             ExecEnum::DoomsdayClock(e) => e.init(game, tick),
+            ExecEnum::DeleteUnit(e) => e.init(game, tick),
         }
     }
 
@@ -146,6 +149,7 @@ impl Execution for ExecEnum {
             ExecEnum::TargetPlayer(e) => e.tick(game, tick),
             ExecEnum::Warship(e) => e.tick(game, tick),
             ExecEnum::DoomsdayClock(e) => e.tick(game, tick),
+            ExecEnum::DeleteUnit(e) => e.tick(game, tick),
         }
     }
 
@@ -191,6 +195,7 @@ impl Execution for ExecEnum {
             ExecEnum::TargetPlayer(e) => e.is_active(),
             ExecEnum::Warship(e) => e.is_active(),
             ExecEnum::DoomsdayClock(e) => e.is_active(),
+            ExecEnum::DeleteUnit(e) => e.is_active(),
         }
     }
 
@@ -236,6 +241,7 @@ impl Execution for ExecEnum {
             ExecEnum::TargetPlayer(e) => e.active_during_spawn(),
             ExecEnum::Warship(e) => e.active_during_spawn(),
             ExecEnum::DoomsdayClock(e) => e.active_during_spawn(),
+            ExecEnum::DeleteUnit(e) => e.active_during_spawn(),
         }
     }
 
@@ -310,6 +316,7 @@ impl ExecEnum {
             ExecEnum::TargetPlayer(_) => "TargetPlayerExecution".into(),
             ExecEnum::Warship(_) => "WarshipExecution".into(),
             ExecEnum::DoomsdayClock(_) => "DoomsdayClockExecution".into(),
+            ExecEnum::DeleteUnit(_) => "DeleteUnitExecution".into(),
         }
     }
 }
