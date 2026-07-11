@@ -595,7 +595,20 @@ fn nearby_players_ts_order(game: &Game, small_id: u16) -> Vec<u16> {
                 if !game.is_land(neighbor) || game.is_impassable(neighbor) {
                     continue;
                 }
-                push(game.map.owner_id(neighbor));
+                let owner = game.map.owner_id(neighbor);
+                // TS `PlayerImpl.nearby()`'s direct-neighbor `visit`: an
+                // unowned tile that is nuked (fallout) contributes NO slot at
+                // all (`return` before `ns.add(...)`), unlike a plain unowned
+                // tile, which still adds a TerraNullius slot. Native was
+                // pushing `owner` unconditionally here, so a nuked-TN border
+                // tile occupied a slot in this order-sensitive list (feeding
+                // e.g. `tribe_maybe_attack`'s neighbor shuffle and
+                // `troop_send_cap`'s neighbor scan) that TS's fixed `nearby()`
+                // (see `AiAttackBehaviorNukedTerritory.test.ts`) omits.
+                if owner == 0 && game.has_fallout(neighbor) {
+                    continue;
+                }
+                push(owner);
             }
         }
     }
