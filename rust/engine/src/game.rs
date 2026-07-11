@@ -2935,7 +2935,13 @@ impl Game {
         if sender.is_disconnected || recipient.is_disconnected {
             return false;
         }
-        if sender.tiles_owned == 0 || recipient.tiles_owned == 0 {
+        // TS `PlayerImpl.canSendAllianceRequest`: `this.isFriendly(other) ||
+        // !this.isAlive()` - only the SENDER's aliveness (`isAlive() ==
+        // this._tiles.size > 0`) gates the request; a dead recipient (0
+        // tiles) is not checked at all, so TS allows requesting an alliance
+        // with an eliminated player. Native previously also required
+        // `recipient.tiles_owned != 0`, which is stricter than TS.
+        if sender.tiles_owned == 0 {
             return false;
         }
         if self.is_friendly(sender_small_id, recipient_small_id) {
@@ -3160,6 +3166,28 @@ mod relation_tests {
         assert!(game.is_allied_with(requestor, recipient));
         assert_eq!(game.relation_value(requestor, recipient), -20.0);
         assert_eq!(game.relation_value(recipient, requestor), -30.0);
+    }
+
+    // TS `PlayerImpl.test.ts` "Can't send alliance requests when dead" +
+    // the asymmetric case it doesn't cover (see
+    // `can_send_alliance_request`'s doc comment on the fix this caught).
+    #[test]
+    fn dead_sender_cannot_send_alliance_request() {
+        let mut game = Game::default();
+        let dead = add_human(&mut game, "dead");
+        let alive = add_human(&mut game, "alive");
+        game.player_by_small_id_mut(alive).unwrap().tiles_owned = 1;
+        // `dead` never gained tiles (`tiles_owned == 0`, TS's `!isAlive()`).
+        assert!(!game.can_send_alliance_request(dead, alive));
+    }
+
+    #[test]
+    fn alive_sender_can_send_alliance_request_to_a_dead_recipient() {
+        let mut game = Game::default();
+        let alive = add_human(&mut game, "alive");
+        let dead = add_human(&mut game, "dead");
+        game.player_by_small_id_mut(alive).unwrap().tiles_owned = 1;
+        assert!(game.can_send_alliance_request(alive, dead));
     }
 
     #[test]
