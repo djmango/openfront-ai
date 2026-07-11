@@ -299,4 +299,84 @@ mod tests {
         assert!(!game.unit_exists(2, target));
         assert_eq!(game.unit_veterancy(1, shooter), 1);
     }
+
+    // Ported from `openfront/tests/ShellRandom.test.ts`. Unlike the veterancy tests above
+    // (which pin the damage *formula*), these exercise the underlying PRNG draw directly:
+    // is the roll actually random per-shot, is it bounded to the documented 200-300 range,
+    // and is it reproducible for a fixed tick seed. `getEffectOnTargetForTesting` is used
+    // the same way the TS test file uses it - directly, without a real path/tick loop -
+    // since the shot's own resolution logic (not shell travel) is what's under test.
+    mod shell_random_tests {
+        use super::*;
+
+        #[test]
+        fn shell_damage_varies_randomly_between_200_and_300_base_damage() {
+            let mut game = crate::test_util::plains_game(20, 20);
+            add_player(&mut game, 1);
+            add_player(&mut game, 2);
+            let target = game.build_unit(2, WARSHIP, game.map.ref_xy(10, 10));
+
+            let mut damages = Vec::new();
+            for tick in 0..50u32 {
+                let shooter = game.build_unit(1, WARSHIP, game.map.ref_xy(0, 0));
+                let mut shell = ShellExecution::new(game.map.ref_xy(0, 0), 1, shooter, 2, target);
+                shell.init(&mut game, tick);
+                damages.push(shell.get_effect_on_target_for_testing(&game));
+            }
+
+            assert!(!damages.is_empty());
+            for &d in &damages {
+                assert!((200..=300).contains(&d), "d={d}");
+            }
+        }
+
+        #[test]
+        fn shell_damage_distribution_follows_expected_pattern() {
+            let mut game = crate::test_util::plains_game(20, 20);
+            add_player(&mut game, 1);
+            add_player(&mut game, 2);
+            let target = game.build_unit(2, WARSHIP, game.map.ref_xy(10, 10));
+
+            let mut counts: std::collections::HashMap<i32, u32> = std::collections::HashMap::new();
+            let mut total = 0u32;
+            for tick in 0..1000u32 {
+                let shooter = game.build_unit(1, WARSHIP, game.map.ref_xy(0, 0));
+                let mut shell = ShellExecution::new(game.map.ref_xy(0, 0), 1, shooter, 2, target);
+                shell.init(&mut game, tick);
+                let d = shell.get_effect_on_target_for_testing(&game);
+                *counts.entry(d).or_insert(0) += 1;
+                total += 1;
+            }
+
+            assert!(!counts.is_empty());
+            let max_count = *counts.values().max().unwrap();
+            let min_count = *counts.values().min().unwrap();
+            assert!(
+                (max_count - min_count) < (total as f64 * 0.8) as u32,
+                "max={max_count} min={min_count} total={total}"
+            );
+        }
+
+        #[test]
+        fn shell_damage_is_consistent_with_same_random_seed() {
+            let mut game = crate::test_util::plains_game(20, 20);
+            add_player(&mut game, 1);
+            add_player(&mut game, 2);
+            let target = game.build_unit(2, WARSHIP, game.map.ref_xy(10, 10));
+            let shooter1 = game.build_unit(1, WARSHIP, game.map.ref_xy(0, 0));
+            let shooter2 = game.build_unit(1, WARSHIP, game.map.ref_xy(0, 0));
+
+            let mut shell1 = ShellExecution::new(game.map.ref_xy(0, 0), 1, shooter1, 2, target);
+            let mut shell2 = ShellExecution::new(game.map.ref_xy(0, 0), 1, shooter2, 2, target);
+
+            let tick = 42u32;
+            shell1.init(&mut game, tick);
+            shell2.init(&mut game, tick);
+
+            let d1 = shell1.get_effect_on_target_for_testing(&game);
+            let d2 = shell2.get_effect_on_target_for_testing(&game);
+
+            assert_eq!(d1, d2, "same tick seed must produce the same roll");
+        }
+    }
 }
