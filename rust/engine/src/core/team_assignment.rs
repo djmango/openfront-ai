@@ -79,7 +79,20 @@ pub fn get_max_team_size(num_players: usize, num_teams: usize) -> usize {
 /// TS `assignTeams`  -  team per player id (`"kicked"` when benched) plus Map
 /// insertion order (clan blocks first, then non-clan humans, then shuffled nations).
 pub fn assign_teams(players: &[PlayerInfo], teams: &[String]) -> (HashMap<String, String>, Vec<usize>) {
-    let max_team_size = get_max_team_size(players.len(), teams.len());
+    assign_teams_with_max_size(players, teams, None)
+}
+
+/// TS `assignTeams`'s optional third `maxTeamSize` parameter - every in-game caller
+/// (`GameImpl.ts`'s real team assignment) omits it and gets the default
+/// `getMaxTeamSize(players.length, teams.length)`; only the client-only lobby-preview
+/// helper (`assignTeamsLobbyPreview`, not ported - pure UI) ever overrides it.
+pub fn assign_teams_with_max_size(
+    players: &[PlayerInfo],
+    teams: &[String],
+    max_team_size: Option<usize>,
+) -> (HashMap<String, String>, Vec<usize>) {
+    let max_team_size =
+        max_team_size.unwrap_or_else(|| get_max_team_size(players.len(), teams.len()));
     let mut result: HashMap<String, String> = HashMap::new();
     let mut insertion_order: Vec<usize> = Vec::new();
     let mut team_player_count: HashMap<String, usize> = HashMap::new();

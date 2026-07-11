@@ -456,7 +456,13 @@ impl Game {
         team_areas.get(team_index)
     }
 
-    fn maybe_assign_team(&self, player_type: PlayerType) -> Option<String> {
+    /// TS `GameImpl.maybeAssignTeam` - the on-the-fly per-player fallback used when a
+    /// player joins without an explicit team (`addPlayer(info, team = null)`), as opposed
+    /// to `assign_teams_for_players`'s batch clan/friend-aware grouping used at game start.
+    /// Was previously a stub that always returned `None` for non-Bot player types even
+    /// with a non-empty `player_teams` list - every human/nation joining this way ended up
+    /// on no team at all in Team mode instead of TS's `playerTeams[hash(id) % len]` spread.
+    fn maybe_assign_team(&self, player_type: PlayerType, id_hash: i32) -> Option<String> {
         if self.wire.game_config().game_mode != "Team" {
             return None;
         }
@@ -467,7 +473,8 @@ impl Game {
         if teams.is_empty() {
             return None;
         }
-        None
+        let idx = (id_hash as usize) % teams.len();
+        Some(teams[idx].clone())
     }
 
     pub fn assign_teams_for_players(&mut self, players: &mut [PlayerInfo]) {
@@ -883,7 +890,7 @@ impl Game {
         let team = info
             .team
             .clone()
-            .or_else(|| self.maybe_assign_team(info.player_type));
+            .or_else(|| self.maybe_assign_team(info.player_type, id_hash));
         let idx = self.players.len();
         self.players.push(Player {
             id: info.id.clone(),
@@ -3174,8 +3181,16 @@ impl Game {
         self.ticks_since_start() as i64 / 10
     }
 
-    pub fn is_on_same_team(&self, _a: u16, _winner: &str) -> bool {
-        false
+    /// TS `Player.isOnSameTeam(other)`, called with the winner's `PlayerID` (not a
+    /// `small_id`) at its only call site (`nation_emoji.rs`'s `congratulate_winner`).
+    /// Was previously a hardcoded stub always returning `false` - every nation
+    /// unconditionally sent the "congratulate winner" emoji even when the winner was
+    /// its own teammate, which TS's real `isOnSameTeam` suppresses.
+    pub fn is_on_same_team(&self, a: u16, winner_id: &str) -> bool {
+        let Some(winner) = self.player_by_id(winner_id) else {
+            return false;
+        };
+        self.players_on_same_team(a, winner.small_id)
     }
 
     pub fn players_on_same_team(&self, a: u16, b: u16) -> bool {
@@ -4648,5 +4663,144 @@ mod veterancy_tests {
         game.record_trade_capture(1, transport);
 
         assert_eq!(game.unit_veterancy(1, transport), 0);
+    }
+}
+
+// Ported from `Team.test.ts` - covers `GameImpl.addPlayer`'s on-the-fly
+// `maybeAssignTeam` fallback (as opposed to `TeamAssignment.test.ts`'s batch
+// `assignTeams`, ported separately in `core/team_assignment.rs`).
+#[cfg(test)]
+mod team_join_tests {
+    use super::{Game, GameConfig, PlayerInfo, PlayerType};
+    use crate::core::config::Config as WireConfig;
+    use crate::core::schemas::{GameConfig as WireGameConfig, NationsConfig, PlayerTeamsConfig};
+    use crate::map::{GameMap, MapMeta};
+
+    fn team_mode_game(num_teams: u32) -> Game {
+        let meta = MapMeta {
+            width: 10,
+            height: 1,
+            num_land_tiles: 10,
+        };
+        let terrain = vec![0x80u8; 10];
+        let map = GameMap::from_terrain_bytes(&meta, &terrain).unwrap();
+        let mini_map = GameMap::from_terrain_bytes(&meta, &terrain).unwrap();
+        let wire_cfg = WireGameConfig {
+            game_map: "Plains".into(),
+            difficulty: "Medium".into(),
+            donate_gold: false,
+            donate_troops: false,
+            game_type: "Singleplayer".into(),
+            game_mode: "Team".into(),
+            game_map_size: "Normal".into(),
+            nations: NationsConfig::Mode("default".into()),
+            bots: 0,
+            infinite_gold: false,
+            infinite_troops: false,
+            instant_build: false,
+            random_spawn: false,
+            doomsday_clock: None,
+            disabled_units: None,
+            player_teams: Some(PlayerTeamsConfig::Count(num_teams)),
+            disable_alliances: None,
+            spawn_immunity_duration: None,
+            starting_gold: None,
+            gold_multiplier: None,
+            max_timer_value: None,
+            ranked_type: None,
+        };
+        let mut game = Game::new(
+            String::new(),
+            GameConfig::default(),
+            WireConfig::new(wire_cfg, false),
+            map,
+            mini_map,
+            None,
+        );
+        game.end_spawn_phase();
+        game
+    }
+
+    fn add_player(game: &mut Game, id: &str, player_type: PlayerType) -> u16 {
+        game.add_from_info(&PlayerInfo {
+            name: id.into(),
+            player_type,
+            client_id: Some(id.into()),
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        })
+    }
+
+    #[test]
+    fn bots_share_a_team_but_are_not_mutually_friendly() {
+        let mut game = team_mode_game(2);
+        let bot1 = add_player(&mut game, "bot1", PlayerType::Bot);
+        let bot2 = add_player(&mut game, "bot2", PlayerType::Bot);
+
+        assert_eq!(
+            game.player_by_small_id(bot1).unwrap().team.as_deref(),
+            Some(crate::core::team_assignment::BOT_TEAM)
+        );
+        assert_eq!(
+            game.player_by_small_id(bot2).unwrap().team.as_deref(),
+            Some(crate::core::team_assignment::BOT_TEAM)
+        );
+        // Same nominal team, but `Bot` is explicitly excluded from `players_on_same_team`'s
+        // friendliness check - tribes still fight each other.
+        assert!(!game.players_on_same_team(bot1, bot2));
+    }
+
+    #[test]
+    fn humans_joining_without_an_explicit_team_get_hash_spread_across_teams() {
+        // Before the fix, `maybe_assign_team` returned `None` for every non-Bot player
+        // type regardless of `player_teams`, so both humans ended up on no team at all
+        // (`players_on_same_team` treats "no team" as never-same-team, which would have
+        // made this assertion pass for the wrong reason). Assert both are actually
+        // assigned a real team, then that they land on different ones - matching TS
+        // `GameImpl.maybeAssignTeam`'s `simpleHash(id) % playerTeams.length` spread for
+        // these specific ids.
+        let mut game = team_mode_game(2);
+        let human1 = add_player(&mut game, "human1", PlayerType::Human);
+        let human2 = add_player(&mut game, "human2", PlayerType::Human);
+
+        assert!(game.player_by_small_id(human1).unwrap().team.is_some());
+        assert!(game.player_by_small_id(human2).unwrap().team.is_some());
+        assert!(!game.players_on_same_team(human1, human2));
+    }
+
+    #[test]
+    fn congratulate_winner_recognizes_a_teammate_as_the_winner() {
+        // `is_on_same_team` takes the winner's `PlayerID` string (matching its only call
+        // site, `nation_emoji.rs`), not a `small_id` - was a hardcoded-`false` stub.
+        let mut game = team_mode_game(2);
+        let p1 = add_player(&mut game, "p1", PlayerType::Nation);
+        let p2 = add_player(&mut game, "p2", PlayerType::Nation);
+        game.player_by_small_id_mut(p1).unwrap().team = Some("Red".into());
+        game.player_by_small_id_mut(p2).unwrap().team = Some("Red".into());
+        let p2_id = game.player_by_small_id(p2).unwrap().id.clone();
+
+        assert!(game.is_on_same_team(p1, &p2_id));
+    }
+
+    #[test]
+    fn congratulate_winner_does_not_recognize_an_opposing_team_as_the_winner() {
+        let mut game = team_mode_game(2);
+        let p1 = add_player(&mut game, "p1", PlayerType::Nation);
+        let p2 = add_player(&mut game, "p2", PlayerType::Nation);
+        game.player_by_small_id_mut(p1).unwrap().team = Some("Red".into());
+        game.player_by_small_id_mut(p2).unwrap().team = Some("Blue".into());
+        let p2_id = game.player_by_small_id(p2).unwrap().id.clone();
+
+        assert!(!game.is_on_same_team(p1, &p2_id));
+    }
+
+    #[test]
+    fn is_on_same_team_returns_false_for_an_unknown_winner_id() {
+        let mut game = team_mode_game(2);
+        let p1 = add_player(&mut game, "p1", PlayerType::Nation);
+
+        assert!(!game.is_on_same_team(p1, "no-such-player"));
     }
 }
