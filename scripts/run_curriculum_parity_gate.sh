@@ -113,7 +113,7 @@ CARGO_ARGS=(
 if [[ -n "${OUTCOME_TARGET_DIR:-}" ]]; then
   export CARGO_TARGET_DIR="$OUTCOME_TARGET_DIR"
 fi
-REPORT_FILE="$(mktemp -t curriculum_gate_report).json"
+REPORT_FILE="$(mktemp -t curriculum_gate_report.XXXXXX).json"
 cargo "${CARGO_ARGS[@]}" > "$REPORT_FILE"
 echo "[curriculum_parity] full report -> $REPORT_FILE" >&2
 

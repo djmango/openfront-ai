@@ -50,7 +50,17 @@
  * Usage (from openfront-ai/):
  *   openfront/node_modules/.bin/tsx datagen/gen_curriculum_parity.ts \
  *     --out records/curriculum-parity-v1 [--games-per-bucket 5] \
- *     [--ticks 4500] [--max-timer 6] [--buckets 0,5,10]
+ *     [--ticks 4500] [--max-timer 6] [--buckets 0,5,10] \
+ *     [--seed-offset 0] [--skip-manifest]
+ *
+ * Generation itself is a single-threaded, CPU-bound Node loop with no
+ * internal parallelism (unlike the later oracle/native gate steps, which
+ * already fan out over --jobs). To use more than one core, shard by bucket
+ * and/or seed across multiple OS processes instead - e.g. one process per
+ * bucket via --buckets, or one per (bucket, seed) via --buckets B
+ * --games-per-bucket 1 --seed-offset S --skip-manifest, all pointed at the
+ * same --out dir (record filenames are unique per bucket+seed, so this is
+ * safe to run concurrently).
  */
 import * as fs from "fs";
 import * as path from "path";
@@ -228,6 +238,18 @@ async function main() {
   const wantedBots = bucketFilter
     ? new Set(bucketFilter.split(",").map((s) => parseInt(s.trim(), 10)))
     : null;
+  // Seed window (not total count): generation is a single-threaded CPU-bound
+  // loop with no parallelism of its own, so each seed within a bucket takes
+  // as long serially as if it were the only one. `--seed-offset` lets the
+  // caller shard one (bucket, seed) range per OS process - e.g. one process
+  // per bucket, or one per game - and run them concurrently instead
+  // (records are independent files with no shared state, so this is safe).
+  // `--skip-manifest` avoids clobbering `${outDir}.manifest.json` when
+  // multiple sharded processes target the same --out dir concurrently; it's
+  // informational only (see analyze_curriculum_parity.py's header comment -
+  // nothing downstream reads it).
+  const seedOffset = parseInt(getArg("seed-offset", "0"), 10);
+  const skipManifest = args.includes("--skip-manifest");
 
   fs.mkdirSync(outDir, { recursive: true });
   const manifest: ManifestEntry[] = [];
@@ -235,7 +257,7 @@ async function main() {
   for (const bucket of BUCKETS) {
     if (wantedBots && !wantedBots.has(bucket.bots)) continue;
     console.log(`=== bucket bots=${bucket.bots} (${bucket.stageLabel}) ===`);
-    for (let g = 0; g < gamesPerBucket; g++) {
+    for (let g = seedOffset; g < seedOffset + gamesPerBucket; g++) {
       const mapKey = bucket.mapKeys[g % bucket.mapKeys.length];
       const gameId = `curr-b${String(bucket.bots).padStart(3, "0")}-s${g}-${mapKey.toLowerCase()}`;
       const config = buildConfig(mapKey, bucket.bots, bucket.nations, bucket.difficulty, maxTimerMinutes);
@@ -272,13 +294,17 @@ async function main() {
     }
   }
 
+  console.log(`\nwrote ${manifest.length} records -> ${outDir}`);
+  if (skipManifest) {
+    console.log("skipping manifest write (--skip-manifest, sharded run)");
+    return;
+  }
   // Sibling to outDir, NOT inside it: datagen/replay.ts's --outcome-oracle
   // (and the plain replay CLI) glob every *.json/*.json.gz file under the
   // records dir as a game record, so a manifest.json living inside would
   // get mistaken for one and crash decompressGameRecord() on it.
   const manifestPath = `${outDir}.manifest.json`;
   fs.writeFileSync(manifestPath, JSON.stringify({ generatedAt: new Date().toISOString(), numTurns, maxTimerMinutes, records: manifest }, null, 2));
-  console.log(`\nwrote ${manifest.length} records -> ${outDir}`);
   console.log(`wrote manifest -> ${manifestPath}`);
 }
 
