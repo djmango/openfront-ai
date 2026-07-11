@@ -49,3 +49,8 @@ for gid in "${GAME_IDS[@]}"; do
 done
 
 echo "done: $(ls "$OUT_DIR" | wc -l | tr -d ' ') fixture(s) in $OUT_DIR"
+
+# A couple of these records' maps were rebalanced upstream after capture
+# (see rust/engine/src/core/terrain.rs's `map_dir_for_commit` doc comment) -
+# fetch the frozen period-correct snapshot(s) needed to replay them, too.
+bash "$(dirname "${BASH_SOURCE[0]}")/fetch_test_fixture_maps.sh"
