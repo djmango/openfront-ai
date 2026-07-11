@@ -4804,3 +4804,146 @@ mod team_join_tests {
         assert!(!game.is_on_same_team(p1, "no-such-player"));
     }
 }
+
+// Ported from `UnitGrid.test.ts`. Native has no spatial-cell grid (`spatial.rs` is an
+// unrelated transport-pathfinding module) - `has_unit_nearby_any`/`nearby_structures_any`
+// are a flat per-tick scan over all players' units that produce the same *query results*
+// as TS's `UnitGrid.hasUnitNearby`/`nearbyUnits`, so these tests exercise that behavioral
+// equivalence rather than any internal grid-cell mechanics.
+#[cfg(test)]
+mod unit_grid_tests {
+    use super::{Game, PlayerInfo, PlayerType};
+    use crate::core::schemas::unit_type;
+    use crate::test_util::plains_game;
+
+    fn add_human(game: &mut Game, id: &str) -> u16 {
+        game.add_from_info(&PlayerInfo {
+            name: id.into(),
+            player_type: PlayerType::Human,
+            client_id: Some(id.into()),
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        })
+    }
+
+    fn check_range(map_size: u32, unit_pos_x: u32, range_check_x: u32, range: u32) -> bool {
+        let mut game = plains_game(map_size, map_size);
+        let p1 = add_human(&mut game, "test_id");
+        let unit_tile = game.map.ref_xy(unit_pos_x, 0);
+        game.build_unit(p1, unit_type::DEFENSE_POST, unit_tile);
+        let check_tile = game.map.ref_xy(range_check_x, 0);
+        game.has_unit_nearby_any(check_tile, range, unit_type::DEFENSE_POST)
+    }
+
+    fn nearby_count(
+        map_size: u32,
+        unit_pos_x: u32,
+        range_check_x: u32,
+        range: u32,
+        unit_types: &[&str],
+    ) -> usize {
+        let mut game = plains_game(map_size, map_size);
+        let p1 = add_human(&mut game, "test_id");
+        let unit_tile = game.map.ref_xy(unit_pos_x, 0);
+        for &t in unit_types {
+            game.build_unit(p1, t, unit_tile);
+        }
+        let check_tile = game.map.ref_xy(range_check_x, 0);
+        game.nearby_structures_any(check_tile, range, unit_types).len()
+    }
+
+    #[test]
+    fn has_unit_nearby_same_spot() {
+        assert!(check_range(100, 0, 0, 10));
+    }
+
+    #[test]
+    fn has_unit_nearby_exactly_on_the_range() {
+        assert!(check_range(100, 0, 10, 10));
+    }
+
+    #[test]
+    fn has_unit_nearby_exactly_one_outside_the_range() {
+        assert!(!check_range(100, 0, 11, 10));
+    }
+
+    #[test]
+    fn has_unit_nearby_inside_a_huge_range() {
+        assert!(check_range(200, 0, 42, 198));
+    }
+
+    #[test]
+    fn has_unit_nearby_exactly_one_outside_a_huge_range() {
+        assert!(!check_range(200, 0, 199, 198));
+    }
+
+    #[test]
+    fn nearby_units_same_spot() {
+        assert_eq!(nearby_count(100, 0, 0, 10, &[unit_type::WARSHIP]), 1);
+    }
+
+    #[test]
+    fn nearby_units_two_types_in_range() {
+        assert_eq!(
+            nearby_count(100, 0, 0, 10, &[unit_type::CITY, unit_type::PORT]),
+            2
+        );
+    }
+
+    #[test]
+    fn nearby_units_no_types_requested() {
+        assert_eq!(nearby_count(100, 0, 0, 10, &[]), 0);
+    }
+
+    #[test]
+    fn nearby_units_exactly_on_the_range() {
+        assert_eq!(nearby_count(100, 0, 10, 10, &[unit_type::CITY]), 1);
+    }
+
+    #[test]
+    fn nearby_units_one_outside_the_range() {
+        assert_eq!(nearby_count(100, 0, 11, 10, &[unit_type::DEFENSE_POST]), 0);
+    }
+
+    #[test]
+    fn nearby_units_inside_a_huge_range() {
+        assert_eq!(
+            nearby_count(200, 0, 42, 198, &[unit_type::TRADE_SHIP]),
+            1
+        );
+    }
+
+    #[test]
+    fn nearby_units_one_outside_a_huge_range() {
+        assert_eq!(
+            nearby_count(200, 0, 199, 198, &[unit_type::TRANSPORT]),
+            0
+        );
+    }
+
+    #[test]
+    fn nearby_units_ignores_a_type_not_present() {
+        let mut game = plains_game(100, 100);
+        let p1 = add_human(&mut game, "test_id");
+        let tile = game.map.ref_xy(0, 0);
+        game.build_unit(p1, unit_type::CITY, tile);
+        assert_eq!(game.nearby_structures_any(tile, 10, &[unit_type::PORT]).len(), 0);
+    }
+
+    #[test]
+    fn nearby_units_one_inside_one_outside_of_range() {
+        let mut game = plains_game(100, 100);
+        let p1 = add_human(&mut game, "test_id");
+        let inside_tile = game.map.ref_xy(0, 0);
+        game.build_unit(p1, unit_type::CITY, inside_tile);
+        let outside_tile = game.map.ref_xy(99, 0);
+        game.build_unit(p1, unit_type::CITY, outside_tile);
+        let check_tile = game.map.ref_xy(0, 0);
+        assert_eq!(
+            game.nearby_structures_any(check_tile, 10, &[unit_type::CITY]).len(),
+            1
+        );
+    }
+}
