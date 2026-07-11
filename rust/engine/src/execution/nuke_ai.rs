@@ -899,3 +899,441 @@ fn bounding_box_tiles(game: &Game, center: TileRef, radius: i32) -> Vec<TileRef>
 
     tiles
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::PlayerInfo;
+
+    fn tiny_all_land_map(width: u32, height: u32) -> crate::map::GameMap {
+        let n = (width * height) as usize;
+        crate::map::GameMap::from_terrain_bytes(
+            &crate::map::MapMeta {
+                width,
+                height,
+                num_land_tiles: n as u32,
+            },
+            &vec![0x80u8; n],
+        )
+        .unwrap()
+    }
+
+    fn tiny_game(width: u32, height: u32, difficulty: &str, game_mode: &str) -> Game {
+        let mut game = Game::default();
+        game.map = tiny_all_land_map(width, height);
+        game.wire = crate::core::config::Config::new(
+            crate::core::schemas::GameConfig {
+                game_map: "tiny".into(),
+                difficulty: difficulty.into(),
+                donate_gold: false,
+                donate_troops: false,
+                game_type: "Singleplayer".into(),
+                game_mode: game_mode.into(),
+                game_map_size: "Normal".into(),
+                nations: crate::core::schemas::NationsConfig::Mode("default".into()),
+                bots: 0,
+                infinite_gold: false,
+                infinite_troops: false,
+                instant_build: false,
+                random_spawn: false,
+                doomsday_clock: None,
+                disabled_units: None,
+                player_teams: None,
+                disable_alliances: None,
+                spawn_immunity_duration: None,
+                starting_gold: None,
+                gold_multiplier: None,
+                max_timer_value: None,
+                ranked_type: None,
+            },
+            false,
+        );
+        game.end_spawn_phase();
+        game
+    }
+
+    fn add_player(game: &mut Game, id: &str, player_type: PlayerType) -> u16 {
+        game.add_from_info(&PlayerInfo {
+            name: id.into(),
+            player_type,
+            client_id: Some(id.into()),
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        })
+    }
+
+    #[test]
+    fn maybe_send_nuke_is_noop_without_a_missile_silo() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let attacker = add_player(&mut game, "attacker", PlayerType::Nation);
+        let _target = add_player(&mut game, "target", PlayerType::Human);
+        if let Some(p) = game.player_by_small_id_mut(attacker) {
+            p.gold = 10_000_000;
+            p.tiles_owned = 1;
+        }
+        let mut random = PseudoRandom::new(1);
+        let mut nuke_state = NationNukeState::default();
+        let mut emoji_state = NationEmojiState::default();
+
+        maybe_send_nuke(
+            &mut game,
+            &mut random,
+            attacker,
+            false,
+            &mut nuke_state,
+            &mut emoji_state,
+        );
+
+        assert!(nuke_state.recently_sent_nukes.is_empty());
+        assert_eq!(game.player_by_small_id(attacker).unwrap().gold, 10_000_000);
+    }
+
+    #[test]
+    fn maybe_send_nuke_is_noop_when_missile_silo_is_disabled() {
+        let mut game = tiny_game(20, 20, "Hard", "Free For All");
+        game.wire = crate::core::config::Config::new(
+            crate::core::schemas::GameConfig {
+                game_map: "tiny".into(),
+                difficulty: "Hard".into(),
+                donate_gold: false,
+                donate_troops: false,
+                game_type: "Singleplayer".into(),
+                game_mode: "Free For All".into(),
+                game_map_size: "Normal".into(),
+                nations: crate::core::schemas::NationsConfig::Mode("default".into()),
+                bots: 0,
+                infinite_gold: false,
+                infinite_troops: false,
+                instant_build: false,
+                random_spawn: false,
+                doomsday_clock: None,
+                disabled_units: Some(vec![unit_type::MISSILE_SILO.to_string()]),
+                player_teams: None,
+                disable_alliances: None,
+                spawn_immunity_duration: None,
+                starting_gold: None,
+                gold_multiplier: None,
+                max_timer_value: None,
+                ranked_type: None,
+            },
+            false,
+        );
+        let attacker = add_player(&mut game, "attacker", PlayerType::Nation);
+        let target = add_player(&mut game, "target", PlayerType::Human);
+        let silo_tile = game.ref_xy(0, 0);
+        game.build_unit(attacker, unit_type::MISSILE_SILO, silo_tile);
+        if let Some(p) = game.player_by_small_id_mut(attacker) {
+            p.gold = 10_000_000;
+            p.tiles_owned = 1;
+        }
+        let _ = target;
+
+        let mut random = PseudoRandom::new(1);
+        let mut nuke_state = NationNukeState::default();
+        let mut emoji_state = NationEmojiState::default();
+
+        maybe_send_nuke(
+            &mut game,
+            &mut random,
+            attacker,
+            false,
+            &mut nuke_state,
+            &mut emoji_state,
+        );
+
+        assert!(nuke_state.recently_sent_nukes.is_empty());
+    }
+
+    #[test]
+    fn is_richest_nation_true_only_when_no_nation_has_more_gold() {
+        let mut game = tiny_game(10, 10, "Medium", "Free For All");
+        let me = add_player(&mut game, "me", PlayerType::Nation);
+        let richer = add_player(&mut game, "richer", PlayerType::Nation);
+        let human = add_player(&mut game, "human", PlayerType::Human);
+        game.player_by_small_id_mut(me).unwrap().gold = 1_000;
+        game.player_by_small_id_mut(richer).unwrap().gold = 2_000;
+        game.player_by_small_id_mut(human).unwrap().gold = 1_000_000; // not a Nation - ignored.
+
+        assert!(!is_richest_nation(&game, me));
+
+        game.player_by_small_id_mut(richer).unwrap().gold = 500;
+        assert!(is_richest_nation(&game, me));
+    }
+
+    #[test]
+    fn find_high_density_target_ignores_bots_friendlies_and_low_structure_counts() {
+        let mut game = tiny_game(30, 30, "Impossible", "Free For All");
+        let me = add_player(&mut game, "me", PlayerType::Nation);
+        let bot = add_player(&mut game, "bot", PlayerType::Bot);
+        let sparse = add_player(&mut game, "sparse", PlayerType::Human);
+        let dense = add_player(&mut game, "dense", PlayerType::Human);
+
+        for (sid, count) in [(bot, 50), (sparse, 50), (dense, 4)] {
+            for i in 0..count {
+                game.conquer(sid, game.ref_xy(i, 0));
+            }
+        }
+        // Bot: dense in structures, but excluded entirely by player_type.
+        for i in 0..10 {
+            game.build_unit(bot, unit_type::CITY, game.ref_xy(i, 0));
+        }
+        // Sparse: too few total structure levels to qualify.
+        game.build_unit(sparse, unit_type::CITY, game.ref_xy(0, 0));
+        // Dense: only 4 tiles owned but 6 structure levels (>= the min sum of
+        // 5) at a density (1.5) way above HIGH_DENSITY_NUKE_THRESHOLD (1/75).
+        for i in 0..6 {
+            game.build_unit(dense, unit_type::DEFENSE_POST, game.ref_xy(i % 4, 1));
+        }
+
+        assert_eq!(find_high_density_target(&game, me), Some(dense));
+    }
+
+    #[test]
+    fn get_perceived_nuke_cost_uses_actual_cost_with_two_players_left() {
+        let mut game = tiny_game(10, 10, "Medium", "Free For All");
+        let me = add_player(&mut game, "me", PlayerType::Nation);
+        let _other = add_player(&mut game, "other", PlayerType::Human);
+        let nuke_state = NationNukeState {
+            atom_bomb_perceived_cost: 999_999_999,
+            ..Default::default()
+        };
+
+        let cost = get_perceived_nuke_cost(&game, me, &nuke_state, unit_type::ATOM_BOMB);
+        assert_eq!(cost, game.structure_cost(me, unit_type::ATOM_BOMB));
+    }
+
+    #[test]
+    fn get_perceived_nuke_cost_uses_escalated_value_with_more_players_and_low_gold() {
+        let mut game = tiny_game(10, 10, "Medium", "Free For All");
+        let me = add_player(&mut game, "me", PlayerType::Nation);
+        let _p2 = add_player(&mut game, "p2", PlayerType::Human);
+        let _p3 = add_player(&mut game, "p3", PlayerType::Human);
+        game.player_by_small_id_mut(me).unwrap().gold = 0;
+        let nuke_state = NationNukeState {
+            atom_bomb_perceived_cost: 999_999_999,
+            ..Default::default()
+        };
+
+        let cost = get_perceived_nuke_cost(&game, me, &nuke_state, unit_type::ATOM_BOMB);
+        assert_eq!(cost, 999_999_999);
+    }
+
+    #[test]
+    fn send_nuke_escalates_perceived_cost_and_records_the_event() {
+        let mut game = tiny_game(10, 10, "Medium", "Free For All");
+        let me = add_player(&mut game, "me", PlayerType::Nation);
+        let target = add_player(&mut game, "target", PlayerType::Human);
+        let atom_cost = game.structure_cost(me, unit_type::ATOM_BOMB);
+        let mut nuke_state = NationNukeState {
+            atom_bomb_perceived_cost: atom_cost,
+            ..Default::default()
+        };
+        let mut emoji_state = NationEmojiState::default();
+        let mut random = PseudoRandom::new(7);
+        let tile = game.ref_xy(3, 3);
+
+        send_nuke(
+            &mut game,
+            &mut random,
+            me,
+            &mut nuke_state,
+            &mut emoji_state,
+            tile,
+            unit_type::ATOM_BOMB,
+            target,
+            0,
+        );
+
+        assert_eq!(nuke_state.atom_bombs_launched, 1);
+        assert_eq!(nuke_state.atom_bomb_perceived_cost, atom_cost * 150 / 100);
+        assert_eq!(nuke_state.recently_sent_nukes.len(), 1);
+        assert_eq!(nuke_state.recently_sent_nukes[0].1, tile);
+    }
+
+    #[test]
+    fn remove_old_nuke_events_drops_only_entries_past_max_age() {
+        let mut game = tiny_game(10, 10, "Medium", "Free For All");
+        for _ in 0..1_000 {
+            game.execute_next_tick();
+        }
+        let mut nuke_state = NationNukeState {
+            recently_sent_nukes: vec![
+                (100, 0, unit_type::ATOM_BOMB.to_string()), // 900 ticks old -> dropped.
+                (500, 1, unit_type::ATOM_BOMB.to_string()), // 500 ticks old -> kept.
+            ],
+            ..Default::default()
+        };
+
+        remove_old_nuke_events(&game, &mut nuke_state);
+
+        assert_eq!(nuke_state.recently_sent_nukes.len(), 1);
+        assert_eq!(nuke_state.recently_sent_nukes[0].0, 500);
+    }
+
+    #[test]
+    fn is_valid_nuke_tile_on_medium_only_allows_the_targets_own_tiles() {
+        let mut game = tiny_game(10, 10, "Medium", "Free For All");
+        let me = add_player(&mut game, "me", PlayerType::Nation);
+        let target = add_player(&mut game, "target", PlayerType::Human);
+        let their_tile = game.ref_xy(1, 1);
+        let unowned_tile = game.ref_xy(5, 5);
+        game.conquer(target, their_tile);
+
+        assert!(is_valid_nuke_tile(&game, me, their_tile, target));
+        assert!(!is_valid_nuke_tile(&game, me, unowned_tile, target));
+    }
+
+    #[test]
+    fn is_valid_nuke_tile_on_hard_allows_terra_nullius_too() {
+        let mut game = tiny_game(10, 10, "Hard", "Free For All");
+        let me = add_player(&mut game, "me", PlayerType::Nation);
+        let target = add_player(&mut game, "target", PlayerType::Human);
+        let unowned_tile = game.ref_xy(5, 5);
+
+        assert!(is_valid_nuke_tile(&game, me, unowned_tile, target));
+    }
+
+    #[test]
+    fn nuke_tile_score_on_medium_penalizes_a_nearby_sam_to_negative() {
+        let mut game = tiny_game(20, 20, "Medium", "Free For All");
+        let target = add_player(&mut game, "target", PlayerType::Human);
+        let sam_tile = game.ref_xy(10, 10);
+        game.build_unit(target, unit_type::SAM_LAUNCHER, sam_tile);
+        let target_tile = game.ref_xy(10, 10);
+        let structures = vec![StructureSnapshot {
+            tile: sam_tile,
+            level: 1,
+            unit_type: unit_type::SAM_LAUNCHER.to_string(),
+        }];
+        let silo_tiles = vec![game.ref_xy(0, 0)];
+
+        let value = nuke_tile_score(
+            &game,
+            target_tile,
+            &silo_tiles,
+            &structures,
+            unit_type::ATOM_BOMB,
+            &[],
+        );
+        assert_eq!(value, -1.0);
+    }
+
+    #[test]
+    fn nuke_tile_score_penalizes_overlap_with_a_recently_sent_nuke() {
+        let mut game = tiny_game(20, 20, "Medium", "Free For All");
+        let _target = add_player(&mut game, "target", PlayerType::Human);
+        let tile = game.ref_xy(10, 10);
+        let silo_tiles = vec![tile];
+        let recently_sent = vec![(0u32, tile, unit_type::ATOM_BOMB.to_string())];
+
+        let with_recent = nuke_tile_score(
+            &game,
+            tile,
+            &silo_tiles,
+            &[],
+            unit_type::ATOM_BOMB,
+            &recently_sent,
+        );
+        let without_recent =
+            nuke_tile_score(&game, tile, &silo_tiles, &[], unit_type::ATOM_BOMB, &[]);
+        assert_eq!(without_recent - with_recent, 1_000_000.0);
+    }
+
+    #[test]
+    fn bounding_box_tiles_returns_only_the_perimeter() {
+        let game = tiny_game(20, 20, "Medium", "Free For All");
+        let center = game.ref_xy(10, 10);
+        let perimeter = bounding_box_tiles(&game, center, 2);
+
+        // A radius-2 box has an 5x5 footprint; the perimeter is everything
+        // except the inner 3x3, i.e. 25 - 9 = 16 tiles.
+        assert_eq!(perimeter.len(), 16);
+        assert!(!perimeter.contains(&center));
+        assert!(perimeter.contains(&game.ref_xy(8, 8)));
+        assert!(perimeter.contains(&game.ref_xy(12, 12)));
+    }
+
+    /// End-to-end smoke test for the whole `maybe_send_nuke` entry point (not
+    /// just its sub-functions): a nation with a missile silo, favorable gold,
+    /// and a hostile human neighbor should autonomously build and launch a
+    /// real `NukeExecution` at them within a couple of ticks. Uses "Hard" +
+    /// exactly 2 alive players so `findBestNukeTarget`'s very first branch
+    /// (target the only other player) fires deterministically, without
+    /// needing to fake relations or dice rolls.
+    #[test]
+    fn maybe_send_nuke_builds_and_launches_a_real_nuke_end_to_end() {
+        let size = 70u32;
+        let mut game = tiny_game(size, size, "Hard", "Free For All");
+        let attacker = add_player(&mut game, "attacker", PlayerType::Nation);
+        let target = add_player(&mut game, "target", PlayerType::Human);
+
+        // Target owns essentially the whole map; attacker owns only its own
+        // silo's tile, far from the target's structure so every bounding-box
+        // tile checked by `isValidNukeTile` stays inside the target's territory.
+        for x in 0..size {
+            for y in 0..size {
+                let t = game.ref_xy(x, y);
+                if x == 0 && y == 0 {
+                    continue;
+                }
+                game.conquer(target, t);
+            }
+        }
+        let silo_tile = game.ref_xy(0, 0);
+        game.conquer(attacker, silo_tile);
+        game.build_unit(attacker, unit_type::MISSILE_SILO, silo_tile);
+        if let Some(p) = game.player_by_small_id_mut(attacker) {
+            p.gold = 1_000_000; // enough for an atom bomb (750k), not a hydrogen bomb (5M).
+        }
+
+        let target_structure_tile = game.ref_xy(35, 35);
+        game.build_unit(target, unit_type::CITY, target_structure_tile);
+
+        // Nukes can't be built while the global spawn-immunity window is
+        // active (see `nuke_spawn`'s `is_spawn_immunity_active` guard).
+        for _ in 0..game.wire.spawn_immunity_duration() + 1 {
+            game.execute_next_tick();
+        }
+
+        let mut random = PseudoRandom::new(42);
+        let mut nuke_state = NationNukeState {
+            atom_bomb_perceived_cost: game.structure_cost(attacker, unit_type::ATOM_BOMB),
+            hydrogen_bomb_perceived_cost: game.structure_cost(attacker, unit_type::HYDROGEN_BOMB),
+            ..Default::default()
+        };
+        let mut emoji_state = NationEmojiState::default();
+
+        maybe_send_nuke(
+            &mut game,
+            &mut random,
+            attacker,
+            false,
+            &mut nuke_state,
+            &mut emoji_state,
+        );
+
+        assert_eq!(
+            nuke_state.recently_sent_nukes.len(),
+            1,
+            "maybe_send_nuke should have queued exactly one nuke"
+        );
+        assert_eq!(nuke_state.atom_bombs_launched, 1);
+
+        // Let the queued `NukeExecution` actually init (tick 1) and spawn (tick 2).
+        game.execute_next_tick();
+        game.execute_next_tick();
+
+        assert_eq!(
+            game.unit_count(attacker, unit_type::ATOM_BOMB),
+            1,
+            "NukeExecution should have spawned a real in-flight Atom Bomb unit"
+        );
+        assert!(
+            game.player_by_small_id(attacker).unwrap().gold < 1_000_000,
+            "building the nuke should have spent gold"
+        );
+    }
+}
