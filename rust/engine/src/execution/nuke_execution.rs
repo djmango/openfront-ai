@@ -178,6 +178,15 @@ impl NukeExecution {
                         }
                     }
                 }
+                // TS `NukeExecution.detonate` also spends this same per-tile death
+                // rate against the impacted player's already-launched attacks and
+                // in-flight transport ships (see `apply_nuke_deaths_to_deployed_forces`).
+                game.apply_nuke_deaths_to_deployed_forces(
+                    owner_sid,
+                    &self.nuke_type,
+                    num_tiles_left,
+                    max_troops,
+                );
             }
         }
 
@@ -416,6 +425,115 @@ pub(crate) fn would_nuke_break_alliance(
         game.wire.nuke_alliance_break_threshold(),
     )
     .contains(&ally_small_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::execution::{AttackExecution, ExecEnum};
+    use crate::game::{PlayerInfo, PlayerType};
+
+    // `PlayerType::Bot` (not `Human`) deliberately, so spawn immunity (which only
+    // gates Human/Nation attackers/defenders, see `Game::is_player_immune`) doesn't
+    // interfere with the attack's `init()` in the very next tick - matching the
+    // existing `boat_landed_attack_cancels_opposing_land_attack` test's pattern in
+    // `attack.rs`, since these tests aren't about immunity at all.
+    fn add_bot(game: &mut Game, id: &str) -> u16 {
+        game.add_from_info(&PlayerInfo {
+            name: id.into(),
+            player_type: PlayerType::Bot,
+            client_id: Some(id.into()),
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        })
+    }
+
+    // TS `NukeExecution.detonate` (`openfront/src/core/execution/NukeExecution.ts`)
+    // applies the SAME per-impacted-tile `nukeDeathFactor` rate to a nuked player's
+    // home troops *and* to every one of their live outgoing attacks - ported here as
+    // a direct call to `Game::apply_nuke_deaths_to_deployed_forces` (the mechanism
+    // this test caught missing) rather than a literal port of `Attack.test.ts`'s
+    // "Nuke reduce attacking troop counts", whose exact troop-loss numbers depend on
+    // the `ocean_and_land` fixture map's real spawn/border geometry (the nuke lands
+    // on the attacker's own spawn tile only because that tile has, by then, already
+    // been conquered by the attacker's in-progress attack against a neighboring
+    // spawn 5 tiles away) - `Game::default()`'s synthetic 1x1 map can't reproduce that.
+    #[test]
+    fn nuke_reduces_troops_of_a_live_outgoing_attack_owned_by_the_impacted_player() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let owner = add_bot(&mut game, "owner");
+        let target = add_bot(&mut game, "target");
+        if let Some(p) = game.player_by_small_id_mut(owner) {
+            p.troops = 1_000;
+            p.tiles_owned = 5;
+        }
+        if let Some(p) = game.player_by_small_id_mut(target) {
+            p.tiles_owned = 5;
+        }
+
+        game.add_execution(ExecEnum::Attack(AttackExecution::new(
+            owner,
+            Some("target".to_string()),
+            Some(300.0),
+        )));
+        game.execute_next_tick();
+
+        let troops_before: f64 = game
+            .live_attacks()
+            .find(|a| a.owner_small_id() == owner)
+            .map(|a| a.troops())
+            .expect("attack should be live after init");
+        assert_eq!(troops_before, 300.0);
+
+        // A single impacted tile with 100 tiles left of the owner's territory
+        // (tilesOwned before the nuke) - matches TS's diminishing-effect loop
+        // running once with `numTilesLeft = 100`.
+        game.apply_nuke_deaths_to_deployed_forces(owner, unit_type::ATOM_BOMB, 100.0, 10_000.0);
+
+        let troops_after = game
+            .live_attacks()
+            .find(|a| a.owner_small_id() == owner)
+            .map(|a| a.troops())
+            .expect("attack should still be live");
+        // nukeDeathFactor(ATOM_BOMB, 300, 100, _) = 5 * 300 / 100 = 15.
+        assert_eq!(troops_after, 285.0);
+    }
+
+    #[test]
+    fn nuke_deaths_never_push_deployed_forces_below_zero() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let owner = add_bot(&mut game, "owner");
+        let target = add_bot(&mut game, "target");
+        if let Some(p) = game.player_by_small_id_mut(owner) {
+            p.troops = 1_000;
+            p.tiles_owned = 5;
+        }
+        if let Some(p) = game.player_by_small_id_mut(target) {
+            p.tiles_owned = 5;
+        }
+
+        game.add_execution(ExecEnum::Attack(AttackExecution::new(
+            owner,
+            Some("target".to_string()),
+            Some(10.0),
+        )));
+        game.execute_next_tick();
+
+        // nukeDeathFactor(ATOM_BOMB, 10, 1, _) = 5 * 10 / 1 = 50, far exceeding
+        // the attack's 10 troops - TS's `AttackImpl.setTroops` clamps at 0.
+        game.apply_nuke_deaths_to_deployed_forces(owner, unit_type::ATOM_BOMB, 1.0, 10_000.0);
+
+        let troops_after = game
+            .live_attacks()
+            .find(|a| a.owner_small_id() == owner)
+            .map(|a| a.troops())
+            .expect("attack should still be live");
+        assert_eq!(troops_after, 0.0);
+    }
 }
 
 fn list_nuke_break_alliance(

@@ -54,10 +54,20 @@ impl TransportShipExecution {
         self.unit_id
     }
 
+    pub fn owner_small_id(&self) -> u16 {
+        self.owner_small_id
+    }
+
     /// Carried troops (TS `unit.troops()` for transports lives on the unit;
     /// natively it lives here, read by the RL obs units list).
     pub fn carried_troops(&self) -> f64 {
         self.troops.unwrap_or(0.0)
+    }
+
+    /// TS `Unit.setTroops()` for a `TransportShip` - used by `NukeExecution::detonate`
+    /// to apply blast casualties to an in-flight boat's carried troops.
+    pub fn set_carried_troops(&mut self, troops: f64) {
+        self.troops = Some(troops.max(0.0));
     }
 
     pub fn request_retreat(&mut self) {
