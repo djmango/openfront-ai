@@ -3332,6 +3332,107 @@ mod owned_tiles_tests {
     }
 }
 
+// TS `PlayerImpl.test.ts`.
+#[cfg(test)]
+mod player_tests {
+    use super::{Game, Player, PlayerType};
+    use crate::core::schemas::unit_type;
+
+    fn add_bot(game: &mut Game, id: &str, small_id: u16) {
+        game.add_player(Player {
+            id: id.to_string(),
+            small_id,
+            player_type: PlayerType::Bot,
+            gold: 1_000_000,
+            ..Default::default()
+        });
+    }
+
+    fn units_of(game: &Game, small_id: u16, types: &[&str]) -> Vec<i32> {
+        game.player_by_small_id(small_id)
+            .unwrap()
+            .units
+            .iter()
+            .filter(|u| types.contains(&u.unit_type.as_str()))
+            .map(|u| u.id)
+            .collect()
+    }
+
+    /// TS `PlayerImpl.test.ts` "units() type filtering": `Player.units(type1,
+    /// type2, ...)` returns the union of matching units in insertion order,
+    /// deduplicated, as a fresh array each call. Native has no single shared
+    /// helper of that name - every call site filters `Player.units:
+    /// Vec<Unit>` inline instead (see `nation_tick.rs`/
+    /// `nation_structures.rs`) - so this pins that the same
+    /// filter-by-type-set pattern those call sites use preserves the TS
+    /// invariants, using the same 4 unit types/order as the TS test.
+    #[test]
+    fn unit_type_filtering_preserves_insertion_order_and_dedups() {
+        let mut game = crate::test_util::plains_game(16, 16);
+        add_bot(&mut game, "player", 1);
+        game.conquer(1, game.map.ref_xy(0, 0));
+        let city1 = game.build_unit(1, unit_type::CITY, game.map.ref_xy(0, 0));
+        game.build_unit(1, unit_type::DEFENSE_POST, game.map.ref_xy(11, 0));
+        let city2 = game.build_unit(1, unit_type::CITY, game.map.ref_xy(0, 11));
+        let silo = game.build_unit(1, unit_type::MISSILE_SILO, game.map.ref_xy(11, 11));
+
+        assert_eq!(units_of(&game, 1, &[unit_type::CITY]), vec![city1, city2]);
+        assert_eq!(
+            units_of(&game, 1, &[unit_type::CITY, unit_type::MISSILE_SILO]),
+            vec![city1, city2, silo]
+        );
+        // Duplicate types in the filter set don't duplicate results.
+        assert_eq!(
+            units_of(&game, 1, &[unit_type::CITY, unit_type::CITY]),
+            vec![city1, city2]
+        );
+        assert_eq!(units_of(&game, 1, &[unit_type::PORT]), Vec::<i32>::new());
+    }
+
+    /// TS `PlayerImpl.test.ts` "Can't send alliance requests when dead" -
+    /// the literal scenario (eliminate a player by conquering every tile it
+    /// owns, then check it can no longer send an alliance request),
+    /// exercised through the real map/conquer path rather than by directly
+    /// setting `tiles_owned` (see `relation_tests::dead_sender_cannot_send_
+    /// alliance_request` for the field-level version, and its sibling for
+    /// the asymmetric recipient-side bug this same function had).
+    #[test]
+    fn eliminated_player_cannot_send_alliance_request() {
+        let mut game = crate::test_util::plains_game(16, 16);
+        add_bot(&mut game, "player", 1);
+        add_bot(&mut game, "other", 2);
+        game.conquer(2, game.map.ref_xy(5, 5));
+
+        let others_tiles = game.player_by_small_id(2).unwrap().owned_tiles.clone();
+        for t in others_tiles {
+            game.conquer(1, t);
+        }
+
+        assert_eq!(game.player_by_small_id(2).unwrap().tiles_owned, 0);
+        assert!(!game.can_send_alliance_request(2, 1));
+    }
+
+    /// TS `PlayerImpl.test.ts` "City can be upgraded" / "DefensePost cannot
+    /// be upgraded" / "City can be upgraded from another city" / "City
+    /// cannot be upgraded when too far away" / "Unit cannot be upgraded when
+    /// not enough gold": all five exercise `PlayerImpl.buildableUnits()`/
+    /// `findUnitToUpgrade()`, whose only caller is `GameRunner.ts` (feeding
+    /// the human build/upgrade UI's clickable-unit hints) - no `Execution`
+    /// or other simulation-affecting code path calls them. Native has no
+    /// port of either method; the nation-AI upgrade decision (a genuinely
+    /// different, already-ported code path) is `find_best_structure_to_
+    /// upgrade` in `nation_structures.rs`, covered by that file's own
+    /// tests. Building a client-UI-only subsystem from scratch here would
+    /// have no hash-parity payoff and is out of scope for this batch.
+    #[test]
+    #[ignore = "buildableUnits()/findUnitToUpgrade() are human-UI-only build hints (GameRunner.ts); not ported, see doc comment"]
+    fn buildable_units_and_find_unit_to_upgrade_are_unported_ui_only_apis() {
+        unreachable!(
+            "gap marker only - see PlayerImpl.test.ts's City/DefensePost upgrade tests and this test's doc comment"
+        );
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct TickUpdates {
     pub hash: Option<HashUpdate>,
