@@ -1123,6 +1123,105 @@ mod tests {
         }
 
         #[test]
+        fn does_not_target_trade_ship_outside_patrol_range() {
+            // Trade ship is within the general 130-tile targeting radius of the warship's
+            // *current* tile, but beyond the 100-tile trade-ship-specific patrol range
+            // measured from `patrol_tile` (which is deliberately different from `from` here,
+            // to isolate the patrol-range check from the general radius check).
+            let mut game = water_game(200, 200);
+            let p1 = add_nation(&mut game, "p1");
+            let p2 = add_human(&mut game, "p2");
+            let p3 = add_human(&mut game, "p3");
+
+            let patrol_tile = game.ref_xy(10, 10);
+            let from = game.ref_xy(10, 150);
+            let trade_ship_tile = game.ref_xy(10, 155);
+            let dst_tile = game.ref_xy(20, 155);
+
+            game.build_unit(p1, unit_type::PORT, from);
+            let ship_id = game.build_unit(p2, unit_type::TRADE_SHIP, trade_ship_tile);
+            let dst_port_id = game.build_unit(p3, unit_type::PORT, dst_tile);
+            game.unit_mut(p2, ship_id).unwrap().last_safe_from_pirates_tick = -1000;
+            game.add_execution(ExecEnum::TradeShip(TradeShipExecution::new_for_test(
+                p2,
+                dst_port_id,
+                ship_id,
+            )));
+            game.execute_next_tick();
+
+            let exec = WarshipExecution::new(p1, patrol_tile);
+            assert!(exec.target(&game, from, true).is_none());
+        }
+
+        #[test]
+        fn does_not_target_trade_ship_in_different_water_component() {
+            let (mut game, west_tile, east_tile) = split_water_game();
+            let p1 = add_nation(&mut game, "p1");
+            let p2 = add_human(&mut game, "p2");
+            let p3 = add_human(&mut game, "p3");
+
+            game.build_unit(p1, unit_type::PORT, west_tile);
+            let ship_id = game.build_unit(p2, unit_type::TRADE_SHIP, east_tile);
+            let dst_port_id = game.build_unit(p3, unit_type::PORT, east_tile);
+            game.unit_mut(p2, ship_id).unwrap().last_safe_from_pirates_tick = -1000;
+            game.add_execution(ExecEnum::TradeShip(TradeShipExecution::new_for_test(
+                p2,
+                dst_port_id,
+                ship_id,
+            )));
+            game.execute_next_tick();
+
+            let exec = WarshipExecution::new(p1, west_tile);
+            assert!(
+                exec.target(&game, west_tile, true).is_none(),
+                "trade ship lives in a water component disconnected from the warship's"
+            );
+        }
+
+        #[test]
+        fn hunt_trade_ship_captures_immediately_within_five_tiles() {
+            let mut game = water_game(60, 60);
+            let p1 = add_nation(&mut game, "p1");
+            let p2 = add_human(&mut game, "p2");
+            let warship_tile = game.ref_xy(10, 10);
+            let trade_tile = game.ref_xy(13, 10); // Manhattan distance 3.
+            let ship_id = game.build_unit(p1, unit_type::WARSHIP, warship_tile);
+            let trade_id = game.build_unit(p2, unit_type::TRADE_SHIP, trade_tile);
+
+            let mut exec = WarshipExecution::new_for_test(p1, warship_tile, ship_id);
+            exec.hunt_trade_ship(&mut game, ship_id, p2, trade_id);
+
+            assert_eq!(game.find_unit_owner(trade_id), Some(p1));
+        }
+
+        #[test]
+        fn hunt_trade_ship_uses_greedy_pursuit_within_twenty_tiles() {
+            let mut game = water_game(60, 60);
+            let p1 = add_nation(&mut game, "p1");
+            let p2 = add_human(&mut game, "p2");
+            let warship_tile = game.ref_xy(10, 10);
+            let trade_tile = game.ref_xy(10, 20); // Manhattan distance 10 - greedy range, not instant-capture.
+            let ship_id = game.build_unit(p1, unit_type::WARSHIP, warship_tile);
+            let trade_id = game.build_unit(p2, unit_type::TRADE_SHIP, trade_tile);
+
+            let mut exec = WarshipExecution::new_for_test(p1, warship_tile, ship_id);
+            exec.hunt_trade_ship(&mut game, ship_id, p2, trade_id);
+
+            assert_eq!(
+                game.find_unit_owner(trade_id),
+                Some(p2),
+                "not yet within instant-capture range"
+            );
+            let new_tile = game.unit_tile_of(p1, ship_id).unwrap();
+            let old_dist = game.manhattan_dist(warship_tile, trade_tile);
+            let new_dist = game.manhattan_dist(new_tile, trade_tile);
+            assert!(
+                new_dist < old_dist,
+                "greedy neighbor pursuit should close the gap: {old_dist} -> {new_dist}"
+            );
+        }
+
+        #[test]
         fn active_healing_when_docked_heals_by_port_level_times_five() {
             let (mut game, p1) = solo_setup();
             let port_tile = game.ref_xy(0, 0);
