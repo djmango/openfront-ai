@@ -178,6 +178,15 @@ impl NukeExecution {
                         }
                     }
                 }
+                // TS `NukeExecution.detonate` also spends this same per-tile death
+                // rate against the impacted player's already-launched attacks and
+                // in-flight transport ships (see `apply_nuke_deaths_to_deployed_forces`).
+                game.apply_nuke_deaths_to_deployed_forces(
+                    owner_sid,
+                    &self.nuke_type,
+                    num_tiles_left,
+                    max_troops,
+                );
             }
         }
 
@@ -416,6 +425,185 @@ pub(crate) fn would_nuke_break_alliance(
         game.wire.nuke_alliance_break_threshold(),
     )
     .contains(&ally_small_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::execution::{AttackExecution, ExecEnum};
+    use crate::game::{PlayerInfo, PlayerType};
+
+    // `PlayerType::Bot` (not `Human`) deliberately, so spawn immunity (which only
+    // gates Human/Nation attackers/defenders, see `Game::is_player_immune`) doesn't
+    // interfere with the attack's `init()` in the very next tick - matching the
+    // existing `boat_landed_attack_cancels_opposing_land_attack` test's pattern in
+    // `attack.rs`, since these tests aren't about immunity at all.
+    fn add_bot(game: &mut Game, id: &str) -> u16 {
+        game.add_from_info(&PlayerInfo {
+            name: id.into(),
+            player_type: PlayerType::Bot,
+            client_id: Some(id.into()),
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        })
+    }
+
+    // TS `NukeExecution.detonate` (`openfront/src/core/execution/NukeExecution.ts`)
+    // applies the SAME per-impacted-tile `nukeDeathFactor` rate to a nuked player's
+    // home troops *and* to every one of their live outgoing attacks - ported here as
+    // a direct call to `Game::apply_nuke_deaths_to_deployed_forces` (the mechanism
+    // this test caught missing) rather than a literal port of `Attack.test.ts`'s
+    // "Nuke reduce attacking troop counts", whose exact troop-loss numbers depend on
+    // the `ocean_and_land` fixture map's real spawn/border geometry (the nuke lands
+    // on the attacker's own spawn tile only because that tile has, by then, already
+    // been conquered by the attacker's in-progress attack against a neighboring
+    // spawn 5 tiles away) - `Game::default()`'s synthetic 1x1 map can't reproduce that.
+    #[test]
+    fn nuke_reduces_troops_of_a_live_outgoing_attack_owned_by_the_impacted_player() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let owner = add_bot(&mut game, "owner");
+        let target = add_bot(&mut game, "target");
+        if let Some(p) = game.player_by_small_id_mut(owner) {
+            p.troops = 1_000;
+            p.tiles_owned = 5;
+        }
+        if let Some(p) = game.player_by_small_id_mut(target) {
+            p.tiles_owned = 5;
+        }
+
+        game.add_execution(ExecEnum::Attack(AttackExecution::new(
+            owner,
+            Some("target".to_string()),
+            Some(300.0),
+        )));
+        game.execute_next_tick();
+
+        let troops_before: f64 = game
+            .live_attacks()
+            .find(|a| a.owner_small_id() == owner)
+            .map(|a| a.troops())
+            .expect("attack should be live after init");
+        assert_eq!(troops_before, 300.0);
+
+        // A single impacted tile with 100 tiles left of the owner's territory
+        // (tilesOwned before the nuke) - matches TS's diminishing-effect loop
+        // running once with `numTilesLeft = 100`.
+        game.apply_nuke_deaths_to_deployed_forces(owner, unit_type::ATOM_BOMB, 100.0, 10_000.0);
+
+        let troops_after = game
+            .live_attacks()
+            .find(|a| a.owner_small_id() == owner)
+            .map(|a| a.troops())
+            .expect("attack should still be live");
+        // nukeDeathFactor(ATOM_BOMB, 300, 100, _) = 5 * 300 / 100 = 15.
+        assert_eq!(troops_after, 285.0);
+    }
+
+    #[test]
+    fn nuke_deaths_never_push_deployed_forces_below_zero() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let owner = add_bot(&mut game, "owner");
+        let target = add_bot(&mut game, "target");
+        if let Some(p) = game.player_by_small_id_mut(owner) {
+            p.troops = 1_000;
+            p.tiles_owned = 5;
+        }
+        if let Some(p) = game.player_by_small_id_mut(target) {
+            p.tiles_owned = 5;
+        }
+
+        game.add_execution(ExecEnum::Attack(AttackExecution::new(
+            owner,
+            Some("target".to_string()),
+            Some(10.0),
+        )));
+        game.execute_next_tick();
+
+        // nukeDeathFactor(ATOM_BOMB, 10, 1, _) = 5 * 10 / 1 = 50, far exceeding
+        // the attack's 10 troops - TS's `AttackImpl.setTroops` clamps at 0.
+        game.apply_nuke_deaths_to_deployed_forces(owner, unit_type::ATOM_BOMB, 1.0, 10_000.0);
+
+        let troops_after = game
+            .live_attacks()
+            .find(|a| a.owner_small_id() == owner)
+            .map(|a| a.troops())
+            .expect("attack should still be live");
+        assert_eq!(troops_after, 0.0);
+    }
+
+    // Ported from AllianceRequestExecution.test.ts "alliance request is revoked
+    // immediately if requester launches a nuke" (fix for
+    // github.com/openfrontio/OpenFrontIO/issues/2071). The TS test forces this
+    // by monkeypatching `nukeAllianceBreakThreshold` to 0 on the live config
+    // instance so the effect fires without needing >100 weighted tiles in the
+    // blast; native hardcodes this threshold at the same default value TS ships
+    // with (100, see `WireConfig::nuke_alliance_break_threshold`) and has no
+    // per-instance override, so instead of faking the threshold this exercises
+    // the *other*, threshold-independent inclusion path also present in TS's
+    // `Util.listNukeBreakAlliance`: any player with a structure inside the
+    // blast outer radius is included in `targets` regardless of tile-ownership
+    // weight - built here via a City exactly at the nuke's destination tile.
+    #[test]
+    fn nuke_at_a_players_structure_revokes_the_nukers_pending_alliance_request() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let nuker = add_bot(&mut game, "nuker");
+        let target = add_bot(&mut game, "target");
+
+        assert!(game.create_alliance_request(nuker, target, game.ticks()));
+        assert_eq!(game.outgoing_alliance_requests(nuker), vec![target]);
+
+        let dst = game.map.ref_xy(0, 0);
+        game.build_unit(target, unit_type::CITY, dst);
+
+        maybe_break_alliances(&mut game, nuker, dst, unit_type::ATOM_BOMB);
+
+        assert_eq!(game.outgoing_alliance_requests(nuker).len(), 0);
+        assert!(!game.is_allied_with(nuker, target));
+        assert!(!game.is_allied_with(target, nuker));
+    }
+
+    // Ported from Attack.test.ts's "Can't send nuke during immunity phase":
+    // TS `PlayerImpl.nukeSpawn` refuses to spawn any nuke while
+    // `mg.isSpawnImmunityActive()` (a global window, not per-player - see
+    // `Game::is_spawn_immunity_active`), independent of `canAttackPlayer`'s
+    // separate per-defender-type immunity check exercised by `attack.rs`'s
+    // `immunity_tests`. Native's `nuke_spawn` (called from `can_build_nuke`)
+    // already had this gate; this is new coverage for it, not a fix.
+    #[test]
+    fn cannot_build_a_nuke_during_spawn_immunity_but_can_after_it_ends() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        // `Human`, not `Bot`: bots run autonomous tribe AI on every tick
+        // (spending gold on their own builds) that would otherwise interfere
+        // with the plain gold-balance check this test cares about.
+        let owner = game.add_from_info(&PlayerInfo {
+            name: "owner".into(),
+            player_type: PlayerType::Human,
+            client_id: Some("owner".into()),
+            id: "owner".into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        });
+        if let Some(p) = game.player_by_small_id_mut(owner) {
+            p.gold = 10_000_000;
+            p.tiles_owned = 1;
+        }
+        let dst = game.map.ref_xy(0, 0);
+        game.build_unit(owner, unit_type::MISSILE_SILO, dst);
+
+        assert!(can_build_nuke(&game, owner, unit_type::ATOM_BOMB, dst).is_none());
+
+        for _ in 0..game.wire.spawn_immunity_duration() + 1 {
+            game.execute_next_tick();
+        }
+        assert!(can_build_nuke(&game, owner, unit_type::ATOM_BOMB, dst).is_some());
+    }
 }
 
 fn list_nuke_break_alliance(

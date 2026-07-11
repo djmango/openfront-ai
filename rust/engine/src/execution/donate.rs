@@ -80,3 +80,66 @@ impl Execution for DonateTroopsExecution {
         self.active
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::execution::ExecEnum;
+    use crate::game::{PlayerInfo, PlayerType};
+
+    fn game_with_donations_enabled() -> Game {
+        let mut game = Game::default();
+        let mut cfg = game.wire.game_config().clone();
+        cfg.donate_gold = true;
+        cfg.donate_troops = true;
+        game.wire = crate::core::config::Config::new(cfg, false);
+        game
+    }
+
+    fn add_human(game: &mut Game, id: &str, tiles_owned: i32) -> u16 {
+        let sid = game.add_from_info(&PlayerInfo {
+            name: id.into(),
+            player_type: PlayerType::Human,
+            client_id: Some(id.into()),
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        });
+        game.player_by_small_id_mut(sid).unwrap().tiles_owned = tiles_owned;
+        sid
+    }
+
+    // Ported from AllianceDonation.test.ts's "Can donate troops after alliance
+    // formed by reply"/"...by mutual request" (both TS cases collapse to one
+    // here, same as the equivalent gold test in donate_gold.rs).
+    #[test]
+    fn donate_troops_succeeds_once_allied_by_counter_request() {
+        let mut game = game_with_donations_enabled();
+        game.end_spawn_phase();
+        let player1 = add_human(&mut game, "player1", 1);
+        let player2 = add_human(&mut game, "player2", 1);
+        game.player_by_small_id_mut(player1).unwrap().troops = 1_000;
+        game.player_by_small_id_mut(player2).unwrap().troops = 100;
+
+        assert!(game.create_alliance_request(player1, player2, game.ticks()));
+        assert!(game.create_alliance_request(player2, player1, game.ticks()));
+        assert!(game.is_allied_with(player1, player2));
+
+        assert!(game.can_donate_troops(player1, player2));
+        let troops_before = game.player_by_small_id(player2).unwrap().troops;
+
+        game.add_execution(ExecEnum::DonateTroops(DonateTroopsExecution::new(
+            player1,
+            "player2".into(),
+            Some(100.0),
+        )));
+        game.execute_next_tick();
+        game.execute_next_tick();
+
+        assert_eq!(
+            game.player_by_small_id(player2).unwrap().troops,
+            troops_before + 100
+        );
+    }
+}
