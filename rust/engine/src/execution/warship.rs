@@ -1339,6 +1339,55 @@ mod tests {
             (game, west, east)
         }
 
+        // Ported from `openfront/tests/ShellRandom.test.ts`'s "Warship shell attacks have
+        // random damage" - drives a real `WarshipExecution` through the full engine loop
+        // (targeting, firing, shell flight) rather than calling `ShellExecution`'s testing
+        // hook directly, to catch the case where automatic firing itself is a silent no-op.
+        // The direct PRNG-roll range/distribution/reproducibility scenarios from the same TS
+        // file are ported next to `ShellExecution` itself (`shell_execution.rs`'s
+        // `shell_random_tests` module) since they don't need a real engine loop.
+        #[test]
+        fn warship_execution_lands_shells_with_varied_damage_over_real_ticks() {
+            let mut game = water_game(30, 30);
+            let p1 = add_nation(&mut game, "p1");
+            let p2 = add_nation(&mut game, "p2");
+            let port_tile = game.ref_xy(10, 10);
+            let ship_tile = game.ref_xy(10, 11);
+            let enemy_tile = game.ref_xy(10, 12);
+            game.build_unit(p1, unit_type::PORT, port_tile);
+            game.build_unit(p1, unit_type::WARSHIP, ship_tile);
+            let enemy_id = game.build_unit(p2, unit_type::WARSHIP, enemy_tile);
+            let max_health = game.unit_max_health(p2, enemy_id);
+
+            game.add_execution(ExecEnum::Warship(WarshipExecution::new(p1, ship_tile)));
+
+            let mut damages = Vec::new();
+            for _ in 0..400u32 {
+                if damages.len() >= 8 {
+                    break;
+                }
+                let before = game.unit(p2, enemy_id).map(|u| u.health).unwrap_or(0);
+                game.execute_next_tick();
+                let after = game.unit(p2, enemy_id).map(|u| u.health).unwrap_or(0);
+                if after < before {
+                    damages.push(before - after);
+                    if let Some(u) = game.unit_mut(p2, enemy_id) {
+                        u.health = max_health;
+                    }
+                }
+            }
+
+            assert!(!damages.is_empty(), "warship never landed a shell");
+            for &d in &damages {
+                assert!((200..=300).contains(&d), "d={d}");
+            }
+            let unique: std::collections::HashSet<_> = damages.iter().collect();
+            assert!(
+                unique.len() > 1,
+                "damage should vary across shots, got {damages:?}"
+            );
+        }
+
         #[test]
         fn cancels_retreat_when_port_is_in_different_water_component() {
             let (mut game, west_tile, east_tile) = split_water_game();
