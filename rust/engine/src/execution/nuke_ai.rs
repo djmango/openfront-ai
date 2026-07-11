@@ -1707,4 +1707,103 @@ mod tests {
             "building the nuke should have spent gold"
         );
     }
+
+    /// TS `NationNukeSamOverwhelm.test.ts` - "nation overwhelms enemy SAM with
+    /// atom bomb salvo on Impossible difficulty". Calls `maybe_send_nuke`
+    /// directly (like the smoke test above) instead of driving a full
+    /// `NationExecution` through many ticks with multiple game-id retries -
+    /// the TS test's retry loop exists only to work around its own
+    /// attack-tick RNG alignment; `should_attack` is unconditionally `true`
+    /// on Impossible (no RNG draw involved at all), so one direct call is
+    /// fully deterministic and exercises the exact same mechanism.
+    #[test]
+    fn maybe_send_nuke_overwhelms_enemy_sam_with_atom_bomb_salvo_on_impossible() {
+        let size = 100u32;
+        let mut game = tiny_game(size, size, "Impossible", "Free For All");
+        let nation = add_player(&mut game, "nation", PlayerType::Nation);
+        let human = add_player(&mut game, "human", PlayerType::Human);
+
+        for x in 10..40 {
+            for y in 10..40 {
+                game.conquer(nation, game.ref_xy(x, y));
+            }
+        }
+        for x in 60..90 {
+            for y in 60..90 {
+                game.conquer(human, game.ref_xy(x, y));
+            }
+        }
+
+        // Level-1 SAM at the exact center of human's 30x30 block: real
+        // production `sam_range(1)` (70) comfortably covers the whole block
+        // (max corner distance ~21) from there, so every direct nuke attempt
+        // into human territory is judged interceptable, forcing
+        // `maybe_send_nuke`'s Impossible-only fallback.
+        let sam_tile = game.ref_xy(75, 75);
+        game.build_unit(human, unit_type::SAM_LAUNCHER, sam_tile);
+
+        // 3 level-1 missile silos (1 slot each). Overwhelming a level-1 SAM
+        // needs 2 bombs (1 intercepted + 1 that gets through).
+        for &(x, y) in &[(20u32, 20u32), (25, 25), (30, 30)] {
+            game.build_unit(nation, unit_type::MISSILE_SILO, game.ref_xy(x, y));
+        }
+
+        if let Some(p) = game.player_by_small_id_mut(nation) {
+            p.gold = 1_000_000_000;
+            p.troops = 100_000;
+        }
+        if let Some(p) = game.player_by_small_id_mut(human) {
+            p.troops = 100_000;
+        }
+
+        // Nukes can't be built while the global spawn-immunity window is
+        // active (see `nuke_spawn`'s `is_spawn_immunity_active` guard).
+        for _ in 0..game.wire.spawn_immunity_duration() + 1 {
+            game.execute_next_tick();
+        }
+
+        let mut random = PseudoRandom::new(42);
+        let mut nuke_state = NationNukeState {
+            atom_bomb_perceived_cost: game.structure_cost(nation, unit_type::ATOM_BOMB),
+            hydrogen_bomb_perceived_cost: game.structure_cost(nation, unit_type::HYDROGEN_BOMB),
+            ..Default::default()
+        };
+        let mut emoji_state = NationEmojiState::default();
+
+        maybe_send_nuke(
+            &mut game,
+            &mut random,
+            nation,
+            false,
+            &mut nuke_state,
+            &mut emoji_state,
+        );
+
+        assert_eq!(
+            nuke_state.atom_bombs_launched, 2,
+            "overwhelming a level-1 SAM needs exactly bombsNeeded (1 intercepted + 1 through)"
+        );
+
+        // Let the queued `NukeExecution`s actually init and spawn.
+        game.execute_next_tick();
+        game.execute_next_tick();
+
+        let atom_bomb_count = game.unit_count(nation, unit_type::ATOM_BOMB);
+        assert!(
+            atom_bomb_count >= 2,
+            "expected at least 2 atom bombs in flight, got {atom_bomb_count}"
+        );
+
+        let targets: Vec<Option<TileRef>> = game
+            .player_by_small_id(nation)
+            .unwrap()
+            .units
+            .iter()
+            .filter(|u| u.unit_type == unit_type::ATOM_BOMB)
+            .map(|u| u.target_tile)
+            .collect();
+        for target in targets {
+            assert_eq!(target, Some(sam_tile), "every bomb should target the SAM tile");
+        }
+    }
 }
