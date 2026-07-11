@@ -129,8 +129,13 @@ pub struct Config {
     pub pinned_h2d: bool,
     pub device: Device,
     /// Which simulation backend envs run against (Node bridge or the
-    /// in-process native engine).
+    /// in-process native engine) for the `1.0 - node_fraction` majority of
+    /// workers.
     pub engine: EngineKind,
+    /// Fraction of workers that run the Node engine regardless of
+    /// `engine`'s choice, evenly spread by index (see `engine_for_idx`).
+    /// 0.0 = every worker uses `engine` unchanged.
+    pub node_fraction: f64,
     pub log_every: u64,
     pub ckpt_every: u64,
     pub ckpt_dir: String,
@@ -226,6 +231,27 @@ struct Worker {
     stage_tx: Sender<usize>,
     obs_rx: Receiver<Result<(PreparedObs, f64, bool, Option<EpisodeInfo>), String>>,
     handle: JoinHandle<()>,
+}
+
+/// Which engine worker `idx` (a stable, global env index - see both call
+/// sites below) should run, given `default` (the `1.0 - node_fraction`
+/// majority engine) and `node_fraction`. Uses an error-diffusion spread
+/// (same idea as Bresenham line drawing) rather than `idx < node_fraction *
+/// total`, so a 0.2 fraction gives one Node env per 5 spread evenly across
+/// the whole index range instead of clumped at the start - matters because
+/// autoscale-grown envs (see the second call site) get appended at
+/// ever-increasing indices, and clumping would make the *ratio* drift as
+/// more envs get added rather than staying fixed at `node_fraction`.
+fn engine_for_idx(idx: usize, default: EngineKind, node_fraction: f64) -> EngineKind {
+    if node_fraction <= 0.0 {
+        return default;
+    }
+    if node_fraction >= 1.0 {
+        return EngineKind::Node;
+    }
+    let before = (idx as f64 * node_fraction).floor() as i64;
+    let after = ((idx + 1) as f64 * node_fraction).floor() as i64;
+    if after > before { EngineKind::Node } else { default }
 }
 
 fn spawn_worker(
@@ -771,7 +797,8 @@ pub fn run(cfg: Config) -> Result<()> {
         let mut cur_obs = Vec::with_capacity(cfg.num_envs);
         for local_i in 0..cfg.num_envs {
             let idx = gi * cfg.num_envs + local_i;
-            let (w, obs) = spawn_worker(idx, start_stage, cfg.max_episode_ticks, cfg.engine)?;
+            let worker_engine = engine_for_idx(idx, cfg.engine, cfg.node_fraction);
+            let (w, obs) = spawn_worker(idx, start_stage, cfg.max_episode_ticks, worker_engine)?;
             workers.push(w);
             cur_obs.push(obs);
         }
@@ -1060,7 +1087,8 @@ pub fn run(cfg: Config) -> Result<()> {
                 let mut spawn_err: Option<anyhow::Error> = None;
                 'grow: for gi in 0..actors.len() {
                     for _ in 0..add {
-                        match spawn_worker(next_env_idx, curr_stage, cfg.max_episode_ticks, cfg.engine) {
+                        let worker_engine = engine_for_idx(next_env_idx, cfg.engine, cfg.node_fraction);
+                        match spawn_worker(next_env_idx, curr_stage, cfg.max_episode_ticks, worker_engine) {
                             Ok((w, obs)) => {
                                 next_env_idx += 1;
                                 spawned.push((gi, w, obs));
@@ -1187,3 +1215,50 @@ pub fn run(cfg: Config) -> Result<()> {
 
 #[allow(dead_code)]
 fn unused_lock_hint(_m: &Arc<Mutex<()>>) {}
+
+#[cfg(test)]
+mod engine_mix_tests {
+    use super::*;
+
+    #[test]
+    fn zero_fraction_is_always_default() {
+        for idx in 0..50 {
+            assert_eq!(engine_for_idx(idx, EngineKind::Native, 0.0), EngineKind::Native);
+        }
+    }
+
+    #[test]
+    fn full_fraction_is_always_node() {
+        for idx in 0..50 {
+            assert_eq!(engine_for_idx(idx, EngineKind::Native, 1.0), EngineKind::Node);
+        }
+    }
+
+    #[test]
+    fn one_fifth_gives_exactly_one_node_per_five_evenly_spread() {
+        let picks: Vec<usize> =
+            (0..50).filter(|&i| engine_for_idx(i, EngineKind::Native, 0.2) == EngineKind::Node).collect();
+        assert_eq!(picks.len(), 10, "50 * 0.2 == 10 node envs, got {picks:?}");
+        // Evenly spread, not clumped: consecutive picks should be exactly
+        // 5 apart, and the ratio should hold over any prefix, not just the
+        // full range (matters once autoscale appends more envs at
+        // ever-increasing indices - see engine_for_idx's doc comment).
+        for w in picks.windows(2) {
+            assert_eq!(w[1] - w[0], 5, "picks should be evenly spread 5 apart, got {picks:?}");
+        }
+        for prefix_len in [5, 15, 25, 35, 45] {
+            let n = (0..prefix_len).filter(|&i| engine_for_idx(i, EngineKind::Native, 0.2) == EngineKind::Node).count();
+            assert_eq!(n, prefix_len / 5, "ratio should hold at prefix {prefix_len}, got {n} node envs");
+        }
+    }
+
+    #[test]
+    fn respects_default_engine_choice_for_the_majority() {
+        // node_fraction only carves Node envs OUT of the majority - it
+        // should never silently override an explicit `--engine node` run
+        // into anything but all-Node.
+        for idx in 0..20 {
+            assert_eq!(engine_for_idx(idx, EngineKind::Node, 0.2), EngineKind::Node);
+        }
+    }
+}
