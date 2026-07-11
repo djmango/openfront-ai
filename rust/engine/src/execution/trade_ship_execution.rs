@@ -44,6 +44,19 @@ impl TradeShipExecution {
         self.ship_unit_id
     }
 
+    /// Test-only constructor for a trade ship whose backing `Unit` was already built by
+    /// the caller (e.g. via `Game::build_unit`), bypassing `tick()`'s lazy first-tick spawn
+    /// (which would otherwise also immediately try to path/complete the voyage). Registers
+    /// with `Game::trade_ship_destination_owner` once added via `Game::add_execution` +
+    /// `execute_next_tick`, without ever needing this execution's own `tick()` to run.
+    /// Mirrors `WarshipExecution::new_for_test`'s naming/rationale.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(orig_owner_small_id: u16, dst_port_unit_id: i32, ship_unit_id: i32) -> Self {
+        let mut exec = Self::new(orig_owner_small_id, 0, dst_port_unit_id);
+        exec.ship_unit_id = Some(ship_unit_id);
+        exec
+    }
+
     pub fn destination_port_unit_id(&self) -> i32 {
         self.dst_port_unit_id
     }

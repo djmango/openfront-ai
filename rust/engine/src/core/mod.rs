@@ -6,6 +6,7 @@ pub mod nation;
 pub mod schemas;
 pub mod team_assignment;
 pub mod terrain;
+pub mod veterancy;
 
 pub use config::{Config, DoomsdayClockResolved};
 pub use doomsday_clock::{

@@ -77,30 +77,6 @@ fn update_relations_from_embargos(game: &mut Game, state: &mut NationBehaviorSta
     }
 }
 
-fn consider_mirv(game: &Game, random: &mut PseudoRandom, small_id: u16) -> bool {
-    if game.wire.is_unit_disabled(unit_type::MIRV) {
-        return false;
-    }
-    if game.unit_count(small_id, unit_type::MISSILE_SILO) == 0 {
-        return false;
-    }
-    // TS `NationMIRVBehavior.considerMIRV`  -  no RNG draw when gold is insufficient.
-    if game
-        .player_by_small_id(small_id)
-        .is_none_or(|p| p.gold < game.wire.mirv_cost())
-    {
-        return false;
-    }
-    let hesitation = match game.wire.game_config().difficulty.as_str() {
-        "Easy" => 20,
-        "Medium" => 12,
-        "Hard" => 10,
-        "Impossible" => 8,
-        _ => 12,
-    };
-    random.chance(hesitation)
-}
-
 fn handle_structures(game: &mut Game, random: &mut PseudoRandom, small_id: u16, state: &mut NationStructureState) {
     if state.placements_count > 0 && !game.wire.is_unit_disabled(unit_type::DEFENSE_POST) {
         if try_build_defense_post(game, random, small_id) {
@@ -310,7 +286,7 @@ pub fn tick_nation_post_spawn(
     update_relations_from_embargos(game, behavior, small_id);
     handle_alliance_requests(game, random, small_id, &mut behavior.emoji);
     handle_alliance_extension_requests(game, random, small_id, &mut behavior.emoji);
-    let _ = consider_mirv(game, random, small_id);
+    let _ = super::mirv_ai::consider_mirv(game, random, small_id, &mut behavior.emoji);
     handle_structures(game, random, small_id, &mut behavior.structure);
     let _ = super::warship_ai::maybe_spawn_warship(game, random, small_id);
     handle_embargoes_to_hostile_nations(game, small_id);
