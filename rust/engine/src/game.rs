@@ -1131,7 +1131,13 @@ impl Game {
     }
 
     fn conquer_one(&mut self, small_id: u16, tile: TileRef, refresh_borders: bool) {
-        if !self.is_land(tile) {
+        // TS `GameImpl.conquer`: `if (!this.isLand(tile)) throw ...; if
+        // (this.isImpassable(tile)) throw ...;` - impassable tiles (which
+        // are land, so the `is_land` check alone doesn't catch them) must
+        // never receive a real owner. Native no-ops instead of TS's throw,
+        // matching this function's existing silent-reject convention for
+        // the `!is_land` case just above.
+        if !self.is_land(tile) || self.is_impassable(tile) {
             return;
         }
         let tick = self.ticks;
@@ -3010,7 +3016,13 @@ impl Game {
         if sender.is_disconnected || recipient.is_disconnected {
             return false;
         }
-        if sender.tiles_owned == 0 || recipient.tiles_owned == 0 {
+        // TS `PlayerImpl.canSendAllianceRequest`: `this.isFriendly(other) ||
+        // !this.isAlive()` - only the SENDER's aliveness (`isAlive() ==
+        // this._tiles.size > 0`) gates the request; a dead recipient (0
+        // tiles) is not checked at all, so TS allows requesting an alliance
+        // with an eliminated player. Native previously also required
+        // `recipient.tiles_owned != 0`, which is stricter than TS.
+        if sender.tiles_owned == 0 {
             return false;
         }
         if self.is_friendly(sender_small_id, recipient_small_id) {
@@ -3235,6 +3247,28 @@ mod relation_tests {
         assert!(game.is_allied_with(requestor, recipient));
         assert_eq!(game.relation_value(requestor, recipient), -20.0);
         assert_eq!(game.relation_value(recipient, requestor), -30.0);
+    }
+
+    // TS `PlayerImpl.test.ts` "Can't send alliance requests when dead" +
+    // the asymmetric case it doesn't cover (see
+    // `can_send_alliance_request`'s doc comment on the fix this caught).
+    #[test]
+    fn dead_sender_cannot_send_alliance_request() {
+        let mut game = Game::default();
+        let dead = add_human(&mut game, "dead");
+        let alive = add_human(&mut game, "alive");
+        game.player_by_small_id_mut(alive).unwrap().tiles_owned = 1;
+        // `dead` never gained tiles (`tiles_owned == 0`, TS's `!isAlive()`).
+        assert!(!game.can_send_alliance_request(dead, alive));
+    }
+
+    #[test]
+    fn alive_sender_can_send_alliance_request_to_a_dead_recipient() {
+        let mut game = Game::default();
+        let alive = add_human(&mut game, "alive");
+        let dead = add_human(&mut game, "dead");
+        game.player_by_small_id_mut(alive).unwrap().tiles_owned = 1;
+        assert!(game.can_send_alliance_request(alive, dead));
     }
 
     #[test]
@@ -3756,6 +3790,308 @@ mod conquer_gold_tests {
         game.conquer_player(1, 2);
         assert_eq!(game.player_by_small_id(1).unwrap().gold, 0);
         assert_eq!(game.player_by_small_id(2).unwrap().gold, 1000);
+    }
+}
+
+// TS `TileSet.test.ts` invariants, ported against `Player.owned_tiles`
+// (TS `PlayerImpl._tiles`, a `TileSet`) rather than `TileSet` in isolation -
+// see `execution/ordered_tiles.rs`'s `tests` module for the direct
+// `OrderedTiles`/border-tiles port. `owned_tiles` is a plain `Vec<TileRef>`
+// with `push`/`retain` (no dedicated ordered-set type), which a prior
+// investigation (`docs/bot-ai-parity-nation-relations/README.md`, Bug 1
+// area) argued by manual reasoning preserves the same insertion-order/
+// delete-plus-readd-moves-to-end semantics as TS's `TileSet`. These tests
+// confirm that directly via `Game::conquer`/`relinquish_tile` instead of
+// trusting the argument.
+#[cfg(test)]
+mod owned_tiles_tests {
+    use super::{Game, Player, PlayerType};
+
+    fn add_bot(game: &mut Game, id: &str, small_id: u16) {
+        game.add_player(Player {
+            id: id.to_string(),
+            small_id,
+            player_type: PlayerType::Bot,
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn owned_tiles_preserve_insertion_order() {
+        let mut game = crate::test_util::plains_game(10, 10);
+        add_bot(&mut game, "p", 1);
+        let tiles: Vec<_> = [(1, 1), (3, 3), (0, 0), (5, 5)]
+            .iter()
+            .map(|&(x, y)| game.map.ref_xy(x, y))
+            .collect();
+        for &t in &tiles {
+            game.conquer(1, t);
+        }
+        assert_eq!(game.player_by_small_id(1).unwrap().owned_tiles, tiles);
+    }
+
+    #[test]
+    fn relinquish_then_reconquer_moves_a_tile_to_the_end() {
+        let mut game = crate::test_util::plains_game(10, 10);
+        add_bot(&mut game, "p", 1);
+        let t1 = game.map.ref_xy(1, 1);
+        let t2 = game.map.ref_xy(2, 2);
+        let t3 = game.map.ref_xy(3, 3);
+        for t in [t1, t2, t3] {
+            game.conquer(1, t);
+        }
+        game.relinquish_tile(t1);
+        game.conquer(1, t1);
+        assert_eq!(
+            game.player_by_small_id(1).unwrap().owned_tiles,
+            vec![t2, t3, t1]
+        );
+    }
+
+    /// TS `GameImpl.conquer`: unconditionally deletes-then-re-adds to the
+    /// owner's `TileSet` whenever the tile already has a player owner,
+    /// without checking whether that owner is the same player conquering it
+    /// again - so re-conquering your own already-owned tile also moves it
+    /// to the end, same as a genuine delete+re-add. Native's `conquer_one`
+    /// mirrors this (unconditional `retain` + `push` whenever `prev > 0`).
+    #[test]
+    fn reconquering_an_already_owned_tile_moves_it_to_the_end() {
+        let mut game = crate::test_util::plains_game(10, 10);
+        add_bot(&mut game, "p", 1);
+        let t1 = game.map.ref_xy(1, 1);
+        let t2 = game.map.ref_xy(2, 2);
+        for t in [t1, t2] {
+            game.conquer(1, t);
+        }
+        game.conquer(1, t1);
+        assert_eq!(game.player_by_small_id(1).unwrap().owned_tiles, vec![t2, t1]);
+    }
+
+    #[test]
+    fn owned_tiles_membership_stays_correct_after_relinquish() {
+        let mut game = crate::test_util::plains_game(10, 10);
+        add_bot(&mut game, "p", 1);
+        let t1 = game.map.ref_xy(1, 1);
+        let t2 = game.map.ref_xy(2, 2);
+        game.conquer(1, t1);
+        game.conquer(1, t2);
+        game.relinquish_tile(t1);
+        let owned = &game.player_by_small_id(1).unwrap().owned_tiles;
+        assert!(!owned.contains(&t1));
+        assert!(owned.contains(&t2));
+        assert_eq!(game.player_by_small_id(1).unwrap().tiles_owned, 1);
+    }
+}
+
+// TS `PlayerImpl.test.ts`.
+#[cfg(test)]
+mod player_tests {
+    use super::{Game, Player, PlayerType};
+    use crate::core::schemas::unit_type;
+
+    fn add_bot(game: &mut Game, id: &str, small_id: u16) {
+        game.add_player(Player {
+            id: id.to_string(),
+            small_id,
+            player_type: PlayerType::Bot,
+            gold: 1_000_000,
+            ..Default::default()
+        });
+    }
+
+    fn units_of(game: &Game, small_id: u16, types: &[&str]) -> Vec<i32> {
+        game.player_by_small_id(small_id)
+            .unwrap()
+            .units
+            .iter()
+            .filter(|u| types.contains(&u.unit_type.as_str()))
+            .map(|u| u.id)
+            .collect()
+    }
+
+    /// TS `PlayerImpl.test.ts` "units() type filtering": `Player.units(type1,
+    /// type2, ...)` returns the union of matching units in insertion order,
+    /// deduplicated, as a fresh array each call. Native has no single shared
+    /// helper of that name - every call site filters `Player.units:
+    /// Vec<Unit>` inline instead (see `nation_tick.rs`/
+    /// `nation_structures.rs`) - so this pins that the same
+    /// filter-by-type-set pattern those call sites use preserves the TS
+    /// invariants, using the same 4 unit types/order as the TS test.
+    #[test]
+    fn unit_type_filtering_preserves_insertion_order_and_dedups() {
+        let mut game = crate::test_util::plains_game(16, 16);
+        add_bot(&mut game, "player", 1);
+        game.conquer(1, game.map.ref_xy(0, 0));
+        let city1 = game.build_unit(1, unit_type::CITY, game.map.ref_xy(0, 0));
+        game.build_unit(1, unit_type::DEFENSE_POST, game.map.ref_xy(11, 0));
+        let city2 = game.build_unit(1, unit_type::CITY, game.map.ref_xy(0, 11));
+        let silo = game.build_unit(1, unit_type::MISSILE_SILO, game.map.ref_xy(11, 11));
+
+        assert_eq!(units_of(&game, 1, &[unit_type::CITY]), vec![city1, city2]);
+        assert_eq!(
+            units_of(&game, 1, &[unit_type::CITY, unit_type::MISSILE_SILO]),
+            vec![city1, city2, silo]
+        );
+        // Duplicate types in the filter set don't duplicate results.
+        assert_eq!(
+            units_of(&game, 1, &[unit_type::CITY, unit_type::CITY]),
+            vec![city1, city2]
+        );
+        assert_eq!(units_of(&game, 1, &[unit_type::PORT]), Vec::<i32>::new());
+    }
+
+    /// TS `PlayerImpl.test.ts` "Can't send alliance requests when dead" -
+    /// the literal scenario (eliminate a player by conquering every tile it
+    /// owns, then check it can no longer send an alliance request),
+    /// exercised through the real map/conquer path rather than by directly
+    /// setting `tiles_owned` (see `relation_tests::dead_sender_cannot_send_
+    /// alliance_request` for the field-level version, and its sibling for
+    /// the asymmetric recipient-side bug this same function had).
+    #[test]
+    fn eliminated_player_cannot_send_alliance_request() {
+        let mut game = crate::test_util::plains_game(16, 16);
+        add_bot(&mut game, "player", 1);
+        add_bot(&mut game, "other", 2);
+        game.conquer(2, game.map.ref_xy(5, 5));
+
+        let others_tiles = game.player_by_small_id(2).unwrap().owned_tiles.clone();
+        for t in others_tiles {
+            game.conquer(1, t);
+        }
+
+        assert_eq!(game.player_by_small_id(2).unwrap().tiles_owned, 0);
+        assert!(!game.can_send_alliance_request(2, 1));
+    }
+
+    /// TS `PlayerImpl.test.ts` "City can be upgraded" / "DefensePost cannot
+    /// be upgraded" / "City can be upgraded from another city" / "City
+    /// cannot be upgraded when too far away" / "Unit cannot be upgraded when
+    /// not enough gold": all five exercise `PlayerImpl.buildableUnits()`/
+    /// `findUnitToUpgrade()`, whose only caller is `GameRunner.ts` (feeding
+    /// the human build/upgrade UI's clickable-unit hints) - no `Execution`
+    /// or other simulation-affecting code path calls them. Native has no
+    /// port of either method; the nation-AI upgrade decision (a genuinely
+    /// different, already-ported code path) is `find_best_structure_to_
+    /// upgrade` in `nation_structures.rs`, covered by that file's own
+    /// tests. Building a client-UI-only subsystem from scratch here would
+    /// have no hash-parity payoff and is out of scope for this batch.
+    #[test]
+    #[ignore = "buildableUnits()/findUnitToUpgrade() are human-UI-only build hints (GameRunner.ts); not ported, see doc comment"]
+    fn buildable_units_and_find_unit_to_upgrade_are_unported_ui_only_apis() {
+        unreachable!(
+            "gap marker only - see PlayerImpl.test.ts's City/DefensePost upgrade tests and this test's doc comment"
+        );
+    }
+}
+
+// TS `ImpassableTerrain.test.ts` - terrain classification + ownership
+// subset ("Terrain classification" / "Ownership" describe blocks). The
+// nuke/attack/nation-AI subsets of the same TS file are ported alongside
+// their respective native homes: `execution/nuke_execution.rs`,
+// `execution/attack.rs`, `execution/ai_attack.rs`, `execution/
+// nation_tick.rs` (the last one `#[ignore]`d - see its doc comment).
+#[cfg(test)]
+mod impassable_terrain_tests {
+    use super::{Game, Player, PlayerType};
+
+    const WALL_X: u32 = 30;
+    const WALL_WIDTH: u32 = 2;
+    const MAP_W: u32 = 60;
+    const MAP_H: u32 = 20;
+
+    fn wall_game() -> Game {
+        crate::test_util::walled_game(MAP_W, MAP_H, Some((WALL_X, WALL_WIDTH)))
+    }
+
+    #[test]
+    fn is_impassable_returns_true_for_impassable_tiles_false_for_plains() {
+        let game = wall_game();
+        assert!(!game.is_impassable(game.map.ref_xy(20, 10)));
+        assert!(game.is_impassable(game.map.ref_xy(WALL_X, 10)));
+        assert!(game.is_impassable(game.map.ref_xy(WALL_X + 1, 10)));
+    }
+
+    #[test]
+    fn terrain_type_returns_impassable_for_impassable_tiles() {
+        let game = wall_game();
+        assert_eq!(
+            game.terrain_type(game.map.ref_xy(WALL_X, 10)),
+            crate::map::TerrainType::Impassable
+        );
+    }
+
+    #[test]
+    fn is_land_returns_true_for_impassable_solid_for_pathfinding() {
+        let game = wall_game();
+        assert!(game.is_land(game.map.ref_xy(WALL_X, 10)));
+    }
+
+    #[test]
+    fn num_land_tiles_excludes_impassable_tiles() {
+        let game = wall_game();
+        assert_eq!(
+            game.num_land_tiles(),
+            MAP_W * MAP_H - WALL_WIDTH * MAP_H
+        );
+    }
+
+    fn add_bot(game: &mut Game, id: &str, small_id: u16) {
+        game.add_player(Player {
+            id: id.to_string(),
+            small_id,
+            player_type: PlayerType::Bot,
+            ..Default::default()
+        });
+    }
+
+    /// TS `GameImpl.conquer` throws on impassable tiles; native no-ops
+    /// instead (see `conquer_one`'s doc comment for why) - this pins the
+    /// bug that fix caught: before it, `game.conquer(1, impassable_tile)`
+    /// would silently succeed and give a player real ownership of
+    /// impassable terrain.
+    #[test]
+    fn conquer_does_not_grant_ownership_of_impassable_tiles() {
+        let mut game = wall_game();
+        add_bot(&mut game, "player", 1);
+        let tile = game.map.ref_xy(WALL_X, 10);
+        game.conquer(1, tile);
+        assert_eq!(game.map.owner_id(tile), 0, "impassable tile must stay unowned");
+        assert_eq!(game.player_by_small_id(1).unwrap().tiles_owned, 0);
+    }
+
+    #[test]
+    fn conquer_succeeds_on_normal_land() {
+        let mut game = wall_game();
+        add_bot(&mut game, "player", 1);
+        let tile = game.map.ref_xy(20, 10);
+        game.conquer(1, tile);
+        assert_eq!(game.map.owner_id(tile), 1);
+    }
+
+    // TS `PlayerImpl.canAttack(tile)` - only called from `GameRunner.ts`
+    // (feeds the "can I click-attack this tile" UI hint); no `Execution`
+    // reads it. Native has no port and none is needed for hash parity - see
+    // `PlayerImpl.test.ts`'s analogous `buildableUnits`/`findUnitToUpgrade`
+    // gap note in `player_tests` above for the same rationale.
+    #[test]
+    #[ignore = "PlayerImpl.canAttack(tile) is a human-UI-only click-attack hint (GameRunner.ts); not ported"]
+    fn can_attack_tile_is_unported_ui_only_api() {
+        unreachable!("gap marker only - see doc comment above");
+    }
+
+    // TS `GameImpl.setWater`/`queueWaterConversion`'s "water nukes" feature
+    // defaults off (`Config.waterNukes() => this._gameConfig.waterNukes ??
+    // false`) and has no native port; when off, TS's own
+    // `queueWaterConversion` falls back to `setFallout` (which native DOES
+    // implement and does guard `!is_impassable` in `NukeExecution::detonate`
+    // - see `nuke_execution.rs`'s tests). The low-level `GameMap.setWater`
+    // this specific test calls is only reachable via that unported feature
+    // (plus a client-only rendering call site), so there is nothing to
+    // port it against.
+    #[test]
+    #[ignore = "GameMap.setWater is only reachable via the unported (default-off) waterNukes feature; native's default fallout path is covered in nuke_execution.rs"]
+    fn set_water_does_not_convert_impassable_tiles_is_unported() {
+        unreachable!("gap marker only - see doc comment above");
     }
 }
 
