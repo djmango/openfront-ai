@@ -247,6 +247,14 @@ impl Config {
                 let n = cost_units as i64;
                 ((n + 1) * 50_000).min(250_000)
             }
+            // TS `unitInfo(Warship).cost`: `costWrapper((n) => min(1_000_000, (n+1)*250_000),
+            // Warship)`. Missing here meant every warship - AI or human-built - was free
+            // (fell through to the `_ => 0` arm below), letting `maybeSpawnWarship`'s
+            // `player.gold() > this.cost(Warship)` gate (and the RL env's identical
+            // buildable-action gate in `rl.rs`/`obs.rs`) trivially always pass regardless of
+            // gold. Found while porting `NationWarshipBehavior`'s AI decision layer, which is
+            // the first caller to actually rely on this cost being nonzero.
+            unit_type::WARSHIP => ((cost_units as i64 + 1) * 250_000).min(1_000_000),
             unit_type::ATOM_BOMB => 750_000,
             unit_type::HYDROGEN_BOMB => 5_000_000,
             unit_type::MIRV_WARHEAD => 0,
@@ -263,6 +271,7 @@ impl Config {
             unit_type::SAM_LAUNCHER => &[unit_type::SAM_LAUNCHER],
             unit_type::MISSILE_SILO => &[unit_type::MISSILE_SILO],
             unit_type::DEFENSE_POST => &[unit_type::DEFENSE_POST],
+            unit_type::WARSHIP => &[unit_type::WARSHIP],
             _ => &[],
         }
     }
@@ -770,5 +779,21 @@ mod tests {
         let cfg = Config::from_value(&v, false).unwrap();
         assert!(!cfg.spawn_nations());
         assert!(matches!(cfg.game_config().nations, NationsConfig::Mode(_)));
+    }
+
+    // TS `unitInfo(Warship).cost`: `costWrapper((n) => min(1_000_000, (n+1)*250_000),
+    // Warship)`. `unit_type::WARSHIP` fell through `structure_cost`'s `_ => 0` arm before
+    // this fix, so every warship (AI or human-built) was free. Values below match the
+    // TS formula directly: 0 existing -> 250_000, 3 existing -> 1_000_000, 10 existing ->
+    // still capped at 1_000_000 (the `min` ceiling), matching Port/City/DefensePost/
+    // SAMLauncher's identical cap-then-scale shape for the same unit type elsewhere in
+    // this match.
+    #[test]
+    fn warship_cost_scales_with_existing_count_and_caps_at_1m() {
+        let cfg = Config::from_value(&sample_config_value(), true).unwrap();
+        assert_eq!(cfg.structure_cost(unit_type::WARSHIP, 0), 250_000);
+        assert_eq!(cfg.structure_cost(unit_type::WARSHIP, 3), 1_000_000);
+        assert_eq!(cfg.structure_cost(unit_type::WARSHIP, 10), 1_000_000);
+        assert_eq!(cfg.cost_types_for(unit_type::WARSHIP), &[unit_type::WARSHIP]);
     }
 }
