@@ -80,6 +80,7 @@ impl NukeExecution {
             self.active = false;
             return;
         };
+
         let target_range_sq = game.wire.default_nuke_targetable_range().powi(2);
         let trajectory = parabola::find_path_tiles(
             game,
@@ -351,8 +352,180 @@ pub fn can_build_nuke(
     }
 }
 
+// TS `ImpassableTerrain.test.ts` - "Nukes: targeting" / "Nukes: blast
+// radius" / "Nukes: trajectory" describe blocks. Found and fixed three
+// related real bugs in this file (see each test's doc comment for which
+// one it catches): `nuke_spawn` missing an `is_impassable(dst)` guard,
+// `NukeExecution::detonate`'s blast BFS missing the `!is_impassable`
+// exclusion, and `NukeExecution::spawn` never checking the flight
+// trajectory for impassable terrain before launch.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::{Game, Player, PlayerType};
+
+    const WALL_X: u32 = 30;
+
+    fn wall_game() -> Game {
+        crate::test_util::walled_game(60, 20, Some((WALL_X, 2)))
+    }
+
+    fn add_bot(game: &mut Game, id: &str, small_id: u16) {
+        game.add_player(Player {
+            id: id.to_string(),
+            small_id,
+            player_type: PlayerType::Bot,
+            gold: 1_000_000_000,
+            ..Default::default()
+        });
+    }
+
+    fn run_to_completion(nuke: &mut NukeExecution, game: &mut Game, max_ticks: u32) {
+        for tick in 0..max_ticks {
+            if !nuke.is_active() {
+                break;
+            }
+            nuke.tick(game, tick);
+        }
+    }
+
+    #[test]
+    fn can_build_atom_bomb_returns_none_for_impassable_target() {
+        let mut game = wall_game();
+        add_bot(&mut game, "player", 1);
+        let home = game.map.ref_xy(10, 10);
+        game.conquer(1, home);
+        game.build_unit(1, unit_type::MISSILE_SILO, home);
+        let target = game.map.ref_xy(WALL_X, 10);
+        assert!(can_build_nuke(&game, 1, unit_type::ATOM_BOMB, target).is_none());
+    }
+
+    #[test]
+    fn can_build_mirv_returns_none_for_impassable_target() {
+        let mut game = wall_game();
+        add_bot(&mut game, "player", 1);
+        let home = game.map.ref_xy(10, 10);
+        game.conquer(1, home);
+        game.build_unit(1, unit_type::MISSILE_SILO, home);
+        let target = game.map.ref_xy(WALL_X, 10);
+        assert!(can_build_nuke(&game, 1, unit_type::MIRV, target).is_none());
+    }
+
+    #[test]
+    fn nuke_execution_deactivates_when_targeting_impassable_tile() {
+        let mut game = wall_game();
+        add_bot(&mut game, "player", 1);
+        let home = game.map.ref_xy(10, 10);
+        game.conquer(1, home);
+        game.build_unit(1, unit_type::MISSILE_SILO, home);
+
+        let target = game.map.ref_xy(WALL_X, 10);
+        let mut nuke = NukeExecution::new(unit_type::ATOM_BOMB, 1, target, None, -1.0, 0, true);
+        nuke.init(&mut game, 0);
+        run_to_completion(&mut nuke, &mut game, 5);
+
+        assert!(!nuke.is_active());
+        // No gold spent, no unit built (TS never even attempts the build).
+        assert_eq!(
+            game.player_by_small_id(1)
+                .unwrap()
+                .units
+                .iter()
+                .filter(|u| u.unit_type == unit_type::ATOM_BOMB)
+                .count(),
+            0
+        );
+    }
+
+    /// Catches the missing `!is_impassable(n)` term in `detonate`'s blast
+    /// BFS filter: before the fix, a wall tile within blast radius got
+    /// `set_fallout(true)`, which TS's `tilesToDestroy()` (which excludes
+    /// impassable tiles from the set entirely) never allows.
+    #[test]
+    fn nuke_blast_does_not_set_fallout_on_impassable_tiles() {
+        let mut game = wall_game();
+        add_bot(&mut game, "player", 1);
+        add_bot(&mut game, "other", 2);
+        let home = game.map.ref_xy(10, 10);
+        game.conquer(1, home);
+        game.build_unit(1, unit_type::MISSILE_SILO, home);
+        let target = game.map.ref_xy(WALL_X - 1, 10);
+        game.conquer(2, target);
+
+        let mut nuke = NukeExecution::new(unit_type::ATOM_BOMB, 1, target, None, -1.0, 0, true);
+        nuke.init(&mut game, 0);
+        run_to_completion(&mut nuke, &mut game, 60);
+        assert!(!nuke.is_active(), "nuke should have detonated");
+
+        for y in 5..=15 {
+            let t = game.map.ref_xy(WALL_X, y);
+            assert!(game.is_land(t));
+            assert!(game.is_impassable(t));
+            assert!(
+                !game.map.has_fallout(t),
+                "impassable tile must never receive fallout from a nuke blast"
+            );
+        }
+    }
+
+    /// Catches `NukeExecution::spawn` never checking the flight path for
+    /// impassable terrain: before the fix, a nuke would build and fly
+    /// straight through the wall to its target.
+    #[test]
+    fn nuke_trajectory_blocked_by_impassable_terrain_aborts_launch() {
+        let mut game = wall_game();
+        add_bot(&mut game, "player", 1);
+        let home = game.map.ref_xy(5, 10);
+        game.conquer(1, home);
+        game.build_unit(1, unit_type::MISSILE_SILO, home);
+        // Target is on the right side of the wall - trajectory must cross it.
+        let target = game.map.ref_xy(50, 10);
+        assert!(!game.is_impassable(target));
+
+        let mut nuke = NukeExecution::new(unit_type::ATOM_BOMB, 1, target, None, -1.0, 0, true);
+        nuke.init(&mut game, 0);
+        run_to_completion(&mut nuke, &mut game, 10);
+
+        assert!(!nuke.is_active(), "should have been blocked");
+        assert_eq!(
+            game.player_by_small_id(1)
+                .unwrap()
+                .units
+                .iter()
+                .filter(|u| u.unit_type == unit_type::ATOM_BOMB)
+                .count(),
+            0,
+            "a blocked launch must not build a nuke unit"
+        );
+    }
+
+    #[test]
+    fn nuke_can_launch_when_trajectory_does_not_cross_impassable_terrain() {
+        let mut game = wall_game();
+        add_bot(&mut game, "player", 1);
+        let home = game.map.ref_xy(5, 10);
+        game.conquer(1, home);
+        game.build_unit(1, unit_type::MISSILE_SILO, home);
+        // Target is on the same (left) side - no impassable terrain in between.
+        let target = game.map.ref_xy(15, 10);
+        assert!(!game.is_impassable(target));
+
+        let mut nuke = NukeExecution::new(unit_type::ATOM_BOMB, 1, target, None, -1.0, 0, true);
+        nuke.init(&mut game, 0);
+        run_to_completion(&mut nuke, &mut game, 60);
+
+        assert!(!nuke.is_active(), "should have detonated and deactivated normally");
+    }
+}
+
 fn nuke_spawn(game: &Game, owner_small_id: u16, nuke_type: &str, dst: TileRef) -> Option<TileRef> {
     if game.is_spawn_immunity_active() {
+        return None;
+    }
+    // TS `PlayerImpl.nukeSpawn`: "Impassable terrain cannot be nuked."
+    // Native was missing this guard entirely, so `canBuild(AtomBomb/MIRV,
+    // impassableTile)` would incorrectly succeed.
+    if game.is_impassable(dst) {
         return None;
     }
     let owner_of_tile = game.map.owner_id(dst);
