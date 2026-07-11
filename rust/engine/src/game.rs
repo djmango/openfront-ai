@@ -1131,7 +1131,13 @@ impl Game {
     }
 
     fn conquer_one(&mut self, small_id: u16, tile: TileRef, refresh_borders: bool) {
-        if !self.is_land(tile) {
+        // TS `GameImpl.conquer`: `if (!this.isLand(tile)) throw ...; if
+        // (this.isImpassable(tile)) throw ...;` - impassable tiles (which
+        // are land, so the `is_land` check alone doesn't catch them) must
+        // never receive a real owner. Native no-ops instead of TS's throw,
+        // matching this function's existing silent-reject convention for
+        // the `!is_land` case just above.
+        if !self.is_land(tile) || self.is_impassable(tile) {
             return;
         }
         let tick = self.ticks;
@@ -3430,6 +3436,117 @@ mod player_tests {
         unreachable!(
             "gap marker only - see PlayerImpl.test.ts's City/DefensePost upgrade tests and this test's doc comment"
         );
+    }
+}
+
+// TS `ImpassableTerrain.test.ts` - terrain classification + ownership
+// subset ("Terrain classification" / "Ownership" describe blocks). The
+// nuke/attack/nation-AI subsets of the same TS file are ported alongside
+// their respective native homes: `execution/nuke_execution.rs`,
+// `execution/attack.rs`, `execution/ai_attack.rs`, `execution/
+// nation_tick.rs` (the last one `#[ignore]`d - see its doc comment).
+#[cfg(test)]
+mod impassable_terrain_tests {
+    use super::{Game, Player, PlayerType};
+
+    const WALL_X: u32 = 30;
+    const WALL_WIDTH: u32 = 2;
+    const MAP_W: u32 = 60;
+    const MAP_H: u32 = 20;
+
+    fn wall_game() -> Game {
+        crate::test_util::walled_game(MAP_W, MAP_H, Some((WALL_X, WALL_WIDTH)))
+    }
+
+    #[test]
+    fn is_impassable_returns_true_for_impassable_tiles_false_for_plains() {
+        let game = wall_game();
+        assert!(!game.is_impassable(game.map.ref_xy(20, 10)));
+        assert!(game.is_impassable(game.map.ref_xy(WALL_X, 10)));
+        assert!(game.is_impassable(game.map.ref_xy(WALL_X + 1, 10)));
+    }
+
+    #[test]
+    fn terrain_type_returns_impassable_for_impassable_tiles() {
+        let game = wall_game();
+        assert_eq!(
+            game.terrain_type(game.map.ref_xy(WALL_X, 10)),
+            crate::map::TerrainType::Impassable
+        );
+    }
+
+    #[test]
+    fn is_land_returns_true_for_impassable_solid_for_pathfinding() {
+        let game = wall_game();
+        assert!(game.is_land(game.map.ref_xy(WALL_X, 10)));
+    }
+
+    #[test]
+    fn num_land_tiles_excludes_impassable_tiles() {
+        let game = wall_game();
+        assert_eq!(
+            game.num_land_tiles(),
+            MAP_W * MAP_H - WALL_WIDTH * MAP_H
+        );
+    }
+
+    fn add_bot(game: &mut Game, id: &str, small_id: u16) {
+        game.add_player(Player {
+            id: id.to_string(),
+            small_id,
+            player_type: PlayerType::Bot,
+            ..Default::default()
+        });
+    }
+
+    /// TS `GameImpl.conquer` throws on impassable tiles; native no-ops
+    /// instead (see `conquer_one`'s doc comment for why) - this pins the
+    /// bug that fix caught: before it, `game.conquer(1, impassable_tile)`
+    /// would silently succeed and give a player real ownership of
+    /// impassable terrain.
+    #[test]
+    fn conquer_does_not_grant_ownership_of_impassable_tiles() {
+        let mut game = wall_game();
+        add_bot(&mut game, "player", 1);
+        let tile = game.map.ref_xy(WALL_X, 10);
+        game.conquer(1, tile);
+        assert_eq!(game.map.owner_id(tile), 0, "impassable tile must stay unowned");
+        assert_eq!(game.player_by_small_id(1).unwrap().tiles_owned, 0);
+    }
+
+    #[test]
+    fn conquer_succeeds_on_normal_land() {
+        let mut game = wall_game();
+        add_bot(&mut game, "player", 1);
+        let tile = game.map.ref_xy(20, 10);
+        game.conquer(1, tile);
+        assert_eq!(game.map.owner_id(tile), 1);
+    }
+
+    // TS `PlayerImpl.canAttack(tile)` - only called from `GameRunner.ts`
+    // (feeds the "can I click-attack this tile" UI hint); no `Execution`
+    // reads it. Native has no port and none is needed for hash parity - see
+    // `PlayerImpl.test.ts`'s analogous `buildableUnits`/`findUnitToUpgrade`
+    // gap note in `player_tests` above for the same rationale.
+    #[test]
+    #[ignore = "PlayerImpl.canAttack(tile) is a human-UI-only click-attack hint (GameRunner.ts); not ported"]
+    fn can_attack_tile_is_unported_ui_only_api() {
+        unreachable!("gap marker only - see doc comment above");
+    }
+
+    // TS `GameImpl.setWater`/`queueWaterConversion`'s "water nukes" feature
+    // defaults off (`Config.waterNukes() => this._gameConfig.waterNukes ??
+    // false`) and has no native port; when off, TS's own
+    // `queueWaterConversion` falls back to `setFallout` (which native DOES
+    // implement and does guard `!is_impassable` in `NukeExecution::detonate`
+    // - see `nuke_execution.rs`'s tests). The low-level `GameMap.setWater`
+    // this specific test calls is only reachable via that unported feature
+    // (plus a client-only rendering call site), so there is nothing to
+    // port it against.
+    #[test]
+    #[ignore = "GameMap.setWater is only reachable via the unported (default-off) waterNukes feature; native's default fallout path is covered in nuke_execution.rs"]
+    fn set_water_does_not_convert_impassable_tiles_is_unported() {
+        unreachable!("gap marker only - see doc comment above");
     }
 }
 
