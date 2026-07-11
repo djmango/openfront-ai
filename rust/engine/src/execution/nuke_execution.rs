@@ -146,7 +146,13 @@ impl NukeExecution {
             let rand_cell = std::cell::RefCell::new(PseudoRandom::new(tick as i32));
             game.map.bfs(dst, |gm, n| {
                 let d2 = gm.euclidean_dist_squared(dst, n);
-                d2 <= outer2 && (d2 <= inner2 || rand_cell.borrow_mut().chance(2))
+                // TS `NukeExecution.tilesToDestroy`: `d2 <= outer2 && (d2 <=
+                // inner2 || rand.chance(2)) && !this.mg.isImpassable(n)` -
+                // impassable tiles are excluded from the destroy set itself
+                // (not just "solid" against later floods), so they never
+                // get flagged with fallout. Native was missing the
+                // `!isImpassable` term.
+                d2 <= outer2 && (d2 <= inner2 || rand_cell.borrow_mut().chance(2)) && !gm.is_impassable(n)
             })
         };
 
