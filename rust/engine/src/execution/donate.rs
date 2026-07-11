@@ -81,11 +81,15 @@ impl Execution for DonateTroopsExecution {
     }
 }
 
+// Ported from Donate.test.ts. TS's DonateGoldExecution shares the same
+// alliance-gated donate path as DonateTroopsExecution, so both live here
+// rather than duplicating the setup in donate_gold.rs.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::execution::ExecEnum;
-    use crate::game::{PlayerInfo, PlayerType};
+    use crate::core::schemas::GameConfig as WireGameConfig;
+    use crate::execution::{donate_gold::DonateGoldExecution, ExecEnum};
+    use crate::game::{Game, PlayerInfo, PlayerType};
 
     fn game_with_donations_enabled() -> Game {
         let mut game = Game::default();
@@ -108,6 +112,62 @@ mod tests {
         });
         game.player_by_small_id_mut(sid).unwrap().tiles_owned = tiles_owned;
         sid
+    }
+
+    // Second scenario family below needs real land tiles (uses game.conquer),
+    // not just a tiles_owned counter - its own map/config/add_human builders.
+    fn game_with_donations_enabled_and_map() -> Game {
+        let mut game = Game::default();
+        game.map = crate::map::GameMap::from_terrain_bytes(
+            &crate::map::MapMeta {
+                width: 5,
+                height: 5,
+                num_land_tiles: 25,
+            },
+            &vec![0x80u8; 25],
+        )
+        .unwrap();
+        game.wire = crate::core::config::Config::new(
+            WireGameConfig {
+                game_map: "test".into(),
+                difficulty: "Medium".into(),
+                donate_gold: true,
+                donate_troops: true,
+                game_type: "Singleplayer".into(),
+                game_mode: "Free For All".into(),
+                game_map_size: "Normal".into(),
+                nations: crate::core::schemas::NationsConfig::Mode("default".into()),
+                bots: 0,
+                infinite_gold: false,
+                infinite_troops: false,
+                instant_build: false,
+                random_spawn: false,
+                doomsday_clock: None,
+                disabled_units: None,
+                player_teams: None,
+                disable_alliances: None,
+                spawn_immunity_duration: None,
+                starting_gold: None,
+                gold_multiplier: None,
+                max_timer_value: None,
+                ranked_type: None,
+            },
+            false,
+        );
+        game.end_spawn_phase();
+        game
+    }
+
+    fn add_human_no_tiles(game: &mut Game, id: &str) -> u16 {
+        game.add_from_info(&PlayerInfo {
+            name: id.into(),
+            player_type: PlayerType::Human,
+            client_id: Some(id.into()),
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        })
     }
 
     // Ported from AllianceDonation.test.ts's "Can donate troops after alliance
@@ -141,5 +201,142 @@ mod tests {
             game.player_by_small_id(player2).unwrap().troops,
             troops_before + 100
         );
+    }
+
+    #[test]
+    fn troops_are_donated_between_allies() {
+        let mut game = game_with_donations_enabled_and_map();
+        let donor = add_human_no_tiles(&mut game, "donor");
+        let recipient = add_human_no_tiles(&mut game, "recipient");
+        // `can_donate_troops`/`can_donate_gold` require `tiles_owned > 0`
+        // (mirrors TS `isAlive() == tiles.size > 0`); TS's tests spawn both
+        // players via `SpawnExecution` for the same reason.
+        game.conquer(donor, game.ref_xy(0, 0));
+        game.conquer(recipient, game.ref_xy(4, 4));
+        assert!(game.create_alliance_request(donor, recipient, game.ticks()));
+        game.accept_alliance_request(donor, recipient, game.ticks());
+
+        game.player_by_small_id_mut(donor).unwrap().troops += 6000;
+        let donor_troops_before = game.player_by_small_id(donor).unwrap().troops;
+        let recipient_troops_before = game.player_by_small_id(recipient).unwrap().troops;
+
+        game.add_execution(ExecEnum::DonateTroops(DonateTroopsExecution::new(
+            donor,
+            game.player_by_small_id(recipient).unwrap().id.clone(),
+            Some(5000.0),
+        )));
+        for _ in 0..5 {
+            game.execute_next_tick();
+        }
+
+        assert!(game.player_by_small_id(donor).unwrap().troops < donor_troops_before);
+        assert!(game.player_by_small_id(recipient).unwrap().troops > recipient_troops_before);
+    }
+
+    #[test]
+    fn gold_is_donated_between_allies() {
+        let mut game = game_with_donations_enabled_and_map();
+        let donor = add_human_no_tiles(&mut game, "donor");
+        let recipient = add_human_no_tiles(&mut game, "recipient");
+        game.conquer(donor, game.ref_xy(0, 0));
+        game.conquer(recipient, game.ref_xy(4, 4));
+        assert!(game.create_alliance_request(donor, recipient, game.ticks()));
+        game.accept_alliance_request(donor, recipient, game.ticks());
+
+        game.player_by_small_id_mut(donor).unwrap().gold += 6000;
+        let donor_gold_before = game.player_by_small_id(donor).unwrap().gold;
+        let recipient_gold_before = game.player_by_small_id(recipient).unwrap().gold;
+
+        game.add_execution(ExecEnum::DonateGold(DonateGoldExecution::new(
+            donor,
+            game.player_by_small_id(recipient).unwrap().id.clone(),
+            Some(5000),
+        )));
+        for _ in 0..5 {
+            game.execute_next_tick();
+        }
+
+        assert!(game.player_by_small_id(donor).unwrap().gold < donor_gold_before);
+        assert!(game.player_by_small_id(recipient).unwrap().gold > recipient_gold_before);
+    }
+
+    #[test]
+    fn troops_are_not_donated_to_a_non_ally() {
+        let mut game = game_with_donations_enabled_and_map();
+        let donor = add_human_no_tiles(&mut game, "donor");
+        let recipient = add_human_no_tiles(&mut game, "recipient");
+        game.conquer(donor, game.ref_xy(0, 0));
+        game.conquer(recipient, game.ref_xy(4, 4));
+        assert!(game.create_alliance_request(donor, recipient, game.ticks()));
+        game.reject_alliance_request(donor, recipient);
+
+        let donor_troops_before = game.player_by_small_id(donor).unwrap().troops;
+        let recipient_troops_before = game.player_by_small_id(recipient).unwrap().troops;
+
+        game.add_execution(ExecEnum::DonateTroops(DonateTroopsExecution::new(
+            donor,
+            game.player_by_small_id(recipient).unwrap().id.clone(),
+            Some(5000.0),
+        )));
+        game.execute_next_tick();
+
+        assert!(game.player_by_small_id(donor).unwrap().troops >= donor_troops_before);
+        assert!(game.player_by_small_id(recipient).unwrap().troops >= recipient_troops_before);
+    }
+
+    #[test]
+    fn gold_is_not_donated_to_a_non_ally() {
+        let mut game = game_with_donations_enabled_and_map();
+        let donor = add_human_no_tiles(&mut game, "donor");
+        let recipient = add_human_no_tiles(&mut game, "recipient");
+        game.conquer(donor, game.ref_xy(0, 0));
+        game.conquer(recipient, game.ref_xy(4, 4));
+        assert!(game.create_alliance_request(donor, recipient, game.ticks()));
+        game.reject_alliance_request(donor, recipient);
+
+        let donor_gold_before = game.player_by_small_id(donor).unwrap().gold;
+        let recipient_gold_before = game.player_by_small_id(recipient).unwrap().gold;
+
+        game.add_execution(ExecEnum::DonateGold(DonateGoldExecution::new(
+            donor,
+            game.player_by_small_id(recipient).unwrap().id.clone(),
+            Some(5000),
+        )));
+        game.execute_next_tick();
+
+        assert!(game.player_by_small_id(donor).unwrap().gold >= donor_gold_before);
+        assert!(game.player_by_small_id(recipient).unwrap().gold >= recipient_gold_before);
+    }
+
+    #[test]
+    fn self_donation_is_disallowed_despite_being_friendly_with_self() {
+        let mut game = game_with_donations_enabled_and_map();
+        let player = add_human_no_tiles(&mut game, "player_self");
+        game.conquer(player, game.ref_xy(0, 0));
+
+        assert!(game.is_friendly(player, player));
+        assert!(!game.can_donate_gold(player, player));
+        assert!(!game.can_donate_troops(player, player));
+
+        game.player_by_small_id_mut(player).unwrap().gold += 1000;
+        game.player_by_small_id_mut(player).unwrap().troops += 1000;
+        let gold_before = game.player_by_small_id(player).unwrap().gold;
+        let troops_before = game.player_by_small_id(player).unwrap().troops;
+
+        let self_id = game.player_by_small_id(player).unwrap().id.clone();
+        game.add_execution(ExecEnum::DonateGold(DonateGoldExecution::new(
+            player,
+            self_id.clone(),
+            Some(500),
+        )));
+        game.add_execution(ExecEnum::DonateTroops(DonateTroopsExecution::new(
+            player,
+            self_id,
+            Some(500.0),
+        )));
+        game.execute_next_tick();
+
+        assert!(game.player_by_small_id(player).unwrap().gold >= gold_before);
+        assert!(game.player_by_small_id(player).unwrap().troops >= troops_before);
     }
 }

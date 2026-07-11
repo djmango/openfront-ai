@@ -485,4 +485,29 @@ mod tests {
         // nukeDeathFactor(ATOM_BOMB, 300, 100, _) = 5 * 300 / 100 = 15.
         assert_eq!(troops_after, 285.0);
     }
+
+    // Ported/adapted from Disconnected.test.ts's "Disconnected team member
+    // interactions" describe block (openfront/tests/Disconnected.test.ts,
+    // the three tests below "Conqueror gets conquered disconnected team
+    // member's transport- and warships"):
+    //   - "Captured transport ship landing attack should be in name of new owner"
+    //   - "Captured transport ship should retreat to closest owner shore tile"
+    //   - "Retreating transport ship is deleted if new owner has no shore tiles"
+    //
+    // All three drive a real `TransportShipExecution` through actual water
+    // pathfinding (`half_land_half_ocean` fixture: shore tiles, a real ocean
+    // component, `bestTransportShipSpawn`/retreat-tile selection) across
+    // multiple ticks after the ship is captured mid-voyage. No existing
+    // native test builds a synthetic water map (every current test - attack,
+    // nation_structures, warship's own new tests above - stays on land-only
+    // or mocks geometry out entirely), and building that infra from scratch
+    // is out of scope here per the porting task's guardrails. The underlying
+    // capture mechanism itself (`Game::conquer_player`) is covered directly
+    // in `game.rs::conquer_player_tests`; what's *not* covered natively is
+    // the captured ship's own post-capture behavior (continuing its voyage
+    // under the new owner's name, retreating to the new owner's shore, or
+    // self-deleting when the new owner has no shore left).
+    #[test]
+    #[ignore = "needs a synthetic water-map test harness (shore tiles/ocean component/retreat-tile search) - see module comment and Disconnected.test.ts lines 333-458"]
+    fn captured_transport_ship_behavior_needs_water_map_test_harness() {}
 }
