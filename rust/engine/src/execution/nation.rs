@@ -155,7 +155,12 @@ impl Execution for NationExecution {
 
         if !self.behaviors_initialized {
             self.behaviors_initialized = true;
-            super::nation_tick::initialize_nation_behaviors(&mut self.random, &mut self.behavior);
+            super::nation_tick::initialize_nation_behaviors(
+                game,
+                &mut self.random,
+                small_id,
+                &mut self.behavior,
+            );
             let troops = game
                 .player_by_small_id(small_id)
                 .map(|p| p.troops as f64 / 2.0)
