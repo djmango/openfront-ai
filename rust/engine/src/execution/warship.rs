@@ -594,6 +594,7 @@ impl Execution for WarshipExecution {
 mod tests {
     use super::*;
     use crate::core::schemas::unit_type;
+    use crate::execution::TradeShipExecution;
     use crate::game::{Player, PlayerType, PlayerInfo};
     use crate::map::{GameMap, MapMeta};
 
@@ -642,6 +643,20 @@ mod tests {
         game.add_from_info(&PlayerInfo {
             name: id.into(),
             player_type: PlayerType::Human,
+            client_id: Some(id.into()),
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        })
+    }
+
+    /// Like `add_human` but `PlayerType::Nation` - sidesteps Human-only spawn immunity
+    /// (`can_attack_player_ex`) for combat/target-selection tests that don't care about it.
+    fn add_nation(game: &mut Game, id: &str) -> u16 {
+        game.add_from_info(&PlayerInfo {
+            name: id.into(),
+            player_type: PlayerType::Nation,
             client_id: Some(id.into()),
             id: id.into(),
             clan_tag: None,
@@ -831,6 +846,15 @@ mod tests {
                 "different water component - no move"
             );
         }
+
+        #[test]
+        fn fails_gracefully_if_warship_id_never_existed() {
+            let mut game = water_game(60, 60);
+            let p1 = add_human(&mut game, "p1");
+
+            // Must not panic even though unit id 123 was never built.
+            game.move_warships(p1, &[123], game.ref_xy(30, 30));
+        }
     }
 
     fn team_setup() -> (Game, u16, u16) {
@@ -864,6 +888,37 @@ mod tests {
             ..Default::default()
         });
         (game, 1)
+    }
+
+    /// Like `team_setup` but with no team relation - genuine (attackable) enemies, for
+    /// combat/target-selection tests. `PlayerType::Nation` again sidesteps Human-only
+    /// spawn immunity, which is orthogonal to what these tests exercise.
+    fn two_nations_setup() -> (Game, u16, u16) {
+        let mut game = Game::default();
+        game.add_player(Player {
+            id: "p1".to_string(),
+            small_id: 1,
+            player_type: PlayerType::Nation,
+            ..Default::default()
+        });
+        game.add_player(Player {
+            id: "p2".to_string(),
+            small_id: 2,
+            player_type: PlayerType::Nation,
+            ..Default::default()
+        });
+        (game, 1, 2)
+    }
+
+    fn three_nations_setup() -> (Game, u16, u16, u16) {
+        let (mut game, p1, p2) = two_nations_setup();
+        game.add_player(Player {
+            id: "p3".to_string(),
+            small_id: 3,
+            player_type: PlayerType::Nation,
+            ..Default::default()
+        });
+        (game, p1, p2, 3)
     }
 
     // Ported from `Warship.test.ts`'s "Warship heals only if player has port". Drives
@@ -965,5 +1020,313 @@ mod tests {
             exec.target(&game, warship_tile, true),
             Some((p1, transport_id, unit_type::TRANSPORT))
         );
+    }
+
+    // Ported from `Warship.test.ts`'s remaining (non-heal, non-`MoveWarshipExecution`)
+    // cases. `target()` is private but reachable from this same-file `mod tests` (Rust
+    // privacy is module-tree-scoped, not file-scoped) - most of these call it directly
+    // instead of driving full `tick()`/shell mechanics, exactly like the two
+    // `disconnected_team_mates_*` tests above already do.
+    mod target_and_retreat_tests {
+        use super::*;
+
+        #[test]
+        fn prioritizes_transport_over_warship_target() {
+            let (mut game, p1, p2) = two_nations_setup();
+            let warship_tile = game.ref_xy(0, 10);
+            let enemy_warship_tile = game.ref_xy(0, 11);
+            let enemy_transport_tile = game.ref_xy(0, 12);
+            game.build_unit(p2, unit_type::WARSHIP, enemy_warship_tile);
+            let transport_id = game.build_unit(p2, unit_type::TRANSPORT, enemy_transport_tile);
+
+            let exec = WarshipExecution::new(p1, warship_tile);
+            // The transport is farther away than the enemy warship, but type priority
+            // (Transport > Warship > TradeShip) always wins over distance.
+            assert_eq!(
+                exec.target(&game, warship_tile, true),
+                Some((p2, transport_id, unit_type::TRANSPORT))
+            );
+        }
+
+        #[test]
+        fn docked_warship_not_targeted_by_enemy_warship() {
+            let (mut game, p1, p2) = two_nations_setup();
+            game.end_spawn_phase(); // `add_execution` only promotes out of `uninit` post-spawn.
+            let tile1 = game.ref_xy(0, 10);
+            let tile2 = game.ref_xy(0, 11);
+            let w1 = game.build_unit(p1, unit_type::WARSHIP, tile1);
+            let mut docked_exec = WarshipExecution::new_for_test(p1, tile1, w1);
+            docked_exec.docked = true;
+            game.add_execution(ExecEnum::Warship(docked_exec));
+            // Promotes the exec out of the uninit queue and into `execs` (its `init()` is
+            // a no-op since `unit_id` is already set) - `warship_is_docked` only scans `execs`.
+            game.execute_next_tick();
+
+            let exec = WarshipExecution::new(p2, tile2);
+            assert!(exec.target(&game, tile2, true).is_none());
+        }
+
+        #[test]
+        fn does_not_target_trade_ship_if_owner_has_no_port() {
+            let (mut game, p1, p2) = two_nations_setup();
+            let warship_tile = game.ref_xy(0, 10);
+            let trade_ship_tile = game.ref_xy(0, 11);
+            game.build_unit(p2, unit_type::TRADE_SHIP, trade_ship_tile);
+
+            let exec = WarshipExecution::new(p1, warship_tile);
+            assert!(exec.target(&game, warship_tile, true).is_none());
+        }
+
+        #[test]
+        fn does_not_target_trade_ship_safe_from_pirates() {
+            let (mut game, p1, p2) = two_nations_setup();
+            let warship_tile = game.ref_xy(0, 10);
+            let trade_ship_tile = game.ref_xy(0, 11);
+            game.build_unit(p1, unit_type::PORT, warship_tile);
+            // `Game::build_unit` grants every freshly built trade ship a 20-tick pirate
+            // immunity window from its own spawn tick (still tick 0 here).
+            game.build_unit(p2, unit_type::TRADE_SHIP, trade_ship_tile);
+
+            let exec = WarshipExecution::new(p1, warship_tile);
+            assert!(exec.target(&game, warship_tile, true).is_none());
+        }
+
+        #[test]
+        fn captures_trade_ship_when_conditions_are_met() {
+            let mut game = water_game(60, 60);
+            let p1 = add_nation(&mut game, "p1"); // sidesteps Human spawn immunity on p2/p3.
+            let p2 = add_human(&mut game, "p2");
+            let p3 = add_human(&mut game, "p3");
+
+            let warship_tile = game.ref_xy(10, 10);
+            let ship_tile = game.ref_xy(11, 10);
+            let dst_tile = game.ref_xy(12, 10);
+
+            game.build_unit(p1, unit_type::PORT, warship_tile);
+            let ship_id = game.build_unit(p2, unit_type::TRADE_SHIP, ship_tile);
+            let dst_port_id = game.build_unit(p3, unit_type::PORT, dst_tile);
+            // Past its spawn-tick pirate-immunity window (see the "safe from pirates" test).
+            game.unit_mut(p2, ship_id).unwrap().last_safe_from_pirates_tick = -1000;
+
+            game.add_execution(ExecEnum::TradeShip(TradeShipExecution::new_for_test(
+                p2,
+                dst_port_id,
+                ship_id,
+            )));
+            game.execute_next_tick();
+
+            let exec = WarshipExecution::new(p1, warship_tile);
+            assert_eq!(
+                exec.target(&game, warship_tile, true),
+                Some((p2, ship_id, unit_type::TRADE_SHIP))
+            );
+        }
+
+        #[test]
+        fn active_healing_when_docked_heals_by_port_level_times_five() {
+            let (mut game, p1) = solo_setup();
+            let port_tile = game.ref_xy(0, 0);
+            // Far enough from the port that passive near-port healing (<=150 tiles) is
+            // inert, isolating the active docked-healing formula under test.
+            let ship_tile = game.ref_xy(0, 200);
+            game.build_unit(p1, unit_type::PORT, port_tile);
+            let ship_id = game.build_unit(p1, unit_type::WARSHIP, ship_tile);
+            game.unit_mut(p1, ship_id).unwrap().health -= 100;
+            let health_before = game.unit(p1, ship_id).unwrap().health;
+
+            let mut exec = WarshipExecution::new_for_test(p1, ship_tile, ship_id);
+            exec.docked = true;
+            exec.retreat_port = Some(port_tile);
+            exec.tick(&mut game, 1);
+
+            assert_eq!(
+                game.unit(p1, ship_id).unwrap().health,
+                health_before + 5,
+                "port level (1) * 5"
+            );
+        }
+
+        #[test]
+        fn cancels_docking_if_retreat_port_destroyed() {
+            let (mut game, p1) = solo_setup();
+            let port_tile = game.ref_xy(0, 0);
+            let ship_tile = game.ref_xy(0, 200);
+            let port_id = game.build_unit(p1, unit_type::PORT, port_tile);
+            let ship_id = game.build_unit(p1, unit_type::WARSHIP, ship_tile);
+
+            let mut exec = WarshipExecution::new_for_test(p1, ship_tile, ship_id);
+            exec.docked = true;
+            exec.retreating = true;
+            exec.retreat_port = Some(port_tile);
+
+            game.remove_unit(p1, port_id);
+            exec.tick(&mut game, 1);
+
+            assert!(!exec.docked);
+            assert!(!exec.retreating);
+            assert!(exec.retreat_port.is_none());
+        }
+
+        #[test]
+        fn does_not_start_retreat_when_no_port_exists() {
+            // A real navmesh (`water_game`, not `solo_setup`'s navmesh-less `Game::default()`)
+            // so this isolates "no ports at all" specifically, rather than also hitting
+            // `nearest_port`'s `get_water_component(from)?` navmesh-less bailout.
+            let mut game = water_game(30, 30);
+            let p1 = add_nation(&mut game, "p1");
+            let ship_tile = game.ref_xy(10, 10);
+            let ship_id = game.build_unit(p1, unit_type::WARSHIP, ship_tile);
+            let max_health = game.unit_max_health(p1, ship_id);
+            game.unit_mut(p1, ship_id).unwrap().health = max_health * 50 / 100;
+
+            let mut exec = WarshipExecution::new_for_test(p1, ship_tile, ship_id);
+            exec.tick(&mut game, 25);
+
+            assert!(!exec.retreating);
+            assert!(!exec.docked);
+        }
+
+        /// Two water pools divided by a land strip, each wrapped in a real `mini_water_hpa`
+        /// (`get_water_component`/`has_water_component` are permissive/no-ops without one -
+        /// see `Game::has_water_component`'s "disableNavMesh" fallback - so a real navmesh is
+        /// required to genuinely exercise the different-component rejection, not just the
+        /// navmesh-less bailout `does_not_start_retreat_when_no_port_exists` already covers).
+        /// Mirrors `move_warships_tests`' `does_not_move_a_warship_across_disconnected_water_bodies`.
+        fn split_water_game() -> (Game, TileRef, TileRef) {
+            let width = 40u32;
+            let height = 20u32;
+            let n = (width * height) as usize;
+            let mut data = vec![0u8; n];
+            for y in 0..height {
+                data[(y * width + (width / 2)) as usize] = 0b1000_0000; // land, plains
+            }
+            let map = GameMap::from_terrain_bytes(
+                &MapMeta {
+                    width,
+                    height,
+                    num_land_tiles: height,
+                },
+                &data,
+            )
+            .expect("split water/land test map");
+            let mini_w = width.div_ceil(2);
+            let mini_h = height.div_ceil(2);
+            let mut mini_data = vec![0u8; (mini_w * mini_h) as usize];
+            for y in 0..mini_h {
+                mini_data[(y * mini_w + (mini_w / 2)) as usize] = 0b1000_0000;
+            }
+            let mini_map = GameMap::from_terrain_bytes(
+                &MapMeta {
+                    width: mini_w,
+                    height: mini_h,
+                    num_land_tiles: mini_h,
+                },
+                &mini_data,
+            )
+            .expect("split water/land test mini map");
+
+            let mut game = Game::default();
+            game.map = map.clone();
+            game.mini_map = mini_map.clone();
+            game.bfs = crate::water::BfsScratch::new(n);
+            game.water_astar = crate::water::WaterAstarScratch::new(n);
+            game.mini_water_astar =
+                crate::water::WaterAstarScratch::new((mini_w * mini_h) as usize);
+            game.mini_water_hpa = Some(crate::water_hpa::WaterHierarchical::new(&mini_map, true));
+            game.water_component = crate::water::build_water_components(&map);
+            game.end_spawn_phase();
+            let west = game.ref_xy(2, height / 2);
+            let east = game.ref_xy(width - 3, height / 2);
+            (game, west, east)
+        }
+
+        #[test]
+        fn cancels_retreat_when_port_is_in_different_water_component() {
+            let (mut game, west_tile, east_tile) = split_water_game();
+            let p1 = add_nation(&mut game, "p1");
+            game.build_unit(p1, unit_type::PORT, east_tile);
+            let ship_id = game.build_unit(p1, unit_type::WARSHIP, west_tile);
+            let max_health = game.unit_max_health(p1, ship_id);
+            game.unit_mut(p1, ship_id).unwrap().health = max_health * 50 / 100;
+
+            let mut exec = WarshipExecution::new_for_test(p1, west_tile, ship_id);
+            exec.tick(&mut game, 25);
+
+            assert!(
+                !exec.retreating,
+                "the only port is unreachable by water - retreat never starts"
+            );
+        }
+
+        #[test]
+        fn low_health_warship_retreats_and_fires_at_nearby_enemy_warship() {
+            let mut game = water_game(30, 30);
+            let p1 = add_nation(&mut game, "p1");
+            let p2 = add_nation(&mut game, "p2");
+            let base_tile = game.ref_xy(10, 10);
+            let enemy_tile = game.ref_xy(10, 11);
+            game.build_unit(p1, unit_type::PORT, base_tile);
+            let ship_id = game.build_unit(p1, unit_type::WARSHIP, base_tile);
+            let enemy_id = game.build_unit(p2, unit_type::WARSHIP, enemy_tile);
+            let max_health = game.unit_max_health(p1, ship_id);
+            game.unit_mut(p1, ship_id).unwrap().health = max_health * 50 / 100;
+
+            // `shoot_target`'s reload gate compares `game.ticks()` (not the tick argument
+            // passed to `exec.tick` below) against `last_shell_attack` - advance the game's
+            // own tick counter past the 20-tick reload window first.
+            for _ in 0..25 {
+                game.execute_next_tick();
+            }
+            let tick = game.ticks();
+            let mut exec = WarshipExecution::new_for_test(p1, base_tile, ship_id);
+            exec.tick(&mut game, tick);
+
+            assert!(
+                exec.docked,
+                "port is at the same tile - retreat docks immediately"
+            );
+            game.execute_next_tick(); // promotes the queued ShellExecution out of `uninit`.
+            game.execute_next_tick(); // shell travels (distance 1) and hits this tick.
+
+            let enemy_health = game.unit(p2, enemy_id).unwrap().health;
+            assert!(
+                enemy_health < 1000,
+                "warship should fire at the nearby enemy while retreating, got {enemy_health}"
+            );
+        }
+
+        #[test]
+        fn retreating_warship_aggroes_nearby_transport() {
+            let mut game = water_game(30, 30);
+            let p1 = add_nation(&mut game, "p1");
+            let p2 = add_nation(&mut game, "p2");
+            let base_tile = game.ref_xy(10, 10);
+            let enemy_tile = game.ref_xy(10, 11);
+            game.build_unit(p1, unit_type::PORT, base_tile);
+            let ship_id = game.build_unit(p1, unit_type::WARSHIP, base_tile);
+            let transport_id = game.build_unit(p2, unit_type::TRANSPORT, enemy_tile);
+            game.unit_mut(p2, transport_id).unwrap().health = 1;
+            let max_health = game.unit_max_health(p1, ship_id);
+            game.unit_mut(p1, ship_id).unwrap().health = max_health * 50 / 100;
+
+            // `retreat()`'s aggro shot (`self.target(game, from, false)`, run before the
+            // docking check) reads `game.ticks()` for `shoot_target`'s reload gate, not
+            // the `tick` argument passed to `exec.tick` - advance the real counter first.
+            for _ in 0..25 {
+                game.execute_next_tick();
+            }
+            let tick = game.ticks();
+            let mut exec = WarshipExecution::new_for_test(p1, base_tile, ship_id);
+            exec.tick(&mut game, tick);
+            assert!(exec.docked, "port is at the same tile - retreat docks immediately");
+
+            game.execute_next_tick(); // promotes the queued ShellExecution out of `uninit`.
+            game.execute_next_tick(); // shell travels (distance 1) and hits this tick.
+
+            assert!(
+                game.find_unit_owner(transport_id).is_none(),
+                "1-hp transport should be destroyed by the retreat-aggro shell"
+            );
+        }
     }
 }
