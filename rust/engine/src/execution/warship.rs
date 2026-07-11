@@ -105,6 +105,18 @@ impl WarshipExecution {
         self.patrol_tile = tile;
     }
 
+    /// TS `MoveWarshipExecution.init()`'s per-warship redirect (a manual player move) -
+    /// unlike `set_patrol_tile` (`NationWarshipBehavior.maybeMoveWarship`, which lets an
+    /// in-progress patrol leg finish), this also clears the in-flight patrol
+    /// waypoint/path (TS `warship.setTargetTile(undefined)`) so the ship redirects toward
+    /// the new patrol tile immediately instead of finishing its current leg first.
+    pub fn retarget_patrol(&mut self, tile: TileRef) {
+        self.patrol_tile = tile;
+        self.target_tile = None;
+        self.path.clear();
+        self.path_idx = 0;
+    }
+
     /// Test-only constructor for a warship whose backing `Unit` already exists, bypassing
     /// `init()`'s water-component port lookup (`Game::default()`/synthetic test maps have no
     /// `mini_water_hpa` - see `warship_ai.rs`'s test module doc comment). Mirrors
@@ -582,7 +594,244 @@ impl Execution for WarshipExecution {
 mod tests {
     use super::*;
     use crate::core::schemas::unit_type;
-    use crate::game::{Player, PlayerType};
+    use crate::game::{Player, PlayerType, PlayerInfo};
+    use crate::map::{GameMap, MapMeta};
+
+    /// All-water `width`x`height` map wrapped in a `Game` with a real `mini_water_hpa`
+    /// (unlike `warship_ai.rs`'s `big_water_game`, which only swaps `Game::default()`'s map
+    /// field in place and so has no navmesh at all - `get_water_component` always returns
+    /// `None` there). Needed for `move_warships` tests, which gate on water-component
+    /// membership. Mirrors `test_util::walled_game`'s all-land equivalent.
+    fn water_game(width: u32, height: u32) -> Game {
+        let n = (width * height) as usize;
+        let map = GameMap::from_terrain_bytes(
+            &MapMeta {
+                width,
+                height,
+                num_land_tiles: 0,
+            },
+            &vec![0u8; n],
+        )
+        .expect("all-water test map");
+        let mini_w = width.div_ceil(2);
+        let mini_h = height.div_ceil(2);
+        let mini_n = (mini_w * mini_h) as usize;
+        let mini_map = GameMap::from_terrain_bytes(
+            &MapMeta {
+                width: mini_w,
+                height: mini_h,
+                num_land_tiles: 0,
+            },
+            &vec![0u8; mini_n],
+        )
+        .expect("all-water test mini map");
+
+        let mut game = Game::default();
+        game.map = map.clone();
+        game.mini_map = mini_map.clone();
+        game.bfs = crate::water::BfsScratch::new(n);
+        game.water_astar = crate::water::WaterAstarScratch::new(n);
+        game.mini_water_astar = crate::water::WaterAstarScratch::new(mini_n);
+        game.mini_water_hpa = Some(crate::water_hpa::WaterHierarchical::new(&mini_map, true));
+        game.water_component = crate::water::build_water_components(&map);
+        game.end_spawn_phase();
+        game
+    }
+
+    fn add_human(game: &mut Game, id: &str) -> u16 {
+        game.add_from_info(&PlayerInfo {
+            name: id.into(),
+            player_type: PlayerType::Human,
+            client_id: Some(id.into()),
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        })
+    }
+
+    // TS `WarshipMultiSelection.test.ts` (`MoveWarshipExecution`). Ported by calling
+    // `Game::move_warships` directly (the native equivalent of constructing a
+    // `MoveWarshipExecution` and calling `.init()` on it - TS's own test does the same,
+    // never advancing ticks to observe the effect through `WarshipExecution::tick`).
+    mod move_warships_tests {
+        use super::*;
+
+        fn patrol_tile_of(game: &Game, owner: u16, unit_id: i32) -> TileRef {
+            game.warship_patrol_candidates(owner)
+                .into_iter()
+                .find(|&(id, _, _)| id == unit_id)
+                .map(|(_, _, patrol_tile)| patrol_tile)
+                .unwrap()
+        }
+
+        #[test]
+        fn moves_multiple_warships_to_a_shared_target() {
+            let mut game = water_game(60, 60);
+            let p1 = add_human(&mut game, "p1");
+            let tiles = [game.ref_xy(10, 10), game.ref_xy(11, 10), game.ref_xy(12, 10)];
+            let ids: Vec<i32> = tiles
+                .iter()
+                .map(|&t| game.build_unit(p1, unit_type::WARSHIP, t))
+                .collect();
+            for (&id, &t) in ids.iter().zip(tiles.iter()) {
+                game.add_execution(ExecEnum::Warship(WarshipExecution::new_for_test(p1, t, id)));
+            }
+            game.execute_next_tick(); // moves the freshly-added execs out of the uninit queue.
+
+            let target = game.ref_xy(30, 30);
+            game.move_warships(p1, &ids, target);
+
+            for &id in &ids {
+                assert_eq!(patrol_tile_of(&game, p1, id), target);
+            }
+        }
+
+        #[test]
+        fn moves_different_warships_to_independent_targets() {
+            let mut game = water_game(60, 60);
+            let p1 = add_human(&mut game, "p1");
+            let t1 = game.ref_xy(10, 10);
+            let t2 = game.ref_xy(11, 10);
+            let w1 = game.build_unit(p1, unit_type::WARSHIP, t1);
+            let w2 = game.build_unit(p1, unit_type::WARSHIP, t2);
+            game.add_execution(ExecEnum::Warship(WarshipExecution::new_for_test(p1, t1, w1)));
+            game.add_execution(ExecEnum::Warship(WarshipExecution::new_for_test(p1, t2, w2)));
+            game.execute_next_tick();
+
+            let target1 = game.ref_xy(20, 25);
+            let target2 = game.ref_xy(25, 30);
+            game.move_warships(p1, &[w1], target1);
+            game.move_warships(p1, &[w2], target2);
+
+            assert_eq!(patrol_tile_of(&game, p1, w1), target1);
+            assert_eq!(patrol_tile_of(&game, p1, w2), target2);
+        }
+
+        #[test]
+        fn enemy_cannot_move_another_players_warship() {
+            let mut game = water_game(60, 60);
+            let p1 = add_human(&mut game, "p1");
+            let p2 = add_human(&mut game, "p2");
+            let original_tile = game.ref_xy(10, 10);
+            let w1 = game.build_unit(p1, unit_type::WARSHIP, original_tile);
+            game.add_execution(ExecEnum::Warship(WarshipExecution::new_for_test(
+                p1,
+                original_tile,
+                w1,
+            )));
+            game.execute_next_tick();
+
+            // `p2` (not the owner) tries to move `p1`'s warship.
+            game.move_warships(p2, &[w1], game.ref_xy(30, 30));
+
+            assert_eq!(patrol_tile_of(&game, p1, w1), original_tile);
+        }
+
+        #[test]
+        fn does_not_panic_on_a_destroyed_warship() {
+            let mut game = water_game(60, 60);
+            let p1 = add_human(&mut game, "p1");
+            let tile = game.ref_xy(10, 10);
+            let w1 = game.build_unit(p1, unit_type::WARSHIP, tile);
+            game.add_execution(ExecEnum::Warship(WarshipExecution::new_for_test(p1, tile, w1)));
+            game.remove_unit(p1, w1);
+
+            // Must not panic even though the warship no longer exists.
+            game.move_warships(p1, &[w1], game.ref_xy(30, 30));
+        }
+
+        #[test]
+        fn batch_move_does_not_affect_another_players_warship() {
+            let mut game = water_game(60, 60);
+            let p1 = add_human(&mut game, "p1");
+            let p2 = add_human(&mut game, "p2");
+            let p1_tile = game.ref_xy(10, 10);
+            let p2_tile = game.ref_xy(11, 10);
+            let w1 = game.build_unit(p1, unit_type::WARSHIP, p1_tile);
+            let w2 = game.build_unit(p2, unit_type::WARSHIP, p2_tile);
+            game.add_execution(ExecEnum::Warship(WarshipExecution::new_for_test(p1, p1_tile, w1)));
+            game.add_execution(ExecEnum::Warship(WarshipExecution::new_for_test(p2, p2_tile, w2)));
+            game.execute_next_tick();
+
+            let target = game.ref_xy(30, 30);
+            // p1 tries to move both its own warship and p2's, in one batch.
+            game.move_warships(p1, &[w1, w2], target);
+
+            assert_eq!(patrol_tile_of(&game, p1, w1), target);
+            assert_eq!(
+                patrol_tile_of(&game, p2, w2),
+                p2_tile,
+                "unchanged - wrong owner"
+            );
+        }
+
+        #[test]
+        fn does_not_move_a_warship_across_disconnected_water_bodies() {
+            // Two separate water pools divided by a land strip - `move_warships` should
+            // leave a warship's patrol tile untouched if the target lives in a different
+            // water component (TS `hasWaterComponent` gate).
+            let width = 40u32;
+            let height = 20u32;
+            let n = (width * height) as usize;
+            let mut data = vec![0u8; n]; // all water
+            for y in 0..height {
+                data[(y * width + (width / 2)) as usize] = 0b1000_0000; // land, plains
+            }
+            let map = GameMap::from_terrain_bytes(
+                &MapMeta {
+                    width,
+                    height,
+                    num_land_tiles: height,
+                },
+                &data,
+            )
+            .unwrap();
+            let mini_w = width.div_ceil(2);
+            let mini_h = height.div_ceil(2);
+            let mut mini_data = vec![0u8; (mini_w * mini_h) as usize];
+            for y in 0..mini_h {
+                mini_data[(y * mini_w + (mini_w / 2)) as usize] = 0b1000_0000;
+            }
+            let mini_map = GameMap::from_terrain_bytes(
+                &MapMeta {
+                    width: mini_w,
+                    height: mini_h,
+                    num_land_tiles: mini_h,
+                },
+                &mini_data,
+            )
+            .unwrap();
+
+            let mut game = Game::default();
+            game.map = map.clone();
+            game.mini_map = mini_map.clone();
+            game.bfs = crate::water::BfsScratch::new(n);
+            game.water_astar = crate::water::WaterAstarScratch::new(n);
+            game.mini_water_astar =
+                crate::water::WaterAstarScratch::new((mini_w * mini_h) as usize);
+            game.mini_water_hpa = Some(crate::water_hpa::WaterHierarchical::new(&mini_map, true));
+            game.water_component = crate::water::build_water_components(&map);
+            game.end_spawn_phase();
+
+            let p1 = add_human(&mut game, "p1");
+            let west_tile = game.ref_xy(2, 10);
+            let east_tile = game.ref_xy(width - 3, 10);
+            let w1 = game.build_unit(p1, unit_type::WARSHIP, west_tile);
+            game.add_execution(ExecEnum::Warship(WarshipExecution::new_for_test(
+                p1, west_tile, w1,
+            )));
+            game.execute_next_tick();
+
+            game.move_warships(p1, &[w1], east_tile);
+
+            assert_eq!(
+                patrol_tile_of(&game, p1, w1),
+                west_tile,
+                "different water component - no move"
+            );
+        }
+    }
 
     fn team_setup() -> (Game, u16, u16) {
         let mut game = Game::default();

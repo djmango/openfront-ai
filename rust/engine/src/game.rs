@@ -2595,6 +2595,51 @@ impl Game {
         }
     }
 
+    /// TS `MoveWarshipExecution.init()` - a manual (human-issued) batch move of one or more
+    /// of `owner_small_id`'s own warships to `position`. Deduplicates `unit_ids` (TS `new
+    /// Set(this.unitIds)`) and, per id, requires: the id names one of `owner_small_id`'s own
+    /// `Warship` units (this alone is what makes another player's/another owner's warships
+    /// un-movable - TS builds its lookup map from `this.owner.units(Warship)`, so an id the
+    /// owner doesn't hold is simply absent from it), an active `WarshipExecution`, and the
+    /// warship's current tile sharing a water component with `position`. TS's leading
+    /// `isValidRef(position)` bounds check is not ported - no caller in this codebase passes
+    /// anything but a `TileRef` already known to be in-bounds.
+    pub fn move_warships(&mut self, owner_small_id: u16, unit_ids: &[i32], position: TileRef) {
+        let Some(component) = self.get_water_component(position) else {
+            return;
+        };
+        let mut seen = std::collections::HashSet::new();
+        for &unit_id in unit_ids {
+            if !seen.insert(unit_id) {
+                continue;
+            }
+            let owns_warship = self.player_by_small_id(owner_small_id).is_some_and(|p| {
+                p.units
+                    .iter()
+                    .any(|u| u.id == unit_id && u.unit_type == crate::core::schemas::unit_type::WARSHIP)
+            });
+            if !owns_warship {
+                continue;
+            }
+            let Some(current_tile) = self.unit_tile_of(owner_small_id, unit_id) else {
+                continue;
+            };
+            if !self.has_water_component(current_tile, component) {
+                continue;
+            }
+            for exec in &mut self.execs {
+                if let ExecEnum::Warship(w) = exec {
+                    if w.owner_small_id() == owner_small_id && w.unit_id() == Some(unit_id) {
+                        if w.is_active() {
+                            w.retarget_patrol(position);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     /// TS `UnitGrid.hasUnitNearby(tile, range, type, playerId, includeUnderConstruction)` -
     /// the owner-filtered overload `has_unit_nearby_any` doesn't cover (that one scans all
     /// players and always excludes under-construction units; this one is scoped to a single
