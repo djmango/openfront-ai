@@ -369,7 +369,7 @@ pub fn can_build_nuke(
 // exclusion, and `NukeExecution::spawn` never checking the flight
 // trajectory for impassable terrain before launch.
 #[cfg(test)]
-mod tests {
+mod impassable_terrain_tests {
     use super::*;
     use crate::game::{Game, Player, PlayerType};
 
