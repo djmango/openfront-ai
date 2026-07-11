@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn spawn_set_tick50_centers() {
         let repo = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let dir = std::path::Path::new(&repo).join("openfront/resources/maps/twolakes");
         let map = crate::map::GameMap::load_map_dir(&dir).unwrap().1;
         let mut scratch = crate::water::BfsScratch::new((map.width * map.height) as usize);
@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn spawn_set_matches_python_reference_for_1830957() {
         let repo = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let dir = std::path::Path::new(&repo)
             .join("openfront/resources/maps/twolakes");
         let map = GameMap::load_map_dir(&dir).unwrap().1;
