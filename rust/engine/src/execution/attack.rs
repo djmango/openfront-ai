@@ -431,6 +431,68 @@ mod tests {
         assert_eq!(attacks[1].1, 1);
         assert!(!attacks[1].3);
     }
+
+    // Ported from AttackStats.test.ts. TS tracks a detailed per-category gold
+    // ledger (`GOLD_INDEX_WAR`/`GOLD_INDEX_WORK` in `StatsImpl`) purely for UI
+    // display; native has no such stats subsystem at all (see
+    // docs/bot-ai-parity-nation-relations/README.md's documented "dead for
+    // this dataset" carve-outs for similar UI-only bookkeeping). What IS
+    // gameplay-relevant and ported here is the underlying mechanic those
+    // stats are derived from: `Game::conquer_player`'s actual gold transfer,
+    // and its "conquered player never attacked anyone" skip condition (TS
+    // `GameImpl.conquerPlayer`'s `skipGoldTransfer`, tracked via
+    // `attacks_sent_net`/TS's `ATTACK_INDEX_SENT`). TS's third test
+    // ("...via territory annexation") exercises this exact same
+    // `conquerPlayer` code path with different map geometry leading to the
+    // same elimination trigger - not re-ported separately since native's
+    // `handle_dead_defender` doesn't distinguish how a defender's tiles
+    // dropped below the elimination threshold.
+    #[test]
+    fn conqueror_receives_half_a_human_defenders_gold_on_elimination() {
+        let mut game = Game::default();
+        game.add_player(Player {
+            id: "attacker".to_string(),
+            small_id: 1,
+            gold: 0,
+            ..Default::default()
+        });
+        game.add_player(Player {
+            id: "defender".to_string(),
+            small_id: 2,
+            gold: 100,
+            ..Default::default()
+        });
+        // TS: "Player2 must attack to be considered active (otherwise gold
+        // won't transfer)".
+        game.adjust_attacks_sent(2, 50.0);
+
+        game.conquer_player(1, 2);
+
+        assert_eq!(game.player_by_small_id(1).unwrap().gold, 50);
+        assert_eq!(game.player_by_small_id(2).unwrap().gold, 0);
+    }
+
+    #[test]
+    fn no_gold_transfers_when_an_inactive_human_defender_is_eliminated() {
+        let mut game = Game::default();
+        game.add_player(Player {
+            id: "attacker".to_string(),
+            small_id: 1,
+            gold: 0,
+            ..Default::default()
+        });
+        game.add_player(Player {
+            id: "defender".to_string(),
+            small_id: 2,
+            gold: 100,
+            ..Default::default()
+        });
+
+        game.conquer_player(1, 2);
+
+        assert_eq!(game.player_by_small_id(1).unwrap().gold, 0);
+        assert_eq!(game.player_by_small_id(2).unwrap().gold, 100);
+    }
 }
 
 impl AttackExecution {
