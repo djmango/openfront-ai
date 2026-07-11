@@ -52,6 +52,11 @@ pub struct Unit {
     pub targetable: bool,
     /// Last tick a trade ship moved along shoreline and was protected from piracy.
     pub last_safe_from_pirates_tick: i32,
+    /// TS `WarshipState.veterancy` - always 0 for non-warships (nothing ever increments it).
+    pub veterancy: i32,
+    /// TS `WarshipState.veterancyProgress` - partial progress toward the next veterancy
+    /// level from transport kills/trade captures; see `Game::record_kill`'s doc comment.
+    pub veterancy_progress: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -285,6 +290,10 @@ pub struct Game {
     pub rail_network: crate::rail::RailNetwork,
     /// TS `StatsImpl._numMirvLaunched`  -  global count feeding escalating MIRV cost.
     pub mirvs_launched: u32,
+    /// TS `NationMIRVBehavior.recentMirvTargets` (`static`, shared across every nation's
+    /// behavior instance so multiple nations don't pile-on the same freshly-hit target) -
+    /// keyed by target `small_id` rather than `PlayerID`, value is the tick of the last hit.
+    pub recent_mirv_targets: HashMap<u16, u32>,
     /// TS `UnitImpl._destroyer`/`_wasDestroyedByEnemy`, scoped to transport ships (the only
     /// unit type `NationWarshipBehavior.trackShipsAndRetaliate` queries `destroyer()` for -
     /// see `warship_ai.rs`). Native fully removes a destroyed unit from `Player.units` (no
@@ -378,6 +387,7 @@ impl Default for Game {
             shared_water_cache: std::cell::RefCell::new(HashMap::new()),
             rail_network: crate::rail::RailNetwork::default(),
             mirvs_launched: 0,
+            recent_mirv_targets: HashMap::new(),
             transport_kills: Vec::new(),
         }
     }
@@ -1514,6 +1524,122 @@ impl Game {
             .and_then(|p| p.units.iter().find(|u| u.id == unit_id))
     }
 
+    /// TS `UnitImpl.veterancy()` - always 0 for non-warships (nothing ever increments
+    /// a non-warship's `veterancy` field).
+    pub fn unit_veterancy(&self, small_id: u16, unit_id: i32) -> i32 {
+        self.unit(small_id, unit_id).map(|u| u.veterancy).unwrap_or(0)
+    }
+
+    /// TS `UnitImpl.maxHealth()`. Only `Warship` has a veterancy-scaled bonus (every other
+    /// unit type's `veterancy` field is always 0, so `max_health_with_veterancy` is a no-op
+    /// for them and this reduces to `base`).
+    pub fn unit_max_health(&self, small_id: u16, unit_id: i32) -> i32 {
+        use crate::core::schemas::unit_type::WARSHIP;
+        let Some(unit) = self.unit(small_id, unit_id) else {
+            return 1;
+        };
+        if unit.unit_type != WARSHIP {
+            return 1; // Only warships have configured maxHealth in this port so far.
+        }
+        crate::core::veterancy::max_health_with_veterancy(
+            self.wire.warship_base_max_health(),
+            unit.veterancy,
+            self.wire.warship_veterancy_health_bonus(),
+        )
+    }
+
+    /// Raise a warship's veterancy by one level (capped at `warshipMaxVeterancy`), which
+    /// raises its max health - TS `UnitImpl.increaseVeterancy()`. The ship is NOT instantly
+    /// healed; it heals toward the new, higher cap normally. No-op for non-warships or a
+    /// unit already at the cap.
+    fn increase_veterancy(&mut self, small_id: u16, unit_id: i32) {
+        let max_veterancy = self.wire.warship_max_veterancy();
+        if let Some(unit) = self.unit_mut(small_id, unit_id) {
+            if unit.veterancy < max_veterancy {
+                unit.veterancy += 1;
+            }
+        }
+    }
+
+    /// TS `UnitImpl.recordKill(targetType)`. A killing blow on an enemy warship is an
+    /// instant level (and wipes partial transport/capture progress); a transport kill only
+    /// adds partial progress (shared with trade captures - see `add_veterancy_progress`).
+    /// No-op for non-warships (mirrors `_warshipState === undefined` in TS) and for any
+    /// other `target_type` (TS's `recordKill` only branches on Warship/TransportShip).
+    pub fn record_kill(&mut self, small_id: u16, unit_id: i32, target_type: &str) {
+        use crate::core::schemas::unit_type::{TRANSPORT, WARSHIP};
+        let Some(unit) = self.unit(small_id, unit_id) else {
+            return;
+        };
+        if unit.unit_type != WARSHIP {
+            return;
+        }
+        if target_type == WARSHIP {
+            if let Some(unit) = self.unit_mut(small_id, unit_id) {
+                unit.veterancy_progress = 0;
+            }
+            self.increase_veterancy(small_id, unit_id);
+        } else if target_type == TRANSPORT {
+            self.add_veterancy_progress(small_id, unit_id, TRANSPORT);
+        }
+    }
+
+    /// TS `UnitImpl.recordTradeCapture()`.
+    pub fn record_trade_capture(&mut self, small_id: u16, unit_id: i32) {
+        use crate::core::schemas::unit_type::{TRADE_SHIP, WARSHIP};
+        let Some(unit) = self.unit(small_id, unit_id) else {
+            return;
+        };
+        if unit.unit_type != WARSHIP {
+            return;
+        }
+        self.add_veterancy_progress(small_id, unit_id, TRADE_SHIP);
+    }
+
+    /// TS `UnitImpl.addVeterancyProgress(source)`. Transports and captures share one
+    /// integer progress meter: one level = `transportThreshold * captureThreshold` points,
+    /// a transport is worth `captureThreshold` points and a capture is worth
+    /// `transportThreshold` points, so `transportThreshold` transports OR
+    /// `captureThreshold` captures (or any mix) fill exactly one level. Overflow carries
+    /// into the next level; only a warship kill (`record_kill`'s Warship arm) resets it.
+    fn add_veterancy_progress(&mut self, small_id: u16, unit_id: i32, source: &str) {
+        use crate::core::schemas::unit_type::TRANSPORT;
+        let max_veterancy = self.wire.warship_max_veterancy();
+        let transport_threshold = self.wire.warship_veterancy_transport_kills();
+        let capture_threshold = self.wire.warship_veterancy_trade_captures();
+        let points_per_level = transport_threshold * capture_threshold;
+
+        let Some(current) = self.unit(small_id, unit_id).map(|u| u.veterancy) else {
+            return;
+        };
+        if current >= max_veterancy {
+            return;
+        }
+        let add = if source == TRANSPORT { capture_threshold } else { transport_threshold };
+        if let Some(unit) = self.unit_mut(small_id, unit_id) {
+            unit.veterancy_progress += add;
+        }
+
+        // Each loop iteration re-fetches through `unit()`/`unit_mut()` rather than holding a
+        // borrow across `increase_veterancy`'s own `&mut self` call.
+        loop {
+            let Some(unit) = self.unit(small_id, unit_id) else { return };
+            if unit.veterancy_progress < points_per_level || unit.veterancy >= max_veterancy {
+                break;
+            }
+            if let Some(unit) = self.unit_mut(small_id, unit_id) {
+                unit.veterancy_progress -= points_per_level;
+            }
+            self.increase_veterancy(small_id, unit_id);
+        }
+
+        if self.unit(small_id, unit_id).is_some_and(|u| u.veterancy >= max_veterancy) {
+            if let Some(unit) = self.unit_mut(small_id, unit_id) {
+                unit.veterancy_progress = 0;
+            }
+        }
+    }
+
     /// TS `UnitImpl.launch()`  -  push the current tick onto the missile timer queue.
     pub fn unit_launch(&mut self, small_id: u16, unit_id: i32) {
         let tick = self.ticks;
@@ -2464,6 +2590,51 @@ impl Game {
                 if w.owner_small_id() == small_id && w.unit_id() == Some(unit_id) {
                     w.set_patrol_tile(tile);
                     return;
+                }
+            }
+        }
+    }
+
+    /// TS `MoveWarshipExecution.init()` - a manual (human-issued) batch move of one or more
+    /// of `owner_small_id`'s own warships to `position`. Deduplicates `unit_ids` (TS `new
+    /// Set(this.unitIds)`) and, per id, requires: the id names one of `owner_small_id`'s own
+    /// `Warship` units (this alone is what makes another player's/another owner's warships
+    /// un-movable - TS builds its lookup map from `this.owner.units(Warship)`, so an id the
+    /// owner doesn't hold is simply absent from it), an active `WarshipExecution`, and the
+    /// warship's current tile sharing a water component with `position`. TS's leading
+    /// `isValidRef(position)` bounds check is not ported - no caller in this codebase passes
+    /// anything but a `TileRef` already known to be in-bounds.
+    pub fn move_warships(&mut self, owner_small_id: u16, unit_ids: &[i32], position: TileRef) {
+        let Some(component) = self.get_water_component(position) else {
+            return;
+        };
+        let mut seen = std::collections::HashSet::new();
+        for &unit_id in unit_ids {
+            if !seen.insert(unit_id) {
+                continue;
+            }
+            let owns_warship = self.player_by_small_id(owner_small_id).is_some_and(|p| {
+                p.units
+                    .iter()
+                    .any(|u| u.id == unit_id && u.unit_type == crate::core::schemas::unit_type::WARSHIP)
+            });
+            if !owns_warship {
+                continue;
+            }
+            let Some(current_tile) = self.unit_tile_of(owner_small_id, unit_id) else {
+                continue;
+            };
+            if !self.has_water_component(current_tile, component) {
+                continue;
+            }
+            for exec in &mut self.execs {
+                if let ExecEnum::Warship(w) = exec {
+                    if w.owner_small_id() == owner_small_id && w.unit_id() == Some(unit_id) {
+                        if w.is_active() {
+                            w.retarget_patrol(position);
+                        }
+                        break;
+                    }
                 }
             }
         }
@@ -4247,4 +4418,184 @@ mod impassable_terrain_tests {
 pub struct TickUpdates {
     pub hash: Option<HashUpdate>,
     pub win: Option<WinUpdate>,
+}
+
+// Ported from `openfront/tests/WarshipVeterancy.test.ts`. That file's setup uses a real
+// `half_land_half_ocean` map + `WarshipExecution` end-to-end; these tests instead drive
+// `Game::record_kill`/`record_trade_capture`/`unit_max_health` directly (this codebase's
+// established `Game::default()` idiom - see e.g. `impassable_terrain_tests` above), since
+// none of the veterancy math itself depends on geometry/pathfinding.
+#[cfg(test)]
+mod veterancy_tests {
+    use super::{Game, Player, PlayerType};
+    use crate::core::schemas::unit_type::{TRADE_SHIP, TRANSPORT, WARSHIP};
+
+    fn add_player(game: &mut Game, small_id: u16) {
+        game.add_player(Player {
+            id: small_id.to_string(),
+            small_id,
+            player_type: PlayerType::Human,
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn killing_an_enemy_warship_grants_one_veterancy_level() {
+        let mut game = Game::default();
+        add_player(&mut game, 1);
+        let tile = game.map.ref_xy(0, 0);
+        let ship = game.build_unit(1, WARSHIP, tile);
+        assert_eq!(game.unit_veterancy(1, ship), 0);
+
+        game.record_kill(1, ship, WARSHIP);
+        assert_eq!(game.unit_veterancy(1, ship), 1);
+    }
+
+    #[test]
+    fn veterancy_is_capped_at_the_configured_maximum() {
+        let mut game = Game::default();
+        add_player(&mut game, 1);
+        let tile = game.map.ref_xy(0, 0);
+        let ship = game.build_unit(1, WARSHIP, tile);
+        let max = game.wire.warship_max_veterancy();
+
+        for _ in 0..max + 3 {
+            game.record_kill(1, ship, WARSHIP);
+        }
+        assert_eq!(game.unit_veterancy(1, ship), max);
+    }
+
+    #[test]
+    fn destroying_transport_ships_alone_fills_a_level_at_the_threshold() {
+        let mut game = Game::default();
+        add_player(&mut game, 1);
+        let tile = game.map.ref_xy(0, 0);
+        let ship = game.build_unit(1, WARSHIP, tile);
+        let threshold = game.wire.warship_veterancy_transport_kills();
+
+        for _ in 0..threshold - 1 {
+            game.record_kill(1, ship, TRANSPORT);
+        }
+        assert_eq!(game.unit_veterancy(1, ship), 0);
+
+        game.record_kill(1, ship, TRANSPORT);
+        assert_eq!(game.unit_veterancy(1, ship), 1);
+    }
+
+    #[test]
+    fn capturing_trade_ships_alone_fills_a_level_at_the_threshold() {
+        let mut game = Game::default();
+        add_player(&mut game, 1);
+        let tile = game.map.ref_xy(0, 0);
+        let ship = game.build_unit(1, WARSHIP, tile);
+        let threshold = game.wire.warship_veterancy_trade_captures();
+
+        for _ in 0..threshold - 1 {
+            game.record_trade_capture(1, ship);
+        }
+        assert_eq!(game.unit_veterancy(1, ship), 0);
+
+        game.record_trade_capture(1, ship);
+        assert_eq!(game.unit_veterancy(1, ship), 1);
+    }
+
+    #[test]
+    fn transports_and_captures_share_one_progress_meter() {
+        let mut game = Game::default();
+        add_player(&mut game, 1);
+        let tile = game.map.ref_xy(0, 0);
+        let ship = game.build_unit(1, WARSHIP, tile);
+        // Defaults: 10 transports OR 25 captures = 1 level, so a transport is worth 1/10 of
+        // a level and a capture 1/25. Mixed progress combines.
+        for _ in 0..5 {
+            game.record_kill(1, ship, TRANSPORT);
+        }
+        for _ in 0..12 {
+            game.record_trade_capture(1, ship);
+        }
+        assert_eq!(game.unit_veterancy(1, ship), 0); // 5/10 + 12/25 = 0.98 < 1
+
+        game.record_trade_capture(1, ship);
+        assert_eq!(game.unit_veterancy(1, ship), 1); // 5/10 + 13/25 = 1.02 >= 1
+    }
+
+    #[test]
+    fn a_warship_kill_resets_transport_capture_progress() {
+        let mut game = Game::default();
+        add_player(&mut game, 1);
+        let tile = game.map.ref_xy(0, 0);
+        let ship = game.build_unit(1, WARSHIP, tile);
+        let threshold = game.wire.warship_veterancy_transport_kills();
+
+        // Build up 9/10 of a level from transports (no level yet).
+        for _ in 0..threshold - 1 {
+            game.record_kill(1, ship, TRANSPORT);
+        }
+        assert_eq!(game.unit_veterancy(1, ship), 0);
+
+        // A warship kill grants a level AND wipes the partial progress.
+        game.record_kill(1, ship, WARSHIP);
+        assert_eq!(game.unit_veterancy(1, ship), 1);
+
+        // Had progress carried, this transport would have completed level 2. Since it
+        // reset, we're still at level 1.
+        game.record_kill(1, ship, TRANSPORT);
+        assert_eq!(game.unit_veterancy(1, ship), 1);
+    }
+
+    #[test]
+    fn partial_progress_carries_past_a_level_up() {
+        let mut game = Game::default();
+        add_player(&mut game, 1);
+        let tile = game.map.ref_xy(0, 0);
+        let ship = game.build_unit(1, WARSHIP, tile);
+        let threshold = game.wire.warship_veterancy_trade_captures();
+
+        // One past the threshold -> level 1 with 1 capture's worth carried over.
+        for _ in 0..threshold + 1 {
+            game.record_trade_capture(1, ship);
+        }
+        assert_eq!(game.unit_veterancy(1, ship), 1);
+
+        // The carried progress means one fewer capture completes level 2.
+        for _ in 0..threshold - 1 {
+            game.record_trade_capture(1, ship);
+        }
+        assert_eq!(game.unit_veterancy(1, ship), 2);
+    }
+
+    #[test]
+    fn veterancy_raises_max_health_but_does_not_instantly_heal() {
+        let mut game = Game::default();
+        add_player(&mut game, 1);
+        let tile = game.map.ref_xy(0, 0);
+        let ship = game.build_unit(1, WARSHIP, tile);
+        let base = game.wire.warship_base_max_health();
+        let bonus_percent = game.wire.warship_veterancy_health_bonus();
+
+        // Drop below full so a (removed) instant heal would be observable.
+        game.unit_mut(1, ship).unwrap().health -= 100;
+        assert_eq!(game.unit_max_health(1, ship), base);
+        assert_eq!(game.unit(1, ship).unwrap().health, base - 100);
+
+        game.record_kill(1, ship, WARSHIP); // veterancy 1
+
+        // The cap rises, but current health is unchanged - the ship heals toward the new
+        // max normally, it does not jump on level-up.
+        assert_eq!(game.unit_max_health(1, ship), base + base * 1 * bonus_percent / 100);
+        assert_eq!(game.unit(1, ship).unwrap().health, base - 100);
+    }
+
+    #[test]
+    fn non_warships_never_gain_veterancy() {
+        let mut game = Game::default();
+        add_player(&mut game, 1);
+        let tile = game.map.ref_xy(0, 0);
+        let transport = game.build_unit(1, TRANSPORT, tile);
+
+        game.record_kill(1, transport, WARSHIP);
+        game.record_trade_capture(1, transport);
+
+        assert_eq!(game.unit_veterancy(1, transport), 0);
+    }
 }

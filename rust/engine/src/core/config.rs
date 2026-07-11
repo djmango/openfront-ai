@@ -105,6 +105,40 @@ impl Config {
         (troops as f64 / 5.0).floor()
     }
 
+    /// TS `UnitInfo(Warship).maxHealth` - base (veterancy-0) warship health cap.
+    pub fn warship_base_max_health(&self) -> i32 {
+        1000
+    }
+
+    /// TS `warshipMaxVeterancy()` - highest veterancy level a warship can reach.
+    pub fn warship_max_veterancy(&self) -> i32 {
+        3
+    }
+
+    /// TS `warshipVeterancyHealthBonus()` - max-health boost per level, as an integer
+    /// percent of base max health.
+    pub fn warship_veterancy_health_bonus(&self) -> i32 {
+        20
+    }
+
+    /// TS `warshipVeterancyShellDamageBonus()` - shell-damage boost per level, as an
+    /// integer percent of the rolled damage.
+    pub fn warship_veterancy_shell_damage_bonus(&self) -> i32 {
+        20
+    }
+
+    /// TS `warshipVeterancyTransportKills()` - transport ships a warship must destroy
+    /// (alone, with no trade captures) to gain one veterancy level.
+    pub fn warship_veterancy_transport_kills(&self) -> i32 {
+        10
+    }
+
+    /// TS `warshipVeterancyTradeCaptures()` - trade ships a warship must capture (alone,
+    /// with no transport kills) to gain one veterancy level.
+    pub fn warship_veterancy_trade_captures(&self) -> i32 {
+        25
+    }
+
     pub fn doomsday_clock_config(&self) -> DoomsdayClockResolved {
         let defaults = DoomsdayClockResolved::default();
         let wire = self.game_config.doomsday_clock.as_ref();
