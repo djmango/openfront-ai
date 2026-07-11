@@ -61,11 +61,6 @@ impl Execution for PlayerExecution {
             return;
         }
 
-        // TS delays troop income until the tick after spawn phase ends.
-        if game.spawn_end_tick() == Some(tick) {
-            return;
-        }
-
         let inc = game.troop_increase_rate_for(self.small_id);
         let gold = game.wire.gold_addition_rate(p.player_type);
         if let Some(pm) = game.player_by_small_id_mut(self.small_id) {

@@ -605,7 +605,7 @@ mod tests {
     #[test]
     fn hash_checkpoints_280_to_320() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/jby2gMJF.json.gz");
         let bytes = load_record_bytes(&path).unwrap();
@@ -633,10 +633,75 @@ mod tests {
         }
     }
 
+    /// Bisection utility: replays `FIND_DIVERGENCE_RECORD` (default
+    /// `rN7wbZ1Y`) tick-by-tick and stops at the first tick whose hash
+    /// disagrees with the record's own archived hash, printing every
+    /// player's tiles/troops/gold/alive/unit-count at that tick (and,
+    /// if `FIND_DIVERGENCE_TRACK_NAME` names a player, that single
+    /// player's tiles/troops/gold every tick up to it) - the native side of
+    /// the same before/after-a-fix bisection loop used throughout
+    /// `docs/bot-ai-parity-*/`. Note the printed tick is `HashUpdate::tick`,
+    /// which is the *pre-increment* tick just processed (see
+    /// `execute_next_tick`, hash is computed before `self.ticks += 1`) - one
+    /// less than `game.ticks()` read afterward.
+    ///
+    /// Usage:
+    ///   FIND_DIVERGENCE_RECORD=fkVh9QtC cargo test --release -p \
+    ///     openfront-engine --lib find_first_divergence -- --nocapture
+    #[test]
+    fn find_first_divergence() {
+        let repo_root = std::env::var("OPENFRONT_REPO")
+            .unwrap_or_else(|_| crate::util::default_repo_root());
+        let repo = std::path::Path::new(&repo_root);
+        let record_name =
+            std::env::var("FIND_DIVERGENCE_RECORD").unwrap_or_else(|_| "rN7wbZ1Y".into());
+        let path = repo.join(format!("records/0c4c7d7993c9/{record_name}.json.gz"));
+        let bytes = load_record_bytes(&path).unwrap();
+        let rec = GameRecord::from_json_bytes(&bytes).unwrap().decompress();
+        let mut game = crate::bootstrap::game_from_record(repo, &rec).unwrap();
+        let track_name = std::env::var("FIND_DIVERGENCE_TRACK_NAME").ok();
+        let mut processed: u32 = 0;
+        for turn in rec.turns.iter() {
+            let gid = game.game_id.clone();
+            for e in turn_to_executions(&mut game, &gid, &turn.intents) {
+                game.add_execution(e);
+            }
+            let updates = game.execute_next_tick();
+            processed += 1;
+            if let Some(track_name) = track_name.as_deref() {
+                if processed <= 200 {
+                    if let Some(p) = game.players_in_order().iter().find(|p| p.name == track_name) {
+                        eprintln!(
+                            "processed {} (game.ticks()={}) {} tiles={} troops={} gold={}",
+                            processed, game.ticks(), track_name, p.tiles_owned, p.troops, p.gold
+                        );
+                    }
+                }
+            }
+            if let Some(h) = updates.hash {
+                let archived = rec.turns.get(h.tick as usize).and_then(|t| t.hash);
+                if archived.is_some() && archived != Some(h.hash) {
+                    eprintln!(
+                        "FIRST DIVERGENCE at tick {} native={} archived={:?}",
+                        h.tick, h.hash, archived
+                    );
+                    for p in game.players_in_order() {
+                        eprintln!(
+                            "  player {} ({}): tiles={} troops={} gold={} alive={} units={}",
+                            p.id, p.name, p.tiles_owned, p.troops, p.gold, p.alive, p.units.len()
+                        );
+                    }
+                    return;
+                }
+            }
+        }
+        eprintln!("no divergence found in {} turns", rec.turns.len());
+    }
+
     #[test]
     fn export_tick_state_json() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let target: u32 = std::env::var("EXPORT_TICK")
             .ok()
@@ -731,7 +796,7 @@ mod tests {
     #[ignore]
     fn multi_record_parity_report() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let paths = list_record_paths(repo);
         eprintln!(
@@ -785,7 +850,7 @@ mod tests {
     #[test]
     fn bootstrap_nation_ids_3qnu() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/3QNU4eJa.json.gz");
         let bytes = std::fs::read(&path).unwrap();
@@ -824,7 +889,7 @@ mod tests {
     #[test]
     fn parity_single_record() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let rel = std::env::var("PARITY_RECORD")
             .unwrap_or_else(|_| "records/0c4c7d7993c9/3QNU4eJa.json.gz".into());
@@ -849,7 +914,7 @@ mod tests {
     fn export_transport_path_json() {
         use crate::spatial::{can_build_transport_ship, target_transport_tile};
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let target: u32 = std::env::var("EXPORT_TICK")
             .ok()
@@ -911,7 +976,7 @@ mod tests {
     #[test]
     fn export_record_hash_at_turn() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let target: u32 = std::env::var("EXPORT_TICK")
             .ok()
@@ -957,19 +1022,64 @@ mod tests {
 
     #[test]
     fn sigmoid_matches_ts() {
+        // TS `Util.sigmoid`/`Config.attackLogic`'s `defenseSig`:
+        // `1 / (1 + exp(-decayRate * (numTilesOwned - midpoint)))` with
+        // `DEFENSE_DEBUFF_DECAY_RATE = LN2/50_000`, `DEFENSE_DEBUFF_MIDPOINT
+        // = 150_000` (see `openfront/src/core/configuration/Config.ts`).
+        // With these constants the sigmoid's floor at `numTilesOwned == 0`
+        // is `1/9 ~= 0.111` - NOT near 0 (a previous version of this test
+        // asserted `sigmoid(71.0, ..) < 0.01`, which is unsatisfiable for
+        // any `numTilesOwned >= 0` given `midpoint - 0 == 3` decay
+        // half-lives away, `2^-3 == 0.125`-ish, not 100+ half-lives - that
+        // was a bug in the test's own expectation, not in `sigmoid()` or
+        // its constants, both of which already match TS's formula and
+        // config values exactly). Pin the three mathematically exact anchor
+        // points instead: floor (0 tiles), midpoint (150_000 tiles, defined
+        // to be exactly 0.5), and a large defender well past the midpoint
+        // (approaching but never reaching 1).
         use crate::util::sigmoid;
         let decay = std::f64::consts::LN_2 / 50_000.0;
         let mid = 150_000.0;
-        let s = sigmoid(71.0, decay, mid);
-        assert!(s < 0.01, "small defender sigmoid near 0, got {s}");
-        let ldb = 0.7 + 0.3 * (1.0 - s);
-        assert!((ldb - 1.0).abs() < 0.01, "large defender attack debuff ~1, got {ldb}");
+
+        let floor = sigmoid(0.0, decay, mid);
+        assert!(
+            (floor - 1.0 / 9.0).abs() < 1e-9,
+            "0-tile defender sigmoid should be exactly 1/9, got {floor}"
+        );
+
+        let at_midpoint = sigmoid(mid, decay, mid);
+        assert!(
+            (at_midpoint - 0.5).abs() < 1e-9,
+            "sigmoid at the midpoint should be exactly 0.5, got {at_midpoint}"
+        );
+
+        let large = sigmoid(500_000.0, decay, mid);
+        assert!(
+            large > 0.99 && large < 1.0,
+            "large (500k-tile) defender sigmoid should approach 1, got {large}"
+        );
+
+        // Attack-logic's derived "large defender attack debuff":
+        // `0.7 + 0.3 * (1 - defenseSig)`. A large defender (sigmoid near 1)
+        // pushes the attacker's effective troops toward the 0.7 floor (the
+        // strongest defense bonus); a 0-tile defender sits at the sigmoid
+        // floor's own ceiling (~0.967), not exactly 1.0.
+        let ldb_large = 0.7 + 0.3 * (1.0 - large);
+        assert!(
+            (ldb_large - 0.7).abs() < 0.01,
+            "large defender attack debuff near 0.7 (max bonus), got {ldb_large}"
+        );
+        let ldb_floor = 0.7 + 0.3 * (1.0 - floor);
+        assert!(
+            (ldb_floor - (0.7 + 0.3 * (1.0 - 1.0 / 9.0))).abs() < 1e-9,
+            "0-tile defender attack debuff should sit at the sigmoid floor's ceiling, got {ldb_floor}"
+        );
     }
 
     #[test]
     fn debug_attack_7mv_turn_353_354() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/7MVmc1cR.json.gz");
         let a_sid = replay_to_tick(repo, &path, 352)
@@ -996,7 +1106,7 @@ mod tests {
     #[test]
     fn compare_owned_tiles_7mv_turn_353() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/7MVmc1cR.json.gz");
         let game = replay_to_tick(repo, &path, 353);
@@ -1022,7 +1132,7 @@ mod tests {
     #[test]
     fn dbg_border_ocean() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let target: u32 = std::env::var("EXPORT_TICK")
             .ok()
@@ -1060,7 +1170,7 @@ mod tests {
     #[test]
     fn export_state_json() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let target: u32 = std::env::var("EXPORT_TICK")
             .ok()
@@ -1136,7 +1246,7 @@ mod tests {
     #[test]
     fn debug_raw_mini_path() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let record = std::env::var("EXPORT_RECORD")
             .unwrap_or_else(|_| "records/0c4c7d7993c9/MdPDuVXZ.json.gz".into());
@@ -1208,7 +1318,7 @@ mod tests {
     #[test]
     fn debug_player_client_id() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let record = std::env::var("EXPORT_RECORD")
             .unwrap_or_else(|_| "records/0c4c7d7993c9/1MFxEdwr.json.gz".into());
@@ -1234,7 +1344,7 @@ mod tests {
     #[test]
     fn debug_transport_src_pick() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let record = std::env::var("EXPORT_RECORD")
             .unwrap_or_else(|_| "records/0c4c7d7993c9/MdPDuVXZ.json.gz".into());
@@ -1286,7 +1396,7 @@ mod tests {
     #[test]
     fn debug_player86_state() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/3QNU4eJa.json.gz");
         // Replay to tick 191 (state just before tick 191 runs)
@@ -1314,7 +1424,7 @@ mod tests {
     #[test]
     fn export_exec_order() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let target: u32 = std::env::var("EXPORT_TICK")
             .ok()
@@ -1334,7 +1444,7 @@ mod tests {
     #[test]
     fn export_player_border_tiles() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let target: u32 = std::env::var("EXPORT_TICK")
             .ok()
@@ -1357,7 +1467,7 @@ mod tests {
     #[test]
     fn export_map_owner_blob() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let target: u32 = std::env::var("EXPORT_TICK")
             .ok()
@@ -1382,7 +1492,7 @@ mod tests {
     #[test]
     fn debug_6k4_tile_690794_turn_237() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/6k4SnLrH.json.gz");
         let tile: crate::map::TileRef = 690794;
@@ -1416,7 +1526,7 @@ mod tests {
     #[test]
     fn map_tile_accounting_6k4_turn_195() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/6k4SnLrH.json.gz");
         for target in [193u32, 194u32, 195u32] {
@@ -1456,7 +1566,7 @@ mod tests {
     #[test]
     fn border_adjacency_7mv_turn_353() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/7MVmc1cR.json.gz");
         let game = replay_to_tick(repo, &path, 353);
@@ -1480,7 +1590,7 @@ mod tests {
     #[test]
     fn compare_attack_logic_turn_317() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/jby2gMJF.json.gz");
         let game = replay_to_tick(repo, &path, 317);
@@ -1503,7 +1613,7 @@ mod tests {
     #[test]
     fn random_boat_target_filters_match_tcf_through_turn_430() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/tCFq6nPn.json.gz");
         let bytes = load_record_bytes(&path).unwrap();
@@ -1521,7 +1631,7 @@ mod tests {
     #[test]
     fn island_target_filters_match_fdh_through_turn_440() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/fdh3gYAF.json.gz");
         let bytes = load_record_bytes(&path).unwrap();
@@ -1539,7 +1649,7 @@ mod tests {
     #[test]
     fn warship_patrol_matches_fk_through_turn_510() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/fkVh9QtC.json.gz");
         let bytes = load_record_bytes(&path).unwrap();
@@ -1557,7 +1667,7 @@ mod tests {
     #[test]
     fn warship_shells_match_transport_and_warship_targets() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         for (record_id, turn_number) in [("x7pvCXU3", 500), ("rN7wbZ1Y", 620)] {
             let path = repo.join(format!("records/0c4c7d7993c9/{record_id}.json.gz"));
@@ -1581,7 +1691,7 @@ mod tests {
     #[test]
     fn damaged_warship_heals_and_retreats_in_rn7wbz1y() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/rN7wbZ1Y.json.gz");
 
@@ -1605,7 +1715,7 @@ mod tests {
     #[test]
     fn docked_warship_gets_active_healing_in_rn7wbz1y() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/rN7wbZ1Y.json.gz");
 
@@ -1647,7 +1757,7 @@ mod tests {
     #[test]
     fn warship_hunts_and_captures_trade_ship_in_rn7wbz1y() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/rN7wbZ1Y.json.gz");
 
@@ -1686,7 +1796,7 @@ mod tests {
     #[test]
     fn warship_replans_patrol_after_trade_hunt_in_rn7wbz1y() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/rN7wbZ1Y.json.gz");
 
@@ -1708,7 +1818,7 @@ mod tests {
     #[test]
     fn manual_boat_retreat_matches_giq_through_turn_450() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/GiQovEcP.json.gz");
         let bytes = load_record_bytes(&path).unwrap();
@@ -1726,7 +1836,7 @@ mod tests {
     #[test]
     fn boat_attack_cancellation_matches_2dg_through_turn_670() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/2dG9dxmX.json.gz");
         let bytes = load_record_bytes(&path).unwrap();
@@ -1744,7 +1854,7 @@ mod tests {
     #[test]
     fn trace_alliance_exec_86_wnep5pzi() {
         let repo_root = std::env::var("OPENFRONT_REPO")
-            .unwrap_or_else(|_| "/Users/djmango/github/openfront-ai-rust-fast".into());
+            .unwrap_or_else(|_| crate::util::default_repo_root());
         let repo = std::path::Path::new(&repo_root);
         let path = repo.join("records/0c4c7d7993c9/3QNU4eJa.json.gz");
 
