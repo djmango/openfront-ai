@@ -2822,6 +2822,15 @@ impl Game {
     }
 
     pub fn is_friendly(&self, a: u16, b: u16) -> bool {
+        self.is_friendly_ex(a, b, false)
+    }
+
+    /// TS `PlayerImpl.isFriendly(other, treatAFKFriendly)`. `treat_afk_friendly`
+    /// keeps a disconnected teammate/ally friendly instead of the normal
+    /// disconnected-is-never-friendly rule - used by `WarshipExecution`'s
+    /// target filter so warships don't shoot at a disconnected team mate's
+    /// ships (they're still captured on conquest, just not shelled first).
+    pub fn is_friendly_ex(&self, a: u16, b: u16, treat_afk_friendly: bool) -> bool {
         if a == b {
             return true;
         }
@@ -2829,7 +2838,9 @@ impl Game {
         // even if allied. This keeps `bordering_enemies` and `bordering_friends` lists
         // in sync with TS so that RNG consumption in `maybe_send_alliance_requests`
         // (and attack strategies) is identical between the two engines.
-        if self.player_by_small_id(b).map_or(false, |p| p.is_disconnected) {
+        if !treat_afk_friendly
+            && self.player_by_small_id(b).map_or(false, |p| p.is_disconnected)
+        {
             return false;
         }
         // TS `Player.isFriendly`: teammates count as friendly even without a
@@ -2868,7 +2879,17 @@ impl Game {
     }
 
     pub fn can_attack_player(&self, attacker_small_id: u16, defender_small_id: u16) -> bool {
-        if self.is_friendly(attacker_small_id, defender_small_id) {
+        self.can_attack_player_ex(attacker_small_id, defender_small_id, false)
+    }
+
+    /// TS `PlayerImpl.canAttackPlayer(player, treatAFKFriendly)`.
+    pub fn can_attack_player_ex(
+        &self,
+        attacker_small_id: u16,
+        defender_small_id: u16,
+        treat_afk_friendly: bool,
+    ) -> bool {
+        if self.is_friendly_ex(attacker_small_id, defender_small_id, treat_afk_friendly) {
             return false;
         }
         let attacker_type = self
@@ -3577,6 +3598,164 @@ mod alliance_accept_nukes_tests {
             game.unit_mut(player1, nuke_to_3).unwrap().target_tile,
             Some(target3)
         );
+    }
+}
+
+// Ported from Disconnected.test.ts "Conqueror gets conquered disconnected
+// team member's transport- and warships": `conquer_player`'s ship-capture
+// branch doesn't depend on map/water geometry, so it's exercised directly
+// rather than through a full attack simulation.
+#[cfg(test)]
+mod conquer_player_tests {
+    use super::{Game, Player, PlayerType};
+    use crate::core::schemas::unit_type;
+
+    #[test]
+    fn conquering_a_disconnected_team_mate_captures_their_ships() {
+        let mut game = Game::default();
+        game.add_player(Player {
+            id: "conqueror".to_string(),
+            small_id: 1,
+            player_type: PlayerType::Human,
+            team: Some("CLAN".to_string()),
+            ..Default::default()
+        });
+        game.add_player(Player {
+            id: "conquered".to_string(),
+            small_id: 2,
+            player_type: PlayerType::Human,
+            team: Some("CLAN".to_string()),
+            is_disconnected: true,
+            ..Default::default()
+        });
+        let warship = game.build_unit(2, unit_type::WARSHIP, 0);
+        let transport = game.build_unit(2, unit_type::TRANSPORT, 0);
+
+        game.conquer_player(1, 2);
+
+        assert!(game.unit_exists(1, warship));
+        assert!(game.unit_exists(1, transport));
+        assert!(!game.unit_exists(2, warship));
+        assert!(!game.unit_exists(2, transport));
+    }
+
+    #[test]
+    fn conquering_a_connected_team_mate_does_not_capture_their_ships() {
+        // TS's `conquerPlayer` only transfers ships when the conquered
+        // player `isDisconnected()`; capturing a still-connected teammate's
+        // ships (e.g. after they're simply eliminated) would be wrong.
+        let mut game = Game::default();
+        game.add_player(Player {
+            id: "conqueror".to_string(),
+            small_id: 1,
+            player_type: PlayerType::Human,
+            team: Some("CLAN".to_string()),
+            ..Default::default()
+        });
+        game.add_player(Player {
+            id: "conquered".to_string(),
+            small_id: 2,
+            player_type: PlayerType::Human,
+            team: Some("CLAN".to_string()),
+            ..Default::default()
+        });
+        let warship = game.build_unit(2, unit_type::WARSHIP, 0);
+
+        game.conquer_player(1, 2);
+
+        assert!(!game.unit_exists(1, warship));
+        assert!(game.unit_exists(2, warship));
+    }
+
+    #[test]
+    fn conquering_a_disconnected_non_team_mate_does_not_capture_their_ships() {
+        let mut game = Game::default();
+        game.add_player(Player {
+            id: "conqueror".to_string(),
+            small_id: 1,
+            player_type: PlayerType::Human,
+            ..Default::default()
+        });
+        game.add_player(Player {
+            id: "conquered".to_string(),
+            small_id: 2,
+            player_type: PlayerType::Human,
+            is_disconnected: true,
+            ..Default::default()
+        });
+        let warship = game.build_unit(2, unit_type::WARSHIP, 0);
+
+        game.conquer_player(1, 2);
+
+        assert!(!game.unit_exists(1, warship));
+        assert!(game.unit_exists(2, warship));
+    }
+}
+
+// Ported from ConquerGold.test.ts. TS exposes the gold-share computation as
+// a standalone `config().conquerGoldAmount(player)`; native inlines the same
+// match directly into `conquer_player`, so both of TS's describe blocks
+// ("DefaultConfig.conquerGoldAmount" and "Conquest gold transfer") collapse
+// into one set of `conquer_player` assertions here.
+#[cfg(test)]
+mod conquer_gold_tests {
+    use super::{Game, Player, PlayerType};
+
+    fn add_player_with_gold(
+        game: &mut Game,
+        id: &str,
+        small_id: u16,
+        player_type: PlayerType,
+        gold: i64,
+    ) {
+        game.add_player(Player {
+            id: id.to_string(),
+            small_id,
+            player_type,
+            gold,
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn conqueror_receives_full_gold_from_a_bot() {
+        let mut game = Game::default();
+        add_player_with_gold(&mut game, "conqueror", 1, PlayerType::Human, 0);
+        add_player_with_gold(&mut game, "bot", 2, PlayerType::Bot, 1000);
+        game.conquer_player(1, 2);
+        assert_eq!(game.player_by_small_id(1).unwrap().gold, 1000);
+        assert_eq!(game.player_by_small_id(2).unwrap().gold, 0);
+    }
+
+    #[test]
+    fn conqueror_receives_full_gold_from_a_nation() {
+        let mut game = Game::default();
+        add_player_with_gold(&mut game, "conqueror", 1, PlayerType::Human, 0);
+        add_player_with_gold(&mut game, "nation", 2, PlayerType::Nation, 800);
+        game.conquer_player(1, 2);
+        assert_eq!(game.player_by_small_id(1).unwrap().gold, 800);
+        assert_eq!(game.player_by_small_id(2).unwrap().gold, 0);
+    }
+
+    #[test]
+    fn conqueror_receives_half_gold_from_a_human_who_has_attacked() {
+        let mut game = Game::default();
+        add_player_with_gold(&mut game, "conqueror", 1, PlayerType::Human, 0);
+        add_player_with_gold(&mut game, "victim", 2, PlayerType::Human, 1000);
+        game.adjust_attacks_sent(2, 100.0);
+        game.conquer_player(1, 2);
+        assert_eq!(game.player_by_small_id(1).unwrap().gold, 500);
+        assert_eq!(game.player_by_small_id(2).unwrap().gold, 0);
+    }
+
+    #[test]
+    fn conqueror_receives_no_gold_from_a_human_who_never_attacked() {
+        let mut game = Game::default();
+        add_player_with_gold(&mut game, "conqueror", 1, PlayerType::Human, 0);
+        add_player_with_gold(&mut game, "afk", 2, PlayerType::Human, 1000);
+        game.conquer_player(1, 2);
+        assert_eq!(game.player_by_small_id(1).unwrap().gold, 0);
+        assert_eq!(game.player_by_small_id(2).unwrap().gold, 1000);
     }
 }
 

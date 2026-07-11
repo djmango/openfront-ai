@@ -95,15 +95,22 @@ fn spacing_constants(game: &Game) -> (u32, u32) {
     (border, border * 2)
 }
 
-fn should_use_connectivity_score(random: &mut PseudoRandom, difficulty: &str) -> bool {
-    let chance = match difficulty {
+/// TS `NationStructureBehavior.shouldUseConnectivityScore`'s `randomChance`
+/// lookup, split out from the `nextInt` draw itself so tests can verify the
+/// exact per-difficulty cutoff (0/60/75/100) without needing to control
+/// `PseudoRandom`'s output deterministically.
+fn connectivity_score_chance(difficulty: &str) -> i32 {
+    match difficulty {
         "Easy" => 0,
         "Medium" => 60,
         "Hard" => 75,
         "Impossible" => 100,
         _ => 60,
-    };
-    random.next_int(0, 100) < chance
+    }
+}
+
+fn should_use_connectivity_score(random: &mut PseudoRandom, difficulty: &str) -> bool {
+    random.next_int(0, 100) < connectivity_score_chance(difficulty)
 }
 
 fn city_value_with_connectivity(
@@ -1442,6 +1449,7 @@ fn sample_tiles_near_front(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rail::connect_station;
 
     #[test]
     fn defense_post_sampling_includes_positive_radius_edge() {
@@ -1470,6 +1478,586 @@ mod tests {
             city_value_with_connectivity(100.0, 0.5, spacing, false),
             100.0
         );
+    }
+
+    // ── Ported from NationStructureBehavior.test.ts ─────────────────────────
+    //
+    // TS's tests mock the entire `Game`/`Player` surface and, for
+    // `tryBuildDefensePost`'s cap-enforcement/successful-build/no-valid-tile
+    // cases, `vi.spyOn` individual private methods (`getAttackFrontTiles`,
+    // `countDefensePostsNearFront`, `sampleTilesNearFront`) to isolate
+    // `tryBuildDefensePost`'s own control flow from their real
+    // implementations. Native has no method-mocking equivalent (these are
+    // free functions, not overridable virtual methods), so those specific
+    // cases are ported here as real integration tests against a small
+    // synthetic map instead: real attacker-adjacency geometry produces real
+    // front tiles, real defense-post units produce a real
+    // `countDefensePostsNearFront` result, etc. Same inputs/outputs as TS's
+    // intent, not the literal mocked-call-count assertions.
+
+    fn tiny_all_land_map(width: u32, height: u32) -> crate::map::GameMap {
+        let n = (width * height) as usize;
+        crate::map::GameMap::from_terrain_bytes(
+            &crate::map::MapMeta {
+                width,
+                height,
+                num_land_tiles: n as u32,
+            },
+            &vec![0x80u8; n],
+        )
+        .unwrap()
+    }
+
+    fn tiny_game(width: u32, height: u32, difficulty: &str) -> Game {
+        let mut game = Game::default();
+        game.map = tiny_all_land_map(width, height);
+        game.wire = crate::core::config::Config::new(
+            crate::core::schemas::GameConfig {
+                game_map: "tiny".into(),
+                difficulty: difficulty.into(),
+                donate_gold: false,
+                donate_troops: false,
+                game_type: "Singleplayer".into(),
+                game_mode: "Free For All".into(),
+                game_map_size: "Normal".into(),
+                nations: crate::core::schemas::NationsConfig::Mode("default".into()),
+                bots: 0,
+                infinite_gold: false,
+                infinite_troops: false,
+                instant_build: false,
+                random_spawn: false,
+                doomsday_clock: None,
+                disabled_units: None,
+                player_teams: None,
+                disable_alliances: None,
+                spawn_immunity_duration: None,
+                starting_gold: None,
+                gold_multiplier: None,
+                max_timer_value: None,
+                ranked_type: None,
+            },
+            false,
+        );
+        game.end_spawn_phase();
+        game
+    }
+
+    fn add_player(game: &mut Game, id: &str, player_type: crate::game::PlayerType) -> u16 {
+        add_player_team(game, id, player_type, None)
+    }
+
+    fn add_player_team(
+        game: &mut Game,
+        id: &str,
+        player_type: crate::game::PlayerType,
+        team: Option<&str>,
+    ) -> u16 {
+        game.add_from_info(&crate::game::PlayerInfo {
+            name: id.into(),
+            player_type,
+            client_id: Some(id.into()),
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: team.map(|t| t.to_string()),
+        })
+    }
+
+    // ── shouldUseConnectivityScore (exact per-difficulty cutoff) ────────────
+
+    #[test]
+    fn connectivity_score_chance_matches_ts_cutoffs() {
+        assert_eq!(connectivity_score_chance("Easy"), 0);
+        assert_eq!(connectivity_score_chance("Medium"), 60);
+        assert_eq!(connectivity_score_chance("Hard"), 75);
+        assert_eq!(connectivity_score_chance("Impossible"), 100);
+    }
+
+    // ── getAttackFrontTiles ──────────────────────────────────────────────────
+
+    #[test]
+    fn get_attack_front_tiles_empty_for_no_attackers() {
+        let game = tiny_game(20, 20, "Hard");
+        assert!(get_attack_front_tiles(&game, 1, &[]).is_empty());
+    }
+
+    #[test]
+    fn get_attack_front_tiles_includes_border_tile_adjacent_to_attacker() {
+        let mut game = tiny_game(20, 20, "Hard");
+        let defender = add_player(&mut game, "defender", crate::game::PlayerType::Human);
+        let attacker = add_player(&mut game, "attacker", crate::game::PlayerType::Human);
+        let a = game.ref_xy(1, 1);
+        let b = game.ref_xy(10, 10);
+        game.conquer(defender, a);
+        game.conquer(defender, b);
+        game.conquer(attacker, game.ref_xy(2, 1));
+
+        assert_eq!(get_attack_front_tiles(&game, defender, &[attacker]), vec![a]);
+    }
+
+    #[test]
+    fn get_attack_front_tiles_excludes_tiles_not_adjacent_to_any_attacker() {
+        let mut game = tiny_game(20, 20, "Hard");
+        let defender = add_player(&mut game, "defender", crate::game::PlayerType::Human);
+        let attacker = add_player(&mut game, "attacker", crate::game::PlayerType::Human);
+        let a = game.ref_xy(1, 1);
+        let b = game.ref_xy(10, 10);
+        game.conquer(defender, a);
+        game.conquer(defender, b);
+        game.conquer(attacker, game.ref_xy(2, 1));
+
+        let front = get_attack_front_tiles(&game, defender, &[attacker]);
+        assert!(front.contains(&a));
+        assert!(!front.contains(&b));
+    }
+
+    #[test]
+    fn get_attack_front_tiles_handles_multiple_attackers_from_separate_attacks() {
+        let mut game = tiny_game(20, 20, "Hard");
+        let defender = add_player(&mut game, "defender", crate::game::PlayerType::Human);
+        let atk1 = add_player(&mut game, "atk1", crate::game::PlayerType::Human);
+        let atk2 = add_player(&mut game, "atk2", crate::game::PlayerType::Human);
+        let a = game.ref_xy(1, 1);
+        let b = game.ref_xy(5, 5);
+        let c = game.ref_xy(15, 15);
+        game.conquer(defender, a);
+        game.conquer(defender, b);
+        game.conquer(defender, c);
+        game.conquer(atk1, game.ref_xy(2, 1));
+        game.conquer(atk2, game.ref_xy(5, 6));
+
+        let front = get_attack_front_tiles(&game, defender, &[atk1, atk2]);
+        assert!(front.contains(&a));
+        assert!(front.contains(&b));
+        assert!(!front.contains(&c));
+    }
+
+    #[test]
+    fn get_attack_front_tiles_does_not_duplicate_tile_with_multiple_attacker_neighbors() {
+        let mut game = tiny_game(20, 20, "Hard");
+        let defender = add_player(&mut game, "defender", crate::game::PlayerType::Human);
+        let attacker = add_player(&mut game, "attacker", crate::game::PlayerType::Human);
+        let a = game.ref_xy(5, 5);
+        game.conquer(defender, a);
+        game.conquer(attacker, game.ref_xy(6, 5));
+        game.conquer(attacker, game.ref_xy(5, 6));
+
+        assert_eq!(get_attack_front_tiles(&game, defender, &[attacker]), vec![a]);
+    }
+
+    // ── countDefensePostsNearFront ───────────────────────────────────────────
+
+    #[test]
+    fn count_defense_posts_zero_with_no_posts() {
+        let mut game = tiny_game(300, 300, "Hard");
+        let p = add_player(&mut game, "p", crate::game::PlayerType::Human);
+        let front = vec![game.ref_xy(100, 100)];
+        assert_eq!(count_defense_posts_near_front(&game, p, &front, usize::MAX), 0);
+    }
+
+    #[test]
+    fn count_defense_posts_zero_with_no_front_tiles() {
+        let mut game = tiny_game(300, 300, "Hard");
+        let p = add_player(&mut game, "p", crate::game::PlayerType::Human);
+        let t = game.ref_xy(10, 10);
+        game.build_unit(p, unit_type::DEFENSE_POST, t);
+        assert_eq!(count_defense_posts_near_front(&game, p, &[], usize::MAX), 0);
+    }
+
+    #[test]
+    fn count_defense_posts_counts_posts_within_range() {
+        let mut game = tiny_game(300, 300, "Hard");
+        let p = add_player(&mut game, "p", crate::game::PlayerType::Human);
+        let front = vec![game.ref_xy(100, 100)];
+        let t1 = game.ref_xy(105, 100);
+        let t2 = game.ref_xy(100, 110);
+        game.build_unit(p, unit_type::DEFENSE_POST, t1);
+        game.build_unit(p, unit_type::DEFENSE_POST, t2);
+        assert_eq!(count_defense_posts_near_front(&game, p, &front, usize::MAX), 2);
+    }
+
+    #[test]
+    fn count_defense_posts_excludes_posts_outside_range() {
+        let mut game = tiny_game(300, 300, "Hard");
+        let p = add_player(&mut game, "p", crate::game::PlayerType::Human);
+        let front = vec![game.ref_xy(100, 100)];
+        let t = game.ref_xy(250, 250);
+        game.build_unit(p, unit_type::DEFENSE_POST, t);
+        assert_eq!(count_defense_posts_near_front(&game, p, &front, usize::MAX), 0);
+    }
+
+    #[test]
+    fn count_defense_posts_counts_a_post_only_once_for_multiple_front_tiles() {
+        let mut game = tiny_game(300, 300, "Hard");
+        let p = add_player(&mut game, "p", crate::game::PlayerType::Human);
+        let front = vec![game.ref_xy(100, 100), game.ref_xy(102, 100)];
+        let t = game.ref_xy(101, 100);
+        game.build_unit(p, unit_type::DEFENSE_POST, t);
+        assert_eq!(count_defense_posts_near_front(&game, p, &front, usize::MAX), 1);
+    }
+
+    #[test]
+    fn count_defense_posts_sums_posts_near_different_front_sections() {
+        let mut game = tiny_game(300, 300, "Hard");
+        let p = add_player(&mut game, "p", crate::game::PlayerType::Human);
+        let front = vec![game.ref_xy(50, 50), game.ref_xy(250, 250)];
+        let t1 = game.ref_xy(52, 50);
+        let t2 = game.ref_xy(250, 252);
+        game.build_unit(p, unit_type::DEFENSE_POST, t1);
+        game.build_unit(p, unit_type::DEFENSE_POST, t2);
+        assert_eq!(count_defense_posts_near_front(&game, p, &front, usize::MAX), 2);
+    }
+
+    // ── tryBuildDefensePost — early-exit guards ──────────────────────────────
+    //
+    // Both players are `Nation` type so `AttackExecution::init`'s
+    // `can_attack_player` immunity gate (which only applies when the
+    // *attacker* is Human) never self-cancels these manually-added attacks.
+
+    fn defense_test_setup(difficulty: &str) -> (Game, u16, u16) {
+        let mut game = tiny_game(60, 60, difficulty);
+        let defender = add_player(&mut game, "defender", crate::game::PlayerType::Nation);
+        let attacker = add_player(&mut game, "attacker", crate::game::PlayerType::Nation);
+        game.conquer(defender, game.ref_xy(30, 30));
+        (game, defender, attacker)
+    }
+
+    fn add_attack(game: &mut Game, attacker: u16, defender: u16, troops: f64, source_tile: Option<TileRef>) {
+        let defender_id = game.player_by_small_id(defender).unwrap().id.clone();
+        game.add_land_attack_from(attacker, Some(defender_id), Some(troops), source_tile);
+        game.execute_next_tick();
+    }
+
+    #[test]
+    fn try_build_defense_post_false_on_easy_regardless_of_ratio() {
+        let (mut game, defender, attacker) = defense_test_setup("Easy");
+        game.add_troops(defender, 100.0);
+        add_attack(&mut game, attacker, defender, 5000.0, None);
+        let mut random = PseudoRandom::new(0);
+        assert!(!try_build_defense_post(&mut game, &mut random, defender));
+    }
+
+    #[test]
+    fn try_build_defense_post_false_with_no_incoming_attacks() {
+        let (mut game, defender, _attacker) = defense_test_setup("Hard");
+        game.add_troops(defender, 1000.0);
+        let mut random = PseudoRandom::new(0);
+        assert!(!try_build_defense_post(&mut game, &mut random, defender));
+    }
+
+    #[test]
+    fn try_build_defense_post_false_when_only_boat_attacks_incoming() {
+        let (mut game, defender, attacker) = defense_test_setup("Hard");
+        game.add_troops(defender, 100.0);
+        let source_tile = game.ref_xy(0, 0);
+        add_attack(&mut game, attacker, defender, 5000.0, Some(source_tile));
+        let mut random = PseudoRandom::new(0);
+        assert!(!try_build_defense_post(&mut game, &mut random, defender));
+    }
+
+    #[test]
+    fn try_build_defense_post_false_when_ratio_below_threshold() {
+        let (mut game, defender, attacker) = defense_test_setup("Hard");
+        game.add_troops(defender, 1000.0);
+        add_attack(&mut game, attacker, defender, 349.0, None);
+        let mut random = PseudoRandom::new(0);
+        assert!(!try_build_defense_post(&mut game, &mut random, defender));
+    }
+
+    #[test]
+    fn try_build_defense_post_false_when_own_troops_are_zero() {
+        let (mut game, defender, attacker) = defense_test_setup("Hard");
+        add_attack(&mut game, attacker, defender, 500.0, None);
+        let mut random = PseudoRandom::new(0);
+        assert!(!try_build_defense_post(&mut game, &mut random, defender));
+    }
+
+    // ── tryBuildDefensePost — real integration scenario ─────────────────────
+    //
+    // A large defender territory bordering a large attacker territory gives
+    // `get_attack_front_tiles` a genuine multi-tile front and
+    // `sample_tiles_near_front` genuine owned/buildable candidates nearby,
+    // so the full pipeline (front → cap check → gold check → sampling →
+    // `can_build_land_structure`) can be exercised end-to-end without
+    // mocking any of it.
+
+    fn defense_integration_setup(difficulty: &str, defender_troops: f64, attack_troops: f64) -> (Game, u16) {
+        let (mut game, defender, attacker) = defense_test_setup(difficulty);
+        // Overwrite the single conquered tile from defense_test_setup with a
+        // real block of territory bordering the attacker's block.
+        for x in 0..30 {
+            for y in 0..60 {
+                game.conquer(defender, game.ref_xy(x, y));
+            }
+        }
+        for x in 30..40 {
+            for y in 0..60 {
+                game.conquer(attacker, game.ref_xy(x, y));
+            }
+        }
+        if let Some(p) = game.player_by_small_id_mut(defender) {
+            p.gold = 1_000_000_000;
+        }
+        // `add_attack` runs a real tick, and with ~1800 owned tiles the
+        // population-growth income for that tick dwarfs any troop count set
+        // beforehand. Set the exact troop count *after* ticking so the
+        // attack-troops/defender-troops ratio the test cares about isn't
+        // perturbed by incidental growth.
+        add_attack(&mut game, attacker, defender, attack_troops, None);
+        if let Some(p) = game.player_by_small_id_mut(defender) {
+            p.troops = crate::util::to_int(defender_troops);
+        }
+        (game, defender)
+    }
+
+    #[test]
+    fn try_build_defense_post_builds_when_all_conditions_are_met() {
+        let (mut game, defender) = defense_integration_setup("Hard", 1000.0, 1000.0);
+        let mut random = PseudoRandom::new(0);
+        assert!(try_build_defense_post(&mut game, &mut random, defender));
+        // `try_build_defense_post` only queues a `ConstructionExecution`;
+        // new executions get `init()` on the next tick and only run `tick()`
+        // (where the unit is actually built) the tick after that.
+        game.execute_next_tick();
+        game.execute_next_tick();
+        assert_eq!(game.unit_count(defender, unit_type::DEFENSE_POST), 1);
+    }
+
+    #[test]
+    fn try_build_defense_post_succeeds_when_ratio_is_exactly_at_threshold() {
+        let (mut game, defender) = defense_integration_setup("Hard", 1000.0, 350.0);
+        let mut random = PseudoRandom::new(0);
+        assert!(try_build_defense_post(&mut game, &mut random, defender));
+    }
+
+    #[test]
+    fn try_build_defense_post_sums_troops_across_multiple_land_attacks() {
+        // TS's `defensePostNeeded` test for this sums two mocked
+        // `incomingAttacks()` entries directly. Native inlines that ratio
+        // logic into `try_build_defense_post` itself, so exercising it
+        // faithfully needs two *real*, non-merging attacks incoming at once:
+        // same-owner attacks to the same target merge into a single
+        // executing attack (see `merge_outgoing_land_attacks`), so this uses
+        // two distinct attacker players bordering the defender from
+        // opposite sides instead of one attacker sending twice.
+        let mut game = tiny_game(60, 60, "Hard");
+        let defender = add_player(&mut game, "defender", crate::game::PlayerType::Nation);
+        let attacker1 = add_player(&mut game, "attacker1", crate::game::PlayerType::Nation);
+        let attacker2 = add_player(&mut game, "attacker2", crate::game::PlayerType::Nation);
+        for x in 10..50 {
+            for y in 0..60 {
+                game.conquer(defender, game.ref_xy(x, y));
+            }
+        }
+        for x in 0..10 {
+            for y in 0..60 {
+                game.conquer(attacker1, game.ref_xy(x, y));
+            }
+        }
+        for x in 50..60 {
+            for y in 0..60 {
+                game.conquer(attacker2, game.ref_xy(x, y));
+            }
+        }
+        if let Some(p) = game.player_by_small_id_mut(defender) {
+            p.gold = 1_000_000_000;
+        }
+        // Neither attack alone reaches the 0.35 ratio; together they do.
+        // Both attacks are queued before ticking so a single
+        // `execute_next_tick` only runs their `init()` (which sets troops
+        // to the requested start amount) without yet running their own
+        // `tick()` (which would decay troops as border tiles get conquered).
+        let defender_id = game.player_by_small_id(defender).unwrap().id.clone();
+        game.add_land_attack_from(attacker1, Some(defender_id.clone()), Some(200.0), None);
+        game.add_land_attack_from(attacker2, Some(defender_id), Some(200.0), None);
+        game.execute_next_tick();
+        if let Some(p) = game.player_by_small_id_mut(defender) {
+            p.troops = 1000;
+        }
+        let mut random = PseudoRandom::new(0);
+        assert!(try_build_defense_post(&mut game, &mut random, defender));
+    }
+
+    #[test]
+    fn try_build_defense_post_false_when_gold_below_cost() {
+        let (mut game, defender) = defense_integration_setup("Hard", 1000.0, 1000.0);
+        if let Some(p) = game.player_by_small_id_mut(defender) {
+            p.gold = 0;
+        }
+        let mut random = PseudoRandom::new(0);
+        assert!(!try_build_defense_post(&mut game, &mut random, defender));
+    }
+
+    #[test]
+    fn try_build_defense_post_false_once_cap_reached() {
+        let (mut game, defender) = defense_integration_setup("Hard", 1000.0, 1000.0);
+        // ratio = 1.0 → ceil(1.0 / 0.4) = 3 allowed. Pre-place 3 defense posts
+        // right on the front line so the cap is already saturated.
+        for i in 0..3 {
+            let t = game.ref_xy(29, 10 + i * 5);
+            game.build_unit(defender, unit_type::DEFENSE_POST, t);
+        }
+        let mut random = PseudoRandom::new(0);
+        assert!(!try_build_defense_post(&mut game, &mut random, defender));
+    }
+
+    // ── sampleTilesNearFront ─────────────────────────────────────────────────
+
+    #[test]
+    fn sample_tiles_near_front_empty_when_no_front_tiles() {
+        let game = tiny_game(10, 10, "Hard");
+        let mut random = PseudoRandom::new(0);
+        assert!(sample_tiles_near_front(&game, &mut random, 1, &[], 25).is_empty());
+    }
+
+    // ── buildReachableStations ───────────────────────────────────────────────
+
+    fn adjacent_players(
+        difficulty: &str,
+        neighbor_type: crate::game::PlayerType,
+        neighbor_team: Option<&str>,
+    ) -> (Game, u16, u16) {
+        let mut game = tiny_game(30, 30, difficulty);
+        let defender = add_player(&mut game, "defender", crate::game::PlayerType::Human);
+        let neighbor = add_player_team(&mut game, "neighbor", neighbor_type, neighbor_team);
+        game.conquer(defender, game.ref_xy(10, 10));
+        game.conquer(neighbor, game.ref_xy(11, 10));
+        (game, defender, neighbor)
+    }
+
+    fn ally_weight(game: &Game) -> f64 {
+        game.wire.train_gold(TrainRelation::Ally, 0) as f64
+            / (game.wire.train_gold(TrainRelation::Ally, 0) as f64).max(1.0)
+    }
+
+    #[test]
+    fn build_reachable_stations_includes_own_registered_units_with_self_weight() {
+        let (mut game, defender, _neighbor) = adjacent_players("Medium", crate::game::PlayerType::Human, None);
+        let tile = game.ref_xy(10, 10);
+        let unit_id = game.build_unit(defender, unit_type::CITY, tile);
+        connect_station(&mut game, defender, unit_id, unit_type::CITY);
+
+        let result = build_reachable_stations(&game, defender);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].tile, tile);
+        let expected = game.wire.train_gold(TrainRelation::SelfTrade, 0) as f64
+            / game.wire.train_gold(TrainRelation::Ally, 0) as f64;
+        assert!((result[0].weight - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn build_reachable_stations_excludes_own_unit_not_registered_as_station() {
+        let (mut game, defender, _neighbor) = adjacent_players("Medium", crate::game::PlayerType::Human, None);
+        let tile = game.ref_xy(10, 10);
+        game.build_unit(defender, unit_type::CITY, tile);
+        // No `connect_station` call - the city has no train station.
+        assert!(build_reachable_stations(&game, defender).is_empty());
+    }
+
+    #[test]
+    fn build_reachable_stations_excludes_bot_neighbors() {
+        let (mut game, defender, neighbor) = adjacent_players("Medium", crate::game::PlayerType::Bot, None);
+        let tile = game.ref_xy(11, 10);
+        let unit_id = game.build_unit(neighbor, unit_type::CITY, tile);
+        connect_station(&mut game, neighbor, unit_id, unit_type::CITY);
+
+        assert!(build_reachable_stations(&game, defender).is_empty());
+    }
+
+    #[test]
+    fn build_reachable_stations_excludes_non_player_terra_nullius_neighbor() {
+        // Equivalent of TS's "non-player neighbor" mock: simply don't give
+        // the defender any actual neighboring player at all - the adjacent
+        // land stays unowned (TerraNullius), which `nearby_player_small_ids`
+        // already excludes unconditionally.
+        let mut game = tiny_game(30, 30, "Medium");
+        let defender = add_player(&mut game, "defender", crate::game::PlayerType::Human);
+        game.conquer(defender, game.ref_xy(10, 10));
+        assert!(build_reachable_stations(&game, defender).is_empty());
+    }
+
+    #[test]
+    fn build_reachable_stations_excludes_embargoed_neighbor() {
+        let (mut game, defender, neighbor) = adjacent_players("Medium", crate::game::PlayerType::Human, None);
+        let tile = game.ref_xy(11, 10);
+        let unit_id = game.build_unit(neighbor, unit_type::CITY, tile);
+        connect_station(&mut game, neighbor, unit_id, unit_type::CITY);
+        game.add_embargo(defender, neighbor, false, 0);
+
+        assert!(build_reachable_stations(&game, defender).is_empty());
+    }
+
+    #[test]
+    fn build_reachable_stations_uses_other_weight_for_non_allied_neighbor() {
+        let (mut game, defender, neighbor) = adjacent_players("Medium", crate::game::PlayerType::Human, None);
+        let tile = game.ref_xy(11, 10);
+        let unit_id = game.build_unit(neighbor, unit_type::CITY, tile);
+        connect_station(&mut game, neighbor, unit_id, unit_type::CITY);
+
+        let result = build_reachable_stations(&game, defender);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].tile, tile);
+        let expected = game.wire.train_gold(TrainRelation::Other, 0) as f64
+            / game.wire.train_gold(TrainRelation::Ally, 0) as f64;
+        assert!((result[0].weight - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn build_reachable_stations_uses_ally_weight_for_allied_neighbor() {
+        let (mut game, defender, neighbor) = adjacent_players("Medium", crate::game::PlayerType::Human, None);
+        let tile = game.ref_xy(11, 10);
+        let unit_id = game.build_unit(neighbor, unit_type::CITY, tile);
+        connect_station(&mut game, neighbor, unit_id, unit_type::CITY);
+        assert!(game.create_alliance_request(defender, neighbor, 0));
+        game.accept_alliance_request(defender, neighbor, 1);
+        assert!(game.is_allied_with(defender, neighbor));
+
+        let result = build_reachable_stations(&game, defender);
+        assert_eq!(result.len(), 1);
+        assert!((result[0].weight - ally_weight(&game)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn build_reachable_stations_uses_team_weight_and_takes_precedence_over_ally() {
+        let (mut game, defender, neighbor) =
+            adjacent_players("Medium", crate::game::PlayerType::Human, Some("team-a"));
+        if let Some(p) = game.player_by_small_id_mut(defender) {
+            p.team = Some("team-a".to_string());
+        }
+        assert!(game.players_on_same_team(defender, neighbor));
+        let tile = game.ref_xy(11, 10);
+        let unit_id = game.build_unit(neighbor, unit_type::CITY, tile);
+        connect_station(&mut game, neighbor, unit_id, unit_type::CITY);
+
+        let result = build_reachable_stations(&game, defender);
+        assert_eq!(result.len(), 1);
+        let expected = game.wire.train_gold(TrainRelation::Team, 0) as f64
+            / game.wire.train_gold(TrainRelation::Ally, 0) as f64;
+        assert!((result[0].weight - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn build_reachable_stations_excludes_neighbor_unit_not_registered_as_station() {
+        let (mut game, defender, neighbor) = adjacent_players("Medium", crate::game::PlayerType::Human, None);
+        game.build_unit(neighbor, unit_type::CITY, game.ref_xy(11, 10));
+        // No `connect_station` call.
+        assert!(build_reachable_stations(&game, defender).is_empty());
+    }
+
+    #[test]
+    fn build_reachable_stations_collects_own_and_neighbor_units_together() {
+        let (mut game, defender, neighbor) = adjacent_players("Medium", crate::game::PlayerType::Human, None);
+        let own_tile = game.ref_xy(10, 10);
+        let own_unit = game.build_unit(defender, unit_type::CITY, own_tile);
+        connect_station(&mut game, defender, own_unit, unit_type::CITY);
+        let neighbor_tile = game.ref_xy(11, 10);
+        let neighbor_unit = game.build_unit(neighbor, unit_type::CITY, neighbor_tile);
+        connect_station(&mut game, neighbor, neighbor_unit, unit_type::CITY);
+
+        let mut result = build_reachable_stations(&game, defender);
+        result.sort_by_key(|r| r.tile);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].tile.min(result[1].tile), own_tile.min(neighbor_tile));
     }
 }
 
