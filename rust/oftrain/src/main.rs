@@ -144,6 +144,20 @@ struct Args {
     #[arg(long, default_value = "native")]
     engine: engine::EngineKind,
 
+    /// Fraction (0.0-1.0) of env workers, evenly spread across every
+    /// shard's index range, that run the real Node/TS engine instead of
+    /// `--engine`'s choice for the rest. Exists to hedge the native
+    /// engine's known parity gaps (see `--engine`'s doc comment - weaker at
+    /// 30+ bot counts) by keeping some ground-truth-accurate episodes
+    /// flowing even while training mostly on native's ~10x-faster ticking.
+    /// 0.0 (default) is a pure single-engine run, identical to omitting
+    /// this flag entirely. 0.2 = 1 Node env per 5 (evenly spread, not
+    /// clumped - see `train::engine_for_idx`). Requires `openfront/`'s
+    /// node_modules installed (`bridge::Bridge::spawn` shells out to its
+    /// `tsx`) whenever this is > 0, even if `--engine native`.
+    #[arg(long, default_value_t = 0.0)]
+    node_fraction: f64,
+
     #[arg(long, default_value_t = 1)]
     log_every: u64,
 
@@ -260,6 +274,7 @@ fn main() -> anyhow::Result<()> {
         pinned_h2d: args.pinned_h2d,
         device,
         engine: args.engine,
+        node_fraction: args.node_fraction.clamp(0.0, 1.0),
         log_every: args.log_every,
         ckpt_every: args.ckpt_every,
         ckpt_dir: args.ckpt_dir,

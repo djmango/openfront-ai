@@ -11,6 +11,12 @@
 # As a pod start command:
 #   bash -c "curl -fsSL https://raw.githubusercontent.com/djmango/openfront-ai/master/scripts/pod_train_v8.sh | RUN_NAME=ppo_v8 NUM_GPUS=8 bash"
 #
+# To hedge native's known weaker parity at higher bot counts by running a
+# fraction of envs on the real Node/TS engine (see oftrain's `--engine` doc
+# comment), set NODE_FRACTION (0.0-1.0, default 0 = pure native, no extra
+# bootstrap cost):
+#   RUN_NAME=ppo_v8 NUM_GPUS=4 NODE_FRACTION=0.2 bash scripts/pod_train_v8.sh
+#
 # See docs/devlog.html's "ppo_v8 launch plan" section for the full runbook,
 # config rationale, and sizing math this script implements.
 
@@ -23,6 +29,12 @@ NUM_GPUS="${NUM_GPUS:-1}"
 NUM_ENVS="${NUM_ENVS:-64}"
 ROLLOUT_LEN="${ROLLOUT_LEN:-32}"
 STAGE="${STAGE:-0}"
+# Fraction (0.0-1.0) of env workers that run the real Node/TS engine
+# instead of native, to hedge native's known parity gaps at higher bot
+# counts (see oftrain's `--engine` doc comment) while still getting
+# native's ~10x tick speed for the majority. 0 (default) = pure native,
+# same as before this option existed - no extra bootstrap cost in that case.
+NODE_FRACTION="${NODE_FRACTION:-0}"
 # Frozen v8 launch config (see devlog): full policy (no --gc/--blocks
 # override), AMP on, pinned H2D on, entropy floor at its default. Override
 # via EXTRA_ARGS if deliberately deviating from the plan.
@@ -56,6 +68,21 @@ if ! command -v cargo >/dev/null 2>&1; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y -q
 fi
 . "$HOME/.cargo/env" 2>/dev/null || true
+
+# --- Node.js + openfront/bridge deps, ONLY if any envs will run the Node
+# engine (--node-fraction > 0) - the pure-native path (the default) never
+# needed this, and Bridge::spawn shells out to openfront/node_modules/.bin/
+# tsx, so it must exist before oftrain is even launched, not just before
+# the eventual `--engine node` call site fails. Same install lines as
+# pod_train.sh (the Python-era script), which already proved this works. ---
+if [ "$(python3 -c "print(1 if float('$NODE_FRACTION') > 0 else 0)")" = "1" ]; then
+  if ! command -v node >/dev/null 2>&1; then
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null
+    apt-get install -y nodejs >/dev/null
+  fi
+  [ -d openfront/node_modules ] || (cd openfront && npm install --silent)
+  echo "node engine mix enabled (--node-fraction $NODE_FRACTION): node $(node --version), tsx ready"
+fi
 
 # --- CUDA-linked libtorch venv (see devlog: must be exactly $TORCH_VERSION,
 # tch 0.24's C++ shim calls ATen ops that don't exist in older/newer torch
@@ -150,7 +177,7 @@ while true; do
   START_TS=$(date +%s)
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB" \
-    ./target/release/oftrain --engine native --num-envs "$NUM_ENVS" --num-gpus "$NUM_GPUS" \
+    ./target/release/oftrain --engine native --node-fraction "$NODE_FRACTION" --num-envs "$NUM_ENVS" --num-gpus "$NUM_GPUS" \
     --rollout-len "$ROLLOUT_LEN" --stage "$STAGE" --device cuda:0 \
     --ckpt-dir "$CKPT_DIR" $EXTRA_ARGS $RESUME \
     >> "/tmp/train_$RUN_NAME.log" 2>&1
