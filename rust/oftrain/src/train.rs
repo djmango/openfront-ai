@@ -54,6 +54,7 @@ use rand::SeedableRng;
 use tch::nn::OptimizerConfig;
 use tch::{nn, Device, Kind, Tensor};
 
+use crate::autoscale;
 use crate::batch::{self, ChoiceScalars};
 use crate::gpu_util::GpuUtilSampler;
 use crate::policy::{self, PolicyNet};
@@ -69,7 +70,14 @@ const ENT_GRACE_UPDATES: u64 = 20;
 const ENT_SCALE_MAX: f64 = 5.0;
 
 pub struct Config {
-    /// Envs per shard (per device). Total envs = num_envs * devices().len().
+    /// Envs per shard (per device) *at startup*. Total envs = num_envs *
+    /// devices().len(). If `auto_scale_envs` is on, the *live* per-shard
+    /// count can grow past this at runtime (see `autoscale.rs`/`run()`'s
+    /// update loop) - anything that sizes a buffer or indexes per-env data
+    /// must use the actual live count (e.g. `ActorShard::workers.len()` or
+    /// a rollout's actual buffer width), never this field, or it will
+    /// silently misindex after a scale-up. Logging/startup-only uses (e.g.
+    /// the initial spawn-count message) are fine as-is.
     pub num_envs: usize,
     /// Number of GPU replicas/shards. 1 = original single-device path.
     /// >1 requires `device` to be `Cuda(_)`; shards use `Cuda(0..num_gpus)`.
@@ -136,6 +144,25 @@ pub struct Config {
     /// the first few dozen post-resume updates, a deliberate, documented
     /// gap rather than a silent one.
     pub resume: Option<String>,
+
+    /// `--auto-scale-envs`: opt-in runtime growth of the per-shard env
+    /// count toward `target_gpu_util` (see `autoscale.rs`). Off by
+    /// default - existing configs/behavior are unaffected.
+    pub auto_scale_envs: bool,
+    /// `--target-gpu-util`: 0-1 fraction set point for `auto_scale_envs`.
+    pub target_gpu_util: f64,
+    /// `--min-envs`: per-shard floor for `auto_scale_envs` (defaults to
+    /// `num_envs` if the user didn't pass an explicit value - see
+    /// `main.rs`).
+    pub min_envs: usize,
+    /// `--max-envs`: per-shard ceiling for `auto_scale_envs`. 0 means
+    /// "derive from CPU headroom" (see `autoscale::cpu_env_cap_per_shard`,
+    /// resolved once in `run()`).
+    pub max_envs: usize,
+    /// `--autoscale-check-every`: how often (in updates) to re-evaluate.
+    pub autoscale_check_every: u64,
+    /// `--autoscale-step`: envs added per growth step (per shard).
+    pub autoscale_step: usize,
 }
 
 /// Restart-proof training state, saved as a JSON sidecar next to every
@@ -458,8 +485,18 @@ fn train_update(
     rng: &mut rand::rngs::SmallRng,
     ent_coef: f32,
 ) -> Result<(f64, f64, f64, f64)> {
-    let n = cfg.num_envs;
     let t_len = cfg.rollout_len;
+    // Derive the live per-shard env count from the actual rollout data,
+    // not `cfg.num_envs` - `auto_scale_envs` can grow every `ActorShard`'s
+    // workers between updates (see `run()`), and every shard is grown in
+    // lockstep (an all-or-nothing spawn across shards, rolled back on any
+    // single failure - see `run()`) specifically so every `RolloutResult`
+    // in `pending` has the same buffer width and this single shared `n`
+    // stays valid for every shard's minibatch/index-tensor math below.
+    // Trusting the *original* `cfg.num_envs` here after a scale-up would
+    // silently misindex/corrupt the GAE and minibatch buffers the very
+    // next update.
+    let n = pending.first().and_then(|r| r.buffer.first()).map(|row| row.len()).unwrap_or(cfg.num_envs);
     let total = t_len * n;
     let minibatch_size = (total / cfg.minibatches.max(1)).max(1);
     // Sums over every (epoch, minibatch) pair, averaged across shards -
@@ -505,6 +542,11 @@ fn train_update(
                 s.spawn(move || {
                     let buffer = &result.buffer;
                     let bootstrap_v = &result.bootstrap_v;
+                    // Guards the uniform-per-shard-env-count invariant
+                    // `n`'s derivation above relies on (see this
+                    // function's top) - would only trip if a future
+                    // change lets shards' env counts drift apart.
+                    debug_assert_eq!(buffer.first().map(|row| row.len()).unwrap_or(n), n);
                     let mut adv = vec![vec![0.0f32; n]; t_len];
                     let mut last_gae = vec![0.0f32; n];
                     for t in (0..t_len).rev() {
@@ -767,6 +809,49 @@ pub fn run(cfg: Config) -> Result<()> {
     let gpu_sampler =
         if devices.iter().any(|d| matches!(d, Device::Cuda(_))) { Some(GpuUtilSampler::start(Duration::from_millis(500))) } else { None };
 
+    // Resolve `auto_scale_envs`' bounds once up front (cheap, and only
+    // ever logged/used when the flag is actually on): `max_envs=0` means
+    // "derive from CPU headroom" (see `autoscale::cpu_env_cap_per_shard`),
+    // and `max < min` (e.g. `--max-envs` set below `--num-envs`) is
+    // resolved by raising max to min rather than left as a state that
+    // could later hang or panic the resize logic below.
+    let (autoscale_min_envs, autoscale_max_envs) = if cfg.auto_scale_envs {
+        let min_envs = cfg.min_envs.max(1);
+        let mut max_envs = if cfg.max_envs == 0 {
+            let auto_cap = autoscale::cpu_env_cap_per_shard(devices.len());
+            println!(
+                "[autoscale] --max-envs=0 (auto): cpu-derived cap = {auto_cap} envs/shard \
+                 ({} logical cpu(s) available, {} shard(s))",
+                std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
+                devices.len()
+            );
+            auto_cap
+        } else {
+            cfg.max_envs
+        };
+        if max_envs < min_envs {
+            println!(
+                "[autoscale] WARNING: --max-envs ({max_envs}) < effective --min-envs ({min_envs}); \
+                 raising max to min so scaling never hangs/panics"
+            );
+            max_envs = min_envs;
+        }
+        println!(
+            "[autoscale] enabled: target_gpu_util={:.0}% min_envs={min_envs} max_envs={max_envs} \
+             check_every={} step={}",
+            cfg.target_gpu_util * 100.0,
+            cfg.autoscale_check_every,
+            cfg.autoscale_step
+        );
+        (min_envs, max_envs)
+    } else {
+        (cfg.min_envs, cfg.max_envs)
+    };
+    // Monotonic id for newly-spawned envs past the initial batch (RNG
+    // seed/thread-name/log uniqueness only - doesn't need to encode shard
+    // index the way the startup loop's `idx` does).
+    let mut next_env_idx = total_envs;
+
     let mut rng = rand::rngs::SmallRng::from_entropy();
     let mut ep_rewards: Vec<f64> = Vec::new();
     let mut ep_lengths: Vec<i64> = Vec::new();
@@ -849,6 +934,14 @@ pub fn run(cfg: Config) -> Result<()> {
         let collect_dt = collect_start.elapsed().as_secs_f64();
         let last_losses = train_result?;
         let next_pending = next_pending?;
+        // Actual env count behind `next_pending` (each shard's rollout
+        // just collected) - not the startup `total_envs`, which goes
+        // stale the moment `auto_scale_envs` grows any shard. Derived
+        // straight from the collected data rather than
+        // `actors[..].workers.len()` so it's correct regardless of
+        // exactly when in this iteration a resize lands.
+        let live_total_envs: usize =
+            next_pending.iter().map(|r| r.buffer.first().map(|row| row.len()).unwrap_or(0)).sum();
 
         // Entropy floor controller (port of `rl/ppo.py`): nudge the coef
         // scale toward keeping measured mean entropy above the floor, with
@@ -922,7 +1015,7 @@ pub fn run(cfg: Config) -> Result<()> {
                 st.maps, st.bots, st.difficulty
             );
         }
-        total_env_steps += (total_envs * cfg.rollout_len) as u64;
+        total_env_steps += (live_total_envs * cfg.rollout_len) as u64;
 
         // Refresh every actor from its paired learner's just-updated
         // weights, now that training has finished (and the collection
@@ -933,10 +1026,83 @@ pub fn run(cfg: Config) -> Result<()> {
         }
         pending = next_pending;
 
+        // Auto-scale check: deliberately placed here, after this
+        // update's `pending`/`next_pending` swap and *before* the next
+        // loop iteration spawns its `collect_rollout` calls - growing
+        // `actor.workers`/`actor.cur_obs` mid-rollout (inside
+        // `collect_rollout`'s per-step send/recv loop) would desync the
+        // `n = actor.workers.len()` it captured at the top of that call.
+        if cfg.auto_scale_envs && update % cfg.autoscale_check_every.max(1) == 0 {
+            let gpu_util_frac = gpu_sampler.as_ref().map(|g| g.snapshot().min_mean_util() / 100.0);
+            let current = actors[0].workers.len();
+            let target_n = autoscale::next_env_count(
+                current,
+                gpu_util_frac,
+                cfg.target_gpu_util,
+                autoscale_min_envs,
+                autoscale_max_envs,
+                cfg.autoscale_step,
+            );
+            if target_n > current {
+                let add = target_n - current;
+                // Grow every shard by the same amount in lockstep so all
+                // shards keep an identical env count (see `train_update`'s
+                // derivation of a single shared `n` from shard 0's data,
+                // and this module's doc for why uniform growth is the
+                // simplifying choice) - spawn everything first, and only
+                // commit (push onto the real shards) if every single spawn
+                // across every shard succeeded; otherwise close whatever
+                // was spawned in this attempt and keep the old count. A
+                // partial commit would leave shards with different env
+                // counts, which the rest of this file assumes never
+                // happens.
+                let mut spawned: Vec<(usize, Worker, PreparedObs)> = Vec::with_capacity(add * actors.len());
+                let mut spawn_err: Option<anyhow::Error> = None;
+                'grow: for gi in 0..actors.len() {
+                    for _ in 0..add {
+                        match spawn_worker(next_env_idx, curr_stage, cfg.max_episode_ticks, cfg.engine) {
+                            Ok((w, obs)) => {
+                                next_env_idx += 1;
+                                spawned.push((gi, w, obs));
+                            }
+                            Err(e) => {
+                                spawn_err = Some(e);
+                                break 'grow;
+                            }
+                        }
+                    }
+                }
+                let gpu_str = gpu_util_frac.map(|f| format!("{:.1}%", f * 100.0)).unwrap_or_else(|| "n/a (no GPU)".to_string());
+                match spawn_err {
+                    Some(e) => {
+                        println!(
+                            "[autoscale] scale-up {current} -> {target_n} envs/shard FAILED ({e:#}); \
+                             closing partially-spawned workers, staying at {current}"
+                        );
+                        for (_, w, _) in spawned {
+                            drop(w.choice_tx);
+                            let _ = w.handle.join();
+                        }
+                    }
+                    None => {
+                        for (gi, w, obs) in spawned {
+                            actors[gi].workers.push(w);
+                            actors[gi].cur_obs.push(obs);
+                        }
+                        println!(
+                            "[autoscale] all shards: {current} -> {target_n} envs (gpu_util={gpu_str} \
+                             target={:.0}% cpu_cap={autoscale_max_envs})",
+                            cfg.target_gpu_util * 100.0
+                        );
+                    }
+                }
+            }
+        }
+
         if update % cfg.log_every == 0 || update == cfg.updates - 1 {
             let dt = update_start.elapsed().as_secs_f64();
             let total_dt = train_start.elapsed().as_secs_f64();
-            let sps = (total_envs * cfg.rollout_len) as f64 / dt.max(1e-6);
+            let sps = (live_total_envs * cfg.rollout_len) as f64 / dt.max(1e-6);
             let recent_n = ep_rewards.len().min(50);
             let recent_reward = if recent_n > 0 {
                 ep_rewards[ep_rewards.len() - recent_n..].iter().sum::<f64>() / recent_n as f64
