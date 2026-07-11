@@ -8,6 +8,56 @@ use crate::map::TileRef;
 use crate::prng::PseudoRandom;
 use std::collections::HashSet;
 
+/// TS `PlayerImpl.warshipSpawn(tile)` (the `canBuild(Warship, tile)` case): nearest active,
+/// not-under-construction port of `small_id` sharing `tile`'s water component, or `None`
+/// (`false` in TS) if none exists. Shared by `WarshipExecution::spawn_tile` (this is what a
+/// freshly `ConstructionExecution`-delegated warship actually spawns from) and
+/// `NationWarshipBehavior`'s several AI-level `canBuild` checks (`warship_ai.rs`),
+/// which need the identical check *before* deciding whether to queue a
+/// `ConstructionExecution` at all, without an existing `WarshipExecution` to call it on.
+pub fn warship_build_port_tile(game: &Game, small_id: u16, tile: TileRef) -> Option<TileRef> {
+    if !game.is_water(tile) {
+        return None;
+    }
+    let component = game.get_water_component(tile)?;
+    game.player_by_small_id(small_id)?
+        .units
+        .iter()
+        .filter(|unit| unit.unit_type == PORT && !unit.under_construction)
+        .filter(|unit| game.has_water_component(unit.tile as TileRef, component))
+        .min_by_key(|unit| game.manhattan_dist(unit.tile as TileRef, tile))
+        .map(|unit| unit.tile as TileRef)
+}
+
+/// TS `NationWarshipBehavior.warshipSpawnTile(portTile, radius)` - a PRNG-consuming random
+/// search for *any* water tile within `radius` of `center` (up to 50 attempts, 2 draws
+/// each); unrelated to `warship_build_port_tile` above despite the similar TS name (that one
+/// searches this nation's own ports, deterministically, with no PRNG draws at all). Used both
+/// to pick a rough patrol location near an existing port (`maybeSpawnWarship`) and to pick a
+/// rough ocean tile near an enemy transport's landing target (`trackIncomingTransportsAndRetaliate`).
+pub fn warship_random_water_tile_near(
+    game: &Game,
+    random: &mut PseudoRandom,
+    center: TileRef,
+    radius: i32,
+) -> Option<TileRef> {
+    let cx = game.x(center) as i32;
+    let cy = game.y(center) as i32;
+    for _ in 0..50 {
+        let rand_x = random.next_int(cx - radius, cx + radius);
+        let rand_y = random.next_int(cy - radius, cy + radius);
+        if !game.is_valid_coord(rand_x, rand_y) {
+            continue;
+        }
+        let tile = game.ref_xy(rand_x as u32, rand_y as u32);
+        if !game.is_water(tile) {
+            continue;
+        }
+        return Some(tile);
+    }
+    None
+}
+
 pub struct WarshipExecution {
     owner_small_id: u16,
     patrol_tile: TileRef,
@@ -40,6 +90,32 @@ impl WarshipExecution {
         self.docked
     }
 
+    /// TS `Unit.warshipState().patrolTile`, read by `NationWarshipBehavior.maybeMoveWarship`
+    /// (via `warship_ai.rs`) to pick the least-busy existing warship to redirect
+    /// instead of building a new one.
+    pub fn patrol_tile(&self) -> TileRef {
+        self.patrol_tile
+    }
+
+    /// TS `warship.updateWarshipState({ patrolTile: tile })` - `NationWarshipBehavior`'s
+    /// `maybeMoveWarship` redirect. Deliberately does *not* clear `target_tile`/`path`,
+    /// matching TS's `patrol()`: an in-progress patrol leg finishes before the next
+    /// `randomTile()` call samples around the new patrol tile.
+    pub fn set_patrol_tile(&mut self, tile: TileRef) {
+        self.patrol_tile = tile;
+    }
+
+    /// Test-only constructor for a warship whose backing `Unit` already exists, bypassing
+    /// `init()`'s water-component port lookup (`Game::default()`/synthetic test maps have no
+    /// `mini_water_hpa` - see `warship_ai.rs`'s test module doc comment). Mirrors
+    /// `Game::push_exec_for_test`'s rationale and naming.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(owner_small_id: u16, patrol_tile: TileRef, unit_id: i32) -> Self {
+        let mut exec = Self::new(owner_small_id, patrol_tile);
+        exec.unit_id = Some(unit_id);
+        exec
+    }
+
     pub fn new(owner_small_id: u16, patrol_tile: TileRef) -> Self {
         Self {
             owner_small_id,
@@ -62,17 +138,7 @@ impl WarshipExecution {
     }
 
     fn spawn_tile(&self, game: &Game) -> Option<TileRef> {
-        if !game.is_water(self.patrol_tile) {
-            return None;
-        }
-        let component = game.get_water_component(self.patrol_tile)?;
-        game.player_by_small_id(self.owner_small_id)?
-            .units
-            .iter()
-            .filter(|unit| unit.unit_type == PORT && !unit.under_construction)
-            .filter(|unit| game.has_water_component(unit.tile as TileRef, component))
-            .min_by_key(|unit| game.manhattan_dist(unit.tile as TileRef, self.patrol_tile))
-            .map(|unit| unit.tile as TileRef)
+        warship_build_port_tile(game, self.owner_small_id, self.patrol_tile)
     }
 
     fn random_target(&mut self, game: &Game, from: TileRef) -> Option<TileRef> {

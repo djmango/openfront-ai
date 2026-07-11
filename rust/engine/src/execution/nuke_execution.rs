@@ -208,7 +208,7 @@ impl NukeExecution {
             }
         }
 
-        let mut to_remove_units: Vec<(u16, i32)> = Vec::new();
+        let mut to_remove_units: Vec<(u16, i32, Option<TileRef>)> = Vec::new();
         for p in game.players_in_order() {
             for u in &p.units {
                 if EXCLUDED_FROM_BLAST.contains(&u.unit_type.as_str()) {
@@ -216,11 +216,19 @@ impl NukeExecution {
                 }
                 let d2 = game.map.euclidean_dist_squared(dst, u.tile as TileRef);
                 if d2 < outer2 {
-                    to_remove_units.push((p.small_id, u.id));
+                    let transport_tile =
+                        (u.unit_type == unit_type::TRANSPORT).then(|| u.tile as TileRef);
+                    to_remove_units.push((p.small_id, u.id, transport_tile));
                 }
             }
         }
-        for (sid, uid) in to_remove_units {
+        for (sid, uid, transport_tile) in to_remove_units {
+            // TS `NukeExecution.detonate`: `unit.delete(true, destroyer)` where `destroyer =
+            // this.player` - see `Game::record_transport_kill`'s doc comment for why native
+            // needs this recorded before `remove_unit` rather than queried after.
+            if let Some(tile) = transport_tile {
+                game.record_transport_kill(uid, sid, self.owner_small_id, tile);
+            }
             game.remove_unit(sid, uid);
         }
 

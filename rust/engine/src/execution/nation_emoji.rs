@@ -334,9 +334,11 @@ pub fn maybe_send_attack_emoji(
 }
 
 /// TS `NationEmojiBehavior.maybeSendEmoji(otherPlayer, emojisList)` - exposed
-/// crate-wide so `NationNukeBehavior.sendNuke`'s
-/// `this.emojiBehavior.maybeSendEmoji(targetPlayer, EMOJI_NUKE)` call has a
-/// native equivalent to invoke (see `nuke_ai.rs::EMOJI_NUKE_LEN`).
+/// crate-wide for its other two TS callers now ported natively:
+/// `NationNukeBehavior.sendNuke`'s `maybeSendEmoji(targetPlayer, EMOJI_NUKE)`
+/// (see `nuke_ai.rs::EMOJI_NUKE_LEN`) and
+/// `NationWarshipBehavior.maybeRetaliateWithWarship`'s equivalent call (see
+/// `warship_ai.rs`).
 pub(crate) fn maybe_send_emoji(
     random: &mut PseudoRandom,
     game: &Game,
