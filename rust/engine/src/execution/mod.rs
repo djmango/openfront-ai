@@ -49,6 +49,7 @@ pub mod doomsday_clock_execution;
 pub mod factory_execution;
 pub mod mirv_execution;
 pub mod missile_silo_execution;
+pub mod nuke_ai;
 pub mod nuke_execution;
 pub mod parabola;
 pub mod port_execution;

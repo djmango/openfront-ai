@@ -732,7 +732,7 @@ fn is_bordering_nuked_territory(game: &Game, small_id: u16) -> bool {
     found
 }
 
-fn find_incoming_attacker(game: &Game, small_id: u16) -> Option<u16> {
+pub(crate) fn find_incoming_attacker(game: &Game, small_id: u16) -> Option<u16> {
     let ptype = game
         .player_by_small_id(small_id)
         .map(|p| p.player_type)
@@ -908,7 +908,11 @@ fn nation_try_attack_player(
     }
 }
 
-fn should_attack(
+/// TS `AiAttackBehavior.shouldAttack(other)` merged with `sendAttack`'s
+/// `if (!force && !this.shouldAttack(target)) return false;` guard (`force`
+/// short-circuits, matching TS's caller-side check rather than a
+/// `shouldAttack` parameter, since TS's `shouldAttack` itself takes none).
+pub(crate) fn should_attack(
     game: &Game,
     random: &mut PseudoRandom,
     attacker_small_id: u16,
@@ -924,9 +928,20 @@ fn should_attack(
     let Some(attacker) = game.player_by_small_id(attacker_small_id) else {
         return false;
     };
+    // TS also short-circuits to `true` when `gameConfig().playerTeams ===
+    // HumansVsNations` - missing here entirely before this fix, so an
+    // HvN-mode nation would incorrectly roll Easy/Medium's "skip attacking
+    // humans" dice against a mode where TS always attacks.
+    let is_humans_vs_nations = game
+        .wire
+        .game_config()
+        .player_teams
+        .as_ref()
+        .is_some_and(|c| c.is_humans_vs_nations());
     if target.player_type != PlayerType::Human
         || game.is_traitor(target_small_id)
         || attacker.player_type == PlayerType::Bot
+        || is_humans_vs_nations
     {
         return true;
     }

@@ -333,7 +333,11 @@ pub fn maybe_send_attack_emoji(
     );
 }
 
-fn maybe_send_emoji(
+/// TS `NationEmojiBehavior.maybeSendEmoji(otherPlayer, emojisList)` - exposed
+/// crate-wide so `NationNukeBehavior.sendNuke`'s
+/// `this.emojiBehavior.maybeSendEmoji(targetPlayer, EMOJI_NUKE)` call has a
+/// native equivalent to invoke (see `nuke_ai.rs::EMOJI_NUKE_LEN`).
+pub(crate) fn maybe_send_emoji(
     random: &mut PseudoRandom,
     game: &Game,
     small_id: u16,

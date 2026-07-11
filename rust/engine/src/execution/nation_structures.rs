@@ -72,7 +72,11 @@ fn rand_territory_tile(
     None
 }
 
-fn rand_territory_tile_array(
+/// TS `NationUtils.randTerritoryTileArray`  -  exposed crate-wide since
+/// `NationNukeBehavior.maybeSendNuke` samples random tiles inside the
+/// **target's** territory (not necessarily `this.player`'s), the same
+/// primitive `NationStructureBehavior` uses for its own placement scans.
+pub(crate) fn rand_territory_tile_array(
     game: &Game,
     random: &mut PseudoRandom,
     small_id: u16,
