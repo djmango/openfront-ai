@@ -371,6 +371,18 @@ pub fn send_emoji(
     let _ = random.next_int(0, emoji_list_len);
 }
 
+/// TS `respondToMIRV()` - the MIRV *target*'s reaction, not the launching
+/// nation's, so it skips `shouldSendEmoji`'s per-recipient cooldown (only
+/// ever sent to `AllPlayers`, which that check treats as unconditionally OK
+/// anyway) and only gates on the `canSendEmoji` self-check, which is always
+/// true for an `AllPlayers` recipient.
+pub(crate) fn respond_to_mirv(random: &mut PseudoRandom) {
+    if !random.chance(8) {
+        return;
+    }
+    let _ = random.next_int(0, EMOJI_OVERWHELMED_LEN);
+}
+
 fn should_send_emoji(
     game: &Game,
     small_id: u16,
