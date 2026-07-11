@@ -3326,6 +3326,73 @@ mod conquer_player_tests {
     }
 }
 
+// Ported from ConquerGold.test.ts. TS exposes the gold-share computation as
+// a standalone `config().conquerGoldAmount(player)`; native inlines the same
+// match directly into `conquer_player`, so both of TS's describe blocks
+// ("DefaultConfig.conquerGoldAmount" and "Conquest gold transfer") collapse
+// into one set of `conquer_player` assertions here.
+#[cfg(test)]
+mod conquer_gold_tests {
+    use super::{Game, Player, PlayerType};
+
+    fn add_player_with_gold(
+        game: &mut Game,
+        id: &str,
+        small_id: u16,
+        player_type: PlayerType,
+        gold: i64,
+    ) {
+        game.add_player(Player {
+            id: id.to_string(),
+            small_id,
+            player_type,
+            gold,
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn conqueror_receives_full_gold_from_a_bot() {
+        let mut game = Game::default();
+        add_player_with_gold(&mut game, "conqueror", 1, PlayerType::Human, 0);
+        add_player_with_gold(&mut game, "bot", 2, PlayerType::Bot, 1000);
+        game.conquer_player(1, 2);
+        assert_eq!(game.player_by_small_id(1).unwrap().gold, 1000);
+        assert_eq!(game.player_by_small_id(2).unwrap().gold, 0);
+    }
+
+    #[test]
+    fn conqueror_receives_full_gold_from_a_nation() {
+        let mut game = Game::default();
+        add_player_with_gold(&mut game, "conqueror", 1, PlayerType::Human, 0);
+        add_player_with_gold(&mut game, "nation", 2, PlayerType::Nation, 800);
+        game.conquer_player(1, 2);
+        assert_eq!(game.player_by_small_id(1).unwrap().gold, 800);
+        assert_eq!(game.player_by_small_id(2).unwrap().gold, 0);
+    }
+
+    #[test]
+    fn conqueror_receives_half_gold_from_a_human_who_has_attacked() {
+        let mut game = Game::default();
+        add_player_with_gold(&mut game, "conqueror", 1, PlayerType::Human, 0);
+        add_player_with_gold(&mut game, "victim", 2, PlayerType::Human, 1000);
+        game.adjust_attacks_sent(2, 100.0);
+        game.conquer_player(1, 2);
+        assert_eq!(game.player_by_small_id(1).unwrap().gold, 500);
+        assert_eq!(game.player_by_small_id(2).unwrap().gold, 0);
+    }
+
+    #[test]
+    fn conqueror_receives_no_gold_from_a_human_who_never_attacked() {
+        let mut game = Game::default();
+        add_player_with_gold(&mut game, "conqueror", 1, PlayerType::Human, 0);
+        add_player_with_gold(&mut game, "afk", 2, PlayerType::Human, 1000);
+        game.conquer_player(1, 2);
+        assert_eq!(game.player_by_small_id(1).unwrap().gold, 0);
+        assert_eq!(game.player_by_small_id(2).unwrap().gold, 1000);
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct TickUpdates {
     pub hash: Option<HashUpdate>,
