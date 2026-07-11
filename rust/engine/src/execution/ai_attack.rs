@@ -1684,15 +1684,18 @@ fn attack_with_random_boat(
         }
     }
 
-    if !bordering_enemies.is_empty() {
-        let idx = random.next_int(0, bordering_enemies.len() as i32) as usize;
-        let target = bordering_enemies[idx];
-        let troops = game
-            .player_by_small_id(small_id)
-            .map(|p| game.wire.boat_attack_amount(p.troops))
-            .unwrap_or(0.0);
-        return send_boat_attack_to_player(game, small_id, target, troops);
-    }
+    // TS `AiAttackBehavior.attackWithRandomBoat`: if both the high-interest
+    // and normal `findRandomBoatTarget` passes come back `null`, the method
+    // simply returns (no attack this cycle) - there is no fallback to a
+    // random bordering enemy. Native previously had an extra fallback here
+    // (attack a random entry of `bordering_enemies` via boat, unconditionally,
+    // even though the target is land-adjacent and should never need a boat)
+    // that doesn't exist in TS at all: it fabricated an attack TS never
+    // sends AND consumed an extra `random.next_int()` draw TS never makes,
+    // permanently desyncing every subsequent PRNG draw for the rest of the
+    // game from that point on. Bisected via a `curriculum-parity-v4`
+    // `timing_mismatch` gate failure (`curr-b010-s0-pangaea`) - see
+    // docs/bot-ai-parity-b010-timing/README.md.
     false
 }
 
@@ -2933,5 +2936,157 @@ mod tests {
             .unwrap()
             .outgoing_land_attacks
             .is_empty());
+    }
+}
+
+/// Regression coverage for the `curriculum-parity-v4` `curr-b010-s0-pangaea`
+/// `timing_mismatch` bisection (see `docs/bot-ai-parity-b010-timing/README.md`):
+/// `attack_with_random_boat`'s two `findRandomBoatTarget`-equivalent passes
+/// (TS `AiAttackBehavior.attackWithRandomBoat`) had a fabricated fallback -
+/// attacking a random entry of `bordering_enemies` via boat whenever both
+/// passes came back empty - with no TS counterpart at all (TS just returns,
+/// doing nothing, when `findRandomBoatTarget` returns `null` twice). Besides
+/// sending an attack TS never sends, the fallback drew an extra
+/// `random.next_int()` that TS never draws, permanently shifting every
+/// subsequent PRNG-driven decision for the rest of the game.
+#[cfg(test)]
+mod random_boat_fallback_tests {
+    use super::*;
+    use crate::game::PlayerInfo;
+    use crate::map::{GameMap, MapMeta};
+
+    const LAND_PLAINS: u8 = 0b1000_0000;
+    const SHORELINE_BIT: u8 = 1 << 6;
+
+    /// A `width`x`height` map that's all land except a single water tile at
+    /// `(0, 0)` - just enough geometry for `shore_border_tiles` to be
+    /// non-empty (the attacker's tiles adjacent to that one water cell) while
+    /// keeping the random-tile search in `attack_with_random_boat`
+    /// deterministically fruitless: every in-bounds land tile is owned by
+    /// the attacker itself (skipped via the `owner == small_id` check) and
+    /// the lone water tile always fails `is_land`, so no valid boat target
+    /// can ever be found regardless of which coordinates the PRNG draws.
+    ///
+    /// `from_terrain_bytes` stores the terrain plane verbatim - it does not
+    /// derive the shoreline bit from water adjacency the way the real map
+    /// loader / TS map processing does - so the two land tiles adjacent to
+    /// `(0, 0)` (`(1, 0)` and `(0, 1)`) need the shoreline bit set by hand,
+    /// or `is_shore`/`shore_border_tiles` would see the attacker as having
+    /// no shore at all and every test here would vacuously pass by hitting
+    /// the unrelated `shores.is_empty()` early-return at the top of
+    /// `attack_with_random_boat`, never actually exercising the fallback
+    /// branch this test module exists to cover.
+    fn one_water_tile_game(width: u32, height: u32) -> Game {
+        let n = (width * height) as usize;
+        let mut data = vec![LAND_PLAINS; n];
+        data[0] = 0; // (0, 0) is water.
+        data[1] |= SHORELINE_BIT; // (1, 0): land, adjacent to (0, 0).
+        data[width as usize] |= SHORELINE_BIT; // (0, 1): land, adjacent to (0, 0).
+        let meta = MapMeta {
+            width,
+            height,
+            num_land_tiles: (n - 1) as u32,
+        };
+        let map = GameMap::from_terrain_bytes(&meta, &data).unwrap();
+        let mut game = Game::default();
+        game.map = map.clone();
+        game.mini_map = map;
+        game.bfs = crate::water::BfsScratch::new(n);
+        game.water_astar = crate::water::WaterAstarScratch::new(n);
+        game.mini_water_astar = crate::water::WaterAstarScratch::new(n);
+        game.end_spawn_phase();
+        game
+    }
+
+    fn add_player(game: &mut Game, id: &str) -> u16 {
+        game.add_from_info(&PlayerInfo {
+            name: id.into(),
+            player_type: PlayerType::Nation,
+            client_id: Some(id.into()),
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        })
+    }
+
+    /// Builds a fresh game with `attacker` owning every land tile (so
+    /// `shore_border_tiles` is non-empty, but the random-tile search can
+    /// never find a valid unowned/bot/reachable target - every land draw is
+    /// attacker-owned, and the lone water tile always fails `is_land`),
+    /// guaranteeing both `attack_with_random_boat` passes exhaust their full
+    /// 500 draws regardless of the PRNG seed. `enemy` deliberately owns no
+    /// tiles at all, so it can never be found by the random search either -
+    /// isolating whether `bordering_enemies` being non-empty changes
+    /// anything by itself.
+    fn setup(seed: i32) -> (Game, u16, u16, PseudoRandom) {
+        let mut game = one_water_tile_game(8, 8);
+        let attacker = add_player(&mut game, "attacker");
+        let enemy = add_player(&mut game, "enemy");
+        for t in 1..(8 * 8) {
+            game.conquer(attacker, t);
+        }
+        if let Some(p) = game.player_by_small_id_mut(attacker) {
+            p.troops = 100_000;
+        }
+        (game, attacker, enemy, PseudoRandom::new(seed))
+    }
+
+    #[test]
+    fn no_target_found_does_not_fall_back_to_attacking_a_bordering_enemy() {
+        let (mut game, attacker, _enemy, mut random) = setup(7);
+        let fired = attack_with_random_boat(&mut game, &mut random, attacker, &[]);
+        assert!(
+            !fired,
+            "attack_with_random_boat must not fabricate an attack when both target searches fail"
+        );
+
+        // No TransportShip execution should have been queued at all - run a
+        // tick so any queued `init()` would have fired, then confirm no boat
+        // was ever built.
+        game.execute_next_tick();
+        assert_eq!(
+            game.unit_count(attacker, crate::core::schemas::unit_type::TRANSPORT),
+            0,
+            "no transport ship should have been built"
+        );
+        assert!(game.active_attacks_debug().is_empty());
+    }
+
+    /// The real regression: whether `bordering_enemies` is empty or not must
+    /// not change how many PRNG draws `attack_with_random_boat` consumes
+    /// when neither search finds a target (`enemy` owns no tiles, so it can
+    /// never be the tile a random draw lands on either way - the ONLY
+    /// possible difference is the old fallback's extra
+    /// `random.next_int(0, bordering_enemies.len())` draw). With the bug,
+    /// passing a non-empty `bordering_enemies` drew exactly one extra
+    /// `next_int` versus passing `&[]`, permanently shifting every
+    /// subsequent PRNG-driven decision (attack targets, troop rolls, emoji,
+    /// alliance requests, ...) out of sync with TS for the rest of the game.
+    #[test]
+    fn bordering_enemies_non_empty_draws_the_same_prng_sequence_as_empty() {
+        let (mut game_empty, attacker_empty, _e1, mut random_empty) = setup(1234);
+        let (mut game_full, attacker_full, enemy_full, mut random_full) = setup(1234);
+
+        let fired_empty =
+            attack_with_random_boat(&mut game_empty, &mut random_empty, attacker_empty, &[]);
+        let fired_full = attack_with_random_boat(
+            &mut game_full,
+            &mut random_full,
+            attacker_full,
+            &[enemy_full],
+        );
+        assert!(!fired_empty);
+        assert!(!fired_full);
+
+        // Draw a marker value from each PRNG afterward - if the function
+        // consumed a different number of draws internally, these diverge.
+        let marker_empty = random_empty.next_int(0, 1_000_000);
+        let marker_full = random_full.next_int(0, 1_000_000);
+        assert_eq!(
+            marker_empty, marker_full,
+            "a non-empty bordering_enemies list must not draw any extra PRNG values \
+             when no boat target is found"
+        );
     }
 }
