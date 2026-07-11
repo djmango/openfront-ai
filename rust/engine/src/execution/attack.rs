@@ -708,6 +708,26 @@ mod immunity_tests {
         );
     }
 
+    // Ported from "Should be able to attack bots during immunity phase": a
+    // Bot target has no immunity type of its own in `is_player_immune`
+    // (only `Human`/`Nation` match), so it's attackable at any time
+    // regardless of which type the attacker is - distinct from the
+    // `bot_can_attack_human_during_spawn_immunity` case below, which instead
+    // exercises `can_attack_player`'s "non-human attacker bypasses immunity"
+    // branch.
+    #[test]
+    fn human_can_attack_a_bot_during_spawn_immunity() {
+        let mut game = game_with_spawn_immunity(IMMUNITY_TICKS);
+        let human = add(&mut game, "human", PlayerType::Human);
+        add(&mut game, "bot", PlayerType::Bot);
+
+        let mut attack = AttackExecution::new(human, Some("bot".to_string()), Some(10.0));
+        let tick = game.ticks();
+        attack.init(&mut game, tick);
+
+        assert!(attack.is_active());
+    }
+
     #[test]
     fn bot_can_attack_human_during_spawn_immunity() {
         let mut game = game_with_spawn_immunity(IMMUNITY_TICKS);
