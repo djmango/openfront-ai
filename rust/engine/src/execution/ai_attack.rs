@@ -39,6 +39,111 @@ pub fn has_trigger_ratio(game: &Game, small_id: u16, trigger_ratio: f64) -> bool
     attacker.troops as f64 / max_troops >= trigger_ratio
 }
 
+/// TS `AiAttackBehavior.troopSendCap()`: for Hard/Impossible-difficulty
+/// non-Bot players in FFA (never for Bots or Team games), caps troops sent
+/// in ANY attack against a player - land, boat, or bot-target - so at least
+/// `retainFraction` (Hard: 75%, Impossible: 90%) of the strongest
+/// non-allied, non-Bot neighbor's current troops remain uncommitted. If the
+/// player has active incoming (land) attacks, the cap is raised to at least
+/// the total incoming troop count so retaliation is never blocked by it.
+/// This whole mechanic, plus `is_attack_too_weak` below, was entirely
+/// unported natively - `AiAttackBehavior.test.ts`'s "Hard/Impossible troop
+/// floor" describe block (8 tests) caught it.
+fn troop_send_cap(game: &Game, small_id: u16) -> f64 {
+    let Some(attacker) = game.player_by_small_id(small_id) else {
+        return f64::INFINITY;
+    };
+    if attacker.player_type == PlayerType::Bot {
+        return f64::INFINITY;
+    }
+    if game.wire.game_config().game_mode == "Team" {
+        return f64::INFINITY;
+    }
+    let retain_fraction = match game.wire.game_config().difficulty.as_str() {
+        "Hard" => 0.75,
+        "Impossible" => 0.9,
+        _ => return f64::INFINITY,
+    };
+
+    let mut max_neighbor_troops: i32 = 0;
+    for sid in nearby_players_ts_order(game, small_id) {
+        let Some(p) = game.player_by_small_id(sid) else {
+            continue;
+        };
+        if p.player_type == PlayerType::Bot {
+            continue;
+        }
+        if game.is_friendly(small_id, sid) {
+            continue;
+        }
+        if p.troops > max_neighbor_troops {
+            max_neighbor_troops = p.troops;
+        }
+    }
+
+    let mut cap = if max_neighbor_troops == 0 {
+        f64::INFINITY
+    } else {
+        let min_retained = (max_neighbor_troops as f64 * retain_fraction).ceil();
+        (attacker.troops as f64 - min_retained).max(0.0)
+    };
+
+    let incoming = game.incoming_attacks(small_id, false);
+    if !incoming.is_empty() {
+        let total_incoming: f64 = incoming.iter().map(|a| a.troops).sum();
+        cap = cap.max(total_incoming);
+    }
+    cap
+}
+
+/// TS `AiAttackBehavior.isAttackTooWeak()`: on Hard/Impossible in FFA,
+/// blocks a player-targeted attack that would send less than 20% of the
+/// target's troops. Bots, Team games, and attackers already under incoming
+/// attack (who may retaliate freely regardless of size) are exempt.
+fn is_attack_too_weak(game: &Game, small_id: u16, troops: f64, target_small_id: u16) -> bool {
+    let Some(attacker) = game.player_by_small_id(small_id) else {
+        return false;
+    };
+    if attacker.player_type == PlayerType::Bot {
+        return false;
+    }
+    if game.wire.game_config().game_mode == "Team" {
+        return false;
+    }
+    if !game.incoming_attacks(small_id, false).is_empty() {
+        return false;
+    }
+    let difficulty = game.wire.game_config().difficulty.as_str();
+    if difficulty != "Hard" && difficulty != "Impossible" {
+        return false;
+    }
+    let target_troops = game
+        .player_by_small_id(target_small_id)
+        .map(|p| p.troops)
+        .unwrap_or(0);
+    troops < target_troops as f64 * 0.2
+}
+
+/// TS `AiAttackBehavior.calculateAttackTroops`'s shared post-processing for
+/// every player-targeted attack (land, boat, and bot-target alike): apply
+/// `troop_send_cap`, then `is_attack_too_weak`. Returns `None` when the
+/// attack must be blocked entirely (capped below 1 troop, or too weak).
+fn cap_player_attack_troops(
+    game: &Game,
+    small_id: u16,
+    target_small_id: u16,
+    troops: f64,
+) -> Option<f64> {
+    let capped = troops.min(troop_send_cap(game, small_id));
+    if capped < 1.0 {
+        return None;
+    }
+    if is_attack_too_weak(game, small_id, capped, target_small_id) {
+        return None;
+    }
+    Some(capped)
+}
+
 pub fn has_land_border_tn(game: &Game, small_id: u16) -> bool {
     let Some(border) = game.border_tiles_of(small_id) else {
         return false;
@@ -349,6 +454,11 @@ fn try_send_player_attack_forced(
         let Some(troops) = land_attack_troops(game, attacker_small_id, reserve_ratio) else {
             return false;
         };
+        let Some(troops) =
+            cap_player_attack_troops(game, attacker_small_id, target_small_id, troops)
+        else {
+            return false;
+        };
         if is_nation && is_human {
             if let Some(state) = emoji {
                 super::nation_emoji::maybe_send_attack_emoji(
@@ -363,14 +473,24 @@ fn try_send_player_attack_forced(
         game.add_land_attack(attacker_small_id, Some(target_id), Some(troops));
         return true;
     }
-    send_boat_attack_to_player(
-        game,
-        attacker_small_id,
-        target_small_id,
-        game.player_by_small_id(attacker_small_id)
-            .map(|p| game.wire.boat_attack_amount(p.troops))
-            .unwrap_or(0.0),
-    )
+    // TS `sendBoatAttack`'s `nonBotTroops` lambda is `() => this.player.troops()
+    // / 5` - unlike `Config.boatAttackAmount()` (`floor(troops / 5)`, used
+    // only by `TransportShipExecution`'s human-intent default), this value is
+    // NOT floored. Previously used `wire.boat_attack_amount` here, which is
+    // the floored config function - a same-class-of-bug rounding mismatch to
+    // the `send_boat_attack_to_nearby_tn`/`random_boat_attack_troops`
+    // functions in this same file, which already correctly use the unfloored
+    // form.
+    let boat_troops = game
+        .player_by_small_id(attacker_small_id)
+        .map(|p| p.troops as f64 / 5.0)
+        .unwrap_or(0.0);
+    let Some(boat_troops) =
+        cap_player_attack_troops(game, attacker_small_id, target_small_id, boat_troops)
+    else {
+        return false;
+    };
+    send_boat_attack_to_player(game, attacker_small_id, target_small_id, boat_troops)
 }
 
 pub fn send_boat_attack_to_player(
@@ -1585,6 +1705,16 @@ fn try_send_nation_bot_attack(
         ) else {
             return false;
         };
+        // TS `calculateAttackTroops`: `troopSendCap`/`isAttackTooWeak` apply
+        // to EVERY player-targeted attack, including bot targets (the
+        // bot-specific `calculateBotAttackTroops` branch feeds straight into
+        // the same shared cap/weak-check below it) - not just the plain
+        // land/boat-vs-non-bot path.
+        let Some(troops) =
+            cap_player_attack_troops(game, attacker_small_id, target_small_id, troops)
+        else {
+            return false;
+        };
         let target_id = game.player_by_small_id(target_small_id).unwrap().id.clone();
         game.add_land_attack(attacker_small_id, Some(target_id), Some(troops));
         *bot_attack_troops_sent += troops;
@@ -1598,6 +1728,11 @@ fn try_send_nation_bot_attack(
         *bot_attack_troops_sent,
         difficulty,
     ) else {
+        return false;
+    };
+    let Some(troops) =
+        cap_player_attack_troops(game, attacker_small_id, target_small_id, troops)
+    else {
         return false;
     };
     if send_boat_attack_to_player(
