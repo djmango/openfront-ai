@@ -1394,6 +1394,19 @@ impl Game {
             .collect()
     }
 
+    /// Test-only scaffolding: appends an already-fully-constructed execution
+    /// straight into the live `execs` list, bypassing `add_execution`'s
+    /// `uninit` -> `init()` pipeline entirely. Lets tests build an exec (e.g.
+    /// a `TransportShipExecution` with a real `unit_id`/carried troops set
+    /// directly via its own module's private-field access) that represents
+    /// mid-flight state `init()` itself can't reach without real map
+    /// geometry `Game::default()` doesn't provide, then exercise later-tick
+    /// logic (like nuke blast casualties) against it directly.
+    #[cfg(test)]
+    pub(crate) fn push_exec_for_test(&mut self, exec: crate::execution::ExecEnum) {
+        self.execs.push(exec);
+    }
+
     pub fn add_transport_attack(&mut self, owner_small_id: u16, target_tile: TileRef, troops: f64) {
         self.add_execution(ExecEnum::TransportShip(
             crate::execution::TransportShipExecution::new(owner_small_id, target_tile, troops),

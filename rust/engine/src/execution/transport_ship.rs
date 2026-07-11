@@ -356,4 +356,133 @@ mod tests {
             && r.recipient_small_id == sender
             && r.status == crate::game::AllianceRequestStatus::Rejected));
     }
+
+    // Ported from Attack.test.ts's "Attack immunity" > "Should not be able to
+    // send a boat during immunity phase": a boat aimed at another human's
+    // territory is blocked while that human's spawn immunity is active, via
+    // the same `can_attack_player` gate `AttackExecution::init` uses (see
+    // `immunity_tests` in `execution/attack.rs`). The mirror TS case ("Should
+    // be able to send a boat after immunity phase") isn't ported literally:
+    // once past this gate, `init()` needs real water/land adjacency
+    // (`target_transport_tile`, `can_build_transport_ship`) that
+    // `Game::default()`'s 1x1 map can't provide, and that later geometry is
+    // already exercised by the alliance-rejection test above using the same
+    // land-only map - only the immunity gate itself is new coverage here.
+    #[test]
+    fn sending_a_transport_ship_during_spawn_immunity_is_blocked() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let sender = add_human(&mut game, "sender");
+        let target = add_human(&mut game, "target");
+        if let Some(p) = game.player_by_small_id_mut(sender) {
+            p.troops = 1_000;
+        }
+        let only_tile = game.map.ref_xy(0, 0);
+        game.map.set_owner_id(only_tile, target);
+
+        let mut ship = TransportShipExecution::new(sender, only_tile, 100.0);
+        let tick = game.ticks();
+        ship.init(&mut game, tick);
+
+        assert!(!ship.is_active());
+        assert!(ship.unit_id().is_none());
+    }
+
+    // Ported from Attack.test.ts's "Should abort TransportShipExecution when
+    // target is the attacker itself": aiming a boat at a tile the sender
+    // already owns aborts in `init()` before any pathfinding/build attempt.
+    #[test]
+    fn transport_ship_targeting_own_territory_aborts_immediately() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let sender = add_human(&mut game, "sender");
+        if let Some(p) = game.player_by_small_id_mut(sender) {
+            p.troops = 1_000;
+        }
+        let only_tile = game.map.ref_xy(0, 0);
+        game.map.set_owner_id(only_tile, sender);
+
+        let mut ship = TransportShipExecution::new(sender, only_tile, 10.0);
+        let tick = game.ticks();
+        ship.init(&mut game, tick);
+
+        assert!(!ship.is_active());
+        assert!(ship.unit_id().is_none());
+    }
+
+    // Ported from Attack.test.ts's "Boat penalty on retreat Transport Ship
+    // arrival": TS `TransportShipExecution.tick` credits only 75% of a boat's
+    // carried troops back to its owner when it lands on territory the owner
+    // already controls (`this.mg.units...owner === this._owner ?
+    // addTroops(troops * 0.75) : ...` in the TS source) - the same code path
+    // for both "retreating home" and "never left home" landings. Reaching
+    // this via a real multi-tick voyage+retreat needs water pathfinding
+    // `Game::default()` can't provide, so this drives `tick()` directly with
+    // the boat already parked at its (owned) destination, which exercises
+    // the exact same `land()` branch TS's retreat case does.
+    #[test]
+    fn transport_ship_landing_on_own_territory_returns_75_percent_of_carried_troops() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let owner = add_human(&mut game, "owner");
+        if let Some(p) = game.player_by_small_id_mut(owner) {
+            p.troops = 1_000;
+        }
+        let tile = game.map.ref_xy(0, 0);
+        game.map.set_owner_id(tile, owner);
+        let uid = game.build_unit(owner, TRANSPORT, tile);
+
+        let boat_troops = 500.0;
+        let mut ship = TransportShipExecution::new(owner, tile, boat_troops);
+        ship.unit_id = Some(uid);
+        ship.dst = Some(tile);
+        ship.initialized = true;
+        ship.retreat_destination_resolved = true;
+        ship.last_move_tick = 0;
+
+        ship.tick(&mut game, 1);
+
+        assert!(!ship.is_active());
+        assert_eq!(
+            game.player_by_small_id(owner).unwrap().troops,
+            1_000 + 375
+        );
+    }
+
+    // Ported from the intent of Attack.test.ts's "Nuke reduce attacking boat
+    // troop count": TS's `NukeExecution.detonate` applies the same
+    // `nukeDeathFactor` to a nuked player's in-flight transport ships as it
+    // does to their home troops and outgoing land attacks (see the sibling
+    // attack-side coverage in `execution/nuke_execution.rs`'s
+    // `nuke_reduces_troops_of_a_live_outgoing_attack_owned_by_the_impacted_player`,
+    // which caught native previously skipping both entirely - fixed in
+    // `Game::apply_nuke_deaths_to_deployed_forces`). This exercises the
+    // transport-ship arm of that same fix directly: `Game::push_exec_for_test`
+    // places an already-in-flight boat (real `unit_id`, no pathfinding
+    // needed) straight into `execs`, since `Game::default()`'s 1x1 map can't
+    // run this boat through a real naval `init()`.
+    #[test]
+    fn nuke_reduces_carried_troops_of_a_live_transport_ship_owned_by_the_impacted_player() {
+        use crate::core::schemas::unit_type;
+
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let owner = add_human(&mut game, "owner");
+        let tile = game.map.ref_xy(0, 0);
+        let uid = game.build_unit(owner, TRANSPORT, tile);
+
+        let mut ship = TransportShipExecution::new(owner, tile, 300.0);
+        ship.unit_id = Some(uid);
+        game.push_exec_for_test(crate::execution::ExecEnum::TransportShip(ship));
+
+        game.apply_nuke_deaths_to_deployed_forces(owner, unit_type::ATOM_BOMB, 100.0, 10_000.0);
+
+        let troops_after = game
+            .live_transports()
+            .find(|t| t.owner_small_id() == owner)
+            .map(|t| t.carried_troops())
+            .expect("transport ship should still be present");
+        // nukeDeathFactor(ATOM_BOMB, 300, 100, _) = 5 * 300 / 100 = 15.
+        assert_eq!(troops_after, 285.0);
+    }
 }
