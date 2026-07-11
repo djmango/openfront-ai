@@ -63,6 +63,7 @@ pub mod nation_tick;
 pub mod noop;
 pub mod ordered_map;
 pub mod ordered_tiles;
+pub mod ordered_units;
 pub mod player;
 pub mod player_clusters;
 pub mod retreat;
