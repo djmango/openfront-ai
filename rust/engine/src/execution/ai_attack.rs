@@ -577,11 +577,20 @@ fn find_incoming_attacker(game: &Game, small_id: u16) -> Option<u16> {
     game.find_incoming_land_attacker(small_id, ptype)
 }
 
-fn find_victim(game: &Game, bordering: &[u16]) -> Option<u16> {
+/// TS `findVictim`: `if (this.isFFA() && enemy.troops() > this.player.troops()
+/// * 1.2) return false;` guard was missing entirely (same class of bug as
+/// `nation_strategy_hated`'s missing FFA guard - see
+/// docs/bot-ai-parity-nation-relations/README.md).
+fn find_victim(game: &Game, attacker_small_id: u16, bordering: &[u16]) -> Option<u16> {
+    let is_ffa = game.wire.game_config().game_mode != "Team";
+    let attacker_troops = game.player_by_small_id(attacker_small_id).map(|p| p.troops).unwrap_or(0);
     for &sid in bordering {
         let Some(enemy) = game.player_by_small_id(sid) else {
             continue;
         };
+        if is_ffa && enemy.troops as f64 > attacker_troops as f64 * 1.2 {
+            continue;
+        }
         let incoming = game.incoming_land_troops(sid);
         if incoming > enemy.troops as f64 * 0.5 {
             return Some(sid);
@@ -590,13 +599,19 @@ fn find_victim(game: &Game, bordering: &[u16]) -> Option<u16> {
     None
 }
 
-fn find_very_weak_enemy(game: &Game, bordering: &[u16]) -> Option<u16> {
+/// TS `findVeryWeakEnemy`: `(!this.isFFA() || enemy.troops() <
+/// this.player.troops() * 1.2)` guard was missing entirely (same bug class).
+fn find_very_weak_enemy(game: &Game, attacker_small_id: u16, bordering: &[u16]) -> Option<u16> {
+    let is_ffa = game.wire.game_config().game_mode != "Team";
+    let attacker_troops = game.player_by_small_id(attacker_small_id).map(|p| p.troops).unwrap_or(0);
     for &sid in bordering {
         let Some(enemy) = game.player_by_small_id(sid) else {
             continue;
         };
         let max = game.max_troops_for(enemy.small_id);
-        if (enemy.troops as f64) < max * 0.15 {
+        if (enemy.troops as f64) < max * 0.15
+            && (!is_ffa || (enemy.troops as f64) < attacker_troops as f64 * 1.2)
+        {
             return Some(sid);
         }
     }
@@ -982,43 +997,86 @@ fn nation_attack_best_target(
                 emoji.as_deref_mut(),
             )
         }
-        _ => {
-            if attack_bots(
-                game,
-                random,
-                attacker_small_id,
-                reserve_ratio,
-                expand_ratio,
-                bot_attack_troops_sent,
-                difficulty,
-            ) {
+        // TS Hard order (minus `assist`, dead code - see the Easy arm's
+        // comment - and `donate`, live only in `GameMode.Team`, not ported,
+        // see docs/bot-ai-parity-nation-relations/README.md's follow-up
+        // list): [bots, retaliate, betray, nuked, traitor, afk, hated,
+        // veryWeak, victim, weakest, island]. Previously this whole branch
+        // (shared with Impossible below, as a single `_` catch-all) only
+        // implemented [bots, retaliate, weakest] - 8 of 11 strategies were
+        // silently missing, found via a systematic audit of this match
+        // after the Easy-arm bug (see docs/bot-ai-parity-nation-relations/).
+        "Hard" => {
+            if attack_bots(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty) {
                 return true;
             }
             if let Some(attacker) = find_incoming_attacker(game, attacker_small_id) {
-                return nation_try_attack_player(
-                    game,
-                    random,
-                    attacker_small_id,
-                    attacker,
-                    reserve_ratio,
-                    expand_ratio,
-                    bot_attack_troops_sent,
-                    difficulty,
-                    emoji.as_deref_mut(),
-                    true,
-                );
+                return nation_try_attack_player(game, random, attacker_small_id, attacker, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, emoji.as_deref_mut(), true);
             }
-            nation_strategy_weakest(
-                game,
-                random,
-                attacker_small_id,
-                reserve_ratio,
-                expand_ratio,
-                bot_attack_troops_sent,
-                difficulty,
-                bordering,
-                emoji.as_deref_mut(),
-            )
+            if nation_strategy_betray(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut()) {
+                return true;
+            }
+            if is_bordering_nuked_territory(game, attacker_small_id) && send_tn_attack(game, attacker_small_id, expand_ratio) {
+                return true;
+            }
+            if nation_strategy_traitor(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut()) {
+                return true;
+            }
+            if nation_strategy_afk(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut()) {
+                return true;
+            }
+            if nation_strategy_hated(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut()) {
+                return true;
+            }
+            if nation_strategy_very_weak(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut()) {
+                return true;
+            }
+            if nation_strategy_victim(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut()) {
+                return true;
+            }
+            if nation_strategy_weakest(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut()) {
+                return true;
+            }
+            nation_strategy_island(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut())
+        }
+        // TS Impossible order (same dead-code exclusions as Hard above):
+        // [retaliate, bots, veryWeak, traitor, afk, betray, victim, nuked,
+        // hated, weakest, island]. Note this order genuinely differs from
+        // Hard's (retaliate before bots; veryWeak much earlier) - it is not
+        // just Hard with a different set, so it needs its own arm rather
+        // than falling back to a shared default.
+        _ => {
+            if let Some(attacker) = find_incoming_attacker(game, attacker_small_id) {
+                return nation_try_attack_player(game, random, attacker_small_id, attacker, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, emoji.as_deref_mut(), true);
+            }
+            if attack_bots(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty) {
+                return true;
+            }
+            if nation_strategy_very_weak(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut()) {
+                return true;
+            }
+            if nation_strategy_traitor(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut()) {
+                return true;
+            }
+            if nation_strategy_afk(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut()) {
+                return true;
+            }
+            if nation_strategy_betray(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut()) {
+                return true;
+            }
+            if nation_strategy_victim(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut()) {
+                return true;
+            }
+            if is_bordering_nuked_territory(game, attacker_small_id) && send_tn_attack(game, attacker_small_id, expand_ratio) {
+                return true;
+            }
+            if nation_strategy_hated(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut()) {
+                return true;
+            }
+            if nation_strategy_weakest(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut()) {
+                return true;
+            }
+            nation_strategy_island(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut())
         }
     }
 }
@@ -1151,6 +1209,10 @@ fn nation_strategy_afk(
     bordering: &[u16],
     emoji: Option<&mut super::nation_emoji::NationEmojiState>,
 ) -> bool {
+    // TS `afk`: `!this.isFFA() || enemy.troops() < this.player.troops() * 3`
+    // - the troop-cap guard only applies in FFA, not team games (same bug
+    // class as `nation_strategy_hated`'s previously-missing guard).
+    let is_ffa = game.wire.game_config().game_mode != "Team";
     let attacker_troops = game.player_by_small_id(sid).map(|p| p.troops).unwrap_or(0);
     for &enemy in bordering {
         let Some(p) = game.player_by_small_id(enemy) else {
@@ -1159,7 +1221,7 @@ fn nation_strategy_afk(
         if !p.is_disconnected {
             continue;
         }
-        if p.troops >= attacker_troops * 3 {
+        if is_ffa && p.troops >= attacker_troops * 3 {
             continue;
         }
         return nation_try_attack_player(
@@ -1189,14 +1251,19 @@ fn nation_strategy_traitor(
     bordering: &[u16],
     emoji: Option<&mut super::nation_emoji::NationEmojiState>,
 ) -> bool {
+    // TS `findTraitor`: `!this.isFFA() || enemy.troops() < this.player.troops() * 1.2`
+    // - FFA-only guard, same bug class as above.
+    let is_ffa = game.wire.game_config().game_mode != "Team";
     let attacker_troops = game.player_by_small_id(sid).map(|p| p.troops).unwrap_or(0);
     for &enemy in bordering {
         if !game.is_traitor(enemy) {
             continue;
         }
-        if let Some(p) = game.player_by_small_id(enemy) {
-            if p.troops >= (attacker_troops as f64 * 1.2) as i32 {
-                continue;
+        if is_ffa {
+            if let Some(p) = game.player_by_small_id(enemy) {
+                if p.troops >= (attacker_troops as f64 * 1.2) as i32 {
+                    continue;
+                }
             }
         }
         return nation_try_attack_player(
@@ -1213,6 +1280,67 @@ fn nation_strategy_traitor(
         );
     }
     false
+}
+
+/// TS `getAttackStrategies`' `veryWeak` closure (Hard/Impossible only) -
+/// wraps `find_very_weak_enemy`, which was defined but never wired into any
+/// difficulty arm.
+fn nation_strategy_very_weak(
+    game: &mut Game,
+    random: &mut PseudoRandom,
+    sid: u16,
+    reserve_ratio: f64,
+    expand_ratio: f64,
+    bot_attack_troops_sent: &mut f64,
+    difficulty: &str,
+    bordering: &[u16],
+    emoji: Option<&mut super::nation_emoji::NationEmojiState>,
+) -> bool {
+    let Some(very_weak) = find_very_weak_enemy(game, sid, bordering) else {
+        return false;
+    };
+    nation_try_attack_player(
+        game,
+        random,
+        sid,
+        very_weak,
+        reserve_ratio,
+        expand_ratio,
+        bot_attack_troops_sent,
+        difficulty,
+        emoji,
+        false,
+    )
+}
+
+/// TS `getAttackStrategies`' `victim` closure (Hard/Impossible only) - wraps
+/// `find_victim`, same previously-dead-code situation as `veryWeak` above.
+fn nation_strategy_victim(
+    game: &mut Game,
+    random: &mut PseudoRandom,
+    sid: u16,
+    reserve_ratio: f64,
+    expand_ratio: f64,
+    bot_attack_troops_sent: &mut f64,
+    difficulty: &str,
+    bordering: &[u16],
+    emoji: Option<&mut super::nation_emoji::NationEmojiState>,
+) -> bool {
+    let Some(victim) = find_victim(game, sid, bordering) else {
+        return false;
+    };
+    nation_try_attack_player(
+        game,
+        random,
+        sid,
+        victim,
+        reserve_ratio,
+        expand_ratio,
+        bot_attack_troops_sent,
+        difficulty,
+        emoji,
+        false,
+    )
 }
 
 fn nation_strategy_island(
