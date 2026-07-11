@@ -165,6 +165,36 @@ pub fn has_land_border_tn(game: &Game, small_id: u16) -> bool {
     false
 }
 
+/// TS `AiAttackBehavior.hasLandBorderWithTerraNullius()`: deliberately does
+/// NOT filter fallout, unlike `has_land_border_tn` above (TS's
+/// `hasNonNukedTerraNullius` border check, used only to decide whether to
+/// even attempt TN expansion at all). This one decides `sendAttack`'s
+/// land-vs-boat branch once we already know we're sending a TerraNullius
+/// attack (from either the early gate or the `nuked` strategy), so it must
+/// say "yes, land-attack it" for a directly-adjacent NUKED tile too -
+/// that's the whole point of the `nuked` strategy. `try_send_tn_attack`
+/// was using `has_land_border_tn` (fallout-filtered) here, so on a nation
+/// entirely surrounded by nuked land with no water to fall back to
+/// (`AiAttackBehaviorNukedTerritory.test.ts`'s "idle capture" scenarios),
+/// it always fell through to the boat path and found nothing, silently
+/// dropping the `nuked` strategy's attack.
+fn has_land_border_with_terra_nullius(game: &Game, small_id: u16) -> bool {
+    let Some(border) = game.border_tiles_of(small_id) else {
+        return false;
+    };
+    let mut nbuf = [TileRef::MAX; 4];
+    for border_tile in border.iter() {
+        let n = game.map.neighbors4_ts(border_tile, &mut nbuf);
+        for i in 0..n {
+            let neighbor = nbuf[i];
+            if game.is_land(neighbor) && !game.is_impassable(neighbor) && !game.has_owner(neighbor) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn sampled_shore_tiles(game: &Game, small_id: u16) -> Vec<TileRef> {
     let shores: Vec<TileRef> = game
         .border_tiles_of(small_id)
@@ -356,7 +386,7 @@ pub fn send_boat_attack_to_nearby_tn(game: &mut Game, small_id: u16) -> bool {
 }
 
 pub fn try_send_tn_attack(game: &mut Game, small_id: u16, expand_ratio: f64) -> bool {
-    if has_land_border_tn(game, small_id) {
+    if has_land_border_with_terra_nullius(game, small_id) {
         if let Some(troops) = land_attack_troops(game, small_id, expand_ratio) {
             game.add_land_attack(small_id, None, Some(troops));
             return true;
