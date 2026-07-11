@@ -30,6 +30,12 @@ import { loadFreshTerrain } from "../datagen/common";
 
 interface PlayerSnapshot {
   identity: string;
+  // `id`/`hash`/`numUnits`: added for tick-level bisections that need to
+  // match players by their stable game-engine id (`identity` is
+  // clientID-keyed and `name` alone is ambiguous - bot names collide) and
+  // cross-check against native's own per-player hash contribution without
+  // re-deriving it from troops/tiles by hand.
+  id: string;
   name: string;
   playerType: string;
   team: string | null;
@@ -37,6 +43,8 @@ interface PlayerSnapshot {
   troops: number;
   gold: string;
   alive: boolean;
+  hash: number;
+  numUnits: number;
 }
 
 interface TickSnapshot {
@@ -55,6 +63,7 @@ function playerIdentity(p: Player): string {
 function snapshot(game: Game): TickSnapshot {
   const players: PlayerSnapshot[] = game.allPlayers().map((p) => ({
     identity: playerIdentity(p),
+    id: p.id(),
     name: p.name(),
     playerType: p.type(),
     team: p.team(),
@@ -62,6 +71,8 @@ function snapshot(game: Game): TickSnapshot {
     troops: Math.round(p.troops()),
     gold: p.gold().toString(),
     alive: p.isAlive(),
+    hash: p.hash(),
+    numUnits: p.units().length,
   }));
   const totalOwnedTiles = players.reduce((sum, p) => sum + p.tiles, 0);
   return {
