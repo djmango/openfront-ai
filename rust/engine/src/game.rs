@@ -3242,6 +3242,96 @@ mod relation_tests {
     }
 }
 
+// TS `TileSet.test.ts` invariants, ported against `Player.owned_tiles`
+// (TS `PlayerImpl._tiles`, a `TileSet`) rather than `TileSet` in isolation -
+// see `execution/ordered_tiles.rs`'s `tests` module for the direct
+// `OrderedTiles`/border-tiles port. `owned_tiles` is a plain `Vec<TileRef>`
+// with `push`/`retain` (no dedicated ordered-set type), which a prior
+// investigation (`docs/bot-ai-parity-nation-relations/README.md`, Bug 1
+// area) argued by manual reasoning preserves the same insertion-order/
+// delete-plus-readd-moves-to-end semantics as TS's `TileSet`. These tests
+// confirm that directly via `Game::conquer`/`relinquish_tile` instead of
+// trusting the argument.
+#[cfg(test)]
+mod owned_tiles_tests {
+    use super::{Game, Player, PlayerType};
+
+    fn add_bot(game: &mut Game, id: &str, small_id: u16) {
+        game.add_player(Player {
+            id: id.to_string(),
+            small_id,
+            player_type: PlayerType::Bot,
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn owned_tiles_preserve_insertion_order() {
+        let mut game = crate::test_util::plains_game(10, 10);
+        add_bot(&mut game, "p", 1);
+        let tiles: Vec<_> = [(1, 1), (3, 3), (0, 0), (5, 5)]
+            .iter()
+            .map(|&(x, y)| game.map.ref_xy(x, y))
+            .collect();
+        for &t in &tiles {
+            game.conquer(1, t);
+        }
+        assert_eq!(game.player_by_small_id(1).unwrap().owned_tiles, tiles);
+    }
+
+    #[test]
+    fn relinquish_then_reconquer_moves_a_tile_to_the_end() {
+        let mut game = crate::test_util::plains_game(10, 10);
+        add_bot(&mut game, "p", 1);
+        let t1 = game.map.ref_xy(1, 1);
+        let t2 = game.map.ref_xy(2, 2);
+        let t3 = game.map.ref_xy(3, 3);
+        for t in [t1, t2, t3] {
+            game.conquer(1, t);
+        }
+        game.relinquish_tile(t1);
+        game.conquer(1, t1);
+        assert_eq!(
+            game.player_by_small_id(1).unwrap().owned_tiles,
+            vec![t2, t3, t1]
+        );
+    }
+
+    /// TS `GameImpl.conquer`: unconditionally deletes-then-re-adds to the
+    /// owner's `TileSet` whenever the tile already has a player owner,
+    /// without checking whether that owner is the same player conquering it
+    /// again - so re-conquering your own already-owned tile also moves it
+    /// to the end, same as a genuine delete+re-add. Native's `conquer_one`
+    /// mirrors this (unconditional `retain` + `push` whenever `prev > 0`).
+    #[test]
+    fn reconquering_an_already_owned_tile_moves_it_to_the_end() {
+        let mut game = crate::test_util::plains_game(10, 10);
+        add_bot(&mut game, "p", 1);
+        let t1 = game.map.ref_xy(1, 1);
+        let t2 = game.map.ref_xy(2, 2);
+        for t in [t1, t2] {
+            game.conquer(1, t);
+        }
+        game.conquer(1, t1);
+        assert_eq!(game.player_by_small_id(1).unwrap().owned_tiles, vec![t2, t1]);
+    }
+
+    #[test]
+    fn owned_tiles_membership_stays_correct_after_relinquish() {
+        let mut game = crate::test_util::plains_game(10, 10);
+        add_bot(&mut game, "p", 1);
+        let t1 = game.map.ref_xy(1, 1);
+        let t2 = game.map.ref_xy(2, 2);
+        game.conquer(1, t1);
+        game.conquer(1, t2);
+        game.relinquish_tile(t1);
+        let owned = &game.player_by_small_id(1).unwrap().owned_tiles;
+        assert!(!owned.contains(&t1));
+        assert!(owned.contains(&t2));
+        assert_eq!(game.player_by_small_id(1).unwrap().tiles_owned, 1);
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct TickUpdates {
     pub hash: Option<HashUpdate>,
