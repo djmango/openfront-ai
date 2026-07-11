@@ -1289,6 +1289,47 @@ impl Game {
         }
     }
 
+    /// TS `NukeExecution.detonate`'s per-impacted-tile casualty spread to forces
+    /// already deployed: the SAME `nukeDeathFactor` rate applied to the impacted
+    /// player's home troops (just above this call at each call site) is also applied
+    /// to every live outgoing land attack and in-flight transport ship that player
+    /// owns, regardless of that attack/ship's own location. Native previously only
+    /// reduced the home troop pool, leaving attacks/boats already under way
+    /// completely unaffected by a nuke landing on the home territory that spawned them.
+    pub fn apply_nuke_deaths_to_deployed_forces(
+        &mut self,
+        owner_small_id: u16,
+        nuke_type: &str,
+        num_tiles_left: f64,
+        max_troops: f64,
+    ) {
+        let execs = &mut self.execs;
+        let wire = &self.wire;
+        for exec in execs {
+            match exec {
+                ExecEnum::Attack(atk)
+                    if atk.owner_small_id() == owner_small_id
+                        && atk.attack_live()
+                        && atk.is_initialized() =>
+                {
+                    let troops = atk.troops();
+                    let deaths =
+                        wire.nuke_death_factor(nuke_type, troops, num_tiles_left, max_troops);
+                    atk.set_troops(troops - deaths);
+                }
+                ExecEnum::TransportShip(t)
+                    if t.owner_small_id() == owner_small_id && t.unit_id().is_some() =>
+                {
+                    let troops = t.carried_troops();
+                    let deaths =
+                        wire.nuke_death_factor(nuke_type, troops, num_tiles_left, max_troops);
+                    t.set_carried_troops(troops - deaths);
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub fn order_boat_retreat(&mut self, owner_small_id: u16, unit_id: i32) {
         let owns_unit = self
             .player_by_small_id(owner_small_id)
