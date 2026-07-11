@@ -23,11 +23,15 @@ COMMIT_SHORT="${COMMIT:0:12}"
 OUT_ROOT="$ROOT/records/frozen-maps/$COMMIT_SHORT"
 
 # Every map key a `records/0c4c7d7993c9/<ID>.json.gz` fixture is known to
-# need a period-correct snapshot for (currently just `jby2gMJF`'s "Two
-# Lakes" map - add more here if another archived record's map is found to
-# have drifted too; see docs/bot-ai-parity-nation-relations/README.md for
-# how this was diagnosed).
-MAP_KEYS=(twolakes)
+# need a period-correct snapshot for (add more here if another archived
+# record's map is found to have drifted too; see
+# docs/bot-ai-parity-nation-relations/README.md for how this was
+# diagnosed). `twolakes` (jby2gMJF) is confirmed drifted; `balkans`
+# (fdh3gYAF/GiQovEcP/fkVh9QtC) and `world` (tCFq6nPn) are fetched
+# defensively even though not individually confirmed - harmless if
+# identical to the live submodule (map_dir_for_commit just prefers an
+# identical frozen copy), and cheap to include in the same tarball fetch.
+MAP_KEYS=(twolakes balkans world)
 
 TARBALL_URL="https://codeload.github.com/djmango/OpenFrontIO/tar.gz/$COMMIT"
 
