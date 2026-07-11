@@ -1,14 +1,11 @@
 //! Doomsday Clock wave-schedule and drain math (TS `core/game/DoomsdayClock.ts`).
 //!
-//! This is the pure, integer-only calculation layer only. TS's
-//! `DoomsdayClockExecution` (the stateful per-tick Player marking/draining,
-//! team grouping, crown exemption, and warship decay-without-kill-credit) has
-//! **no native equivalent at all** - `Config::doomsday_clock_config` parses the
-//! wire config but nothing in the engine ever calls it to affect a tick. That
-//! is a large unported subsystem (new `Player` state fields, a new
-//! `Execution`, and game-loop wiring) and is out of scope here; see
-//! `openfront/src/core/execution/DoomsdayClockExecution.ts` for the reference
-//! and the doomsday-clock section of the porting report for details.
+//! This is the pure, integer-only calculation layer. The stateful per-tick
+//! consumer - `Player` marking/draining, team grouping, crown exemption,
+//! warship decay - is `crate::execution::doomsday_clock_execution`, wired into
+//! `bootstrap.rs::game_from_record` the same way TS's `GameRunner.init()`
+//! conditionally adds `DoomsdayClockExecution` (only when the config enables
+//! it).
 
 use super::schemas::DoomsdayClockSpeed;
 
@@ -164,8 +161,18 @@ pub struct DoomsdayClockDrainConfig {
 /// from `drain_start_percent` up to `drain_max_percent` over
 /// `drain_ramp_seconds`, as a percentage of `max_troops` (capacity, not
 /// current). Always removes at least 1.
+///
+/// `max_troops` is `f64`, not `i64`: TS's caller passes `Config.maxTroops(m)`
+/// straight through (a raw, un-`toInt`'d float - `2 * (tiles^0.6 * 1000 +
+/// 50000) + ...`), and `doomsdayClockDrain` floors only the *final* product
+/// (`Math.floor((maxTroops * pct) / 100)`). Flooring `max_troops` first (as an
+/// `i64` param would force) computes a different, sometimes-smaller result:
+/// e.g. `max_troops=1.5, pct=99` gives TS `floor(1.5*99/100)=1` but
+/// `floor(1.5)*99/100=0` if truncated up front. Real `maxTroops` values are
+/// always >= 100000 (the formula's floor), so this never bites in practice,
+/// but matching TS's single-floor-at-the-end exactly costs nothing.
 pub fn doomsday_clock_drain(
-    max_troops: i64,
+    max_troops: f64,
     seconds_past_warn: i64,
     cfg: &DoomsdayClockDrainConfig,
 ) -> i64 {
@@ -177,7 +184,7 @@ pub fn doomsday_clock_drain(
     } else {
         cfg.drain_start_percent + span * t / r
     };
-    (max_troops * pct / 100).max(1)
+    ((max_troops * pct as f64) / 100.0).floor().max(1.0) as i64
 }
 
 #[cfg(test)]
@@ -296,43 +303,29 @@ mod tests {
     #[test]
     fn drain_starts_gentle_and_grows_linearly_capping_at_max() {
         let cfg = drain_cfg();
-        assert_eq!(doomsday_clock_drain(1000, 0, &cfg), 100);
-        assert_eq!(doomsday_clock_drain(1000, 1, &cfg), 330);
-        assert_eq!(doomsday_clock_drain(1000, 2, &cfg), 560);
-        assert_eq!(doomsday_clock_drain(1000, 3, &cfg), 800);
-        assert_eq!(doomsday_clock_drain(1000, 100, &cfg), 800);
-        let d0 = doomsday_clock_drain(1000, 0, &cfg);
-        let d1 = doomsday_clock_drain(1000, 1, &cfg);
-        let d2 = doomsday_clock_drain(1000, 2, &cfg);
+        assert_eq!(doomsday_clock_drain(1000.0, 0, &cfg), 100);
+        assert_eq!(doomsday_clock_drain(1000.0, 1, &cfg), 330);
+        assert_eq!(doomsday_clock_drain(1000.0, 2, &cfg), 560);
+        assert_eq!(doomsday_clock_drain(1000.0, 3, &cfg), 800);
+        assert_eq!(doomsday_clock_drain(1000.0, 100, &cfg), 800);
+        let d0 = doomsday_clock_drain(1000.0, 0, &cfg);
+        let d1 = doomsday_clock_drain(1000.0, 1, &cfg);
+        let d2 = doomsday_clock_drain(1000.0, 2, &cfg);
         assert_eq!(d1 - d0, d2 - d1);
     }
 
     #[test]
     fn drain_removes_at_least_one_troop_and_never_less() {
-        assert_eq!(doomsday_clock_drain(1, 0, &drain_cfg()), 1);
+        assert_eq!(doomsday_clock_drain(1.0, 0, &drain_cfg()), 1);
     }
 
     #[test]
     fn drain_treats_time_before_warn_window_as_zero() {
-        assert_eq!(doomsday_clock_drain(1000, -5, &drain_cfg()), 100);
+        assert_eq!(doomsday_clock_drain(1000.0, -5, &drain_cfg()), 100);
     }
 
-    // The wave-schedule/drain math above (openfront/tests/DoomsdayClockExecution.test.ts
-    // `doomsdayClockRequiredTiles`/`doomsdayClockSideRequiredTiles`/
-    // `doomsdayClockWaveState`/`doomsdayClockDrain` describe blocks) is fully
-    // ported and passing. The rest of that test file - the "(logic)",
-    // "(warship decay)", "(teams)", and "(integration)" describe blocks -
-    // exercises `DoomsdayClockExecution` (openfront/src/core/execution/
-    // DoomsdayClockExecution.ts) plus `Player.enterDoomsdayClock`/
-    // `clearDoomsdayClock`/`inDoomsdayClock`/`doomsdayClockTicks`. None of
-    // that exists natively: `Config::doomsday_clock_config` only parses the
-    // wire config, nothing ever calls it. Porting those ~25 test cases needs a
-    // brand-new stateful Execution (per-tick side grouping by team/FFA, crown
-    // exemption, warn+drain against Player troops, warship HP decay with no
-    // kill credit) and new Player state - a genuinely large unported
-    // subsystem, not a bug fix, so it is out of scope here per the task's
-    // guardrails. Flagging prominently: this is a real, confirmed gap.
-    #[test]
-    #[ignore = "DoomsdayClockExecution itself (Player marking/draining, team grouping, crown exemption, warship decay) has no native implementation at all - see module comment and openfront/src/core/execution/DoomsdayClockExecution.ts"]
-    fn doomsday_clock_execution_is_entirely_unported() {}
+    // The rest of openfront/tests/DoomsdayClockExecution.test.ts (the "(logic)",
+    // "(warship decay)", "(teams)", and "(integration)" describe blocks) is
+    // ported in `crate::execution::doomsday_clock_execution`'s own test module,
+    // alongside the stateful `Execution` those tests exercise.
 }

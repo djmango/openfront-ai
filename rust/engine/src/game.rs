@@ -74,6 +74,9 @@ pub struct Player {
     pub last_cluster_calc: u32,
     pub last_tile_change: u32,
     pub marked_traitor_tick: i32,
+    /// TS `PlayerImpl.markedDoomsdayClockTick` - tick this player's side first
+    /// dropped below the Doomsday Clock bar, or -1 if not currently flagged.
+    pub marked_doomsday_clock_tick: i32,
     /// TS `PlayerImpl.relations` is a `Map<Player, number>`, which iterates in insertion
     /// order (re-setting an existing key's value does not move it). `allRelationsSorted()`
     /// relies on that insertion order as the tie-break after its stable sort-by-value, so a
@@ -129,6 +132,7 @@ impl Default for Player {
             last_cluster_calc: 0,
             last_tile_change: 0,
             marked_traitor_tick: -1,
+            marked_doomsday_clock_tick: -1,
             relations: OrderedMap::new(),
             embargoes: OrderedMap::new(),
             last_embargo_all_tick: -1,
@@ -2802,6 +2806,54 @@ impl Game {
         if let Some(p) = self.player_by_small_id_mut(small_id) {
             p.marked_traitor_tick = tick;
         }
+    }
+
+    /// TS `PlayerImpl.inDoomsdayClock` - a dead player is never "in doomsday
+    /// clock": nothing clears the mark on death (`DoomsdayClockExecution` only
+    /// ever processes alive contenders), so this gates on `alive` too, to
+    /// avoid a stuck skull/panel and per-tick update churn for an eliminated
+    /// player.
+    pub fn in_doomsday_clock(&self, small_id: u16) -> bool {
+        self.player_by_small_id(small_id)
+            .is_some_and(|p| p.alive && p.marked_doomsday_clock_tick >= 0)
+    }
+
+    /// TS `PlayerImpl.doomsdayClockTicks` - ticks spent continuously below the
+    /// bar (0 when not marked or dead).
+    pub fn doomsday_clock_ticks(&self, small_id: u16) -> i64 {
+        if !self.in_doomsday_clock(small_id) {
+            return 0;
+        }
+        let Some(p) = self.player_by_small_id(small_id) else {
+            return 0;
+        };
+        self.ticks as i64 - p.marked_doomsday_clock_tick as i64
+    }
+
+    /// TS `PlayerImpl.enterDoomsdayClock` - only the first drop below the bar
+    /// stamps the tick; staying below on later ticks is a no-op so the ticks-
+    /// under counter keeps counting from the original drop.
+    pub fn enter_doomsday_clock(&mut self, small_id: u16) {
+        let tick = self.ticks as i32;
+        if let Some(p) = self.player_by_small_id_mut(small_id) {
+            if p.marked_doomsday_clock_tick < 0 {
+                p.marked_doomsday_clock_tick = tick;
+            }
+        }
+    }
+
+    /// TS `PlayerImpl.clearDoomsdayClock`.
+    pub fn clear_doomsday_clock(&mut self, small_id: u16) {
+        if let Some(p) = self.player_by_small_id_mut(small_id) {
+            p.marked_doomsday_clock_tick = -1;
+        }
+    }
+
+    /// TS `GameImpl.elapsedGameSeconds` (`ticksSinceStart() / 10`). Integer
+    /// seconds: `doomsday_clock.rs`'s wave-schedule math is integer-only, and
+    /// `ticks_since_start()` only ever changes by whole ticks anyway.
+    pub fn elapsed_game_seconds(&self) -> i64 {
+        self.ticks_since_start() as i64 / 10
     }
 
     pub fn is_on_same_team(&self, _a: u16, _winner: &str) -> bool {
