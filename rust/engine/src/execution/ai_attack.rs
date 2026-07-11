@@ -1897,3 +1897,88 @@ pub fn tribe_maybe_attack(
         }
     }
 }
+
+// TS `ImpassableTerrain.test.ts` "Nation AI attack behavior near impassable
+// terrain" describe block.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::Player;
+
+    fn bot_player(id: &str, small_id: u16) -> Player {
+        Player {
+            id: id.to_string(),
+            small_id,
+            player_type: PlayerType::Nation,
+            troops: 200_000,
+            ..Default::default()
+        }
+    }
+
+    fn wall_scenario() -> (crate::game::Game, u32) {
+        let wall_x = 30u32;
+        let mut game = crate::test_util::walled_game(60, 20, Some((wall_x, 2)));
+        game.add_player(bot_player("nation", 1));
+        game.add_player(bot_player("enemy", 2));
+        // Nation owns the two columns right next to the wall (full height).
+        for y in 0..20 {
+            game.conquer(1, game.map.ref_xy(wall_x - 1, y));
+            game.conquer(1, game.map.ref_xy(wall_x - 2, y));
+        }
+        // Enemy owns the five columns directly to the left of the nation
+        // (full height) - no TerraNullius gap between them.
+        for y in 0..20 {
+            for x in (wall_x - 7)..=(wall_x - 3) {
+                game.conquer(2, game.map.ref_xy(x, y));
+            }
+        }
+        (game, wall_x)
+    }
+
+    /// TS `ImpassableTerrain.test.ts` "hasNonNukedTerraNullius does not
+    /// falsely detect impassable tiles as TerraNullius": a nation bordering
+    /// an impassable wall must not see the wall's TerraNullius (owner 0) as
+    /// a nearby neighbor, but must still see the real enemy player across
+    /// its other border. Ported directly against `nearby_players_ts_order`
+    /// (TS `PlayerImpl.nearby()`'s native equivalent, already
+    /// `!is_impassable`-guarded per its own doc comment) rather than the TS
+    /// test's `AiAttackBehavior`/`NationAllianceBehavior`/
+    /// `NationEmojiBehavior` orchestration wiring, which has no 1:1 native
+    /// port to construct (client-facing plumbing, not decision logic).
+    #[test]
+    fn nearby_players_excludes_terra_nullius_from_an_impassable_wall() {
+        let (game, _) = wall_scenario();
+        let neighbors = nearby_players_ts_order(&game, 1);
+        assert!(
+            neighbors.contains(&2),
+            "enemy should be a nearby neighbor: {neighbors:?}"
+        );
+        assert!(
+            !neighbors.contains(&0),
+            "impassable-adjacent tiles must not surface TerraNullius: {neighbors:?}"
+        );
+    }
+
+    /// TS `ImpassableTerrain.test.ts`'s follow-up assertion: the nation must
+    /// actually be able to construct a real attack against the enemy (not
+    /// TerraNullius) despite bordering the impassable wall.
+    #[test]
+    fn attack_execution_can_target_enemy_across_from_an_impassable_wall() {
+        let (mut game, _) = wall_scenario();
+        game.add_execution(crate::execution::ExecEnum::Attack(
+            crate::execution::attack::AttackExecution::new(
+                1,
+                Some("enemy".to_string()),
+                Some(1000.0),
+            ),
+        ));
+        game.execute_next_tick();
+        game.execute_next_tick();
+
+        assert!(!game
+            .player_by_small_id(1)
+            .unwrap()
+            .outgoing_land_attacks
+            .is_empty());
+    }
+}
