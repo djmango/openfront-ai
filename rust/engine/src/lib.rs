@@ -23,6 +23,8 @@ pub mod rl;
 pub mod rl_batch;
 pub mod session;
 pub mod spatial;
+#[cfg(test)]
+mod test_util;
 pub mod util;
 pub mod water;
 pub mod water_hpa;
