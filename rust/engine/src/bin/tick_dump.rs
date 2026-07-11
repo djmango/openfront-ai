@@ -34,6 +34,7 @@ struct Args {
 #[serde(rename_all = "camelCase")]
 struct PlayerSnapshot {
     identity: String,
+    id: String,
     name: String,
     player_type: String,
     team: Option<String>,
@@ -41,6 +42,8 @@ struct PlayerSnapshot {
     troops: i32,
     gold: i64,
     alive: bool,
+    hash: i64,
+    num_units: usize,
 }
 
 #[derive(Serialize)]
@@ -89,6 +92,7 @@ fn snapshot(game: &openfront_engine::game::Game) -> TickSnapshot {
         .iter()
         .map(|p| PlayerSnapshot {
             identity: player_identity(p),
+            id: p.id.clone(),
             name: p.name.clone(),
             player_type: format!("{:?}", p.player_type),
             team: p.team.clone(),
@@ -96,6 +100,8 @@ fn snapshot(game: &openfront_engine::game::Game) -> TickSnapshot {
             troops: p.troops,
             gold: p.gold,
             alive: p.alive,
+            hash: openfront_engine::hash::player_hash(p),
+            num_units: p.units.len(),
         })
         .collect();
     let total_owned_tiles: i32 = players.iter().map(|p| p.tiles).sum();
