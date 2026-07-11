@@ -534,6 +534,38 @@ mod tests {
             .expect("attack should still be live");
         assert_eq!(troops_after, 0.0);
     }
+
+    // Ported from AllianceRequestExecution.test.ts "alliance request is revoked
+    // immediately if requester launches a nuke" (fix for
+    // github.com/openfrontio/OpenFrontIO/issues/2071). The TS test forces this
+    // by monkeypatching `nukeAllianceBreakThreshold` to 0 on the live config
+    // instance so the effect fires without needing >100 weighted tiles in the
+    // blast; native hardcodes this threshold at the same default value TS ships
+    // with (100, see `WireConfig::nuke_alliance_break_threshold`) and has no
+    // per-instance override, so instead of faking the threshold this exercises
+    // the *other*, threshold-independent inclusion path also present in TS's
+    // `Util.listNukeBreakAlliance`: any player with a structure inside the
+    // blast outer radius is included in `targets` regardless of tile-ownership
+    // weight - built here via a City exactly at the nuke's destination tile.
+    #[test]
+    fn nuke_at_a_players_structure_revokes_the_nukers_pending_alliance_request() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let nuker = add_bot(&mut game, "nuker");
+        let target = add_bot(&mut game, "target");
+
+        assert!(game.create_alliance_request(nuker, target, game.ticks()));
+        assert_eq!(game.outgoing_alliance_requests(nuker), vec![target]);
+
+        let dst = game.map.ref_xy(0, 0);
+        game.build_unit(target, unit_type::CITY, dst);
+
+        maybe_break_alliances(&mut game, nuker, dst, unit_type::ATOM_BOMB);
+
+        assert_eq!(game.outgoing_alliance_requests(nuker).len(), 0);
+        assert!(!game.is_allied_with(nuker, target));
+        assert!(!game.is_allied_with(target, nuker));
+    }
 }
 
 fn list_nuke_break_alliance(
