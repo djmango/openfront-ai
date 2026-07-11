@@ -196,7 +196,14 @@ impl Execution for AttackExecution {
                 "Impossible" => -100,
                 _ => -70,
             };
-            game.update_relation(self.owner_small_id, self.target_small_id, delta);
+            // TS `AttackExecution.init`: `this.target.updateRelation(this._owner,
+            // relationChange)` - updates the TARGET's relation toward the OWNER
+            // (getting attacked makes the victim more hostile), not the other
+            // way around. `update_relation(a, b, ..)` updates a's relation
+            // toward b, so the call is `(target, owner, ..)`, not `(owner,
+            // target, ..)` (previously swapped - see the bots=5
+            // curriculum-parity bisection this was found from).
+            game.update_relation(self.target_small_id, self.owner_small_id, delta);
         }
     }
 
