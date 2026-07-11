@@ -431,6 +431,167 @@ mod tests {
         assert_eq!(attacks[1].1, 1);
         assert!(!attacks[1].3);
     }
+
+    // TS `NeighborIteration.test.ts` "Conquer border invariants" describe
+    // block: for every player, `borderTiles` must be a subset of `tiles`,
+    // and a tile is a border tile iff some in-bounds cardinal neighbor has a
+    // different owner - checked repeatedly during a live multi-tick land
+    // grab/fight, not just once at the end. Exercises the exact combination
+    // (`for_each_neighbor4` order + `AttackExecution`'s conquest-frontier
+    // maintenance in `add_border_tile`/`remove_border_tile`/
+    // `game.refresh_borders_around`) that the prior neighbor-order
+    // bisections targeted.
+    fn check_border_invariant(game: &Game) {
+        for p in game.players_in_order() {
+            for t in p.border_tiles.iter() {
+                assert!(
+                    p.owned_tiles.contains(&t),
+                    "player {}: border tile {t} not in owned tiles",
+                    p.id
+                );
+            }
+            for &t in &p.owned_tiles {
+                let mut is_border = false;
+                game.map.for_each_neighbor4(t, |n| {
+                    if game.map.owner_id(n) != p.small_id {
+                        is_border = true;
+                    }
+                });
+                assert_eq!(
+                    p.border_tiles.contains(t),
+                    is_border,
+                    "player {}: border-status mismatch at tile {t}",
+                    p.id
+                );
+            }
+        }
+    }
+
+    fn bot_player(id: &str, small_id: u16, id_prng_seed: i32) -> Player {
+        Player {
+            id: id.to_string(),
+            small_id,
+            player_type: PlayerType::Bot,
+            troops: 1_000_000,
+            id_prng: PseudoRandom::new(id_prng_seed),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn border_invariant_holds_after_expanding_into_terra_nullius() {
+        let mut game = crate::test_util::plains_game(40, 40);
+        game.add_player(bot_player("attacker", 1, 1));
+        game.conquer(1, game.map.ref_xy(0, 0));
+
+        game.add_execution(crate::execution::ExecEnum::Attack(AttackExecution::new(
+            1,
+            None,
+            Some(1000.0),
+        )));
+        for _ in 0..30 {
+            game.execute_next_tick();
+        }
+
+        assert!(game.player_by_small_id(1).unwrap().tiles_owned > 10);
+        check_border_invariant(&game);
+    }
+
+    #[test]
+    fn border_invariant_holds_while_two_players_fight_over_territory() {
+        let mut game = crate::test_util::plains_game(40, 40);
+        game.add_player(bot_player("attacker", 1, 1));
+        game.add_player(bot_player("defender", 2, 2));
+        game.conquer(1, game.map.ref_xy(0, 0));
+        game.conquer(2, game.map.ref_xy(30, 30));
+
+        game.add_execution(crate::execution::ExecEnum::Attack(AttackExecution::new(
+            1,
+            None,
+            Some(500.0),
+        )));
+        game.add_execution(crate::execution::ExecEnum::Attack(AttackExecution::new(
+            2,
+            None,
+            Some(500.0),
+        )));
+        for _ in 0..40 {
+            game.execute_next_tick();
+        }
+
+        game.add_execution(crate::execution::ExecEnum::Attack(AttackExecution::new(
+            1,
+            Some("defender".to_string()),
+            Some(5000.0),
+        )));
+        // Check the invariant repeatedly while the fight is in progress, not
+        // just at the end.
+        for i in 0..40 {
+            game.execute_next_tick();
+            if i % 10 == 0 {
+                check_border_invariant(&game);
+            }
+        }
+        assert!(game.player_by_small_id(1).unwrap().tiles_owned > 10);
+        check_border_invariant(&game);
+    }
+
+    #[test]
+    fn conquering_terra_nullius_updates_owner_and_neighbors_border_status() {
+        let mut game = crate::test_util::plains_game(40, 40);
+        game.add_player(bot_player("attacker", 1, 1));
+        game.conquer(1, game.map.ref_xy(0, 0));
+
+        game.add_execution(crate::execution::ExecEnum::Attack(AttackExecution::new(
+            1,
+            None,
+            Some(1000.0),
+        )));
+        for _ in 0..30 {
+            game.execute_next_tick();
+        }
+
+        for &t in &game.player_by_small_id(1).unwrap().owned_tiles {
+            assert_eq!(game.map.owner_id(t), 1);
+        }
+        check_border_invariant(&game);
+    }
+
+    /// TS `ImpassableTerrain.test.ts` "attack does not expand into
+    /// impassable tiles": already covered defensively by
+    /// `AttackExecution::tick`'s `!game.is_land(...) ||
+    /// game.is_impassable(...)` skip (see that check's doc comment) and
+    /// `add_neighbors`'s matching `is_impassable` exclusion - this pins the
+    /// end-to-end behavior through a real multi-tick fight across a wall.
+    #[test]
+    fn attack_does_not_expand_into_impassable_tiles() {
+        const WALL_X: u32 = 30;
+        let mut game = crate::test_util::walled_game(60, 20, Some((WALL_X, 2)));
+        game.add_player(bot_player("attacker", 1, 1));
+        game.add_player(bot_player("other", 2, 2));
+        // Other player owns tiles adjacent to the wall on the right side.
+        for y in 8..=12 {
+            game.conquer(2, game.map.ref_xy(WALL_X + 2, y));
+        }
+        // Attacker owns tiles on the left side, also adjacent to the wall.
+        for y in 8..=12 {
+            game.conquer(1, game.map.ref_xy(WALL_X - 2, y));
+        }
+
+        game.add_execution(crate::execution::ExecEnum::Attack(AttackExecution::new(
+            1,
+            Some("other".to_string()),
+            Some(1000.0),
+        )));
+        for _ in 0..50 {
+            game.execute_next_tick();
+        }
+
+        for y in 8..=12 {
+            assert_ne!(game.map.owner_id(game.map.ref_xy(WALL_X, y)), 1);
+            assert_ne!(game.map.owner_id(game.map.ref_xy(WALL_X + 1, y)), 1);
+        }
+    }
 }
 
 impl AttackExecution {
