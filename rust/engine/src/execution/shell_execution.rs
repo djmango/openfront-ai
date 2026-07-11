@@ -1,7 +1,7 @@
 //! Warship shell flight (`ShellExecution.ts`).
 
 use super::Execution;
-use crate::core::schemas::unit_type::SHELL;
+use crate::core::schemas::unit_type::{SHELL, TRANSPORT};
 use crate::game::Game;
 use crate::map::TileRef;
 use crate::prng::PseudoRandom;
@@ -88,14 +88,31 @@ impl ShellExecution {
             .map(|random| random.next_int(1, 6))
             .unwrap_or(1);
         let damage = (roll - 1) * 25 + 200;
+        let mut destroyed_transport_tile = None;
         let destroyed =
             if let Some(target) = game.unit_mut(self.target_owner_small_id, self.target_unit_id) {
                 target.health = (target.health - damage).max(0);
-                target.health == 0
+                let died = target.health == 0;
+                if died && target.unit_type == TRANSPORT {
+                    destroyed_transport_tile = Some(target.tile as TileRef);
+                }
+                died
             } else {
                 false
             };
         if destroyed {
+            // TS `UnitImpl.modifyHealth`: `if (this._health === 0n) this.delete(true, attacker)`
+            // - record the shooter as destroyer *before* removing the unit, since native (unlike
+            // TS's inert-but-still-inspectable deleted `Unit`) has nothing left to query once
+            // gone. See `Game::record_transport_kill`'s doc comment.
+            if let Some(tile) = destroyed_transport_tile {
+                game.record_transport_kill(
+                    self.target_unit_id,
+                    self.target_owner_small_id,
+                    self.owner_small_id,
+                    tile,
+                );
+            }
             game.remove_unit(self.target_owner_small_id, self.target_unit_id);
         }
         self.remove_shell(game);
