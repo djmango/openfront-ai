@@ -218,4 +218,29 @@ mod tests {
 
         assert_eq!(game.unit(attacker, silo_id).unwrap().level, 2);
     }
+
+    #[test]
+    fn missile_silo_upgrade_mid_cooldown_keeps_cooldown_active() {
+        let (mut game, attacker, _silo_tile, silo_id) = game_with_silo(60, 60);
+        let target = game.map.ref_xy(50, 50);
+        build_nuke(&mut game, attacker, target);
+        assert!(game.unit_is_in_cooldown(attacker, silo_id));
+
+        game.add_execution(ExecEnum::UpgradeStructure(UpgradeStructureExecution::new(
+            attacker, silo_id,
+        )));
+        game.execute_next_tick();
+
+        let u = game.unit(attacker, silo_id).unwrap();
+        assert_eq!(u.level, 2);
+        assert_eq!(
+            u.missile_timer_queue.len(),
+            2,
+            "increaseLevel pushes its own queue entry on top of the missile already in flight"
+        );
+        assert!(
+            game.unit_is_in_cooldown(attacker, silo_id),
+            "TS: upgrading mid-cooldown must not let the silo fire again immediately"
+        );
+    }
 }

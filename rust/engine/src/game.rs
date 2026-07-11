@@ -1887,10 +1887,23 @@ impl Game {
                 .unit_type
                 .clone()
         };
+        let tick = self.ticks;
         if let Some(p) = self.player_by_small_id_mut(small_id) {
             p.gold -= cost;
             if let Some(u) = p.units.iter_mut().find(|u| u.id == unit_id) {
                 u.level += 1;
+                // TS `Unit.increaseLevel`: MissileSilo/SAMLauncher push the current tick
+                // onto their missile timer queue on every level-up, not just on launch -
+                // the newly-added capacity slot starts in its own cooldown rather than
+                // being immediately available. Native previously only bumped `level`,
+                // which under-counted the queue relative to `isInCooldown`'s
+                // `queue.len() == level` check and let an upgraded silo/SAM fire an extra
+                // missile immediately instead of waiting out one cooldown like TS.
+                if u.unit_type == crate::core::schemas::unit_type::MISSILE_SILO
+                    || u.unit_type == crate::core::schemas::unit_type::SAM_LAUNCHER
+                {
+                    u.missile_timer_queue.push(tick);
+                }
             }
         }
         self.record_unit_constructed(small_id, &unit_type);
