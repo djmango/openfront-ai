@@ -175,3 +175,38 @@ pub fn find_path_tiles(
         .map(|p| point_to_tile(game, *p))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    /// TS `openfront/tests/NukeTrajectory.test.ts` exercises
+    /// `src/client/render/gl/utils/NukeTrajectory.ts`'s `computeNukeControlPoints`
+    /// / `computeTrajectoryThresholds` / `buildNukeTrajectory` - pure
+    /// client-side GL-renderer math (Bezier control points plus t-value
+    /// color thresholds for drawing the on-screen nuke arc: untargetable
+    /// mid-air zone, SAM-intercept point, impassable-terrain-block point).
+    /// `rust/engine` is the headless simulation engine and has no rendering
+    /// layer at all (no other module in this crate even mentions "Bezier"
+    /// besides this file) - there is nothing in `rust/engine/src` for that
+    /// TS file's actual subject (a `computeTrajectoryThresholds`-equivalent
+    /// producing UI color-threshold t-values) to test, so it is not ported.
+    ///
+    /// This file's own `create_curve`/`find_path_tiles` already port the
+    /// *simulation-relevant* half of the same underlying math (TS
+    /// `ParabolaUniversalPathFinder.createCurve`/`findPath`, i.e. the exact
+    /// control-point formula `computeNukeControlPoints` mirrors for
+    /// rendering), and the specific simulation behavior the TS test's
+    /// "impassable terrain blocks the trajectory" scenarios are motivated
+    /// by - a nuke launch aborting when its flight path crosses impassable
+    /// terrain - is already fully covered by
+    /// `nuke_execution.rs::impassable_terrain_tests` (`can_build_atom_bomb_returns_none_for_impassable_target`,
+    /// `nuke_trajectory_blocked_by_impassable_terrain_aborts_launch`,
+    /// `nuke_can_launch_when_trajectory_does_not_cross_impassable_terrain`,
+    /// etc.) and `nuke_ai.rs::is_trajectory_blocked_by_impassable`. Kept as
+    /// a documented, permanently-ignored marker (this codebase's precedent
+    /// for "confirmed out of scope", e.g. `warship_ai.rs`'s
+    /// `findTeamGameWarshipTarget` note) rather than silently dropping the
+    /// file from the porting pass.
+    #[test]
+    #[ignore = "NukeTrajectory.test.ts targets client-only GL-renderer math (src/client/render/gl/utils/NukeTrajectory.ts) with no rust/engine simulation equivalent; see doc comment"]
+    fn nuke_trajectory_test_ts_targets_client_only_renderer_math_not_the_simulation() {}
+}
