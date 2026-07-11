@@ -395,9 +395,16 @@ fn is_alliance_partner_similarly_strong(
     has_comparable_troops || has_comparable_tiles
 }
 
-/// TS `NationAllianceBehavior.maybeBetray` - no RNG; returns true when betrayal would occur.
+/// TS `NationAllianceBehavior.maybeBetray` - no RNG; returns true when
+/// betrayal would occur. TS calls `this.betray(otherPlayer)` (break the
+/// alliance) at each `return true` site, as a side effect of the decision
+/// itself, not left for the caller - so every branch below must break the
+/// alliance before returning true. Without this, `AttackExecution::init`'s
+/// `is_friendly` guard silently deactivates the resulting attack (the two
+/// are still allied), making `nation_strategy_betray` report success while
+/// no troops/tiles actually move.
 pub fn maybe_betray(
-    game: &Game,
+    game: &mut Game,
     _random: &mut PseudoRandom,
     attacker_small_id: u16,
     target_small_id: u16,
@@ -422,6 +429,7 @@ pub fn maybe_betray(
         if (target.troops as f64 + target_outgoing) < target_max_troops * 0.2
             && target.troops < attacker.troops
         {
+            game.break_alliance_between(attacker_small_id, target_small_id);
             return true;
         }
     }
@@ -430,11 +438,13 @@ pub fn maybe_betray(
         && !(difficulty == "Easy" && target.player_type == PlayerType::Human)
         && attacker.troops >= target.troops * 10
     {
+        game.break_alliance_between(attacker_small_id, target_small_id);
         return true;
     }
 
     if difficulty != "Easy" && game.is_traitor(target_small_id) {
         if target.troops < (attacker.troops as f64 * 1.2) as i32 {
+            game.break_alliance_between(attacker_small_id, target_small_id);
             return true;
         }
     }
@@ -443,6 +453,7 @@ pub fn maybe_betray(
         && bordering_player_count == 1
         && target.troops * 3 < attacker.troops
     {
+        game.break_alliance_between(attacker_small_id, target_small_id);
         return true;
     }
 

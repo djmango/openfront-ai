@@ -2303,6 +2303,58 @@ mod ai_attack_behavior_tests {
         );
     }
 
+    // Regression test for a bug found via a curriculum-parity-v4 bisection
+    // (Caucasus map, "Astrakhan Oblast", tick 2653): native's `maybe_betray`
+    // decided to betray (returning `true`, matching TS) but - unlike TS's
+    // `maybeBetray`, which calls `this.betray(otherPlayer)` (breaking the
+    // alliance) as a side effect of that same decision - never actually
+    // broke the alliance. `nation_strategy_betray` then forced an attack via
+    // `nation_try_attack_player`, but `AttackExecution::init`'s `is_friendly`
+    // guard silently deactivated it (the two were still allied), so
+    // `nation_strategy_best_target` reported a successful attack while no
+    // troops/tiles ever moved - a silent no-op wearing a success return
+    // value, indistinguishable from a real attack to the caller.
+    #[test]
+    fn nation_strategy_betray_actually_breaks_alliance_and_attacks() {
+        let Some(mut game) = new_game("Medium", "Free For All") else {
+            return;
+        };
+        let attacker = add_player(&mut game, "attacker_id", PlayerType::Nation);
+        let ally = add_player(&mut game, "ally_id", PlayerType::Nation);
+        conquer_round_robin(&mut game, &[attacker, ally], 90);
+        game.add_troops(attacker, 100_000.0);
+        game.add_troops(ally, 1_000.0);
+
+        assert!(game.create_alliance_request(attacker, ally, 0));
+        game.accept_alliance_request(attacker, ally, 1);
+        assert!(game.is_allied_with(attacker, ally));
+
+        // Medium's "attacker.troops() >= otherPlayer.troops() * 10" betrayal
+        // branch: 100_000 >= 1_000 * 10.
+        let mut random = PseudoRandom::new(42);
+        let mut sent = 0.0;
+        let attacked = nation_strategy_betray(
+            &mut game,
+            &mut random,
+            attacker,
+            0.3,
+            0.2,
+            &mut sent,
+            "Medium",
+            &[],
+            None,
+        );
+        assert!(attacked, "maybe_betray should have decided to attack");
+        assert!(
+            !game.is_allied_with(attacker, ally),
+            "betraying must break the alliance, not just report success"
+        );
+
+        let start_troops = queued_attack_troops(&mut game, attacker, ally)
+            .expect("a real attack should have been queued, not silently dropped");
+        assert!(start_troops > 0.0, "start_troops={start_troops}");
+    }
+
     #[test]
     fn hard_caps_attack_troops_to_75pct_of_strongest_neighbor() {
         let Some((mut game, attacker, neighbor, _bot)) = troop_floor_setup("Hard", "Free For All")
