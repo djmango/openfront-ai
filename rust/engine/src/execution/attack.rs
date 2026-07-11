@@ -506,6 +506,59 @@ mod tests {
         })
     }
 
+    // Ported from Attack.test.ts's "Should not mark attacker as traitor when
+    // alliance is formed after attack starts": an alliance created and
+    // accepted *after* both attacks are already in flight retreats both
+    // (via the `is_friendly` check in `tick()`, not `init()` - the attacks
+    // were already live before the alliance existed) without either side
+    // being marked a traitor, since neither ever attacked an existing ally
+    // (`mark_traitor` is only reachable via `break_alliance_between`/
+    // `break_alliance_silently`, never from `AttackExecution` itself).
+    #[test]
+    fn alliance_formed_after_both_attacks_launch_retreats_both_without_marking_a_traitor() {
+        use crate::execution::ExecEnum;
+
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let a = add_human(&mut game, "a");
+        let b = add_human(&mut game, "b");
+        if let Some(p) = game.player_by_small_id_mut(a) {
+            p.troops = 1_000;
+        }
+        if let Some(p) = game.player_by_small_id_mut(b) {
+            p.troops = 1_000;
+        }
+        assert!(game.create_alliance_request(a, b, game.ticks()));
+
+        game.add_execution(ExecEnum::Attack(AttackExecution::new(
+            a,
+            Some("b".to_string()),
+            Some(100.0),
+        )));
+        game.add_execution(ExecEnum::Attack(AttackExecution::new(
+            b,
+            Some("a".to_string()),
+            Some(100.0),
+        )));
+        game.accept_alliance_request(a, b, game.ticks());
+
+        for _ in 0..5 {
+            game.execute_next_tick();
+        }
+
+        assert!(game.is_allied_with(a, b));
+        assert!(game.is_allied_with(b, a));
+        assert!(!game.is_traitor(a));
+        assert!(!game.is_traitor(b));
+        assert_eq!(
+            game.active_attacks_debug()
+                .iter()
+                .filter(|t| t.3)
+                .count(),
+            0
+        );
+    }
+
     // Ported from Attack.test.ts's "Should prevent player from attacking
     // allied player": `AttackExecution::init`'s `is_friendly` gate blocks the
     // attack outright, so no attack ever becomes live on either side.
