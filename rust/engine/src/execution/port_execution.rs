@@ -190,3 +190,187 @@ impl Execution for PortExecution {
         false
     }
 }
+
+// TS `PortExecution.test.ts`. Real production `trade_ship_short_range_debuff`
+// (300) and `proximity_bonus_ports_nb` (`within(n/3, 4, n)`) are fixed
+// constants with no native override mechanism (unlike TS's `TestConfig`,
+// which the original test overrides to 0/10/100 for convenience) - these
+// tests instead pick real tile distances that land on either side of the
+// real 300-tile debuff threshold to exercise the exact same code paths.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::schemas::unit_type;
+    use crate::game::{Game, GameConfig as CoreGameConfig, PlayerInfo, PlayerType};
+    use crate::map::{GameMap, MapMeta};
+
+    /// A 1-row map, all water except two single-tile land "islands" `dist`
+    /// tiles apart (one per port). The mini map is pure water, so
+    /// `has_water_component`/`get_water_component` always report a single
+    /// shared component everywhere - real per-map water connectivity isn't
+    /// what these tests are about, only the level/proximity-bonus/
+    /// short-range-debuff math downstream of "the ports share a trade
+    /// network" is.
+    fn game_with_two_ports(dist: u32) -> (Game, u16, TileRef, i32, u16, TileRef, i32) {
+        let width = dist + 20;
+        let player_x = 5u32;
+        let other_x = 5 + dist;
+
+        let mut terrain = vec![0u8; width as usize]; // all water
+        terrain[player_x as usize] = 0x80; // isLand=1, magnitude=0 (Plains)
+        terrain[other_x as usize] = 0x80;
+        let meta = MapMeta {
+            width,
+            height: 1,
+            num_land_tiles: 2,
+        };
+        let map = GameMap::from_terrain_bytes(&meta, &terrain).unwrap();
+
+        let mini_width = width / 2 + 2;
+        let mini_meta = MapMeta {
+            width: mini_width,
+            height: 1,
+            num_land_tiles: 0,
+        };
+        let mini_map =
+            GameMap::from_terrain_bytes(&mini_meta, &vec![0u8; mini_width as usize]).unwrap();
+
+        let wire_cfg = crate::core::schemas::GameConfig {
+            game_map: "tiny".into(),
+            difficulty: "Medium".into(),
+            donate_gold: false,
+            donate_troops: false,
+            game_type: "Singleplayer".into(),
+            game_mode: "Free For All".into(),
+            game_map_size: "Normal".into(),
+            nations: crate::core::schemas::NationsConfig::Mode("default".into()),
+            bots: 0,
+            infinite_gold: false,
+            infinite_troops: false,
+            instant_build: false,
+            random_spawn: false,
+            doomsday_clock: None,
+            disabled_units: None,
+            player_teams: None,
+            disable_alliances: None,
+            spawn_immunity_duration: Some(0),
+            starting_gold: None,
+            gold_multiplier: None,
+            max_timer_value: None,
+            ranked_type: None,
+        };
+        let mut game = Game::new(
+            String::new(),
+            CoreGameConfig::default(),
+            crate::core::config::Config::new(wire_cfg, false),
+            map,
+            mini_map,
+            None,
+        );
+        game.end_spawn_phase();
+
+        let player = game.add_from_info(&PlayerInfo {
+            name: "player".into(),
+            player_type: PlayerType::Human,
+            client_id: Some("player_id".into()),
+            id: "player_id".into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        });
+        let other = game.add_from_info(&PlayerInfo {
+            name: "other".into(),
+            player_type: PlayerType::Human,
+            client_id: Some("other_id".into()),
+            id: "other_id".into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        });
+        if let Some(p) = game.player_by_small_id_mut(player) {
+            p.gold = 1_000_000_000;
+        }
+        if let Some(p) = game.player_by_small_id_mut(other) {
+            p.gold = 1_000_000_000;
+        }
+
+        let player_tile = game.map.ref_xy(player_x, 0);
+        let other_tile = game.map.ref_xy(other_x, 0);
+        game.conquer(player, player_tile);
+        game.conquer(other, other_tile);
+        let player_port = game.build_unit(player, unit_type::PORT, player_tile);
+        let other_port = game.build_unit(other, unit_type::PORT, other_tile);
+
+        (
+            game,
+            player,
+            player_tile,
+            player_port,
+            other,
+            other_tile,
+            other_port,
+        )
+    }
+
+    fn increase_level(game: &mut Game, small_id: u16, unit_id: i32, times: i32) {
+        for _ in 0..times {
+            if let Some(u) = game.unit_mut(small_id, unit_id) {
+                u.level += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn trading_ports_weighted_list_scales_with_level_when_not_bonus_eligible() {
+        // Within the real 300-tile short-range debuff, so no proximity or
+        // friendly bonus applies regardless of `proximityBonusPortsNb` -
+        // isolates the pure per-level weighting.
+        let (mut game, player, player_tile, player_port, other, _other_tile, other_port) =
+            game_with_two_ports(10);
+        let mut execution = PortExecution::new(player, player_port);
+        execution.init(&mut game, 0);
+        execution.tick(&mut game, 0);
+
+        increase_level(&mut game, other, other_port, 2); // level 1 -> 3
+
+        let ports = execution.trading_ports(&game, player_tile);
+        assert_eq!(ports.len(), 3, "a level-3 port should appear 3 times, unweighted by any bonus");
+        assert!(ports.iter().all(|&(sid, uid)| sid == other && uid == other_port));
+    }
+
+    #[test]
+    fn trading_ports_gets_a_proximity_bonus_copy_when_far_enough_but_not_too_far() {
+        // Past the real 300-tile short-range debuff, so the proximity bonus
+        // (not cancelled by `tooClose`) applies for this lone candidate.
+        let (mut game, player, player_tile, player_port, _other, _other_tile, _other_port) =
+            game_with_two_ports(310);
+        let mut execution = PortExecution::new(player, player_port);
+        execution.init(&mut game, 0);
+        execution.tick(&mut game, 0);
+
+        let ports = execution.trading_ports(&game, player_tile);
+        assert_eq!(
+            ports.len(),
+            2,
+            "a lone level-1 port far enough away should get 1 base + 1 proximity-bonus copy"
+        );
+    }
+
+    #[test]
+    fn trading_ports_short_range_debuff_cancels_the_proximity_bonus() {
+        // Within the real 300-tile short-range debuff cancels the bonus
+        // that would otherwise apply to this lone candidate.
+        let (mut game, player, player_tile, player_port, _other, _other_tile, _other_port) =
+            game_with_two_ports(50);
+        let mut execution = PortExecution::new(player, player_port);
+        execution.init(&mut game, 0);
+        execution.tick(&mut game, 0);
+
+        let ports = execution.trading_ports(&game, player_tile);
+        assert_eq!(
+            ports.len(),
+            1,
+            "too-close-for-the-debuff should cancel the proximity bonus, leaving just the base copy"
+        );
+    }
+}

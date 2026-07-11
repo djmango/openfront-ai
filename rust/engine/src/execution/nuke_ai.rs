@@ -7,19 +7,19 @@
 //! (`NationNukeState`, threaded through from `nation_tick.rs`'s
 //! `NationBehaviorState`) instead of porting the class/instance directly.
 //!
-//! Deferred (documented, not ported - see guidance in the task this was
-//! written for): `NationNukeBehavior.maybeDestroyEnemySam` and its two
-//! helpers (`findEnemySamsCoveringTile`, `maybeUpgradeHelpfulSilo`) - the
-//! Impossible-only SAM-overwhelm salvo planner (~230 lines of TS). Nations
-//! on Impossible difficulty simply skip that fallback here when no
-//! reasonable direct nuke target scores above zero; every other branch of
-//! `maybeSendNuke`/`findBestNukeTarget` is ported for real.
+//! `NationNukeBehavior.maybeDestroyEnemySam` and its two helpers
+//! (`findEnemySamsCoveringTile`, `maybeUpgradeHelpfulSilo`) - the
+//! Impossible-only SAM-overwhelm salvo planner - are fully ported (see
+//! `maybe_destroy_enemy_sam` below). This was previously deferred but is now
+//! done for real: every branch of `maybeSendNuke`/`findBestNukeTarget` is
+//! ported.
 
 use super::ai_attack::{find_incoming_attacker, should_attack};
 use super::nation_emoji::{self, NationEmojiState};
 use super::nation_structures::rand_territory_tile_array;
 use super::nuke_execution::{can_build_nuke, NukeExecution};
 use super::parabola;
+use super::upgrade_structure::UpgradeStructureExecution;
 use super::ExecEnum;
 use crate::core::schemas::unit_type;
 use crate::game::{Game, Player, PlayerType, Relation};
@@ -36,6 +36,9 @@ const RECENT_NUKE_MAX_AGE_TICKS: u32 = 600;
 /// TS `EMOJI_NUKE` (`["☢️", "💥"]`) - only its length matters for RNG parity
 /// (see `nation_emoji.rs`'s other `EMOJI_*_LEN` constants).
 const EMOJI_NUKE_LEN: i32 = 2;
+/// TS `MAX_NATION_SILO_UPGRADE_LEVEL` - cap on silo levels reachable via
+/// `maybe_destroy_enemy_sam`'s upgrade fallback.
+const MAX_NATION_SILO_UPGRADE_LEVEL: i32 = 5;
 
 /// TS `Structures.types` (`City`, `DefensePost`, `SAMLauncher`, `MissileSilo`,
 /// `Port`, `Factory`) - duplicated locally rather than imported, matching
@@ -189,7 +192,13 @@ pub fn maybe_send_nuke(
 
         // On Hard & Impossible, avoid trajectories that can be intercepted by enemy SAMs.
         if (difficulty == "Hard" || difficulty == "Impossible")
-            && is_trajectory_interceptable_by_sam(game, small_id, spawn_tile, tile)
+            && is_trajectory_interceptable_by_sam(
+                game,
+                small_id,
+                spawn_tile,
+                tile,
+                &HashSet::new(),
+            )
         {
             continue;
         }
@@ -227,10 +236,12 @@ pub fn maybe_send_nuke(
                 nuke_target,
                 0,
             );
+            return;
         }
     }
-    // else if difficulty == "Impossible": TS falls back to
-    // `maybeDestroyEnemySam(nukeTarget)` here - deferred, see module doc.
+    if difficulty == "Impossible" {
+        maybe_destroy_enemy_sam(game, random, small_id, nuke_target, nuke_state, emoji_state);
+    }
 }
 
 /// TS `NationNukeBehavior.findBestNukeTarget()`.
@@ -629,15 +640,16 @@ fn is_teammate_already_nuking_this_spot(
     false
 }
 
-/// TS `NationNukeBehavior.isTrajectoryInterceptableBySam()`, without the
-/// `excludedSamIds` parameter - only ever non-empty from the deferred
-/// `maybeDestroyEnemySam` (see module doc), so it's dropped here rather than
-/// threaded through unused.
+/// TS `NationNukeBehavior.isTrajectoryInterceptableBySam()`. `excluded_sam_ids`
+/// mirrors TS's optional `excludedSamIds` param, used by `maybe_destroy_enemy_sam`
+/// to ignore the SAM(s) it's intentionally trying to overwhelm; every other
+/// caller passes an empty set (TS callers simply omit the argument).
 fn is_trajectory_interceptable_by_sam(
     game: &Game,
     small_id: u16,
     spawn_tile: TileRef,
     target_tile: TileRef,
+    excluded_sam_ids: &HashSet<i32>,
 ) -> bool {
     let speed = game.wire.default_nuke_speed();
     let trajectory = parabola::find_path_tiles(game, spawn_tile, target_tile, speed, true, true);
@@ -680,6 +692,10 @@ fn is_trajectory_interceptable_by_sam(
             if owner_sid == small_id || game.is_friendly(small_id, owner_sid) {
                 continue;
             }
+            // Skip SAMs we're intentionally overwhelming.
+            if excluded_sam_ids.contains(&unit_id) {
+                continue;
+            }
             let level = game
                 .player_by_small_id(owner_sid)
                 .and_then(|p| p.units.iter().find(|u| u.id == unit_id))
@@ -707,6 +723,361 @@ fn is_trajectory_blocked_by_impassable(game: &Game, spawn_tile: TileRef, target_
         true,
     );
     path.iter().any(|&t| game.is_impassable(t))
+}
+
+/// TS `NationNukeBehavior.findEnemySamsCoveringTile()` - enemy SAMs (unit id +
+/// level) whose range covers `tile`, i.e. every SAM that would try to
+/// intercept a nuke landing there.
+fn find_enemy_sams_covering_tile(game: &Game, small_id: u16, tile: TileRef) -> Vec<(i32, i32)> {
+    let max_range = game.wire.max_sam_range();
+    game.nearby_structures_any(tile, max_range as u32, &[unit_type::SAM_LAUNCHER])
+        .into_iter()
+        .filter_map(|(owner_sid, unit_id, _sam_tile, dist_sq)| {
+            if owner_sid == small_id || game.is_friendly(small_id, owner_sid) {
+                return None;
+            }
+            let level = game
+                .player_by_small_id(owner_sid)
+                .and_then(|p| p.units.iter().find(|u| u.id == unit_id))
+                .map(|u| u.level)
+                .unwrap_or(1);
+            let range = game.wire.sam_range(level);
+            if dist_sq <= range * range {
+                Some((unit_id, level))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// TS `NationNukeBehavior.maybeUpgradeHelpfulSilo()` - upgrades the missile
+/// silo (if any) that would actually have helped the just-failed overwhelm
+/// attempt, preferring the one best protected by our own SAMs.
+fn maybe_upgrade_helpful_silo(
+    game: &mut Game,
+    small_id: u16,
+    failed_target_tile: TileRef,
+    covering_sam_ids: &HashSet<i32>,
+    total_bombs: i64,
+) {
+    let silos: Vec<(i32, TileRef, i32)> = game
+        .player_by_small_id(small_id)
+        .map(|p| {
+            p.units
+                .iter()
+                .filter(|u| u.unit_type == unit_type::MISSILE_SILO)
+                .map(|u| (u.id, u.tile as TileRef, u.level))
+                .collect()
+        })
+        .unwrap_or_default();
+    if silos.is_empty() {
+        return;
+    }
+
+    // First pass: only silos whose trajectory to the failed target is
+    // unblocked (not interceptable by a non-covering enemy SAM, and not
+    // crossing impassable terrain) contribute slots to the overwhelm plan.
+    let unblocked_silos: Vec<(i32, TileRef, i32)> = silos
+        .into_iter()
+        .filter(|&(_, tile, _)| {
+            !is_trajectory_interceptable_by_sam(
+                game,
+                small_id,
+                tile,
+                failed_target_tile,
+                covering_sam_ids,
+            ) && !is_trajectory_blocked_by_impassable(game, tile, failed_target_tile)
+        })
+        .collect();
+    if unblocked_silos.is_empty() {
+        return;
+    }
+
+    // Bail out if the target is unreachable even at max silo level - crazy
+    // amounts of covering SAMs, upgrading is wasted gold.
+    let max_achievable_slots = unblocked_silos.len() as i64 * MAX_NATION_SILO_UPGRADE_LEVEL as i64;
+    if max_achievable_slots < total_bombs {
+        return;
+    }
+
+    let our_sams: Vec<(TileRef, i32)> = game
+        .player_by_small_id(small_id)
+        .map(|p| {
+            p.units
+                .iter()
+                .filter(|u| u.unit_type == unit_type::SAM_LAUNCHER)
+                .map(|u| (u.tile as TileRef, u.level))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut best_silo: Option<i32> = None;
+    let mut best_protection: i64 = -1;
+    for &(id, tile, level) in &unblocked_silos {
+        if level >= MAX_NATION_SILO_UPGRADE_LEVEL {
+            continue;
+        }
+        if !game.can_upgrade_unit(small_id, id) {
+            continue;
+        }
+        let mut protection: i64 = 0;
+        for &(sam_tile, sam_level) in &our_sams {
+            let range = game.wire.sam_range(sam_level);
+            let dist_sq = game.map.euclidean_dist_squared(tile, sam_tile) as f64;
+            if dist_sq <= range * range {
+                protection += sam_level as i64;
+            }
+        }
+        if protection > best_protection {
+            best_protection = protection;
+            best_silo = Some(id);
+        }
+    }
+
+    if let Some(id) = best_silo {
+        game.add_execution(ExecEnum::UpgradeStructure(UpgradeStructureExecution::new(
+            small_id, id,
+        )));
+    }
+}
+
+/// TS `NationNukeBehavior.maybeDestroyEnemySam()` - Impossible-only fallback
+/// fired from `maybe_send_nuke` when no direct nuke target scored above zero:
+/// plans a salvo of atom bombs sized (and time-staggered) to overwhelm one of
+/// `nuke_target`'s SAMs, trying the weakest SAM first. A SAM of level N can
+/// intercept N nukes before going on cooldown, so overwhelming it needs N+1
+/// bombs that all survive interception and arrive within the same cooldown
+/// window.
+fn maybe_destroy_enemy_sam(
+    game: &mut Game,
+    random: &mut PseudoRandom,
+    small_id: u16,
+    nuke_target: u16,
+    nuke_state: &mut NationNukeState,
+    emoji_state: &mut NationEmojiState,
+) {
+    if game.wire.is_unit_disabled(unit_type::ATOM_BOMB) {
+        return;
+    }
+
+    // Don't launch another salvo if we already have atom bombs in flight.
+    let our_atom_bombs_in_flight = game
+        .player_by_small_id(small_id)
+        .map(|p| p.units.iter().filter(|u| u.unit_type == unit_type::ATOM_BOMB).count())
+        .unwrap_or(0);
+    if our_atom_bombs_in_flight > 0 {
+        return;
+    }
+
+    let atom_cost = cost(game, small_id, unit_type::ATOM_BOMB);
+
+    let mut enemy_sams: Vec<(i32, TileRef, i32)> = game
+        .player_by_small_id(nuke_target)
+        .map(|p| {
+            p.units
+                .iter()
+                .filter(|u| u.unit_type == unit_type::SAM_LAUNCHER)
+                .map(|u| (u.id, u.tile as TileRef, u.level))
+                .collect()
+        })
+        .unwrap_or_default();
+    if enemy_sams.is_empty() {
+        return;
+    }
+
+    let our_silos: Vec<(TileRef, i32, usize)> = game
+        .player_by_small_id(small_id)
+        .map(|p| {
+            p.units
+                .iter()
+                .filter(|u| u.unit_type == unit_type::MISSILE_SILO && !u.under_construction)
+                .map(|u| (u.tile as TileRef, u.level, u.missile_timer_queue.len()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if our_silos.is_empty() {
+        return;
+    }
+
+    // Try each enemy SAM as a target, easiest (lowest level) first.
+    enemy_sams.sort_by_key(|&(_, _, level)| level);
+
+    let mut needs_more_silos = false;
+    // Track the first failed attempt so we can upgrade a silo that would
+    // actually have helped that plan (rather than an unrelated silo).
+    let mut failed_target: Option<(TileRef, HashSet<i32>, i64)> = None;
+
+    let nuke_speed = game.wire.default_nuke_speed();
+    let sam_cooldown = game.wire.sam_cooldown() as i64;
+    let max_total_arrival_spread = sam_cooldown / 2;
+
+    for &(_, target_tile, _) in &enemy_sams {
+        let covering_sams = find_enemy_sams_covering_tile(game, small_id, target_tile);
+        let covering_sam_ids: HashSet<i32> = covering_sams.iter().map(|&(id, _)| id).collect();
+        let total_interceptions: i64 = covering_sams.iter().map(|&(_, level)| level as i64).sum();
+        let bombs_needed = total_interceptions + 1;
+
+        // NukeExecution always picks the closest non-cooldown silo by
+        // Manhattan distance to target (via nuke_spawn). Our planning must
+        // mirror that order. Silos with interceptable trajectories are still
+        // picked first by NukeExecution - their bombs launch but get
+        // intercepted, "wasting" slots.
+        let mut available_silos: Vec<(TileRef, i64, usize, bool)> = Vec::new();
+        for &(silo_tile, level, queue_len) in &our_silos {
+            let available_slots = level as i64 - queue_len as i64;
+            if available_slots <= 0 {
+                continue;
+            }
+            let interceptable = is_trajectory_interceptable_by_sam(
+                game,
+                small_id,
+                silo_tile,
+                target_tile,
+                &covering_sam_ids,
+            );
+            let trajectory = parabola::find_path_tiles(game, silo_tile, target_tile, nuke_speed, true, true);
+            if trajectory.is_empty() {
+                continue;
+            }
+            // Skip silos whose trajectory crosses impassable terrain - the
+            // simulation would abort these launches (see NukeExecution).
+            if is_trajectory_blocked_by_impassable(game, silo_tile, target_tile) {
+                continue;
+            }
+            available_silos.push((silo_tile, available_slots, trajectory.len(), interceptable));
+        }
+
+        // Sort by Manhattan distance to target (matching nuke_spawn's pick order).
+        available_silos.sort_by_key(|&(silo_tile, ..)| game.manhattan_dist(silo_tile, target_tile));
+
+        // Flatten into a per-bomb launch sequence matching NukeExecution's order.
+        // Each silo contributes `slots` consecutive bombs before NukeExecution
+        // moves to the next silo.
+        let mut launch_sequence: Vec<(usize, bool)> = Vec::new();
+        for &(_, slots, flight_ticks, interceptable) in &available_silos {
+            for _ in 0..slots {
+                launch_sequence.push((flight_ticks, interceptable));
+            }
+        }
+
+        // Add extra bombs: 1 for every 5 to account for the enemy building
+        // more SAMs while our bombs are in flight.
+        let extra_bombs = bombs_needed / 5;
+        let total_bombs = bombs_needed + extra_bombs;
+
+        // Collect bombs from silos whose trajectory to the target is NOT
+        // blocked by enemy SAMs other than the covering SAMs we're trying to
+        // overwhelm.
+        let unblocked_bombs: Vec<(usize, usize)> = launch_sequence
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &(flight_ticks, interceptable))| {
+                if interceptable {
+                    None
+                } else {
+                    Some((index, flight_ticks))
+                }
+            })
+            .collect();
+
+        if (unblocked_bombs.len() as i64) < total_bombs {
+            failed_target.get_or_insert((target_tile, covering_sam_ids.clone(), total_bombs));
+            needs_more_silos = true;
+            continue;
+        }
+
+        // Sort unblocked bombs by flight time to find a sliding window of
+        // `max_total_arrival_spread` that captures the most bombs.
+        let mut sorted_by_flight = unblocked_bombs.clone();
+        sorted_by_flight.sort_by_key(|&(_, flight_ticks)| flight_ticks);
+
+        let mut best_window_start = 0usize;
+        let mut best_window_count = 0usize;
+        for start in 0..sorted_by_flight.len() {
+            let mut end = start;
+            while end < sorted_by_flight.len()
+                && (sorted_by_flight[end].1 as i64) - (sorted_by_flight[start].1 as i64)
+                    <= max_total_arrival_spread
+            {
+                end += 1;
+            }
+            if end - start > best_window_count {
+                best_window_count = end - start;
+                best_window_start = start;
+            }
+        }
+
+        if (best_window_count as i64) < total_bombs {
+            failed_target.get_or_insert((target_tile, covering_sam_ids.clone(), total_bombs));
+            needs_more_silos = true;
+            continue;
+        }
+
+        // From the window, pick `total_bombs` with the lowest launch-sequence
+        // indices to minimise how many bombs we need to fire (minimise gold cost).
+        let window_bombs =
+            &sorted_by_flight[best_window_start..best_window_start + best_window_count];
+        let mut window_by_index = window_bombs.to_vec();
+        window_by_index.sort_by_key(|&(index, _)| index);
+        let selected: Vec<(usize, usize)> =
+            window_by_index[..total_bombs as usize].to_vec();
+        let selected_set: HashSet<usize> = selected.iter().map(|&(index, _)| index).collect();
+        let last_selected_index = selected.last().unwrap().0;
+        let bombs_to_fire = last_selected_index + 1;
+
+        // Compute per-bomb waitTicks so all selected bombs arrive in the
+        // window. Target: spread arrivals evenly, anchored at the earliest
+        // flight time in the selected set.
+        let selected_flight_min = selected.iter().map(|&(_, ft)| ft).min().unwrap() as i64;
+        let stagger_interval = (max_total_arrival_spread / total_bombs).max(1);
+        let mut selected_idx: i64 = 0;
+        let mut wait_ticks_per_bomb: Vec<u32> = Vec::with_capacity(bombs_to_fire);
+        for i in 0..bombs_to_fire {
+            if selected_set.contains(&i) {
+                let target_arrival = selected_flight_min + selected_idx * stagger_interval;
+                let flight_ticks_i = launch_sequence[i].0 as i64;
+                wait_ticks_per_bomb.push((target_arrival - flight_ticks_i).max(0) as u32);
+                selected_idx += 1;
+            } else {
+                // Wasted bomb (interceptable or out-of-window) - launch immediately.
+                wait_ticks_per_bomb.push(0);
+            }
+        }
+
+        // Check gold for all fired bombs (including wasted ones).
+        let total_cost = atom_cost * bombs_to_fire as i64;
+        let gold = game.player_by_small_id(small_id).map(|p| p.gold).unwrap_or(0);
+        if gold < total_cost {
+            continue;
+        }
+
+        // Fire the salvo - NukeExecution will pick silos in the same
+        // Manhattan distance order we planned.
+        for i in 0..bombs_to_fire {
+            send_nuke(
+                game,
+                random,
+                small_id,
+                nuke_state,
+                emoji_state,
+                target_tile,
+                unit_type::ATOM_BOMB,
+                nuke_target,
+                wait_ticks_per_bomb[i],
+            );
+        }
+        return;
+    }
+
+    // Couldn't destroy any SAM - upgrade silos only if capacity was the
+    // bottleneck. If we only lack gold, don't waste it upgrading silos - just
+    // wait and save.
+    if needs_more_silos {
+        if let Some((target_tile, covering_sam_ids, total_bombs)) = failed_target {
+            maybe_upgrade_helpful_silo(game, small_id, target_tile, &covering_sam_ids, total_bombs);
+        }
+    }
 }
 
 /// TS `NationNukeBehavior.isValidNukeTile()`.
@@ -1335,5 +1706,104 @@ mod tests {
             game.player_by_small_id(attacker).unwrap().gold < 1_000_000,
             "building the nuke should have spent gold"
         );
+    }
+
+    /// TS `NationNukeSamOverwhelm.test.ts` - "nation overwhelms enemy SAM with
+    /// atom bomb salvo on Impossible difficulty". Calls `maybe_send_nuke`
+    /// directly (like the smoke test above) instead of driving a full
+    /// `NationExecution` through many ticks with multiple game-id retries -
+    /// the TS test's retry loop exists only to work around its own
+    /// attack-tick RNG alignment; `should_attack` is unconditionally `true`
+    /// on Impossible (no RNG draw involved at all), so one direct call is
+    /// fully deterministic and exercises the exact same mechanism.
+    #[test]
+    fn maybe_send_nuke_overwhelms_enemy_sam_with_atom_bomb_salvo_on_impossible() {
+        let size = 100u32;
+        let mut game = tiny_game(size, size, "Impossible", "Free For All");
+        let nation = add_player(&mut game, "nation", PlayerType::Nation);
+        let human = add_player(&mut game, "human", PlayerType::Human);
+
+        for x in 10..40 {
+            for y in 10..40 {
+                game.conquer(nation, game.ref_xy(x, y));
+            }
+        }
+        for x in 60..90 {
+            for y in 60..90 {
+                game.conquer(human, game.ref_xy(x, y));
+            }
+        }
+
+        // Level-1 SAM at the exact center of human's 30x30 block: real
+        // production `sam_range(1)` (70) comfortably covers the whole block
+        // (max corner distance ~21) from there, so every direct nuke attempt
+        // into human territory is judged interceptable, forcing
+        // `maybe_send_nuke`'s Impossible-only fallback.
+        let sam_tile = game.ref_xy(75, 75);
+        game.build_unit(human, unit_type::SAM_LAUNCHER, sam_tile);
+
+        // 3 level-1 missile silos (1 slot each). Overwhelming a level-1 SAM
+        // needs 2 bombs (1 intercepted + 1 that gets through).
+        for &(x, y) in &[(20u32, 20u32), (25, 25), (30, 30)] {
+            game.build_unit(nation, unit_type::MISSILE_SILO, game.ref_xy(x, y));
+        }
+
+        if let Some(p) = game.player_by_small_id_mut(nation) {
+            p.gold = 1_000_000_000;
+            p.troops = 100_000;
+        }
+        if let Some(p) = game.player_by_small_id_mut(human) {
+            p.troops = 100_000;
+        }
+
+        // Nukes can't be built while the global spawn-immunity window is
+        // active (see `nuke_spawn`'s `is_spawn_immunity_active` guard).
+        for _ in 0..game.wire.spawn_immunity_duration() + 1 {
+            game.execute_next_tick();
+        }
+
+        let mut random = PseudoRandom::new(42);
+        let mut nuke_state = NationNukeState {
+            atom_bomb_perceived_cost: game.structure_cost(nation, unit_type::ATOM_BOMB),
+            hydrogen_bomb_perceived_cost: game.structure_cost(nation, unit_type::HYDROGEN_BOMB),
+            ..Default::default()
+        };
+        let mut emoji_state = NationEmojiState::default();
+
+        maybe_send_nuke(
+            &mut game,
+            &mut random,
+            nation,
+            false,
+            &mut nuke_state,
+            &mut emoji_state,
+        );
+
+        assert_eq!(
+            nuke_state.atom_bombs_launched, 2,
+            "overwhelming a level-1 SAM needs exactly bombsNeeded (1 intercepted + 1 through)"
+        );
+
+        // Let the queued `NukeExecution`s actually init and spawn.
+        game.execute_next_tick();
+        game.execute_next_tick();
+
+        let atom_bomb_count = game.unit_count(nation, unit_type::ATOM_BOMB);
+        assert!(
+            atom_bomb_count >= 2,
+            "expected at least 2 atom bombs in flight, got {atom_bomb_count}"
+        );
+
+        let targets: Vec<Option<TileRef>> = game
+            .player_by_small_id(nation)
+            .unwrap()
+            .units
+            .iter()
+            .filter(|u| u.unit_type == unit_type::ATOM_BOMB)
+            .map(|u| u.target_tile)
+            .collect();
+        for target in targets {
+            assert_eq!(target, Some(sam_tile), "every bomb should target the SAM tile");
+        }
     }
 }
