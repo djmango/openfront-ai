@@ -1427,5 +1427,48 @@ mod tests {
                 "1-hp transport should be destroyed by the retreat-aggro shell"
             );
         }
+
+        #[test]
+        fn retreating_warship_continues_moving_to_port_after_firing_back() {
+            // Unlike `low_health_warship_retreats_and_fires_at_nearby_enemy_warship` (which
+            // starts already at the port and docks on the very first `retreat()` call), this
+            // ship starts outside the docking radius (`euclidean_dist_squared <= 25`), so
+            // `retreat()`'s shoot-then-move branches both run in the same call.
+            let mut game = water_game(30, 30);
+            let p1 = add_nation(&mut game, "p1");
+            let p2 = add_nation(&mut game, "p2");
+            let port_tile = game.ref_xy(10, 10);
+            let ship_tile = game.ref_xy(20, 10);
+            let enemy_tile = game.ref_xy(19, 10);
+            game.build_unit(p1, unit_type::PORT, port_tile);
+            let ship_id = game.build_unit(p1, unit_type::WARSHIP, ship_tile);
+            let enemy_id = game.build_unit(p2, unit_type::WARSHIP, enemy_tile);
+            let max_health = game.unit_max_health(p1, ship_id);
+            game.unit_mut(p1, ship_id).unwrap().health = max_health * 50 / 100;
+
+            for _ in 0..25 {
+                game.execute_next_tick();
+            }
+            let tick = game.ticks();
+            let mut exec = WarshipExecution::new_for_test(p1, ship_tile, ship_id);
+            exec.tick(&mut game, tick);
+
+            assert!(!exec.docked, "still outside the docking radius");
+            assert!(exec.retreating);
+            assert_eq!(exec.target_tile, Some(port_tile));
+            let moved_tile = game.unit_tile_of(p1, ship_id).unwrap();
+            assert_ne!(
+                moved_tile, ship_tile,
+                "should still move toward port on the same tick it fires back"
+            );
+
+            game.execute_next_tick(); // promotes the queued ShellExecution out of `uninit`.
+            game.execute_next_tick(); // shell travels (distance 1) and hits this tick.
+            let enemy_health = game.unit(p2, enemy_id).unwrap().health;
+            assert!(
+                enemy_health < 1000,
+                "warship should fire at the nearby enemy while still en route, got {enemy_health}"
+            );
+        }
     }
 }
