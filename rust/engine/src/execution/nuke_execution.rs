@@ -80,10 +80,6 @@ impl NukeExecution {
             self.active = false;
             return;
         };
-        self.src = Some(spawn_tile);
-        let id = game.build_unit(self.owner_small_id, &self.nuke_type, spawn_tile);
-        self.nuke_unit_id = Some(id);
-
         let target_range_sq = game.wire.default_nuke_targetable_range().powi(2);
         let trajectory = parabola::find_path_tiles(
             game,
@@ -93,6 +89,21 @@ impl NukeExecution {
             self.distance_based_height(),
             self.rocket_direction_up,
         );
+        // TS `NukeExecution.tick`: "Nuke trajectories cannot pass over
+        // impassable terrain, just as they cannot exceed the map border" -
+        // the full parabola path is checked BEFORE launch (no gold spent, no
+        // unit built) and the launch is aborted if any tile is impassable.
+        // Native previously never checked this at all, letting nukes fly
+        // straight through impassable walls.
+        if trajectory.iter().any(|&t| game.is_impassable(t)) {
+            self.active = false;
+            return;
+        }
+
+        self.src = Some(spawn_tile);
+        let id = game.build_unit(self.owner_small_id, &self.nuke_type, spawn_tile);
+        self.nuke_unit_id = Some(id);
+
         let trajectory_targetable: Vec<bool> = trajectory
             .iter()
             .map(|&t| is_targetable(game, self.dst, t, Some(spawn_tile), target_range_sq))
