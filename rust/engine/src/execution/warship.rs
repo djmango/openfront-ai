@@ -350,8 +350,9 @@ impl WarshipExecution {
                 })
             });
         if near_port {
+            let max_health = game.unit_max_health(self.owner_small_id, unit_id);
             if let Some(unit) = game.unit_mut(self.owner_small_id, unit_id) {
-                unit.health = (unit.health + 1).min(1000);
+                unit.health = (unit.health + 1).min(max_health);
             }
         }
     }
@@ -380,8 +381,9 @@ impl WarshipExecution {
             })
             .unwrap_or(0);
         if healing > 0 {
+            let max_health = game.unit_max_health(self.owner_small_id, unit_id);
             if let Some(unit) = game.unit_mut(self.owner_small_id, unit_id) {
-                unit.health = (unit.health + healing).min(1000);
+                unit.health = (unit.health + healing).min(max_health);
             }
         }
     }
@@ -481,9 +483,10 @@ impl Execution for WarshipExecution {
                 self.retreat_port = None;
             } else {
                 self.heal_at_dock(game, unit_id);
+                let max_health = game.unit_max_health(self.owner_small_id, unit_id);
                 let fully_healed = game
                     .unit(self.owner_small_id, unit_id)
-                    .is_none_or(|unit| unit.health >= 1000);
+                    .is_none_or(|unit| unit.health >= max_health);
                 if !fully_healed {
                     return;
                 }
@@ -496,7 +499,9 @@ impl Execution for WarshipExecution {
         if self.retreating && self.retreat(game, from, unit_id) {
             return;
         }
-        if health_before_healing < 750 {
+        // TS `shouldStartRepairRetreat`: `Math.floor(maxHealth * warshipRetreatHealthPercent() / 100)`.
+        let retreat_threshold = game.unit_max_health(self.owner_small_id, unit_id) * 75 / 100;
+        if health_before_healing < retreat_threshold {
             if let Some(port) = self.nearest_port(game, from) {
                 self.retreating = true;
                 self.retreat_port = Some(port);
