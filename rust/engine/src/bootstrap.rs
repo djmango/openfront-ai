@@ -6,8 +6,8 @@ use crate::core::nation::create_nations_for_game;
 use crate::core::schemas::GameConfig as WireGameConfig;
 use crate::core::terrain::{load_fresh_terrain_for_commit, GameMapSize};
 use crate::execution::{
-    ExecEnum, NationExecution, NationRuntime, RecomputeRailClusterExecution, SpawnExecution,
-    SpawnTimerExecution, WinCheckExecution,
+    DoomsdayClockExecution, ExecEnum, NationExecution, NationRuntime,
+    RecomputeRailClusterExecution, SpawnExecution, SpawnTimerExecution, WinCheckExecution,
 };
 use crate::game::{Game, GameConfig, PlayerInfo, PlayerType};
 use crate::prng::PseudoRandom;
@@ -159,6 +159,16 @@ pub fn game_from_record(repo_root: &Path, record: &GameRecord) -> Result<Game, S
     }
 
     game.add_execution(ExecEnum::WinCheck(WinCheckExecution::new()));
+
+    // TS `GameRunner.init()` calls `addExecution(new DoomsdayClockExecution())`
+    // unconditionally alongside `WinCheckExecution`, but the execution itself
+    // no-ops every tick when `doomsdayClockConfig().enabled` is false (see
+    // `doomsday_clock_execution.rs::tick`'s early-return) - gating the add
+    // here instead is behaviorally identical and skips a permanently-inert
+    // execution for the overwhelming majority of games that never enable it.
+    if cfg.doomsday_clock_config().enabled {
+        game.add_execution(ExecEnum::DoomsdayClock(DoomsdayClockExecution::new()));
+    }
 
     if !cfg.is_unit_disabled(crate::core::schemas::unit_type::FACTORY) {
         game.add_execution(ExecEnum::RecomputeRailCluster(
