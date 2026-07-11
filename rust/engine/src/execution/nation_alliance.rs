@@ -448,3 +448,210 @@ pub fn maybe_betray(
 
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::{AllianceRequestStatus, PlayerInfo};
+
+    fn add_player(game: &mut Game, id: &str, player_type: PlayerType) -> u16 {
+        let sid = game.add_from_info(&PlayerInfo {
+            name: id.into(),
+            player_type,
+            client_id: Some(id.into()),
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        });
+        let p = game.player_by_small_id_mut(sid).unwrap();
+        p.troops = 1_000;
+        p.tiles_owned = 10;
+        sid
+    }
+
+    /// Mirrors TS `setupAllianceRequest`'s defaults (relationDelta=2 - i.e.
+    /// `Relation::Neutral` since it's non-negative and below `Friendly`'s
+    /// threshold - equal troop counts so nobody looks like a threat). Request
+    /// `created_at` is a tick comfortably past the spawn-phase cutoff (see the
+    /// dedicated cutoff test below for that boundary case).
+    fn setup(
+        player_troops: i32,
+        requestor_troops: i32,
+        relation_delta: i32,
+        is_traitor: bool,
+    ) -> (Game, u16, u16) {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let player = add_player(&mut game, "player_id", PlayerType::Bot);
+        let requestor = add_player(&mut game, "requestor_id", PlayerType::Human);
+        game.player_by_small_id_mut(player).unwrap().troops = player_troops;
+        game.player_by_small_id_mut(requestor).unwrap().troops = requestor_troops;
+        game.update_relation(player, requestor, relation_delta);
+        game.update_relation(requestor, player, relation_delta);
+        if is_traitor {
+            game.mark_traitor(requestor);
+        }
+        assert!(game.create_alliance_request(requestor, player, 1_000));
+        (game, player, requestor)
+    }
+
+    fn request_status(game: &Game, requestor: u16, player: u16) -> AllianceRequestStatus {
+        game.alliance_requests
+            .iter()
+            .find(|r| r.requestor_small_id == requestor && r.recipient_small_id == player)
+            .map(|r| r.status)
+            .expect("request should still be tracked")
+    }
+
+    // Ported from NationAllianceBehavior.test.ts "should reject alliance
+    // created on first post-spawn tick".
+    #[test]
+    fn rejects_alliance_request_created_during_the_spawn_phase_cutoff() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let cutoff = game.wire.num_spawn_phase_turns() + 1;
+        let player = add_player(&mut game, "player_id", PlayerType::Bot);
+        let requestor = add_player(&mut game, "requestor_id", PlayerType::Human);
+        game.update_relation(player, requestor, 2);
+        game.update_relation(requestor, player, 2);
+        assert!(game.create_alliance_request(requestor, player, cutoff));
+
+        let mut random = PseudoRandom::new(46);
+        let mut emoji = NationEmojiState::default();
+        handle_alliance_requests(&mut game, &mut random, player, &mut emoji);
+
+        assert!(!game.is_allied_with(player, requestor));
+        assert_eq!(
+            request_status(&game, requestor, player),
+            AllianceRequestStatus::Rejected
+        );
+    }
+
+    // Ported from NationAllianceBehavior.test.ts "should accept alliance when
+    // all conditions are met".
+    #[test]
+    fn accepts_alliance_request_when_all_conditions_are_met() {
+        let (mut game, player, requestor) = setup(1_000, 1_000, 2, false);
+        let mut random = PseudoRandom::new(46);
+        let mut emoji = NationEmojiState::default();
+        handle_alliance_requests(&mut game, &mut random, player, &mut emoji);
+
+        assert!(game.is_allied_with(player, requestor));
+    }
+
+    // Ported from NationAllianceBehavior.test.ts "should reject alliance if
+    // requestor is a traitor".
+    #[test]
+    fn rejects_alliance_request_from_a_traitor() {
+        let (mut game, player, requestor) = setup(1_000, 1_000, 2, true);
+        let mut random = PseudoRandom::new(46);
+        let mut emoji = NationEmojiState::default();
+        handle_alliance_requests(&mut game, &mut random, player, &mut emoji);
+
+        assert!(!game.is_allied_with(player, requestor));
+        assert_eq!(
+            request_status(&game, requestor, player),
+            AllianceRequestStatus::Rejected
+        );
+    }
+
+    // Ported from NationAllianceBehavior.test.ts "should reject alliance if
+    // relation is hostile".
+    #[test]
+    fn rejects_alliance_request_when_relation_is_hostile() {
+        let (mut game, player, requestor) = setup(1_000, 1_000, -2, false);
+        let mut random = PseudoRandom::new(46);
+        let mut emoji = NationEmojiState::default();
+        handle_alliance_requests(&mut game, &mut random, player, &mut emoji);
+
+        assert!(!game.is_allied_with(player, requestor));
+        assert_eq!(
+            request_status(&game, requestor, player),
+            AllianceRequestStatus::Rejected
+        );
+    }
+
+    // Ported from NationAllianceBehavior.test.ts "should accept alliance if
+    // requestor is much larger (> 3 times size of recipient)" - TS derives the
+    // size difference from tile counts feeding into the troop formula; ported
+    // here as a direct troop-count difference exceeding Medium's
+    // `isAlliancePartnerThreat` 2.5x ratio, exercising the exact same decision
+    // branch.
+    #[test]
+    fn accepts_alliance_request_from_a_much_larger_requestor() {
+        let (mut game, player, requestor) = setup(1_000, 4_000, 2, false);
+        let mut random = PseudoRandom::new(46);
+        let mut emoji = NationEmojiState::default();
+        handle_alliance_requests(&mut game, &mut random, player, &mut emoji);
+
+        assert!(game.is_allied_with(player, requestor));
+    }
+
+    // Ported from NationAllianceBehavior.test.ts "should reject alliance if
+    // player has too many alliances" - TS mocks `player.alliances()` directly;
+    // native computes `alliance_count` from real alliance records, so this
+    // creates 10 real (unrelated) alliances for `player` instead.
+    #[test]
+    fn rejects_alliance_request_when_recipient_already_has_many_alliances() {
+        let (mut game, player, requestor) = setup(1_000, 1_000, 2, false);
+        for i in 0..10 {
+            let other = add_player(&mut game, &format!("filler{i}"), PlayerType::Human);
+            assert!(game.create_alliance_request(player, other, 1_000));
+            assert!(game.create_alliance_request(other, player, 1_000));
+        }
+        assert_eq!(game.alliance_count(player), 10);
+
+        let mut random = PseudoRandom::new(46);
+        let mut emoji = NationEmojiState::default();
+        handle_alliance_requests(&mut game, &mut random, player, &mut emoji);
+
+        assert!(!game.is_allied_with(player, requestor));
+        assert_eq!(
+            request_status(&game, requestor, player),
+            AllianceRequestStatus::Rejected
+        );
+    }
+
+    // Ported from NationAllianceBehavior.test.ts "should NOT request extension
+    // if onlyOneAgreedToExtend is false" - native's
+    // `alliance_extension_candidates` only surfaces an alliance when exactly
+    // one side has requested an extension (`extension_requested_requestor ^
+    // extension_requested_recipient`), so a freshly-formed alliance where
+    // neither side has requested anything should yield zero candidates and
+    // queue no `AllianceExtensionExecution`.
+    #[test]
+    fn does_not_request_extension_when_neither_side_has_agreed() {
+        let (mut game, player, requestor) = setup(1_000, 1_000, 2, false);
+        // Form a real alliance (the pending request from `setup` plus its
+        // counter-request auto-accepts), rather than leaving only a dangling
+        // pending request, so `alliance_extension_candidates` has an actual
+        // alliance to (correctly) find zero extension candidates for.
+        assert!(game.create_alliance_request(player, requestor, 1_001));
+        assert!(game.is_allied_with(player, requestor));
+
+        let expiration_before = game
+            .player_alliances(player)
+            .first()
+            .map(|al| al.expires_at)
+            .expect("alliance should exist");
+
+        let mut random = PseudoRandom::new(46);
+        let mut emoji = NationEmojiState::default();
+        handle_alliance_extension_requests(&mut game, &mut random, player, &mut emoji);
+        // If an `AllianceExtensionExecution` had (incorrectly) been queued, its
+        // `init()` would run on this next tick and flip
+        // `extension_requested_requestor`/`_recipient`.
+        game.execute_next_tick();
+
+        let alliance = game
+            .player_alliances(player)
+            .first()
+            .cloned()
+            .cloned()
+            .expect("alliance should still exist");
+        assert!(!alliance.extension_requested_requestor);
+        assert!(!alliance.extension_requested_recipient);
+        assert_eq!(alliance.expires_at, expiration_before);
+    }
+}
