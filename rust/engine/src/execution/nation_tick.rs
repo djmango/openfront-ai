@@ -263,6 +263,33 @@ fn maybe_send_nuke(_game: &Game, _random: &mut PseudoRandom, _small_id: u16) {
     // TS `NationNukeBehavior.maybeSendNuke`  -  no RNG until a target is found.
 }
 
+// TS `ImpassableTerrain.test.ts` "NationNukeBehavior trajectory over
+// impassable terrain" > "NationNukeBehavior skips nuke targets whose
+// trajectory crosses impassable terrain": `maybe_send_nuke` above is a
+// complete stub (`NationNukeBehavior.maybeSendNuke` has no native port at
+// all yet - nations never autonomously nuke in this engine). There is
+// nothing to port this test against; skipped rather than building the
+// whole nation-nuke-targeting subsystem as a side quest. Note that the
+// underlying trajectory-impassable check this TS test exercises IS ported
+// and covered elsewhere: `NukeExecution::spawn` (see `nuke_execution.rs`'s
+// `nuke_launch_is_blocked_by_impassable_trajectory` test) now aborts any
+// nuke launch - human or nation-triggered - whose parabola path crosses
+// impassable terrain, which was a real bug this batch found and fixed.
+// What's missing here is specifically the nation AI's own target-selection
+// logic that would normally call into that (now-correct) launch path.
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[ignore = "NationNukeBehavior.maybeSendNuke has no native port (maybe_send_nuke is a stub); see doc comment above and ImpassableTerrain.test.ts"]
+    fn nation_nuke_behavior_target_selection_is_unported() {
+        unreachable!(
+            "gap marker only - maybe_send_nuke never selects or launches a nuke; \
+             the impassable-trajectory guard it would rely on is separately \
+             tested in nuke_execution.rs"
+        );
+    }
+}
+
 pub fn tick_nation_post_spawn(
     game: &mut Game,
     random: &mut PseudoRandom,

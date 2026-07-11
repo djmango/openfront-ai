@@ -423,6 +423,151 @@ impl GameMap {
     }
 }
 
+// TS `NeighborIteration.test.ts` ("Neighbor iteration" describe block) -
+// exercises the exact cardinal/diagonal neighbor visiting order, the same
+// bug class (`for_each_neighbor4` N,S,W,E vs W,E,N,S) found and fixed by
+// `docs/bot-ai-parity-investigation/` and `docs/bot-ai-parity-rate/`. These
+// tests confirm all of `for_each_neighbor4`, `neighbors4_ts`, and
+// `for_each_neighbor8` agree with TS's `neighbors()`/`forEachNeighbor()`/
+// `neighbors4()`/`forEachNeighborWithDiag()` order, including at edges and
+// corners, on a real (16x16) map - no NEW instance of the bug found here,
+// both cardinal helpers already carry the N,S,W,E fix from the prior
+// investigations, confirmed directly rather than by manual reasoning.
+#[cfg(test)]
+mod neighbor_order_tests {
+    use super::{GameMap, MapMeta, TileRef};
+
+    fn map16() -> GameMap {
+        let n = 16 * 16;
+        GameMap::from_terrain_bytes(
+            &MapMeta {
+                width: 16,
+                height: 16,
+                num_land_tiles: n as u32,
+            },
+            &vec![0b1000_0000u8; n as usize],
+        )
+        .unwrap()
+    }
+
+    fn collect_neighbors4(map: &GameMap, t: TileRef) -> Vec<TileRef> {
+        let mut out = Vec::new();
+        map.for_each_neighbor4(t, |n| out.push(n));
+        out
+    }
+
+    fn collect_neighbors8(map: &GameMap, t: TileRef) -> Vec<TileRef> {
+        let mut out = Vec::new();
+        map.for_each_neighbor8(t, |n| out.push(n));
+        out
+    }
+
+    #[test]
+    fn for_each_neighbor4_visits_n_s_w_e_for_interior_tiles() {
+        let map = map16();
+        let tile = map.ref_xy(5, 7);
+        assert_eq!(
+            collect_neighbors4(&map, tile),
+            vec![
+                map.ref_xy(5, 6),
+                map.ref_xy(5, 8),
+                map.ref_xy(4, 7),
+                map.ref_xy(6, 7),
+            ]
+        );
+    }
+
+    #[test]
+    fn for_each_neighbor4_clips_at_corners_and_edges() {
+        let map = map16();
+        let w = map.width;
+        let h = map.height;
+        // top-left corner: S, E only.
+        assert_eq!(
+            collect_neighbors4(&map, map.ref_xy(0, 0)),
+            vec![map.ref_xy(0, 1), map.ref_xy(1, 0)]
+        );
+        // bottom-right corner: N, W only.
+        assert_eq!(
+            collect_neighbors4(&map, map.ref_xy(w - 1, h - 1)),
+            vec![map.ref_xy(w - 1, h - 2), map.ref_xy(w - 2, h - 1)]
+        );
+        // left edge: N, S, E.
+        assert_eq!(
+            collect_neighbors4(&map, map.ref_xy(0, 5)),
+            vec![map.ref_xy(0, 4), map.ref_xy(0, 6), map.ref_xy(1, 5)]
+        );
+        // bottom edge: N, W, E.
+        assert_eq!(
+            collect_neighbors4(&map, map.ref_xy(5, h - 1)),
+            vec![
+                map.ref_xy(5, h - 2),
+                map.ref_xy(4, h - 1),
+                map.ref_xy(6, h - 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn for_each_neighbor4_matches_neighbors4_ts_for_every_tile() {
+        let map = map16();
+        for t in 0..(map.width * map.height) {
+            let via_callback = collect_neighbors4(&map, t);
+            let mut buf = [TileRef::MAX; 4];
+            let n = map.neighbors4_ts(t, &mut buf);
+            assert_eq!(via_callback, buf[..n].to_vec(), "tile {t}");
+        }
+    }
+
+    #[test]
+    fn for_each_neighbor8_visits_all_8_neighbors_in_dx_major_order() {
+        let map = map16();
+        let tile = map.ref_xy(5, 7);
+        assert_eq!(
+            collect_neighbors8(&map, tile),
+            vec![
+                map.ref_xy(4, 6),
+                map.ref_xy(4, 7),
+                map.ref_xy(4, 8),
+                map.ref_xy(5, 6),
+                map.ref_xy(5, 8),
+                map.ref_xy(6, 6),
+                map.ref_xy(6, 7),
+                map.ref_xy(6, 8),
+            ]
+        );
+    }
+
+    #[test]
+    fn for_each_neighbor8_clips_at_corners_and_edges() {
+        let map = map16();
+        let w = map.width;
+        let h = map.height;
+        assert_eq!(
+            collect_neighbors8(&map, map.ref_xy(0, 0)),
+            vec![map.ref_xy(0, 1), map.ref_xy(1, 0), map.ref_xy(1, 1)]
+        );
+        assert_eq!(
+            collect_neighbors8(&map, map.ref_xy(w - 1, h - 1)),
+            vec![
+                map.ref_xy(w - 2, h - 2),
+                map.ref_xy(w - 2, h - 1),
+                map.ref_xy(w - 1, h - 2),
+            ]
+        );
+        assert_eq!(
+            collect_neighbors8(&map, map.ref_xy(5, 0)),
+            vec![
+                map.ref_xy(4, 0),
+                map.ref_xy(4, 1),
+                map.ref_xy(5, 1),
+                map.ref_xy(6, 0),
+                map.ref_xy(6, 1),
+            ]
+        );
+    }
+}
+
 pub fn read_manifest(map_dir: &Path) -> Result<MapManifest, String> {
     let path = map_dir.join("manifest.json");
     let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;

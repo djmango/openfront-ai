@@ -58,3 +58,39 @@ impl Execution for SpawnExecution {
         true
     }
 }
+
+// TS `TerritoryCapture.test.ts`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::execution::ExecEnum;
+
+    #[test]
+    fn player_owns_the_tile_it_spawns_on() {
+        let mut game = crate::test_util::plains_game(100, 100);
+        let info = PlayerInfo {
+            name: "test_player".to_string(),
+            player_type: PlayerType::Human,
+            client_id: Some("test_id".to_string()),
+            id: "test_id".to_string(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        };
+        let spawn_tile = game.map.ref_xy(50, 50);
+        game.add_execution(ExecEnum::Spawn(SpawnExecution::new(
+            "game_id".to_string(),
+            info,
+            Some(spawn_tile),
+        )));
+        // Init the execution.
+        game.execute_next_tick();
+        // Execute the execution.
+        game.execute_next_tick();
+
+        let owner_id = game.map.owner_id(spawn_tile);
+        assert_ne!(owner_id, 0, "tile should have an owner");
+        let owner = game.player_by_small_id(owner_id).expect("owner exists");
+        assert_eq!(owner.name, "test_player");
+    }
+}
