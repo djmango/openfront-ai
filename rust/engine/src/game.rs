@@ -285,6 +285,17 @@ pub struct Game {
     pub rail_network: crate::rail::RailNetwork,
     /// TS `StatsImpl._numMirvLaunched`  -  global count feeding escalating MIRV cost.
     pub mirvs_launched: u32,
+    /// TS `UnitImpl._destroyer`/`_wasDestroyedByEnemy`, scoped to transport ships (the only
+    /// unit type `NationWarshipBehavior.trackShipsAndRetaliate` queries `destroyer()` for -
+    /// see `warship_ai.rs`). Native fully removes a destroyed unit from `Player.units` (no
+    /// TS-style inert "deleted but still inspectable" tombstone object), so there is nothing
+    /// left to call `.destroyer()` on after the fact; this is a minimal side channel recording
+    /// `(unit_id, victim_owner, destroyer)` at the two real "enemy destroys a transport ship"
+    /// call sites (`ShellExecution::hit_target`, `NukeExecution`'s blast-radius deletion loop),
+    /// consumed (and removed) by the tracker the tick it notices the ship is gone. Entries are
+    /// removed on read (`take_transport_kill`) rather than left to grow, and are otherwise
+    /// harmless if never read (e.g. a bystander's own transport ship, which nobody is tracking).
+    transport_kills: Vec<(i32, u16, u16, TileRef)>,
 }
 
 impl Default for Game {
@@ -367,6 +378,7 @@ impl Default for Game {
             shared_water_cache: std::cell::RefCell::new(HashMap::new()),
             rail_network: crate::rail::RailNetwork::default(),
             mirvs_launched: 0,
+            transport_kills: Vec::new(),
         }
     }
 }
@@ -1794,6 +1806,28 @@ impl Game {
         id
     }
 
+    /// Records that `destroyer_small_id` just destroyed `victim_small_id`'s transport ship
+    /// `unit_id` at `tile` - TS `unit.delete(true, destroyer)` (the tile is recorded too since
+    /// `maybeRetaliateWithWarship(ship.tile(), ...)` reads it off the - in TS, still
+    /// inspectable - dead unit). Call *before* `remove_unit`, which drops the unit immediately.
+    pub fn record_transport_kill(
+        &mut self,
+        unit_id: i32,
+        victim_small_id: u16,
+        destroyer_small_id: u16,
+        tile: TileRef,
+    ) {
+        self.transport_kills.push((unit_id, victim_small_id, destroyer_small_id, tile));
+    }
+
+    /// Consumes (removes) a recorded transport-ship kill, if any - TS `ship.wasDestroyedByEnemy()
+    /// && ship.destroyer()`. Returns `(destroyer_small_id, tile)`.
+    pub fn take_transport_kill(&mut self, unit_id: i32) -> Option<(u16, TileRef)> {
+        let idx = self.transport_kills.iter().position(|&(id, _, _, _)| id == unit_id)?;
+        let (_, _, destroyer, tile) = self.transport_kills.remove(idx);
+        Some((destroyer, tile))
+    }
+
     pub fn remove_unit(&mut self, small_id: u16, unit_id: i32) {
         let had_station = self
             .player_by_small_id(small_id)
@@ -2305,9 +2339,18 @@ impl Game {
     }
 
     pub fn update_relation(&mut self, a: u16, b: u16, delta: i32) {
+        self.update_relation_f64(a, b, delta as f64);
+    }
+
+    /// TS `PlayerImpl.updateRelation(other, delta: number)` accepts a float delta - every
+    /// existing native call site happens to pass a whole number (embargo malus, attack
+    /// retaliation, emoji responses), so `update_relation` above took a plain `i32`, until
+    /// `NationWarshipBehavior.maybeRetaliateWithWarship`'s `-7.5` (trade-ship retaliation; the
+    /// transport case is `-15`, still whole) needed a non-integer delta for the first time.
+    pub fn update_relation_f64(&mut self, a: u16, b: u16, delta: f64) {
         if let Some(p) = self.player_by_small_id_mut(a) {
             let entry = p.relations.entry_or_insert(b, 0.0);
-            *entry = clamp_relation(*entry + delta as f64);
+            *entry = clamp_relation(*entry + delta);
         }
     }
 
@@ -2386,6 +2429,59 @@ impl Game {
         self.execs.iter().filter_map(|e| match e {
             ExecEnum::TransportShip(t) => Some(t),
             _ => None,
+        })
+    }
+
+    /// Live warship executions - mirrors `live_transports()`'s pattern. Backs
+    /// `NationWarshipBehavior`'s AI-level queries (`warship_ai.rs`), which need a
+    /// warship's `patrolTile` (private to `WarshipExecution`, not stored on the shared
+    /// `Unit`).
+    pub fn live_warships(&self) -> impl Iterator<Item = &crate::execution::WarshipExecution> {
+        self.execs.iter().filter_map(|e| match e {
+            ExecEnum::Warship(w) => Some(w),
+            _ => None,
+        })
+    }
+
+    /// TS `NationWarshipBehavior.maybeMoveWarship`'s candidate list: `(unit_id,
+    /// current_tile, patrol_tile)` for every live warship owned by `small_id`.
+    pub fn warship_patrol_candidates(&self, small_id: u16) -> Vec<(i32, TileRef, TileRef)> {
+        self.live_warships()
+            .filter(|w| w.owner_small_id() == small_id)
+            .filter_map(|w| {
+                let unit_id = w.unit_id()?;
+                let tile = self.unit_tile_of(small_id, unit_id)?;
+                Some((unit_id, tile, w.patrol_tile()))
+            })
+            .collect()
+    }
+
+    /// Redirects one of `small_id`'s existing warships to a new patrol tile - TS
+    /// `warship.updateWarshipState({ patrolTile: tile })`.
+    pub fn set_warship_patrol_tile(&mut self, small_id: u16, unit_id: i32, tile: TileRef) {
+        for exec in &mut self.execs {
+            if let ExecEnum::Warship(w) = exec {
+                if w.owner_small_id() == small_id && w.unit_id() == Some(unit_id) {
+                    w.set_patrol_tile(tile);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// TS `UnitGrid.hasUnitNearby(tile, range, type, playerId, includeUnderConstruction)` -
+    /// the owner-filtered overload `has_unit_nearby_any` doesn't cover (that one scans all
+    /// players and always excludes under-construction units; this one is scoped to a single
+    /// owner and always includes them, matching `NationWarshipBehavior`'s only caller:
+    /// `hasUnitNearby(target, 90, Warship, this.player.id(), true)`).
+    pub fn has_own_unit_nearby(&self, small_id: u16, tile: TileRef, range: u32, unit_type: &str) -> bool {
+        let Some(p) = self.player_by_small_id(small_id) else {
+            return false;
+        };
+        let range_sq = range * range;
+        p.units.iter().any(|u| {
+            u.unit_type == unit_type
+                && self.map.euclidean_dist_squared(tile, u.tile as TileRef) <= range_sq
         })
     }
 

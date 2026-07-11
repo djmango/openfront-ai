@@ -4,6 +4,7 @@ use super::ai_attack::nation_maybe_attack;
 use super::nation_alliance::{handle_alliance_extension_requests, handle_alliance_requests};
 use super::nation_emoji::{NationEmojiState, maybe_send_casual_emoji};
 use super::nuke_ai::NationNukeState;
+use super::warship_ai::NationWarshipState;
 use crate::core::schemas::unit_type;
 use crate::game::{Game, PlayerType, Relation};
 use crate::prng::PseudoRandom;
@@ -31,6 +32,8 @@ pub struct NationBehaviorState {
     pub is_hydro_nation: bool,
     /// TS `NationNukeBehavior`'s remaining per-instance state (see `nuke_ai.rs`).
     pub nuke: NationNukeState,
+    /// TS `NationWarshipBehavior`'s tracked-ship instance state (`warship_ai.rs`).
+    pub warship: NationWarshipState,
 }
 
 /// TS `NationExecution.initializeBehaviors` RNG + field-init order:
@@ -48,9 +51,6 @@ pub fn initialize_nation_behaviors(
         game.structure_cost(small_id, unit_type::HYDROGEN_BOMB);
     state.is_hydro_nation = random.chance(3);
 }
-
-/// TS `NationWarshipBehavior.trackShipsAndRetaliate` - no-op until warships are ported.
-fn track_ships_and_retaliate(_game: &Game, _random: &mut PseudoRandom, _small_id: u16) {}
 
 /// TS `NationExecution.updateRelationsFromEmbargos` - applies (and later reverts) a relation
 /// malus for every other player that currently has an active embargo against this nation.
@@ -201,28 +201,6 @@ fn do_handle_structures(game: &mut Game, random: &mut PseudoRandom, small_id: u1
     super::nation_structures::do_handle_structures(game, random, small_id, placements_count)
 }
 
-fn maybe_spawn_warship(game: &Game, random: &mut PseudoRandom, small_id: u16) -> bool {
-    if game.wire.is_unit_disabled(unit_type::WARSHIP) {
-        return false;
-    }
-    if !random.chance(50) {
-        return false;
-    }
-    let ports: Vec<_> = game
-        .player_by_small_id(small_id)
-        .map(|p| {
-            p.units
-                .iter()
-                .filter(|u| u.unit_type == unit_type::PORT)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if ports.is_empty() || game.unit_count(small_id, unit_type::WARSHIP) > 0 {
-        return false;
-    }
-    false
-}
-
 /// TS `NationExecution.handleEmbargoesToHostileNations`.
 fn handle_embargoes_to_hostile_nations(game: &mut Game, small_id: u16) {
     let tick = game.ticks();
@@ -271,8 +249,6 @@ fn handle_embargoes_to_hostile_nations(game: &mut Game, small_id: u16) {
     }
 }
 
-fn counter_warship_infestation(_game: &Game, _random: &mut PseudoRandom, _small_id: u16) {}
-
 /// TS `NationNukeBehavior.maybeSendNuke` - see `nuke_ai.rs` for the full port.
 /// `maybeDestroyEnemySam` (Impossible-only SAM-overwhelm salvo planning) is
 /// the one documented sub-piece deferred there; everything else (target
@@ -311,7 +287,13 @@ pub fn tick_nation_post_spawn(
         && game.unit_count(small_id, unit_type::PORT) > 0
         && !game.wire.is_unit_disabled(unit_type::WARSHIP)
     {
-        track_ships_and_retaliate(game, random, small_id);
+        super::warship_ai::track_ships_and_retaliate(
+            game,
+            random,
+            small_id,
+            &mut behavior.warship,
+            &mut behavior.emoji,
+        );
     }
 
     if tick_i % attack_rate != attack_tick {
@@ -330,7 +312,7 @@ pub fn tick_nation_post_spawn(
     handle_alliance_extension_requests(game, random, small_id, &mut behavior.emoji);
     let _ = consider_mirv(game, random, small_id);
     handle_structures(game, random, small_id, &mut behavior.structure);
-    let _ = maybe_spawn_warship(game, random, small_id);
+    let _ = super::warship_ai::maybe_spawn_warship(game, random, small_id);
     handle_embargoes_to_hostile_nations(game, small_id);
     nation_maybe_attack(
         game,
@@ -343,7 +325,7 @@ pub fn tick_nation_post_spawn(
         &difficulty,
         Some(&mut behavior.emoji),
     );
-    counter_warship_infestation(game, random, small_id);
+    super::warship_ai::counter_warship_infestation(game, random, small_id, &mut behavior.emoji);
     maybe_send_nuke(
         game,
         random,

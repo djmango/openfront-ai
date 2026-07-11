@@ -65,6 +65,7 @@ pub mod nation_tick;
 pub mod noop;
 pub mod ordered_map;
 pub mod ordered_tiles;
+pub mod ordered_units;
 pub mod player;
 pub mod player_clusters;
 pub mod retreat;
@@ -76,6 +77,7 @@ pub mod trade_ship_execution;
 pub mod transport_ship;
 pub mod upgrade_structure;
 pub mod warship;
+pub mod warship_ai;
 pub mod win_check;
 
 pub use attack::AttackExecution;
