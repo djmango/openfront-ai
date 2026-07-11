@@ -3,6 +3,7 @@
 use super::ai_attack::nation_maybe_attack;
 use super::nation_alliance::{handle_alliance_extension_requests, handle_alliance_requests};
 use super::nation_emoji::{NationEmojiState, maybe_send_casual_emoji};
+use super::nuke_ai::NationNukeState;
 use crate::core::schemas::unit_type;
 use crate::game::{Game, PlayerType, Relation};
 use crate::prng::PseudoRandom;
@@ -28,10 +29,23 @@ pub struct NationBehaviorState {
     pub emoji: NationEmojiState,
     /// TS `NationNukeBehavior.isHydroNation`  -  `random.chance(3)` at behavior init.
     pub is_hydro_nation: bool,
+    /// TS `NationNukeBehavior`'s remaining per-instance state (see `nuke_ai.rs`).
+    pub nuke: NationNukeState,
 }
 
-/// TS `NationExecution.initializeBehaviors` RNG: `NationNukeBehavior` field init.
-pub fn initialize_nation_behaviors(random: &mut PseudoRandom, state: &mut NationBehaviorState) {
+/// TS `NationExecution.initializeBehaviors` RNG + field-init order:
+/// `NationNukeBehavior`'s `atomBombPerceivedCost`/`hydrogenBombPerceivedCost`
+/// initializers (`this.cost(...)`, no RNG) followed by `isHydroNation`
+/// (`random.chance(3)`, the only RNG draw in that constructor).
+pub fn initialize_nation_behaviors(
+    game: &Game,
+    random: &mut PseudoRandom,
+    small_id: u16,
+    state: &mut NationBehaviorState,
+) {
+    state.nuke.atom_bomb_perceived_cost = game.structure_cost(small_id, unit_type::ATOM_BOMB);
+    state.nuke.hydrogen_bomb_perceived_cost =
+        game.structure_cost(small_id, unit_type::HYDROGEN_BOMB);
     state.is_hydro_nation = random.chance(3);
 }
 
@@ -259,35 +273,20 @@ fn handle_embargoes_to_hostile_nations(game: &mut Game, small_id: u16) {
 
 fn counter_warship_infestation(_game: &Game, _random: &mut PseudoRandom, _small_id: u16) {}
 
-fn maybe_send_nuke(_game: &Game, _random: &mut PseudoRandom, _small_id: u16) {
-    // TS `NationNukeBehavior.maybeSendNuke`  -  no RNG until a target is found.
-}
-
-// TS `ImpassableTerrain.test.ts` "NationNukeBehavior trajectory over
-// impassable terrain" > "NationNukeBehavior skips nuke targets whose
-// trajectory crosses impassable terrain": `maybe_send_nuke` above is a
-// complete stub (`NationNukeBehavior.maybeSendNuke` has no native port at
-// all yet - nations never autonomously nuke in this engine). There is
-// nothing to port this test against; skipped rather than building the
-// whole nation-nuke-targeting subsystem as a side quest. Note that the
-// underlying trajectory-impassable check this TS test exercises IS ported
-// and covered elsewhere: `NukeExecution::spawn` (see `nuke_execution.rs`'s
-// `nuke_launch_is_blocked_by_impassable_trajectory` test) now aborts any
-// nuke launch - human or nation-triggered - whose parabola path crosses
-// impassable terrain, which was a real bug this batch found and fixed.
-// What's missing here is specifically the nation AI's own target-selection
-// logic that would normally call into that (now-correct) launch path.
-#[cfg(test)]
-mod tests {
-    #[test]
-    #[ignore = "NationNukeBehavior.maybeSendNuke has no native port (maybe_send_nuke is a stub); see doc comment above and ImpassableTerrain.test.ts"]
-    fn nation_nuke_behavior_target_selection_is_unported() {
-        unreachable!(
-            "gap marker only - maybe_send_nuke never selects or launches a nuke; \
-             the impassable-trajectory guard it would rely on is separately \
-             tested in nuke_execution.rs"
-        );
-    }
+/// TS `NationNukeBehavior.maybeSendNuke` - see `nuke_ai.rs` for the full port.
+/// `maybeDestroyEnemySam` (Impossible-only SAM-overwhelm salvo planning) is
+/// the one documented sub-piece deferred there; everything else (target
+/// selection, MIRV-savings cost simulation, SAM-trajectory/impassable-terrain
+/// avoidance, tile scoring, recent-nuke cooldown) is ported for real.
+fn maybe_send_nuke(
+    game: &mut Game,
+    random: &mut PseudoRandom,
+    small_id: u16,
+    is_hydro_nation: bool,
+    nuke_state: &mut NationNukeState,
+    emoji_state: &mut NationEmojiState,
+) {
+    super::nuke_ai::maybe_send_nuke(game, random, small_id, is_hydro_nation, nuke_state, emoji_state);
 }
 
 pub fn tick_nation_post_spawn(
@@ -345,5 +344,12 @@ pub fn tick_nation_post_spawn(
         Some(&mut behavior.emoji),
     );
     counter_warship_infestation(game, random, small_id);
-    maybe_send_nuke(game, random, small_id);
+    maybe_send_nuke(
+        game,
+        random,
+        small_id,
+        behavior.is_hydro_nation,
+        &mut behavior.nuke,
+        &mut behavior.emoji,
+    );
 }
