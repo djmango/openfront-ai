@@ -145,6 +145,23 @@ impl Execution for TransportShipExecution {
         }
 
         let ref_owner = game.map.owner_id(self.ref_tile);
+        // TS `TransportShipExecution.init`: rejects any alliance request the
+        // landing tile's owner has outstanding toward the sender - e.g. sending a
+        // boat at someone cancels a pending alliance request from them, exactly
+        // like attacking them does in `AttackExecution.init`. Native previously
+        // never called this, so a boat sent at a would-be ally left their
+        // pending alliance request live even as troops were en route to invade them.
+        if ref_owner != 0 && ref_owner != game.terra_nullius_id() {
+            let owner_is_bot = game
+                .player_by_small_id(self.owner_small_id)
+                .map_or(false, |p| p.player_type == crate::game::PlayerType::Bot);
+            let target_is_bot = game
+                .player_by_small_id(ref_owner)
+                .map_or(false, |p| p.player_type == crate::game::PlayerType::Bot);
+            if !owner_is_bot && !target_is_bot {
+                game.reject_alliance_request(ref_owner, self.owner_small_id);
+            }
+        }
         if ref_owner == self.owner_small_id {
             self.active = false;
             return;
@@ -281,5 +298,62 @@ impl TransportShipExecution {
         }
         game.remove_unit(self.owner_small_id, uid);
         self.active = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::{PlayerInfo, PlayerType};
+
+    fn add_human(game: &mut Game, id: &str) -> u16 {
+        game.add_from_info(&PlayerInfo {
+            name: id.into(),
+            player_type: PlayerType::Human,
+            client_id: Some(id.into()),
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        })
+    }
+
+    // Ported from the intent of Attack.test.ts's "Should cancel alliance
+    // requests if the recipient sends a transport ship": sending a boat at a
+    // player who has a pending alliance request outstanding toward the sender
+    // rejects that request, mirroring AttackExecution.init's identical rule for
+    // land attacks (see `openfront/src/core/execution/TransportShipExecution.ts`
+    // `rejectIncomingAllianceRequests`, called from `init`). `Game::default()`'s
+    // 1x1 map is repurposed here (rather than a literal `setup()`+fixture-map
+    // port) by directly setting that single tile's owner, since the bug is in
+    // `init()`'s alliance bookkeeping, not in boat pathfinding/geometry.
+    #[test]
+    fn sending_a_transport_ship_rejects_a_pending_alliance_request_from_the_target() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let sender = add_human(&mut game, "sender");
+        let target = add_human(&mut game, "target");
+        if let Some(p) = game.player_by_small_id_mut(sender) {
+            p.troops = 1_000;
+        }
+
+        let only_tile = game.map.ref_xy(0, 0);
+        game.map.set_owner_id(only_tile, target);
+
+        game.create_alliance_request(target, sender, 0);
+        assert!(game
+            .alliance_requests
+            .iter()
+            .any(|r| r.requestor_small_id == target
+                && r.recipient_small_id == sender
+                && r.status == crate::game::AllianceRequestStatus::Pending));
+
+        let mut ship = TransportShipExecution::new(sender, only_tile, 100.0);
+        ship.init(&mut game, 1);
+
+        assert!(game.alliance_requests.iter().any(|r| r.requestor_small_id
+            == target
+            && r.recipient_small_id == sender
+            && r.status == crate::game::AllianceRequestStatus::Rejected));
     }
 }
