@@ -290,6 +290,10 @@ pub struct Game {
     pub rail_network: crate::rail::RailNetwork,
     /// TS `StatsImpl._numMirvLaunched`  -  global count feeding escalating MIRV cost.
     pub mirvs_launched: u32,
+    /// TS `NationMIRVBehavior.recentMirvTargets` (`static`, shared across every nation's
+    /// behavior instance so multiple nations don't pile-on the same freshly-hit target) -
+    /// keyed by target `small_id` rather than `PlayerID`, value is the tick of the last hit.
+    pub recent_mirv_targets: HashMap<u16, u32>,
     /// TS `UnitImpl._destroyer`/`_wasDestroyedByEnemy`, scoped to transport ships (the only
     /// unit type `NationWarshipBehavior.trackShipsAndRetaliate` queries `destroyer()` for -
     /// see `warship_ai.rs`). Native fully removes a destroyed unit from `Player.units` (no
@@ -383,6 +387,7 @@ impl Default for Game {
             shared_water_cache: std::cell::RefCell::new(HashMap::new()),
             rail_network: crate::rail::RailNetwork::default(),
             mirvs_launched: 0,
+            recent_mirv_targets: HashMap::new(),
             transport_kills: Vec::new(),
         }
     }

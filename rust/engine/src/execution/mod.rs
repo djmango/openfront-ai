@@ -47,6 +47,7 @@ pub mod city_execution;
 pub mod defense_post_execution;
 pub mod doomsday_clock_execution;
 pub mod factory_execution;
+pub mod mirv_ai;
 pub mod mirv_execution;
 pub mod missile_silo_execution;
 pub mod nuke_ai;
