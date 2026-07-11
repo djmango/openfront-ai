@@ -431,6 +431,83 @@ mod tests {
         assert_eq!(attacks[1].1, 1);
         assert!(!attacks[1].3);
     }
+
+    // Ported from Disconnected.test.ts "Player can attack disconnected team
+    // mate without troop loss": a disconnected teammate is still a valid
+    // attack target (isFriendly/is_friendly excludes disconnected players by
+    // default), and fully eliminating them - as opposed to an explicit
+    // order-retreat - returns all remaining troops with 0 malus.
+    #[test]
+    fn full_conquest_of_disconnected_team_mate_returns_troops_with_no_malus() {
+        let mut game = Game::default();
+        game.map = crate::map::GameMap::from_terrain_bytes(
+            &crate::map::MapMeta {
+                width: 10,
+                height: 10,
+                num_land_tiles: 100,
+            },
+            &vec![0x80u8; 100],
+        )
+        .unwrap();
+        game.end_spawn_phase();
+
+        game.add_player(Player {
+            id: "attacker".to_string(),
+            small_id: 1,
+            player_type: PlayerType::Human,
+            team: Some("T".to_string()),
+            troops: 10_000,
+            ..Default::default()
+        });
+        game.add_player(Player {
+            id: "defender".to_string(),
+            small_id: 2,
+            player_type: PlayerType::Human,
+            team: Some("T".to_string()),
+            troops: 100,
+            is_disconnected: true,
+            ..Default::default()
+        });
+
+        for x in 0..10u32 {
+            for y in 0..10u32 {
+                let t = game.ref_xy(x, y);
+                if x == 9 && y == 9 {
+                    game.conquer(2, t);
+                } else {
+                    game.conquer(1, t);
+                }
+            }
+        }
+
+        // Human targets are immune for `spawn_immunity_duration()` (50 ticks)
+        // after spawn phase ends; advance past it so `init()` doesn't reject
+        // the attack outright.
+        for _ in 0..60 {
+            game.execute_next_tick();
+        }
+
+        let troops_before_attack = game.player_by_small_id(1).unwrap().troops;
+        let start_troops = troops_before_attack as f64 * 0.25;
+        game.add_execution(crate::execution::ExecEnum::Attack(AttackExecution::new(
+            1,
+            Some("defender".to_string()),
+            Some(start_troops),
+        )));
+
+        for _ in 0..2_000 {
+            if game.player_by_small_id(2).unwrap().tiles_owned == 0 {
+                break;
+            }
+            game.execute_next_tick();
+        }
+        assert_eq!(game.player_by_small_id(2).unwrap().tiles_owned, 0);
+        // retreat() fires the tick after the last tile is conquered (toConquer
+        // empties, refresh finds nothing, then retreat).
+        game.execute_next_tick();
+
+        assert!(game.player_by_small_id(1).unwrap().troops >= troops_before_attack);
+    }
 }
 
 impl AttackExecution {

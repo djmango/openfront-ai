@@ -3235,6 +3235,97 @@ mod relation_tests {
     }
 }
 
+// Ported from Disconnected.test.ts "Conqueror gets conquered disconnected
+// team member's transport- and warships": `conquer_player`'s ship-capture
+// branch doesn't depend on map/water geometry, so it's exercised directly
+// rather than through a full attack simulation.
+#[cfg(test)]
+mod conquer_player_tests {
+    use super::{Game, Player, PlayerType};
+    use crate::core::schemas::unit_type;
+
+    #[test]
+    fn conquering_a_disconnected_team_mate_captures_their_ships() {
+        let mut game = Game::default();
+        game.add_player(Player {
+            id: "conqueror".to_string(),
+            small_id: 1,
+            player_type: PlayerType::Human,
+            team: Some("CLAN".to_string()),
+            ..Default::default()
+        });
+        game.add_player(Player {
+            id: "conquered".to_string(),
+            small_id: 2,
+            player_type: PlayerType::Human,
+            team: Some("CLAN".to_string()),
+            is_disconnected: true,
+            ..Default::default()
+        });
+        let warship = game.build_unit(2, unit_type::WARSHIP, 0);
+        let transport = game.build_unit(2, unit_type::TRANSPORT, 0);
+
+        game.conquer_player(1, 2);
+
+        assert!(game.unit_exists(1, warship));
+        assert!(game.unit_exists(1, transport));
+        assert!(!game.unit_exists(2, warship));
+        assert!(!game.unit_exists(2, transport));
+    }
+
+    #[test]
+    fn conquering_a_connected_team_mate_does_not_capture_their_ships() {
+        // TS's `conquerPlayer` only transfers ships when the conquered
+        // player `isDisconnected()`; capturing a still-connected teammate's
+        // ships (e.g. after they're simply eliminated) would be wrong.
+        let mut game = Game::default();
+        game.add_player(Player {
+            id: "conqueror".to_string(),
+            small_id: 1,
+            player_type: PlayerType::Human,
+            team: Some("CLAN".to_string()),
+            ..Default::default()
+        });
+        game.add_player(Player {
+            id: "conquered".to_string(),
+            small_id: 2,
+            player_type: PlayerType::Human,
+            team: Some("CLAN".to_string()),
+            ..Default::default()
+        });
+        let warship = game.build_unit(2, unit_type::WARSHIP, 0);
+
+        game.conquer_player(1, 2);
+
+        assert!(!game.unit_exists(1, warship));
+        assert!(game.unit_exists(2, warship));
+    }
+
+    #[test]
+    fn conquering_a_disconnected_non_team_mate_does_not_capture_their_ships() {
+        let mut game = Game::default();
+        game.add_player(Player {
+            id: "conqueror".to_string(),
+            small_id: 1,
+            player_type: PlayerType::Human,
+            ..Default::default()
+        });
+        game.add_player(Player {
+            id: "conquered".to_string(),
+            small_id: 2,
+            player_type: PlayerType::Human,
+            is_disconnected: true,
+            ..Default::default()
+        });
+        let warship = game.build_unit(2, unit_type::WARSHIP, 0);
+
+        game.conquer_player(1, 2);
+
+        assert!(!game.unit_exists(1, warship));
+        assert!(game.unit_exists(2, warship));
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct TickUpdates {
     pub hash: Option<HashUpdate>,
