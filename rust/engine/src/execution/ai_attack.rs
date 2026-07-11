@@ -2099,7 +2099,7 @@ mod ai_attack_behavior_tests {
     /// loader) rather than building new map-geometry test infrastructure.
     /// Returns `None` (callers skip/return early) if the submodule checkout
     /// is unavailable, matching `core::terrain::tests`'s `skip_without_maps`.
-    fn big_plains_map() -> Option<GameMap> {
+    pub(super) fn big_plains_map() -> Option<GameMap> {
         let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
@@ -2159,7 +2159,7 @@ mod ai_attack_behavior_tests {
         Some(game)
     }
 
-    fn add_player(game: &mut Game, id: &str, player_type: PlayerType) -> u16 {
+    pub(super) fn add_player(game: &mut Game, id: &str, player_type: PlayerType) -> u16 {
         game.add_from_info(&PlayerInfo {
             name: id.into(),
             player_type,
@@ -2534,5 +2534,304 @@ mod ai_attack_behavior_tests {
             capped >= 50_000.0,
             "capped={capped} should retain at least the incoming 50k"
         );
+    }
+}
+
+/// Ported from `AiAttackBehaviorNukedTerritory.test.ts`. Covers the
+/// `nearby()`/`hasNonNukedTerraNullius` nuked-territory early-out gate in
+/// `maybeAttack` (native: `nation_maybe_attack`'s `has_non_nuked_tn` gate)
+/// and the `nuked` attack strategy (native: `is_bordering_nuked_territory`).
+#[cfg(test)]
+mod ai_attack_nuked_territory_tests {
+    use super::ai_attack_behavior_tests::{add_player, big_plains_map};
+    use super::*;
+
+    /// TS `setupBehavior`'s config: `infiniteGold`/`instantBuild`/
+    /// `infiniteTroops` all `true` (irrelevant to this file's assertions, but
+    /// matched for parity), plus optional `disabledUnits`.
+    fn wire_config(difficulty: &str, disabled_units: Option<Vec<String>>) -> crate::core::config::Config {
+        crate::core::config::Config::new(
+            crate::core::schemas::GameConfig {
+                game_map: "big_plains".into(),
+                difficulty: difficulty.into(),
+                donate_gold: false,
+                donate_troops: false,
+                game_type: "Singleplayer".into(),
+                game_mode: "Free For All".into(),
+                game_map_size: "Normal".into(),
+                nations: crate::core::schemas::NationsConfig::Mode("default".into()),
+                bots: 0,
+                infinite_gold: true,
+                infinite_troops: true,
+                instant_build: true,
+                random_spawn: false,
+                doomsday_clock: None,
+                disabled_units,
+                player_teams: None,
+                disable_alliances: None,
+                spawn_immunity_duration: None,
+                starting_gold: None,
+                gold_multiplier: None,
+                max_timer_value: None,
+                ranked_type: None,
+            },
+            false,
+        )
+    }
+
+    fn new_game(difficulty: &str, disabled_units: Option<Vec<String>>) -> Option<Game> {
+        let map = big_plains_map()?;
+        let mut game = Game::default();
+        game.map = map;
+        game.wire = wire_config(difficulty, disabled_units);
+        game.end_spawn_phase();
+        Some(game)
+    }
+
+    /// Conquer every land tile of `[x0,x1) x [y0,y1)` for `owner` (`big_plains`
+    /// is 100% land, so this never has to skip water).
+    fn conquer_rect(game: &mut Game, owner: u16, x0: u32, y0: u32, x1: u32, y1: u32) {
+        for x in x0..x1 {
+            for y in y0..y1 {
+                let t = game.ref_xy(x, y);
+                if game.is_land(t) {
+                    game.conquer(owner, t);
+                }
+            }
+        }
+    }
+
+    /// Mark every unowned land tile in `[x0,x1) x [y0,y1)` as nuked
+    /// (fallout). Already-conquered tiles are naturally skipped, matching TS
+    /// `nukeRect`'s comment that `setFallout` throws on owned tiles.
+    fn nuke_rect(game: &mut Game, x0: u32, y0: u32, x1: u32, y1: u32) {
+        for x in x0..x1 {
+            for y in y0..y1 {
+                let t = game.ref_xy(x, y);
+                if game.is_land(t) && !game.has_owner(t) {
+                    game.map.set_fallout(t, true);
+                }
+            }
+        }
+    }
+
+    /// TS `setupBehavior`: a Nation at x∈[60,80), an optional Human "enemy"
+    /// at x∈[40,60) sharing a land border with it (both y∈[60,80)), and,
+    /// unless `with_nuke` is false, every other unowned tile in
+    /// x∈[40,120), y∈[40,100) marked nuked - so the nation's only non-nuked
+    /// border is the enemy, when present.
+    struct NukedEnv {
+        game: Game,
+        nation: u16,
+        enemy: u16,
+    }
+
+    fn setup_behavior(
+        difficulty: &str,
+        with_enemy: bool,
+        with_nuke: bool,
+        nation_troops: f64,
+        enemy_troops: f64,
+        disabled_units: Option<Vec<String>>,
+    ) -> Option<NukedEnv> {
+        let mut game = new_game(difficulty, disabled_units)?;
+        let nation = add_player(&mut game, "nation_id", PlayerType::Nation);
+        let enemy = add_player(&mut game, "enemy_id", PlayerType::Human);
+
+        conquer_rect(&mut game, nation, 60, 60, 80, 80);
+        if with_enemy {
+            conquer_rect(&mut game, enemy, 40, 60, 60, 80);
+        }
+        if with_nuke {
+            nuke_rect(&mut game, 40, 40, 120, 100);
+        }
+
+        game.add_troops(nation, nation_troops);
+        game.add_troops(enemy, enemy_troops);
+
+        assert!(game.player_by_small_id(nation).unwrap().tiles_owned > 0);
+        Some(NukedEnv { game, nation, enemy })
+    }
+
+    /// New outgoing attacks (owner == `owner`) not present in `before`.
+    fn new_outgoing_attacks(
+        game: &Game,
+        owner: u16,
+        before: &[(u16, u16, f64, bool, bool, usize, usize)],
+    ) -> Vec<(u16, u16, f64, bool, bool, usize, usize)> {
+        game.active_attacks_debug()
+            .into_iter()
+            .filter(|a| a.0 == owner && !before.contains(a))
+            .collect()
+    }
+
+    #[test]
+    fn nearby_excludes_directly_adjacent_nuked_terra_nullius() {
+        let Some(NukedEnv { game, nation, .. }) =
+            setup_behavior("Impossible", false, true, 5_000_000.0, 50_000.0, None)
+        else {
+            return;
+        };
+
+        // Sanity: the nation really borders nuked land.
+        assert!(is_bordering_nuked_territory(&game, nation));
+
+        // nearby() must not report TerraNullius (it's all nuked), and with no
+        // enemy there are no player neighbours either.
+        let nearby = nearby_players_ts_order(&game, nation);
+        assert!(nearby.is_empty(), "nearby={nearby:?} should be empty");
+    }
+
+    #[test]
+    fn maybe_attack_does_not_preempt_retaliation_with_nuked_tn_attack() {
+        // Nation borders nuked TN (east/north/south) and an enemy (west). The
+        // enemy attacks the nation. On Impossible `retaliate` is the first
+        // strategy, but with the bug the early gate fires first and attacks
+        // TerraNullius, so retaliation never runs. The nation has far more
+        // troops than the enemy so `retaliate`'s attack is not rejected as
+        // "too weak".
+        let Some(NukedEnv { mut game, nation, enemy }) =
+            setup_behavior("Impossible", true, true, 5_000_000.0, 50_000.0, None)
+        else {
+            return;
+        };
+
+        // Native hardcodes `nation_spawn_immunity_duration()` to 50 ticks
+        // (TS's test config overrides it to 0) - tick past it so the
+        // enemy's (Human) attack on the nation (Nation) isn't self-cancelled
+        // by `can_attack_player`'s immunity check.
+        for _ in 0..60 {
+            game.execute_next_tick();
+        }
+
+        let nation_id = game.player_by_small_id(nation).unwrap().id.clone();
+        game.add_land_attack(enemy, Some(nation_id), Some(100_000.0));
+        game.execute_next_tick();
+        assert!(!game.incoming_attacks(nation, false).is_empty());
+
+        let before = game.active_attacks_debug();
+        let mut random = PseudoRandom::new(42);
+        let mut sent = 0.0;
+        nation_maybe_attack(&mut game, &mut random, nation, 0.0, 0.0, 0.0, &mut sent, "Impossible", None);
+        game.execute_next_tick();
+
+        let attacks = new_outgoing_attacks(&game, nation, &before);
+        assert!(!attacks.is_empty(), "expected at least one new outgoing attack");
+        for a in &attacks {
+            assert_eq!(a.1, enemy, "expected retaliation against the enemy, not TerraNullius");
+        }
+    }
+
+    #[test]
+    fn maybe_attack_early_gate_bypassed_when_only_nuked_tn_borders() {
+        // No enemy, no incoming attack. The early gate must NOT fire (there
+        // is no non-nuked TN). `attackBestTarget` falls through to the
+        // `nuked` strategy, which dispatches a land attack on TerraNullius.
+        let Some(NukedEnv { mut game, nation, .. }) =
+            setup_behavior("Impossible", false, true, 5_000_000.0, 50_000.0, None)
+        else {
+            return;
+        };
+        assert!(game.incoming_attacks(nation, false).is_empty());
+
+        let before = game.active_attacks_debug();
+        let mut random = PseudoRandom::new(42);
+        let mut sent = 0.0;
+        nation_maybe_attack(&mut game, &mut random, nation, 0.0, 0.0, 0.0, &mut sent, "Impossible", None);
+        game.execute_next_tick();
+
+        let attacks = new_outgoing_attacks(&game, nation, &before);
+        assert!(!attacks.is_empty(), "expected at least one new outgoing attack");
+        let tn = game.terra_nullius_id();
+        for a in &attacks {
+            assert_eq!(a.1, tn, "expected a TerraNullius attack, got target {}", a.1);
+        }
+    }
+
+    #[test]
+    fn nuked_strategy_captures_tiles_when_idle() {
+        let Some(NukedEnv { mut game, nation, .. }) =
+            setup_behavior("Impossible", false, true, 5_000_000.0, 50_000.0, None)
+        else {
+            return;
+        };
+
+        let before = game.active_attacks_debug();
+        let mut random = PseudoRandom::new(42);
+        let mut sent = 0.0;
+        nation_maybe_attack(&mut game, &mut random, nation, 0.0, 0.0, 0.0, &mut sent, "Impossible", None);
+        game.execute_next_tick();
+
+        let attacks = new_outgoing_attacks(&game, nation, &before);
+        assert!(!attacks.is_empty());
+        let tn = game.terra_nullius_id();
+        for a in &attacks {
+            assert_eq!(a.1, tn);
+        }
+
+        // Let the AttackExecution make progress. The nation should conquer
+        // at least one previously-nuked tile east of its territory (x >= 80).
+        for _ in 0..60 {
+            game.execute_next_tick();
+        }
+        let mut conquered_east = 0;
+        for x in 80..120 {
+            for y in 60..100 {
+                let t = game.ref_xy(x, y);
+                if game.map.owner_id(t) == nation {
+                    conquered_east += 1;
+                }
+            }
+        }
+        assert!(conquered_east > 0, "expected the nation to conquer nuked land east of its territory");
+    }
+
+    #[test]
+    fn easy_difficulty_nuked_strategy_still_fires_when_idle() {
+        let Some(NukedEnv { mut game, nation, .. }) =
+            setup_behavior("Easy", false, true, 5_000_000.0, 50_000.0, None)
+        else {
+            return;
+        };
+
+        let before = game.active_attacks_debug();
+        let mut random = PseudoRandom::new(42);
+        let mut sent = 0.0;
+        nation_maybe_attack(&mut game, &mut random, nation, 0.0, 0.0, 0.0, &mut sent, "Easy", None);
+        game.execute_next_tick();
+
+        // On Easy the `nuked` strategy is first, so it dispatches a TN attack.
+        let attacks = new_outgoing_attacks(&game, nation, &before);
+        assert!(!attacks.is_empty());
+        let tn = game.terra_nullius_id();
+        for a in &attacks {
+            assert_eq!(a.1, tn);
+        }
+    }
+
+    #[test]
+    fn missile_silo_disabled_disables_nuked_strategy() {
+        // `isBorderingNukedTerritory` returns false when MissileSilo is
+        // disabled, so even with nuked TN on the border the `nuked` strategy
+        // does NOT fire and no attack is created.
+        let Some(NukedEnv { mut game, nation, .. }) = setup_behavior(
+            "Impossible",
+            false,
+            true,
+            5_000_000.0,
+            50_000.0,
+            Some(vec![crate::core::schemas::unit_type::MISSILE_SILO.to_string()]),
+        ) else {
+            return;
+        };
+
+        let before = game.active_attacks_debug();
+        let mut random = PseudoRandom::new(42);
+        let mut sent = 0.0;
+        nation_maybe_attack(&mut game, &mut random, nation, 0.0, 0.0, 0.0, &mut sent, "Impossible", None);
+        game.execute_next_tick();
+
+        let attacks = new_outgoing_attacks(&game, nation, &before);
+        assert!(attacks.is_empty(), "expected no attack, got {attacks:?}");
     }
 }
