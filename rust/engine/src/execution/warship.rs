@@ -340,7 +340,19 @@ impl WarshipExecution {
         }
     }
 
+    /// TS `healWarship()`'s leading `if (owner.inDoomsdayClock()) return;` - a doomed side
+    /// can't repair its navy, so `DoomsdayClockExecution`'s decay actually sinks warships
+    /// instead of being out-healed at a port. Inert when the mode is off (the mark is never
+    /// set), and shared by both `heal_near_port` (passive) and `heal_at_dock` (active
+    /// docked healing), matching TS's single early return covering both call sites.
+    fn owner_is_doomed(&self, game: &Game) -> bool {
+        game.in_doomsday_clock(self.owner_small_id)
+    }
+
     fn heal_near_port(&self, game: &mut Game, from: TileRef, unit_id: i32) {
+        if self.owner_is_doomed(game) {
+            return;
+        }
         let near_port = game
             .player_by_small_id(self.owner_small_id)
             .is_some_and(|owner| {
@@ -370,6 +382,9 @@ impl WarshipExecution {
     }
 
     fn heal_at_dock(&self, game: &mut Game, unit_id: i32) {
+        if self.owner_is_doomed(game) {
+            return;
+        }
         let healing = self
             .retreat_port
             .and_then(|port| {
@@ -589,6 +604,79 @@ mod tests {
             ..Default::default()
         });
         (game, 1, 2)
+    }
+
+    fn solo_setup() -> (Game, u16) {
+        let mut game = Game::default();
+        game.add_player(Player {
+            id: "p1".to_string(),
+            small_id: 1,
+            player_type: PlayerType::Human,
+            ..Default::default()
+        });
+        (game, 1)
+    }
+
+    // Ported from `Warship.test.ts`'s "Warship heals only if player has port". Drives
+    // `WarshipExecution::tick` directly via `new_for_test` (bypasses `init()`'s
+    // water-component port lookup - see that constructor's doc comment) since only the
+    // passive-healing branch is under test, not spawn/patrol geometry.
+    #[test]
+    fn warship_heals_only_if_player_has_port() {
+        let (mut game, p1) = solo_setup();
+        let tile = game.ref_xy(0, 0);
+        let port_id = game.build_unit(p1, unit_type::PORT, tile);
+        let ship_id = game.build_unit(p1, unit_type::WARSHIP, tile);
+        let max_health = game.unit_max_health(p1, ship_id);
+        let mut exec = WarshipExecution::new_for_test(p1, tile, ship_id);
+
+        exec.tick(&mut game, 1);
+        assert_eq!(game.unit(p1, ship_id).unwrap().health, max_health);
+
+        game.unit_mut(p1, ship_id).unwrap().health -= 10;
+        assert_eq!(game.unit(p1, ship_id).unwrap().health, max_health - 10);
+        exec.tick(&mut game, 2);
+        assert_eq!(game.unit(p1, ship_id).unwrap().health, max_health - 9);
+
+        game.remove_unit(p1, port_id);
+        exec.tick(&mut game, 3);
+        assert_eq!(
+            game.unit(p1, ship_id).unwrap().health,
+            max_health - 9,
+            "no port nearby means no passive heal"
+        );
+    }
+
+    // Ported from `Warship.test.ts`'s "Warship does not heal while its owner is doomed
+    // (Doomsday Clock)" - pins the bug `owner_is_doomed`'s addition to `heal_near_port`/
+    // `heal_at_dock` fixed (native previously had no Doomsday Clock check in either at
+    // all, so a doomed side's navy kept out-healing the clock's drain indefinitely).
+    #[test]
+    fn warship_does_not_heal_while_owner_is_doomed() {
+        let (mut game, p1) = solo_setup();
+        let tile = game.ref_xy(0, 0);
+        game.build_unit(p1, unit_type::PORT, tile);
+        let ship_id = game.build_unit(p1, unit_type::WARSHIP, tile);
+        let max_health = game.unit_max_health(p1, ship_id);
+        let mut exec = WarshipExecution::new_for_test(p1, tile, ship_id);
+        exec.tick(&mut game, 1);
+
+        // Damaged next to a port, it heals normally (+1 passive heal per tick).
+        game.unit_mut(p1, ship_id).unwrap().health -= 10;
+        assert_eq!(game.unit(p1, ship_id).unwrap().health, max_health - 10);
+        exec.tick(&mut game, 2);
+        assert_eq!(game.unit(p1, ship_id).unwrap().health, max_health - 9);
+
+        // Once the owner is flagged by the clock, healing is suppressed even next to a
+        // port, so the decay in `DoomsdayClockExecution` can actually sink the fleet.
+        game.enter_doomsday_clock(p1);
+        exec.tick(&mut game, 3);
+        assert_eq!(game.unit(p1, ship_id).unwrap().health, max_health - 9); // no heal while doomed
+
+        // Climbing back above the bar clears the mark and healing resumes.
+        game.clear_doomsday_clock(p1);
+        exec.tick(&mut game, 4);
+        assert_eq!(game.unit(p1, ship_id).unwrap().health, max_health - 8);
     }
 
     #[test]
