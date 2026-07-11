@@ -40,12 +40,50 @@ pub fn map_dir(repo_root: &Path, map_key: &str) -> PathBuf {
         .join(normalize_map_key(map_key))
 }
 
+/// Resolve a map directory for archived-record replay, preferring a frozen
+/// per-commit asset snapshot over the live `openfront/` submodule checkout
+/// when one has been fetched (`rust/scripts/fetch_test_fixture_maps.sh`).
+///
+/// Map binaries (`map.bin`/`manifest.json`) are ordinary tracked assets in
+/// upstream `openfront` and get rebalanced/redrawn over time just like any
+/// other game content - they are **not** pinned to `PARITY_COMMIT` the way
+/// TS source/behavior is expected to be for archived-record parity. Once the
+/// live submodule advances past whatever commit an archived record's terrain
+/// was generated against, replaying that record against the *current* map
+/// silently diverges from the very first tick any tile geometry differs
+/// (e.g. a coastline tweak shifting which spawn tiles are land) - not a
+/// native-vs-TS logic bug, just a stale terrain snapshot. Falls back to the
+/// live submodule checkout when no frozen snapshot exists (the common case
+/// for everything that isn't an old archived-record fixture).
+pub fn map_dir_for_commit(repo_root: &Path, map_key: &str, git_commit: Option<&str>) -> PathBuf {
+    if let Some(commit) = git_commit {
+        let short: String = commit.chars().take(12).collect();
+        let frozen = repo_root
+            .join("records/frozen-maps")
+            .join(&short)
+            .join(normalize_map_key(map_key));
+        if frozen.join("manifest.json").exists() {
+            return frozen;
+        }
+    }
+    map_dir(repo_root, map_key)
+}
+
 pub fn load_fresh_terrain(
     repo_root: &Path,
     map_key: &str,
     map_size: GameMapSize,
 ) -> Result<TerrainMapData, String> {
     load_fresh_terrain_from_dir(&map_dir(repo_root, map_key), map_size)
+}
+
+pub fn load_fresh_terrain_for_commit(
+    repo_root: &Path,
+    map_key: &str,
+    map_size: GameMapSize,
+    git_commit: Option<&str>,
+) -> Result<TerrainMapData, String> {
+    load_fresh_terrain_from_dir(&map_dir_for_commit(repo_root, map_key, git_commit), map_size)
 }
 
 pub fn load_fresh_terrain_from_dir(

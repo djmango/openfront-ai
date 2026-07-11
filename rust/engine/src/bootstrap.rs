@@ -4,7 +4,7 @@ use crate::bot::tribe_spawner::TribeSpawner;
 use crate::core::config::Config;
 use crate::core::nation::create_nations_for_game;
 use crate::core::schemas::GameConfig as WireGameConfig;
-use crate::core::terrain::{load_fresh_terrain, GameMapSize};
+use crate::core::terrain::{load_fresh_terrain_for_commit, GameMapSize};
 use crate::execution::{
     ExecEnum, NationExecution, NationRuntime, RecomputeRailClusterExecution, SpawnExecution,
     SpawnTimerExecution, WinCheckExecution,
@@ -22,7 +22,8 @@ pub fn game_from_record(repo_root: &Path, record: &GameRecord) -> Result<Game, S
         .map_err(|e| format!("config: {e}"))?;
     let map_key = wire.game_map.clone();
     let map_size = GameMapSize::parse(&wire.game_map_size).unwrap_or(GameMapSize::Normal);
-    let terrain = load_fresh_terrain(repo_root, &map_key, map_size)?;
+    let terrain =
+        load_fresh_terrain_for_commit(repo_root, &map_key, map_size, record.git_commit.as_deref())?;
 
     let game_id = record.info.game_id.clone();
     let stub_config = GameConfig {
