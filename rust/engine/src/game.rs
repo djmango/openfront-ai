@@ -3427,6 +3427,146 @@ mod player_alliance_list_tests {
     }
 }
 
+// Ported from AllianceAcceptNukes.test.ts. That TS test forces the
+// nuke-cancellation weight check to fire regardless of tile-ownership shape
+// by monkeypatching `nukeAllianceBreakThreshold` to 0; native hardcodes this
+// threshold at TS's own default (100, see `WireConfig::nuke_alliance_break_threshold`)
+// with no per-instance override, so these tests instead use the
+// threshold-independent "nuke targets a tile with a structure owned by the
+// ally" inclusion path in `Util.listNukeBreakAlliance` (mirrored natively by
+// `list_nuke_break_alliance`'s `nearby_structures_any` branch) - same
+// approach as `nuke_execution.rs`'s
+// `nuke_at_a_players_structure_revokes_the_nukers_pending_alliance_request`.
+// This also needs >1 distinct tile (to give the "only nukes between allied
+// players" test two different nuke targets), so unlike every other test in
+// this file it builds its own tiny synthetic map instead of using
+// `Game::default()`'s degenerate 1x1 one.
+#[cfg(test)]
+mod alliance_accept_nukes_tests {
+    use super::{Game, GameConfig, PlayerInfo, PlayerType};
+    use crate::core::config::Config as WireConfig;
+    use crate::core::schemas::unit_type;
+    use crate::map::{GameMap, MapMeta};
+
+    // Wide enough that two targets placed far apart don't both fall within a
+    // single atom bomb's outer blast radius (30 tiles, see
+    // `WireConfig::nuke_magnitudes`) of each other - otherwise a City near one
+    // target would spuriously count as "in range" of a nuke aimed at the other.
+    const MAP_WIDTH: u32 = 100;
+
+    fn small_land_map_game() -> Game {
+        let meta = MapMeta {
+            width: MAP_WIDTH,
+            height: 1,
+            num_land_tiles: MAP_WIDTH,
+        };
+        let terrain = vec![0x80u8; MAP_WIDTH as usize];
+        let map = GameMap::from_terrain_bytes(&meta, &terrain).unwrap();
+        let mini_map = GameMap::from_terrain_bytes(&meta, &terrain).unwrap();
+        let wire_cfg = crate::core::schemas::GameConfig {
+            game_map: "Onion".into(),
+            difficulty: "Medium".into(),
+            donate_gold: false,
+            donate_troops: false,
+            game_type: "Singleplayer".into(),
+            game_mode: "Free For All".into(),
+            game_map_size: "Normal".into(),
+            nations: crate::core::schemas::NationsConfig::Mode("default".into()),
+            bots: 0,
+            infinite_gold: false,
+            infinite_troops: false,
+            instant_build: false,
+            random_spawn: false,
+            doomsday_clock: None,
+            disabled_units: None,
+            player_teams: None,
+            disable_alliances: None,
+            spawn_immunity_duration: None,
+            starting_gold: None,
+            gold_multiplier: None,
+            max_timer_value: None,
+            ranked_type: None,
+        };
+        let mut game = Game::new(
+            String::new(),
+            GameConfig::default(),
+            WireConfig::new(wire_cfg, false),
+            map,
+            mini_map,
+            None,
+        );
+        game.end_spawn_phase();
+        game
+    }
+
+    fn add_human(game: &mut Game, id: &str) -> u16 {
+        let sid = game.add_from_info(&PlayerInfo {
+            name: id.into(),
+            player_type: PlayerType::Human,
+            client_id: Some(id.into()),
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        });
+        game.player_by_small_id_mut(sid).unwrap().tiles_owned = 1;
+        sid
+    }
+
+    #[test]
+    fn accepting_an_alliance_destroys_in_flight_nukes_between_the_new_allies() {
+        let mut game = small_land_map_game();
+        let player1 = add_human(&mut game, "player1");
+        let player2 = add_human(&mut game, "player2");
+
+        let target = game.map.ref_xy(1, 0);
+        game.build_unit(player2, unit_type::CITY, target);
+        let nuke = game.build_unit(player1, unit_type::ATOM_BOMB, game.map.ref_xy(0, 0));
+        game.unit_mut(player1, nuke).unwrap().target_tile = Some(target);
+
+        assert!(!game.is_allied_with(player1, player2));
+
+        assert!(game.create_alliance_request(player1, player2, game.ticks()));
+        assert!(game.create_alliance_request(player2, player1, game.ticks()));
+
+        assert!(game.is_allied_with(player1, player2));
+        assert!(!game.unit_exists(player1, nuke));
+    }
+
+    #[test]
+    fn accepting_an_alliance_destroys_only_nukes_targeting_the_new_ally() {
+        let mut game = small_land_map_game();
+        let player1 = add_human(&mut game, "player1");
+        let player2 = add_human(&mut game, "player2");
+        let player3 = add_human(&mut game, "player3");
+
+        let target2 = game.map.ref_xy(1, 0);
+        let target3 = game.map.ref_xy(90, 0);
+        game.build_unit(player2, unit_type::CITY, target2);
+        game.build_unit(player3, unit_type::CITY, target3);
+
+        let nuke_to_2 = game.build_unit(player1, unit_type::ATOM_BOMB, game.map.ref_xy(0, 0));
+        game.unit_mut(player1, nuke_to_2).unwrap().target_tile = Some(target2);
+        let nuke_to_3 = game.build_unit(player1, unit_type::ATOM_BOMB, game.map.ref_xy(0, 0));
+        game.unit_mut(player1, nuke_to_3).unwrap().target_tile = Some(target3);
+
+        assert!(!game.is_allied_with(player1, player2));
+
+        // Both requests created in the same call, mirroring the TS test's "both
+        // added in the same tick" setup.
+        assert!(game.create_alliance_request(player1, player2, game.ticks()));
+        assert!(game.create_alliance_request(player2, player1, game.ticks()));
+
+        assert!(game.is_allied_with(player1, player2));
+        assert!(!game.unit_exists(player1, nuke_to_2));
+        assert!(game.unit_exists(player1, nuke_to_3));
+        assert_eq!(
+            game.unit_mut(player1, nuke_to_3).unwrap().target_tile,
+            Some(target3)
+        );
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct TickUpdates {
     pub hash: Option<HashUpdate>,
