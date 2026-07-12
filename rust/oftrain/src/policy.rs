@@ -654,8 +654,28 @@ impl PolicyNet {
         let build = self.head_build.forward(&h) + (&o.legal_build - 1.0) * (-MASKED_NEG);
         let nuke = self.head_nuke.forward(&h) + (&o.legal_nuke - 1.0) * (-MASKED_NEG);
         let quantity = self.head_quantity.forward(&h);
-        let value = self.head_value.forward(&h).squeeze_dim(-1);
+        let value = Self::sanitize_value(&self.head_value.forward(&h).squeeze_dim(-1));
         (act_logits, player_logits, tile_coarse, tile_fine, build, nuke, quantity, value, p, coarse_grid)
+    }
+
+    /// `train.rs`'s `ret_clip` only bounds the value *target* before the
+    /// loss ever sees it - nothing ever bounded the value *head's own
+    /// prediction*. A live run showed the value loss spike to 26.5
+    /// BILLION in a single update (recovered from a mid-hundreds-of-
+    /// thousands baseline that Huber/ret_clip were already failing to
+    /// keep under control), which given Huber's bounded gradient can only
+    /// come from the raw *prediction* itself drifting to a similarly
+    /// extreme magnitude - i.e. the same "nothing bounds the network's
+    /// own output" gap that `LOGIT_CLAMP_MAX`/`QUANTITY_AB_MAX` closed for
+    /// the policy heads, just not yet closed for the value head. Clamping
+    /// (and sanitizing NaN/Inf, same rationale as `sanitize_logits`) here
+    /// keeps a single bad prediction from ever producing a loss so large
+    /// it destabilizes the whole batch, and keeps the value head from
+    /// becoming miscalibrated to the point of corrupting every advantage
+    /// estimate derived from it.
+    const VALUE_CLAMP_ABS: f64 = 1.0e4;
+    fn sanitize_value(value: &Tensor) -> Tensor {
+        value.nan_to_num(0.0, Self::VALUE_CLAMP_ABS, -Self::VALUE_CLAMP_ABS).clamp(-Self::VALUE_CLAMP_ABS, Self::VALUE_CLAMP_ABS)
     }
 
     fn coarse_dims(coarse_grid: &Tensor) -> (i64, i64) {
@@ -897,7 +917,7 @@ impl PolicyNet {
 
     pub fn value_only(&self, o: &Obs) -> Tensor {
         let (h, _, _, _, _) = self.trunk_forward(o);
-        self.head_value.forward(&h).squeeze_dim(-1)
+        Self::sanitize_value(&self.head_value.forward(&h).squeeze_dim(-1))
     }
 }
 
@@ -1448,6 +1468,22 @@ mod logit_clamp_tests {
         let b_v: f64 = b.double_value(&[0, 0]);
         assert!(a_v.is_finite(), "alpha must be finite for a NaN raw param, got {a_v}");
         assert!(b_v.is_finite(), "beta must be finite for a -inf raw param, got {b_v}");
+    }
+
+    #[test]
+    fn value_head_output_is_bounded_and_nan_safe() {
+        // Directly exercises PolicyNet::sanitize_value (same rationale as
+        // sanitize_logits, applied to the value head this time - a live
+        // run's value loss spiked to 26.5 billion in one update, which
+        // given Huber's bounded gradient could only come from the raw
+        // value *prediction* itself, not the (already ret-clipped) target).
+        let huge = Tensor::from_slice(&[1.0e9f32, -1.0e9f32, f32::NAN, f32::INFINITY]);
+        let sanitized = PolicyNet::sanitize_value(&huge);
+        let v: Vec<f64> = (0..4).map(|i| sanitized.double_value(&[i])).collect();
+        for x in &v {
+            assert!(x.is_finite(), "value must stay finite, got {v:?}");
+            assert!(x.abs() <= PolicyNet::VALUE_CLAMP_ABS, "value must stay bounded, got {v:?}");
+        }
     }
 
     #[test]
