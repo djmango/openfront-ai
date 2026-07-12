@@ -92,10 +92,8 @@ pub fn consider_mirv(
         return false;
     }
     let mirv_cost = game.structure_cost(small_id, unit_type::MIRV);
-    if game
-        .player_by_small_id(small_id)
-        .is_none_or(|p| p.gold < mirv_cost)
-    {
+    let gold = game.player_by_small_id(small_id).map(|p| p.gold).unwrap_or(0);
+    if gold < mirv_cost {
         return false;
     }
 
@@ -129,11 +127,14 @@ pub fn consider_mirv(
 }
 
 /// TS `NationMIRVBehavior.getValidMirvTargetPlayers()`.
+///
+/// Mirrors `game.players()` (alive only), not `allPlayers()`.
 fn valid_mirv_target_players(game: &Game, small_id: u16) -> Vec<&Player> {
     game.all_players()
         .iter()
         .filter(|p| {
-            p.small_id != small_id
+            p.alive
+                && p.small_id != small_id
                 && p.player_type != PlayerType::Bot
                 && !game.players_on_same_team(small_id, p.small_id)
         })
@@ -175,10 +176,11 @@ fn select_victory_denial_target(game: &Game, small_id: u16, difficulty: &str) ->
     for p in valid_mirv_target_players(game, small_id) {
         let mut severity = 0.0;
         if let Some(team) = p.team.as_deref() {
+            // TS `game.players().filter(x => x.team() === team && x.isPlayer())`.
             let team_members: Vec<&Player> = game
                 .all_players()
                 .iter()
-                .filter(|x| x.team.as_deref() == Some(team))
+                .filter(|x| x.alive && x.team.as_deref() == Some(team))
                 .collect();
             let team_territory: i64 = team_members.iter().map(|x| x.tiles_owned as i64).sum();
             let team_share = team_territory as f64 / total_land as f64;
@@ -217,10 +219,16 @@ fn select_steamroll_stop_target(game: &Game, small_id: u16, difficulty: &str) ->
         return None;
     }
 
+    // TS ranks with `p.unitCount(UnitType.City)` which sums city *levels*, not
+    // unit cardinality. Using `unit_count` here made native over-trigger steamroll
+    // MIRVs whenever the leader had more city buildings but a smaller level gap
+    // (e.g. many L1 cities vs fewer upgraded ones) — seen as Egypt MIRV @ 15888
+    // on curr-b030-s0-pangaea while TS correctly stayed put.
     let mut all_players: Vec<(u16, i64)> = game
         .all_players()
         .iter()
-        .map(|p| (p.small_id, game.unit_count(p.small_id, unit_type::CITY) as i64))
+        .filter(|p| p.alive)
+        .map(|p| (p.small_id, game.unit_level_sum(p.small_id, unit_type::CITY) as i64))
         .collect();
     if all_players.len() < 2 {
         return None;
@@ -492,6 +500,49 @@ mod tests {
         assert_eq!(
             select_steamroll_stop_target(&game, nation, "Medium"),
             Some(steamroller)
+        );
+    }
+
+    /// Regression: TS ranks by `unitCount(City)` (sum of levels). A leader with
+    /// many L1 cities can clear a 2x *unit* gap while losing a 2x *level* gap to
+    /// a second place with fewer, upgraded cities — native must not MIRV then.
+    #[test]
+    fn select_steamroll_stop_target_uses_city_level_sum_not_unit_cardinality() {
+        let mut game = crate::test_util::plains_game(20, 20);
+        let nation = add_player(&mut game, "nation", PlayerType::Nation, None);
+        let many_l1 = add_player(&mut game, "many_l1", PlayerType::Human, None);
+        let few_upgraded = add_player(&mut game, "few_upgraded", PlayerType::Human, None);
+
+        let a_tile = game.ref_xy(0, 0);
+        game.conquer(many_l1, a_tile);
+        // 9 L1 cities: unit_count=9, level_sum=9. Easy min-leader is 20, so use Medium (10).
+        // Against Medium: need >10 and >= second*1.5.
+        for _ in 0..12 {
+            game.build_unit(many_l1, unit_type::CITY, a_tile);
+        }
+        let b_tile = game.ref_xy(1, 0);
+        game.conquer(few_upgraded, b_tile);
+        // 5 cities upgraded to level 3 → unit_count=5, level_sum=15.
+        // unit_count gap: 12 >= 5*1.5=7.5 → would wrongly fire.
+        // level_sum gap: 12 >= 15*1.5=22.5 → correctly stays quiet.
+        for _ in 0..5 {
+            let id = game.build_unit(few_upgraded, unit_type::CITY, b_tile);
+            if let Some(u) = game.unit_mut(few_upgraded, id) {
+                u.level = 3;
+            }
+        }
+        game.conquer(nation, game.ref_xy(2, 0));
+
+        assert_eq!(
+            game.unit_count(many_l1, unit_type::CITY),
+            12,
+            "sanity: unit cardinality gap would look like a steamroll"
+        );
+        assert_eq!(game.unit_level_sum(few_upgraded, unit_type::CITY), 15);
+        assert_eq!(
+            select_steamroll_stop_target(&game, nation, "Medium"),
+            None,
+            "must rank by city level sum like TS unitCount(City)"
         );
     }
 
