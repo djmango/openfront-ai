@@ -21,6 +21,7 @@ anyhow = "1"
 flate2 = "1"
 base64 = "0.22"
 crossbeam-channel = "0.5"
+libc = "0.2"
 # In-process native engine (same workspace since the rust-ofrs-fast merge).
 openfront-engine = { path = "../engine", optional = true }
 

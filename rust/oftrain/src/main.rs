@@ -241,7 +241,66 @@ fn parse_device(s: &str) -> Device {
     }
 }
 
+/// Mirrors PyTorch's own `torch/__init__.py::_preload_cuda_deps()`: when
+/// libtorch is a "split" pip wheel install (each CUDA component - cublas,
+/// cudnn, cusparse, nccl, etc. - its own separate `nvidia-*-cu12` package,
+/// as opposed to one monolithic system libtorch), Python's loader
+/// `ctypes.CDLL(path, mode=RTLD_GLOBAL)`s each of these .so files in a
+/// specific dependency order *before* the C extension that actually calls
+/// into CUDA loads. A plain Rust binary linking against the same libraries
+/// via normal ELF DT_NEEDED/lazy-binding does NOT replicate this - `ldd`
+/// resolves every library fine, but `cudaGetDeviceCount` still fails with
+/// "CUDA unknown error" at runtime (reproduced directly: this exact
+/// combination of libs works from `python3 -c "import torch; ..."` in the
+/// same environment/LD_LIBRARY_PATH, but panics from `oftrain` otherwise -
+/// see docs/devlog or the PR that added this for the full bisection). Only
+/// matters for a split pip-wheel libtorch, so failing silently (missing
+/// `nvidia/` dir entirely, e.g. a monolithic/system libtorch) is fine - the
+/// binary just proceeds exactly as it did before this existed.
+fn preload_cuda_deps() {
+    // LIBTORCH's own lib dir is a sibling of the `nvidia/` package dir this
+    // hunts for (`<venv>/.../site-packages/{torch,nvidia}/`) - reuse
+    // whichever the binary was actually linked against (LD_LIBRARY_PATH,
+    // set by the launch script) rather than hardcoding a venv path.
+    let Ok(ld_path) = std::env::var("LD_LIBRARY_PATH") else { return };
+    // Rough dependency order (cublasLt before cublas, cusparse/cublas
+    // before cusolver, etc.) - matches the order torch's own preloader
+    // uses; harmless if a library has no such ordering constraint.
+    const ORDER: &[&str] = &[
+        "cusparselt", "nvtx", "nvjitlink", "cuda_nvrtc", "cuda_runtime", "cuda_cupti", "cublas",
+        "cufft", "curand", "cudnn", "cusparse", "cusolver", "nccl", "cufile", "nvshmem",
+    ];
+    let dirs: Vec<&str> = ld_path.split(':').collect();
+    // Drive the walk from ORDER, not from LD_LIBRARY_PATH's own entry
+    // order, so load order matches torch's regardless of how the launch
+    // script happened to list these directories.
+    for pkg in ORDER {
+        let Some(base) = dirs.iter().find(|dir| {
+            std::path::Path::new(dir).parent().and_then(|p| p.file_name()).and_then(|n| n.to_str())
+                == Some(*pkg)
+        }) else {
+            continue;
+        };
+        let Ok(entries) = std::fs::read_dir(base) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            if !name.starts_with("lib") || !name.contains(".so") {
+                continue;
+            }
+            let Ok(cpath) = std::ffi::CString::new(path.as_os_str().to_string_lossy().as_bytes())
+            else {
+                continue;
+            };
+            unsafe {
+                libc::dlopen(cpath.as_ptr(), libc::RTLD_GLOBAL | libc::RTLD_NOW);
+            }
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
+    preload_cuda_deps();
     let args = Args::parse();
     tch::manual_seed(0);
     let device = parse_device(&args.device);
