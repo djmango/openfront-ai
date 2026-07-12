@@ -16,6 +16,7 @@ use ofcore::curriculum::{
 use ofcore::feat::{self, ACTIONS, IS_LAND_BIT, MAG_MASK, REGION};
 use ofcore::translate::{translate, Choice, IntentTranslator};
 
+use crate::ae::{self, AeRaw};
 use crate::engine::{self, EngineKind, GameEngine, RawObs};
 
 pub struct EpisodeInfo {
@@ -33,12 +34,32 @@ pub struct EpisodeInfo {
     pub rehearsal: bool,
 }
 
-/// Fully assembled per-env observation, ready to batch into
-/// `policy::Obs` tensors. `grid` channel order matches `policy::C_GRID`:
-/// stat(6) + ego(3) + defense_bonus(1) + transient(53) - see policy.rs's
-/// module doc for why this is a placeholder for the real AE latent.
+/// Per-env observation ready to batch into `policy::Obs`.
+///
+/// Production path (`batch::build_obs` with an `AePair`): GPU AE encode
+/// replaces the old 6ch `stat` placeholder with a 32ch latent, yielding
+/// `C_GRID = 89 = latent(32) + ego(3) + db(1) + transient(53)`.
+///
+/// `grid` is only filled for the no-AE test/legacy path (63ch
+/// stat+ego+db+transient); training always passes an AE and rebuilds
+/// `grid` inside `build_obs`.
 pub struct PreparedObs {
-    pub grid: Vec<f32>,         // (C_GRID, gh, gw)
+    /// Optional pre-assembled fine grid (C_GRID, gh, gw). Filled by the
+    /// actor encode path so the learner can rebuild Obs without holding an
+    /// AE (tch Optimizer/Tensor are !Sync across shard batch-build threads).
+    pub grid: Option<Vec<f32>>,
+    /// Optional native /16 coarse grid (C_GRID, cgh, cgw).
+    pub grid_coarse: Option<Vec<f32>>,
+    pub cgh: usize,
+    pub cgw: usize,
+    /// Full-res AE inputs for batched GPU encode.
+    pub ae_raw: AeRaw,
+    /// Pooled ego fractions at /8: (3, gh, gw).
+    pub ego: Vec<f32>,
+    /// Pooled defense bonus at /8: (1, gh, gw).
+    pub db: Vec<f32>,
+    /// Transient planes at /8: (53, gh, gw).
+    pub transient: Vec<f32>,
     pub legal_tile: Vec<f32>,   // (gh, gw)
     pub gh: usize,
     pub gw: usize,
@@ -220,16 +241,25 @@ impl EnvWorker {
             wr,
             crate::policy::LOCAL as usize,
         );
-        let plane = gh * gw;
-        let mut grid = Vec::with_capacity(crate::policy::C_GRID as usize * plane);
-        grid.extend_from_slice(&f.stat);
-        grid.extend_from_slice(&ego);
-        grid.extend_from_slice(&db);
-        grid.extend_from_slice(&f.transient);
-        debug_assert_eq!(grid.len(), crate::policy::C_GRID as usize * plane);
+        let owners_i64: Vec<i64> = owners_slotted.iter().map(|&o| o as i64).collect();
+        let terrain = ae::pack_terrain(&self.land, &self.mag, &fallout, hr, wr);
+        let ae_raw = AeRaw {
+            owners: owners_i64,
+            terrain,
+            stat: f.stat,
+            hr,
+            wr,
+        };
 
         PreparedObs {
-            grid,
+            grid: None,
+            grid_coarse: None,
+            cgh: 0,
+            cgw: 0,
+            ae_raw,
+            ego,
+            db,
+            transient: f.transient,
             legal_tile: f.legal_tile,
             gh,
             gw,

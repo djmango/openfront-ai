@@ -33,15 +33,25 @@ fn main() {
     if os != "linux" {
         return;
     }
-    if let Ok(libtorch) = std::env::var("LIBTORCH") {
-        let lib_dir = format!("{libtorch}/lib");
+    let lib_dir = std::env::var("LIBTORCH").ok().map(|p| format!("{p}/lib"));
+    if let Some(ref lib_dir) = lib_dir {
         println!("cargo:rustc-link-search=native={lib_dir}");
         println!("cargo:rustc-link-arg=-Wl,-rpath,{lib_dir}");
     }
-    println!("cargo:rustc-link-arg=-Wl,--no-as-needed");
-    println!("cargo:rustc-link-arg=-ltorch_cuda");
-    println!("cargo:rustc-link-arg=-lc10_cuda");
-    println!("cargo:rustc-link-arg=-Wl,--as-needed");
+    // Only force-link CUDA when the shared libs are actually present
+    // (CUDA/GPU libtorch). A CPU-only wheel has no libtorch_cuda.so and
+    // would fail the link otherwise - still fine for unit tests / AE
+    // parity checks on CPU boxes.
+    let has_cuda = lib_dir
+        .as_ref()
+        .map(|d| std::path::Path::new(d).join("libtorch_cuda.so").exists())
+        .unwrap_or(false);
+    if has_cuda {
+        println!("cargo:rustc-link-arg=-Wl,--no-as-needed");
+        println!("cargo:rustc-link-arg=-ltorch_cuda");
+        println!("cargo:rustc-link-arg=-lc10_cuda");
+        println!("cargo:rustc-link-arg=-Wl,--as-needed");
+    }
 
     println!("cargo:rerun-if-env-changed=OFTRAIN_ROCM");
     if std::env::var("OFTRAIN_ROCM").as_deref() == Ok("1") {
