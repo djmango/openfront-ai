@@ -62,7 +62,7 @@ NODE_FRACTION="${NODE_FRACTION:-0}"
 # Frozen v8 launch config (see devlog): full policy (no --gc/--blocks
 # override), AMP on, pinned H2D on, entropy floor at its default. Override
 # via EXTRA_ARGS if deliberately deviating from the plan.
-EXTRA_ARGS="${EXTRA_ARGS:---amp --pinned-h2d --foveate --coarse-ckpt weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt weights/ae/ae_v31_d8c32.encoder.safetensors}"
+EXTRA_ARGS="${EXTRA_ARGS:---amp --pinned-h2d --foveate --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
 REPO_DIR="${REPO_DIR:-/root/openfront-ai}"
 CKPT_DIR="$REPO_DIR/rust/checkpoints/$RUN_NAME"
 HF_SYNC_INTERVAL_SECONDS="${HF_SYNC_INTERVAL_SECONDS:-600}"
