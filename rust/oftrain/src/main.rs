@@ -73,6 +73,19 @@ struct Args {
     #[arg(long, default_value_t = 3000.0)]
     ret_clip: f32,
 
+    /// PPO2-style value-prediction clipping (see `train::Config::vf_clip`'s
+    /// doc for the full mechanism/rationale). 0.0 disables it. Default
+    /// (50.0) intentionally much tighter than a single worst-case
+    /// per-step reward (~6.5) would suggest is needed for *normal*
+    /// learning - its job is specifically to bound how far a single
+    /// update can move any one sample's prediction, not to accommodate
+    /// legitimate variance in the returns themselves (that's `ret_clip`'s
+    /// job). Combined with `clip_grad_norm(0.5)` already bounding the
+    /// aggregate step, this is deliberately the tighter constraint of the
+    /// two on the value head specifically.
+    #[arg(long, default_value_t = 50.0)]
+    vf_clip: f32,
+
     /// Anneals linearly to `ent_coef_final` over `ent_anneal_updates`.
     #[arg(long, default_value_t = 0.01)]
     ent_coef: f32,
@@ -348,6 +361,7 @@ fn main() -> anyhow::Result<()> {
         clip: args.clip,
         vf_coef: args.vf_coef,
         ret_clip: args.ret_clip,
+        vf_clip: args.vf_clip,
         ent_coef: args.ent_coef,
         ent_coef_final: args.ent_coef_final,
         ent_anneal_updates: args.ent_anneal_updates,
