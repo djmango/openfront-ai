@@ -605,6 +605,22 @@ impl PolicyNet {
         let cat = Tensor::cat(&[&gc_pool, &gf_pool, &p_pool, &l_pool, &o.scalars], -1);
         let h = self.trunk1.forward(&cat).silu();
         let h = self.trunk2.forward(&h).silu();
+        // Single chokepoint for the whole forward pass: every head (value,
+        // action logits, quantity, tile, player) is derived from `h`/`p`/
+        // `gc_map`/`gf_map`, so sanitizing NaN/Inf here - rather than
+        // separately in each downstream head - protects all of them at
+        // once regardless of which upstream op (a manual-bf16-cast conv in
+        // `--amp`'s path is the prime suspect; see the entropy-collapse
+        // devlog entries) actually produced it. A live run showed exactly
+        // one of four independently-initialized shard replicas producing
+        // NaN value AND policy losses together from the very first
+        // minibatch - i.e. from a shared upstream tensor, not something
+        // head-specific - which is exactly what this guards against.
+        let sanitize = |t: &Tensor| t.nan_to_num(0.0, 1.0e4, -1.0e4);
+        let h = sanitize(&h);
+        let gc_map = sanitize(&gc_map);
+        let gf_map = sanitize(&gf_map);
+        let p = sanitize(&p);
         (h, gc_map, gf_map, p, fov.grid_coarse)
     }
 
