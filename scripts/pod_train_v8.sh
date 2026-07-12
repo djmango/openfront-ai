@@ -126,16 +126,20 @@ fi
 # RunPod community-cloud host once had a working nvidia-smi/driver but a
 # broken cuInit() for THIS compiled binary specifically (worked fine from
 # plain python3 -c "import torch" in the identical env) - not fixable in
-# code, only by relaunching on a different host. Catch it in ~2s here
-# instead of discovering it only after several crash-loop cycles.
+# code, only by relaunching on a different host. Warn-only, deliberately
+# NOT fatal (a real GPU pod is the only place this can ever run, and this
+# exact invocation - --num-envs 1 --updates 0, minimal but still spawning a
+# real native env worker - has only been validated on CPU where the CUDA
+# panic masks any other failure mode this specific shape could have; a bug
+# *in this check itself* must never be able to kill a launch the real
+# trainer, with its own crash-loop/backoff, would have survived).
 if ! LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB" OFTRAIN_EXPLICIT_CUINIT=1 \
-  ./target/release/oftrain --engine native --node-fraction 0 --num-envs 1 --num-gpus 1 \
+  timeout 30 ./target/release/oftrain --engine native --node-fraction 0 --num-envs 1 --num-gpus 1 \
   --rollout-len 1 --updates 0 --device cuda:0 --ckpt-dir /tmp/oftrain_cuda_preflight \
   2>&1 | grep -q "explicit cuInit(0) -> 0"; then
-  echo "FATAL: cuInit() failed on this host despite nvidia-smi looking healthy - this is the" \
-       "known-bad-host class of failure from the 2026-07-12 devlog entry, not a code bug." \
-       "Terminate this pod and relaunch (prefer secure cloud) rather than debugging further here."
-  exit 1
+  echo "WARNING: cuInit() preflight didn't report success (see 2026-07-09 devlog entry for the" \
+       "known-bad-host failure mode this checks for) - proceeding anyway; the real trainer's own" \
+       "crash-loop will retry/backoff if this host genuinely can't init CUDA." >&2
 fi
 
 "$VENV/bin/pip" install --quiet huggingface_hub 2>/dev/null || true
