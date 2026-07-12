@@ -2122,13 +2122,48 @@ the TFLOPS ratio carries over directly (this exact session's A40-vs-A100 numbers
 cleanly with TFLOPS alone - memory bandwidth and per-shard-thread overhead both matter too). Current
 guidance: <b>A40 secure cloud is the best-value option with real, current data behind it; re-check RTX
 4090 secure-cloud stock before the next launch and re-run this comparison if it's available.</b></p>
-<h3 id="v8-value-explosion">Open: value-loss explosion mid-run, unrelated to the infra debugging above</h3>
+<h3 id="v8-value-explosion">Value-loss explosion mid-run: root-cause attempt, symptom guarded, exact trigger still unconfirmed</h3>
 <p>Around update 9 of the same run, <code>v</code> (value loss) jumped from a healthy ~0.05-0.14 range to
-56.4M, and stayed in the tens-to-hundreds-of-millions for several subsequent updates (39M, 202M, 150M)
-while entropy fell from ~3.7 to ~1.6 over the same span - value divergence and premature entropy collapse
-happening together, not investigated further yet in this session. Not obviously caused by anything in
-this entry (A40 hardware, node-fraction mixing, or the CUDA-init fix) - could be a genuine PPO instability
-worth its own bisection (reward scale, AMP fp16 range, or an actual bug), separate follow-up work.</p>
+56.4 <i>trillion</i>, stayed in the tens-to-hundreds-of-billions for several more updates (743K, 39.4M,
+202M, 150M, 4.8B, 84.4B, 254B, 1.27T), then hit outright <code>NaN</code> at update 18 - entropy fell from
+~3.7 to ~1.6 over the same span, a classic value-divergence-plus-premature-exploitation pattern. Killed
+the run (no checkpoint existed yet - <code>--ckpt-every</code> defaults to 200, this never got past 18) and
+read code rather than keep guessing live on GPU-hours.</p>
+<p><b>Ruled out by direct comparison, not speculation:</b> the leading hypothesis going in was a native-vs-
+Node-engine reward-scale mismatch, since this was the <i>first-ever</i> run to combine
+<code>--node-fraction</code> engine-mixing with a real, full 4-GPU/256-env-scale run - exactly the kind of
+brand-new code path most likely to hide a real bug. Traced the reward computation
+(<code>oftrain/src/vecenv.rs::apply</code> &rarr; <code>ofcore::curriculum::strengths</code>) back to its
+terrain/land-total dependency and compared the <code>IS_LAND_BIT</code> bit position across all three
+implementations that could disagree: TS's <code>GameMapImpl.ts</code> (7), native's <code>engine/src/map.rs</code>
+(7), and the shared <code>ofcore::feat</code> constant Rust code on both backends is meant to match (7) -
+identical everywhere, so a terrain-decode mismatch corrupting <code>land_total</code> (and hence every
+tile-share term in the reward) is not the cause. Also checked whether the Rust port had silently dropped
+a value-loss safeguard <code>rl/ppo.py</code> has: it hasn't - neither implementation clips or normalizes
+the value-loss target (<code>ret</code>), only the advantage (correctly, and only after <code>ret</code> is
+already derived from the pre-normalization advantage - standard GAE, not a bug), and gradient clipping
+(<code>clip_grad_norm(0.5)</code>) is present and correctly matches Python's - it just bounds the step size
+given a gradient, not the loss magnitude producing that gradient, so an unclipped squared-error value loss
+can still produce a step that overshoots badly enough to compound across updates even when every single
+step is clip-bounded.</p>
+<p><b>Exact trigger still unconfirmed</b> - the pod was killed before enough live diagnostic data could be
+gathered (no checkpoint, no detailed per-episode reward trace at the tick this happened). Rather than
+guess at a fix for an unconfirmed root cause, guarded the <i>symptom</i> directly and instrumented for a
+future recurrence:</p>
+<ul>
+<li>Skip applying a minibatch's optimizer step outright (zero the grads, log a warning, move on) if any
+shard's loss comes back non-finite - turns "one bad rollout eventually NaNs the entire run and whatever
+checkpoint it produces" into "one bad rollout costs one discarded minibatch". 5 new unit tests pin the
+boundary precisely - a merely huge-but-finite loss (like the actual 1.27 trillion seen live) must
+<i>not</i> trigger this, only true NaN/Inf should.</li>
+<li>A new warning whenever any single return exceeds &#124;1000&#124;, logging the exact <i>global</i>
+env-worker index (matching <code>engine_for_idx</code>'s own indexing scheme) that produced it - if this
+recurs, that index directly answers whether the anomalous return came from a Node- or native-engine
+worker, closing exactly the evidence gap this investigation hit.</li>
+</ul>
+<p>Next real run should watch for either warning firing; if the global-index warning ever points
+consistently at Node-mixed workers, that confirms the original hypothesis after all and narrows the
+follow-up to comparing reward-relevant fields between the two engines' observation payloads directly.</p>
 
 <h2 class="date" id="reference">Reference and open threads</h2>
 <p class="session">Tooling, bugs, lessons, infra, recipes, backlog.</p>
