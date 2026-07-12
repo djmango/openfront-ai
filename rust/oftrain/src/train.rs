@@ -817,7 +817,36 @@ fn train_update(
                             let old_logp_t = sb.old_logp.index_select(0, &idx_t);
 
                             let (logp, ent, ent_q, value) = shard.policy.evaluate(&obs_t, &choice_t);
-                            let ratio = (&logp - &old_logp_t).exp();
+                            // `surr2`'s ratio is clamped to PPO's trust
+                            // region [1-clip, 1+clip], but `surr1` - needed
+                            // unclamped so `min(surr1, surr2)` stays a
+                            // correct *pessimistic* bound for legitimate
+                            // policy drift - multiplies the *raw* ratio by
+                            // adv_t with nothing bounding it. A live run's
+                            // pg_loss spiked to 1.48 TRILLION in a single
+                            // update, immediately recovering the next
+                            // update: `old_logp` is a frozen snapshot from
+                            // rollout collection and `logp` is recomputed
+                            // under the policy *after* several epochs of
+                            // minibatch updates on the same rollout, so if
+                            // even one sample's policy has drifted far
+                            // enough in that window, `logp - old_logp_t`
+                            // can be large enough that `.exp()` alone turns
+                            // it into an astronomical ratio - and because
+                            // `min(surr1, surr2)` picks whichever branch is
+                            // *more negative*, that exact pathological case
+                            // (huge ratio, negative advantage) is precisely
+                            // when the unbounded `surr1` branch gets
+                            // selected instead of the safe, clamped one.
+                            // Bounding the log-ratio before exponentiating
+                            // (same "fix the network's own output, not
+                            // just a downstream aggregate" pattern as
+                            // LOGIT_CLAMP_MAX/sanitize_value) keeps this
+                            // pathological case bounded without touching
+                            // the clipped trust-region behavior for any
+                            // sample whose drift is within a sane range.
+                            let log_ratio = (&logp - &old_logp_t).clamp(-20.0, 20.0);
+                            let ratio = log_ratio.exp();
                             let surr1 = &ratio * &adv_t;
                             let surr2 = ratio.clamp(1.0 - cfg.clip as f64, 1.0 + cfg.clip as f64) * &adv_t;
                             let pg_loss = -surr1.minimum(&surr2).mean(Kind::Float);
@@ -1572,6 +1601,58 @@ mod huber_value_loss_tests {
         // Huber's small-error branch is 0.5*(err)^2 (half of MSE's err^2);
         // both scale identically with error, only the constant differs.
         assert!((h - 0.5 * m).abs() < 1e-5, "huber={h} should be ~0.5*mse={m} for small errors");
+    }
+}
+
+#[cfg(test)]
+mod ratio_clamp_tests {
+    use tch::{Kind, Tensor};
+
+    /// Replicates the exact `log_ratio`/`ratio`/`surr1`/`surr2`/`pg_loss`
+    /// formula from the minibatch loop above. A live run's pg_loss spiked
+    /// to 1.48 TRILLION from a single sample whose `logp - old_logp_t`
+    /// (the pre-fix unclamped input to `.exp()`) got large enough that the
+    /// resulting astronomical ratio, paired with a negative advantage,
+    /// made `min(surr1, surr2)` select the *unclamped* branch - this test
+    /// reproduces that exact shape (huge log-ratio, negative advantage)
+    /// and asserts the fixed formula keeps pg_loss bounded.
+    fn pg_loss(logp: &Tensor, old_logp: &Tensor, adv: &Tensor, clip: f64) -> f64 {
+        let log_ratio = (logp - old_logp).clamp(-20.0, 20.0);
+        let ratio = log_ratio.exp();
+        let surr1 = &ratio * adv;
+        let surr2 = ratio.clamp(1.0 - clip, 1.0 + clip) * adv;
+        f64::try_from(-surr1.minimum(&surr2).mean(Kind::Float)).unwrap()
+    }
+
+    #[test]
+    fn pg_loss_stays_bounded_for_a_huge_log_ratio_with_negative_advantage() {
+        // Exactly the pathological combination: policy drifted far enough
+        // during minibatch updates that logp - old_logp is enormous, and
+        // the advantage is negative (so min() would otherwise pick the
+        // unbounded surr1 branch).
+        let logp = Tensor::from_slice(&[1000.0f32]);
+        let old_logp = Tensor::from_slice(&[0.0f32]);
+        let adv = Tensor::from_slice(&[-10.0f32]); // adv_clip's default bound
+        let loss = pg_loss(&logp, &old_logp, &adv, 0.2);
+        assert!(loss.is_finite(), "pg_loss must stay finite, got {loss}");
+        // exp(20) * 10 is the worst case the clamp permits; give some slack.
+        assert!(loss.abs() < 1.0e10, "pg_loss must stay bounded, got {loss}");
+    }
+
+    #[test]
+    fn pg_loss_is_unaffected_by_the_clamp_for_ordinary_ratios() {
+        // A log-ratio well within the clamp's range must produce the exact
+        // same result as the unclamped formula would - the fix must not
+        // perturb ordinary, healthy PPO updates.
+        let logp = Tensor::from_slice(&[0.05f32, -0.1, 0.2]);
+        let old_logp = Tensor::from_slice(&[0.0f32, 0.0, 0.0]);
+        let adv = Tensor::from_slice(&[1.0f32, -1.0, 0.5]);
+        let clamped = pg_loss(&logp, &old_logp, &adv, 0.2);
+        let ratio = (&logp - &old_logp).exp();
+        let surr1 = &ratio * &adv;
+        let surr2 = ratio.clamp(0.8, 1.2) * &adv;
+        let unclamped = f64::try_from(-surr1.minimum(&surr2).mean(Kind::Float)).unwrap();
+        assert!((clamped - unclamped).abs() < 1e-5, "clamp must be a no-op for ordinary ratios: {clamped} vs {unclamped}");
     }
 }
 
