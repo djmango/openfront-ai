@@ -2044,6 +2044,92 @@ toward the previously-manual 64 and utilization tracks it up toward the 95% targ
 oscillating, stalling short, or overshooting the CPU-derived cap before the GPU signal even gets a
 chance to matter.</p>
 
+<h2 class="date" id="v8-cuda-init">July 12th, 2026 - v8 launch: a RunPod community-cloud host with a broken CUDA init, and a real A40-vs-A100 price/perf number</h2>
+<p class="session">First real multi-GPU RunPod launch of the Rust <code>oftrain</code> trainer (v8), mixing
+<code>--node-fraction 0.2</code> (1 Node/TS env per 5, hedging native's known parity gaps at higher bot
+counts - see the bot-ai-parity docs) into an otherwise-native run. Hit a genuinely confusing CUDA init
+failure on the first pod that took an extended live bisection to root-cause; documenting the dead ends
+as much as the fix, since the dead ends are what would waste time again.</p>
+<h3 id="v8-cuda-deadend">The failure: <code>cuInit()</code> itself returns <code>CUDA_ERROR_UNKNOWN</code>, only from the compiled binary</h3>
+<p>Symptom: <code>oftrain --engine native --num-gpus 4</code> panicked in
+<code>tch::nn::VarStore::new</code> immediately on startup with libtorch's generic
+<code>"CUDA unknown error ... Setting the available devices to be zero"</code>, crash-looping every
+~15s. <code>nvidia-smi</code> inside the same container showed all 4 GPUs healthy;
+<code>torch.cuda.device_count()</code> from a plain <code>python3 -c "import torch; ..."</code> in the
+<i>exact same venv, same <code>LD_LIBRARY_PATH</code></i> returned <code>4</code> correctly, every time,
+interactively. Only the compiled Rust binary failed - and it failed identically whether launched from
+the crash-loop wrapper or run by hand over SSH, ruling out a spawn-context/race explanation.</p>
+<p><b>Dead end 1: missing device nodes.</b> <code>/dev/nvidia*</code> only had numbers 1/3/6/7, not
+0-3, on the first pod - looked exactly like the known "container device-passthrough numbering doesn't
+match NVML's clean 0..N-1 view" class of bug. Turned out irrelevant: `nvidia-smi -L` and
+`torch.cuda.device_count()` both worked fine despite it.</p>
+<p><b>Dead end 2: missing split-pip-wheel library directories.</b> The launch script's
+<code>LD_LIBRARY_PATH</code> only listed <code>torch/lib</code> and <code>nvidia/cuda_nvrtc/lib</code>,
+not the dozen other <code>nvidia-*-cu12</code> packages' own <code>lib/</code> dirs (each CUDA
+component - cublas, cudnn, cufft, etc. - is its own separate pip package in a modern torch wheel).
+Expanded <code>LD_LIBRARY_PATH</code> to include all of them - `ldd ./target/release/oftrain` already
+resolved every single library either way, and the expanded path made no difference at runtime.</p>
+<p><b>Dead end 3: PyTorch's own <code>RTLD_GLOBAL</code> preload dance.</b> Python's
+<code>torch/__init__.py</code> explicitly <code>ctypes.CDLL(path, mode=RTLD_GLOBAL)</code>s each split
+nvidia-*-cu12 package's <code>.so</code> in dependency order before its C extension touches CUDA - a
+plain Rust binary's normal ELF <code>DT_NEEDED</code>/lazy-bind linking doesn't replicate this, and it's
+a real, separate bug class (see <code>tch-rs</code> issue #1015 for the ROCm/HIP version of exactly this
+problem, hit and fixed for real in this same session's ROCm port). Implemented the same preload
+(<code>oftrain/src/main.rs::preload_cuda_deps</code>, kept in the codebase - harmless no-op elsewhere,
+and cheap insurance if this resurfaces) - zero effect on this specific failure.</p>
+<p><b>The actual diagnostic: bypass torch/tch entirely.</b> <code>dlopen("libcuda.so.1")</code> +
+<code>dlsym("cuInit")</code> + calling it directly, before any tch/torch code ran at all, returned
+<b>999 (<code>CUDA_ERROR_UNKNOWN</code>)</b> - the CUDA <i>driver</i> API's most basic possible call
+failed, for this compiled binary, on this specific host, full stop. Not a torch bug, not a linking bug,
+not a preload-order bug. Kept as an opt-in diagnostic flag (<code>OFTRAIN_EXPLICIT_CUINIT=1</code>) for
+next time this shows up.</p>
+<p><b>The fix: different host, not different code.</b> Noticed (while chasing an unrelated
+<code>setarch -R</code> permission error, which turned out to be a red herring - the identical
+restriction exists on the host that ended up working fine, so it's apparently just how RunPod containers
+are hardened in general, unrelated to the CUDA failure) that this was worth testing on a different
+physical machine rather than continuing to debug in place. Terminated the pod, relaunched on
+<b>secure cloud</b> instead of <b>community cloud</b> (different specific host, since <code>machineId</code>
+changed) - worked on the very first attempt, zero code changes. Community-cloud machines are
+individually-operated third-party hardware with far less standardization than RunPod's own secure-cloud
+datacenters; this is the concrete cost of that variance materializing, not a general "community cloud is
+broken" claim - the working host also happened to share the exact same <code>setarch</code> restriction.
+<b>Takeaway for next launch: if a fresh community-cloud pod fails CUDA init with everything else looking
+healthy (`nvidia-smi`/`ldd`/env all fine), don't sink time bisecting it - terminate and retry, preferring
+secure cloud, before assuming it's a real code bug.</b></p>
+<h3 id="v8-price-perf">A40 vs A100 price/perf, with a real number instead of a TFLOPS-sheet guess</h3>
+<p>The working run: 4x A40 (secure cloud, $1.76/hr total), <code>--node-fraction 0.2 --num-envs 64
+--rollout-len 32 --amp --pinned-h2d</code> (the frozen v8 launch config). Steady-state (updates 6-13,
+past initial env-spawn ramp-up): <b>~320-340 steps/s</b>, GPU util spiking to 100% across all 4 during
+the compute-heavy part of each update. Compared against this repo's only prior multi-GPU throughput
+numbers (<a href="#rust-gpu-rounds">rounds 1-3</a>, all on A100 SXM secure-cloud pods, same
+<code>--num-envs 64 --rollout-len 32 --amp</code> config): single A100 ~217 steps/s (with AMP), 4x A100
+~520-550 steps/s. On raw steps/s, A100 is faster (as its ~2x-higher memory bandwidth and ~2x TFLOPS over
+A40 would suggest) - but on <b>steps per dollar</b>, using each GPU's live secure-cloud price at the time
+of writing (A40 $0.44/GPU/hr, A100 SXM $1.49/GPU/hr):</p>
+<ul>
+<li>A40 x4: 330 steps/s &divide; $1.76/hr &asymp; <b>675,000 steps/$</b></li>
+<li>A100 x4: 535 steps/s &divide; $5.96/hr &asymp; 323,000 steps/$ (worse - multi-GPU scaling is sub-linear
+for both, but A100's per-hour cost isn't)</li>
+<li>A100 x1: 217 steps/s &divide; $1.49/hr &asymp; 525,000 steps/$ (still worse than 4x A40)</li>
+</ul>
+<p>RTX 4090 was <i>not</i> empirically tested for this comparison - secure-cloud 4090 capacity showed zero
+availability at the exact time this was checked (<code>SUPPLY_CONSTRAINT</code> from
+<code>podFindAndDeployOnDemand</code>), and community-cloud 4090 is where the CUDA-init failure above was
+first hit, so re-testing it wasn't worth the risk of re-landing on a similarly broken host mid-comparison.
+4090's raw TFLOPS (~330, more than double A40's ~150) suggests it could beat A40 on both raw steps/s and
+steps/$ if secure-cloud stock ever firms up - worth a real re-test if/when it does, rather than assuming
+the TFLOPS ratio carries over directly (this exact session's A40-vs-A100 numbers show it doesn't scale
+cleanly with TFLOPS alone - memory bandwidth and per-shard-thread overhead both matter too). Current
+guidance: <b>A40 secure cloud is the best-value option with real, current data behind it; re-check RTX
+4090 secure-cloud stock before the next launch and re-run this comparison if it's available.</b></p>
+<h3 id="v8-value-explosion">Open: value-loss explosion mid-run, unrelated to the infra debugging above</h3>
+<p>Around update 9 of the same run, <code>v</code> (value loss) jumped from a healthy ~0.05-0.14 range to
+56.4M, and stayed in the tens-to-hundreds-of-millions for several subsequent updates (39M, 202M, 150M)
+while entropy fell from ~3.7 to ~1.6 over the same span - value divergence and premature entropy collapse
+happening together, not investigated further yet in this session. Not obviously caused by anything in
+this entry (A40 hardware, node-fraction mixing, or the CUDA-init fix) - could be a genuine PPO instability
+worth its own bisection (reward scale, AMP fp16 range, or an actual bug), separate follow-up work.</p>
+
 <h2 class="date" id="reference">Reference and open threads</h2>
 <p class="session">Tooling, bugs, lessons, infra, recipes, backlog.</p>
 <h3 id="tooling">Visualization &amp; tooling</h3>

@@ -17,6 +17,17 @@
 # bootstrap cost):
 #   RUN_NAME=ppo_v8 NUM_GPUS=4 NODE_FRACTION=0.2 bash scripts/pod_train_v8.sh
 #
+# If a pod fails to actually train (crash-loops immediately, "CUDA unknown
+# error" in the trainer's own log at /tmp/train_$RUN_NAME.log) despite
+# `nvidia-smi` looking healthy: this has already happened on a RunPod
+# community-cloud host once (see docs/devlog.html's "v8 launch" entry,
+# 2026-07-12) and was NOT fixable in code - `cuInit()` itself failed for the
+# compiled binary on that specific host while plain `python3 -c "import
+# torch"` worked fine in the identical environment. Don't sink time
+# bisecting it again - terminate that pod and relaunch (prefer secure cloud
+# over community; a different physical host resolved it instantly last
+# time, zero code changes needed).
+#
 # See docs/devlog.html's "ppo_v8 launch plan" section for the full runbook,
 # config rationale, and sizing math this script implements.
 
@@ -109,6 +120,21 @@ cargo build --release -p oftrain --features native-engine
 # spending any GPU-hours, not after wondering why util is stuck near 0.
 if ! readelf -d target/release/oftrain | grep -q libtorch_cuda.so; then
   echo "FATAL: libtorch_cuda.so not linked into oftrain - CUDA is silently missing (see devlog)"
+  exit 1
+fi
+# Host-level CUDA-init footgun (see devlog 2026-07-09 "v8 launch" entry): a
+# RunPod community-cloud host once had a working nvidia-smi/driver but a
+# broken cuInit() for THIS compiled binary specifically (worked fine from
+# plain python3 -c "import torch" in the identical env) - not fixable in
+# code, only by relaunching on a different host. Catch it in ~2s here
+# instead of discovering it only after several crash-loop cycles.
+if ! LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB" OFTRAIN_EXPLICIT_CUINIT=1 \
+  ./target/release/oftrain --engine native --node-fraction 0 --num-envs 1 --num-gpus 1 \
+  --rollout-len 1 --updates 0 --device cuda:0 --ckpt-dir /tmp/oftrain_cuda_preflight \
+  2>&1 | grep -q "explicit cuInit(0) -> 0"; then
+  echo "FATAL: cuInit() failed on this host despite nvidia-smi looking healthy - this is the" \
+       "known-bad-host class of failure from the 2026-07-12 devlog entry, not a code bug." \
+       "Terminate this pod and relaunch (prefer secure cloud) rather than debugging further here."
   exit 1
 fi
 
