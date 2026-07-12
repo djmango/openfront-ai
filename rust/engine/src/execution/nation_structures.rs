@@ -938,7 +938,9 @@ pub fn save_up_target(game: &Game) -> i64 {
         return game.wire.hydrogen_bomb_cost();
     }
     if !game.wire.is_unit_disabled(unit_type::MIRV) {
-        return game.wire.mirv_cost() + game.wire.hydrogen_bomb_cost();
+        // TS `this.cost(MIRV)` escalates with `stats().numMirvsLaunched()`.
+        // `wire.mirv_cost()` is the zero-launch base only — use `structure_cost`.
+        return game.structure_cost(0, unit_type::MIRV) + game.wire.hydrogen_bomb_cost();
     }
     if !game.wire.is_unit_disabled(unit_type::HYDROGEN_BOMB) {
         return game.wire.hydrogen_bomb_cost() * SAVE_UP_HYDROGEN_COUNT;
@@ -1304,6 +1306,13 @@ pub fn do_handle_structures(
     }
 
     if !cities_disabled && maybe_spawn_structure(game, random, small_id, unit_type::CITY) {
+        if game
+            .player_by_small_id(small_id)
+            .is_some_and(|p| p.name == "China")
+            && (18000..=18005).contains(&game.ticks())
+        {
+            eprintln!("[struct-native] tick={} spawned CITY", game.ticks());
+        }
         return true;
     }
     false
@@ -2072,6 +2081,28 @@ mod tests {
         result.sort_by_key(|r| r.tile);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].tile.min(result[1].tile), own_tile.min(neighbor_tile));
+    }
+
+    /// After a MIRV launches, TS `stats().numMirvsLaunched` escalates MIRV cost
+    /// (and therefore the nation save-up target). Native must bump `mirvs_launched`
+    /// the same way or post-MIRV structure AI keeps spending under a stale 30M target
+    /// (China City @ 18003 on curr-b030-s0-pangaea).
+    #[test]
+    fn save_up_target_escalates_with_mirvs_launched() {
+        let game = tiny_game(10, 10, "Easy");
+        assert_eq!(
+            save_up_target(&game),
+            30_000_000,
+            "base: 25M MIRV + 5M hydro"
+        );
+        let mut game = game;
+        game.mirvs_launched = 1;
+        assert_eq!(
+            save_up_target(&game),
+            45_000_000,
+            "after 1 MIRV: 40M MIRV + 5M hydro"
+        );
+        assert_eq!(game.structure_cost(0, unit_type::MIRV), 40_000_000);
     }
 
     /// TS SAM `perceivedCostIncreasePerOwned` is 0.3, not 1.0. With gold under the
