@@ -523,7 +523,6 @@ fn action_needs_quantity(a: i64) -> bool {
 /// One (T, N) rollout buffer slot (N = envs in this shard).
 struct Step {
     obs: PreparedObs,
-    resident: Option<batch::ResidentLatents>,
     choice: ChoiceScalars,
     logp: f32,
     value: f32,
@@ -608,39 +607,29 @@ fn choice_from_act_vecs(
 }
 
 /// Encode + act for a contiguous worker slice `[start, end)`. Returns
-/// per-env choice scalars / logp / value / resident AE latents aligned to
-/// the slice (length `end - start`).
+/// per-env choice scalars / logp / value aligned to the slice (length
+/// `end - start`).
 fn act_group(
     actor: &mut ActorShard,
     cfg: &Config,
     start: usize,
     end: usize,
-) -> Result<(
-    Vec<ChoiceScalars>,
-    Vec<f32>,
-    Vec<f32>,
-    Vec<Option<batch::ResidentLatents>>,
-)> {
+) -> Result<(Vec<ChoiceScalars>, Vec<f32>, Vec<f32>)> {
     let n = end - start;
     if n == 0 {
-        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
     }
-    let (obs_t, resident) = if let Some(ae) = actor.ae.as_ref() {
-        let obs_refs: Vec<&PreparedObs> = actor.cur_obs[start..end].iter().collect();
-        let (obs, resident) = batch::encode_rollout_obs(
-            &obs_refs,
+    let obs_t = if let Some(ae) = actor.ae.as_ref() {
+        batch::build_rollout_obs(
+            &mut actor.cur_obs[start..end],
             actor.device,
             cfg.pinned_h2d,
             cfg.fp16_rollout,
             ae,
-        )?;
-        (obs, resident.into_iter().map(Some).collect())
+        )?
     } else {
         let obs_refs: Vec<&PreparedObs> = actor.cur_obs[start..end].iter().collect();
-        (
-            batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d, cfg.fp16_rollout),
-            (0..n).map(|_| None).collect(),
-        )
+        batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d, cfg.fp16_rollout)
     };
     let (a, player, tile, build, nuke, qty, logp, value) =
         tch::no_grad(|| actor.policy.act(&obs_t, false));
@@ -664,7 +653,7 @@ fn act_group(
             .map_err(|_| anyhow!("env {} choice channel closed", start + i))?;
         scalars.push(sc);
     }
-    Ok((scalars, logp_v, value_v, resident))
+    Ok((scalars, logp_v, value_v))
 }
 
 fn recv_group(
@@ -674,7 +663,6 @@ fn recv_group(
     scalars: &[ChoiceScalars],
     logp_v: &[f32],
     value_v: &[f32],
-    resident: &mut [Option<batch::ResidentLatents>],
     step_row: &mut [Option<Step>],
     ep_infos: &mut Vec<EpisodeInfo>,
 ) -> Result<()> {
@@ -690,7 +678,6 @@ fn recv_group(
         let prev_obs = std::mem::replace(&mut actor.cur_obs[i], next_obs);
         step_row[i] = Some(Step {
             obs: prev_obs,
-            resident: resident[j].take(),
             choice: scalars[j].clone(),
             logp: logp_v[j],
             value: value_v[j],
@@ -716,18 +703,12 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
 
     // Prime: act+send group 0 before the step loop (matches Python's
     // `pack0 = act_group(groups[0]); vec.send_group(...)` before `for t`).
-    let (mut pack0_sc, mut pack0_lp, mut pack0_v, mut pack0_resident) =
-        act_group(actor, cfg, g0.0, g0.1)?;
+    let (mut pack0_sc, mut pack0_lp, mut pack0_v) = act_group(actor, cfg, g0.0, g0.1)?;
 
     for t in 0..cfg.rollout_len {
         let mut step_row: Vec<Option<Step>> = (0..n).map(|_| None).collect();
 
-        let mut pack1: Option<(
-            Vec<ChoiceScalars>,
-            Vec<f32>,
-            Vec<f32>,
-            Vec<Option<batch::ResidentLatents>>,
-        )> = None;
+        let mut pack1: Option<(Vec<ChoiceScalars>, Vec<f32>, Vec<f32>)> = None;
         if g1.0 < g1.1 {
             // Overlaps group 0 stepping (choices already in flight).
             pack1 = Some(act_group(actor, cfg, g1.0, g1.1)?);
@@ -740,7 +721,6 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
             &pack0_sc,
             &pack0_lp,
             &pack0_v,
-            &mut pack0_resident,
             &mut step_row,
             &mut ep_infos,
         )?;
@@ -751,21 +731,10 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
             pack0_sc = next.0;
             pack0_lp = next.1;
             pack0_v = next.2;
-            pack0_resident = next.3;
         }
 
-        if let Some((sc1, lp1, v1, resident1)) = pack1.as_mut() {
-            recv_group(
-                actor,
-                g1.0,
-                g1.1,
-                sc1,
-                lp1,
-                v1,
-                resident1,
-                &mut step_row,
-                &mut ep_infos,
-            )?;
+        if let Some((sc1, lp1, v1)) = pack1.as_ref() {
+            recv_group(actor, g1.0, g1.1, sc1, lp1, v1, &mut step_row, &mut ep_infos)?;
         }
 
         buffer.push(
@@ -1025,7 +994,7 @@ impl RetStat {
 /// update's `collect_rollout` calls (see module doc).
 fn train_update(
     learners: &mut [LearnerShard],
-    pending: &mut [RolloutResult],
+    pending: &[RolloutResult],
     cfg: &Config,
     rng: &mut rand::rngs::SmallRng,
     ent_coef: f32,
@@ -1052,11 +1021,14 @@ fn train_update(
     let mut loss_sums = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let mut n_mb: usize = 0;
 
-    // Per-shard full-rollout tensors, built once and resident for the whole
-    // update. AE channels come directly from each Step's device tensors;
-    // only host-native feature/mask/scalar data is packed and uploaded.
-    // `epochs`>1 revisits this same rollout under different minibatch
-    // shuffles via GPU-side `index_select`.
+    // Per-shard full-rollout tensors, built once (CPU repack + one
+    // host->device upload) and resident on that shard's device for the
+    // whole update. `epochs`>1 revisits this same rollout under different
+    // minibatch shuffles - rebuilding+re-uploading the observation grid
+    // from scratch for every (epoch, minibatch) pair would dominate
+    // update wall-clock while barely touching the GPU's compute units
+    // (see DEVLOG). Minibatches instead `index_select` a GPU-resident
+    // shuffled-index slice out of these.
     struct ShardBatch {
         obs: policy::Obs,
         choice: policy::ChoiceBatch,
@@ -1065,10 +1037,17 @@ fn train_update(
         old_logp: Tensor,
     }
     let batch_build_t0 = Instant::now();
-    // Per-shard GAE and batch construction still run in parallel. A tch
-    // Tensor is Send but not Sync, so each closure receives an exclusive
-    // `&mut RolloutResult`; no resident tensor handle is shared between
-    // threads. Each result belongs to the same device as its paired learner.
+    // Per-shard: GAE (plain Rust, negligible) + one CPU repack/host->device
+    // upload of the whole rollout (the actual cost here - tens of MB of
+    // observation grid per shard). Spawn one thread per shard instead of a
+    // sequential `for` loop: `RolloutResult`/`Device` hold no GPU tensor
+    // handles (only plain floats/ints until `build_obs` allocates fresh
+    // tensors *inside* each thread), so this is safe, and without it the
+    // 4 shards' multi-second CPU repacks and independent-GPU H2D transfers
+    // were serialized one after another instead of overlapping (measured:
+    // ~8-9s sequential for 4 shards vs ~2s once parallelized - this was
+    // the single largest remaining non-overlapped, GPU-idle chunk of
+    // update wall-clock; see DEVLOG).
     // Read *before* this update's data is folded in, so the bound applied
     // to this batch reflects only prior updates (matching how a live
     // system would have to work - you can't normalize against data you
@@ -1079,7 +1058,7 @@ fn train_update(
     let shard_results: Vec<(ShardBatch, f64, f64, f64)> = std::thread::scope(|s| {
         let handles: Vec<_> = learners
             .iter()
-            .zip(pending.iter_mut())
+            .zip(pending.iter())
             .enumerate()
             .map(|(gi, (shard, result))| {
                 let device = shard.device;
@@ -1206,20 +1185,6 @@ fn train_update(
                             obs_flat.push(&s.obs);
                         }
                     }
-                    let resident_count = buffer
-                        .iter()
-                        .flat_map(|row| row.iter())
-                        .filter(|s| s.resident.is_some())
-                        .count();
-                    assert!(
-                        resident_count == 0 || resident_count == total,
-                        "rollout mixes resident and host observations"
-                    );
-                    let resident_flat: Option<Vec<&batch::ResidentLatents>> = buffer
-                        .iter()
-                        .flat_map(|row| row.iter())
-                        .map(|s| s.resident.as_ref())
-                        .collect();
                     // Local partial sums for RetStat's global running
                     // total - see RetStat's doc for why plain sum/sum_sq
                     // accumulation (not Welford) composes trivially here:
@@ -1231,23 +1196,7 @@ fn train_update(
                     let local_sum: f64 = ret_flat.iter().map(|&x| x as f64).sum();
                     let local_sum_sq: f64 = ret_flat.iter().map(|&x| (x as f64) * (x as f64)).sum();
 
-                    let obs = if let Some(resident) = resident_flat {
-                        batch::build_obs_with_resident_latents(
-                            &obs_flat,
-                            &resident,
-                            device,
-                            cfg.pinned_h2d,
-                            cfg.fp16_rollout,
-                        )
-                        .expect("build resident rollout Obs")
-                    } else {
-                        batch::build_obs(
-                            &obs_flat,
-                            device,
-                            cfg.pinned_h2d,
-                            cfg.fp16_rollout,
-                        )
-                    };
+                    let obs = batch::build_obs(&obs_flat, device, cfg.pinned_h2d, cfg.fp16_rollout);
                     let choice = batch::build_choice_batch(&choice_flat, device, cfg.pinned_h2d);
                     let adv = Tensor::from_slice(&adv_flat).to_device(device);
                     let ret = Tensor::from_slice(&ret_flat).to_device(device);
@@ -1766,8 +1715,7 @@ pub fn run(cfg: Config) -> Result<()> {
                 actors.iter_mut().map(|actor| s.spawn(move || collect_rollout(actor, cfg_ref))).collect();
 
             let train_t0 = Instant::now();
-            let train_result =
-                train_update(&mut learners, &mut pending, cfg_ref, &mut rng, ent_coef_now, &mut ret_stat);
+            let train_result = train_update(&mut learners, &pending, cfg_ref, &mut rng, ent_coef_now, &mut ret_stat);
             let train_dt = train_t0.elapsed().as_secs_f64();
 
             let next_pending: Result<Vec<RolloutResult>> =
