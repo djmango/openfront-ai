@@ -2122,6 +2122,42 @@ the TFLOPS ratio carries over directly (this exact session's A40-vs-A100 numbers
 cleanly with TFLOPS alone - memory bandwidth and per-shard-thread overhead both matter too). Current
 guidance: <b>A40 secure cloud is the best-value option with real, current data behind it; re-check RTX
 4090 secure-cloud stock before the next launch and re-run this comparison if it's available.</b></p>
+<h3 id="v8-pod-lifecycle">A more fundamental infra fix: don't tie the container's lifecycle to the training script</h3>
+<p>While iterating on the NaN guard above, pod relaunches started failing in a new, much worse way:
+<code>ssh.runpod.io</code> proxy connections returned <code>"container not running"</code> or
+<code>"container not found"</code>, repeatedly, across multiple fresh pods, multiple GPU types (A40, then
+A100 SXM to rule out one bad host), and both with and without a persistent volume - i.e. not a
+host-specific or GPU-type-specific problem, and not something retrying/recreating pods fixed (several
+cycles of terminate-and-relaunch all hit the identical symptom, which is itself the sign something
+structural was wrong, not "unlucky" - see the retrospective note below).</p>
+<p><b>The actual design flaw:</b> every earlier launch set <code>dockerArgs</code> to run the bootstrap +
+training script <i>directly</i> as the container's own foreground process. That makes the training
+script's process <i>the container's entire lifecycle</i> - if it exits for any reason (a bug in a
+newly-added preflight check, a transient error, anything), the container exits too, and SSH access (which
+depends on sshd running <i>inside</i> that same container) disappears along with it. Confirmed directly:
+removing the <code>dockerArgs</code> override entirely (falling back to the base
+<code>runpod/pytorch</code> image's own default <code>CMD ["/start.sh"]</code>) made the "container not
+found" failures <i>worse</i>, not better - that default script sets up nginx/Jupyter/filebrowser/sshd and
+appears to hang or take far longer than any prior custom <code>dockerArgs</code> ever needed, on this
+account/image combination specifically.</p>
+<p><b>The fix: decouple training from the container's foreground process entirely.</b>
+<code>dockerArgs</code> now: (1) explicitly starts sshd itself
+(<code>service ssh start || /usr/sbin/sshd</code>, not relying on the base image's own startup script for
+it), (2) launches the bootstrap+training script as a fully detached background job
+(<code>nohup ... &amp; disown</code>, output redirected to a file), then (3) uses <code>sleep infinity</code>
+as the container's actual foreground process - stable and content-free, so nothing the training script
+does can ever bring the container down. Worked on the very first attempt: SSH available within
+~60-70s (vs. multi-minute hangs/failures on every attempt before this), stable throughout a 20+ minute
+build+train cycle, survived the training process itself hitting the NaN-guard warnings above without any
+container-level disruption.</p>
+<p><b>Retrospective note on process, not just the technical fix:</b> several relaunch cycles in a row hit
+the identical "container not found" symptom before the actual structural cause (dockerArgs-tied lifecycle)
+was identified and fixed - repeatedly terminating and recreating pods without changing the underlying
+approach wastes time and money without new information once the same failure recurs on genuinely
+different hardware. The lesson generalizes past this one incident: when a class of failure repeats across
+multiple "fresh start" attempts, stop retrying the same approach and go looking for what's structurally
+common to all of them instead.</p>
+
 <h3 id="v8-value-explosion">Value-loss explosion mid-run: root-cause attempt, symptom guarded, exact trigger still unconfirmed</h3>
 <p>Around update 9 of the same run, <code>v</code> (value loss) jumped from a healthy ~0.05-0.14 range to
 56.4 <i>trillion</i>, stayed in the tens-to-hundreds-of-billions for several more updates (743K, 39.4M,
@@ -2164,6 +2200,22 @@ worker, closing exactly the evidence gap this investigation hit.</li>
 <p>Next real run should watch for either warning firing; if the global-index warning ever points
 consistently at Node-mixed workers, that confirms the original hypothesis after all and narrows the
 follow-up to comparing reward-relevant fields between the two engines' observation payloads directly.</p>
+<h3 id="v8-value-explosion-followup">Follow-up: relaunched with the guard, node-fraction hypothesis revised</h3>
+<p>Relaunched the same config after fixing the pod-stability issue below. The exact same instability
+recurred - if anything worse (<code>v</code> peaked at 16.5 trillion this time, vs 56.4 trillion before,
+but across more updates) - and this time <b>did not reach NaN</b>: the guard fired 13 times over the
+first ~21 updates, and <code>v</code> settled into a ~700K-2.7M oscillation (still far from the healthy
+~0.05-0.14 baseline, but stable, not climbing further) while training kept progressing
+(<code>eps_done</code> 0 &rarr; 217, steps/s holding ~330-350 throughout). The extreme-return diagnostic's
+global env-worker indices this time were <b>129 (Node-mixed), 138 (native), 182 (native)</b> - computed
+directly against <code>engine_for_idx(idx, default, 0.2)</code>'s own formula. A mix, not all-Node - this
+is real evidence *against* the native-vs-Node-engine reward-mismatch hypothesis from the original
+incident, not for it. Revised conclusion: this looks like a genuine, reward-scale/hyperparameter-inherent
+PPO value-function instability at early stage-0 training (all three flagged occurrences were at
+<code>t=31</code>, the rollout's own bootstrap-value timestep specifically), independent of
+<code>--node-fraction</code>. Worth a real fix later (return normalization, or a smaller/warmup-scheduled
+<code>vf_coef</code>), but the guard already converts it from run-ending to merely-annoying, which was
+the actual goal.</p>
 
 <h2 class="date" id="reference">Reference and open threads</h2>
 <p class="session">Tooling, bugs, lessons, infra, recipes, backlog.</p>
