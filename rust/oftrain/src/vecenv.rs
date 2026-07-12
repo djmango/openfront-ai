@@ -41,14 +41,12 @@ pub struct EpisodeInfo {
 /// replaces the old 6ch `stat` placeholder with a 32ch latent, yielding
 /// `C_GRID = 89 = latent(32) + ego(3) + db(1) + transient(53)`.
 ///
-/// `grid` is only filled for the no-AE test/legacy path (63ch
-/// stat+ego+db+transient); training always passes an AE and rebuilds
-/// `grid` inside `build_obs`.
+/// `grid` is only filled for the no-AE test/legacy host fallback. Training
+/// keeps AE latents in separate device tensors owned by each rollout step.
 #[derive(Clone)]
 pub struct PreparedObs {
-    /// Optional pre-assembled fine grid (C_GRID, gh, gw). Filled by the
-    /// actor encode path so the learner can rebuild Obs without holding an
-    /// AE (tch Optimizer/Tensor are !Sync across shard batch-build threads).
+    /// Optional pre-assembled fine grid (C_GRID, gh, gw), used by the
+    /// no-AE test/legacy host fallback.
     pub grid: Option<Vec<f32>>,
     /// Optional native /16 coarse grid (C_GRID, cgh, cgw).
     pub grid_coarse: Option<Vec<f32>>,
