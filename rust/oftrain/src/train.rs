@@ -619,11 +619,18 @@ fn act_group(
     if n == 0 {
         return Ok((Vec::new(), Vec::new(), Vec::new()));
     }
-    if let Some(ae) = actor.ae.as_ref() {
-        batch::encode_prepared_obs(&mut actor.cur_obs[start..end], actor.device, ae)?;
-    }
-    let obs_refs: Vec<&PreparedObs> = actor.cur_obs[start..end].iter().collect();
-    let obs_t = batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d, cfg.fp16_rollout);
+    let obs_t = if let Some(ae) = actor.ae.as_ref() {
+        batch::build_rollout_obs(
+            &mut actor.cur_obs[start..end],
+            actor.device,
+            cfg.pinned_h2d,
+            cfg.fp16_rollout,
+            ae,
+        )?
+    } else {
+        let obs_refs: Vec<&PreparedObs> = actor.cur_obs[start..end].iter().collect();
+        batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d, cfg.fp16_rollout)
+    };
     let (a, player, tile, build, nuke, qty, logp, value) =
         tch::no_grad(|| actor.policy.act(&obs_t, false));
 
@@ -739,11 +746,19 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
     }
 
     let bootstrap_v: Vec<f32> = {
-        if let Some(ae) = actor.ae.as_ref() {
-            batch::encode_prepared_obs(&mut actor.cur_obs, actor.device, ae)?;
-        }
-        let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
-        let obs_t = batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d, cfg.fp16_rollout);
+        let obs_t = if let Some(ae) = actor.ae.as_ref() {
+            let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
+            batch::build_obs_with_ae(
+                &obs_refs,
+                actor.device,
+                cfg.pinned_h2d,
+                cfg.fp16_rollout,
+                Some(ae),
+            )?
+        } else {
+            let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
+            batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d, cfg.fp16_rollout)
+        };
         let v = tch::no_grad(|| actor.policy.value_only(&obs_t));
         (&v).try_into()?
     };
@@ -792,10 +807,10 @@ fn run_eval(
         if pending.is_empty() {
             break;
         }
-        let mut batch: Vec<PreparedObs> = pending.iter().map(|&i| cur_obs[i].clone()).collect();
-        batch::encode_prepared_obs(&mut batch, device, ae)?;
+        let batch: Vec<PreparedObs> = pending.iter().map(|&i| cur_obs[i].clone()).collect();
         let refs: Vec<&PreparedObs> = batch.iter().collect();
-        let obs_t = batch::build_obs(&refs, device, pinned_h2d, fp16_rollout);
+        let obs_t =
+            batch::build_obs_with_ae(&refs, device, pinned_h2d, fp16_rollout, Some(ae))?;
         let (a, player, tile, build, nuke, qty, _logp, _value) =
             tch::no_grad(|| policy.act(&obs_t, true));
         let a_v: Vec<i64> = (&a).try_into()?;
