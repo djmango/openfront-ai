@@ -28,6 +28,14 @@
 //! available, one version behind the learner it's paired with for
 //! training).
 //!
+//! ## Dual env-group pipelining (`--pipeline-groups`)
+//!
+//! Inside a single `collect_rollout`, workers are split into two halves
+//! (Python `rl/ppo.py` v4.1): encode+act(g0) → send(g0) → encode+act(g1)
+//! while g0's engines step → recv(g0) → … . With one env the second group
+//! is empty and the path degenerates to the classic lockstep loop. Default
+//! on.
+//!
 //! Multi-GPU (see `LearnerShard`/`ActorShard`): one `PolicyNet`/`VarStore`
 //! replica per device, each owning a disjoint slice of envs, in a single
 //! process/thread. This mirrors `rl/ppo.py`'s DDP mode (torchrun ranks
@@ -43,20 +51,13 @@
 //!
 //! ## Remaining Python-parity gaps (oftrain)
 //!
-//! - **Dual env-group pipelining**: Python overlaps collection of group A
-//!   with stepping group B inside a single update; Rust already overlaps
-//!   *next* rollout collection with the PPO update, but does not split the
-//!   live env pool into two alternating groups. Skipped as too invasive for
-//!   the current actor/learner layout.
-//! - **AdamW optimizer-state restore**: tch-rs exposes no optimizer
-//!   `state_dict` save/load; momentum/variance rebuild after `--resume`
-//!   (documented on `Config::resume`).
-//! - **fp16 host grids**: `PreparedObs` keeps f32 host buffers; optional
-//!   f16 packing skipped (invasive for little gain on the encode path).
-//! - **Value loss default**: `--value-loss` defaults to `huber` (Rust
-//!   stabilizer); Phase 5 (final) switches the default to `mse` once
-//!   training is stable, matching Python `F.mse_loss`.
-
+//! - **AdamW optimizer-state restore**: tch-rs `COptimizer` exposes no
+//!   moment getters / `state_dict`. Handled via `--resume-warmup-updates`
+//!   (default 100) so LR warms in while moments rebuild after `--resume`
+//!   (documented on `Config::resume` / `Config::resume_warmup_updates`).
+//! - **fp16 host storage**: grids stay f32 on the host; `--fp16-rollout`
+//!   (opt-in) casts to Half only for the H2D upload then back to Float on
+//!   device.
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -84,8 +85,8 @@ use crate::vecenv::{EnvWorker, EpisodeInfo, PreparedObs};
 /// `w_sub = sub_len / mb_len` weights before a single optimizer step.
 const MAX_UPD_PIX: usize = 1_600_000;
 
-/// Value-loss form. Default `Huber` keeps the Rust stabilizer; Phase 5
-/// (final) switches the CLI default to `Mse` once training is stable.
+/// Value-loss form. Default `Mse` matches Python `F.mse_loss`; `Huber`
+/// remains available as a stabilizer escape hatch (`--value-loss huber`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueLoss {
     Huber,
@@ -253,6 +254,16 @@ pub struct Config {
     /// CPU->GPU upload (see `batch::to_device_maybe_pinned`). No-op unless
     /// `device`/shard devices are CUDA.
     pub pinned_h2d: bool,
+    /// `--fp16-rollout`: after AE encode, H2D fine/coarse grids as Half
+    /// then cast to Float on device (halves PCIe transfer). Host
+    /// `PreparedObs.grid` stays f32. Default off (opt-in); pod_train_v8
+    /// enables it via EXTRA_ARGS.
+    pub fp16_rollout: bool,
+    /// `--pipeline-groups`: split env workers into two halves and overlap
+    /// act(g1) with step(g0) inside each rollout step (Python v4.1
+    /// dual-group pipelining). Default on; with N=1 the second group is
+    /// empty and behavior matches the single-group path.
+    pub pipeline_groups: bool,
     pub device: Device,
     /// Which simulation backend envs run against (Node bridge or the
     /// in-process native engine) for the `1.0 - node_fraction` majority of
@@ -270,23 +281,27 @@ pub struct Config {
     pub eval_episodes: usize,
     pub ckpt_every: u64,
     pub ckpt_dir: String,
-    /// `--init`: warm-start weights from a `.ot` VarStore dump without
-    /// restoring `TrainState` (BC→RL / exported weights). Ignored when
-    /// `resume` is also set.
+    /// `--init`: warm-start weights from a `.safetensors` (preferred) or
+    /// legacy `.ot` VarStore dump without restoring `TrainState`
+    /// (BC→RL / exported weights). Ignored when `resume` is also set.
     pub init: Option<String>,
-    /// `--resume`: path to a previously-saved `.ot` weights file (its
-    /// training-state sidecar is found by swapping the `.ot` extension for
-    /// `.state.json` - see `TrainState`). Restores weights, curriculum
-    /// stage, entropy-floor scale, learning rate, total env steps, and the
-    /// win-rate window; the update counter resumes from where it left off.
-    /// AdamW's momentum/variance state is NOT restored (tch-rs exposes no
-    /// optimizer state_dict save/load - see module doc) and rebuilds over
-    /// the first few dozen post-resume updates, a deliberate, documented
-    /// gap rather than a silent one.
+    /// `--resume`: path to a previously-saved `.safetensors` (preferred) or
+    /// legacy `.ot` weights file (its training-state sidecar is found by
+    /// swapping the extension for `.state.json` - see `TrainState`).
+    /// Restores weights, curriculum stage, entropy-floor scale, learning
+    /// rate, total env steps, and the win-rate window; the update counter
+    /// resumes from where it left off. AdamW's momentum/variance state is
+    /// NOT restored (tch-rs exposes no optimizer state_dict save/load -
+    /// see module doc / `--resume-warmup-updates`) and rebuilds over the
+    /// post-resume warmup window.
     pub resume: Option<String>,
-    /// `--value-loss`: `Huber` (default; Rust stabilizer) or `Mse`
-    /// (Python `F.mse_loss` parity). Phase 5 (final) flips the default to
-    /// `Mse` once training is stable under Huber.
+    /// `--resume-warmup-updates`: extra LR warmup length after `--resume`
+    /// while Adam moments rebuild (tch COptimizer has no state dump).
+    /// Stage-advance warmup still uses `LR_WARMUP_UPDATES`; this only
+    /// stretches the *first* post-resume window. Default 100; 0 disables.
+    pub resume_warmup_updates: u64,
+    /// `--value-loss`: `Mse` (Python `F.mse_loss` parity, default) or
+    /// `Huber` (Rust stabilizer escape hatch).
     pub value_loss: ValueLoss,
 
     /// `--auto-scale-envs`: opt-in runtime growth of the per-shard env
@@ -310,9 +325,10 @@ pub struct Config {
 }
 
 /// Restart-proof training state, saved as a JSON sidecar next to every
-/// weights checkpoint (`<ckpt>.state.json` alongside `<ckpt>.ot`) - port of
-/// `rl/ppo.py`'s `state.json`/embedded-checkpoint-state pattern. Small and
-/// cheap enough to write every checkpoint without it being the bottleneck.
+/// weights checkpoint (`<ckpt>.state.json` alongside
+/// `<ckpt>.safetensors` / legacy `<ckpt>.ot`) - port of `rl/ppo.py`'s
+/// `state.json`/embedded-checkpoint-state pattern. Small and cheap enough
+/// to write every checkpoint without it being the bottleneck.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TrainState {
     pub update: u64,
@@ -324,9 +340,31 @@ pub struct TrainState {
 }
 
 fn state_sidecar_path(ckpt_path: &str) -> String {
-    match ckpt_path.strip_suffix(".ot") {
-        Some(stem) => format!("{stem}.state.json"),
-        None => format!("{ckpt_path}.state.json"),
+    let stem = ckpt_path
+        .strip_suffix(".safetensors")
+        .or_else(|| ckpt_path.strip_suffix(".ot"))
+        .unwrap_or(ckpt_path);
+    format!("{stem}.state.json")
+}
+
+#[cfg(test)]
+mod sidecar_path_tests {
+    use super::state_sidecar_path;
+
+    #[test]
+    fn strips_safetensors_and_ot() {
+        assert_eq!(
+            state_sidecar_path("checkpoints/latest.safetensors"),
+            "checkpoints/latest.state.json"
+        );
+        assert_eq!(
+            state_sidecar_path("checkpoints/latest.ot"),
+            "checkpoints/latest.state.json"
+        );
+        assert_eq!(
+            state_sidecar_path("checkpoints/policy_update10.safetensors"),
+            "checkpoints/policy_update10.state.json"
+        );
     }
 }
 
@@ -503,84 +541,170 @@ struct RolloutResult {
 /// *different* update's data - this function never touches any
 /// `LearnerShard` state, only `actor`'s own workers/`cur_obs`/`vs`/
 /// `policy`, all owned exclusively by the caller's `&mut ActorShard`.
+fn choice_from_act_vecs(
+    i: usize,
+    a_v: &[i64],
+    player_v: &[i64],
+    tile_v: &[i64],
+    build_v: &[i64],
+    nuke_v: &[i64],
+    qty_v: &[f32],
+) -> (Choice, ChoiceScalars) {
+    let act = a_v[i];
+    let np = action_needs_player(act);
+    let nt = action_needs_tile(act);
+    let nq = action_needs_quantity(act);
+    let is_build = ACTIONS[act as usize] == "build";
+    let is_nuke = ACTIONS[act as usize] == "launch_nuke";
+    let choice = Choice {
+        action: act,
+        player_slot: np.then_some(player_v[i]),
+        tile_region: nt.then_some(tile_v[i]),
+        build_type: is_build.then_some(build_v[i]),
+        nuke_type: is_nuke.then_some(nuke_v[i]),
+        quantity_frac: nq.then_some(qty_v[i] as f64),
+    };
+    let scalars = ChoiceScalars {
+        action: act,
+        player_slot: if np { player_v[i] } else { -1 },
+        tile_region: if nt { tile_v[i] } else { -1 },
+        build_type: if is_build { build_v[i] } else { -1 },
+        nuke_type: if is_nuke { nuke_v[i] } else { -1 },
+        quantity_frac: if nq { qty_v[i] } else { -1.0 },
+    };
+    (choice, scalars)
+}
+
+/// Encode + act for a contiguous worker slice `[start, end)`. Returns
+/// per-env choice scalars / logp / value aligned to the slice (length
+/// `end - start`).
+fn act_group(
+    actor: &mut ActorShard,
+    cfg: &Config,
+    start: usize,
+    end: usize,
+) -> Result<(Vec<ChoiceScalars>, Vec<f32>, Vec<f32>)> {
+    let n = end - start;
+    if n == 0 {
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
+    }
+    if let Some(ae) = actor.ae.as_ref() {
+        batch::encode_prepared_obs(&mut actor.cur_obs[start..end], actor.device, ae)?;
+    }
+    let obs_refs: Vec<&PreparedObs> = actor.cur_obs[start..end].iter().collect();
+    let obs_t = batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d, cfg.fp16_rollout);
+    let (a, player, tile, build, nuke, qty, logp, value) =
+        tch::no_grad(|| actor.policy.act(&obs_t, false));
+
+    let a_v: Vec<i64> = (&a).try_into()?;
+    let player_v: Vec<i64> = (&player).try_into()?;
+    let tile_v: Vec<i64> = (&tile).try_into()?;
+    let build_v: Vec<i64> = (&build).try_into()?;
+    let nuke_v: Vec<i64> = (&nuke).try_into()?;
+    let qty_v: Vec<f32> = (&qty).try_into()?;
+    let logp_v: Vec<f32> = (&logp).try_into()?;
+    let value_v: Vec<f32> = (&value).try_into()?;
+
+    let mut scalars = Vec::with_capacity(n);
+    for i in 0..n {
+        let (choice, sc) =
+            choice_from_act_vecs(i, &a_v, &player_v, &tile_v, &build_v, &nuke_v, &qty_v);
+        actor.workers[start + i]
+            .choice_tx
+            .send(choice)
+            .map_err(|_| anyhow!("env {} choice channel closed", start + i))?;
+        scalars.push(sc);
+    }
+    Ok((scalars, logp_v, value_v))
+}
+
+fn recv_group(
+    actor: &mut ActorShard,
+    start: usize,
+    end: usize,
+    scalars: &[ChoiceScalars],
+    logp_v: &[f32],
+    value_v: &[f32],
+    step_row: &mut [Option<Step>],
+    ep_infos: &mut Vec<EpisodeInfo>,
+) -> Result<()> {
+    for (j, i) in (start..end).enumerate() {
+        let (next_obs, reward, done, info) = actor.workers[i]
+            .obs_rx
+            .recv()
+            .map_err(|_| anyhow!("env {i} obs channel closed"))?
+            .map_err(|e| anyhow!("env {i}: {e}"))?;
+        if let Some(info) = info {
+            ep_infos.push(info);
+        }
+        let prev_obs = std::mem::replace(&mut actor.cur_obs[i], next_obs);
+        step_row[i] = Some(Step {
+            obs: prev_obs,
+            choice: scalars[j].clone(),
+            logp: logp_v[j],
+            value: value_v[j],
+            reward: reward as f32,
+            done,
+        });
+    }
+    Ok(())
+}
+
 fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult> {
     let n = actor.workers.len();
     let mut buffer: Vec<Vec<Step>> = Vec::with_capacity(cfg.rollout_len);
     let mut ep_infos = Vec::new();
 
-    for _ in 0..cfg.rollout_len {
-        // Encode into host grids on the actor (exclusive &mut) so the
-        // learner's !Sync batch-build threads can rebuild Obs from
-        // `PreparedObs.grid` without holding an AE.
-        if let Some(ae) = actor.ae.as_ref() {
-            batch::encode_prepared_obs(&mut actor.cur_obs, actor.device, ae)?;
-        }
-        let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
-        let obs_t = batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d);
-        let (a, player, tile, build, nuke, qty, logp, value) = tch::no_grad(|| actor.policy.act(&obs_t, false));
+    // Dual env-group pipelining (Python v4.1): split workers into two
+    // halves; while group 0's engines step, encode+act group 1 (and vice
+    // versa). Disabled or N<=1 → single lockstep group.
+    let pipeline = cfg.pipeline_groups && n > 1;
+    let half = if pipeline { n.div_ceil(2) } else { n };
+    let g0 = (0, half);
+    let g1 = (half, n);
 
-        let a_v: Vec<i64> = (&a).try_into()?;
-        let player_v: Vec<i64> = (&player).try_into()?;
-        let tile_v: Vec<i64> = (&tile).try_into()?;
-        let build_v: Vec<i64> = (&build).try_into()?;
-        let nuke_v: Vec<i64> = (&nuke).try_into()?;
-        let qty_v: Vec<f32> = (&qty).try_into()?;
-        let logp_v: Vec<f32> = (&logp).try_into()?;
-        let value_v: Vec<f32> = (&value).try_into()?;
+    // Prime: act+send group 0 before the step loop (matches Python's
+    // `pack0 = act_group(groups[0]); vec.send_group(...)` before `for t`).
+    let (mut pack0_sc, mut pack0_lp, mut pack0_v) = act_group(actor, cfg, g0.0, g0.1)?;
 
-        // Phase 1 (send): issue every env's next choice before blocking on
-        // any recv, so all `n` worker threads tick concurrently instead of
-        // serializing on this shard's own env count.
-        let mut step_choices = Vec::with_capacity(n);
-        for i in 0..n {
-            let act = a_v[i];
-            let np = action_needs_player(act);
-            let nt = action_needs_tile(act);
-            let nq = action_needs_quantity(act);
-            let is_build = ACTIONS[act as usize] == "build";
-            let is_nuke = ACTIONS[act as usize] == "launch_nuke";
-            let choice = Choice {
-                action: act,
-                player_slot: np.then_some(player_v[i]),
-                tile_region: nt.then_some(tile_v[i]),
-                build_type: is_build.then_some(build_v[i]),
-                nuke_type: is_nuke.then_some(nuke_v[i]),
-                quantity_frac: nq.then_some(qty_v[i] as f64),
-            };
-            let scalars = ChoiceScalars {
-                action: act,
-                player_slot: if np { player_v[i] } else { -1 },
-                tile_region: if nt { tile_v[i] } else { -1 },
-                build_type: if is_build { build_v[i] } else { -1 },
-                nuke_type: if is_nuke { nuke_v[i] } else { -1 },
-                quantity_frac: if nq { qty_v[i] } else { -1.0 },
-            };
-            actor.workers[i].choice_tx.send(choice).map_err(|_| anyhow!("env {i} choice channel closed"))?;
-            step_choices.push(scalars);
+    for t in 0..cfg.rollout_len {
+        let mut step_row: Vec<Option<Step>> = (0..n).map(|_| None).collect();
+
+        let mut pack1: Option<(Vec<ChoiceScalars>, Vec<f32>, Vec<f32>)> = None;
+        if g1.0 < g1.1 {
+            // Overlaps group 0 stepping (choices already in flight).
+            pack1 = Some(act_group(actor, cfg, g1.0, g1.1)?);
         }
 
-        // Phase 2 (recv).
-        let mut step_row = Vec::with_capacity(n);
-        for i in 0..n {
-            let (next_obs, reward, done, info) = actor.workers[i]
-                .obs_rx
-                .recv()
-                .map_err(|_| anyhow!("env {i} obs channel closed"))?
-                .map_err(|e| anyhow!("env {i}: {e}"))?;
-            if let Some(info) = info {
-                ep_infos.push(info);
-            }
-            let prev_obs = std::mem::replace(&mut actor.cur_obs[i], next_obs);
-            step_row.push(Step {
-                obs: prev_obs,
-                choice: step_choices[i].clone(),
-                logp: logp_v[i],
-                value: value_v[i],
-                reward: reward as f32,
-                done,
-            });
+        recv_group(
+            actor,
+            g0.0,
+            g0.1,
+            &pack0_sc,
+            &pack0_lp,
+            &pack0_v,
+            &mut step_row,
+            &mut ep_infos,
+        )?;
+
+        if t + 1 < cfg.rollout_len {
+            // Next-step act for g0 overlaps g1 stepping when pack1 is live.
+            let next = act_group(actor, cfg, g0.0, g0.1)?;
+            pack0_sc = next.0;
+            pack0_lp = next.1;
+            pack0_v = next.2;
         }
-        buffer.push(step_row);
+
+        if let Some((sc1, lp1, v1)) = pack1.as_ref() {
+            recv_group(actor, g1.0, g1.1, sc1, lp1, v1, &mut step_row, &mut ep_infos)?;
+        }
+
+        buffer.push(
+            step_row
+                .into_iter()
+                .map(|s| s.expect("every env must produce a step"))
+                .collect(),
+        );
     }
 
     let bootstrap_v: Vec<f32> = {
@@ -588,7 +712,7 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
             batch::encode_prepared_obs(&mut actor.cur_obs, actor.device, ae)?;
         }
         let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
-        let obs_t = batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d);
+        let obs_t = batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d, cfg.fp16_rollout);
         let v = tch::no_grad(|| actor.policy.value_only(&obs_t));
         (&v).try_into()?
     };
@@ -615,6 +739,7 @@ fn run_eval(
     max_ticks: i64,
     engine: EngineKind,
     pinned_h2d: bool,
+    fp16_rollout: bool,
 ) -> Result<EvalResult> {
     if episodes == 0 {
         return Ok(EvalResult { win: 0.0, score: 0.0, episodes: 0 });
@@ -639,7 +764,7 @@ fn run_eval(
         let mut batch: Vec<PreparedObs> = pending.iter().map(|&i| cur_obs[i].clone()).collect();
         batch::encode_prepared_obs(&mut batch, device, ae)?;
         let refs: Vec<&PreparedObs> = batch.iter().collect();
-        let obs_t = batch::build_obs(&refs, device, pinned_h2d);
+        let obs_t = batch::build_obs(&refs, device, pinned_h2d, fp16_rollout);
         let (a, player, tile, build, nuke, qty, _logp, _value) =
             tch::no_grad(|| policy.act(&obs_t, true));
         let a_v: Vec<i64> = (&a).try_into()?;
@@ -1025,7 +1150,7 @@ fn train_update(
                     let local_sum: f64 = ret_flat.iter().map(|&x| x as f64).sum();
                     let local_sum_sq: f64 = ret_flat.iter().map(|&x| (x as f64) * (x as f64)).sum();
 
-                    let obs = batch::build_obs(&obs_flat, device, cfg.pinned_h2d);
+                    let obs = batch::build_obs(&obs_flat, device, cfg.pinned_h2d, cfg.fp16_rollout);
                     let choice = batch::build_choice_batch(&choice_flat, device, cfg.pinned_h2d);
                     let adv = Tensor::from_slice(&adv_flat).to_device(device);
                     let ret = Tensor::from_slice(&ret_flat).to_device(device);
@@ -1483,6 +1608,14 @@ pub fn run(cfg: Config) -> Result<()> {
     // See LR_WARMUP_UPDATES's doc - resets on every curriculum advance
     // too, not just the run's very start, since the value function faces
     // the same "brand new data distribution" shock either way.
+    // After `--resume`, AdamW moments are cold (tch cannot restore them);
+    // `--resume-warmup-updates` (default 100) sets the first warmup length.
+    // 0 → fall back to the ordinary stage warmup (`LR_WARMUP_UPDATES`).
+    let mut lr_warmup_updates = if cfg.resume.is_some() && cfg.resume_warmup_updates > 0 {
+        cfg.resume_warmup_updates
+    } else {
+        LR_WARMUP_UPDATES
+    };
     let mut lr_warmup_start_update = start_update;
 
     // Prime the pipeline: collect the very first rollout (using the
@@ -1510,7 +1643,7 @@ pub fn run(cfg: Config) -> Result<()> {
         // LR warmup (see LR_WARMUP_UPDATES's doc) - a no-op once warmup
         // completes (frac saturates at 1.0), so this is safe to apply on
         // every single update rather than only during the warmup window.
-        let warmup_frac = lr_warmup_frac(update, lr_warmup_start_update, LR_WARMUP_UPDATES);
+        let warmup_frac = lr_warmup_frac(update, lr_warmup_start_update, lr_warmup_updates);
         for shard in learners.iter_mut() {
             shard.opt.set_lr(lr_now * warmup_frac);
         }
@@ -1614,6 +1747,7 @@ pub fn run(cfg: Config) -> Result<()> {
         if advanced {
             lr_now = cfg.lr * cfg.stage_lr_decay.powi(curr_stage as i32);
             lr_warmup_start_update = update + 1;
+            lr_warmup_updates = LR_WARMUP_UPDATES;
             for actor in &actors {
                 for w in &actor.workers {
                     let _ = w.stage_tx.send(curr_stage);
@@ -1738,6 +1872,7 @@ pub fn run(cfg: Config) -> Result<()> {
                 cfg.max_episode_ticks,
                 cfg.engine,
                 cfg.pinned_h2d,
+                cfg.fp16_rollout,
             )?;
             println!(
                 "[eval] stage {curr_stage}  win {:.2}  score {:.2}  ({} eps, {:.0}s)",
@@ -1851,13 +1986,19 @@ pub fn run(cfg: Config) -> Result<()> {
                 total_env_steps,
                 recent_wins: recent_wins.iter().copied().collect(),
             };
-            let path = format!("{}/policy_update{}.ot", cfg.ckpt_dir, update);
+            let path = format!("{}/policy_update{}.safetensors", cfg.ckpt_dir, update);
             save_checkpoint(&learners[0].vs, &path, &state)?;
             // Fixed-name pointer at the latest checkpoint so a restart-loop
             // wrapper (or a fresh pod after total disk loss) always has one
             // unambiguous thing to resume from, without parsing filenames -
             // matches `rl/ppo.py`'s single always-current `policy.pt`.
-            save_checkpoint(&learners[0].vs, &format!("{}/latest.ot", cfg.ckpt_dir), &state)?;
+            // Extension is `.safetensors` so tch `VarStore::save` writes the
+            // safetensors interchange format (legacy `.ot` still loads).
+            save_checkpoint(
+                &learners[0].vs,
+                &format!("{}/latest.safetensors", cfg.ckpt_dir),
+                &state,
+            )?;
             println!("[train] checkpoint saved: {path} (update={})", state.update);
         }
     }
@@ -1870,8 +2011,16 @@ pub fn run(cfg: Config) -> Result<()> {
         total_env_steps,
         recent_wins: recent_wins.iter().copied().collect(),
     };
-    save_checkpoint(&learners[0].vs, &format!("{}/policy_final.ot", cfg.ckpt_dir), &final_state)?;
-    save_checkpoint(&learners[0].vs, &format!("{}/latest.ot", cfg.ckpt_dir), &final_state)?;
+    save_checkpoint(
+        &learners[0].vs,
+        &format!("{}/policy_final.safetensors", cfg.ckpt_dir),
+        &final_state,
+    )?;
+    save_checkpoint(
+        &learners[0].vs,
+        &format!("{}/latest.safetensors", cfg.ckpt_dir),
+        &final_state,
+    )?;
     for actor in actors {
         for w in actor.workers {
             drop(w.choice_tx);

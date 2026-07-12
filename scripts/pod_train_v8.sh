@@ -62,7 +62,7 @@ NODE_FRACTION="${NODE_FRACTION:-0}"
 # Frozen v8 launch config (see devlog): full policy (no --gc/--blocks
 # override), AMP on, pinned H2D on, entropy floor at its default. Override
 # via EXTRA_ARGS if deliberately deviating from the plan.
-EXTRA_ARGS="${EXTRA_ARGS:---amp --pinned-h2d --foveate --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
+EXTRA_ARGS="${EXTRA_ARGS:---amp --pinned-h2d --fp16-rollout --foveate --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
 REPO_DIR="${REPO_DIR:-/root/openfront-ai}"
 CKPT_DIR="$REPO_DIR/rust/checkpoints/$RUN_NAME"
 HF_SYNC_INTERVAL_SECONDS="${HF_SYNC_INTERVAL_SECONDS:-600}"
@@ -170,14 +170,18 @@ mkdir -p "$CKPT_DIR"
 
 # --- resume seed: if the local checkpoint is gone (fresh pod, disk wiped)
 # but a synced copy exists on HF, pull it down before starting ---
-if [ ! -f "$CKPT_DIR/latest.ot" ]; then
+# Prefer `.safetensors`; fall back to legacy `.ot` if that is all HF has.
+LATEST_CKPT=""
+[ -f "$CKPT_DIR/latest.safetensors" ] && LATEST_CKPT="$CKPT_DIR/latest.safetensors"
+[ -z "$LATEST_CKPT" ] && [ -f "$CKPT_DIR/latest.ot" ] && LATEST_CKPT="$CKPT_DIR/latest.ot"
+if [ -z "$LATEST_CKPT" ]; then
   "$PYTHON" - "$RUN_NAME" "$CKPT_DIR" <<'PYEOF' || true
 import sys
 from pathlib import Path
 from huggingface_hub import hf_hub_download
 
 run, dest = sys.argv[1], Path(sys.argv[2])
-for f in ("latest.ot", "latest.state.json"):
+for f in ("latest.safetensors", "latest.ot", "latest.state.json"):
     try:
         p = hf_hub_download("djmango/openfront-rl", f"{run}/{f}")
         dest.mkdir(parents=True, exist_ok=True)
@@ -193,7 +197,7 @@ fi
 (
   while true; do
     sleep "$HF_SYNC_INTERVAL_SECONDS"
-    if [ -f "$CKPT_DIR/latest.ot" ]; then
+    if [ -f "$CKPT_DIR/latest.safetensors" ] || [ -f "$CKPT_DIR/latest.ot" ]; then
       "$PYTHON" - "$RUN_NAME" "$CKPT_DIR" <<'PYEOF' 2>&1 | sed 's/^/[hf-sync] /'
 import sys
 from pathlib import Path
@@ -203,7 +207,7 @@ run, ckpt_dir = sys.argv[1], Path(sys.argv[2])
 api = HfApi()
 try:
     api.create_repo("djmango/openfront-rl", exist_ok=True, repo_type="model")
-    for f in ("latest.ot", "latest.state.json"):
+    for f in ("latest.safetensors", "latest.ot", "latest.state.json"):
         p = ckpt_dir / f
         if p.exists():
             api.upload_file(path_or_fileobj=str(p), path_in_repo=f"{run}/{f}", repo_id="djmango/openfront-rl")
@@ -223,7 +227,11 @@ ulimit -n 65535 2>/dev/null || true
 FAST_EXITS=0
 while true; do
   RESUME=""
-  [ -f "$CKPT_DIR/latest.ot" ] && RESUME="--resume $CKPT_DIR/latest.ot"
+  if [ -f "$CKPT_DIR/latest.safetensors" ]; then
+    RESUME="--resume $CKPT_DIR/latest.safetensors"
+  elif [ -f "$CKPT_DIR/latest.ot" ]; then
+    RESUME="--resume $CKPT_DIR/latest.ot"
+  fi
   echo "=== $(date -u +%FT%TZ) launching $RUN_NAME num_gpus=$NUM_GPUS envs/shard=$NUM_ENVS $RESUME ==="
   START_TS=$(date +%s)
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
