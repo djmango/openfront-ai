@@ -342,4 +342,3 @@ mod tests {
         assert!(z.isfinite().all().double_value(&[]) != 0.0);
     }
 }
-}
