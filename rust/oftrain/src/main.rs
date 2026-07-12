@@ -61,6 +61,18 @@ struct Args {
     #[arg(long, default_value_t = 0.5)]
     vf_coef: f32,
 
+    /// Clamps the value-loss target to [-ret_clip, ret_clip] before the
+    /// MSE loss ever sees it (see `train::Config::ret_clip`'s doc for the
+    /// full rationale/incident this fixes). 0.0 disables it entirely.
+    /// Default derived from `gamma=0.999`'s ~1000-tick effective horizon
+    /// and this reward function's worst-single-step magnitude (~6.5, the
+    /// larger of `W_DELTA_GAIN`/`W_DELTA_LOSS`) - generous enough that a
+    /// real long/extreme episode's return shouldn't ever hit it, but far
+    /// below the billions/trillions the unclipped version actually reached
+    /// during the 2026-07-12 incident.
+    #[arg(long, default_value_t = 3000.0)]
+    ret_clip: f32,
+
     /// Anneals linearly to `ent_coef_final` over `ent_anneal_updates`.
     #[arg(long, default_value_t = 0.01)]
     ent_coef: f32,
@@ -335,6 +347,7 @@ fn main() -> anyhow::Result<()> {
         lambda: args.lambda_,
         clip: args.clip,
         vf_coef: args.vf_coef,
+        ret_clip: args.ret_clip,
         ent_coef: args.ent_coef,
         ent_coef_final: args.ent_coef_final,
         ent_anneal_updates: args.ent_anneal_updates,
