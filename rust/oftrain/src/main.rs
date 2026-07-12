@@ -301,6 +301,23 @@ fn preload_cuda_deps() {
 
 fn main() -> anyhow::Result<()> {
     preload_cuda_deps();
+    if std::env::var("OFTRAIN_EXPLICIT_CUINIT").is_ok() {
+        unsafe {
+            let handle = libc::dlopen(c"libcuda.so.1".as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+            if handle.is_null() {
+                eprintln!("[oftrain] dlopen(libcuda.so.1) failed: {:?}", std::ffi::CStr::from_ptr(libc::dlerror()));
+            } else {
+                let sym = libc::dlsym(handle, c"cuInit".as_ptr());
+                if sym.is_null() {
+                    eprintln!("[oftrain] dlsym(cuInit) failed");
+                } else {
+                    let cu_init: extern "C" fn(u32) -> i32 = std::mem::transmute(sym);
+                    let rc = cu_init(0);
+                    eprintln!("[oftrain] explicit cuInit(0) -> {rc}");
+                }
+            }
+        }
+    }
     let args = Args::parse();
     tch::manual_seed(0);
     let device = parse_device(&args.device);
