@@ -45,6 +45,12 @@ impl Execution for SamLauncherExecution {
 
     fn tick(&mut self, game: &mut Game, ticks: u32) {
         let sam_id = self.sam_unit_id;
+        // TS SAMLauncherExecution holds the Unit; after capture, retarget owner.
+        let Some(owner) = game.find_unit_owner(sam_id) else {
+            self.active = false;
+            return;
+        };
+        self.owner_small_id = owner;
         let Some(sam) = game.unit(self.owner_small_id, sam_id) else {
             self.active = false;
             return;
