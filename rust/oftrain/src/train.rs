@@ -69,6 +69,31 @@ use crate::vecenv::{EnvWorker, EpisodeInfo, PreparedObs};
 const ENT_GRACE_UPDATES: u64 = 20;
 const ENT_SCALE_MAX: f64 = 5.0;
 
+/// Linear LR warmup over the first N updates of *every* stage (including
+/// stage 0's very start and every curriculum advance). Every value-loss
+/// instability episode observed this session started within the first
+/// ~10-40 updates after a fresh/stage-advance policy snapshot began
+/// training on genuinely new data - exactly the highest-variance,
+/// least-reliable-gradient-estimate window PPO ever sees, since the
+/// value function hasn't had a chance to calibrate to the new distribution
+/// yet. A full-strength optimizer step against a badly wrong value
+/// function's advantage estimates is the most likely trigger for the
+/// initial disruption that every other fix in this session (Huber,
+/// ret_clip, adv_clip, the value soft-bound, the adaptive return clip)
+/// has been bounding the *damage* from rather than reducing how often it
+/// happens in the first place. Standard warmup mitigation: scale LR
+/// linearly from 0 up to its target value over this many updates,
+/// applied every update (a no-op once warmup completes, so this doesn't
+/// interact with the existing stage-advance LR decay at all).
+const LR_WARMUP_UPDATES: u64 = 20;
+
+/// `update`/`warmup_start` are both absolute update indices (not reset to
+/// 0 at stage boundaries) - see the call site's doc for why warmup resets
+/// on every curriculum advance, not just the run's start.
+fn lr_warmup_frac(update: u64, warmup_start: u64, warmup_updates: u64) -> f64 {
+    ((update - warmup_start + 1) as f64 / warmup_updates.max(1) as f64).min(1.0)
+}
+
 /// How many running standard deviations (see `RetStat`) the adaptive
 /// return-clip bound allows - generous relative to a well-behaved return
 /// distribution (matching `adv_clip`'s own default of 10 std-devs for the
@@ -1262,6 +1287,10 @@ pub fn run(cfg: Config) -> Result<()> {
     // after each update from that update's measured mean entropy.
     let mut ent_scale: f64 = resumed_state.as_ref().map(|s| s.ent_scale).unwrap_or(1.0);
     let start_update = resumed_state.as_ref().map(|s| s.update).unwrap_or(0);
+    // See LR_WARMUP_UPDATES's doc - resets on every curriculum advance
+    // too, not just the run's very start, since the value function faces
+    // the same "brand new data distribution" shock either way.
+    let mut lr_warmup_start_update = start_update;
 
     // Prime the pipeline: collect the very first rollout (using the
     // actors' initial, freshly-copied-from-learner weights) before the
@@ -1285,6 +1314,13 @@ pub fn run(cfg: Config) -> Result<()> {
         let frac = (update as f64 / cfg.ent_anneal_updates.max(1) as f64).min(1.0);
         let ent_coef_now =
             ((cfg.ent_coef as f64 + (cfg.ent_coef_final as f64 - cfg.ent_coef as f64) * frac) * ent_scale) as f32;
+        // LR warmup (see LR_WARMUP_UPDATES's doc) - a no-op once warmup
+        // completes (frac saturates at 1.0), so this is safe to apply on
+        // every single update rather than only during the warmup window.
+        let warmup_frac = lr_warmup_frac(update, lr_warmup_start_update, LR_WARMUP_UPDATES);
+        for shard in learners.iter_mut() {
+            shard.opt.set_lr(lr_now * warmup_frac);
+        }
         // `collect_dt`/`train_dt` used to both be measured from
         // (effectively) the same start instant to the same point *after*
         // this whole scope returns - since the scope can't return until
@@ -1384,11 +1420,20 @@ pub fn run(cfg: Config) -> Result<()> {
         }
         if advanced {
             lr_now = cfg.lr * cfg.stage_lr_decay.powi(curr_stage as i32);
+            lr_warmup_start_update = update + 1;
             for actor in &actors {
                 for w in &actor.workers {
                     let _ = w.stage_tx.send(curr_stage);
                 }
             }
+            // The *next* iteration's top-of-loop warmup logic recomputes
+            // and re-applies the correct (freshly-reset) warmup-scaled LR
+            // before it's ever used for an actual optimizer step, so what
+            // gets set here doesn't matter for training itself - keeping
+            // it at the un-warmed-up `lr_now` just means anything that
+            // reads the optimizer's LR *before* the next iteration starts
+            // (there's currently nothing that does) sees the stage's
+            // target rate, not a stale pre-advance value.
             for shard in learners.iter_mut() {
                 shard.opt.set_lr(lr_now);
             }
@@ -1702,6 +1747,38 @@ mod huber_value_loss_tests {
         // Huber's small-error branch is 0.5*(err)^2 (half of MSE's err^2);
         // both scale identically with error, only the constant differs.
         assert!((h - 0.5 * m).abs() < 1e-5, "huber={h} should be ~0.5*mse={m} for small errors");
+    }
+}
+
+#[cfg(test)]
+mod lr_warmup_tests {
+    use super::lr_warmup_frac;
+
+    #[test]
+    fn ramps_linearly_from_the_first_update_to_full_strength() {
+        assert!((lr_warmup_frac(0, 0, 20) - 1.0 / 20.0).abs() < 1e-9);
+        assert!((lr_warmup_frac(9, 0, 20) - 10.0 / 20.0).abs() < 1e-9);
+        assert!((lr_warmup_frac(19, 0, 20) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn never_exceeds_full_strength_after_warmup_completes() {
+        assert_eq!(lr_warmup_frac(20, 0, 20), 1.0);
+        assert_eq!(lr_warmup_frac(1_000_000, 0, 20), 1.0);
+    }
+
+    #[test]
+    fn resets_correctly_from_a_nonzero_warmup_start_update() {
+        // Mirrors a curriculum advance at update 137: the very next
+        // update (138) must be back at the start of a fresh ramp, not
+        // treated as update 138 of an already-long-since-finished ramp.
+        assert!((lr_warmup_frac(138, 138, 20) - 1.0 / 20.0).abs() < 1e-9);
+        assert_eq!(lr_warmup_frac(158, 138, 20), 1.0);
+    }
+
+    #[test]
+    fn a_warmup_window_of_zero_updates_never_panics_and_is_full_strength_immediately() {
+        assert_eq!(lr_warmup_frac(0, 0, 0), 1.0);
     }
 }
 
