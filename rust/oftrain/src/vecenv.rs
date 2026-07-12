@@ -19,6 +19,7 @@ use ofcore::translate::{translate, Choice, IntentTranslator};
 use crate::ae::{self, AeRaw};
 use crate::engine::{self, EngineKind, GameEngine, RawObs};
 
+#[derive(Clone)]
 pub struct EpisodeInfo {
     pub reward: f64,
     pub length: i64,
@@ -43,6 +44,7 @@ pub struct EpisodeInfo {
 /// `grid` is only filled for the no-AE test/legacy path (63ch
 /// stat+ego+db+transient); training always passes an AE and rebuilds
 /// `grid` inside `build_obs`.
+#[derive(Clone)]
 pub struct PreparedObs {
     /// Optional pre-assembled fine grid (C_GRID, gh, gw). Filled by the
     /// actor encode path so the learner can rebuild Obs without holding an

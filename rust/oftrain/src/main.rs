@@ -4,6 +4,7 @@ mod batch;
 mod bridge;
 mod engine;
 mod gpu_util;
+mod metrics;
 #[cfg(feature = "native-engine")]
 mod native;
 mod policy;
@@ -210,11 +211,27 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     log_every: u64,
 
+    /// Updates between fixed-seed greedy eval passes (0 = off). Default 50
+    /// (tighter than Python's 300 so short smoke runs still see a number).
+    #[arg(long, default_value_t = 50)]
+    eval_every: u64,
+
+    /// Episodes per greedy eval pass (fresh workers, seeds `w{i}-ep0`).
+    #[arg(long, default_value_t = 8)]
+    eval_episodes: usize,
+
     #[arg(long, default_value_t = 200)]
     ckpt_every: u64,
 
     #[arg(long, default_value = "checkpoints")]
     ckpt_dir: String,
+
+    /// Warm-start policy weights from a `.ot` VarStore dump (BC→RL or a
+    /// previously exported checkpoint) without restoring TrainState.
+    /// Ignored when `--resume` is also set. See
+    /// `scripts/convert_policy_pt_notes.md` for Python↔Rust key mapping.
+    #[arg(long)]
+    init: Option<String>,
 
     /// Resume from a previously-saved checkpoint (e.g.
     /// `checkpoints/latest.ot`). Restores weights and training state
@@ -226,6 +243,13 @@ struct Args {
     /// dozen updates post-resume.
     #[arg(long)]
     resume: Option<String>,
+
+    /// Value-loss form: `huber` (default; Rust stabilizer after the
+    /// 2026-07-12 explosion) or `mse` (Python `F.mse_loss` parity).
+    /// Phase 5 (final): switch the default to `mse` once training is
+    /// stable under Huber.
+    #[arg(long, default_value = "huber", value_parser = ["huber", "mse"])]
+    value_loss: String,
 
     /// Opt-in: automatically grow `--num-envs` at runtime toward the
     /// `--target-gpu-util` set point instead of relying on manual
@@ -406,9 +430,16 @@ fn main() -> anyhow::Result<()> {
         engine: args.engine,
         node_fraction: args.node_fraction.clamp(0.0, 1.0),
         log_every: args.log_every,
+        eval_every: args.eval_every,
+        eval_episodes: args.eval_episodes,
         ckpt_every: args.ckpt_every,
         ckpt_dir: args.ckpt_dir,
+        init: args.init,
         resume: args.resume,
+        value_loss: match args.value_loss.as_str() {
+            "mse" => train::ValueLoss::Mse,
+            _ => train::ValueLoss::Huber,
+        },
         auto_scale_envs: args.auto_scale_envs,
         target_gpu_util: args.target_gpu_util,
         // Never scale below whatever the run was explicitly started with
