@@ -47,16 +47,15 @@ impl Execution for CityExecution {
         if !self.active {
             return;
         }
+        // TS CityExecution holds the Unit; after capture, retarget owner.
+        let Some(owner) = game.find_unit_owner(self.unit_id) else {
+            self.active = false;
+            return;
+        };
+        self.small_id = owner;
         if !self.station_created {
             self.create_station(game);
             self.station_created = true;
-        }
-        let still_active = game
-            .player_by_small_id(self.small_id)
-            .and_then(|p| p.units.iter().find(|u| u.id == self.unit_id))
-            .is_some();
-        if !still_active {
-            self.active = false;
         }
     }
 

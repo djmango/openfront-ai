@@ -408,7 +408,13 @@ impl Config {
             };
         }
         let capped_delta = (troops as f64 + to_add).min(max) - troops as f64;
-        crate::util::to_int(capped_delta)
+        // Match TS `addTroops` rounding: floor positives, and for negatives use
+        // `-floor(-delta)` (via removeTroops(-delta)) rather than `floor(delta)`.
+        if capped_delta >= 0.0 {
+            crate::util::to_int(capped_delta)
+        } else {
+            -crate::util::to_int(-capped_delta)
+        }
     }
 
     /// Unrounded TS `troopIncreaseRate()` - the RL obs emits the raw float

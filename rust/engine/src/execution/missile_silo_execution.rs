@@ -23,6 +23,12 @@ impl Execution for MissileSiloExecution {
     fn init(&mut self, _game: &mut Game, _tick: u32) {}
 
     fn tick(&mut self, game: &mut Game, _tick: u32) {
+        // TS MissileSiloExecution holds the Unit; after capture, retarget owner.
+        let Some(owner) = game.find_unit_owner(self.unit_id) else {
+            self.active = false;
+            return;
+        };
+        self.small_id = owner;
         let Some(u) = game.unit(self.small_id, self.unit_id) else {
             self.active = false;
             return;

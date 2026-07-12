@@ -26,12 +26,18 @@ impl Execution for DefensePostExecution {
         if !self.active {
             return;
         }
-        let still_active = game
-            .player_by_small_id(self.small_id)
-            .and_then(|p| p.units.iter().find(|u| u.id == self.unit_id))
-            .is_some_and(|u| !u.under_construction);
-        if !still_active {
+        // TS DefensePostExecution holds the Unit; after capture, retarget owner.
+        let Some(owner) = game.find_unit_owner(self.unit_id) else {
             self.active = false;
+            return;
+        };
+        self.small_id = owner;
+        let Some(u) = game.unit(self.small_id, self.unit_id) else {
+            self.active = false;
+            return;
+        };
+        if u.under_construction {
+            return;
         }
     }
 
