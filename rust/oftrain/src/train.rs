@@ -349,7 +349,7 @@ fn state_sidecar_path(ckpt_path: &str) -> String {
 
 #[cfg(test)]
 mod sidecar_path_tests {
-    use super::state_sidecar_path;
+    use super::{atomic_tmp_path, state_sidecar_path};
 
     #[test]
     fn strips_safetensors_and_ot() {
@@ -366,13 +366,44 @@ mod sidecar_path_tests {
             "checkpoints/policy_update10.state.json"
         );
     }
+
+    #[test]
+    fn atomic_tmp_keeps_serializer_extension() {
+        assert_eq!(
+            atomic_tmp_path("checkpoints/latest.safetensors"),
+            "checkpoints/latest.tmp.safetensors"
+        );
+        assert_eq!(
+            atomic_tmp_path("checkpoints/policy_update10.ot"),
+            "checkpoints/policy_update10.tmp.ot"
+        );
+        assert_eq!(
+            atomic_tmp_path("checkpoints/latest.state.json"),
+            "checkpoints/latest.state.tmp.json"
+        );
+    }
 }
 
 /// Atomic write (tmp file + rename) so a kill mid-save can never leave a
 /// torn/half-written checkpoint or state file behind - matches
 /// `rl/ppo.py`'s `policy.pt.tmp` -> `policy.pt` rename pattern.
+fn atomic_tmp_path(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    match (p.file_stem(), p.extension()) {
+        (Some(stem), Some(ext)) => {
+            let name = format!("{}.tmp.{}", stem.to_string_lossy(), ext.to_string_lossy());
+            p.with_file_name(name).to_string_lossy().into_owned()
+        }
+        _ => format!("{path}.tmp"),
+    }
+}
+
 fn save_atomic(path: &str, write: impl FnOnce(&str) -> Result<()>) -> Result<()> {
-    let tmp = format!("{path}.tmp");
+    // VarStore chooses the serializer from the filename extension. Keep
+    // `.safetensors`/`.ot` on the temporary path; `foo.safetensors.tmp`
+    // silently selects PyTorch zip serialization and then becomes
+    // unreadable after it is renamed back to `.safetensors`.
+    let tmp = atomic_tmp_path(path);
     write(&tmp)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
