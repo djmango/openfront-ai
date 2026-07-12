@@ -773,6 +773,7 @@ dependencies = [
  "clap",
  "crossbeam-channel",
  "flate2",
+ "libc",
  "ofcore",
  "openfront-engine",
  "rand",
