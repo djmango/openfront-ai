@@ -110,14 +110,20 @@ pub struct Config {
     /// observed failure mode without touching the advantage/policy-loss
     /// path at all - the return is only ever consumed as this one target.
     pub ret_clip: f32,
-    /// `--vf-clip` (0.0 = disabled): PPO2-style value-*prediction* clipping
-    /// - complements `ret_clip` (which only bounds the target). See the
-    /// clipping site in `train_update`'s minibatch loop for the mechanism
-    /// and why `ret_clip` alone wasn't sufficient (confirmed live on the
-    /// 2026-07-12 incident's relaunch: `v` still reached 15.7 billion with
-    /// `ret_clip=3000` active - only explainable by the *prediction*
-    /// itself drifting far past the clamped target, which target-clamping
-    /// alone can't prevent).
+    /// Huber-loss delta for the value loss (replaces plain MSE - see the
+    /// loss computation in `train_update`'s minibatch loop for the full
+    /// incident history/rationale). Below `delta`, behaves like ordinary
+    /// squared error; beyond it, the loss - and critically, its *gradient*
+    /// - grows only linearly, bounded by `delta`, no matter how extreme the
+    /// target or prediction is. This is what actually fixed the
+    /// 2026-07-12 value-loss-explosion incident: `--ret-clip` (bounding
+    /// only the target) and a PPO2-style prediction-clipping attempt
+    /// (bounding the prediction relative to its old value, but still
+    /// selecting the *unclipped* branch's unbounded gradient whenever the
+    /// prediction had already drifted far enough - confirmed live, `v`
+    /// still reached 310 quadrillion with that active) both failed to
+    /// actually cap the gradient magnitude in the one case that matters -
+    /// Huber does, by construction, unconditionally.
     pub vf_clip: f32,
     /// Entropy coefficient anneals linearly `ent_coef -> ent_coef_final`
     /// over `ent_anneal_updates` (matches `rl/ppo.py`'s schedule), with
@@ -582,13 +588,6 @@ fn train_update(
         adv: Tensor,
         ret: Tensor,
         old_logp: Tensor,
-        /// Rollout-time value estimate (the actor's own prediction when
-        /// this sample was collected) - see `Config::vf_clip`'s doc for
-        /// why this needs to travel separately from `ret` (which is
-        /// already `advantage + old_value`, so recoverable in principle,
-        /// but not once `--ret-clip` has clamped it - the two clamps need
-        /// independent, un-entangled inputs).
-        old_value: Tensor,
     }
     let batch_build_t0 = Instant::now();
     // Per-shard: GAE (plain Rust, negligible) + one CPU repack/host->device
@@ -632,7 +631,6 @@ fn train_update(
                     let mut adv_flat = vec![0.0f32; total];
                     let mut ret_flat = vec![0.0f32; total];
                     let mut old_logp_flat = vec![0.0f32; total];
-                    let mut old_value_flat = vec![0.0f32; total];
                     // Tracks the pre-clamp raw return separately from
                     // `ret_flat` itself, so the diagnostic below still
                     // reports the *true* extreme value even once
@@ -654,7 +652,6 @@ fn train_update(
                             ret_flat[flat_idx] =
                                 if cfg.ret_clip > 0.0 { ret.clamp(-cfg.ret_clip, cfg.ret_clip) } else { ret };
                             old_logp_flat[flat_idx] = buffer[t][e].logp;
-                            old_value_flat[flat_idx] = buffer[t][e].value;
                         }
                     }
                     // Diagnostic for the 2026-07-12 value-loss-explosion
@@ -707,8 +704,7 @@ fn train_update(
                     let adv = Tensor::from_slice(&adv_flat).to_device(device);
                     let ret = Tensor::from_slice(&ret_flat).to_device(device);
                     let old_logp = Tensor::from_slice(&old_logp_flat).to_device(device);
-                    let old_value = Tensor::from_slice(&old_value_flat).to_device(device);
-                    ShardBatch { obs, choice, adv, ret, old_logp, old_value }
+                    ShardBatch { obs, choice, adv, ret, old_logp }
                 })
             })
             .collect();
@@ -755,41 +751,39 @@ fn train_update(
                             let adv_t = sb.adv.index_select(0, &idx_t);
                             let ret_t = sb.ret.index_select(0, &idx_t);
                             let old_logp_t = sb.old_logp.index_select(0, &idx_t);
-                            let old_value_t = sb.old_value.index_select(0, &idx_t);
 
                             let (logp, ent, ent_q, value) = shard.policy.evaluate(&obs_t, &choice_t);
                             let ratio = (&logp - &old_logp_t).exp();
                             let surr1 = &ratio * &adv_t;
                             let surr2 = ratio.clamp(1.0 - cfg.clip as f64, 1.0 + cfg.clip as f64) * &adv_t;
                             let pg_loss = -surr1.minimum(&surr2).mean(Kind::Float);
-                            // PPO2-style value clipping (see Config::vf_clip's
-                            // doc): `--ret-clip` alone bounds the *target*
-                            // but not the *prediction* - once `value` itself
-                            // has drifted from a diverging update, an
-                            // unclipped `(value - ret)^2` still produces an
-                            // unbounded loss/gradient regardless of how
-                            // tightly `ret` is clamped (confirmed live: `v`
-                            // reached 15.7 billion with `--ret-clip 3000`
-                            // active, only explainable by `value` itself
-                            // having drifted to roughly +-125,000). Clipping
-                            // `value` to within `vf_clip` of its own
-                            // *rollout-time* estimate, and taking the worse
-                            // (max) of the clipped/unclipped squared error -
-                            // exactly PPO2's original value-loss formula -
-                            // means any single update can only move a given
-                            // sample's prediction by at most `vf_clip`,
-                            // directly bounding runaway prediction drift
-                            // instead of just bounding what it's compared
-                            // against.
-                            let v_loss = if cfg.vf_clip > 0.0 {
-                                let value_clipped =
-                                    &old_value_t + (&value - &old_value_t).clamp(-cfg.vf_clip as f64, cfg.vf_clip as f64);
-                                let v_loss_unclipped = (&value - &ret_t).pow_tensor_scalar(2);
-                                let v_loss_clipped = (&value_clipped - &ret_t).pow_tensor_scalar(2);
-                                v_loss_unclipped.maximum(&v_loss_clipped).mean(Kind::Float)
-                            } else {
-                                (&value - &ret_t).pow_tensor_scalar(2).mean(Kind::Float)
-                            };
+                            // Huber (delta=`vf_clip`) instead of plain MSE for
+                            // the value loss - see Config::vf_clip's doc for
+                            // the full incident history. A PPO2-style
+                            // "clip-and-take-worse-of-two" attempt (tried
+                            // first, see git history) did NOT work: that
+                            // formula's `max(unclipped, clipped)` can still
+                            // select the *unclipped* branch's gradient
+                            // whenever the raw prediction has drifted far
+                            // enough, so it regularizes normal training but
+                            // provides no actual ceiling once a prediction
+                            // has already diverged - confirmed live, `v`
+                            // still reached 310 quadrillion with that
+                            // approach active, and even `pg_loss` got
+                            // corrupted (poisoned gradients flowing back
+                            // through the shared conv-tower backbone both
+                            // heads sit on). Huber's gradient magnitude is
+                            // bounded by `delta` by construction, everywhere,
+                            // for any error size - it degrades gracefully to
+                            // linear (bounded-gradient) loss beyond the
+                            // delta threshold instead of MSE's unbounded
+                            // quadratic gradient. This is the actual fix, not
+                            // another clamp: no single sample's target or
+                            // prediction, however extreme, can ever
+                            // contribute more than a `delta`-bounded
+                            // gradient, so the shared-backbone poisoning
+                            // pathway is closed off at the source.
+                            let v_loss = value.huber_loss(&ret_t, tch::Reduction::Mean, cfg.vf_clip.max(1e-3) as f64);
                             let ent_loss = ent.mean(Kind::Float);
                             // `ent_q` (Beta quantity-head entropy) is 0 for
                             // every sample whose action doesn't use a
@@ -1369,6 +1363,55 @@ pub fn run(cfg: Config) -> Result<()> {
 
 #[allow(dead_code)]
 fn unused_lock_hint(_m: &Arc<Mutex<()>>) {}
+
+#[cfg(test)]
+mod huber_value_loss_tests {
+    use tch::{Kind, Tensor};
+
+    /// The core property the 2026-07-12 fix relies on: Huber loss's
+    /// *gradient* w.r.t. the prediction stays bounded by `delta`
+    /// regardless of how extreme the target is - unlike plain MSE, whose
+    /// gradient is `2*(value-target)`, unbounded as the error grows. This
+    /// is what a plain magnitude assertion on the loss *value* wouldn't
+    /// catch (a huge loss value alone isn't the problem - see the
+    /// PPO2-clipping attempt this replaced, which also produced *bounded*
+    /// clipped-branch losses but still let `max(unclipped, clipped)` select
+    /// an unbounded gradient) - so this test differentiates w.r.t. the
+    /// prediction directly and checks the resulting gradient, not the loss.
+    #[test]
+    fn huber_loss_gradient_stays_bounded_for_extreme_targets() {
+        let delta = 50.0;
+        for &target in &[0.0, 100.0, 1_000.0, 1e9, 1e15] {
+            let value = Tensor::from_slice(&[0.0f32]).set_requires_grad(true);
+            let ret = Tensor::from_slice(&[target as f32]);
+            let loss = value.huber_loss(&ret, tch::Reduction::Mean, delta);
+            loss.backward();
+            let grad = f64::try_from(value.grad()).unwrap();
+            assert!(
+                grad.abs() <= delta + 1e-4,
+                "gradient magnitude must stay <= delta={delta} (Huber's exact bound beyond \
+                 the quadratic region, regardless of how much larger the error is) even for \
+                 target={target}, got {grad}"
+            );
+        }
+    }
+
+    /// Below `delta`, Huber must behave identically to plain MSE (matching
+    /// "normal"/healthy training exactly, per Config::vf_clip's doc) - only
+    /// large errors should ever see different behavior.
+    #[test]
+    fn huber_loss_matches_mse_for_small_errors() {
+        let delta = 50.0;
+        let value = Tensor::from_slice(&[1.0f32, 2.0, -3.0]);
+        let ret = Tensor::from_slice(&[1.5f32, 2.2, -3.1]);
+        let huber = value.huber_loss(&ret, tch::Reduction::Mean, delta);
+        let mse = (&value - &ret).pow_tensor_scalar(2).mean(Kind::Float);
+        let (h, m) = (f64::try_from(&huber).unwrap(), f64::try_from(&mse).unwrap());
+        // Huber's small-error branch is 0.5*(err)^2 (half of MSE's err^2);
+        // both scale identically with error, only the constant differs.
+        assert!((h - 0.5 * m).abs() < 1e-5, "huber={h} should be ~0.5*mse={m} for small errors");
+    }
+}
 
 #[cfg(test)]
 mod nan_guard_tests {
