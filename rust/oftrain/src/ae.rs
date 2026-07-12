@@ -209,12 +209,15 @@ pub fn pack_terrain(land: &[u8], mag: &[u8], fallout: &[u8], hr: usize, wr: usiz
 /// chunks by pixel budget (mirrors `rl/obs.py::MAX_ENC_PIX`).
 pub const MAX_ENC_PIX: usize = 16_000_000;
 
-pub fn encode_latent_batch(
+/// Encode to per-item tensors on `device`. Keeping this operation separate
+/// from the host fallback lets rollout inference consume the same CUDA
+/// latents that the frozen AE produced.
+pub fn encode_latent_batch_device(
     ae: &SpatialAE,
     items: &[&AeRaw],
     device: Device,
 ) -> Result<Vec<Tensor>> {
-    // Returns one (latent_c, gh, gw) CPU f32 tensor per item, in input order.
+    // Returns one (latent_c, gh, gw) tensor per item, in input order.
     let n = items.len();
     let mut out: Vec<Option<Tensor>> = (0..n).map(|_| None).collect();
     let mut groups: std::collections::HashMap<(usize, usize), Vec<usize>> =
@@ -259,10 +262,10 @@ pub fn encode_latent_batch(
                 .to_device(device)
                 .to_kind(Kind::Float);
             let z = tch::no_grad(|| ae.encode(&owners_t, &terrain_t, &static_t));
-            // Split batch back to per-item CPU tensors.
+            // Split batch without changing device. `select` views retain the
+            // batch storage after `z` leaves this scope.
             for (j, &i) in chunk.iter().enumerate() {
-                let zj = z.select(0, j as i64).to_device(Device::Cpu).to_kind(Kind::Float);
-                out[i] = Some(zj);
+                out[i] = Some(z.select(0, j as i64));
             }
         }
     }
@@ -270,6 +273,18 @@ pub fn encode_latent_batch(
     out.into_iter()
         .enumerate()
         .map(|(i, t)| t.with_context(|| format!("missing AE latent for item {i}")))
+        .collect()
+}
+
+/// General mixed-shape host fallback used when grids must be padded.
+pub fn encode_latent_batch(
+    ae: &SpatialAE,
+    items: &[&AeRaw],
+    device: Device,
+) -> Result<Vec<Tensor>> {
+    encode_latent_batch_device(ae, items, device)?
+        .into_iter()
+        .map(|z| Ok(z.to_device(Device::Cpu).to_kind(Kind::Float)))
         .collect()
 }
 
