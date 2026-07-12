@@ -85,7 +85,19 @@ const ENT_SCALE_MAX: f64 = 5.0;
 /// linearly from 0 up to its target value over this many updates,
 /// applied every update (a no-op once warmup completes, so this doesn't
 /// interact with the existing stage-advance LR decay at all).
-const LR_WARMUP_UPDATES: u64 = 20;
+///
+/// A live run with a 20-update warmup confirmed the mechanism works
+/// exactly as intended - v-loss stayed healthy (0.02-0.9) for the *entire*
+/// warmup window and recent_reward hit a new best (28.2, sustained
+/// 15-19 for many updates, far above every prior run's ~3.5-4.9
+/// plateau) - but then instability reignited at *exactly* update
+/// 20-21, the update right after warmup completed and LR snapped to
+/// full strength. That's about as direct a confirmation of the warmup
+/// hypothesis as a live run can give, and an equally direct signal that
+/// 20 updates isn't a long enough runway - raised 5x to give the value
+/// function much more time to actually stabilize before facing a
+/// full-strength step.
+const LR_WARMUP_UPDATES: u64 = 100;
 
 /// `update`/`warmup_start` are both absolute update indices (not reset to
 /// 0 at stage boundaries) - see the call site's doc for why warmup resets
