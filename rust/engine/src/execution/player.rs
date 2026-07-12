@@ -73,10 +73,13 @@ impl Execution for PlayerExecution {
             return;
         }
 
-        let inc = game.troop_increase_rate_for(self.small_id);
+        // TS `PlayerExecution.tick`: `addTroops(config.troopIncreaseRate(player))`
+        // with the raw float (can be negative when over maxTroops). Must go through
+        // `add_troops` so negative deltas match TS's removeTroops(-delta) flooring.
+        let inc = game.troop_increase_rate_raw_for(self.small_id);
         let gold = game.wire.gold_addition_rate(p.player_type);
+        game.add_troops(self.small_id, inc);
         if let Some(pm) = game.player_by_small_id_mut(self.small_id) {
-            pm.troops += inc;
             pm.gold += gold;
         }
 
@@ -92,6 +95,73 @@ impl Execution for PlayerExecution {
 
     fn active_during_spawn(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::{Player, PlayerType};
+
+    /// TS `PlayerImpl.addTroops` routes negatives through `removeTroops(-delta)`,
+    /// so a fractional over-max income of e.g. `-6360.28` removes 6360 troops
+    /// (`floor` of the magnitude), not 6361 (`floor` of the signed value).
+    /// Regresses the UK soft ±1 troop fork at tick ~1793 on `curr-b030-s0-pangaea`.
+    #[test]
+    fn add_troops_negative_uses_magnitude_floor_like_ts() {
+        let mut game = crate::test_util::plains_game(4, 4);
+        game.add_player(Player {
+            id: "p".into(),
+            small_id: 1,
+            player_type: PlayerType::Human,
+            troops: 10_000,
+            ..Default::default()
+        });
+        game.add_troops(1, -6360.282895866956);
+        assert_eq!(game.player_by_small_id(1).unwrap().troops, 10_000 - 6360);
+    }
+
+    #[test]
+    fn troop_increase_rate_negative_matches_add_troops_rounding() {
+        // Easy nation, over maxTroops: raw delta is a non-integral negative.
+        let cfg = crate::core::config::Config::new(
+            crate::core::schemas::GameConfig {
+                game_map: "tiny".into(),
+                difficulty: "Easy".into(),
+                donate_gold: false,
+                donate_troops: false,
+                game_type: "Singleplayer".into(),
+                game_mode: "Free For All".into(),
+                game_map_size: "Normal".into(),
+                nations: crate::core::schemas::NationsConfig::Mode("default".into()),
+                bots: 0,
+                infinite_gold: false,
+                infinite_troops: false,
+                instant_build: false,
+                random_spawn: false,
+                doomsday_clock: None,
+                disabled_units: None,
+                player_teams: None,
+                disable_alliances: None,
+                spawn_immunity_duration: Some(0),
+                starting_gold: None,
+                gold_multiplier: None,
+                max_timer_value: None,
+                ranked_type: None,
+            },
+            false,
+        );
+        let troops = 159_354;
+        let tiles = 2_263;
+        let raw = cfg.troop_increase_rate_raw(PlayerType::Nation, troops, tiles, 0);
+        assert!(raw < -1.0, "expected meaningful negative income, got {raw}");
+        let floored_signed = crate::util::to_int(raw);
+        let ts_style = cfg.troop_increase_rate(PlayerType::Nation, troops, tiles, 0);
+        assert_eq!(ts_style, -crate::util::to_int(-raw));
+        assert!(
+            floored_signed < ts_style,
+            "signed floor ({floored_signed}) must be stricter than TS-style ({ts_style}) for {raw}"
+        );
     }
 }
 
