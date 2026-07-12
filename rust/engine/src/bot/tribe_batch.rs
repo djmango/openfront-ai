@@ -1,5 +1,12 @@
 //! Batched tribe AI - one tick driver for all bots (avoids 400× `dyn Execution` dispatch).
+//!
+//! Keep this in lockstep with [`crate::bot::tribe::TribeExecution::tick`]
+//! (alliance accept + `delete_next_structure` + `tribe_maybe_attack`). The
+//! live spawn path currently uses per-tribe `ExecEnum::Tribe`; this batch
+//! driver is the unused perf shell — still must not silently drop tribe
+//! steps if it is ever wired in.
 
+use crate::bot::tribe::TribeExecution;
 use crate::execution::ai_attack::{send_tn_attack, tribe_maybe_attack};
 use crate::game::Game;
 use crate::prng::PseudoRandom;
@@ -68,6 +75,12 @@ impl TribeBatch {
                 t.attack_behavior_init = true;
                 send_tn_attack(game, t.small_id, t.expand_ratio);
                 continue;
+            }
+            // Mirror TribeExecution::tick alliance + structure cleanup.
+            {
+                let shell = TribeExecution::new(t.small_id, String::new());
+                shell.accept_all_alliance_requests(game, tick);
+                shell.delete_next_structure(game);
             }
             tribe_maybe_attack(
                 game,

@@ -973,6 +973,9 @@ impl Game {
             p.tiles_owned = 0;
             p.border_tiles.clear();
             p.owned_tiles.clear();
+            // TS `isAlive()` is `_tiles.size > 0` — keep the sticky flag in sync
+            // so mid-tick readers match (see conquer_one / relinquish_tile).
+            p.alive = false;
         }
     }
 
@@ -989,6 +992,11 @@ impl Game {
             p.border_tiles.remove(tile);
             p.owned_tiles.retain(|&t| t != tile);
             p.last_tile_change = tick;
+            if p.tiles_owned == 0 {
+                // Match TS `Player.isAlive()` (`_tiles.size > 0`) immediately —
+                // do not wait for the next `PlayerExecution` tick.
+                p.alive = false;
+            }
         }
         self.map.set_owner_id(tile, 0);
         self.refresh_borders_around(tile);
@@ -1185,6 +1193,13 @@ impl Game {
                 p.border_tiles.remove(tile);
                 p.owned_tiles.retain(|&t| t != tile);
                 p.last_tile_change = tick;
+                if p.tiles_owned == 0 {
+                    // Match TS `Player.isAlive()` (`_tiles.size > 0`) immediately —
+                    // do not wait for the next `PlayerExecution` tick. Mid-tick
+                    // AI / attack filters that read `.alive` must see the player
+                    // as dead the moment their last tile is gone.
+                    p.alive = false;
+                }
             }
         }
         self.map.set_owner_id(tile, small_id);
@@ -1193,6 +1208,7 @@ impl Game {
             p.tiles_owned += 1;
             p.owned_tiles.push(tile);
             p.last_tile_change = tick;
+            p.alive = true;
         }
         if refresh_borders {
             self.refresh_borders_around(tile);
@@ -4451,6 +4467,30 @@ mod impassable_terrain_tests {
         let tile = game.map.ref_xy(20, 10);
         game.conquer(1, tile);
         assert_eq!(game.map.owner_id(tile), 1);
+    }
+
+    /// TS `Player.isAlive()` is `_tiles.size > 0`. Losing the last tile must
+    /// clear `alive` immediately (not wait for the next `PlayerExecution`),
+    /// otherwise mid-tick AI filters and tick dumps lag TS by one tick.
+    #[test]
+    fn losing_last_tile_clears_alive_immediately() {
+        let mut game = wall_game();
+        add_bot(&mut game, "victim", 1);
+        add_bot(&mut game, "attacker", 2);
+        game.end_spawn_phase();
+        let tile = game.map.ref_xy(20, 10);
+        game.conquer(1, tile);
+        assert!(game.player_by_small_id(1).unwrap().alive);
+        assert_eq!(game.player_by_small_id(1).unwrap().tiles_owned, 1);
+
+        game.conquer(2, tile);
+        let victim = game.player_by_small_id(1).unwrap();
+        assert_eq!(victim.tiles_owned, 0);
+        assert!(
+            !victim.alive,
+            "alive must track tiles like TS isAlive() on the conquer tick"
+        );
+        assert!(game.player_by_small_id(2).unwrap().alive);
     }
 
     // TS `PlayerImpl.canAttack(tile)` - only called from `GameRunner.ts`

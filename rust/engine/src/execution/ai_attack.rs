@@ -754,7 +754,13 @@ fn find_victim(game: &Game, attacker_small_id: u16, bordering: &[u16]) -> Option
         if is_ffa && enemy.troops as f64 > attacker_troops as f64 * 1.2 {
             continue;
         }
-        let incoming = game.incoming_land_troops(sid);
+        // TS `enemy.incomingAttacks()` includes boat-landed attacks
+        // (sourceTile set); do not use land-only incoming troops here.
+        let incoming: f64 = game
+            .incoming_attacks(sid, false)
+            .iter()
+            .map(|a| a.troops)
+            .sum();
         if incoming > enemy.troops as f64 * 0.5 {
             return Some(sid);
         }
@@ -1560,46 +1566,19 @@ fn has_nearby_terra_nullius(game: &Game, small_id: u16) -> bool {
 }
 
 fn random_boat_attack_troops(game: &Game, attacker_small_id: u16, target_small_id: u16) -> f64 {
+    // TS `attackWithRandomBoat`:
+    //   const cap = owner.isPlayer() ? this.troopSendCap() : Infinity;
+    //   const troops = Math.min(this.player.troops() / 5, cap);
+    //   if (troops < 1) return;
+    //   if (owner.isPlayer() && this.isAttackTooWeak(troops, owner)) return;
     let Some(attacker) = game.player_by_small_id(attacker_small_id) else {
         return 0.0;
     };
-    let mut troops = attacker.troops as f64 / 5.0;
-    if target_small_id == game.terra_nullius_id()
-        || attacker.player_type == PlayerType::Bot
-        || game.wire.game_config().game_mode == "Team"
-    {
-        return troops;
+    let troops = attacker.troops as f64 / 5.0;
+    if target_small_id == game.terra_nullius_id() {
+        return if troops < 1.0 { 0.0 } else { troops };
     }
-
-    let retain_fraction = match game.wire.game_config().difficulty.as_str() {
-        "Hard" => 0.75,
-        "Impossible" => 0.9,
-        _ => return troops,
-    };
-    let max_neighbor_troops = nearby_players_ts_order(game, attacker_small_id)
-        .into_iter()
-        .filter_map(|sid| game.player_by_small_id(sid))
-        .filter(|p| {
-            p.player_type != PlayerType::Bot && !game.is_friendly(attacker_small_id, p.small_id)
-        })
-        .map(|p| p.troops)
-        .max()
-        .unwrap_or(0);
-    if max_neighbor_troops > 0 {
-        let min_retained = (max_neighbor_troops as f64 * retain_fraction).ceil();
-        troops = troops.min((attacker.troops as f64 - min_retained).max(0.0));
-    }
-
-    let incoming = game.incoming_land_troops(attacker_small_id);
-    if incoming > 0.0 {
-        troops = troops.max(incoming.min(attacker.troops as f64 / 5.0));
-    } else if game
-        .player_by_small_id(target_small_id)
-        .is_some_and(|target| troops < target.troops as f64 * 0.2)
-    {
-        return 0.0;
-    }
-    troops
+    cap_player_attack_troops(game, attacker_small_id, target_small_id, troops).unwrap_or(0.0)
 }
 
 fn attack_with_random_boat(
