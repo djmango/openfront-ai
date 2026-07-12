@@ -163,7 +163,7 @@ PYTHON="$VENV/bin/python"
 mkdir -p "$AE_DIR"
 if [ ! -f "$AE_DIR/ae_v31_d8c32.encoder.safetensors" ] || [ ! -f "$AE_DIR/ae_v31_d16c32.encoder.safetensors" ]; then
   echo "=== fetching/exporting AE encoders into $AE_DIR ==="
-  AE_DIR="$AE_DIR" PYTHON="$PYTHON" bash scripts/fetch_ae_encoders.sh
+  AE_DIR="$AE_DIR" PYTHON="$PYTHON" bash "$REPO_DIR/scripts/fetch_ae_encoders.sh"
 fi
 
 mkdir -p "$CKPT_DIR"
