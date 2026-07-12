@@ -200,17 +200,38 @@ fn categorical_entropy(logits: &Tensor) -> Tensor {
     -(p * logp).sum_dim_intlist(-1, false, Kind::Float)
 }
 
-/// alpha/beta >= 1 (unimodal, bounded Beta): 1 + softplus(raw), clamped
-/// above so the Beta can't collapse into a numerically-degenerate delta
-/// (same rationale as `LOGIT_CLAMP_MAX` above: bound how confident/peaked
-/// any policy output can get, independent of gradient dynamics).
+/// alpha/beta >= 1 (unimodal, bounded Beta): 1 + softplus(raw), *softly*
+/// bounded above so the Beta can't collapse into a numerically-degenerate
+/// delta (same rationale as `LOGIT_CLAMP_MAX` above: bound how confident/
+/// peaked any policy output can get, independent of gradient dynamics).
+///
+/// This used to be a hard `clamp_max`, which has the exact same "stuck
+/// forever" defect `sanitize_value`'s doc describes for the value head:
+/// zero gradient once alpha/beta drift past the bound, so the optimizer
+/// can never pull them back down. Live evidence this session that this
+/// was live and biting: `entq` (this head's differential entropy - can
+/// legitimately go very negative for a highly-peaked Beta, unlike
+/// discrete entropy) swung from a healthy ~-0.07 to ~-1.5 in the exact
+/// same handful of updates `v` exploded in, both recovering together
+/// on earlier runs - i.e. this head's own instability was likely
+/// corrupting the shared trunk's features (which the value head reads,
+/// even after being gradient-decoupled from it) rather than being an
+/// independent, unrelated symptom. Same fix as the value head: swap the
+/// hard clamp for a soft bound that saturates without ever fully zeroing
+/// the gradient.
 const QUANTITY_AB_MAX: f64 = 1000.0;
 fn quantity_ab(params: &Tensor) -> (Tensor, Tensor) {
     // Same NaN-before-clamp hazard as `sanitize_logits` above: sanitize the
     // raw params first, then derive alpha/beta, so a NaN raw value can't
-    // survive `clamp_max` and reach `lgamma`/`digamma` downstream.
-    let params = params.nan_to_num(0.0, QUANTITY_AB_MAX, -QUANTITY_AB_MAX);
-    let ab = (params.softplus() + 1.0).clamp_max(QUANTITY_AB_MAX);
+    // survive the soft bound and reach `lgamma`/`digamma` downstream.
+    let params = params.nan_to_num(0.0, 1.0e12, -1.0e12);
+    let raw_ab: Tensor = params.softplus() + 1.0;
+    // x / (1 + (x-1)/(C-1)) : same soft-saturating shape as
+    // `PolicyNet::sanitize_value`, shifted so raw_ab's floor of 1.0 maps
+    // to itself (an alpha/beta of exactly 1 - the least-peaked case,
+    // uniform - must stay untouched, not soft-bounded toward 0).
+    let excess: Tensor = &raw_ab - 1.0;
+    let ab: Tensor = &excess / (excess.abs() / (QUANTITY_AB_MAX - 1.0) + 1.0) + 1.0;
     (ab.select(-1, 0), ab.select(-1, 1))
 }
 
@@ -1600,6 +1621,23 @@ mod logit_clamp_tests {
             // not vanishingly so - use a relative, not absolute, bound.
             assert!((got - want).abs() / want.abs().max(1.0) < 0.02, "expected near-identity for small inputs, got {got} want ~{want}");
         }
+    }
+
+    #[test]
+    fn quantity_ab_soft_bound_preserves_nonzero_gradient_even_when_saturated() {
+        // Same rationale/shape as
+        // value_head_soft_bound_preserves_nonzero_gradient_even_when_saturated:
+        // a hard clamp_max here (the pre-fix behavior) would give zero
+        // gradient once alpha/beta drift past QUANTITY_AB_MAX, which is
+        // exactly the "stuck forever" failure mode this replaces.
+        let params = Tensor::from_slice(&[1.0e6f32, 1.0e6f32]).reshape([1, 1, 2]).set_requires_grad(true);
+        let (a, b) = quantity_ab(&params);
+        (&a + &b).backward();
+        let grad = params.grad();
+        let g0: f64 = grad.double_value(&[0, 0, 0]);
+        let g1: f64 = grad.double_value(&[0, 0, 1]);
+        assert!(g0.is_finite() && g0 > 0.0, "alpha's gradient must be finite and nonzero, got {g0}");
+        assert!(g1.is_finite() && g1 > 0.0, "beta's gradient must be finite and nonzero, got {g1}");
     }
 
     #[test]
