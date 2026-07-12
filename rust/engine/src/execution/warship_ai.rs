@@ -9,9 +9,7 @@
 
 use super::nation_emoji::{maybe_send_emoji, send_emoji, NationEmojiState};
 use super::ordered_units::OrderedUnitSet;
-use super::warship::{
-    can_build_warship, warship_build_port_tile, warship_random_water_tile_near,
-};
+use super::warship::{can_build_warship, warship_random_water_tile_near};
 use super::{ConstructionExecution, ExecEnum, Execution};
 use crate::core::schemas::unit_type::{PORT, TRADE_SHIP, TRANSPORT, WARSHIP};
 use crate::game::{Game, PlayerType};
