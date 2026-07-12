@@ -708,7 +708,29 @@ fn train_update(
                 })
             })
             .collect();
-        handles.into_iter().map(|h| h.join().expect("batch-build thread panicked")).collect()
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join().unwrap_or_else(|e| {
+                    // `.expect()` on a `thread::Result` only ever prints
+                    // "Any { .. }" - the panic payload's `Box<dyn Any>` only
+                    // downcasts cleanly for the exact type the panicking
+                    // code used (usually `&str`/`String` for a `panic!()`,
+                    // but a `.unwrap()` on a tensor op's `Result` carries a
+                    // different payload type tch/libtorch chooses, which is
+                    // exactly the case this session's crashes hit and had
+                    // zero visibility into). Try both common payload shapes
+                    // before giving up, so a future crash's actual message
+                    // - not just its opaque type - ends up in the log.
+                    let msg = e
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| e.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| format!("{e:?}"));
+                    panic!("batch-build thread panicked: {msg}");
+                })
+            })
+            .collect()
     });
     if std::env::var("OFTRAIN_DIAG").is_ok() {
         println!("[diag] batch_build_s={:.3}", batch_build_t0.elapsed().as_secs_f64());
@@ -812,7 +834,21 @@ fn train_update(
                         })
                     })
                     .collect();
-                handles.into_iter().map(|h| h.join().expect("backward thread panicked")).collect()
+                handles
+                    .into_iter()
+                    .map(|h| {
+                        h.join().unwrap_or_else(|e| {
+                            // See the batch-build thread's identical fix
+                            // above for why this doesn't just `.expect()`.
+                            let msg = e
+                                .downcast_ref::<&str>()
+                                .map(|s| s.to_string())
+                                .or_else(|| e.downcast_ref::<String>().cloned())
+                                .unwrap_or_else(|| format!("{e:?}"));
+                            panic!("backward thread panicked: {msg}");
+                        })
+                    })
+                    .collect()
             });
             let n_shards = per_shard_losses.len() as f64;
             // Neither `rl/ppo.py` nor this port clip/normalize the value
