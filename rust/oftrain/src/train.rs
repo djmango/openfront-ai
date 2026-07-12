@@ -69,6 +69,14 @@ use crate::vecenv::{EnvWorker, EpisodeInfo, PreparedObs};
 const ENT_GRACE_UPDATES: u64 = 20;
 const ENT_SCALE_MAX: f64 = 5.0;
 
+/// How many running standard deviations (see `RetStat`) the adaptive
+/// return-clip bound allows - generous relative to a well-behaved return
+/// distribution (matching `adv_clip`'s own default of 10 std-devs for the
+/// same reasoning), tight relative to the "value head plateaued in the
+/// tens of thousands while typical returns were single digits" gap this
+/// closes.
+const RET_ADAPTIVE_N_STD: f64 = 10.0;
+
 pub struct Config {
     /// Envs per shard (per device) *at startup*. Total envs = num_envs *
     /// devices().len(). If `auto_scale_envs` is on, the *live* per-shard
@@ -554,6 +562,64 @@ fn any_loss_non_finite(losses: &[(f64, f64, f64, f64)]) -> bool {
     losses.iter().any(|(pg, v, ent, entq)| !pg.is_finite() || !v.is_finite() || !ent.is_finite() || !entq.is_finite())
 }
 
+/// Running (all-updates-so-far) mean/variance of the value-loss target,
+/// used to derive an *adaptive* second bound on top of the fixed
+/// `ret_clip` ceiling (see `train_update`'s batch-build stage for where
+/// this is applied). `ret_clip` alone is a single guessed constant - fine
+/// as an absolute safety ceiling, but it does nothing to help the value
+/// head when the *typical* return scale is much smaller than that
+/// ceiling (observed live: healthy early updates had v-loss ~0.02-10, but
+/// once the value head drifted, it plateaued in the tens-of-thousands
+/// range - well under ret_clip=3000's *square* but nowhere near the
+/// scale the value head should actually be predicting). Adapting the
+/// bound to `N_STD` standard deviations of what returns have actually
+/// looked like so far gives the value head a target scale that tracks
+/// the real data instead of a fixed guess, while `ret_clip` still caps
+/// the absolute worst case unconditionally.
+///
+/// Uses plain sum/sum-of-squares accumulation (not Welford) specifically
+/// because it composes trivially across the per-shard parallel threads in
+/// `train_update`'s batch-build stage: each shard accumulates its own
+/// partial (count, sum, sum_sq) locally with no cross-thread
+/// synchronization, and merging them into the single running total after
+/// the parallel scope closes is exact plain addition - no merge formula
+/// needed.
+#[derive(Default, Clone, Copy)]
+pub struct RetStat {
+    count: f64,
+    sum: f64,
+    sum_sq: f64,
+}
+
+impl RetStat {
+    fn add_batch(&mut self, count: f64, sum: f64, sum_sq: f64) {
+        self.count += count;
+        self.sum += sum;
+        self.sum_sq += sum_sq;
+    }
+
+    fn mean(&self) -> f64 {
+        if self.count < 1.0 {
+            0.0
+        } else {
+            self.sum / self.count
+        }
+    }
+
+    /// Population std of everything seen so far. Deliberately returns
+    /// `f64::INFINITY` until there's enough data to estimate it at all
+    /// (fewer than 2 samples) - callers use this to mean "don't apply the
+    /// adaptive bound yet", the same way `ret_clip=0.0` means "disabled"
+    /// for the fixed bound.
+    fn std(&self) -> f64 {
+        if self.count < 2.0 {
+            return f64::INFINITY;
+        }
+        let m = self.mean();
+        (self.sum_sq / self.count - m * m).max(0.0).sqrt().max(1e-3)
+    }
+}
+
 /// Runs GAE + the `epochs` x `minibatches` clipped-PPO update for one
 /// update's worth of rollouts (one `RolloutResult` per learner shard).
 /// Pure compute over `learners`/`pending` - never touches any
@@ -565,6 +631,7 @@ fn train_update(
     cfg: &Config,
     rng: &mut rand::rngs::SmallRng,
     ent_coef: f32,
+    ret_stat: &mut RetStat,
 ) -> Result<(f64, f64, f64, f64)> {
     let t_len = cfg.rollout_len;
     // Derive the live per-shard env count from the actual rollout data,
@@ -614,7 +681,14 @@ fn train_update(
     // ~8-9s sequential for 4 shards vs ~2s once parallelized - this was
     // the single largest remaining non-overlapped, GPU-idle chunk of
     // update wall-clock; see DEVLOG).
-    let mut shard_batches: Vec<ShardBatch> = std::thread::scope(|s| {
+    // Read *before* this update's data is folded in, so the bound applied
+    // to this batch reflects only prior updates (matching how a live
+    // system would have to work - you can't normalize against data you
+    // haven't seen yet). `RET_ADAPTIVE_N_STD * std` only kicks in once
+    // `ret_stat` has enough samples (see `RetStat::std`'s doc); until
+    // then this is `f64::INFINITY` and the adaptive bound is a no-op.
+    let adaptive_ret_bound = (RET_ADAPTIVE_N_STD * ret_stat.std()).max(1.0);
+    let shard_results: Vec<(ShardBatch, f64, f64, f64)> = std::thread::scope(|s| {
         let handles: Vec<_> = learners
             .iter()
             .zip(pending.iter())
@@ -662,8 +736,11 @@ fn train_update(
                             if ret.abs() > max_raw_ret.0.abs() {
                                 max_raw_ret = (ret, flat_idx);
                             }
-                            ret_flat[flat_idx] =
-                                if cfg.ret_clip > 0.0 { ret.clamp(-cfg.ret_clip, cfg.ret_clip) } else { ret };
+                            let ret = if cfg.ret_clip > 0.0 { ret.clamp(-cfg.ret_clip, cfg.ret_clip) } else { ret };
+                            // Adaptive bound (see RetStat's doc) applied
+                            // on top of the fixed ret_clip ceiling above -
+                            // always at least as tight, never looser.
+                            ret_flat[flat_idx] = ret.clamp(-adaptive_ret_bound as f32, adaptive_ret_bound as f32);
                             old_logp_flat[flat_idx] = buffer[t][e].logp;
                         }
                     }
@@ -741,12 +818,23 @@ fn train_update(
                             obs_flat.push(&s.obs);
                         }
                     }
+                    // Local partial sums for RetStat's global running
+                    // total - see RetStat's doc for why plain sum/sum_sq
+                    // accumulation (not Welford) composes trivially here:
+                    // this shard's thread never touches any other
+                    // shard's state, and the caller just adds these three
+                    // numbers into the running total after every shard's
+                    // thread has finished.
+                    let local_count = ret_flat.len() as f64;
+                    let local_sum: f64 = ret_flat.iter().map(|&x| x as f64).sum();
+                    let local_sum_sq: f64 = ret_flat.iter().map(|&x| (x as f64) * (x as f64)).sum();
+
                     let obs = batch::build_obs(&obs_flat, device, cfg.pinned_h2d);
                     let choice = batch::build_choice_batch(&choice_flat, device, cfg.pinned_h2d);
                     let adv = Tensor::from_slice(&adv_flat).to_device(device);
                     let ret = Tensor::from_slice(&ret_flat).to_device(device);
                     let old_logp = Tensor::from_slice(&old_logp_flat).to_device(device);
-                    ShardBatch { obs, choice, adv, ret, old_logp }
+                    (ShardBatch { obs, choice, adv, ret, old_logp }, local_count, local_sum, local_sum_sq)
                 })
             })
             .collect();
@@ -777,6 +865,14 @@ fn train_update(
     if std::env::var("OFTRAIN_DIAG").is_ok() {
         println!("[diag] batch_build_s={:.3}", batch_build_t0.elapsed().as_secs_f64());
     }
+    // Fold this update's per-shard partial sums into the running total
+    // *after* they were used to compute `adaptive_ret_bound` above - the
+    // bound applied to a given batch always reflects only prior updates
+    // (see the comment there), never this one's own data.
+    for (_, count, sum, sum_sq) in &shard_results {
+        ret_stat.add_batch(*count, *sum, *sum_sq);
+    }
+    let mut shard_batches: Vec<ShardBatch> = shard_results.into_iter().map(|(batch, ..)| batch).collect();
 
     for _epoch in 0..cfg.epochs {
         // Per-shard shuffled index tensor, built once per epoch (CPU
@@ -1135,6 +1231,11 @@ pub fn run(cfg: Config) -> Result<()> {
     let mut next_env_idx = total_envs;
 
     let mut rng = rand::rngs::SmallRng::from_entropy();
+    // Persists across every update in this run (see RetStat's doc) - a
+    // fresh, empty RetStat on every process restart is an acceptable cold
+    // start (its adaptive bound is a no-op until ~2 updates' worth of
+    // data has accumulated; RET_ADAPTIVE_N_STD covers everything else).
+    let mut ret_stat = RetStat::default();
     let mut ep_rewards: Vec<f64> = Vec::new();
     let mut ep_lengths: Vec<i64> = Vec::new();
     let train_start = Instant::now();
@@ -1206,7 +1307,7 @@ pub fn run(cfg: Config) -> Result<()> {
                 actors.iter_mut().map(|actor| s.spawn(move || collect_rollout(actor, cfg_ref))).collect();
 
             let train_t0 = Instant::now();
-            let train_result = train_update(&mut learners, &pending, cfg_ref, &mut rng, ent_coef_now);
+            let train_result = train_update(&mut learners, &pending, cfg_ref, &mut rng, ent_coef_now, &mut ret_stat);
             let train_dt = train_t0.elapsed().as_secs_f64();
 
             let next_pending: Result<Vec<RolloutResult>> =
@@ -1601,6 +1702,50 @@ mod huber_value_loss_tests {
         // Huber's small-error branch is 0.5*(err)^2 (half of MSE's err^2);
         // both scale identically with error, only the constant differs.
         assert!((h - 0.5 * m).abs() < 1e-5, "huber={h} should be ~0.5*mse={m} for small errors");
+    }
+}
+
+#[cfg(test)]
+mod ret_stat_tests {
+    use super::RetStat;
+
+    #[test]
+    fn std_is_infinite_before_enough_data_so_the_adaptive_bound_is_a_no_op() {
+        let mut s = RetStat::default();
+        assert!(s.std().is_infinite());
+        s.add_batch(1.0, 5.0, 25.0);
+        // Still only one sample total - can't estimate variance yet.
+        assert!(s.std().is_infinite());
+        s.add_batch(1.0, 5.0, 25.0);
+        assert!(s.std().is_finite());
+    }
+
+    #[test]
+    fn mean_and_std_match_a_known_distribution() {
+        // 1, 2, 3, 4, 5: mean=3, population variance=2, std=sqrt(2).
+        let mut s = RetStat::default();
+        for x in [1.0, 2.0, 3.0, 4.0, 5.0] {
+            s.add_batch(1.0, x, x * x);
+        }
+        assert!((s.mean() - 3.0).abs() < 1e-9, "mean={}", s.mean());
+        assert!((s.std() - 2.0f64.sqrt()).abs() < 1e-9, "std={}", s.std());
+    }
+
+    #[test]
+    fn merging_partial_batches_matches_merging_all_samples_at_once() {
+        // The whole point of using plain sum/sum_sq (see RetStat's doc):
+        // splitting the same data across several add_batch calls (as the
+        // per-shard threads in train_update do) must give an identical
+        // result to accumulating it all in one call.
+        let mut split = RetStat::default();
+        split.add_batch(2.0, 1.0 + 2.0, 1.0 + 4.0);
+        split.add_batch(3.0, 3.0 + 4.0 + 5.0, 9.0 + 16.0 + 25.0);
+
+        let mut whole = RetStat::default();
+        whole.add_batch(5.0, 1.0 + 2.0 + 3.0 + 4.0 + 5.0, 1.0 + 4.0 + 9.0 + 16.0 + 25.0);
+
+        assert!((split.mean() - whole.mean()).abs() < 1e-9);
+        assert!((split.std() - whole.std()).abs() < 1e-9);
     }
 }
 
