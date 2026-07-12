@@ -1063,10 +1063,20 @@ fn perceived_structure_cost(game: &Game, small_id: u16, structure_type: &str) ->
     if save_up == 0 || gold >= save_up {
         return real;
     }
+    // TS `getPerceivedCost`: City uses CITY_PERCEIVED_COST_INCREASE_PER_OWNED;
+    // other types use `getStructureRatios(difficulty)[type].perceivedCostIncreasePerOwned`
+    // (Port/Factory/MissileSilo: 1.0, SAMLauncher: 0.3, fallback: 0.1). Native previously
+    // used 1.0 for every non-city type, so SAM perceived cost was `real*(1+owned)` instead
+    // of `real*(1+0.3*owned)` — Mongolia @ tick 6129 couldn't "afford" a 3M SAM with
+    // ~3.93M gold (native wanted 6M; TS wanted 3.9M).
     let increase = if structure_type == unit_type::CITY {
         CITY_PERCEIVED_COST_INCREASE_PER_OWNED
     } else {
-        1.0
+        match structure_type {
+            unit_type::PORT | unit_type::FACTORY | unit_type::MISSILE_SILO => 1.0,
+            unit_type::SAM_LAUNCHER => 0.3,
+            _ => 0.1,
+        }
     };
     let multiplier = 1.0 + increase * owned as f64;
     ((real as f64) * multiplier).ceil() as i64
@@ -2062,6 +2072,39 @@ mod tests {
         result.sort_by_key(|r| r.tile);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].tile.min(result[1].tile), own_tile.min(neighbor_tile));
+    }
+
+    /// TS SAM `perceivedCostIncreasePerOwned` is 0.3, not 1.0. With gold under the
+    /// nuke save-up target, one existing SAM makes a 3M launcher feel like 3.9M
+    /// (affordable with ~3.93M) rather than 6M.
+    #[test]
+    fn sam_perceived_cost_uses_0_3_increase_per_owned_not_1_0() {
+        let mut game = tiny_game(20, 20, "Easy");
+        let sid = add_player(&mut game, "mongolia", crate::game::PlayerType::Nation);
+        let tile = game.ref_xy(5, 5);
+        game.conquer(sid, tile);
+        game.build_unit(sid, unit_type::SAM_LAUNCHER, tile);
+        if let Some(p) = game.player_by_small_id_mut(sid) {
+            p.gold = 3_932_801;
+            p.tiles_owned = 100_000; // keep alive / non-trivial
+        }
+        // Force under save-up so the multiplier path runs (MIRV+hydro = 30M).
+        assert!(
+            save_up_target(&game) > 3_932_801,
+            "precondition: gold must be under save-up target"
+        );
+        let real = game.structure_cost(sid, unit_type::SAM_LAUNCHER);
+        // With 1 SAM already, next is at the 3M cap for count>=1.
+        assert_eq!(real, 3_000_000);
+        let perceived = perceived_structure_cost(&game, sid, unit_type::SAM_LAUNCHER);
+        assert_eq!(
+            perceived, 3_900_000,
+            "1 existing SAM => ceil(3M * 1.3) = 3.9M, not ceil(3M * 2) = 6M"
+        );
+        assert!(
+            game.player_by_small_id(sid).unwrap().gold >= perceived,
+            "Mongolia-at-6129 gold must clear the TS perceived SAM cost"
+        );
     }
 }
 

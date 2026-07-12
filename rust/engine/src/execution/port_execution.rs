@@ -143,12 +143,18 @@ impl Execution for PortExecution {
         if !self.active {
             return;
         }
-        let still_active = game
-            .player_by_small_id(self.small_id)
-            .and_then(|p| p.units.iter().find(|u| u.id == self.unit_id))
-            .is_some_and(|u| !u.under_construction);
-        if !still_active {
+        // TS PortExecution holds the Unit; after capture, retarget owner like
+        // TrainStationExecution so trade ships keep spawning for the new owner.
+        let Some(owner) = game.find_unit_owner(self.unit_id) else {
             self.active = false;
+            return;
+        };
+        self.small_id = owner;
+        let Some(u) = game.unit(self.small_id, self.unit_id) else {
+            self.active = false;
+            return;
+        };
+        if u.under_construction {
             return;
         }
         if !game.unit_has_train_station(self.small_id, self.unit_id) {
@@ -372,5 +378,33 @@ mod tests {
             1,
             "too-close-for-the-debuff should cancel the proximity bonus, leaving just the base copy"
         );
+    }
+
+    #[test]
+    fn port_execution_stays_active_and_retargets_after_capture() {
+        // TS PortExecution holds the Unit; after capture it must keep ticking
+        // for the new owner (trade-ship spawns), not go inactive because the
+        // cached small_id no longer owns the port.
+        let (mut game, player, _player_tile, player_port, other, _other_tile, _other_port) =
+            game_with_two_ports(50);
+        let mut execution = PortExecution::new(player, player_port);
+        execution.init(&mut game, 0);
+        execution.tick(&mut game, 0);
+        assert!(execution.is_active());
+
+        game.capture_unit(player, other, player_port);
+        assert_eq!(game.find_unit_owner(player_port), Some(other));
+
+        execution.tick(&mut game, 10);
+        assert!(
+            execution.is_active(),
+            "PortExecution must survive capture like TS Unit-backed execution"
+        );
+        assert_eq!(
+            execution.small_id, other,
+            "PortExecution must retarget to the capturing owner"
+        );
+        // Still able to resolve the port under the new owner (trade-ship path uses this).
+        assert!(game.unit_tile_of(other, player_port).is_some());
     }
 }

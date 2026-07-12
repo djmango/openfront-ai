@@ -188,8 +188,17 @@ fn categorical_sample(logits: &Tensor, greedy: bool) -> (Tensor, Tensor) {
     (idx, logp)
 }
 
-fn categorical_logp(logits: &Tensor, idx_clamped: &Tensor) -> Tensor {
-    sanitize_logits(logits).log_softmax(-1, Kind::Float).gather(-1, &idx_clamped.unsqueeze(-1), false).squeeze_dim(-1)
+fn categorical_logp(logits: &Tensor, idx: &Tensor) -> Tensor {
+    // Defensive at the gather boundary: unused choice fields are encoded
+    // as -1, and any future actor/learner transport bug must not poison the
+    // CUDA context with a device-side indexing assert. Callers still mask
+    // unused heads out of the composed log-prob.
+    let classes = logits.size().last().copied().unwrap_or(1).max(1);
+    let idx = idx.clamp(0, classes - 1);
+    sanitize_logits(logits)
+        .log_softmax(-1, Kind::Float)
+        .gather(-1, &idx.unsqueeze(-1), false)
+        .squeeze_dim(-1)
 }
 
 fn categorical_entropy(logits: &Tensor) -> Tensor {
@@ -1538,6 +1547,16 @@ mod logit_clamp_tests {
         let logp2 = categorical_logp(&logits, &idx);
         let logp2_v: f64 = logp2.double_value(&[0]);
         assert!(logp2_v.is_finite(), "categorical_logp must be finite, got {logp2_v}");
+    }
+
+    #[test]
+    fn categorical_logp_clamps_invalid_transport_indices() {
+        let logits = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]).reshape([2, 3]);
+        let invalid = Tensor::from_slice(&[-1i64, 99]);
+        let logp = categorical_logp(&logits, &invalid);
+        let values: Vec<f32> = Vec::try_from(logp).unwrap();
+        assert_eq!(values.len(), 2);
+        assert!(values.iter().all(|v| v.is_finite()));
     }
 
     #[test]
