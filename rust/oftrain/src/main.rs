@@ -73,6 +73,13 @@ struct Args {
     #[arg(long, default_value_t = 3000.0)]
     ret_clip: f32,
 
+    /// Clamps the normalized advantage magnitude (see
+    /// `train::Config::adv_clip`'s doc - the policy-loss-side counterpart
+    /// to `vf_clip`/Huber on the value-loss side, both needed to fully fix
+    /// the 2026-07-12 incident). 0.0 disables it.
+    #[arg(long, default_value_t = 10.0)]
+    adv_clip: f32,
+
     /// Huber-loss delta for the value loss, replacing plain MSE (see
     /// `train::Config::vf_clip`'s doc for the full mechanism and the two
     /// prior attempts - target clamping, then PPO2-style prediction
@@ -364,6 +371,7 @@ fn main() -> anyhow::Result<()> {
         clip: args.clip,
         vf_coef: args.vf_coef,
         ret_clip: args.ret_clip,
+        adv_clip: args.adv_clip,
         vf_clip: args.vf_clip,
         ent_coef: args.ent_coef,
         ent_coef_final: args.ent_coef_final,

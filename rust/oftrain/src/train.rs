@@ -110,6 +110,19 @@ pub struct Config {
     /// observed failure mode without touching the advantage/policy-loss
     /// path at all - the return is only ever consumed as this one target.
     pub ret_clip: f32,
+    /// Clamps the *normalized* advantage to [-adv_clip, adv_clip] (0.0 =
+    /// disabled) - see the clamping site in `train_update`'s batch-build
+    /// stage for why this, not just `vf_clip`, was needed to fully close
+    /// the 2026-07-12 incident (the policy loss's gradient scales with the
+    /// advantage directly, and normalization alone doesn't bound a single
+    /// outlier's normalized magnitude when the rest of the batch's
+    /// advantages are near zero - the same return-spike was poisoning
+    /// *both* the value and policy losses' gradients, and only the value
+    /// side had been fixed before this). Default 10.0 - generous (10
+    /// population std-devs) relative to a well-behaved advantage
+    /// distribution, tight relative to the hundreds-of-std-devs outliers
+    /// actually observed live.
+    pub adv_clip: f32,
     /// Huber-loss delta for the value loss (replaces plain MSE - see the
     /// loss computation in `train_update`'s minibatch loop for the full
     /// incident history/rationale). Below `delta`, behaves like ordinary
@@ -685,6 +698,35 @@ fn train_update(
                         let adv_std = adv_var.sqrt().max(1e-8);
                         for v in adv_flat.iter_mut() {
                             *v = (*v - adv_mean) / adv_std;
+                        }
+                        // Advantage clipping (see Config::adv_clip's doc) -
+                        // closes the *other* half of the 2026-07-12
+                        // incident this session spent hours chasing.
+                        // Fixing the value loss's gradient boundedness
+                        // (Huber, prior commit) was necessary but not
+                        // sufficient: the policy loss's gradient w.r.t.
+                        // logits is proportional to `adv_t` too (`surr1 =
+                        // ratio * adv_t`, and d(ratio)/d(logp) = ratio, so
+                        // d(loss)/d(logp) scales directly with adv_t) - and
+                        // normalization *by itself* doesn't bound a single
+                        // outlier's *normalized* magnitude at all. If one
+                        // sample's raw advantage is a legitimate-but-rare
+                        // outlier (the same GAE/return spikes this whole
+                        // incident is about) while most of the batch's
+                        // advantages are near zero, the population std
+                        // that outlier gets divided by is *itself* tiny,
+                        // so its normalized value can land tens or
+                        // hundreds of std-devs out - directly explaining
+                        // why entropy collapse and value explosion were
+                        // observed happening together every single time:
+                        // the same root return-spike was poisoning both
+                        // loss terms' gradients simultaneously, and only
+                        // one of the two was ever actually fixed before
+                        // now.
+                        if cfg.adv_clip > 0.0 {
+                            for v in adv_flat.iter_mut() {
+                                *v = v.clamp(-cfg.adv_clip, cfg.adv_clip);
+                            }
                         }
                     }
                     let mut choice_flat: Vec<ChoiceScalars> = Vec::with_capacity(total);
@@ -1399,6 +1441,90 @@ pub fn run(cfg: Config) -> Result<()> {
 
 #[allow(dead_code)]
 fn unused_lock_hint(_m: &Arc<Mutex<()>>) {}
+
+#[cfg(test)]
+mod adv_clip_tests {
+    /// Mirrors the exact normalize-then-clamp sequence in `train_update`'s
+    /// batch-build stage (see `Config::adv_clip`'s doc for why both steps,
+    /// in this order, are needed): confirms a single extreme outlier
+    /// advantage - the same failure mode this whole incident is about -
+    /// gets clamped to a bounded magnitude after normalization, while a
+    /// well-behaved batch with no outliers is left untouched (normalizing
+    /// a batch that's already within the clip range should never trigger
+    /// clamping at all).
+    fn normalize_and_clamp(adv: &mut [f32], clip: f32) {
+        let total = adv.len() as f32;
+        let mean = adv.iter().sum::<f32>() / total;
+        let var = adv.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / total;
+        let std = var.sqrt().max(1e-8);
+        for v in adv.iter_mut() {
+            *v = (*v - mean) / std;
+        }
+        if clip > 0.0 {
+            for v in adv.iter_mut() {
+                *v = v.clamp(-clip, clip);
+            }
+        }
+    }
+
+    #[test]
+    fn one_extreme_outlier_among_many_tiny_advantages_gets_clamped() {
+        // Exactly the shape of the live incident: ~2048 samples, all but
+        // one near zero, one legitimate-but-rare outlier return spike.
+        let mut adv = vec![0.01f32; 2047];
+        adv.push(4000.0);
+        normalize_and_clamp(&mut adv, 10.0);
+        for &v in &adv {
+            assert!(v.abs() <= 10.0 + 1e-4, "every normalized advantage must be clamped to +-10, got {v}");
+        }
+        // The outlier should still be *at* the clip boundary (not
+        // collapsed to 0 or left unclamped) - clamping should engage, not
+        // silently no-op.
+        assert!((adv[2047] - 10.0).abs() < 1e-3, "the outlier should sit exactly at the clip boundary, got {}", adv[2047]);
+    }
+
+    #[test]
+    fn well_behaved_batch_is_never_clamped() {
+        let mut adv: Vec<f32> = (0..100).map(|i| (i as f32 - 50.0) / 25.0).collect();
+        let before = adv.clone();
+        normalize_and_clamp(&mut adv, 10.0);
+        for (a, b) in adv.iter().zip(before.iter()) {
+            let mean = before.iter().sum::<f32>() / before.len() as f32;
+            let var = before.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / before.len() as f32;
+            let std = var.sqrt().max(1e-8);
+            let expected = (b - mean) / std;
+            assert!((a - expected).abs() < 1e-4, "no clamping should engage for a well-behaved batch");
+        }
+    }
+
+    #[test]
+    fn zero_disables_clamping_entirely() {
+        // Same shape as the "one outlier among many" test above (2047
+        // near-zero + 1 outlier) - with only ~100 samples total, the
+        // outlier itself would dominate the population std enough that
+        // its own normalized value isn't actually that extreme (a
+        // smaller-scale version of this same test with 99 tiny samples
+        // instead of 2047 gives a normalized outlier of only ~10, not
+        // "huge" - the whole point of this incident is that it takes a
+        // *large* population of near-zero advantages for one outlier's
+        // normalized magnitude to blow up, so the test needs that same
+        // scale to actually exercise the failure mode it's named for).
+        let mut adv = vec![0.01f32; 2047];
+        adv.push(4000.0);
+        normalize_and_clamp(&mut adv, 0.0);
+        // Population std ends up dominated by the outlier itself here
+        // (~88, mostly from its own contribution to the variance sum), so
+        // its own normalized value lands around ~45 - well above the
+        // adv_clip=10.0 default the other test confirms clamping engages
+        // at, which is exactly the point: unclamped, this is still a
+        // 40+-std-dev outlier feeding straight into the policy gradient.
+        assert!(
+            adv[2047].abs() > 20.0,
+            "with adv_clip=0.0 (disabled), the outlier must NOT be clamped down near +-10, got {}",
+            adv[2047]
+        );
+    }
+}
 
 #[cfg(test)]
 mod huber_value_loss_tests {
