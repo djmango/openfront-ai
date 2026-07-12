@@ -54,7 +54,7 @@ ticking stays on native (~10× faster).
 | 0 | Done | `scripts/export_safetensors.py`, `fetch_ae_encoders.sh` |
 | 1 | Done | Frozen AE encode (`C_GRID=89`), `--ckpt`/`--coarse-ckpt`, foveate default on |
 | 2 | Done | `MAX_UPD_PIX` sub-batches, greedy `--eval-every`, `metrics.jsonl` |
-| 3 | Done | `--init` / `--resume` via `.safetensors` (legacy `.ot` still loads); see `scripts/convert_policy_pt_notes.md` |
+| 3 | Done | `--init` / `--resume` via `.safetensors` (legacy `.ot` still loads); see `scripts/policy_safetensors_notes.md` |
 | 4 | Docs | Native gaps + `--node-fraction` hedge (this section) |
 | **5 (final)** | Done | `--value-loss` default **`mse`** (Python `F.mse_loss`); `--value-loss huber` escape hatch |
 
