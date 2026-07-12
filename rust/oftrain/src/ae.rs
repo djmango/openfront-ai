@@ -276,18 +276,6 @@ pub fn encode_latent_batch_device(
         .collect()
 }
 
-/// General mixed-shape host fallback used when grids must be padded.
-pub fn encode_latent_batch(
-    ae: &SpatialAE,
-    items: &[&AeRaw],
-    device: Device,
-) -> Result<Vec<Tensor>> {
-    encode_latent_batch_device(ae, items, device)?
-        .into_iter()
-        .map(|z| Ok(z.to_device(Device::Cpu).to_kind(Kind::Float)))
-        .collect()
-}
-
 /// 2x max-pool over (C,H,W) host planes with ceil mode (odd dims keep a
 /// 1-wide edge), matching `F.max_pool2d(..., ceil_mode=True)`.
 fn max_pool2_stat(stat: &[f32], gh: usize, gw: usize) -> Vec<f32> {
