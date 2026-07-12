@@ -499,6 +499,14 @@ fn sync_grads(shards: &[LearnerShard]) {
     }
 }
 
+/// True if any shard's (pg, v, ent, entq) loss tuple has a non-finite
+/// (NaN/Inf) component - see `train_update`'s NaN guard (docs/devlog.html's
+/// 2026-07-12 entry) for why this gates skipping `opt.step()` for a
+/// minibatch rather than applying a poisoned gradient.
+fn any_loss_non_finite(losses: &[(f64, f64, f64, f64)]) -> bool {
+    losses.iter().any(|(pg, v, ent, entq)| !pg.is_finite() || !v.is_finite() || !ent.is_finite() || !entq.is_finite())
+}
+
 /// Runs GAE + the `epochs` x `minibatches` clipped-PPO update for one
 /// update's worth of rollouts (one `RolloutResult` per learner shard).
 /// Pure compute over `learners`/`pending` - never touches any
@@ -563,7 +571,8 @@ fn train_update(
         let handles: Vec<_> = learners
             .iter()
             .zip(pending.iter())
-            .map(|(shard, result)| {
+            .enumerate()
+            .map(|(gi, (shard, result))| {
                 let device = shard.device;
                 s.spawn(move || {
                     let buffer = &result.buffer;
@@ -594,6 +603,33 @@ fn train_update(
                             adv_flat[flat_idx] = adv[t][e];
                             ret_flat[flat_idx] = adv[t][e] + buffer[t][e].value;
                             old_logp_flat[flat_idx] = buffer[t][e].logp;
+                        }
+                    }
+                    // Diagnostic for the 2026-07-12 NaN-divergence incident
+                    // (docs/devlog.html) - unconfirmed whether a native-vs-
+                    // Node-engine reward-scale mismatch under
+                    // `--node-fraction` was the actual trigger (this run
+                    // was the first to ever combine engine-mixing with a
+                    // full-scale run). Logs the *global* env-worker index
+                    // (matching `spawn_worker`'s `idx = gi * cfg.num_envs +
+                    // local_i` and hence `engine_for_idx`) so a recurrence
+                    // can be checked directly against which engine that
+                    // specific worker was running - evidence this
+                    // session's live bisection never got the chance to
+                    // collect before the pod was killed.
+                    if let Some((flat_idx, &r)) =
+                        ret_flat.iter().enumerate().max_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()))
+                    {
+                        if r.abs() > 1000.0 {
+                            let e_local = flat_idx % n;
+                            let global_idx = gi * n + e_local;
+                            eprintln!(
+                                "[train] WARNING: extreme return {r:.1} at global env-worker index \
+                                 {global_idx} (shard={gi} local_e={e_local} t={}, value={:.1}) - \
+                                 see docs/devlog.html's 2026-07-12 NaN-guard entry",
+                                flat_idx / n,
+                                buffer[flat_idx / n][e_local].value
+                            );
                         }
                     }
                     {
@@ -706,6 +742,45 @@ fn train_update(
                 handles.into_iter().map(|h| h.join().expect("backward thread panicked")).collect()
             });
             let n_shards = per_shard_losses.len() as f64;
+            // Neither `rl/ppo.py` nor this port clip/normalize the value
+            // target (`ret`) itself - only the advantage is normalized, and
+            // only *after* `ret` is derived from the raw (unnormalized) one,
+            // which is correct GAE, not a bug. That means an unusually
+            // large true return (a long high-reward episode, a big terminal
+            // bonus, or - not yet ruled out - a reward-scale mismatch
+            // between the native and Node engines under `--node-fraction`,
+            // since this run was the first to ever combine that with a
+            // full-scale multi-GPU run) can still occasionally push the
+            // *value loss* (squared, then `vf_coef`-scaled) into the range
+            // where a `clip_grad_norm(0.5)`-bounded step still overshoots
+            // badly enough to compound into NaN over a few updates (see
+            // docs/devlog.html's 2026-07-12 entry for the live incident this
+          // guards against - `v` climbed from 5.47 to 56.4 TRILLION in one
+            // update, then to outright NaN eight updates later). Rather
+            // than fix the exact trigger (unconfirmed) by guessing at a
+            // reward-scale change, guard the *symptom* directly: skip
+            // applying a minibatch's update outright if any shard's loss
+            // came back non-finite, so one poisoned rollout costs one
+            // discarded minibatch instead of turning every future update
+            // (and the checkpoint born from it) into unrecoverable garbage.
+            if any_loss_non_finite(&per_shard_losses) {
+                eprintln!(
+                    "[train] WARNING: non-finite loss in epoch={_epoch} mb={m} \
+                     (per-shard pg/v/ent/entq={per_shard_losses:?}) - discarding this \
+                     minibatch's gradients without stepping the optimizer (see \
+                     docs/devlog.html's 2026-07-12 NaN-guard entry)"
+                );
+                // Still clears the poisoned grads (zero_grad() runs at the
+                // top of next minibatch's forward-pass closure regardless,
+                // but doing it here too means a mid-epoch panic/early exit
+                // between minibatches can never leave a shard holding NaN
+                // grads for `sync_grads`/logging elsewhere to observe).
+                for shard in learners.iter_mut() {
+                    shard.opt.zero_grad();
+                }
+                n_mb += 1;
+                continue;
+            }
             for (pg, v, ent, entq) in &per_shard_losses {
                 loss_sums.0 += pg / n_shards;
                 loss_sums.1 += v / n_shards;
@@ -1215,6 +1290,45 @@ pub fn run(cfg: Config) -> Result<()> {
 
 #[allow(dead_code)]
 fn unused_lock_hint(_m: &Arc<Mutex<()>>) {}
+
+#[cfg(test)]
+mod nan_guard_tests {
+    use super::*;
+
+    #[test]
+    fn all_finite_losses_are_not_flagged() {
+        let losses = vec![(0.02, 0.14, 2.1, -0.08), (0.01, 0.09, 3.6, -0.08)];
+        assert!(!any_loss_non_finite(&losses));
+    }
+
+    #[test]
+    fn a_single_nan_value_loss_is_flagged() {
+        let losses = vec![(0.02, 0.14, 2.1, -0.08), (0.01, f64::NAN, 3.6, -0.08)];
+        assert!(any_loss_non_finite(&losses));
+    }
+
+    #[test]
+    fn infinite_pg_loss_is_flagged() {
+        let losses = vec![(f64::INFINITY, 0.14, 2.1, -0.08)];
+        assert!(any_loss_non_finite(&losses));
+    }
+
+    #[test]
+    fn nan_in_entropy_or_entq_is_also_flagged() {
+        assert!(any_loss_non_finite(&[(0.0, 0.0, f64::NAN, 0.0)]));
+        assert!(any_loss_non_finite(&[(0.0, 0.0, 0.0, f64::NAN)]));
+    }
+
+    #[test]
+    fn a_merely_large_but_finite_loss_is_not_flagged() {
+        // The actual incident this guards against saw v climb into the
+        // trillions *before* going NaN - large-but-finite values should
+        // still train (badly, but not corrupt weights outright); only the
+        // NaN/Inf endpoint itself should skip the optimizer step.
+        let losses = vec![(0.1, 1_265_838_468_017.77, 3.3, -0.27)];
+        assert!(!any_loss_non_finite(&losses));
+    }
+}
 
 #[cfg(test)]
 mod engine_mix_tests {
