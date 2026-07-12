@@ -667,15 +667,24 @@ impl PolicyNet {
     /// come from the raw *prediction* itself drifting to a similarly
     /// extreme magnitude - i.e. the same "nothing bounds the network's
     /// own output" gap that `LOGIT_CLAMP_MAX`/`QUANTITY_AB_MAX` closed for
-    /// the policy heads, just not yet closed for the value head. Clamping
-    /// (and sanitizing NaN/Inf, same rationale as `sanitize_logits`) here
-    /// keeps a single bad prediction from ever producing a loss so large
-    /// it destabilizes the whole batch, and keeps the value head from
-    /// becoming miscalibrated to the point of corrupting every advantage
-    /// estimate derived from it.
+    /// the policy heads, just not yet closed for the value head.
+    ///
+    /// A first version of this used a hard `clamp`, which made things
+    /// *worse* in a follow-up run: once the raw prediction drifts past
+    /// the bound, a hard clamp's gradient is exactly zero out there, so
+    /// gradient descent can never pull it back - the value loss stopped
+    /// exploding but got permanently stuck plateaued at the clamp's worst
+    /// case instead of recovering (visibly different from the earlier,
+    /// self-correcting v-spikes: this one just sat there for 15+ updates
+    /// with reward regressing in step). A soft bound - `x / (1 +
+    /// |x|/C)` - saturates at +-C the same way but its gradient decays
+    /// polynomially (~1/x^2) rather than dropping to exactly zero, so
+    /// even a badly-drifted prediction still gets pulled back toward a
+    /// sane range instead of getting stuck there forever.
     const VALUE_CLAMP_ABS: f64 = 1.0e4;
     fn sanitize_value(value: &Tensor) -> Tensor {
-        value.nan_to_num(0.0, Self::VALUE_CLAMP_ABS, -Self::VALUE_CLAMP_ABS).clamp(-Self::VALUE_CLAMP_ABS, Self::VALUE_CLAMP_ABS)
+        let v = value.nan_to_num(0.0, 1.0e12, -1.0e12);
+        &v / (v.abs() / Self::VALUE_CLAMP_ABS + 1.0)
     }
 
     fn coarse_dims(coarse_grid: &Tensor) -> (i64, i64) {
@@ -1483,6 +1492,38 @@ mod logit_clamp_tests {
         for x in &v {
             assert!(x.is_finite(), "value must stay finite, got {v:?}");
             assert!(x.abs() <= PolicyNet::VALUE_CLAMP_ABS, "value must stay bounded, got {v:?}");
+        }
+    }
+
+    #[test]
+    fn value_head_soft_bound_preserves_nonzero_gradient_even_when_saturated() {
+        // The whole point of the soft (x / (1 + |x|/C)) bound over a hard
+        // clamp: even a wildly-drifted raw prediction must still carry a
+        // nonzero gradient back toward Self::VALUE_CLAMP_ABS, or the
+        // optimizer can never recover from it (this is exactly the "got
+        // stuck at the clamp forever" regression a hard clamp caused).
+        let raw = Tensor::from_slice(&[1.0e6f32]).set_requires_grad(true);
+        let out = PolicyNet::sanitize_value(&raw);
+        out.backward();
+        let grad = raw.grad();
+        let g: f64 = grad.double_value(&[0]);
+        assert!(g.is_finite() && g > 0.0, "gradient must be finite and nonzero (pulling back toward the bound), got {g}");
+    }
+
+    #[test]
+    fn value_head_soft_bound_is_near_identity_for_small_inputs() {
+        // For |x| << C the bound should barely perturb the value at all -
+        // it should only kick in once predictions actually start drifting
+        // to an unreasonable magnitude, not distort ordinary training.
+        let small = Tensor::from_slice(&[1.0f32, -5.0f32, 100.0f32]);
+        let out = PolicyNet::sanitize_value(&small);
+        let v: Vec<f64> = (0..3).map(|i| out.double_value(&[i])).collect();
+        let expect = [1.0f64, -5.0, 100.0];
+        for (got, want) in v.iter().zip(expect.iter()) {
+            // |x|/C is at most 100/1e4 = 0.01 here, so the relative error
+            // introduced by the "+ |x|/C" denominator term is small but
+            // not vanishingly so - use a relative, not absolute, bound.
+            assert!((got - want).abs() / want.abs().max(1.0) < 0.02, "expected near-identity for small inputs, got {got} want ~{want}");
         }
     }
 
