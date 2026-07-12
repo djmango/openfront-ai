@@ -21,3 +21,6 @@ rust/ofrs/target/
 rust/target/
 rust/ofrs/Cargo.lock
 .venv-t/
+
+# Exported AE encoder weights (regenerate via scripts/export_safetensors.py)
+weights/ae/
