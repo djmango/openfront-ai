@@ -162,8 +162,23 @@ impl ChoiceBatch {
 /// whatever the entropy-bonus coefficient happens to be doing.
 const LOGIT_CLAMP_MAX: f64 = 30.0;
 
+/// `clamp_max` alone doesn't help if a logit is already NaN: IEEE-754
+/// comparisons against NaN are always false, so `nan.clamp_max(x) == nan`
+/// (verified: PyTorch's `clamp` propagates NaN rather than bounding it).
+/// A live run hit exactly this - `multinomial`'s CUDA kernel asserted
+/// "probability tensor contains inf, nan or element < 0" a few updates
+/// after logit-clamping alone was deployed, meaning some upstream op (the
+/// AMP/bf16 forward path is the prime suspect) produced a NaN/Inf logit
+/// that sailed straight through the max-clamp. `nan_to_num` replaces NaN
+/// with 0 (a neutral/uniform-ish logit) and any +-inf with the same
+/// bounds `clamp_max`/`MASKED_NEG` already use, so this must run *before*
+/// clamping to actually make softmax/log_softmax's input safe.
+fn sanitize_logits(logits: &Tensor) -> Tensor {
+    logits.nan_to_num(0.0, LOGIT_CLAMP_MAX, MASKED_NEG).clamp_max(LOGIT_CLAMP_MAX)
+}
+
 fn categorical_sample(logits: &Tensor, greedy: bool) -> (Tensor, Tensor) {
-    let logits = logits.clamp_max(LOGIT_CLAMP_MAX);
+    let logits = sanitize_logits(logits);
     let logp_all = logits.log_softmax(-1, Kind::Float);
     let idx = if greedy {
         logits.argmax(-1, false)
@@ -176,11 +191,11 @@ fn categorical_sample(logits: &Tensor, greedy: bool) -> (Tensor, Tensor) {
 }
 
 fn categorical_logp(logits: &Tensor, idx_clamped: &Tensor) -> Tensor {
-    logits.clamp_max(LOGIT_CLAMP_MAX).log_softmax(-1, Kind::Float).gather(-1, &idx_clamped.unsqueeze(-1), false).squeeze_dim(-1)
+    sanitize_logits(logits).log_softmax(-1, Kind::Float).gather(-1, &idx_clamped.unsqueeze(-1), false).squeeze_dim(-1)
 }
 
 fn categorical_entropy(logits: &Tensor) -> Tensor {
-    let logp = logits.clamp_max(LOGIT_CLAMP_MAX).log_softmax(-1, Kind::Float);
+    let logp = sanitize_logits(logits).log_softmax(-1, Kind::Float);
     let p = logp.exp();
     -(p * logp).sum_dim_intlist(-1, false, Kind::Float)
 }
@@ -191,6 +206,10 @@ fn categorical_entropy(logits: &Tensor) -> Tensor {
 /// any policy output can get, independent of gradient dynamics).
 const QUANTITY_AB_MAX: f64 = 1000.0;
 fn quantity_ab(params: &Tensor) -> (Tensor, Tensor) {
+    // Same NaN-before-clamp hazard as `sanitize_logits` above: sanitize the
+    // raw params first, then derive alpha/beta, so a NaN raw value can't
+    // survive `clamp_max` and reach `lgamma`/`digamma` downstream.
+    let params = params.nan_to_num(0.0, QUANTITY_AB_MAX, -QUANTITY_AB_MAX);
     let ab = (params.softplus() + 1.0).clamp_max(QUANTITY_AB_MAX);
     (ab.select(-1, 0), ab.select(-1, 1))
 }
@@ -1390,6 +1409,29 @@ mod logit_clamp_tests {
         let logp2 = categorical_logp(&logits, &idx);
         let logp2_v: f64 = logp2.double_value(&[0]);
         assert!(logp2_v.is_finite(), "categorical_logp must be finite, got {logp2_v}");
+    }
+
+    #[test]
+    fn categorical_sample_survives_an_actual_nan_logit() {
+        // This is the exact failure mode a live run hit: clamp_max alone
+        // does NOT save a NaN logit (NaN comparisons are always false), so
+        // this must go through `sanitize_logits`'s nan_to_num first.
+        let logits = Tensor::from_slice(&[f32::NAN, 2.0f32, f32::INFINITY]).reshape([1, 3]);
+        let (idx, logp) = categorical_sample(&logits, false);
+        let idx_v: i64 = idx.int64_value(&[0]);
+        assert!((0..3).contains(&idx_v), "sampled index must be valid, got {idx_v}");
+        let logp_v: f64 = logp.double_value(&[0]);
+        assert!(logp_v.is_finite(), "logp must be finite for a NaN/Inf-containing logit row, got {logp_v}");
+    }
+
+    #[test]
+    fn quantity_ab_survives_an_actual_nan_param() {
+        let params = Tensor::from_slice(&[f32::NAN, f32::NEG_INFINITY]).reshape([1, 1, 2]);
+        let (a, b) = quantity_ab(&params);
+        let a_v: f64 = a.double_value(&[0, 0]);
+        let b_v: f64 = b.double_value(&[0, 0]);
+        assert!(a_v.is_finite(), "alpha must be finite for a NaN raw param, got {a_v}");
+        assert!(b_v.is_finite(), "beta must be finite for a -inf raw param, got {b_v}");
     }
 
     #[test]
