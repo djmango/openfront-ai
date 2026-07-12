@@ -188,7 +188,7 @@ struct Args {
     /// Split env workers into two halves and overlap act(g1) with step(g0)
     /// inside each rollout step (Python v4.1 dual-group pipelining).
     /// Default on; with one env the second group is empty.
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pipeline_groups: bool,
 
     /// "cpu", "cuda", or "cuda:N".
