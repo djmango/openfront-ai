@@ -151,7 +151,19 @@ impl ChoiceBatch {
     }
 }
 
+/// Upper bound on any single action's logit (legal or illegal) before it
+/// enters softmax/log_softmax. Illegal actions sit at `MASKED_NEG` (very
+/// negative) and are unaffected by a max-clamp, so masking still works.
+/// Without this, an unbounded logit on a legal action lets the categorical
+/// distribution collapse to a near-delta (entropy -> 0) and makes
+/// log_softmax's gradient increasingly ill-conditioned, which is the root
+/// cause of the entropy-collapse -> instability chain seen in training.
+/// Clamping bounds how peaked the policy can ever get, independent of
+/// whatever the entropy-bonus coefficient happens to be doing.
+const LOGIT_CLAMP_MAX: f64 = 30.0;
+
 fn categorical_sample(logits: &Tensor, greedy: bool) -> (Tensor, Tensor) {
+    let logits = logits.clamp_max(LOGIT_CLAMP_MAX);
     let logp_all = logits.log_softmax(-1, Kind::Float);
     let idx = if greedy {
         logits.argmax(-1, false)
@@ -164,18 +176,22 @@ fn categorical_sample(logits: &Tensor, greedy: bool) -> (Tensor, Tensor) {
 }
 
 fn categorical_logp(logits: &Tensor, idx_clamped: &Tensor) -> Tensor {
-    logits.log_softmax(-1, Kind::Float).gather(-1, &idx_clamped.unsqueeze(-1), false).squeeze_dim(-1)
+    logits.clamp_max(LOGIT_CLAMP_MAX).log_softmax(-1, Kind::Float).gather(-1, &idx_clamped.unsqueeze(-1), false).squeeze_dim(-1)
 }
 
 fn categorical_entropy(logits: &Tensor) -> Tensor {
-    let logp = logits.log_softmax(-1, Kind::Float);
+    let logp = logits.clamp_max(LOGIT_CLAMP_MAX).log_softmax(-1, Kind::Float);
     let p = logp.exp();
     -(p * logp).sum_dim_intlist(-1, false, Kind::Float)
 }
 
-/// alpha/beta >= 1 (unimodal, bounded Beta): 1 + softplus(raw).
+/// alpha/beta >= 1 (unimodal, bounded Beta): 1 + softplus(raw), clamped
+/// above so the Beta can't collapse into a numerically-degenerate delta
+/// (same rationale as `LOGIT_CLAMP_MAX` above: bound how confident/peaked
+/// any policy output can get, independent of gradient dynamics).
+const QUANTITY_AB_MAX: f64 = 1000.0;
 fn quantity_ab(params: &Tensor) -> (Tensor, Tensor) {
-    let ab = params.softplus() + 1.0;
+    let ab = (params.softplus() + 1.0).clamp_max(QUANTITY_AB_MAX);
     (ab.select(-1, 0), ab.select(-1, 1))
 }
 
@@ -1336,5 +1352,53 @@ mod tests {
         let local_outside = global_to_fine_local_cropped(&outside_global, ch, cw, &oy1, &ox1);
         let local_outside_v: Vec<i64> = local_outside.reshape([-1]).try_into().unwrap();
         assert_eq!(local_outside_v, vec![-1]);
+    }
+}
+
+#[cfg(test)]
+mod logit_clamp_tests {
+    //! `LOGIT_CLAMP_MAX`/`QUANTITY_AB_MAX` guard the entropy-collapse ->
+    //! instability chain seen in training (see devlog): without a bound,
+    //! an ever-larger legal-action logit (or Beta alpha/beta) makes the
+    //! distribution collapse toward a delta and drives `categorical_*`'s
+    //! log_softmax/lgamma-based math into an increasingly degenerate,
+    //! high-gradient regime. These tests pin the exact bound so a future
+    //! change can't silently widen or remove it.
+    use super::*;
+
+    #[test]
+    fn categorical_entropy_never_collapses_to_zero_no_matter_how_extreme_the_logit() {
+        // One wildly dominant legal logit among otherwise-illegal (masked)
+        // alternatives - exactly the shape that, pre-clamp, drove entropy
+        // toward zero as training pushed the winning logit ever higher.
+        let logits = Tensor::from_slice(&[1.0e6f32, MASKED_NEG as f32, MASKED_NEG as f32, MASKED_NEG as f32])
+            .reshape([1, 4]);
+        let ent: f64 = categorical_entropy(&logits).double_value(&[0]);
+        assert!(ent.is_finite(), "entropy must stay finite, got {ent}");
+        // With the clamp, the effective gap between the winning and next
+        // logits is bounded by LOGIT_CLAMP_MAX vs MASKED_NEG, so entropy
+        // is small but not exactly zero and never NaN/negative.
+        assert!(ent >= 0.0, "entropy must be non-negative, got {ent}");
+    }
+
+    #[test]
+    fn categorical_sample_and_logp_stay_finite_for_extreme_logits() {
+        let logits = Tensor::from_slice(&[-1.0e8f32, 1.0e8f32, 5.0f32]).reshape([1, 3]);
+        let (idx, logp) = categorical_sample(&logits, false);
+        let logp_v: f64 = logp.double_value(&[0]);
+        assert!(logp_v.is_finite(), "sampled logp must be finite, got {logp_v}");
+        let logp2 = categorical_logp(&logits, &idx);
+        let logp2_v: f64 = logp2.double_value(&[0]);
+        assert!(logp2_v.is_finite(), "categorical_logp must be finite, got {logp2_v}");
+    }
+
+    #[test]
+    fn quantity_ab_is_bounded_even_for_a_huge_raw_input() {
+        let params = Tensor::from_slice(&[1.0e9f32, 1.0e9f32]).reshape([1, 1, 2]);
+        let (a, b) = quantity_ab(&params);
+        let a_v: f64 = a.double_value(&[0, 0]);
+        let b_v: f64 = b.double_value(&[0, 0]);
+        assert!(a_v.is_finite() && a_v <= QUANTITY_AB_MAX, "alpha must be bounded, got {a_v}");
+        assert!(b_v.is_finite() && b_v <= QUANTITY_AB_MAX, "beta must be bounded, got {b_v}");
     }
 }
