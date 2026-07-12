@@ -40,6 +40,22 @@
 //! copies instead of an `ncclAllReduce`; correct and plenty fast for an
 //! 11M-param policy on a single node, just not as low-latency as real NCCL
 //! would be across nodes.
+//!
+//! ## Remaining Python-parity gaps (oftrain)
+//!
+//! - **Dual env-group pipelining**: Python overlaps collection of group A
+//!   with stepping group B inside a single update; Rust already overlaps
+//!   *next* rollout collection with the PPO update, but does not split the
+//!   live env pool into two alternating groups. Skipped as too invasive for
+//!   the current actor/learner layout.
+//! - **AdamW optimizer-state restore**: tch-rs exposes no optimizer
+//!   `state_dict` save/load; momentum/variance rebuild after `--resume`
+//!   (documented on `Config::resume`).
+//! - **fp16 host grids**: `PreparedObs` keeps f32 host buffers; optional
+//!   f16 packing skipped (invasive for little gain on the encode path).
+//! - **Value loss default**: `--value-loss` defaults to `huber` (Rust
+//!   stabilizer); Phase 5 (final) switches the default to `mse` once
+//!   training is stable, matching Python `F.mse_loss`.
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -56,10 +72,25 @@ use tch::{nn, Device, Kind, Tensor};
 
 use crate::autoscale;
 use crate::batch::{self, ChoiceScalars};
-use crate::gpu_util::GpuUtilSampler;
-use crate::policy::{self, PolicyNet};
 use crate::engine::EngineKind;
+use crate::gpu_util::GpuUtilSampler;
+use crate::metrics::MetricsWriter;
+use crate::policy::{self, PolicyNet};
 use crate::vecenv::{EnvWorker, EpisodeInfo, PreparedObs};
+
+/// Pixel budget for one forward/backward sub-batch during the PPO update
+/// (mirrors `rl/ppo.py::MAX_UPD_PIX`). When `mb_size * (gh*gw + cgh*cgw)`
+/// exceeds this, the minibatch is further split and grads accumulate with
+/// `w_sub = sub_len / mb_len` weights before a single optimizer step.
+const MAX_UPD_PIX: usize = 1_600_000;
+
+/// Value-loss form. Default `Huber` keeps the Rust stabilizer; Phase 5
+/// (final) switches the CLI default to `Mse` once training is stable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueLoss {
+    Huber,
+    Mse,
+}
 
 /// Port of `rl/ppo.py`'s entropy-floor controller constants: hold the
 /// controller for the first N updates (spawn-heavy startup rollouts read
@@ -232,8 +263,17 @@ pub struct Config {
     /// 0.0 = every worker uses `engine` unchanged.
     pub node_fraction: f64,
     pub log_every: u64,
+    /// `--eval-every`: updates between fixed-seed greedy eval passes
+    /// (0 = off). See `run_eval`.
+    pub eval_every: u64,
+    /// `--eval-episodes`: fresh workers per greedy eval pass.
+    pub eval_episodes: usize,
     pub ckpt_every: u64,
     pub ckpt_dir: String,
+    /// `--init`: warm-start weights from a `.ot` VarStore dump without
+    /// restoring `TrainState` (BC→RL / exported weights). Ignored when
+    /// `resume` is also set.
+    pub init: Option<String>,
     /// `--resume`: path to a previously-saved `.ot` weights file (its
     /// training-state sidecar is found by swapping the `.ot` extension for
     /// `.state.json` - see `TrainState`). Restores weights, curriculum
@@ -244,6 +284,10 @@ pub struct Config {
     /// the first few dozen post-resume updates, a deliberate, documented
     /// gap rather than a silent one.
     pub resume: Option<String>,
+    /// `--value-loss`: `Huber` (default; Rust stabilizer) or `Mse`
+    /// (Python `F.mse_loss` parity). Phase 5 (final) flips the default to
+    /// `Mse` once training is stable under Huber.
+    pub value_loss: ValueLoss,
 
     /// `--auto-scale-envs`: opt-in runtime growth of the per-shard env
     /// count toward `target_gpu_util` (see `autoscale.rs`). Off by
@@ -550,6 +594,108 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
     };
 
     Ok(RolloutResult { buffer, bootstrap_v, ep_infos })
+}
+
+/// Result of a fixed-seed greedy eval pass (`run_eval`).
+pub struct EvalResult {
+    pub win: f64,
+    pub score: f64,
+    pub episodes: usize,
+}
+
+/// Deployment-style eval: fresh fixed-seed envs (worker `i` always plays
+/// seed `w{i}-ep0` at this stage), greedy actions, one episode per env.
+/// Mirrors `rl/ppo.py::run_eval`.
+fn run_eval(
+    policy: &PolicyNet,
+    ae: &crate::ae::AePair,
+    device: Device,
+    stage: usize,
+    episodes: usize,
+    max_ticks: i64,
+    engine: EngineKind,
+    pinned_h2d: bool,
+) -> Result<EvalResult> {
+    if episodes == 0 {
+        return Ok(EvalResult { win: 0.0, score: 0.0, episodes: 0 });
+    }
+    let mut workers = Vec::with_capacity(episodes);
+    let mut cur_obs = Vec::with_capacity(episodes);
+    for i in 0..episodes {
+        let (w, obs) = spawn_worker(i, stage, max_ticks, engine)?;
+        workers.push(w);
+        cur_obs.push(obs);
+    }
+    let stages = ofcore::curriculum::stages();
+    let decision_ticks = stages[stage.min(stages.len().saturating_sub(1))].decision_ticks.max(1) as u64;
+    let step_cap = (max_ticks as u64 / decision_ticks) + 64;
+    let mut results: Vec<Option<EpisodeInfo>> = vec![None; episodes];
+
+    for _ in 0..step_cap {
+        let pending: Vec<usize> = (0..episodes).filter(|&i| results[i].is_none()).collect();
+        if pending.is_empty() {
+            break;
+        }
+        let mut batch: Vec<PreparedObs> = pending.iter().map(|&i| cur_obs[i].clone()).collect();
+        batch::encode_prepared_obs(&mut batch, device, ae)?;
+        let refs: Vec<&PreparedObs> = batch.iter().collect();
+        let obs_t = batch::build_obs(&refs, device, pinned_h2d);
+        let (a, player, tile, build, nuke, qty, _logp, _value) =
+            tch::no_grad(|| policy.act(&obs_t, true));
+        let a_v: Vec<i64> = (&a).try_into()?;
+        let player_v: Vec<i64> = (&player).try_into()?;
+        let tile_v: Vec<i64> = (&tile).try_into()?;
+        let build_v: Vec<i64> = (&build).try_into()?;
+        let nuke_v: Vec<i64> = (&nuke).try_into()?;
+        let qty_v: Vec<f32> = (&qty).try_into()?;
+
+        for (bi, &ei) in pending.iter().enumerate() {
+            let act = a_v[bi];
+            let np = action_needs_player(act);
+            let nt = action_needs_tile(act);
+            let nq = action_needs_quantity(act);
+            let is_build = ACTIONS[act as usize] == "build";
+            let is_nuke = ACTIONS[act as usize] == "launch_nuke";
+            let choice = Choice {
+                action: act,
+                player_slot: np.then_some(player_v[bi]),
+                tile_region: nt.then_some(tile_v[bi]),
+                build_type: is_build.then_some(build_v[bi]),
+                nuke_type: is_nuke.then_some(nuke_v[bi]),
+                quantity_frac: nq.then_some(qty_v[bi] as f64),
+            };
+            workers[ei]
+                .choice_tx
+                .send(choice)
+                .map_err(|_| anyhow!("eval env {ei} choice channel closed"))?;
+        }
+        for (bi, &ei) in pending.iter().enumerate() {
+            let _ = bi;
+            let (next_obs, _reward, _done, info) = workers[ei]
+                .obs_rx
+                .recv()
+                .map_err(|_| anyhow!("eval env {ei} obs channel closed"))?
+                .map_err(|e| anyhow!("eval env {ei}: {e}"))?;
+            cur_obs[ei] = next_obs;
+            if let Some(info) = info {
+                results[ei] = Some(info);
+            }
+        }
+    }
+
+    for w in workers {
+        drop(w.choice_tx);
+        let _ = w.handle.join();
+    }
+
+    let finished: Vec<&EpisodeInfo> = results.iter().filter_map(|r| r.as_ref()).collect();
+    if finished.is_empty() {
+        return Ok(EvalResult { win: 0.0, score: 0.0, episodes: 0 });
+    }
+    let n = finished.len() as f64;
+    let win = finished.iter().map(|e| if e.won { 1.0 } else { 0.0 }).sum::<f64>() / n;
+    let score = finished.iter().map(|e| e.score).sum::<f64>() / n;
+    Ok(EvalResult { win, score, episodes: finished.len() })
 }
 
 /// Averages gradients across all shards and writes the average back onto
@@ -940,179 +1086,158 @@ fn train_update(
             .collect();
         let n_minibatches = cfg.minibatches.max(1);
 
+        // Pixel budget from the padded rollout Obs (shared across shards).
+        let (gh, gw) = {
+            let s = shard_batches[0].obs.grid.size();
+            (s[2] as usize, s[3] as usize)
+        };
+        let (cgh, cgw) = match &shard_batches[0].obs.grid_coarse {
+            Some(gc) => {
+                let s = gc.size();
+                (s[2] as usize, s[3] as usize)
+            }
+            None => (gh.div_ceil(2), gw.div_ceil(2)),
+        };
+        let pix_per = (gh * gw + cgh * cgw).max(1);
+        let sub_size = (MAX_UPD_PIX / pix_per).max(1) as i64;
+
         for m in 0..n_minibatches {
             let start = (m * minibatch_size) as i64;
             let len = if m == n_minibatches - 1 { total as i64 - start } else { minibatch_size as i64 };
             let mb_t0 = Instant::now();
-            // Forward + backward for every shard on its own OS thread:
-            // `opt.zero_grad()`/`backward()` for shard 0 would otherwise
-            // fully finish, including its implicit device sync, before
-            // shard 1 even starts on a plain sequential loop.
-            let per_shard_losses: Vec<(f64, f64, f64, f64)> = std::thread::scope(|s| {
-                let handles: Vec<_> = learners
-                    .iter_mut()
-                    .zip(shard_batches.iter_mut())
-                    .zip(idx_tensors.iter())
-                    .map(|((shard, sb), idx_full)| {
-                        let idx_t = idx_full.narrow(0, start, len);
-                        s.spawn(move || {
-                            let obs_t = sb.obs.index_select(&idx_t);
-                            let choice_t = sb.choice.index_select(&idx_t);
-                            let adv_t = sb.adv.index_select(0, &idx_t);
-                            let ret_t = sb.ret.index_select(0, &idx_t);
-                            let old_logp_t = sb.old_logp.index_select(0, &idx_t);
+            // Further split when `mb_size * pix_per > MAX_UPD_PIX` (mirror
+            // `rl/ppo.py`). All samples share padded grid dims, so no
+            // shape-grouping is needed — just chop and accumulate grads
+            // with `w_sub = sub_len / mb_len` before one optimizer step.
+            let n_subs = ((len + sub_size - 1) / sub_size) as usize;
+            for shard in learners.iter_mut() {
+                shard.opt.zero_grad();
+            }
+            let mut mb_loss_sums = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+            let mut discard_mb = false;
 
-                            let (logp, ent, ent_q, value) = shard.policy.evaluate(&obs_t, &choice_t);
-                            // `surr2`'s ratio is clamped to PPO's trust
-                            // region [1-clip, 1+clip], but `surr1` - needed
-                            // unclamped so `min(surr1, surr2)` stays a
-                            // correct *pessimistic* bound for legitimate
-                            // policy drift - multiplies the *raw* ratio by
-                            // adv_t with nothing bounding it. A live run's
-                            // pg_loss spiked to 1.48 TRILLION in a single
-                            // update, immediately recovering the next
-                            // update: `old_logp` is a frozen snapshot from
-                            // rollout collection and `logp` is recomputed
-                            // under the policy *after* several epochs of
-                            // minibatch updates on the same rollout, so if
-                            // even one sample's policy has drifted far
-                            // enough in that window, `logp - old_logp_t`
-                            // can be large enough that `.exp()` alone turns
-                            // it into an astronomical ratio - and because
-                            // `min(surr1, surr2)` picks whichever branch is
-                            // *more negative*, that exact pathological case
-                            // (huge ratio, negative advantage) is precisely
-                            // when the unbounded `surr1` branch gets
-                            // selected instead of the safe, clamped one.
-                            // Bounding the log-ratio before exponentiating
-                            // (same "fix the network's own output, not
-                            // just a downstream aggregate" pattern as
-                            // LOGIT_CLAMP_MAX/sanitize_value) keeps this
-                            // pathological case bounded without touching
-                            // the clipped trust-region behavior for any
-                            // sample whose drift is within a sane range.
-                            let log_ratio = (&logp - &old_logp_t).clamp(-20.0, 20.0);
-                            let ratio = log_ratio.exp();
-                            let surr1 = &ratio * &adv_t;
-                            let surr2 = ratio.clamp(1.0 - cfg.clip as f64, 1.0 + cfg.clip as f64) * &adv_t;
-                            let pg_loss = -surr1.minimum(&surr2).mean(Kind::Float);
-                            // Huber (delta=`vf_clip`) instead of plain MSE for
-                            // the value loss - see Config::vf_clip's doc for
-                            // the full incident history. A PPO2-style
-                            // "clip-and-take-worse-of-two" attempt (tried
-                            // first, see git history) did NOT work: that
-                            // formula's `max(unclipped, clipped)` can still
-                            // select the *unclipped* branch's gradient
-                            // whenever the raw prediction has drifted far
-                            // enough, so it regularizes normal training but
-                            // provides no actual ceiling once a prediction
-                            // has already diverged - confirmed live, `v`
-                            // still reached 310 quadrillion with that
-                            // approach active, and even `pg_loss` got
-                            // corrupted (poisoned gradients flowing back
-                            // through the shared conv-tower backbone both
-                            // heads sit on). Huber's gradient magnitude is
-                            // bounded by `delta` by construction, everywhere,
-                            // for any error size - it degrades gracefully to
-                            // linear (bounded-gradient) loss beyond the
-                            // delta threshold instead of MSE's unbounded
-                            // quadratic gradient. This is the actual fix, not
-                            // another clamp: no single sample's target or
-                            // prediction, however extreme, can ever
-                            // contribute more than a `delta`-bounded
-                            // gradient, so the shared-backbone poisoning
-                            // pathway is closed off at the source.
-                            let v_loss = value.huber_loss(&ret_t, tch::Reduction::Mean, cfg.vf_clip.max(1e-3) as f64);
-                            let ent_loss = ent.mean(Kind::Float);
-                            // `ent_q` (Beta quantity-head entropy) is 0 for
-                            // every sample whose action doesn't use a
-                            // quantity_frac - averaging over the *full*
-                            // batch (as `rl/ppo.py`'s original mistake would
-                            // be) scales the bonus down by
-                            // n_active/batch_size, weakening exploration on
-                            // quantity actions. Python divides by n_active
-                            // (`ppo.py` `ent_qm = ent_q.sum() / n_q`); match
-                            // that.
-                            let n_active = choice_t.quantity_frac.ge(0.0).to_kind(Kind::Float).sum(Kind::Float).clamp_min(1.0);
-                            let entq_loss = ent_q.sum(Kind::Float) / &n_active;
-                            let loss = &pg_loss + cfg.vf_coef as f64 * &v_loss
-                                - ent_coef as f64 * &ent_loss
-                                - cfg.entq_coef as f64 * &entq_loss;
+            for s_i in 0..n_subs {
+                let sub_start = start + (s_i as i64) * sub_size;
+                let sub_len = if s_i == n_subs - 1 {
+                    start + len - sub_start
+                } else {
+                    sub_size
+                };
+                let w_sub = sub_len as f64 / len as f64;
+                // Forward + backward for every shard on its own OS thread:
+                // `backward()` for shard 0 would otherwise fully finish,
+                // including its implicit device sync, before shard 1 even
+                // starts on a plain sequential loop.
+                let per_shard_losses: Vec<(f64, f64, f64, f64)> = std::thread::scope(|s| {
+                    let handles: Vec<_> = learners
+                        .iter_mut()
+                        .zip(shard_batches.iter_mut())
+                        .zip(idx_tensors.iter())
+                        .map(|((shard, sb), idx_full)| {
+                            let idx_t = idx_full.narrow(0, sub_start, sub_len);
+                            s.spawn(move || {
+                                let obs_t = sb.obs.index_select(&idx_t);
+                                let choice_t = sb.choice.index_select(&idx_t);
+                                let adv_t = sb.adv.index_select(0, &idx_t);
+                                let ret_t = sb.ret.index_select(0, &idx_t);
+                                let old_logp_t = sb.old_logp.index_select(0, &idx_t);
 
-                            shard.opt.zero_grad();
-                            loss.backward();
+                                let (logp, ent, ent_q, value) = shard.policy.evaluate(&obs_t, &choice_t);
+                                // Bound log-ratio before exp (see prior
+                                // pg_loss trillion-spike incident).
+                                let log_ratio = (&logp - &old_logp_t).clamp(-20.0, 20.0);
+                                let ratio = log_ratio.exp();
+                                let surr1 = &ratio * &adv_t;
+                                let surr2 = ratio.clamp(1.0 - cfg.clip as f64, 1.0 + cfg.clip as f64) * &adv_t;
+                                let pg_loss = -surr1.minimum(&surr2).mean(Kind::Float);
+                                // Value loss: Huber (default Rust
+                                // stabilizer; see Config::vf_clip) or MSE
+                                // (Python F.mse_loss). Phase 5 (final)
+                                // switches the CLI default to mse once
+                                // training is stable under Huber.
+                                let v_loss = match cfg.value_loss {
+                                    ValueLoss::Huber => value.huber_loss(
+                                        &ret_t,
+                                        tch::Reduction::Mean,
+                                        cfg.vf_clip.max(1e-3) as f64,
+                                    ),
+                                    ValueLoss::Mse => {
+                                        value.mse_loss(&ret_t, tch::Reduction::Mean)
+                                    }
+                                };
+                                let ent_loss = ent.mean(Kind::Float);
+                                let n_active = choice_t
+                                    .quantity_frac
+                                    .ge(0.0)
+                                    .to_kind(Kind::Float)
+                                    .sum(Kind::Float)
+                                    .clamp_min(1.0);
+                                let entq_loss = ent_q.sum(Kind::Float) / &n_active;
+                                let loss = (&pg_loss
+                                    + cfg.vf_coef as f64 * &v_loss
+                                    - ent_coef as f64 * &ent_loss
+                                    - cfg.entq_coef as f64 * &entq_loss)
+                                    * w_sub;
 
-                            (
-                                f64::try_from(&pg_loss).unwrap_or(0.0),
-                                f64::try_from(&v_loss).unwrap_or(0.0),
-                                f64::try_from(&ent_loss).unwrap_or(0.0),
-                                f64::try_from(&entq_loss).unwrap_or(0.0),
-                            )
+                                // Grads accumulate across pixel-budget
+                                // subs (zero_grad ran once above).
+                                loss.backward();
+
+                                (
+                                    f64::try_from(&pg_loss).unwrap_or(0.0),
+                                    f64::try_from(&v_loss).unwrap_or(0.0),
+                                    f64::try_from(&ent_loss).unwrap_or(0.0),
+                                    f64::try_from(&entq_loss).unwrap_or(0.0),
+                                )
+                            })
                         })
-                    })
-                    .collect();
-                handles
-                    .into_iter()
-                    .map(|h| {
-                        h.join().unwrap_or_else(|e| {
-                            // See the batch-build thread's identical fix
-                            // above for why this doesn't just `.expect()`.
-                            let msg = e
-                                .downcast_ref::<&str>()
-                                .map(|s| s.to_string())
-                                .or_else(|| e.downcast_ref::<String>().cloned())
-                                .unwrap_or_else(|| format!("{e:?}"));
-                            panic!("backward thread panicked: {msg}");
+                        .collect();
+                    handles
+                        .into_iter()
+                        .map(|h| {
+                            h.join().unwrap_or_else(|e| {
+                                let msg = e
+                                    .downcast_ref::<&str>()
+                                    .map(|s| s.to_string())
+                                    .or_else(|| e.downcast_ref::<String>().cloned())
+                                    .unwrap_or_else(|| format!("{e:?}"));
+                                panic!("backward thread panicked: {msg}");
+                            })
                         })
-                    })
-                    .collect()
-            });
-            let n_shards = per_shard_losses.len() as f64;
-            // Neither `rl/ppo.py` nor this port clip/normalize the value
-            // target (`ret`) itself - only the advantage is normalized, and
-            // only *after* `ret` is derived from the raw (unnormalized) one,
-            // which is correct GAE, not a bug. That means an unusually
-            // large true return (a long high-reward episode, a big terminal
-            // bonus, or - not yet ruled out - a reward-scale mismatch
-            // between the native and Node engines under `--node-fraction`,
-            // since this run was the first to ever combine that with a
-            // full-scale multi-GPU run) can still occasionally push the
-            // *value loss* (squared, then `vf_coef`-scaled) into the range
-            // where a `clip_grad_norm(0.5)`-bounded step still overshoots
-            // badly enough to compound into NaN over a few updates (see
-            // docs/devlog.html's 2026-07-12 entry for the live incident this
-          // guards against - `v` climbed from 5.47 to 56.4 TRILLION in one
-            // update, then to outright NaN eight updates later). Rather
-            // than fix the exact trigger (unconfirmed) by guessing at a
-            // reward-scale change, guard the *symptom* directly: skip
-            // applying a minibatch's update outright if any shard's loss
-            // came back non-finite, so one poisoned rollout costs one
-            // discarded minibatch instead of turning every future update
-            // (and the checkpoint born from it) into unrecoverable garbage.
-            if any_loss_non_finite(&per_shard_losses) {
-                eprintln!(
-                    "[train] WARNING: non-finite loss in epoch={_epoch} mb={m} \
-                     (per-shard pg/v/ent/entq={per_shard_losses:?}) - discarding this \
-                     minibatch's gradients without stepping the optimizer (see \
-                     docs/devlog.html's 2026-07-12 NaN-guard entry)"
-                );
-                // Still clears the poisoned grads (zero_grad() runs at the
-                // top of next minibatch's forward-pass closure regardless,
-                // but doing it here too means a mid-epoch panic/early exit
-                // between minibatches can never leave a shard holding NaN
-                // grads for `sync_grads`/logging elsewhere to observe).
+                        .collect()
+                });
+                let n_shards = per_shard_losses.len() as f64;
+                // Skip the whole minibatch if any sub-batch went non-finite
+                // (see docs/devlog.html's 2026-07-12 NaN-guard entry).
+                if any_loss_non_finite(&per_shard_losses) {
+                    eprintln!(
+                        "[train] WARNING: non-finite loss in epoch={_epoch} mb={m} sub={s_i} \
+                         (per-shard pg/v/ent/entq={per_shard_losses:?}) - discarding this \
+                         minibatch's gradients without stepping the optimizer (see \
+                         docs/devlog.html's 2026-07-12 NaN-guard entry)"
+                    );
+                    discard_mb = true;
+                    break;
+                }
+                for (pg, v, ent, entq) in &per_shard_losses {
+                    mb_loss_sums.0 += pg / n_shards * w_sub;
+                    mb_loss_sums.1 += v / n_shards * w_sub;
+                    mb_loss_sums.2 += ent / n_shards * w_sub;
+                    mb_loss_sums.3 += entq / n_shards * w_sub;
+                }
+            }
+
+            if discard_mb {
                 for shard in learners.iter_mut() {
                     shard.opt.zero_grad();
                 }
                 n_mb += 1;
                 continue;
             }
-            for (pg, v, ent, entq) in &per_shard_losses {
-                loss_sums.0 += pg / n_shards;
-                loss_sums.1 += v / n_shards;
-                loss_sums.2 += ent / n_shards;
-                loss_sums.3 += entq / n_shards;
-            }
+            loss_sums.0 += mb_loss_sums.0;
+            loss_sums.1 += mb_loss_sums.1;
+            loss_sums.2 += mb_loss_sums.2;
+            loss_sums.3 += mb_loss_sums.3;
             n_mb += 1;
             let fwdbwd_dt = mb_t0.elapsed().as_secs_f64();
 
@@ -1130,7 +1255,10 @@ fn train_update(
             }
             let step_dt = step_t0.elapsed().as_secs_f64();
             if std::env::var("OFTRAIN_DIAG").is_ok() {
-                println!("[diag] epoch={_epoch} mb={m} fwdbwd_s={fwdbwd_dt:.3} sync_s={sync_dt:.3} step_s={step_dt:.3}");
+                println!(
+                    "[diag] epoch={_epoch} mb={m} subs={n_subs} fwdbwd_s={fwdbwd_dt:.3} \
+                     sync_s={sync_dt:.3} step_s={step_dt:.3}"
+                );
             }
         }
     }
@@ -1142,11 +1270,8 @@ fn train_update(
 pub fn run(cfg: Config) -> Result<()> {
     std::fs::create_dir_all(&cfg.ckpt_dir)?;
 
-    // Resume: load weights + training state before anything else needs
-    // them - env workers need the resumed curriculum stage at spawn time,
-    // and every shard copies from `hub_vs` below, so it has to be seeded
-    // with the resumed weights (not shard 0's freshly-initialized ones)
-    // before the shard loop runs.
+    // Resume / init: load weights before shards spawn. `--resume` restores
+    // TrainState; `--init` is warm-start only (fresh counters/stage).
     let mut resumed_state: Option<TrainState> = None;
     let mut hub_vs: Option<nn::VarStore> = if let Some(resume_path) = &cfg.resume {
         let mut snapshot = nn::VarStore::new(Device::Cpu);
@@ -1175,10 +1300,21 @@ pub fn run(cfg: Config) -> Result<()> {
                 .unwrap_or_default()
         );
         Some(snapshot)
+    } else if let Some(init_path) = &cfg.init {
+        let mut snapshot = nn::VarStore::new(Device::Cpu);
+        let _ = PolicyNet::new(&snapshot.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
+        snapshot.load(init_path)?;
+        println!(
+            "[train] warm-started weights from {init_path} (--init; fresh TrainState / optimizer)"
+        );
+        Some(snapshot)
     } else {
         None
     };
     let start_stage = resumed_state.as_ref().map(|s| s.stage).unwrap_or(cfg.stage);
+
+    let metrics = MetricsWriter::create(&cfg.ckpt_dir)?;
+    println!("[train] metrics -> {}/metrics.jsonl", cfg.ckpt_dir);
 
     let devices = cfg.devices();
     let total_envs = cfg.num_envs * devices.len();
@@ -1585,6 +1721,56 @@ pub fn run(cfg: Config) -> Result<()> {
             }
         }
 
+        let mut last_eval: Option<EvalResult> = None;
+        if cfg.eval_every > 0 && update % cfg.eval_every == 0 {
+            let t_eval = Instant::now();
+            // Use shard 0's learner policy + actor AE (same device).
+            let ae = actors[0]
+                .ae
+                .as_ref()
+                .ok_or_else(|| anyhow!("eval requires AE encoders"))?;
+            let ev = run_eval(
+                &learners[0].policy,
+                ae,
+                learners[0].device,
+                curr_stage,
+                cfg.eval_episodes,
+                cfg.max_episode_ticks,
+                cfg.engine,
+                cfg.pinned_h2d,
+            )?;
+            println!(
+                "[eval] stage {curr_stage}  win {:.2}  score {:.2}  ({} eps, {:.0}s)",
+                ev.win,
+                ev.score,
+                ev.episodes,
+                t_eval.elapsed().as_secs_f64()
+            );
+            // Always persist eval rows even when this update isn't a
+            // log_every tick (so sparse eval schedules still land in JSONL).
+            if update % cfg.log_every != 0 && update != cfg.updates - 1 {
+                let win_rate = if recent_wins.is_empty() {
+                    None
+                } else {
+                    Some(recent_wins.iter().sum::<f64>() / recent_wins.len() as f64)
+                };
+                let _ = metrics.log_update(
+                    update,
+                    curr_stage,
+                    last_losses.0,
+                    last_losses.1,
+                    last_losses.2,
+                    last_losses.3,
+                    win_rate,
+                    lr_now,
+                    total_env_steps,
+                    Some(ev.win),
+                    Some(ev.score),
+                );
+            }
+            last_eval = Some(ev);
+        }
+
         if update % cfg.log_every == 0 || update == cfg.updates - 1 {
             let dt = update_start.elapsed().as_secs_f64();
             let total_dt = train_start.elapsed().as_secs_f64();
@@ -1594,6 +1780,11 @@ pub fn run(cfg: Config) -> Result<()> {
                 ep_rewards[ep_rewards.len() - recent_n..].iter().sum::<f64>() / recent_n as f64
             } else {
                 0.0
+            };
+            let win_rate = if recent_wins.is_empty() {
+                None
+            } else {
+                Some(recent_wins.iter().sum::<f64>() / recent_wins.len() as f64)
             };
             let gpu_str = match &gpu_sampler {
                 Some(s) => {
@@ -1630,6 +1821,25 @@ pub fn run(cfg: Config) -> Result<()> {
                 collect_dt,
                 train_dt,
             );
+            let (eval_win, eval_score) = match &last_eval {
+                Some(ev) => (Some(ev.win), Some(ev.score)),
+                None => (None, None),
+            };
+            if let Err(e) = metrics.log_update(
+                update,
+                curr_stage,
+                last_losses.0,
+                last_losses.1,
+                last_losses.2,
+                last_losses.3,
+                win_rate,
+                lr_now,
+                total_env_steps,
+                eval_win,
+                eval_score,
+            ) {
+                eprintln!("[train] WARNING: metrics log failed: {e:#}");
+            }
         }
 
         if cfg.ckpt_every > 0 && (update % cfg.ckpt_every == 0) && update > 0 {
