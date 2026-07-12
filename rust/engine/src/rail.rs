@@ -112,16 +112,15 @@ impl RailNetwork {
             .collect()
     }
 
-    /// TS `Cluster.addStation` + `TrainStation.setCluster`.
-    ///
-    /// TS `setCluster` always `removeStation`s from the previous cluster before assigning the
-    /// new one. When the previous cluster *is* the destination (second `addStation` for the
-    /// same cluster in one `connectToNearbyStations` pass), that remove-after-add orphans the
-    /// station: `cluster` still points at the cluster but it is absent from `stations` /
-    /// `tradeStations`. Live TS play still keeps these stations visible to
-    /// `randomTradeDestination` (Egypt dest skew on curr-b030 @9480: native missing 141/171
-    /// while TS listed them). Skip the remove when `prev == cluster_id` so membership is
-    /// preserved; still remove when moving between distinct clusters.
+    /// TS `Cluster.addStation` + `TrainStation.setCluster`. TS adds the station to the new
+    /// cluster's `stations` Set *first*, then unconditionally removes it from whatever
+    /// cluster it previously pointed to (`this.cluster.removeStation`) - even if that's the
+    /// *same* cluster we just added it to. When a new station connects to two neighbors that
+    /// both resolve to the same cluster within one `connectToNearbyStations` call, the second
+    /// `addStation` call re-triggers this remove-after-add and the station ends up with
+    /// `cluster` pointing at the cluster but absent from its `stations` set. This is real TS
+    /// behavior we must reproduce byte-for-byte, so the removal below is unconditional (no
+    /// `prev_id != cluster_id` guard) and happens *after* the add, matching TS's exact order.
     fn cluster_add_station(&mut self, cluster_id: u32, station_id: u32) {
         if let Some(c) = self.clusters.get_mut(&cluster_id) {
             if !c.stations.contains(&station_id) {
@@ -130,10 +129,8 @@ impl RailNetwork {
         }
         let prev = self.stations.get(&station_id).and_then(|s| s.cluster);
         if let Some(prev_id) = prev {
-            if prev_id != cluster_id {
-                if let Some(c) = self.clusters.get_mut(&prev_id) {
-                    c.stations.retain(|&s| s != station_id);
-                }
+            if let Some(c) = self.clusters.get_mut(&prev_id) {
+                c.stations.retain(|&s| s != station_id);
             }
         }
         if let Some(st) = self.stations.get_mut(&station_id) {
@@ -1095,33 +1092,5 @@ mod tests {
             b
         );
         assert_eq!(station_tile(&game, &game.rail_network, station_id), Some(city_tile));
-    }
-
-    /// Double `cluster_add_station` into the same cluster must not orphan the station
-    /// (pointer set, absent from `stations`) — that dropped trade destinations from
-    /// `randomTradeDestination` (curr-b030 Egypt @9480).
-    #[test]
-    fn cluster_add_station_same_cluster_twice_keeps_membership() {
-        let mut rn = RailNetwork::default();
-        let cluster = rn.new_cluster();
-        let sid = rn.new_station_id();
-        rn.stations.insert(
-            sid,
-            Station {
-                id: sid,
-                owner_small_id: 1,
-                unit_id: 1,
-                unit_type: unit_type::CITY.to_string(),
-                cluster: None,
-                railroads: Vec::new(),
-            },
-        );
-        rn.cluster_add_station(cluster, sid);
-        rn.cluster_add_station(cluster, sid);
-        assert_eq!(rn.stations.get(&sid).unwrap().cluster, Some(cluster));
-        assert!(
-            rn.clusters.get(&cluster).unwrap().stations.contains(&sid),
-            "must remain in cluster.stations after same-cluster re-add"
-        );
     }
 }
