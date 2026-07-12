@@ -73,16 +73,19 @@ struct Args {
     #[arg(long, default_value_t = 3000.0)]
     ret_clip: f32,
 
-    /// PPO2-style value-prediction clipping (see `train::Config::vf_clip`'s
-    /// doc for the full mechanism/rationale). 0.0 disables it. Default
-    /// (50.0) intentionally much tighter than a single worst-case
-    /// per-step reward (~6.5) would suggest is needed for *normal*
-    /// learning - its job is specifically to bound how far a single
-    /// update can move any one sample's prediction, not to accommodate
-    /// legitimate variance in the returns themselves (that's `ret_clip`'s
-    /// job). Combined with `clip_grad_norm(0.5)` already bounding the
-    /// aggregate step, this is deliberately the tighter constraint of the
-    /// two on the value head specifically.
+    /// Huber-loss delta for the value loss, replacing plain MSE (see
+    /// `train::Config::vf_clip`'s doc for the full mechanism and the two
+    /// prior attempts - target clamping, then PPO2-style prediction
+    /// clamping - that didn't actually bound the gradient in the case that
+    /// matters). Below this error magnitude, behaves like ordinary squared
+    /// error (matching typical/healthy training exactly); beyond it, the
+    /// loss grows only linearly, so no single sample can ever contribute
+    /// more than a `vf_clip`-bounded gradient regardless of how extreme
+    /// the target or prediction is. Default 50.0 - well above the healthy
+    /// v-loss range (~0.05-0.5) seen early in training, so it doesn't
+    /// interfere with normal learning at all, while still bounding the
+    /// pathological case (millions/billions/quadrillions, all observed
+    /// live before this fix) to a sane per-sample gradient contribution.
     #[arg(long, default_value_t = 50.0)]
     vf_clip: f32,
 
