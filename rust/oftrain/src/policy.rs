@@ -654,7 +654,25 @@ impl PolicyNet {
         let build = self.head_build.forward(&h) + (&o.legal_build - 1.0) * (-MASKED_NEG);
         let nuke = self.head_nuke.forward(&h) + (&o.legal_nuke - 1.0) * (-MASKED_NEG);
         let quantity = self.head_quantity.forward(&h);
-        let value = Self::sanitize_value(&self.head_value.forward(&h).squeeze_dim(-1));
+        // `h.detach()` here, not `h` - this is the actual root fix for the
+        // recurring value-instability pattern chased all session (see
+        // devlog): value and policy heads share this one trunk, so without
+        // detaching, every value-loss gradient (however well-behaved
+        // Huber/the soft bound/etc. make it *look*) still flows straight
+        // into the *same* convolutional features the policy heads depend
+        // on. A long live investigation ruled out reward-function bugs,
+        // GAE-implementation bugs, and engine-mixing parity as the cause
+        // (identical instability with node_fraction=0, i.e. zero engine
+        // mixing) and instead found entropy staying *healthy* while v-loss
+        // climbed into the thousands - i.e. the value function genuinely
+        // lagging behind a policy that's still actively changing (classic
+        // actor-critic non-stationarity, not a numerical bug), which
+        // every previous fix in this session only ever bounded the
+        // *symptom* of. Detaching here means the value head can still fit
+        // itself to the current shared features, but a value-loss
+        // gradient can never again reach back into (and corrupt) those
+        // features - only the policy loss shapes the trunk from now on.
+        let value = Self::sanitize_value(&self.head_value.forward(&h.detach()).squeeze_dim(-1));
         (act_logits, player_logits, tile_coarse, tile_fine, build, nuke, quantity, value, p, coarse_grid)
     }
 
@@ -1295,6 +1313,54 @@ mod tests {
         loss.backward();
         let loss_v = loss.double_value(&[]);
         assert!(loss_v.is_finite(), "loss not finite: {loss_v}");
+    }
+
+    /// The actual root fix for this session's recurring value-instability
+    /// pattern (see `forward`'s doc on `h.detach()`): value and policy
+    /// heads share one trunk, so without detaching, a value-loss gradient
+    /// would flow straight into the same convolutional features the
+    /// policy heads depend on. This directly exercises that: backward
+    /// through *only* the value output must leave every trunk/tower
+    /// parameter's gradient untouched, while backward through *only* the
+    /// policy output (logp) must still reach them normally.
+    #[test]
+    fn value_loss_gradient_does_not_reach_the_shared_trunk() {
+        tch::manual_seed(5);
+        let vs = nn::VarStore::new(Device::Cpu);
+        let policy = PolicyNet::new(&vs.root(), false, false, GC, BLOCKS);
+        let o = synthetic_obs(Device::Cpu, 2, 6, 6);
+        let (a, player, tile, build, nuke, qty, _logp, _value) = tch::no_grad(|| policy.act(&o, false));
+        let choice = ChoiceBatch {
+            action: a,
+            player_slot: player,
+            tile_region: tile,
+            build_type: build,
+            nuke_type: nuke,
+            quantity_frac: qty,
+        };
+
+        fn trunk_grad_norm(vs: &nn::VarStore) -> f64 {
+            let mut total = 0.0;
+            for (name, mut t) in vs.variables() {
+                if (name.contains("trunk") || name.contains("grid_coarse_net") || name.contains("grid_fine_net"))
+                    && t.grad().defined()
+                {
+                    total += f64::try_from(t.grad().abs().sum(Kind::Float)).unwrap();
+                }
+                t.zero_grad();
+            }
+            total
+        }
+
+        let (_logp2, _ent, _ent_q, value2) = policy.evaluate(&o, &choice);
+        value2.mean(Kind::Float).backward();
+        let value_only_norm = trunk_grad_norm(&vs);
+        assert_eq!(value_only_norm, 0.0, "trunk must see zero gradient from the value output alone, got {value_only_norm}");
+
+        let (logp2, _ent, _ent_q, _value2) = policy.evaluate(&o, &choice);
+        logp2.mean(Kind::Float).backward();
+        let policy_norm = trunk_grad_norm(&vs);
+        assert!(policy_norm > 0.0, "trunk MUST see nonzero gradient from the policy output, got {policy_norm}");
     }
 
     #[test]
