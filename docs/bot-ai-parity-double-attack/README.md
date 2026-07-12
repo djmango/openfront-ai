@@ -471,18 +471,10 @@ somewhere else in the nation/tribe AI decision surface - but that wasn't
 confirmed with the same tick-by-tick evidentiary rigor as the four fixes
 above, so it's left as a documented follow-up rather than guessed at.
 
-One more thing noticed but **not fixed** (no concrete tile/troop evidence
-tying it to a specific divergence, so left as a documented gap rather than
-a "fix"): TS's `TribeExecution.tick()`
-(`openfront/src/core/execution/TribeExecution.ts:62-64`) calls
-`this.deleteNextStructure()` (deletes one structure marked for deletion,
-per tick, before `maybeAttack()`) every tick after the alliance-request
-step; native's `TribeExecution::tick` (`rust/engine/src/bot/tribe.rs`) has
-no equivalent call. This wouldn't affect troop/tile counts directly (it
-only removes a unit already marked for deletion) and doesn't consume PRNG,
-so it's unlikely to explain any of the divergences investigated here, but
-it is a real, small behavioral gap for anyone relying on native tribes to
-clean up deleted structures.
+One more thing previously noticed as a gap is now fixed on the training-parity
+branch: TS's `TribeExecution.tick()` calls `this.deleteNextStructure()` and
+alliance-extension acceptance before `maybeAttack()`; native's
+`TribeExecution::tick` (`rust/engine/src/bot/tribe.rs`) now mirrors both.
 
 ## Files changed
 
