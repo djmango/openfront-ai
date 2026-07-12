@@ -207,9 +207,12 @@ pub struct Config {
     /// GPU), off by default.
     pub amp: bool,
     /// `--foveate`: real foveated crop for the fine-grid branch (see
-    /// `policy::PolicyNet::foveate` doc). Off by default (legacy
-    /// whole-map-as-fine fallback).
+    /// `policy::PolicyNet::foveate` doc). Default on (Python v7 parity).
     pub foveate: bool,
+    /// Fine AE encoder safetensors path (`--ckpt`).
+    pub ae_ckpt: String,
+    /// Optional coarse /16 AE encoder safetensors (`--coarse-ckpt`).
+    pub coarse_ckpt: Option<String>,
     /// `--gc`/`--blocks`: GridTower size overrides (see `policy::GC`/
     /// `policy::BLOCKS` defaults).
     pub gc: i64,
@@ -426,6 +429,7 @@ struct ActorShard {
     cur_obs: Vec<PreparedObs>,
     vs: nn::VarStore,
     policy: PolicyNet,
+    ae: Option<crate::ae::AePair>,
 }
 
 /// One GPU replica's trainable weights/optimizer. `run()` holds one
@@ -461,6 +465,12 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
     let mut ep_infos = Vec::new();
 
     for _ in 0..cfg.rollout_len {
+        // Encode into host grids on the actor (exclusive &mut) so the
+        // learner's !Sync batch-build threads can rebuild Obs from
+        // `PreparedObs.grid` without holding an AE.
+        if let Some(ae) = actor.ae.as_ref() {
+            batch::encode_prepared_obs(&mut actor.cur_obs, actor.device, ae)?;
+        }
         let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
         let obs_t = batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d);
         let (a, player, tile, build, nuke, qty, logp, value) = tch::no_grad(|| actor.policy.act(&obs_t, false));
@@ -530,6 +540,9 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
     }
 
     let bootstrap_v: Vec<f32> = {
+        if let Some(ae) = actor.ae.as_ref() {
+            batch::encode_prepared_obs(&mut actor.cur_obs, actor.device, ae)?;
+        }
         let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
         let obs_t = batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d);
         let v = tch::no_grad(|| actor.policy.value_only(&obs_t));
@@ -1213,8 +1226,40 @@ pub fn run(cfg: Config) -> Result<()> {
         let actor_policy = PolicyNet::new(&actor_vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
         actor_vs.copy(&learner_vs)?;
 
-        actors.push(ActorShard { device, workers, cur_obs, vs: actor_vs, policy: actor_policy });
-        learners.push(LearnerShard { device, vs: learner_vs, policy: learner_policy, opt });
+        let actor_ae = {
+            let path = std::path::Path::new(&cfg.ae_ckpt);
+            if !path.exists() {
+                anyhow::bail!(
+                    "AE checkpoint not found at {} — run scripts/export_safetensors.py \
+                     (or scripts/fetch_ae_encoders.sh) first",
+                    path.display()
+                );
+            }
+            let coarse = cfg.coarse_ckpt.as_ref().map(std::path::Path::new);
+            Some(crate::ae::AePair::load(path, coarse, device)?)
+        };
+        if gi == 0 {
+            println!(
+                "[train] AE fine={} coarse={}",
+                cfg.ae_ckpt,
+                cfg.coarse_ckpt.as_deref().unwrap_or("(2x pool fallback)")
+            );
+        }
+
+        actors.push(ActorShard {
+            device,
+            workers,
+            cur_obs,
+            vs: actor_vs,
+            policy: actor_policy,
+            ae: actor_ae,
+        });
+        learners.push(LearnerShard {
+            device,
+            vs: learner_vs,
+            policy: learner_policy,
+            opt,
+        });
     }
     println!("[train] all {total_envs} envs ready");
 

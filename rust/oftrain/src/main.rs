@@ -1,4 +1,5 @@
 mod autoscale;
+mod ae;
 mod batch;
 mod bridge;
 mod engine;
@@ -40,13 +41,13 @@ struct Args {
     max_episode_ticks: i64,
 
     /// Steps collected per env before each PPO update.
-    #[arg(long, default_value_t = 64)]
+    #[arg(long, default_value_t = 32)]
     rollout_len: usize,
 
     #[arg(long, default_value_t = 1_000_000)]
     updates: u64,
 
-    #[arg(long, default_value_t = 3e-4)]
+    #[arg(long, default_value_t = 2.5e-4)]
     lr: f64,
 
     #[arg(long, default_value_t = 0.999)]
@@ -122,7 +123,9 @@ struct Args {
     #[arg(long, default_value_t = 2)]
     epochs: usize,
 
-    #[arg(long, default_value_t = 4)]
+    /// Number of minibatches per shard. The default gives Python's
+    /// 128-sample minibatches for the default 4 envs x 32 rollout.
+    #[arg(long, default_value_t = 1)]
     minibatches: usize,
 
     /// Manual bf16 mixed precision for the policy net's conv towers
@@ -137,11 +140,22 @@ struct Args {
     /// Real foveated crop: the fine-grid branch becomes a fixed
     /// `policy::FOVEATE_SIZE`x`FOVEATE_SIZE` window centered on the agent's
     /// own-tile centroid instead of the whole map (coarse branch is
-    /// unaffected - always the full map). Off by default, matching the
-    /// existing legacy fallback (fine == whole map) - see `policy.rs`
-    /// module doc / `PolicyNet::foveate`.
-    #[arg(long, default_value_t = false)]
+    /// unaffected - always the full map). Default on to match Python v7;
+    /// pass `--foveate=false` for the legacy whole-map-as-fine path.
+    #[arg(long, default_value_t = true)]
     foveate: bool,
+
+    /// Frozen fine AE encoder safetensors (from
+    /// `scripts/export_safetensors.py` on `ae_v31_d8c32.pt`). Required for
+    /// production obs parity (`C_GRID=89`).
+    #[arg(long, default_value = "weights/ae/ae_v31_d8c32.encoder.safetensors")]
+    ckpt: String,
+
+    /// Optional frozen coarse /16 AE encoder safetensors (from
+    /// `ae_v31_d16c32.pt`). When set, the coarse stream uses a native /16
+    /// latent instead of 2x-pooling the fine grid.
+    #[arg(long)]
+    coarse_ckpt: Option<String>,
 
     /// GridTower channel width override (default from `policy::GC` = 256).
     /// Applies to both the coarse and fine grid towers. Smaller values
@@ -383,6 +397,8 @@ fn main() -> anyhow::Result<()> {
         minibatches: args.minibatches,
         amp: args.amp,
         foveate: args.foveate,
+        ae_ckpt: args.ckpt,
+        coarse_ckpt: args.coarse_ckpt,
         gc: args.gc,
         blocks: args.blocks,
         pinned_h2d: args.pinned_h2d,
