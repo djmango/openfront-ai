@@ -91,6 +91,25 @@ pub struct Config {
     pub lambda: f32,
     pub clip: f32,
     pub vf_coef: f32,
+    /// `--ret-clip` (0.0 = disabled): clamps the value-loss *target*
+    /// (`ret = advantage + rollout-time value`, see `train_update`) to
+    /// `[-ret_clip, ret_clip]` before it's ever used in the MSE loss. Real
+    /// fix (not just a guard) for the 2026-07-12 value-loss-explosion
+    /// incident (docs/devlog.html): squared-error loss scales with the
+    /// *square* of the target, so a legitimately-large-but-rare return (a
+    /// long episode's accumulated reward, or a big terminal bonus - not
+    /// necessarily a bug, see the reward-scale analysis in that entry)
+    /// still produces a disproportionately large gradient even with
+    /// grad-norm clipping applied every step, and can kick off a
+    /// self-reinforcing bootstrap-value feedback loop (GAE uses the
+    /// rollout-time value as `next_value`, so a bad prediction poisons
+    /// every earlier timestep's own return too). Clamping the target
+    /// directly is a coarser fix than PPO2-style value-prediction clipping
+    /// (which would need the old per-sample value threaded into the
+    /// minibatch loss separately, a bigger refactor) but stops the exact
+    /// observed failure mode without touching the advantage/policy-loss
+    /// path at all - the return is only ever consumed as this one target.
+    pub ret_clip: f32,
     /// Entropy coefficient anneals linearly `ent_coef -> ent_coef_final`
     /// over `ent_anneal_updates` (matches `rl/ppo.py`'s schedule), with
     /// the adaptive entropy-floor multiplier (`ent_floor`) on top.
@@ -597,40 +616,53 @@ fn train_update(
                     let mut adv_flat = vec![0.0f32; total];
                     let mut ret_flat = vec![0.0f32; total];
                     let mut old_logp_flat = vec![0.0f32; total];
+                    // Tracks the pre-clamp raw return separately from
+                    // `ret_flat` itself, so the diagnostic below still
+                    // reports the *true* extreme value even once
+                    // `--ret-clip` (see Config::ret_clip's doc) is
+                    // clamping it out of the actual loss target - the
+                    // whole point of this diagnostic is visibility into
+                    // what the return *would have been*, now that the fix
+                    // for the incident it's named after means `ret_flat`
+                    // itself won't show it anymore.
+                    let mut max_raw_ret: (f32, usize) = (0.0, 0);
                     for t in 0..t_len {
                         for e in 0..n {
                             let flat_idx = t * n + e;
                             adv_flat[flat_idx] = adv[t][e];
-                            ret_flat[flat_idx] = adv[t][e] + buffer[t][e].value;
+                            let ret = adv[t][e] + buffer[t][e].value;
+                            if ret.abs() > max_raw_ret.0.abs() {
+                                max_raw_ret = (ret, flat_idx);
+                            }
+                            ret_flat[flat_idx] =
+                                if cfg.ret_clip > 0.0 { ret.clamp(-cfg.ret_clip, cfg.ret_clip) } else { ret };
                             old_logp_flat[flat_idx] = buffer[t][e].logp;
                         }
                     }
-                    // Diagnostic for the 2026-07-12 NaN-divergence incident
-                    // (docs/devlog.html) - unconfirmed whether a native-vs-
-                    // Node-engine reward-scale mismatch under
-                    // `--node-fraction` was the actual trigger (this run
-                    // was the first to ever combine engine-mixing with a
-                    // full-scale run). Logs the *global* env-worker index
-                    // (matching `spawn_worker`'s `idx = gi * cfg.num_envs +
-                    // local_i` and hence `engine_for_idx`) so a recurrence
-                    // can be checked directly against which engine that
-                    // specific worker was running - evidence this
-                    // session's live bisection never got the chance to
-                    // collect before the pod was killed.
-                    if let Some((flat_idx, &r)) =
-                        ret_flat.iter().enumerate().max_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()))
-                    {
-                        if r.abs() > 1000.0 {
-                            let e_local = flat_idx % n;
-                            let global_idx = gi * n + e_local;
-                            eprintln!(
-                                "[train] WARNING: extreme return {r:.1} at global env-worker index \
-                                 {global_idx} (shard={gi} local_e={e_local} t={}, value={:.1}) - \
-                                 see docs/devlog.html's 2026-07-12 NaN-guard entry",
-                                flat_idx / n,
-                                buffer[flat_idx / n][e_local].value
-                            );
-                        }
+                    // Diagnostic for the 2026-07-12 value-loss-explosion
+                    // incident (docs/devlog.html) - the original
+                    // native-vs-Node-engine reward-mismatch hypothesis was
+                    // revised after live data showed flagged env indices
+                    // were a mix of both engines, not exclusively Node;
+                    // current understanding is this is an inherent
+                    // early-stage-0 PPO value instability, now bounded (not
+                    // just guarded against NaN) by `--ret-clip`. Logs the
+                    // *global* env-worker index (matching `spawn_worker`'s
+                    // `idx = gi * cfg.num_envs + local_i` and hence
+                    // `engine_for_idx`) in case a future recurrence's
+                    // engine distribution ever looks different from this
+                    // session's mixed result.
+                    let (r, flat_idx) = max_raw_ret;
+                    if r.abs() > 1000.0 {
+                        let e_local = flat_idx % n;
+                        let global_idx = gi * n + e_local;
+                        eprintln!(
+                            "[train] WARNING: extreme return {r:.1} (pre-clamp) at global env-worker \
+                             index {global_idx} (shard={gi} local_e={e_local} t={}, value={:.1}) - \
+                             see docs/devlog.html's 2026-07-12 NaN-guard entry",
+                            flat_idx / n,
+                            buffer[flat_idx / n][e_local].value
+                        );
                     }
                     {
                         let adv_mean = adv_flat.iter().sum::<f32>() / total as f32;
