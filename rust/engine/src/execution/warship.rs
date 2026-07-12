@@ -29,6 +29,29 @@ pub fn warship_build_port_tile(game: &Game, small_id: u16, tile: TileRef) -> Opt
         .map(|unit| unit.tile as TileRef)
 }
 
+/// TS `PlayerImpl.canBuild(Warship, tile)`: `canBuildUnitType` (disabled/gold/alive) then
+/// `canSpawnUnitType` → `warshipSpawn(tile)` (nearest port sharing `tile`'s water component).
+///
+/// `ConstructionExecution` never gates Warship on cost (it isn't a structure), so this is the
+/// *only* gold/buildability gate a warship goes through — both when AI decides to queue one
+/// (`warship_ai`) and again in `WarshipExecution::init` (matching TS `WarshipExecution.init`,
+/// which re-checks `canBuild` at spawn time after same-tick spends like SAM construction).
+pub fn can_build_warship(game: &Game, small_id: u16, tile: TileRef) -> bool {
+    if game.wire.is_unit_disabled(WARSHIP) {
+        return false;
+    }
+    let Some(player) = game.player_by_small_id(small_id) else {
+        return false;
+    };
+    if !player.alive {
+        return false;
+    }
+    if player.gold < game.structure_cost(small_id, WARSHIP) {
+        return false;
+    }
+    warship_build_port_tile(game, small_id, tile).is_some()
+}
+
 /// TS `NationWarshipBehavior.warshipSpawnTile(portTile, radius)` - a PRNG-consuming random
 /// search for *any* water tile within `radius` of `center` (up to 50 attempts, 2 draws
 /// each); unrelated to `warship_build_port_tile` above despite the similar TS name (that one
@@ -471,6 +494,13 @@ impl Execution for WarshipExecution {
         if !self.active || self.unit_id.is_some() {
             return;
         }
+        // TS `WarshipExecution.init`: re-check `canBuild` at spawn time (gold may have been
+        // spent earlier this tick by Structure construction / nukes). On failure, warn and
+        // leave inactive — do not call `buildUnit` / drive gold negative.
+        if !can_build_warship(game, self.owner_small_id, self.patrol_tile) {
+            self.active = false;
+            return;
+        }
         let Some(spawn) = self.spawn_tile(game) else {
             self.active = false;
             return;
@@ -585,16 +615,16 @@ impl Execution for WarshipExecution {
     }
 }
 
-// Ported from Disconnected.test.ts's "Disconnected team member interactions"
-// (the two Warship-vs-teammate-ships cases). Full end-to-end coverage would
-// need a real water map (patrol/pathfinding, ports, spawn tiles) that no
-// native test currently constructs - `target()`'s own filtering is what the
-// TS tests actually assert on, so exercise it directly instead.
-#[cfg(test)]
-mod tests {
+    // Ported from Disconnected.test.ts's "Disconnected team member interactions"
+    // (the two Warship-vs-teammate-ships cases). Full end-to-end coverage would
+    // need a real water map (patrol/pathfinding, ports, spawn tiles) that no
+    // native test currently constructs - `target()`'s own filtering is what the
+    // TS tests actually assert on, so exercise it directly instead.
+    #[cfg(test)]
+    mod tests {
     use super::*;
     use crate::core::schemas::unit_type;
-    use crate::execution::TradeShipExecution;
+    use crate::execution::{Execution, TradeShipExecution};
     use crate::game::{Player, PlayerType, PlayerInfo};
     use crate::map::{GameMap, MapMeta};
 
@@ -663,6 +693,73 @@ mod tests {
             friends: Vec::new(),
             team: None,
         })
+    }
+
+    /// TS `WarshipExecution.init` re-checks `canBuild` at spawn time. Same-tick structure
+    /// spends (e.g. SAM construction) can drop gold below warship cost after Construction
+    /// already queued the WarshipExecution — native must skip the build (not drive gold
+    /// negative / invent an extra unit), matching TS's "Failed to spawn warship" path.
+    #[test]
+    fn warship_init_skips_build_when_gold_insufficient_after_prior_spend() {
+        let mut game = water_game(20, 20);
+        let sid = add_nation(&mut game, "mongolia");
+        let port = game.ref_xy(5, 5);
+        let patrol = game.ref_xy(8, 5);
+        // Free port (tests often don't care about port cost).
+        let _ = game.build_unit(sid, unit_type::PORT, port);
+        let warship_cost = game.structure_cost(sid, unit_type::WARSHIP);
+        assert!(warship_cost > 0);
+        if let Some(p) = game.player_by_small_id_mut(sid) {
+            // Enough at queue time for warship, but after a same-tick SAM-sized spend only
+            // half remains — below warship cost.
+            p.gold = warship_cost / 2;
+            p.alive = true;
+        }
+        let units_before = game.player_by_small_id(sid).unwrap().units.len();
+        let gold_before = game.player_by_small_id(sid).unwrap().gold;
+
+        let mut exec = WarshipExecution::new(sid, patrol);
+        exec.init(&mut game, 1);
+
+        assert!(!exec.is_active(), "must deactivate like TS when canBuild fails");
+        assert!(exec.unit_id().is_none());
+        assert_eq!(
+            game.player_by_small_id(sid).unwrap().units.len(),
+            units_before,
+            "must not spawn a warship unit"
+        );
+        assert_eq!(
+            game.player_by_small_id(sid).unwrap().gold,
+            gold_before,
+            "must not spend gold on a failed spawn"
+        );
+        assert!(gold_before >= 0);
+    }
+
+    #[test]
+    fn warship_init_builds_when_can_build_passes() {
+        let mut game = water_game(20, 20);
+        let sid = add_nation(&mut game, "mongolia");
+        let port = game.ref_xy(5, 5);
+        let patrol = game.ref_xy(8, 5);
+        let _ = game.build_unit(sid, unit_type::PORT, port);
+        let warship_cost = game.structure_cost(sid, unit_type::WARSHIP);
+        if let Some(p) = game.player_by_small_id_mut(sid) {
+            p.gold = warship_cost;
+            p.alive = true;
+        }
+        let units_before = game.player_by_small_id(sid).unwrap().units.len();
+
+        let mut exec = WarshipExecution::new(sid, patrol);
+        exec.init(&mut game, 1);
+
+        assert!(exec.is_active());
+        assert!(exec.unit_id().is_some());
+        assert_eq!(
+            game.player_by_small_id(sid).unwrap().units.len(),
+            units_before + 1
+        );
+        assert_eq!(game.player_by_small_id(sid).unwrap().gold, 0);
     }
 
     // TS `WarshipMultiSelection.test.ts` (`MoveWarshipExecution`). Ported by calling

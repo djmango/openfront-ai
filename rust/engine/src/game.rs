@@ -1950,10 +1950,9 @@ impl Game {
     }
 
     pub fn build_unit(&mut self, small_id: u16, unit_type: &str, tile: TileRef) -> i32 {
+        // TS `PlayerImpl.buildUnit` → `removeGold` (clamped); never drive gold negative.
         let cost = self.structure_cost(small_id, unit_type);
-        if let Some(p) = self.player_by_small_id_mut(small_id) {
-            p.gold -= cost;
-        }
+        self.remove_gold(small_id, cost);
         let id = self.next_unit_id;
         self.next_unit_id += 1;
         let ticks = self.ticks;
