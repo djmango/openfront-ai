@@ -8,8 +8,15 @@
 #
 #   RUN_NAME=ppo_v8 NUM_GPUS=8 bash scripts/pod_train_v8.sh
 #
-# As a pod start command:
-#   bash -c "curl -fsSL https://raw.githubusercontent.com/djmango/openfront-ai/master/scripts/pod_train_v8.sh | RUN_NAME=ppo_v8 NUM_GPUS=8 bash"
+# As a RunPod `dockerArgs` pod start command - deliberately does NOT run
+# this script as the container's own foreground process (see docs/devlog.html's
+# 2026-07-12 "don't tie the container's lifecycle to the training script"
+# entry for why that caused repeated "container not found" SSH failures
+# that terminating-and-relaunching pods did NOT fix, since it wasn't a
+# host-specific problem): starts sshd explicitly, launches this script
+# fully detached in the background, and keeps the container itself alive
+# with `sleep infinity` regardless of what happens to the training process.
+#   bash -c "service ssh start 2>/dev/null || /usr/sbin/sshd; nohup bash -c 'curl -fsSL https://raw.githubusercontent.com/djmango/openfront-ai/master/scripts/pod_train_v8.sh -o /root/pod_train_v8.sh && RUN_NAME=ppo_v8 NUM_GPUS=8 bash /root/pod_train_v8.sh' > /root/bootstrap.log 2>&1 & disown; sleep infinity"
 #
 # To hedge native's known weaker parity at higher bot counts by running a
 # fraction of envs on the real Node/TS engine (see oftrain's `--engine` doc
