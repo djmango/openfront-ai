@@ -1,24 +1,15 @@
 //! Policy network: tch port of `rl/policy.py`.
 //!
-//! v1 deviation (documented, temporary): there is no exported AE checkpoint
-//! in this repo yet (`ae/model_v3.py` is trained separately and frozen for
-//! PPO), so the grid the policy sees here is the *raw* pooled ego-class
-//! occupancy + static-structure + transient planes instead of the AE's
-//! 32ch latent - i.e. `ofcore::feat`'s `stat`/`transient` planes plus
-//! `pool_ego_db`'s ego/defense-bonus fractions, all already at /REGION
-//! resolution. `C_GRID` below reflects that (6 + 3 + 1 + 53 = 63 instead
-//! of the real arch's 32 + 3 + 1 + 53 = 89). Swap in a real
-//! `ofcore`-side AE encode() port once `scripts/export_safetensors.py`
-//! has produced a checkpoint to validate against - the head/trunk
-//! topology and factorized-action-head logic below already match
-//! `Policy.forward`/`act`/`evaluate` field for field.
+//! Grid channels match production Python PPO: frozen AE latent (32) +
+//! ego (3) + defense_bonus (1) + transient (53) = `C_GRID` 89. AE encode
+//! lives in `ae.rs` / `batch::build_obs_with_ae`. Optional native /16
+//! coarse stream arrives via `Obs::grid_coarse` when `--coarse-ckpt` is
+//! set; otherwise `foveate` falls back to 2x avg-pool of the fine grid
+//! (same as Python without `coarse_ae`).
 //!
-//! v1 simplification: no fine/coarse foveation crop (`_fine_coverage` in
-//! `rl/obs.py`) - every obs uses the *whole* /REGION grid as "fine" with
-//! an all-ones coverage channel and a 2x avg-pooled "coarse" derived from
-//! it, exactly matching `Policy._ensure_foveated`'s legacy fallback path
-//! (a real, already-existing code path in the Python model, not an
-//! invented shortcut). `fine_origin` is therefore always (0, 0).
+//! `--foveate` (on by default in training configs that pass it): fixed
+//! `FOVEATE_SIZE` crop centered on own-tile mass. Off uses the legacy
+//! whole-map-as-fine path (`Policy._ensure_foveated` fallback).
 
 use ofcore::feat::{ACTIONS, GW_MAX};
 use tch::nn::Module;
@@ -27,10 +18,12 @@ use tch::{nn, Device, Kind, Tensor};
 pub const N_ACTIONS: i64 = ofcore::feat::N_ACTIONS as i64;
 pub const MAX_SLOTS: i64 = ofcore::feat::MAX_SLOTS as i64;
 
-pub const N_STATIC: i64 = 6;
+pub const LATENT_C: i64 = 32;
 pub const N_TRANSIENT: i64 = 53;
-pub const C_GRID: i64 = N_STATIC + 3 + 1 + N_TRANSIENT; // 63
-pub const C_GRID_FINE: i64 = C_GRID + 1; // 64
+/// Own-ego channel index inside `grid` (first bypass plane after latent).
+pub const EGO_OWN_CH: i64 = LATENT_C;
+pub const C_GRID: i64 = LATENT_C + 3 + 1 + N_TRANSIENT; // 89
+pub const C_GRID_FINE: i64 = C_GRID + 1; // 90
 pub const N_LOCAL: i64 = 5;
 pub const LOCAL: i64 = 64;
 pub const P_FEAT: i64 = 21;
@@ -85,12 +78,16 @@ fn action_table(names: &[&str], device: Device) -> Tensor {
 }
 
 /// Batched observation tensors. `grid`/`grid_valid`/`legal_tile` are the
-/// full /REGION-resolution "fine" inputs (see module doc); coarse tensors
-/// are derived from them inside `trunk_forward`.
+/// full /REGION-resolution "fine" inputs; coarse tensors come from
+/// `grid_coarse` when a native /16 AE was used, else 2x pool inside
+/// `foveate`.
 pub struct Obs {
     pub grid: Tensor,          // (B, C_GRID, gh, gw) f32
-    pub grid_valid: Tensor,    // (B, gh, gw) f32, all-ones in v1
+    pub grid_valid: Tensor,    // (B, gh, gw) f32
     pub legal_tile: Tensor,    // (B, gh, gw) f32
+    /// Optional native /16 coarse grid `(B, C_GRID, cgh, cgw)`. When
+    /// `None`, `foveate` derives coarse via 2x avg-pool of `grid`.
+    pub grid_coarse: Option<Tensor>,
     pub players: Tensor,       // (B, MAX_SLOTS, P_FEAT) f32
     pub pmask: Tensor,         // (B, MAX_SLOTS) f32
     pub local: Tensor,         // (B, N_LOCAL, LOCAL, LOCAL) f32
@@ -115,6 +112,7 @@ impl Obs {
             grid: self.grid.index_select(0, idx),
             grid_valid: self.grid_valid.index_select(0, idx),
             legal_tile: self.legal_tile.index_select(0, idx),
+            grid_coarse: self.grid_coarse.as_ref().map(|g| g.index_select(0, idx)),
             players: self.players.index_select(0, idx),
             pmask: self.pmask.index_select(0, idx),
             local: self.local.index_select(0, idx),
@@ -497,8 +495,8 @@ impl PolicyNet {
     /// a hard crop) from the full-res grid, with a per-sample origin
     /// centered on the agent's own tile centroid (computed from the
     /// "mine" ego-occupancy channel already in `o.grid`, channel index
-    /// `N_STATIC` - see `vecenv.rs::prepare`'s channel layout and
-    /// `ofcore::feat::pool_ego_db`; falls back to the map center before
+    /// Own-tile mass for crop centering uses `EGO_OWN_CH` (first ego
+    /// plane after the AE latent). Falls back to the map center before
     /// the agent owns anything, e.g. spawn phase, mirroring
     /// `ofcore::feat::local_crop`'s identical fallback for the unrelated
     /// LocalNet branch). The origin is snapped to an even coordinate so
@@ -510,7 +508,10 @@ impl PolicyNet {
     /// the padded cells are never legal to pick).
     fn foveate(o: &Obs, use_crop: bool) -> Foveation {
         let (b, gh, gw) = o.legal_tile.size3().unwrap();
-        let grid_coarse = o.grid.avg_pool2d([2, 2], [2, 2], [0, 0], true, false, None::<i64>);
+        let grid_coarse = match &o.grid_coarse {
+            Some(gc) => gc.shallow_clone(),
+            None => o.grid.avg_pool2d([2, 2], [2, 2], [0, 0], true, false, None::<i64>),
+        };
         let gc_valid =
             o.grid_valid.unsqueeze(1).max_pool2d([2, 2], [2, 2], [0, 0], [1, 1], true).squeeze_dim(1);
         let legal_tile_coarse =
@@ -542,7 +543,7 @@ impl PolicyNet {
         let fine_w = (FOVEATE_SIZE.min(gw)).max(2);
         let fine_h = fine_h - fine_h % 2;
         let fine_w = fine_w - fine_w % 2;
-        let mine = o.grid.select(1, N_STATIC); // (B, gh, gw): own-tile occupancy fraction
+        let mine = o.grid.select(1, EGO_OWN_CH); // (B, gh, gw): own-tile occupancy fraction
         let (origin_y, origin_x) = crop_origin(&mine, gh, gw, fine_h, fine_w);
 
         let grid_cropped =
@@ -675,25 +676,13 @@ impl PolicyNet {
         let build = self.head_build.forward(&h) + (&o.legal_build - 1.0) * (-MASKED_NEG);
         let nuke = self.head_nuke.forward(&h) + (&o.legal_nuke - 1.0) * (-MASKED_NEG);
         let quantity = self.head_quantity.forward(&h);
-        // `h.detach()` here, not `h` - this is the actual root fix for the
-        // recurring value-instability pattern chased all session (see
-        // devlog): value and policy heads share this one trunk, so without
-        // detaching, every value-loss gradient (however well-behaved
-        // Huber/the soft bound/etc. make it *look*) still flows straight
-        // into the *same* convolutional features the policy heads depend
-        // on. A long live investigation ruled out reward-function bugs,
-        // GAE-implementation bugs, and engine-mixing parity as the cause
-        // (identical instability with node_fraction=0, i.e. zero engine
-        // mixing) and instead found entropy staying *healthy* while v-loss
-        // climbed into the thousands - i.e. the value function genuinely
-        // lagging behind a policy that's still actively changing (classic
-        // actor-critic non-stationarity, not a numerical bug), which
-        // every previous fix in this session only ever bounded the
-        // *symptom* of. Detaching here means the value head can still fit
-        // itself to the current shared features, but a value-loss
-        // gradient can never again reach back into (and corrupt) those
-        // features - only the policy loss shapes the trunk from now on.
-        let value = Self::sanitize_value(&self.head_value.forward(&h.detach()).squeeze_dim(-1));
+        // Match the Python trainer: the critic must co-train the shared
+        // representation. Detaching `h` left a single linear value head
+        // chasing features that the policy continuously moved; live runs
+        // showed the resulting critic lag grow from v-loss 0.12 to 13k.
+        // Huber loss in train.rs bounds the value gradient, so sharing the
+        // trunk does not reintroduce the old unbounded-MSE failure mode.
+        let value = Self::sanitize_value(&self.head_value.forward(&h).squeeze_dim(-1));
         (act_logits, player_logits, tile_coarse, tile_fine, build, nuke, quantity, value, p, coarse_grid)
     }
 
@@ -1285,6 +1274,7 @@ mod tests {
             grid: Tensor::rand([b, C_GRID, gh, gw], opts),
             grid_valid: Tensor::ones([b, gh, gw], opts),
             legal_tile: Tensor::ones([b, gh, gw], opts),
+            grid_coarse: None,
             players: Tensor::rand([b, ms, P_FEAT], opts),
             pmask: Tensor::ones([b, ms], opts),
             local: Tensor::rand([b, N_LOCAL, LOCAL, LOCAL], opts),
@@ -1336,16 +1326,11 @@ mod tests {
         assert!(loss_v.is_finite(), "loss not finite: {loss_v}");
     }
 
-    /// The actual root fix for this session's recurring value-instability
-    /// pattern (see `forward`'s doc on `h.detach()`): value and policy
-    /// heads share one trunk, so without detaching, a value-loss gradient
-    /// would flow straight into the same convolutional features the
-    /// policy heads depend on. This directly exercises that: backward
-    /// through *only* the value output must leave every trunk/tower
-    /// parameter's gradient untouched, while backward through *only* the
-    /// policy output (logp) must still reach them normally.
+    /// Match Python actor-critic learning: both value and policy losses
+    /// train the shared representation. Huber loss bounds the critic's
+    /// contribution before it reaches this path.
     #[test]
-    fn value_loss_gradient_does_not_reach_the_shared_trunk() {
+    fn value_loss_gradient_reaches_the_shared_trunk() {
         tch::manual_seed(5);
         let vs = nn::VarStore::new(Device::Cpu);
         let policy = PolicyNet::new(&vs.root(), false, false, GC, BLOCKS);
@@ -1376,7 +1361,10 @@ mod tests {
         let (_logp2, _ent, _ent_q, value2) = policy.evaluate(&o, &choice);
         value2.mean(Kind::Float).backward();
         let value_only_norm = trunk_grad_norm(&vs);
-        assert_eq!(value_only_norm, 0.0, "trunk must see zero gradient from the value output alone, got {value_only_norm}");
+        assert!(
+            value_only_norm > 0.0,
+            "trunk MUST see nonzero gradient from the value output, got {value_only_norm}"
+        );
 
         let (logp2, _ent, _ent_q, _value2) = policy.evaluate(&o, &choice);
         logp2.mean(Kind::Float).backward();

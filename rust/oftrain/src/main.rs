@@ -1,8 +1,10 @@
 mod autoscale;
+mod ae;
 mod batch;
 mod bridge;
 mod engine;
 mod gpu_util;
+mod metrics;
 #[cfg(feature = "native-engine")]
 mod native;
 mod policy;
@@ -40,13 +42,13 @@ struct Args {
     max_episode_ticks: i64,
 
     /// Steps collected per env before each PPO update.
-    #[arg(long, default_value_t = 64)]
+    #[arg(long, default_value_t = 32)]
     rollout_len: usize,
 
     #[arg(long, default_value_t = 1_000_000)]
     updates: u64,
 
-    #[arg(long, default_value_t = 3e-4)]
+    #[arg(long, default_value_t = 2.5e-4)]
     lr: f64,
 
     #[arg(long, default_value_t = 0.999)]
@@ -122,7 +124,9 @@ struct Args {
     #[arg(long, default_value_t = 2)]
     epochs: usize,
 
-    #[arg(long, default_value_t = 4)]
+    /// Number of minibatches per shard. The default gives Python's
+    /// 128-sample minibatches for the default 4 envs x 32 rollout.
+    #[arg(long, default_value_t = 1)]
     minibatches: usize,
 
     /// Manual bf16 mixed precision for the policy net's conv towers
@@ -137,11 +141,22 @@ struct Args {
     /// Real foveated crop: the fine-grid branch becomes a fixed
     /// `policy::FOVEATE_SIZE`x`FOVEATE_SIZE` window centered on the agent's
     /// own-tile centroid instead of the whole map (coarse branch is
-    /// unaffected - always the full map). Off by default, matching the
-    /// existing legacy fallback (fine == whole map) - see `policy.rs`
-    /// module doc / `PolicyNet::foveate`.
-    #[arg(long, default_value_t = false)]
+    /// unaffected - always the full map). Default on to match Python v7;
+    /// pass `--foveate=false` for the legacy whole-map-as-fine path.
+    #[arg(long, default_value_t = true)]
     foveate: bool,
+
+    /// Frozen fine AE encoder safetensors (from
+    /// `scripts/export_safetensors.py` on `ae_v31_d8c32.pt`). Required for
+    /// production obs parity (`C_GRID=89`).
+    #[arg(long, default_value = "weights/ae/ae_v31_d8c32.encoder.safetensors")]
+    ckpt: String,
+
+    /// Optional frozen coarse /16 AE encoder safetensors (from
+    /// `ae_v31_d16c32.pt`). When set, the coarse stream uses a native /16
+    /// latent instead of 2x-pooling the fine grid.
+    #[arg(long)]
+    coarse_ckpt: Option<String>,
 
     /// GridTower channel width override (default from `policy::GC` = 256).
     /// Applies to both the coarse and fine grid towers. Smaller values
@@ -196,11 +211,27 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     log_every: u64,
 
+    /// Updates between fixed-seed greedy eval passes (0 = off). Default 50
+    /// (tighter than Python's 300 so short smoke runs still see a number).
+    #[arg(long, default_value_t = 50)]
+    eval_every: u64,
+
+    /// Episodes per greedy eval pass (fresh workers, seeds `w{i}-ep0`).
+    #[arg(long, default_value_t = 8)]
+    eval_episodes: usize,
+
     #[arg(long, default_value_t = 200)]
     ckpt_every: u64,
 
     #[arg(long, default_value = "checkpoints")]
     ckpt_dir: String,
+
+    /// Warm-start policy weights from a `.ot` VarStore dump (BC→RL or a
+    /// previously exported checkpoint) without restoring TrainState.
+    /// Ignored when `--resume` is also set. See
+    /// `scripts/convert_policy_pt_notes.md` for Python↔Rust key mapping.
+    #[arg(long)]
+    init: Option<String>,
 
     /// Resume from a previously-saved checkpoint (e.g.
     /// `checkpoints/latest.ot`). Restores weights and training state
@@ -212,6 +243,13 @@ struct Args {
     /// dozen updates post-resume.
     #[arg(long)]
     resume: Option<String>,
+
+    /// Value-loss form: `huber` (default; Rust stabilizer after the
+    /// 2026-07-12 explosion) or `mse` (Python `F.mse_loss` parity).
+    /// Phase 5 (final): switch the default to `mse` once training is
+    /// stable under Huber.
+    #[arg(long, default_value = "huber", value_parser = ["huber", "mse"])]
+    value_loss: String,
 
     /// Opt-in: automatically grow `--num-envs` at runtime toward the
     /// `--target-gpu-util` set point instead of relying on manual
@@ -383,6 +421,8 @@ fn main() -> anyhow::Result<()> {
         minibatches: args.minibatches,
         amp: args.amp,
         foveate: args.foveate,
+        ae_ckpt: args.ckpt,
+        coarse_ckpt: args.coarse_ckpt,
         gc: args.gc,
         blocks: args.blocks,
         pinned_h2d: args.pinned_h2d,
@@ -390,9 +430,16 @@ fn main() -> anyhow::Result<()> {
         engine: args.engine,
         node_fraction: args.node_fraction.clamp(0.0, 1.0),
         log_every: args.log_every,
+        eval_every: args.eval_every,
+        eval_episodes: args.eval_episodes,
         ckpt_every: args.ckpt_every,
         ckpt_dir: args.ckpt_dir,
+        init: args.init,
         resume: args.resume,
+        value_loss: match args.value_loss.as_str() {
+            "mse" => train::ValueLoss::Mse,
+            _ => train::ValueLoss::Huber,
+        },
         auto_scale_envs: args.auto_scale_envs,
         target_gpu_util: args.target_gpu_util,
         // Never scale below whatever the run was explicitly started with

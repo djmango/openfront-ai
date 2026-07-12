@@ -46,6 +46,12 @@ NUM_GPUS="${NUM_GPUS:-1}"
 # proven-safe ceiling for the full, non-foveated policy before OOM).
 NUM_ENVS="${NUM_ENVS:-64}"
 ROLLOUT_LEN="${ROLLOUT_LEN:-32}"
+# Match rl/ppo.py's optimizer cadence: its --minibatch is a target sample
+# count (128), while oftrain's --minibatches is a count. Derive the latter
+# so scaling env workers does not silently make each critic update weaker.
+MINIBATCH_SIZE="${MINIBATCH_SIZE:-128}"
+MINIBATCHES=$((NUM_ENVS * ROLLOUT_LEN / MINIBATCH_SIZE))
+[ "$MINIBATCHES" -ge 1 ] || MINIBATCHES=1
 STAGE="${STAGE:-0}"
 # Fraction (0.0-1.0) of env workers that run the real Node/TS engine
 # instead of native, to hedge native's known parity gaps at higher bot
@@ -56,11 +62,12 @@ NODE_FRACTION="${NODE_FRACTION:-0}"
 # Frozen v8 launch config (see devlog): full policy (no --gc/--blocks
 # override), AMP on, pinned H2D on, entropy floor at its default. Override
 # via EXTRA_ARGS if deliberately deviating from the plan.
-EXTRA_ARGS="${EXTRA_ARGS:---amp --pinned-h2d}"
+EXTRA_ARGS="${EXTRA_ARGS:---amp --pinned-h2d --foveate --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
 REPO_DIR="${REPO_DIR:-/root/openfront-ai}"
 CKPT_DIR="$REPO_DIR/rust/checkpoints/$RUN_NAME"
 HF_SYNC_INTERVAL_SECONDS="${HF_SYNC_INTERVAL_SECONDS:-600}"
 TORCH_VERSION="2.11.0" # tch 0.24's C++ shim needs this exact version - see devlog
+AE_DIR="${AE_DIR:-$REPO_DIR/weights/ae}"
 
 # --- bootstrap: repo ---
 mkdir -p "$(dirname "$REPO_DIR")"
@@ -149,8 +156,15 @@ if ! LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB" OFTRAIN_EXPLICIT_CUINIT=1 \
        "crash-loop will retry/backoff if this host genuinely can't init CUDA." >&2
 fi
 
-"$VENV/bin/pip" install --quiet huggingface_hub 2>/dev/null || true
+"$VENV/bin/pip" install --quiet huggingface_hub safetensors numpy 2>/dev/null || true
 PYTHON="$VENV/bin/python"
+
+# Fine + coarse AE encoder safetensors for oftrain --ckpt / --coarse-ckpt.
+mkdir -p "$AE_DIR"
+if [ ! -f "$AE_DIR/ae_v31_d8c32.encoder.safetensors" ] || [ ! -f "$AE_DIR/ae_v31_d16c32.encoder.safetensors" ]; then
+  echo "=== fetching/exporting AE encoders into $AE_DIR ==="
+  AE_DIR="$AE_DIR" PYTHON="$PYTHON" bash "$REPO_DIR/scripts/fetch_ae_encoders.sh"
+fi
 
 mkdir -p "$CKPT_DIR"
 
@@ -215,7 +229,7 @@ while true; do
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB" \
     ./target/release/oftrain --engine native --node-fraction "$NODE_FRACTION" --num-envs "$NUM_ENVS" --num-gpus "$NUM_GPUS" \
-    --rollout-len "$ROLLOUT_LEN" --stage "$STAGE" --device cuda:0 \
+    --rollout-len "$ROLLOUT_LEN" --minibatches "$MINIBATCHES" --stage "$STAGE" --device cuda:0 \
     --ckpt-dir "$CKPT_DIR" $EXTRA_ARGS $RESUME \
     >> "/tmp/train_$RUN_NAME.log" 2>&1
   RC=$?
