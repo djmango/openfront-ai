@@ -1,3 +1,10 @@
 creation_rules:
   - path_regex: secrets/.*\.enc\.(yaml|json|env)$
-    age: age1ngv9f6nd4sjzpvtwq3zprtqcdxptc5a8wxutgwtfxcvfndj6y9ss368nqm
+    # Two recipients: the agent's own age key (generated this session, only
+    # usable from within an agent session that has SOPS_AGE_KEY set) and
+    # sulaiman.ghori@outlook.com's personal SSH ed25519 key (age natively
+    # supports ssh-ed25519/ssh-rsa public keys as recipients, no conversion
+    # needed) - so either party can decrypt independently of the other.
+    age: >-
+      age1ngv9f6nd4sjzpvtwq3zprtqcdxptc5a8wxutgwtfxcvfndj6y9ss368nqm,
+      ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK4RmXrS61fSaWojx1aK9oB1N1LzllAkOpcLrcXsUsVz sulaiman.ghori@outlook.com
