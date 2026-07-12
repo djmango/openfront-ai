@@ -110,6 +110,15 @@ pub struct Config {
     /// observed failure mode without touching the advantage/policy-loss
     /// path at all - the return is only ever consumed as this one target.
     pub ret_clip: f32,
+    /// `--vf-clip` (0.0 = disabled): PPO2-style value-*prediction* clipping
+    /// - complements `ret_clip` (which only bounds the target). See the
+    /// clipping site in `train_update`'s minibatch loop for the mechanism
+    /// and why `ret_clip` alone wasn't sufficient (confirmed live on the
+    /// 2026-07-12 incident's relaunch: `v` still reached 15.7 billion with
+    /// `ret_clip=3000` active - only explainable by the *prediction*
+    /// itself drifting far past the clamped target, which target-clamping
+    /// alone can't prevent).
+    pub vf_clip: f32,
     /// Entropy coefficient anneals linearly `ent_coef -> ent_coef_final`
     /// over `ent_anneal_updates` (matches `rl/ppo.py`'s schedule), with
     /// the adaptive entropy-floor multiplier (`ent_floor`) on top.
@@ -573,6 +582,13 @@ fn train_update(
         adv: Tensor,
         ret: Tensor,
         old_logp: Tensor,
+        /// Rollout-time value estimate (the actor's own prediction when
+        /// this sample was collected) - see `Config::vf_clip`'s doc for
+        /// why this needs to travel separately from `ret` (which is
+        /// already `advantage + old_value`, so recoverable in principle,
+        /// but not once `--ret-clip` has clamped it - the two clamps need
+        /// independent, un-entangled inputs).
+        old_value: Tensor,
     }
     let batch_build_t0 = Instant::now();
     // Per-shard: GAE (plain Rust, negligible) + one CPU repack/host->device
@@ -616,6 +632,7 @@ fn train_update(
                     let mut adv_flat = vec![0.0f32; total];
                     let mut ret_flat = vec![0.0f32; total];
                     let mut old_logp_flat = vec![0.0f32; total];
+                    let mut old_value_flat = vec![0.0f32; total];
                     // Tracks the pre-clamp raw return separately from
                     // `ret_flat` itself, so the diagnostic below still
                     // reports the *true* extreme value even once
@@ -637,6 +654,7 @@ fn train_update(
                             ret_flat[flat_idx] =
                                 if cfg.ret_clip > 0.0 { ret.clamp(-cfg.ret_clip, cfg.ret_clip) } else { ret };
                             old_logp_flat[flat_idx] = buffer[t][e].logp;
+                            old_value_flat[flat_idx] = buffer[t][e].value;
                         }
                     }
                     // Diagnostic for the 2026-07-12 value-loss-explosion
@@ -689,7 +707,8 @@ fn train_update(
                     let adv = Tensor::from_slice(&adv_flat).to_device(device);
                     let ret = Tensor::from_slice(&ret_flat).to_device(device);
                     let old_logp = Tensor::from_slice(&old_logp_flat).to_device(device);
-                    ShardBatch { obs, choice, adv, ret, old_logp }
+                    let old_value = Tensor::from_slice(&old_value_flat).to_device(device);
+                    ShardBatch { obs, choice, adv, ret, old_logp, old_value }
                 })
             })
             .collect();
@@ -736,13 +755,41 @@ fn train_update(
                             let adv_t = sb.adv.index_select(0, &idx_t);
                             let ret_t = sb.ret.index_select(0, &idx_t);
                             let old_logp_t = sb.old_logp.index_select(0, &idx_t);
+                            let old_value_t = sb.old_value.index_select(0, &idx_t);
 
                             let (logp, ent, ent_q, value) = shard.policy.evaluate(&obs_t, &choice_t);
                             let ratio = (&logp - &old_logp_t).exp();
                             let surr1 = &ratio * &adv_t;
                             let surr2 = ratio.clamp(1.0 - cfg.clip as f64, 1.0 + cfg.clip as f64) * &adv_t;
                             let pg_loss = -surr1.minimum(&surr2).mean(Kind::Float);
-                            let v_loss = (&value - &ret_t).pow_tensor_scalar(2).mean(Kind::Float);
+                            // PPO2-style value clipping (see Config::vf_clip's
+                            // doc): `--ret-clip` alone bounds the *target*
+                            // but not the *prediction* - once `value` itself
+                            // has drifted from a diverging update, an
+                            // unclipped `(value - ret)^2` still produces an
+                            // unbounded loss/gradient regardless of how
+                            // tightly `ret` is clamped (confirmed live: `v`
+                            // reached 15.7 billion with `--ret-clip 3000`
+                            // active, only explainable by `value` itself
+                            // having drifted to roughly +-125,000). Clipping
+                            // `value` to within `vf_clip` of its own
+                            // *rollout-time* estimate, and taking the worse
+                            // (max) of the clipped/unclipped squared error -
+                            // exactly PPO2's original value-loss formula -
+                            // means any single update can only move a given
+                            // sample's prediction by at most `vf_clip`,
+                            // directly bounding runaway prediction drift
+                            // instead of just bounding what it's compared
+                            // against.
+                            let v_loss = if cfg.vf_clip > 0.0 {
+                                let value_clipped =
+                                    &old_value_t + (&value - &old_value_t).clamp(-cfg.vf_clip as f64, cfg.vf_clip as f64);
+                                let v_loss_unclipped = (&value - &ret_t).pow_tensor_scalar(2);
+                                let v_loss_clipped = (&value_clipped - &ret_t).pow_tensor_scalar(2);
+                                v_loss_unclipped.maximum(&v_loss_clipped).mean(Kind::Float)
+                            } else {
+                                (&value - &ret_t).pow_tensor_scalar(2).mean(Kind::Float)
+                            };
                             let ent_loss = ent.mean(Kind::Float);
                             // `ent_q` (Beta quantity-head entropy) is 0 for
                             // every sample whose action doesn't use a
