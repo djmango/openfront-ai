@@ -1,4 +1,10 @@
 data/
+# Only SOPS-encrypted files under secrets/ are ever meant to be committed
+# (see .sops.yaml + scripts/load_secrets.sh) - block any plaintext secret
+# that might land here by accident (e.g. an unencrypted `sops -d -i` slip).
+secrets/*
+!secrets/*.enc.yaml
+!secrets/README.md
 .venv/
 __pycache__/
 *.pt
