@@ -100,10 +100,12 @@ impl Execution for TrainStationExecution {
         if !self.active {
             return;
         }
-        if !game.unit_exists(self.small_id, self.unit_id) {
+        // TS TrainStationExecution holds the Unit; after capture, retarget.
+        let Some(owner) = game.find_unit_owner(self.unit_id) else {
             self.active = false;
             return;
-        }
+        };
+        self.small_id = owner;
         if self.station_id.is_none() {
             let unit_type_str = game
                 .unit_type_of(self.small_id, self.unit_id)
