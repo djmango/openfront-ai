@@ -156,7 +156,7 @@ if ! LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB" OFTRAIN_EXPLICIT_CUINIT=1 \
        "crash-loop will retry/backoff if this host genuinely can't init CUDA." >&2
 fi
 
-"$VENV/bin/pip" install --quiet huggingface_hub safetensors 2>/dev/null || true
+"$VENV/bin/pip" install --quiet huggingface_hub safetensors numpy 2>/dev/null || true
 PYTHON="$VENV/bin/python"
 
 # Fine + coarse AE encoder safetensors for oftrain --ckpt / --coarse-ckpt.
