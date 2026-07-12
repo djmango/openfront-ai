@@ -1084,6 +1084,10 @@ impl Game {
     }
 
     pub fn remove_troops(&mut self, small_id: u16, amount: f64) -> i32 {
+        // TS `PlayerImpl.removeTroops`: non-positive amounts are a no-op.
+        if amount <= 0.0 {
+            return 0;
+        }
         let Some(p) = self.player_by_small_id_mut(small_id) else {
             return 0;
         };
@@ -1092,7 +1096,15 @@ impl Game {
         to_remove
     }
 
+    /// TS `PlayerImpl.addTroops`. Negative amounts go through `removeTroops(-amount)`,
+    /// so a fractional over-max income pullback of e.g. `-6360.28` removes `floor(6360.28)=6360`
+    /// troops rather than applying `floor(-6360.28)=-6361` (which desynced soft troop counts
+    /// whenever a player was over `maxTroops`).
     pub fn add_troops(&mut self, small_id: u16, amount: f64) {
+        if amount < 0.0 {
+            self.remove_troops(small_id, -amount);
+            return;
+        }
         if let Some(p) = self.player_by_small_id_mut(small_id) {
             p.troops += crate::util::to_int(amount);
         }
