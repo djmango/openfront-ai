@@ -216,7 +216,12 @@ impl RailNetwork {
 
 pub fn station_tile(game: &Game, rn: &RailNetwork, station_id: u32) -> Option<TileRef> {
     let st = rn.stations.get(&station_id)?;
-    game.unit_tile_of(st.owner_small_id, st.unit_id)
+    // TS reads `station.unit.tile()` via the live unit reference — owner may
+    // have changed after capture without reconnecting the station.
+    let owner = game
+        .find_unit_owner(st.unit_id)
+        .unwrap_or(st.owner_small_id);
+    game.unit_tile_of(owner, st.unit_id)
 }
 
 pub fn station_unit_type(rn: &RailNetwork, station_id: u32) -> Option<String> {
@@ -224,15 +229,31 @@ pub fn station_unit_type(rn: &RailNetwork, station_id: u32) -> Option<String> {
 }
 
 pub fn station_active(game: &Game, rn: &RailNetwork, station_id: u32) -> bool {
+    // TS `TrainStation.isActive()` is `this.unit.isActive()` — resolve the
+    // unit by id globally so a captured station isn't treated as dead just
+    // because `Station.owner_small_id` is stale.
     rn.stations
         .get(&station_id)
-        .is_some_and(|st| game.unit_exists(st.owner_small_id, st.unit_id))
+        .is_some_and(|st| game.find_unit_owner(st.unit_id).is_some())
+}
+
+/// Keep `Station.owner_small_id` in sync when a station building is captured
+/// (TS `Unit.setOwner` leaves the TrainStation pointing at the same Unit).
+pub fn update_station_owner_for_unit(rn: &mut RailNetwork, unit_id: i32, new_owner: u16) {
+    if let Some(station_id) = rn.station_by_unit.get(&unit_id).copied() {
+        if let Some(st) = rn.stations.get_mut(&station_id) {
+            st.owner_small_id = new_owner;
+        }
+    }
 }
 
 /// TS `TrainStation.tradeAvailable` - a destination station is available to `source_owner`
 /// if it's the same owner (self-trade), or neither side embargoes the other.
 fn station_trade_available(game: &Game, station: &Station, source_owner: u16) -> bool {
-    station.owner_small_id == source_owner || game.can_trade(station.owner_small_id, source_owner)
+    let owner = game
+        .find_unit_owner(station.unit_id)
+        .unwrap_or(station.owner_small_id);
+    owner == source_owner || game.can_trade(owner, source_owner)
 }
 
 /// TS `Cluster.hasAnyTradeDestination`.
@@ -990,17 +1011,19 @@ fn train_relation(game: &Game, train_owner: u16, station_owner: u16) -> TrainRel
 
 /// TS `TrainStation.onTrainStop` - City/Port pay gold; Factory is a no-op stop.
 pub fn on_train_stop(game: &mut Game, station_id: u32, train_owner: u16, trade_stops_visited: u32) {
-    let Some((owner, utype)) = game
+    let Some((unit_id, cached_owner, utype)) = game
         .rail_network
         .stations
         .get(&station_id)
-        .map(|s| (s.owner_small_id, s.unit_type.clone()))
+        .map(|s| (s.unit_id, s.owner_small_id, s.unit_type.clone()))
     else {
         return;
     };
     if !is_trade_type(&utype) {
         return; // Factory stop handler is a no-op in TS too.
     }
+    // Live owner (TS `station.unit.owner()`), not the connect-time cache.
+    let owner = game.find_unit_owner(unit_id).unwrap_or(cached_owner);
     let rel = train_relation(game, train_owner, owner);
     let gold = game.wire.train_gold(rel, trade_stops_visited);
     if train_owner != owner {
@@ -1015,4 +1038,59 @@ pub fn is_trade_station_type(t: &str) -> bool {
 
 pub fn is_valid_station_type(t: &str) -> bool {
     is_station_type(t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::schemas::unit_type;
+    use crate::game::{Game, PlayerInfo, PlayerType};
+    use crate::test_util::plains_game;
+
+    fn add_nation(game: &mut Game, id: &str) -> u16 {
+        game.add_from_info(&PlayerInfo {
+            name: id.into(),
+            player_type: PlayerType::Nation,
+            client_id: None,
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        })
+    }
+
+    /// Capturing a city that is a train station must not make `station_active`
+    /// flip false — TS `TrainStation.isActive()` follows the Unit, not a
+    /// frozen owner id. Without this, in-flight trains delete on the next tick
+    /// (Canada +7/−7 unit blip on curr-b030-s0-pangaea ~4242).
+    #[test]
+    fn station_stays_active_after_structure_capture() {
+        let mut game = plains_game(40, 40);
+        let a = add_nation(&mut game, "a");
+        let b = add_nation(&mut game, "b");
+        for sid in [a, b] {
+            let tile = game.map.ref_xy(if sid == a { 0 } else { 20 }, 0);
+            game.conquer(sid, tile);
+            if let Some(p) = game.player_by_small_id_mut(sid) {
+                p.spawn_tile = Some(tile);
+                p.alive = true;
+                p.gold = 1_000_000;
+            }
+        }
+        let city_tile = game.map.ref_xy(0, 0);
+        let city_id = game.build_unit(a, unit_type::CITY, city_tile);
+        let station_id = connect_station(&mut game, a, city_id, unit_type::CITY);
+        assert!(station_active(&game, &game.rail_network, station_id));
+
+        game.capture_unit(a, b, city_id);
+        assert!(
+            station_active(&game, &game.rail_network, station_id),
+            "captured station must remain active for in-flight trains"
+        );
+        assert_eq!(
+            game.rail_network.stations.get(&station_id).unwrap().owner_small_id,
+            b
+        );
+        assert_eq!(station_tile(&game, &game.rail_network, station_id), Some(city_tile));
+    }
 }
