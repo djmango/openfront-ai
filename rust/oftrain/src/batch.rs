@@ -57,80 +57,6 @@ fn upload_float_grid(v: &[f32], shape: &[i64], device: Device, pinned: bool, fp1
     }
 }
 
-/// Assemble per-item `C_GRID` host planes: AE latent (or prebuilt grid)
-/// + ego + db + transient. When `ae` is set, runs batched GPU encode
-/// (mirrors `rl/obs.py::encode_grids`); otherwise requires each item's
-/// `PreparedObs::grid` to already be filled (unit-test path).
-fn assemble_grids(items: &[&PreparedObs], device: Device, ae: Option<&AePair>) -> anyhow::Result<Vec<Vec<f32>>> {
-    let c_grid = policy::C_GRID as usize;
-    if let Some(pair) = ae {
-        let raws: Vec<&ae::AeRaw> = items.iter().map(|it| &it.ae_raw).collect();
-        let zs = ae::encode_latent_batch(&pair.fine, &raws, device)?;
-        let mut grids = Vec::with_capacity(items.len());
-        for (it, z) in items.iter().zip(zs.into_iter()) {
-            let plane = it.gh * it.gw;
-            let z_flat = z.flatten(0, -1);
-            let z_vec: Vec<f32> = Vec::<f32>::try_from(z_flat)
-                .map_err(|e| anyhow::anyhow!("AE latent host copy failed: {e}"))?;
-            debug_assert_eq!(z_vec.len(), policy::LATENT_C as usize * plane);
-            let mut grid = Vec::with_capacity(c_grid * plane);
-            grid.extend_from_slice(&z_vec);
-            grid.extend_from_slice(&it.ego);
-            grid.extend_from_slice(&it.db);
-            grid.extend_from_slice(&it.transient);
-            debug_assert_eq!(grid.len(), c_grid * plane);
-            grids.push(grid);
-        }
-        // Optional native /16 coarse stream is attached later on Obs when
-        // present; fine grid always uses the /8 AE above.
-        Ok(grids)
-    } else {
-        items
-            .iter()
-            .map(|it| {
-                it.grid.clone().ok_or_else(|| {
-                    anyhow::anyhow!("PreparedObs.grid missing and no AE provided for encode")
-                })
-            })
-            .collect()
-    }
-}
-
-/// Optional coarse grids at /16 (C_GRID, cgh, cgw) when a coarse AE is
-/// loaded; otherwise `None` and the policy falls back to 2x avg-pool.
-fn assemble_coarse_grids(
-    items: &[&PreparedObs],
-    device: Device,
-    ae: Option<&AePair>,
-) -> anyhow::Result<Option<Vec<Vec<f32>>>> {
-    let Some(pair) = ae else { return Ok(None) };
-    let Some(coarse) = pair.coarse.as_ref() else { return Ok(None) };
-    let raws: Vec<&ae::AeRaw> = items.iter().map(|it| &it.ae_raw).collect();
-    let zs = ae::encode_latent_batch(coarse, &raws, device)?;
-    let c_grid = policy::C_GRID as usize;
-    let mut grids = Vec::with_capacity(items.len());
-    for (it, z) in items.iter().zip(zs.into_iter()) {
-        let cgh = it.gh.div_ceil(2);
-        let cgw = it.gw.div_ceil(2);
-        let z_flat = z.flatten(0, -1);
-        let z_vec: Vec<f32> = Vec::<f32>::try_from(z_flat)
-            .map_err(|e| anyhow::anyhow!("coarse AE latent host copy failed: {e}"))?;
-        debug_assert_eq!(z_vec.len(), policy::LATENT_C as usize * cgh * cgw);
-        // Pool ego/db (avg) and transient (max) to /16, matching encode_grids.
-        let ego_c = avg_pool2_planes(&it.ego, 3, it.gh, it.gw);
-        let db_c = avg_pool2_planes(&it.db, 1, it.gh, it.gw);
-        let tr_c = max_pool2_planes(&it.transient, ofcore::feat::N_TRANSIENT, it.gh, it.gw);
-        let mut grid = Vec::with_capacity(c_grid * cgh * cgw);
-        grid.extend_from_slice(&z_vec);
-        grid.extend_from_slice(&ego_c);
-        grid.extend_from_slice(&db_c);
-        grid.extend_from_slice(&tr_c);
-        debug_assert_eq!(grid.len(), c_grid * cgh * cgw);
-        grids.push(grid);
-    }
-    Ok(Some(grids))
-}
-
 fn avg_pool2_planes(src: &[f32], channels: usize, gh: usize, gw: usize) -> Vec<f32> {
     let cgh = gh.div_ceil(2);
     let cgw = gw.div_ceil(2);
@@ -181,102 +107,106 @@ fn max_pool2_planes(src: &[f32], channels: usize, gh: usize, gw: usize) -> Vec<f
     out
 }
 
-struct UniformAeGrids {
-    fine: Tensor,
-    fine_latent: Tensor,
-    coarse: Option<Tensor>,
-    coarse_latent: Option<Tensor>,
+/// Frozen-AE output retained on the shard device for one rollout sample.
+/// The host-native feature planes remain in `PreparedObs`; only the tensors
+/// that would otherwise make a GPU -> CPU -> GPU round trip live here.
+pub struct ResidentLatents {
+    pub fine: Tensor,
+    pub coarse: Option<Tensor>,
 }
 
-/// Same-shape AE path: stack the encoder outputs on their original device,
-/// upload only the host-native feature planes, and concatenate there.
-fn encode_uniform_ae_grids(
+/// Build the complete fine/coarse grid from resident per-item AE latents.
+/// Items may have different shapes; tensors are top-left aligned and padded
+/// exactly like the host fallback.
+fn assemble_resident_device_grid(
     items: &[&PreparedObs],
-    device: Device,
-    pinned_h2d: bool,
-    fp16_rollout: bool,
-    pair: &AePair,
-) -> anyhow::Result<UniformAeGrids> {
-    debug_assert!(!items.is_empty());
-    debug_assert!(
-        items
-            .iter()
-            .all(|it| it.gh == items[0].gh && it.gw == items[0].gw)
-    );
-    let b = items.len() as i64;
-    let (gh, gw) = (items[0].gh, items[0].gw);
-    let raws: Vec<&ae::AeRaw> = items.iter().map(|it| &it.ae_raw).collect();
-
-    let fine_items = ae::encode_latent_batch_device(&pair.fine, &raws, device)?;
-    let fine_refs: Vec<&Tensor> = fine_items.iter().collect();
-    let fine_latent = Tensor::stack(&fine_refs, 0);
-    let fine = assemble_uniform_device_grid(
-        items,
-        &fine_latent,
-        gh,
-        gw,
-        device,
-        pinned_h2d,
-        fp16_rollout,
-        false,
-    );
-
-    let (coarse, coarse_latent) = if let Some(coarse_ae) = pair.coarse.as_ref() {
-        let coarse_items = ae::encode_latent_batch_device(coarse_ae, &raws, device)?;
-        let coarse_refs: Vec<&Tensor> = coarse_items.iter().collect();
-        let latent = Tensor::stack(&coarse_refs, 0);
-        let (cgh, cgw) = (gh.div_ceil(2), gw.div_ceil(2));
-        let grid = assemble_uniform_device_grid(
-            items,
-            &latent,
-            cgh,
-            cgw,
-            device,
-            pinned_h2d,
-            fp16_rollout,
-            true,
-        );
-        (Some(grid), Some(latent))
-    } else {
-        (None, None)
-    };
-
-    debug_assert_eq!(fine.size(), [b, policy::C_GRID, gh as i64, gw as i64]);
-    Ok(UniformAeGrids {
-        fine,
-        fine_latent,
-        coarse,
-        coarse_latent,
-    })
-}
-
-fn assemble_uniform_device_grid(
-    items: &[&PreparedObs],
-    latent: &Tensor,
-    gh: usize,
-    gw: usize,
+    latents: &[&ResidentLatents],
     device: Device,
     pinned_h2d: bool,
     fp16_rollout: bool,
     coarse: bool,
-) -> Tensor {
+) -> anyhow::Result<Tensor> {
+    anyhow::ensure!(items.len() == latents.len(), "item/latent count mismatch");
+    let gh = items
+        .iter()
+        .map(|it| if coarse { it.gh.div_ceil(2) } else { it.gh })
+        .max()
+        .unwrap_or(0);
+    let gw = items
+        .iter()
+        .map(|it| if coarse { it.gw.div_ceil(2) } else { it.gw })
+        .max()
+        .unwrap_or(0);
     let extra_c = policy::C_GRID as usize - policy::LATENT_C as usize;
-    let mut extras = Vec::with_capacity(items.len() * extra_c * gh * gw);
-    for it in items {
+    let uniform = items.iter().all(|it| {
+        let (igh, igw) = if coarse {
+            (it.gh.div_ceil(2), it.gw.div_ceil(2))
+        } else {
+            (it.gh, it.gw)
+        };
+        igh == gh && igw == gw
+    });
+    let mut extras = if uniform {
+        Vec::with_capacity(items.len() * extra_c * gh * gw)
+    } else {
+        vec![0.0f32; items.len() * extra_c * gh * gw]
+    };
+    let mut padded_latents = Vec::with_capacity(items.len());
+    for (bi, (it, z)) in items.iter().zip(latents).enumerate() {
+        let (igh, igw) = if coarse {
+            (it.gh.div_ceil(2), it.gw.div_ceil(2))
+        } else {
+            (it.gh, it.gw)
+        };
+        let mut src = Vec::with_capacity(extra_c * igh * igw);
         if coarse {
-            extras.extend(avg_pool2_planes(&it.ego, 3, it.gh, it.gw));
-            extras.extend(avg_pool2_planes(&it.db, 1, it.gh, it.gw));
-            extras.extend(max_pool2_planes(
+            src.extend(avg_pool2_planes(&it.ego, 3, it.gh, it.gw));
+            src.extend(avg_pool2_planes(&it.db, 1, it.gh, it.gw));
+            src.extend(max_pool2_planes(
                 &it.transient,
                 feat::N_TRANSIENT,
                 it.gh,
                 it.gw,
             ));
-        } else {
+        } else if uniform {
             extras.extend_from_slice(&it.ego);
             extras.extend_from_slice(&it.db);
             extras.extend_from_slice(&it.transient);
+        } else {
+            src.extend_from_slice(&it.ego);
+            src.extend_from_slice(&it.db);
+            src.extend_from_slice(&it.transient);
         }
+        if uniform && coarse {
+            extras.extend_from_slice(&src);
+        } else if !uniform {
+            for c in 0..extra_c {
+                for y in 0..igh {
+                    let src_off = c * igh * igw + y * igw;
+                    let dst_off = bi * extra_c * gh * gw + c * gh * gw + y * gw;
+                    extras[dst_off..dst_off + igw].copy_from_slice(&src[src_off..src_off + igw]);
+                }
+            }
+        }
+
+        let z = if coarse {
+            z.coarse
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("coarse latent missing for rollout item {bi}"))?
+        } else {
+            &z.fine
+        };
+        anyhow::ensure!(
+            z.size() == [policy::LATENT_C, igh as i64, igw as i64],
+            "rollout latent {bi} shape {:?}, expected [{}, {igh}, {igw}]",
+            z.size(),
+            policy::LATENT_C
+        );
+        padded_latents.push(if igh == gh && igw == gw {
+            z.shallow_clone()
+        } else {
+            z.constant_pad_nd([0, (gw - igw) as i64, 0, (gh - igh) as i64])
+        });
     }
     let extras = upload_float_grid(
         &extras,
@@ -285,6 +215,8 @@ fn assemble_uniform_device_grid(
         pinned_h2d,
         fp16_rollout,
     );
+    let latent_refs: Vec<&Tensor> = padded_latents.iter().collect();
+    let latent = Tensor::stack(&latent_refs, 0);
     // Match the old `--fp16-rollout` path, which quantized the complete
     // assembled grid during H2D, including the AE channels.
     let latent = if fp16_rollout && device.is_cuda() {
@@ -292,136 +224,105 @@ fn assemble_uniform_device_grid(
     } else {
         latent.shallow_clone()
     };
-    Tensor::cat(&[latent, extras], 1)
+    Ok(Tensor::cat(&[latent, extras], 1))
 }
 
-fn host_grids_from_latent(
+/// Encode and build an actor/eval observation without moving AE output to
+/// the host. Returned latents own references to the same device storage and
+/// can outlive the temporary full observation.
+pub fn encode_rollout_obs(
     items: &[&PreparedObs],
-    latent: &Tensor,
-    coarse: bool,
-) -> anyhow::Result<Vec<Vec<f32>>> {
-    let latent: Vec<f32> = Vec::<f32>::try_from(
-        latent.to_device(Device::Cpu).to_kind(Kind::Float).reshape([-1]),
-    )
-    .map_err(|e| anyhow::anyhow!("AE latent host copy failed: {e}"))?;
-    let mut offset = 0;
-    let mut grids = Vec::with_capacity(items.len());
-    for it in items {
-        let (gh, gw) = if coarse {
-            (it.gh.div_ceil(2), it.gw.div_ceil(2))
-        } else {
-            (it.gh, it.gw)
-        };
-        let latent_len = policy::LATENT_C as usize * gh * gw;
-        let mut grid = Vec::with_capacity(policy::C_GRID as usize * gh * gw);
-        grid.extend_from_slice(&latent[offset..offset + latent_len]);
-        offset += latent_len;
-        if coarse {
-            grid.extend(avg_pool2_planes(&it.ego, 3, it.gh, it.gw));
-            grid.extend(avg_pool2_planes(&it.db, 1, it.gh, it.gw));
-            grid.extend(max_pool2_planes(
-                &it.transient,
-                feat::N_TRANSIENT,
-                it.gh,
-                it.gw,
-            ));
-        } else {
-            grid.extend_from_slice(&it.ego);
-            grid.extend_from_slice(&it.db);
-            grid.extend_from_slice(&it.transient);
-        }
-        grids.push(grid);
-    }
-    debug_assert_eq!(offset, latent.len());
-    Ok(grids)
-}
-
-/// Encode AE latents into each item's `grid` / `grid_coarse` host buffers
-/// in place. Called on the actor thread (exclusive `&mut`) before
-/// `build_obs` so learner threads never need to hold an AE.
-pub fn encode_prepared_obs(items: &mut [PreparedObs], device: Device, ae: &AePair) -> anyhow::Result<()> {
-    let refs: Vec<&PreparedObs> = items.iter().collect();
-    let fine = assemble_grids(&refs, device, Some(ae))?;
-    let coarse = assemble_coarse_grids(&refs, device, Some(ae))?;
-    for (i, it) in items.iter_mut().enumerate() {
-        it.grid = Some(fine[i].clone());
-        if let Some(ref cg) = coarse {
-            it.grid_coarse = Some(cg[i].clone());
-            it.cgh = it.gh.div_ceil(2);
-            it.cgw = it.gw.div_ceil(2);
-        } else {
-            it.grid_coarse = None;
-            it.cgh = 0;
-            it.cgw = 0;
-        }
-    }
-    Ok(())
-}
-
-pub fn build_obs(items: &[&PreparedObs], device: Device, pinned_h2d: bool, fp16_rollout: bool) -> Obs {
-    build_obs_with_ae(items, device, pinned_h2d, fp16_rollout, None).expect("build_obs")
-}
-
-/// Rollout-only builder. Uniform batches retain AE output on `device` for
-/// inference while copying the latent once to the host-backed rollout
-/// buffer. Mixed shapes keep the established padding/general path.
-pub fn build_rollout_obs(
-    items: &mut [PreparedObs],
     device: Device,
     pinned_h2d: bool,
     fp16_rollout: bool,
-    ae: &AePair,
-) -> anyhow::Result<Obs> {
-    let uniform = !items.is_empty()
-        && items
-            .iter()
-            .all(|it| it.gh == items[0].gh && it.gw == items[0].gw);
-    if !uniform {
-        encode_prepared_obs(items, device, ae)?;
-        let refs: Vec<&PreparedObs> = items.iter().collect();
-        return Ok(build_obs(&refs, device, pinned_h2d, fp16_rollout));
-    }
+    pair: &AePair,
+) -> anyhow::Result<(Obs, Vec<ResidentLatents>)> {
+    anyhow::ensure!(!items.is_empty(), "cannot encode an empty rollout batch");
+    let raws: Vec<&ae::AeRaw> = items.iter().map(|it| &it.ae_raw).collect();
+    let fine = ae::encode_latent_batch_device(&pair.fine, &raws, device)?;
+    let coarse = pair
+        .coarse
+        .as_ref()
+        .map(|coarse| ae::encode_latent_batch_device(coarse, &raws, device))
+        .transpose()?;
+    let resident: Vec<ResidentLatents> = fine
+        .into_iter()
+        .enumerate()
+        .map(|(i, fine)| ResidentLatents {
+            fine,
+            coarse: coarse.as_ref().map(|zs| zs[i].shallow_clone()),
+        })
+        .collect();
+    let refs: Vec<&ResidentLatents> = resident.iter().collect();
+    let obs = build_obs_with_resident_latents(items, &refs, device, pinned_h2d, fp16_rollout)?;
+    Ok((obs, resident))
+}
 
-    let (resident, fine_host, coarse_host) = {
-        let refs: Vec<&PreparedObs> = items.iter().collect();
-        let resident = encode_uniform_ae_grids(&refs, device, pinned_h2d, fp16_rollout, ae)?;
-        let fine_host = host_grids_from_latent(&refs, &resident.fine_latent, false)?;
-        let coarse_host = resident
-            .coarse_latent
-            .as_ref()
-            .map(|z| host_grids_from_latent(&refs, z, true))
-            .transpose()?;
-        (resident, fine_host, coarse_host)
-    };
-    if let Some(coarse_host) = coarse_host {
-        for ((it, fine), coarse) in items
-            .iter_mut()
-            .zip(fine_host.into_iter())
-            .zip(coarse_host.into_iter())
-        {
-            it.grid = Some(fine);
-            it.grid_coarse = Some(coarse);
-            it.cgh = it.gh.div_ceil(2);
-            it.cgw = it.gw.div_ceil(2);
-        }
+/// Learner-side batch construction. Only host-native planes/masks are
+/// uploaded; fine/coarse AE channels remain on the shard GPU throughout.
+pub fn build_obs_with_resident_latents(
+    items: &[&PreparedObs],
+    latents: &[&ResidentLatents],
+    device: Device,
+    pinned_h2d: bool,
+    fp16_rollout: bool,
+) -> anyhow::Result<Obs> {
+    let fine =
+        assemble_resident_device_grid(items, latents, device, pinned_h2d, fp16_rollout, false)?;
+    let has_coarse = latents.iter().any(|z| z.coarse.is_some());
+    anyhow::ensure!(
+        !has_coarse || latents.iter().all(|z| z.coarse.is_some()),
+        "inconsistent coarse latent presence in rollout"
+    );
+    let coarse = if has_coarse {
+        Some(assemble_resident_device_grid(
+            items,
+            latents,
+            device,
+            pinned_h2d,
+            fp16_rollout,
+            true,
+        )?)
     } else {
-        for (it, fine) in items.iter_mut().zip(fine_host) {
-            it.grid = Some(fine);
-            it.grid_coarse = None;
-            it.cgh = 0;
-            it.cgw = 0;
-        }
-    }
-    let refs: Vec<&PreparedObs> = items.iter().collect();
+        None
+    };
     build_obs_from_parts(
-        &refs,
+        items,
         device,
         pinned_h2d,
         fp16_rollout,
         None,
         None,
-        Some((resident.fine, resident.coarse)),
+        Some((fine, coarse)),
     )
+}
+
+#[cfg(test)]
+fn resident_latents_from_host_grids(items: &[&PreparedObs]) -> Vec<ResidentLatents> {
+    items
+        .iter()
+        .map(|it| {
+            let plane = it.gh * it.gw;
+            let fine = Tensor::from_slice(
+                &it.grid.as_ref().unwrap()[..policy::LATENT_C as usize * plane],
+            )
+            .view([policy::LATENT_C, it.gh as i64, it.gw as i64]);
+            let coarse = it.grid_coarse.as_ref().map(|grid| {
+                let cgh = it.gh.div_ceil(2);
+                let cgw = it.gw.div_ceil(2);
+                Tensor::from_slice(&grid[..policy::LATENT_C as usize * cgh * cgw]).view([
+                    policy::LATENT_C,
+                    cgh as i64,
+                    cgw as i64,
+                ])
+            });
+            ResidentLatents { fine, coarse }
+        })
+        .collect()
+}
+
+pub fn build_obs(items: &[&PreparedObs], device: Device, pinned_h2d: bool, fp16_rollout: bool) -> Obs {
+    build_obs_with_ae(items, device, pinned_h2d, fp16_rollout, None).expect("build_obs")
 }
 
 pub fn build_obs_with_ae(
@@ -431,41 +332,19 @@ pub fn build_obs_with_ae(
     fp16_rollout: bool,
     ae: Option<&AePair>,
 ) -> anyhow::Result<Obs> {
-    let uniform = !items.is_empty()
-        && items
-            .iter()
-            .all(|it| it.gh == items[0].gh && it.gw == items[0].gw);
-    if uniform {
-        if let Some(pair) = ae {
-            let resident =
-                encode_uniform_ae_grids(items, device, pinned_h2d, fp16_rollout, pair)?;
-            return build_obs_from_parts(
-                items,
-                device,
-                pinned_h2d,
-                fp16_rollout,
-                None,
-                None,
-                Some((resident.fine, resident.coarse)),
-            );
-        }
+    if let Some(pair) = ae {
+        return Ok(encode_rollout_obs(items, device, pinned_h2d, fp16_rollout, pair)?.0);
     }
 
-    let assembled = if ae.is_some() {
-        assemble_grids(items, device, ae)?
-    } else {
-        items
-            .iter()
-            .map(|it| {
-                it.grid.clone().ok_or_else(|| {
-                    anyhow::anyhow!("PreparedObs.grid missing — call encode_prepared_obs first")
-                })
+    let assembled = items
+        .iter()
+        .map(|it| {
+            it.grid.clone().ok_or_else(|| {
+                anyhow::anyhow!("PreparedObs.grid missing and no resident AE latent provided")
             })
-            .collect::<anyhow::Result<Vec<_>>>()?
-    };
-    let coarse_assembled = if ae.is_some() {
-        assemble_coarse_grids(items, device, ae)?
-    } else if items.iter().all(|it| it.grid_coarse.is_some()) {
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let coarse_assembled = if items.iter().all(|it| it.grid_coarse.is_some()) {
         Some(items.iter().map(|it| it.grid_coarse.clone().unwrap()).collect())
     } else {
         None
@@ -774,8 +653,8 @@ mod tests {
     }
 
     #[test]
-    fn uniform_resident_fine_and_coarse_match_host_fallback() {
-        let mut items = vec![tiny_prepared_obs(4, 4), tiny_prepared_obs(4, 4)];
+    fn resident_mixed_shape_fine_and_coarse_match_host_fallback() {
+        let mut items = vec![tiny_prepared_obs(2, 3), tiny_prepared_obs(4, 4)];
         for (bi, it) in items.iter_mut().enumerate() {
             for (i, x) in it.ego.iter_mut().enumerate() {
                 *x = bi as f32 * 100.0 + i as f32;
@@ -786,61 +665,45 @@ mod tests {
             for (i, x) in it.transient.iter_mut().enumerate() {
                 *x = bi as f32 * 3.0 - i as f32 * 0.01;
             }
-        }
-        let fine_values: Vec<f32> = (0..2 * policy::LATENT_C as usize * 4 * 4)
-            .map(|i| i as f32 * 0.5)
-            .collect();
-        let coarse_values: Vec<f32> = (0..2 * policy::LATENT_C as usize * 2 * 2)
-            .map(|i| 1000.0 + i as f32)
-            .collect();
-        let fine_latent =
-            Tensor::from_slice(&fine_values).view([2, policy::LATENT_C, 4, 4]);
-        let coarse_latent =
-            Tensor::from_slice(&coarse_values).view([2, policy::LATENT_C, 2, 2]);
+            let plane = it.gh * it.gw;
+            let mut fine = Vec::with_capacity(policy::C_GRID as usize * plane);
+            fine.extend(
+                (0..policy::LATENT_C as usize * plane)
+                    .map(|i| bi as f32 * 1000.0 + i as f32 * 0.5),
+            );
+            fine.extend_from_slice(&it.ego);
+            fine.extend_from_slice(&it.db);
+            fine.extend_from_slice(&it.transient);
+            it.grid = Some(fine);
 
-        let (fine_resident, coarse_resident, fine_host, coarse_host) = {
-            let refs: Vec<&PreparedObs> = items.iter().collect();
-            (
-                assemble_uniform_device_grid(
-                    &refs,
-                    &fine_latent,
-                    4,
-                    4,
-                    Device::Cpu,
-                    false,
-                    false,
-                    false,
-                ),
-                assemble_uniform_device_grid(
-                    &refs,
-                    &coarse_latent,
-                    2,
-                    2,
-                    Device::Cpu,
-                    false,
-                    false,
-                    true,
-                ),
-                host_grids_from_latent(&refs, &fine_latent, false).unwrap(),
-                host_grids_from_latent(&refs, &coarse_latent, true).unwrap(),
-            )
-        };
-        for (i, it) in items.iter_mut().enumerate() {
-            it.grid = Some(fine_host[i].clone());
-            it.grid_coarse = Some(coarse_host[i].clone());
-            it.cgh = 2;
-            it.cgw = 2;
+            let (cgh, cgw) = (it.gh.div_ceil(2), it.gw.div_ceil(2));
+            let mut coarse = Vec::with_capacity(policy::C_GRID as usize * cgh * cgw);
+            coarse.extend(
+                (0..policy::LATENT_C as usize * cgh * cgw)
+                    .map(|i| 5000.0 + bi as f32 * 1000.0 + i as f32),
+            );
+            coarse.extend(avg_pool2_planes(&it.ego, 3, it.gh, it.gw));
+            coarse.extend(avg_pool2_planes(&it.db, 1, it.gh, it.gw));
+            coarse.extend(max_pool2_planes(
+                &it.transient,
+                feat::N_TRANSIENT,
+                it.gh,
+                it.gw,
+            ));
+            it.grid_coarse = Some(coarse);
+            it.cgh = cgh;
+            it.cgw = cgw;
         }
         let refs: Vec<&PreparedObs> = items.iter().collect();
         let fallback = build_obs(&refs, Device::Cpu, false, false);
-        let fast = build_obs_from_parts(
+        let resident = resident_latents_from_host_grids(&refs);
+        let resident_refs: Vec<&ResidentLatents> = resident.iter().collect();
+        let fast = build_obs_with_resident_latents(
             &refs,
+            &resident_refs,
             Device::Cpu,
             false,
             false,
-            None,
-            None,
-            Some((fine_resident, Some(coarse_resident))),
         )
         .unwrap();
 
