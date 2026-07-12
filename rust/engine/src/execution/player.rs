@@ -43,14 +43,20 @@ impl Execution for PlayerExecution {
             self.active = false;
             return;
         };
-        if !p.alive || p.spawn_tile.is_none() {
+        if p.spawn_tile.is_none() {
             return;
         }
 
         reconcile_structure_ownership(game, self.small_id);
 
-        // TS `isAlive()` is `_tiles.size > 0` - no income after elimination.
-        if p.tiles_owned == 0 {
+        // TS `isAlive()` is `_tiles.size > 0`. Check tiles before the sticky
+        // `alive` flag so `removeOnDeath` still runs when conquer already
+        // cleared `alive` mid-tick on the previous (or same) tick.
+        let tiles_owned = game
+            .player_by_small_id(self.small_id)
+            .map(|p| p.tiles_owned)
+            .unwrap_or(0);
+        if tiles_owned == 0 {
             if !spawn {
                 if let Some(pm) = game.player_by_small_id_mut(self.small_id) {
                     pm.alive = false;
@@ -58,6 +64,12 @@ impl Execution for PlayerExecution {
                 remove_on_death(game, self.small_id);
                 self.active = false;
             }
+            return;
+        }
+        if !game
+            .player_by_small_id(self.small_id)
+            .is_some_and(|p| p.alive)
+        {
             return;
         }
 
