@@ -43,6 +43,20 @@ fn to_device_maybe_pinned(t: &Tensor, device: Device, pinned: bool) -> Tensor {
     }
 }
 
+/// Host f32 slice → device Float tensor. When `fp16_rollout` and the
+/// destination is CUDA, stage as Half on the host, H2D as Half (half the
+/// PCIe bytes), then `.to_kind(Float)` on device. CPU / flag-off keep the
+/// plain Float path (byte-identical to pre-flag behavior).
+fn upload_float_grid(v: &[f32], shape: &[i64], device: Device, pinned: bool, fp16_rollout: bool) -> Tensor {
+    let cpu = Tensor::from_slice(v).view(shape).to_kind(Kind::Float);
+    if fp16_rollout && device.is_cuda() {
+        let half = cpu.to_kind(Kind::Half);
+        to_device_maybe_pinned(&half, device, pinned).to_kind(Kind::Float)
+    } else {
+        to_device_maybe_pinned(&cpu, device, pinned)
+    }
+}
+
 /// Assemble per-item `C_GRID` host planes: AE latent (or prebuilt grid)
 /// + ego + db + transient. When `ae` is set, runs batched GPU encode
 /// (mirrors `rl/obs.py::encode_grids`); otherwise requires each item's
@@ -189,14 +203,15 @@ pub fn encode_prepared_obs(items: &mut [PreparedObs], device: Device, ae: &AePai
     Ok(())
 }
 
-pub fn build_obs(items: &[&PreparedObs], device: Device, pinned_h2d: bool) -> Obs {
-    build_obs_with_ae(items, device, pinned_h2d, None).expect("build_obs")
+pub fn build_obs(items: &[&PreparedObs], device: Device, pinned_h2d: bool, fp16_rollout: bool) -> Obs {
+    build_obs_with_ae(items, device, pinned_h2d, fp16_rollout, None).expect("build_obs")
 }
 
 pub fn build_obs_with_ae(
     items: &[&PreparedObs],
     device: Device,
     pinned_h2d: bool,
+    fp16_rollout: bool,
     ae: Option<&AePair>,
 ) -> anyhow::Result<Obs> {
     let b = items.len();
@@ -278,6 +293,10 @@ pub fn build_obs_with_ae(
         let cpu = Tensor::from_slice(&v).view(shape).to_kind(Kind::Float);
         to_device_maybe_pinned(&cpu, device, pinned_h2d)
     };
+    // Fine/coarse AE grids: optional Half H2D when `--fp16-rollout`.
+    let t_grid = |v: Vec<f32>, shape: &[i64]| -> Tensor {
+        upload_float_grid(&v, shape, device, pinned_h2d, fp16_rollout)
+    };
     let bi = b as i64;
     let (ghi, gwi) = (gh as i64, gw as i64);
     let ms = feat::MAX_SLOTS as i64;
@@ -307,13 +326,13 @@ pub fn build_obs_with_ae(
                 packed.extend_from_slice(&g);
             }
         }
-        Some(t(packed, &[bi, policy::C_GRID, cgh as i64, cgw as i64]))
+        Some(t_grid(packed, &[bi, policy::C_GRID, cgh as i64, cgw as i64]))
     } else {
         None
     };
 
     Ok(Obs {
-        grid: t(grid, &[bi, policy::C_GRID, ghi, gwi]),
+        grid: t_grid(grid, &[bi, policy::C_GRID, ghi, gwi]),
         grid_valid: t(grid_valid, &[bi, ghi, gwi]),
         legal_tile: t(legal_tile, &[bi, ghi, gwi]),
         grid_coarse,
@@ -404,8 +423,8 @@ mod tests {
     fn pinned_h2d_flag_is_noop_on_cpu() {
         let items = vec![tiny_prepared_obs(4, 5), tiny_prepared_obs(4, 5)];
         let refs: Vec<&PreparedObs> = items.iter().collect();
-        let plain = build_obs(&refs, Device::Cpu, false);
-        let pinned = build_obs(&refs, Device::Cpu, true);
+        let plain = build_obs(&refs, Device::Cpu, false, false);
+        let pinned = build_obs(&refs, Device::Cpu, true, false);
         assert_eq!(
             Vec::<f32>::try_from(plain.grid.reshape([-1])).unwrap(),
             Vec::<f32>::try_from(pinned.grid.reshape([-1])).unwrap()
@@ -447,7 +466,7 @@ mod tests {
         big.legal_tile.iter_mut().for_each(|v| *v = 9.0);
 
         let items = vec![&small, &big];
-        let obs = build_obs(&items, Device::Cpu, false);
+        let obs = build_obs(&items, Device::Cpu, false, false);
 
         assert_eq!(obs.grid.size(), [2, policy::C_GRID, 4, 5]);
         assert_eq!(obs.grid_valid.size(), [2, 4, 5]);
@@ -482,5 +501,23 @@ mod tests {
         assert_eq!(lt[0 * plane + 0 * 5 + 0], 1.0); // small's real cell
         assert_eq!(lt[0 * plane + 3 * 5 + 4], 0.0); // padded corner
         assert_eq!(lt[1 * plane + 3 * 5 + 4], 9.0); // big's real corner
+    }
+
+    /// `--fp16-rollout` on CPU is a no-op (Half H2D only fires on CUDA),
+    /// but still exercises the encode→build path and requires finite Obs.
+    #[test]
+    fn fp16_rollout_flag_produces_finite_obs_on_cpu() {
+        let items = vec![tiny_prepared_obs(4, 5)];
+        let refs: Vec<&PreparedObs> = items.iter().collect();
+        let obs = build_obs(&refs, Device::Cpu, false, true);
+        let grid: Vec<f32> = Vec::try_from(obs.grid.reshape([-1])).unwrap();
+        assert!(grid.iter().all(|v| v.is_finite()), "grid must be finite");
+        assert_eq!(obs.grid.size(), [1, policy::C_GRID, 4, 5]);
+        // CPU path must match flag-off byte-for-byte (no Half round-trip).
+        let plain = build_obs(&refs, Device::Cpu, false, false);
+        assert_eq!(
+            grid,
+            Vec::<f32>::try_from(plain.grid.reshape([-1])).unwrap()
+        );
     }
 }

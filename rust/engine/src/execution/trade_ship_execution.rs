@@ -1,11 +1,12 @@
-//! Trade ship voyage (`TradeShipExecution.ts` subset).
+//! Trade ship voyage (`TradeShipExecution.ts`).
 //!
-//! Piracy/capture (`WarshipExecution` stealing an in-transit trade ship) is
-//! still a known gap: warship AI is ported (`warship_ai::track_ships_and_retaliate`),
-//! but this execution never reassigns `orig_owner` when a warship captures the
-//! ship mid-voyage. Port ends can still change owner via ordinary land conquest,
-//! so both ends are re-resolved by unit id every tick rather than frozen at
-//! spawn time.
+//! Warship piracy is modeled end-to-end: `WarshipExecution::hunt_trade_ship`
+//! calls `Game::capture_unit`, and this execution detects the owner change
+//! (`ship_owner != orig_owner_small_id`), sets `was_captured`, redirects the
+//! voyage to the capturer's nearest port in the same water component, and
+//! pays voyage gold to the pirate on `complete`. Port ends can also change
+//! owner via land conquest, so both ends are re-resolved by unit id every
+//! tick rather than frozen at spawn time.
 
 use super::Execution;
 use crate::core::schemas::unit_type;
@@ -252,5 +253,122 @@ impl Execution for TradeShipExecution {
 
     fn active_during_spawn(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod piracy_tests {
+    use super::*;
+    use crate::core::schemas::unit_type;
+    use crate::execution::Execution;
+    use crate::game::{PlayerInfo, PlayerType};
+    use crate::map::{GameMap, MapMeta};
+
+    fn water_game(width: u32, height: u32) -> Game {
+        let n = (width * height) as usize;
+        let map = GameMap::from_terrain_bytes(
+            &MapMeta {
+                width,
+                height,
+                num_land_tiles: 0,
+            },
+            &vec![0u8; n],
+        )
+        .expect("all-water test map");
+        let mini_w = width.div_ceil(2);
+        let mini_h = height.div_ceil(2);
+        let mini_n = (mini_w * mini_h) as usize;
+        let mini_map = GameMap::from_terrain_bytes(
+            &MapMeta {
+                width: mini_w,
+                height: mini_h,
+                num_land_tiles: 0,
+            },
+            &vec![0u8; mini_n],
+        )
+        .expect("all-water test mini map");
+        let mut game = Game::default();
+        game.map = map;
+        game.mini_map = mini_map;
+        game.bfs = crate::water::BfsScratch::new(n);
+        game.water_astar = crate::water::WaterAstarScratch::new(n);
+        game.mini_water_astar = crate::water::WaterAstarScratch::new(mini_n);
+        game.mini_water_hpa = Some(crate::water_hpa::WaterHierarchical::new(&game.mini_map, true));
+        game.water_component = crate::water::build_water_components(&game.map);
+        game.end_spawn_phase();
+        game
+    }
+
+    fn add_nation(game: &mut Game, id: &str) -> u16 {
+        game.add_from_info(&PlayerInfo {
+            name: id.into(),
+            player_type: PlayerType::Nation,
+            client_id: Some(id.into()),
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        })
+    }
+
+    /// Warship capture mid-voyage: TradeShipExecution must detect the owner
+    /// change, mark `was_captured`, and redirect toward the pirate's port.
+    #[test]
+    fn captured_trade_ship_redirects_to_pirate_port() {
+        let mut game = water_game(40, 40);
+        let pirate = add_nation(&mut game, "pirate");
+        let merchant = add_nation(&mut game, "merchant");
+        let customer = add_nation(&mut game, "customer");
+
+        let pirate_port_tile = game.ref_xy(5, 5);
+        let ship_tile = game.ref_xy(20, 20);
+        let dst_tile = game.ref_xy(35, 35);
+
+        let pirate_port = game.build_unit(pirate, unit_type::PORT, pirate_port_tile);
+        let ship_id = game.build_unit(merchant, unit_type::TRADE_SHIP, ship_tile);
+        let dst_port = game.build_unit(customer, unit_type::PORT, dst_tile);
+
+        let mut exec = TradeShipExecution::new_for_test(merchant, dst_port, ship_id);
+        assert_eq!(exec.destination_port_unit_id(), dst_port);
+
+        game.capture_unit(merchant, pirate, ship_id);
+        assert_eq!(game.find_unit_owner(ship_id), Some(pirate));
+
+        exec.tick(&mut game, 1);
+        assert!(exec.was_captured, "owner change must set was_captured");
+        assert_eq!(
+            exec.destination_port_unit_id(),
+            pirate_port,
+            "captured ship should redirect to pirate's nearest port"
+        );
+        assert!(exec.is_active());
+    }
+
+    /// Captured voyage gold goes to the pirate (current ship owner), not
+    /// the original trade partners — mirrors TS `TradeShipExecution.complete`.
+    #[test]
+    fn captured_trade_ship_pays_gold_to_pirate_on_complete() {
+        let mut game = water_game(20, 20);
+        let pirate = add_nation(&mut game, "pirate");
+        let merchant = add_nation(&mut game, "merchant");
+
+        let pirate_port_tile = game.ref_xy(2, 2);
+        let ship_tile = game.ref_xy(2, 2); // already at pirate port → complete on tick
+        let _pirate_port = game.build_unit(pirate, unit_type::PORT, pirate_port_tile);
+        let ship_id = game.build_unit(merchant, unit_type::TRADE_SHIP, ship_tile);
+
+        let mut exec = TradeShipExecution::new_for_test(merchant, _pirate_port, ship_id);
+        exec.tiles_traveled = 10;
+        game.capture_unit(merchant, pirate, ship_id);
+
+        let gold_before = game.player_by_small_id(pirate).unwrap().gold;
+        exec.tick(&mut game, 1);
+        assert!(!exec.is_active(), "voyage should complete at pirate port");
+        let gold_after = game.player_by_small_id(pirate).unwrap().gold;
+        assert!(
+            gold_after > gold_before,
+            "pirate should receive voyage gold ({gold_before} -> {gold_after})"
+        );
+        assert!(game.find_unit_owner(ship_id).is_none(), "ship removed on complete");
     }
 }
