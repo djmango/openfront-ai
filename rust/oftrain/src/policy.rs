@@ -681,7 +681,16 @@ impl PolicyNet {
     /// polynomially (~1/x^2) rather than dropping to exactly zero, so
     /// even a badly-drifted prediction still gets pulled back toward a
     /// sane range instead of getting stuck there forever.
-    const VALUE_CLAMP_ABS: f64 = 1.0e4;
+    /// Chosen relative to `train::Config::ret_clip`'s default (3000.0,
+    /// the value *target*'s clamp): the previous 1e4 here left a wide
+    /// "dead zone" (3000-10000) where a drifted prediction is guaranteed
+    /// wrong against the capped target but the soft bound barely engages
+    /// (it's only a near-identity for |x| << this constant), needing many
+    /// more updates to get pulled back than a tighter, ret_clip-aligned
+    /// bound would. 5000 keeps a comfortable 1.67x margin above ret_clip
+    /// (so a legitimately-near-cap-scale prediction isn't over-compressed)
+    /// while meaningfully shrinking that dead zone.
+    const VALUE_CLAMP_ABS: f64 = 5.0e3;
     fn sanitize_value(value: &Tensor) -> Tensor {
         let v = value.nan_to_num(0.0, 1.0e12, -1.0e12);
         &v / (v.abs() / Self::VALUE_CLAMP_ABS + 1.0)
