@@ -1,10 +1,11 @@
 //! Trade ship voyage (`TradeShipExecution.ts` subset).
 //!
-//! Piracy/capture (`WarshipExecution` stealing an in-transit trade ship) is not
-//! modeled: native has no active Warship AI yet (see `nation_tick::track_ships_and_retaliate`
-//! - "no-op until warships are ported"), so a trade ship's owner never changes here.
-//! The port counterparts *can* change owner via ordinary land conquest, so both
-//! ends are re-resolved by unit id every tick rather than frozen at spawn time.
+//! Piracy/capture (`WarshipExecution` stealing an in-transit trade ship) is
+//! still a known gap: warship AI is ported (`warship_ai::track_ships_and_retaliate`),
+//! but this execution never reassigns `orig_owner` when a warship captures the
+//! ship mid-voyage. Port ends can still change owner via ordinary land conquest,
+//! so both ends are re-resolved by unit id every tick rather than frozen at
+//! spawn time.
 
 use super::Execution;
 use crate::core::schemas::unit_type;
