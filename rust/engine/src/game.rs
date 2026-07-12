@@ -2022,6 +2022,13 @@ impl Game {
             if let Some(p) = self.player_by_small_id_mut(to_small_id) {
                 p.units.push(unit);
             }
+            // TS TrainStation keeps a live Unit ref so owner/isActive track
+            // capture automatically — update the cached station owner here.
+            crate::rail::update_station_owner_for_unit(
+                &mut self.rail_network,
+                unit_id,
+                to_small_id,
+            );
         }
     }
 
