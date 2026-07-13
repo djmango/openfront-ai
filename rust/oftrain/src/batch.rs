@@ -210,6 +210,16 @@ struct UniformAeGrids {
     coarse_latent: Option<Tensor>,
 }
 
+fn exact_uniform_shape(items: &[&PreparedObs]) -> bool {
+    !items.is_empty()
+        && items.iter().all(|item| {
+            item.gh == items[0].gh
+                && item.gw == items[0].gw
+                && item.ae_raw.hr == items[0].ae_raw.hr
+                && item.ae_raw.wr == items[0].ae_raw.wr
+        })
+}
+
 /// Use the shared-input path only when both encoders and a persistent-actor
 /// cache are present. Non-persistent, uncached, and fine-only callers keep the
 /// established separate encoder path.
@@ -261,10 +271,23 @@ fn encode_uniform_ae_grids(
     let (gh, gw) = (items[0].gh, items[0].gw);
     let raws: Vec<&ae::AeRaw> = items.iter().map(|it| &it.ae_raw).collect();
 
-    let (fine_items, coarse_items) =
-        encode_pair_latents(pair, &raws, device, terrain_cache.as_deref_mut())?;
-    let fine_refs: Vec<&Tensor> = fine_items.iter().collect();
-    let fine_latent = Tensor::stack(&fine_refs, 0);
+    let (fine_latent, coarse_latent) = if let Some(cache) = terrain_cache
+        .as_deref_mut()
+        .filter(|cache| cache.supports_shared_pair_inputs())
+    {
+        let encoded = ae::encode_uniform_latent_batch_device(pair, &raws, device, cache)?;
+        (encoded.fine, encoded.coarse)
+    } else {
+        let (fine_items, coarse_items) =
+            encode_pair_latents(pair, &raws, device, terrain_cache.as_deref_mut())?;
+        let fine_refs: Vec<&Tensor> = fine_items.iter().collect();
+        let fine = Tensor::stack(&fine_refs, 0);
+        let coarse = coarse_items.map(|items| {
+            let refs: Vec<&Tensor> = items.iter().collect();
+            Tensor::stack(&refs, 0)
+        });
+        (fine, coarse)
+    };
     let fine = assemble_uniform_device_grid(
         items,
         &fine_latent,
@@ -276,13 +299,11 @@ fn encode_uniform_ae_grids(
         false,
     );
 
-    let (coarse, coarse_latent) = if let Some(coarse_items) = coarse_items {
-        let coarse_refs: Vec<&Tensor> = coarse_items.iter().collect();
-        let latent = Tensor::stack(&coarse_refs, 0);
+    let coarse = if let Some(latent) = coarse_latent.as_ref() {
         let (cgh, cgw) = (gh.div_ceil(2), gw.div_ceil(2));
         let grid = assemble_uniform_device_grid(
             items,
-            &latent,
+            latent,
             cgh,
             cgw,
             device,
@@ -290,9 +311,9 @@ fn encode_uniform_ae_grids(
             fp16_rollout,
             true,
         );
-        (Some(grid), Some(latent))
+        Some(grid)
     } else {
-        (None, None)
+        None
     };
 
     debug_assert_eq!(fine.size(), [b, policy::C_GRID, gh as i64, gw as i64]);
@@ -465,6 +486,34 @@ fn build_device_ae_obs(
     )
 }
 
+fn build_uniform_device_ae_obs(
+    items: &[&PreparedObs],
+    device: Device,
+    pinned_h2d: bool,
+    fp16_rollout: bool,
+    pair: &AePair,
+    terrain_cache: &mut TerrainDeviceCache,
+) -> anyhow::Result<Obs> {
+    debug_assert!(exact_uniform_shape(items));
+    let resident = encode_uniform_ae_grids(
+        items,
+        device,
+        pinned_h2d,
+        fp16_rollout,
+        pair,
+        Some(terrain_cache),
+    )?;
+    build_obs_from_parts(
+        items,
+        device,
+        pinned_h2d,
+        fp16_rollout,
+        None,
+        None,
+        Some((resident.fine, resident.coarse)),
+    )
+}
+
 fn host_grids_from_latent(
     items: &[&PreparedObs],
     latent: &Tensor,
@@ -580,19 +629,28 @@ pub fn build_compact_rollout_obs(
     ae: &AePair,
     terrain_cache: &mut TerrainDeviceCache,
 ) -> anyhow::Result<Obs> {
-    let compact = {
+    let (compact, uniform) = {
         let refs: Vec<&PreparedObs> = items.iter().collect();
-        let full = build_device_ae_obs(
-            &refs,
-            device,
-            pinned_h2d,
-            fp16_rollout,
-            ae,
-            Some(terrain_cache),
-        )?;
-        PolicyNet::compact_observation(&full)
+        let uniform = exact_uniform_shape(&refs);
+        let full = if uniform {
+            build_uniform_device_ae_obs(&refs, device, pinned_h2d, fp16_rollout, ae, terrain_cache)?
+        } else {
+            build_device_ae_obs(
+                &refs,
+                device,
+                pinned_h2d,
+                fp16_rollout,
+                ae,
+                Some(terrain_cache),
+            )?
+        };
+        (PolicyNet::compact_observation(&full), uniform)
     };
-    store_compact_host(items, &compact)?;
+    if uniform {
+        store_uniform_compact_host(items, &compact)?;
+    } else {
+        store_compact_host(items, &compact)?;
+    }
     Ok(compact)
 }
 
@@ -606,14 +664,18 @@ pub fn build_compact_obs_with_ae(
     ae: &AePair,
     terrain_cache: &mut TerrainDeviceCache,
 ) -> anyhow::Result<Obs> {
-    let full = build_device_ae_obs(
-        items,
-        device,
-        pinned_h2d,
-        fp16_rollout,
-        ae,
-        Some(terrain_cache),
-    )?;
+    let full = if exact_uniform_shape(items) {
+        build_uniform_device_ae_obs(items, device, pinned_h2d, fp16_rollout, ae, terrain_cache)?
+    } else {
+        build_device_ae_obs(
+            items,
+            device,
+            pinned_h2d,
+            fp16_rollout,
+            ae,
+            Some(terrain_cache),
+        )?
+    };
     Ok(PolicyNet::compact_observation(&full))
 }
 
@@ -628,10 +690,10 @@ pub fn build_rollout_obs(
     ae: &AePair,
     terrain_cache: &mut TerrainDeviceCache,
 ) -> anyhow::Result<Obs> {
-    let uniform = !items.is_empty()
-        && items
-            .iter()
-            .all(|it| it.gh == items[0].gh && it.gw == items[0].gw);
+    let uniform = {
+        let refs: Vec<&PreparedObs> = items.iter().collect();
+        exact_uniform_shape(&refs)
+    };
     if !uniform {
         encode_prepared_obs(items, device, ae, terrain_cache)?;
         let refs: Vec<&PreparedObs> = items.iter().collect();
@@ -723,10 +785,7 @@ fn build_obs_with_ae_cache(
     ae: Option<&AePair>,
     mut terrain_cache: Option<&mut TerrainDeviceCache>,
 ) -> anyhow::Result<Obs> {
-    let uniform = !items.is_empty()
-        && items
-            .iter()
-            .all(|it| it.gh == items[0].gh && it.gw == items[0].gw);
+    let uniform = exact_uniform_shape(items);
     if uniform {
         if let Some(pair) = ae {
             let resident = encode_uniform_ae_grids(
@@ -943,12 +1002,12 @@ fn build_obs_from_parts(
 
 fn tensor_vec_f16(t: &Tensor) -> anyhow::Result<Vec<half::f16>> {
     Vec::<half::f16>::try_from(t.to_device(Device::Cpu).to_kind(Kind::Half).reshape([-1]))
-        .map_err(|e| anyhow::anyhow!("compact fp16 host copy failed: {e}"))
+    .map_err(|e| anyhow::anyhow!("compact fp16 host copy failed: {e}"))
 }
 
 fn tensor_vec_f32(t: &Tensor) -> anyhow::Result<Vec<f32>> {
     Vec::<f32>::try_from(t.to_device(Device::Cpu).to_kind(Kind::Float).reshape([-1]))
-        .map_err(|e| anyhow::anyhow!("compact mask host copy failed: {e}"))
+    .map_err(|e| anyhow::anyhow!("compact mask host copy failed: {e}"))
 }
 
 fn store_compact_host(items: &mut [PreparedObs], obs: &Obs) -> anyhow::Result<()> {
@@ -961,7 +1020,7 @@ fn store_compact_host(items: &mut [PreparedObs], obs: &Obs) -> anyhow::Result<()
         "compact batch/item length mismatch"
     );
 
-    // One D2H per payload, then split on CPU. No Tensor escapes this actor call.
+    // Established mixed-shape fallback: one D2H per payload, then split on CPU.
     let fine = tensor_vec_f16(&obs.grid)?;
     let coarse = tensor_vec_f16(coarse)?;
     let fine_valid = tensor_vec_f32(&obs.grid_valid)?;
@@ -990,19 +1049,100 @@ fn store_compact_host(items: &mut [PreparedObs], obs: &Obs) -> anyhow::Result<()
             coarse_h: ch as usize,
             coarse_w: cw as usize,
         });
-        // These full-resolution buffers are actor inputs, not rollout data.
-        it.grid = None;
-        it.grid_coarse = None;
-        it.ae_raw.owners.clear();
-        it.ae_raw.static_terrain.land_mag = Vec::<f32>::new().into();
-        it.ae_raw.fallout.clear();
-        it.ae_raw.stat.clear();
-        it.ego.clear();
-        it.db.clear();
-        it.transient.clear();
-        it.legal_tile.clear();
+        clear_full_resolution_payload(it);
     }
     Ok(())
+}
+
+fn tensor_vec_f16_device(t: &Tensor) -> anyhow::Result<Vec<half::f16>> {
+    Vec::<half::f16>::try_from(
+        t.to_kind(Kind::Half)
+            .contiguous()
+            .to_device(Device::Cpu)
+            .reshape([-1]),
+    )
+    .map_err(|e| anyhow::anyhow!("compact fp16 host copy failed: {e}"))
+}
+
+fn store_uniform_compact_host(items: &mut [PreparedObs], obs: &Obs) -> anyhow::Result<()> {
+    let meta = obs.compact.as_ref().expect("compact metadata");
+    let (b, _, fh, fw) = obs.grid.size4()?;
+    let coarse = obs.grid_coarse.as_ref().expect("compact coarse grid");
+    let (_, _, ch, cw) = coarse.size4()?;
+    anyhow::ensure!(
+        b as usize == items.len(),
+        "compact batch/item length mismatch"
+    );
+
+    let fine_n = policy::C_GRID as usize * fh as usize * fw as usize;
+    let fine_mask_n = fh as usize * fw as usize;
+    let coarse_n = policy::C_GRID as usize * ch as usize * cw as usize;
+    let coarse_mask_n = ch as usize * cw as usize;
+    let batch = b as usize;
+
+    // Three synchronous, native-width D2H transfers for the complete batch:
+    // fp16 grids, f32 masks, and i64 origins. Concatenation also materializes
+    // contiguous T-major/N-minor payloads before the host ownership boundary.
+    let grids = Tensor::cat(&[obs.grid.flatten(0, -1), coarse.flatten(0, -1)], 0);
+    let grids = tensor_vec_f16_device(&grids)?;
+    let fine_len = batch * fine_n;
+    let (fine, coarse) = grids.split_at(fine_len);
+    let masks = Tensor::cat(
+        &[
+            obs.grid_valid.flatten(0, -1),
+            obs.legal_tile.flatten(0, -1),
+            meta.coarse_valid.flatten(0, -1),
+            meta.coarse_legal.flatten(0, -1),
+        ],
+        0,
+    );
+    let masks = tensor_vec_f32(&masks)?;
+    let fine_mask_len = batch * fine_mask_n;
+    let coarse_mask_len = batch * coarse_mask_n;
+    let (fine_valid, masks) = masks.split_at(fine_mask_len);
+    let (fine_legal, masks) = masks.split_at(fine_mask_len);
+    let (coarse_valid, coarse_legal) = masks.split_at(coarse_mask_len);
+    anyhow::ensure!(
+        coarse_legal.len() == coarse_mask_len,
+        "compact mask payload length mismatch"
+    );
+    let origins = Tensor::stack(&[&meta.origin_y, &meta.origin_x], 1)
+        .contiguous()
+        .to_device(Device::Cpu);
+    let origins: Vec<i64> = Vec::try_from(origins.reshape([-1]))?;
+
+    for (i, it) in items.iter_mut().enumerate() {
+        it.compact = Some(CompactGrid {
+            fine: fine[i * fine_n..(i + 1) * fine_n].to_vec(),
+            fine_valid: fine_valid[i * fine_mask_n..(i + 1) * fine_mask_n].to_vec(),
+            fine_legal: fine_legal[i * fine_mask_n..(i + 1) * fine_mask_n].to_vec(),
+            fine_h: fh as usize,
+            fine_w: fw as usize,
+            origin_y: origins[2 * i],
+            origin_x: origins[2 * i + 1],
+            coarse: coarse[i * coarse_n..(i + 1) * coarse_n].to_vec(),
+            coarse_valid: coarse_valid[i * coarse_mask_n..(i + 1) * coarse_mask_n].to_vec(),
+            coarse_legal: coarse_legal[i * coarse_mask_n..(i + 1) * coarse_mask_n].to_vec(),
+            coarse_h: ch as usize,
+            coarse_w: cw as usize,
+        });
+        clear_full_resolution_payload(it);
+    }
+    Ok(())
+}
+
+fn clear_full_resolution_payload(it: &mut PreparedObs) {
+    // These full-resolution buffers are actor inputs, not rollout data.
+    it.grid = None;
+    it.grid_coarse = None;
+    it.ae_raw.owners.clear();
+    it.ae_raw.static_terrain.land_mag = Vec::<f32>::new().into();
+    it.ae_raw.fallout.clear();
+    it.ae_raw.stat.clear();
+    it.ego.clear();
+    it.db.clear();
+    it.transient.clear();
+    it.legal_tile.clear();
 }
 
 fn build_compact_host_obs(
@@ -1518,6 +1658,198 @@ mod tests {
         assert!(
             compact_grid_bytes < old_fine_bytes,
             "compact fp16 grids must reduce rollout bytes ({compact_grid_bytes} vs {old_fine_bytes})"
+        );
+    }
+
+    fn compact_payload_bytes(c: &CompactGrid) -> Vec<u8> {
+        let mut out = Vec::new();
+        for values in [&c.fine, &c.coarse] {
+            for value in values {
+                out.extend_from_slice(&value.to_bits().to_ne_bytes());
+            }
+        }
+        for values in [
+            &c.fine_valid,
+            &c.fine_legal,
+            &c.coarse_valid,
+            &c.coarse_legal,
+        ] {
+            for value in values {
+                out.extend_from_slice(&value.to_bits().to_ne_bytes());
+            }
+        }
+        for value in [
+            c.fine_h as i64,
+            c.fine_w as i64,
+            c.origin_y,
+            c.origin_x,
+            c.coarse_h as i64,
+            c.coarse_w as i64,
+        ] {
+            out.extend_from_slice(&value.to_ne_bytes());
+        }
+        out
+    }
+
+    /// Forces equal-shaped data through the general mixed machinery and
+    /// proves the exact uniform assembly/foveation/host path is only a
+    /// representation optimization. 53x59 also exercises odd fine/coarse
+    /// dimensions and nontrivial crop origins.
+    #[test]
+    fn exact_uniform_compact_matches_forced_mixed_bytes_and_order() {
+        let (b, gh, gw) = (4usize, 53usize, 59usize);
+        let (cgh, cgw) = (gh.div_ceil(2), gw.div_ceil(2));
+        let mut items: Vec<PreparedObs> = (0..b).map(|_| tiny_prepared_obs(gh, gw)).collect();
+        for (bi, item) in items.iter_mut().enumerate() {
+            item.scalars[0] = 700.0 + bi as f32; // T-major/N-minor sentinel.
+            for (i, value) in item.ego.iter_mut().enumerate() {
+                *value = ((i * 17 + bi * 29) % 101) as f32 / 101.0;
+            }
+            // Give each item a different crop origin through the own-ego plane.
+            item.ego[..gh * gw].fill(0.0);
+            let y = 1 + bi * 11;
+            let x = 2 + bi * 13;
+            item.ego[y * gw + x] = 1.0;
+            for y in 0..gh {
+                for x in 0..gw {
+                    item.legal_tile[y * gw + x] = ((x * 3 + y * 5 + bi) % 7 != 0) as u8 as f32;
+                }
+            }
+            for (i, value) in item.db.iter_mut().enumerate() {
+                *value = ((i + bi * 7) % 31) as f32 / 9.0;
+            }
+            for (i, value) in item.transient.iter_mut().enumerate() {
+                *value = ((i * 11 + bi * 5) % 43) as f32 / 13.0;
+            }
+        }
+        let fine_values: Vec<f32> = (0..b * policy::LATENT_C as usize * gh * gw)
+            .map(|i| ((i * 19 + 3) % 257) as f32 / 37.0)
+            .collect();
+        let coarse_values: Vec<f32> = (0..b * policy::LATENT_C as usize * cgh * cgw)
+            .map(|i| ((i * 23 + 5) % 263) as f32 / 41.0)
+            .collect();
+        let fine_latent = Tensor::from_slice(&fine_values).view([
+            b as i64,
+            policy::LATENT_C,
+            gh as i64,
+            gw as i64,
+        ]);
+        let coarse_latent = Tensor::from_slice(&coarse_values).view([
+            b as i64,
+            policy::LATENT_C,
+            cgh as i64,
+            cgw as i64,
+        ]);
+
+        let refs: Vec<&PreparedObs> = items.iter().collect();
+        assert!(exact_uniform_shape(&refs));
+        let uniform_fine = assemble_uniform_device_grid(
+            &refs,
+            &fine_latent,
+            gh,
+            gw,
+            Device::Cpu,
+            false,
+            false,
+            false,
+        );
+        let uniform_coarse = assemble_uniform_device_grid(
+            &refs,
+            &coarse_latent,
+            cgh,
+            cgw,
+            Device::Cpu,
+            false,
+            false,
+            true,
+        );
+        let fine_items: Vec<Tensor> = (0..b).map(|i| fine_latent.select(0, i as i64)).collect();
+        let coarse_items: Vec<Tensor> = (0..b).map(|i| coarse_latent.select(0, i as i64)).collect();
+        let mixed_fine = assemble_mixed_device_grid(
+            &refs,
+            &fine_items,
+            gh,
+            gw,
+            Device::Cpu,
+            false,
+            false,
+            false,
+        );
+        let mixed_coarse = assemble_mixed_device_grid(
+            &refs,
+            &coarse_items,
+            cgh,
+            cgw,
+            Device::Cpu,
+            false,
+            false,
+            true,
+        );
+        let uniform_full = build_obs_from_parts(
+            &refs,
+            Device::Cpu,
+            false,
+            false,
+            None,
+            None,
+            Some((uniform_fine, Some(uniform_coarse))),
+        )
+        .unwrap();
+        let mixed_full = build_obs_from_parts(
+            &refs,
+            Device::Cpu,
+            false,
+            false,
+            None,
+            None,
+            Some((mixed_fine, Some(mixed_coarse))),
+        )
+        .unwrap();
+        let uniform_compact = PolicyNet::compact_observation(&uniform_full);
+        let mixed_compact = PolicyNet::compact_observation(&mixed_full);
+        let values = |t: &Tensor| Vec::<f32>::try_from(t.reshape([-1])).unwrap();
+        assert_eq!(values(&uniform_compact.grid), values(&mixed_compact.grid));
+        assert_eq!(
+            values(uniform_compact.grid_coarse.as_ref().unwrap()),
+            values(mixed_compact.grid_coarse.as_ref().unwrap())
+        );
+        assert_eq!(
+            values(&uniform_compact.grid_valid),
+            values(&mixed_compact.grid_valid)
+        );
+        assert_eq!(
+            values(&uniform_compact.legal_tile),
+            values(&mixed_compact.legal_tile)
+        );
+        let um = uniform_compact.compact.as_ref().unwrap();
+        let mm = mixed_compact.compact.as_ref().unwrap();
+        assert_eq!(values(&um.coarse_valid), values(&mm.coarse_valid));
+        assert_eq!(values(&um.coarse_legal), values(&mm.coarse_legal));
+        assert_eq!(
+            Vec::<i64>::try_from(&um.origin_y).unwrap(),
+            Vec::<i64>::try_from(&mm.origin_y).unwrap()
+        );
+        assert_eq!(
+            Vec::<i64>::try_from(&um.origin_x).unwrap(),
+            Vec::<i64>::try_from(&mm.origin_x).unwrap()
+        );
+
+        let mut uniform_items = items.clone();
+        let mut mixed_items = items;
+        store_uniform_compact_host(&mut uniform_items, &uniform_compact).unwrap();
+        store_compact_host(&mut mixed_items, &mixed_compact).unwrap();
+        for i in 0..b {
+            assert_eq!(
+                compact_payload_bytes(uniform_items[i].compact.as_ref().unwrap()),
+                compact_payload_bytes(mixed_items[i].compact.as_ref().unwrap()),
+                "host CompactGrid payload differs at T-major/N-minor item {i}"
+            );
+        }
+        let rebuilt_refs: Vec<&PreparedObs> = uniform_items.iter().collect();
+        let rebuilt = build_obs(&rebuilt_refs, Device::Cpu, false, false);
+        assert_eq!(
+            Vec::<f32>::try_from(rebuilt.scalars.select(1, 0)).unwrap(),
+            vec![700.0, 701.0, 702.0, 703.0]
         );
     }
 }

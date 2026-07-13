@@ -578,6 +578,165 @@ pub struct DualLatents {
     pub coarse: Vec<Tensor>,
 }
 
+/// Batched fine/coarse outputs for an exactly uniform actor batch. Unlike
+/// [`DualLatents`], these tensors retain their batch dimension so callers do
+/// not have to split, pad, and stack them again before policy inference.
+#[derive(Debug)]
+pub struct UniformDualLatents {
+    pub fine: Tensor,
+    pub coarse: Option<Tensor>,
+}
+
+/// Same-shape paired encode using contiguous batched inputs and outputs.
+///
+/// This is intentionally separate from [`encode_dual_latent_batch_device`]:
+/// mixed-shape callers retain that established grouping/order-restoration
+/// path unchanged. Every tensor here is owned by the persistent actor thread.
+pub fn encode_uniform_latent_batch_device(
+    pair: &AePair,
+    items: &[&AeRaw],
+    device: Device,
+    terrain_cache: &mut TerrainDeviceCache,
+) -> Result<UniformDualLatents> {
+    anyhow::ensure!(!items.is_empty(), "uniform AE batch must not be empty");
+    let groups = validate_items(items)?;
+    let (hr, wr) = (items[0].hr, items[0].wr);
+    anyhow::ensure!(
+        groups.len() == 1 && items.iter().all(|item| item.hr == hr && item.wr == wr),
+        "uniform AE batch contains mixed full-resolution shapes"
+    );
+    anyhow::ensure!(
+        terrain_cache.device == device,
+        "terrain cache device {:?} does not match encode device {:?}",
+        terrain_cache.device,
+        device
+    );
+    anyhow::ensure!(
+        terrain_cache.supports_shared_pair_inputs(),
+        "uniform AE encode requires persistent actor cache ownership"
+    );
+    anyhow::ensure!(
+        pair.fine.latent_down == REGION,
+        "uniform AE fine latent_down {}, expected {REGION}",
+        pair.fine.latent_down
+    );
+    if let Some(coarse) = pair.coarse.as_ref() {
+        anyhow::ensure!(
+            coarse.latent_down == COARSE_REGION,
+            "uniform AE coarse latent_down {}, expected {COARSE_REGION}",
+            coarse.latent_down
+        );
+    }
+
+    let pix = hr * wr;
+    let packed_wr = packed_fallout_row_bytes(wr);
+    let per = (MAX_ENC_PIX / pix).max(1);
+    let fine_gh = hr / REGION as usize;
+    let fine_gw = wr / REGION as usize;
+    let coarse_encoder = pair.coarse.as_ref();
+    let mut fine_chunks = Vec::with_capacity(items.len().div_ceil(per));
+    let mut coarse_chunks = Vec::with_capacity(items.len().div_ceil(per));
+
+    for chunk in items.chunks(per) {
+        let b = chunk.len() as i64;
+        let use_terrain_cache = device.is_cuda();
+        let mut owners = Vec::with_capacity(chunk.len() * pix);
+        let mut terrain = Vec::with_capacity(if use_terrain_cache {
+            0
+        } else {
+            chunk.len() * TERRAIN_CHANNELS as usize * pix
+        });
+        let mut fallout = Vec::with_capacity(if use_terrain_cache {
+            chunk.len() * hr * packed_wr
+        } else {
+            0
+        });
+        let mut fine_static =
+            Vec::with_capacity(chunk.len() * NUM_STATIC as usize * fine_gh * fine_gw);
+        for item in chunk {
+            owners.extend_from_slice(&item.owners);
+            if use_terrain_cache {
+                fallout.extend_from_slice(&item.fallout);
+            } else {
+                terrain.extend_from_slice(item.static_terrain.land_mag.as_ref());
+                terrain.extend(unpack_fallout_host(&item.fallout, hr, wr));
+            }
+            fine_static.extend_from_slice(&item.stat);
+        }
+
+        // All host-backed uploads are synchronous: no temporary vector can
+        // be dropped while a device copy is still reading it.
+        let owners_t = upload_owner_indices(&owners, [b, hr as i64, wr as i64], device)?;
+        let terrain_t = if use_terrain_cache {
+            let shifts = terrain_cache.fallout_shifts();
+            let static_items: Vec<Tensor> = chunk
+                .iter()
+                .map(|item| terrain_cache.static_tensor(&item.static_terrain))
+                .collect();
+            let static_refs: Vec<&Tensor> = static_items.iter().collect();
+            let static_t = Tensor::stack(&static_refs, 0);
+            let packed_t = Tensor::from_slice(&fallout)
+                .view([b, hr as i64, packed_wr as i64])
+                .to_device(device);
+            let fallout_t = unpack_fallout_device(&packed_t, wr, &shifts).unsqueeze(1);
+            Tensor::cat(&[static_t, fallout_t], 1)
+        } else {
+            Tensor::from_slice(&terrain)
+                .view([b, TERRAIN_CHANNELS, hr as i64, wr as i64])
+                .to_device(device)
+                .to_kind(Kind::Float)
+        };
+        let fine_static_t = Tensor::from_slice(&fine_static)
+            .view([b, NUM_STATIC, fine_gh as i64, fine_gw as i64])
+            .to_device(device)
+            .to_kind(Kind::Float);
+
+        let (fine_z, coarse_z) = tch::no_grad(|| {
+            let fine_z = pair.fine.encode(&owners_t, &terrain_t, &fine_static_t);
+            let coarse_z = coarse_encoder.map(|encoder| {
+                let coarse_static = fine_static_t.max_pool2d([2, 2], [2, 2], [0, 0], [1, 1], true);
+                encoder.encode(&owners_t, &terrain_t, &coarse_static)
+            });
+            (fine_z, coarse_z)
+        });
+        fine_chunks.push(fine_z);
+        if let Some(z) = coarse_z {
+            coarse_chunks.push(z);
+        }
+    }
+
+    let join = |mut chunks: Vec<Tensor>| {
+        if chunks.len() == 1 {
+            chunks.pop().unwrap()
+        } else {
+            let refs: Vec<&Tensor> = chunks.iter().collect();
+            Tensor::cat(&refs, 0)
+        }
+    };
+    let fine = join(fine_chunks);
+    let coarse = coarse_encoder.map(|_| join(coarse_chunks));
+    let b = items.len() as i64;
+    anyhow::ensure!(
+        fine.size() == [b, pair.fine.latent_c, fine_gh as i64, fine_gw as i64],
+        "uniform fine AE output has unexpected shape {:?}",
+        fine.size()
+    );
+    if let (Some(encoder), Some(z)) = (coarse_encoder, coarse.as_ref()) {
+        let expected = [
+            b,
+            encoder.latent_c,
+            fine_gh.div_ceil(2) as i64,
+            fine_gw.div_ceil(2) as i64,
+        ];
+        anyhow::ensure!(
+            z.size() == expected,
+            "uniform coarse AE output has unexpected shape {:?}",
+            z.size()
+        );
+    }
+    Ok(UniformDualLatents { fine, coarse })
+}
+
 /// Paired actor encode using one input upload per same-shape chunk.
 ///
 /// The AE pair, cache, packed inputs, temporary tensors, and returned latent
@@ -1054,6 +1213,41 @@ mod tests {
                 "coarse values item {i}"
             );
         }
+    }
+
+    #[test]
+    fn uniform_batched_encode_exactly_matches_forced_general_fine_and_coarse() {
+        let pair = random_pair();
+        // 3x5 fine and 2x3 coarse dimensions exercise odd ceil pooling.
+        let raws = [
+            patterned_raw(21, 24, 40),
+            patterned_raw(22, 24, 40),
+            patterned_raw(23, 24, 40),
+            patterned_raw(24, 24, 40),
+        ];
+        let refs: Vec<&AeRaw> = raws.iter().collect();
+        let mut uniform_cache = TerrainDeviceCache::new_persistent_actor(Device::Cpu);
+        let uniform =
+            encode_uniform_latent_batch_device(&pair, &refs, Device::Cpu, &mut uniform_cache)
+                .unwrap();
+
+        // Deliberately invoke the established general path for the same
+        // shapes, then reproduce its per-item stack at the policy boundary.
+        let mut general_cache = TerrainDeviceCache::new_persistent_actor(Device::Cpu);
+        let general =
+            encode_dual_latent_batch_device(&pair, &refs, Device::Cpu, &mut general_cache).unwrap();
+        let general_fine_refs: Vec<&Tensor> = general.fine.iter().collect();
+        let general_coarse_refs: Vec<&Tensor> = general.coarse.iter().collect();
+        let general_fine = Tensor::stack(&general_fine_refs, 0);
+        let general_coarse = Tensor::stack(&general_coarse_refs, 0);
+
+        assert_eq!(uniform.fine.size(), [4, LATENT_C, 3, 5]);
+        assert_eq!(uniform.coarse.as_ref().unwrap().size(), [4, LATENT_C, 2, 3]);
+        assert_eq!(flat_f32(&uniform.fine), flat_f32(&general_fine));
+        assert_eq!(
+            flat_f32(uniform.coarse.as_ref().unwrap()),
+            flat_f32(&general_coarse)
+        );
     }
 
     #[test]
