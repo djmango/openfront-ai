@@ -128,7 +128,10 @@ fn snapshot(game: &openfront_engine::game::Game, dump_units: bool) -> TickSnapsh
                 tiles: p.tiles_owned,
                 troops: p.troops,
                 gold: p.gold,
-                alive: p.alive,
+                // TS `PlayerImpl.isAlive()` is `_tiles.size > 0`; report the
+                // same value here so early failed-spawn diagnostics are not
+                // polluted by native's internal sticky flag.
+                alive: p.tiles_owned > 0,
                 hash: openfront_engine::hash::player_hash(p),
                 num_units: p.units.len(),
                 units,
