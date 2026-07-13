@@ -102,7 +102,7 @@ impl ShellExecution {
             let bonus_percent = game.wire.warship_veterancy_shell_damage_bonus();
             damage_multiplier = damage_multiplier * (100 + veterancy * bonus_percent) / 100;
         }
-        damage_multiplier
+        ((game.wire.shell_base_damage() as f64 / 250.0) * damage_multiplier as f64).round() as i32
     }
 
     fn hit_target(&mut self, game: &mut Game) {
@@ -262,9 +262,14 @@ mod tests {
             let d_base = base_shell.get_effect_on_target_for_testing(&game);
             let d_vet = vet_shell.get_effect_on_target_for_testing(&game);
 
-            // Same roll -> base damage (250 base) equals the rolled multiplier and the
-            // veteran's shot is the integer-boosted value.
-            assert_eq!(d_vet, d_base * (100 + max_vet * bonus_percent) / 100);
+            // Same roll -> veteran damage is boosted before the configured shell base damage
+            // scaling is applied.
+            let expected_vet = ((game.wire.shell_base_damage() as f64 / 250.0)
+                * (d_base * 250 / game.wire.shell_base_damage()
+                    * (100 + max_vet * bonus_percent)
+                    / 100) as f64)
+                .round() as i32;
+            assert_eq!(d_vet, expected_vet);
             boosted_values.insert(d_vet);
         }
 
@@ -302,7 +307,7 @@ mod tests {
 
     // Ported from `openfront/tests/ShellRandom.test.ts`. Unlike the veterancy tests above
     // (which pin the damage *formula*), these exercise the underlying PRNG draw directly:
-    // is the roll actually random per-shot, is it bounded to the documented 200-300 range,
+    // is the roll actually random per-shot, is it bounded to the documented scaled range,
     // and is it reproducible for a fixed tick seed. `getEffectOnTargetForTesting` is used
     // the same way the TS test file uses it - directly, without a real path/tick loop -
     // since the shot's own resolution logic (not shell travel) is what's under test.
@@ -310,7 +315,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn shell_damage_varies_randomly_between_200_and_300_base_damage() {
+        fn shell_damage_varies_randomly_between_scaled_base_damage_bounds() {
             let mut game = crate::test_util::plains_game(20, 20);
             add_player(&mut game, 1);
             add_player(&mut game, 2);
@@ -326,7 +331,7 @@ mod tests {
 
             assert!(!damages.is_empty());
             for &d in &damages {
-                assert!((200..=300).contains(&d), "d={d}");
+                assert!((240..=360).contains(&d), "d={d}");
             }
         }
 
