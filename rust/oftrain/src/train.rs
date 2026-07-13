@@ -542,6 +542,45 @@ mod v81_state_and_gate_tests {
     }
 
     #[test]
+    fn policy_manifest_is_machine_readable_and_versioned() {
+        let state = TrainState {
+            update: 81,
+            stage: 4,
+            ent_scale: 1.0,
+            lr_now: 1e-4,
+            total_env_steps: 123,
+            recent_wins: vec![],
+            best_eval_win: None,
+            best_eval_score: None,
+            v81_curriculum: true,
+            stage_env_targets: vec![],
+            envs_per_shard: 24,
+            requested_env_target: None,
+        };
+        let manifest = policy_manifest_value(
+            128,
+            2,
+            "weights/ae/fine.encoder.safetensors",
+            Some("weights/ae/coarse.encoder.safetensors"),
+            &state,
+        );
+        assert_eq!(manifest["format"], "oftrain-safetensors");
+        assert_eq!(manifest["manifest_schema_version"], 1);
+        assert_eq!(manifest["architecture"]["schema_version"], 1);
+        assert_eq!(
+            manifest["architecture"]["dimensions"]["grid_channels"],
+            policy::C_GRID
+        );
+        assert_eq!(
+            manifest["architecture"]["dimensions"]["grid_tower_channels"],
+            128
+        );
+        assert_eq!(manifest["autoencoders"]["fine"]["format"], "safetensors");
+        assert_eq!(manifest["update"], 81);
+        assert_eq!(manifest["stage"], 4);
+    }
+
+    #[test]
     fn resize_request_is_machine_readable_and_per_shard() {
         let request = EnvResizeRequest {
             format: 1,
@@ -605,6 +644,68 @@ fn save_checkpoint_state(path: &str, state: &TrainState) -> Result<()> {
         Ok(())
     })?;
     Ok(())
+}
+
+fn policy_manifest_value(
+    gc: i64,
+    blocks: i64,
+    ae_ckpt: &str,
+    coarse_ckpt: Option<&str>,
+    state: &TrainState,
+) -> serde_json::Value {
+    serde_json::json!({
+        "format": "oftrain-safetensors",
+        "manifest_schema_version": 1,
+        "architecture": {
+            "name": "oftrain-policy",
+            "schema_version": 1,
+            "dimensions": {
+                "grid_channels": policy::C_GRID,
+                "fine_grid_channels": policy::C_GRID_FINE,
+                "player_features": policy::P_FEAT,
+                "scalars": policy::N_SCALARS,
+                "local_planes": policy::N_LOCAL,
+                "actions": policy::N_ACTIONS,
+                "build_types": policy::N_BUILD,
+                "nuke_types": policy::N_NUKE,
+                "quantity_params": 2,
+                "grid_tower_channels": gc,
+                "grid_tower_blocks": blocks,
+                "hidden": policy::HIDDEN,
+                "player_hidden": policy::PC,
+                "local_hidden": policy::LC,
+                "transformer_layers": policy::TF_LAYERS,
+                "attention_heads": policy::N_HEAD,
+            },
+        },
+        "autoencoders": {
+            "fine": {"ref": ae_ckpt, "format": "safetensors"},
+            "coarse": coarse_ckpt.map(|reference| {
+                serde_json::json!({"ref": reference, "format": "safetensors"})
+            }),
+        },
+        "checkpoint": {
+            "weights": "latest.safetensors",
+            "state": "latest.state.json",
+        },
+        "update": state.update,
+        "stage": state.stage,
+    })
+}
+
+fn save_policy_manifest(cfg: &Config, state: &TrainState) -> Result<()> {
+    let path = format!("{}/manifest.json", cfg.ckpt_dir);
+    let manifest = policy_manifest_value(
+        cfg.gc,
+        cfg.blocks,
+        &cfg.ae_ckpt,
+        cfg.coarse_ckpt.as_deref(),
+        state,
+    );
+    save_atomic(&path, |tmp| {
+        std::fs::write(tmp, serde_json::to_string_pretty(&manifest)?)?;
+        Ok(())
+    })
 }
 
 impl Config {
@@ -5493,6 +5594,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             } else {
                 save_checkpoint(&learners[0].vs, &latest, &state)?;
             }
+            save_policy_manifest(&cfg, &state)?;
             let request = EnvResizeRequest {
                 format: 1,
                 reason: "curriculum_stage_env_target".to_string(),
@@ -5846,6 +5948,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             } else {
                 save_checkpoint(&learners[0].vs, &latest, &state)?;
             }
+            save_policy_manifest(&cfg, &state)?;
             println!("[train] checkpoint saved: {path} (update={})", state.update);
         }
     }
@@ -5888,6 +5991,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
         save_checkpoint(&learners[0].vs, &final_path, &final_state)?;
         save_checkpoint(&learners[0].vs, &latest_path, &final_state)?;
     }
+    save_policy_manifest(&cfg, &final_state)?;
     if let Some((learner, _)) = persistent_learner {
         learner.shutdown()?;
     }

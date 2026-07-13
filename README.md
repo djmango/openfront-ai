@@ -196,7 +196,10 @@ all-zeros on 99.9%-empty grids).
   (285 hash-verified replays + raw intent records)
 - Encoders: [djmango/openfront-tile-autoencoder](https://huggingface.co/djmango/openfront-tile-autoencoder)
   (`ae_v31_d8c32.pt`, `ae_v31_d8.pt`, `ae_v3.pt`)
-- RL/BC checkpoints on HF under run names (`ppo_v4/policy.pt`, `bc_v4/bc.pt`, …)
+- Current Rust RL runs on HF use `latest.safetensors`,
+  `latest.state.json`, best-eval/milestone safetensors, and `manifest.json`
+  under the run name. Historical Python runs retain legacy fixtures such as
+  `ppo_v4/policy.pt` and `bc_v4/bc.pt`.
 
 ## RL stack (v4)
 
