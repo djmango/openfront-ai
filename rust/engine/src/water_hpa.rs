@@ -11,6 +11,7 @@ pub const CLUSTER_SIZE: u32 = 32;
 
 struct ConnectedComponents {
     component_ids: Vec<u32>,
+    component_sizes: Vec<u32>,
 }
 
 impl ConnectedComponents {
@@ -24,6 +25,7 @@ impl ConnectedComponents {
         }
         Self {
             component_ids: ids,
+            component_sizes: vec![0],
         }
     }
 
@@ -35,6 +37,8 @@ impl ConnectedComponents {
         let mut next_id = 0u32;
         let mut queue = vec![0i32; n];
         let ids = &mut self.component_ids;
+        self.component_sizes.clear();
+        self.component_sizes.push(0);
 
         for start in 0..n {
             let val = ids[start];
@@ -43,6 +47,7 @@ impl ConnectedComponents {
             }
             next_id += 1;
             let component_id = next_id;
+            self.component_sizes.push(0);
             let mut head = 0usize;
             let mut tail = 0usize;
             queue[tail] = start as i32;
@@ -66,6 +71,7 @@ impl ConnectedComponents {
                 }
                 for x in left..=right {
                     ids[x] = component_id;
+                    self.component_sizes[component_id as usize] += 1;
                     if x >= width as usize {
                         let above = x - width as usize;
                         if ids[above] == 0 {
@@ -87,6 +93,13 @@ impl ConnectedComponents {
 
     fn get_component_id(&self, tile: TileRef) -> u32 {
         self.component_ids.get(tile as usize).copied().unwrap_or(0)
+    }
+
+    fn get_component_size(&self, component_id: u32) -> u32 {
+        self.component_sizes
+            .get(component_id as usize)
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -292,6 +305,10 @@ impl AbstractGraph {
         self.water_components.get_component_id(tile)
     }
 
+    pub fn get_component_size(&self, component_id: u32) -> u32 {
+        self.water_components.get_component_size(component_id)
+    }
+
     fn cluster_key(&self, cluster_x: u32, cluster_y: u32) -> usize {
         (cluster_y * self.clusters_x + cluster_x) as usize
     }
@@ -319,11 +336,14 @@ impl AbstractGraph {
 
     fn set_cluster(&mut self, key: usize, cluster: Cluster) {
         if self.clusters.len() <= key {
-            self.clusters.resize(key + 1, Cluster {
-                x: 0,
-                y: 0,
-                node_ids: Vec::new(),
-            });
+            self.clusters.resize(
+                key + 1,
+                Cluster {
+                    x: 0,
+                    y: 0,
+                    node_ids: Vec::new(),
+                },
+            );
         }
         self.clusters[key] = cluster;
     }
@@ -464,7 +484,11 @@ impl<'a> AbstractGraphBuilder<'a> {
         let mut nodes = Vec::new();
         let max_y = (base_y + self.cluster_size).min(self.map.height);
         let mut span_start: Option<u32> = None;
-        let try_add = |span_start: &mut Option<u32>, y: u32, nodes: &mut Vec<usize>, this: &mut Self, x: u32| {
+        let try_add = |span_start: &mut Option<u32>,
+                       y: u32,
+                       nodes: &mut Vec<usize>,
+                       this: &mut Self,
+                       x: u32| {
             let Some(start) = span_start.take() else {
                 return;
             };
@@ -480,8 +504,9 @@ impl<'a> AbstractGraphBuilder<'a> {
             } else {
                 TileRef::MAX
             };
-            let is_entrance =
-                self.map.is_water(tile) && next_tile != TileRef::MAX && self.map.is_water(next_tile);
+            let is_entrance = self.map.is_water(tile)
+                && next_tile != TileRef::MAX
+                && self.map.is_water(next_tile);
             if is_entrance {
                 if span_start.is_none() {
                     span_start = Some(y);
@@ -498,7 +523,11 @@ impl<'a> AbstractGraphBuilder<'a> {
         let mut nodes = Vec::new();
         let max_x = (base_x + self.cluster_size).min(self.map.width);
         let mut span_start: Option<u32> = None;
-        let try_add = |span_start: &mut Option<u32>, x: u32, nodes: &mut Vec<usize>, this: &mut Self, y: u32| {
+        let try_add = |span_start: &mut Option<u32>,
+                       x: u32,
+                       nodes: &mut Vec<usize>,
+                       this: &mut Self,
+                       y: u32| {
             let Some(start) = span_start.take() else {
                 return;
             };
@@ -514,8 +543,9 @@ impl<'a> AbstractGraphBuilder<'a> {
             } else {
                 TileRef::MAX
             };
-            let is_entrance =
-                self.map.is_water(tile) && next_tile != TileRef::MAX && self.map.is_water(next_tile);
+            let is_entrance = self.map.is_water(tile)
+                && next_tile != TileRef::MAX
+                && self.map.is_water(next_tile);
             if is_entrance {
                 if span_start.is_none() {
                     span_start = Some(x);
@@ -749,8 +779,17 @@ impl BoundedWaterAstar {
         if std::env::var("DEBUG_LOCAL_BOUNDED").is_ok() {
             eprintln!(
                 "[native local] starts={:?} goal={} (x={},y={}) bounds=[{},{}]x[{},{}]",
-                starts.iter().map(|&s| (s, map.x(s), map.y(s))).collect::<Vec<_>>(),
-                goal, map.x(goal), map.y(goal), min_x, max_x, min_y, max_y
+                starts
+                    .iter()
+                    .map(|&s| (s, map.x(s), map.y(s)))
+                    .collect::<Vec<_>>(),
+                goal,
+                map.x(goal),
+                map.y(goal),
+                min_x,
+                max_x,
+                min_y,
+                max_y
             );
         }
         self.stamp = self.stamp.wrapping_add(1);
@@ -938,7 +977,12 @@ impl AbstractGraphAstar {
         }
     }
 
-    fn find_path(&mut self, graph: &AbstractGraph, start: usize, goal: usize) -> Option<Vec<usize>> {
+    fn find_path(
+        &mut self,
+        graph: &AbstractGraph,
+        start: usize,
+        goal: usize,
+    ) -> Option<Vec<usize>> {
         self.find_path_multi(graph, &[start], goal)
     }
 
@@ -1035,8 +1079,8 @@ impl AbstractGraphAstar {
         self.g[start] = 0;
         self.g_stamp[start] = stamp;
         self.came_from[start] = -1;
-        let h = self.heuristic_weight
-            * (start_node.x.abs_diff(goal_x) + start_node.y.abs_diff(goal_y));
+        let h =
+            self.heuristic_weight * (start_node.x.abs_diff(goal_x) + start_node.y.abs_diff(goal_y));
         self.heap.push(start as TileRef, h);
 
         let mut iterations = self.max_iterations;
@@ -1115,7 +1159,9 @@ impl WaterHierarchical {
         Self {
             abstract_astar: AbstractGraphAstar::new(graph.node_count(), graph.edge_count()),
             local_astar: BoundedWaterAstar::new((cluster_size * cluster_size) as usize),
-            local_astar_multi: BoundedWaterAstar::new((cluster_size * 3 * cluster_size * 3) as usize),
+            local_astar_multi: BoundedWaterAstar::new(
+                (cluster_size * 3 * cluster_size * 3) as usize,
+            ),
             local_astar_short: BoundedWaterAstar::new(260 * 260),
             tile_bfs: BfsGrid::new(num_tiles),
             graph,
@@ -1123,7 +1169,12 @@ impl WaterHierarchical {
         }
     }
 
-    pub fn find_path(&mut self, map: &GameMap, from: &[TileRef], to: TileRef) -> Option<Vec<TileRef>> {
+    pub fn find_path(
+        &mut self,
+        map: &GameMap,
+        from: &[TileRef],
+        to: TileRef,
+    ) -> Option<Vec<TileRef>> {
         if from.len() == 1 {
             return self.find_path_single(map, from[0], to);
         }
@@ -1162,24 +1213,37 @@ impl WaterHierarchical {
             return None;
         }
         if std::env::var("DEBUG_WATER_MULTI").is_ok() {
-            eprintln!("[native] target_node.id={} tile={}", target_node.id, target_node.tile);
+            eprintln!(
+                "[native] target_node.id={} tile={}",
+                target_node.id, target_node.tile
+            );
             for &nid in &node_ids {
                 let src = node_to_source[&nid];
                 let node = self.graph.get_node(nid).unwrap();
                 eprintln!(
                     "[native] node_id={} tile={} x={} y={} <- source={} (x={},y={})",
-                    nid, node.tile, node.x, node.y, src, map.x(src), map.y(src)
+                    nid,
+                    node.tile,
+                    node.x,
+                    node.y,
+                    src,
+                    map.x(src),
+                    map.y(src)
                 );
             }
         }
-        let node_path = self
-            .abstract_astar
-            .find_path_multi(&self.graph, &node_ids, target_node.id)?;
+        let node_path =
+            self.abstract_astar
+                .find_path_multi(&self.graph, &node_ids, target_node.id)?;
         let winning_source = node_to_source.get(&node_path[0])?;
         if std::env::var("DEBUG_WATER_MULTI").is_ok() {
             eprintln!(
                 "[native] winning node_path[0]={} winning_source={} (x={},y={}) node_path.len()={}",
-                node_path[0], winning_source, map.x(*winning_source), map.y(*winning_source), node_path.len()
+                node_path[0],
+                winning_source,
+                map.x(*winning_source),
+                map.y(*winning_source),
+                node_path.len()
             );
         }
         self.find_path_single(map, *winning_source, target)
@@ -1226,7 +1290,12 @@ impl WaterHierarchical {
         )
     }
 
-    fn find_path_single(&mut self, map: &GameMap, from: TileRef, to: TileRef) -> Option<Vec<TileRef>> {
+    fn find_path_single(
+        &mut self,
+        map: &GameMap,
+        from: TileRef,
+        to: TileRef,
+    ) -> Option<Vec<TileRef>> {
         let dist = map.manhattan_dist(from, to);
         if dist <= self.graph.cluster_size {
             let start_x = map.x(from);
@@ -1273,12 +1342,7 @@ impl WaterHierarchical {
                 let from_node = self.graph.get_node(from_node_id)?;
                 let to_node = self.graph.get_node(to_node_id)?;
                 let edge = self.graph.get_edge(edge_id)?;
-                (
-                    from_node.tile,
-                    to_node.tile,
-                    edge.cluster_x,
-                    edge.cluster_y,
-                )
+                (from_node.tile, to_node.tile, edge.cluster_x, edge.cluster_y)
             };
 
             if self.cache_paths {
@@ -1290,16 +1354,11 @@ impl WaterHierarchical {
                 }
             }
 
-            let segment = self.find_local_path(
-                map,
-                from_tile,
-                to_tile,
-                cluster_x,
-                cluster_y,
-                false,
-            )?;
+            let segment =
+                self.find_local_path(map, from_tile, to_tile, cluster_x, cluster_y, false)?;
             if self.cache_paths {
-                self.graph.set_cached_path(edge_id, from_node_id, segment.clone());
+                self.graph
+                    .set_cached_path(edge_id, from_node_id, segment.clone());
             }
             initial_path.extend_from_slice(&segment[1..]);
         }
@@ -1307,14 +1366,8 @@ impl WaterHierarchical {
         let last_node = self.graph.get_node(*node_path.last()?)?;
         let end_cluster_x = map.x(to) / self.graph.cluster_size;
         let end_cluster_y = map.y(to) / self.graph.cluster_size;
-        let end_segment = self.find_local_path(
-            map,
-            last_node.tile,
-            to,
-            end_cluster_x,
-            end_cluster_y,
-            false,
-        )?;
+        let end_segment =
+            self.find_local_path(map, last_node.tile, to, end_cluster_x, end_cluster_y, false)?;
         initial_path.extend_from_slice(&end_segment[1..]);
         Some(initial_path)
     }

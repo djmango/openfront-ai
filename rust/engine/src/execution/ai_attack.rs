@@ -532,26 +532,27 @@ pub fn send_boat_attack_to_player(
     if troops < 1.0 {
         return false;
     }
+    let Some(dst_shore) = boat_attack_destination_to_player(game, attacker_small_id, target_small_id) else {
+        return false;
+    };
+    game.add_transport_attack(attacker_small_id, dst_shore, troops);
+    true
+}
+
+fn boat_attack_destination_to_player(
+    game: &mut Game,
+    attacker_small_id: u16,
+    target_small_id: u16,
+) -> Option<TileRef> {
     if game.wire.is_unit_disabled(crate::core::schemas::unit_type::TRANSPORT) {
-        return false;
-    }
-    if game.unit_count(attacker_small_id, crate::core::schemas::unit_type::TRANSPORT)
-        >= game.wire.boat_max_number()
-    {
-        return false;
+        return None;
     }
 
     let attacker_shores = shore_border_tiles(game, attacker_small_id);
     let target_shores = shore_border_tiles(game, target_small_id);
-    let Some((_src_shore, dst_shore)) = closest_two_tiles(game, &attacker_shores, &target_shores) else {
-        return false;
-    };
-    if can_build_transport_ship(game, attacker_small_id, dst_shore).is_none() {
-        return false;
-    }
-
-    game.add_transport_attack(attacker_small_id, dst_shore, troops);
-    true
+    let (_src_shore, dst_shore) = closest_two_tiles(game, &attacker_shores, &target_shores)?;
+    can_build_transport_ship(game, attacker_small_id, dst_shore)?;
+    Some(dst_shore)
 }
 
 pub fn collect_bordering_players_pub(game: &Game, small_id: u16) -> Vec<u16> {
@@ -607,7 +608,7 @@ fn collect_bordering_players(game: &Game, small_id: u16) -> Vec<u16> {
 /// call sites: they each already drop small ID `0` via
 /// `game.player_by_small_id(0) == None` (`filter_map`/`Option` chains) or an
 /// equivalent player-only filter.
-fn nearby_players_ts_order(game: &Game, small_id: u16) -> Vec<u16> {
+pub(crate) fn nearby_players_ts_order(game: &Game, small_id: u16) -> Vec<u16> {
     let mut seen = HashSet::new();
     let mut ordered: Vec<u16> = Vec::new();
     let mut push = |sid: u16| {
@@ -788,6 +789,16 @@ fn find_very_weak_enemy(game: &Game, attacker_small_id: u16, bordering: &[u16]) 
 }
 
 fn player_center_tile(game: &Game, small_id: u16) -> Option<TileRef> {
+    if let Some(bb) = game
+        .player_by_small_id(small_id)
+        .and_then(|p| p.largest_cluster_bounding_box)
+    {
+        return Some(game.ref_xy(
+            bb.min_x + (bb.max_x - bb.min_x) / 2,
+            bb.min_y + (bb.max_y - bb.min_y) / 2,
+        ));
+    }
+
     let border = game.border_tiles_of(small_id)?;
     let mut tiles = border.iter();
     let first = tiles.next()?;
@@ -1024,17 +1035,23 @@ fn nation_attack_best_target(
                     true,
                 );
             }
+            if nation_strategy_assist(
+                game,
+                random,
+                attacker_small_id,
+                reserve_ratio,
+                expand_ratio,
+                bot_attack_troops_sent,
+                difficulty,
+                emoji.as_deref_mut(),
+            ) {
+                return true;
+            }
             // TS Easy order is [nuked, bots, retaliate, assist, betray, hated,
-            // weakest]. `assist` (TS `AiAttackBehavior.assistAllies`, ally
-            // target-following) has no native port yet - see DEVLOG; the
-            // remaining strategies were previously missing from this arm
-            // entirely (this file already implements `betray`/`hated`, used
-            // by the Medium arm below, just never wired in here), which made
-            // Easy nations skip straight from `retaliate` to `weakest`
-            // whenever TS would have taken a `betray`/`hated` branch instead
-            // - a real behavior divergence, not just an unlikely edge case
-            // (root-caused via a bots=5 curriculum-parity bisection, see
-            // docs/bot-ai-parity-*/ for the methodology).
+            // weakest]. The remaining strategies were previously missing from
+            // this arm entirely, which made Easy nations skip straight from
+            // `retaliate` to `weakest` whenever TS would have taken a
+            // `betray`/`hated` branch instead.
             if nation_strategy_betray(
                 game,
                 random,
@@ -1103,6 +1120,18 @@ fn nation_attack_best_target(
                     emoji.as_deref_mut(),
                     true,
                 );
+            }
+            if nation_strategy_assist(
+                game,
+                random,
+                attacker_small_id,
+                reserve_ratio,
+                expand_ratio,
+                bot_attack_troops_sent,
+                difficulty,
+                emoji.as_deref_mut(),
+            ) {
+                return true;
             }
             if nation_strategy_betray(
                 game,
@@ -1181,11 +1210,10 @@ fn nation_attack_best_target(
                 emoji.as_deref_mut(),
             )
         }
-        // TS Hard order (minus `assist`, dead code - see the Easy arm's
-        // comment - and `donate`, live only in `GameMode.Team`, not ported,
-        // see docs/bot-ai-parity-nation-relations/README.md's follow-up
-        // list): [bots, retaliate, betray, nuked, traitor, afk, hated,
-        // veryWeak, victim, weakest, island]. Previously this whole branch
+        // TS Hard order (minus `donate`, live only in `GameMode.Team`, not
+        // ported, see docs/bot-ai-parity-nation-relations/README.md's
+        // follow-up list): [bots, retaliate, assist, betray, nuked, traitor,
+        // afk, hated, veryWeak, victim, weakest, island]. Previously this whole branch
         // (shared with Impossible below, as a single `_` catch-all) only
         // implemented [bots, retaliate, weakest] - 8 of 11 strategies were
         // silently missing, found via a systematic audit of this match
@@ -1196,6 +1224,9 @@ fn nation_attack_best_target(
             }
             if let Some(attacker) = find_incoming_attacker(game, attacker_small_id) {
                 return nation_try_attack_player(game, random, attacker_small_id, attacker, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, emoji.as_deref_mut(), true);
+            }
+            if nation_strategy_assist(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, emoji.as_deref_mut()) {
+                return true;
             }
             if nation_strategy_betray(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut()) {
                 return true;
@@ -1223,9 +1254,9 @@ fn nation_attack_best_target(
             }
             nation_strategy_island(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut())
         }
-        // TS Impossible order (same dead-code exclusions as Hard above):
-        // [retaliate, bots, veryWeak, traitor, afk, betray, victim, nuked,
-        // hated, weakest, island]. Note this order genuinely differs from
+        // TS Impossible order (same `donate` exclusion as Hard above):
+        // [retaliate, bots, veryWeak, assist, traitor, afk, betray, victim,
+        // nuked, hated, weakest, island]. Note this order genuinely differs from
         // Hard's (retaliate before bots; veryWeak much earlier) - it is not
         // just Hard with a different set, so it needs its own arm rather
         // than falling back to a shared default.
@@ -1237,6 +1268,9 @@ fn nation_attack_best_target(
                 return true;
             }
             if nation_strategy_very_weak(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut()) {
+                return true;
+            }
+            if nation_strategy_assist(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, emoji.as_deref_mut()) {
                 return true;
             }
             if nation_strategy_traitor(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut()) {
@@ -1378,6 +1412,53 @@ fn nation_strategy_hated(
             emoji,
             false,
         );
+    }
+    false
+}
+
+fn nation_strategy_assist(
+    game: &mut Game,
+    random: &mut PseudoRandom,
+    sid: u16,
+    reserve_ratio: f64,
+    expand_ratio: f64,
+    bot_attack_troops_sent: &mut f64,
+    difficulty: &str,
+    mut emoji: Option<&mut super::nation_emoji::NationEmojiState>,
+) -> bool {
+    if game.wire.disable_alliances() {
+        return false;
+    }
+    let allies = game.allied_small_ids(sid);
+    for ally in allies {
+        let targets = game.player_targets(ally);
+        if targets.is_empty() {
+            continue;
+        }
+        if game.relation(sid, ally) < Relation::Friendly {
+            continue;
+        }
+        for target in targets {
+            if target == sid || game.is_friendly(sid, target) {
+                continue;
+            }
+            if !nation_try_attack_player(
+                game,
+                random,
+                sid,
+                target,
+                reserve_ratio,
+                expand_ratio,
+                bot_attack_troops_sent,
+                difficulty,
+                emoji.as_deref_mut(),
+                false,
+            ) {
+                continue;
+            }
+            game.update_relation(sid, ally, -20);
+            return true;
+        }
     }
     false
 }
@@ -1620,6 +1701,9 @@ fn attack_with_random_boat(
             if !game.is_land(tile) {
                 continue;
             }
+            if game.is_impassable(tile) {
+                continue;
+            }
             let owner = game.map.owner_id(tile);
             if owner == small_id {
                 continue;
@@ -1735,7 +1819,7 @@ fn try_send_nation_bot_attack(
     difficulty: &str,
 ) -> bool {
     if game.shares_land_border_with(attacker_small_id, target_small_id) {
-        let Some(troops) = nation_bot_attack_troops(
+        let Some(raw_troops) = nation_bot_attack_troops(
             game,
             attacker_small_id,
             target_small_id,
@@ -1750,17 +1834,28 @@ fn try_send_nation_bot_attack(
         // bot-specific `calculateBotAttackTroops` branch feeds straight into
         // the same shared cap/weak-check below it) - not just the plain
         // land/boat-vs-non-bot path.
+        //
+        // `calculateBotAttackTroops` also increments `botAttackTroopsSent`
+        // before that shared cap is applied. Keep the same raw-budget
+        // accounting so a capped first bot attack can still prevent later
+        // parallel bot attacks in this tick.
+        *bot_attack_troops_sent += raw_troops;
         let Some(troops) =
-            cap_player_attack_troops(game, attacker_small_id, target_small_id, troops)
+            cap_player_attack_troops(game, attacker_small_id, target_small_id, raw_troops)
         else {
             return false;
         };
         let target_id = game.player_by_small_id(target_small_id).unwrap().id.clone();
         game.add_land_attack(attacker_small_id, Some(target_id), Some(troops));
-        *bot_attack_troops_sent += troops;
         return true;
     }
-    let Some(troops) = nation_bot_attack_troops(
+    // TS `sendBoatAttack` checks reachability before `calculateAttackTroops`;
+    // the bot-specific calculation mutates `botAttackTroopsSent`, so failed
+    // boat targets must not consume budget before later valid bot attacks.
+    let Some(dst_shore) = boat_attack_destination_to_player(game, attacker_small_id, target_small_id) else {
+        return false;
+    };
+    let Some(raw_troops) = nation_bot_attack_troops(
         game,
         attacker_small_id,
         target_small_id,
@@ -1770,21 +1865,14 @@ fn try_send_nation_bot_attack(
     ) else {
         return false;
     };
+    *bot_attack_troops_sent += raw_troops;
     let Some(troops) =
-        cap_player_attack_troops(game, attacker_small_id, target_small_id, troops)
+        cap_player_attack_troops(game, attacker_small_id, target_small_id, raw_troops)
     else {
         return false;
     };
-    if send_boat_attack_to_player(
-        game,
-        attacker_small_id,
-        target_small_id,
-        troops,
-    ) {
-        *bot_attack_troops_sent += troops;
-        return true;
-    }
-    false
+    game.add_transport_attack(attacker_small_id, dst_shore, troops);
+    true
 }
 
 fn attack_bots(
@@ -2241,6 +2329,30 @@ mod ai_attack_behavior_tests {
     }
 
     #[test]
+    fn incoming_attacks_ignore_zero_tile_attackers() {
+        let Some(mut game) = new_game("Hard", "Free For All") else {
+            return;
+        };
+        let attacker = add_player(&mut game, "attacker_id", PlayerType::Nation);
+        let defender = add_player(&mut game, "defender_id", PlayerType::Nation);
+        conquer_round_robin(&mut game, &[attacker, defender], 40);
+        game.add_troops(attacker, 100_000.0);
+
+        let defender_id = game.player_by_small_id(defender).unwrap().id.clone();
+        game.add_land_attack(attacker, Some(defender_id), Some(10_000.0));
+        game.execute_next_tick();
+        assert_eq!(game.incoming_attacks(defender, false).len(), 1);
+
+        // TS `PlayerImpl.incomingAttacks()` filters by `attacker().isAlive()`,
+        // which is `_tiles.size > 0`, not a sticky liveness flag.
+        let attacker_player = game.player_by_small_id_mut(attacker).unwrap();
+        attacker_player.tiles_owned = 0;
+        attacker_player.alive = true;
+
+        assert!(game.incoming_attacks(defender, false).is_empty());
+    }
+
+    #[test]
     fn nation_cannot_attack_allied_player() {
         let Some(mut game) = new_game("Medium", "Free For All") else {
             return;
@@ -2359,6 +2471,52 @@ mod ai_attack_behavior_tests {
         assert!(
             start_troops <= expected_cap,
             "start_troops={start_troops} expected_cap={expected_cap}"
+        );
+    }
+
+    #[test]
+    fn capped_parallel_bot_attacks_budget_against_raw_troops() {
+        let Some(mut game) = new_game("Hard", "Free For All") else {
+            return;
+        };
+        let attacker = add_player(&mut game, "attacker_id", PlayerType::Nation);
+        let neighbor = add_player(&mut game, "neighbor_id", PlayerType::Human);
+        let bot1 = add_player(&mut game, "bot1_id", PlayerType::Bot);
+        let bot2 = add_player(&mut game, "bot2_id", PlayerType::Bot);
+        conquer_round_robin(&mut game, &[attacker, neighbor, bot1, bot2], 400);
+        game.add_troops(attacker, 200_000.0);
+        game.add_troops(neighbor, 200_000.0);
+        game.add_troops(bot1, 25_000.0);
+        game.add_troops(bot2, 25_000.0);
+
+        let mut random = PseudoRandom::new(42);
+        let mut sent = 0.0;
+        assert!(attack_bots(
+            &mut game,
+            &mut random,
+            attacker,
+            0.3,
+            0.2,
+            &mut sent,
+            "Hard",
+        ));
+
+        game.execute_next_tick();
+        let attacks: Vec<_> = game
+            .active_attacks_debug()
+            .into_iter()
+            .filter(|(owner, target, ..)| {
+                *owner == attacker && (*target == bot1 || *target == bot2)
+            })
+            .collect();
+        assert_eq!(
+            attacks.len(),
+            1,
+            "raw pre-cap bot budget should block a second parallel bot attack: {attacks:?}"
+        );
+        assert!(
+            sent > attacks[0].2,
+            "budget should track the raw allocation, not capped start troops"
         );
     }
 
@@ -3029,16 +3187,20 @@ mod random_boat_fallback_tests {
         game
     }
 
-    fn add_player(game: &mut Game, id: &str) -> u16 {
+    fn add_player_of_type(game: &mut Game, id: &str, player_type: PlayerType) -> u16 {
         game.add_from_info(&PlayerInfo {
             name: id.into(),
-            player_type: PlayerType::Nation,
-            client_id: Some(id.into()),
+            player_type,
+            client_id: (player_type != PlayerType::Bot).then(|| id.into()),
             id: id.into(),
             clan_tag: None,
             friends: Vec::new(),
             team: None,
         })
+    }
+
+    fn add_player(game: &mut Game, id: &str) -> u16 {
+        add_player_of_type(game, id, PlayerType::Nation)
     }
 
     /// Builds a fresh game with `attacker` owning every land tile (so
@@ -3119,5 +3281,57 @@ mod random_boat_fallback_tests {
             "a non-empty bordering_enemies list must not draw any extra PRNG values \
              when no boat target is found"
         );
+    }
+
+    #[test]
+    fn unreachable_bot_boat_target_does_not_consume_bot_attack_budget() {
+        let mut game = one_water_tile_game(8, 8);
+        let attacker = add_player(&mut game, "attacker");
+        let unreachable_bot = add_player_of_type(&mut game, "unreachable-bot", PlayerType::Bot);
+        let land_bot = add_player_of_type(&mut game, "land-bot", PlayerType::Bot);
+
+        for t in 1..(8 * 8) {
+            game.conquer(attacker, t);
+        }
+        game.conquer(land_bot, 63);
+        if let Some(p) = game.player_by_small_id_mut(attacker) {
+            p.troops = 100_000;
+        }
+        if let Some(p) = game.player_by_small_id_mut(unreachable_bot) {
+            p.troops = 10_000;
+        }
+        if let Some(p) = game.player_by_small_id_mut(land_bot) {
+            p.troops = 10_000;
+        }
+
+        let mut bot_attack_troops_sent = 0.0;
+        assert!(
+            !try_send_nation_bot_attack(
+                &mut game,
+                attacker,
+                unreachable_bot,
+                0.0,
+                &mut bot_attack_troops_sent,
+                "Easy",
+            ),
+            "the first bot has no tiles, so TS sendBoatAttack would fail before troop calculation"
+        );
+        assert_eq!(
+            bot_attack_troops_sent, 0.0,
+            "failed boat preflight must not consume bot attack budget"
+        );
+
+        assert!(
+            try_send_nation_bot_attack(
+                &mut game,
+                attacker,
+                land_bot,
+                0.0,
+                &mut bot_attack_troops_sent,
+                "Easy",
+            ),
+            "a later land-border bot target should still have the full budget available"
+        );
+        assert!(bot_attack_troops_sent > 0.0);
     }
 }
