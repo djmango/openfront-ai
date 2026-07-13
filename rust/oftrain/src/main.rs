@@ -68,7 +68,7 @@ struct Args {
     gamma: f32,
 
     /// V8.1 potential-based closeout shaping coefficient K_DOM (0 disables).
-    #[arg(long, default_value_t = 0.25)]
+    #[arg(long, default_value_t = 0.0)]
     v81_dom_coef: f64,
 
     /// First curriculum stage where V8.1 shaping may apply.
@@ -80,7 +80,7 @@ struct Args {
     v81_potential_clamp: f64,
 
     /// Relax loss aversion after reaching the dominance threshold.
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
     v81_dominant_loss: bool,
 
     /// Normalized composite-strength share that counts as dominant.
