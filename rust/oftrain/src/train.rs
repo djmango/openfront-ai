@@ -317,6 +317,14 @@ pub struct Config {
     pub eval_every: u64,
     /// `--eval-episodes`: fresh workers per greedy eval pass.
     pub eval_episodes: usize,
+    /// Run evaluation on its own long-lived owner thread. The coordinator
+    /// only submits immutable CPU weight snapshots and polls completed work
+    /// at update boundaries. When no eval device is available the existing
+    /// synchronous path is retained.
+    pub async_eval: bool,
+    /// Dedicated device for asynchronous evaluation. `main` resolves the
+    /// automatic spare-GPU default; `None` selects synchronous evaluation.
+    pub eval_device: Option<Device>,
     pub ckpt_every: u64,
     pub ckpt_dir: String,
     /// `--init`: warm-start weights from a `.safetensors` (preferred) or
@@ -375,6 +383,12 @@ pub struct TrainState {
     pub lr_now: f64,
     pub total_env_steps: u64,
     pub recent_wins: Vec<f64>,
+    /// Best fixed-seed evaluation associated with this checkpoint. Optional
+    /// for backward compatibility with sidecars written before async eval.
+    #[serde(default)]
+    pub best_eval_win: Option<f64>,
+    #[serde(default)]
+    pub best_eval_score: Option<f64>,
 }
 
 fn state_sidecar_path(ckpt_path: &str) -> String {
@@ -2192,15 +2206,17 @@ struct CpuWeightMeta {
 
 #[derive(Clone)]
 struct CpuWeightSnapshot {
-    meta: Vec<CpuWeightMeta>,
-    values: Vec<f32>,
+    /// Shared immutable backing makes actor refresh and asynchronous eval
+    /// submissions cheap clones rather than another full policy copy.
+    meta: Arc<[CpuWeightMeta]>,
+    values: Arc<[f32]>,
 }
 
 fn snapshot_weights(vs: &nn::VarStore) -> Result<CpuWeightSnapshot> {
     tch::no_grad(|| {
         let mut variables: Vec<_> = vs.variables().into_iter().collect();
         variables.sort_by(|(a, _), (b, _)| a.cmp(b));
-        let meta = variables
+        let meta: Vec<CpuWeightMeta> = variables
             .iter()
             .map(|(name, tensor)| CpuWeightMeta {
                 name: name.clone(),
@@ -2217,7 +2233,10 @@ fn snapshot_weights(vs: &nn::VarStore) -> Result<CpuWeightSnapshot> {
             .to_device(Device::Cpu)
             .to_kind(Kind::Float);
         let values = Vec::<f32>::try_from(packed)?;
-        Ok(CpuWeightSnapshot { meta, values })
+        Ok(CpuWeightSnapshot {
+            meta: meta.into(),
+            values: values.into(),
+        })
     })
 }
 
@@ -2229,9 +2248,9 @@ fn apply_weight_snapshot(vs: &nn::VarStore, snapshot: &CpuWeightSnapshot) -> Res
         snapshot.meta.len(),
         variables.len()
     );
-    let cpu = Tensor::from_slice(&snapshot.values);
+    let cpu = Tensor::from_slice(snapshot.values.as_ref());
     let mut offset = 0i64;
-    for item in &snapshot.meta {
+    for item in snapshot.meta.iter() {
         let mut destination = variables
             .remove(&item.name)
             .ok_or_else(|| anyhow!("weight snapshot destination missing {}", item.name))?;
@@ -2254,6 +2273,438 @@ fn apply_weight_snapshot(vs: &nn::VarStore, snapshot: &CpuWeightSnapshot) -> Res
         "weight snapshot payload length mismatch"
     );
     Ok(())
+}
+
+#[derive(Clone)]
+struct EvalReportContext {
+    losses: (f64, f64, f64, f64),
+    win_rate: Option<f64>,
+    lr_now: f64,
+    total_env_steps: u64,
+}
+
+struct EvalJob {
+    update: u64,
+    stage: usize,
+    weights: CpuWeightSnapshot,
+    state: TrainState,
+    report: EvalReportContext,
+}
+
+struct EvalCompletion {
+    update: u64,
+    stage: usize,
+    result: EvalResult,
+    elapsed_seconds: f64,
+    promoted: bool,
+    best: Option<(f64, f64)>,
+    report: EvalReportContext,
+}
+
+fn eval_is_better(candidate: &EvalResult, best: Option<(f64, f64)>) -> bool {
+    if !candidate.win.is_finite() || !candidate.score.is_finite() {
+        return false;
+    }
+    match best {
+        None => true,
+        Some((best_win, best_score)) => {
+            candidate.win > best_win || (candidate.win == best_win && candidate.score > best_score)
+        }
+    }
+}
+
+fn best_eval_path(ckpt_dir: &str) -> String {
+    format!("{ckpt_dir}/best_eval.safetensors")
+}
+
+fn save_snapshot_checkpoint(
+    snapshot: &CpuWeightSnapshot,
+    cfg: &Config,
+    path: &str,
+    state: &TrainState,
+) -> Result<()> {
+    // Materialize directly on CPU. The immutable snapshot remains owned by
+    // the eval job and no training CUDA state or VarStore is touched.
+    let vs = nn::VarStore::new(Device::Cpu);
+    let _ = PolicyNet::new(&vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
+    apply_weight_snapshot(&vs, snapshot)?;
+    save_checkpoint(&vs, path, state)
+}
+
+enum EvalCommand {
+    Run(EvalJob),
+    Shutdown,
+}
+
+#[derive(Default)]
+struct EvalFlight {
+    update: Option<u64>,
+}
+
+impl EvalFlight {
+    fn reserve(&mut self, update: u64) -> bool {
+        if self.update.is_some() {
+            false
+        } else {
+            self.update = Some(update);
+            true
+        }
+    }
+
+    fn complete(&mut self, update: u64) -> Result<()> {
+        anyhow::ensure!(
+            self.update == Some(update),
+            "eval completion update {update} does not match in-flight {:?}",
+            self.update
+        );
+        self.update = None;
+        Ok(())
+    }
+
+    fn is_busy(&self) -> bool {
+        self.update.is_some()
+    }
+}
+
+struct AsyncEval {
+    command_tx: mpsc::SyncSender<EvalCommand>,
+    result_rx: Receiver<std::result::Result<EvalCompletion, String>>,
+    handle: Option<JoinHandle<()>>,
+    flight: EvalFlight,
+}
+
+impl AsyncEval {
+    fn spawn(cfg: Config, device: Device, initial_best: Option<(f64, f64)>) -> Result<Self> {
+        let (command_tx, command_rx) = mpsc::sync_channel(1);
+        let (result_tx, result_rx) = mpsc::channel();
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let handle = std::thread::Builder::new()
+            .name("oftrain-async-eval".to_string())
+            .spawn(move || {
+                // Every CUDA-bearing eval object is created, used, and
+                // destroyed on this owner thread.
+                let initialized = (|| -> Result<(nn::VarStore, PolicyNet, crate::ae::AePair)> {
+                    let vs = nn::VarStore::new(device);
+                    let policy =
+                        PolicyNet::new(&vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
+                    let path = std::path::Path::new(&cfg.ae_ckpt);
+                    anyhow::ensure!(
+                        path.exists(),
+                        "AE checkpoint not found at {}",
+                        path.display()
+                    );
+                    let coarse = cfg.coarse_ckpt.as_ref().map(std::path::Path::new);
+                    let ae = crate::ae::AePair::load(path, coarse, device, cfg.amp, true)?;
+                    if let Device::Cuda(index) = device {
+                        Cuda::synchronize(index as i64);
+                    }
+                    Ok((vs, policy, ae))
+                })();
+                let (vs, policy, ae) = match initialized {
+                    Ok(resources) => {
+                        let _ = ready_tx.send(Ok(()));
+                        resources
+                    }
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(format!("{error:#}")));
+                        return;
+                    }
+                };
+                let mut best = initial_best;
+                while let Ok(command) = command_rx.recv() {
+                    let EvalCommand::Run(mut job) = command else {
+                        break;
+                    };
+                    let started = Instant::now();
+                    let outcome = (|| -> Result<EvalCompletion> {
+                        apply_weight_snapshot(&vs, &job.weights)?;
+                        if let Device::Cuda(index) = device {
+                            Cuda::synchronize(index as i64);
+                        }
+                        let result = run_eval(
+                            &policy,
+                            &ae,
+                            device,
+                            job.stage,
+                            cfg.eval_episodes,
+                            cfg.max_episode_ticks,
+                            cfg.engine,
+                            cfg.pinned_h2d,
+                            cfg.fp16_rollout,
+                            cfg.compact_rollout && cfg.foveate,
+                        )?;
+                        let promoted = eval_is_better(&result, best);
+                        if promoted {
+                            best = Some((result.win, result.score));
+                            job.state.best_eval_win = Some(result.win);
+                            job.state.best_eval_score = Some(result.score);
+                            save_snapshot_checkpoint(
+                                &job.weights,
+                                &cfg,
+                                &best_eval_path(&cfg.ckpt_dir),
+                                &job.state,
+                            )?;
+                        }
+                        Ok(EvalCompletion {
+                            update: job.update,
+                            stage: job.stage,
+                            result,
+                            elapsed_seconds: started.elapsed().as_secs_f64(),
+                            promoted,
+                            best,
+                            report: job.report,
+                        })
+                    })();
+                    if result_tx
+                        .send(outcome.map_err(|e| format!("{e:#}")))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                if let Device::Cuda(index) = device {
+                    Cuda::synchronize(index as i64);
+                }
+            })?;
+        match ready_rx.recv() {
+            Ok(Ok(())) => Ok(Self {
+                command_tx,
+                result_rx,
+                handle: Some(handle),
+                flight: EvalFlight::default(),
+            }),
+            Ok(Err(error)) => {
+                let _ = handle.join();
+                Err(anyhow!("async eval initialization failed: {error}"))
+            }
+            Err(_) => {
+                let _ = handle.join();
+                Err(anyhow!("async eval thread exited during initialization"))
+            }
+        }
+    }
+
+    fn submit(&mut self, job: EvalJob) -> Result<bool> {
+        if !self.flight.reserve(job.update) {
+            return Ok(false);
+        }
+        let update = job.update;
+        if let Err(error) = self.command_tx.try_send(EvalCommand::Run(job)) {
+            self.flight.complete(update)?;
+            return Err(anyhow!("async eval command failed: {error}"));
+        }
+        Ok(true)
+    }
+
+    fn poll(&mut self) -> Result<Option<EvalCompletion>> {
+        match self.result_rx.try_recv() {
+            Ok(Ok(completion)) => {
+                self.flight.complete(completion.update)?;
+                Ok(Some(completion))
+            }
+            Ok(Err(error)) => {
+                self.flight.update = None;
+                Err(anyhow!("asynchronous evaluation failed: {error}"))
+            }
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => Err(anyhow!(
+                "asynchronous evaluation thread exited unexpectedly"
+            )),
+        }
+    }
+
+    fn shutdown(mut self) -> Result<Option<EvalCompletion>> {
+        let _ = self.command_tx.send(EvalCommand::Shutdown);
+        let completion = if self.flight.is_busy() {
+            match self.result_rx.recv() {
+                Ok(Ok(completion)) => {
+                    self.flight.complete(completion.update)?;
+                    Some(completion)
+                }
+                Ok(Err(error)) => {
+                    return Err(anyhow!("asynchronous evaluation failed: {error}"));
+                }
+                Err(_) => return Err(anyhow!("asynchronous evaluation result channel closed")),
+            }
+        } else {
+            None
+        };
+        if self
+            .handle
+            .take()
+            .expect("async eval join handle available")
+            .join()
+            .is_err()
+        {
+            return Err(anyhow!("asynchronous evaluation thread panicked"));
+        }
+        Ok(completion)
+    }
+}
+
+impl Drop for AsyncEval {
+    fn drop(&mut self) {
+        let _ = self.command_tx.send(EvalCommand::Shutdown);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn report_eval_completion(
+    completion: EvalCompletion,
+    boundary_update: u64,
+    metrics: &MetricsWriter,
+) -> Result<Option<(f64, f64)>> {
+    let suffix = if completion.promoted {
+        " promoted=best_eval"
+    } else {
+        ""
+    };
+    println!(
+        "[eval] update {} (reported_at={boundary_update}) stage {}  win {:.2}  score {:.2}  \
+         ({} eps, {:.0}s){suffix}",
+        completion.update,
+        completion.stage,
+        completion.result.win,
+        completion.result.score,
+        completion.result.episodes,
+        completion.elapsed_seconds,
+    );
+    // Always append an eval row. In the asynchronous case the training row
+    // for this evaluated update may already be on disk; retaining the launch
+    // update here prevents a stale completion from being attributed to the
+    // boundary where it happened to finish.
+    metrics.log_update(
+        completion.update,
+        completion.stage,
+        completion.report.losses.0,
+        completion.report.losses.1,
+        completion.report.losses.2,
+        completion.report.losses.3,
+        completion.report.win_rate,
+        completion.report.lr_now,
+        completion.report.total_env_steps,
+        Some(completion.result.win),
+        Some(completion.result.score),
+    )?;
+    Ok(completion.best)
+}
+
+#[cfg(test)]
+mod async_eval_tests {
+    use super::*;
+
+    fn result(win: f64, score: f64) -> EvalResult {
+        EvalResult {
+            win,
+            score,
+            episodes: 8,
+        }
+    }
+
+    #[test]
+    fn best_eval_uses_win_then_score_tie_break() {
+        assert!(eval_is_better(&result(0.5, 1.0), None));
+        assert!(eval_is_better(&result(0.6, -10.0), Some((0.5, 100.0))));
+        assert!(eval_is_better(&result(0.5, 2.0), Some((0.5, 1.0))));
+        assert!(!eval_is_better(&result(0.5, 1.0), Some((0.5, 1.0))));
+        assert!(!eval_is_better(&result(0.4, 100.0), Some((0.5, 1.0))));
+    }
+
+    #[test]
+    fn flight_rejects_overlap_and_checks_stale_completion_update() {
+        let mut flight = EvalFlight::default();
+        assert!(flight.reserve(17));
+        assert!(!flight.reserve(18));
+        let error = flight.complete(18).unwrap_err();
+        assert!(error.to_string().contains("does not match"));
+        assert!(flight.is_busy());
+        flight.complete(17).unwrap();
+        assert!(flight.reserve(19));
+    }
+
+    #[test]
+    fn command_submission_is_nonblocking_when_worker_is_busy() {
+        let (tx, _rx) = mpsc::sync_channel(1);
+        tx.try_send(1u8).unwrap();
+        let started = Instant::now();
+        assert!(matches!(tx.try_send(2u8), Err(mpsc::TrySendError::Full(2))));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn stale_result_is_logged_against_evaluated_update() {
+        let dir = std::env::temp_dir().join(format!(
+            "oftrain-eval-attribution-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let metrics = MetricsWriter::create(dir.to_str().unwrap()).unwrap();
+        let completion = EvalCompletion {
+            update: 7,
+            stage: 2,
+            result: result(0.75, 3.5),
+            elapsed_seconds: 1.0,
+            promoted: false,
+            best: Some((0.8, 4.0)),
+            report: EvalReportContext {
+                losses: (1.0, 2.0, 3.0, 4.0),
+                win_rate: Some(0.5),
+                lr_now: 1e-4,
+                total_env_steps: 99,
+            },
+        };
+        report_eval_completion(completion, 12, &metrics).unwrap();
+        let line = std::fs::read_to_string(dir.join("metrics.jsonl")).unwrap();
+        let row: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(row["update"], 7);
+        assert_eq!(row["stage"], 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn best_atomic_paths_do_not_alias_latest() {
+        let dir = std::env::temp_dir().join(format!(
+            "oftrain-best-paths-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let best = best_eval_path(dir.to_str().unwrap());
+        let latest = dir.join("latest.safetensors");
+        std::fs::write(&latest, b"latest-sentinel").unwrap();
+        let seen_tmp = std::cell::RefCell::new(String::new());
+        save_atomic(&best, |tmp| {
+            *seen_tmp.borrow_mut() = tmp.to_string();
+            std::fs::write(tmp, b"best")?;
+            Ok(())
+        })
+        .unwrap();
+        let state = TrainState {
+            update: 8,
+            stage: 2,
+            ent_scale: 1.0,
+            lr_now: 1e-4,
+            total_env_steps: 99,
+            recent_wins: vec![1.0],
+            best_eval_win: Some(0.75),
+            best_eval_score: Some(3.5),
+        };
+        save_checkpoint_state(&best, &state).unwrap();
+        assert!(seen_tmp.borrow().ends_with("best_eval.tmp.safetensors"));
+        assert_eq!(std::fs::read(&best).unwrap(), b"best");
+        let saved_state: TrainState = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("best_eval.state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved_state.update, 8);
+        assert_eq!(saved_state.best_eval_win, Some(0.75));
+        assert_eq!(std::fs::read(&latest).unwrap(), b"latest-sentinel");
+        assert!(!std::path::Path::new(seen_tmp.borrow().as_str()).exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 enum ActorCommand {
@@ -4286,6 +4737,15 @@ pub fn run(mut cfg: Config) -> Result<()> {
         LR_WARMUP_UPDATES
     };
     let mut lr_warmup_start_update = start_update;
+    let mut current_best = resumed_state
+        .as_ref()
+        .and_then(|state| state.best_eval_win.zip(state.best_eval_score));
+    let mut async_eval = match (cfg.async_eval, cfg.eval_device) {
+        (true, Some(device)) if cfg.eval_every > 0 => {
+            Some(AsyncEval::spawn(cfg.clone(), device, current_best)?)
+        }
+        _ => None,
+    };
 
     // Prime the pipeline: collect the very first rollout (using the
     // actors' initial, freshly-copied-from-learner weights) before the
@@ -4323,6 +4783,11 @@ pub fn run(mut cfg: Config) -> Result<()> {
 
     for update in start_update..cfg.updates {
         let update_start = Instant::now();
+        if let Some(eval) = async_eval.as_mut() {
+            if let Some(completion) = eval.poll()? {
+                current_best = report_eval_completion(completion, update, &metrics)?;
+            }
+        }
         let expected_pending_version =
             if update == start_update { start_update } else { update - 1 };
         validate_rollout_set(&pending, expected_pending_version)?;
@@ -4564,6 +5029,22 @@ pub fn run(mut cfg: Config) -> Result<()> {
             );
         }
         total_env_steps += (live_total_envs * cfg.rollout_len) as u64;
+        let eval_due = cfg.eval_every > 0 && update % cfg.eval_every == 0;
+        let can_submit_async = async_eval
+            .as_ref()
+            .is_some_and(|eval| !eval.flight.is_busy());
+        let eval_weights = if eval_due && (async_eval.is_none() || can_submit_async) {
+            Some(if persistent_learner_enabled {
+                learner_weights
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("eval requires persistent learner weights"))?
+                    .clone()
+            } else {
+                snapshot_weights(&learners[0].vs)?
+            })
+        } else {
+            None
+        };
 
         // Refresh every actor from its paired learner's just-updated
         // weights, now that training has finished (and the collection
@@ -4697,63 +5178,108 @@ pub fn run(mut cfg: Config) -> Result<()> {
             }
         }
 
-        let mut last_eval: Option<EvalResult> = None;
-        if cfg.eval_every > 0 && update % cfg.eval_every == 0 {
-            let t_eval = Instant::now();
-            eprintln!(
-                "[phase] update {update} evaluation started (stage={curr_stage}, episodes={})",
-                cfg.eval_episodes
-            );
-            let ev = if cfg.persistent_actors {
-                persistent_actors[0].eval(curr_stage, cfg.eval_episodes)?
+        if eval_due {
+            let win_rate = if recent_wins.is_empty() {
+                None
             } else {
-                let ae = actors[0]
-                    .ae
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("eval requires AE encoders"))?;
-                run_eval(
-                    &learners[0].policy,
-                    ae,
-                    learners[0].device,
-                    curr_stage,
-                    cfg.eval_episodes,
-                    cfg.max_episode_ticks,
-                    cfg.engine,
-                    cfg.pinned_h2d,
-                    cfg.fp16_rollout,
-                    cfg.compact_rollout && cfg.foveate,
-                )?
+                Some(recent_wins.iter().sum::<f64>() / recent_wins.len() as f64)
             };
-            println!(
-                "[eval] stage {curr_stage}  win {:.2}  score {:.2}  ({} eps, {:.0}s)",
-                ev.win,
-                ev.score,
-                ev.episodes,
-                t_eval.elapsed().as_secs_f64()
-            );
-            // Always persist eval rows even when this update isn't a
-            // log_every tick (so sparse eval schedules still land in JSONL).
-            if update % cfg.log_every != 0 && update != cfg.updates - 1 {
-                let win_rate = if recent_wins.is_empty() {
-                    None
+            let report = EvalReportContext {
+                losses: last_losses,
+                win_rate,
+                lr_now,
+                total_env_steps,
+            };
+            let state = TrainState {
+                update: update + 1,
+                stage: curr_stage,
+                ent_scale,
+                lr_now,
+                total_env_steps,
+                recent_wins: recent_wins.iter().copied().collect(),
+                best_eval_win: current_best.map(|best| best.0),
+                best_eval_score: current_best.map(|best| best.1),
+            };
+            if let Some(eval) = async_eval.as_mut() {
+                if let Some(weights) = eval_weights {
+                    let submitted = eval.submit(EvalJob {
+                        update,
+                        stage: curr_stage,
+                        weights,
+                        state,
+                        report,
+                    })?;
+                    debug_assert!(submitted);
+                    eprintln!(
+                        "[phase] update {update} asynchronous evaluation submitted \
+                         (stage={curr_stage}, episodes={})",
+                        cfg.eval_episodes
+                    );
                 } else {
-                    Some(recent_wins.iter().sum::<f64>() / recent_wins.len() as f64)
-                };
-                let _ = metrics.log_update(
-                    update,
-                    curr_stage,
-                    last_losses.0,
-                    last_losses.1,
-                    last_losses.2,
-                    last_losses.3,
-                    win_rate,
-                    lr_now,
-                    total_env_steps,
-                    Some(ev.win),
-                    Some(ev.score),
+                    eprintln!(
+                        "[eval] update {update} skipped: previous asynchronous evaluation \
+                         is still in flight"
+                    );
+                }
+            } else {
+                let weights = eval_weights
+                    .ok_or_else(|| anyhow!("synchronous eval missing weight snapshot"))?;
+                let started = Instant::now();
+                eprintln!(
+                    "[phase] update {update} synchronous evaluation started \
+                     (stage={curr_stage}, episodes={})",
+                    cfg.eval_episodes
                 );
+                let result = if cfg.persistent_actors {
+                    persistent_actors[0].eval(curr_stage, cfg.eval_episodes)?
+                } else {
+                    let ae = actors[0]
+                        .ae
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("eval requires AE encoders"))?;
+                    run_eval(
+                        &learners[0].policy,
+                        ae,
+                        learners[0].device,
+                        curr_stage,
+                        cfg.eval_episodes,
+                        cfg.max_episode_ticks,
+                        cfg.engine,
+                        cfg.pinned_h2d,
+                        cfg.fp16_rollout,
+                        cfg.compact_rollout && cfg.foveate,
+                    )?
+                };
+                let promoted = eval_is_better(&result, current_best);
+                let best = if promoted {
+                    let next_best = Some((result.win, result.score));
+                    let mut promoted_state = state;
+                    promoted_state.best_eval_win = Some(result.win);
+                    promoted_state.best_eval_score = Some(result.score);
+                    save_snapshot_checkpoint(
+                        &weights,
+                        &cfg,
+                        &best_eval_path(&cfg.ckpt_dir),
+                        &promoted_state,
+                    )?;
+                    next_best
+                } else {
+                    current_best
+                };
+                current_best = report_eval_completion(
+                    EvalCompletion {
+                        update,
+                        stage: curr_stage,
+                        result,
+                        elapsed_seconds: started.elapsed().as_secs_f64(),
+                        promoted,
+                        best,
+                        report,
+                    },
+                    update,
+                    &metrics,
+                )?;
             }
-            last_eval = Some(ev);
         }
 
         if update % cfg.log_every == 0 || update == cfg.updates - 1 {
@@ -4817,10 +5343,6 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 learner_snapshot_dt,
                 refresh_dt,
             );
-            let (eval_win, eval_score) = match &last_eval {
-                Some(ev) => (Some(ev.win), Some(ev.score)),
-                None => (None, None),
-            };
             if let Err(e) = metrics.log_update(
                 update,
                 curr_stage,
@@ -4831,8 +5353,8 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 win_rate,
                 lr_now,
                 total_env_steps,
-                eval_win,
-                eval_score,
+                None,
+                None,
             ) {
                 eprintln!("[train] WARNING: metrics log failed: {e:#}");
             }
@@ -4846,6 +5368,8 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 lr_now,
                 total_env_steps,
                 recent_wins: recent_wins.iter().copied().collect(),
+                best_eval_win: current_best.map(|best| best.0),
+                best_eval_score: current_best.map(|best| best.1),
             };
             let path = format!("{}/policy_update{}.safetensors", cfg.ckpt_dir, update);
             if persistent_learner_enabled {
@@ -4879,6 +5403,11 @@ pub fn run(mut cfg: Config) -> Result<()> {
         }
     }
 
+    if let Some(eval) = async_eval.take() {
+        if let Some(completion) = eval.shutdown()? {
+            current_best = report_eval_completion(completion, cfg.updates, &metrics)?;
+        }
+    }
     let final_state = TrainState {
         update: cfg.updates,
         stage: curr_stage,
@@ -4886,6 +5415,8 @@ pub fn run(mut cfg: Config) -> Result<()> {
         lr_now,
         total_env_steps,
         recent_wins: recent_wins.iter().copied().collect(),
+        best_eval_win: current_best.map(|best| best.0),
+        best_eval_score: current_best.map(|best| best.1),
     };
     let final_path = format!("{}/policy_final.safetensors", cfg.ckpt_dir);
     let latest_path = format!("{}/latest.safetensors", cfg.ckpt_dir);
@@ -4937,8 +5468,8 @@ mod persistent_actor_tests {
                 id: 2,
                 policy_version: 8,
                 weights: CpuWeightSnapshot {
-                    meta: Vec::new(),
-                    values: vec![1.0, 2.0, 3.0],
+                    meta: Vec::new().into(),
+                    values: vec![1.0, 2.0, 3.0].into(),
                 },
             })
             .unwrap();
@@ -4975,8 +5506,8 @@ mod persistent_actor_tests {
                 id: 1,
                 policy_version: 3,
                 weights: CpuWeightSnapshot {
-                    meta: Vec::new(),
-                    values: Vec::new(),
+                    meta: Vec::new().into(),
+                    values: Vec::new().into(),
                 },
             })
             .unwrap_err();
@@ -5126,6 +5657,8 @@ mod persistent_actor_tests {
             log_every: 1,
             eval_every: 0,
             eval_episodes: 0,
+            async_eval: false,
+            eval_device: None,
             ckpt_every: 0,
             ckpt_dir: String::new(),
             init: None,
