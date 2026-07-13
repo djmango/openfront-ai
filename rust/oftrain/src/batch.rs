@@ -27,18 +27,14 @@ use crate::vecenv::{CompactGrid, PreparedObs};
 /// When `pinned && device` is CUDA, pins the CPU tensor's backing memory
 /// for `device` (`Tensor::pin_memory`, needs a page-locked allocation so
 /// the CUDA driver can DMA out of it) and issues a non-blocking copy
-/// (`to_device_`'s `non_blocking=true`, ATen's `aten::to.device` op) so
-/// the H2D copy can overlap with other CUDA-stream work instead of the
-/// calling thread blocking on a synchronous `cudaMemcpy`. Falls back to
-/// the original plain `to_device` when `pinned` is off or `device` isn't
-/// CUDA - pinning is meaningless (and untestable - this Mac's libtorch
-/// build has no CUDA support at all) without a real CUDA device, so this
-/// keeps the CPU-only path byte-for-byte unchanged from before this flag
-/// existed.
+/// Pinning is retained as a staging option, but the transfer is deliberately
+/// synchronous. The pinned tensor is a temporary local; a non-blocking copy
+/// allowed its storage to be dropped/reused while CUDA still read it, causing
+/// repeatable device-side asserts in multi-GPU stage-1 rollouts.
 fn to_device_maybe_pinned(t: &Tensor, device: Device, pinned: bool) -> Tensor {
     if pinned && device.is_cuda() {
-        t.pin_memory(device)
-            .to_device_(device, t.kind(), true, false)
+        let staged = t.pin_memory(device);
+        staged.to_device_(device, t.kind(), false, false)
     } else {
         t.to_device(device)
     }
@@ -129,11 +125,10 @@ fn assemble_coarse_grids(
         return Ok(None);
     };
     let raws: Vec<&ae::AeRaw> = items.iter().map(|it| &it.ae_raw).collect();
-    let zs =
-        ae::encode_latent_batch_device(coarse, &raws, device, terrain_cache.as_deref_mut())?
-            .into_iter()
-            .map(|z| z.to_device(Device::Cpu).to_kind(Kind::Float))
-            .collect::<Vec<_>>();
+    let zs = ae::encode_latent_batch_device(coarse, &raws, device, terrain_cache.as_deref_mut())?
+        .into_iter()
+        .map(|z| z.to_device(Device::Cpu).to_kind(Kind::Float))
+        .collect::<Vec<_>>();
     let c_grid = policy::C_GRID as usize;
     let mut grids = Vec::with_capacity(items.len());
     for (it, z) in items.iter().zip(zs.into_iter()) {
@@ -235,12 +230,8 @@ fn encode_uniform_ae_grids(
     let (gh, gw) = (items[0].gh, items[0].gw);
     let raws: Vec<&ae::AeRaw> = items.iter().map(|it| &it.ae_raw).collect();
 
-    let fine_items = ae::encode_latent_batch_device(
-        &pair.fine,
-        &raws,
-        device,
-        terrain_cache.as_deref_mut(),
-    )?;
+    let fine_items =
+        ae::encode_latent_batch_device(&pair.fine, &raws, device, terrain_cache.as_deref_mut())?;
     let fine_refs: Vec<&Tensor> = fine_items.iter().collect();
     let fine_latent = Tensor::stack(&fine_refs, 0);
     let fine = assemble_uniform_device_grid(
@@ -255,12 +246,8 @@ fn encode_uniform_ae_grids(
     );
 
     let (coarse, coarse_latent) = if let Some(coarse_ae) = pair.coarse.as_ref() {
-        let coarse_items = ae::encode_latent_batch_device(
-            coarse_ae,
-            &raws,
-            device,
-            terrain_cache.as_deref_mut(),
-        )?;
+        let coarse_items =
+            ae::encode_latent_batch_device(coarse_ae, &raws, device, terrain_cache.as_deref_mut())?;
         let coarse_refs: Vec<&Tensor> = coarse_items.iter().collect();
         let latent = Tensor::stack(&coarse_refs, 0);
         let (cgh, cgw) = (gh.div_ceil(2), gw.div_ceil(2));
@@ -412,12 +399,8 @@ fn build_device_ae_obs(
     let gh = items.iter().map(|it| it.gh).max().unwrap_or(0);
     let gw = items.iter().map(|it| it.gw).max().unwrap_or(0);
     let raws: Vec<&ae::AeRaw> = items.iter().map(|it| &it.ae_raw).collect();
-    let fine_latents = ae::encode_latent_batch_device(
-        &pair.fine,
-        &raws,
-        device,
-        terrain_cache.as_deref_mut(),
-    )?;
+    let fine_latents =
+        ae::encode_latent_batch_device(&pair.fine, &raws, device, terrain_cache.as_deref_mut())?;
     let fine = assemble_mixed_device_grid(
         items,
         &fine_latents,
@@ -429,12 +412,8 @@ fn build_device_ae_obs(
         false,
     );
     let coarse = if let Some(coarse_ae) = pair.coarse.as_ref() {
-        let latents = ae::encode_latent_batch_device(
-            coarse_ae,
-            &raws,
-            device,
-            terrain_cache.as_deref_mut(),
-        )?;
+        let latents =
+            ae::encode_latent_batch_device(coarse_ae, &raws, device, terrain_cache.as_deref_mut())?;
         Some(assemble_mixed_device_grid(
             items,
             &latents,
