@@ -16,7 +16,8 @@ graphs simple and shape-flexible.
 
 Usage:
   uv run python -m scripts.export_onnx \
-      --ae runs/ae_v31_d8c32/ae_v3.pt --policy runs/rl/ppo_v6/policy.pt \
+      --ae runs/ae_v31_d8c32/ae_v3.pt \
+      --policy rust/checkpoints/ppo_v81/latest.safetensors \
       --out openfront/resources/webbot/models
 """
 
@@ -220,7 +221,9 @@ def verify(out_dir: Path, ae, policy, dummy) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ae", default="runs/ae_v31_d8c32/ae_v3.pt")
-    ap.add_argument("--policy", default="runs/rl/ppo_v6/policy.pt")
+    ap.add_argument(
+        "--policy", default="rust/checkpoints/ppo_v81/latest.safetensors"
+    )
     ap.add_argument("--out", default="openfront/resources/webbot/models")
     ap.add_argument("--skip-verify", action="store_true")
     args = ap.parse_args()
@@ -230,8 +233,16 @@ def main() -> None:
 
     ae = load_ae(args.ae, "cpu")
     policy = Policy()
-    ck = torch.load(args.policy, map_location="cpu", weights_only=False)
-    policy.load_state_dict(ck["model_state_dict"])
+    if Path(args.policy).suffix == ".safetensors":
+        from scripts.policy_safetensors import load_oftrain_safetensors
+
+        metadata = load_oftrain_safetensors(policy, args.policy)
+        ck = metadata["state"]
+    else:
+        # Explicit legacy Python fixture compatibility. New oftrain runs never
+        # create this format.
+        ck = torch.load(args.policy, map_location="cpu", weights_only=False)
+        policy.load_state_dict(ck["model_state_dict"], strict=True)
     policy.eval()
     # TransformerEncoder's nested-tensor fast path (autoselected whenever a
     # key_padding_mask is passed) diverges under ONNX tracing - not a

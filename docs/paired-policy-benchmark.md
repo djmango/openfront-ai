@@ -16,7 +16,7 @@ bootstrap intervals for means, and paired Rust-minus-old deltas.
 | policy | source used for inference | grid / player / scalar / local | action / build / nuke | quantity | current Rust loader |
 |---|---|---|---|---|---|
 | current Rust | current checkout | 89 / 21 / 11 / 5 | 21 / 7 / 5 | Beta scalar | yes |
-| `ppo_v7` | current Python checkout | 89 / 21 / 11 / 5 | 21 / 7 / 5 | Beta scalar | weights are Python `.pt`; no converter |
+| `ppo_v7` | current Python checkout | 89 / 21 / 11 / 5 | 21 / 7 / 5 | Beta scalar | frozen legacy Python fixture |
 | `ppo_v5` | `23197d4^` (pre-v6 source) | 43 / 12 / 8 / 4 | 14 / 6 / 3 | 5-way categorical | no |
 
 The old source archive is used only for observation construction, policy
@@ -31,11 +31,12 @@ Frozen checkpoints are public:
 
 * `hf://djmango/openfront-rl/ppo_v5/policy.pt`
 * `hf://djmango/openfront-rl/ppo_v7/policy.pt`
-* archived Rust v8: `hf://djmango/openfront-rl/ppo_v8_rust_8gpu/policy_latest.ot`
 
 The harness downloads v5/v7 to
 `runs/rl/frozen-eval/{ppo_v5,ppo_v7}/policy.pt`. Supply the current Rust
-checkpoint explicitly; `.ot` and `.safetensors` are accepted.
+checkpoint explicitly as `.safetensors`. The two `policy.pt` files are frozen,
+read-only historical fixtures; current and future runs neither produce nor
+upload them.
 
 ```bash
 cargo build --manifest-path rust/Cargo.toml --release \
