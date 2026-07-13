@@ -24,9 +24,25 @@ pub const LATENT_C: i64 = 32;
 pub const REGION: i64 = 8;
 pub const COARSE_REGION: i64 = 16;
 
+/// Python enables AE bf16 only inside CUDA autocast on the long-lived
+/// rollout owner. The legacy collector may move CUDA state across threads,
+/// so `--amp` must not alter its AE path.
+fn use_bf16_ae(amp: bool, persistent_actor: bool, device: Device) -> bool {
+    amp && persistent_actor && device.is_cuda()
+}
+
+/// Run one convolution in bf16 without mutating its VarStore-owned f32
+/// parameters. This mirrors policy.rs's proven mixed-precision primitive.
+fn conv2d_bf16(conv: &nn::Conv2D, x: &Tensor, stride: [i64; 2], padding: [i64; 2]) -> Tensor {
+    let ws = conv.ws.to_kind(Kind::BFloat16);
+    let bs = conv.bs.as_ref().map(|b| b.to_kind(Kind::BFloat16));
+    x.conv2d(&ws, bs.as_ref(), stride, padding, [1i64, 1], 1)
+}
+
 struct ConvGn {
     conv: nn::Conv2D,
     gn: nn::GroupNorm,
+    stride: i64,
 }
 
 impl ConvGn {
@@ -37,11 +53,21 @@ impl ConvGn {
         Self {
             conv: nn::conv2d(vs / 0, c_in, c_out, 3, cfg),
             gn: nn::group_norm(vs / 1, 8, c_out, Default::default()),
+            stride,
         }
     }
 
-    fn forward(&self, xs: &Tensor) -> Tensor {
-        self.gn.forward(&self.conv.forward(xs)).silu()
+    fn forward(&self, xs: &Tensor, amp: bool) -> Tensor {
+        if amp {
+            // Autocast uses reduced precision for the convolution, not for
+            // GroupNorm. Round-trip each block so GN and silu remain f32.
+            let xb = xs.to_kind(Kind::BFloat16);
+            let conv = conv2d_bf16(&self.conv, &xb, [self.stride, self.stride], [1, 1])
+                .to_kind(Kind::Float);
+            self.gn.forward(&conv).silu()
+        } else {
+            self.gn.forward(&self.conv.forward(xs)).silu()
+        }
     }
 }
 
@@ -52,6 +78,7 @@ pub struct SpatialAE {
     enc_stem: Vec<ConvGn>,
     enc_fuse: ConvGn,
     enc_out: nn::Conv2D,
+    amp: bool,
     pub latent_c: i64,
     pub latent_down: i64,
 }
@@ -59,7 +86,7 @@ pub struct SpatialAE {
 impl SpatialAE {
     /// Build the encoder module tree under `vs` (typically `vs.root()`).
     /// Call [`SpatialAE::load`] afterward to copy weights in.
-    pub fn new(vs: &nn::Path, latent_c: i64, latent_down: i64) -> Result<Self> {
+    pub fn new(vs: &nn::Path, latent_c: i64, latent_down: i64, amp: bool) -> Result<Self> {
         if latent_down != 8 && latent_down != 16 {
             bail!("latent_down must be 8 or 16, got {latent_down}");
         }
@@ -103,6 +130,7 @@ impl SpatialAE {
             enc_stem,
             enc_fuse,
             enc_out,
+            amp,
             latent_c,
             latent_down,
         })
@@ -114,6 +142,7 @@ impl SpatialAE {
         path: impl AsRef<Path>,
         device: Device,
         expected_down: i64,
+        amp: bool,
     ) -> Result<(nn::VarStore, Self)> {
         let path = path.as_ref();
         let meta_path = path.with_extension("json");
@@ -146,7 +175,7 @@ impl SpatialAE {
         }
 
         let mut vs = nn::VarStore::new(device);
-        let ae = Self::new(&vs.root(), latent_c, latent_down)?;
+        let ae = Self::new(&vs.root(), latent_c, latent_down, amp)?;
         vs.load(path)
             .with_context(|| format!("load AE encoder weights from {}", path.display()))?;
         vs.freeze();
@@ -156,13 +185,22 @@ impl SpatialAE {
     /// `owners` (B,H,W) int64, `terrain` (B,3,H,W) f32, `static_planes`
     /// (B,6,H/down,W/down) f32 → `z` (B,latent_c,H/down,W/down) f32.
     pub fn encode(&self, owners: &Tensor, terrain: &Tensor, static_planes: &Tensor) -> Tensor {
+        // Embedding and concatenated activations remain f32. Owners stay
+        // int64 as required by embedding lookup.
         let emb = self.owner_emb.forward(owners).permute([0, 3, 1, 2]);
         let mut g = Tensor::cat(&[&emb, terrain], 1);
         for block in &self.enc_stem {
-            g = block.forward(&g);
+            g = block.forward(&g, self.amp);
         }
-        self.enc_out
-            .forward(&self.enc_fuse.forward(&Tensor::cat(&[&g, static_planes], 1)))
+        g = self
+            .enc_fuse
+            .forward(&Tensor::cat(&[&g, static_planes], 1), self.amp);
+        if self.amp {
+            conv2d_bf16(&self.enc_out, &g.to_kind(Kind::BFloat16), [1, 1], [0, 0])
+                .to_kind(Kind::Float)
+        } else {
+            self.enc_out.forward(&g)
+        }
     }
 }
 
@@ -180,11 +218,14 @@ impl AePair {
         fine_path: impl AsRef<Path>,
         coarse_path: Option<&Path>,
         device: Device,
+        amp: bool,
+        persistent_actor: bool,
     ) -> Result<Self> {
-        let (fine_vs, fine) = SpatialAE::load(fine_path.as_ref(), device, REGION)?;
+        let ae_amp = use_bf16_ae(amp, persistent_actor, device);
+        let (fine_vs, fine) = SpatialAE::load(fine_path.as_ref(), device, REGION, ae_amp)?;
         let (coarse_vs, coarse) = match coarse_path {
             Some(p) => {
-                let (vs, ae) = SpatialAE::load(p, device, COARSE_REGION)?;
+                let (vs, ae) = SpatialAE::load(p, device, COARSE_REGION, ae_amp)?;
                 (Some(vs), Some(ae))
             }
             None => (None, None),
@@ -983,12 +1024,12 @@ mod tests {
         Vec::<f32>::try_from(tensor.reshape([-1])).unwrap()
     }
 
-    fn random_pair() -> AePair {
+    fn random_pair_with_amp(amp: bool) -> AePair {
         tch::manual_seed(73);
         let fine_vs = nn::VarStore::new(Device::Cpu);
-        let fine = SpatialAE::new(&fine_vs.root(), LATENT_C, REGION).unwrap();
+        let fine = SpatialAE::new(&fine_vs.root(), LATENT_C, REGION, amp).unwrap();
         let coarse_vs = nn::VarStore::new(Device::Cpu);
-        let coarse = SpatialAE::new(&coarse_vs.root(), LATENT_C, COARSE_REGION).unwrap();
+        let coarse = SpatialAE::new(&coarse_vs.root(), LATENT_C, COARSE_REGION, amp).unwrap();
         AePair {
             fine,
             _fine_vs: fine_vs,
@@ -997,10 +1038,14 @@ mod tests {
         }
     }
 
+    fn random_pair() -> AePair {
+        random_pair_with_amp(false)
+    }
+
     #[test]
     fn encoder_tree_key_count_d8() {
         let vs = nn::VarStore::new(Device::Cpu);
-        let _ae = SpatialAE::new(&vs.root(), 32, 8).unwrap();
+        let _ae = SpatialAE::new(&vs.root(), 32, 8, false).unwrap();
         // 1 emb + 4 stem*(conv.w/b + gn.w/b) + fuse_block + 1x1 out = 1+16+4+2 = 23
         assert_eq!(vs.variables().len(), 23);
     }
@@ -1008,7 +1053,7 @@ mod tests {
     #[test]
     fn encoder_tree_key_count_d16() {
         let vs = nn::VarStore::new(Device::Cpu);
-        let _ae = SpatialAE::new(&vs.root(), 32, 16).unwrap();
+        let _ae = SpatialAE::new(&vs.root(), 32, 16, false).unwrap();
         // +1 stem block (4 tensors) vs d8 → 27
         assert_eq!(vs.variables().len(), 27);
     }
@@ -1020,7 +1065,7 @@ mod tests {
         assert!(err.to_string().contains("owner[2]=128"));
 
         let vs = nn::VarStore::new(Device::Cpu);
-        let ae = SpatialAE::new(&vs.root(), LATENT_C, REGION).unwrap();
+        let ae = SpatialAE::new(&vs.root(), LATENT_C, REGION, false).unwrap();
         let mut raw = AeRaw {
             owners: vec![0; 8 * 8],
             static_terrain: terrain(1, 1, 8, 8, 0.0),
@@ -1039,9 +1084,9 @@ mod tests {
     fn packed_owner_embedding_and_latents_exactly_match_i64_reference() {
         tch::manual_seed(97);
         let fine_vs = nn::VarStore::new(Device::Cpu);
-        let fine = SpatialAE::new(&fine_vs.root(), LATENT_C, REGION).unwrap();
+        let fine = SpatialAE::new(&fine_vs.root(), LATENT_C, REGION, false).unwrap();
         let coarse_vs = nn::VarStore::new(Device::Cpu);
-        let coarse = SpatialAE::new(&coarse_vs.root(), LATENT_C, COARSE_REGION).unwrap();
+        let coarse = SpatialAE::new(&coarse_vs.root(), LATENT_C, COARSE_REGION, false).unwrap();
 
         let every_slot: Vec<u8> = (0..MAX_SLOTS as u8).collect();
         let packed = upload_owner_indices(&every_slot, [1, 8, 16], Device::Cpu).unwrap();
@@ -1157,7 +1202,7 @@ mod tests {
     #[test]
     fn coarse_encode_supports_odd_fine_dimensions() {
         let vs = nn::VarStore::new(Device::Cpu);
-        let ae = SpatialAE::new(&vs.root(), LATENT_C, 16).unwrap();
+        let ae = SpatialAE::new(&vs.root(), LATENT_C, 16, false).unwrap();
         let raw = AeRaw {
             owners: vec![0; 24 * 40],
             static_terrain: terrain(1, 1, 24, 40, 0.0),
@@ -1298,7 +1343,7 @@ mod tests {
             );
             return;
         }
-        let (_vs, ae) = SpatialAE::load(&path, Device::Cpu, REGION).unwrap();
+        let (_vs, ae) = SpatialAE::load(&path, Device::Cpu, REGION, false).unwrap();
         assert_eq!(ae.latent_down, 8);
         let owners = Tensor::zeros([1, 32, 40], (Kind::Int64, Device::Cpu));
         let terrain = Tensor::zeros([1, 3, 32, 40], (Kind::Float, Device::Cpu));
@@ -1361,7 +1406,7 @@ mod tests {
     fn cached_device_unpacked_and_legacy_host_unpacked_latents_are_exact() {
         tch::manual_seed(41);
         let vs = nn::VarStore::new(Device::Cpu);
-        let ae = SpatialAE::new(&vs.root(), LATENT_C, REGION).unwrap();
+        let ae = SpatialAE::new(&vs.root(), LATENT_C, REGION, false).unwrap();
         let static_terrain = terrain(2, 5, 8, 8, 0.375);
         let fallout_bits: Vec<u8> = (0..64).map(|i| ((i * 5 + 3) % 11 < 4) as u8).collect();
         let packed = pack_fallout(&fallout_bits, 8, 8);
@@ -1447,5 +1492,111 @@ mod tests {
         ));
         assert_ne!(raw_a.stat, raw_b.stat, "structure stats were stale");
         assert_ne!(raw_a.fallout, raw_b.fallout, "fallout was stale");
+    }
+
+    #[test]
+    fn conv_only_bf16_is_finite_close_and_keeps_weights_f32() {
+        for latent_down in [REGION, COARSE_REGION] {
+            tch::manual_seed(17);
+            let fp_vs = nn::VarStore::new(Device::Cpu);
+            let fp_ae = SpatialAE::new(&fp_vs.root(), LATENT_C, latent_down, false).unwrap();
+
+            let mut bf_vs = nn::VarStore::new(Device::Cpu);
+            let bf_ae = SpatialAE::new(&bf_vs.root(), LATENT_C, latent_down, true).unwrap();
+            bf_vs.copy(&fp_vs).unwrap();
+
+            let side = 32;
+            let owners = Tensor::randint(MAX_SLOTS, [2, side, side], (Kind::Int64, Device::Cpu));
+            let terrain = Tensor::rand(
+                [2, TERRAIN_CHANNELS, side, side],
+                (Kind::Float, Device::Cpu),
+            );
+            let static_p = Tensor::rand(
+                [2, NUM_STATIC, side / latent_down, side / latent_down],
+                (Kind::Float, Device::Cpu),
+            );
+            let fp = tch::no_grad(|| fp_ae.encode(&owners, &terrain, &static_p));
+            let bf = tch::no_grad(|| bf_ae.encode(&owners, &terrain, &static_p));
+
+            assert!(
+                bf_vs.variables().values().all(|v| v.kind() == Kind::Float),
+                "mixed precision must not mutate stored AE parameter dtypes"
+            );
+            assert_eq!(bf.kind(), Kind::Float);
+            assert!(bf.isfinite().all().int64_value(&[]) != 0);
+            let mean_abs_err = (&fp - &bf).abs().mean(Kind::Float).double_value(&[]);
+            assert!(
+                mean_abs_err < 0.02,
+                "1/{latent_down} bf16 mean absolute error {mean_abs_err} is too large"
+            );
+        }
+    }
+
+    #[test]
+    fn bf16_gate_requires_amp_cuda_and_persistent_actor() {
+        for amp in [false, true] {
+            for persistent in [false, true] {
+                for device in [Device::Cpu, Device::Cuda(0)] {
+                    assert_eq!(
+                        use_bf16_ae(amp, persistent, device),
+                        amp && persistent && device.is_cuda()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shared_fine_coarse_bf16_is_finite_close_and_has_exact_shapes() {
+        let fp_pair = random_pair_with_amp(false);
+        let mut bf_pair = random_pair_with_amp(true);
+        bf_pair._fine_vs.copy(&fp_pair._fine_vs).unwrap();
+        bf_pair
+            ._coarse_vs
+            .as_mut()
+            .unwrap()
+            .copy(fp_pair._coarse_vs.as_ref().unwrap())
+            .unwrap();
+        let raws = [
+            patterned_raw(21, 24, 40),
+            patterned_raw(22, 16, 32),
+            patterned_raw(23, 24, 40),
+        ];
+        let refs: Vec<&AeRaw> = raws.iter().collect();
+        let mut fp_cache = TerrainDeviceCache::new_persistent_actor(Device::Cpu);
+        let mut bf_cache = TerrainDeviceCache::new_persistent_actor(Device::Cpu);
+        let fp =
+            encode_dual_latent_batch_device(&fp_pair, &refs, Device::Cpu, &mut fp_cache).unwrap();
+        let bf =
+            encode_dual_latent_batch_device(&bf_pair, &refs, Device::Cpu, &mut bf_cache).unwrap();
+
+        for (i, raw) in raws.iter().enumerate() {
+            let gh = raw.hr as i64 / REGION;
+            let gw = raw.wr as i64 / REGION;
+            for (name, actual, expected, shape) in [
+                ("fine", &bf.fine[i], &fp.fine[i], [LATENT_C, gh, gw]),
+                (
+                    "coarse",
+                    &bf.coarse[i],
+                    &fp.coarse[i],
+                    [LATENT_C, (gh + 1) / 2, (gw + 1) / 2],
+                ),
+            ] {
+                assert_eq!(actual.size(), shape, "{name} item {i}");
+                assert_eq!(actual.kind(), Kind::Float, "{name} API dtype item {i}");
+                assert!(
+                    actual.isfinite().all().int64_value(&[]) != 0,
+                    "{name} non-finite item {i}"
+                );
+                let mean_abs_err = (actual - expected)
+                    .abs()
+                    .mean(Kind::Float)
+                    .double_value(&[]);
+                assert!(
+                    mean_abs_err < 0.02,
+                    "{name} item {i} bf16 mean absolute error {mean_abs_err}"
+                );
+            }
+        }
     }
 }
