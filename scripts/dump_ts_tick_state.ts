@@ -175,17 +175,27 @@ async function main() {
   const dumpUnitsFrom = process.env.OF_DUMP_UNITS_FROM
     ? parseInt(process.env.OF_DUMP_UNITS_FROM, 10)
     : 0;
+  // Keep snapshots only from this tick onward (still replay from 0). Avoids
+  // JSON.stringify blowing past V8's string length on multi-thousand-tick
+  // fine dumps of large bot-count curriculum games.
+  const dumpTicksFrom = process.env.OF_DUMP_TICKS_FROM
+    ? parseInt(process.env.OF_DUMP_TICKS_FROM, 10)
+    : 0;
 
   const out: TickSnapshot[] = [];
   for (const turn of record.turns) {
     if (maxTicks !== undefined && turn.turnNumber > maxTicks) break;
     game.addExecution(...executor.createExecs(turn));
     game.executeNextTick();
+    if (game.ticks() < dumpTicksFrom) continue;
     if (game.ticks() % every === 0) {
       out.push(snapshot(game, dumpUnits && game.ticks() >= dumpUnitsFrom));
     }
   }
-  if (out.length === 0 || out[out.length - 1].tick !== game.ticks()) {
+  if (
+    game.ticks() >= dumpTicksFrom &&
+    (out.length === 0 || out[out.length - 1].tick !== game.ticks())
+  ) {
     out.push(snapshot(game, dumpUnits && game.ticks() >= dumpUnitsFrom));
   }
 

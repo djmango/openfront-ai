@@ -177,6 +177,10 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
+    let dump_ticks_from: u32 = std::env::var("OF_DUMP_TICKS_FROM")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     let bytes = load_record_bytes(&args.record).expect("read record");
     let record = GameRecord::from_json_bytes(&bytes)
         .expect("parse record")
@@ -196,6 +200,9 @@ fn main() {
             game.add_execution(execution);
         }
         game.execute_next_tick();
+        if game.ticks() < dump_ticks_from {
+            continue;
+        }
         if game.ticks() % args.every == 0 {
             let include_units = dump_units && game.ticks() >= dump_units_from;
             out.push(snapshot(&game, include_units));
@@ -203,7 +210,7 @@ fn main() {
     }
     // Always capture the true final state even if it doesn't land on an
     // `every`-tick boundary.
-    if out.last().map(|s| s.tick) != Some(game.ticks()) {
+    if game.ticks() >= dump_ticks_from && out.last().map(|s| s.tick) != Some(game.ticks()) {
         let include_units = dump_units && game.ticks() >= dump_units_from;
         out.push(snapshot(&game, include_units));
     }
