@@ -210,6 +210,37 @@ struct UniformAeGrids {
     coarse_latent: Option<Tensor>,
 }
 
+/// Use the shared-input path only when both encoders and a persistent-actor
+/// cache are present. Non-persistent, uncached, and fine-only callers keep the
+/// established separate encoder path.
+fn encode_pair_latents(
+    pair: &AePair,
+    raws: &[&ae::AeRaw],
+    device: Device,
+    mut terrain_cache: Option<&mut TerrainDeviceCache>,
+) -> anyhow::Result<(Vec<Tensor>, Option<Vec<Tensor>>)> {
+    if pair.coarse.is_some() {
+        if let Some(cache) = terrain_cache
+            .as_deref_mut()
+            .filter(|cache| cache.supports_shared_pair_inputs())
+        {
+            let dual = ae::encode_dual_latent_batch_device(pair, raws, device, cache)?;
+            return Ok((dual.fine, Some(dual.coarse)));
+        }
+    }
+
+    let fine =
+        ae::encode_latent_batch_device(&pair.fine, raws, device, terrain_cache.as_deref_mut())?;
+    let coarse = pair
+        .coarse
+        .as_ref()
+        .map(|coarse| {
+            ae::encode_latent_batch_device(coarse, raws, device, terrain_cache.as_deref_mut())
+        })
+        .transpose()?;
+    Ok((fine, coarse))
+}
+
 /// Same-shape AE path: stack the encoder outputs on their original device,
 /// upload only the host-native feature planes, and concatenate there.
 fn encode_uniform_ae_grids(
@@ -230,8 +261,8 @@ fn encode_uniform_ae_grids(
     let (gh, gw) = (items[0].gh, items[0].gw);
     let raws: Vec<&ae::AeRaw> = items.iter().map(|it| &it.ae_raw).collect();
 
-    let fine_items =
-        ae::encode_latent_batch_device(&pair.fine, &raws, device, terrain_cache.as_deref_mut())?;
+    let (fine_items, coarse_items) =
+        encode_pair_latents(pair, &raws, device, terrain_cache.as_deref_mut())?;
     let fine_refs: Vec<&Tensor> = fine_items.iter().collect();
     let fine_latent = Tensor::stack(&fine_refs, 0);
     let fine = assemble_uniform_device_grid(
@@ -245,9 +276,7 @@ fn encode_uniform_ae_grids(
         false,
     );
 
-    let (coarse, coarse_latent) = if let Some(coarse_ae) = pair.coarse.as_ref() {
-        let coarse_items =
-            ae::encode_latent_batch_device(coarse_ae, &raws, device, terrain_cache.as_deref_mut())?;
+    let (coarse, coarse_latent) = if let Some(coarse_items) = coarse_items {
         let coarse_refs: Vec<&Tensor> = coarse_items.iter().collect();
         let latent = Tensor::stack(&coarse_refs, 0);
         let (cgh, cgw) = (gh.div_ceil(2), gw.div_ceil(2));
@@ -399,8 +428,8 @@ fn build_device_ae_obs(
     let gh = items.iter().map(|it| it.gh).max().unwrap_or(0);
     let gw = items.iter().map(|it| it.gw).max().unwrap_or(0);
     let raws: Vec<&ae::AeRaw> = items.iter().map(|it| &it.ae_raw).collect();
-    let fine_latents =
-        ae::encode_latent_batch_device(&pair.fine, &raws, device, terrain_cache.as_deref_mut())?;
+    let (fine_latents, coarse_latents) =
+        encode_pair_latents(pair, &raws, device, terrain_cache.as_deref_mut())?;
     let fine = assemble_mixed_device_grid(
         items,
         &fine_latents,
@@ -411,9 +440,7 @@ fn build_device_ae_obs(
         fp16_rollout,
         false,
     );
-    let coarse = if let Some(coarse_ae) = pair.coarse.as_ref() {
-        let latents =
-            ae::encode_latent_batch_device(coarse_ae, &raws, device, terrain_cache.as_deref_mut())?;
+    let coarse = if let Some(latents) = coarse_latents {
         Some(assemble_mixed_device_grid(
             items,
             &latents,
@@ -482,6 +509,22 @@ fn host_grids_from_latent(
     Ok(grids)
 }
 
+fn host_grids_from_item_latents(
+    items: &[&PreparedObs],
+    latents: Vec<Tensor>,
+    coarse: bool,
+) -> anyhow::Result<Vec<Vec<f32>>> {
+    items
+        .iter()
+        .zip(latents)
+        .map(|(item, latent)| {
+            let one_item = [*item];
+            let batched = latent.unsqueeze(0);
+            host_grids_from_latent(&one_item, &batched, coarse).map(|mut grids| grids.remove(0))
+        })
+        .collect()
+}
+
 /// Encode AE latents into each item's `grid` / `grid_coarse` host buffers
 /// in place. Called on the actor thread (exclusive `&mut`) before
 /// `build_obs` so learner threads never need to hold an AE.
@@ -492,8 +535,13 @@ pub fn encode_prepared_obs(
     terrain_cache: &mut TerrainDeviceCache,
 ) -> anyhow::Result<()> {
     let refs: Vec<&PreparedObs> = items.iter().collect();
-    let fine = assemble_grids(&refs, device, Some(ae), Some(terrain_cache))?;
-    let coarse = assemble_coarse_grids(&refs, device, Some(ae), Some(terrain_cache))?;
+    let raws: Vec<&ae::AeRaw> = refs.iter().map(|it| &it.ae_raw).collect();
+    let (fine_latents, coarse_latents) =
+        encode_pair_latents(ae, &raws, device, Some(terrain_cache))?;
+    let fine = host_grids_from_item_latents(&refs, fine_latents, false)?;
+    let coarse = coarse_latents
+        .map(|latents| host_grids_from_item_latents(&refs, latents, true))
+        .transpose()?;
     for (i, it) in items.iter_mut().enumerate() {
         it.grid = Some(fine[i].clone());
         if let Some(ref cg) = coarse {
@@ -697,6 +745,21 @@ fn build_obs_with_ae_cache(
                 None,
                 None,
                 Some((resident.fine, resident.coarse)),
+            );
+        }
+    }
+    if let Some(pair) = ae.filter(|pair| pair.coarse.is_some()) {
+        if terrain_cache
+            .as_deref()
+            .is_some_and(TerrainDeviceCache::supports_shared_pair_inputs)
+        {
+            return build_device_ae_obs(
+                items,
+                device,
+                pinned_h2d,
+                fp16_rollout,
+                pair,
+                terrain_cache.as_deref_mut(),
             );
         }
     }
