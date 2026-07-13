@@ -815,6 +815,15 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
         (&v).try_into()?
     };
 
+    // Each collection runs on a freshly spawned OS thread, and libtorch uses
+    // thread-local CUDA streams. Joining the thread only waits for its host
+    // function; it does not guarantee all kernels queued on that stream have
+    // completed. Finish the actor stream before its tensors return to the main
+    // thread for VarStore refresh or move to another collector thread.
+    if let Device::Cuda(index) = actor.device {
+        Cuda::synchronize(index as i64);
+    }
+
     Ok(RolloutResult {
         buffer,
         bootstrap_v,
