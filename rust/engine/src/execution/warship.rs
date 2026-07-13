@@ -260,14 +260,14 @@ impl WarshipExecution {
                 let same_water_component = game
                     .get_water_component(from)
                     .is_some_and(|component| game.has_water_component(unit_tile, component));
-                // TS only pirates active trade routes. Once the destination
-                // port is gone, `targetUnit()` is undefined and the ship is
-                // ignored rather than becoming a free nearest target.
-                let Some(destination_owner) = destination_owner else {
-                    continue;
-                };
-                let dest_is_friendly = destination_owner == self.owner_small_id
-                    || game.is_friendly(destination_owner, self.owner_small_id);
+                // TS optional-chains these targetUnit owner checks, so a
+                // missing destination does not reject the trade ship by
+                // itself; when TradeShipExecution still has a last-known
+                // owner for a deleted destination port, use it for parity.
+                let dest_is_friendly = destination_owner.is_some_and(|destination_owner| {
+                    destination_owner == self.owner_small_id
+                        || game.is_friendly(destination_owner, self.owner_small_id)
+                });
                 if !owner_has_port
                     || game.trade_ship_is_safe_from_pirates(owner, unit_id)
                     || dest_is_friendly
@@ -1256,7 +1256,7 @@ impl Execution for WarshipExecution {
         }
 
         #[test]
-        fn does_not_target_trade_ship_without_live_destination() {
+        fn targets_trade_ship_when_destination_owner_is_unknown() {
             let mut game = water_game(60, 60);
             let p1 = add_nation(&mut game, "p1");
             let p2 = add_human(&mut game, "p2");
@@ -1269,7 +1269,77 @@ impl Execution for WarshipExecution {
             game.unit_mut(p2, ship_id).unwrap().last_safe_from_pirates_tick = -1000;
 
             let exec = WarshipExecution::new(p1, warship_tile);
-            assert!(exec.target(&game, warship_tile, true).is_none());
+            assert_eq!(
+                exec.target(&game, warship_tile, true),
+                Some((p2, ship_id, unit_type::TRADE_SHIP)),
+                "TS optional-chains targetUnit owner checks, so undefined is not a rejection"
+            );
+        }
+
+        #[test]
+        fn targets_trade_ship_with_deleted_enemy_destination_port() {
+            let mut game = water_game(60, 60);
+            let p1 = add_nation(&mut game, "p1");
+            let p2 = add_human(&mut game, "p2");
+            let p3 = add_human(&mut game, "p3");
+
+            let warship_tile = game.ref_xy(10, 10);
+            let ship_tile = game.ref_xy(11, 10);
+            let dst_tile = game.ref_xy(12, 10);
+
+            game.build_unit(p1, unit_type::PORT, warship_tile);
+            let ship_id = game.build_unit(p2, unit_type::TRADE_SHIP, ship_tile);
+            let dst_port_id = game.build_unit(p3, unit_type::PORT, dst_tile);
+            game.unit_mut(p2, ship_id).unwrap().last_safe_from_pirates_tick = -1000;
+            game.add_execution(ExecEnum::TradeShip(
+                TradeShipExecution::new_for_test_with_destination_owner(
+                    p2,
+                    dst_port_id,
+                    ship_id,
+                    p3,
+                ),
+            ));
+            game.execute_next_tick();
+            game.remove_unit(p3, dst_port_id);
+
+            let exec = WarshipExecution::new(p1, warship_tile);
+            assert_eq!(
+                exec.target(&game, warship_tile, true),
+                Some((p2, ship_id, unit_type::TRADE_SHIP)),
+                "deleted destination keeps its last-known enemy owner like TS targetUnit.owner()"
+            );
+        }
+
+        #[test]
+        fn does_not_target_trade_ship_with_deleted_friendly_destination_port() {
+            let mut game = water_game(60, 60);
+            let p1 = add_nation(&mut game, "p1");
+            let p2 = add_human(&mut game, "p2");
+
+            let warship_tile = game.ref_xy(10, 10);
+            let ship_tile = game.ref_xy(11, 10);
+            let dst_tile = game.ref_xy(12, 10);
+
+            game.build_unit(p1, unit_type::PORT, warship_tile);
+            let dst_port_id = game.build_unit(p1, unit_type::PORT, dst_tile);
+            let ship_id = game.build_unit(p2, unit_type::TRADE_SHIP, ship_tile);
+            game.unit_mut(p2, ship_id).unwrap().last_safe_from_pirates_tick = -1000;
+            game.add_execution(ExecEnum::TradeShip(
+                TradeShipExecution::new_for_test_with_destination_owner(
+                    p2,
+                    dst_port_id,
+                    ship_id,
+                    p1,
+                ),
+            ));
+            game.execute_next_tick();
+            game.remove_unit(p1, dst_port_id);
+
+            let exec = WarshipExecution::new(p1, warship_tile);
+            assert!(
+                exec.target(&game, warship_tile, true).is_none(),
+                "cached friendly destination owner still suppresses piracy after port deletion"
+            );
         }
 
         #[test]
