@@ -2,7 +2,7 @@
 
 use crate::core::config::TrainRelation;
 use crate::core::schemas::unit_type;
-use crate::execution::{ExecEnum, construction::ConstructionExecution};
+use crate::execution::{construction::ConstructionExecution, ExecEnum};
 use crate::game::Game;
 use crate::map::TileRef;
 use crate::prng::PseudoRandom;
@@ -221,13 +221,19 @@ fn build_reachable_stations(game: &Game, small_id: u16) -> Vec<ReachableStation>
             }
             if let Some(station_id) = rn.find_station_by_unit(u.id) {
                 let cluster = rn.stations.get(&station_id).and_then(|s| s.cluster);
-                result.push(ReachableStation { tile: u.tile as TileRef, cluster, weight: self_weight });
+                result.push(ReachableStation {
+                    tile: u.tile as TileRef,
+                    cluster,
+                    weight: self_weight,
+                });
             }
         }
     }
 
     for neighbor_id in crate::execution::ai_attack::nearby_player_small_ids(game, small_id) {
-        let Some(neighbor) = game.player_by_small_id(neighbor_id) else { continue };
+        let Some(neighbor) = game.player_by_small_id(neighbor_id) else {
+            continue;
+        };
         if neighbor.player_type == crate::game::PlayerType::Bot {
             continue;
         }
@@ -248,7 +254,11 @@ fn build_reachable_stations(game: &Game, small_id: u16) -> Vec<ReachableStation>
             }
             if let Some(station_id) = rn.find_station_by_unit(u.id) {
                 let cluster = rn.stations.get(&station_id).and_then(|s| s.cluster);
-                result.push(ReachableStation { tile: u.tile as TileRef, cluster, weight });
+                result.push(ReachableStation {
+                    tile: u.tile as TileRef,
+                    cluster,
+                    weight,
+                });
             }
         }
     }
@@ -309,7 +319,11 @@ struct FactoryValueCtx {
     min_range_sq: f64,
 }
 
-fn build_factory_value_ctx(game: &Game, small_id: u16, use_connection_score: bool) -> FactoryValueCtx {
+fn build_factory_value_ctx(
+    game: &Game,
+    small_id: u16,
+    use_connection_score: bool,
+) -> FactoryValueCtx {
     let (border_spacing, structure_spacing) = spacing_constants(game);
     let station_range = game.wire.train_station_max_range();
     let station_range_sq = (station_range as f64).powi(2);
@@ -404,7 +418,11 @@ fn missile_silo_value(
     let (_, border_dist) = closest_tile(game, border_tiles, tile);
     w += border_dist.min(border_spacing) as f64;
 
-    let others: Vec<TileRef> = other_silo_tiles.iter().copied().filter(|&t| t != tile).collect();
+    let others: Vec<TileRef> = other_silo_tiles
+        .iter()
+        .copied()
+        .filter(|&t| t != tile)
+        .collect();
     if let Some((other, _)) = closest_two_tiles(game, &others, &[tile]) {
         let d = game.manhattan_dist(other, tile);
         w += d.min(structure_spacing) as f64;
@@ -426,7 +444,12 @@ struct SamValueCtx {
     structure_coverage: Option<HashMap<TileRef, f64>>,
 }
 
-fn build_sam_value_ctx(game: &Game, random: &mut PseudoRandom, small_id: u16, difficulty: &str) -> SamValueCtx {
+fn build_sam_value_ctx(
+    game: &Game,
+    random: &mut PseudoRandom,
+    small_id: u16,
+    difficulty: &str,
+) -> SamValueCtx {
     let (border_spacing, structure_spacing) = spacing_constants(game);
     let weight_by_level = difficulty == "Hard" || difficulty == "Impossible";
 
@@ -439,7 +462,10 @@ fn build_sam_value_ctx(game: &Game, random: &mut PseudoRandom, small_id: u16, di
     if let Some(p) = game.player_by_small_id(small_id) {
         for u in &p.units {
             match u.unit_type.as_str() {
-                unit_type::CITY | unit_type::FACTORY | unit_type::MISSILE_SILO | unit_type::PORT => {
+                unit_type::CITY
+                | unit_type::FACTORY
+                | unit_type::MISSILE_SILO
+                | unit_type::PORT => {
                     let weight = if weight_by_level { u.level as f64 } else { 1.0 };
                     protect_entries.push((u.tile as TileRef, weight));
                 }
@@ -496,7 +522,12 @@ fn sam_launcher_value(game: &Game, ctx: &SamValueCtx, tile: TileRef) -> f64 {
     let (_, border_dist) = closest_tile(game, &ctx.border_tiles, tile);
     w += border_dist.min(ctx.border_spacing) as f64;
 
-    let others: Vec<TileRef> = ctx.other_sam_tiles.iter().copied().filter(|&t| t != tile).collect();
+    let others: Vec<TileRef> = ctx
+        .other_sam_tiles
+        .iter()
+        .copied()
+        .filter(|&t| t != tile)
+        .collect();
     if let Some((other, _)) = closest_two_tiles(game, &others, &[tile]) {
         let d = game.manhattan_dist(other, tile);
         w += d.min(ctx.structure_spacing) as f64;
@@ -580,7 +611,9 @@ pub fn valid_structure_spawn_tiles(game: &Game, small_id: u16, tile: TileRef) ->
 fn port_spawn(game: &Game, small_id: u16, tile: TileRef) -> Option<TileRef> {
     let radius = game.wire.radius_port_spawn();
     let valid: std::collections::HashSet<TileRef> =
-        valid_structure_spawn_tiles(game, small_id, tile).into_iter().collect();
+        valid_structure_spawn_tiles(game, small_id, tile)
+            .into_iter()
+            .collect();
     let mut scratch = crate::water::BfsScratch::new((game.map.width * game.map.height) as usize);
     let reachable = game.map.bfs_with_scratch(&mut scratch, tile, |_, t| {
         game.manhattan_dist(tile, t) <= radius
@@ -595,7 +628,9 @@ fn port_spawn(game: &Game, small_id: u16, tile: TileRef) -> Option<TileRef> {
 
 /// TS `PlayerImpl.landBasedStructureSpawn` / `canBuild` for land structures.
 fn land_based_structure_spawn(game: &Game, small_id: u16, tile: TileRef) -> Option<TileRef> {
-    valid_structure_spawn_tiles(game, small_id, tile).into_iter().next()
+    valid_structure_spawn_tiles(game, small_id, tile)
+        .into_iter()
+        .next()
 }
 
 /// TS `PlayerImpl.canSpawnUnitType` tile resolution for construction intents.
@@ -622,14 +657,12 @@ pub fn can_build_land_structure(game: &Game, small_id: u16, tile: TileRef) -> Op
 
 /// TS `SharedWaterCache.TTL_TICKS`  -  rebuilt at most once every 3s (30 ticks).
 const SHARED_WATER_CACHE_TTL_TICKS: i64 = 30;
+const MIN_PORT_WATER_COMPONENT_SIZE: u32 = 3000;
 
 /// Which water bodies (lake component ids, plus a `u32::MAX` sentinel for ocean) a
 /// player's coastline touches, keyed by small id. Bots are excluded (TS `SharedWaterCache`
 /// treats them as never having a trade partner and never being one).
-fn player_water_touch(
-    game: &Game,
-    small_id: u16,
-) -> (bool, std::collections::HashSet<u32>) {
+fn player_water_touch(game: &Game, small_id: u16) -> (bool, std::collections::HashSet<u32>) {
     let mut has_ocean = false;
     let mut lakes = std::collections::HashSet::new();
     game.for_each_border_tile(small_id, |border| {
@@ -655,9 +688,7 @@ fn player_water_touch(
 /// TS `SharedWaterCache.build`  -  ocean is always shared once touched (no partner
 /// requirement); a lake is shared only if some other non-bot, alive player who can still
 /// trade with this one (no mutual embargo) also touches it.
-fn build_shared_water_cache(
-    game: &Game,
-) -> HashMap<u16, Option<std::collections::HashSet<u32>>> {
+fn build_shared_water_cache(game: &Game) -> HashMap<u16, Option<std::collections::HashSet<u32>>> {
     let mut touch: HashMap<u16, (bool, std::collections::HashSet<u32>)> = HashMap::new();
     let mut lake_partners: HashMap<u32, Vec<u16>> = HashMap::new();
     for p in game.players_alive() {
@@ -687,12 +718,22 @@ fn build_shared_water_cache(
                 }
             }
         }
-        result.insert(*small_id, if shared.is_empty() { None } else { Some(shared) });
+        result.insert(
+            *small_id,
+            if shared.is_empty() {
+                None
+            } else {
+                Some(shared)
+            },
+        );
     }
     result
 }
 
-pub fn shared_water_components(game: &Game, small_id: u16) -> Option<std::collections::HashSet<u32>> {
+pub fn shared_water_components(
+    game: &Game,
+    small_id: u16,
+) -> Option<std::collections::HashSet<u32>> {
     let tick = game.ticks() as i64;
     let needs_rebuild = {
         let last = game.shared_water_cache_tick.borrow();
@@ -720,6 +761,7 @@ fn rand_coastal_tile_array(
     let Some(shared) = shared_water_components(game, small_id) else {
         return Vec::new();
     };
+    let difficulty = game.wire.game_config().difficulty.as_str();
     let mut tiles: Vec<TileRef> = Vec::new();
     game.for_each_border_tile(small_id, |border| {
         if !game.is_shore(border) {
@@ -735,9 +777,21 @@ fn rand_coastal_tile_array(
                 return;
             }
             if let Some(c) = game.get_water_component(neighbor) {
-                if shared.contains(&c) {
-                    ok = true;
+                if !shared.contains(&c) {
+                    return;
                 }
+                // TS skips tiny non-ocean lakes for port placement outside
+                // Easy difficulty; otherwise nations spend ports on water
+                // bodies too small for meaningful trade routes.
+                if difficulty != "Easy" {
+                    if game
+                        .get_water_component_size(c)
+                        .is_some_and(|size| size < MIN_PORT_WATER_COMPONENT_SIZE)
+                    {
+                        return;
+                    }
+                }
+                ok = true;
             }
         });
         if ok {
@@ -814,9 +868,10 @@ fn structure_spawn_tile(
         return None;
     }
     let difficulty = game.wire.game_config().difficulty.as_str();
-    let debug = std::env::var("STRUCTURE_DEBUG")
-        .ok()
-        .is_some_and(|id| game.player_by_small_id(small_id).is_some_and(|p| p.id == id));
+    let debug = std::env::var("STRUCTURE_DEBUG").ok().is_some_and(|id| {
+        game.player_by_small_id(small_id)
+            .is_some_and(|p| p.id == id)
+    });
 
     // TS `structureSpawnTileValue`  -  each branch builds its own closure/context. Only
     // City and Factory draw a `shouldUseConnectivityScore` random number; MissileSilo and
@@ -830,7 +885,12 @@ fn structure_spawn_tile(
             station_range_sq: f64,
         },
         Factory(FactoryValueCtx),
-        MissileSilo { border_tiles: Vec<TileRef>, other_tiles: Vec<TileRef>, border_spacing: u32, structure_spacing: u32 },
+        MissileSilo {
+            border_tiles: Vec<TileRef>,
+            other_tiles: Vec<TileRef>,
+            border_spacing: u32,
+            structure_spacing: u32,
+        },
         Sam(SamValueCtx),
         None,
     }
@@ -852,7 +912,11 @@ fn structure_spawn_tile(
         }
         unit_type::FACTORY => {
             let use_connection_score = should_use_connectivity_score(random, difficulty);
-            ValueCtx::Factory(build_factory_value_ctx(game, small_id, use_connection_score))
+            ValueCtx::Factory(build_factory_value_ctx(
+                game,
+                small_id,
+                use_connection_score,
+            ))
         }
         unit_type::MISSILE_SILO => {
             let (border_spacing, structure_spacing) = spacing_constants(game);
@@ -869,7 +933,12 @@ fn structure_spawn_tile(
                     )
                 })
                 .unwrap_or_default();
-            ValueCtx::MissileSilo { border_tiles, other_tiles, border_spacing, structure_spacing }
+            ValueCtx::MissileSilo {
+                border_tiles,
+                other_tiles,
+                border_spacing,
+                structure_spacing,
+            }
         }
         unit_type::SAM_LAUNCHER => {
             ValueCtx::Sam(build_sam_value_ctx(game, random, small_id, difficulty))
@@ -879,7 +948,10 @@ fn structure_spawn_tile(
 
     if debug {
         if let Some(bbox) = border_bbox(game, small_id) {
-            eprintln!("  bbox min=({}, {}) max=({}, {})", bbox.min_x, bbox.min_y, bbox.max_x, bbox.max_y);
+            eprintln!(
+                "  bbox min=({}, {}) max=({}, {})",
+                bbox.min_x, bbox.min_y, bbox.max_x, bbox.max_y
+            );
         }
         eprintln!(
             "structure_spawn {:?} tiles_in={}",
@@ -907,14 +979,29 @@ fn structure_spawn_tile(
                 *station_range_sq,
             ),
             ValueCtx::Factory(fctx) => factory_value(game, fctx, t),
-            ValueCtx::MissileSilo { border_tiles, other_tiles, border_spacing, structure_spacing } => {
-                missile_silo_value(game, border_tiles, other_tiles, *border_spacing, *structure_spacing, t)
-            }
+            ValueCtx::MissileSilo {
+                border_tiles,
+                other_tiles,
+                border_spacing,
+                structure_spacing,
+            } => missile_silo_value(
+                game,
+                border_tiles,
+                other_tiles,
+                *border_spacing,
+                *structure_spacing,
+                t,
+            ),
             ValueCtx::Sam(sctx) => sam_launcher_value(game, sctx, t),
             ValueCtx::None => 0.0,
         };
         if debug && best.is_none() {
-            eprintln!("  sample tile={} v={} can={}", t, v, can_build_structure(game, small_id, unit_type_name, t));
+            eprintln!(
+                "  sample tile={} v={} can={}",
+                t,
+                v,
+                can_build_structure(game, small_id, unit_type_name, t)
+            );
         }
         if best.is_some() && v <= best_value {
             continue;
@@ -955,7 +1042,10 @@ fn perceived_city_cost(game: &Game, small_id: u16) -> i64 {
     let owned = game.units_owned_count(small_id, unit_type::CITY);
     let real = game.structure_cost(small_id, unit_type::CITY);
     let save_up = save_up_target(game);
-    let gold = game.player_by_small_id(small_id).map(|p| p.gold).unwrap_or(0);
+    let gold = game
+        .player_by_small_id(small_id)
+        .map(|p| p.gold)
+        .unwrap_or(0);
     if save_up == 0 || gold >= save_up {
         return real;
     }
@@ -1061,7 +1151,10 @@ fn perceived_structure_cost(game: &Game, small_id: u16, structure_type: &str) ->
     let owned = game.units_owned_count(small_id, structure_type);
     let real = game.structure_cost(small_id, structure_type);
     let save_up = save_up_target(game);
-    let gold = game.player_by_small_id(small_id).map(|p| p.gold).unwrap_or(0);
+    let gold = game
+        .player_by_small_id(small_id)
+        .map(|p| p.gold)
+        .unwrap_or(0);
     if save_up == 0 || gold >= save_up {
         return real;
     }
@@ -1160,10 +1253,14 @@ fn find_best_structure_to_upgrade(
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
     if scored.len() >= 2 && random.chance(2) {
-        let pick_index = if scored.len() >= 3 { random.next_int(1, 3) as usize } else { 1 };
-        return Some(scored[pick_index].0.0);
+        let pick_index = if scored.len() >= 3 {
+            random.next_int(1, 3) as usize
+        } else {
+            1
+        };
+        return Some(scored[pick_index].0 .0);
     }
-    Some(scored[0].0.0)
+    Some(scored[0].0 .0)
 }
 
 /// TS `Config.samRange`.
@@ -1180,7 +1277,8 @@ fn maybe_upgrade_structure_of_type(
     if get_total_structure_density(game, small_id) <= UPGRADE_DENSITY_THRESHOLD {
         return false;
     }
-    let Some(unit_id) = find_best_structure_to_upgrade(game, random, small_id, unit_type_name) else {
+    let Some(unit_id) = find_best_structure_to_upgrade(game, random, small_id, unit_type_name)
+    else {
         return false;
     };
     game.add_execution(ExecEnum::UpgradeStructure(
@@ -1199,7 +1297,10 @@ fn maybe_spawn_structure(
         return false;
     }
     let cost = perceived_structure_cost(game, small_id, unit_type_name);
-    if game.player_by_small_id(small_id).is_none_or(|p| p.gold < cost) {
+    if game
+        .player_by_small_id(small_id)
+        .is_none_or(|p| p.gold < cost)
+    {
         return false;
     }
     let type_count = game.unit_count(small_id, unit_type_name);
@@ -1291,7 +1392,8 @@ pub fn do_handle_structures(
             continue;
         }
         if !nukes_enabled
-            && (structure_type == unit_type::MISSILE_SILO || structure_type == unit_type::SAM_LAUNCHER)
+            && (structure_type == unit_type::MISSILE_SILO
+                || structure_type == unit_type::SAM_LAUNCHER)
         {
             continue;
         }
@@ -1351,7 +1453,12 @@ fn get_attack_front_tiles(game: &Game, small_id: u16, attackers: &[u16]) -> Vec<
     front
 }
 
-fn count_defense_posts_near_front(game: &Game, small_id: u16, front_tiles: &[TileRef], cap: usize) -> usize {
+fn count_defense_posts_near_front(
+    game: &Game,
+    small_id: u16,
+    front_tiles: &[TileRef],
+    cap: usize,
+) -> usize {
     if front_tiles.is_empty() {
         return 0;
     }
@@ -1460,11 +1567,28 @@ fn sample_tiles_near_front(
     }
 
     if result.is_empty() {
-        return rand_territory_tile_array(game, random, small_id, count)
-            .into_iter()
-            .filter(|t| can_build_land_structure(game, small_id, *t).is_some())
-            .take(count)
-            .collect();
+        let mut fallback = Vec::new();
+        for _ in 0..(count * 4) {
+            if fallback.len() >= count {
+                break;
+            }
+            let Some(anchor) = random.rand_element(&anchors) else {
+                break;
+            };
+            let ax = game.map.x(anchor) as i32;
+            let ay = game.map.y(anchor) as i32;
+            let x = sample_front_coordinate(random, ax, search_radius);
+            let y = sample_front_coordinate(random, ay, search_radius);
+            if !game.is_valid_coord(x, y) {
+                continue;
+            }
+            let t = game.ref_xy(x as u32, y as u32);
+            if game.map.owner_id(t) != small_id {
+                continue;
+            }
+            fallback.push(t);
+        }
+        return fallback;
     }
     result
 }
@@ -1615,7 +1739,10 @@ mod tests {
         game.conquer(defender, b);
         game.conquer(attacker, game.ref_xy(2, 1));
 
-        assert_eq!(get_attack_front_tiles(&game, defender, &[attacker]), vec![a]);
+        assert_eq!(
+            get_attack_front_tiles(&game, defender, &[attacker]),
+            vec![a]
+        );
     }
 
     #[test]
@@ -1665,7 +1792,10 @@ mod tests {
         game.conquer(attacker, game.ref_xy(6, 5));
         game.conquer(attacker, game.ref_xy(5, 6));
 
-        assert_eq!(get_attack_front_tiles(&game, defender, &[attacker]), vec![a]);
+        assert_eq!(
+            get_attack_front_tiles(&game, defender, &[attacker]),
+            vec![a]
+        );
     }
 
     // ── countDefensePostsNearFront ───────────────────────────────────────────
@@ -1675,7 +1805,10 @@ mod tests {
         let mut game = tiny_game(300, 300, "Hard");
         let p = add_player(&mut game, "p", crate::game::PlayerType::Human);
         let front = vec![game.ref_xy(100, 100)];
-        assert_eq!(count_defense_posts_near_front(&game, p, &front, usize::MAX), 0);
+        assert_eq!(
+            count_defense_posts_near_front(&game, p, &front, usize::MAX),
+            0
+        );
     }
 
     #[test]
@@ -1696,7 +1829,10 @@ mod tests {
         let t2 = game.ref_xy(100, 110);
         game.build_unit(p, unit_type::DEFENSE_POST, t1);
         game.build_unit(p, unit_type::DEFENSE_POST, t2);
-        assert_eq!(count_defense_posts_near_front(&game, p, &front, usize::MAX), 2);
+        assert_eq!(
+            count_defense_posts_near_front(&game, p, &front, usize::MAX),
+            2
+        );
     }
 
     #[test]
@@ -1706,7 +1842,10 @@ mod tests {
         let front = vec![game.ref_xy(100, 100)];
         let t = game.ref_xy(250, 250);
         game.build_unit(p, unit_type::DEFENSE_POST, t);
-        assert_eq!(count_defense_posts_near_front(&game, p, &front, usize::MAX), 0);
+        assert_eq!(
+            count_defense_posts_near_front(&game, p, &front, usize::MAX),
+            0
+        );
     }
 
     #[test]
@@ -1716,7 +1855,10 @@ mod tests {
         let front = vec![game.ref_xy(100, 100), game.ref_xy(102, 100)];
         let t = game.ref_xy(101, 100);
         game.build_unit(p, unit_type::DEFENSE_POST, t);
-        assert_eq!(count_defense_posts_near_front(&game, p, &front, usize::MAX), 1);
+        assert_eq!(
+            count_defense_posts_near_front(&game, p, &front, usize::MAX),
+            1
+        );
     }
 
     #[test]
@@ -1728,7 +1870,10 @@ mod tests {
         let t2 = game.ref_xy(250, 252);
         game.build_unit(p, unit_type::DEFENSE_POST, t1);
         game.build_unit(p, unit_type::DEFENSE_POST, t2);
-        assert_eq!(count_defense_posts_near_front(&game, p, &front, usize::MAX), 2);
+        assert_eq!(
+            count_defense_posts_near_front(&game, p, &front, usize::MAX),
+            2
+        );
     }
 
     // ── tryBuildDefensePost — early-exit guards ──────────────────────────────
@@ -1745,7 +1890,13 @@ mod tests {
         (game, defender, attacker)
     }
 
-    fn add_attack(game: &mut Game, attacker: u16, defender: u16, troops: f64, source_tile: Option<TileRef>) {
+    fn add_attack(
+        game: &mut Game,
+        attacker: u16,
+        defender: u16,
+        troops: f64,
+        source_tile: Option<TileRef>,
+    ) {
         let defender_id = game.player_by_small_id(defender).unwrap().id.clone();
         game.add_land_attack_from(attacker, Some(defender_id), Some(troops), source_tile);
         game.execute_next_tick();
@@ -1804,7 +1955,11 @@ mod tests {
     // `can_build_land_structure`) can be exercised end-to-end without
     // mocking any of it.
 
-    fn defense_integration_setup(difficulty: &str, defender_troops: f64, attack_troops: f64) -> (Game, u16) {
+    fn defense_integration_setup(
+        difficulty: &str,
+        defender_troops: f64,
+        attack_troops: f64,
+    ) -> (Game, u16) {
         let (mut game, defender, attacker) = defense_test_setup(difficulty);
         // Overwrite the single conquered tile from defense_test_setup with a
         // real block of territory bordering the attacker's block.
@@ -1955,7 +2110,8 @@ mod tests {
 
     #[test]
     fn build_reachable_stations_includes_own_registered_units_with_self_weight() {
-        let (mut game, defender, _neighbor) = adjacent_players("Medium", crate::game::PlayerType::Human, None);
+        let (mut game, defender, _neighbor) =
+            adjacent_players("Medium", crate::game::PlayerType::Human, None);
         let tile = game.ref_xy(10, 10);
         let unit_id = game.build_unit(defender, unit_type::CITY, tile);
         connect_station(&mut game, defender, unit_id, unit_type::CITY);
@@ -1970,7 +2126,8 @@ mod tests {
 
     #[test]
     fn build_reachable_stations_excludes_own_unit_not_registered_as_station() {
-        let (mut game, defender, _neighbor) = adjacent_players("Medium", crate::game::PlayerType::Human, None);
+        let (mut game, defender, _neighbor) =
+            adjacent_players("Medium", crate::game::PlayerType::Human, None);
         let tile = game.ref_xy(10, 10);
         game.build_unit(defender, unit_type::CITY, tile);
         // No `connect_station` call - the city has no train station.
@@ -1979,7 +2136,8 @@ mod tests {
 
     #[test]
     fn build_reachable_stations_excludes_bot_neighbors() {
-        let (mut game, defender, neighbor) = adjacent_players("Medium", crate::game::PlayerType::Bot, None);
+        let (mut game, defender, neighbor) =
+            adjacent_players("Medium", crate::game::PlayerType::Bot, None);
         let tile = game.ref_xy(11, 10);
         let unit_id = game.build_unit(neighbor, unit_type::CITY, tile);
         connect_station(&mut game, neighbor, unit_id, unit_type::CITY);
@@ -2001,7 +2159,8 @@ mod tests {
 
     #[test]
     fn build_reachable_stations_excludes_embargoed_neighbor() {
-        let (mut game, defender, neighbor) = adjacent_players("Medium", crate::game::PlayerType::Human, None);
+        let (mut game, defender, neighbor) =
+            adjacent_players("Medium", crate::game::PlayerType::Human, None);
         let tile = game.ref_xy(11, 10);
         let unit_id = game.build_unit(neighbor, unit_type::CITY, tile);
         connect_station(&mut game, neighbor, unit_id, unit_type::CITY);
@@ -2012,7 +2171,8 @@ mod tests {
 
     #[test]
     fn build_reachable_stations_uses_other_weight_for_non_allied_neighbor() {
-        let (mut game, defender, neighbor) = adjacent_players("Medium", crate::game::PlayerType::Human, None);
+        let (mut game, defender, neighbor) =
+            adjacent_players("Medium", crate::game::PlayerType::Human, None);
         let tile = game.ref_xy(11, 10);
         let unit_id = game.build_unit(neighbor, unit_type::CITY, tile);
         connect_station(&mut game, neighbor, unit_id, unit_type::CITY);
@@ -2027,7 +2187,8 @@ mod tests {
 
     #[test]
     fn build_reachable_stations_uses_ally_weight_for_allied_neighbor() {
-        let (mut game, defender, neighbor) = adjacent_players("Medium", crate::game::PlayerType::Human, None);
+        let (mut game, defender, neighbor) =
+            adjacent_players("Medium", crate::game::PlayerType::Human, None);
         let tile = game.ref_xy(11, 10);
         let unit_id = game.build_unit(neighbor, unit_type::CITY, tile);
         connect_station(&mut game, neighbor, unit_id, unit_type::CITY);
@@ -2061,7 +2222,8 @@ mod tests {
 
     #[test]
     fn build_reachable_stations_excludes_neighbor_unit_not_registered_as_station() {
-        let (mut game, defender, neighbor) = adjacent_players("Medium", crate::game::PlayerType::Human, None);
+        let (mut game, defender, neighbor) =
+            adjacent_players("Medium", crate::game::PlayerType::Human, None);
         game.build_unit(neighbor, unit_type::CITY, game.ref_xy(11, 10));
         // No `connect_station` call.
         assert!(build_reachable_stations(&game, defender).is_empty());
@@ -2069,7 +2231,8 @@ mod tests {
 
     #[test]
     fn build_reachable_stations_collects_own_and_neighbor_units_together() {
-        let (mut game, defender, neighbor) = adjacent_players("Medium", crate::game::PlayerType::Human, None);
+        let (mut game, defender, neighbor) =
+            adjacent_players("Medium", crate::game::PlayerType::Human, None);
         let own_tile = game.ref_xy(10, 10);
         let own_unit = game.build_unit(defender, unit_type::CITY, own_tile);
         connect_station(&mut game, defender, own_unit, unit_type::CITY);
@@ -2080,7 +2243,10 @@ mod tests {
         let mut result = build_reachable_stations(&game, defender);
         result.sort_by_key(|r| r.tile);
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].tile.min(result[1].tile), own_tile.min(neighbor_tile));
+        assert_eq!(
+            result[0].tile.min(result[1].tile),
+            own_tile.min(neighbor_tile)
+        );
     }
 
     /// After a MIRV launches, TS `stats().numMirvsLaunched` escalates MIRV cost
@@ -2200,4 +2366,3 @@ pub fn try_build_defense_post(game: &mut Game, random: &mut PseudoRandom, small_
     }
     false
 }
-

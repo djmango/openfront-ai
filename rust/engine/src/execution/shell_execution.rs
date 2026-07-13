@@ -42,6 +42,7 @@ pub struct ShellExecution {
     shell_unit_id: Option<i32>,
     seed: i32,
     damage_random: Option<PseudoRandom>,
+    owner_veterancy: i32,
     destroy_at_tick: Option<u32>,
     last_target_tile: Option<TileRef>,
     path: Vec<TileRef>,
@@ -66,6 +67,7 @@ impl ShellExecution {
             shell_unit_id: None,
             seed: 0,
             damage_random: None,
+            owner_veterancy: 0,
             destroy_at_tick: None,
             last_target_tile: None,
             path: Vec::new(),
@@ -97,12 +99,15 @@ impl ShellExecution {
             .map(|random| random.next_int(1, 6))
             .unwrap_or(1);
         let mut damage_multiplier = (roll - 1) * 25 + 200;
-        let veterancy = game.unit_veterancy(self.owner_small_id, self.owner_unit_id);
+        let veterancy = game
+            .unit(self.owner_small_id, self.owner_unit_id)
+            .map(|unit| unit.veterancy)
+            .unwrap_or(self.owner_veterancy);
         if veterancy > 0 {
             let bonus_percent = game.wire.warship_veterancy_shell_damage_bonus();
             damage_multiplier = damage_multiplier * (100 + veterancy * bonus_percent) / 100;
         }
-        damage_multiplier
+        ((game.wire.shell_base_damage() as f64 / 250.0) * damage_multiplier as f64).round() as i32
     }
 
     fn hit_target(&mut self, game: &mut Game) {
@@ -138,7 +143,10 @@ impl ShellExecution {
             // sunk mid-flight awards nothing) and is actually a Warship (this execution is only
             // ever constructed by `WarshipExecution` in this port, but TS's own `ownerUnit.type()
             // === UnitType.Warship` guard is kept for parity/future-proofing).
-            if game.unit_type_of(self.owner_small_id, self.owner_unit_id).as_deref() == Some(WARSHIP)
+            if game
+                .unit_type_of(self.owner_small_id, self.owner_unit_id)
+                .as_deref()
+                == Some(WARSHIP)
             {
                 if let Some(target_type) = target_type {
                     game.record_kill(self.owner_small_id, self.owner_unit_id, &target_type);
@@ -154,6 +162,7 @@ impl Execution for ShellExecution {
     fn init(&mut self, _game: &mut Game, tick: u32) {
         self.seed = tick as i32;
         self.damage_random = Some(PseudoRandom::new(tick as i32));
+        self.owner_veterancy = _game.unit_veterancy(self.owner_small_id, self.owner_unit_id);
     }
 
     fn tick(&mut self, game: &mut Game, tick: u32) {
@@ -177,6 +186,9 @@ impl Execution for ShellExecution {
         }
 
         let owner_alive = game.unit_exists(self.owner_small_id, self.owner_unit_id);
+        if owner_alive {
+            self.owner_veterancy = game.unit_veterancy(self.owner_small_id, self.owner_unit_id);
+        }
         if !owner_alive && self.destroy_at_tick.is_none() {
             self.destroy_at_tick = Some(tick + 50);
         }
@@ -262,13 +274,40 @@ mod tests {
             let d_base = base_shell.get_effect_on_target_for_testing(&game);
             let d_vet = vet_shell.get_effect_on_target_for_testing(&game);
 
-            // Same roll -> base damage (250 base) equals the rolled multiplier and the
-            // veteran's shot is the integer-boosted value.
+            // TS's current Shell base damage is 250, so the base shot is the rolled
+            // multiplier and the veteran's shot is the integer-boosted value.
+            assert_eq!(game.wire.shell_base_damage(), 250);
             assert_eq!(d_vet, d_base * (100 + max_vet * bonus_percent) / 100);
             boosted_values.insert(d_vet);
         }
 
         assert!(boosted_values.len() > 1, "the roll must vary across ticks");
+    }
+
+    #[test]
+    fn in_flight_shell_keeps_dead_shooters_veterancy_damage_bonus() {
+        let mut game = crate::test_util::plains_game(20, 20);
+        add_player(&mut game, 1);
+        add_player(&mut game, 2);
+        let target = game.build_unit(2, WARSHIP, game.map.ref_xy(10, 10));
+        let live_shooter = game.build_unit(1, WARSHIP, game.map.ref_xy(0, 0));
+        let dead_shooter = game.build_unit(1, WARSHIP, game.map.ref_xy(1, 0));
+        game.record_kill(1, live_shooter, WARSHIP);
+        game.record_kill(1, dead_shooter, WARSHIP);
+
+        let mut live_shell = ShellExecution::new(game.map.ref_xy(0, 0), 1, live_shooter, 2, target);
+        let mut cached_shell =
+            ShellExecution::new(game.map.ref_xy(1, 0), 1, dead_shooter, 2, target);
+        let tick = 9437u32;
+        live_shell.init(&mut game, tick);
+        cached_shell.init(&mut game, tick);
+        game.remove_unit(1, dead_shooter);
+
+        assert_eq!(
+            cached_shell.get_effect_on_target_for_testing(&game),
+            live_shell.get_effect_on_target_for_testing(&game),
+            "TS shells keep reading the deleted shooter Unit's veterancy state"
+        );
     }
 
     #[test]
@@ -302,7 +341,7 @@ mod tests {
 
     // Ported from `openfront/tests/ShellRandom.test.ts`. Unlike the veterancy tests above
     // (which pin the damage *formula*), these exercise the underlying PRNG draw directly:
-    // is the roll actually random per-shot, is it bounded to the documented 200-300 range,
+    // is the roll actually random per-shot, is it bounded to the documented scaled range,
     // and is it reproducible for a fixed tick seed. `getEffectOnTargetForTesting` is used
     // the same way the TS test file uses it - directly, without a real path/tick loop -
     // since the shot's own resolution logic (not shell travel) is what's under test.
@@ -310,7 +349,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn shell_damage_varies_randomly_between_200_and_300_base_damage() {
+        fn shell_damage_varies_randomly_between_scaled_base_damage_bounds() {
             let mut game = crate::test_util::plains_game(20, 20);
             add_player(&mut game, 1);
             add_player(&mut game, 2);
@@ -326,7 +365,10 @@ mod tests {
 
             assert!(!damages.is_empty());
             for &d in &damages {
-                assert!((200..=300).contains(&d), "d={d}");
+                let base_damage = game.wire.shell_base_damage();
+                let min_expected = ((base_damage as f64 / 250.0) * 200.0).round() as i32;
+                let max_expected = ((base_damage as f64 / 250.0) * 300.0).round() as i32;
+                assert!((min_expected..=max_expected).contains(&d), "d={d}");
             }
         }
 

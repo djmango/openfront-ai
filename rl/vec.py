@@ -8,6 +8,7 @@ arrays (~300KB/env).
 """
 
 import multiprocessing as mp
+import os
 import sys
 
 import numpy as np
@@ -203,7 +204,14 @@ class VecEnv:
         # idx_offset shifts worker ids (DDP: rank r owns envs [r*n, r*n+n)),
         # keeping per-worker rngs and game seed strings globally unique so
         # ranks never play identical episodes.
-        ctx = mp.get_context("spawn" if sys.platform == "darwin" else "fork")
+        default_start = "spawn" if sys.platform == "darwin" else "fork"
+        start_method = os.environ.get("OPENFRONT_MP_START", default_start)
+        if start_method not in {"fork", "spawn", "forkserver"}:
+            raise ValueError(
+                f"invalid OPENFRONT_MP_START={start_method!r}; "
+                "expected fork, spawn, or forkserver"
+            )
+        ctx = mp.get_context(start_method)
         self.stage_val = ctx.Value("i", start_stage)
         self.pipes = []
         self.procs = []

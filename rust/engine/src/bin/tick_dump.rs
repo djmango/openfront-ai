@@ -12,6 +12,7 @@ use clap::Parser;
 use openfront_engine::execution::intent::turn_to_executions;
 use openfront_engine::record::GameRecord;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -32,6 +33,22 @@ struct Args {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct UnitSnapshot {
+    id: i32,
+    unit_type: String,
+    tile: i32,
+    hash: i64,
+    health: i32,
+    veterancy: i32,
+    veterancy_progress: i32,
+    target_tile: Option<i32>,
+    retreat_port: Option<u32>,
+    retreating: bool,
+    docked: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct PlayerSnapshot {
     identity: String,
     id: String,
@@ -44,6 +61,8 @@ struct PlayerSnapshot {
     alive: bool,
     hash: i64,
     num_units: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    units: Option<Vec<UnitSnapshot>>,
 }
 
 #[derive(Serialize)]
@@ -86,22 +105,59 @@ fn load_record_bytes(path: &std::path::Path) -> Result<Vec<u8>, String> {
     }
 }
 
-fn snapshot(game: &openfront_engine::game::Game) -> TickSnapshot {
+fn snapshot(game: &openfront_engine::game::Game, dump_units: bool) -> TickSnapshot {
+    let warships: HashMap<(u16, i32), &openfront_engine::execution::WarshipExecution> = game
+        .live_warships()
+        .filter_map(|warship| Some(((warship.owner_small_id(), warship.unit_id()?), warship)))
+        .collect();
     let players: Vec<PlayerSnapshot> = game
         .all_players()
         .iter()
-        .map(|p| PlayerSnapshot {
-            identity: player_identity(p),
-            id: p.id.clone(),
-            name: p.name.clone(),
-            player_type: format!("{:?}", p.player_type),
-            team: p.team.clone(),
-            tiles: p.tiles_owned,
-            troops: p.troops,
-            gold: p.gold,
-            alive: p.alive,
-            hash: openfront_engine::hash::player_hash(p),
-            num_units: p.units.len(),
+        .map(|p| {
+            let units = if dump_units {
+                Some(
+                    p.units
+                        .iter()
+                        .map(|u| {
+                            let warship = warships.get(&(p.small_id, u.id)).copied();
+                            UnitSnapshot {
+                                id: u.id,
+                                unit_type: u.unit_type.clone(),
+                                tile: u.tile,
+                                hash: openfront_engine::hash::unit_hash(u),
+                                health: u.health,
+                                veterancy: u.veterancy,
+                                veterancy_progress: u.veterancy_progress,
+                                target_tile: warship
+                                    .and_then(|w| w.target_tile())
+                                    .map(|t| t as i32),
+                                retreat_port: warship.and_then(|w| w.retreat_port()),
+                                retreating: warship.is_some_and(|w| w.is_retreating()),
+                                docked: warship.is_some_and(|w| w.is_docked()),
+                            }
+                        })
+                        .collect(),
+                )
+            } else {
+                None
+            };
+            PlayerSnapshot {
+                identity: player_identity(p),
+                id: p.id.clone(),
+                name: p.name.clone(),
+                player_type: format!("{:?}", p.player_type),
+                team: p.team.clone(),
+                tiles: p.tiles_owned,
+                troops: p.troops,
+                gold: p.gold,
+                // TS `PlayerImpl.isAlive()` is `_tiles.size > 0`; report the
+                // same value here so early failed-spawn diagnostics are not
+                // polluted by native's internal sticky flag.
+                alive: p.tiles_owned > 0,
+                hash: openfront_engine::hash::player_hash(p),
+                num_units: p.units.len(),
+                units,
+            }
         })
         .collect();
     let total_owned_tiles: i32 = players.iter().map(|p| p.tiles).sum();
@@ -116,6 +172,11 @@ fn snapshot(game: &openfront_engine::game::Game) -> TickSnapshot {
 
 fn main() {
     let args = Args::parse();
+    let dump_units = std::env::var_os("OF_DUMP_UNITS").is_some();
+    let dump_units_from: u32 = std::env::var("OF_DUMP_UNITS_FROM")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     let bytes = load_record_bytes(&args.record).expect("read record");
     let record = GameRecord::from_json_bytes(&bytes)
         .expect("parse record")
@@ -136,13 +197,15 @@ fn main() {
         }
         game.execute_next_tick();
         if game.ticks() % args.every == 0 {
-            out.push(snapshot(&game));
+            let include_units = dump_units && game.ticks() >= dump_units_from;
+            out.push(snapshot(&game, include_units));
         }
     }
     // Always capture the true final state even if it doesn't land on an
     // `every`-tick boundary.
     if out.last().map(|s| s.tick) != Some(game.ticks()) {
-        out.push(snapshot(&game));
+        let include_units = dump_units && game.ticks() >= dump_units_from;
+        out.push(snapshot(&game, include_units));
     }
 
     let dump = Dump {

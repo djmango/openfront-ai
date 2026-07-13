@@ -52,6 +52,7 @@ pub fn walled_game(width: u32, height: u32, wall: Option<(u32, u32)>) -> Game {
     game.bfs = crate::water::BfsScratch::new(tile_count);
     game.water_astar = crate::water::WaterAstarScratch::new(tile_count);
     game.mini_water_astar = crate::water::WaterAstarScratch::new(tile_count);
+    game.reinit_unit_grid();
     game.end_spawn_phase();
     game
 }

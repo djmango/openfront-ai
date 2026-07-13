@@ -121,8 +121,8 @@ pub fn get_spawn_tiles(
         gm.euclidean_dist_squared_center(center, t) <= dist2
     });
 
-    // TS `getSpawnTiles`: invalid if owned or not land (no impassable check).
-    let is_invalid = |t: TileRef| map.has_owner(t) || !map.is_land(t);
+    // TS `getSpawnTiles`: invalid if owned, not land, or impassable land.
+    let is_invalid = |t: TileRef| map.has_owner(t) || !map.is_land(t) || map.is_impassable(t);
 
     if !require_all_valid {
         return Some(
@@ -175,5 +175,27 @@ mod tests {
         assert_eq!(sorted.len(), 52);
         assert_eq!(sorted[0], expected_min);
         assert_eq!(sorted[51], expected_max);
+    }
+
+    #[test]
+    fn spawn_tiles_reject_impassable_terrain() {
+        let game = crate::test_util::walled_game(20, 20, Some((10, 1)));
+        let mut scratch =
+            crate::water::BfsScratch::new((game.map.width * game.map.height) as usize);
+        let center_next_to_wall = game.map.ref_xy(8, 10);
+        let wall_tile = game.map.ref_xy(10, 10);
+        assert!(game.map.is_impassable(wall_tile));
+
+        assert!(
+            get_spawn_tiles(&game.map, &mut scratch, center_next_to_wall, true).is_none(),
+            "strict spawn footprints that include impassable land must be rejected"
+        );
+
+        let loose_tiles =
+            get_spawn_tiles(&game.map, &mut scratch, center_next_to_wall, false).unwrap();
+        assert!(
+            !loose_tiles.contains(&wall_tile),
+            "loose spawn footprints must filter impassable land out like TS"
+        );
     }
 }
