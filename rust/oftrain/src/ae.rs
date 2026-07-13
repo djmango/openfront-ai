@@ -102,8 +102,14 @@ impl SpatialAE {
     }
 
     /// Construct on `device`, load encoder weights from a `.safetensors`
-    /// file produced by `scripts/export_safetensors.py`, then freeze.
-    pub fn load(path: impl AsRef<Path>, device: Device, expected_down: i64) -> Result<(nn::VarStore, Self)> {
+    /// file produced by `scripts/export_safetensors.py`, optionally convert
+    /// the frozen floating weights to bf16, then freeze.
+    pub fn load(
+        path: impl AsRef<Path>,
+        device: Device,
+        expected_down: i64,
+        bf16: bool,
+    ) -> Result<(nn::VarStore, Self)> {
         let path = path.as_ref();
         let meta_path = path.with_extension("json");
         let (latent_c, latent_down) = if meta_path.exists() {
@@ -134,6 +140,13 @@ impl SpatialAE {
         let ae = Self::new(&vs.root(), latent_c, latent_down)?;
         vs.load(path)
             .with_context(|| format!("load AE encoder weights from {}", path.display()))?;
+        if bf16 {
+            // tch's autocast API cannot select bfloat16 like
+            // torch.autocast(..., dtype=torch.bfloat16). The encoder is
+            // frozen, so permanently converting its floating parameters is
+            // equivalent for inference and avoids fp16 autocast on CUDA.
+            vs.bfloat16();
+        }
         vs.freeze();
         Ok((vs, ae))
     }
@@ -141,12 +154,32 @@ impl SpatialAE {
     /// `owners` (B,H,W) int64, `terrain` (B,3,H,W) f32, `static_planes`
     /// (B,6,H/down,W/down) f32 → `z` (B,latent_c,H/down,W/down) f32.
     pub fn encode(&self, owners: &Tensor, terrain: &Tensor, static_planes: &Tensor) -> Tensor {
+        let bf16 = self.enc_out.ws.kind() == Kind::BFloat16;
+        // Owner indices must remain int64 for the embedding. Only floating
+        // inputs follow the frozen weights into bf16.
+        let terrain = if bf16 {
+            terrain.to_kind(Kind::BFloat16)
+        } else {
+            terrain.shallow_clone()
+        };
+        let static_planes = if bf16 {
+            static_planes.to_kind(Kind::BFloat16)
+        } else {
+            static_planes.shallow_clone()
+        };
         let emb = self.owner_emb.forward(owners).permute([0, 3, 1, 2]);
-        let mut g = Tensor::cat(&[&emb, terrain], 1);
+        let mut g = Tensor::cat(&[&emb, &terrain], 1);
         for block in &self.enc_stem {
             g = block.forward(&g);
         }
-        self.enc_out.forward(&self.enc_fuse.forward(&Tensor::cat(&[&g, static_planes], 1)))
+        let z = self.enc_out.forward(
+            &self
+                .enc_fuse
+                .forward(&Tensor::cat(&[&g, &static_planes], 1)),
+        );
+        // Existing grid assembly and policy consumers expect f32 regardless
+        // of the encoder's inference precision.
+        if bf16 { z.to_kind(Kind::Float) } else { z }
     }
 }
 
@@ -160,11 +193,19 @@ pub struct AePair {
 }
 
 impl AePair {
-    pub fn load(fine_path: impl AsRef<Path>, coarse_path: Option<&Path>, device: Device) -> Result<Self> {
-        let (fine_vs, fine) = SpatialAE::load(fine_path.as_ref(), device, REGION)?;
+    pub fn load(
+        fine_path: impl AsRef<Path>,
+        coarse_path: Option<&Path>,
+        device: Device,
+        amp: bool,
+    ) -> Result<Self> {
+        // Match rl/obs.py: its bf16 autocast is CUDA-only. CPU remains f32
+        // even when --amp is set.
+        let bf16 = amp && device.is_cuda();
+        let (fine_vs, fine) = SpatialAE::load(fine_path.as_ref(), device, REGION, bf16)?;
         let (coarse_vs, coarse) = match coarse_path {
             Some(p) => {
-                let (vs, ae) = SpatialAE::load(p, device, COARSE_REGION)?;
+                let (vs, ae) = SpatialAE::load(p, device, COARSE_REGION, bf16)?;
                 (Some(vs), Some(ae))
             }
             None => (None, None),
@@ -347,7 +388,7 @@ mod tests {
             eprintln!("skip: {} missing (run scripts/fetch_ae_encoders.sh)", path.display());
             return;
         }
-        let (_vs, ae) = SpatialAE::load(&path, Device::Cpu, REGION).unwrap();
+        let (_vs, ae) = SpatialAE::load(&path, Device::Cpu, REGION, false).unwrap();
         assert_eq!(ae.latent_down, 8);
         let owners = Tensor::zeros([1, 32, 40], (Kind::Int64, Device::Cpu));
         let terrain = Tensor::zeros([1, 3, 32, 40], (Kind::Float, Device::Cpu));
@@ -355,5 +396,40 @@ mod tests {
         let z = tch::no_grad(|| ae.encode(&owners, &terrain, &static_p));
         assert_eq!(z.size(), &[1, 32, 4, 5]);
         assert!(z.isfinite().all().double_value(&[]) != 0.0);
+    }
+
+    #[test]
+    fn cpu_bf16_encoder_outputs_are_finite_and_close_to_f32() {
+        for latent_down in [REGION, COARSE_REGION] {
+            tch::manual_seed(17);
+            let fp_vs = nn::VarStore::new(Device::Cpu);
+            let fp_ae = SpatialAE::new(&fp_vs.root(), LATENT_C, latent_down).unwrap();
+
+            let mut bf_vs = nn::VarStore::new(Device::Cpu);
+            let bf_ae = SpatialAE::new(&bf_vs.root(), LATENT_C, latent_down).unwrap();
+            bf_vs.copy(&fp_vs).unwrap();
+            bf_vs.bfloat16();
+
+            let side = 32;
+            let owners = Tensor::randint(MAX_SLOTS, [2, side, side], (Kind::Int64, Device::Cpu));
+            let terrain = Tensor::rand(
+                [2, TERRAIN_CHANNELS, side, side],
+                (Kind::Float, Device::Cpu),
+            );
+            let static_p = Tensor::rand(
+                [2, NUM_STATIC, side / latent_down, side / latent_down],
+                (Kind::Float, Device::Cpu),
+            );
+            let fp = tch::no_grad(|| fp_ae.encode(&owners, &terrain, &static_p));
+            let bf = tch::no_grad(|| bf_ae.encode(&owners, &terrain, &static_p));
+
+            assert_eq!(bf.kind(), Kind::Float);
+            assert!(bf.isfinite().all().int64_value(&[]) != 0);
+            let mean_abs_err = (&fp - &bf).abs().mean(Kind::Float).double_value(&[]);
+            assert!(
+                mean_abs_err < 0.02,
+                "1/{latent_down} bf16 mean absolute error {mean_abs_err} is too large"
+            );
+        }
     }
 }
