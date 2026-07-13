@@ -591,6 +591,13 @@ impl Game {
         None
     }
 
+    /// TS `WaterManager.getWaterComponentSize` - component size is measured on
+    /// the minimap, then scaled by four to approximate full-map tile count.
+    pub fn get_water_component_size(&self, component_id: u32) -> Option<u32> {
+        let hpa = self.mini_water_hpa.as_ref()?;
+        Some(hpa.graph.get_component_size(component_id) * 4)
+    }
+
     /// TS `WaterManager.hasWaterComponent` - like `get_water_component` but a
     /// membership test (used by trade-ship routing to check whether a
     /// candidate port shares any of a source port's adjacent water bodies).

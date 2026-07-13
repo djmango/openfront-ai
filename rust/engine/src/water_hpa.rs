@@ -11,6 +11,7 @@ pub const CLUSTER_SIZE: u32 = 32;
 
 struct ConnectedComponents {
     component_ids: Vec<u32>,
+    component_sizes: Vec<u32>,
 }
 
 impl ConnectedComponents {
@@ -24,6 +25,7 @@ impl ConnectedComponents {
         }
         Self {
             component_ids: ids,
+            component_sizes: vec![0],
         }
     }
 
@@ -35,6 +37,8 @@ impl ConnectedComponents {
         let mut next_id = 0u32;
         let mut queue = vec![0i32; n];
         let ids = &mut self.component_ids;
+        self.component_sizes.clear();
+        self.component_sizes.push(0);
 
         for start in 0..n {
             let val = ids[start];
@@ -43,6 +47,7 @@ impl ConnectedComponents {
             }
             next_id += 1;
             let component_id = next_id;
+            self.component_sizes.push(0);
             let mut head = 0usize;
             let mut tail = 0usize;
             queue[tail] = start as i32;
@@ -66,6 +71,7 @@ impl ConnectedComponents {
                 }
                 for x in left..=right {
                     ids[x] = component_id;
+                    self.component_sizes[component_id as usize] += 1;
                     if x >= width as usize {
                         let above = x - width as usize;
                         if ids[above] == 0 {
@@ -87,6 +93,13 @@ impl ConnectedComponents {
 
     fn get_component_id(&self, tile: TileRef) -> u32 {
         self.component_ids.get(tile as usize).copied().unwrap_or(0)
+    }
+
+    fn get_component_size(&self, component_id: u32) -> u32 {
+        self.component_sizes
+            .get(component_id as usize)
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -290,6 +303,10 @@ impl AbstractGraph {
 
     pub fn get_component_id(&self, tile: TileRef) -> u32 {
         self.water_components.get_component_id(tile)
+    }
+
+    pub fn get_component_size(&self, component_id: u32) -> u32 {
+        self.water_components.get_component_size(component_id)
     }
 
     fn cluster_key(&self, cluster_x: u32, cluster_y: u32) -> usize {
