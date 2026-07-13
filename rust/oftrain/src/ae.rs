@@ -280,12 +280,11 @@ impl TerrainDeviceCache {
                 key.hr as i64,
                 key.wr as i64,
             ]);
-            // This allocation is retained on device for the episode. Pinning
-            // the one-shot source permits non-blocking H2D where CUDA supports
-            // it, without introducing a long-lived host Tensor.
+            // The device allocation is retained for the episode. Keep this
+            // copy synchronous because the pinned source is temporary.
             let tensor = if self.device.is_cuda() {
-                cpu.pin_memory(self.device)
-                    .to_device_(self.device, Kind::Float, true, false)
+                let staged = cpu.pin_memory(self.device);
+                staged.to_device_(self.device, Kind::Float, false, false)
             } else {
                 cpu.to_device(self.device)
             };
