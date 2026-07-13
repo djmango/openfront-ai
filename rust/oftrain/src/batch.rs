@@ -1186,7 +1186,11 @@ mod tests {
                     map: std::sync::Arc::from("test"),
                     land_mag: vec![0.0f32; 2 * (gh * 8) * (gw * 8)].into(),
                 },
-                fallout: vec![0.0f32; (gh * 8) * (gw * 8)],
+                fallout: crate::ae::pack_fallout(
+                    &vec![0u8; (gh * 8) * (gw * 8)],
+                    gh * 8,
+                    gw * 8,
+                ),
                 stat: vec![0.0f32; 6 * plane],
                 hr: gh * 8,
                 wr: gw * 8,
