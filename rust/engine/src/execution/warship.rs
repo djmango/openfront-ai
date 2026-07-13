@@ -1625,6 +1625,29 @@ mod tests {
         }
 
         #[test]
+        fn active_healing_matches_ts_unit_grid_boundary_miss() {
+            let mut game = water_game(120, 120);
+            let p1 = add_nation(&mut game, "p1");
+            let port_tile = game.ref_xy(10, 95);
+            let ship_tile = game.ref_xy(10, 100);
+            game.build_unit(p1, unit_type::PORT, port_tile);
+            let ship_id = game.build_unit(p1, unit_type::WARSHIP, ship_tile);
+            game.unit_mut(p1, ship_id).unwrap().health = 500;
+
+            let mut exec = WarshipExecution::new_for_test(p1, port_tile, ship_id);
+            exec.docked = true;
+            exec.retreat_port = Some(port_tile);
+            game.push_exec_for_test(ExecEnum::Warship(exec));
+            game.execute_next_tick();
+
+            assert_eq!(
+                game.unit(p1, ship_id).unwrap().health,
+                501,
+                "TS UnitGrid.nearbyUnits misses exact-radius units across a 100px cell boundary, so only passive healing applies"
+            );
+        }
+
+        #[test]
         fn active_healing_is_split_between_docked_warships() {
             let mut game = water_game(30, 30);
             let p1 = add_nation(&mut game, "p1");

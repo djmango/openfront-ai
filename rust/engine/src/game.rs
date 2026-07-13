@@ -2819,6 +2819,35 @@ impl Game {
         })
     }
 
+    fn ts_unit_grid_query_includes(&self, center: TileRef, range: i32, unit_tile: TileRef) -> bool {
+        // TS `UnitGrid.nearbyUnits` first narrows candidates by 100px grid
+        // cells, then applies exact distance. The cell-window formula has
+        // edge behavior at exact cell boundaries; mirror it for callers whose
+        // semantics go through `nearbyUnits` rather than a direct unit scan.
+        const CELL_SIZE: i32 = 100;
+        let grid_w = (self.map.width as i32 + CELL_SIZE - 1) / CELL_SIZE;
+        let grid_h = (self.map.height as i32 + CELL_SIZE - 1) / CELL_SIZE;
+        let x = self.x(center) as i32;
+        let y = self.y(center) as i32;
+        let grid_x = x / CELL_SIZE;
+        let grid_y = y / CELL_SIZE;
+        let x_mod = x % CELL_SIZE;
+        let y_mod = y % CELL_SIZE;
+        let ceil_div = |n: i32, d: i32| (n as f64 / d as f64).ceil() as i32;
+        let start_grid_x = (grid_x - ceil_div(range - x_mod, CELL_SIZE)).max(0);
+        let end_grid_x =
+            (grid_x + ceil_div(range - (CELL_SIZE - x_mod), CELL_SIZE)).min(grid_w - 1);
+        let start_grid_y = (grid_y - ceil_div(range - y_mod, CELL_SIZE)).max(0);
+        let end_grid_y =
+            (grid_y + ceil_div(range - (CELL_SIZE - y_mod), CELL_SIZE)).min(grid_h - 1);
+        let unit_grid_x = self.x(unit_tile) as i32 / CELL_SIZE;
+        let unit_grid_y = self.y(unit_tile) as i32 / CELL_SIZE;
+        unit_grid_x >= start_grid_x
+            && unit_grid_x <= end_grid_x
+            && unit_grid_y >= start_grid_y
+            && unit_grid_y <= end_grid_y
+    }
+
     /// TS `WarshipExecution.dockedShipsAtPort`: non-patrolling own warships
     /// within docking range whose `targetTile` is clear occupy a port's active
     /// healing capacity. `exclude_unit_id` mirrors TS's optional `excludeShip`
@@ -2844,6 +2873,7 @@ impl Game {
             .filter(|(warship, tile)| {
                 !warship.is_patrolling()
                     && warship.target_tile().is_none()
+                    && self.ts_unit_grid_query_includes(port_tile, docking_radius as i32, *tile)
                     && self.map.euclidean_dist_squared(*tile, port_tile) <= docking_radius_sq
             })
             .count()
