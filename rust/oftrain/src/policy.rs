@@ -77,10 +77,18 @@ fn action_table(names: &[&str], device: Device) -> Tensor {
     Tensor::from_slice(&v).to_device(device)
 }
 
-/// Batched observation tensors. `grid`/`grid_valid`/`legal_tile` are the
-/// full /REGION-resolution "fine" inputs; coarse tensors come from
-/// `grid_coarse` when a native /16 AE was used, else 2x pool inside
-/// `foveate`.
+/// Metadata carried by an already-foveated observation. These tensors make
+/// the compact fine grid self-describing and preserve absolute tile math.
+pub struct CompactObsMeta {
+    pub origin_y: Tensor,
+    pub origin_x: Tensor,
+    pub coarse_valid: Tensor,
+    pub coarse_legal: Tensor,
+}
+
+/// Batched observation tensors. Ordinarily `grid`/masks are the full
+/// /REGION-resolution input. With `compact` present they are already the
+/// exact foveated fine window and must not be cropped again.
 pub struct Obs {
     pub grid: Tensor,          // (B, C_GRID, gh, gw) f32
     pub grid_valid: Tensor,    // (B, gh, gw) f32
@@ -96,6 +104,7 @@ pub struct Obs {
     pub legal_ptarget: Tensor, // (B, N_ACTIONS, MAX_SLOTS) f32
     pub legal_build: Tensor,   // (B, N_BUILD) f32
     pub legal_nuke: Tensor,    // (B, N_NUKE) f32
+    pub compact: Option<CompactObsMeta>,
 }
 
 impl Obs {
@@ -121,6 +130,12 @@ impl Obs {
             legal_ptarget: self.legal_ptarget.index_select(0, idx),
             legal_build: self.legal_build.index_select(0, idx),
             legal_nuke: self.legal_nuke.index_select(0, idx),
+            compact: self.compact.as_ref().map(|m| CompactObsMeta {
+                origin_y: m.origin_y.index_select(0, idx),
+                origin_x: m.origin_x.index_select(0, idx),
+                coarse_valid: m.coarse_valid.index_select(0, idx),
+                coarse_legal: m.coarse_legal.index_select(0, idx),
+            }),
         }
     }
 }
@@ -517,6 +532,38 @@ impl PolicyNet {
     /// the padded cells are never legal to pick).
     fn foveate(o: &Obs, use_crop: bool) -> Foveation {
         let (b, gh, gw) = o.legal_tile.size3().unwrap();
+        if let Some(meta) = &o.compact {
+            debug_assert!(use_crop, "compact observations require foveation");
+            let grid_coarse = o
+                .grid_coarse
+                .as_ref()
+                .expect("compact observation requires coarse grid")
+                .shallow_clone();
+            let (cgh, cgw) = (meta.coarse_valid.size()[1], meta.coarse_valid.size()[2]);
+            let fine_coarse = fine_to_coarse_mask_cropped(
+                &o.legal_tile,
+                &o.grid_valid,
+                &meta.origin_y,
+                &meta.origin_x,
+                gh,
+                gw,
+                cgh,
+                cgw,
+            );
+            return Foveation {
+                grid_fine: Tensor::cat(&[&o.grid, &o.grid_valid.unsqueeze(1)], 1),
+                legal_tile_fine: o.legal_tile.shallow_clone(),
+                grid_valid_fine: o.grid_valid.shallow_clone(),
+                grid_coarse,
+                gc_valid: meta.coarse_valid.shallow_clone(),
+                legal_tile_coarse: meta.coarse_legal.shallow_clone(),
+                fine_coarse,
+                origin_y: meta.origin_y.shallow_clone(),
+                origin_x: meta.origin_x.shallow_clone(),
+                fine_h: gh,
+                fine_w: gw,
+            };
+        }
         let grid_coarse = match &o.grid_coarse {
             Some(gc) => gc.shallow_clone(),
             None => o.grid.avg_pool2d([2, 2], [2, 2], [0, 0], true, false, None::<i64>),
@@ -606,6 +653,36 @@ impl PolicyNet {
             origin_x,
             fine_h: FOVEATE_SIZE,
             fine_w: FOVEATE_SIZE,
+        }
+    }
+
+    /// Materialize the exact `--foveate` policy view while the full
+    /// assembled observation is still actor-owned. The result is device
+    /// local and is either consumed immediately by the actor or serialized
+    /// to host by `batch`; it is never sent to a learner thread.
+    pub fn compact_observation(o: &Obs) -> Obs {
+        debug_assert!(o.compact.is_none());
+        let fov = Self::foveate(o, true);
+        let fine = fov.grid_fine.narrow(1, 0, C_GRID);
+        Obs {
+            grid: fine,
+            grid_valid: fov.grid_valid_fine,
+            legal_tile: fov.legal_tile_fine,
+            grid_coarse: Some(fov.grid_coarse),
+            players: o.players.shallow_clone(),
+            pmask: o.pmask.shallow_clone(),
+            local: o.local.shallow_clone(),
+            scalars: o.scalars.shallow_clone(),
+            legal_actions: o.legal_actions.shallow_clone(),
+            legal_ptarget: o.legal_ptarget.shallow_clone(),
+            legal_build: o.legal_build.shallow_clone(),
+            legal_nuke: o.legal_nuke.shallow_clone(),
+            compact: Some(CompactObsMeta {
+                origin_y: fov.origin_y,
+                origin_x: fov.origin_x,
+                coarse_valid: fov.gc_valid,
+                coarse_legal: fov.legal_tile_coarse,
+            }),
         }
     }
 
@@ -1292,6 +1369,7 @@ mod tests {
             legal_ptarget: Tensor::ones([b, na, ms], opts),
             legal_build: Tensor::ones([b, N_BUILD], opts),
             legal_nuke: Tensor::ones([b, N_NUKE], opts),
+            compact: None,
         }
     }
 
@@ -1509,6 +1587,77 @@ mod tests {
         let local_outside = global_to_fine_local_cropped(&outside_global, ch, cw, &oy1, &ox1);
         let local_outside_v: Vec<i64> = local_outside.reshape([-1]).try_into().unwrap();
         assert_eq!(local_outside_v, vec![-1]);
+    }
+
+    /// The compact path must be a representation change, not a policy
+    /// change: the old full-grid foveation and an already-cropped Obs feed
+    /// identical tensors into every head and preserve global tile targets.
+    #[test]
+    fn compact_observation_matches_full_grid_policy_and_coordinates() {
+        tch::manual_seed(17);
+        let vs = nn::VarStore::new(Device::Cpu);
+        let policy = PolicyNet::new(&vs.root(), false, true, 16, 1);
+        let o = synthetic_obs(Device::Cpu, 2, FOVEATE_SIZE + 8, FOVEATE_SIZE + 12);
+        let mut mine = o.grid.select(1, EGO_OWN_CH);
+        let _ = mine.zero_();
+        let _ = mine.get(0).get(3).get(5).fill_(1.0);
+        let _ = mine.get(1).get(FOVEATE_SIZE + 3).get(FOVEATE_SIZE + 7).fill_(1.0);
+
+        let old_fov = PolicyNet::foveate(&o, true);
+        let compact = PolicyNet::compact_observation(&o);
+        let new_fov = PolicyNet::foveate(&compact, true);
+        let close = |a: &Tensor, b: &Tensor, name: &str| {
+            let d = (a - b).abs().max().double_value(&[]);
+            assert!(d <= 1e-6, "{name} differs by {d}");
+        };
+        close(&old_fov.grid_fine, &new_fov.grid_fine, "fine grid");
+        close(&old_fov.grid_coarse, &new_fov.grid_coarse, "coarse grid");
+        close(&old_fov.fine_coarse, &new_fov.fine_coarse, "fine/coarse mask");
+        close(&old_fov.legal_tile_fine, &new_fov.legal_tile_fine, "fine legality");
+        assert_eq!(
+            Vec::<i64>::try_from(&old_fov.origin_y).unwrap(),
+            Vec::<i64>::try_from(&new_fov.origin_y).unwrap()
+        );
+        assert_eq!(
+            Vec::<i64>::try_from(&old_fov.origin_x).unwrap(),
+            Vec::<i64>::try_from(&new_fov.origin_x).unwrap()
+        );
+
+        let full_out = policy.forward(&o);
+        let compact_out = policy.forward(&compact);
+        for (i, (a, b)) in [
+            (&full_out.0, &compact_out.0),
+            (&full_out.1, &compact_out.1),
+            (&full_out.2, &compact_out.2),
+            (&full_out.3, &compact_out.3),
+            (&full_out.4, &compact_out.4),
+            (&full_out.5, &compact_out.5),
+            (&full_out.6, &compact_out.6),
+            (&full_out.7, &compact_out.7),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            close(a, b, &format!("policy output {i}"));
+        }
+
+        let spawn = ACTIONS.iter().position(|&a| a == "spawn").unwrap() as i64;
+        let choices = ChoiceBatch {
+            action: Tensor::from_slice(&[spawn, spawn]),
+            player_slot: Tensor::from_slice(&[-1i64, -1]),
+            tile_region: Tensor::from_slice(&[
+                3 * GW_MAX + 5,
+                (FOVEATE_SIZE + 3) * GW_MAX + FOVEATE_SIZE + 7,
+            ]),
+            build_type: Tensor::from_slice(&[-1i64, -1]),
+            nuke_type: Tensor::from_slice(&[-1i64, -1]),
+            quantity_frac: Tensor::from_slice(&[-1.0f32, -1.0]),
+        };
+        let old_eval = policy.evaluate(&o, &choices);
+        let new_eval = policy.evaluate(&compact, &choices);
+        close(&old_eval.0, &new_eval.0, "evaluate logp");
+        close(&old_eval.1, &new_eval.1, "evaluate entropy");
+        close(&old_eval.3, &new_eval.3, "evaluate value");
     }
 }
 

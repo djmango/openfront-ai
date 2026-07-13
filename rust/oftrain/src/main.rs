@@ -185,6 +185,12 @@ struct Args {
     #[arg(long, default_value_t = false)]
     fp16_rollout: bool,
 
+    /// Store foveated rollout grids as compact host fp16 windows with
+    /// explicit origins/masks. Requires --foveate; legacy behavior is kept
+    /// when disabled or when foveation is off.
+    #[arg(long, default_value_t = false)]
+    compact_rollout: bool,
+
     /// Split env workers into two halves and overlap act(g1) with step(g0)
     /// inside each rollout step (Python v4.1 dual-group pipelining).
     /// Default on; with one env the second group is empty.
@@ -448,6 +454,7 @@ fn main() -> anyhow::Result<()> {
         blocks: args.blocks,
         pinned_h2d: args.pinned_h2d,
         fp16_rollout: args.fp16_rollout,
+        compact_rollout: args.compact_rollout,
         pipeline_groups: args.pipeline_groups,
         device,
         engine: args.engine,
