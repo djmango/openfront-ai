@@ -537,6 +537,79 @@ fn action_needs_quantity(a: i64) -> bool {
     policy::needs_quantity(ACTIONS[a as usize])
 }
 
+const ACT_DISCRETE_FIELDS: usize = 5;
+const ACT_FLOAT_FIELDS: usize = 3;
+
+/// Host representation of one policy act batch. Discrete and floating-point
+/// outputs stay in their native types, so packing does not change any bits.
+struct PackedActHost {
+    /// Row-major `(action, player, tile, build, nuke)` values.
+    discrete: Vec<i64>,
+    /// Row-major `(quantity, logp, value)` values.
+    floats: Vec<f32>,
+    len: usize,
+}
+
+impl PackedActHost {
+    fn from_parts(discrete: Vec<i64>, floats: Vec<f32>, len: usize) -> Result<Self> {
+        let expected_discrete = len
+            .checked_mul(ACT_DISCRETE_FIELDS)
+            .ok_or_else(|| anyhow!("act batch length {len} overflows discrete packed size"))?;
+        let expected_floats = len
+            .checked_mul(ACT_FLOAT_FIELDS)
+            .ok_or_else(|| anyhow!("act batch length {len} overflows float packed size"))?;
+        if discrete.len() != expected_discrete || floats.len() != expected_floats {
+            return Err(anyhow!(
+                "packed act result size mismatch for batch {len}: got {} discrete / {} float, expected {expected_discrete} / {expected_floats}",
+                discrete.len(),
+                floats.len()
+            ));
+        }
+        Ok(Self {
+            discrete,
+            floats,
+            len,
+        })
+    }
+
+    fn row(&self, i: usize) -> Result<(&[i64], &[f32])> {
+        if i >= self.len {
+            return Err(anyhow!(
+                "packed act row {i} out of bounds for batch {}",
+                self.len
+            ));
+        }
+        let d = i * ACT_DISCRETE_FIELDS;
+        let f = i * ACT_FLOAT_FIELDS;
+        Ok((
+            &self.discrete[d..d + ACT_DISCRETE_FIELDS],
+            &self.floats[f..f + ACT_FLOAT_FIELDS],
+        ))
+    }
+}
+
+/// Pack policy outputs by dtype before crossing the device boundary. A single
+/// mixed-dtype tensor would either lose i64 precision or promote all f32
+/// values to f64 and increase transfer volume. These are therefore the
+/// minimal two exact native-width device-to-host transfers.
+fn transfer_act_results(
+    a: &Tensor,
+    player: &Tensor,
+    tile: &Tensor,
+    build: &Tensor,
+    nuke: &Tensor,
+    qty: &Tensor,
+    logp: &Tensor,
+    value: &Tensor,
+    len: usize,
+) -> Result<PackedActHost> {
+    let discrete_cpu = Tensor::stack(&[a, player, tile, build, nuke], 1).to_device(Device::Cpu);
+    let floats_cpu = Tensor::stack(&[qty, logp, value], 1).to_device(Device::Cpu);
+    let discrete: Vec<i64> = discrete_cpu.reshape([-1]).try_into()?;
+    let floats: Vec<f32> = floats_cpu.reshape([-1]).try_into()?;
+    PackedActHost::from_parts(discrete, floats, len)
+}
+
 /// One (T, N) rollout buffer slot (N = envs in this shard).
 struct Step {
     obs: PreparedObs,
@@ -600,7 +673,24 @@ fn choice_from_act_vecs(
     nuke_v: &[i64],
     qty_v: &[f32],
 ) -> (Choice, ChoiceScalars) {
-    let act = a_v[i];
+    choice_from_act_values(
+        a_v[i],
+        player_v[i],
+        tile_v[i],
+        build_v[i],
+        nuke_v[i],
+        qty_v[i],
+    )
+}
+
+fn choice_from_act_values(
+    act: i64,
+    player: i64,
+    tile: i64,
+    build: i64,
+    nuke: i64,
+    qty: f32,
+) -> (Choice, ChoiceScalars) {
     let np = action_needs_player(act);
     let nt = action_needs_tile(act);
     let nq = action_needs_quantity(act);
@@ -608,19 +698,19 @@ fn choice_from_act_vecs(
     let is_nuke = ACTIONS[act as usize] == "launch_nuke";
     let choice = Choice {
         action: act,
-        player_slot: np.then_some(player_v[i]),
-        tile_region: nt.then_some(tile_v[i]),
-        build_type: is_build.then_some(build_v[i]),
-        nuke_type: is_nuke.then_some(nuke_v[i]),
-        quantity_frac: nq.then_some(qty_v[i] as f64),
+        player_slot: np.then_some(player),
+        tile_region: nt.then_some(tile),
+        build_type: is_build.then_some(build),
+        nuke_type: is_nuke.then_some(nuke),
+        quantity_frac: nq.then_some(qty as f64),
     };
     let scalars = ChoiceScalars {
         action: act,
-        player_slot: if np { player_v[i] } else { -1 },
-        tile_region: if nt { tile_v[i] } else { -1 },
-        build_type: if is_build { build_v[i] } else { -1 },
-        nuke_type: if is_nuke { nuke_v[i] } else { -1 },
-        quantity_frac: if nq { qty_v[i] } else { -1.0 },
+        player_slot: if np { player } else { -1 },
+        tile_region: if nt { tile } else { -1 },
+        build_type: if is_build { build } else { -1 },
+        nuke_type: if is_nuke { nuke } else { -1 },
+        quantity_frac: if nq { qty } else { -1.0 },
     };
     (choice, scalars)
 }
@@ -665,26 +755,193 @@ fn act_group(
     let (a, player, tile, build, nuke, qty, logp, value) =
         tch::no_grad(|| actor.policy.act(&obs_t, false));
 
-    let a_v: Vec<i64> = (&a).try_into()?;
-    let player_v: Vec<i64> = (&player).try_into()?;
-    let tile_v: Vec<i64> = (&tile).try_into()?;
-    let build_v: Vec<i64> = (&build).try_into()?;
-    let nuke_v: Vec<i64> = (&nuke).try_into()?;
-    let qty_v: Vec<f32> = (&qty).try_into()?;
-    let logp_v: Vec<f32> = (&logp).try_into()?;
-    let value_v: Vec<f32> = (&value).try_into()?;
+    let packed = transfer_act_results(&a, &player, &tile, &build, &nuke, &qty, &logp, &value, n)?;
 
     let mut scalars = Vec::with_capacity(n);
+    let mut logp_v = Vec::with_capacity(n);
+    let mut value_v = Vec::with_capacity(n);
     for i in 0..n {
-        let (choice, sc) =
-            choice_from_act_vecs(i, &a_v, &player_v, &tile_v, &build_v, &nuke_v, &qty_v);
+        let (discrete, floats) = packed.row(i)?;
+        let (choice, sc) = choice_from_act_values(
+            discrete[0],
+            discrete[1],
+            discrete[2],
+            discrete[3],
+            discrete[4],
+            floats[0],
+        );
         actor.workers[start + i]
             .choice_tx
             .send(choice)
             .map_err(|_| anyhow!("env {} choice channel closed", start + i))?;
         scalars.push(sc);
+        logp_v.push(floats[1]);
+        value_v.push(floats[2]);
     }
     Ok((scalars, logp_v, value_v))
+}
+
+#[cfg(test)]
+mod packed_act_tests {
+    use super::*;
+
+    fn choice_bits(
+        c: &Choice,
+    ) -> (
+        i64,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<u64>,
+    ) {
+        (
+            c.action,
+            c.player_slot,
+            c.tile_region,
+            c.build_type,
+            c.nuke_type,
+            c.quantity_frac.map(f64::to_bits),
+        )
+    }
+
+    fn scalar_bits(c: &ChoiceScalars) -> (i64, i64, i64, i64, i64, u32) {
+        (
+            c.action,
+            c.player_slot,
+            c.tile_region,
+            c.build_type,
+            c.nuke_type,
+            c.quantity_frac.to_bits(),
+        )
+    }
+
+    #[test]
+    fn packed_transfer_matches_individual_reference_unpack_in_batch_order() {
+        // Covers no-mask, player/tile/quantity, build, and nuke actions. The
+        // reference vectors are the eight individual conversions act_group
+        // used before packing.
+        let actions = [0i64, 1, 4, 5, 9];
+        let players = [10i64, 11, 12, 13, 14];
+        let tiles = [20i64, 21, 22, 23, 24];
+        let builds = [1i64, 2, 3, 4, 5];
+        let nukes = [4i64, 3, 2, 1, 0];
+        let quantities = [0.125f32, 0.25, 0.5, 0.75, 0.875];
+        let logps = [-0.01f32, -1.25, -2.5, -3.75, -5.0];
+        let values = [100.0f32, -20.0, 3.5, -0.0, 1.0 / 3.0];
+
+        let a = Tensor::from_slice(&actions);
+        let player = Tensor::from_slice(&players);
+        let tile = Tensor::from_slice(&tiles);
+        let build = Tensor::from_slice(&builds);
+        let nuke = Tensor::from_slice(&nukes);
+        let qty = Tensor::from_slice(&quantities);
+        let logp = Tensor::from_slice(&logps);
+        let value = Tensor::from_slice(&values);
+        let packed = transfer_act_results(
+            &a,
+            &player,
+            &tile,
+            &build,
+            &nuke,
+            &qty,
+            &logp,
+            &value,
+            actions.len(),
+        )
+        .unwrap();
+
+        let a_v: Vec<i64> = (&a).try_into().unwrap();
+        let player_v: Vec<i64> = (&player).try_into().unwrap();
+        let tile_v: Vec<i64> = (&tile).try_into().unwrap();
+        let build_v: Vec<i64> = (&build).try_into().unwrap();
+        let nuke_v: Vec<i64> = (&nuke).try_into().unwrap();
+        let qty_v: Vec<f32> = (&qty).try_into().unwrap();
+        let logp_v: Vec<f32> = (&logp).try_into().unwrap();
+        let value_v: Vec<f32> = (&value).try_into().unwrap();
+
+        for i in 0..actions.len() {
+            let (discrete, floats) = packed.row(i).unwrap();
+            assert_eq!(
+                discrete,
+                &[a_v[i], player_v[i], tile_v[i], build_v[i], nuke_v[i]]
+            );
+            assert_eq!(
+                floats.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                [qty_v[i], logp_v[i], value_v[i]]
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>()
+            );
+
+            let packed_choice = choice_from_act_values(
+                discrete[0],
+                discrete[1],
+                discrete[2],
+                discrete[3],
+                discrete[4],
+                floats[0],
+            );
+            let reference_choice =
+                choice_from_act_vecs(i, &a_v, &player_v, &tile_v, &build_v, &nuke_v, &qty_v);
+            assert_eq!(
+                choice_bits(&packed_choice.0),
+                choice_bits(&reference_choice.0)
+            );
+            assert_eq!(
+                scalar_bits(&packed_choice.1),
+                scalar_bits(&reference_choice.1)
+            );
+        }
+    }
+
+    #[test]
+    fn packed_transfer_preserves_native_integer_and_float_bounds_exactly() {
+        let discrete_inputs = [
+            [i64::MIN, i64::MAX],
+            [-(1i64 << 54), 1i64 << 54],
+            [-(1i64 << 24) - 1, (1i64 << 24) + 1],
+            [-1, 0],
+            [123_456_789_012_345, -123_456_789_012_345],
+        ];
+        let float_inputs = [
+            [f32::MIN, f32::MAX],
+            [-0.0, f32::MIN_POSITIVE],
+            [f32::EPSILON, -f32::EPSILON],
+        ];
+        let d: Vec<Tensor> = discrete_inputs
+            .iter()
+            .map(|values| Tensor::from_slice(values))
+            .collect();
+        let f: Vec<Tensor> = float_inputs
+            .iter()
+            .map(|values| Tensor::from_slice(values))
+            .collect();
+        let packed =
+            transfer_act_results(&d[0], &d[1], &d[2], &d[3], &d[4], &f[0], &f[1], &f[2], 2)
+                .unwrap();
+
+        for row in 0..2 {
+            let (actual_d, actual_f) = packed.row(row).unwrap();
+            assert_eq!(actual_d, &discrete_inputs.map(|field| field[row]));
+            assert_eq!(
+                actual_f.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                float_inputs.map(|field| field[row].to_bits()).to_vec()
+            );
+        }
+    }
+
+    #[test]
+    fn packed_host_rejects_size_overflow_mismatches_and_out_of_bounds_rows() {
+        assert!(PackedActHost::from_parts(Vec::new(), Vec::new(), usize::MAX).is_err());
+        assert!(PackedActHost::from_parts(vec![0; 4], vec![0.0; 3], 1).is_err());
+        assert!(PackedActHost::from_parts(vec![0; 5], vec![0.0; 2], 1).is_err());
+
+        let one = PackedActHost::from_parts(vec![0; 5], vec![0.0; 3], 1).unwrap();
+        assert!(one.row(1).is_err());
+        let empty = PackedActHost::from_parts(Vec::new(), Vec::new(), 0).unwrap();
+        assert!(empty.row(0).is_err());
+    }
 }
 
 fn recv_group(
