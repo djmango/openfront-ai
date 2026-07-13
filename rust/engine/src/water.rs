@@ -1091,21 +1091,6 @@ fn densify_path_adjacent(map: &GameMap, path: Vec<TileRef>) -> Vec<TileRef> {
     out
 }
 
-/// Upscale/interpolation can emit the same TileRef twice in a row; collapse
-/// them so the transport stepper does not stall on a spurious duplicate.
-fn collapse_consecutive_dupes(path: Vec<TileRef>) -> Vec<TileRef> {
-    if path.is_empty() {
-        return path;
-    }
-    let mut out = Vec::with_capacity(path.len());
-    for t in path {
-        if out.last() != Some(&t) {
-            out.push(t);
-        }
-    }
-    out
-}
-
 fn closest_full_source(full: &GameMap, froms: &[TileRef], path_start: TileRef) -> Option<TileRef> {
     if froms.len() == 1 {
         return Some(froms[0]);
