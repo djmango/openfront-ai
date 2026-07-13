@@ -197,9 +197,10 @@ struct Args {
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pipeline_groups: bool,
 
-    /// Keep one actor OS thread alive per GPU for the full run. Actor-side
-    /// CUDA state never crosses channels. Phase 1 falls back to the legacy
-    /// collector path when --auto-scale-envs is enabled.
+    /// Keep one actor OS thread alive per GPU for the full run and, for the
+    /// one-GPU Phase 2 path, keep the learner on its own stable owner thread.
+    /// CUDA state never crosses channels. Autoscale uses the legacy path;
+    /// multi-GPU currently keeps persistent actors but uses legacy learners.
     #[arg(long, default_value_t = false)]
     persistent_actors: bool,
 
