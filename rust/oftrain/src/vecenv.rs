@@ -8,7 +8,9 @@ use anyhow::Result;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use serde_json::Value;
+use std::ops::Range;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ofcore::curriculum::{
@@ -24,20 +26,183 @@ use crate::engine::{self, EngineKind, GameEngine, RawObs};
 /// CPU-owned foveated rollout payload. Grid samples cross the actor/learner
 /// boundary as fp16 values; masks and crop metadata stay explicit so the
 /// learner never has to reconstruct a full fine grid or infer coordinates.
+#[derive(Default)]
+pub(crate) struct CompactHostBuffers {
+    pub grids: Vec<half::f16>,
+    pub masks: Vec<f32>,
+    pub origins: Vec<i64>,
+}
+
+/// Actor-created pool for compact D2H payloads. A payload is returned only
+/// when the last `CompactGrid` range into it is dropped (normally after the
+/// learner has finished with that rollout), so current observations can never
+/// alias or mutate an older `Step`.
+#[derive(Default)]
+pub(crate) struct CompactHostArena {
+    free: Mutex<Vec<CompactHostBuffers>>,
+}
+
+impl CompactHostArena {
+    pub fn lease(self: &Arc<Self>) -> CompactHostLease {
+        let buffers = self
+            .free
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop()
+            .unwrap_or_default();
+        CompactHostLease {
+            arena: Arc::clone(self),
+            buffers: Some(buffers),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn free_len(&self) -> usize {
+        self.free
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    }
+}
+
+pub(crate) struct CompactHostLease {
+    arena: Arc<CompactHostArena>,
+    buffers: Option<CompactHostBuffers>,
+}
+
+impl CompactHostLease {
+    pub fn buffers_mut(&mut self) -> &mut CompactHostBuffers {
+        self.buffers.as_mut().expect("compact host lease consumed")
+    }
+
+    pub fn publish(mut self) -> Arc<CompactHostPayload> {
+        Arc::new(CompactHostPayload {
+            arena: Arc::clone(&self.arena),
+            buffers: self.buffers.take().expect("compact host lease consumed"),
+        })
+    }
+}
+
+impl Drop for CompactHostLease {
+    fn drop(&mut self) {
+        if let Some(buffers) = self.buffers.take() {
+            self.arena
+                .free
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(buffers);
+        }
+    }
+}
+
+pub(crate) struct CompactHostPayload {
+    arena: Arc<CompactHostArena>,
+    pub buffers: CompactHostBuffers,
+}
+
+impl Drop for CompactHostPayload {
+    fn drop(&mut self) {
+        let buffers = std::mem::take(&mut self.buffers);
+        self.arena
+            .free
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(buffers);
+    }
+}
+
+/// An immutable per-environment view into one batch-contiguous host payload.
+/// Cloning this type clones only the `Arc` and ranges, never the fp16/mask
+/// bytes. Exact-shape buckets therefore need three host allocations/transfers
+/// per bucket rather than six allocations and six slice copies per env.
 #[derive(Clone)]
 pub struct CompactGrid {
-    pub fine: Vec<half::f16>, // (C_GRID, fine_h, fine_w)
-    pub fine_valid: Vec<f32>, // (fine_h, fine_w)
-    pub fine_legal: Vec<f32>, // (fine_h, fine_w)
+    payload: Arc<CompactHostPayload>,
+    fine: Range<usize>,       // (C_GRID, fine_h, fine_w)
+    fine_valid: Range<usize>, // (fine_h, fine_w)
+    fine_legal: Range<usize>, // (fine_h, fine_w)
     pub fine_h: usize,
     pub fine_w: usize,
     pub origin_y: i64,
     pub origin_x: i64,
-    pub coarse: Vec<half::f16>, // (C_GRID, coarse_h, coarse_w)
-    pub coarse_valid: Vec<f32>, // (coarse_h, coarse_w)
-    pub coarse_legal: Vec<f32>, // (coarse_h, coarse_w)
+    coarse: Range<usize>,       // (C_GRID, coarse_h, coarse_w)
+    coarse_valid: Range<usize>, // (coarse_h, coarse_w)
+    coarse_legal: Range<usize>, // (coarse_h, coarse_w)
     pub coarse_h: usize,
     pub coarse_w: usize,
+}
+
+impl CompactGrid {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        payload: Arc<CompactHostPayload>,
+        fine: Range<usize>,
+        fine_valid: Range<usize>,
+        fine_legal: Range<usize>,
+        fine_h: usize,
+        fine_w: usize,
+        origin_y: i64,
+        origin_x: i64,
+        coarse: Range<usize>,
+        coarse_valid: Range<usize>,
+        coarse_legal: Range<usize>,
+        coarse_h: usize,
+        coarse_w: usize,
+    ) -> Self {
+        Self {
+            payload,
+            fine,
+            fine_valid,
+            fine_legal,
+            fine_h,
+            fine_w,
+            origin_y,
+            origin_x,
+            coarse,
+            coarse_valid,
+            coarse_legal,
+            coarse_h,
+            coarse_w,
+        }
+    }
+
+    pub fn fine(&self) -> &[half::f16] {
+        &self.payload.buffers.grids[self.fine.clone()]
+    }
+    pub fn fine_valid(&self) -> &[f32] {
+        &self.payload.buffers.masks[self.fine_valid.clone()]
+    }
+    pub fn fine_legal(&self) -> &[f32] {
+        &self.payload.buffers.masks[self.fine_legal.clone()]
+    }
+    pub fn coarse(&self) -> &[half::f16] {
+        &self.payload.buffers.grids[self.coarse.clone()]
+    }
+    pub fn coarse_valid(&self) -> &[f32] {
+        &self.payload.buffers.masks[self.coarse_valid.clone()]
+    }
+    pub fn coarse_legal(&self) -> &[f32] {
+        &self.payload.buffers.masks[self.coarse_legal.clone()]
+    }
+
+    #[cfg(test)]
+    pub(crate) fn grid_storage_ptr(&self) -> *const half::f16 {
+        self.payload.buffers.grids.as_ptr()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mask_storage_ptr(&self) -> *const f32 {
+        self.payload.buffers.masks.as_ptr()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn storage_capacities(&self) -> (usize, usize, usize) {
+        (
+            self.payload.buffers.grids.capacity(),
+            self.payload.buffers.masks.capacity(),
+            self.payload.buffers.origins.capacity(),
+        )
+    }
 }
 
 #[derive(Clone)]

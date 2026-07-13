@@ -655,6 +655,9 @@ struct ActorShard {
     device: Device,
     workers: Vec<Worker>,
     cur_obs: Vec<PreparedObs>,
+    /// CPU-only compact payloads are recycled after the learner drops the
+    /// final immutable Step view. CUDA tensors never enter this arena.
+    compact_host_arena: Arc<crate::vecenv::CompactHostArena>,
     /// Libtorch's CUDA current stream is thread-local. The persistent actor
     /// creates, uses, and drops this VarStore and every tensor derived from it
     /// on its one owner thread; no policy/AE tensor is sent through a channel.
@@ -881,6 +884,7 @@ fn act_contiguous_obs(
                 cfg.fp16_rollout,
                 ae,
                 &mut actor.terrain_cache,
+                &actor.compact_host_arena,
             )?
         } else {
             batch::build_rollout_obs(
@@ -1898,6 +1902,7 @@ fn build_actor_shard(
         device,
         workers,
         cur_obs,
+        compact_host_arena: Arc::new(crate::vecenv::CompactHostArena::default()),
         vs,
         policy,
         ae,
@@ -3326,6 +3331,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 device,
                 workers,
                 cur_obs,
+                compact_host_arena: Arc::new(crate::vecenv::CompactHostArena::default()),
                 vs: actor_vs,
                 policy: actor_policy,
                 ae: actor_ae,
