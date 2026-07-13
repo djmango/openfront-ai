@@ -16,6 +16,7 @@ use crate::map::TileRef;
 pub struct TradeShipExecution {
     orig_owner_small_id: u16,
     src_port_unit_id: i32,
+    src_port_owner_small_id: Option<u16>,
     dst_port_unit_id: i32,
     dst_port_owner_small_id: Option<u16>,
     ship_unit_id: Option<i32>,
@@ -37,6 +38,7 @@ impl TradeShipExecution {
         Self {
             orig_owner_small_id,
             src_port_unit_id,
+            src_port_owner_small_id: Some(orig_owner_small_id),
             dst_port_unit_id,
             dst_port_owner_small_id: Some(dst_port_owner_small_id),
             ship_unit_id: None,
@@ -60,10 +62,15 @@ impl TradeShipExecution {
     /// `execute_next_tick`, without ever needing this execution's own `tick()` to run.
     /// Mirrors `WarshipExecution::new_for_test`'s naming/rationale.
     #[cfg(test)]
-    pub(crate) fn new_for_test(orig_owner_small_id: u16, dst_port_unit_id: i32, ship_unit_id: i32) -> Self {
+    pub(crate) fn new_for_test(
+        orig_owner_small_id: u16,
+        dst_port_unit_id: i32,
+        ship_unit_id: i32,
+    ) -> Self {
         Self {
             orig_owner_small_id,
             src_port_unit_id: 0,
+            src_port_owner_small_id: Some(orig_owner_small_id),
             dst_port_unit_id,
             dst_port_owner_small_id: None,
             ship_unit_id: Some(ship_unit_id),
@@ -105,7 +112,11 @@ impl TradeShipExecution {
         if self.path.is_empty() || self.path.first() != Some(&from) {
             self.path.insert(0, from);
         }
-        self.path_idx = if self.path.first() == Some(&from) { 1 } else { 0 };
+        self.path_idx = if self.path.first() == Some(&from) {
+            1
+        } else {
+            0
+        };
         self.path_dst = Some(to);
         true
     }
@@ -149,10 +160,16 @@ impl TradeShipExecution {
             game.add_gold(ship_owner, gold);
             return;
         }
-        if let Some(src_owner) = game.find_unit_owner(self.src_port_unit_id) {
+        if let Some(src_owner) = game
+            .find_unit_owner(self.src_port_unit_id)
+            .or(self.src_port_owner_small_id)
+        {
             game.add_gold(src_owner, gold);
         }
-        if let Some(dst_owner) = game.find_unit_owner(self.dst_port_unit_id) {
+        if let Some(dst_owner) = game
+            .find_unit_owner(self.dst_port_unit_id)
+            .or(self.dst_port_owner_small_id)
+        {
             game.add_gold(dst_owner, gold);
         }
     }
@@ -175,13 +192,15 @@ impl Execution for TradeShipExecution {
             };
             // TS `origOwner.canBuild(TradeShip, srcPort.tile())` -> `tradeShipSpawn`:
             // owner must still have an (active) Port at that tile.
-            let has_port = game.player_by_small_id(self.orig_owner_small_id).is_some_and(|p| {
-                p.units.iter().any(|u| {
-                    u.id == self.src_port_unit_id
-                        && u.unit_type == unit_type::PORT
-                        && !u.under_construction
-                })
-            });
+            let has_port = game
+                .player_by_small_id(self.orig_owner_small_id)
+                .is_some_and(|p| {
+                    p.units.iter().any(|u| {
+                        u.id == self.src_port_unit_id
+                            && u.unit_type == unit_type::PORT
+                            && !u.under_construction
+                    })
+                });
             if !has_port {
                 self.active = false;
                 return;
@@ -203,6 +222,9 @@ impl Execution for TradeShipExecution {
             return;
         };
 
+        if let Some(owner) = game.find_unit_owner(self.src_port_unit_id) {
+            self.src_port_owner_small_id = Some(owner);
+        }
         // TS: `!this._dstPort.isActive()` (port destroyed/demolished since spawn).
         let mut dst_owner = game.find_unit_owner(self.dst_port_unit_id);
         if let Some(owner) = dst_owner {
@@ -330,7 +352,10 @@ mod piracy_tests {
         game.bfs = crate::water::BfsScratch::new(n);
         game.water_astar = crate::water::WaterAstarScratch::new(n);
         game.mini_water_astar = crate::water::WaterAstarScratch::new(mini_n);
-        game.mini_water_hpa = Some(crate::water_hpa::WaterHierarchical::new(&game.mini_map, true));
+        game.mini_water_hpa = Some(crate::water_hpa::WaterHierarchical::new(
+            &game.mini_map,
+            true,
+        ));
         game.water_component = crate::water::build_water_components(&game.map);
         game.end_spawn_phase();
         game
@@ -406,6 +431,50 @@ mod piracy_tests {
             gold_after > gold_before,
             "pirate should receive voyage gold ({gold_before} -> {gold_after})"
         );
-        assert!(game.find_unit_owner(ship_id).is_none(), "ship removed on complete");
+        assert!(
+            game.find_unit_owner(ship_id).is_none(),
+            "ship removed on complete"
+        );
+    }
+
+    /// TS keeps source/destination `Unit` object references in the voyage; if
+    /// one endpoint is deleted before arrival, `unit.owner()` still returns
+    /// the last owner for payout. Native must cache the last owner too.
+    #[test]
+    fn deleted_trade_ship_endpoints_still_receive_completion_gold() {
+        let mut game = water_game(20, 20);
+        let merchant = add_nation(&mut game, "merchant");
+        let customer = add_nation(&mut game, "customer");
+
+        let src_port = game.build_unit(merchant, unit_type::PORT, game.ref_xy(2, 2));
+        let dst_port = game.build_unit(customer, unit_type::PORT, game.ref_xy(3, 3));
+        let ship_id = game.build_unit(merchant, unit_type::TRADE_SHIP, game.ref_xy(4, 4));
+
+        let mut exec = TradeShipExecution::new(merchant, src_port, dst_port, customer);
+        exec.ship_unit_id = Some(ship_id);
+        exec.tiles_traveled = 10;
+
+        game.remove_unit(merchant, src_port);
+        game.remove_unit(customer, dst_port);
+        assert_eq!(game.find_unit_owner(src_port), None);
+        assert_eq!(game.find_unit_owner(dst_port), None);
+
+        let merchant_before = game.player_by_small_id(merchant).unwrap().gold;
+        let customer_before = game.player_by_small_id(customer).unwrap().gold;
+        let gold = game.wire.trade_ship_gold(exec.tiles_traveled as f64);
+        exec.complete(&mut game);
+
+        assert_eq!(
+            game.player_by_small_id(merchant).unwrap().gold,
+            merchant_before + gold
+        );
+        assert_eq!(
+            game.player_by_small_id(customer).unwrap().gold,
+            customer_before + gold
+        );
+        assert!(
+            game.find_unit_owner(ship_id).is_none(),
+            "ship removed on complete"
+        );
     }
 }
