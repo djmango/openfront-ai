@@ -1054,16 +1054,13 @@ fn fix_path_extremes(
     } else {
         path.push(cell_dst);
     }
-    // NOTE: TS `MiniMapTransformer.fixExtremes` does not dedupe consecutive
-    // nodes; a duplicate tile makes `PathFinderStepper.next` stall the ship
-    // for one tick. Tried removing this dedupe to match that exactly, but it
-    // regressed the full 78-record gate (many more early desyncs around
-    // tick 310-350), so the underlying mini-path must be producing more
-    // duplicate nodes than TS's equivalent computation in the common case.
-    // Keep the dedupe until the mini-path/HPA stitching duplicate source is
-    // found and fixed to match TS bit-for-bit (see water_hpa.rs / A* /
-    // cluster-stitching), then revisit.
-    collapse_consecutive_dupes(path)
+    // TS `MiniMapTransformer.fixExtremes` does not dedupe consecutive nodes;
+    // a duplicate tile makes `PathFinderStepper.next` stall the ship for one
+    // tick. Collapsing those dupes made native transports arrive one tick
+    // early (seen on curriculum-parity-v4 `curr-b050-s3-world` boat 385:
+    // native reversed off a duplicated shore cell immediately while TS spent
+    // the stall tick on the duplicate). Match TS and keep the stall.
+    path
 }
 
 /// Ensure each consecutive pair is 4-neighbor adjacent (TS stepper assumption).
@@ -1089,21 +1086,6 @@ fn densify_path_adjacent(map: &GameMap, path: Vec<TileRef>) -> Vec<TileRef> {
             }
         } else {
             out.push(to);
-        }
-    }
-    out
-}
-
-/// Upscale/interpolation can emit the same TileRef twice in a row; collapse
-/// them so the transport stepper does not stall on a spurious duplicate.
-fn collapse_consecutive_dupes(path: Vec<TileRef>) -> Vec<TileRef> {
-    if path.is_empty() {
-        return path;
-    }
-    let mut out = Vec::with_capacity(path.len());
-    for t in path {
-        if out.last() != Some(&t) {
-            out.push(t);
         }
     }
     out

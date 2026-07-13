@@ -49,6 +49,10 @@ done
 GAME_ID="$(basename "$RECORD" | sed -E 's/\.json(\.gz)?$//')"
 TMP="/tmp/bisect_parity.$GAME_ID"
 
+# Parent shells may export OF_DUMP_TICKS_FROM / OF_DUMP_UNITS from a prior fine
+# probe; coarse pass must always retain the full checkpoint series from tick 0.
+unset OF_DUMP_TICKS_FROM OF_DUMP_UNITS OF_DUMP_UNITS_FROM
+
 echo "[bisect_parity] $GAME_ID: coarse pass (every=$COARSE_EVERY, max=$MAX_TICKS)" >&2
 
 cargo run --quiet --release --manifest-path "$ROOT/rust/Cargo.toml" -p openfront-engine --bin tick_dump -- \
@@ -79,6 +83,11 @@ FINE_MAX=$((DIVERGENT_TICK + COARSE_EVERY))
 if (( FINE_MAX > MAX_TICKS )); then FINE_MAX=$MAX_TICKS; fi
 
 echo "[bisect_parity] coarse divergence near tick $DIVERGENT_TICK - fine pass up to tick $FINE_MAX (every=1)" >&2
+
+# Only retain snapshots near the divergence window so large bot-count games
+# do not blow past V8's JSON.stringify string limit.
+FINE_FROM=$((DIVERGENT_TICK > COARSE_EVERY ? DIVERGENT_TICK - COARSE_EVERY : 0))
+export OF_DUMP_TICKS_FROM="$FINE_FROM"
 
 cargo run --quiet --release --manifest-path "$ROOT/rust/Cargo.toml" -p openfront-engine --bin tick_dump -- \
   --repo "$ROOT" --record "$RECORD" --every 1 --max-ticks "$FINE_MAX" \

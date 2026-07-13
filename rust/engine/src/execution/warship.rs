@@ -147,6 +147,17 @@ impl WarshipExecution {
         self.patrol_tile = tile;
     }
 
+    /// Same patrol-tile update as `set_patrol_tile`, but kept separate for
+    /// `Game::set_warship_patrol_tile` call sites. TS only mutates the Unit's
+    /// `patrolTile` there; the WarshipExecution's own `handleManualPatrolOverride()`
+    /// observes the changed tile on its next tick and then clears dock/retreat state.
+    pub fn set_patrol_tile_at_tick(&mut self, tile: TileRef, _tick: u32) {
+        if self.patrol_tile == tile {
+            return;
+        }
+        self.patrol_tile = tile;
+    }
+
     /// TS `MoveWarshipExecution.init()`'s per-warship redirect (a manual player move) -
     /// unlike `set_patrol_tile` (`NationWarshipBehavior.maybeMoveWarship`, which lets an
     /// in-progress patrol leg finish), this also clears the in-flight patrol
@@ -198,7 +209,12 @@ impl WarshipExecution {
         warship_build_port_tile(game, self.owner_small_id, self.patrol_tile)
     }
 
-    fn random_target(&mut self, game: &Game, from: TileRef) -> Option<TileRef> {
+    fn random_target_with_shoreline(
+        &mut self,
+        game: &Game,
+        from: TileRef,
+        allow_shoreline: bool,
+    ) -> Option<TileRef> {
         let component = game.get_water_component(from);
         let random = self.random.as_mut()?;
         let mut patrol_range = 100i32;
@@ -215,7 +231,8 @@ impl WarshipExecution {
             }
             let tile = game.ref_xy(x as u32, y as u32);
             let connected = component.is_none_or(|c| game.has_water_component(tile, c));
-            if game.is_water(tile) && !game.map.is_shoreline(tile) && connected {
+            if game.is_water(tile) && (allow_shoreline || !game.map.is_shoreline(tile)) && connected
+            {
                 return Some(tile);
             }
             attempts += 1;
@@ -226,6 +243,11 @@ impl WarshipExecution {
             }
         }
         None
+    }
+
+    fn random_target(&mut self, game: &Game, from: TileRef) -> Option<TileRef> {
+        self.random_target_with_shoreline(game, from, false)
+            .or_else(|| self.random_target_with_shoreline(game, from, true))
     }
 
     fn refresh_path(&mut self, game: &mut Game, from: TileRef, to: TileRef) -> bool {
@@ -392,12 +414,14 @@ impl WarshipExecution {
         if target.2 != TRANSPORT {
             self.last_shell_attack = tick;
         }
-        game.add_execution(ExecEnum::Shell(ShellExecution::new(
+        let owner_veterancy = game.unit_veterancy(self.owner_small_id, unit_id);
+        game.add_execution(ExecEnum::Shell(ShellExecution::new_with_owner_veterancy(
             from,
             self.owner_small_id,
             unit_id,
             target.0,
             target.1,
+            owner_veterancy,
         )));
         if target.2 == TRANSPORT {
             self.already_sent_shell.insert((target.0, target.1));
@@ -679,7 +703,25 @@ impl Execution for WarshipExecution {
             .unit(self.owner_small_id, unit_id)
             .map(|unit| unit.health)
             .unwrap_or(0);
+        // TS `tick`: `healWarship()` (passive + active dock heal) before
+        // `handleManualPatrolOverride()`. Undocking on a same-tick patrol
+        // redirect must not skip that tick's docked active heal
+        // (`curr-b150-s1-pangaea` Egypt warship 1403 @5752: native +1 vs TS +6).
         self.heal_near_port(game, from, unit_id);
+        if self.docked {
+            let port_exists = self.retreat_port.is_some_and(|port| {
+                game.player_by_small_id(self.owner_small_id)
+                    .is_some_and(|owner| {
+                        owner
+                            .units
+                            .iter()
+                            .any(|unit| unit.unit_type == PORT && unit.tile as TileRef == port)
+                    })
+            });
+            if port_exists {
+                self.heal_at_dock(game, unit_id);
+            }
+        }
         self.handle_manual_patrol_override(tick);
 
         if self.docked {
@@ -698,18 +740,18 @@ impl Execution for WarshipExecution {
                 self.retreat_port = None;
                 self.active_healing_remainder = 0.0;
             } else {
-                self.heal_at_dock(game, unit_id);
                 let max_health = game.unit_max_health(self.owner_small_id, unit_id);
                 let fully_healed = game
                     .unit(self.owner_small_id, unit_id)
                     .is_none_or(|unit| unit.health >= max_health);
-                if !fully_healed {
+                if fully_healed {
+                    self.docked = false;
+                    self.retreating = false;
+                    self.retreat_port = None;
+                    self.active_healing_remainder = 0.0;
+                } else {
                     return;
                 }
-                self.docked = false;
-                self.retreating = false;
-                self.retreat_port = None;
-                self.active_healing_remainder = 0.0;
             }
         }
 
@@ -1129,6 +1171,70 @@ mod tests {
             // Must not panic even though unit id 123 was never built.
             game.move_warships(p1, &[123], game.ref_xy(30, 30));
         }
+    }
+
+    #[test]
+    fn ai_patrol_redirect_leaves_docked_ship_docked_until_its_tick() {
+        let mut game = water_game(40, 40);
+        let p1 = add_nation(&mut game, "p1");
+        let port_tile = game.ref_xy(10, 10);
+        let new_patrol = game.ref_xy(20, 10);
+        game.build_unit(p1, unit_type::PORT, port_tile);
+        let ship_id = game.build_unit(p1, unit_type::WARSHIP, port_tile);
+        let max_health = game.unit_max_health(p1, ship_id);
+        game.unit_mut(p1, ship_id).unwrap().health = max_health - 100;
+
+        let mut exec = WarshipExecution::new_for_test(p1, port_tile, ship_id);
+        exec.docked = true;
+        exec.retreat_port = Some(port_tile);
+        exec.last_observed_patrol_tile = Some(port_tile);
+        game.push_exec_for_test(ExecEnum::Warship(exec));
+
+        game.set_warship_patrol_tile(p1, ship_id, new_patrol);
+        assert!(
+            game.warship_is_docked(p1, ship_id),
+            "AI updateWarshipState({{ patrolTile }}) should not undock synchronously"
+        );
+
+        game.execute_next_tick();
+        assert!(
+            !game.warship_is_docked(p1, ship_id),
+            "the warship execution should process the patrol override on its own tick"
+        );
+    }
+
+    #[test]
+    fn docked_active_heal_applies_before_same_tick_patrol_undock() {
+        // TS heals while still docked, then `handleManualPatrolOverride` undocks.
+        // Native previously undocked first and skipped the +5 active heal.
+        let mut game = water_game(40, 40);
+        let p1 = add_nation(&mut game, "p1");
+        let port_tile = game.ref_xy(10, 10);
+        let ship_tile = game.ref_xy(10, 12); // within docking range 5
+        let new_patrol = game.ref_xy(25, 10);
+        game.build_unit(p1, unit_type::PORT, port_tile);
+        let ship_id = game.build_unit(p1, unit_type::WARSHIP, ship_tile);
+        game.unit_mut(p1, ship_id).unwrap().health = 500;
+
+        let mut exec = WarshipExecution::new_for_test(p1, port_tile, ship_id);
+        exec.docked = true;
+        exec.retreat_port = Some(port_tile);
+        exec.last_observed_patrol_tile = Some(port_tile);
+        game.push_exec_for_test(ExecEnum::Warship(exec));
+        game.reinit_unit_grid();
+
+        game.set_warship_patrol_tile(p1, ship_id, new_patrol);
+        game.execute_next_tick();
+
+        let health = game.unit(p1, ship_id).unwrap().health;
+        assert!(
+            !game.warship_is_docked(p1, ship_id),
+            "patrol redirect should undock on the warship tick"
+        );
+        assert_eq!(
+            health, 506,
+            "passive +1 and docked active +5 must apply before undock (got {health})"
+        );
     }
 
     fn team_setup() -> (Game, u16, u16) {
@@ -1946,7 +2052,10 @@ mod tests {
                 Some(available_port),
                 "the newly retreating ship still has its stale target while alternatives are checked"
             );
-            assert!(exec.docked, "available nearby port should dock the ship immediately");
+            assert!(
+                exec.docked,
+                "available nearby port should dock the ship immediately"
+            );
             assert!(exec.target_tile.is_none(), "docking clears the target tile");
         }
 
