@@ -104,13 +104,13 @@ pub fn struct_value(unit_type: &str) -> Option<f64> {
     })
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Nations {
     Default,
     Exact(u32),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Stage {
     pub maps: &'static [&'static str],
     pub bots: u32,
@@ -123,9 +123,21 @@ pub struct Stage {
 pub const ALL_MAPS: [&str; 7] =
     ["Onion", "Pangaea", "Caucasus", "BlackSea", "BetweenTwoSeas", "World", "Asia"];
 
+/// V8.1 env workers per GPU/shard. Early maps are cheap enough to keep the
+/// actor full; later, larger maps use fewer workers to bound host memory and
+/// engine tail latency.
+pub const V81_ENV_TARGETS: [usize; 11] = [24, 24, 24, 24, 24, 24, 12, 10, 8, 8, 8];
+
 pub fn stages() -> Vec<Stage> {
+    stages_for(false)
+}
+
+/// Return the selected gate schedule. V8.1 deliberately changes only
+/// `win_at`: stage indices, maps, opponents, difficulty, and decision cadence
+/// remain stable so checkpoints and episode metadata retain their identity.
+pub fn stages_for(v81: bool) -> Vec<Stage> {
     use Nations::{Default as ND, Exact as NE};
-    vec![
+    let mut stages = vec![
         Stage { maps: &["Onion"], bots: 0, difficulty: "Easy", nations: NE(1), decision_ticks: 15, win_at: 0.9 },
         Stage { maps: &["Onion"], bots: 0, difficulty: "Easy", nations: NE(3), decision_ticks: 15, win_at: 0.8 },
         Stage { maps: &["Onion", "Pangaea"], bots: 5, difficulty: "Easy", nations: NE(3), decision_ticks: 15, win_at: 0.75 },
@@ -137,7 +149,17 @@ pub fn stages() -> Vec<Stage> {
         Stage { maps: &ALL_MAPS, bots: 80, difficulty: "Hard", nations: ND, decision_ticks: 10, win_at: 0.4 },
         Stage { maps: &ALL_MAPS, bots: 120, difficulty: "Hard", nations: ND, decision_ticks: 10, win_at: 0.35 },
         Stage { maps: &ALL_MAPS, bots: 150, difficulty: "Impossible", nations: ND, decision_ticks: 10, win_at: 0.3 },
-    ]
+    ];
+    if v81 {
+        // Stages 0-3 are intentionally unchanged. Crowded-map wins are much
+        // rarer than placement success, so require repeatable wins without
+        // making the old 0.5 gate an effectively permanent lock.
+        let gates = [0.35, 0.30, 0.25, 0.22, 0.20, 0.18, 0.15];
+        for (stage, gate) in stages[4..].iter_mut().zip(gates) {
+            stage.win_at = gate;
+        }
+    }
+    stages
 }
 
 pub const GH_MAX: i64 = 150;
@@ -317,14 +339,17 @@ mod tests {
         let (gamma, coefficient) = (0.9f64, 0.25);
         let mut shaper = DominanceShaper::default();
         shaper.reset(phi[0]);
-        let increments: Vec<f64> = phi[1..].iter()
+        let increments: Vec<f64> = phi[1..]
+            .iter()
             .map(|&next| shaper.transition(next, gamma, coefficient))
             .collect();
-        let discounted: f64 = increments.iter().enumerate()
+        let discounted: f64 = increments
+            .iter()
+            .enumerate()
             .map(|(t, value)| gamma.powi(t as i32) * value)
             .sum();
-        let expected = coefficient
-            * (-phi[0] + gamma.powi((phi.len() - 1) as i32) * phi[phi.len() - 1]);
+        let expected =
+            coefficient * (-phi[0] + gamma.powi((phi.len() - 1) as i32) * phi[phi.len() - 1]);
         assert!((discounted - expected).abs() < 1e-12);
         assert_eq!(shaper.prior().to_bits(), phi[phi.len() - 1].to_bits());
     }
@@ -347,7 +372,9 @@ mod tests {
         let _ = shaper.transition(-0.7, 0.9, 0.25);
         shaper.reset(0.3);
         assert_eq!(shaper.prior().to_bits(), 0.3f64.to_bits());
-        assert!((shaper.transition(0.5, 0.9, 0.25) - 0.25 * (0.9 * 0.5 - 0.3)).abs() < 1e-15);
+        assert!(
+            (shaper.transition(0.5, 0.9, 0.25) - 0.25 * (0.9 * 0.5 - 0.3)).abs() < 1e-15
+        );
     }
 
     #[test]
@@ -364,7 +391,10 @@ mod tests {
     fn dominant_threshold_relaxes_only_losses_at_or_above_threshold() {
         let cfg = config();
         assert_eq!(strength_delta_weight(-0.1, 0.549, 4, cfg), W_DELTA_LOSS);
-        assert_eq!(strength_delta_weight(-0.1, 0.55, 4, cfg), cfg.v81_delta_loss_dominant);
+        assert_eq!(
+            strength_delta_weight(-0.1, 0.55, 4, cfg),
+            cfg.v81_delta_loss_dominant
+        );
         assert_eq!(strength_delta_weight(0.1, 0.99, 4, cfg), W_DELTA_GAIN);
     }
 
@@ -376,9 +406,13 @@ mod tests {
         let (mine, previous, tw) = (0.3125, 0.375, 0.78125);
         let delta = mine - previous;
         let legacy = W_STR * mine * tw
-            + (if delta >= 0.0 { W_DELTA_GAIN } else { W_DELTA_LOSS }) * delta;
-        let current = W_STR * mine * tw
-            + strength_delta_weight(delta, 0.99, 10, cfg) * delta;
+            + (if delta >= 0.0 {
+                W_DELTA_GAIN
+            } else {
+                W_DELTA_LOSS
+            }) * delta;
+        let current =
+            W_STR * mine * tw + strength_delta_weight(delta, 0.99, 10, cfg) * delta;
         assert_eq!(legacy.to_bits(), current.to_bits());
         assert!(!cfg.dominance_shaping_active(10));
     }
@@ -411,5 +445,44 @@ mod tests {
         let expected = ((exact[&1] + DOMINANCE_EPS) / (exact[&2] + DOMINANCE_EPS)).ln();
         assert!((dominance_potential(&exact, 1, 10.0) - expected).abs() < 1e-15);
         assert_eq!(placement(&ents, 1, true, 100), (1, 2));
+    }
+}
+
+#[cfg(test)]
+mod curriculum_v81_tests {
+    use super::*;
+
+    #[test]
+    fn v81_preserves_stage_identity_and_only_recalibrates_late_gates() {
+        let legacy = stages();
+        let v81 = stages_for(true);
+        assert_eq!(legacy.len(), v81.len());
+        for (index, (old, new)) in legacy.iter().zip(&v81).enumerate() {
+            assert_eq!(old.maps, new.maps, "stage {index} maps changed");
+            assert_eq!(old.bots, new.bots, "stage {index} bots changed");
+            assert_eq!(
+                old.difficulty, new.difficulty,
+                "stage {index} difficulty changed"
+            );
+            assert_eq!(old.nations, new.nations, "stage {index} nations changed");
+            assert_eq!(
+                old.decision_ticks, new.decision_ticks,
+                "stage {index} cadence changed"
+            );
+        }
+        assert_eq!(
+            v81.iter().map(|stage| stage.win_at).collect::<Vec<_>>(),
+            vec![0.9, 0.8, 0.75, 0.65, 0.35, 0.30, 0.25, 0.22, 0.20, 0.18, 0.15]
+        );
+        for index in 0..4 {
+            assert_eq!(legacy[index].win_at, v81[index].win_at);
+        }
+    }
+
+    #[test]
+    fn v81_env_defaults_match_map_scale_plan() {
+        assert_eq!(&V81_ENV_TARGETS[..6], &[24; 6]);
+        assert_eq!(&V81_ENV_TARGETS[6..], &[12, 10, 8, 8, 8]);
+        assert_eq!(V81_ENV_TARGETS.len(), stages().len());
     }
 }
