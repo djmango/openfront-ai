@@ -262,14 +262,10 @@ mod tests {
             let d_base = base_shell.get_effect_on_target_for_testing(&game);
             let d_vet = vet_shell.get_effect_on_target_for_testing(&game);
 
-            // Same roll -> veteran damage is boosted before the configured shell base damage
-            // scaling is applied.
-            let expected_vet = ((game.wire.shell_base_damage() as f64 / 250.0)
-                * (d_base * 250 / game.wire.shell_base_damage()
-                    * (100 + max_vet * bonus_percent)
-                    / 100) as f64)
-                .round() as i32;
-            assert_eq!(d_vet, expected_vet);
+            // TS's current Shell base damage is 250, so the base shot is the rolled
+            // multiplier and the veteran's shot is the integer-boosted value.
+            assert_eq!(game.wire.shell_base_damage(), 250);
+            assert_eq!(d_vet, d_base * (100 + max_vet * bonus_percent) / 100);
             boosted_values.insert(d_vet);
         }
 
@@ -331,7 +327,10 @@ mod tests {
 
             assert!(!damages.is_empty());
             for &d in &damages {
-                assert!((240..=360).contains(&d), "d={d}");
+                let base_damage = game.wire.shell_base_damage();
+                let min_expected = ((base_damage as f64 / 250.0) * 200.0).round() as i32;
+                let max_expected = ((base_damage as f64 / 250.0) * 300.0).round() as i32;
+                assert!((min_expected..=max_expected).contains(&d), "d={d}");
             }
         }
 
