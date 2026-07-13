@@ -14,8 +14,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ofcore::curriculum::{
-    self, Stage, W_DEATH, W_DELTA_GAIN, W_DELTA_LOSS, W_STR, W_WASTE, placement, placement_score,
-    sample_episode, stages, terminal_reward, timeweight,
+    self, DominanceShaper, RewardComponents, RewardConfig, Stage, W_DEATH, W_STR, W_WASTE,
+    dominance_potential, normalized_strength_share, placement, placement_score, sample_episode,
+    stages, strength_delta_weight, terminal_reward, timeweight,
 };
 use ofcore::feat::{self, ACTIONS, IS_LAND_BIT, MAG_MASK, REGION};
 use ofcore::translate::{Choice, IntentTranslator, translate};
@@ -219,6 +220,7 @@ pub struct EpisodeInfo {
     pub stage: usize,
     pub map: String,
     pub rehearsal: bool,
+    pub reward_components: RewardComponents,
 }
 
 /// Per-env observation ready to batch into `policy::Obs`.
@@ -270,7 +272,9 @@ pub struct EnvWorker {
     bridge: Box<dyn GameEngine>,
     stages: Vec<Stage>,
     stage: usize,
+    episode_stage: usize,
     max_episode_ticks: i64,
+    reward_config: RewardConfig,
     decision_ticks: u32,
     rng: SmallRng,
     episode: u64,
@@ -282,6 +286,8 @@ pub struct EnvWorker {
     translator: Option<IntentTranslator>,
     land_total: i64,
     prev_strength: f64,
+    dominance_shaper: DominanceShaper,
+    ep_reward_components: RewardComponents,
     spawn_steps: i64,
     map_name: String,
     rehearsal: bool,
@@ -300,6 +306,7 @@ impl EnvWorker {
         stage: usize,
         max_episode_ticks: i64,
         engine: EngineKind,
+        reward_config: RewardConfig,
     ) -> Result<Self> {
         let bridge = engine::create(engine)?;
         let mut w = EnvWorker {
@@ -307,7 +314,9 @@ impl EnvWorker {
             bridge,
             stages: stages(),
             stage,
+            episode_stage: stage,
             max_episode_ticks,
+            reward_config,
             decision_ticks: 10,
             rng: SmallRng::seed_from_u64(1000 + idx as u64),
             episode: 0,
@@ -319,6 +328,8 @@ impl EnvWorker {
             translator: None,
             land_total: 1,
             prev_strength: 0.0,
+            dominance_shaper: DominanceShaper::default(),
+            ep_reward_components: RewardComponents::default(),
             spawn_steps: 0,
             map_name: String::new(),
             rehearsal: false,
@@ -343,6 +354,7 @@ impl EnvWorker {
     }
 
     pub fn reset_episode(&mut self) -> Result<()> {
+        self.episode_stage = self.stage;
         let stg = &self.stages[self.stage];
         self.decision_ticks = stg.decision_ticks;
         let (map_name, bots, difficulty, nations, rehearsal) =
@@ -391,8 +403,16 @@ impl EnvWorker {
         self.translator = Some(IntentTranslator::new(self.bridge.terrain(), width, hr, wr));
         self.lut.clear();
         self.prev_strength = 0.0;
+        let initial_strengths =
+            curriculum::strengths(&feat::parse_ents(obs.entities()), self.land_total);
+        self.dominance_shaper.reset(dominance_potential(
+            &initial_strengths,
+            obs.me().max(0) as usize,
+            self.reward_config.v81_potential_clamp,
+        ));
         self.spawn_steps = 0;
         self.ep_reward = 0.0;
+        self.ep_reward_components = RewardComponents::default();
         self.ep_len = 0;
         self.ep_wasted = 0;
         self.episode += 1;
@@ -547,6 +567,13 @@ impl EnvWorker {
                 // Fallback: pick a uniformly random legal spawn tile.
                 self.spawn_randomly()?;
             } else {
+                let next_ents = feat::parse_ents(obs.entities());
+                let composite = curriculum::strengths(&next_ents, self.land_total);
+                self.dominance_shaper.reset(dominance_potential(
+                    &composite,
+                    obs.me().max(0) as usize,
+                    self.reward_config.v81_potential_clamp,
+                ));
                 self.ep_len += 1;
                 return Ok((0.0, false, None));
             }
@@ -555,19 +582,42 @@ impl EnvWorker {
         let obs = self.obs.as_ref().unwrap();
         let ents = feat::parse_ents(obs.entities());
         let tiles = ofcore::translate::my_tiles(&ents, obs.me());
-        let mine = curriculum::strengths(&ents, self.land_total)
+        let composite = curriculum::strengths(&ents, self.land_total);
+        let me = obs.me().max(0) as usize;
+        let mine = composite
             .get(&(obs.me().max(0) as usize))
             .copied()
             .unwrap_or(0.0);
         let tw = timeweight(obs.tick());
         let delta = mine - self.prev_strength;
-        let mut reward = W_STR * mine * tw
-            + (if delta >= 0.0 {
-                W_DELTA_GAIN
-            } else {
-                W_DELTA_LOSS
-            }) * delta;
+        let normalized_share = if self.reward_config.dominant_loss_active(self.episode_stage) {
+            normalized_strength_share(&composite, me)
+        } else {
+            0.0
+        };
+        let delta_weight =
+            strength_delta_weight(delta, normalized_share, self.episode_stage, self.reward_config);
+        let mut components = RewardComponents {
+            strength: W_STR * mine * tw,
+            strength_delta: delta_weight * delta,
+            ..RewardComponents::default()
+        };
+        let mut reward = components.strength + components.strength_delta;
+        let next_potential =
+            dominance_potential(&composite, me, self.reward_config.v81_potential_clamp);
+        if self.reward_config.dominance_shaping_active(self.episode_stage) {
+            components.dominance = self.dominance_shaper.transition(
+                next_potential,
+                self.reward_config.gamma,
+                self.reward_config.v81_dom_coef,
+            );
+            reward += components.dominance;
+        } else {
+            // Avoid even adding zero in the disabled legacy-parity path.
+            self.dominance_shaper.reset(next_potential);
+        }
         reward -= W_WASTE * wasted as f64;
+        components.waste = -W_WASTE * wasted as f64;
         self.ep_wasted += wasted;
         self.prev_strength = mine;
 
@@ -575,6 +625,7 @@ impl EnvWorker {
         let mut won = false;
         if !obs.alive() {
             reward -= W_DEATH;
+            components.death = -W_DEATH;
             done = true;
         } else if !obs.winner().is_null() {
             let w = obs.winner();
@@ -590,7 +641,9 @@ impl EnvWorker {
         let mut info = None;
         if done {
             let (place, n) = placement(&ents, obs.me(), obs.alive(), self.land_total);
-            reward += terminal_reward(place, won);
+            components.terminal = terminal_reward(place, won);
+            reward += components.terminal;
+            self.ep_reward_components.add_assign(components);
             self.ep_reward += reward;
             self.ep_len += 1;
             info = Some(EpisodeInfo {
@@ -606,9 +659,11 @@ impl EnvWorker {
                 stage: self.stage,
                 map: self.map_name.clone(),
                 rehearsal: self.rehearsal,
+                reward_components: self.ep_reward_components,
             });
             self.reset_episode()?;
         } else {
+            self.ep_reward_components.add_assign(components);
             self.ep_reward += reward;
             self.ep_len += 1;
         }
