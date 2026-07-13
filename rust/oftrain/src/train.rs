@@ -6033,13 +6033,13 @@ mod persistent_actor_tests {
             let max_replica_diff = two_reply.weights[0]
                 .values
                 .iter()
-                .zip(&two_reply.weights[1].values)
+                .zip(two_reply.weights[1].values.iter())
                 .map(|(a, b)| (a - b).abs())
                 .fold(0.0f32, f32::max);
             let max_weight_diff = one_reply.weights[0]
                 .values
                 .iter()
-                .zip(&two_reply.weights[0].values)
+                .zip(two_reply.weights[0].values.iter())
                 .map(|(a, b)| (a - b).abs())
                 .fold(0.0f32, f32::max);
             eprintln!(
