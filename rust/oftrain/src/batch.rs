@@ -1111,7 +1111,7 @@ mod tests {
             cgh: 0,
             cgw: 0,
             ae_raw: crate::ae::AeRaw {
-                owners: vec![0i64; (gh * 8) * (gw * 8)],
+                owners: vec![0u8; (gh * 8) * (gw * 8)],
                 static_terrain: crate::ae::StaticTerrain {
                     key: crate::ae::TerrainCacheKey {
                         env_id: 0,
