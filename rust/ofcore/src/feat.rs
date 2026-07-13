@@ -67,7 +67,13 @@ pub const ACTIONS: [&str; N_ACTIONS] = [
 ];
 
 pub const BUILD_TYPES: [&str; N_BUILD] = [
-    "City", "Port", "Defense Post", "Missile Silo", "SAM Launcher", "Factory", "Warship",
+    "City",
+    "Port",
+    "Defense Post",
+    "Missile Silo",
+    "SAM Launcher",
+    "Factory",
+    "Warship",
 ];
 
 /// (engine unit, rocketDirectionUp). MIRV ignores the arc flag.
@@ -138,7 +144,10 @@ pub fn needs_tile(a: i64) -> bool {
 }
 
 pub fn needs_quantity(a: i64) -> bool {
-    matches!(a, A_ATTACK | A_EXPAND | A_BOAT | A_DONATE_GOLD | A_DONATE_TROOPS)
+    matches!(
+        a,
+        A_ATTACK | A_EXPAND | A_BOAT | A_DONATE_GOLD | A_DONATE_TROOPS
+    )
 }
 
 /// Actions whose tile pick refines to the fine /8 grid (see policy.rs).
@@ -150,7 +159,10 @@ pub fn refine_tile(a: i64) -> bool {
 }
 
 pub fn build_index(unit: &str) -> Option<i64> {
-    BUILD_TYPES.iter().position(|&u| u == unit).map(|i| i as i64)
+    BUILD_TYPES
+        .iter()
+        .position(|&u| u == unit)
+        .map(|i| i as i64)
 }
 
 pub fn nuke_index(unit: &str, up: bool) -> Option<i64> {
@@ -215,7 +227,11 @@ pub fn num(v: &Value) -> f64 {
 
 fn id_list(v: &Value) -> Vec<usize> {
     v.as_array()
-        .map(|a| a.iter().filter_map(|x| x.as_u64().map(|u| u as usize)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_u64().map(|u| u as usize))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -322,8 +338,16 @@ pub fn parse_ents(v: &Value) -> EntsData {
                         y: u["y"].as_i64()?,
                         gx: u["x"].as_i64()? / REGION as i64,
                         gy: u["y"].as_i64()? / REGION as i64,
-                        tgx: if has_target { num(tx) as i64 / REGION as i64 } else { -1 },
-                        tgy: if has_target { num(ty) as i64 / REGION as i64 } else { -1 },
+                        tgx: if has_target {
+                            num(tx) as i64 / REGION as i64
+                        } else {
+                            -1
+                        },
+                        tgy: if has_target {
+                            num(ty) as i64 / REGION as i64
+                        } else {
+                            -1
+                        },
                         has_target,
                         constructing: u["constructing"].as_bool().unwrap_or(false),
                         level: u.get("level").map(num).filter(|&x| x != 0.0).unwrap_or(1.0),
@@ -443,7 +467,11 @@ pub fn parse_legal(actions: &Value) -> Legal {
     let attack_ids = |k: &str| -> Vec<String> {
         get(k)
             .as_array()
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default()
     };
     Legal {
@@ -474,10 +502,10 @@ pub fn parse_legal(actions: &Value) -> Legal {
 }
 
 pub struct Feat {
-    pub stat: Vec<f32>,          // (N_STATIC, gh, gw)
-    pub transient: Vec<f32>,     // (N_TRANSIENT, gh, gw)
+    pub stat: Vec<f32>,      // (N_STATIC, gh, gw)
+    pub transient: Vec<f32>, // (N_TRANSIENT, gh, gw)
     pub clut: [u8; MAX_SLOTS],
-    pub players: Vec<f32>,       // (MAX_SLOTS, P_FEAT)
+    pub players: Vec<f32>, // (MAX_SLOTS, P_FEAT)
     pub pmask: [f32; MAX_SLOTS],
     pub scalars: [f32; N_SCALARS],
     pub me_slot: i64,
@@ -485,7 +513,7 @@ pub struct Feat {
     pub legal_ptarget: Vec<f32>, // (N_ACTIONS, MAX_SLOTS)
     pub legal_build: [f32; N_BUILD],
     pub legal_nuke: [f32; N_NUKE],
-    pub legal_tile: Vec<f32>,    // (gh, gw)
+    pub legal_tile: Vec<f32>, // (gh, gw)
 }
 
 /// Slot lookup table: raw small-player-id -> stable slot in [0, MAX_SLOTS).
@@ -567,7 +595,11 @@ pub fn featurize(
             && (u.tgy as usize) < gh
             && 0 <= u.tgx
             && (u.tgx as usize) < gw;
-        let tat = if target_ok { u.tgy as usize * gw + u.tgx as usize } else { 0 };
+        let tat = if target_ok {
+            u.tgy as usize * gw + u.tgx as usize
+        } else {
+            0
+        };
         match u.class {
             6 => {
                 // Warship: value = health fraction.
@@ -735,8 +767,16 @@ pub fn featurize(
         f[20] = (p.doomsday_ticks / 3000.0).clamp(0.0, 1.0) as f32;
     }
 
-    let me_troop_income = ents.players.iter().find(|p| p.id as i64 == me).map(|p| p.troop_income);
-    let me_gold_income = ents.players.iter().find(|p| p.id as i64 == me).map(|p| p.gold_income);
+    let me_troop_income = ents
+        .players
+        .iter()
+        .find(|p| p.id as i64 == me)
+        .map(|p| p.troop_income);
+    let me_gold_income = ents
+        .players
+        .iter()
+        .find(|p| p.id as i64 == me)
+        .map(|p| p.gold_income);
     let scalars = [
         tick as f32 / 15000.0,
         spawn_phase as u8 as f32,
@@ -868,6 +908,93 @@ pub fn pool_ego_db(
     (ego, db)
 }
 
+/// Pool ego classes and compute the own-territory centroid in one full-map
+/// scan. The centroid is consumed by [`local_crop_at_with_defense`].
+pub fn pool_ego_and_center(
+    owners_slotted: &[u8],
+    clut: &[u8; MAX_SLOTS],
+    hr: usize,
+    wr: usize,
+) -> (Vec<f32>, (f64, f64)) {
+    let (gh, gw) = (hr / REGION, wr / REGION);
+    let plane = gh * gw;
+    let mut counts = vec![0u32; 3 * plane];
+    let mut sum_y = 0.0f64;
+    let mut sum_x = 0.0f64;
+    let mut own_count = 0.0f64;
+    for y in 0..hr {
+        for x in 0..wr {
+            let cls = clut[owners_slotted[y * wr + x] as usize];
+            if cls > 0 {
+                let at = (y / REGION) * gw + x / REGION;
+                counts[(cls - 1) as usize * plane + at] += 1;
+            }
+            if cls == 1 {
+                sum_y += y as f64;
+                sum_x += x as f64;
+                own_count += 1.0;
+            }
+        }
+    }
+    let norm = (REGION * REGION) as f32;
+    let ego = counts
+        .into_iter()
+        .map(|count| count as f32 / norm)
+        .collect();
+    let center = if own_count > 0.0 {
+        (sum_y / own_count, sum_x / own_count)
+    } else {
+        (hr as f64 / 2.0, wr as f64 / 2.0)
+    };
+    (ego, center)
+}
+
+/// Local crop using a precomputed own-territory center and an indexed defense
+/// accessor. This lets packed native observations decode defense only for the
+/// crop instead of allocating a full defense plane.
+pub fn local_crop_at_with_defense<F>(
+    owners_slotted: &[u8],
+    clut: &[u8; MAX_SLOTS],
+    land: &[u8],
+    hr: usize,
+    wr: usize,
+    local: usize,
+    center: (f64, f64),
+    defense_at: F,
+) -> Vec<f32>
+where
+    F: Fn(usize) -> u8,
+{
+    let (cy, cx) = center;
+    let y0 = ((cy - local as f64 / 2.0).round() as i64)
+        .clamp(0, hr as i64 - local as i64)
+        .max(0);
+    let x0 = ((cx - local as f64 / 2.0).round() as i64)
+        .clamp(0, wr as i64 - local as i64)
+        .max(0);
+    let mut out = vec![0.0f32; 5 * local * local];
+    let plane = local * local;
+    for ly in 0..local {
+        let y = (y0 + ly as i64).clamp(0, hr as i64 - 1) as usize;
+        for lx in 0..local {
+            let x = (x0 + lx as i64).clamp(0, wr as i64 - 1) as usize;
+            let i = y * wr + x;
+            let cls = clut[owners_slotted[i] as usize];
+            let at = ly * local + lx;
+            if cls == 1 {
+                out[at] = 1.0;
+            } else if cls == 2 {
+                out[plane + at] = 1.0;
+            } else if cls == 3 {
+                out[2 * plane + at] = 1.0;
+            }
+            out[3 * plane + at] = land[i] as f32;
+            out[4 * plane + at] = defense_at(i) as f32;
+        }
+    }
+    out
+}
+
 /// (N_LOCAL=5, LOCAL, LOCAL) raw owner-map crop centered on own territory's
 /// centroid (map center if the agent owns nothing yet, e.g. spawn phase).
 /// Channels: own, ally, enemy, land, defense_bonus. Port of
@@ -894,9 +1021,17 @@ pub fn local_crop(
             }
         }
     }
-    let (cy, cx) = if n > 0.0 { (sum_y / n, sum_x / n) } else { (hr as f64 / 2.0, wr as f64 / 2.0) };
-    let y0 = ((cy - local as f64 / 2.0).round() as i64).clamp(0, hr as i64 - local as i64).max(0);
-    let x0 = ((cx - local as f64 / 2.0).round() as i64).clamp(0, wr as i64 - local as i64).max(0);
+    let (cy, cx) = if n > 0.0 {
+        (sum_y / n, sum_x / n)
+    } else {
+        (hr as f64 / 2.0, wr as f64 / 2.0)
+    };
+    let y0 = ((cy - local as f64 / 2.0).round() as i64)
+        .clamp(0, hr as i64 - local as i64)
+        .max(0);
+    let x0 = ((cx - local as f64 / 2.0).round() as i64)
+        .clamp(0, wr as i64 - local as i64)
+        .max(0);
     let mut out = vec![0.0f32; 5 * local * local];
     let plane = local * local;
     for ly in 0..local {
