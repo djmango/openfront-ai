@@ -9,8 +9,10 @@
 //! - fine:  `ae_v31_d8c32`  — 32ch @ 1/8
 //! - coarse: `ae_v31_d16c32` — 32ch @ 1/16 (optional v7 coarse stream)
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use tch::nn::{self, Module};
 use tch::{Device, Kind, Tensor};
 
@@ -61,7 +63,12 @@ impl SpatialAE {
         if latent_down != 8 && latent_down != 16 {
             bail!("latent_down must be 8 or 16, got {latent_down}");
         }
-        let owner_emb = nn::embedding(vs / "owner_emb", MAX_SLOTS, OWNER_EMB_DIM, Default::default());
+        let owner_emb = nn::embedding(
+            vs / "owner_emb",
+            MAX_SLOTS,
+            OWNER_EMB_DIM,
+            Default::default(),
+        );
 
         let stem_specs: &[(i64, i64, i64)] = if latent_down == 16 {
             &[
@@ -103,7 +110,11 @@ impl SpatialAE {
 
     /// Construct on `device`, load encoder weights from a `.safetensors`
     /// file produced by `scripts/export_safetensors.py`, then freeze.
-    pub fn load(path: impl AsRef<Path>, device: Device, expected_down: i64) -> Result<(nn::VarStore, Self)> {
+    pub fn load(
+        path: impl AsRef<Path>,
+        device: Device,
+        expected_down: i64,
+    ) -> Result<(nn::VarStore, Self)> {
         let path = path.as_ref();
         let meta_path = path.with_extension("json");
         let (latent_c, latent_down) = if meta_path.exists() {
@@ -111,8 +122,12 @@ impl SpatialAE {
                 .with_context(|| format!("read AE meta {}", meta_path.display()))?;
             let v: serde_json::Value = serde_json::from_str(&raw)?;
             (
-                v.get("latent_c").and_then(|x| x.as_i64()).unwrap_or(LATENT_C),
-                v.get("latent_down").and_then(|x| x.as_i64()).unwrap_or(expected_down),
+                v.get("latent_c")
+                    .and_then(|x| x.as_i64())
+                    .unwrap_or(LATENT_C),
+                v.get("latent_down")
+                    .and_then(|x| x.as_i64())
+                    .unwrap_or(expected_down),
             )
         } else {
             (LATENT_C, expected_down)
@@ -146,7 +161,8 @@ impl SpatialAE {
         for block in &self.enc_stem {
             g = block.forward(&g);
         }
-        self.enc_out.forward(&self.enc_fuse.forward(&Tensor::cat(&[&g, static_planes], 1)))
+        self.enc_out
+            .forward(&self.enc_fuse.forward(&Tensor::cat(&[&g, static_planes], 1)))
     }
 }
 
@@ -160,7 +176,11 @@ pub struct AePair {
 }
 
 impl AePair {
-    pub fn load(fine_path: impl AsRef<Path>, coarse_path: Option<&Path>, device: Device) -> Result<Self> {
+    pub fn load(
+        fine_path: impl AsRef<Path>,
+        coarse_path: Option<&Path>,
+        device: Device,
+    ) -> Result<Self> {
         let (fine_vs, fine) = SpatialAE::load(fine_path.as_ref(), device, REGION)?;
         let (coarse_vs, coarse) = match coarse_path {
             Some(p) => {
@@ -178,31 +198,108 @@ impl AePair {
     }
 }
 
-/// Full-res AE inputs staged by `vecenv::prepare` for batched GPU encode.
-#[derive(Clone)]
-pub struct AeRaw {
-    pub owners: Vec<i64>, // (hr*wr) slotted
-    pub terrain: Vec<f32>, // (3, hr, wr) row-major channels-first
-    pub stat: Vec<f32>, // (6, gh, gw)
+/// Identity of one environment's episode-static terrain. Every reset gets
+/// a new `static_id`, even when it happens to select the same map.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TerrainCacheKey {
+    pub env_id: u64,
+    pub episode: u64,
+    pub static_id: u64,
     pub hr: usize,
     pub wr: usize,
 }
 
-/// Build land/magnitude/fallout terrain tensor planes on the host
-/// (channels-first). `mag` is already the raw magnitude byte; we normalize
-/// by /31 to match `rl/obs.py`.
-pub fn pack_terrain(land: &[u8], mag: &[u8], fallout: &[u8], hr: usize, wr: usize) -> Vec<f32> {
+/// Episode-static AE terrain channels, shared from EnvWorker to every
+/// PreparedObs without rebuilding or copying their float payload.
+#[derive(Clone)]
+pub struct StaticTerrain {
+    pub key: TerrainCacheKey,
+    pub map: Arc<str>,
+    pub land_mag: Arc<[f32]>, // (2, hr, wr), land then magnitude
+}
+
+/// Full-res AE inputs staged by `vecenv::prepare` for batched GPU encode.
+#[derive(Clone)]
+pub struct AeRaw {
+    pub owners: Vec<i64>, // (hr*wr) slotted
+    pub static_terrain: StaticTerrain,
+    pub fallout: Vec<f32>, // (hr, wr), fresh every decision
+    pub stat: Vec<f32>,    // (6, gh, gw)
+    pub hr: usize,
+    pub wr: usize,
+}
+
+/// Build the two immutable terrain planes once per episode.
+pub fn pack_static_terrain(land: &[u8], mag: &[u8], hr: usize, wr: usize) -> Arc<[f32]> {
     let n = hr * wr;
     debug_assert_eq!(land.len(), n);
     debug_assert_eq!(mag.len(), n);
-    debug_assert_eq!(fallout.len(), n);
-    let mut out = vec![0.0f32; 3 * n];
+    let mut out = vec![0.0f32; 2 * n];
     for i in 0..n {
         out[i] = if land[i] != 0 { 1.0 } else { 0.0 };
         out[n + i] = (mag[i] as f32) / 31.0;
-        out[2 * n + i] = if fallout[i] != 0 { 1.0 } else { 0.0 };
     }
-    out
+    out.into()
+}
+
+pub fn pack_fallout(fallout: &[u8]) -> Vec<f32> {
+    fallout
+        .iter()
+        .map(|&v| if v != 0 { 1.0 } else { 0.0 })
+        .collect()
+}
+
+/// Actor-thread-owned CUDA cache. Tensor is deliberately not Clone and this
+/// type is never stored in PreparedObs, so no device handle can enter a
+/// rollout or cross into a learner thread.
+pub struct TerrainDeviceCache {
+    device: Device,
+    entries: HashMap<u64, (TerrainCacheKey, Arc<str>, Tensor)>,
+    uploads: u64,
+}
+
+impl TerrainDeviceCache {
+    pub fn new(device: Device) -> Self {
+        Self {
+            device,
+            entries: HashMap::new(),
+            uploads: 0,
+        }
+    }
+
+    fn static_tensor(&mut self, terrain: &StaticTerrain) -> Tensor {
+        let key = terrain.key;
+        let stale = self
+            .entries
+            .get(&key.env_id)
+            .map(|(k, map, _)| *k != key || map.as_ref() != terrain.map.as_ref())
+            .unwrap_or(true);
+        if stale {
+            let cpu = Tensor::from_slice(terrain.land_mag.as_ref()).view([
+                2,
+                key.hr as i64,
+                key.wr as i64,
+            ]);
+            // This allocation is retained on device for the episode. Pinning
+            // the one-shot source permits non-blocking H2D where CUDA supports
+            // it, without introducing a long-lived host Tensor.
+            let tensor = if self.device.is_cuda() {
+                cpu.pin_memory(self.device)
+                    .to_device_(self.device, Kind::Float, true, false)
+            } else {
+                cpu.to_device(self.device)
+            };
+            self.entries
+                .insert(key.env_id, (key, Arc::clone(&terrain.map), tensor));
+            self.uploads += 1;
+        }
+        self.entries[&key.env_id].2.shallow_clone()
+    }
+
+    #[cfg(test)]
+    fn uploads(&self) -> u64 {
+        self.uploads
+    }
 }
 
 /// Batched encode helpers used by `batch::build_obs`. Groups by shape,
@@ -216,6 +313,7 @@ pub fn encode_latent_batch_device(
     ae: &SpatialAE,
     items: &[&AeRaw],
     device: Device,
+    mut terrain_cache: Option<&mut TerrainDeviceCache>,
 ) -> Result<Vec<Tensor>> {
     // Returns one (latent_c, gh, gw) tensor per item, in input order.
     let n = items.len();
@@ -231,8 +329,18 @@ pub fn encode_latent_batch_device(
         let per = (MAX_ENC_PIX / pix.max(1)).max(1);
         for chunk in idxs.chunks(per) {
             let b = chunk.len() as i64;
+            let use_terrain_cache = terrain_cache.is_some() && device.is_cuda();
             let mut owners = Vec::with_capacity(chunk.len() * pix);
-            let mut terrain = Vec::with_capacity(chunk.len() * 3 * pix);
+            let mut terrain = Vec::with_capacity(if use_terrain_cache {
+                0
+            } else {
+                chunk.len() * 3 * pix
+            });
+            let mut fallout = Vec::with_capacity(if use_terrain_cache {
+                chunk.len() * pix
+            } else {
+                0
+            });
             let gh = hr / ae.latent_down as usize;
             let gw = wr / ae.latent_down as usize;
             // static must be at latent resolution. Fine AE uses /8 = REGION
@@ -242,21 +350,45 @@ pub fn encode_latent_batch_device(
             for &i in chunk {
                 let it = items[i];
                 owners.extend_from_slice(&it.owners);
-                terrain.extend_from_slice(&it.terrain);
+                if !use_terrain_cache {
+                    terrain.extend_from_slice(it.static_terrain.land_mag.as_ref());
+                    terrain.extend_from_slice(&it.fallout);
+                } else {
+                    fallout.extend_from_slice(&it.fallout);
+                }
                 if ae.latent_down == REGION {
                     static_p.extend_from_slice(&it.stat);
                 } else {
-                    static_p.extend(max_pool2_stat(&it.stat, it.hr / REGION as usize, it.wr / REGION as usize));
+                    static_p.extend(max_pool2_stat(
+                        &it.stat,
+                        it.hr / REGION as usize,
+                        it.wr / REGION as usize,
+                    ));
                 }
             }
             let owners_t = Tensor::from_slice(&owners)
                 .view([b, hr as i64, wr as i64])
                 .to_device(device)
                 .to_kind(Kind::Int64);
-            let terrain_t = Tensor::from_slice(&terrain)
-                .view([b, 3, hr as i64, wr as i64])
-                .to_device(device)
-                .to_kind(Kind::Float);
+            let terrain_t = if use_terrain_cache {
+                let cache = terrain_cache.as_deref_mut().expect("cache checked above");
+                let static_items: Vec<Tensor> = chunk
+                    .iter()
+                    .map(|&i| cache.static_tensor(&items[i].static_terrain))
+                    .collect();
+                let static_refs: Vec<&Tensor> = static_items.iter().collect();
+                let static_t = Tensor::stack(&static_refs, 0);
+                let fallout_t = Tensor::from_slice(&fallout)
+                    .view([b, 1, hr as i64, wr as i64])
+                    .to_device(device)
+                    .to_kind(Kind::Float);
+                Tensor::cat(&[static_t, fallout_t], 1)
+            } else {
+                Tensor::from_slice(&terrain)
+                    .view([b, 3, hr as i64, wr as i64])
+                    .to_device(device)
+                    .to_kind(Kind::Float)
+            };
             let static_t = Tensor::from_slice(&static_p)
                 .view([b, NUM_STATIC, gh as i64, gw as i64])
                 .to_device(device)
@@ -273,18 +405,6 @@ pub fn encode_latent_batch_device(
     out.into_iter()
         .enumerate()
         .map(|(i, t)| t.with_context(|| format!("missing AE latent for item {i}")))
-        .collect()
-}
-
-/// General mixed-shape host fallback used when grids must be padded.
-pub fn encode_latent_batch(
-    ae: &SpatialAE,
-    items: &[&AeRaw],
-    device: Device,
-) -> Result<Vec<Tensor>> {
-    encode_latent_batch_device(ae, items, device)?
-        .into_iter()
-        .map(|z| Ok(z.to_device(Device::Cpu).to_kind(Kind::Float)))
         .collect()
 }
 
@@ -322,6 +442,21 @@ fn max_pool2_stat(stat: &[f32], gh: usize, gw: usize) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    fn terrain(env_id: u64, static_id: u64, hr: usize, wr: usize, fill: f32) -> StaticTerrain {
+        StaticTerrain {
+            key: TerrainCacheKey {
+                env_id,
+                episode: static_id,
+                static_id,
+                hr,
+                wr,
+            },
+            map: Arc::from(format!("map-{static_id}")),
+            land_mag: vec![fill; 2 * hr * wr].into(),
+        }
+    }
 
     #[test]
     fn encoder_tree_key_count_d8() {
@@ -344,7 +479,10 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../weights/ae/ae_v31_d8c32.encoder.safetensors");
         if !path.exists() {
-            eprintln!("skip: {} missing (run scripts/fetch_ae_encoders.sh)", path.display());
+            eprintln!(
+                "skip: {} missing (run scripts/fetch_ae_encoders.sh)",
+                path.display()
+            );
             return;
         }
         let (_vs, ae) = SpatialAE::load(&path, Device::Cpu, REGION).unwrap();
@@ -355,5 +493,129 @@ mod tests {
         let z = tch::no_grad(|| ae.encode(&owners, &terrain, &static_p));
         assert_eq!(z.size(), &[1, 32, 4, 5]);
         assert!(z.isfinite().all().double_value(&[]) != 0.0);
+    }
+
+    #[test]
+    fn static_terrain_arc_is_reused_and_float_packing_is_exact() {
+        let land = [0, 1, 2, 0];
+        let mag = [0, 1, 30, 31];
+        let packed = pack_static_terrain(&land, &mag, 2, 2);
+        let shared = StaticTerrain {
+            key: TerrainCacheKey {
+                env_id: 3,
+                episode: 7,
+                static_id: 13,
+                hr: 2,
+                wr: 2,
+            },
+            map: Arc::from("arc-test"),
+            land_mag: Arc::clone(&packed),
+        };
+        let prepared_clone = shared.clone();
+        assert!(Arc::ptr_eq(&shared.land_mag, &prepared_clone.land_mag));
+        assert_eq!(
+            packed.as_ref(),
+            &[0.0, 1.0, 1.0, 0.0, 0.0, 1.0 / 31.0, 30.0 / 31.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn cached_terrain_matches_uncached_and_fallout_stays_fresh() {
+        let static_terrain = terrain(1, 1, 2, 3, 0.25);
+        let mut cache = TerrainDeviceCache::new(Device::Cpu);
+        let cached_static = cache.static_tensor(&static_terrain);
+        let fallout_a = Tensor::from_slice(&[0.0f32, 1.0, 0.0, 1.0, 0.0, 1.0]).view([1, 1, 2, 3]);
+        let fallout_b = Tensor::from_slice(&[1.0f32, 0.0, 1.0, 0.0, 1.0, 0.0]).view([1, 1, 2, 3]);
+        let cached_a = Tensor::cat(&[cached_static.unsqueeze(0), fallout_a], 1);
+        let cached_b = Tensor::cat(
+            &[cache.static_tensor(&static_terrain).unsqueeze(0), fallout_b],
+            1,
+        );
+        let mut expected = static_terrain.land_mag.to_vec();
+        expected.extend([0.0f32, 1.0, 0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(
+            Vec::<f32>::try_from(cached_a.reshape([-1])).unwrap(),
+            expected
+        );
+        let a = Vec::<f32>::try_from(cached_a.reshape([-1])).unwrap();
+        let b = Vec::<f32>::try_from(cached_b.reshape([-1])).unwrap();
+        assert_eq!(&a[..12], &b[..12], "static channels changed");
+        assert_ne!(&a[12..], &b[12..], "fallout was stale");
+        assert_eq!(cache.uploads(), 1, "cache hit reuploaded static terrain");
+    }
+
+    #[test]
+    fn cached_and_uncached_encoder_inputs_produce_exact_output() {
+        tch::manual_seed(41);
+        let vs = nn::VarStore::new(Device::Cpu);
+        let ae = SpatialAE::new(&vs.root(), LATENT_C, REGION).unwrap();
+        let static_terrain = terrain(2, 5, 8, 8, 0.375);
+        let fallout = vec![1.0f32; 64];
+        let mut uncached = static_terrain.land_mag.to_vec();
+        uncached.extend_from_slice(&fallout);
+        let uncached = Tensor::from_slice(&uncached).view([1, 3, 8, 8]);
+
+        let mut cache = TerrainDeviceCache::new(Device::Cpu);
+        let cached = Tensor::cat(
+            &[
+                cache.static_tensor(&static_terrain).unsqueeze(0),
+                Tensor::from_slice(&fallout).view([1, 1, 8, 8]),
+            ],
+            1,
+        );
+        let owners = Tensor::zeros([1, 8, 8], (Kind::Int64, Device::Cpu));
+        let stat = Tensor::from_slice(&[0.0f32, 1.0, 2.0, 3.0, 4.0, 5.0]).view([1, 6, 1, 1]);
+        let expected = tch::no_grad(|| ae.encode(&owners, &uncached, &stat));
+        let actual = tch::no_grad(|| ae.encode(&owners, &cached, &stat));
+        assert_eq!(
+            Vec::<f32>::try_from(expected.reshape([-1])).unwrap(),
+            Vec::<f32>::try_from(actual.reshape([-1])).unwrap()
+        );
+    }
+
+    #[test]
+    fn cache_invalidates_on_episode_map_identity_or_dimensions() {
+        let mut cache = TerrainDeviceCache::new(Device::Cpu);
+        let first = terrain(4, 1, 2, 2, 1.0);
+        let same = first.clone();
+        let mut other_map = first.clone();
+        other_map.map = Arc::from("different-map");
+        let reset = terrain(4, 2, 2, 3, 2.0);
+        let other_shape = terrain(5, 1, 3, 1, 3.0);
+
+        assert_eq!(cache.static_tensor(&first).size(), [2, 2, 2]);
+        let _ = cache.static_tensor(&same);
+        assert_eq!(cache.uploads(), 1);
+        let _ = cache.static_tensor(&other_map);
+        assert_eq!(cache.uploads(), 2);
+        assert_eq!(cache.static_tensor(&reset).size(), [2, 2, 3]);
+        assert_eq!(cache.uploads(), 3);
+        assert_eq!(cache.static_tensor(&other_shape).size(), [2, 3, 1]);
+        assert_eq!(cache.uploads(), 4);
+        assert_eq!(cache.entries.len(), 2, "one current entry per env");
+        let reset_values = Vec::<f32>::try_from(cache.static_tensor(&reset).reshape([-1])).unwrap();
+        assert!(reset_values.iter().all(|&v| v == 2.0));
+    }
+
+    #[test]
+    fn dynamic_stat_plane_is_never_part_of_terrain_cache() {
+        let terrain = terrain(9, 1, 8, 8, 0.0);
+        let raw_a = AeRaw {
+            owners: vec![0; 64],
+            static_terrain: terrain.clone(),
+            fallout: vec![0.0; 64],
+            stat: vec![0.0; 6],
+            hr: 8,
+            wr: 8,
+        };
+        let mut raw_b = raw_a.clone();
+        raw_b.stat[3] = 7.0;
+        raw_b.fallout[5] = 1.0;
+        assert!(Arc::ptr_eq(
+            &raw_a.static_terrain.land_mag,
+            &raw_b.static_terrain.land_mag
+        ));
+        assert_ne!(raw_a.stat, raw_b.stat, "structure stats were stale");
+        assert_ne!(raw_a.fallout, raw_b.fallout, "fallout was stale");
     }
 }

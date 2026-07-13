@@ -19,7 +19,7 @@
 use ofcore::feat;
 use tch::{Device, Kind, Tensor};
 
-use crate::ae::{self, AePair};
+use crate::ae::{self, AePair, TerrainDeviceCache};
 use crate::policy::{self, CompactObsMeta, Obs, PolicyNet};
 use crate::vecenv::{CompactGrid, PreparedObs};
 
@@ -72,11 +72,20 @@ fn assemble_grids(
     items: &[&PreparedObs],
     device: Device,
     ae: Option<&AePair>,
+    mut terrain_cache: Option<&mut TerrainDeviceCache>,
 ) -> anyhow::Result<Vec<Vec<f32>>> {
     let c_grid = policy::C_GRID as usize;
     if let Some(pair) = ae {
         let raws: Vec<&ae::AeRaw> = items.iter().map(|it| &it.ae_raw).collect();
-        let zs = ae::encode_latent_batch(&pair.fine, &raws, device)?;
+        let zs = ae::encode_latent_batch_device(
+            &pair.fine,
+            &raws,
+            device,
+            terrain_cache.as_deref_mut(),
+        )?
+        .into_iter()
+        .map(|z| z.to_device(Device::Cpu).to_kind(Kind::Float))
+        .collect::<Vec<_>>();
         let mut grids = Vec::with_capacity(items.len());
         for (it, z) in items.iter().zip(zs.into_iter()) {
             let plane = it.gh * it.gw;
@@ -113,13 +122,18 @@ fn assemble_coarse_grids(
     items: &[&PreparedObs],
     device: Device,
     ae: Option<&AePair>,
+    mut terrain_cache: Option<&mut TerrainDeviceCache>,
 ) -> anyhow::Result<Option<Vec<Vec<f32>>>> {
     let Some(pair) = ae else { return Ok(None) };
     let Some(coarse) = pair.coarse.as_ref() else {
         return Ok(None);
     };
     let raws: Vec<&ae::AeRaw> = items.iter().map(|it| &it.ae_raw).collect();
-    let zs = ae::encode_latent_batch(coarse, &raws, device)?;
+    let zs =
+        ae::encode_latent_batch_device(coarse, &raws, device, terrain_cache.as_deref_mut())?
+            .into_iter()
+            .map(|z| z.to_device(Device::Cpu).to_kind(Kind::Float))
+            .collect::<Vec<_>>();
     let c_grid = policy::C_GRID as usize;
     let mut grids = Vec::with_capacity(items.len());
     for (it, z) in items.iter().zip(zs.into_iter()) {
@@ -209,16 +223,24 @@ fn encode_uniform_ae_grids(
     pinned_h2d: bool,
     fp16_rollout: bool,
     pair: &AePair,
+    mut terrain_cache: Option<&mut TerrainDeviceCache>,
 ) -> anyhow::Result<UniformAeGrids> {
     debug_assert!(!items.is_empty());
-    debug_assert!(items
-        .iter()
-        .all(|it| it.gh == items[0].gh && it.gw == items[0].gw));
+    debug_assert!(
+        items
+            .iter()
+            .all(|it| it.gh == items[0].gh && it.gw == items[0].gw)
+    );
     let b = items.len() as i64;
     let (gh, gw) = (items[0].gh, items[0].gw);
     let raws: Vec<&ae::AeRaw> = items.iter().map(|it| &it.ae_raw).collect();
 
-    let fine_items = ae::encode_latent_batch_device(&pair.fine, &raws, device)?;
+    let fine_items = ae::encode_latent_batch_device(
+        &pair.fine,
+        &raws,
+        device,
+        terrain_cache.as_deref_mut(),
+    )?;
     let fine_refs: Vec<&Tensor> = fine_items.iter().collect();
     let fine_latent = Tensor::stack(&fine_refs, 0);
     let fine = assemble_uniform_device_grid(
@@ -233,7 +255,12 @@ fn encode_uniform_ae_grids(
     );
 
     let (coarse, coarse_latent) = if let Some(coarse_ae) = pair.coarse.as_ref() {
-        let coarse_items = ae::encode_latent_batch_device(coarse_ae, &raws, device)?;
+        let coarse_items = ae::encode_latent_batch_device(
+            coarse_ae,
+            &raws,
+            device,
+            terrain_cache.as_deref_mut(),
+        )?;
         let coarse_refs: Vec<&Tensor> = coarse_items.iter().collect();
         let latent = Tensor::stack(&coarse_refs, 0);
         let (cgh, cgw) = (gh.div_ceil(2), gw.div_ceil(2));
@@ -380,11 +407,17 @@ fn build_device_ae_obs(
     pinned_h2d: bool,
     fp16_rollout: bool,
     pair: &AePair,
+    mut terrain_cache: Option<&mut TerrainDeviceCache>,
 ) -> anyhow::Result<Obs> {
     let gh = items.iter().map(|it| it.gh).max().unwrap_or(0);
     let gw = items.iter().map(|it| it.gw).max().unwrap_or(0);
     let raws: Vec<&ae::AeRaw> = items.iter().map(|it| &it.ae_raw).collect();
-    let fine_latents = ae::encode_latent_batch_device(&pair.fine, &raws, device)?;
+    let fine_latents = ae::encode_latent_batch_device(
+        &pair.fine,
+        &raws,
+        device,
+        terrain_cache.as_deref_mut(),
+    )?;
     let fine = assemble_mixed_device_grid(
         items,
         &fine_latents,
@@ -396,7 +429,12 @@ fn build_device_ae_obs(
         false,
     );
     let coarse = if let Some(coarse_ae) = pair.coarse.as_ref() {
-        let latents = ae::encode_latent_batch_device(coarse_ae, &raws, device)?;
+        let latents = ae::encode_latent_batch_device(
+            coarse_ae,
+            &raws,
+            device,
+            terrain_cache.as_deref_mut(),
+        )?;
         Some(assemble_mixed_device_grid(
             items,
             &latents,
@@ -472,10 +510,11 @@ pub fn encode_prepared_obs(
     items: &mut [PreparedObs],
     device: Device,
     ae: &AePair,
+    terrain_cache: &mut TerrainDeviceCache,
 ) -> anyhow::Result<()> {
     let refs: Vec<&PreparedObs> = items.iter().collect();
-    let fine = assemble_grids(&refs, device, Some(ae))?;
-    let coarse = assemble_coarse_grids(&refs, device, Some(ae))?;
+    let fine = assemble_grids(&refs, device, Some(ae), Some(terrain_cache))?;
+    let coarse = assemble_coarse_grids(&refs, device, Some(ae), Some(terrain_cache))?;
     for (i, it) in items.iter_mut().enumerate() {
         it.grid = Some(fine[i].clone());
         if let Some(ref cg) = coarse {
@@ -512,10 +551,18 @@ pub fn build_compact_rollout_obs(
     pinned_h2d: bool,
     fp16_rollout: bool,
     ae: &AePair,
+    terrain_cache: &mut TerrainDeviceCache,
 ) -> anyhow::Result<Obs> {
     let compact = {
         let refs: Vec<&PreparedObs> = items.iter().collect();
-        let full = build_device_ae_obs(&refs, device, pinned_h2d, fp16_rollout, ae)?;
+        let full = build_device_ae_obs(
+            &refs,
+            device,
+            pinned_h2d,
+            fp16_rollout,
+            ae,
+            Some(terrain_cache),
+        )?;
         PolicyNet::compact_observation(&full)
     };
     store_compact_host(items, &compact)?;
@@ -530,8 +577,16 @@ pub fn build_compact_obs_with_ae(
     pinned_h2d: bool,
     fp16_rollout: bool,
     ae: &AePair,
+    terrain_cache: &mut TerrainDeviceCache,
 ) -> anyhow::Result<Obs> {
-    let full = build_device_ae_obs(items, device, pinned_h2d, fp16_rollout, ae)?;
+    let full = build_device_ae_obs(
+        items,
+        device,
+        pinned_h2d,
+        fp16_rollout,
+        ae,
+        Some(terrain_cache),
+    )?;
     Ok(PolicyNet::compact_observation(&full))
 }
 
@@ -544,20 +599,28 @@ pub fn build_rollout_obs(
     pinned_h2d: bool,
     fp16_rollout: bool,
     ae: &AePair,
+    terrain_cache: &mut TerrainDeviceCache,
 ) -> anyhow::Result<Obs> {
     let uniform = !items.is_empty()
         && items
             .iter()
             .all(|it| it.gh == items[0].gh && it.gw == items[0].gw);
     if !uniform {
-        encode_prepared_obs(items, device, ae)?;
+        encode_prepared_obs(items, device, ae, terrain_cache)?;
         let refs: Vec<&PreparedObs> = items.iter().collect();
         return Ok(build_obs(&refs, device, pinned_h2d, fp16_rollout));
     }
 
     let (resident, fine_host, coarse_host) = {
         let refs: Vec<&PreparedObs> = items.iter().collect();
-        let resident = encode_uniform_ae_grids(&refs, device, pinned_h2d, fp16_rollout, ae)?;
+        let resident = encode_uniform_ae_grids(
+            &refs,
+            device,
+            pinned_h2d,
+            fp16_rollout,
+            ae,
+            Some(terrain_cache),
+        )?;
         let fine_host = host_grids_from_latent(&refs, &resident.fine_latent, false)?;
         let coarse_host = resident
             .coarse_latent
@@ -604,13 +667,49 @@ pub fn build_obs_with_ae(
     fp16_rollout: bool,
     ae: Option<&AePair>,
 ) -> anyhow::Result<Obs> {
+    build_obs_with_ae_cache(items, device, pinned_h2d, fp16_rollout, ae, None)
+}
+
+pub fn build_obs_with_ae_cached(
+    items: &[&PreparedObs],
+    device: Device,
+    pinned_h2d: bool,
+    fp16_rollout: bool,
+    ae: &AePair,
+    terrain_cache: &mut TerrainDeviceCache,
+) -> anyhow::Result<Obs> {
+    build_obs_with_ae_cache(
+        items,
+        device,
+        pinned_h2d,
+        fp16_rollout,
+        Some(ae),
+        Some(terrain_cache),
+    )
+}
+
+fn build_obs_with_ae_cache(
+    items: &[&PreparedObs],
+    device: Device,
+    pinned_h2d: bool,
+    fp16_rollout: bool,
+    ae: Option<&AePair>,
+    mut terrain_cache: Option<&mut TerrainDeviceCache>,
+) -> anyhow::Result<Obs> {
     let uniform = !items.is_empty()
         && items
             .iter()
             .all(|it| it.gh == items[0].gh && it.gw == items[0].gw);
     if uniform {
         if let Some(pair) = ae {
-            let resident = encode_uniform_ae_grids(items, device, pinned_h2d, fp16_rollout, pair)?;
+            let resident = encode_uniform_ae_grids(
+                items,
+                device,
+                pinned_h2d,
+                fp16_rollout,
+                pair,
+                terrain_cache.as_deref_mut(),
+            )?;
             return build_obs_from_parts(
                 items,
                 device,
@@ -624,7 +723,7 @@ pub fn build_obs_with_ae(
     }
 
     let assembled = if ae.is_some() {
-        assemble_grids(items, device, ae)?
+        assemble_grids(items, device, ae, terrain_cache.as_deref_mut())?
     } else {
         items
             .iter()
@@ -636,7 +735,7 @@ pub fn build_obs_with_ae(
             .collect::<anyhow::Result<Vec<_>>>()?
     };
     let coarse_assembled = if ae.is_some() {
-        assemble_coarse_grids(items, device, ae)?
+        assemble_coarse_grids(items, device, ae, terrain_cache.as_deref_mut())?
     } else if items.iter().all(|it| it.grid_coarse.is_some()) {
         Some(
             items
@@ -853,7 +952,8 @@ fn store_compact_host(items: &mut [PreparedObs], obs: &Obs) -> anyhow::Result<()
         it.grid = None;
         it.grid_coarse = None;
         it.ae_raw.owners.clear();
-        it.ae_raw.terrain.clear();
+        it.ae_raw.static_terrain.land_mag = Vec::<f32>::new().into();
+        it.ae_raw.fallout.clear();
         it.ae_raw.stat.clear();
         it.ego.clear();
         it.db.clear();
@@ -1033,7 +1133,18 @@ mod tests {
             cgw: 0,
             ae_raw: crate::ae::AeRaw {
                 owners: vec![0i64; (gh * 8) * (gw * 8)],
-                terrain: vec![0.0f32; 3 * (gh * 8) * (gw * 8)],
+                static_terrain: crate::ae::StaticTerrain {
+                    key: crate::ae::TerrainCacheKey {
+                        env_id: 0,
+                        episode: 0,
+                        static_id: 1,
+                        hr: gh * 8,
+                        wr: gw * 8,
+                    },
+                    map: std::sync::Arc::from("test"),
+                    land_mag: vec![0.0f32; 2 * (gh * 8) * (gw * 8)].into(),
+                },
+                fallout: vec![0.0f32; (gh * 8) * (gw * 8)],
                 stat: vec![0.0f32; 6 * plane],
                 hr: gh * 8,
                 wr: gw * 8,
@@ -1154,7 +1265,7 @@ mod tests {
         assert_eq!(grid_at(0, 0, 1, 2), 0.5);
         assert_eq!(grid_at(0, 0, 0, 3), 0.0); // outside small's gw=3
         assert_eq!(grid_at(0, 0, 3, 0), 0.0); // outside small's gh=2
-                                              // Item 1 fills the whole max shape, no padding needed.
+        // Item 1 fills the whole max shape, no padding needed.
         assert_eq!(grid_at(1, 0, 3, 4), 9.0);
 
         let lt: Vec<f32> = Vec::try_from(obs.legal_tile.reshape([-1])).unwrap();
