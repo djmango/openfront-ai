@@ -12,7 +12,7 @@ mod train;
 mod vecenv;
 
 use clap::Parser;
-use tch::Device;
+use tch::{Cuda, Device};
 
 /// Rust PPO trainer for OpenFront (v8 port of `rl/ppo.py`). See
 /// `rust/DEVLOG.md` for status, known deviations from the Python model,
@@ -260,6 +260,18 @@ struct Args {
     #[arg(long, default_value_t = 8)]
     eval_episodes: usize,
 
+    /// Evaluate on a dedicated owner thread without pausing training.
+    /// Disable to retain the original synchronous actor evaluation.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    async_eval: bool,
+
+    /// Dedicated asynchronous evaluation device (for example `cuda:2`).
+    /// If omitted, `cuda:1` is selected when training uses one GPU on
+    /// cuda:0 and at least two CUDA devices are visible. Otherwise eval
+    /// falls back to the synchronous path.
+    #[arg(long)]
+    eval_device: Option<String>,
+
     #[arg(long, default_value_t = 200)]
     ckpt_every: u64,
 
@@ -362,6 +374,96 @@ fn parse_device(s: &str) -> Device {
     }
 }
 
+fn resolve_eval_device(
+    explicit: Option<&str>,
+    async_eval: bool,
+    train_device: Device,
+    num_gpus: usize,
+    cuda_devices: i64,
+) -> anyhow::Result<Option<Device>> {
+    if !async_eval {
+        return Ok(None);
+    }
+    if let Some(value) = explicit {
+        let device = match value {
+            "cuda" => Device::Cuda(0),
+            value if value.starts_with("cuda:") => {
+                let index = value["cuda:".len()..]
+                    .parse::<usize>()
+                    .map_err(|_| anyhow::anyhow!("invalid --eval-device {value:?}"))?;
+                Device::Cuda(index)
+            }
+            _ => anyhow::bail!("--eval-device must be cuda or cuda:N"),
+        };
+        if let Device::Cuda(index) = device {
+            anyhow::ensure!(
+                (index as i64) < cuda_devices,
+                "--eval-device cuda:{index} is not visible ({cuda_devices} CUDA device(s))"
+            );
+            let occupied = match train_device {
+                Device::Cuda(train_index) if num_gpus <= 1 => index == train_index,
+                Device::Cuda(_) => index < num_gpus,
+                _ => false,
+            };
+            anyhow::ensure!(
+                !occupied,
+                "--eval-device cuda:{index} is used by training; select a spare GPU"
+            );
+        }
+        return Ok(Some(device));
+    }
+    if num_gpus == 1 && train_device == Device::Cuda(0) && cuda_devices > 1 {
+        Ok(Some(Device::Cuda(1)))
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod eval_device_tests {
+    use super::resolve_eval_device;
+    use tch::Device;
+
+    #[test]
+    fn defaults_to_cuda_one_only_for_single_cuda_zero_training() {
+        assert_eq!(
+            resolve_eval_device(None, true, Device::Cuda(0), 1, 2).unwrap(),
+            Some(Device::Cuda(1))
+        );
+        assert_eq!(
+            resolve_eval_device(None, true, Device::Cuda(1), 1, 2).unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_eval_device(None, true, Device::Cuda(0), 2, 4).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_device_must_be_visible_and_spare() {
+        assert_eq!(
+            resolve_eval_device(Some("cuda:3"), true, Device::Cuda(0), 2, 4).unwrap(),
+            Some(Device::Cuda(3))
+        );
+        assert!(
+            resolve_eval_device(Some("cuda:1"), true, Device::Cuda(0), 2, 4)
+                .unwrap_err()
+                .to_string()
+                .contains("used by training")
+        );
+        assert!(resolve_eval_device(Some("cpu"), true, Device::Cuda(0), 1, 2).is_err());
+    }
+
+    #[test]
+    fn disabling_async_eval_forces_synchronous_fallback() {
+        assert_eq!(
+            resolve_eval_device(Some("cuda:1"), false, Device::Cuda(0), 1, 2).unwrap(),
+            None
+        );
+    }
+}
+
 /// Mirrors PyTorch's own `torch/__init__.py::_preload_cuda_deps()`: when
 /// libtorch is a "split" pip wheel install (each CUDA component - cublas,
 /// cudnn, cusparse, nccl, etc. - its own separate `nvidia-*-cu12` package,
@@ -442,7 +544,23 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     tch::manual_seed(0);
     let device = parse_device(&args.device);
+    let eval_device = resolve_eval_device(
+        args.eval_device.as_deref(),
+        args.async_eval,
+        device,
+        args.num_gpus,
+        Cuda::device_count(),
+    )?;
     println!("[oftrain] device={device:?}");
+    if args.async_eval {
+        match eval_device {
+            Some(eval_device) => println!("[oftrain] async eval device={eval_device:?}"),
+            None => println!(
+                "[oftrain] no spare eval GPU selected; using synchronous evaluation \
+                 (set --eval-device cuda:N to override)"
+            ),
+        }
+    }
 
     let cfg = train::Config {
         num_envs: args.num_envs,
@@ -487,6 +605,8 @@ fn main() -> anyhow::Result<()> {
         log_every: args.log_every,
         eval_every: args.eval_every,
         eval_episodes: args.eval_episodes,
+        async_eval: args.async_eval,
+        eval_device,
         ckpt_every: args.ckpt_every,
         ckpt_dir: args.ckpt_dir,
         init: args.init,
