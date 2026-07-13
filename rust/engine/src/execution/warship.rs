@@ -147,6 +147,27 @@ impl WarshipExecution {
         self.patrol_tile = tile;
     }
 
+    /// Same patrol-tile update as `set_patrol_tile`, but for updates flowing through
+    /// `Game::set_warship_patrol_tile` where native has the current engine tick at the
+    /// mutation site. TS observes these `warship.updateWarshipState({ patrolTile })`
+    /// changes in `handleManualPatrolOverride()` and suppresses repair retreats for the
+    /// next 50 ticks; recording the tick here keeps native aligned even when the redirect
+    /// happens after this execution's tick for the frame.
+    pub fn set_patrol_tile_at_tick(&mut self, tile: TileRef, tick: u32) {
+        if self.patrol_tile == tile {
+            return;
+        }
+        self.patrol_tile = tile;
+        self.last_manual_move_tick_retreat_disabled = tick;
+        if !self.is_patrolling() {
+            self.retreating = false;
+            self.docked = false;
+            self.retreat_port = None;
+            self.active_healing_remainder = 0.0;
+        }
+        self.last_observed_patrol_tile = Some(tile);
+    }
+
     /// TS `MoveWarshipExecution.init()`'s per-warship redirect (a manual player move) -
     /// unlike `set_patrol_tile` (`NationWarshipBehavior.maybeMoveWarship`, which lets an
     /// in-progress patrol leg finish), this also clears the in-flight patrol
@@ -198,7 +219,12 @@ impl WarshipExecution {
         warship_build_port_tile(game, self.owner_small_id, self.patrol_tile)
     }
 
-    fn random_target(&mut self, game: &Game, from: TileRef) -> Option<TileRef> {
+    fn random_target_with_shoreline(
+        &mut self,
+        game: &Game,
+        from: TileRef,
+        allow_shoreline: bool,
+    ) -> Option<TileRef> {
         let component = game.get_water_component(from);
         let random = self.random.as_mut()?;
         let mut patrol_range = 100i32;
@@ -215,7 +241,8 @@ impl WarshipExecution {
             }
             let tile = game.ref_xy(x as u32, y as u32);
             let connected = component.is_none_or(|c| game.has_water_component(tile, c));
-            if game.is_water(tile) && !game.map.is_shoreline(tile) && connected {
+            if game.is_water(tile) && (allow_shoreline || !game.map.is_shoreline(tile)) && connected
+            {
                 return Some(tile);
             }
             attempts += 1;
@@ -226,6 +253,11 @@ impl WarshipExecution {
             }
         }
         None
+    }
+
+    fn random_target(&mut self, game: &Game, from: TileRef) -> Option<TileRef> {
+        self.random_target_with_shoreline(game, from, false)
+            .or_else(|| self.random_target_with_shoreline(game, from, true))
     }
 
     fn refresh_path(&mut self, game: &mut Game, from: TileRef, to: TileRef) -> bool {
@@ -392,12 +424,14 @@ impl WarshipExecution {
         if target.2 != TRANSPORT {
             self.last_shell_attack = tick;
         }
-        game.add_execution(ExecEnum::Shell(ShellExecution::new(
+        let owner_veterancy = game.unit_veterancy(self.owner_small_id, unit_id);
+        game.add_execution(ExecEnum::Shell(ShellExecution::new_with_owner_veterancy(
             from,
             self.owner_small_id,
             unit_id,
             target.0,
             target.1,
+            owner_veterancy,
         )));
         if target.2 == TRANSPORT {
             self.already_sent_shell.insert((target.0, target.1));
@@ -1946,7 +1980,10 @@ mod tests {
                 Some(available_port),
                 "the newly retreating ship still has its stale target while alternatives are checked"
             );
-            assert!(exec.docked, "available nearby port should dock the ship immediately");
+            assert!(
+                exec.docked,
+                "available nearby port should dock the ship immediately"
+            );
             assert!(exec.target_tile.is_none(), "docking clears the target tile");
         }
 

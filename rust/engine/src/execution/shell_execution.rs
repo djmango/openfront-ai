@@ -76,6 +76,25 @@ impl ShellExecution {
         }
     }
 
+    pub fn new_with_owner_veterancy(
+        spawn: TileRef,
+        owner_small_id: u16,
+        owner_unit_id: i32,
+        target_owner_small_id: u16,
+        target_unit_id: i32,
+        owner_veterancy: i32,
+    ) -> Self {
+        let mut shell = Self::new(
+            spawn,
+            owner_small_id,
+            owner_unit_id,
+            target_owner_small_id,
+            target_unit_id,
+        );
+        shell.owner_veterancy = owner_veterancy;
+        shell
+    }
+
     fn remove_shell(&mut self, game: &mut Game) {
         if let Some(shell_id) = self.shell_unit_id {
             game.remove_unit(self.owner_small_id, shell_id);
@@ -91,6 +110,16 @@ impl ShellExecution {
         self.effect_on_target(game)
     }
 
+    pub(crate) fn refresh_owner_veterancy(&mut self, unit_id: i32, veterancy: i32) {
+        if self.owner_unit_id == unit_id {
+            self.owner_veterancy = veterancy;
+        }
+    }
+
+    fn owner_unit_owner(&self, game: &Game) -> Option<u16> {
+        game.find_unit_owner(self.owner_unit_id)
+    }
+
     /// TS `effectOnTarget()`.
     fn effect_on_target(&mut self, game: &Game) -> i32 {
         let roll = self
@@ -99,8 +128,9 @@ impl ShellExecution {
             .map(|random| random.next_int(1, 6))
             .unwrap_or(1);
         let mut damage_multiplier = (roll - 1) * 25 + 200;
-        let veterancy = game
-            .unit(self.owner_small_id, self.owner_unit_id)
+        let veterancy = self
+            .owner_unit_owner(game)
+            .and_then(|owner| game.unit(owner, self.owner_unit_id))
             .map(|unit| unit.veterancy)
             .unwrap_or(self.owner_veterancy);
         if veterancy > 0 {
@@ -143,13 +173,11 @@ impl ShellExecution {
             // sunk mid-flight awards nothing) and is actually a Warship (this execution is only
             // ever constructed by `WarshipExecution` in this port, but TS's own `ownerUnit.type()
             // === UnitType.Warship` guard is kept for parity/future-proofing).
-            if game
-                .unit_type_of(self.owner_small_id, self.owner_unit_id)
-                .as_deref()
-                == Some(WARSHIP)
-            {
-                if let Some(target_type) = target_type {
-                    game.record_kill(self.owner_small_id, self.owner_unit_id, &target_type);
+            if let Some(owner) = self.owner_unit_owner(game) {
+                if game.unit_type_of(owner, self.owner_unit_id).as_deref() == Some(WARSHIP) {
+                    if let Some(target_type) = target_type {
+                        game.record_kill(owner, self.owner_unit_id, &target_type);
+                    }
                 }
             }
             game.remove_unit(self.target_owner_small_id, self.target_unit_id);
@@ -162,7 +190,9 @@ impl Execution for ShellExecution {
     fn init(&mut self, _game: &mut Game, tick: u32) {
         self.seed = tick as i32;
         self.damage_random = Some(PseudoRandom::new(tick as i32));
-        self.owner_veterancy = _game.unit_veterancy(self.owner_small_id, self.owner_unit_id);
+        if let Some(owner) = self.owner_unit_owner(_game) {
+            self.owner_veterancy = _game.unit_veterancy(owner, self.owner_unit_id);
+        }
     }
 
     fn tick(&mut self, game: &mut Game, tick: u32) {
@@ -185,9 +215,11 @@ impl Execution for ShellExecution {
             return;
         }
 
-        let owner_alive = game.unit_exists(self.owner_small_id, self.owner_unit_id);
+        let owner_alive = self.owner_unit_owner(game).is_some();
         if owner_alive {
-            self.owner_veterancy = game.unit_veterancy(self.owner_small_id, self.owner_unit_id);
+            if let Some(owner) = self.owner_unit_owner(game) {
+                self.owner_veterancy = game.unit_veterancy(owner, self.owner_unit_id);
+            }
         }
         if !owner_alive && self.destroy_at_tick.is_none() {
             self.destroy_at_tick = Some(tick + 50);
