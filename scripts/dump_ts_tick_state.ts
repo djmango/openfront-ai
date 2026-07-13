@@ -34,6 +34,12 @@ interface UnitSnapshot {
   tile: number;
   hash: number;
   health: number;
+  veterancy: number;
+  veterancyProgress: number;
+  targetTile: number | null;
+  retreatPort: number | null;
+  retreating: boolean;
+  docked: boolean;
 }
 
 interface PlayerSnapshot {
@@ -91,6 +97,22 @@ function snapshot(game: Game, dumpUnits: boolean): TickSnapshot {
         tile: u.tile(),
         hash: u.hash(),
         health: u.health(),
+        veterancy: u.veterancy(),
+        veterancyProgress:
+          u.type() === UnitType.Warship ? u.warshipState().veterancyProgress : 0,
+        targetTile: u.targetTile() ?? null,
+        retreatPort:
+          u.type() === UnitType.Warship
+            ? (u.warshipState().retreatPort ?? null)
+            : null,
+        retreating:
+          u.type() === UnitType.Warship
+            ? u.warshipState().state === "retreating"
+            : false,
+        docked:
+          u.type() === UnitType.Warship
+            ? u.warshipState().state === "docked"
+            : false,
       }));
     }
     return base;
