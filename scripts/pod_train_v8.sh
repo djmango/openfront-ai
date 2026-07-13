@@ -42,9 +42,15 @@ set -uo pipefail
 
 RUN_NAME="${RUN_NAME:-ppo_v8}"
 NUM_GPUS="${NUM_GPUS:-1}"
+V81_CURRICULUM="${V81_CURRICULUM:-0}"
 # Envs per GPU/shard. Live A40 A/Bs found 48 faster than 64 once the
 # persistent compact path was enabled (64 increased stage-2 tail latency).
-NUM_ENVS="${NUM_ENVS:-48}"
+if [ "$V81_CURRICULUM" = "1" ]; then
+  NUM_ENVS="${NUM_ENVS:-24}"
+else
+  NUM_ENVS="${NUM_ENVS:-48}"
+fi
+STAGE_ENV_TARGETS="${STAGE_ENV_TARGETS:-}"
 ROLLOUT_LEN="${ROLLOUT_LEN:-32}"
 # Match rl/ppo.py's optimizer cadence: its --minibatch is a target sample
 # count (128), while oftrain's --minibatches is a count. Derive the latter
@@ -64,6 +70,13 @@ NODE_FRACTION="${NODE_FRACTION:-0}"
 # data, and two env groups overlap stepping with actor inference. Keep
 # fp16-rollout opt-in until it receives the same extended CUDA soak.
 EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --persistent-actors --pipeline-groups=true --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
+V81_ARGS=""
+if [ "$V81_CURRICULUM" = "1" ]; then
+  V81_ARGS="--v81-curriculum"
+fi
+if [ -n "$STAGE_ENV_TARGETS" ]; then
+  V81_ARGS="$V81_ARGS --stage-env-targets $STAGE_ENV_TARGETS"
+fi
 REPO_DIR="${REPO_DIR:-/root/openfront-ai}"
 CKPT_DIR="$REPO_DIR/rust/checkpoints/$RUN_NAME"
 HF_SYNC_INTERVAL_SECONDS="${HF_SYNC_INTERVAL_SECONDS:-600}"
@@ -239,10 +252,20 @@ while true; do
   LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB" \
     ./target/release/oftrain --engine native --node-fraction "$NODE_FRACTION" --num-envs "$NUM_ENVS" --num-gpus "$NUM_GPUS" \
     --rollout-len "$ROLLOUT_LEN" --minibatches "$MINIBATCHES" --stage "$STAGE" --device cuda:0 \
-    --ckpt-dir "$CKPT_DIR" $EXTRA_ARGS $RESUME \
+    --ckpt-dir "$CKPT_DIR" $V81_ARGS $EXTRA_ARGS $RESUME \
     >> "/tmp/train_$RUN_NAME.log" 2>&1
   RC=$?
   ELAPSED=$(( $(date +%s) - START_TS ))
+  if [ -f "$CKPT_DIR/restart_request.json" ]; then
+    REQUESTED_ENVS=$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["requested_envs_per_shard"])' "$CKPT_DIR/restart_request.json")
+    echo "=== intentional stage resize requested: $NUM_ENVS -> $REQUESTED_ENVS envs/shard; restarting now ===" \
+      | tee -a "/tmp/train_$RUN_NAME.log"
+    NUM_ENVS="$REQUESTED_ENVS"
+    MINIBATCHES=$((NUM_ENVS * ROLLOUT_LEN / MINIBATCH_SIZE))
+    [ "$MINIBATCHES" -ge 1 ] || MINIBATCHES=1
+    FAST_EXITS=0
+    continue
+  fi
   if [ "$ELAPSED" -lt 120 ]; then
     FAST_EXITS=$((FAST_EXITS + 1))
   else
