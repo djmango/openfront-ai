@@ -260,13 +260,14 @@ impl WarshipExecution {
                 let same_water_component = game
                     .get_water_component(from)
                     .is_some_and(|component| game.has_water_component(unit_tile, component));
-                // TS filters only when destination owner is self/friendly. Missing
-                // destination (`targetUnit()` undefined) does *not* exclude the ship
-                // (`is_none_or` here previously treated missing dest as "friendly").
-                let dest_is_friendly = destination_owner.is_some_and(|destination| {
-                    destination == self.owner_small_id
-                        || game.is_friendly(destination, self.owner_small_id)
-                });
+                // TS only pirates active trade routes. Once the destination
+                // port is gone, `targetUnit()` is undefined and the ship is
+                // ignored rather than becoming a free nearest target.
+                let Some(destination_owner) = destination_owner else {
+                    continue;
+                };
+                let dest_is_friendly = destination_owner == self.owner_small_id
+                    || game.is_friendly(destination_owner, self.owner_small_id);
                 if !owner_has_port
                     || game.trade_ship_is_safe_from_pirates(owner, unit_id)
                     || dest_is_friendly
@@ -1252,6 +1253,23 @@ impl Execution for WarshipExecution {
                 exec.target(&game, warship_tile, true),
                 Some((p2, ship_id, unit_type::TRADE_SHIP))
             );
+        }
+
+        #[test]
+        fn does_not_target_trade_ship_without_live_destination() {
+            let mut game = water_game(60, 60);
+            let p1 = add_nation(&mut game, "p1");
+            let p2 = add_human(&mut game, "p2");
+
+            let warship_tile = game.ref_xy(10, 10);
+            let ship_tile = game.ref_xy(11, 10);
+
+            game.build_unit(p1, unit_type::PORT, warship_tile);
+            let ship_id = game.build_unit(p2, unit_type::TRADE_SHIP, ship_tile);
+            game.unit_mut(p2, ship_id).unwrap().last_safe_from_pirates_tick = -1000;
+
+            let exec = WarshipExecution::new(p1, warship_tile);
+            assert!(exec.target(&game, warship_tile, true).is_none());
         }
 
         #[test]
