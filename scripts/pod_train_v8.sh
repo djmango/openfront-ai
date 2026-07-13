@@ -42,9 +42,9 @@ set -uo pipefail
 
 RUN_NAME="${RUN_NAME:-ppo_v8}"
 NUM_GPUS="${NUM_GPUS:-1}"
-# Envs PER GPU/shard (see the v8 plan's sizing section: 64 is the
-# proven-safe ceiling for the full, non-foveated policy before OOM).
-NUM_ENVS="${NUM_ENVS:-64}"
+# Envs per GPU/shard. Live A40 A/Bs found 48 faster than 64 once the
+# persistent compact path was enabled (64 increased stage-2 tail latency).
+NUM_ENVS="${NUM_ENVS:-48}"
 ROLLOUT_LEN="${ROLLOUT_LEN:-32}"
 # Match rl/ppo.py's optimizer cadence: its --minibatch is a target sample
 # count (128), while oftrain's --minibatches is a count. Derive the latter
@@ -59,10 +59,11 @@ STAGE="${STAGE:-0}"
 # native's ~10x tick speed for the majority. 0 (default) = pure native,
 # same as before this option existed - no extra bootstrap cost in that case.
 NODE_FRACTION="${NODE_FRACTION:-0}"
-# Frozen v8 launch config (see devlog): full policy (no --gc/--blocks
-# override), AMP on, synchronous H2D, entropy floor at its default. Override
-# via EXTRA_ARGS if deliberately deviating from the plan.
-EXTRA_ARGS="${EXTRA_ARGS:---amp --fp16-rollout --foveate --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
+# Validated Jul-13 one-GPU recipe: actor/learner CUDA state remains on
+# persistent owner threads, rollout payloads cross threads as compact host
+# data, and two env groups overlap stepping with actor inference. Keep
+# fp16-rollout opt-in until it receives the same extended CUDA soak.
+EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --persistent-actors --pipeline-groups=true --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
 REPO_DIR="${REPO_DIR:-/root/openfront-ai}"
 CKPT_DIR="$REPO_DIR/rust/checkpoints/$RUN_NAME"
 HF_SYNC_INTERVAL_SECONDS="${HF_SYNC_INTERVAL_SECONDS:-600}"
