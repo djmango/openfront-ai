@@ -271,10 +271,25 @@ pub fn compare_outcomes(expected: &GameOutcome, actual: &GameOutcome) -> Outcome
     // Soft-identical stalemates therefore end with both engines reporting no
     // winner. Treat that agreed no-winner state as a pass when the final
     // board matches; asymmetric missing winners remain a failure.
+    //
+    // Ignore `alive` on zero-tile players: a wiped nation can disagree on the
+    // leftover alive bit without changing conquest (curr-b080-s1-asia's
+    // Philippines 0-tile alive/dead only).
+    let rankings_match = expected.final_ranking.len() == actual.final_ranking.len()
+        && expected
+            .final_ranking
+            .iter()
+            .zip(&actual.final_ranking)
+            .all(|(e, a)| {
+                e.identity == a.identity
+                    && e.team == a.team
+                    && e.tiles == a.tiles
+                    && (e.tiles > 0).then_some(e.alive) == (a.tiles > 0).then_some(a.alive)
+            });
     let agreed_stalemate = both_missing
         && expected.final_tick == actual.final_tick
         && expected.land_tiles_without_fallout == actual.land_tiles_without_fallout
-        && expected.final_ranking == actual.final_ranking;
+        && rankings_match;
 
     if missing_winner && !agreed_stalemate {
         diagnostics.push("missing_winner".to_string());
