@@ -329,7 +329,10 @@ pub fn connect_station(
             railroads: Vec::new(),
         },
     );
-    rn.station_by_unit.insert(unit_id, id);
+    // TS `StationManager.findStation(unit)` scans the insertion-ordered Set and returns
+    // the first station object for a Unit. Duplicate TrainStationExecutions can exist for
+    // the same Unit, so do not overwrite an earlier mapping with a later duplicate.
+    rn.station_by_unit.entry(unit_id).or_insert(id);
 
     if !connect_to_existing_rails(game, &mut rn, id) {
         connect_to_nearby_stations(game, &mut rn, id);
@@ -531,6 +534,14 @@ pub fn remove_station(game: &mut Game, unit_id: i32) {
 
         let cluster = rn.stations.get(&station_id).and_then(|s| s.cluster);
         rn.stations.remove(&station_id);
+        if let Some(next_station_id) = rn
+            .stations
+            .iter()
+            .filter_map(|(&sid, st)| (st.unit_id == unit_id).then_some(sid))
+            .min()
+        {
+            rn.station_by_unit.insert(unit_id, next_station_id);
+        }
 
         if let Some(cluster_id) = cluster {
             if let Some(c) = rn.clusters.get_mut(&cluster_id) {
@@ -1150,5 +1161,35 @@ mod tests {
             "addStation onto cleared cluster must revive membership"
         );
         assert_eq!(rn.stations.get(&sid).unwrap().cluster, Some(cluster));
+    }
+
+    /// TS `StationManager.findStation(unit)` scans stations in insertion order,
+    /// so duplicate station objects for one unit resolve to the first one until
+    /// it is removed. A simple HashMap overwrite picks the newest duplicate and
+    /// can connect later stations to the wrong rail graph node.
+    #[test]
+    fn duplicate_unit_station_lookup_matches_first_inserted_station() {
+        let mut game = plains_game(20, 20);
+        let owner = add_nation(&mut game, "owner");
+        let tile = game.map.ref_xy(5, 5);
+        game.conquer(owner, tile);
+
+        let factory = game.build_unit(owner, unit_type::FACTORY, tile);
+        let first = connect_station(&mut game, owner, factory, unit_type::FACTORY);
+        let second = connect_station(&mut game, owner, factory, unit_type::FACTORY);
+
+        assert_ne!(first, second, "test should create duplicate stations");
+        assert_eq!(
+            game.rail_network.find_station_by_unit(factory),
+            Some(first),
+            "lookup should preserve TS first-insertion semantics"
+        );
+
+        remove_station(&mut game, factory);
+        assert_eq!(
+            game.rail_network.find_station_by_unit(factory),
+            Some(second),
+            "after the first duplicate is removed, lookup advances to the next"
+        );
     }
 }
