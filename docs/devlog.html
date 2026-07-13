@@ -73,8 +73,10 @@
   moved from roughly 53-60 decisions/s to 81-95 decisions/s on stage 1. Stage-2 mixed-map
   throughput moved from a mature 32-46 decisions/s to roughly 50-56 with exact shape bucketing,
   persistent pipeline overlap, compact host arenas, and fused native observation preparation.
-  This is faster than the older ~40 decisions/s Python reference, but a same-A40 run of the latest
-  Python stack is still required before claiming a universal Python win.</p>
+  At stage 3, cached bf16 AE convolution weights raised Rust to 34.2-34.7 decisions/s. A same-A40,
+  same-stage, same-48-env Python run measured 392 game-ticks/s = 26.1 decisions/s without compile;
+  Rust is therefore ~31-33% faster on the paired workload. Python <code>torch.compile</code> spent
+  many minutes tracing dynamic shapes and never completed update 1 in the benchmark.</p>
   <p><b>The Rust port is real and merged to master</b> (<a href="#rust-port">full session</a>):
   PPO trainer on tch-rs, the game engine itself running <i>in-process</i> as native Rust (no
   Node, no pipes, no JSON IPC), ~19 outcome-parity fixes landed, engine stepping at 130-150k
@@ -213,6 +215,7 @@ cross channels. No CUDA tensor crosses an OS-thread boundary.</p>
   <tr><td>shared AE uploads</td><td>24 updates under persistent actor ownership</td><td>72-79</td></tr>
   <tr><td>bit-packed fallout</td><td>13+ updates; strong completed-episode rewards</td><td>81-95 (stage 1)</td></tr>
   <tr><td>stage-2 shape buckets + pipeline</td><td>mixed maps; persistent stream ownership</td><td>50-56 vs 32-46 before</td></tr>
+  <tr><td>cached bf16 frozen-AE convolutions</td><td>stage 3; fp32 embedding/GroupNorm/output</td><td>34.2-34.7 vs Python 26.1</td></tr>
 </table>
 <p>The live run advanced stage 1 &rarr; 2 at update 262. Stage-1 recent reward reached roughly
 41-49; entropy stayed mostly 2.5-3.5. Value MSE sometimes spiked at curriculum/non-stationarity
@@ -245,10 +248,12 @@ Python's game-ticks/s (which must be divided by <code>decision_ticks</code>).</p
   episodes to judge reward. The candidate lives in draft PR
   <a href="https://github.com/djmango/openfront-ai/pull/14">#14</a>, stacked on CUDA lifecycle PR
   <a href="https://github.com/djmango/openfront-ai/pull/13">#13</a>.</li>
-  <li><b>Run the paired Python benchmark on the same A40.</b> Same 48 envs, rollout 32, full policy,
-  fine+coarse AE, foveation, epochs, and minibatch size; convert Python game-ticks/s to decisions/s.
-  The Rust run already beats the older ~40 decisions/s Python reference, but the latest Python/H200
-  fleet peak is not an apples comparison.</li>
+  <li><b>Paired Python benchmark: done.</b> Same A40, stage 3, 48 envs, rollout 32, two epochs,
+  minibatch 128, fine+coarse AE, foveation, eval off. Python no-compile stabilized at
+  392 game-ticks/s = 26.1 decisions/s (<code>roll=43.6s</code>, <code>update=83.0s</code>).
+  Rust cached-bf16 stabilized at 34.2-34.7 decisions/s (<code>collect~44.4s</code>,
+  <code>train~18s</code>). Python compile was not a usable comparison on this dynamic workload:
+  it remained in Dynamo tracing for many minutes without completing update 1.</li>
   <li><b>Keep one GPU until the paired benchmark and soak pass.</b> Then extend persistent learner
   ownership to multi-GPU gradient synchronization. Do not simply turn four GPUs back on around the
   legacy cross-thread learner path.</li>
