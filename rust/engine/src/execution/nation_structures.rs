@@ -1460,11 +1460,28 @@ fn sample_tiles_near_front(
     }
 
     if result.is_empty() {
-        return rand_territory_tile_array(game, random, small_id, count)
-            .into_iter()
-            .filter(|t| can_build_land_structure(game, small_id, *t).is_some())
-            .take(count)
-            .collect();
+        let mut fallback = Vec::new();
+        for _ in 0..(count * 4) {
+            if fallback.len() >= count {
+                break;
+            }
+            let Some(anchor) = random.rand_element(&anchors) else {
+                break;
+            };
+            let ax = game.map.x(anchor) as i32;
+            let ay = game.map.y(anchor) as i32;
+            let x = sample_front_coordinate(random, ax, search_radius);
+            let y = sample_front_coordinate(random, ay, search_radius);
+            if !game.is_valid_coord(x, y) {
+                continue;
+            }
+            let t = game.ref_xy(x as u32, y as u32);
+            if game.map.owner_id(t) != small_id {
+                continue;
+            }
+            fallback.push(t);
+        }
+        return fallback;
     }
     result
 }

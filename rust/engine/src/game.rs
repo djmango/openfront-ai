@@ -726,6 +726,9 @@ impl Game {
                 if u.unit_type != unit_type::DEFENSE_POST {
                     continue;
                 }
+                if u.under_construction {
+                    continue;
+                }
                 let ut = u.tile as u32;
                 let dx = self.map.x(ut) as i32 - tx as i32;
                 let dy = self.map.y(ut) as i32 - ty as i32;
@@ -4433,6 +4436,26 @@ mod player_tests {
 
         assert_eq!(game.player_by_small_id(2).unwrap().tiles_owned, 0);
         assert!(!game.can_send_alliance_request(2, 1));
+    }
+
+    /// TS `Game.nearbyUnits()` excludes under-construction units by default.
+    /// Defense posts are built immediately as units but stay under construction
+    /// for 50 ticks, so they must not apply attack-defense bonuses until
+    /// completion.
+    #[test]
+    fn under_construction_defense_post_does_not_count_as_nearby() {
+        let mut game = crate::test_util::plains_game(64, 64);
+        add_bot(&mut game, "player", 1);
+        let post_tile = game.map.ref_xy(10, 10);
+        let check_tile = game.map.ref_xy(12, 10);
+        game.conquer(1, post_tile);
+        let post_id = game.build_unit(1, unit_type::DEFENSE_POST, post_tile);
+
+        assert!(game.has_defense_post_nearby(check_tile, 1));
+        game.set_unit_under_construction(1, post_id, true);
+        assert!(!game.has_defense_post_nearby(check_tile, 1));
+        game.set_unit_under_construction(1, post_id, false);
+        assert!(game.has_defense_post_nearby(check_tile, 1));
     }
 
     /// TS `PlayerImpl.test.ts` "City can be upgraded" / "DefensePost cannot
