@@ -54,6 +54,30 @@ struct Args {
     #[arg(long, default_value_t = 0.999)]
     gamma: f32,
 
+    /// V8.1 potential-based closeout shaping coefficient K_DOM (0 disables).
+    #[arg(long, default_value_t = 0.25)]
+    v81_dom_coef: f64,
+
+    /// First curriculum stage where V8.1 shaping may apply.
+    #[arg(long, default_value_t = 4)]
+    v81_min_stage: usize,
+
+    /// Symmetric clamp magnitude for the V8.1 log strength-ratio potential.
+    #[arg(long, default_value_t = 2.0)]
+    v81_potential_clamp: f64,
+
+    /// Relax loss aversion after reaching the dominance threshold.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    v81_dominant_loss: bool,
+
+    /// Normalized composite-strength share that counts as dominant.
+    #[arg(long, default_value_t = 0.55)]
+    v81_dominance_threshold: f64,
+
+    /// Strength-loss weight while dominant (global legacy weight is 6.5).
+    #[arg(long, default_value_t = 5.25)]
+    v81_delta_loss_dominant: f64,
+
     #[arg(long, default_value_t = 0.95)]
     lambda_: f32,
 
@@ -548,6 +572,32 @@ fn main() -> anyhow::Result<()> {
         }
     }
     let args = Args::parse();
+    anyhow::ensure!(
+        args.v81_dom_coef.is_finite() && args.v81_dom_coef >= 0.0,
+        "--v81-dom-coef must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.v81_potential_clamp.is_finite() && args.v81_potential_clamp >= 0.0,
+        "--v81-potential-clamp must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.v81_dominance_threshold.is_finite()
+            && (0.0..=1.0).contains(&args.v81_dominance_threshold),
+        "--v81-dominance-threshold must be in [0, 1]"
+    );
+    anyhow::ensure!(
+        args.v81_delta_loss_dominant.is_finite() && args.v81_delta_loss_dominant >= 0.0,
+        "--v81-delta-loss-dominant must be finite and non-negative"
+    );
+    let reward_config = ofcore::curriculum::RewardConfig {
+        gamma: args.gamma as f64,
+        v81_dom_coef: args.v81_dom_coef,
+        v81_min_stage: args.v81_min_stage,
+        v81_potential_clamp: args.v81_potential_clamp,
+        v81_dominant_loss: args.v81_dominant_loss,
+        v81_dominance_threshold: args.v81_dominance_threshold,
+        v81_delta_loss_dominant: args.v81_delta_loss_dominant,
+    };
     tch::manual_seed(0);
     let device = parse_device(&args.device);
     let eval_device = resolve_eval_device(
@@ -558,6 +608,17 @@ fn main() -> anyhow::Result<()> {
         Cuda::device_count(),
     )?;
     println!("[oftrain] device={device:?}");
+    println!(
+        "[oftrain] v81 reward: min_stage={} K_DOM={} gamma={} phi_clamp={} \
+         dominant_loss={} threshold={} W_DELTA_LOSS_DOMINANT={}",
+        reward_config.v81_min_stage,
+        reward_config.v81_dom_coef,
+        reward_config.gamma,
+        reward_config.v81_potential_clamp,
+        reward_config.v81_dominant_loss,
+        reward_config.v81_dominance_threshold,
+        reward_config.v81_delta_loss_dominant,
+    );
     if args.async_eval {
         match eval_device {
             Some(eval_device) => println!("[oftrain] async eval device={eval_device:?}"),
@@ -591,6 +652,7 @@ fn main() -> anyhow::Result<()> {
             pinned_h2d: args.pinned_h2d,
             fp16_rollout: args.fp16_rollout,
             compact_rollout: args.compact_rollout,
+            reward_config,
         });
     }
 
@@ -603,6 +665,7 @@ fn main() -> anyhow::Result<()> {
         updates: args.updates,
         lr: args.lr,
         gamma: args.gamma,
+        reward_config,
         lambda: args.lambda_,
         clip: args.clip,
         vf_coef: args.vf_coef,
