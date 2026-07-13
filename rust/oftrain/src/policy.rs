@@ -440,6 +440,29 @@ struct Foveation {
     fine_w: i64,
 }
 
+/// Private forward plumbing. Keeping the exact `Foveation` beside the maps
+/// derived from it prevents action/evaluation heads from rebuilding the crop,
+/// masks, and coordinate origins after the trunk has already computed them.
+struct TrunkOutput {
+    h: Tensor,
+    gc_map: Tensor,
+    gf_map: Tensor,
+    p: Tensor,
+    fov: Foveation,
+}
+
+struct ForwardOutput {
+    act_logits: Tensor,
+    player_logits: Tensor,
+    tile_coarse: Tensor,
+    tile_fine: Tensor,
+    build: Tensor,
+    nuke: Tensor,
+    quantity: Tensor,
+    value: Tensor,
+    fov: Foveation,
+}
+
 pub struct PolicyNet {
     grid_coarse_net: GridTower,
     grid_fine_net: GridTower,
@@ -686,7 +709,7 @@ impl PolicyNet {
         }
     }
 
-    fn trunk_forward(&self, o: &Obs) -> (Tensor, Tensor, Tensor, Tensor, Tensor) {
+    fn trunk_forward(&self, o: &Obs) -> TrunkOutput {
         let fov = Self::foveate(o, self.foveate);
 
         let gc_map = self.grid_coarse_net.forward(&fov.grid_coarse, self.amp);
@@ -729,7 +752,7 @@ impl PolicyNet {
         let gc_map = sanitize(&gc_map);
         let gf_map = sanitize(&gf_map);
         let p = sanitize(&p);
-        (h, gc_map, gf_map, p, fov.grid_coarse)
+        TrunkOutput { h, gc_map, gf_map, p, fov }
     }
 
     fn tile_head(head: &(nn::Conv2D, nn::Conv2D), map: &Tensor, h: &Tensor, amp: bool) -> Tensor {
@@ -752,8 +775,8 @@ impl PolicyNet {
 
     /// Full forward pass. Returns raw head tensors; callers combine with
     /// masks (see `act`/`evaluate`).
-    fn forward(&self, o: &Obs) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor) {
-        let (h, gc_map, gf_map, p, coarse_grid) = self.trunk_forward(o);
+    fn forward(&self, o: &Obs) -> ForwardOutput {
+        let TrunkOutput { h, gc_map, gf_map, p, fov } = self.trunk_forward(o);
         let act_logits = self.head_action.forward(&h) + (&o.legal_actions - 1.0) * (-MASKED_NEG);
         let q = self.head_player_q.forward(&h); // (B, PC)
         let player_logits = q.unsqueeze(1).matmul(&p.transpose(-2, -1)).squeeze_dim(1); // (B, S)
@@ -769,7 +792,17 @@ impl PolicyNet {
         // Huber loss in train.rs bounds the value gradient, so sharing the
         // trunk does not reintroduce the old unbounded-MSE failure mode.
         let value = Self::sanitize_value(&self.head_value.forward(&h).squeeze_dim(-1));
-        (act_logits, player_logits, tile_coarse, tile_fine, build, nuke, quantity, value, p, coarse_grid)
+        ForwardOutput {
+            act_logits,
+            player_logits,
+            tile_coarse,
+            tile_fine,
+            build,
+            nuke,
+            quantity,
+            value,
+            fov,
+        }
     }
 
     /// `train.rs`'s `ret_clip` only bounds the value *target* before the
@@ -927,8 +960,27 @@ impl PolicyNet {
         o: &Obs,
         greedy: bool,
     ) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor) {
-        let (act_logits, player_logits_raw, tile_coarse, tile_fine, build, nuke, quantity, value, _p, coarse_grid) =
-            self.forward(o);
+        let output = self.forward(o);
+        self.act_from_forward(o, greedy, output)
+    }
+
+    fn act_from_forward(
+        &self,
+        o: &Obs,
+        greedy: bool,
+        output: ForwardOutput,
+    ) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor) {
+        let ForwardOutput {
+            act_logits,
+            player_logits: player_logits_raw,
+            tile_coarse,
+            tile_fine,
+            build,
+            nuke,
+            quantity,
+            value,
+            fov,
+        } = output;
         let (a, mut logp) = categorical_sample(&act_logits, greedy);
 
         let pmask = o
@@ -956,13 +1008,7 @@ impl PolicyNet {
 
         logp = logp + &needs_p * &player_lp;
 
-        let (_cgh, cgw) = Self::coarse_dims(&coarse_grid);
-        // Recomputes the crop (deterministic given `o.grid`, so this
-        // matches what `forward()` used internally bit-for-bit) - only
-        // needed here for the coordinate-translation fields (origin,
-        // legal/valid masks), not the actual grid tensors already
-        // consumed above.
-        let fov = Self::foveate(o, self.foveate);
+        let (_cgh, cgw) = Self::coarse_dims(&fov.grid_coarse);
         let coarse_logits =
             self.coarse_logits_for_action(&tile_coarse, &fov.legal_tile_coarse, &fov.gc_valid, &fov.fine_coarse, &a);
         let (coarse, _coarse_lp_sampled) = categorical_sample(&coarse_logits, greedy);
@@ -985,14 +1031,44 @@ impl PolicyNet {
         (a, player, tile_region, build_s, nuke_s, q, logp, value)
     }
 
+    #[cfg(test)]
+    fn act_recomputing_foveation_reference(
+        &self,
+        o: &Obs,
+        greedy: bool,
+    ) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor) {
+        let mut output = self.forward(o);
+        output.fov = Self::foveate(o, self.foveate);
+        self.act_from_forward(o, greedy, output)
+    }
+
     /// Batched logprob/entropy/value for PPO updates (mirrors
     /// `Policy.evaluate`). Every sub-head's contribution is computed over
     /// the FULL batch and zeroed via the "used" mask instead of Python's
     /// boolean-subset indexing (equivalent result, simpler on tch, and the
     /// extra compute is harmless for throughput testing).
     pub fn evaluate(&self, o: &Obs, c: &ChoiceBatch) -> (Tensor, Tensor, Tensor, Tensor) {
-        let (act_logits, player_logits_raw, tile_coarse, tile_fine, build, nuke, quantity, value, _p, coarse_grid) =
-            self.forward(o);
+        let output = self.forward(o);
+        self.evaluate_from_forward(o, c, output)
+    }
+
+    fn evaluate_from_forward(
+        &self,
+        o: &Obs,
+        c: &ChoiceBatch,
+        output: ForwardOutput,
+    ) -> (Tensor, Tensor, Tensor, Tensor) {
+        let ForwardOutput {
+            act_logits,
+            player_logits: player_logits_raw,
+            tile_coarse,
+            tile_fine,
+            build,
+            nuke,
+            quantity,
+            value,
+            fov,
+        } = output;
         let mut logp = categorical_logp(&act_logits, &c.action);
         let mut ent = categorical_entropy(&act_logits);
 
@@ -1007,16 +1083,13 @@ impl PolicyNet {
         logp = logp + &p_used * categorical_logp(&player_logits, &ps_c);
         ent = ent + &p_used * categorical_entropy(&player_logits);
 
-        let (_gh, cgw) = Self::coarse_dims(&coarse_grid);
-        // See `act`'s identical comment: recomputes the (deterministic)
-        // crop for the coordinate-translation fields.
-        let fov = Self::foveate(o, self.foveate);
+        let (cgh, cgw) = Self::coarse_dims(&fov.grid_coarse);
         let t_used = c.tile_region.ge(0).to_kind(Kind::Float);
         let tr_c = c.tile_region.clamp(0, i64::MAX / 2);
         let coarse_target = global_to_coarse_local(&tr_c, cgw);
         let coarse_logits =
             self.coarse_logits_for_action(&tile_coarse, &fov.legal_tile_coarse, &fov.gc_valid, &fov.fine_coarse, &action_c);
-        let coarse_target_c = coarse_target.clamp(0, cgw * Self::coarse_dims(&coarse_grid).0 - 1);
+        let coarse_target_c = coarse_target.clamp(0, cgw * cgh - 1);
         logp = logp + &t_used * categorical_logp(&coarse_logits, &coarse_target_c);
         ent = ent + &t_used * categorical_entropy(&coarse_logits);
 
@@ -1047,9 +1120,20 @@ impl PolicyNet {
         (logp, ent, ent_q, value)
     }
 
+    #[cfg(test)]
+    fn evaluate_recomputing_foveation_reference(
+        &self,
+        o: &Obs,
+        c: &ChoiceBatch,
+    ) -> (Tensor, Tensor, Tensor, Tensor) {
+        let mut output = self.forward(o);
+        output.fov = Self::foveate(o, self.foveate);
+        self.evaluate_from_forward(o, c, output)
+    }
+
     pub fn value_only(&self, o: &Obs) -> Tensor {
-        let (h, _, _, _, _) = self.trunk_forward(o);
-        Self::sanitize_value(&self.head_value.forward(&h).squeeze_dim(-1))
+        let output = self.trunk_forward(o);
+        Self::sanitize_value(&self.head_value.forward(&output.h).squeeze_dim(-1))
     }
 }
 
@@ -1626,14 +1710,14 @@ mod tests {
         let full_out = policy.forward(&o);
         let compact_out = policy.forward(&compact);
         for (i, (a, b)) in [
-            (&full_out.0, &compact_out.0),
-            (&full_out.1, &compact_out.1),
-            (&full_out.2, &compact_out.2),
-            (&full_out.3, &compact_out.3),
-            (&full_out.4, &compact_out.4),
-            (&full_out.5, &compact_out.5),
-            (&full_out.6, &compact_out.6),
-            (&full_out.7, &compact_out.7),
+            (&full_out.act_logits, &compact_out.act_logits),
+            (&full_out.player_logits, &compact_out.player_logits),
+            (&full_out.tile_coarse, &compact_out.tile_coarse),
+            (&full_out.tile_fine, &compact_out.tile_fine),
+            (&full_out.build, &compact_out.build),
+            (&full_out.nuke, &compact_out.nuke),
+            (&full_out.quantity, &compact_out.quantity),
+            (&full_out.value, &compact_out.value),
         ]
         .into_iter()
         .enumerate()
@@ -1658,6 +1742,133 @@ mod tests {
         close(&old_eval.0, &new_eval.0, "evaluate logp");
         close(&old_eval.1, &new_eval.1, "evaluate entropy");
         close(&old_eval.3, &new_eval.3, "evaluate value");
+    }
+
+    fn assert_same_tensor(actual: &Tensor, expected: &Tensor, name: &str) {
+        assert_eq!(actual.size(), expected.size(), "{name} shape");
+        let max_diff = (actual - expected).abs().max().double_value(&[]);
+        assert_eq!(max_diff, 0.0, "{name} differs by {max_diff}");
+    }
+
+    fn reference_choice(device: Device) -> ChoiceBatch {
+        let spawn = ACTIONS.iter().position(|&a| a == "spawn").unwrap() as i64;
+        ChoiceBatch {
+            action: Tensor::from_slice(&[spawn, spawn]).to_device(device),
+            player_slot: Tensor::from_slice(&[-1i64, -1]).to_device(device),
+            tile_region: Tensor::from_slice(&[4 * GW_MAX + 6, (FOVEATE_SIZE + 2) * GW_MAX + FOVEATE_SIZE + 4])
+                .to_device(device),
+            build_type: Tensor::from_slice(&[-1i64, -1]).to_device(device),
+            nuke_type: Tensor::from_slice(&[-1i64, -1]).to_device(device),
+            quantity_frac: Tensor::from_slice(&[-1.0f32, -1.0]).to_device(device),
+        }
+    }
+
+    fn zero_parameter_gradients(vs: &nn::VarStore) {
+        for (_, mut parameter) in vs.variables() {
+            parameter.zero_grad();
+        }
+    }
+
+    fn parameter_gradients(vs: &nn::VarStore) -> std::collections::BTreeMap<String, Tensor> {
+        vs.variables()
+            .into_iter()
+            .filter_map(|(name, parameter)| {
+                let grad = parameter.grad();
+                grad.defined().then(|| (name, grad.detach().copy()))
+            })
+            .collect()
+    }
+
+    /// Pins the pre-optimization behavior: the old path recomputed
+    /// `foveate` after `forward`, while the optimized path carries forward
+    /// that exact object. Both representations must produce identical
+    /// masks/origins, deterministic actions, evaluation outputs, and
+    /// parameter gradients.
+    #[test]
+    fn carried_foveation_matches_recomputation_for_full_and_compact_obs() {
+        tch::manual_seed(29);
+        let vs = nn::VarStore::new(Device::Cpu);
+        let policy = PolicyNet::new(&vs.root(), false, true, 8, 1);
+        let full = synthetic_obs(Device::Cpu, 2, FOVEATE_SIZE + 8, FOVEATE_SIZE + 12);
+        let mut mine = full.grid.select(1, EGO_OWN_CH);
+        let _ = mine.zero_();
+        let _ = mine.get(0).get(4).get(6).fill_(1.0);
+        let _ = mine.get(1).get(FOVEATE_SIZE + 2).get(FOVEATE_SIZE + 4).fill_(1.0);
+        let compact = PolicyNet::compact_observation(&full);
+        let choice = reference_choice(Device::Cpu);
+
+        for (obs_name, obs) in [("foveated", &full), ("compact", &compact)] {
+            let forward = policy.forward(obs);
+            let recomputed = PolicyNet::foveate(obs, true);
+            for (field, carried, reference) in [
+                ("grid_fine", &forward.fov.grid_fine, &recomputed.grid_fine),
+                ("legal_tile_fine", &forward.fov.legal_tile_fine, &recomputed.legal_tile_fine),
+                ("grid_valid_fine", &forward.fov.grid_valid_fine, &recomputed.grid_valid_fine),
+                ("grid_coarse", &forward.fov.grid_coarse, &recomputed.grid_coarse),
+                ("gc_valid", &forward.fov.gc_valid, &recomputed.gc_valid),
+                ("legal_tile_coarse", &forward.fov.legal_tile_coarse, &recomputed.legal_tile_coarse),
+                ("fine_coarse", &forward.fov.fine_coarse, &recomputed.fine_coarse),
+                ("origin_y", &forward.fov.origin_y, &recomputed.origin_y),
+                ("origin_x", &forward.fov.origin_x, &recomputed.origin_x),
+            ] {
+                assert_same_tensor(carried, reference, &format!("{obs_name}.{field}"));
+            }
+            assert_eq!(forward.fov.fine_h, recomputed.fine_h, "{obs_name}.fine_h");
+            assert_eq!(forward.fov.fine_w, recomputed.fine_w, "{obs_name}.fine_w");
+
+            // Greedy mode makes categorical and quantity choices
+            // deterministic; the stochastic actor path intentionally keeps
+            // its existing RNG behavior and is not reseeded here.
+            let optimized_act = tch::no_grad(|| policy.act(obs, true));
+            let reference_act = tch::no_grad(|| policy.act_recomputing_foveation_reference(obs, true));
+            for (field, optimized, reference) in [
+                ("action", &optimized_act.0, &reference_act.0),
+                ("player", &optimized_act.1, &reference_act.1),
+                ("tile", &optimized_act.2, &reference_act.2),
+                ("build", &optimized_act.3, &reference_act.3),
+                ("nuke", &optimized_act.4, &reference_act.4),
+                ("quantity", &optimized_act.5, &reference_act.5),
+                ("logp", &optimized_act.6, &reference_act.6),
+                ("value", &optimized_act.7, &reference_act.7),
+            ] {
+                assert_same_tensor(optimized, reference, &format!("{obs_name}.act.{field}"));
+            }
+
+            let optimized_eval = policy.evaluate(obs, &choice);
+            let reference_eval = policy.evaluate_recomputing_foveation_reference(obs, &choice);
+            for (field, optimized, reference) in [
+                ("logp", &optimized_eval.0, &reference_eval.0),
+                ("entropy", &optimized_eval.1, &reference_eval.1),
+                ("quantity_entropy", &optimized_eval.2, &reference_eval.2),
+                ("value", &optimized_eval.3, &reference_eval.3),
+            ] {
+                assert_same_tensor(optimized, reference, &format!("{obs_name}.evaluate.{field}"));
+            }
+
+            zero_parameter_gradients(&vs);
+            let optimized_loss = optimized_eval.0.mean(Kind::Float)
+                + optimized_eval.1.mean(Kind::Float)
+                + optimized_eval.2.mean(Kind::Float)
+                + optimized_eval.3.mean(Kind::Float);
+            optimized_loss.backward();
+            let optimized_grads = parameter_gradients(&vs);
+
+            zero_parameter_gradients(&vs);
+            let reference_eval = policy.evaluate_recomputing_foveation_reference(obs, &choice);
+            let reference_loss = reference_eval.0.mean(Kind::Float)
+                + reference_eval.1.mean(Kind::Float)
+                + reference_eval.2.mean(Kind::Float)
+                + reference_eval.3.mean(Kind::Float);
+            reference_loss.backward();
+            let reference_grads = parameter_gradients(&vs);
+
+            assert_eq!(optimized_grads.len(), reference_grads.len(), "{obs_name} gradient count");
+            for (name, optimized) in &optimized_grads {
+                let reference =
+                    reference_grads.get(name).unwrap_or_else(|| panic!("{obs_name} missing reference gradient {name}"));
+                assert_same_tensor(optimized, reference, &format!("{obs_name}.gradient.{name}"));
+            }
+        }
     }
 }
 
