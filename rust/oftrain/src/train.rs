@@ -1308,6 +1308,12 @@ fn train_update(
                     let adv = Tensor::from_slice(&adv_flat).to_device(device);
                     let ret = Tensor::from_slice(&ret_flat).to_device(device);
                     let old_logp = Tensor::from_slice(&old_logp_flat).to_device(device);
+                    // ShardBatch crosses from this short-lived builder thread
+                    // to newly spawned learner threads. Complete its
+                    // thread-local stream before handing device tensors over.
+                    if let Device::Cuda(index) = device {
+                        Cuda::synchronize(index as i64);
+                    }
                     (ShardBatch { obs, choice, adv, ret, old_logp }, local_count, local_sum, local_sum_sq)
                 })
             })
@@ -1690,6 +1696,13 @@ pub fn run(cfg: Config) -> Result<()> {
             policy: learner_policy,
             opt,
         });
+    }
+    // Initialization and VarStore copies ran on the main thread. Prime
+    // collection uses fresh collector threads with different CUDA streams.
+    for &device in &devices {
+        if let Device::Cuda(index) = device {
+            Cuda::synchronize(index as i64);
+        }
     }
     println!("[train] all {total_envs} envs ready");
 
