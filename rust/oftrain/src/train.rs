@@ -655,10 +655,14 @@ struct ActorShard {
     device: Device,
     workers: Vec<Worker>,
     cur_obs: Vec<PreparedObs>,
+    /// Libtorch's CUDA current stream is thread-local. The persistent actor
+    /// creates, uses, and drops this VarStore and every tensor derived from it
+    /// on its one owner thread; no policy/AE tensor is sent through a channel.
     vs: nn::VarStore,
     policy: PolicyNet,
     ae: Option<crate::ae::AePair>,
-    /// CUDA tensors remain owned and used exclusively by this actor shard.
+    /// Shares that same actor-thread CUDA stream ownership. Cached terrain,
+    /// shared fine/coarse inputs, and encoder outputs never enter a rollout.
     terrain_cache: crate::ae::TerrainDeviceCache,
 }
 
@@ -780,6 +784,9 @@ fn act_group(
     if n == 0 {
         return Ok((Vec::new(), Vec::new(), Vec::new()));
     }
+    // `obs_t` and all shared AE input/output temporaries are created and
+    // consumed on this actor thread's CUDA stream. In compact mode the only
+    // rollout representation retained after this call is host-owned CompactGrid.
     let obs_t = if let Some(ae) = actor.ae.as_ref() {
         if cfg.compact_rollout && cfg.foveate {
             batch::build_compact_rollout_obs(
@@ -1481,7 +1488,7 @@ fn build_actor_shard(
         vs,
         policy,
         ae,
-        terrain_cache: crate::ae::TerrainDeviceCache::new(device),
+        terrain_cache: crate::ae::TerrainDeviceCache::new_persistent_actor(device),
     })
 }
 

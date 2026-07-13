@@ -254,6 +254,7 @@ pub fn pack_fallout(fallout: &[u8]) -> Vec<f32> {
 /// rollout or cross into a learner thread.
 pub struct TerrainDeviceCache {
     device: Device,
+    shared_pair_inputs: bool,
     entries: HashMap<u64, (TerrainCacheKey, Arc<str>, Tensor)>,
     uploads: u64,
 }
@@ -262,9 +263,23 @@ impl TerrainDeviceCache {
     pub fn new(device: Device) -> Self {
         Self {
             device,
+            shared_pair_inputs: false,
             entries: HashMap::new(),
             uploads: 0,
         }
+    }
+
+    /// Enable shared fine/coarse inputs only for a cache whose entire lifetime
+    /// is pinned to one persistent actor thread and its thread-local CUDA stream.
+    pub fn new_persistent_actor(device: Device) -> Self {
+        Self {
+            shared_pair_inputs: true,
+            ..Self::new(device)
+        }
+    }
+
+    pub(crate) fn supports_shared_pair_inputs(&self) -> bool {
+        self.shared_pair_inputs
     }
 
     fn static_tensor(&mut self, terrain: &StaticTerrain) -> Tensor {
@@ -305,6 +320,70 @@ impl TerrainDeviceCache {
 /// chunks by pixel budget (mirrors `rl/obs.py::MAX_ENC_PIX`).
 pub const MAX_ENC_PIX: usize = 16_000_000;
 
+fn validate_items(items: &[&AeRaw]) -> Result<HashMap<(usize, usize), Vec<usize>>> {
+    let mut groups: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+    for (i, it) in items.iter().enumerate() {
+        anyhow::ensure!(
+            it.hr > 0 && it.wr > 0,
+            "AE item {i} shape {}x{} must be non-zero",
+            it.hr,
+            it.wr
+        );
+        anyhow::ensure!(
+            it.hr % REGION as usize == 0 && it.wr % REGION as usize == 0,
+            "AE item {i} shape {}x{} is not divisible by REGION={REGION}",
+            it.hr,
+            it.wr
+        );
+        let pix = it.hr * it.wr;
+        let fine_gh = it.hr / REGION as usize;
+        let fine_gw = it.wr / REGION as usize;
+        anyhow::ensure!(
+            it.owners.len() == pix,
+            "AE item {i} owners len {}, expected {pix}",
+            it.owners.len()
+        );
+        anyhow::ensure!(
+            it.fallout.len() == pix,
+            "AE item {i} fallout len {}, expected {pix}",
+            it.fallout.len()
+        );
+        anyhow::ensure!(
+            it.stat.len() == NUM_STATIC as usize * fine_gh * fine_gw,
+            "AE item {i} stat len {}, expected {}",
+            it.stat.len(),
+            NUM_STATIC as usize * fine_gh * fine_gw
+        );
+        anyhow::ensure!(
+            it.static_terrain.key.hr == it.hr && it.static_terrain.key.wr == it.wr,
+            "AE item {i} static terrain shape {}x{} does not match raw shape {}x{}",
+            it.static_terrain.key.hr,
+            it.static_terrain.key.wr,
+            it.hr,
+            it.wr
+        );
+        anyhow::ensure!(
+            it.static_terrain.land_mag.len() == 2 * pix,
+            "AE item {i} static terrain len {}, expected {}",
+            it.static_terrain.land_mag.len(),
+            2 * pix
+        );
+        if let Some((offset, owner)) = it
+            .owners
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|&(_, owner)| owner as i64 >= MAX_SLOTS)
+        {
+            anyhow::bail!(
+                "AE item {i} owner[{offset}]={owner} is outside embedding range 0..{MAX_SLOTS}"
+            );
+        }
+        groups.entry((it.hr, it.wr)).or_default().push(i);
+    }
+    Ok(groups)
+}
+
 /// Upload compact owner slots synchronously, then widen on the encoder's
 /// device immediately before embedding lookup. The range check belongs at
 /// this conversion boundary so malformed u8 payloads cannot reach CUDA's
@@ -334,47 +413,7 @@ pub fn encode_latent_batch_device(
     // Returns one (latent_c, gh, gw) tensor per item, in input order.
     let n = items.len();
     let mut out: Vec<Option<Tensor>> = (0..n).map(|_| None).collect();
-    let mut groups: std::collections::HashMap<(usize, usize), Vec<usize>> =
-        std::collections::HashMap::new();
-    for (i, it) in items.iter().enumerate() {
-        anyhow::ensure!(
-            it.hr % REGION as usize == 0 && it.wr % REGION as usize == 0,
-            "AE item {i} shape {}x{} is not divisible by REGION={REGION}",
-            it.hr,
-            it.wr
-        );
-        let pix = it.hr * it.wr;
-        let fine_gh = it.hr / REGION as usize;
-        let fine_gw = it.wr / REGION as usize;
-        anyhow::ensure!(
-            it.owners.len() == pix,
-            "AE item {i} owners len {}, expected {pix}",
-            it.owners.len()
-        );
-        anyhow::ensure!(
-            it.fallout.len() == pix,
-            "AE item {i} fallout len {}, expected {pix}",
-            it.fallout.len()
-        );
-        anyhow::ensure!(
-            it.stat.len() == NUM_STATIC as usize * fine_gh * fine_gw,
-            "AE item {i} stat len {}, expected {}",
-            it.stat.len(),
-            NUM_STATIC as usize * fine_gh * fine_gw
-        );
-        if let Some((offset, owner)) = it
-            .owners
-            .iter()
-            .copied()
-            .enumerate()
-            .find(|&(_, owner)| owner as i64 >= MAX_SLOTS)
-        {
-            anyhow::bail!(
-                "AE item {i} owner[{offset}]={owner} is outside embedding range 0..{MAX_SLOTS}"
-            );
-        }
-        groups.entry((it.hr, it.wr)).or_default().push(i);
-    }
+    let groups = validate_items(items)?;
 
     for ((hr, wr), idxs) in groups {
         let pix = hr * wr;
@@ -465,6 +504,160 @@ pub fn encode_latent_batch_device(
         .enumerate()
         .map(|(i, t)| t.with_context(|| format!("missing AE latent for item {i}")))
         .collect()
+}
+
+/// Per-item fine and coarse latent views produced from shared device inputs.
+#[derive(Debug)]
+pub struct DualLatents {
+    pub fine: Vec<Tensor>,
+    pub coarse: Vec<Tensor>,
+}
+
+/// Paired actor encode using one input upload per same-shape chunk.
+///
+/// The AE pair, cache, packed inputs, temporary tensors, and returned latent
+/// views are all actor-thread-owned. On CUDA, libtorch operations are enqueued
+/// on that actor thread's current stream; none of these tensors may cross the
+/// actor/learner boundary. The caller must compact or synchronously copy the
+/// final rollout payload to host before returning it from the actor.
+pub fn encode_dual_latent_batch_device(
+    pair: &AePair,
+    items: &[&AeRaw],
+    device: Device,
+    terrain_cache: &mut TerrainDeviceCache,
+) -> Result<DualLatents> {
+    let coarse = pair
+        .coarse
+        .as_ref()
+        .context("dual AE encode requires a coarse encoder")?;
+    anyhow::ensure!(
+        pair.fine.latent_down == REGION,
+        "dual AE fine latent_down {}, expected {REGION}",
+        pair.fine.latent_down
+    );
+    anyhow::ensure!(
+        coarse.latent_down == COARSE_REGION,
+        "dual AE coarse latent_down {}, expected {COARSE_REGION}",
+        coarse.latent_down
+    );
+    anyhow::ensure!(
+        terrain_cache.device == device,
+        "terrain cache device {:?} does not match encode device {:?}",
+        terrain_cache.device,
+        device
+    );
+    anyhow::ensure!(
+        terrain_cache.supports_shared_pair_inputs(),
+        "dual AE encode requires persistent actor cache ownership"
+    );
+
+    let groups = validate_items(items)?;
+    let mut fine_out: Vec<Option<Tensor>> = (0..items.len()).map(|_| None).collect();
+    let mut coarse_out: Vec<Option<Tensor>> = (0..items.len()).map(|_| None).collect();
+
+    for ((hr, wr), idxs) in groups {
+        let pix = hr * wr;
+        let per = (MAX_ENC_PIX / pix).max(1);
+        for chunk in idxs.chunks(per) {
+            let b = chunk.len() as i64;
+            let use_terrain_cache = device.is_cuda();
+            let mut owners = Vec::with_capacity(chunk.len() * pix);
+            let mut terrain = Vec::with_capacity(if use_terrain_cache {
+                0
+            } else {
+                chunk.len() * TERRAIN_CHANNELS as usize * pix
+            });
+            let mut fallout = Vec::with_capacity(if use_terrain_cache {
+                chunk.len() * pix
+            } else {
+                0
+            });
+            let fine_gh = hr / REGION as usize;
+            let fine_gw = wr / REGION as usize;
+            let mut fine_static =
+                Vec::with_capacity(chunk.len() * NUM_STATIC as usize * fine_gh * fine_gw);
+            for &i in chunk {
+                let item = items[i];
+                owners.extend_from_slice(&item.owners);
+                if use_terrain_cache {
+                    fallout.extend_from_slice(&item.fallout);
+                } else {
+                    terrain.extend_from_slice(item.static_terrain.land_mag.as_ref());
+                    terrain.extend_from_slice(&item.fallout);
+                }
+                fine_static.extend_from_slice(&item.stat);
+            }
+
+            // Every host-backed H2D above/below is synchronous. In particular,
+            // no nonblocking copy may outlive these temporary packed vectors.
+            // Owners cross as u8 and widen to int64 only on the target device.
+            let owners_t = upload_owner_indices(&owners, [b, hr as i64, wr as i64], device)?;
+            let terrain_t = if use_terrain_cache {
+                let static_items: Vec<Tensor> = chunk
+                    .iter()
+                    .map(|&i| terrain_cache.static_tensor(&items[i].static_terrain))
+                    .collect();
+                let static_refs: Vec<&Tensor> = static_items.iter().collect();
+                let static_t = Tensor::stack(&static_refs, 0);
+                let fallout_t = Tensor::from_slice(&fallout)
+                    .view([b, 1, hr as i64, wr as i64])
+                    .to_device(device)
+                    .to_kind(Kind::Float);
+                Tensor::cat(&[static_t, fallout_t], 1)
+            } else {
+                Tensor::from_slice(&terrain)
+                    .view([b, TERRAIN_CHANNELS, hr as i64, wr as i64])
+                    .to_device(device)
+                    .to_kind(Kind::Float)
+            };
+            let fine_static_t = Tensor::from_slice(&fine_static)
+                .view([b, NUM_STATIC, fine_gh as i64, fine_gw as i64])
+                .to_device(device)
+                .to_kind(Kind::Float);
+
+            let (fine_z, coarse_z) = tch::no_grad(|| {
+                let fine_z = pair.fine.encode(&owners_t, &terrain_t, &fine_static_t);
+                // This exactly matches F.max_pool2d(kernel=2, stride=2,
+                // ceil_mode=True): odd fine edges are retained, not dropped.
+                let coarse_static_t =
+                    fine_static_t.max_pool2d([2, 2], [2, 2], [0, 0], [1, 1], true);
+                let coarse_z = coarse.encode(&owners_t, &terrain_t, &coarse_static_t);
+                (fine_z, coarse_z)
+            });
+            let coarse_gh = fine_gh.div_ceil(2);
+            let coarse_gw = fine_gw.div_ceil(2);
+            anyhow::ensure!(
+                fine_z.size() == [b, pair.fine.latent_c, fine_gh as i64, fine_gw as i64],
+                "fine AE output shape {:?}, expected [{b}, {}, {fine_gh}, {fine_gw}]",
+                fine_z.size(),
+                pair.fine.latent_c
+            );
+            anyhow::ensure!(
+                coarse_z.size() == [b, coarse.latent_c, coarse_gh as i64, coarse_gw as i64],
+                "coarse AE output shape {:?}, expected [{b}, {}, {coarse_gh}, {coarse_gw}]",
+                coarse_z.size(),
+                coarse.latent_c
+            );
+            for (j, &i) in chunk.iter().enumerate() {
+                fine_out[i] = Some(fine_z.select(0, j as i64));
+                coarse_out[i] = Some(coarse_z.select(0, j as i64));
+            }
+        }
+    }
+
+    let collect = |name: &str, values: Vec<Option<Tensor>>| {
+        values
+            .into_iter()
+            .enumerate()
+            .map(|(i, value)| {
+                value.with_context(|| format!("missing {name} AE latent for item {i}"))
+            })
+            .collect::<Result<Vec<_>>>()
+    };
+    Ok(DualLatents {
+        fine: collect("fine", fine_out)?,
+        coarse: collect("coarse", coarse_out)?,
+    })
 }
 
 /// 2x max-pool over (C,H,W) host planes with ceil mode (odd dims keep a
@@ -561,6 +754,20 @@ mod tests {
 
     fn flat_f32(tensor: &Tensor) -> Vec<f32> {
         Vec::<f32>::try_from(tensor.reshape([-1])).unwrap()
+    }
+
+    fn random_pair() -> AePair {
+        tch::manual_seed(73);
+        let fine_vs = nn::VarStore::new(Device::Cpu);
+        let fine = SpatialAE::new(&fine_vs.root(), LATENT_C, REGION).unwrap();
+        let coarse_vs = nn::VarStore::new(Device::Cpu);
+        let coarse = SpatialAE::new(&coarse_vs.root(), LATENT_C, COARSE_REGION).unwrap();
+        AePair {
+            fine,
+            _fine_vs: fine_vs,
+            coarse: Some(coarse),
+            _coarse_vs: Some(coarse_vs),
+        }
     }
 
     #[test]
@@ -665,6 +872,88 @@ mod tests {
         };
         let z = encode_latent_batch_device(&ae, &[&raw], Device::Cpu, None).unwrap();
         assert_eq!(z[0].size(), [LATENT_C, 2, 3]);
+    }
+
+    #[test]
+    fn dual_encode_exactly_matches_separate_for_even_odd_and_mixed_order() {
+        let pair = random_pair();
+        // Fine dimensions are odd 3x5, even 2x4, then 4x3. The repeated
+        // first shape at the end verifies shape grouping restores input order.
+        let raws = [
+            patterned_raw(1, 24, 40),
+            patterned_raw(2, 16, 32),
+            patterned_raw(3, 32, 24),
+            patterned_raw(4, 24, 40),
+        ];
+        let refs: Vec<&AeRaw> = raws.iter().collect();
+        let separate_fine =
+            encode_latent_batch_device(&pair.fine, &refs, Device::Cpu, None).unwrap();
+        let separate_coarse =
+            encode_latent_batch_device(pair.coarse.as_ref().unwrap(), &refs, Device::Cpu, None)
+                .unwrap();
+        let mut cache = TerrainDeviceCache::new_persistent_actor(Device::Cpu);
+        let shared =
+            encode_dual_latent_batch_device(&pair, &refs, Device::Cpu, &mut cache).unwrap();
+
+        for i in 0..refs.len() {
+            assert_eq!(
+                shared.fine[i].size(),
+                separate_fine[i].size(),
+                "fine shape/order item {i}"
+            );
+            assert_eq!(
+                shared.coarse[i].size(),
+                separate_coarse[i].size(),
+                "coarse shape/order item {i}"
+            );
+            assert_eq!(
+                flat_f32(&shared.fine[i]),
+                flat_f32(&separate_fine[i]),
+                "fine values item {i}"
+            );
+            assert_eq!(
+                flat_f32(&shared.coarse[i]),
+                flat_f32(&separate_coarse[i]),
+                "coarse values item {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn dual_encode_validates_owner_and_static_payload_before_encoding() {
+        let pair = random_pair();
+        let mut cache = TerrainDeviceCache::new_persistent_actor(Device::Cpu);
+
+        let mut invalid_owner = patterned_raw(5, 16, 16);
+        invalid_owner.owners[37] = MAX_SLOTS as u8;
+        let err =
+            encode_dual_latent_batch_device(&pair, &[&invalid_owner], Device::Cpu, &mut cache)
+                .expect_err("invalid packed owner must fail");
+        assert!(err.to_string().contains("owner[37]=128"));
+
+        let mut invalid_static = patterned_raw(6, 16, 16);
+        invalid_static.static_terrain.land_mag = vec![0.0; 2 * 16 * 16 - 1].into();
+        let err =
+            encode_dual_latent_batch_device(&pair, &[&invalid_static], Device::Cpu, &mut cache)
+                .expect_err("short static terrain must fail");
+        assert!(err.to_string().contains("static terrain len"));
+
+        let mut mismatched_shape = patterned_raw(7, 16, 16);
+        mismatched_shape.static_terrain.key.wr = 24;
+        let err =
+            encode_dual_latent_batch_device(&pair, &[&mismatched_shape], Device::Cpu, &mut cache)
+                .expect_err("mismatched static terrain shape must fail");
+        assert!(err.to_string().contains("does not match raw shape"));
+    }
+
+    #[test]
+    fn dual_encode_rejects_non_persistent_cache_ownership() {
+        let pair = random_pair();
+        let raw = patterned_raw(8, 16, 16);
+        let mut legacy_cache = TerrainDeviceCache::new(Device::Cpu);
+        let err = encode_dual_latent_batch_device(&pair, &[&raw], Device::Cpu, &mut legacy_cache)
+            .expect_err("legacy/non-persistent cache must retain separate encoding");
+        assert!(err.to_string().contains("persistent actor cache ownership"));
     }
 
     #[test]
