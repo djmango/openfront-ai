@@ -725,9 +725,6 @@ impl Execution for WarshipExecution {
                 self.retreating = true;
                 self.retreat_port = Some(port);
                 self.active_healing_remainder = 0.0;
-                self.target_tile = None;
-                self.path.clear();
-                self.path_idx = 0;
                 if self.retreat(game, from, unit_id) {
                     return;
                 }
@@ -1883,6 +1880,51 @@ mod tests {
                 "full current port must be replaced by the nearest available port"
             );
             assert_eq!(exec.target_tile, Some(available_port));
+        }
+
+        #[test]
+        fn initial_repair_retreat_does_not_count_self_as_docked_at_better_port() {
+            let mut game = water_game(40, 20);
+            let p1 = add_nation(&mut game, "p1");
+            let full_port = game.ref_xy(10, 10);
+            let available_port = game.ref_xy(16, 10);
+            let ship_tile = game.ref_xy(12, 10);
+            let stale_patrol_target = game.ref_xy(30, 10);
+            game.build_unit(p1, unit_type::PORT, full_port);
+            game.build_unit(p1, unit_type::PORT, available_port);
+            let docked_ship = game.build_unit(p1, unit_type::WARSHIP, full_port);
+            let retreating_ship = game.build_unit(p1, unit_type::WARSHIP, ship_tile);
+            let docked_max_health = game.unit_max_health(p1, docked_ship);
+            game.unit_mut(p1, docked_ship).unwrap().health = docked_max_health * 50 / 100;
+
+            for _ in 0..55 {
+                game.execute_next_tick();
+            }
+
+            let mut docked_exec = WarshipExecution::new_for_test(p1, full_port, docked_ship);
+            docked_exec.docked = true;
+            docked_exec.retreat_port = Some(full_port);
+            game.push_exec_for_test(ExecEnum::Warship(docked_exec));
+
+            let max_health = game.unit_max_health(p1, retreating_ship);
+            game.unit_mut(p1, retreating_ship).unwrap().health = max_health * 50 / 100;
+
+            let mut exec = WarshipExecution::new_for_test(p1, ship_tile, retreating_ship);
+            exec.target_tile = Some(stale_patrol_target);
+            game.push_exec_for_test(ExecEnum::Warship(exec));
+            game.execute_next_tick();
+
+            let exec = game
+                .live_warships()
+                .find(|warship| warship.unit_id() == Some(retreating_ship))
+                .expect("retreating warship execution after tick");
+            assert_eq!(
+                exec.retreat_port,
+                Some(available_port),
+                "the newly retreating ship still has its stale target while alternatives are checked"
+            );
+            assert!(exec.docked, "available nearby port should dock the ship immediately");
+            assert!(exec.target_tile.is_none(), "docking clears the target tile");
         }
 
         #[test]
