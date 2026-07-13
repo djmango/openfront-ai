@@ -1745,7 +1745,7 @@ fn try_send_nation_bot_attack(
     difficulty: &str,
 ) -> bool {
     if game.shares_land_border_with(attacker_small_id, target_small_id) {
-        let Some(troops) = nation_bot_attack_troops(
+        let Some(raw_troops) = nation_bot_attack_troops(
             game,
             attacker_small_id,
             target_small_id,
@@ -1760,17 +1760,22 @@ fn try_send_nation_bot_attack(
         // bot-specific `calculateBotAttackTroops` branch feeds straight into
         // the same shared cap/weak-check below it) - not just the plain
         // land/boat-vs-non-bot path.
+        //
+        // `calculateBotAttackTroops` also increments `botAttackTroopsSent`
+        // before that shared cap is applied. Keep the same raw-budget
+        // accounting so a capped first bot attack can still prevent later
+        // parallel bot attacks in this tick.
+        *bot_attack_troops_sent += raw_troops;
         let Some(troops) =
-            cap_player_attack_troops(game, attacker_small_id, target_small_id, troops)
+            cap_player_attack_troops(game, attacker_small_id, target_small_id, raw_troops)
         else {
             return false;
         };
         let target_id = game.player_by_small_id(target_small_id).unwrap().id.clone();
         game.add_land_attack(attacker_small_id, Some(target_id), Some(troops));
-        *bot_attack_troops_sent += troops;
         return true;
     }
-    let Some(troops) = nation_bot_attack_troops(
+    let Some(raw_troops) = nation_bot_attack_troops(
         game,
         attacker_small_id,
         target_small_id,
@@ -1780,8 +1785,9 @@ fn try_send_nation_bot_attack(
     ) else {
         return false;
     };
+    *bot_attack_troops_sent += raw_troops;
     let Some(troops) =
-        cap_player_attack_troops(game, attacker_small_id, target_small_id, troops)
+        cap_player_attack_troops(game, attacker_small_id, target_small_id, raw_troops)
     else {
         return false;
     };
@@ -1791,7 +1797,6 @@ fn try_send_nation_bot_attack(
         target_small_id,
         troops,
     ) {
-        *bot_attack_troops_sent += troops;
         return true;
     }
     false
@@ -2251,6 +2256,30 @@ mod ai_attack_behavior_tests {
     }
 
     #[test]
+    fn incoming_attacks_ignore_zero_tile_attackers() {
+        let Some(mut game) = new_game("Hard", "Free For All") else {
+            return;
+        };
+        let attacker = add_player(&mut game, "attacker_id", PlayerType::Nation);
+        let defender = add_player(&mut game, "defender_id", PlayerType::Nation);
+        conquer_round_robin(&mut game, &[attacker, defender], 40);
+        game.add_troops(attacker, 100_000.0);
+
+        let defender_id = game.player_by_small_id(defender).unwrap().id.clone();
+        game.add_land_attack(attacker, Some(defender_id), Some(10_000.0));
+        game.execute_next_tick();
+        assert_eq!(game.incoming_attacks(defender, false).len(), 1);
+
+        // TS `PlayerImpl.incomingAttacks()` filters by `attacker().isAlive()`,
+        // which is `_tiles.size > 0`, not a sticky liveness flag.
+        let attacker_player = game.player_by_small_id_mut(attacker).unwrap();
+        attacker_player.tiles_owned = 0;
+        attacker_player.alive = true;
+
+        assert!(game.incoming_attacks(defender, false).is_empty());
+    }
+
+    #[test]
     fn nation_cannot_attack_allied_player() {
         let Some(mut game) = new_game("Medium", "Free For All") else {
             return;
@@ -2369,6 +2398,52 @@ mod ai_attack_behavior_tests {
         assert!(
             start_troops <= expected_cap,
             "start_troops={start_troops} expected_cap={expected_cap}"
+        );
+    }
+
+    #[test]
+    fn capped_parallel_bot_attacks_budget_against_raw_troops() {
+        let Some(mut game) = new_game("Hard", "Free For All") else {
+            return;
+        };
+        let attacker = add_player(&mut game, "attacker_id", PlayerType::Nation);
+        let neighbor = add_player(&mut game, "neighbor_id", PlayerType::Human);
+        let bot1 = add_player(&mut game, "bot1_id", PlayerType::Bot);
+        let bot2 = add_player(&mut game, "bot2_id", PlayerType::Bot);
+        conquer_round_robin(&mut game, &[attacker, neighbor, bot1, bot2], 400);
+        game.add_troops(attacker, 200_000.0);
+        game.add_troops(neighbor, 200_000.0);
+        game.add_troops(bot1, 25_000.0);
+        game.add_troops(bot2, 25_000.0);
+
+        let mut random = PseudoRandom::new(42);
+        let mut sent = 0.0;
+        assert!(attack_bots(
+            &mut game,
+            &mut random,
+            attacker,
+            0.3,
+            0.2,
+            &mut sent,
+            "Hard",
+        ));
+
+        game.execute_next_tick();
+        let attacks: Vec<_> = game
+            .active_attacks_debug()
+            .into_iter()
+            .filter(|(owner, target, ..)| {
+                *owner == attacker && (*target == bot1 || *target == bot2)
+            })
+            .collect();
+        assert_eq!(
+            attacks.len(),
+            1,
+            "raw pre-cap bot budget should block a second parallel bot attack: {attacks:?}"
+        );
+        assert!(
+            sent > attacks[0].2,
+            "budget should track the raw allocation, not capped start troops"
         );
     }
 
