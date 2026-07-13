@@ -24,6 +24,7 @@ crossbeam-channel = "0.5"
 libc = "0.2"
 # In-process native engine (same workspace since the rust-ofrs-fast merge).
 openfront-engine = { path = "../engine", optional = true }
+half = "2.7.1"
 
 [features]
 default = []

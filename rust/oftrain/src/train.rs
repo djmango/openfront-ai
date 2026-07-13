@@ -55,21 +55,21 @@
 //!   moment getters / `state_dict`. Handled via `--resume-warmup-updates`
 //!   (default 100) so LR warms in while moments rebuild after `--resume`
 //!   (documented on `Config::resume` / `Config::resume_warmup_updates`).
-//! - **fp16 host storage**: grids stay f32 on the host; `--fp16-rollout`
-//!   (opt-in) casts to Half only for the H2D upload then back to Float on
-//!   device.
+//! - **fp16 host storage**: `--compact-rollout` stores foveated grids as
+//!   host fp16. The legacy path stays f32; `--fp16-rollout` only changes
+//!   its H2D transfer dtype.
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use ofcore::feat::ACTIONS;
 use ofcore::translate::Choice;
-use rand::seq::SliceRandom;
 use rand::SeedableRng;
+use rand::seq::SliceRandom;
 use tch::nn::OptimizerConfig;
-use tch::{nn, Cuda, Device, Kind, Tensor};
+use tch::{Device, Kind, Tensor, nn};
 
 use crate::autoscale;
 use crate::batch::{self, ChoiceScalars};
@@ -259,6 +259,9 @@ pub struct Config {
     /// `PreparedObs.grid` stays f32. Default off (opt-in); pod_train_v8
     /// enables it via EXTRA_ARGS.
     pub fp16_rollout: bool,
+    /// Host-owned fp16 foveated rollout payload. Effective only together
+    /// with `foveate`; no actor device tensor crosses into learner threads.
+    pub compact_rollout: bool,
     /// `--pipeline-groups`: split env workers into two halves and overlap
     /// act(g1) with step(g0) inside each rollout step (Python v4.1
     /// dual-group pipelining). Default on; with N=1 the second group is
@@ -459,7 +462,11 @@ fn engine_for_idx(idx: usize, default: EngineKind, node_fraction: f64) -> Engine
     }
     let before = (idx as f64 * node_fraction).floor() as i64;
     let after = ((idx + 1) as f64 * node_fraction).floor() as i64;
-    if after > before { EngineKind::Node } else { default }
+    if after > before {
+        EngineKind::Node
+    } else {
+        default
+    }
 }
 
 fn spawn_worker(
@@ -472,42 +479,52 @@ fn spawn_worker(
     let (stage_tx, stage_rx) = mpsc::channel::<usize>();
     let (obs_tx, obs_rx) = mpsc::channel();
     let (init_tx, init_rx) = mpsc::channel::<Result<PreparedObs, String>>();
-    let handle = std::thread::Builder::new().name(format!("env{idx}")).spawn(move || {
-        let mut w = match EnvWorker::new(idx, stage, max_ticks, engine) {
-            Ok(w) => w,
-            Err(e) => {
-                let _ = init_tx.send(Err(format!("{e:#}")));
+    let handle = std::thread::Builder::new()
+        .name(format!("env{idx}"))
+        .spawn(move || {
+            let mut w = match EnvWorker::new(idx, stage, max_ticks, engine) {
+                Ok(w) => w,
+                Err(e) => {
+                    let _ = init_tx.send(Err(format!("{e:#}")));
+                    return;
+                }
+            };
+            let first = w.prepare();
+            if init_tx.send(Ok(first)).is_err() {
                 return;
             }
-        };
-        let first = w.prepare();
-        if init_tx.send(Ok(first)).is_err() {
-            return;
-        }
-        while let Ok(choice) = choice_rx.recv() {
-            // Curriculum advance: take the newest pending stage (if any);
-            // takes effect at this env's *next* episode reset inside
-            // `step()`, matching `rl/vec.py::set_stage`'s per-episode
-            // sampling (never mid-episode).
-            let mut new_stage = None;
-            while let Ok(s) = stage_rx.try_recv() {
-                new_stage = Some(s);
+            while let Ok(choice) = choice_rx.recv() {
+                // Curriculum advance: take the newest pending stage (if any);
+                // takes effect at this env's *next* episode reset inside
+                // `step()`, matching `rl/vec.py::set_stage`'s per-episode
+                // sampling (never mid-episode).
+                let mut new_stage = None;
+                while let Ok(s) = stage_rx.try_recv() {
+                    new_stage = Some(s);
+                }
+                if let Some(s) = new_stage {
+                    w.set_stage(s);
+                }
+                let result = w.step(&choice).map_err(|e| format!("{e:#}"));
+                if obs_tx.send(result).is_err() {
+                    break;
+                }
             }
-            if let Some(s) = new_stage {
-                w.set_stage(s);
-            }
-            let result = w.step(&choice).map_err(|e| format!("{e:#}"));
-            if obs_tx.send(result).is_err() {
-                break;
-            }
-        }
-        w.close();
-    })?;
+            w.close();
+        })?;
     let first = init_rx
         .recv()
         .map_err(|_| anyhow!("env {idx} died before first obs"))?
         .map_err(|e| anyhow!("env {idx}: {e}"))?;
-    Ok((Worker { choice_tx, stage_tx, obs_rx, handle }, first))
+    Ok((
+        Worker {
+            choice_tx,
+            stage_tx,
+            obs_rx,
+            handle,
+        },
+        first,
+    ))
 }
 
 fn action_needs_player(a: i64) -> bool {
@@ -523,7 +540,6 @@ fn action_needs_quantity(a: i64) -> bool {
 /// One (T, N) rollout buffer slot (N = envs in this shard).
 struct Step {
     obs: PreparedObs,
-    resident: Option<batch::ResidentLatents>,
     choice: ChoiceScalars,
     logp: f32,
     value: f32,
@@ -544,6 +560,8 @@ struct ActorShard {
     vs: nn::VarStore,
     policy: PolicyNet,
     ae: Option<crate::ae::AePair>,
+    /// CUDA tensors remain owned and used exclusively by this actor shard.
+    terrain_cache: crate::ae::TerrainDeviceCache,
 }
 
 /// One GPU replica's trainable weights/optimizer. `run()` holds one
@@ -608,39 +626,41 @@ fn choice_from_act_vecs(
 }
 
 /// Encode + act for a contiguous worker slice `[start, end)`. Returns
-/// per-env choice scalars / logp / value / resident AE latents aligned to
-/// the slice (length `end - start`).
+/// per-env choice scalars / logp / value aligned to the slice (length
+/// `end - start`).
 fn act_group(
     actor: &mut ActorShard,
     cfg: &Config,
     start: usize,
     end: usize,
-) -> Result<(
-    Vec<ChoiceScalars>,
-    Vec<f32>,
-    Vec<f32>,
-    Vec<Option<batch::ResidentLatents>>,
-)> {
+) -> Result<(Vec<ChoiceScalars>, Vec<f32>, Vec<f32>)> {
     let n = end - start;
     if n == 0 {
-        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
     }
-    let (obs_t, resident) = if let Some(ae) = actor.ae.as_ref() {
-        let obs_refs: Vec<&PreparedObs> = actor.cur_obs[start..end].iter().collect();
-        let (obs, resident) = batch::encode_rollout_obs(
-            &obs_refs,
-            actor.device,
-            cfg.pinned_h2d,
-            cfg.fp16_rollout,
-            ae,
-        )?;
-        (obs, resident.into_iter().map(Some).collect())
+    let obs_t = if let Some(ae) = actor.ae.as_ref() {
+        if cfg.compact_rollout && cfg.foveate {
+            batch::build_compact_rollout_obs(
+                &mut actor.cur_obs[start..end],
+                actor.device,
+                cfg.pinned_h2d,
+                cfg.fp16_rollout,
+                ae,
+                &mut actor.terrain_cache,
+            )?
+        } else {
+            batch::build_rollout_obs(
+                &mut actor.cur_obs[start..end],
+                actor.device,
+                cfg.pinned_h2d,
+                cfg.fp16_rollout,
+                ae,
+                &mut actor.terrain_cache,
+            )?
+        }
     } else {
         let obs_refs: Vec<&PreparedObs> = actor.cur_obs[start..end].iter().collect();
-        (
-            batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d, cfg.fp16_rollout),
-            (0..n).map(|_| None).collect(),
-        )
+        batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d, cfg.fp16_rollout)
     };
     let (a, player, tile, build, nuke, qty, logp, value) =
         tch::no_grad(|| actor.policy.act(&obs_t, false));
@@ -664,7 +684,7 @@ fn act_group(
             .map_err(|_| anyhow!("env {} choice channel closed", start + i))?;
         scalars.push(sc);
     }
-    Ok((scalars, logp_v, value_v, resident))
+    Ok((scalars, logp_v, value_v))
 }
 
 fn recv_group(
@@ -674,7 +694,6 @@ fn recv_group(
     scalars: &[ChoiceScalars],
     logp_v: &[f32],
     value_v: &[f32],
-    resident: &mut [Option<batch::ResidentLatents>],
     step_row: &mut [Option<Step>],
     ep_infos: &mut Vec<EpisodeInfo>,
 ) -> Result<()> {
@@ -690,7 +709,6 @@ fn recv_group(
         let prev_obs = std::mem::replace(&mut actor.cur_obs[i], next_obs);
         step_row[i] = Some(Step {
             obs: prev_obs,
-            resident: resident[j].take(),
             choice: scalars[j].clone(),
             logp: logp_v[j],
             value: value_v[j],
@@ -716,18 +734,12 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
 
     // Prime: act+send group 0 before the step loop (matches Python's
     // `pack0 = act_group(groups[0]); vec.send_group(...)` before `for t`).
-    let (mut pack0_sc, mut pack0_lp, mut pack0_v, mut pack0_resident) =
-        act_group(actor, cfg, g0.0, g0.1)?;
+    let (mut pack0_sc, mut pack0_lp, mut pack0_v) = act_group(actor, cfg, g0.0, g0.1)?;
 
     for t in 0..cfg.rollout_len {
         let mut step_row: Vec<Option<Step>> = (0..n).map(|_| None).collect();
 
-        let mut pack1: Option<(
-            Vec<ChoiceScalars>,
-            Vec<f32>,
-            Vec<f32>,
-            Vec<Option<batch::ResidentLatents>>,
-        )> = None;
+        let mut pack1: Option<(Vec<ChoiceScalars>, Vec<f32>, Vec<f32>)> = None;
         if g1.0 < g1.1 {
             // Overlaps group 0 stepping (choices already in flight).
             pack1 = Some(act_group(actor, cfg, g1.0, g1.1)?);
@@ -740,7 +752,6 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
             &pack0_sc,
             &pack0_lp,
             &pack0_v,
-            &mut pack0_resident,
             &mut step_row,
             &mut ep_infos,
         )?;
@@ -751,10 +762,9 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
             pack0_sc = next.0;
             pack0_lp = next.1;
             pack0_v = next.2;
-            pack0_resident = next.3;
         }
 
-        if let Some((sc1, lp1, v1, resident1)) = pack1.as_mut() {
+        if let Some((sc1, lp1, v1)) = pack1.as_ref() {
             recv_group(
                 actor,
                 g1.0,
@@ -762,7 +772,6 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
                 sc1,
                 lp1,
                 v1,
-                resident1,
                 &mut step_row,
                 &mut ep_infos,
             )?;
@@ -779,13 +788,25 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
     let bootstrap_v: Vec<f32> = {
         let obs_t = if let Some(ae) = actor.ae.as_ref() {
             let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
-            batch::build_obs_with_ae(
-                &obs_refs,
-                actor.device,
-                cfg.pinned_h2d,
-                cfg.fp16_rollout,
-                Some(ae),
-            )?
+            if cfg.compact_rollout && cfg.foveate {
+                batch::build_compact_obs_with_ae(
+                    &obs_refs,
+                    actor.device,
+                    cfg.pinned_h2d,
+                    cfg.fp16_rollout,
+                    ae,
+                    &mut actor.terrain_cache,
+                )?
+            } else {
+                batch::build_obs_with_ae_cached(
+                    &obs_refs,
+                    actor.device,
+                    cfg.pinned_h2d,
+                    cfg.fp16_rollout,
+                    ae,
+                    &mut actor.terrain_cache,
+                )?
+            }
         } else {
             let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
             batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d, cfg.fp16_rollout)
@@ -794,15 +815,11 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
         (&v).try_into()?
     };
 
-    // `Tensor` is Send but CUDA execution is stream-ordered. Complete every
-    // actor-stream write (including the owning latent copies) before moving
-    // this rollout to learner batch-building threads with different
-    // thread-local CUDA streams.
-    if let Device::Cuda(index) = actor.device {
-        Cuda::synchronize(index as i64);
-    }
-
-    Ok(RolloutResult { buffer, bootstrap_v, ep_infos })
+    Ok(RolloutResult {
+        buffer,
+        bootstrap_v,
+        ep_infos,
+    })
 }
 
 /// Result of a fixed-seed greedy eval pass (`run_eval`).
@@ -825,9 +842,14 @@ fn run_eval(
     engine: EngineKind,
     pinned_h2d: bool,
     fp16_rollout: bool,
+    compact_rollout: bool,
 ) -> Result<EvalResult> {
     if episodes == 0 {
-        return Ok(EvalResult { win: 0.0, score: 0.0, episodes: 0 });
+        return Ok(EvalResult {
+            win: 0.0,
+            score: 0.0,
+            episodes: 0,
+        });
     }
     let mut workers = Vec::with_capacity(episodes);
     let mut cur_obs = Vec::with_capacity(episodes);
@@ -837,19 +859,38 @@ fn run_eval(
         cur_obs.push(obs);
     }
     let stages = ofcore::curriculum::stages();
-    let decision_ticks = stages[stage.min(stages.len().saturating_sub(1))].decision_ticks.max(1) as u64;
+    let decision_ticks = stages[stage.min(stages.len().saturating_sub(1))]
+        .decision_ticks
+        .max(1) as u64;
     let step_cap = (max_ticks as u64 / decision_ticks) + 64;
     let mut results: Vec<Option<EpisodeInfo>> = vec![None; episodes];
+    let mut terrain_cache = crate::ae::TerrainDeviceCache::new(device);
 
     for _ in 0..step_cap {
         let pending: Vec<usize> = (0..episodes).filter(|&i| results[i].is_none()).collect();
         if pending.is_empty() {
             break;
         }
-        let batch: Vec<PreparedObs> = pending.iter().map(|&i| cur_obs[i].clone()).collect();
-        let refs: Vec<&PreparedObs> = batch.iter().collect();
-        let obs_t =
-            batch::build_obs_with_ae(&refs, device, pinned_h2d, fp16_rollout, Some(ae))?;
+        let refs: Vec<&PreparedObs> = pending.iter().map(|&i| &cur_obs[i]).collect();
+        let obs_t = if compact_rollout {
+            batch::build_compact_obs_with_ae(
+                &refs,
+                device,
+                pinned_h2d,
+                fp16_rollout,
+                ae,
+                &mut terrain_cache,
+            )?
+        } else {
+            batch::build_obs_with_ae_cached(
+                &refs,
+                device,
+                pinned_h2d,
+                fp16_rollout,
+                ae,
+                &mut terrain_cache,
+            )?
+        };
         let (a, player, tile, build, nuke, qty, _logp, _value) =
             tch::no_grad(|| policy.act(&obs_t, true));
         let a_v: Vec<i64> = (&a).try_into()?;
@@ -900,12 +941,24 @@ fn run_eval(
 
     let finished: Vec<&EpisodeInfo> = results.iter().filter_map(|r| r.as_ref()).collect();
     if finished.is_empty() {
-        return Ok(EvalResult { win: 0.0, score: 0.0, episodes: 0 });
+        return Ok(EvalResult {
+            win: 0.0,
+            score: 0.0,
+            episodes: 0,
+        });
     }
     let n = finished.len() as f64;
-    let win = finished.iter().map(|e| if e.won { 1.0 } else { 0.0 }).sum::<f64>() / n;
+    let win = finished
+        .iter()
+        .map(|e| if e.won { 1.0 } else { 0.0 })
+        .sum::<f64>()
+        / n;
     let score = finished.iter().map(|e| e.score).sum::<f64>() / n;
-    Ok(EvalResult { win, score, episodes: finished.len() })
+    Ok(EvalResult {
+        win,
+        score,
+        episodes: finished.len(),
+    })
 }
 
 /// Averages gradients across all shards and writes the average back onto
@@ -965,7 +1018,9 @@ fn sync_grads(shards: &[LearnerShard]) {
 /// 2026-07-12 entry) for why this gates skipping `opt.step()` for a
 /// minibatch rather than applying a poisoned gradient.
 fn any_loss_non_finite(losses: &[(f64, f64, f64, f64)]) -> bool {
-    losses.iter().any(|(pg, v, ent, entq)| !pg.is_finite() || !v.is_finite() || !ent.is_finite() || !entq.is_finite())
+    losses.iter().any(|(pg, v, ent, entq)| {
+        !pg.is_finite() || !v.is_finite() || !ent.is_finite() || !entq.is_finite()
+    })
 }
 
 /// Running (all-updates-so-far) mean/variance of the value-loss target,
@@ -1033,7 +1088,7 @@ impl RetStat {
 /// update's `collect_rollout` calls (see module doc).
 fn train_update(
     learners: &mut [LearnerShard],
-    pending: &mut [RolloutResult],
+    pending: &[RolloutResult],
     cfg: &Config,
     rng: &mut rand::rngs::SmallRng,
     ent_coef: f32,
@@ -1050,29 +1105,11 @@ fn train_update(
     // Trusting the *original* `cfg.num_envs` here after a scale-up would
     // silently misindex/corrupt the GAE and minibatch buffers the very
     // next update.
-    let n = pending.first().and_then(|r| r.buffer.first()).map(|row| row.len()).unwrap_or(cfg.num_envs);
-    anyhow::ensure!(
-        pending.len() == learners.len(),
-        "rollout shard count {} does not match learner count {}",
-        pending.len(),
-        learners.len()
-    );
-    for (gi, result) in pending.iter().enumerate() {
-        anyhow::ensure!(
-            result.buffer.len() == t_len,
-            "rollout shard {gi} has {} time rows, expected {t_len}",
-            result.buffer.len()
-        );
-        anyhow::ensure!(
-            result.buffer.iter().all(|row| row.len() == n),
-            "rollout shard {gi} has inconsistent env-row width, expected {n}"
-        );
-        anyhow::ensure!(
-            result.bootstrap_v.len() == n,
-            "rollout shard {gi} bootstrap width {}, expected {n}",
-            result.bootstrap_v.len()
-        );
-    }
+    let n = pending
+        .first()
+        .and_then(|r| r.buffer.first())
+        .map(|row| row.len())
+        .unwrap_or(cfg.num_envs);
     let total = t_len * n;
     let minibatch_size = (total / cfg.minibatches.max(1)).max(1);
     // Sums over every (epoch, minibatch) pair, averaged across shards -
@@ -1082,11 +1119,14 @@ fn train_update(
     let mut loss_sums = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let mut n_mb: usize = 0;
 
-    // Per-shard full-rollout tensors, built once and resident for the whole
-    // update. AE channels come directly from each Step's device tensors;
-    // only host-native feature/mask/scalar data is packed and uploaded.
-    // `epochs`>1 revisits this same rollout under different minibatch
-    // shuffles via GPU-side `index_select`.
+    // Per-shard full-rollout tensors, built once (CPU repack + one
+    // host->device upload) and resident on that shard's device for the
+    // whole update. `epochs`>1 revisits this same rollout under different
+    // minibatch shuffles - rebuilding+re-uploading the observation grid
+    // from scratch for every (epoch, minibatch) pair would dominate
+    // update wall-clock while barely touching the GPU's compute units
+    // (see DEVLOG). Minibatches instead `index_select` a GPU-resident
+    // shuffled-index slice out of these.
     struct ShardBatch {
         obs: policy::Obs,
         choice: policy::ChoiceBatch,
@@ -1095,10 +1135,17 @@ fn train_update(
         old_logp: Tensor,
     }
     let batch_build_t0 = Instant::now();
-    // Per-shard GAE and batch construction still run in parallel. A tch
-    // Tensor is Send but not Sync, so each closure receives an exclusive
-    // `&mut RolloutResult`; no resident tensor handle is shared between
-    // threads. Each result belongs to the same device as its paired learner.
+    // Per-shard: GAE (plain Rust, negligible) + one CPU repack/host->device
+    // upload of the whole rollout (the actual cost here - tens of MB of
+    // observation grid per shard). Spawn one thread per shard instead of a
+    // sequential `for` loop: `RolloutResult`/`Device` hold no GPU tensor
+    // handles (only plain floats/ints until `build_obs` allocates fresh
+    // tensors *inside* each thread), so this is safe, and without it the
+    // 4 shards' multi-second CPU repacks and independent-GPU H2D transfers
+    // were serialized one after another instead of overlapping (measured:
+    // ~8-9s sequential for 4 shards vs ~2s once parallelized - this was
+    // the single largest remaining non-overlapped, GPU-idle chunk of
+    // update wall-clock; see DEVLOG).
     // Read *before* this update's data is folded in, so the bound applied
     // to this batch reflects only prior updates (matching how a live
     // system would have to work - you can't normalize against data you
@@ -1109,7 +1156,7 @@ fn train_update(
     let shard_results: Vec<(ShardBatch, f64, f64, f64)> = std::thread::scope(|s| {
         let handles: Vec<_> = learners
             .iter()
-            .zip(pending.iter_mut())
+            .zip(pending.iter())
             .enumerate()
             .map(|(gi, (shard, result))| {
                 let device = shard.device;
@@ -1236,20 +1283,6 @@ fn train_update(
                             obs_flat.push(&s.obs);
                         }
                     }
-                    let resident_count = buffer
-                        .iter()
-                        .flat_map(|row| row.iter())
-                        .filter(|s| s.resident.is_some())
-                        .count();
-                    anyhow::ensure!(
-                        resident_count == 0 || resident_count == total,
-                        "rollout mixes resident and host observations"
-                    );
-                    let resident_flat: Option<Vec<&batch::ResidentLatents>> = buffer
-                        .iter()
-                        .flat_map(|row| row.iter())
-                        .map(|s| s.resident.as_ref())
-                        .collect();
                     // Local partial sums for RetStat's global running
                     // total - see RetStat's doc for why plain sum/sum_sq
                     // accumulation (not Welford) composes trivially here:
@@ -1261,32 +1294,12 @@ fn train_update(
                     let local_sum: f64 = ret_flat.iter().map(|&x| x as f64).sum();
                     let local_sum_sq: f64 = ret_flat.iter().map(|&x| (x as f64) * (x as f64)).sum();
 
-                    let obs = if let Some(resident) = resident_flat {
-                        batch::build_obs_with_resident_latents(
-                            &obs_flat,
-                            &resident,
-                            device,
-                            cfg.pinned_h2d,
-                            cfg.fp16_rollout,
-                        )?
-                    } else {
-                        batch::build_obs(
-                            &obs_flat,
-                            device,
-                            cfg.pinned_h2d,
-                            cfg.fp16_rollout,
-                        )
-                    };
+                    let obs = batch::build_obs(&obs_flat, device, cfg.pinned_h2d, cfg.fp16_rollout);
                     let choice = batch::build_choice_batch(&choice_flat, device, cfg.pinned_h2d);
                     let adv = Tensor::from_slice(&adv_flat).to_device(device);
                     let ret = Tensor::from_slice(&ret_flat).to_device(device);
                     let old_logp = Tensor::from_slice(&old_logp_flat).to_device(device);
-                    Ok((
-                        ShardBatch { obs, choice, adv, ret, old_logp },
-                        local_count,
-                        local_sum,
-                        local_sum_sq,
-                    ))
+                    (ShardBatch { obs, choice, adv, ret, old_logp }, local_count, local_sum, local_sum_sq)
                 })
             })
             .collect();
@@ -1309,13 +1322,16 @@ fn train_update(
                         .map(|s| s.to_string())
                         .or_else(|| e.downcast_ref::<String>().cloned())
                         .unwrap_or_else(|| format!("{e:?}"));
-                    Err(anyhow!("batch-build thread panicked: {msg}"))
+                    panic!("batch-build thread panicked: {msg}");
                 })
             })
-            .collect::<Result<Vec<_>>>()
-    })?;
+            .collect()
+    });
     if std::env::var("OFTRAIN_DIAG").is_ok() {
-        println!("[diag] batch_build_s={:.3}", batch_build_t0.elapsed().as_secs_f64());
+        println!(
+            "[diag] batch_build_s={:.3}",
+            batch_build_t0.elapsed().as_secs_f64()
+        );
     }
     // Fold this update's per-shard partial sums into the running total
     // *after* they were used to compute `adaptive_ret_bound` above - the
@@ -1324,7 +1340,8 @@ fn train_update(
     for (_, count, sum, sum_sq) in &shard_results {
         ret_stat.add_batch(*count, *sum, *sum_sq);
     }
-    let mut shard_batches: Vec<ShardBatch> = shard_results.into_iter().map(|(batch, ..)| batch).collect();
+    let mut shard_batches: Vec<ShardBatch> =
+        shard_results.into_iter().map(|(batch, ..)| batch).collect();
 
     for _epoch in 0..cfg.epochs {
         // Per-shard shuffled index tensor, built once per epoch (CPU
@@ -1359,7 +1376,11 @@ fn train_update(
 
         for m in 0..n_minibatches {
             let start = (m * minibatch_size) as i64;
-            let len = if m == n_minibatches - 1 { total as i64 - start } else { minibatch_size as i64 };
+            let len = if m == n_minibatches - 1 {
+                total as i64 - start
+            } else {
+                minibatch_size as i64
+            };
             let mb_t0 = Instant::now();
             // Further split when `mb_size * pix_per > MAX_UPD_PIX` (mirror
             // `rl/ppo.py`). All samples share padded grid dims, so no
@@ -1398,13 +1419,16 @@ fn train_update(
                                 let ret_t = sb.ret.index_select(0, &idx_t);
                                 let old_logp_t = sb.old_logp.index_select(0, &idx_t);
 
-                                let (logp, ent, ent_q, value) = shard.policy.evaluate(&obs_t, &choice_t);
+                                let (logp, ent, ent_q, value) =
+                                    shard.policy.evaluate(&obs_t, &choice_t);
                                 // Bound log-ratio before exp (see prior
                                 // pg_loss trillion-spike incident).
                                 let log_ratio = (&logp - &old_logp_t).clamp(-20.0, 20.0);
                                 let ratio = log_ratio.exp();
                                 let surr1 = &ratio * &adv_t;
-                                let surr2 = ratio.clamp(1.0 - cfg.clip as f64, 1.0 + cfg.clip as f64) * &adv_t;
+                                let surr2 = ratio
+                                    .clamp(1.0 - cfg.clip as f64, 1.0 + cfg.clip as f64)
+                                    * &adv_t;
                                 let pg_loss = -surr1.minimum(&surr2).mean(Kind::Float);
                                 // Value loss: Huber (default Rust
                                 // stabilizer; see Config::vf_clip) or MSE
@@ -1417,9 +1441,7 @@ fn train_update(
                                         tch::Reduction::Mean,
                                         cfg.vf_clip.max(1e-3) as f64,
                                     ),
-                                    ValueLoss::Mse => {
-                                        value.mse_loss(&ret_t, tch::Reduction::Mean)
-                                    }
+                                    ValueLoss::Mse => value.mse_loss(&ret_t, tch::Reduction::Mean),
                                 };
                                 let ent_loss = ent.mean(Kind::Float);
                                 let n_active = choice_t
@@ -1429,8 +1451,7 @@ fn train_update(
                                     .sum(Kind::Float)
                                     .clamp_min(1.0);
                                 let entq_loss = ent_q.sum(Kind::Float) / &n_active;
-                                let loss = (&pg_loss
-                                    + cfg.vf_coef as f64 * &v_loss
+                                let loss = (&pg_loss + cfg.vf_coef as f64 * &v_loss
                                     - ent_coef as f64 * &ent_loss
                                     - cfg.entq_coef as f64 * &entq_loss)
                                     * w_sub;
@@ -1520,7 +1541,12 @@ fn train_update(
     }
 
     let d = n_mb.max(1) as f64;
-    Ok((loss_sums.0 / d, loss_sums.1 / d, loss_sums.2 / d, loss_sums.3 / d))
+    Ok((
+        loss_sums.0 / d,
+        loss_sums.1 / d,
+        loss_sums.2 / d,
+        loss_sums.3 / d,
+    ))
 }
 
 pub fn run(cfg: Config) -> Result<()> {
@@ -1596,7 +1622,8 @@ pub fn run(cfg: Config) -> Result<()> {
             cur_obs.push(obs);
         }
         let mut learner_vs = nn::VarStore::new(device);
-        let learner_policy = PolicyNet::new(&learner_vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
+        let learner_policy =
+            PolicyNet::new(&learner_vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
         if let Some(hub) = &hub_vs {
             learner_vs.copy(hub)?;
         } else {
@@ -1615,7 +1642,8 @@ pub fn run(cfg: Config) -> Result<()> {
         let opt = nn::AdamW::default().build(&learner_vs, lr_init)?;
 
         let mut actor_vs = nn::VarStore::new(device);
-        let actor_policy = PolicyNet::new(&actor_vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
+        let actor_policy =
+            PolicyNet::new(&actor_vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
         actor_vs.copy(&learner_vs)?;
 
         let actor_ae = {
@@ -1645,6 +1673,7 @@ pub fn run(cfg: Config) -> Result<()> {
             vs: actor_vs,
             policy: actor_policy,
             ae: actor_ae,
+            terrain_cache: crate::ae::TerrainDeviceCache::new(device),
         });
         learners.push(LearnerShard {
             device,
@@ -1655,11 +1684,23 @@ pub fn run(cfg: Config) -> Result<()> {
     }
     println!("[train] all {total_envs} envs ready");
 
-    let n_params: i64 = learners[0].vs.trainable_variables().iter().map(|t| t.numel() as i64).sum();
-    println!("[train] policy params: {n_params} per shard x {} shard(s) on {:?}", learners.len(), devices);
+    let n_params: i64 = learners[0]
+        .vs
+        .trainable_variables()
+        .iter()
+        .map(|t| t.numel() as i64)
+        .sum();
+    println!(
+        "[train] policy params: {n_params} per shard x {} shard(s) on {:?}",
+        learners.len(),
+        devices
+    );
 
-    let gpu_sampler =
-        if devices.iter().any(|d| matches!(d, Device::Cuda(_))) { Some(GpuUtilSampler::start(Duration::from_millis(500))) } else { None };
+    let gpu_sampler = if devices.iter().any(|d| matches!(d, Device::Cuda(_))) {
+        Some(GpuUtilSampler::start(Duration::from_millis(500)))
+    } else {
+        None
+    };
 
     // Resolve `auto_scale_envs`' bounds once up front (cheap, and only
     // ever logged/used when the flag is actually on): `max_envs=0` means
@@ -1674,7 +1715,9 @@ pub fn run(cfg: Config) -> Result<()> {
             println!(
                 "[autoscale] --max-envs=0 (auto): cpu-derived cap = {auto_cap} envs/shard \
                  ({} logical cpu(s) available, {} shard(s))",
-                std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(0),
                 devices.len()
             );
             auto_cap
@@ -1713,7 +1756,10 @@ pub fn run(cfg: Config) -> Result<()> {
     let mut ep_rewards: Vec<f64> = Vec::new();
     let mut ep_lengths: Vec<i64> = Vec::new();
     let train_start = Instant::now();
-    let mut total_env_steps: u64 = resumed_state.as_ref().map(|s| s.total_env_steps).unwrap_or(0);
+    let mut total_env_steps: u64 = resumed_state
+        .as_ref()
+        .map(|s| s.total_env_steps)
+        .unwrap_or(0);
     let cfg_ref = &cfg;
 
     // Curriculum advancement (port of `rl/ppo.py`'s win-rate gate, see
@@ -1753,8 +1799,14 @@ pub fn run(cfg: Config) -> Result<()> {
     // actors' initial, freshly-copied-from-learner weights) before the
     // update loop starts overlapping collection with training.
     let mut pending: Vec<RolloutResult> = std::thread::scope(|s| {
-        let handles: Vec<_> = actors.iter_mut().map(|actor| s.spawn(move || collect_rollout(actor, cfg_ref))).collect();
-        handles.into_iter().map(|h| h.join().expect("collector thread panicked")).collect::<Result<Vec<_>>>()
+        let handles: Vec<_> = actors
+            .iter_mut()
+            .map(|actor| s.spawn(move || collect_rollout(actor, cfg_ref)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("collector thread panicked"))
+            .collect::<Result<Vec<_>>>()
     })?;
 
     for update in start_update..cfg.updates {
@@ -1769,8 +1821,9 @@ pub fn run(cfg: Config) -> Result<()> {
         // instead of exploring forever, times the adaptive entropy-floor
         // scale (both match `rl/ppo.py`).
         let frac = (update as f64 / cfg.ent_anneal_updates.max(1) as f64).min(1.0);
-        let ent_coef_now =
-            ((cfg.ent_coef as f64 + (cfg.ent_coef_final as f64 - cfg.ent_coef as f64) * frac) * ent_scale) as f32;
+        let ent_coef_now = ((cfg.ent_coef as f64
+            + (cfg.ent_coef_final as f64 - cfg.ent_coef as f64) * frac)
+            * ent_scale) as f32;
         // LR warmup (see LR_WARMUP_UPDATES's doc) - a no-op once warmup
         // completes (frac saturates at 1.0), so this is safe to apply on
         // every single update rather than only during the warmup window.
@@ -1796,16 +1849,26 @@ pub fn run(cfg: Config) -> Result<()> {
         // will block, adding to `collect_dt` but not `train_dt`).
         let collect_start = Instant::now();
         let (train_result, next_pending, train_dt) = std::thread::scope(|s| {
-            let collect_handles: Vec<_> =
-                actors.iter_mut().map(|actor| s.spawn(move || collect_rollout(actor, cfg_ref))).collect();
+            let collect_handles: Vec<_> = actors
+                .iter_mut()
+                .map(|actor| s.spawn(move || collect_rollout(actor, cfg_ref)))
+                .collect();
 
             let train_t0 = Instant::now();
-            let train_result =
-                train_update(&mut learners, &mut pending, cfg_ref, &mut rng, ent_coef_now, &mut ret_stat);
+            let train_result = train_update(
+                &mut learners,
+                &pending,
+                cfg_ref,
+                &mut rng,
+                ent_coef_now,
+                &mut ret_stat,
+            );
             let train_dt = train_t0.elapsed().as_secs_f64();
 
-            let next_pending: Result<Vec<RolloutResult>> =
-                collect_handles.into_iter().map(|h| h.join().expect("collector thread panicked")).collect();
+            let next_pending: Result<Vec<RolloutResult>> = collect_handles
+                .into_iter()
+                .map(|h| h.join().expect("collector thread panicked"))
+                .collect();
             (train_result, next_pending, train_dt)
         });
         let collect_dt = collect_start.elapsed().as_secs_f64();
@@ -1817,8 +1880,10 @@ pub fn run(cfg: Config) -> Result<()> {
         // straight from the collected data rather than
         // `actors[..].workers.len()` so it's correct regardless of
         // exactly when in this iteration a resize lands.
-        let live_total_envs: usize =
-            next_pending.iter().map(|r| r.buffer.first().map(|row| row.len()).unwrap_or(0)).sum();
+        let live_total_envs: usize = next_pending
+            .iter()
+            .map(|r| r.buffer.first().map(|row| row.len()).unwrap_or(0))
+            .sum();
 
         // Entropy floor controller (port of `rl/ppo.py`): nudge the coef
         // scale toward keeping measured mean entropy above the floor, with
@@ -1849,9 +1914,18 @@ pub fn run(cfg: Config) -> Result<()> {
                 if debug_eps {
                     eprintln!(
                         "[ep] reward={:.3} len={} tiles={:.1} tick={} place={}/{} score={:.3} won={} wasted={} stage={} rehearsal={} map={}",
-                        info.reward, info.length, info.final_tiles, info.final_tick,
-                        info.place, info.n_players, info.score, info.won, info.wasted,
-                        info.stage, info.rehearsal, info.map
+                        info.reward,
+                        info.length,
+                        info.final_tiles,
+                        info.final_tick,
+                        info.place,
+                        info.n_players,
+                        info.score,
+                        info.won,
+                        info.wasted,
+                        info.stage,
+                        info.rehearsal,
+                        info.map
                     );
                 }
                 ep_rewards.push(info.reward);
@@ -1863,7 +1937,12 @@ pub fn run(cfg: Config) -> Result<()> {
                     recent_wins.push_back(if info.won { 1.0 } else { 0.0 });
                     let win_rate = recent_wins.iter().sum::<f64>() / recent_wins.len() as f64;
                     if debug_eps {
-                        eprintln!("[win_rate] {:.3} (window={}/{})", win_rate, recent_wins.len(), ofcore::curriculum::WINDOW);
+                        eprintln!(
+                            "[win_rate] {:.3} (window={}/{})",
+                            win_rate,
+                            recent_wins.len(),
+                            ofcore::curriculum::WINDOW
+                        );
                     }
                     if recent_wins.len() == ofcore::curriculum::WINDOW
                         && win_rate > stages[curr_stage].win_at
@@ -1920,7 +1999,9 @@ pub fn run(cfg: Config) -> Result<()> {
         // `collect_rollout`'s per-step send/recv loop) would desync the
         // `n = actor.workers.len()` it captured at the top of that call.
         if cfg.auto_scale_envs && update % cfg.autoscale_check_every.max(1) == 0 {
-            let gpu_util_frac = gpu_sampler.as_ref().map(|g| g.snapshot().min_mean_util() / 100.0);
+            let gpu_util_frac = gpu_sampler
+                .as_ref()
+                .map(|g| g.snapshot().min_mean_util() / 100.0);
             let current = actors[0].workers.len();
             let target_n = autoscale::next_env_count(
                 current,
@@ -1943,12 +2024,19 @@ pub fn run(cfg: Config) -> Result<()> {
                 // partial commit would leave shards with different env
                 // counts, which the rest of this file assumes never
                 // happens.
-                let mut spawned: Vec<(usize, Worker, PreparedObs)> = Vec::with_capacity(add * actors.len());
+                let mut spawned: Vec<(usize, Worker, PreparedObs)> =
+                    Vec::with_capacity(add * actors.len());
                 let mut spawn_err: Option<anyhow::Error> = None;
                 'grow: for gi in 0..actors.len() {
                     for _ in 0..add {
-                        let worker_engine = engine_for_idx(next_env_idx, cfg.engine, cfg.node_fraction);
-                        match spawn_worker(next_env_idx, curr_stage, cfg.max_episode_ticks, worker_engine) {
+                        let worker_engine =
+                            engine_for_idx(next_env_idx, cfg.engine, cfg.node_fraction);
+                        match spawn_worker(
+                            next_env_idx,
+                            curr_stage,
+                            cfg.max_episode_ticks,
+                            worker_engine,
+                        ) {
                             Ok((w, obs)) => {
                                 next_env_idx += 1;
                                 spawned.push((gi, w, obs));
@@ -1960,7 +2048,9 @@ pub fn run(cfg: Config) -> Result<()> {
                         }
                     }
                 }
-                let gpu_str = gpu_util_frac.map(|f| format!("{:.1}%", f * 100.0)).unwrap_or_else(|| "n/a (no GPU)".to_string());
+                let gpu_str = gpu_util_frac
+                    .map(|f| format!("{:.1}%", f * 100.0))
+                    .unwrap_or_else(|| "n/a (no GPU)".to_string());
                 match spawn_err {
                     Some(e) => {
                         println!(
@@ -2005,6 +2095,7 @@ pub fn run(cfg: Config) -> Result<()> {
                 cfg.engine,
                 cfg.pinned_h2d,
                 cfg.fp16_rollout,
+                cfg.compact_rollout && cfg.foveate,
             )?;
             println!(
                 "[eval] stage {curr_stage}  win {:.2}  score {:.2}  ({} eps, {:.0}s)",
@@ -2044,7 +2135,10 @@ pub fn run(cfg: Config) -> Result<()> {
             let sps = (live_total_envs * cfg.rollout_len) as f64 / dt.max(1e-6);
             let recent_n = ep_rewards.len().min(50);
             let recent_reward = if recent_n > 0 {
-                ep_rewards[ep_rewards.len() - recent_n..].iter().sum::<f64>() / recent_n as f64
+                ep_rewards[ep_rewards.len() - recent_n..]
+                    .iter()
+                    .sum::<f64>()
+                    / recent_n as f64
             } else {
                 0.0
             };
@@ -2063,7 +2157,11 @@ pub fn run(cfg: Config) -> Result<()> {
                         .map(|(i, u)| format!("gpu{i}={u:.0}%"))
                         .collect::<Vec<_>>()
                         .join(" ");
-                    format!(" gpu_mem%={:.0} min_mean_util%={:.0} [{per_gpu_str}]", gpu.mem_pct, gpu.min_mean_util())
+                    format!(
+                        " gpu_mem%={:.0} min_mean_util%={:.0} [{per_gpu_str}]",
+                        gpu.mem_pct,
+                        gpu.min_mean_util()
+                    )
                 }
                 None => String::new(),
             };
@@ -2198,12 +2296,19 @@ mod adv_clip_tests {
         adv.push(4000.0);
         normalize_and_clamp(&mut adv, 10.0);
         for &v in &adv {
-            assert!(v.abs() <= 10.0 + 1e-4, "every normalized advantage must be clamped to +-10, got {v}");
+            assert!(
+                v.abs() <= 10.0 + 1e-4,
+                "every normalized advantage must be clamped to +-10, got {v}"
+            );
         }
         // The outlier should still be *at* the clip boundary (not
         // collapsed to 0 or left unclamped) - clamping should engage, not
         // silently no-op.
-        assert!((adv[2047] - 10.0).abs() < 1e-3, "the outlier should sit exactly at the clip boundary, got {}", adv[2047]);
+        assert!(
+            (adv[2047] - 10.0).abs() < 1e-3,
+            "the outlier should sit exactly at the clip boundary, got {}",
+            adv[2047]
+        );
     }
 
     #[test]
@@ -2216,7 +2321,10 @@ mod adv_clip_tests {
             let var = before.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / before.len() as f32;
             let std = var.sqrt().max(1e-8);
             let expected = (b - mean) / std;
-            assert!((a - expected).abs() < 1e-4, "no clamping should engage for a well-behaved batch");
+            assert!(
+                (a - expected).abs() < 1e-4,
+                "no clamping should engage for a well-behaved batch"
+            );
         }
     }
 
@@ -2294,7 +2402,10 @@ mod huber_value_loss_tests {
         let (h, m) = (f64::try_from(&huber).unwrap(), f64::try_from(&mse).unwrap());
         // Huber's small-error branch is 0.5*(err)^2 (half of MSE's err^2);
         // both scale identically with error, only the constant differs.
-        assert!((h - 0.5 * m).abs() < 1e-5, "huber={h} should be ~0.5*mse={m} for small errors");
+        assert!(
+            (h - 0.5 * m).abs() < 1e-5,
+            "huber={h} should be ~0.5*mse={m} for small errors"
+        );
     }
 }
 
@@ -2367,7 +2478,11 @@ mod ret_stat_tests {
         split.add_batch(3.0, 3.0 + 4.0 + 5.0, 9.0 + 16.0 + 25.0);
 
         let mut whole = RetStat::default();
-        whole.add_batch(5.0, 1.0 + 2.0 + 3.0 + 4.0 + 5.0, 1.0 + 4.0 + 9.0 + 16.0 + 25.0);
+        whole.add_batch(
+            5.0,
+            1.0 + 2.0 + 3.0 + 4.0 + 5.0,
+            1.0 + 4.0 + 9.0 + 16.0 + 25.0,
+        );
 
         assert!((split.mean() - whole.mean()).abs() < 1e-9);
         assert!((split.std() - whole.std()).abs() < 1e-9);
@@ -2422,7 +2537,10 @@ mod ratio_clamp_tests {
         let surr1 = &ratio * &adv;
         let surr2 = ratio.clamp(0.8, 1.2) * &adv;
         let unclamped = f64::try_from(-surr1.minimum(&surr2).mean(Kind::Float)).unwrap();
-        assert!((clamped - unclamped).abs() < 1e-5, "clamp must be a no-op for ordinary ratios: {clamped} vs {unclamped}");
+        assert!(
+            (clamped - unclamped).abs() < 1e-5,
+            "clamp must be a no-op for ordinary ratios: {clamped} vs {unclamped}"
+        );
     }
 }
 
@@ -2472,32 +2590,49 @@ mod engine_mix_tests {
     #[test]
     fn zero_fraction_is_always_default() {
         for idx in 0..50 {
-            assert_eq!(engine_for_idx(idx, EngineKind::Native, 0.0), EngineKind::Native);
+            assert_eq!(
+                engine_for_idx(idx, EngineKind::Native, 0.0),
+                EngineKind::Native
+            );
         }
     }
 
     #[test]
     fn full_fraction_is_always_node() {
         for idx in 0..50 {
-            assert_eq!(engine_for_idx(idx, EngineKind::Native, 1.0), EngineKind::Node);
+            assert_eq!(
+                engine_for_idx(idx, EngineKind::Native, 1.0),
+                EngineKind::Node
+            );
         }
     }
 
     #[test]
     fn one_fifth_gives_exactly_one_node_per_five_evenly_spread() {
-        let picks: Vec<usize> =
-            (0..50).filter(|&i| engine_for_idx(i, EngineKind::Native, 0.2) == EngineKind::Node).collect();
+        let picks: Vec<usize> = (0..50)
+            .filter(|&i| engine_for_idx(i, EngineKind::Native, 0.2) == EngineKind::Node)
+            .collect();
         assert_eq!(picks.len(), 10, "50 * 0.2 == 10 node envs, got {picks:?}");
         // Evenly spread, not clumped: consecutive picks should be exactly
         // 5 apart, and the ratio should hold over any prefix, not just the
         // full range (matters once autoscale appends more envs at
         // ever-increasing indices - see engine_for_idx's doc comment).
         for w in picks.windows(2) {
-            assert_eq!(w[1] - w[0], 5, "picks should be evenly spread 5 apart, got {picks:?}");
+            assert_eq!(
+                w[1] - w[0],
+                5,
+                "picks should be evenly spread 5 apart, got {picks:?}"
+            );
         }
         for prefix_len in [5, 15, 25, 35, 45] {
-            let n = (0..prefix_len).filter(|&i| engine_for_idx(i, EngineKind::Native, 0.2) == EngineKind::Node).count();
-            assert_eq!(n, prefix_len / 5, "ratio should hold at prefix {prefix_len}, got {n} node envs");
+            let n = (0..prefix_len)
+                .filter(|&i| engine_for_idx(i, EngineKind::Native, 0.2) == EngineKind::Node)
+                .count();
+            assert_eq!(
+                n,
+                prefix_len / 5,
+                "ratio should hold at prefix {prefix_len}, got {n} node envs"
+            );
         }
     }
 
