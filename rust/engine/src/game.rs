@@ -1,11 +1,13 @@
 //! Core game state + tick driver.
 
 use crate::core::config::Config as WireConfig;
+use crate::core::team_assignment::{
+    assign_teams, populate_player_teams, BOT_TEAM, HUMANS_TEAM, NATIONS_TEAM,
+};
 use crate::execution::ordered_map::OrderedMap;
 use crate::execution::ordered_tiles::OrderedTiles;
 use crate::execution::{ExecEnum, Execution, HashUpdate, WinUpdate};
 use crate::hash::game_hash;
-use crate::core::team_assignment::{assign_teams, populate_player_teams, BOT_TEAM, HUMANS_TEAM, NATIONS_TEAM};
 use crate::map::{GameMap, SpawnArea, TileRef};
 use crate::prng::PseudoRandom;
 use crate::util::simple_hash;
@@ -63,6 +65,14 @@ pub struct Unit {
     pub deletion_at: Option<i32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerBoundingBox {
+    pub min_x: u32,
+    pub min_y: u32,
+    pub max_x: u32,
+    pub max_y: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct Player {
     pub id: String,
@@ -82,6 +92,9 @@ pub struct Player {
     pub owned_tiles: Vec<TileRef>,
     pub last_cluster_calc: u32,
     pub last_tile_change: u32,
+    /// TS `PlayerImpl.largestClusterBoundingBox`; updated by PlayerExecution's
+    /// cluster pass and read by island-enemy boat targeting.
+    pub largest_cluster_bounding_box: Option<PlayerBoundingBox>,
     pub marked_traitor_tick: i32,
     /// TS `PlayerImpl.markedDoomsdayClockTick` - tick this player's side first
     /// dropped below the Doomsday Clock bar, or -1 if not currently flagged.
@@ -140,6 +153,7 @@ impl Default for Player {
             owned_tiles: Vec::new(),
             last_cluster_calc: 0,
             last_tile_change: 0,
+            largest_cluster_bounding_box: None,
             marked_traitor_tick: -1,
             marked_doomsday_clock_tick: -1,
             relations: OrderedMap::new(),
@@ -268,6 +282,8 @@ pub struct Game {
     water_graph_version: u32,
     path_buf: Vec<TileRef>,
     next_unit_id: i32,
+    /// TS `GameImpl.unitGrid` - spatial index for nearbyUnits order.
+    unit_grid: crate::unit_grid::UnitGrid,
     pub hash_enabled: bool,
     pub tribe_batch: crate::bot::TribeBatch,
     pub nation_batch: crate::execution::NationBatch,
@@ -378,6 +394,7 @@ impl Default for Game {
             water_graph_version: 0,
             path_buf: Vec::new(),
             next_unit_id: 1,
+            unit_grid: crate::unit_grid::UnitGrid::new(1, 1),
             hash_enabled: true,
             tribe_batch: crate::bot::TribeBatch::new(),
             nation_batch: crate::execution::NationBatch::new(),
@@ -411,7 +428,9 @@ impl Game {
         team_spawn_areas: Option<HashMap<String, Vec<SpawnArea>>>,
     ) -> Self {
         let seed = simple_hash(&game_id);
-        let tile_count = (map.width * map.height) as usize;
+        let map_width = map.width;
+        let map_height = map.height;
+        let tile_count = (map_width * map_height) as usize;
         let mini_count = (mini_map.width * mini_map.height) as usize;
         let water_component = crate::water::build_water_components(&map);
         let mini_water_hpa = crate::water_hpa::WaterHierarchical::new(&mini_map, true);
@@ -432,6 +451,7 @@ impl Game {
             mini_water_hpa: Some(mini_water_hpa),
             water_graph_version,
             path_buf: Vec::with_capacity(256),
+            unit_grid: crate::unit_grid::UnitGrid::new(map_width, map_height),
             tribe_batch: crate::bot::TribeBatch::new(),
             nation_batch: crate::execution::NationBatch::new(),
             team_spawn_areas,
@@ -440,11 +460,21 @@ impl Game {
         }
     }
 
+    /// Rebuild the UnitGrid for the current map size. Needed when tests swap
+    /// `map` after `Game::default()` (which starts with a 1x1 grid).
+    pub(crate) fn reinit_unit_grid(&mut self) {
+        self.unit_grid = crate::unit_grid::UnitGrid::new(self.map.width, self.map.height);
+    }
+
     pub fn init_player_teams(&mut self, num_humans: usize, num_nations: usize) {
         let game_mode = self.wire.game_config().game_mode.clone();
         let player_teams_cfg = self.wire.game_config().player_teams.clone();
-        self.player_teams =
-            populate_player_teams(&game_mode, player_teams_cfg.as_ref(), num_humans, num_nations);
+        self.player_teams = populate_player_teams(
+            &game_mode,
+            player_teams_cfg.as_ref(),
+            num_humans,
+            num_nations,
+        );
     }
 
     /// TS `GameImpl.teamSpawnArea`.
@@ -567,6 +597,13 @@ impl Game {
         None
     }
 
+    /// TS `WaterManager.getWaterComponentSize` - component size is measured on
+    /// the minimap, then scaled by four to approximate full-map tile count.
+    pub fn get_water_component_size(&self, component_id: u32) -> Option<u32> {
+        let hpa = self.mini_water_hpa.as_ref()?;
+        Some(hpa.graph.get_component_size(component_id) * 4)
+    }
+
     /// TS `WaterManager.hasWaterComponent` - like `get_water_component` but a
     /// membership test (used by trade-ship routing to check whether a
     /// candidate port shares any of a source port's adjacent water bodies).
@@ -579,8 +616,7 @@ impl Game {
         let mini_y = self.map.y(tile) / 2;
         let mini_tile = self.mini_map.ref_xy(mini_x, mini_y);
 
-        if self.mini_map.is_water(mini_tile) && hpa.graph.get_component_id(mini_tile) == component
-        {
+        if self.mini_map.is_water(mini_tile) && hpa.graph.get_component_id(mini_tile) == component {
             return true;
         }
         let mut one_hop = [TileRef::MAX; 4];
@@ -699,30 +735,14 @@ impl Game {
         self.map.num_tiles_with_fallout()
     }
 
-    /// TS `Game.nearbyUnits(tile, range, DefensePost)` - first owned post in range.
+    /// TS `Game.nearbyUnits(tile, range, DefensePost)` - through the unit grid,
+    /// including its exact cell-window semantics and active/under-construction filters.
     pub fn has_defense_post_nearby(&self, tile: TileRef, owner_small_id: u16) -> bool {
         use crate::core::schemas::unit_type;
         let range = self.wire.defense_post_range();
-        let range_sq = (range * range) as u32;
-        let tx = self.map.x(tile);
-        let ty = self.map.y(tile);
-        for p in &self.players {
-            if p.small_id != owner_small_id {
-                continue;
-            }
-            for u in &p.units {
-                if u.unit_type != unit_type::DEFENSE_POST {
-                    continue;
-                }
-                let ut = u.tile as u32;
-                let dx = self.map.x(ut) as i32 - tx as i32;
-                let dy = self.map.y(ut) as i32 - ty as i32;
-                if (dx * dx + dy * dy) as u32 <= range_sq {
-                    return true;
-                }
-            }
-        }
-        false
+        self.nearby_structures_any(tile, range, &[unit_type::DEFENSE_POST])
+            .into_iter()
+            .any(|(owner, ..)| owner == owner_small_id)
     }
 
     /// TS `Config.attackLogic(gm, attackTroops, attacker, defender, tile)`.
@@ -777,10 +797,8 @@ impl Game {
                 mag = 0.0;
             }
 
-            if matches!(
-                attacker_type,
-                PlayerType::Human | PlayerType::Nation
-            ) && defender_type == Some(PlayerType::Bot)
+            if matches!(attacker_type, PlayerType::Human | PlayerType::Nation)
+                && defender_type == Some(PlayerType::Bot)
             {
                 mag *= 0.7;
             }
@@ -799,8 +817,7 @@ impl Game {
 
             let mut large_attack_bonus = 1.0;
             if attacker_tiles > 100_000 {
-                large_attack_bonus =
-                    (100_000.0 / attacker_tiles as f64).sqrt().powf(0.7);
+                large_attack_bonus = (100_000.0 / attacker_tiles as f64).sqrt().powf(0.7);
             }
             let mut large_attacker_speed_bonus = 1.0;
             if attacker_tiles > 100_000 {
@@ -813,11 +830,8 @@ impl Game {
             } else {
                 1.0
             };
-            let current_attacker_loss = within(
-                defender_troops as f64 / attack_troops,
-                0.6,
-                2.0,
-            ) * mag
+            let current_attacker_loss = within(defender_troops as f64 / attack_troops, 0.6, 2.0)
+                * mag
                 * 0.8
                 * large_defender_attack_debuff
                 * large_attack_bonus
@@ -830,11 +844,8 @@ impl Game {
             } else {
                 1.0
             };
-            let tiles_per_tick = within(
-                defender_troops as f64 / (5.0 * attack_troops),
-                0.2,
-                1.5,
-            ) * speed
+            let tiles_per_tick = within(defender_troops as f64 / (5.0 * attack_troops), 0.2, 1.5)
+                * speed
                 * large_defender_speed_debuff
                 * large_attacker_speed_bonus
                 * traitor_speed;
@@ -846,8 +857,7 @@ impl Game {
             } else {
                 mag / 5.0
             };
-            let tiles_per_tick =
-                within((2000.0 * speed.max(10.0)) / attack_troops, 5.0, 100.0);
+            let tiles_per_tick = within((2000.0 * speed.max(10.0)) / attack_troops, 5.0, 100.0);
             (attacker_troop_loss, 0.0, tiles_per_tick)
         }
     }
@@ -1049,8 +1059,7 @@ impl Game {
     }
 
     pub fn border_tiles_of(&self, small_id: u16) -> Option<&OrderedTiles> {
-        self.player_by_small_id(small_id)
-            .map(|p| &p.border_tiles)
+        self.player_by_small_id(small_id).map(|p| &p.border_tiles)
     }
 
     fn update_border_status(&mut self, tile: TileRef) {
@@ -1154,8 +1163,7 @@ impl Game {
         else {
             return;
         };
-        let skip_gold_transfer =
-            attacks_sent_net == 0 && conquered_type == PlayerType::Human;
+        let skip_gold_transfer = attacks_sent_net == 0 && conquered_type == PlayerType::Human;
         if skip_gold_transfer {
             return;
         }
@@ -1253,9 +1261,9 @@ impl Game {
     }
 
     pub fn player_exec_index(&self, small_id: u16) -> Option<usize> {
-        self.execs.iter().position(|e| {
-            matches!(e, ExecEnum::Player(p) if p.small_id() == small_id)
-        })
+        self.execs
+            .iter()
+            .position(|e| matches!(e, ExecEnum::Player(p) if p.small_id() == small_id))
     }
 
     pub fn first_attack_index_from(&self, owner_small_id: u16) -> Option<usize> {
@@ -1486,12 +1494,7 @@ impl Game {
 
     pub fn unit_count(&self, small_id: u16, unit_type: &str) -> usize {
         self.player_by_small_id(small_id)
-            .map(|p| {
-                p.units
-                    .iter()
-                    .filter(|u| u.unit_type == unit_type)
-                    .count()
-            })
+            .map(|p| p.units.iter().filter(|u| u.unit_type == unit_type).count())
             .unwrap_or(0)
     }
 
@@ -1566,7 +1569,9 @@ impl Game {
     /// TS `UnitImpl.veterancy()` - always 0 for non-warships (nothing ever increments
     /// a non-warship's `veterancy` field).
     pub fn unit_veterancy(&self, small_id: u16, unit_id: i32) -> i32 {
-        self.unit(small_id, unit_id).map(|u| u.veterancy).unwrap_or(0)
+        self.unit(small_id, unit_id)
+            .map(|u| u.veterancy)
+            .unwrap_or(0)
     }
 
     /// TS `UnitImpl.maxHealth()`. Only `Warship` has a veterancy-scaled bonus (every other
@@ -1654,7 +1659,11 @@ impl Game {
         if current >= max_veterancy {
             return;
         }
-        let add = if source == TRANSPORT { capture_threshold } else { transport_threshold };
+        let add = if source == TRANSPORT {
+            capture_threshold
+        } else {
+            transport_threshold
+        };
         if let Some(unit) = self.unit_mut(small_id, unit_id) {
             unit.veterancy_progress += add;
         }
@@ -1662,7 +1671,9 @@ impl Game {
         // Each loop iteration re-fetches through `unit()`/`unit_mut()` rather than holding a
         // borrow across `increase_veterancy`'s own `&mut self` call.
         loop {
-            let Some(unit) = self.unit(small_id, unit_id) else { return };
+            let Some(unit) = self.unit(small_id, unit_id) else {
+                return;
+            };
             if unit.veterancy_progress < points_per_level || unit.veterancy >= max_veterancy {
                 break;
             }
@@ -1672,7 +1683,10 @@ impl Game {
             self.increase_veterancy(small_id, unit_id);
         }
 
-        if self.unit(small_id, unit_id).is_some_and(|u| u.veterancy >= max_veterancy) {
+        if self
+            .unit(small_id, unit_id)
+            .is_some_and(|u| u.veterancy >= max_veterancy)
+        {
             if let Some(unit) = self.unit_mut(small_id, unit_id) {
                 unit.veterancy_progress = 0;
             }
@@ -1718,24 +1732,12 @@ impl Game {
 
     /// TS `UnitGrid.hasUnitNearby` - scans across ALL players (not owner-filtered).
     pub fn has_unit_nearby_any(&self, tile: TileRef, range: u32, unit_type: &str) -> bool {
-        let tx = self.map.x(tile) as i64;
-        let ty = self.map.y(tile) as i64;
-        let range_sq = (range as i64) * (range as i64);
-        for p in &self.players {
-            for u in &p.units {
-                if u.unit_type != unit_type || u.under_construction {
-                    continue;
-                }
-                let ux = self.map.x(u.tile as TileRef) as i64;
-                let uy = self.map.y(u.tile as TileRef) as i64;
-                let dx = ux - tx;
-                let dy = uy - ty;
-                if dx * dx + dy * dy <= range_sq {
-                    return true;
-                }
-            }
-        }
-        false
+        let tx = self.map.x(tile);
+        let ty = self.map.y(tile);
+        self.unit_grid
+            .has_unit_nearby(tx, ty, range, unit_type, None, false, |t| {
+                (self.map.x(t), self.map.y(t))
+            })
     }
 
     /// TS `UnitGrid.nearbyUnits(tile, range, types)` - scans across ALL players.
@@ -1745,45 +1747,36 @@ impl Game {
     /// Rust's `sort_by`) are stable, so ties fall back to this pre-sort order, and some callers
     /// (`FactoryExecution.createStation`) use the raw order with no sort at all. TS's `UnitGrid`
     /// enumerates its 100x100-tile cells row-major (`cy` outer, `cx` inner), then `types` in the
-    /// given array order, then insertion order within each cell/type `Set` - which for immobile
-    /// structures is creation order, i.e. our monotonic global `unit_id`. Replicate that
-    /// ordering by sorting on an equivalent key instead of building a real spatial grid.
+    /// given array order, then Set insertion order within each cell/type. Immobile structures
+    /// keep creation order; mobile units that leave and re-enter a cell are re-added at the end.
     pub fn nearby_structures_any(
         &self,
         tile: TileRef,
         range: u32,
         types: &[&str],
     ) -> Vec<(u16, i32, TileRef, f64)> {
-        const UNIT_GRID_CELL_SIZE: i64 = 100;
-        let tx = self.map.x(tile) as i64;
-        let ty = self.map.y(tile) as i64;
-        let range_sq = (range as i64) * (range as i64);
-        let mut out: Vec<(u16, i32, TileRef, f64, i64, i64, usize)> = Vec::new();
-        for p in &self.players {
-            for u in &p.units {
-                if u.under_construction {
-                    continue;
-                }
-                let Some(type_idx) = types.iter().position(|t| *t == u.unit_type) else {
-                    continue;
-                };
-                let ux = self.map.x(u.tile as TileRef) as i64;
-                let uy = self.map.y(u.tile as TileRef) as i64;
-                let dx = ux - tx;
-                let dy = uy - ty;
-                let d2 = dx * dx + dy * dy;
-                if d2 > range_sq {
-                    continue;
-                }
-                let cell_x = ux.div_euclid(UNIT_GRID_CELL_SIZE);
-                let cell_y = uy.div_euclid(UNIT_GRID_CELL_SIZE);
-                out.push((p.small_id, u.id, u.tile as TileRef, d2 as f64, cell_y, cell_x, type_idx));
+        let tx = self.map.x(tile);
+        let ty = self.map.y(tile);
+        self.unit_grid
+            .nearby_units(tx, ty, range, types, false, |t| {
+                (self.map.x(t), self.map.y(t))
+            })
+    }
+
+    /// TS `UnitImpl.setUnderConstruction` - keeps the UnitGrid filter flag in sync.
+    pub fn set_unit_under_construction(
+        &mut self,
+        small_id: u16,
+        unit_id: i32,
+        under_construction: bool,
+    ) {
+        if let Some(p) = self.player_by_small_id_mut(small_id) {
+            if let Some(u) = p.units.iter_mut().find(|u| u.id == unit_id) {
+                u.under_construction = under_construction;
             }
         }
-        out.sort_by(|a, b| {
-            (a.4, a.5, a.6, a.1).cmp(&(b.4, b.5, b.6, b.1))
-        });
-        out.into_iter().map(|(sid, uid, t, d2, ..)| (sid, uid, t, d2)).collect()
+        self.unit_grid
+            .set_under_construction(unit_id, under_construction);
     }
 
     /// TS `unitsOwned(type)`  -  includes construction; completed units count by level.
@@ -1813,7 +1806,9 @@ impl Game {
 
     fn record_unit_constructed(&mut self, small_id: u16, unit_type: &str) {
         if let Some(p) = self.player_by_small_id_mut(small_id) {
-            *p.units_constructed.entry(unit_type.to_string()).or_insert(0) += 1;
+            *p.units_constructed
+                .entry(unit_type.to_string())
+                .or_insert(0) += 1;
         }
     }
 
@@ -1867,12 +1862,8 @@ impl Game {
             return 0;
         };
         let city_levels = self.completed_city_level_sum(small_id);
-        self.wire.troop_increase_rate(
-            p.player_type,
-            p.troops,
-            p.tiles_owned,
-            city_levels,
-        )
+        self.wire
+            .troop_increase_rate(p.player_type, p.troops, p.tiles_owned, city_levels)
     }
 
     /// Unrounded variant for the RL obs (`troopIncome` is a raw float in TS).
@@ -1979,6 +1970,10 @@ impl Game {
                 ..Default::default()
             });
         }
+        // TS `GameImpl.addUnit` → `unitGrid.addUnit`.
+        let (x, y) = (self.map.x(tile), self.map.y(tile));
+        self.unit_grid
+            .add_unit(small_id, id, unit_type, tile, x, y, false);
         self.record_unit_constructed(small_id, unit_type);
         id
     }
@@ -1994,13 +1989,17 @@ impl Game {
         destroyer_small_id: u16,
         tile: TileRef,
     ) {
-        self.transport_kills.push((unit_id, victim_small_id, destroyer_small_id, tile));
+        self.transport_kills
+            .push((unit_id, victim_small_id, destroyer_small_id, tile));
     }
 
     /// Consumes (removes) a recorded transport-ship kill, if any - TS `ship.wasDestroyedByEnemy()
     /// && ship.destroyer()`. Returns `(destroyer_small_id, tile)`.
     pub fn take_transport_kill(&mut self, unit_id: i32) -> Option<(u16, TileRef)> {
-        let idx = self.transport_kills.iter().position(|&(id, _, _, _)| id == unit_id)?;
+        let idx = self
+            .transport_kills
+            .iter()
+            .position(|&(id, _, _, _)| id == unit_id)?;
         let (_, _, destroyer, tile) = self.transport_kills.remove(idx);
         Some((destroyer, tile))
     }
@@ -2010,6 +2009,8 @@ impl Game {
             .player_by_small_id(small_id)
             .and_then(|p| p.units.iter().find(|u| u.id == unit_id))
             .is_some_and(|u| u.has_train_station);
+        // TS `GameImpl.removeUnit` → `unitGrid.removeUnit` before dropping the unit.
+        self.unit_grid.remove_unit(unit_id);
         if let Some(p) = self.player_by_small_id_mut(small_id) {
             p.units.retain(|u| u.id != unit_id);
         }
@@ -2033,6 +2034,8 @@ impl Game {
             if let Some(p) = self.player_by_small_id_mut(to_small_id) {
                 p.units.push(unit);
             }
+            // TS `setOwner` keeps the same Unit object in the grid; only owner changes.
+            self.unit_grid.set_owner(unit_id, to_small_id);
             // TS TrainStation keeps a live Unit ref so owner/isActive track
             // capture automatically — update the cached station owner here.
             crate::rail::update_station_owner_for_unit(
@@ -2049,6 +2052,9 @@ impl Game {
                 u.tile = tile as i32;
             }
         }
+        // TS `UnitImpl.move` → `GameImpl.onUnitMoved` → `unitGrid.updateUnitCell`.
+        let (x, y) = (self.map.x(tile), self.map.y(tile));
+        self.unit_grid.update_unit_tile(unit_id, tile, x, y);
     }
 
     /// Coalesce pending attacks in the uninit queue only. Merging into initialized
@@ -2109,7 +2115,10 @@ impl Game {
         }
     }
 
-    fn find_land_attack_exec_mut(&mut self, attack_id: &str) -> Option<*mut crate::execution::AttackExecution> {
+    fn find_land_attack_exec_mut(
+        &mut self,
+        attack_id: &str,
+    ) -> Option<*mut crate::execution::AttackExecution> {
         let batch_ptr = self.init_merge_batch;
         if let Some(ptr) = batch_ptr {
             let batch = unsafe { &mut *ptr };
@@ -2292,7 +2301,11 @@ impl Game {
             let ExecEnum::Attack(atk) = exec else {
                 continue;
             };
-            if !atk.is_active() || !atk.attack_live() || !atk.is_initialized() || atk.source_tile().is_some() {
+            if !atk.is_active()
+                || !atk.attack_live()
+                || !atk.is_initialized()
+                || atk.source_tile().is_some()
+            {
                 continue;
             }
             if atk.target_small_id() != defender_small_id {
@@ -2344,7 +2357,7 @@ impl Game {
                 continue;
             }
             if let Some(p) = self.player_by_small_id(attacker) {
-                if !p.alive {
+                if p.tiles_owned <= 0 {
                     continue;
                 }
             }
@@ -2405,7 +2418,7 @@ impl Game {
                 continue;
             }
             if let Some(p) = self.player_by_small_id(attacker) {
-                if !p.alive {
+                if p.tiles_owned <= 0 {
                     continue;
                 }
             }
@@ -2621,13 +2634,15 @@ impl Game {
 
     /// TS `UnitImpl.isMarkedForDeletion()`.
     pub fn is_unit_marked_for_deletion(&self, small_id: u16, unit_id: i32) -> bool {
-        self.unit(small_id, unit_id).is_some_and(|u| u.deletion_at.is_some())
+        self.unit(small_id, unit_id)
+            .is_some_and(|u| u.deletion_at.is_some())
     }
 
     /// TS `UnitImpl.isOverdueDeletion()`.
     pub fn is_unit_overdue_deletion(&self, small_id: u16, unit_id: i32) -> bool {
         self.unit(small_id, unit_id).is_some_and(|u| {
-            u.deletion_at.is_some_and(|at| self.ticks as i64 - at as i64 > 0)
+            u.deletion_at
+                .is_some_and(|at| self.ticks as i64 - at as i64 > 0)
         })
     }
 
@@ -2706,9 +2721,9 @@ impl Game {
                 continue;
             }
             let owns_warship = self.player_by_small_id(owner_small_id).is_some_and(|p| {
-                p.units
-                    .iter()
-                    .any(|u| u.id == unit_id && u.unit_type == crate::core::schemas::unit_type::WARSHIP)
+                p.units.iter().any(|u| {
+                    u.id == unit_id && u.unit_type == crate::core::schemas::unit_type::WARSHIP
+                })
             });
             if !owns_warship {
                 continue;
@@ -2737,7 +2752,13 @@ impl Game {
     /// players and always excludes under-construction units; this one is scoped to a single
     /// owner and always includes them, matching `NationWarshipBehavior`'s only caller:
     /// `hasUnitNearby(target, 90, Warship, this.player.id(), true)`).
-    pub fn has_own_unit_nearby(&self, small_id: u16, tile: TileRef, range: u32, unit_type: &str) -> bool {
+    pub fn has_own_unit_nearby(
+        &self,
+        small_id: u16,
+        tile: TileRef,
+        range: u32,
+        unit_type: &str,
+    ) -> bool {
         let Some(p) = self.player_by_small_id(small_id) else {
             return false;
         };
@@ -2749,13 +2770,18 @@ impl Game {
     }
 
     pub fn trade_ship_destination_owner(&self, ship_unit_id: i32) -> Option<u16> {
-        let destination_port = self.execs.iter().find_map(|execution| match execution {
-            ExecEnum::TradeShip(trade) if trade.ship_unit_id() == Some(ship_unit_id) => {
-                Some(trade.destination_port_unit_id())
-            }
-            _ => None,
-        })?;
-        self.find_unit_owner(destination_port)
+        let (destination_port, cached_owner) = self
+            .execs
+            .iter()
+            .chain(self.uninit.iter())
+            .find_map(|execution| match execution {
+                ExecEnum::TradeShip(trade) if trade.ship_unit_id() == Some(ship_unit_id) => Some((
+                    trade.destination_port_unit_id(),
+                    trade.cached_destination_port_owner_small_id(),
+                )),
+                _ => None,
+            })?;
+        self.find_unit_owner(destination_port).or(cached_owner)
     }
 
     pub fn trade_ship_is_safe_from_pirates(&self, owner: u16, unit_id: i32) -> bool {
@@ -2772,6 +2798,87 @@ impl Game {
             }
             _ => false,
         })
+    }
+
+    fn ts_unit_grid_query_includes(&self, center: TileRef, range: i32, unit_tile: TileRef) -> bool {
+        // TS `UnitGrid.nearbyUnits` first narrows candidates by 100px grid
+        // cells, then applies exact distance. The cell-window formula has
+        // edge behavior at exact cell boundaries; mirror it for callers whose
+        // semantics go through `nearbyUnits` rather than a direct unit scan.
+        const CELL_SIZE: i32 = 100;
+        let grid_w = (self.map.width as i32 + CELL_SIZE - 1) / CELL_SIZE;
+        let grid_h = (self.map.height as i32 + CELL_SIZE - 1) / CELL_SIZE;
+        let x = self.x(center) as i32;
+        let y = self.y(center) as i32;
+        let grid_x = x / CELL_SIZE;
+        let grid_y = y / CELL_SIZE;
+        let x_mod = x % CELL_SIZE;
+        let y_mod = y % CELL_SIZE;
+        let ceil_div = |n: i32, d: i32| (n as f64 / d as f64).ceil() as i32;
+        let start_grid_x = (grid_x - ceil_div(range - x_mod, CELL_SIZE)).max(0);
+        let end_grid_x =
+            (grid_x + ceil_div(range - (CELL_SIZE - x_mod), CELL_SIZE)).min(grid_w - 1);
+        let start_grid_y = (grid_y - ceil_div(range - y_mod, CELL_SIZE)).max(0);
+        let end_grid_y =
+            (grid_y + ceil_div(range - (CELL_SIZE - y_mod), CELL_SIZE)).min(grid_h - 1);
+        let unit_grid_x = self.x(unit_tile) as i32 / CELL_SIZE;
+        let unit_grid_y = self.y(unit_tile) as i32 / CELL_SIZE;
+        unit_grid_x >= start_grid_x
+            && unit_grid_x <= end_grid_x
+            && unit_grid_y >= start_grid_y
+            && unit_grid_y <= end_grid_y
+    }
+
+    /// TS `WarshipExecution.dockedShipsAtPort`: non-patrolling own warships
+    /// within docking range whose `targetTile` is clear occupy a port's active
+    /// healing capacity. `exclude_unit_id` mirrors TS's optional `excludeShip`
+    /// used when deciding whether the arriving ship itself may dock.
+    pub fn docked_warships_at_port(
+        &self,
+        owner: u16,
+        port_tile: TileRef,
+        exclude_unit_id: Option<i32>,
+    ) -> usize {
+        let docking_radius = 5;
+        let docking_radius_sq = docking_radius * docking_radius;
+        self.live_warships()
+            .filter(|warship| warship.owner_small_id() == owner)
+            .filter_map(|warship| {
+                let unit_id = warship.unit_id()?;
+                if exclude_unit_id == Some(unit_id) {
+                    return None;
+                }
+                let tile = self.unit_tile_of(owner, unit_id)?;
+                Some((warship, tile))
+            })
+            .filter(|(warship, tile)| {
+                !warship.is_patrolling()
+                    && warship.target_tile().is_none()
+                    && self.ts_unit_grid_query_includes(port_tile, docking_radius as i32, *tile)
+                    && self.map.euclidean_dist_squared(*tile, port_tile) <= docking_radius_sq
+            })
+            .count()
+    }
+
+    pub fn warship_port_is_full(
+        &self,
+        owner: u16,
+        port_tile: TileRef,
+        exclude_unit_id: Option<i32>,
+    ) -> bool {
+        let Some(level) = self.player_by_small_id(owner).and_then(|player| {
+            player
+                .units
+                .iter()
+                .find(|unit| {
+                    unit.unit_type == crate::core::schemas::unit_type::PORT
+                        && unit.tile as TileRef == port_tile
+                })
+                .map(|unit| unit.level)
+        }) else {
+            return false;
+        };
+        self.docked_warships_at_port(owner, port_tile, exclude_unit_id) >= level as usize
     }
 
     /// Pending outgoing alliance requests (TS `player.outgoingAllianceRequests()`).
@@ -2924,38 +3031,25 @@ impl Game {
         })
     }
 
-    pub fn create_alliance_request(
-        &mut self,
-        requestor: u16,
-        recipient: u16,
-        tick: u32,
-    ) -> bool {
+    pub fn create_alliance_request(&mut self, requestor: u16, recipient: u16, tick: u32) -> bool {
         if self.wire.disable_alliances() {
             return false;
         }
         if self.is_allied_with(requestor, recipient) {
             return false;
         }
-        if self
-            .alliance_requests
-            .iter()
-            .any(|r| {
-                r.status == AllianceRequestStatus::Pending
-                    && r.requestor_small_id == requestor
-                    && r.recipient_small_id == recipient
-            })
-        {
+        if self.alliance_requests.iter().any(|r| {
+            r.status == AllianceRequestStatus::Pending
+                && r.requestor_small_id == requestor
+                && r.recipient_small_id == recipient
+        }) {
             return false;
         }
-        if self
-            .alliance_requests
-            .iter()
-            .any(|r| {
-                r.status == AllianceRequestStatus::Pending
-                    && r.requestor_small_id == recipient
-                    && r.recipient_small_id == requestor
-            })
-        {
+        if self.alliance_requests.iter().any(|r| {
+            r.status == AllianceRequestStatus::Pending
+                && r.requestor_small_id == recipient
+                && r.recipient_small_id == requestor
+        }) {
             self.accept_alliance_pair(recipient, requestor, tick);
             // TS `AllianceRequestExecution.init`: only simultaneous cross-requests
             // improve relations. A later manual `AllianceRequest.accept()` does not.
@@ -3036,15 +3130,11 @@ impl Game {
     }
 
     pub fn accept_alliance_request(&mut self, requestor: u16, recipient: u16, tick: u32) {
-        if !self
-            .alliance_requests
-            .iter()
-            .any(|r| {
-                r.status == AllianceRequestStatus::Pending
-                    && r.requestor_small_id == requestor
-                    && r.recipient_small_id == recipient
-            })
-        {
+        if !self.alliance_requests.iter().any(|r| {
+            r.status == AllianceRequestStatus::Pending
+                && r.requestor_small_id == requestor
+                && r.recipient_small_id == recipient
+        }) {
             return;
         }
         self.accept_alliance_pair(requestor, recipient, tick);
@@ -3268,7 +3358,9 @@ impl Game {
         // in sync with TS so that RNG consumption in `maybe_send_alliance_requests`
         // (and attack strategies) is identical between the two engines.
         if !treat_afk_friendly
-            && self.player_by_small_id(b).map_or(false, |p| p.is_disconnected)
+            && self
+                .player_by_small_id(b)
+                .map_or(false, |p| p.is_disconnected)
         {
             return false;
         }
@@ -3287,13 +3379,11 @@ impl Game {
     }
 
     pub fn is_spawn_immunity_active(&self) -> bool {
-        self.spawn_phase
-            || self.ticks_since_start() < self.wire.spawn_immunity_duration()
+        self.spawn_phase || self.ticks_since_start() < self.wire.spawn_immunity_duration()
     }
 
     pub fn is_nation_spawn_immunity_active(&self) -> bool {
-        self.spawn_phase
-            || self.ticks_since_start() < self.wire.nation_spawn_immunity_duration()
+        self.spawn_phase || self.ticks_since_start() < self.wire.nation_spawn_immunity_duration()
     }
 
     pub fn is_player_immune(&self, small_id: u16) -> bool {
@@ -3733,16 +3823,8 @@ mod relation_tests {
         let reciprocal_second = add_human(&mut reciprocal, "reciprocal-second");
         let reciprocal_nuke =
             add_threatening_nuke(&mut reciprocal, reciprocal_first, reciprocal_second);
-        assert!(reciprocal.create_alliance_request(
-            reciprocal_first,
-            reciprocal_second,
-            10
-        ));
-        assert!(reciprocal.create_alliance_request(
-            reciprocal_second,
-            reciprocal_first,
-            11
-        ));
+        assert!(reciprocal.create_alliance_request(reciprocal_first, reciprocal_second, 10));
+        assert!(reciprocal.create_alliance_request(reciprocal_second, reciprocal_first, 11));
         assert!(!reciprocal.unit_exists(reciprocal_first, reciprocal_nuke));
     }
 }
@@ -4321,7 +4403,10 @@ mod owned_tiles_tests {
             game.conquer(1, t);
         }
         game.conquer(1, t1);
-        assert_eq!(game.player_by_small_id(1).unwrap().owned_tiles, vec![t2, t1]);
+        assert_eq!(
+            game.player_by_small_id(1).unwrap().owned_tiles,
+            vec![t2, t1]
+        );
     }
 
     #[test]
@@ -4420,6 +4505,40 @@ mod player_tests {
         assert!(!game.can_send_alliance_request(2, 1));
     }
 
+    /// TS `Game.nearbyUnits()` excludes under-construction units by default.
+    /// Defense posts are built immediately as units but stay under construction
+    /// for 50 ticks, so they must not apply attack-defense bonuses until
+    /// completion.
+    #[test]
+    fn under_construction_defense_post_does_not_count_as_nearby() {
+        let mut game = crate::test_util::plains_game(64, 64);
+        add_bot(&mut game, "player", 1);
+        let post_tile = game.map.ref_xy(10, 10);
+        let check_tile = game.map.ref_xy(12, 10);
+        game.conquer(1, post_tile);
+        let post_id = game.build_unit(1, unit_type::DEFENSE_POST, post_tile);
+
+        assert!(game.has_defense_post_nearby(check_tile, 1));
+        game.set_unit_under_construction(1, post_id, true);
+        assert!(!game.has_defense_post_nearby(check_tile, 1));
+        game.set_unit_under_construction(1, post_id, false);
+        assert!(game.has_defense_post_nearby(check_tile, 1));
+    }
+
+    #[test]
+    fn defense_post_query_matches_unit_grid_boundary_window() {
+        let mut game = crate::test_util::plains_game(128, 128);
+        add_bot(&mut game, "player", 1);
+        let check_tile = game.map.ref_xy(25, 70);
+        let post_tile = game.map.ref_xy(25, 100);
+        game.conquer(1, post_tile);
+        game.build_unit(1, unit_type::DEFENSE_POST, post_tile);
+
+        // TS UnitGrid.getCellsInRange does not scan the next 100-tile cell
+        // when the search range lands exactly on that cell's boundary.
+        assert!(!game.has_defense_post_nearby(check_tile, 1));
+    }
+
     /// TS `PlayerImpl.test.ts` "City can be upgraded" / "DefensePost cannot
     /// be upgraded" / "City can be upgraded from another city" / "City
     /// cannot be upgraded when too far away" / "Unit cannot be upgraded when
@@ -4486,10 +4605,7 @@ mod impassable_terrain_tests {
     #[test]
     fn num_land_tiles_excludes_impassable_tiles() {
         let game = wall_game();
-        assert_eq!(
-            game.num_land_tiles(),
-            MAP_W * MAP_H - WALL_WIDTH * MAP_H
-        );
+        assert_eq!(game.num_land_tiles(), MAP_W * MAP_H - WALL_WIDTH * MAP_H);
     }
 
     fn add_bot(game: &mut Game, id: &str, small_id: u16) {
@@ -4512,7 +4628,11 @@ mod impassable_terrain_tests {
         add_bot(&mut game, "player", 1);
         let tile = game.map.ref_xy(WALL_X, 10);
         game.conquer(1, tile);
-        assert_eq!(game.map.owner_id(tile), 0, "impassable tile must stay unowned");
+        assert_eq!(
+            game.map.owner_id(tile),
+            0,
+            "impassable tile must stay unowned"
+        );
         assert_eq!(game.player_by_small_id(1).unwrap().tiles_owned, 0);
     }
 
@@ -4744,7 +4864,10 @@ mod veterancy_tests {
 
         // The cap rises, but current health is unchanged - the ship heals toward the new
         // max normally, it does not jump on level-up.
-        assert_eq!(game.unit_max_health(1, ship), base + base * 1 * bonus_percent / 100);
+        assert_eq!(
+            game.unit_max_health(1, ship),
+            base + base * 1 * bonus_percent / 100
+        );
         assert_eq!(game.unit(1, ship).unwrap().health, base - 100);
     }
 
@@ -4902,10 +5025,9 @@ mod team_join_tests {
 }
 
 // Ported from `UnitGrid.test.ts`. Native has no spatial-cell grid (`spatial.rs` is an
-// unrelated transport-pathfinding module) - `has_unit_nearby_any`/`nearby_structures_any`
-// are a flat per-tick scan over all players' units that produce the same *query results*
-// as TS's `UnitGrid.hasUnitNearby`/`nearbyUnits`, so these tests exercise that behavioral
-// equivalence rather than any internal grid-cell mechanics.
+// Port of `openfront/tests/UnitGrid.test.ts`. Native now keeps a real UnitGrid
+// (`crate::unit_grid`) matching TS cell/Set insertion-order semantics; these
+// tests exercise the public `has_unit_nearby_any`/`nearby_structures_any` API.
 #[cfg(test)]
 mod unit_grid_tests {
     use super::{Game, PlayerInfo, PlayerType};
@@ -4947,7 +5069,8 @@ mod unit_grid_tests {
             game.build_unit(p1, t, unit_tile);
         }
         let check_tile = game.map.ref_xy(range_check_x, 0);
-        game.nearby_structures_any(check_tile, range, unit_types).len()
+        game.nearby_structures_any(check_tile, range, unit_types)
+            .len()
     }
 
     #[test]
@@ -5005,18 +5128,12 @@ mod unit_grid_tests {
 
     #[test]
     fn nearby_units_inside_a_huge_range() {
-        assert_eq!(
-            nearby_count(200, 0, 42, 198, &[unit_type::TRADE_SHIP]),
-            1
-        );
+        assert_eq!(nearby_count(200, 0, 42, 198, &[unit_type::TRADE_SHIP]), 1);
     }
 
     #[test]
     fn nearby_units_one_outside_a_huge_range() {
-        assert_eq!(
-            nearby_count(200, 0, 199, 198, &[unit_type::TRANSPORT]),
-            0
-        );
+        assert_eq!(nearby_count(200, 0, 199, 198, &[unit_type::TRANSPORT]), 0);
     }
 
     #[test]
@@ -5025,7 +5142,11 @@ mod unit_grid_tests {
         let p1 = add_human(&mut game, "test_id");
         let tile = game.map.ref_xy(0, 0);
         game.build_unit(p1, unit_type::CITY, tile);
-        assert_eq!(game.nearby_structures_any(tile, 10, &[unit_type::PORT]).len(), 0);
+        assert_eq!(
+            game.nearby_structures_any(tile, 10, &[unit_type::PORT])
+                .len(),
+            0
+        );
     }
 
     #[test]
@@ -5038,7 +5159,8 @@ mod unit_grid_tests {
         game.build_unit(p1, unit_type::CITY, outside_tile);
         let check_tile = game.map.ref_xy(0, 0);
         assert_eq!(
-            game.nearby_structures_any(check_tile, 10, &[unit_type::CITY]).len(),
+            game.nearby_structures_any(check_tile, 10, &[unit_type::CITY])
+                .len(),
             1
         );
     }

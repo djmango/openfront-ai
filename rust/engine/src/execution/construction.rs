@@ -12,11 +12,7 @@ use crate::game::Game;
 use crate::map::TileRef;
 
 fn complete_construction(game: &mut Game, small_id: u16, unit_type: &str, unit_id: i32) {
-    if let Some(p) = game.player_by_small_id_mut(small_id) {
-        if let Some(u) = p.units.iter_mut().find(|u| u.id == unit_id) {
-            u.under_construction = false;
-        }
-    }
+    game.set_unit_under_construction(small_id, unit_id, false);
     match unit_type {
         unit_type::CITY => {
             game.add_execution(ExecEnum::City(CityExecution::new(small_id, unit_id)));
@@ -175,11 +171,7 @@ impl Execution for ConstructionExecution {
             let duration = game.wire.construction_ticks(&self.unit_type);
             let id = game.build_unit(self.small_id, &self.unit_type, spawn_tile);
             if duration > 0 {
-                if let Some(p) = game.player_by_small_id_mut(self.small_id) {
-                    if let Some(u) = p.units.iter_mut().find(|u| u.id == id) {
-                        u.under_construction = true;
-                    }
-                }
+                game.set_unit_under_construction(self.small_id, id, true);
                 self.unit_id = Some(id);
                 self.ticks_until_complete = duration;
                 return;
@@ -253,11 +245,7 @@ mod tests {
 
         let city_tile = game.map.ref_xy(0, 0);
         let city_id = game.build_unit(builder, unit_type::CITY, city_tile);
-        if let Some(p) = game.player_by_small_id_mut(builder) {
-            if let Some(u) = p.units.iter_mut().find(|u| u.id == city_id) {
-                u.under_construction = true;
-            }
-        }
+        game.set_unit_under_construction(builder, city_id, true);
         game.add_execution(ExecEnum::Construction(ConstructionExecution::mid_build_for_test(
             builder,
             unit_type::CITY,

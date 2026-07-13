@@ -26,6 +26,7 @@ pub mod spatial;
 #[cfg(test)]
 mod test_util;
 pub mod util;
+pub mod unit_grid;
 pub mod water;
 pub mod water_hpa;
 

@@ -28,8 +28,11 @@ impl PlayerExecution {
 impl Execution for PlayerExecution {
     fn init(&mut self, game: &mut Game, tick: u32) {
         if let Some(p) = game.player_by_small_id_mut(self.small_id) {
-            let name_hash = simple_hash(&p.name);
-            p.last_cluster_calc = tick + (name_hash as u32 % TICKS_PER_CLUSTER_CALC);
+            // TS `PlayerExecution.init` seeds cluster-removal cadence from
+            // `player.id()`, not display name. The cadence is observable when
+            // surrounded clusters are captured before same-tick attacks run.
+            let id_hash = simple_hash(&p.id);
+            p.last_cluster_calc = tick + (id_hash as u32 % TICKS_PER_CLUSTER_CALC);
         }
     }
 
@@ -102,6 +105,27 @@ impl Execution for PlayerExecution {
 mod tests {
     use super::*;
     use crate::game::{Player, PlayerType};
+
+    #[test]
+    fn cluster_calc_seed_uses_player_id_like_ts() {
+        let mut game = Game::default();
+        let small_id = 1;
+        game.add_player(Player {
+            id: "w5d7jk0b".into(),
+            name: "Arawak Colony".into(),
+            small_id,
+            ..Default::default()
+        });
+
+        let mut exec = PlayerExecution::new(small_id);
+        exec.init(&mut game, 100);
+
+        let player = game.player_by_small_id(small_id).unwrap();
+        let id_seed = simple_hash(&player.id) as u32 % TICKS_PER_CLUSTER_CALC;
+        let name_seed = simple_hash(&player.name) as u32 % TICKS_PER_CLUSTER_CALC;
+        assert_ne!(id_seed, name_seed, "fixture should catch id/name swaps");
+        assert_eq!(player.last_cluster_calc, 100 + id_seed);
+    }
 
     /// TS `PlayerImpl.addTroops` routes negatives through `removeTroops(-delta)`,
     /// so a fractional over-max income of e.g. `-6360.28` removes 6360 troops

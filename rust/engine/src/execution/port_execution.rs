@@ -175,7 +175,7 @@ impl Execution for PortExecution {
         if ports.is_empty() {
             return;
         }
-        let (_dst_small_id, dst_unit_id) = self
+        let (dst_small_id, dst_unit_id) = self
             .random
             .as_mut()
             .expect("PortExecution not initialized")
@@ -185,6 +185,7 @@ impl Execution for PortExecution {
             self.small_id,
             self.unit_id,
             dst_unit_id,
+            dst_small_id,
         )));
     }
 

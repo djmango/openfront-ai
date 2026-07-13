@@ -127,6 +127,11 @@ impl Config {
         20
     }
 
+    /// TS `unitInfo(Shell).damage` - base shell damage before the per-shot random multiplier.
+    pub fn shell_base_damage(&self) -> i32 {
+        250
+    }
+
     /// TS `warshipVeterancyTransportKills()` - transport ships a warship must destroy
     /// (alone, with no trade captures) to gain one veterancy level.
     pub fn warship_veterancy_transport_kills(&self) -> i32 {

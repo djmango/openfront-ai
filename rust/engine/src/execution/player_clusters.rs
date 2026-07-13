@@ -1,6 +1,6 @@
 //! Surrounded cluster removal (`PlayerExecution.ts` subset for hash parity).
 
-use crate::game::Game;
+use crate::game::{Game, PlayerBoundingBox};
 use crate::map::TileRef;
 use crate::util::simple_hash;
 use std::collections::HashSet;
@@ -65,6 +65,15 @@ fn bbox_from_tiles(game: &Game, tiles: &OrderedTiles) -> BBox {
         bb.max_y = bb.max_y.max(y);
     }
     bb
+}
+
+fn player_bounding_box(bb: BBox) -> PlayerBoundingBox {
+    PlayerBoundingBox {
+        min_x: bb.min_x,
+        min_y: bb.min_y,
+        max_x: bb.max_x,
+        max_y: bb.max_y,
+    }
 }
 
 fn inscribed(outer: BBox, inner: BBox) -> bool {
@@ -269,11 +278,9 @@ fn get_capturing_player(game: &Game, small_id: u16, cluster: &OrderedTiles) -> O
         return None;
     }
     let attackers: Vec<u16> = neighbors.iter().map(|(sid, _)| *sid).collect();
-    if let Some(attacker) = game.largest_incoming_land_attack_from_neighbors(
-        small_id,
-        &attackers,
-        &neighbors,
-    ) {
+    if let Some(attacker) =
+        game.largest_incoming_land_attack_from_neighbors(small_id, &attackers, &neighbors)
+    {
         return Some(attacker);
     }
     // TS `getMode`: first neighbor with strictly greatest count wins ties.
@@ -332,7 +339,7 @@ fn remove_cluster(game: &mut Game, small_id: u16, cluster: &OrderedTiles) {
 }
 
 pub fn maybe_remove_clusters(game: &mut Game, small_id: u16, tick: u32) {
-    let (tiles_owned, last_calc, last_change, name_hash) = {
+    let (tiles_owned, last_calc, last_change, id_hash) = {
         let Some(p) = game.player_by_small_id(small_id) else {
             return;
         };
@@ -343,13 +350,15 @@ pub fn maybe_remove_clusters(game: &mut Game, small_id: u16, tick: u32) {
             p.tiles_owned,
             p.last_cluster_calc,
             p.last_tile_change,
-            simple_hash(&p.name),
+            simple_hash(&p.id),
         )
     };
 
     let mut last_calc = last_calc;
     if last_calc == 0 {
-        last_calc = tick + (name_hash as u32 % TICKS_PER_CLUSTER_CALC);
+        // Same seed as TS `PlayerExecution.init`; this fallback covers tests
+        // and hand-built games that call cluster removal without an execution init.
+        last_calc = tick + (id_hash as u32 % TICKS_PER_CLUSTER_CALC);
         if let Some(p) = game.player_by_small_id_mut(small_id) {
             p.last_cluster_calc = last_calc;
         }
@@ -368,6 +377,9 @@ pub fn maybe_remove_clusters(game: &mut Game, small_id: u16, tick: u32) {
 
     let clusters = calculate_clusters(game, small_id);
     if clusters.is_empty() {
+        if let Some(p) = game.player_by_small_id_mut(small_id) {
+            p.largest_cluster_bounding_box = None;
+        }
         return;
     }
 
@@ -382,6 +394,9 @@ pub fn maybe_remove_clusters(game: &mut Game, small_id: u16, tick: u32) {
 
     let largest = clusters[largest_idx].clone();
     let largest_bb = bbox_from_tiles(game, &largest);
+    if let Some(p) = game.player_by_small_id_mut(small_id) {
+        p.largest_cluster_bounding_box = Some(player_bounding_box(largest_bb.clone()));
+    }
     if surrounded_by_same_enemy(game, small_id, &largest, largest_bb).is_some() {
         remove_cluster(game, small_id, &largest);
     }
