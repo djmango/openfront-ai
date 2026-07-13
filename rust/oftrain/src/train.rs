@@ -72,7 +72,6 @@
 //! - **fp16 host storage**: `--compact-rollout` stores foveated grids as
 //!   host fp16. The legacy path stays f32; `--fp16-rollout` only changes
 //!   its H2D transfer dtype.
-use std::io::Cursor;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -285,9 +284,9 @@ pub struct Config {
     pub pipeline_groups: bool,
     /// Opt-in persistent ownership. One long-lived OS thread per shard owns
     /// actor CUDA state; with one GPU a stable learner thread also owns all
-    /// learner CUDA state and PPO execution. Weight messages are serialized
-    /// CPU bytes. Disabled by default; autoscaling selects the legacy path,
-    /// and multi-GPU currently retains the legacy learner implementation.
+    /// learner CUDA state and PPO execution. Weight messages are packed
+    /// CPU-only f32 snapshots. Disabled by default; autoscaling selects the
+    /// legacy path, and multi-GPU currently retains the legacy learner implementation.
     pub persistent_actors: bool,
     pub device: Device,
     /// Which simulation backend envs run against (Node bridge or the
@@ -1027,9 +1026,86 @@ fn run_eval(
 
 /// Actor commands contain only ordinary CPU data. `weights` is a complete
 /// VarStore byte serialization, never a VarStore or Tensor handle.
+#[derive(Clone)]
+struct CpuWeightMeta {
+    name: String,
+    shape: Vec<i64>,
+    len: i64,
+}
+
+#[derive(Clone)]
+struct CpuWeightSnapshot {
+    meta: Vec<CpuWeightMeta>,
+    values: Vec<f32>,
+}
+
+fn snapshot_weights(vs: &nn::VarStore) -> Result<CpuWeightSnapshot> {
+    tch::no_grad(|| {
+        let mut variables: Vec<_> = vs.variables().into_iter().collect();
+        variables.sort_by(|(a, _), (b, _)| a.cmp(b));
+        let meta = variables
+            .iter()
+            .map(|(name, tensor)| CpuWeightMeta {
+                name: name.clone(),
+                shape: tensor.size(),
+                len: tensor.numel() as i64,
+            })
+            .collect();
+        let flattened: Vec<Tensor> = variables
+            .iter()
+            .map(|(_, tensor)| tensor.flatten(0, -1))
+            .collect();
+        let refs: Vec<&Tensor> = flattened.iter().collect();
+        let packed = Tensor::cat(&refs, 0)
+            .to_device(Device::Cpu)
+            .to_kind(Kind::Float);
+        let values = Vec::<f32>::try_from(packed)?;
+        Ok(CpuWeightSnapshot { meta, values })
+    })
+}
+
+fn apply_weight_snapshot(vs: &nn::VarStore, snapshot: &CpuWeightSnapshot) -> Result<()> {
+    let mut variables = vs.variables();
+    anyhow::ensure!(
+        variables.len() == snapshot.meta.len(),
+        "weight snapshot variable count {} != destination {}",
+        snapshot.meta.len(),
+        variables.len()
+    );
+    let cpu = Tensor::from_slice(&snapshot.values);
+    let mut offset = 0i64;
+    for item in &snapshot.meta {
+        let mut destination = variables
+            .remove(&item.name)
+            .ok_or_else(|| anyhow!("weight snapshot destination missing {}", item.name))?;
+        anyhow::ensure!(
+            destination.size() == item.shape,
+            "weight snapshot shape mismatch for {}: {:?} != {:?}",
+            item.name,
+            item.shape,
+            destination.size()
+        );
+        let source = cpu
+            .narrow(0, offset, item.len)
+            .view(item.shape.as_slice())
+            .to_device(destination.device());
+        tch::no_grad(|| destination.f_copy_(&source))?;
+        offset += item.len;
+    }
+    anyhow::ensure!(
+        offset as usize == snapshot.values.len(),
+        "weight snapshot payload length mismatch"
+    );
+    Ok(())
+}
+
 enum ActorCommand {
     Collect { id: u64 },
-    Refresh { id: u64, policy_version: u64, weights: Vec<u8> },
+    Refresh {
+        id: u64,
+        policy_version: u64,
+        weights: CpuWeightSnapshot,
+    },
     SetStage { id: u64, stage: usize },
     Eval { id: u64, stage: usize, episodes: usize },
     Shutdown { id: u64 },
@@ -1101,12 +1177,6 @@ impl ActorProtocol {
     }
 }
 
-fn serialize_weights(vs: &nn::VarStore) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    vs.save_to_stream(&mut bytes)?;
-    Ok(bytes)
-}
-
 fn close_actor(actor: ActorShard) {
     for worker in actor.workers {
         drop(worker.choice_tx);
@@ -1119,13 +1189,13 @@ fn build_actor_shard(
     device: Device,
     cfg: &Config,
     stage: usize,
-    initial_weights: Vec<u8>,
+    initial_weights: CpuWeightSnapshot,
 ) -> Result<ActorShard> {
     // All CUDA-bearing actor resources are created and destroyed on the
     // persistent actor thread.
-    let mut vs = nn::VarStore::new(device);
+    let vs = nn::VarStore::new(device);
     let policy = PolicyNet::new(&vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
-    vs.load_from_stream(Cursor::new(initial_weights))?;
+    apply_weight_snapshot(&vs, &initial_weights)?;
     if let Device::Cuda(index) = device {
         Cuda::synchronize(index as i64);
     }
@@ -1164,7 +1234,7 @@ fn actor_loop(
     cfg: Config,
     stage: usize,
     initial_policy_version: u64,
-    initial_weights: Vec<u8>,
+    initial_weights: CpuWeightSnapshot,
     command_rx: Receiver<ActorCommand>,
     reply_tx: Sender<ActorReply>,
 ) {
@@ -1198,16 +1268,14 @@ fn actor_loop(
         let reply: Result<ActorReply> = match command {
             ActorCommand::Collect { id } => collect_rollout(&mut actor, &cfg, protocol.policy_version)
                 .map(|result| ActorReply::Collected { id, result }),
-            ActorCommand::Refresh { id, weights, .. } => actor
-                .vs
-                .load_from_stream(Cursor::new(weights))
-                .map_err(anyhow::Error::from)
-                .map(|_| {
+            ActorCommand::Refresh { id, weights, .. } => {
+                apply_weight_snapshot(&actor.vs, &weights).map(|_| {
                     if let Device::Cuda(index) = actor.device {
                         Cuda::synchronize(index as i64);
                     }
                     ActorReply::Ack { id }
-                }),
+                })
+            }
             ActorCommand::SetStage { id, stage } => {
                 for worker in &actor.workers {
                     let _ = worker.stage_tx.send(stage);
@@ -1281,7 +1349,7 @@ impl PersistentActor {
         cfg: Config,
         stage: usize,
         initial_policy_version: u64,
-        initial_weights: Vec<u8>,
+        initial_weights: CpuWeightSnapshot,
     ) -> Result<Self> {
         let (command_tx, command_rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
@@ -1305,7 +1373,7 @@ impl PersistentActor {
             next_command_id: 1,
             pending_collect_id: None,
         };
-        match actor.recv_reply()? {
+        match actor.recv_reply("initialization")? {
             ActorReply::Ready { envs } => {
                 anyhow::ensure!(envs > 0, "persistent actor {shard_index} initialized with no envs");
                 Ok(actor)
@@ -1313,15 +1381,25 @@ impl PersistentActor {
             reply => Err(actor_reply_error(shard_index, "ready", &reply)),
         }
     }
-    fn recv_reply(&mut self) -> Result<ActorReply> {
-        match self.reply_rx.recv() {
-            Ok(reply) => Ok(reply),
-            Err(_) => {
-                let shard_index = self.shard_index;
-                let status = self.join_status();
-                Err(anyhow!(
-                    "persistent actor {shard_index} reply channel closed{status}"
-                ))
+    fn recv_reply(&mut self, phase: &str) -> Result<ActorReply> {
+        let started = Instant::now();
+        loop {
+            match self.reply_rx.recv_timeout(Duration::from_secs(15)) {
+                Ok(reply) => return Ok(reply),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    eprintln!(
+                        "[watchdog] actor shard {} still in {phase} after {:.0}s",
+                        self.shard_index,
+                        started.elapsed().as_secs_f64()
+                    );
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let shard_index = self.shard_index;
+                    let status = self.join_status();
+                    return Err(anyhow!(
+                        "persistent actor {shard_index} reply channel closed{status}"
+                    ));
+                }
             }
         }
     }
@@ -1352,20 +1430,21 @@ impl PersistentActor {
     fn finish_collect(&mut self) -> Result<RolloutResult> {
         let expected = self.pending_collect_id.take()
             .ok_or_else(|| anyhow!("persistent actor {} has no pending collect", self.shard_index))?;
-        match self.recv_reply()? {
+        match self.recv_reply("rollout collection")? {
             ActorReply::Collected { id, result } if id == expected => Ok(result),
             reply => Err(actor_reply_error(self.shard_index, "matching collect result", &reply)),
         }
     }
     fn request_ack(&mut self, command: ActorCommand) -> Result<()> {
         let expected = command.id();
+        let phase = command.name();
         self.command_tx.send(command)?;
-        match self.recv_reply()? {
+        match self.recv_reply(phase)? {
             ActorReply::Ack { id } if id == expected => Ok(()),
             reply => Err(actor_reply_error(self.shard_index, "matching acknowledgement", &reply)),
         }
     }
-    fn refresh(&mut self, policy_version: u64, weights: Vec<u8>) -> Result<()> {
+    fn refresh(&mut self, policy_version: u64, weights: CpuWeightSnapshot) -> Result<()> {
         let id = self.next_id();
         self.request_ack(ActorCommand::Refresh { id, policy_version, weights })
     }
@@ -1376,7 +1455,7 @@ impl PersistentActor {
     fn eval(&mut self, stage: usize, episodes: usize) -> Result<EvalResult> {
         let id = self.next_id();
         self.command_tx.send(ActorCommand::Eval { id, stage, episodes })?;
-        match self.recv_reply()? {
+        match self.recv_reply("evaluation")? {
             ActorReply::Eval { id: reply_id, result } if reply_id == id => Ok(result),
             reply => Err(actor_reply_error(self.shard_index, "matching eval result", &reply)),
         }
@@ -1433,7 +1512,7 @@ enum LearnerReply {
     Trained {
         id: u64,
         losses: (f64, f64, f64, f64),
-        weights: Vec<u8>,
+        weights: CpuWeightSnapshot,
         train_seconds: f64,
         snapshot_seconds: f64,
     },
@@ -1470,16 +1549,18 @@ impl LearnerProtocol {
 fn learner_loop(
     device: Device,
     cfg: Config,
-    initial_weights: Vec<u8>,
+    initial_weights: CpuWeightSnapshot,
     initial_lr: f64,
     mut rng: rand::rngs::SmallRng,
     command_rx: Receiver<LearnerCommand>,
     reply_tx: Sender<LearnerReply>,
 ) {
+    let init_started = Instant::now();
+    eprintln!("[phase] persistent learner initialization started");
     let initialized = (|| -> Result<LearnerShard> {
-        let mut vs = nn::VarStore::new(device);
+        let vs = nn::VarStore::new(device);
         let policy = PolicyNet::new(&vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
-        vs.load_from_stream(Cursor::new(initial_weights))?;
+        apply_weight_snapshot(&vs, &initial_weights)?;
         let opt = nn::AdamW::default().build(&vs, initial_lr)?;
         if let Device::Cuda(index) = device {
             Cuda::synchronize(index as i64);
@@ -1487,7 +1568,13 @@ fn learner_loop(
         Ok(LearnerShard { device, vs, policy, opt })
     })();
     let mut learner = match initialized {
-        Ok(learner) => learner,
+        Ok(learner) => {
+            eprintln!(
+                "[phase] persistent learner initialization finished in {:.3}s",
+                init_started.elapsed().as_secs_f64()
+            );
+            learner
+        }
         Err(error) => {
             let _ = reply_tx.send(LearnerReply::Failed {
                 id: 0,
@@ -1528,6 +1615,7 @@ fn learner_loop(
             } => {
                 learner.opt.set_lr(lr);
                 let train_start = Instant::now();
+                eprintln!("[phase] learner command {id} PPO started");
                 let losses = train_update(
                     std::slice::from_mut(&mut learner),
                     std::slice::from_ref(&rollout),
@@ -1539,14 +1627,24 @@ fn learner_loop(
                 );
                 let train_seconds = train_start.elapsed().as_secs_f64();
                 losses.and_then(|losses| {
+                    eprintln!(
+                        "[phase] learner command {id} PPO finished in {train_seconds:.3}s; \
+                         packed CPU snapshot started"
+                    );
                     let snapshot_start = Instant::now();
-                    let weights = serialize_weights(&learner.vs)?;
+                    let weights = snapshot_weights(&learner.vs)?;
+                    let snapshot_seconds = snapshot_start.elapsed().as_secs_f64();
+                    eprintln!(
+                        "[phase] learner command {id} packed CPU snapshot finished in \
+                         {snapshot_seconds:.3}s ({} MiB)",
+                        weights.values.len() * std::mem::size_of::<f32>() / (1024 * 1024)
+                    );
                     Ok(LearnerReply::Trained {
                         id,
                         losses,
                         weights,
                         train_seconds,
-                        snapshot_seconds: snapshot_start.elapsed().as_secs_f64(),
+                        snapshot_seconds,
                     })
                 })
             }
@@ -1580,7 +1678,7 @@ fn learner_loop(
 
 struct TrainReply {
     losses: (f64, f64, f64, f64),
-    weights: Vec<u8>,
+    weights: CpuWeightSnapshot,
     train_seconds: f64,
     snapshot_seconds: f64,
 }
@@ -1596,7 +1694,7 @@ impl PersistentLearner {
     fn spawn(
         device: Device,
         cfg: Config,
-        initial_weights: Vec<u8>,
+        initial_weights: CpuWeightSnapshot,
         initial_lr: f64,
         rng: rand::rngs::SmallRng,
     ) -> Result<(Self, i64)> {
@@ -1619,7 +1717,7 @@ impl PersistentLearner {
             handle: Some(handle),
             next_command_id: 1,
         };
-        match learner.recv_reply()? {
+        match learner.recv_reply("initialization")? {
             LearnerReply::Ready { params } => Ok((learner, params)),
             reply => Err(learner_reply_error("ready", &reply)),
         }
@@ -1641,12 +1739,21 @@ impl PersistentLearner {
             }
         }
     }
-    fn recv_reply(&mut self) -> Result<LearnerReply> {
-        match self.reply_rx.recv() {
-            Ok(reply) => Ok(reply),
-            Err(_) => {
-                let status = self.join_status();
-                Err(anyhow!("persistent learner reply channel closed{status}"))
+    fn recv_reply(&mut self, phase: &str) -> Result<LearnerReply> {
+        let started = Instant::now();
+        loop {
+            match self.reply_rx.recv_timeout(Duration::from_secs(15)) {
+                Ok(reply) => return Ok(reply),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    eprintln!(
+                        "[watchdog] learner still in {phase} after {:.0}s",
+                        started.elapsed().as_secs_f64()
+                    );
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let status = self.join_status();
+                    return Err(anyhow!("persistent learner reply channel closed{status}"));
+                }
             }
         }
     }
@@ -1658,7 +1765,7 @@ impl PersistentLearner {
             lr,
             ent_coef,
         })?;
-        match self.recv_reply()? {
+        match self.recv_reply("training and CPU weight snapshot")? {
             LearnerReply::Trained {
                 id: reply_id,
                 losses,
@@ -1680,7 +1787,7 @@ impl PersistentLearner {
             id,
             path: path.to_string(),
         })?;
-        match self.recv_reply()? {
+        match self.recv_reply("checkpoint save")? {
             LearnerReply::Ack { id: reply_id } if reply_id == id => Ok(()),
             reply => Err(learner_reply_error("matching save acknowledgement", &reply)),
         }
@@ -1688,7 +1795,7 @@ impl PersistentLearner {
     fn shutdown(mut self) -> Result<()> {
         let id = self.next_id();
         self.command_tx.send(LearnerCommand::Shutdown { id })?;
-        match self.recv_reply()? {
+        match self.recv_reply("shutdown")? {
             LearnerReply::Ack { id: reply_id } if reply_id == id => {}
             reply => return Err(learner_reply_error("matching shutdown acknowledgement", &reply)),
         }
@@ -2065,6 +2172,10 @@ fn train_update(
                     (ShardBatch { obs, choice, adv, ret, old_logp }, local_count, local_sum, local_sum_sq)
         }};
     }
+    let batch_started = Instant::now();
+    if exclusive_owner {
+        eprintln!("[phase] learner ShardBatch construction started");
+    }
     let shard_results: Vec<(ShardBatch, f64, f64, f64)> = if exclusive_owner {
         vec![build_shard!(0, learners[0].device, &pending[0])]
     } else {
@@ -2115,8 +2226,18 @@ fn train_update(
     }
     let mut shard_batches: Vec<ShardBatch> =
         shard_results.into_iter().map(|(batch, ..)| batch).collect();
+    if exclusive_owner {
+        eprintln!(
+            "[phase] learner ShardBatch construction finished in {:.3}s",
+            batch_started.elapsed().as_secs_f64()
+        );
+    }
 
     for _epoch in 0..cfg.epochs {
+        let epoch_started = Instant::now();
+        if exclusive_owner {
+            eprintln!("[phase] learner PPO epoch {}/{} started", _epoch + 1, cfg.epochs);
+        }
         // Per-shard shuffled index tensor, built once per epoch (CPU
         // shuffle + one tiny (total,) i64 upload) and resident on that
         // shard's device - minibatches `narrow` a contiguous slice of it
@@ -2322,6 +2443,14 @@ fn train_update(
                 );
             }
         }
+        if exclusive_owner {
+            eprintln!(
+                "[phase] learner PPO epoch {}/{} finished in {:.3}s",
+                _epoch + 1,
+                cfg.epochs,
+                epoch_started.elapsed().as_secs_f64()
+            );
+        }
     }
 
     let d = n_mb.max(1) as f64;
@@ -2403,6 +2532,18 @@ pub fn run(mut cfg: Config) -> Result<()> {
         let _ = PolicyNet::new(&snapshot.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
         hub_vs = Some(snapshot);
     }
+    // Build the packed host snapshot once. Phase 2 previously wrote the
+    // complete VarStore archive once for the actor and then again, after the
+    // "all envs ready" line, for the learner. Besides making startup silent
+    // for a long time on large policies, archive creation is unnecessary for
+    // an in-process transfer.
+    let mut persistent_initial_weights = if persistent_learner_enabled {
+        Some(snapshot_weights(
+            hub_vs.as_ref().expect("CPU hub initialized"),
+        )?)
+    } else {
+        None
+    };
     let total_envs = cfg.num_envs * devices.len();
     println!(
         "[train] spawning {} env workers across {} shard(s) {:?} (stage={}, max_ticks={})...",
@@ -2419,7 +2560,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
     for (gi, &device) in devices.iter().enumerate() {
         if persistent_learner_enabled {
             let initial_version = resumed_state.as_ref().map(|s| s.update).unwrap_or(0);
-            let weights = serialize_weights(hub_vs.as_ref().expect("CPU hub initialized"))?;
+            let weights = persistent_initial_weights
+                .as_ref()
+                .expect("persistent initial weights available")
+                .clone();
             persistent_actors.push(PersistentActor::spawn(
                 gi,
                 device,
@@ -2477,7 +2621,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
         });
         if cfg.persistent_actors {
             let initial_version = resumed_state.as_ref().map(|s| s.update).unwrap_or(0);
-            let weights = serialize_weights(&learners[gi].vs)?;
+            let weights = snapshot_weights(&learners[gi].vs)?;
             persistent_actors.push(PersistentActor::spawn(
                 gi,
                 device,
@@ -2525,7 +2669,9 @@ pub fn run(mut cfg: Config) -> Result<()> {
 
     let mut rng = Some(rand::rngs::SmallRng::from_entropy());
     let mut persistent_learner = if persistent_learner_enabled {
-        let initial_weights = serialize_weights(hub_vs.as_ref().expect("CPU hub initialized"))?;
+        let initial_weights = persistent_initial_weights
+            .take()
+            .expect("persistent initial weights available");
         let initial_lr = resumed_state.as_ref().map(|s| s.lr_now).unwrap_or(cfg.lr);
         let (learner, params) = PersistentLearner::spawn(
             devices[0],
@@ -2658,6 +2804,11 @@ pub fn run(mut cfg: Config) -> Result<()> {
     // Prime the pipeline: collect the very first rollout (using the
     // actors' initial, freshly-copied-from-learner weights) before the
     // update loop starts overlapping collection with training.
+    let prime_started = Instant::now();
+    eprintln!(
+        "[phase] prime rollout started ({} envs x {} steps)",
+        total_envs, cfg.rollout_len
+    );
     let mut pending: Vec<RolloutResult> = if cfg.persistent_actors {
         for actor in &mut persistent_actors {
             actor.send_collect()?;
@@ -2679,6 +2830,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
         })?
     };
     validate_rollout_set(&pending, start_update)?;
+    eprintln!(
+        "[phase] prime rollout finished in {:.3}s",
+        prime_started.elapsed().as_secs_f64()
+    );
 
     for update in start_update..cfg.updates {
         let update_start = Instant::now();
@@ -2936,7 +3091,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             } else {
                 learners
                     .iter()
-                    .map(|learner| serialize_weights(&learner.vs))
+                    .map(|learner| snapshot_weights(&learner.vs))
                     .collect::<Result<Vec<_>>>()?
             };
             for (actor, weights) in persistent_actors.iter_mut().zip(snapshots) {
@@ -2964,6 +3119,11 @@ pub fn run(mut cfg: Config) -> Result<()> {
             .map(|result| result.collect_seconds)
             .fold(0.0f64, f64::max);
         pending = next_pending;
+        eprintln!(
+            "[phase] update {update} train+collect+refresh finished in {:.3}s \
+             (train={train_dt:.3}s collect={collect_dt:.3}s refresh={refresh_dt:.3}s)",
+            update_start.elapsed().as_secs_f64()
+        );
 
         // Auto-scale check: deliberately placed here, after this
         // update's `pending`/`next_pending` swap and *before* the next
@@ -3053,6 +3213,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
         let mut last_eval: Option<EvalResult> = None;
         if cfg.eval_every > 0 && update % cfg.eval_every == 0 {
             let t_eval = Instant::now();
+            eprintln!(
+                "[phase] update {update} evaluation started (stage={curr_stage}, episodes={})",
+                cfg.eval_episodes
+            );
             let ev = if cfg.persistent_actors {
                 persistent_actors[0].eval(curr_stage, cfg.eval_episodes)?
             } else {
@@ -3285,7 +3449,10 @@ mod persistent_actor_tests {
             .accept(&ActorCommand::Refresh {
                 id: 2,
                 policy_version: 8,
-                weights: vec![1, 2, 3],
+                weights: CpuWeightSnapshot {
+                    meta: Vec::new(),
+                    values: vec![1.0, 2.0, 3.0],
+                },
             })
             .unwrap();
         protocol
@@ -3320,7 +3487,10 @@ mod persistent_actor_tests {
             .accept(&ActorCommand::Refresh {
                 id: 1,
                 policy_version: 3,
-                weights: Vec::new(),
+                weights: CpuWeightSnapshot {
+                    meta: Vec::new(),
+                    values: Vec::new(),
+                },
             })
             .unwrap_err();
         assert!(err.to_string().contains("stale actor policy refresh"));
@@ -3340,16 +3510,16 @@ mod persistent_actor_tests {
     }
 
     #[test]
-    fn serialized_weight_message_is_independent_cpu_bytes() {
+    fn packed_weight_message_is_independent_cpu_data() {
         tch::manual_seed(91);
         let source = nn::VarStore::new(Device::Cpu);
         let _ = PolicyNet::new(&source.root(), false, false, 8, 1);
-        let bytes = serialize_weights(&source).unwrap();
-        assert!(!bytes.is_empty());
+        let snapshot = snapshot_weights(&source).unwrap();
+        assert!(!snapshot.values.is_empty());
 
-        let mut destination = nn::VarStore::new(Device::Cpu);
+        let destination = nn::VarStore::new(Device::Cpu);
         let _ = PolicyNet::new(&destination.root(), false, false, 8, 1);
-        destination.load_from_stream(Cursor::new(bytes)).unwrap();
+        apply_weight_snapshot(&destination, &snapshot).unwrap();
         let source_vars = source.variables();
         let destination_vars = destination.variables();
         assert_eq!(source_vars.len(), destination_vars.len());
@@ -3553,10 +3723,10 @@ mod persistent_actor_tests {
         }
     }
 
-    fn parity_learner(cfg: &Config, weights: &[u8]) -> LearnerShard {
-        let mut vs = nn::VarStore::new(Device::Cpu);
+    fn parity_learner(cfg: &Config, weights: &CpuWeightSnapshot) -> LearnerShard {
+        let vs = nn::VarStore::new(Device::Cpu);
         let policy = PolicyNet::new(&vs.root(), false, false, cfg.gc, cfg.blocks);
-        vs.load_from_stream(Cursor::new(weights.to_vec())).unwrap();
+        apply_weight_snapshot(&vs, weights).unwrap();
         let opt = nn::AdamW::default().build(&vs, cfg.lr).unwrap();
         LearnerShard {
             device: Device::Cpu,
@@ -3572,7 +3742,7 @@ mod persistent_actor_tests {
         let cfg = parity_config();
         let source = nn::VarStore::new(Device::Cpu);
         let _ = PolicyNet::new(&source.root(), false, false, cfg.gc, cfg.blocks);
-        let weights = serialize_weights(&source).unwrap();
+        let weights = snapshot_weights(&source).unwrap();
         let mut legacy = parity_learner(&cfg, &weights);
         let mut owned = parity_learner(&cfg, &weights);
         let mut legacy_rng = rand::rngs::SmallRng::seed_from_u64(919);
@@ -3630,7 +3800,7 @@ mod persistent_actor_tests {
         let cfg = parity_config();
         let source = nn::VarStore::new(Device::Cpu);
         let _ = PolicyNet::new(&source.root(), false, false, cfg.gc, cfg.blocks);
-        let weights = serialize_weights(&source).unwrap();
+        let weights = snapshot_weights(&source).unwrap();
         let (mut learner, params) = PersistentLearner::spawn(
             Device::Cpu,
             cfg.clone(),
@@ -3643,7 +3813,7 @@ mod persistent_actor_tests {
         let reply = learner.train(parity_rollout(), cfg.lr, 0.01).unwrap();
         assert!(reply.train_seconds >= 0.0);
         assert!(reply.snapshot_seconds >= 0.0);
-        assert!(!reply.weights.is_empty());
+        assert!(!reply.weights.values.is_empty());
 
         let path = std::env::temp_dir().join(format!(
             "oftrain-persistent-learner-{}.safetensors",
