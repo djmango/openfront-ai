@@ -31,6 +31,12 @@
 //! finishes (so the *next* update's collection uses the newest weights
 //! available, one version behind the learner it's paired with for
 //! training).
+//! On the one-GPU path the same flag also starts a persistent learner owner:
+//! it constructs and retains LearnerShard, ShardBatch, RetStat, and shuffle
+//! RNG on one stable OS thread. Train commands/results and actor refreshes
+//! contain CPU data only. Checkpoint weights are written by that owner and
+//! coordinator-ordered sidecars retain their existing format/order. Multi-GPU
+//! keeps the legacy learner threads until persistent gradient sync is ready.
 //!
 //! Phase 1 deliberately does not implement live env-resize commands.
 //! Combining `--persistent-actors` with `--auto-scale-envs` selects the
@@ -277,11 +283,11 @@ pub struct Config {
     /// dual-group pipelining). Default on; with N=1 the second group is
     /// empty and behavior matches the single-group path.
     pub pipeline_groups: bool,
-    /// Opt-in Phase 1 persistent actor ownership. One long-lived OS thread
-    /// per shard owns every actor-side CUDA object and env worker. Weight
-    /// messages are serialized CPU bytes; no VarStore or Tensor crosses
-    /// the actor channel. Disabled by default, and Phase 1 automatically
-    /// selects the legacy path when autoscaling is enabled.
+    /// Opt-in persistent ownership. One long-lived OS thread per shard owns
+    /// actor CUDA state; with one GPU a stable learner thread also owns all
+    /// learner CUDA state and PPO execution. Weight messages are serialized
+    /// CPU bytes. Disabled by default; autoscaling selects the legacy path,
+    /// and multi-GPU currently retains the legacy learner implementation.
     pub persistent_actors: bool,
     pub device: Device,
     /// Which simulation backend envs run against (Node bridge or the
@@ -430,6 +436,10 @@ fn save_atomic(path: &str, write: impl FnOnce(&str) -> Result<()>) -> Result<()>
 
 fn save_checkpoint(vs: &nn::VarStore, path: &str, state: &TrainState) -> Result<()> {
     save_atomic(path, |tmp| Ok(vs.save(tmp)?))?;
+    save_checkpoint_state(path, state)
+}
+
+fn save_checkpoint_state(path: &str, state: &TrainState) -> Result<()> {
     let state_path = state_sidecar_path(path);
     save_atomic(&state_path, |tmp| {
         std::fs::write(tmp, serde_json::to_string_pretty(state)?)?;
@@ -1392,6 +1402,323 @@ impl Drop for PersistentActor {
     }
 }
 
+enum LearnerCommand {
+    Train {
+        id: u64,
+        rollout: RolloutResult,
+        lr: f64,
+        ent_coef: f32,
+    },
+    SaveWeights { id: u64, path: String },
+    Shutdown { id: u64 },
+}
+
+impl LearnerCommand {
+    fn id(&self) -> u64 {
+        match self {
+            Self::Train { id, .. } | Self::SaveWeights { id, .. } | Self::Shutdown { id } => *id,
+        }
+    }
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Train { .. } => "train",
+            Self::SaveWeights { .. } => "save-weights",
+            Self::Shutdown { .. } => "shutdown",
+        }
+    }
+}
+
+enum LearnerReply {
+    Ready { params: i64 },
+    Trained {
+        id: u64,
+        losses: (f64, f64, f64, f64),
+        weights: Vec<u8>,
+        train_seconds: f64,
+        snapshot_seconds: f64,
+    },
+    Ack { id: u64 },
+    Failed { id: u64, command: &'static str, error: String },
+}
+
+#[derive(Debug)]
+struct LearnerProtocol {
+    next_command_id: u64,
+    stopped: bool,
+}
+
+impl LearnerProtocol {
+    fn new() -> Self {
+        Self { next_command_id: 1, stopped: false }
+    }
+    fn accept(&mut self, command: &LearnerCommand) -> Result<()> {
+        anyhow::ensure!(!self.stopped, "learner command received after shutdown");
+        anyhow::ensure!(
+            command.id() == self.next_command_id,
+            "learner command ordering violation: got id {}, expected {}",
+            command.id(),
+            self.next_command_id
+        );
+        self.next_command_id += 1;
+        if matches!(command, LearnerCommand::Shutdown { .. }) {
+            self.stopped = true;
+        }
+        Ok(())
+    }
+}
+
+fn learner_loop(
+    device: Device,
+    cfg: Config,
+    initial_weights: Vec<u8>,
+    initial_lr: f64,
+    mut rng: rand::rngs::SmallRng,
+    command_rx: Receiver<LearnerCommand>,
+    reply_tx: Sender<LearnerReply>,
+) {
+    let initialized = (|| -> Result<LearnerShard> {
+        let mut vs = nn::VarStore::new(device);
+        let policy = PolicyNet::new(&vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
+        vs.load_from_stream(Cursor::new(initial_weights))?;
+        let opt = nn::AdamW::default().build(&vs, initial_lr)?;
+        if let Device::Cuda(index) = device {
+            Cuda::synchronize(index as i64);
+        }
+        Ok(LearnerShard { device, vs, policy, opt })
+    })();
+    let mut learner = match initialized {
+        Ok(learner) => learner,
+        Err(error) => {
+            let _ = reply_tx.send(LearnerReply::Failed {
+                id: 0,
+                command: "initialize",
+                error: format!("{error:#}"),
+            });
+            return;
+        }
+    };
+    let params = learner
+        .vs
+        .trainable_variables()
+        .iter()
+        .map(|tensor| tensor.numel() as i64)
+        .sum();
+    if reply_tx.send(LearnerReply::Ready { params }).is_err() {
+        return;
+    }
+    let mut protocol = LearnerProtocol::new();
+    let mut ret_stat = RetStat::default();
+    while let Ok(command) = command_rx.recv() {
+        let id = command.id();
+        let name = command.name();
+        if let Err(error) = protocol.accept(&command) {
+            let _ = reply_tx.send(LearnerReply::Failed {
+                id,
+                command: name,
+                error: format!("{error:#}"),
+            });
+            break;
+        }
+        let reply: Result<LearnerReply> = match command {
+            LearnerCommand::Train {
+                id,
+                rollout,
+                lr,
+                ent_coef,
+            } => {
+                learner.opt.set_lr(lr);
+                let train_start = Instant::now();
+                let losses = train_update(
+                    std::slice::from_mut(&mut learner),
+                    std::slice::from_ref(&rollout),
+                    &cfg,
+                    &mut rng,
+                    ent_coef,
+                    &mut ret_stat,
+                    true,
+                );
+                let train_seconds = train_start.elapsed().as_secs_f64();
+                losses.and_then(|losses| {
+                    let snapshot_start = Instant::now();
+                    let weights = serialize_weights(&learner.vs)?;
+                    Ok(LearnerReply::Trained {
+                        id,
+                        losses,
+                        weights,
+                        train_seconds,
+                        snapshot_seconds: snapshot_start.elapsed().as_secs_f64(),
+                    })
+                })
+            }
+            LearnerCommand::SaveWeights { id, path } => {
+                save_atomic(&path, |tmp| Ok(learner.vs.save(tmp)?))
+                    .map(|_| LearnerReply::Ack { id })
+            }
+            LearnerCommand::Shutdown { id } => Ok(LearnerReply::Ack { id }),
+        };
+        match reply {
+            Ok(reply) => {
+                let stopped = protocol.stopped;
+                if reply_tx.send(reply).is_err() || stopped {
+                    break;
+                }
+            }
+            Err(error) => {
+                let _ = reply_tx.send(LearnerReply::Failed {
+                    id,
+                    command: name,
+                    error: format!("{error:#}"),
+                });
+                break;
+            }
+        }
+    }
+    if let Device::Cuda(index) = device {
+        Cuda::synchronize(index as i64);
+    }
+}
+
+struct TrainReply {
+    losses: (f64, f64, f64, f64),
+    weights: Vec<u8>,
+    train_seconds: f64,
+    snapshot_seconds: f64,
+}
+
+struct PersistentLearner {
+    command_tx: Sender<LearnerCommand>,
+    reply_rx: Receiver<LearnerReply>,
+    handle: Option<JoinHandle<()>>,
+    next_command_id: u64,
+}
+
+impl PersistentLearner {
+    fn spawn(
+        device: Device,
+        cfg: Config,
+        initial_weights: Vec<u8>,
+        initial_lr: f64,
+        rng: rand::rngs::SmallRng,
+    ) -> Result<(Self, i64)> {
+        let (command_tx, command_rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let handle = std::thread::Builder::new()
+            .name("learner-gpu0".to_string())
+            .spawn(move || learner_loop(
+                device,
+                cfg,
+                initial_weights,
+                initial_lr,
+                rng,
+                command_rx,
+                reply_tx,
+            ))?;
+        let mut learner = Self {
+            command_tx,
+            reply_rx,
+            handle: Some(handle),
+            next_command_id: 1,
+        };
+        match learner.recv_reply()? {
+            LearnerReply::Ready { params } => Ok((learner, params)),
+            reply => Err(learner_reply_error("ready", &reply)),
+        }
+    }
+    fn next_id(&mut self) -> u64 {
+        let id = self.next_command_id;
+        self.next_command_id += 1;
+        id
+    }
+    fn join_status(&mut self) -> String {
+        let Some(handle) = self.handle.take() else { return String::new() };
+        match handle.join() {
+            Ok(()) => " (thread exited)".to_string(),
+            Err(payload) => {
+                let reason = payload.downcast_ref::<&str>().copied()
+                    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("non-string panic");
+                format!(" (thread panicked: {reason})")
+            }
+        }
+    }
+    fn recv_reply(&mut self) -> Result<LearnerReply> {
+        match self.reply_rx.recv() {
+            Ok(reply) => Ok(reply),
+            Err(_) => {
+                let status = self.join_status();
+                Err(anyhow!("persistent learner reply channel closed{status}"))
+            }
+        }
+    }
+    fn train(&mut self, rollout: RolloutResult, lr: f64, ent_coef: f32) -> Result<TrainReply> {
+        let id = self.next_id();
+        self.command_tx.send(LearnerCommand::Train {
+            id,
+            rollout,
+            lr,
+            ent_coef,
+        })?;
+        match self.recv_reply()? {
+            LearnerReply::Trained {
+                id: reply_id,
+                losses,
+                weights,
+                train_seconds,
+                snapshot_seconds,
+            } if reply_id == id => Ok(TrainReply {
+                losses,
+                weights,
+                train_seconds,
+                snapshot_seconds,
+            }),
+            reply => Err(learner_reply_error("matching train result", &reply)),
+        }
+    }
+    fn save_weights(&mut self, path: &str) -> Result<()> {
+        let id = self.next_id();
+        self.command_tx.send(LearnerCommand::SaveWeights {
+            id,
+            path: path.to_string(),
+        })?;
+        match self.recv_reply()? {
+            LearnerReply::Ack { id: reply_id } if reply_id == id => Ok(()),
+            reply => Err(learner_reply_error("matching save acknowledgement", &reply)),
+        }
+    }
+    fn shutdown(mut self) -> Result<()> {
+        let id = self.next_id();
+        self.command_tx.send(LearnerCommand::Shutdown { id })?;
+        match self.recv_reply()? {
+            LearnerReply::Ack { id: reply_id } if reply_id == id => {}
+            reply => return Err(learner_reply_error("matching shutdown acknowledgement", &reply)),
+        }
+        let status = self.join_status();
+        anyhow::ensure!(!status.contains("panicked"), "learner shutdown failed{status}");
+        Ok(())
+    }
+}
+
+impl Drop for PersistentLearner {
+    fn drop(&mut self) {
+        if self.handle.is_none() {
+            return;
+        }
+        let id = self.next_id();
+        let _ = self.command_tx.send(LearnerCommand::Shutdown { id });
+        let _ = self.reply_rx.recv_timeout(Duration::from_secs(5));
+        let _ = self.join_status();
+    }
+}
+
+fn learner_reply_error(expected: &str, reply: &LearnerReply) -> anyhow::Error {
+    match reply {
+        LearnerReply::Failed { id, command, error } => {
+            anyhow!("persistent learner command {id} ({command}) failed: {error}")
+        }
+        _ => anyhow!("persistent learner protocol error: expected {expected}"),
+    }
+}
+
 /// Averages gradients across all shards and writes the average back onto
 /// every shard's own device, in place - equivalent to
 /// `dist.all_reduce(flat); flat /= world` in `rl/ppo.py`, minus the NCCL
@@ -1524,7 +1851,9 @@ fn train_update(
     rng: &mut rand::rngs::SmallRng,
     ent_coef: f32,
     ret_stat: &mut RetStat,
+    exclusive_owner: bool,
 ) -> Result<(f64, f64, f64, f64)> {
+    debug_assert!(!exclusive_owner || learners.len() == 1);
     let t_len = cfg.rollout_len;
     // Derive the live per-shard env count from the actual rollout data,
     // not `cfg.num_envs` - `auto_scale_envs` can grow every `ActorShard`'s
@@ -1584,14 +1913,11 @@ fn train_update(
     // `ret_stat` has enough samples (see `RetStat::std`'s doc); until
     // then this is `f64::INFINITY` and the adaptive bound is a no-op.
     let adaptive_ret_bound = (RET_ADAPTIVE_N_STD * ret_stat.std()).max(1.0);
-    let shard_results: Vec<(ShardBatch, f64, f64, f64)> = std::thread::scope(|s| {
-        let handles: Vec<_> = learners
-            .iter()
-            .zip(pending.iter())
-            .enumerate()
-            .map(|(gi, (shard, result))| {
-                let device = shard.device;
-                s.spawn(move || {
+    macro_rules! build_shard {
+        ($gi:expr, $device:expr, $result:expr) => {{
+                    let gi = $gi;
+                    let result = $result;
+                    let device = $device;
                     let buffer = &result.buffer;
                     let bootstrap_v = &result.bootstrap_v;
                     // Guards the uniform-per-shard-env-count invariant
@@ -1737,12 +2063,22 @@ fn train_update(
                         Cuda::synchronize(index as i64);
                     }
                     (ShardBatch { obs, choice, adv, ret, old_logp }, local_count, local_sum, local_sum_sq)
+        }};
+    }
+    let shard_results: Vec<(ShardBatch, f64, f64, f64)> = if exclusive_owner {
+        vec![build_shard!(0, learners[0].device, &pending[0])]
+    } else {
+        std::thread::scope(|s| {
+            let handles: Vec<_> = learners
+                .iter()
+                .zip(pending.iter())
+                .enumerate()
+                .map(|(gi, (shard, result))| {
+                    let device = shard.device;
+                    s.spawn(move || build_shard!(gi, device, result))
                 })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| {
+                .collect();
+            handles.into_iter().map(|h| {
                 h.join().unwrap_or_else(|e| {
                     // `.expect()` on a `thread::Result` only ever prints
                     // "Any { .. }" - the panic payload's `Box<dyn Any>` only
@@ -1761,9 +2097,9 @@ fn train_update(
                         .unwrap_or_else(|| format!("{e:?}"));
                     panic!("batch-build thread panicked: {msg}");
                 })
-            })
-            .collect()
-    });
+            }).collect()
+        })
+    };
     if std::env::var("OFTRAIN_DIAG").is_ok() {
         println!(
             "[diag] batch_build_s={:.3}",
@@ -1842,14 +2178,11 @@ fn train_update(
                 // `backward()` for shard 0 would otherwise fully finish,
                 // including its implicit device sync, before shard 1 even
                 // starts on a plain sequential loop.
-                let per_shard_losses: Vec<(f64, f64, f64, f64)> = std::thread::scope(|s| {
-                    let handles: Vec<_> = learners
-                        .iter_mut()
-                        .zip(shard_batches.iter_mut())
-                        .zip(idx_tensors.iter())
-                        .map(|((shard, sb), idx_full)| {
-                            let idx_t = idx_full.narrow(0, sub_start, sub_len);
-                            s.spawn(move || {
+                macro_rules! backward_shard {
+                    ($shard:expr, $sb:expr, $idx_t:expr) => {{
+                                let shard = $shard;
+                                let sb = $sb;
+                                let idx_t = $idx_t;
                                 let obs_t = sb.obs.index_select(&idx_t);
                                 let choice_t = sb.choice.index_select(&idx_t);
                                 let adv_t = sb.adv.index_select(0, &idx_t);
@@ -1903,12 +2236,26 @@ fn train_update(
                                     f64::try_from(&ent_loss).unwrap_or(0.0),
                                     f64::try_from(&entq_loss).unwrap_or(0.0),
                                 )
+                    }};
+                }
+                let per_shard_losses: Vec<(f64, f64, f64, f64)> = if exclusive_owner {
+                    vec![backward_shard!(
+                        &mut learners[0],
+                        &mut shard_batches[0],
+                        idx_tensors[0].narrow(0, sub_start, sub_len)
+                    )]
+                } else {
+                    std::thread::scope(|s| {
+                        let handles: Vec<_> = learners
+                            .iter_mut()
+                            .zip(shard_batches.iter_mut())
+                            .zip(idx_tensors.iter())
+                            .map(|((shard, sb), idx_full)| {
+                                let idx_t = idx_full.narrow(0, sub_start, sub_len);
+                                s.spawn(move || backward_shard!(shard, sb, idx_t))
                             })
-                        })
-                        .collect();
-                    handles
-                        .into_iter()
-                        .map(|h| {
+                            .collect();
+                        handles.into_iter().map(|h| {
                             h.join().unwrap_or_else(|e| {
                                 let msg = e
                                     .downcast_ref::<&str>()
@@ -1917,9 +2264,9 @@ fn train_update(
                                     .unwrap_or_else(|| format!("{e:?}"));
                                 panic!("backward thread panicked: {msg}");
                             })
-                        })
-                        .collect()
-                });
+                        }).collect()
+                    })
+                };
                 let n_shards = per_shard_losses.len() as f64;
                 // Skip the whole minibatch if any sub-batch went non-finite
                 // (see docs/devlog.html's 2026-07-12 NaN-guard entry).
@@ -2044,6 +2391,18 @@ pub fn run(mut cfg: Config) -> Result<()> {
     println!("[train] metrics -> {}/metrics.jsonl", cfg.ckpt_dir);
 
     let devices = cfg.devices();
+    let persistent_learner_enabled = cfg.persistent_actors && devices.len() == 1;
+    if cfg.persistent_actors && devices.len() > 1 {
+        println!(
+            "[train] persistent learner Phase 2 currently supports --num-gpus 1; \
+             keeping persistent actors but selecting the legacy multi-GPU learner path"
+        );
+    }
+    if persistent_learner_enabled && hub_vs.is_none() {
+        let snapshot = nn::VarStore::new(Device::Cpu);
+        let _ = PolicyNet::new(&snapshot.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
+        hub_vs = Some(snapshot);
+    }
     let total_envs = cfg.num_envs * devices.len();
     println!(
         "[train] spawning {} env workers across {} shard(s) {:?} (stage={}, max_ticks={})...",
@@ -2058,6 +2417,19 @@ pub fn run(mut cfg: Config) -> Result<()> {
     let mut persistent_actors: Vec<PersistentActor> = Vec::with_capacity(devices.len());
     let mut learners: Vec<LearnerShard> = Vec::with_capacity(devices.len());
     for (gi, &device) in devices.iter().enumerate() {
+        if persistent_learner_enabled {
+            let initial_version = resumed_state.as_ref().map(|s| s.update).unwrap_or(0);
+            let weights = serialize_weights(hub_vs.as_ref().expect("CPU hub initialized"))?;
+            persistent_actors.push(PersistentActor::spawn(
+                gi,
+                device,
+                cfg.clone(),
+                start_stage,
+                initial_version,
+                weights,
+            )?);
+            continue;
+        }
         let mut workers = Vec::with_capacity(cfg.num_envs);
         let mut cur_obs = Vec::with_capacity(cfg.num_envs);
         if !cfg.persistent_actors {
@@ -2140,24 +2512,46 @@ pub fn run(mut cfg: Config) -> Result<()> {
             });
         }
     }
-    // Initialization and VarStore copies ran on the main thread. Prime
-    // collection uses fresh collector threads with different CUDA streams.
-    for &device in &devices {
-        if let Device::Cuda(index) = device {
-            Cuda::synchronize(index as i64);
+    // Legacy initialization and VarStore copies ran on the coordinator.
+    // Persistent owners synchronize their own initialization before Ready.
+    if !persistent_learner_enabled {
+        for &device in &devices {
+            if let Device::Cuda(index) = device {
+                Cuda::synchronize(index as i64);
+            }
         }
     }
     println!("[train] all {total_envs} envs ready");
 
-    let n_params: i64 = learners[0]
-        .vs
-        .trainable_variables()
-        .iter()
-        .map(|t| t.numel() as i64)
-        .sum();
+    let mut rng = Some(rand::rngs::SmallRng::from_entropy());
+    let mut persistent_learner = if persistent_learner_enabled {
+        let initial_weights = serialize_weights(hub_vs.as_ref().expect("CPU hub initialized"))?;
+        let initial_lr = resumed_state.as_ref().map(|s| s.lr_now).unwrap_or(cfg.lr);
+        let (learner, params) = PersistentLearner::spawn(
+            devices[0],
+            cfg.clone(),
+            initial_weights,
+            initial_lr,
+            rng.take().expect("learner RNG available"),
+        )?;
+        Some((learner, params))
+    } else {
+        None
+    };
+    let n_params: i64 = persistent_learner
+        .as_ref()
+        .map(|(_, params)| *params)
+        .unwrap_or_else(|| {
+            learners[0]
+                .vs
+                .trainable_variables()
+                .iter()
+                .map(|t| t.numel() as i64)
+                .sum()
+        });
     println!(
         "[train] policy params: {n_params} per shard x {} shard(s) on {:?}",
-        learners.len(),
+        devices.len(),
         devices
     );
 
@@ -2212,7 +2606,8 @@ pub fn run(mut cfg: Config) -> Result<()> {
     // index the way the startup loop's `idx` does).
     let mut next_env_idx = total_envs;
 
-    let mut rng = rand::rngs::SmallRng::from_entropy();
+    // In persistent one-GPU mode this RNG was moved into the learner owner
+    // above. Legacy mode keeps using the same coordinator-owned instance.
     // Persists across every update in this run (see RetStat's doc) - a
     // fresh, empty RetStat on every process restart is an acceptable cold
     // start (its adaptive bound is a no-op until ~2 updates' worth of
@@ -2307,8 +2702,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
         // completes (frac saturates at 1.0), so this is safe to apply on
         // every single update rather than only during the warmup window.
         let warmup_frac = lr_warmup_frac(update, lr_warmup_start_update, lr_warmup_updates);
-        for shard in learners.iter_mut() {
-            shard.opt.set_lr(lr_now * warmup_frac);
+        if !persistent_learner_enabled {
+            for shard in learners.iter_mut() {
+                shard.opt.set_lr(lr_now * warmup_frac);
+            }
         }
         // `collect_dt`/`train_dt` used to both be measured from
         // (effectively) the same start instant to the same point *after*
@@ -2327,7 +2724,41 @@ pub fn run(mut cfg: Config) -> Result<()> {
         // `train_dt` (the `.join()` calls after `train_update` returns
         // will block, adding to `collect_dt` but not `train_dt`).
         let collect_start = Instant::now();
-        let (train_result, next_pending, train_dt) = if cfg.persistent_actors {
+        let (train_result, next_pending, train_dt, learner_weights, learner_snapshot_dt) =
+            if persistent_learner_enabled {
+                for actor in &mut persistent_actors {
+                    actor.send_collect()?;
+                }
+                let train_t0 = Instant::now();
+                let rollout = pending
+                    .pop()
+                    .ok_or_else(|| anyhow!("persistent learner missing pending rollout"))?;
+                let train_reply = persistent_learner
+                    .as_mut()
+                    .expect("persistent learner initialized")
+                    .0
+                    .train(rollout, lr_now * warmup_frac, ent_coef_now);
+                let next_pending = persistent_actors
+                    .iter_mut()
+                    .map(PersistentActor::finish_collect)
+                    .collect::<Result<Vec<_>>>();
+                match train_reply {
+                    Ok(reply) => (
+                        Ok(reply.losses),
+                        next_pending,
+                        reply.train_seconds,
+                        Some(reply.weights),
+                        reply.snapshot_seconds,
+                    ),
+                    Err(error) => (
+                        Err(error),
+                        next_pending,
+                        train_t0.elapsed().as_secs_f64(),
+                        None,
+                        0.0,
+                    ),
+                }
+            } else if cfg.persistent_actors {
             for actor in &mut persistent_actors {
                 actor.send_collect()?;
             }
@@ -2336,16 +2767,17 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 &mut learners,
                 &pending,
                 cfg_ref,
-                &mut rng,
+                rng.as_mut().expect("legacy learner RNG available"),
                 ent_coef_now,
                 &mut ret_stat,
+                false,
             );
             let train_dt = train_t0.elapsed().as_secs_f64();
             let next_pending = persistent_actors
                 .iter_mut()
                 .map(PersistentActor::finish_collect)
                 .collect::<Result<Vec<_>>>();
-            (train_result, next_pending, train_dt)
+            (train_result, next_pending, train_dt, None, 0.0)
         } else {
             std::thread::scope(|s| {
                 let collect_handles: Vec<_> = actors
@@ -2357,16 +2789,17 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     &mut learners,
                     &pending,
                     cfg_ref,
-                    &mut rng,
+                    rng.as_mut().expect("legacy learner RNG available"),
                     ent_coef_now,
                     &mut ret_stat,
+                    false,
                 );
                 let train_dt = train_t0.elapsed().as_secs_f64();
                 let next_pending: Result<Vec<RolloutResult>> = collect_handles
                     .into_iter()
                     .map(|h| h.join().map_err(|_| anyhow!("collector thread panicked"))?)
                     .collect();
-                (train_result, next_pending, train_dt)
+                (train_result, next_pending, train_dt, None, 0.0)
             })
         };
         let collect_dt = collect_start.elapsed().as_secs_f64();
@@ -2477,8 +2910,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
             // reads the optimizer's LR *before* the next iteration starts
             // (there's currently nothing that does) sees the stage's
             // target rate, not a stale pre-advance value.
-            for shard in learners.iter_mut() {
-                shard.opt.set_lr(lr_now);
+            if !persistent_learner_enabled {
+                for shard in learners.iter_mut() {
+                    shard.opt.set_lr(lr_now);
+                }
             }
             let st = &stages[curr_stage];
             println!(
@@ -2494,10 +2929,16 @@ pub fn run(mut cfg: Config) -> Result<()> {
         // weights) - the next update's collection will use these.
         let refresh_start = Instant::now();
         if cfg.persistent_actors {
-            let snapshots = learners
-                .iter()
-                .map(|learner| serialize_weights(&learner.vs))
-                .collect::<Result<Vec<_>>>()?;
+            let snapshots = if persistent_learner_enabled {
+                vec![learner_weights.ok_or_else(|| {
+                    anyhow!("persistent learner completed without a weight snapshot")
+                })?]
+            } else {
+                learners
+                    .iter()
+                    .map(|learner| serialize_weights(&learner.vs))
+                    .collect::<Result<Vec<_>>>()?
+            };
             for (actor, weights) in persistent_actors.iter_mut().zip(snapshots) {
                 actor.refresh(update + 1, weights)?;
             }
@@ -2703,7 +3144,8 @@ pub fn run(mut cfg: Config) -> Result<()> {
             println!(
                 "[update {:>5}] steps/s={:>7.1} decisions_total={:>9} eps_done={:>5} recent_reward={:>8.3} \
                  pg={:>+.4} v={:>.4} ent={:>.3} entq={:>+.3} ecoef={:.4} stage={} lr={:.2e} elapsed={:.0}s \
-                 update_s={:.1} collect_s={:.1} train_s={:.1} actor_work_s={:.1} refresh_s={:.3}{gpu_str}",
+                 update_s={:.1} collect_s={:.1} train_s={:.1} actor_work_s={:.1} \
+                 learner_snapshot_s={:.3} refresh_s={:.3}{gpu_str}",
                 update,
                 sps,
                 total_env_steps,
@@ -2721,6 +3163,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 collect_dt,
                 train_dt,
                 actor_work_dt,
+                learner_snapshot_dt,
                 refresh_dt,
             );
             let (eval_win, eval_score) = match &last_eval {
@@ -2754,18 +3197,33 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 recent_wins: recent_wins.iter().copied().collect(),
             };
             let path = format!("{}/policy_update{}.safetensors", cfg.ckpt_dir, update);
-            save_checkpoint(&learners[0].vs, &path, &state)?;
+            if persistent_learner_enabled {
+                persistent_learner
+                    .as_mut()
+                    .expect("persistent learner initialized")
+                    .0
+                    .save_weights(&path)?;
+                save_checkpoint_state(&path, &state)?;
+            } else {
+                save_checkpoint(&learners[0].vs, &path, &state)?;
+            }
             // Fixed-name pointer at the latest checkpoint so a restart-loop
             // wrapper (or a fresh pod after total disk loss) always has one
             // unambiguous thing to resume from, without parsing filenames -
             // matches `rl/ppo.py`'s single always-current `policy.pt`.
             // Extension is `.safetensors` so tch `VarStore::save` writes the
             // safetensors interchange format (legacy `.ot` still loads).
-            save_checkpoint(
-                &learners[0].vs,
-                &format!("{}/latest.safetensors", cfg.ckpt_dir),
-                &state,
-            )?;
+            let latest = format!("{}/latest.safetensors", cfg.ckpt_dir);
+            if persistent_learner_enabled {
+                persistent_learner
+                    .as_mut()
+                    .expect("persistent learner initialized")
+                    .0
+                    .save_weights(&latest)?;
+                save_checkpoint_state(&latest, &state)?;
+            } else {
+                save_checkpoint(&learners[0].vs, &latest, &state)?;
+            }
             println!("[train] checkpoint saved: {path} (update={})", state.update);
         }
     }
@@ -2778,16 +3236,24 @@ pub fn run(mut cfg: Config) -> Result<()> {
         total_env_steps,
         recent_wins: recent_wins.iter().copied().collect(),
     };
-    save_checkpoint(
-        &learners[0].vs,
-        &format!("{}/policy_final.safetensors", cfg.ckpt_dir),
-        &final_state,
-    )?;
-    save_checkpoint(
-        &learners[0].vs,
-        &format!("{}/latest.safetensors", cfg.ckpt_dir),
-        &final_state,
-    )?;
+    let final_path = format!("{}/policy_final.safetensors", cfg.ckpt_dir);
+    let latest_path = format!("{}/latest.safetensors", cfg.ckpt_dir);
+    if persistent_learner_enabled {
+        let learner = &mut persistent_learner
+            .as_mut()
+            .expect("persistent learner initialized")
+            .0;
+        learner.save_weights(&final_path)?;
+        save_checkpoint_state(&final_path, &final_state)?;
+        learner.save_weights(&latest_path)?;
+        save_checkpoint_state(&latest_path, &final_state)?;
+    } else {
+        save_checkpoint(&learners[0].vs, &final_path, &final_state)?;
+        save_checkpoint(&learners[0].vs, &latest_path, &final_state)?;
+    }
+    if let Some((learner, _)) = persistent_learner {
+        learner.shutdown()?;
+    }
     if cfg.persistent_actors {
         for actor in persistent_actors {
             actor.shutdown()?;
@@ -2809,6 +3275,7 @@ fn unused_lock_hint(_m: &Arc<Mutex<()>>) {}
 #[cfg(test)]
 mod persistent_actor_tests {
     use super::*;
+    use rand::SeedableRng;
 
     #[test]
     fn protocol_accepts_complete_lifecycle_in_order() {
@@ -2897,6 +3364,298 @@ mod persistent_actor_tests {
                 "weight {name} changed across CPU serialization"
             );
         }
+    }
+
+    fn empty_rollout() -> RolloutResult {
+        RolloutResult {
+            buffer: Vec::new(),
+            bootstrap_v: Vec::new(),
+            ep_infos: Vec::new(),
+            policy_version: 0,
+            collect_seconds: 0.0,
+        }
+    }
+
+    #[test]
+    fn learner_protocol_accepts_train_save_shutdown_lifecycle() {
+        let mut protocol = LearnerProtocol::new();
+        protocol
+            .accept(&LearnerCommand::Train {
+                id: 1,
+                rollout: empty_rollout(),
+                lr: 1e-4,
+                ent_coef: 0.01,
+            })
+            .unwrap();
+        protocol
+            .accept(&LearnerCommand::SaveWeights {
+                id: 2,
+                path: "checkpoint.safetensors".to_string(),
+            })
+            .unwrap();
+        protocol.accept(&LearnerCommand::Shutdown { id: 3 }).unwrap();
+        assert!(protocol.stopped);
+        assert!(
+            protocol
+                .accept(&LearnerCommand::Shutdown { id: 4 })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn learner_protocol_rejects_reordering_and_propagates_errors() {
+        let mut protocol = LearnerProtocol::new();
+        let error = protocol
+            .accept(&LearnerCommand::SaveWeights {
+                id: 2,
+                path: "wrong-order.safetensors".to_string(),
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("expected 1"));
+
+        let reply = LearnerReply::Failed {
+            id: 7,
+            command: "train",
+            error: "batch upload failed".to_string(),
+        };
+        let error = learner_reply_error("train result", &reply).to_string();
+        assert!(error.contains("command 7 (train)"));
+        assert!(error.contains("batch upload failed"));
+    }
+
+    fn parity_config() -> Config {
+        Config {
+            num_envs: 1,
+            num_gpus: 1,
+            stage: 0,
+            max_episode_ticks: 10,
+            rollout_len: 2,
+            updates: 1,
+            lr: 1e-4,
+            gamma: 0.99,
+            lambda: 0.95,
+            clip: 0.2,
+            vf_coef: 0.5,
+            ret_clip: 3000.0,
+            adv_clip: 10.0,
+            vf_clip: 50.0,
+            ent_coef: 0.01,
+            ent_coef_final: 0.002,
+            ent_anneal_updates: 100,
+            ent_floor: 0.0,
+            entq_coef: 0.002,
+            stage_lr_decay: 0.85,
+            epochs: 2,
+            minibatches: 1,
+            amp: false,
+            foveate: false,
+            ae_ckpt: String::new(),
+            coarse_ckpt: None,
+            gc: 8,
+            blocks: 1,
+            pinned_h2d: false,
+            fp16_rollout: false,
+            compact_rollout: false,
+            pipeline_groups: false,
+            persistent_actors: true,
+            device: Device::Cpu,
+            engine: EngineKind::Native,
+            node_fraction: 0.0,
+            log_every: 1,
+            eval_every: 0,
+            eval_episodes: 0,
+            ckpt_every: 0,
+            ckpt_dir: String::new(),
+            init: None,
+            resume: None,
+            resume_warmup_updates: 0,
+            value_loss: ValueLoss::Mse,
+            auto_scale_envs: false,
+            target_gpu_util: 0.95,
+            min_envs: 1,
+            max_envs: 1,
+            autoscale_check_every: 5,
+            autoscale_step: 1,
+        }
+    }
+
+    fn parity_obs() -> PreparedObs {
+        let (gh, gw) = (4usize, 4usize);
+        let plane = gh * gw;
+        PreparedObs {
+            compact: None,
+            grid: Some(vec![0.1; policy::C_GRID as usize * plane]),
+            grid_coarse: None,
+            cgh: 0,
+            cgw: 0,
+            ae_raw: crate::ae::AeRaw {
+                owners: vec![0; gh * 8 * gw * 8],
+                static_terrain: crate::ae::StaticTerrain {
+                    key: crate::ae::TerrainCacheKey {
+                        env_id: 0,
+                        episode: 0,
+                        static_id: 0,
+                        hr: gh * 8,
+                        wr: gw * 8,
+                    },
+                    map: Arc::from("parity"),
+                    land_mag: vec![0.0; 2 * gh * 8 * gw * 8].into(),
+                },
+                fallout: vec![0.0; gh * 8 * gw * 8],
+                stat: vec![0.0; 6 * plane],
+                hr: gh * 8,
+                wr: gw * 8,
+            },
+            ego: vec![0.0; 3 * plane],
+            db: vec![0.0; plane],
+            transient: vec![0.0; ofcore::feat::N_TRANSIENT * plane],
+            legal_tile: vec![1.0; plane],
+            gh,
+            gw,
+            players: vec![0.1; ofcore::feat::MAX_SLOTS * ofcore::feat::P_FEAT],
+            pmask: [1.0; ofcore::feat::MAX_SLOTS],
+            scalars: [0.1; ofcore::feat::N_SCALARS],
+            me_slot: 0,
+            legal_actions: [1.0; ofcore::feat::N_ACTIONS],
+            legal_ptarget: vec![
+                1.0;
+                ofcore::feat::N_ACTIONS * ofcore::feat::MAX_SLOTS
+            ],
+            legal_build: [1.0; ofcore::feat::N_BUILD],
+            legal_nuke: [1.0; ofcore::feat::N_NUKE],
+            local: vec![0.1; 5 * policy::LOCAL as usize * policy::LOCAL as usize],
+        }
+    }
+
+    fn parity_rollout() -> RolloutResult {
+        let wait = ACTIONS.iter().position(|&action| action == "noop").unwrap() as i64;
+        let step = |reward| Step {
+            obs: parity_obs(),
+            choice: ChoiceScalars {
+                action: wait,
+                player_slot: -1,
+                tile_region: -1,
+                build_type: -1,
+                nuke_type: -1,
+                quantity_frac: -1.0,
+            },
+            logp: -1.0,
+            value: 0.25,
+            reward,
+            done: false,
+        };
+        RolloutResult {
+            buffer: vec![vec![step(0.5)], vec![step(-0.25)]],
+            bootstrap_v: vec![0.1],
+            ep_infos: Vec::new(),
+            policy_version: 0,
+            collect_seconds: 0.0,
+        }
+    }
+
+    fn parity_learner(cfg: &Config, weights: &[u8]) -> LearnerShard {
+        let mut vs = nn::VarStore::new(Device::Cpu);
+        let policy = PolicyNet::new(&vs.root(), false, false, cfg.gc, cfg.blocks);
+        vs.load_from_stream(Cursor::new(weights.to_vec())).unwrap();
+        let opt = nn::AdamW::default().build(&vs, cfg.lr).unwrap();
+        LearnerShard {
+            device: Device::Cpu,
+            vs,
+            policy,
+            opt,
+        }
+    }
+
+    #[test]
+    fn persistent_owner_train_path_matches_legacy_single_shard_math() {
+        tch::manual_seed(404);
+        let cfg = parity_config();
+        let source = nn::VarStore::new(Device::Cpu);
+        let _ = PolicyNet::new(&source.root(), false, false, cfg.gc, cfg.blocks);
+        let weights = serialize_weights(&source).unwrap();
+        let mut legacy = parity_learner(&cfg, &weights);
+        let mut owned = parity_learner(&cfg, &weights);
+        let mut legacy_rng = rand::rngs::SmallRng::seed_from_u64(919);
+        let mut owned_rng = rand::rngs::SmallRng::seed_from_u64(919);
+        let mut legacy_ret = RetStat::default();
+        let mut owned_ret = RetStat::default();
+        let legacy_rollout = parity_rollout();
+        let owned_rollout = parity_rollout();
+
+        let legacy_losses = train_update(
+            std::slice::from_mut(&mut legacy),
+            std::slice::from_ref(&legacy_rollout),
+            &cfg,
+            &mut legacy_rng,
+            0.01,
+            &mut legacy_ret,
+            false,
+        )
+        .unwrap();
+        let owned_losses = train_update(
+            std::slice::from_mut(&mut owned),
+            std::slice::from_ref(&owned_rollout),
+            &cfg,
+            &mut owned_rng,
+            0.01,
+            &mut owned_ret,
+            true,
+        )
+        .unwrap();
+
+        for (legacy_loss, owned_loss) in [
+            (legacy_losses.0, owned_losses.0),
+            (legacy_losses.1, owned_losses.1),
+            (legacy_losses.2, owned_losses.2),
+            (legacy_losses.3, owned_losses.3),
+        ] {
+            assert!((legacy_loss - owned_loss).abs() < 1e-6);
+        }
+        assert_eq!(legacy_ret.count, owned_ret.count);
+        assert_eq!(legacy_ret.sum, owned_ret.sum);
+        assert_eq!(legacy_ret.sum_sq, owned_ret.sum_sq);
+        let owned_vars = owned.vs.variables();
+        for (name, legacy_tensor) in legacy.vs.variables() {
+            let max_diff = (&legacy_tensor - &owned_vars[&name])
+                .abs()
+                .max()
+                .double_value(&[]);
+            assert!(max_diff < 1e-6, "{name} differs by {max_diff}");
+        }
+    }
+
+    #[test]
+    fn persistent_learner_thread_trains_saves_and_shuts_down() {
+        tch::manual_seed(505);
+        let cfg = parity_config();
+        let source = nn::VarStore::new(Device::Cpu);
+        let _ = PolicyNet::new(&source.root(), false, false, cfg.gc, cfg.blocks);
+        let weights = serialize_weights(&source).unwrap();
+        let (mut learner, params) = PersistentLearner::spawn(
+            Device::Cpu,
+            cfg.clone(),
+            weights,
+            cfg.lr,
+            rand::rngs::SmallRng::seed_from_u64(1234),
+        )
+        .unwrap();
+        assert!(params > 0);
+        let reply = learner.train(parity_rollout(), cfg.lr, 0.01).unwrap();
+        assert!(reply.train_seconds >= 0.0);
+        assert!(reply.snapshot_seconds >= 0.0);
+        assert!(!reply.weights.is_empty());
+
+        let path = std::env::temp_dir().join(format!(
+            "oftrain-persistent-learner-{}.safetensors",
+            std::process::id()
+        ));
+        learner.save_weights(path.to_str().unwrap()).unwrap();
+        let mut loaded = nn::VarStore::new(Device::Cpu);
+        let _ = PolicyNet::new(&loaded.root(), false, false, cfg.gc, cfg.blocks);
+        loaded.load(&path).unwrap();
+        assert_eq!(loaded.variables().len(), source.variables().len());
+        std::fs::remove_file(&path).unwrap();
+        learner.shutdown().unwrap();
     }
 }
 
