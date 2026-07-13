@@ -63,16 +63,17 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use ofcore::feat::ACTIONS;
 use ofcore::translate::Choice;
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use tch::nn::OptimizerConfig;
-use tch::{Cuda, Device, Kind, Tensor, nn};
+use tch::{Device, Kind, Tensor, nn};
 
 use crate::autoscale;
 use crate::batch::{self, ChoiceScalars};
+use crate::cuda_sync::CudaSyncDiagnostics;
 use crate::engine::EngineKind;
 use crate::gpu_util::GpuUtilSampler;
 use crate::metrics::MetricsWriter;
@@ -238,6 +239,9 @@ pub struct Config {
     /// CPU, just slower - useful for correctness smoke tests without a
     /// GPU), off by default.
     pub amp: bool,
+    /// Opt-in synchronization boundaries for localizing asynchronous CUDA
+    /// failures. Off by default; disabled boundaries are no-ops.
+    pub cuda_sync_diagnostics: bool,
     /// `--foveate`: real foveated crop for the fine-grid branch (see
     /// `policy::PolicyNet::foveate` doc). Default on (Python v7 parity).
     pub foveate: bool,
@@ -631,6 +635,9 @@ fn choice_from_act_vecs(
 fn act_group(
     actor: &mut ActorShard,
     cfg: &Config,
+    diagnostics: &CudaSyncDiagnostics,
+    shard: usize,
+    update: u64,
     start: usize,
     end: usize,
 ) -> Result<(Vec<ChoiceScalars>, Vec<f32>, Vec<f32>)> {
@@ -662,17 +669,29 @@ fn act_group(
         let obs_refs: Vec<&PreparedObs> = actor.cur_obs[start..end].iter().collect();
         batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d, cfg.fp16_rollout)
     };
+    diagnostics.boundary(actor.device, shard, update, "actor.ae_build_obs")?;
     let (a, player, tile, build, nuke, qty, logp, value) =
         tch::no_grad(|| actor.policy.act(&obs_t, false));
+    diagnostics.boundary(actor.device, shard, update, "actor.policy_act")?;
 
-    let a_v: Vec<i64> = (&a).try_into()?;
-    let player_v: Vec<i64> = (&player).try_into()?;
-    let tile_v: Vec<i64> = (&tile).try_into()?;
-    let build_v: Vec<i64> = (&build).try_into()?;
-    let nuke_v: Vec<i64> = (&nuke).try_into()?;
-    let qty_v: Vec<f32> = (&qty).try_into()?;
-    let logp_v: Vec<f32> = (&logp).try_into()?;
-    let value_v: Vec<f32> = (&value).try_into()?;
+    macro_rules! packed_d2h {
+        ($tensor:expr, $ty:ty, $name:literal) => {{
+            let phase = concat!("actor.packed_d2h.", $name);
+            let values: Vec<$ty> = ($tensor)
+                .try_into()
+                .with_context(|| diagnostics.context(actor.device, shard, update, phase))?;
+            diagnostics.boundary(actor.device, shard, update, phase)?;
+            values
+        }};
+    }
+    let a_v = packed_d2h!(&a, i64, "action");
+    let player_v = packed_d2h!(&player, i64, "player");
+    let tile_v = packed_d2h!(&tile, i64, "tile");
+    let build_v = packed_d2h!(&build, i64, "build");
+    let nuke_v = packed_d2h!(&nuke, i64, "nuke");
+    let qty_v = packed_d2h!(&qty, f32, "quantity");
+    let logp_v = packed_d2h!(&logp, f32, "logp");
+    let value_v = packed_d2h!(&value, f32, "value");
 
     let mut scalars = Vec::with_capacity(n);
     for i in 0..n {
@@ -682,6 +701,12 @@ fn act_group(
             .choice_tx
             .send(choice)
             .map_err(|_| anyhow!("env {} choice channel closed", start + i))?;
+        diagnostics.boundary(
+            actor.device,
+            shard,
+            update,
+            format_args!("actor.worker_send.{}", start + i),
+        )?;
         scalars.push(sc);
     }
     Ok((scalars, logp_v, value_v))
@@ -719,7 +744,13 @@ fn recv_group(
     Ok(())
 }
 
-fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult> {
+fn collect_rollout(
+    actor: &mut ActorShard,
+    cfg: &Config,
+    diagnostics: &CudaSyncDiagnostics,
+    shard: usize,
+    update: u64,
+) -> Result<RolloutResult> {
     let n = actor.workers.len();
     let mut buffer: Vec<Vec<Step>> = Vec::with_capacity(cfg.rollout_len);
     let mut ep_infos = Vec::new();
@@ -734,7 +765,8 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
 
     // Prime: act+send group 0 before the step loop (matches Python's
     // `pack0 = act_group(groups[0]); vec.send_group(...)` before `for t`).
-    let (mut pack0_sc, mut pack0_lp, mut pack0_v) = act_group(actor, cfg, g0.0, g0.1)?;
+    let (mut pack0_sc, mut pack0_lp, mut pack0_v) =
+        act_group(actor, cfg, diagnostics, shard, update, g0.0, g0.1)?;
 
     for t in 0..cfg.rollout_len {
         let mut step_row: Vec<Option<Step>> = (0..n).map(|_| None).collect();
@@ -742,7 +774,15 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
         let mut pack1: Option<(Vec<ChoiceScalars>, Vec<f32>, Vec<f32>)> = None;
         if g1.0 < g1.1 {
             // Overlaps group 0 stepping (choices already in flight).
-            pack1 = Some(act_group(actor, cfg, g1.0, g1.1)?);
+            pack1 = Some(act_group(
+                actor,
+                cfg,
+                diagnostics,
+                shard,
+                update,
+                g1.0,
+                g1.1,
+            )?);
         }
 
         recv_group(
@@ -758,7 +798,7 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
 
         if t + 1 < cfg.rollout_len {
             // Next-step act for g0 overlaps g1 stepping when pack1 is live.
-            let next = act_group(actor, cfg, g0.0, g0.1)?;
+            let next = act_group(actor, cfg, diagnostics, shard, update, g0.0, g0.1)?;
             pack0_sc = next.0;
             pack0_lp = next.1;
             pack0_v = next.2;
@@ -812,7 +852,11 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
             batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d, cfg.fp16_rollout)
         };
         let v = tch::no_grad(|| actor.policy.value_only(&obs_t));
-        (&v).try_into()?
+        let values = (&v)
+            .try_into()
+            .with_context(|| diagnostics.context(actor.device, shard, update, "actor.bootstrap"))?;
+        diagnostics.boundary(actor.device, shard, update, "actor.bootstrap")?;
+        values
     };
 
     Ok(RolloutResult {
@@ -1090,6 +1134,8 @@ fn train_update(
     learners: &mut [LearnerShard],
     pending: &[RolloutResult],
     cfg: &Config,
+    diagnostics: &CudaSyncDiagnostics,
+    update: u64,
     rng: &mut rand::rngs::SmallRng,
     ent_coef: f32,
     ret_stat: &mut RetStat,
@@ -1299,7 +1345,13 @@ fn train_update(
                     let adv = Tensor::from_slice(&adv_flat).to_device(device);
                     let ret = Tensor::from_slice(&ret_flat).to_device(device);
                     let old_logp = Tensor::from_slice(&old_logp_flat).to_device(device);
-                    (ShardBatch { obs, choice, adv, ret, old_logp }, local_count, local_sum, local_sum_sq)
+                    diagnostics.boundary(
+                        device,
+                        gi,
+                        update,
+                        "learner.batch_build_upload",
+                    )?;
+                    Ok((ShardBatch { obs, choice, adv, ret, old_logp }, local_count, local_sum, local_sum_sq))
                 })
             })
             .collect();
@@ -1325,8 +1377,8 @@ fn train_update(
                     panic!("batch-build thread panicked: {msg}");
                 })
             })
-            .collect()
-    });
+            .collect::<Result<Vec<_>>>()
+    })?;
     if std::env::var("OFTRAIN_DIAG").is_ok() {
         println!(
             "[diag] batch_build_s={:.3}",
@@ -1410,7 +1462,8 @@ fn train_update(
                         .iter_mut()
                         .zip(shard_batches.iter_mut())
                         .zip(idx_tensors.iter())
-                        .map(|((shard, sb), idx_full)| {
+                        .enumerate()
+                        .map(|(gi, ((shard, sb), idx_full))| {
                             let idx_t = idx_full.narrow(0, sub_start, sub_len);
                             s.spawn(move || {
                                 let obs_t = sb.obs.index_select(&idx_t);
@@ -1421,6 +1474,14 @@ fn train_update(
 
                                 let (logp, ent, ent_q, value) =
                                     shard.policy.evaluate(&obs_t, &choice_t);
+                                diagnostics.boundary(
+                                    shard.device,
+                                    gi,
+                                    update,
+                                    format_args!(
+                                        "learner.evaluate_forward.epoch_{_epoch}.mb_{m}.sub_{s_i}"
+                                    ),
+                                )?;
                                 // Bound log-ratio before exp (see prior
                                 // pg_loss trillion-spike incident).
                                 let log_ratio = (&logp - &old_logp_t).clamp(-20.0, 20.0);
@@ -1455,17 +1516,33 @@ fn train_update(
                                     - ent_coef as f64 * &ent_loss
                                     - cfg.entq_coef as f64 * &entq_loss)
                                     * w_sub;
+                                diagnostics.boundary(
+                                    shard.device,
+                                    gi,
+                                    update,
+                                    format_args!(
+                                        "learner.loss_construction.epoch_{_epoch}.mb_{m}.sub_{s_i}"
+                                    ),
+                                )?;
 
                                 // Grads accumulate across pixel-budget
                                 // subs (zero_grad ran once above).
                                 loss.backward();
+                                diagnostics.boundary(
+                                    shard.device,
+                                    gi,
+                                    update,
+                                    format_args!(
+                                        "learner.backward.epoch_{_epoch}.mb_{m}.sub_{s_i}"
+                                    ),
+                                )?;
 
-                                (
+                                Ok((
                                     f64::try_from(&pg_loss).unwrap_or(0.0),
                                     f64::try_from(&v_loss).unwrap_or(0.0),
                                     f64::try_from(&ent_loss).unwrap_or(0.0),
                                     f64::try_from(&entq_loss).unwrap_or(0.0),
-                                )
+                                ))
                             })
                         })
                         .collect();
@@ -1481,8 +1558,8 @@ fn train_update(
                                 panic!("backward thread panicked: {msg}");
                             })
                         })
-                        .collect()
-                });
+                        .collect::<Result<Vec<_>>>()
+                })?;
                 let n_shards = per_shard_losses.len() as f64;
                 // Skip the whole minibatch if any sub-batch went non-finite
                 // (see docs/devlog.html's 2026-07-12 NaN-guard entry).
@@ -1523,12 +1600,26 @@ fn train_update(
             // weights never drift apart.
             let sync_t0 = Instant::now();
             sync_grads(learners);
+            for (gi, shard) in learners.iter().enumerate() {
+                diagnostics.boundary(
+                    shard.device,
+                    gi,
+                    update,
+                    format_args!("learner.gradient_synchronization.epoch_{_epoch}.mb_{m}"),
+                )?;
+            }
             let sync_dt = sync_t0.elapsed().as_secs_f64();
             let step_t0 = Instant::now();
-            for shard in learners.iter_mut() {
+            for (gi, shard) in learners.iter_mut().enumerate() {
                 // Matches `rl/ppo.py`'s `clip_grad_norm_(..., 0.5)`.
                 shard.opt.clip_grad_norm(0.5);
                 shard.opt.step();
+                diagnostics.boundary(
+                    shard.device,
+                    gi,
+                    update,
+                    format_args!("learner.optimizer_step.epoch_{_epoch}.mb_{m}"),
+                )?;
             }
             let step_dt = step_t0.elapsed().as_secs_f64();
             if std::env::var("OFTRAIN_DIAG").is_ok() {
@@ -1599,6 +1690,10 @@ pub fn run(cfg: Config) -> Result<()> {
     println!("[train] metrics -> {}/metrics.jsonl", cfg.ckpt_dir);
 
     let devices = cfg.devices();
+    let diagnostics = CudaSyncDiagnostics::new(cfg.cuda_sync_diagnostics);
+    if cfg.cuda_sync_diagnostics {
+        println!("[cuda-sync-diagnostics] enabled (synchronizing named CUDA phase boundaries)");
+    }
     let total_envs = cfg.num_envs * devices.len();
     println!(
         "[train] spawning {} env workers across {} shard(s) {:?} (stage={}, max_ticks={})...",
@@ -1645,6 +1740,12 @@ pub fn run(cfg: Config) -> Result<()> {
         let actor_policy =
             PolicyNet::new(&actor_vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
         actor_vs.copy(&learner_vs)?;
+        diagnostics.boundary(
+            device,
+            gi,
+            resumed_state.as_ref().map(|s| s.update).unwrap_or(0),
+            "actor.weight_copy.initial",
+        )?;
 
         let actor_ae = {
             let path = std::path::Path::new(&cfg.ae_ckpt);
@@ -1801,7 +1902,11 @@ pub fn run(cfg: Config) -> Result<()> {
     let mut pending: Vec<RolloutResult> = std::thread::scope(|s| {
         let handles: Vec<_> = actors
             .iter_mut()
-            .map(|actor| s.spawn(move || collect_rollout(actor, cfg_ref)))
+            .enumerate()
+            .map(|(gi, actor)| {
+                let diagnostics = diagnostics.clone();
+                s.spawn(move || collect_rollout(actor, cfg_ref, &diagnostics, gi, start_update))
+            })
             .collect();
         handles
             .into_iter()
@@ -1851,7 +1956,11 @@ pub fn run(cfg: Config) -> Result<()> {
         let (train_result, next_pending, train_dt) = std::thread::scope(|s| {
             let collect_handles: Vec<_> = actors
                 .iter_mut()
-                .map(|actor| s.spawn(move || collect_rollout(actor, cfg_ref)))
+                .enumerate()
+                .map(|(gi, actor)| {
+                    let diagnostics = diagnostics.clone();
+                    s.spawn(move || collect_rollout(actor, cfg_ref, &diagnostics, gi, update + 1))
+                })
                 .collect();
 
             let train_t0 = Instant::now();
@@ -1859,6 +1968,8 @@ pub fn run(cfg: Config) -> Result<()> {
                 &mut learners,
                 &pending,
                 cfg_ref,
+                &diagnostics,
+                update,
                 &mut rng,
                 ent_coef_now,
                 &mut ret_stat,
@@ -1996,10 +2107,8 @@ pub fn run(cfg: Config) -> Result<()> {
         // ownership boundary without a wait can expose partially copied actor
         // weights (or learner storage being mutated while still read). This
         // was the root cause of delayed, non-deterministic device asserts.
-        for actor in &actors {
-            if let Device::Cuda(index) = actor.device {
-                Cuda::synchronize(index as i64);
-            }
+        for (gi, actor) in actors.iter().enumerate() {
+            diagnostics.required_boundary(actor.device, gi, update, "actor.weight_copy")?;
         }
         pending = next_pending;
 

@@ -2,6 +2,7 @@ mod autoscale;
 mod ae;
 mod batch;
 mod bridge;
+mod cuda_sync;
 mod engine;
 mod gpu_util;
 mod metrics;
@@ -137,6 +138,11 @@ struct Args {
     /// it's smoke-testable without a GPU.
     #[arg(long, default_value_t = false)]
     amp: bool,
+
+    /// Synchronize CUDA after named actor/learner boundaries to localize
+    /// asynchronous device failures. Expensive and off by default.
+    #[arg(long, default_value_t = false)]
+    cuda_sync_diagnostics: bool,
 
     /// Real foveated crop: the fine-grid branch becomes a fixed
     /// `policy::FOVEATE_SIZE`x`FOVEATE_SIZE` window centered on the agent's
@@ -447,6 +453,7 @@ fn main() -> anyhow::Result<()> {
         epochs: args.epochs,
         minibatches: args.minibatches,
         amp: args.amp,
+        cuda_sync_diagnostics: args.cuda_sync_diagnostics,
         foveate: args.foveate,
         ae_ckpt: args.ckpt,
         coarse_ckpt: args.coarse_ckpt,
