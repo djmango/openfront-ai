@@ -1570,7 +1570,7 @@ pub fn run(cfg: Config) -> Result<()> {
                 );
             }
             let coarse = cfg.coarse_ckpt.as_ref().map(std::path::Path::new);
-            Some(crate::ae::AePair::load(path, coarse, device, cfg.amp)?)
+            Some(crate::ae::AePair::load(path, coarse, device)?)
         };
         if gi == 0 {
             println!(
