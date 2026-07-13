@@ -221,7 +221,7 @@ pub struct StaticTerrain {
 /// Full-res AE inputs staged by `vecenv::prepare` for batched GPU encode.
 #[derive(Clone)]
 pub struct AeRaw {
-    pub owners: Vec<i64>, // (hr*wr) slotted
+    pub owners: Vec<u8>, // (hr*wr) slotted, embedding indices 0..=127
     pub static_terrain: StaticTerrain,
     pub fallout: Vec<f32>, // (hr, wr), fresh every decision
     pub stat: Vec<f32>,    // (6, gh, gw)
@@ -305,6 +305,23 @@ impl TerrainDeviceCache {
 /// chunks by pixel budget (mirrors `rl/obs.py::MAX_ENC_PIX`).
 pub const MAX_ENC_PIX: usize = 16_000_000;
 
+/// Upload compact owner slots synchronously, then widen on the encoder's
+/// device immediately before embedding lookup. The range check belongs at
+/// this conversion boundary so malformed u8 payloads cannot reach CUDA's
+/// embedding kernel.
+fn upload_owner_indices(owners: &[u8], shape: [i64; 3], device: Device) -> Result<Tensor> {
+    if let Some((offset, owner)) = owners
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|&(_, owner)| owner as i64 >= MAX_SLOTS)
+    {
+        anyhow::bail!("owner[{offset}]={owner} is outside embedding range 0..{MAX_SLOTS}");
+    }
+    let packed = Tensor::from_slice(owners).view(shape).to_device(device);
+    Ok(packed.to_kind(Kind::Int64))
+}
+
 /// Encode to per-item tensors on `device`. Keeping this operation separate
 /// from the host fallback lets rollout inference consume the same CUDA
 /// latents that the frozen AE produced.
@@ -350,7 +367,7 @@ pub fn encode_latent_batch_device(
             .iter()
             .copied()
             .enumerate()
-            .find(|(_, owner)| !(0..MAX_SLOTS).contains(owner))
+            .find(|&(_, owner)| owner as i64 >= MAX_SLOTS)
         {
             anyhow::bail!(
                 "AE item {i} owner[{offset}]={owner} is outside embedding range 0..{MAX_SLOTS}"
@@ -402,10 +419,10 @@ pub fn encode_latent_batch_device(
                     static_p.extend(max_pool2_stat(&it.stat, fine_gh, fine_gw));
                 }
             }
-            let owners_t = Tensor::from_slice(&owners)
-                .view([b, hr as i64, wr as i64])
-                .to_device(device)
-                .to_kind(Kind::Int64);
+            // One synchronous H2D of packed u8, followed by a device-local
+            // widening conversion. No temporary host buffer is used by a
+            // nonblocking copy.
+            let owners_t = upload_owner_indices(&owners, [b, hr as i64, wr as i64], device)?;
             let terrain_t = if use_terrain_cache {
                 let cache = terrain_cache.as_deref_mut().expect("cache checked above");
                 let static_items: Vec<Tensor> = chunk
@@ -500,6 +517,52 @@ mod tests {
         }
     }
 
+    fn patterned_raw(env_id: u64, hr: usize, wr: usize) -> AeRaw {
+        let pix = hr * wr;
+        let gh = hr / REGION as usize;
+        let gw = wr / REGION as usize;
+        AeRaw {
+            owners: (0..pix)
+                .map(|i| ((i * 31 + env_id as usize * 17) % MAX_SLOTS as usize) as u8)
+                .collect(),
+            static_terrain: terrain(env_id, env_id + 10, hr, wr, env_id as f32 / 19.0),
+            fallout: (0..pix)
+                .map(|i| ((i + env_id as usize) % 7 == 0) as u8 as f32)
+                .collect(),
+            stat: (0..NUM_STATIC as usize * gh * gw)
+                .map(|i| ((i * 13 + env_id as usize * 5) % 37) as f32 / 11.0)
+                .collect(),
+            hr,
+            wr,
+        }
+    }
+
+    fn i64_reference(ae: &SpatialAE, raw: &AeRaw) -> Tensor {
+        let owners_i64: Vec<i64> = raw.owners.iter().map(|&owner| owner as i64).collect();
+        let owners = Tensor::from_slice(&owners_i64).view([1, raw.hr as i64, raw.wr as i64]);
+        let mut terrain = raw.static_terrain.land_mag.to_vec();
+        terrain.extend_from_slice(&raw.fallout);
+        let terrain =
+            Tensor::from_slice(&terrain).view([1, TERRAIN_CHANNELS, raw.hr as i64, raw.wr as i64]);
+        let fine_gh = raw.hr / REGION as usize;
+        let fine_gw = raw.wr / REGION as usize;
+        let (stat, gh, gw) = if ae.latent_down == REGION {
+            (raw.stat.clone(), fine_gh, fine_gw)
+        } else {
+            (
+                max_pool2_stat(&raw.stat, fine_gh, fine_gw),
+                fine_gh.div_ceil(2),
+                fine_gw.div_ceil(2),
+            )
+        };
+        let stat = Tensor::from_slice(&stat).view([1, NUM_STATIC, gh as i64, gw as i64]);
+        tch::no_grad(|| ae.encode(&owners, &terrain, &stat).select(0, 0))
+    }
+
+    fn flat_f32(tensor: &Tensor) -> Vec<f32> {
+        Vec::<f32>::try_from(tensor.reshape([-1])).unwrap()
+    }
+
     #[test]
     fn encoder_tree_key_count_d8() {
         let vs = nn::VarStore::new(Device::Cpu);
@@ -517,7 +580,11 @@ mod tests {
     }
 
     #[test]
-    fn invalid_owner_is_rejected_before_embedding_lookup() {
+    fn invalid_owner_is_rejected_at_u8_to_i64_boundary() {
+        let err = upload_owner_indices(&[0, 127, 128], [1, 1, 3], Device::Cpu)
+            .expect_err("out-of-range packed owner must fail");
+        assert!(err.to_string().contains("owner[2]=128"));
+
         let vs = nn::VarStore::new(Device::Cpu);
         let ae = SpatialAE::new(&vs.root(), LATENT_C, REGION).unwrap();
         let mut raw = AeRaw {
@@ -528,10 +595,60 @@ mod tests {
             hr: 8,
             wr: 8,
         };
-        raw.owners[17] = MAX_SLOTS;
+        raw.owners[17] = MAX_SLOTS as u8;
         let err = encode_latent_batch_device(&ae, &[&raw], Device::Cpu, None)
             .expect_err("out-of-range owner must fail");
         assert!(err.to_string().contains("owner[17]"));
+    }
+
+    #[test]
+    fn packed_owner_embedding_and_latents_exactly_match_i64_reference() {
+        tch::manual_seed(97);
+        let fine_vs = nn::VarStore::new(Device::Cpu);
+        let fine = SpatialAE::new(&fine_vs.root(), LATENT_C, REGION).unwrap();
+        let coarse_vs = nn::VarStore::new(Device::Cpu);
+        let coarse = SpatialAE::new(&coarse_vs.root(), LATENT_C, COARSE_REGION).unwrap();
+
+        let every_slot: Vec<u8> = (0..MAX_SLOTS as u8).collect();
+        let packed = upload_owner_indices(&every_slot, [1, 8, 16], Device::Cpu).unwrap();
+        let reference = Tensor::from_slice(&(0..MAX_SLOTS).collect::<Vec<_>>()).view([1, 8, 16]);
+        assert_eq!(
+            flat_f32(&fine.owner_emb.forward(&packed)),
+            flat_f32(&fine.owner_emb.forward(&reference)),
+            "embedding output changed"
+        );
+
+        // Deliberately non-sorted mixed shapes prove grouped results restore
+        // input order; 24x40 also exercises odd 3x5 fine dimensions.
+        let raws = [
+            patterned_raw(1, 24, 40),
+            patterned_raw(2, 16, 32),
+            patterned_raw(3, 32, 24),
+        ];
+        let refs: Vec<&AeRaw> = raws.iter().collect();
+        for ae in [&fine, &coarse] {
+            let actual = encode_latent_batch_device(ae, &refs, Device::Cpu, None).unwrap();
+            assert_eq!(actual.len(), raws.len());
+            for (i, raw) in raws.iter().enumerate() {
+                let expected = i64_reference(ae, raw);
+                assert_eq!(actual[i].size(), expected.size(), "shape/order item {i}");
+                assert_eq!(
+                    flat_f32(&actual[i]),
+                    flat_f32(&expected),
+                    "latent output changed for item {i}, down={}",
+                    ae.latent_down
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ae_raw_owner_payload_uses_one_eighth_i64_reference_bytes() {
+        let raw = patterned_raw(11, 24, 40);
+        let packed_bytes = std::mem::size_of_val(raw.owners.as_slice());
+        let i64_reference_bytes = raw.owners.len() * std::mem::size_of::<i64>();
+        assert_eq!(packed_bytes, raw.hr * raw.wr);
+        assert_eq!(packed_bytes * 8, i64_reference_bytes);
     }
 
     #[test]
