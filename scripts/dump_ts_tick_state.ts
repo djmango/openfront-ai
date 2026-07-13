@@ -28,6 +28,13 @@ import { GameRecord } from "../openfront/src/core/Schemas";
 import { decompressGameRecord, simpleHash } from "../openfront/src/core/Util";
 import { loadFreshTerrain } from "../datagen/common";
 
+interface UnitSnapshot {
+  id: number;
+  unitType: string;
+  tile: number;
+  hash: number;
+}
+
 interface PlayerSnapshot {
   identity: string;
   // `id`/`hash`/`numUnits`: added for tick-level bisections that need to
@@ -45,6 +52,7 @@ interface PlayerSnapshot {
   alive: boolean;
   hash: number;
   numUnits: number;
+  units?: UnitSnapshot[];
 }
 
 interface TickSnapshot {
@@ -60,20 +68,31 @@ function playerIdentity(p: Player): string {
   return clientID === null ? `nation:${p.name()}` : `player:${clientID}`;
 }
 
-function snapshot(game: Game): TickSnapshot {
-  const players: PlayerSnapshot[] = game.allPlayers().map((p) => ({
-    identity: playerIdentity(p),
-    id: p.id(),
-    name: p.name(),
-    playerType: p.type(),
-    team: p.team(),
-    tiles: p.numTilesOwned(),
-    troops: Math.round(p.troops()),
-    gold: p.gold().toString(),
-    alive: p.isAlive(),
-    hash: p.hash(),
-    numUnits: p.units().length,
-  }));
+function snapshot(game: Game, dumpUnits: boolean): TickSnapshot {
+  const players: PlayerSnapshot[] = game.allPlayers().map((p) => {
+    const base: PlayerSnapshot = {
+      identity: playerIdentity(p),
+      id: p.id(),
+      name: p.name(),
+      playerType: p.type(),
+      team: p.team(),
+      tiles: p.numTilesOwned(),
+      troops: Math.round(p.troops()),
+      gold: p.gold().toString(),
+      alive: p.isAlive(),
+      hash: p.hash(),
+      numUnits: p.units().length,
+    };
+    if (dumpUnits) {
+      base.units = p.units().map((u) => ({
+        id: u.id(),
+        unitType: u.type(),
+        tile: u.tile(),
+        hash: u.hash(),
+      }));
+    }
+    return base;
+  });
   const totalOwnedTiles = players.reduce((sum, p) => sum + p.tiles, 0);
   return {
     tick: game.ticks(),
@@ -128,17 +147,22 @@ async function main() {
     game.addExecution(new RecomputeRailClusterExecution(game.railNetwork()));
   }
 
+  const dumpUnits = process.env.OF_DUMP_UNITS !== undefined;
+  const dumpUnitsFrom = process.env.OF_DUMP_UNITS_FROM
+    ? parseInt(process.env.OF_DUMP_UNITS_FROM, 10)
+    : 0;
+
   const out: TickSnapshot[] = [];
   for (const turn of record.turns) {
     if (maxTicks !== undefined && turn.turnNumber > maxTicks) break;
     game.addExecution(...executor.createExecs(turn));
     game.executeNextTick();
     if (game.ticks() % every === 0) {
-      out.push(snapshot(game));
+      out.push(snapshot(game, dumpUnits && game.ticks() >= dumpUnitsFrom));
     }
   }
   if (out.length === 0 || out[out.length - 1].tick !== game.ticks()) {
-    out.push(snapshot(game));
+    out.push(snapshot(game, dumpUnits && game.ticks() >= dumpUnitsFrom));
   }
 
   fs.writeFileSync(

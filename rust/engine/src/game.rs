@@ -268,6 +268,8 @@ pub struct Game {
     water_graph_version: u32,
     path_buf: Vec<TileRef>,
     next_unit_id: i32,
+    /// TS `GameImpl.unitGrid` - spatial index for nearbyUnits order.
+    unit_grid: crate::unit_grid::UnitGrid,
     pub hash_enabled: bool,
     pub tribe_batch: crate::bot::TribeBatch,
     pub nation_batch: crate::execution::NationBatch,
@@ -378,6 +380,7 @@ impl Default for Game {
             water_graph_version: 0,
             path_buf: Vec::new(),
             next_unit_id: 1,
+            unit_grid: crate::unit_grid::UnitGrid::new(1, 1),
             hash_enabled: true,
             tribe_batch: crate::bot::TribeBatch::new(),
             nation_batch: crate::execution::NationBatch::new(),
@@ -411,7 +414,9 @@ impl Game {
         team_spawn_areas: Option<HashMap<String, Vec<SpawnArea>>>,
     ) -> Self {
         let seed = simple_hash(&game_id);
-        let tile_count = (map.width * map.height) as usize;
+        let map_width = map.width;
+        let map_height = map.height;
+        let tile_count = (map_width * map_height) as usize;
         let mini_count = (mini_map.width * mini_map.height) as usize;
         let water_component = crate::water::build_water_components(&map);
         let mini_water_hpa = crate::water_hpa::WaterHierarchical::new(&mini_map, true);
@@ -432,12 +437,19 @@ impl Game {
             mini_water_hpa: Some(mini_water_hpa),
             water_graph_version,
             path_buf: Vec::with_capacity(256),
+            unit_grid: crate::unit_grid::UnitGrid::new(map_width, map_height),
             tribe_batch: crate::bot::TribeBatch::new(),
             nation_batch: crate::execution::NationBatch::new(),
             team_spawn_areas,
             player_teams: populate_player_teams(&game_mode, player_teams_cfg.as_ref(), 0, 0),
             ..Default::default()
         }
+    }
+
+    /// Rebuild the UnitGrid for the current map size. Needed when tests swap
+    /// `map` after `Game::default()` (which starts with a 1x1 grid).
+    pub(crate) fn reinit_unit_grid(&mut self) {
+        self.unit_grid = crate::unit_grid::UnitGrid::new(self.map.width, self.map.height);
     }
 
     pub fn init_player_teams(&mut self, num_humans: usize, num_nations: usize) {
@@ -1718,24 +1730,17 @@ impl Game {
 
     /// TS `UnitGrid.hasUnitNearby` - scans across ALL players (not owner-filtered).
     pub fn has_unit_nearby_any(&self, tile: TileRef, range: u32, unit_type: &str) -> bool {
-        let tx = self.map.x(tile) as i64;
-        let ty = self.map.y(tile) as i64;
-        let range_sq = (range as i64) * (range as i64);
-        for p in &self.players {
-            for u in &p.units {
-                if u.unit_type != unit_type || u.under_construction {
-                    continue;
-                }
-                let ux = self.map.x(u.tile as TileRef) as i64;
-                let uy = self.map.y(u.tile as TileRef) as i64;
-                let dx = ux - tx;
-                let dy = uy - ty;
-                if dx * dx + dy * dy <= range_sq {
-                    return true;
-                }
-            }
-        }
-        false
+        let tx = self.map.x(tile);
+        let ty = self.map.y(tile);
+        self.unit_grid.has_unit_nearby(
+            tx,
+            ty,
+            range,
+            unit_type,
+            None,
+            false,
+            |t| (self.map.x(t), self.map.y(t)),
+        )
     }
 
     /// TS `UnitGrid.nearbyUnits(tile, range, types)` - scans across ALL players.
@@ -1745,45 +1750,40 @@ impl Game {
     /// Rust's `sort_by`) are stable, so ties fall back to this pre-sort order, and some callers
     /// (`FactoryExecution.createStation`) use the raw order with no sort at all. TS's `UnitGrid`
     /// enumerates its 100x100-tile cells row-major (`cy` outer, `cx` inner), then `types` in the
-    /// given array order, then insertion order within each cell/type `Set` - which for immobile
-    /// structures is creation order, i.e. our monotonic global `unit_id`. Replicate that
-    /// ordering by sorting on an equivalent key instead of building a real spatial grid.
+    /// given array order, then Set insertion order within each cell/type. Immobile structures
+    /// keep creation order; mobile units that leave and re-enter a cell are re-added at the end.
     pub fn nearby_structures_any(
         &self,
         tile: TileRef,
         range: u32,
         types: &[&str],
     ) -> Vec<(u16, i32, TileRef, f64)> {
-        const UNIT_GRID_CELL_SIZE: i64 = 100;
-        let tx = self.map.x(tile) as i64;
-        let ty = self.map.y(tile) as i64;
-        let range_sq = (range as i64) * (range as i64);
-        let mut out: Vec<(u16, i32, TileRef, f64, i64, i64, usize)> = Vec::new();
-        for p in &self.players {
-            for u in &p.units {
-                if u.under_construction {
-                    continue;
-                }
-                let Some(type_idx) = types.iter().position(|t| *t == u.unit_type) else {
-                    continue;
-                };
-                let ux = self.map.x(u.tile as TileRef) as i64;
-                let uy = self.map.y(u.tile as TileRef) as i64;
-                let dx = ux - tx;
-                let dy = uy - ty;
-                let d2 = dx * dx + dy * dy;
-                if d2 > range_sq {
-                    continue;
-                }
-                let cell_x = ux.div_euclid(UNIT_GRID_CELL_SIZE);
-                let cell_y = uy.div_euclid(UNIT_GRID_CELL_SIZE);
-                out.push((p.small_id, u.id, u.tile as TileRef, d2 as f64, cell_y, cell_x, type_idx));
+        let tx = self.map.x(tile);
+        let ty = self.map.y(tile);
+        self.unit_grid.nearby_units(
+            tx,
+            ty,
+            range,
+            types,
+            false,
+            |t| (self.map.x(t), self.map.y(t)),
+        )
+    }
+
+    /// TS `UnitImpl.setUnderConstruction` - keeps the UnitGrid filter flag in sync.
+    pub fn set_unit_under_construction(
+        &mut self,
+        small_id: u16,
+        unit_id: i32,
+        under_construction: bool,
+    ) {
+        if let Some(p) = self.player_by_small_id_mut(small_id) {
+            if let Some(u) = p.units.iter_mut().find(|u| u.id == unit_id) {
+                u.under_construction = under_construction;
             }
         }
-        out.sort_by(|a, b| {
-            (a.4, a.5, a.6, a.1).cmp(&(b.4, b.5, b.6, b.1))
-        });
-        out.into_iter().map(|(sid, uid, t, d2, ..)| (sid, uid, t, d2)).collect()
+        self.unit_grid
+            .set_under_construction(unit_id, under_construction);
     }
 
     /// TS `unitsOwned(type)`  -  includes construction; completed units count by level.
@@ -1979,6 +1979,10 @@ impl Game {
                 ..Default::default()
             });
         }
+        // TS `GameImpl.addUnit` → `unitGrid.addUnit`.
+        let (x, y) = (self.map.x(tile), self.map.y(tile));
+        self.unit_grid
+            .add_unit(small_id, id, unit_type, tile, x, y, false);
         self.record_unit_constructed(small_id, unit_type);
         id
     }
@@ -2010,6 +2014,8 @@ impl Game {
             .player_by_small_id(small_id)
             .and_then(|p| p.units.iter().find(|u| u.id == unit_id))
             .is_some_and(|u| u.has_train_station);
+        // TS `GameImpl.removeUnit` → `unitGrid.removeUnit` before dropping the unit.
+        self.unit_grid.remove_unit(unit_id);
         if let Some(p) = self.player_by_small_id_mut(small_id) {
             p.units.retain(|u| u.id != unit_id);
         }
@@ -2033,6 +2039,8 @@ impl Game {
             if let Some(p) = self.player_by_small_id_mut(to_small_id) {
                 p.units.push(unit);
             }
+            // TS `setOwner` keeps the same Unit object in the grid; only owner changes.
+            self.unit_grid.set_owner(unit_id, to_small_id);
             // TS TrainStation keeps a live Unit ref so owner/isActive track
             // capture automatically — update the cached station owner here.
             crate::rail::update_station_owner_for_unit(
@@ -2049,6 +2057,9 @@ impl Game {
                 u.tile = tile as i32;
             }
         }
+        // TS `UnitImpl.move` → `GameImpl.onUnitMoved` → `unitGrid.updateUnitCell`.
+        let (x, y) = (self.map.x(tile), self.map.y(tile));
+        self.unit_grid.update_unit_tile(unit_id, tile, x, y);
     }
 
     /// Coalesce pending attacks in the uninit queue only. Merging into initialized
@@ -4902,10 +4913,9 @@ mod team_join_tests {
 }
 
 // Ported from `UnitGrid.test.ts`. Native has no spatial-cell grid (`spatial.rs` is an
-// unrelated transport-pathfinding module) - `has_unit_nearby_any`/`nearby_structures_any`
-// are a flat per-tick scan over all players' units that produce the same *query results*
-// as TS's `UnitGrid.hasUnitNearby`/`nearbyUnits`, so these tests exercise that behavioral
-// equivalence rather than any internal grid-cell mechanics.
+// Port of `openfront/tests/UnitGrid.test.ts`. Native now keeps a real UnitGrid
+// (`crate::unit_grid`) matching TS cell/Set insertion-order semantics; these
+// tests exercise the public `has_unit_nearby_any`/`nearby_structures_any` API.
 #[cfg(test)]
 mod unit_grid_tests {
     use super::{Game, PlayerInfo, PlayerType};
