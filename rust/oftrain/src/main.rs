@@ -35,6 +35,19 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     stage: usize,
 
+    /// Opt into the V8.1 curriculum gates. Stage identities/maps are
+    /// unchanged; only stages 4+ use recalibrated crowded-map win gates.
+    #[arg(long, default_value_t = false)]
+    v81_curriculum: bool,
+
+    /// Per-stage env worker targets, per GPU/shard. Accepts either one
+    /// comma-separated value per stage (`24,24,...`) or ranges such as
+    /// `0-5=24,6=12,7=10,8+=8`. With --v81-curriculum, defaults to
+    /// `0-5=24,6=12,7=10,8+=8`. A stage change with a different target
+    /// checkpoints and exits cleanly for the supervisor to restart.
+    #[arg(long)]
+    stage_env_targets: Option<String>,
+
     /// Matches `rl/ppo.py --max-episode-ticks` (default 15000). The port
     /// originally shipped 3000, which truncated every stage-0 episode
     /// before the 80%-ownership win condition was reachable - see devlog.
@@ -53,6 +66,30 @@ struct Args {
 
     #[arg(long, default_value_t = 0.999)]
     gamma: f32,
+
+    /// V8.1 potential-based closeout shaping coefficient K_DOM (0 disables).
+    #[arg(long, default_value_t = 0.25)]
+    v81_dom_coef: f64,
+
+    /// First curriculum stage where V8.1 shaping may apply.
+    #[arg(long, default_value_t = 4)]
+    v81_min_stage: usize,
+
+    /// Symmetric clamp magnitude for the V8.1 log strength-ratio potential.
+    #[arg(long, default_value_t = 2.0)]
+    v81_potential_clamp: f64,
+
+    /// Relax loss aversion after reaching the dominance threshold.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    v81_dominant_loss: bool,
+
+    /// Normalized composite-strength share that counts as dominant.
+    #[arg(long, default_value_t = 0.55)]
+    v81_dominance_threshold: f64,
+
+    /// Strength-loss weight while dominant (global legacy weight is 6.5).
+    #[arg(long, default_value_t = 5.25)]
+    v81_delta_loss_dominant: f64,
 
     #[arg(long, default_value_t = 0.95)]
     lambda_: f32,
@@ -200,8 +237,8 @@ struct Args {
 
     /// Keep one actor OS thread alive per GPU for the full run and, for the
     /// one-GPU Phase 2 path, keep the learner on its own stable owner thread.
-    /// CUDA state never crosses channels. Autoscale uses the legacy path;
-    /// multi-GPU currently keeps persistent actors but uses legacy learners.
+    /// CUDA state never crosses channels. Incompatible utilization autoscale
+    /// is disabled without changing ownership mode.
     #[arg(long, default_value_t = false)]
     persistent_actors: bool,
 
@@ -380,6 +417,59 @@ fn parse_device(s: &str) -> Device {
     }
 }
 
+fn parse_stage_env_targets(spec: &str, stage_count: usize) -> anyhow::Result<Vec<usize>> {
+    let parts: Vec<&str> = spec.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    anyhow::ensure!(!parts.is_empty(), "--stage-env-targets cannot be empty");
+    if !parts.iter().any(|part| part.contains('=')) {
+        let values = parts
+            .iter()
+            .map(|value| value.parse::<usize>().map_err(anyhow::Error::from))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        anyhow::ensure!(
+            values.len() == stage_count,
+            "--stage-env-targets requires {stage_count} values, got {}",
+            values.len()
+        );
+        anyhow::ensure!(values.iter().all(|&value| value > 0), "env targets must be positive");
+        return Ok(values);
+    }
+
+    let mut values = vec![0; stage_count];
+    let mut assigned = vec![false; stage_count];
+    for part in parts {
+        let (range, value) = part
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("mixed list/range stage env target {part:?}"))?;
+        let value: usize = value.parse()?;
+        anyhow::ensure!(value > 0, "env targets must be positive");
+        let (start, end) = if let Some(start) = range.strip_suffix('+') {
+            (start.parse::<usize>()?, stage_count.saturating_sub(1))
+        } else if let Some((start, end)) = range.split_once('-') {
+            (start.parse::<usize>()?, end.parse::<usize>()?)
+        } else {
+            let stage = range.parse::<usize>()?;
+            (stage, stage)
+        };
+        anyhow::ensure!(
+            start <= end && end < stage_count,
+            "stage target range {range:?} is outside 0..{}",
+            stage_count.saturating_sub(1)
+        );
+        for stage in start..=end {
+            anyhow::ensure!(!assigned[stage], "stage {stage} has more than one env target");
+            values[stage] = value;
+            assigned[stage] = true;
+        }
+    }
+    let missing: Vec<usize> = assigned
+        .iter()
+        .enumerate()
+        .filter_map(|(stage, assigned)| (!assigned).then_some(stage))
+        .collect();
+    anyhow::ensure!(missing.is_empty(), "missing env targets for stages {missing:?}");
+    Ok(values)
+}
+
 fn resolve_eval_device(
     explicit: Option<&str>,
     async_eval: bool,
@@ -470,6 +560,30 @@ mod eval_device_tests {
     }
 }
 
+#[cfg(test)]
+mod stage_env_target_tests {
+    use super::parse_stage_env_targets;
+
+    #[test]
+    fn parses_v81_range_string() {
+        assert_eq!(
+            parse_stage_env_targets("0-5=24,6=12,7=10,8+=8", 11).unwrap(),
+            vec![24, 24, 24, 24, 24, 24, 12, 10, 8, 8, 8]
+        );
+    }
+
+    #[test]
+    fn parses_full_list_and_rejects_gaps_or_duplicates() {
+        assert_eq!(
+            parse_stage_env_targets("4,4,3", 3).unwrap(),
+            vec![4, 4, 3]
+        );
+        assert!(parse_stage_env_targets("0=4,2+=2", 4).is_err());
+        assert!(parse_stage_env_targets("0-2=4,2+=2", 4).is_err());
+        assert!(parse_stage_env_targets("4,4", 3).is_err());
+    }
+}
+
 /// Mirrors PyTorch's own `torch/__init__.py::_preload_cuda_deps()`: when
 /// libtorch is a "split" pip wheel install (each CUDA component - cublas,
 /// cudnn, cusparse, nccl, etc. - its own separate `nvidia-*-cu12` package,
@@ -548,6 +662,43 @@ fn main() -> anyhow::Result<()> {
         }
     }
     let args = Args::parse();
+    anyhow::ensure!(
+        args.v81_dom_coef.is_finite() && args.v81_dom_coef >= 0.0,
+        "--v81-dom-coef must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.v81_potential_clamp.is_finite() && args.v81_potential_clamp >= 0.0,
+        "--v81-potential-clamp must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.v81_dominance_threshold.is_finite()
+            && (0.0..=1.0).contains(&args.v81_dominance_threshold),
+        "--v81-dominance-threshold must be in [0, 1]"
+    );
+    anyhow::ensure!(
+        args.v81_delta_loss_dominant.is_finite() && args.v81_delta_loss_dominant >= 0.0,
+        "--v81-delta-loss-dominant must be finite and non-negative"
+    );
+    let reward_config = ofcore::curriculum::RewardConfig {
+        gamma: args.gamma as f64,
+        v81_dom_coef: args.v81_dom_coef,
+        v81_min_stage: args.v81_min_stage,
+        v81_potential_clamp: args.v81_potential_clamp,
+        v81_dominant_loss: args.v81_dominant_loss,
+        v81_dominance_threshold: args.v81_dominance_threshold,
+        v81_delta_loss_dominant: args.v81_delta_loss_dominant,
+    };
+    let stage_count = ofcore::curriculum::stages().len();
+    anyhow::ensure!(args.stage < stage_count, "--stage {} is outside 0..{}", args.stage, stage_count - 1);
+    let stage_env_targets = match args.stage_env_targets.as_deref() {
+        Some(spec) => parse_stage_env_targets(spec, stage_count)?,
+        None if args.v81_curriculum => ofcore::curriculum::V81_ENV_TARGETS.to_vec(),
+        None => Vec::new(),
+    };
+    let initial_num_envs = stage_env_targets
+        .get(args.stage)
+        .copied()
+        .unwrap_or(args.num_envs);
     tch::manual_seed(0);
     let device = parse_device(&args.device);
     let eval_device = resolve_eval_device(
@@ -558,6 +709,17 @@ fn main() -> anyhow::Result<()> {
         Cuda::device_count(),
     )?;
     println!("[oftrain] device={device:?}");
+    println!(
+        "[oftrain] v81 reward: min_stage={} K_DOM={} gamma={} phi_clamp={} \
+         dominant_loss={} threshold={} W_DELTA_LOSS_DOMINANT={}",
+        reward_config.v81_min_stage,
+        reward_config.v81_dom_coef,
+        reward_config.gamma,
+        reward_config.v81_potential_clamp,
+        reward_config.v81_dominant_loss,
+        reward_config.v81_dominance_threshold,
+        reward_config.v81_delta_loss_dominant,
+    );
     if args.async_eval {
         match eval_device {
             Some(eval_device) => println!("[oftrain] async eval device={eval_device:?}"),
@@ -591,18 +753,22 @@ fn main() -> anyhow::Result<()> {
             pinned_h2d: args.pinned_h2d,
             fp16_rollout: args.fp16_rollout,
             compact_rollout: args.compact_rollout,
+            reward_config,
         });
     }
 
     let cfg = train::Config {
-        num_envs: args.num_envs,
+        num_envs: initial_num_envs,
         num_gpus: args.num_gpus,
         stage: args.stage,
+        v81_curriculum: args.v81_curriculum,
+        stage_env_targets,
         max_episode_ticks: args.max_episode_ticks,
         rollout_len: args.rollout_len,
         updates: args.updates,
         lr: args.lr,
         gamma: args.gamma,
+        reward_config,
         lambda: args.lambda_,
         clip: args.clip,
         vf_coef: args.vf_coef,
@@ -652,7 +818,7 @@ fn main() -> anyhow::Result<()> {
         target_gpu_util: args.target_gpu_util,
         // Never scale below whatever the run was explicitly started with
         // unless the user gave an explicit floor of their own.
-        min_envs: args.min_envs.unwrap_or(args.num_envs),
+        min_envs: args.min_envs.unwrap_or(initial_num_envs),
         max_envs: args.max_envs,
         autoscale_check_every: args.autoscale_check_every,
         autoscale_step: args.autoscale_step,
