@@ -209,17 +209,54 @@ pub fn pack_terrain(land: &[u8], mag: &[u8], fallout: &[u8], hr: usize, wr: usiz
 /// chunks by pixel budget (mirrors `rl/obs.py::MAX_ENC_PIX`).
 pub const MAX_ENC_PIX: usize = 16_000_000;
 
-pub fn encode_latent_batch(
+/// Encode to per-item tensors on `device`. Keeping this operation separate
+/// from the host fallback lets rollout inference consume the same CUDA
+/// latents that the frozen AE produced.
+pub fn encode_latent_batch_device(
     ae: &SpatialAE,
     items: &[&AeRaw],
     device: Device,
 ) -> Result<Vec<Tensor>> {
-    // Returns one (latent_c, gh, gw) CPU f32 tensor per item, in input order.
+    // Returns one (latent_c, gh, gw) tensor per item, in input order.
     let n = items.len();
     let mut out: Vec<Option<Tensor>> = (0..n).map(|_| None).collect();
     let mut groups: std::collections::HashMap<(usize, usize), Vec<usize>> =
         std::collections::HashMap::new();
     for (i, it) in items.iter().enumerate() {
+        anyhow::ensure!(it.hr > 0 && it.wr > 0, "AE item {i} has empty shape {}x{}", it.hr, it.wr);
+        anyhow::ensure!(
+            it.hr % REGION as usize == 0 && it.wr % REGION as usize == 0,
+            "AE item {i} shape {}x{} is not divisible by REGION={REGION}",
+            it.hr,
+            it.wr
+        );
+        let pix = it.hr * it.wr;
+        let fine_gh = it.hr / REGION as usize;
+        let fine_gw = it.wr / REGION as usize;
+        anyhow::ensure!(
+            it.owners.len() == pix,
+            "AE item {i} owners len {}, expected {pix}",
+            it.owners.len()
+        );
+        anyhow::ensure!(
+            it.terrain.len() == 3 * pix,
+            "AE item {i} terrain len {}, expected {}",
+            it.terrain.len(),
+            3 * pix
+        );
+        anyhow::ensure!(
+            it.stat.len() == NUM_STATIC as usize * fine_gh * fine_gw,
+            "AE item {i} stat len {}, expected {}",
+            it.stat.len(),
+            NUM_STATIC as usize * fine_gh * fine_gw
+        );
+        if let Some((offset, owner)) =
+            it.owners.iter().copied().enumerate().find(|(_, owner)| !(0..MAX_SLOTS).contains(owner))
+        {
+            anyhow::bail!(
+                "AE item {i} owner[{offset}]={owner} is outside embedding range 0..{MAX_SLOTS}"
+            );
+        }
         groups.entry((it.hr, it.wr)).or_default().push(i);
     }
 
@@ -230,8 +267,13 @@ pub fn encode_latent_batch(
             let b = chunk.len() as i64;
             let mut owners = Vec::with_capacity(chunk.len() * pix);
             let mut terrain = Vec::with_capacity(chunk.len() * 3 * pix);
-            let gh = hr / ae.latent_down as usize;
-            let gw = wr / ae.latent_down as usize;
+            let fine_gh = hr / REGION as usize;
+            let fine_gw = wr / REGION as usize;
+            let (gh, gw) = if ae.latent_down == REGION {
+                (fine_gh, fine_gw)
+            } else {
+                (fine_gh.div_ceil(2), fine_gw.div_ceil(2))
+            };
             // static must be at latent resolution. Fine AE uses /8 = REGION
             // which matches `stat` from featurize. Coarse AE needs /16:
             // max-pool the /8 static 2x (ceil), matching encode_grids.
@@ -243,7 +285,7 @@ pub fn encode_latent_batch(
                 if ae.latent_down == REGION {
                     static_p.extend_from_slice(&it.stat);
                 } else {
-                    static_p.extend(max_pool2_stat(&it.stat, it.hr / REGION as usize, it.wr / REGION as usize));
+                    static_p.extend(max_pool2_stat(&it.stat, fine_gh, fine_gw));
                 }
             }
             let owners_t = Tensor::from_slice(&owners)
@@ -259,10 +301,16 @@ pub fn encode_latent_batch(
                 .to_device(device)
                 .to_kind(Kind::Float);
             let z = tch::no_grad(|| ae.encode(&owners_t, &terrain_t, &static_t));
-            // Split batch back to per-item CPU tensors.
+            anyhow::ensure!(
+                z.size() == [b, ae.latent_c, gh as i64, gw as i64],
+                "AE output shape {:?}, expected [{b}, {}, {gh}, {gw}]",
+                z.size(),
+                ae.latent_c
+            );
+            // Materialize independent storage before the tensor is moved to
+            // rollout ownership and eventually another OS thread/stream.
             for (j, &i) in chunk.iter().enumerate() {
-                let zj = z.select(0, j as i64).to_device(Device::Cpu).to_kind(Kind::Float);
-                out[i] = Some(zj);
+                out[i] = Some(z.select(0, j as i64).copy());
             }
         }
     }
@@ -322,6 +370,39 @@ mod tests {
         let _ae = SpatialAE::new(&vs.root(), 32, 16).unwrap();
         // +1 stem block (4 tensors) vs d8 → 27
         assert_eq!(vs.variables().len(), 27);
+    }
+
+    #[test]
+    fn invalid_owner_is_rejected_before_embedding_lookup() {
+        let vs = nn::VarStore::new(Device::Cpu);
+        let ae = SpatialAE::new(&vs.root(), 32, 8).unwrap();
+        let mut raw = AeRaw {
+            owners: vec![0; 8 * 8],
+            terrain: vec![0.0; 3 * 8 * 8],
+            stat: vec![0.0; NUM_STATIC as usize],
+            hr: 8,
+            wr: 8,
+        };
+        raw.owners[17] = MAX_SLOTS;
+        let err = encode_latent_batch_device(&ae, &[&raw], Device::Cpu)
+            .err()
+            .expect("out-of-range owner must fail");
+        assert!(err.to_string().contains("owner[17]"));
+    }
+
+    #[test]
+    fn coarse_encode_supports_odd_fine_dimensions() {
+        let vs = nn::VarStore::new(Device::Cpu);
+        let ae = SpatialAE::new(&vs.root(), 32, 16).unwrap();
+        let raw = AeRaw {
+            owners: vec![0; 24 * 40],
+            terrain: vec![0.0; 3 * 24 * 40],
+            stat: vec![0.0; NUM_STATIC as usize * 3 * 5],
+            hr: 24,
+            wr: 40,
+        };
+        let z = encode_latent_batch_device(&ae, &[&raw], Device::Cpu).unwrap();
+        assert_eq!(z[0].size(), [32, 2, 3]);
     }
 
     #[test]

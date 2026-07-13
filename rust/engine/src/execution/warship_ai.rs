@@ -9,7 +9,7 @@
 
 use super::nation_emoji::{maybe_send_emoji, send_emoji, NationEmojiState};
 use super::ordered_units::OrderedUnitSet;
-use super::warship::{warship_build_port_tile, warship_random_water_tile_near};
+use super::warship::{can_build_warship, warship_random_water_tile_near};
 use super::{ConstructionExecution, ExecEnum, Execution};
 use crate::core::schemas::unit_type::{PORT, TRADE_SHIP, TRANSPORT, WARSHIP};
 use crate::game::{Game, PlayerType};
@@ -117,28 +117,6 @@ pub fn maybe_spawn_warship(game: &mut Game, random: &mut PseudoRandom, small_id:
         small_id, WARSHIP, target_tile, true,
     )));
     true
-}
-
-/// TS `PlayerImpl.canBuild(Warship, tile)`: `canBuildUnitType` (disabled/gold/alive) then
-/// `canSpawnUnitType` → `warshipSpawn(tile)` (nearest port sharing `tile`'s water component).
-/// Unlike `Game::build_unit` (which unconditionally deducts gold, even negative -
-/// `ConstructionExecution` never gates Warship on cost since it isn't a `is_structure` type),
-/// this is the *only* gold/buildability gate a warship ever goes through, so every AI call
-/// site below must run it before queueing a `ConstructionExecution`.
-fn can_build_warship(game: &Game, small_id: u16, tile: TileRef) -> bool {
-    if game.wire.is_unit_disabled(WARSHIP) {
-        return false;
-    }
-    let Some(player) = game.player_by_small_id(small_id) else {
-        return false;
-    };
-    if !player.alive {
-        return false;
-    }
-    if player.gold < game.structure_cost(small_id, WARSHIP) {
-        return false;
-    }
-    warship_build_port_tile(game, small_id, tile).is_some()
 }
 
 /// TS `NationWarshipBehavior.trackShipsAndRetaliate`.

@@ -154,10 +154,20 @@ impl RailNetwork {
     }
 
     fn delete_cluster(&mut self, cluster_id: u32) {
-        if let Some(c) = self.clusters.remove(&cluster_id) {
-            for s in c.stations {
+        // TS `deleteCluster` clears the Cluster object's station set and nulls
+        // `setCluster(null)` on members still in that set — but leaves the Cluster
+        // *object* alive. Orphans that still hold a reference to it can later
+        // `addStation` and resurrect membership (curr-b030 city 141 snapped onto a
+        // rail whose `from` pointed at deleted cluster 28: TS revived size-1 cluster,
+        // native had removed the HashMap entry so `cluster_add_station` no-op'd and
+        // left a stale pointer). Keep an empty entry in `clusters` to match.
+        if let Some(c) = self.clusters.get_mut(&cluster_id) {
+            let members = std::mem::take(&mut c.stations);
+            for s in members {
                 if let Some(st) = self.stations.get_mut(&s) {
-                    st.cluster = None;
+                    if st.cluster == Some(cluster_id) {
+                        st.cluster = None;
+                    }
                 }
             }
         }
@@ -1092,5 +1102,53 @@ mod tests {
             b
         );
         assert_eq!(station_tile(&game, &game.rail_network, station_id), Some(city_tile));
+    }
+
+    /// TS `deleteCluster` leaves the Cluster object alive (cleared). Orphans that
+    /// still point at it must be able to `addStation` again — removing the HashMap
+    /// entry made `cluster_add_station` a no-op and stale-pointer'd new snaps
+    /// (curr-b030 stations 141/171).
+    #[test]
+    fn delete_cluster_keeps_empty_entry_for_orphan_resurrection() {
+        let mut rn = RailNetwork::default();
+        let cluster = rn.new_cluster();
+        let sid = rn.new_station_id();
+        rn.stations.insert(
+            sid,
+            Station {
+                id: sid,
+                owner_small_id: 1,
+                unit_id: 1,
+                unit_type: unit_type::CITY.to_string(),
+                cluster: None,
+                railroads: Vec::new(),
+            },
+        );
+        // Simulate an orphan still pointing at `cluster` after delete (neighbor `from`).
+        let orphan = rn.new_station_id();
+        rn.stations.insert(
+            orphan,
+            Station {
+                id: orphan,
+                owner_small_id: 1,
+                unit_id: 2,
+                unit_type: unit_type::CITY.to_string(),
+                cluster: Some(cluster),
+                railroads: Vec::new(),
+            },
+        );
+        assert!(rn.clusters.get(&cluster).unwrap().stations.is_empty());
+        rn.delete_cluster(cluster);
+        assert!(
+            rn.clusters.contains_key(&cluster),
+            "empty cluster entry must remain after delete"
+        );
+        // New station snaps using orphan neighbor's stale cluster id (TS Cluster object).
+        rn.cluster_add_station(cluster, sid);
+        assert!(
+            rn.clusters.get(&cluster).unwrap().stations.contains(&sid),
+            "addStation onto cleared cluster must revive membership"
+        );
+        assert_eq!(rn.stations.get(&sid).unwrap().cluster, Some(cluster));
     }
 }

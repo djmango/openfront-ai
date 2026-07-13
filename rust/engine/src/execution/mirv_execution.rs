@@ -89,6 +89,9 @@ impl Execution for MirvExecution {
                 };
                 self.spawn_tile = Some(spawn);
                 let id = game.build_unit(self.owner_small_id, unit_type::MIRV, spawn);
+                // TS `stats().bombLaunch(..., MIRV)` increments `numMirvsLaunched`,
+                // which escalates subsequent MIRV costs and nation save-up targets.
+                game.mirvs_launched = game.mirvs_launched.saturating_add(1);
                 if let Some(u) = game.unit_mut(self.owner_small_id, id) {
                     u.target_tile = Some(self.dst);
                 }
