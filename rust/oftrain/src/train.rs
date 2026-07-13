@@ -69,7 +69,7 @@ use ofcore::translate::Choice;
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use tch::nn::OptimizerConfig;
-use tch::{Device, Kind, Tensor, nn};
+use tch::{Cuda, Device, Kind, Tensor, nn};
 
 use crate::autoscale;
 use crate::batch::{self, ChoiceScalars};
@@ -1989,6 +1989,17 @@ pub fn run(cfg: Config) -> Result<()> {
         // weights) - the next update's collection will use these.
         for (actor, learner) in actors.iter_mut().zip(learners.iter()) {
             actor.vs.copy(&learner.vs)?;
+        }
+        // VarStore::copy schedules CUDA device-to-device copies and may return
+        // before they complete. The next loop iteration runs actor inference
+        // while the learner updates on another thread/stream, so crossing this
+        // ownership boundary without a wait can expose partially copied actor
+        // weights (or learner storage being mutated while still read). This
+        // was the root cause of delayed, non-deterministic device asserts.
+        for actor in &actors {
+            if let Device::Cuda(index) = actor.device {
+                Cuda::synchronize(index as i64);
+            }
         }
         pending = next_pending;
 
