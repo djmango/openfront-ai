@@ -102,6 +102,10 @@ function snapshot(game: Game, dumpUnits: boolean): TickSnapshot {
         veterancyProgress:
           u.type() === UnitType.Warship ? u.warshipState().veterancyProgress : 0,
         targetTile: u.targetTile() ?? null,
+        patrolTile:
+          u.type() === UnitType.Warship
+            ? (u.warshipState().patrolTile ?? null)
+            : null,
         retreatPort:
           u.type() === UnitType.Warship
             ? (u.warshipState().retreatPort ?? null)
