@@ -18,15 +18,23 @@
 //! `act()`) and a `LearnerShard` (the trained policy/optimizer), and every
 //! update collect the *next* rollout on the actor (unchanged, so this is
 //! safe to read concurrently) while training the learner on the
-//! *previous* rollout - both phases run on separate OS threads inside one
-//! `std::thread::scope`. This is the standard "collect batch k+1 with
+//! *previous* rollout - both phases run on separate OS threads. With
+//! `--persistent-actors`, one actor thread per GPU owns its ActorShard,
+//! policy VarStore, AE, terrain cache, and env workers for the entire run;
+//! the legacy default uses one scoped collector thread per update. This is
+//! the standard "collect batch k+1 with
 //! actor v(k-1) while training learner v(k-1)->v(k) on batch k" one-step-
-//! lag pipeline (an `Arc<Mutex<VarStore>>`-free way to get real overlap
-//! given `tch` `Tensor`s aren't `Sync`); the actor is refreshed from the
-//! learner's just-updated weights right after each update's training
+//! lag pipeline. Persistent refreshes serialize each learner VarStore to
+//! an owned CPU byte vector; the actor deserializes and synchronizes it on
+//! its own thread, so no VarStore/Tensor reference crosses a channel. The
+//! actor is refreshed from the learner's just-updated weights after training
 //! finishes (so the *next* update's collection uses the newest weights
 //! available, one version behind the learner it's paired with for
 //! training).
+//!
+//! Phase 1 deliberately does not implement live env-resize commands.
+//! Combining `--persistent-actors` with `--auto-scale-envs` selects the
+//! legacy path (with a startup warning), preserving existing autoscaling.
 //!
 //! ## Dual env-group pipelining (`--pipeline-groups`)
 //!
@@ -58,6 +66,7 @@
 //! - **fp16 host storage**: `--compact-rollout` stores foveated grids as
 //!   host fp16. The legacy path stays f32; `--fp16-rollout` only changes
 //!   its H2D transfer dtype.
+use std::io::Cursor;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -146,6 +155,7 @@ fn lr_warmup_frac(update: u64, warmup_start: u64, warmup_updates: u64) -> f64 {
 /// closes.
 const RET_ADAPTIVE_N_STD: f64 = 10.0;
 
+#[derive(Clone)]
 pub struct Config {
     /// Envs per shard (per device) *at startup*. Total envs = num_envs *
     /// devices().len(). If `auto_scale_envs` is on, the *live* per-shard
@@ -267,6 +277,12 @@ pub struct Config {
     /// dual-group pipelining). Default on; with N=1 the second group is
     /// empty and behavior matches the single-group path.
     pub pipeline_groups: bool,
+    /// Opt-in Phase 1 persistent actor ownership. One long-lived OS thread
+    /// per shard owns every actor-side CUDA object and env worker. Weight
+    /// messages are serialized CPU bytes; no VarStore or Tensor crosses
+    /// the actor channel. Disabled by default, and Phase 1 automatically
+    /// selects the legacy path when autoscaling is enabled.
+    pub persistent_actors: bool,
     pub device: Device,
     /// Which simulation backend envs run against (Node bridge or the
     /// in-process native engine) for the `1.0 - node_fraction` majority of
@@ -584,6 +600,33 @@ struct RolloutResult {
     buffer: Vec<Vec<Step>>,
     bootstrap_v: Vec<f32>,
     ep_infos: Vec<EpisodeInfo>,
+    policy_version: u64,
+    collect_seconds: f64,
+}
+
+fn validate_rollout_set(results: &[RolloutResult], expected_policy_version: u64) -> Result<()> {
+    anyhow::ensure!(!results.is_empty(), "no rollout shards returned");
+    for (shard, result) in results.iter().enumerate() {
+        anyhow::ensure!(
+            result.policy_version == expected_policy_version,
+            "rollout shard {shard} used policy version {}, expected {}",
+            result.policy_version,
+            expected_policy_version
+        );
+        anyhow::ensure!(!result.buffer.is_empty(), "rollout shard {shard} is empty");
+        let envs = result.buffer[0].len();
+        anyhow::ensure!(envs > 0, "rollout shard {shard} has no envs");
+        anyhow::ensure!(
+            result.buffer.iter().all(|row| row.len() == envs),
+            "rollout shard {shard} changed env width mid-rollout"
+        );
+        anyhow::ensure!(
+            result.bootstrap_v.len() == envs,
+            "rollout shard {shard} bootstrap width {} != rollout width {envs}",
+            result.bootstrap_v.len()
+        );
+    }
+    Ok(())
 }
 
 /// Collects one full (rollout_len, num_envs) rollout on `actor`'s policy
@@ -719,7 +762,8 @@ fn recv_group(
     Ok(())
 }
 
-fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult> {
+fn collect_rollout(actor: &mut ActorShard, cfg: &Config, policy_version: u64) -> Result<RolloutResult> {
+    let collect_start = Instant::now();
     let n = actor.workers.len();
     let mut buffer: Vec<Vec<Step>> = Vec::with_capacity(cfg.rollout_len);
     let mut ep_infos = Vec::new();
@@ -815,11 +859,10 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
         (&v).try_into()?
     };
 
-    // Each collection runs on a freshly spawned OS thread, and libtorch uses
-    // thread-local CUDA streams. Joining the thread only waits for its host
-    // function; it does not guarantee all kernels queued on that stream have
-    // completed. Finish the actor stream before its tensors return to the main
-    // thread for VarStore refresh or move to another collector thread.
+    // Libtorch uses thread-local CUDA streams. Finish actor work before
+    // producing the CPU-only result. This is required by the legacy path
+    // before ActorShard moves back to the coordinator, and gives the
+    // persistent command a strict completion boundary before refresh/eval.
     if let Device::Cuda(index) = actor.device {
         Cuda::synchronize(index as i64);
     }
@@ -828,6 +871,8 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
         buffer,
         bootstrap_v,
         ep_infos,
+        policy_version,
+        collect_seconds: collect_start.elapsed().as_secs_f64(),
     })
 }
 
@@ -968,6 +1013,383 @@ fn run_eval(
         score,
         episodes: finished.len(),
     })
+}
+
+/// Actor commands contain only ordinary CPU data. `weights` is a complete
+/// VarStore byte serialization, never a VarStore or Tensor handle.
+enum ActorCommand {
+    Collect { id: u64 },
+    Refresh { id: u64, policy_version: u64, weights: Vec<u8> },
+    SetStage { id: u64, stage: usize },
+    Eval { id: u64, stage: usize, episodes: usize },
+    Shutdown { id: u64 },
+}
+
+impl ActorCommand {
+    fn id(&self) -> u64 {
+        match self {
+            Self::Collect { id }
+            | Self::Refresh { id, .. }
+            | Self::SetStage { id, .. }
+            | Self::Eval { id, .. }
+            | Self::Shutdown { id } => *id,
+        }
+    }
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Collect { .. } => "collect",
+            Self::Refresh { .. } => "refresh",
+            Self::SetStage { .. } => "set-stage",
+            Self::Eval { .. } => "eval",
+            Self::Shutdown { .. } => "shutdown",
+        }
+    }
+}
+
+enum ActorReply {
+    Ready { envs: usize },
+    Collected { id: u64, result: RolloutResult },
+    Eval { id: u64, result: EvalResult },
+    Ack { id: u64 },
+    Failed { id: u64, command: &'static str, error: String },
+}
+
+/// Enforces strict command ordering and monotonic policy snapshots.
+#[derive(Debug)]
+struct ActorProtocol {
+    next_command_id: u64,
+    policy_version: u64,
+    stopped: bool,
+}
+
+impl ActorProtocol {
+    fn new(policy_version: u64) -> Self {
+        Self { next_command_id: 1, policy_version, stopped: false }
+    }
+    fn accept(&mut self, command: &ActorCommand) -> Result<()> {
+        anyhow::ensure!(!self.stopped, "command received after shutdown");
+        anyhow::ensure!(
+            command.id() == self.next_command_id,
+            "actor command ordering violation: got id {}, expected {}",
+            command.id(),
+            self.next_command_id
+        );
+        self.next_command_id += 1;
+        if let ActorCommand::Refresh { policy_version, .. } = command {
+            anyhow::ensure!(
+                *policy_version > self.policy_version,
+                "stale actor policy refresh: got version {}, current {}",
+                policy_version,
+                self.policy_version
+            );
+            self.policy_version = *policy_version;
+        }
+        if matches!(command, ActorCommand::Shutdown { .. }) {
+            self.stopped = true;
+        }
+        Ok(())
+    }
+}
+
+fn serialize_weights(vs: &nn::VarStore) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    vs.save_to_stream(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn close_actor(actor: ActorShard) {
+    for worker in actor.workers {
+        drop(worker.choice_tx);
+        let _ = worker.handle.join();
+    }
+}
+
+fn build_actor_shard(
+    shard_index: usize,
+    device: Device,
+    cfg: &Config,
+    stage: usize,
+    initial_weights: Vec<u8>,
+) -> Result<ActorShard> {
+    // All CUDA-bearing actor resources are created and destroyed on the
+    // persistent actor thread.
+    let mut vs = nn::VarStore::new(device);
+    let policy = PolicyNet::new(&vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
+    vs.load_from_stream(Cursor::new(initial_weights))?;
+    if let Device::Cuda(index) = device {
+        Cuda::synchronize(index as i64);
+    }
+    let path = std::path::Path::new(&cfg.ae_ckpt);
+    anyhow::ensure!(
+        path.exists(),
+        "AE checkpoint not found at {} — run scripts/export_safetensors.py \
+         (or scripts/fetch_ae_encoders.sh) first",
+        path.display()
+    );
+    let coarse = cfg.coarse_ckpt.as_ref().map(std::path::Path::new);
+    let ae = Some(crate::ae::AePair::load(path, coarse, device)?);
+    let mut workers = Vec::with_capacity(cfg.num_envs);
+    let mut cur_obs = Vec::with_capacity(cfg.num_envs);
+    for local_i in 0..cfg.num_envs {
+        let idx = shard_index * cfg.num_envs + local_i;
+        let engine = engine_for_idx(idx, cfg.engine, cfg.node_fraction);
+        let (worker, obs) = spawn_worker(idx, stage, cfg.max_episode_ticks, engine)?;
+        workers.push(worker);
+        cur_obs.push(obs);
+    }
+    Ok(ActorShard {
+        device,
+        workers,
+        cur_obs,
+        vs,
+        policy,
+        ae,
+        terrain_cache: crate::ae::TerrainDeviceCache::new(device),
+    })
+}
+
+fn actor_loop(
+    shard_index: usize,
+    device: Device,
+    cfg: Config,
+    stage: usize,
+    initial_policy_version: u64,
+    initial_weights: Vec<u8>,
+    command_rx: Receiver<ActorCommand>,
+    reply_tx: Sender<ActorReply>,
+) {
+    let mut actor = match build_actor_shard(shard_index, device, &cfg, stage, initial_weights) {
+        Ok(actor) => actor,
+        Err(error) => {
+            let _ = reply_tx.send(ActorReply::Failed {
+                id: 0,
+                command: "initialize",
+                error: format!("{error:#}"),
+            });
+            return;
+        }
+    };
+    if reply_tx.send(ActorReply::Ready { envs: actor.workers.len() }).is_err() {
+        close_actor(actor);
+        return;
+    }
+    let mut protocol = ActorProtocol::new(initial_policy_version);
+    while let Ok(command) = command_rx.recv() {
+        let id = command.id();
+        let name = command.name();
+        if let Err(error) = protocol.accept(&command) {
+            let _ = reply_tx.send(ActorReply::Failed {
+                id,
+                command: name,
+                error: format!("{error:#}"),
+            });
+            break;
+        }
+        let reply: Result<ActorReply> = match command {
+            ActorCommand::Collect { id } => collect_rollout(&mut actor, &cfg, protocol.policy_version)
+                .map(|result| ActorReply::Collected { id, result }),
+            ActorCommand::Refresh { id, weights, .. } => actor
+                .vs
+                .load_from_stream(Cursor::new(weights))
+                .map_err(anyhow::Error::from)
+                .map(|_| {
+                    if let Device::Cuda(index) = actor.device {
+                        Cuda::synchronize(index as i64);
+                    }
+                    ActorReply::Ack { id }
+                }),
+            ActorCommand::SetStage { id, stage } => {
+                for worker in &actor.workers {
+                    let _ = worker.stage_tx.send(stage);
+                }
+                Ok(ActorReply::Ack { id })
+            }
+            ActorCommand::Eval { id, stage, episodes } => actor
+                .ae
+                .as_ref()
+                .ok_or_else(|| anyhow!("eval requires AE encoders"))
+                .and_then(|ae| run_eval(
+                    &actor.policy,
+                    ae,
+                    actor.device,
+                    stage,
+                    episodes,
+                    cfg.max_episode_ticks,
+                    cfg.engine,
+                    cfg.pinned_h2d,
+                    cfg.fp16_rollout,
+                    cfg.compact_rollout && cfg.foveate,
+                ))
+                .map(|result| ActorReply::Eval { id, result }),
+            ActorCommand::Shutdown { id } => Ok(ActorReply::Ack { id }),
+        };
+        match reply {
+            Ok(reply) => {
+                let shutdown = protocol.stopped;
+                if reply_tx.send(reply).is_err() || shutdown {
+                    break;
+                }
+            }
+            Err(error) => {
+                let _ = reply_tx.send(ActorReply::Failed {
+                    id,
+                    command: name,
+                    error: format!("{error:#}"),
+                });
+                break;
+            }
+        }
+    }
+    if let Device::Cuda(index) = actor.device {
+        Cuda::synchronize(index as i64);
+    }
+    close_actor(actor);
+}
+
+fn actor_reply_error(shard_index: usize, expected: &str, reply: &ActorReply) -> anyhow::Error {
+    match reply {
+        ActorReply::Failed { id, command, error } => anyhow!(
+            "persistent actor {shard_index} command {id} ({command}) failed: {error}"
+        ),
+        _ => anyhow!("persistent actor {shard_index} protocol error: expected {expected}"),
+    }
+}
+
+struct PersistentActor {
+    shard_index: usize,
+    command_tx: Sender<ActorCommand>,
+    reply_rx: Receiver<ActorReply>,
+    handle: Option<JoinHandle<()>>,
+    next_command_id: u64,
+    pending_collect_id: Option<u64>,
+}
+
+impl PersistentActor {
+    fn spawn(
+        shard_index: usize,
+        device: Device,
+        cfg: Config,
+        stage: usize,
+        initial_policy_version: u64,
+        initial_weights: Vec<u8>,
+    ) -> Result<Self> {
+        let (command_tx, command_rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let handle = std::thread::Builder::new()
+            .name(format!("actor-gpu{shard_index}"))
+            .spawn(move || actor_loop(
+                shard_index,
+                device,
+                cfg,
+                stage,
+                initial_policy_version,
+                initial_weights,
+                command_rx,
+                reply_tx,
+            ))?;
+        let mut actor = Self {
+            shard_index,
+            command_tx,
+            reply_rx,
+            handle: Some(handle),
+            next_command_id: 1,
+            pending_collect_id: None,
+        };
+        match actor.recv_reply()? {
+            ActorReply::Ready { envs } => {
+                anyhow::ensure!(envs > 0, "persistent actor {shard_index} initialized with no envs");
+                Ok(actor)
+            }
+            reply => Err(actor_reply_error(shard_index, "ready", &reply)),
+        }
+    }
+    fn recv_reply(&mut self) -> Result<ActorReply> {
+        match self.reply_rx.recv() {
+            Ok(reply) => Ok(reply),
+            Err(_) => {
+                let shard_index = self.shard_index;
+                let status = self.join_status();
+                Err(anyhow!(
+                    "persistent actor {shard_index} reply channel closed{status}"
+                ))
+            }
+        }
+    }
+    fn join_status(&mut self) -> String {
+        let Some(handle) = self.handle.take() else { return String::new() };
+        match handle.join() {
+            Ok(()) => " (thread exited)".to_string(),
+            Err(payload) => {
+                let reason = payload.downcast_ref::<&str>().copied()
+                    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("non-string panic");
+                format!(" (thread panicked: {reason})")
+            }
+        }
+    }
+    fn next_id(&mut self) -> u64 {
+        let id = self.next_command_id;
+        self.next_command_id += 1;
+        id
+    }
+    fn send_collect(&mut self) -> Result<()> {
+        anyhow::ensure!(self.pending_collect_id.is_none(), "persistent actor {} already collecting", self.shard_index);
+        let id = self.next_id();
+        self.command_tx.send(ActorCommand::Collect { id })?;
+        self.pending_collect_id = Some(id);
+        Ok(())
+    }
+    fn finish_collect(&mut self) -> Result<RolloutResult> {
+        let expected = self.pending_collect_id.take()
+            .ok_or_else(|| anyhow!("persistent actor {} has no pending collect", self.shard_index))?;
+        match self.recv_reply()? {
+            ActorReply::Collected { id, result } if id == expected => Ok(result),
+            reply => Err(actor_reply_error(self.shard_index, "matching collect result", &reply)),
+        }
+    }
+    fn request_ack(&mut self, command: ActorCommand) -> Result<()> {
+        let expected = command.id();
+        self.command_tx.send(command)?;
+        match self.recv_reply()? {
+            ActorReply::Ack { id } if id == expected => Ok(()),
+            reply => Err(actor_reply_error(self.shard_index, "matching acknowledgement", &reply)),
+        }
+    }
+    fn refresh(&mut self, policy_version: u64, weights: Vec<u8>) -> Result<()> {
+        let id = self.next_id();
+        self.request_ack(ActorCommand::Refresh { id, policy_version, weights })
+    }
+    fn set_stage(&mut self, stage: usize) -> Result<()> {
+        let id = self.next_id();
+        self.request_ack(ActorCommand::SetStage { id, stage })
+    }
+    fn eval(&mut self, stage: usize, episodes: usize) -> Result<EvalResult> {
+        let id = self.next_id();
+        self.command_tx.send(ActorCommand::Eval { id, stage, episodes })?;
+        match self.recv_reply()? {
+            ActorReply::Eval { id: reply_id, result } if reply_id == id => Ok(result),
+            reply => Err(actor_reply_error(self.shard_index, "matching eval result", &reply)),
+        }
+    }
+    fn shutdown(mut self) -> Result<()> {
+        let id = self.next_id();
+        self.request_ack(ActorCommand::Shutdown { id })?;
+        let status = self.join_status();
+        anyhow::ensure!(!status.contains("panicked"), "actor shutdown failed{status}");
+        Ok(())
+    }
+}
+
+impl Drop for PersistentActor {
+    fn drop(&mut self) {
+        if self.handle.is_none() {
+            return;
+        }
+        let id = self.next_id();
+        let _ = self.command_tx.send(ActorCommand::Shutdown { id });
+        let _ = self.reply_rx.recv_timeout(Duration::from_secs(5));
+        let _ = self.join_status();
+    }
 }
 
 /// Averages gradients across all shards and writes the average back onto
@@ -1564,7 +1986,15 @@ fn train_update(
     ))
 }
 
-pub fn run(cfg: Config) -> Result<()> {
+pub fn run(mut cfg: Config) -> Result<()> {
+    if cfg.persistent_actors && cfg.auto_scale_envs {
+        println!(
+            "[train] WARNING: --persistent-actors Phase 1 does not support \
+             --auto-scale-envs commands; selecting the legacy collector path \
+             so existing autoscale behavior is preserved"
+        );
+        cfg.persistent_actors = false;
+    }
     std::fs::create_dir_all(&cfg.ckpt_dir)?;
 
     // Resume / init: load weights before shards spawn. `--resume` restores
@@ -1625,16 +2055,19 @@ pub fn run(cfg: Config) -> Result<()> {
     );
 
     let mut actors: Vec<ActorShard> = Vec::with_capacity(devices.len());
+    let mut persistent_actors: Vec<PersistentActor> = Vec::with_capacity(devices.len());
     let mut learners: Vec<LearnerShard> = Vec::with_capacity(devices.len());
     for (gi, &device) in devices.iter().enumerate() {
         let mut workers = Vec::with_capacity(cfg.num_envs);
         let mut cur_obs = Vec::with_capacity(cfg.num_envs);
-        for local_i in 0..cfg.num_envs {
-            let idx = gi * cfg.num_envs + local_i;
-            let worker_engine = engine_for_idx(idx, cfg.engine, cfg.node_fraction);
-            let (w, obs) = spawn_worker(idx, start_stage, cfg.max_episode_ticks, worker_engine)?;
-            workers.push(w);
-            cur_obs.push(obs);
+        if !cfg.persistent_actors {
+            for local_i in 0..cfg.num_envs {
+                let idx = gi * cfg.num_envs + local_i;
+                let worker_engine = engine_for_idx(idx, cfg.engine, cfg.node_fraction);
+                let (w, obs) = spawn_worker(idx, start_stage, cfg.max_episode_ticks, worker_engine)?;
+                workers.push(w);
+                cur_obs.push(obs);
+            }
         }
         let mut learner_vs = nn::VarStore::new(device);
         let learner_policy =
@@ -1656,12 +2089,36 @@ pub fn run(cfg: Config) -> Result<()> {
         let lr_init = resumed_state.as_ref().map(|s| s.lr_now).unwrap_or(cfg.lr);
         let opt = nn::AdamW::default().build(&learner_vs, lr_init)?;
 
-        let mut actor_vs = nn::VarStore::new(device);
-        let actor_policy =
-            PolicyNet::new(&actor_vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
-        actor_vs.copy(&learner_vs)?;
+        if gi == 0 {
+            println!(
+                "[train] AE fine={} coarse={}",
+                cfg.ae_ckpt,
+                cfg.coarse_ckpt.as_deref().unwrap_or("(2x pool fallback)")
+            );
+        }
 
-        let actor_ae = {
+        learners.push(LearnerShard {
+            device,
+            vs: learner_vs,
+            policy: learner_policy,
+            opt,
+        });
+        if cfg.persistent_actors {
+            let initial_version = resumed_state.as_ref().map(|s| s.update).unwrap_or(0);
+            let weights = serialize_weights(&learners[gi].vs)?;
+            persistent_actors.push(PersistentActor::spawn(
+                gi,
+                device,
+                cfg.clone(),
+                start_stage,
+                initial_version,
+                weights,
+            )?);
+        } else {
+            let mut actor_vs = nn::VarStore::new(device);
+            let actor_policy =
+                PolicyNet::new(&actor_vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
+            actor_vs.copy(&learners[gi].vs)?;
             let path = std::path::Path::new(&cfg.ae_ckpt);
             if !path.exists() {
                 anyhow::bail!(
@@ -1671,31 +2128,17 @@ pub fn run(cfg: Config) -> Result<()> {
                 );
             }
             let coarse = cfg.coarse_ckpt.as_ref().map(std::path::Path::new);
-            Some(crate::ae::AePair::load(path, coarse, device)?)
-        };
-        if gi == 0 {
-            println!(
-                "[train] AE fine={} coarse={}",
-                cfg.ae_ckpt,
-                cfg.coarse_ckpt.as_deref().unwrap_or("(2x pool fallback)")
-            );
+            let actor_ae = Some(crate::ae::AePair::load(path, coarse, device)?);
+            actors.push(ActorShard {
+                device,
+                workers,
+                cur_obs,
+                vs: actor_vs,
+                policy: actor_policy,
+                ae: actor_ae,
+                terrain_cache: crate::ae::TerrainDeviceCache::new(device),
+            });
         }
-
-        actors.push(ActorShard {
-            device,
-            workers,
-            cur_obs,
-            vs: actor_vs,
-            policy: actor_policy,
-            ae: actor_ae,
-            terrain_cache: crate::ae::TerrainDeviceCache::new(device),
-        });
-        learners.push(LearnerShard {
-            device,
-            vs: learner_vs,
-            policy: learner_policy,
-            opt,
-        });
     }
     // Initialization and VarStore copies ran on the main thread. Prime
     // collection uses fresh collector threads with different CUDA streams.
@@ -1820,19 +2263,33 @@ pub fn run(cfg: Config) -> Result<()> {
     // Prime the pipeline: collect the very first rollout (using the
     // actors' initial, freshly-copied-from-learner weights) before the
     // update loop starts overlapping collection with training.
-    let mut pending: Vec<RolloutResult> = std::thread::scope(|s| {
-        let handles: Vec<_> = actors
+    let mut pending: Vec<RolloutResult> = if cfg.persistent_actors {
+        for actor in &mut persistent_actors {
+            actor.send_collect()?;
+        }
+        persistent_actors
             .iter_mut()
-            .map(|actor| s.spawn(move || collect_rollout(actor, cfg_ref)))
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().expect("collector thread panicked"))
-            .collect::<Result<Vec<_>>>()
-    })?;
+            .map(PersistentActor::finish_collect)
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        std::thread::scope(|s| {
+            let handles: Vec<_> = actors
+                .iter_mut()
+                .map(|actor| s.spawn(move || collect_rollout(actor, cfg_ref, start_update)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().map_err(|_| anyhow!("collector thread panicked"))?)
+                .collect::<Result<Vec<_>>>()
+        })?
+    };
+    validate_rollout_set(&pending, start_update)?;
 
     for update in start_update..cfg.updates {
         let update_start = Instant::now();
+        let expected_pending_version =
+            if update == start_update { start_update } else { update - 1 };
+        validate_rollout_set(&pending, expected_pending_version)?;
 
         // Overlap: collect update `update+1`'s rollout on every shard's
         // (frozen-for-this-round) actor concurrently with training the
@@ -1870,12 +2327,10 @@ pub fn run(cfg: Config) -> Result<()> {
         // `train_dt` (the `.join()` calls after `train_update` returns
         // will block, adding to `collect_dt` but not `train_dt`).
         let collect_start = Instant::now();
-        let (train_result, next_pending, train_dt) = std::thread::scope(|s| {
-            let collect_handles: Vec<_> = actors
-                .iter_mut()
-                .map(|actor| s.spawn(move || collect_rollout(actor, cfg_ref)))
-                .collect();
-
+        let (train_result, next_pending, train_dt) = if cfg.persistent_actors {
+            for actor in &mut persistent_actors {
+                actor.send_collect()?;
+            }
             let train_t0 = Instant::now();
             let train_result = train_update(
                 &mut learners,
@@ -1886,16 +2341,38 @@ pub fn run(cfg: Config) -> Result<()> {
                 &mut ret_stat,
             );
             let train_dt = train_t0.elapsed().as_secs_f64();
-
-            let next_pending: Result<Vec<RolloutResult>> = collect_handles
-                .into_iter()
-                .map(|h| h.join().expect("collector thread panicked"))
-                .collect();
+            let next_pending = persistent_actors
+                .iter_mut()
+                .map(PersistentActor::finish_collect)
+                .collect::<Result<Vec<_>>>();
             (train_result, next_pending, train_dt)
-        });
+        } else {
+            std::thread::scope(|s| {
+                let collect_handles: Vec<_> = actors
+                    .iter_mut()
+                    .map(|actor| s.spawn(move || collect_rollout(actor, cfg_ref, update)))
+                    .collect();
+                let train_t0 = Instant::now();
+                let train_result = train_update(
+                    &mut learners,
+                    &pending,
+                    cfg_ref,
+                    &mut rng,
+                    ent_coef_now,
+                    &mut ret_stat,
+                );
+                let train_dt = train_t0.elapsed().as_secs_f64();
+                let next_pending: Result<Vec<RolloutResult>> = collect_handles
+                    .into_iter()
+                    .map(|h| h.join().map_err(|_| anyhow!("collector thread panicked"))?)
+                    .collect();
+                (train_result, next_pending, train_dt)
+            })
+        };
         let collect_dt = collect_start.elapsed().as_secs_f64();
         let last_losses = train_result?;
         let next_pending = next_pending?;
+        validate_rollout_set(&next_pending, update)?;
         // Actual env count behind `next_pending` (each shard's rollout
         // just collected) - not the startup `total_envs`, which goes
         // stale the moment `auto_scale_envs` grows any shard. Derived
@@ -1981,9 +2458,15 @@ pub fn run(cfg: Config) -> Result<()> {
             lr_now = cfg.lr * cfg.stage_lr_decay.powi(curr_stage as i32);
             lr_warmup_start_update = update + 1;
             lr_warmup_updates = LR_WARMUP_UPDATES;
-            for actor in &actors {
-                for w in &actor.workers {
-                    let _ = w.stage_tx.send(curr_stage);
+            if cfg.persistent_actors {
+                for actor in &mut persistent_actors {
+                    actor.set_stage(curr_stage)?;
+                }
+            } else {
+                for actor in &actors {
+                    for w in &actor.workers {
+                        let _ = w.stage_tx.send(curr_stage);
+                    }
                 }
             }
             // The *next* iteration's top-of-loop warmup logic recomputes
@@ -2009,20 +2492,36 @@ pub fn run(cfg: Config) -> Result<()> {
         // weights, now that training has finished (and the collection
         // that ran concurrently with it is done reading the *old*
         // weights) - the next update's collection will use these.
-        for (actor, learner) in actors.iter_mut().zip(learners.iter()) {
-            actor.vs.copy(&learner.vs)?;
-        }
-        // VarStore::copy schedules CUDA device-to-device copies and may return
-        // before they complete. The next loop iteration runs actor inference
-        // while the learner updates on another thread/stream, so crossing this
-        // ownership boundary without a wait can expose partially copied actor
-        // weights (or learner storage being mutated while still read). This
-        // was the root cause of delayed, non-deterministic device asserts.
-        for actor in &actors {
-            if let Device::Cuda(index) = actor.device {
-                Cuda::synchronize(index as i64);
+        let refresh_start = Instant::now();
+        if cfg.persistent_actors {
+            let snapshots = learners
+                .iter()
+                .map(|learner| serialize_weights(&learner.vs))
+                .collect::<Result<Vec<_>>>()?;
+            for (actor, weights) in persistent_actors.iter_mut().zip(snapshots) {
+                actor.refresh(update + 1, weights)?;
+            }
+        } else {
+            for (actor, learner) in actors.iter_mut().zip(learners.iter()) {
+                actor.vs.copy(&learner.vs)?;
+            }
+            // VarStore::copy schedules CUDA device-to-device copies and may return
+            // before they complete. The next loop iteration runs actor inference
+            // while the learner updates on another thread/stream, so crossing this
+            // ownership boundary without a wait can expose partially copied actor
+            // weights (or learner storage being mutated while still read). This
+            // was the root cause of delayed, non-deterministic device asserts.
+            for actor in &actors {
+                if let Device::Cuda(index) = actor.device {
+                    Cuda::synchronize(index as i64);
+                }
             }
         }
+        let refresh_dt = refresh_start.elapsed().as_secs_f64();
+        let actor_work_dt = next_pending
+            .iter()
+            .map(|result| result.collect_seconds)
+            .fold(0.0f64, f64::max);
         pending = next_pending;
 
         // Auto-scale check: deliberately placed here, after this
@@ -2113,23 +2612,26 @@ pub fn run(cfg: Config) -> Result<()> {
         let mut last_eval: Option<EvalResult> = None;
         if cfg.eval_every > 0 && update % cfg.eval_every == 0 {
             let t_eval = Instant::now();
-            // Use shard 0's learner policy + actor AE (same device).
-            let ae = actors[0]
-                .ae
-                .as_ref()
-                .ok_or_else(|| anyhow!("eval requires AE encoders"))?;
-            let ev = run_eval(
-                &learners[0].policy,
-                ae,
-                learners[0].device,
-                curr_stage,
-                cfg.eval_episodes,
-                cfg.max_episode_ticks,
-                cfg.engine,
-                cfg.pinned_h2d,
-                cfg.fp16_rollout,
-                cfg.compact_rollout && cfg.foveate,
-            )?;
+            let ev = if cfg.persistent_actors {
+                persistent_actors[0].eval(curr_stage, cfg.eval_episodes)?
+            } else {
+                let ae = actors[0]
+                    .ae
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("eval requires AE encoders"))?;
+                run_eval(
+                    &learners[0].policy,
+                    ae,
+                    learners[0].device,
+                    curr_stage,
+                    cfg.eval_episodes,
+                    cfg.max_episode_ticks,
+                    cfg.engine,
+                    cfg.pinned_h2d,
+                    cfg.fp16_rollout,
+                    cfg.compact_rollout && cfg.foveate,
+                )?
+            };
             println!(
                 "[eval] stage {curr_stage}  win {:.2}  score {:.2}  ({} eps, {:.0}s)",
                 ev.win,
@@ -2201,7 +2703,7 @@ pub fn run(cfg: Config) -> Result<()> {
             println!(
                 "[update {:>5}] steps/s={:>7.1} decisions_total={:>9} eps_done={:>5} recent_reward={:>8.3} \
                  pg={:>+.4} v={:>.4} ent={:>.3} entq={:>+.3} ecoef={:.4} stage={} lr={:.2e} elapsed={:.0}s \
-                 update_s={:.1} collect_s={:.1} train_s={:.1}{gpu_str}",
+                 update_s={:.1} collect_s={:.1} train_s={:.1} actor_work_s={:.1} refresh_s={:.3}{gpu_str}",
                 update,
                 sps,
                 total_env_steps,
@@ -2218,6 +2720,8 @@ pub fn run(cfg: Config) -> Result<()> {
                 dt,
                 collect_dt,
                 train_dt,
+                actor_work_dt,
+                refresh_dt,
             );
             let (eval_win, eval_score) = match &last_eval {
                 Some(ev) => (Some(ev.win), Some(ev.score)),
@@ -2284,10 +2788,16 @@ pub fn run(cfg: Config) -> Result<()> {
         &format!("{}/latest.safetensors", cfg.ckpt_dir),
         &final_state,
     )?;
-    for actor in actors {
-        for w in actor.workers {
-            drop(w.choice_tx);
-            let _ = w.handle.join();
+    if cfg.persistent_actors {
+        for actor in persistent_actors {
+            actor.shutdown()?;
+        }
+    } else {
+        for actor in actors {
+            for w in actor.workers {
+                drop(w.choice_tx);
+                let _ = w.handle.join();
+            }
         }
     }
     Ok(())
@@ -2295,6 +2805,100 @@ pub fn run(cfg: Config) -> Result<()> {
 
 #[allow(dead_code)]
 fn unused_lock_hint(_m: &Arc<Mutex<()>>) {}
+
+#[cfg(test)]
+mod persistent_actor_tests {
+    use super::*;
+
+    #[test]
+    fn protocol_accepts_complete_lifecycle_in_order() {
+        let mut protocol = ActorProtocol::new(7);
+        protocol.accept(&ActorCommand::Collect { id: 1 }).unwrap();
+        protocol
+            .accept(&ActorCommand::Refresh {
+                id: 2,
+                policy_version: 8,
+                weights: vec![1, 2, 3],
+            })
+            .unwrap();
+        protocol
+            .accept(&ActorCommand::SetStage { id: 3, stage: 2 })
+            .unwrap();
+        protocol
+            .accept(&ActorCommand::Eval {
+                id: 4,
+                stage: 2,
+                episodes: 8,
+            })
+            .unwrap();
+        protocol.accept(&ActorCommand::Shutdown { id: 5 }).unwrap();
+        assert_eq!(protocol.policy_version, 8);
+        assert!(protocol.stopped);
+        assert!(
+            protocol.accept(&ActorCommand::Collect { id: 6 }).is_err(),
+            "post-shutdown work must be rejected"
+        );
+    }
+
+    #[test]
+    fn protocol_rejects_reordered_and_stale_refreshes() {
+        let mut reordered = ActorProtocol::new(3);
+        let err = reordered
+            .accept(&ActorCommand::Collect { id: 2 })
+            .unwrap_err();
+        assert!(err.to_string().contains("expected 1"));
+
+        let mut stale = ActorProtocol::new(3);
+        let err = stale
+            .accept(&ActorCommand::Refresh {
+                id: 1,
+                policy_version: 3,
+                weights: Vec::new(),
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("stale actor policy refresh"));
+    }
+
+    #[test]
+    fn actor_failure_reply_preserves_command_context() {
+        let reply = ActorReply::Failed {
+            id: 11,
+            command: "collect",
+            error: "env 4 obs channel closed".to_string(),
+        };
+        let error = actor_reply_error(2, "collect result", &reply).to_string();
+        assert!(error.contains("actor 2"));
+        assert!(error.contains("command 11 (collect)"));
+        assert!(error.contains("env 4 obs channel closed"));
+    }
+
+    #[test]
+    fn serialized_weight_message_is_independent_cpu_bytes() {
+        tch::manual_seed(91);
+        let source = nn::VarStore::new(Device::Cpu);
+        let _ = PolicyNet::new(&source.root(), false, false, 8, 1);
+        let bytes = serialize_weights(&source).unwrap();
+        assert!(!bytes.is_empty());
+
+        let mut destination = nn::VarStore::new(Device::Cpu);
+        let _ = PolicyNet::new(&destination.root(), false, false, 8, 1);
+        destination.load_from_stream(Cursor::new(bytes)).unwrap();
+        let source_vars = source.variables();
+        let destination_vars = destination.variables();
+        assert_eq!(source_vars.len(), destination_vars.len());
+        for (name, source_tensor) in source_vars {
+            let destination_tensor = &destination_vars[&name];
+            assert_eq!(
+                (&source_tensor - destination_tensor)
+                    .abs()
+                    .max()
+                    .double_value(&[]),
+                0.0,
+                "weight {name} changed across CPU serialization"
+            );
+        }
+    }
+}
 
 #[cfg(test)]
 mod adv_clip_tests {

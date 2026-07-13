@@ -197,6 +197,12 @@ struct Args {
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pipeline_groups: bool,
 
+    /// Keep one actor OS thread alive per GPU for the full run. Actor-side
+    /// CUDA state never crosses channels. Phase 1 falls back to the legacy
+    /// collector path when --auto-scale-envs is enabled.
+    #[arg(long, default_value_t = false)]
+    persistent_actors: bool,
+
     /// "cpu", "cuda", or "cuda:N".
     #[arg(long, default_value = "cpu")]
     device: String,
@@ -456,6 +462,7 @@ fn main() -> anyhow::Result<()> {
         fp16_rollout: args.fp16_rollout,
         compact_rollout: args.compact_rollout,
         pipeline_groups: args.pipeline_groups,
+        persistent_actors: args.persistent_actors,
         device,
         engine: args.engine,
         node_fraction: args.node_fraction.clamp(0.0, 1.0),
