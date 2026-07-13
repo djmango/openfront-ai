@@ -260,12 +260,16 @@ impl WarshipExecution {
                 let same_water_component = game
                     .get_water_component(from)
                     .is_some_and(|component| game.has_water_component(unit_tile, component));
+                // TS filters only when destination owner is self/friendly. Missing
+                // destination (`targetUnit()` undefined) does *not* exclude the ship
+                // (`is_none_or` here previously treated missing dest as "friendly").
+                let dest_is_friendly = destination_owner.is_some_and(|destination| {
+                    destination == self.owner_small_id
+                        || game.is_friendly(destination, self.owner_small_id)
+                });
                 if !owner_has_port
                     || game.trade_ship_is_safe_from_pirates(owner, unit_id)
-                    || destination_owner.is_none_or(|destination| {
-                        destination == self.owner_small_id
-                            || game.is_friendly(destination, self.owner_small_id)
-                    })
+                    || dest_is_friendly
                     || !same_water_component
                     || game.map.euclidean_dist_squared(self.patrol_tile, unit_tile) > 100 * 100
                 {
@@ -317,6 +321,8 @@ impl WarshipExecution {
             let distance = game.manhattan_dist(from, target_tile);
             if distance <= 5 {
                 game.capture_unit(target_owner, self.owner_small_id, target_unit_id);
+                // TS `WarshipExecution.huntDownTradeShip`: `recordTradeCapture()` after capture.
+                game.record_trade_capture(self.owner_small_id, unit_id);
                 self.hunt_target_tile = None;
                 self.hunt_path.clear();
                 self.hunt_path_idx = 0;
@@ -1289,6 +1295,12 @@ impl Execution for WarshipExecution {
             exec.hunt_trade_ship(&mut game, ship_id, p2, trade_id);
 
             assert_eq!(game.find_unit_owner(trade_id), Some(p1));
+            // TS `recordTradeCapture()` after capture - progress toward veterancy.
+            assert_eq!(
+                game.unit(p1, ship_id).unwrap().veterancy_progress,
+                1,
+                "trade capture must call record_trade_capture"
+            );
         }
 
         #[test]

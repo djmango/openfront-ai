@@ -37,6 +37,7 @@ struct UnitSnapshot {
     unit_type: String,
     tile: i32,
     hash: i64,
+    health: i32,
 }
 
 #[derive(Serialize)]
@@ -111,6 +112,7 @@ fn snapshot(game: &openfront_engine::game::Game, dump_units: bool) -> TickSnapsh
                             unit_type: u.unit_type.clone(),
                             tile: u.tile,
                             hash: openfront_engine::hash::unit_hash(u),
+                            health: u.health,
                         })
                         .collect(),
                 )
