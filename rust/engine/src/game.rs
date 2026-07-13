@@ -2786,13 +2786,13 @@ impl Game {
     }
 
     /// Active alliances involving `small_id` (TS `player.alliances()`).
+    ///
+    /// TS keeps expired-but-not-yet-swept alliances in `_alliances` until
+    /// `PlayerExecution` calls `expire()`; do not filter on `expires_at` here.
     pub fn player_alliances(&self, small_id: u16) -> Vec<&AllianceState> {
         self.alliances
             .iter()
-            .filter(|al| {
-                al.expires_at > self.ticks
-                    && (al.requestor_small_id == small_id || al.recipient_small_id == small_id)
-            })
+            .filter(|al| al.requestor_small_id == small_id || al.recipient_small_id == small_id)
             .collect()
     }
 
@@ -2900,10 +2900,15 @@ impl Game {
         if a == b {
             return false;
         }
+        // TS `PlayerImpl.isAlliedWith` / `allianceWith`: membership in
+        // `_alliances` only. Expiry is a separate `PlayerExecution` sweep
+        // (`expiresAt() <= ticks` → `expire()`); filtering on `expires_at`
+        // here made alliances disappear one tick early for every reader
+        // (attack bordering-friends, betrayal, donations, …) while TS still
+        // treated them as live until that player's `PlayerExecution` ran.
         self.alliances.iter().any(|al| {
-            al.expires_at > self.ticks
-                && ((al.requestor_small_id == a && al.recipient_small_id == b)
-                    || (al.requestor_small_id == b && al.recipient_small_id == a))
+            (al.requestor_small_id == a && al.recipient_small_id == b)
+                || (al.requestor_small_id == b && al.recipient_small_id == a)
         })
     }
 
@@ -3140,9 +3145,8 @@ impl Game {
         let tick = self.ticks;
         let duration = self.wire.alliance_duration();
         let Some(idx) = self.alliances.iter().position(|al| {
-            al.expires_at > tick
-                && ((al.requestor_small_id == from && al.recipient_small_id == to)
-                    || (al.requestor_small_id == to && al.recipient_small_id == from))
+            (al.requestor_small_id == from && al.recipient_small_id == to)
+                || (al.requestor_small_id == to && al.recipient_small_id == from)
         }) else {
             return;
         };
@@ -3345,9 +3349,10 @@ impl Game {
     }
 
     pub fn allied_small_ids(&self, small_id: u16) -> Vec<u16> {
+        // Match TS `PlayerImpl.allies()` / `alliances()`: no `expires_at` filter
+        // (see `is_allied_with`).
         self.alliances
             .iter()
-            .filter(|al| al.expires_at > self.ticks)
             .filter_map(|al| {
                 if al.requestor_small_id == small_id {
                     Some(al.recipient_small_id)
@@ -3863,11 +3868,44 @@ mod player_alliance_list_tests {
                 al.expires_at = tick;
             }
         }
+        // Until `expire_alliances_for` sweeps, TS still reports the alliance as
+        // live (`isAlliedWith` only checks `_alliances` membership).
+        assert!(game.is_allied_with(player1, player2));
+        assert_eq!(game.alliance_count(player1), 1);
+
         game.expire_alliances_for(player1);
 
         assert_eq!(game.alliance_count(player1), 0);
         assert_eq!(game.alliance_count(player2), 0);
         assert!(!game.is_allied_with(player1, player2));
+    }
+
+    /// Regression: on the exact expiry tick, before that player's
+    /// `PlayerExecution` sweeps, `is_allied_with` must still return true
+    /// (TS keeps the alliance in `_alliances` until `expire()`). Found via
+    /// curriculum-parity-v4 `curr-b010-s2-pangaea`: Canada/Mexico alliance
+    /// expired at 5135; native treated them as non-allied during Canada's
+    /// `maybeAttack` that same tick, adding Mexico to bordering enemies and
+    /// desyncing alliance-request RNG so Canada skipped the Greenland attack.
+    #[test]
+    fn is_allied_with_stays_true_on_expiry_tick_until_swept() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let player1 = add_human(&mut game, "player1");
+        let player2 = add_human(&mut game, "player2");
+        ally(&mut game, player1, "player1", player2, "player2");
+
+        let expires_at = game.alliances[0].expires_at;
+        game.ticks = expires_at;
+        assert!(
+            game.is_allied_with(player1, player2),
+            "alliance must remain live on expires_at tick before PlayerExecution sweep"
+        );
+        assert!(game.is_friendly(player1, player2));
+
+        game.expire_alliances_for(player1);
+        assert!(!game.is_allied_with(player1, player2));
+        assert!(!game.is_friendly(player1, player2));
     }
 
     #[test]
