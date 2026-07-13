@@ -63,6 +63,14 @@ pub struct Unit {
     pub deletion_at: Option<i32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerBoundingBox {
+    pub min_x: u32,
+    pub min_y: u32,
+    pub max_x: u32,
+    pub max_y: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct Player {
     pub id: String,
@@ -82,6 +90,9 @@ pub struct Player {
     pub owned_tiles: Vec<TileRef>,
     pub last_cluster_calc: u32,
     pub last_tile_change: u32,
+    /// TS `PlayerImpl.largestClusterBoundingBox`; updated by PlayerExecution's
+    /// cluster pass and read by island-enemy boat targeting.
+    pub largest_cluster_bounding_box: Option<PlayerBoundingBox>,
     pub marked_traitor_tick: i32,
     /// TS `PlayerImpl.markedDoomsdayClockTick` - tick this player's side first
     /// dropped below the Doomsday Clock bar, or -1 if not currently flagged.
@@ -140,6 +151,7 @@ impl Default for Player {
             owned_tiles: Vec::new(),
             last_cluster_calc: 0,
             last_tile_change: 0,
+            largest_cluster_bounding_box: None,
             marked_traitor_tick: -1,
             marked_doomsday_clock_tick: -1,
             relations: OrderedMap::new(),

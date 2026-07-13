@@ -1,6 +1,6 @@
 //! Surrounded cluster removal (`PlayerExecution.ts` subset for hash parity).
 
-use crate::game::Game;
+use crate::game::{Game, PlayerBoundingBox};
 use crate::map::TileRef;
 use crate::util::simple_hash;
 use std::collections::HashSet;
@@ -65,6 +65,15 @@ fn bbox_from_tiles(game: &Game, tiles: &OrderedTiles) -> BBox {
         bb.max_y = bb.max_y.max(y);
     }
     bb
+}
+
+fn player_bounding_box(bb: BBox) -> PlayerBoundingBox {
+    PlayerBoundingBox {
+        min_x: bb.min_x,
+        min_y: bb.min_y,
+        max_x: bb.max_x,
+        max_y: bb.max_y,
+    }
 }
 
 fn inscribed(outer: BBox, inner: BBox) -> bool {
@@ -368,6 +377,9 @@ pub fn maybe_remove_clusters(game: &mut Game, small_id: u16, tick: u32) {
 
     let clusters = calculate_clusters(game, small_id);
     if clusters.is_empty() {
+        if let Some(p) = game.player_by_small_id_mut(small_id) {
+            p.largest_cluster_bounding_box = None;
+        }
         return;
     }
 
@@ -382,6 +394,9 @@ pub fn maybe_remove_clusters(game: &mut Game, small_id: u16, tick: u32) {
 
     let largest = clusters[largest_idx].clone();
     let largest_bb = bbox_from_tiles(game, &largest);
+    if let Some(p) = game.player_by_small_id_mut(small_id) {
+        p.largest_cluster_bounding_box = Some(player_bounding_box(largest_bb.clone()));
+    }
     if surrounded_by_same_enemy(game, small_id, &largest, largest_bb).is_some() {
         remove_cluster(game, small_id, &largest);
     }
