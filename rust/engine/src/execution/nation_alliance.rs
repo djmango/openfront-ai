@@ -287,7 +287,7 @@ fn has_too_many_alliances(game: &Game, other_small_id: u16) -> bool {
     let total_players = game
         .players_in_order()
         .iter()
-        .filter(|p| p.player_type != PlayerType::Bot)
+        .filter(|p| p.alive && p.player_type != PlayerType::Bot)
         .count();
     let other_alliances = game.alliance_count(other_small_id);
 
@@ -322,9 +322,7 @@ fn check_already_enough_alliances(
                 .filter(|&sid| game.is_friendly(small_id, sid))
                 .collect();
             if bordering.len() >= 2 && bordering.contains(&other_small_id) {
-                if bordering.len() <= bordering_friends.len() + 1 {
-                    return true;
-                }
+                return bordering.len() <= bordering_friends.len() + 1;
             }
             if difficulty == "Hard" {
                 game.alliance_count(small_id) >= random.next_int(3, 5) as usize

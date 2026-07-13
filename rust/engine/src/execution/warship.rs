@@ -89,11 +89,14 @@ pub struct WarshipExecution {
     target_tile: Option<TileRef>,
     path: Vec<TileRef>,
     path_idx: usize,
+    last_observed_patrol_tile: Option<TileRef>,
+    last_manual_move_tick_retreat_disabled: u32,
     last_shell_attack: u32,
     already_sent_shell: HashSet<(u16, i32)>,
     retreat_port: Option<TileRef>,
     retreating: bool,
     docked: bool,
+    active_healing_remainder: f64,
     hunt_target_tile: Option<TileRef>,
     hunt_path: Vec<TileRef>,
     hunt_path_idx: usize,
@@ -111,6 +114,22 @@ impl WarshipExecution {
 
     pub fn is_docked(&self) -> bool {
         self.docked
+    }
+
+    pub fn is_retreating(&self) -> bool {
+        self.retreating
+    }
+
+    pub fn retreat_port(&self) -> Option<TileRef> {
+        self.retreat_port
+    }
+
+    pub fn is_patrolling(&self) -> bool {
+        !self.retreating && !self.docked
+    }
+
+    pub fn target_tile(&self) -> Option<TileRef> {
+        self.target_tile
     }
 
     /// TS `Unit.warshipState().patrolTile`, read by `NationWarshipBehavior.maybeMoveWarship`
@@ -160,11 +179,14 @@ impl WarshipExecution {
             target_tile: None,
             path: Vec::with_capacity(128),
             path_idx: 0,
+            last_observed_patrol_tile: None,
+            last_manual_move_tick_retreat_disabled: 0,
             last_shell_attack: 0,
             already_sent_shell: HashSet::new(),
             retreat_port: None,
             retreating: false,
             docked: false,
+            active_healing_remainder: 0.0,
             hunt_target_tile: None,
             hunt_path: Vec::new(),
             hunt_path_idx: 0,
@@ -260,12 +282,17 @@ impl WarshipExecution {
                 let same_water_component = game
                     .get_water_component(from)
                     .is_some_and(|component| game.has_water_component(unit_tile, component));
+                // TS optional-chains these targetUnit owner checks, so a
+                // missing destination does not reject the trade ship by
+                // itself; when TradeShipExecution still has a last-known
+                // owner for a deleted destination port, use it for parity.
+                let dest_is_friendly = destination_owner.is_some_and(|destination_owner| {
+                    destination_owner == self.owner_small_id
+                        || game.is_friendly(destination_owner, self.owner_small_id)
+                });
                 if !owner_has_port
                     || game.trade_ship_is_safe_from_pirates(owner, unit_id)
-                    || destination_owner.is_none_or(|destination| {
-                        destination == self.owner_small_id
-                            || game.is_friendly(destination, self.owner_small_id)
-                    })
+                    || dest_is_friendly
                     || !same_water_component
                     || game.map.euclidean_dist_squared(self.patrol_tile, unit_tile) > 100 * 100
                 {
@@ -317,6 +344,8 @@ impl WarshipExecution {
             let distance = game.manhattan_dist(from, target_tile);
             if distance <= 5 {
                 game.capture_unit(target_owner, self.owner_small_id, target_unit_id);
+                // TS `WarshipExecution.huntDownTradeShip`: `recordTradeCapture()` after capture.
+                game.record_trade_capture(self.owner_small_id, unit_id);
                 self.hunt_target_tile = None;
                 self.hunt_path.clear();
                 self.hunt_path_idx = 0;
@@ -404,7 +433,23 @@ impl WarshipExecution {
         }
     }
 
-    fn nearest_port(&self, game: &Game, from: TileRef) -> Option<TileRef> {
+    fn handle_manual_patrol_override(&mut self, tick: u32) {
+        if self
+            .last_observed_patrol_tile
+            .is_some_and(|last| last != self.patrol_tile)
+        {
+            self.last_manual_move_tick_retreat_disabled = tick;
+            if !self.is_patrolling() {
+                self.retreating = false;
+                self.docked = false;
+                self.retreat_port = None;
+                self.active_healing_remainder = 0.0;
+            }
+        }
+        self.last_observed_patrol_tile = Some(self.patrol_tile);
+    }
+
+    fn nearest_port_candidate(&self, game: &Game, from: TileRef) -> Option<(TileRef, u32)> {
         let component = game.get_water_component(from)?;
         game.player_by_small_id(self.owner_small_id)?
             .units
@@ -412,25 +457,129 @@ impl WarshipExecution {
             .filter(|unit| {
                 unit.unit_type == PORT && game.has_water_component(unit.tile as TileRef, component)
             })
-            .min_by_key(|unit| game.map.euclidean_dist_squared(from, unit.tile as TileRef))
-            .map(|unit| unit.tile as TileRef)
+            .map(|unit| {
+                let tile = unit.tile as TileRef;
+                (tile, game.map.euclidean_dist_squared(from, tile))
+            })
+            .min_by_key(|&(_, dist)| dist)
     }
 
-    fn heal_at_dock(&self, game: &mut Game, unit_id: i32) {
+    fn nearest_available_port_candidate(
+        &self,
+        game: &Game,
+        from: TileRef,
+        exclude_unit_id: Option<i32>,
+    ) -> Option<(TileRef, u32)> {
+        let component = game.get_water_component(from)?;
+        game.player_by_small_id(self.owner_small_id)?
+            .units
+            .iter()
+            .filter(|unit| {
+                unit.unit_type == PORT
+                    && game.has_water_component(unit.tile as TileRef, component)
+                    && !game.warship_port_is_full(
+                        self.owner_small_id,
+                        unit.tile as TileRef,
+                        exclude_unit_id,
+                    )
+            })
+            .map(|unit| {
+                let tile = unit.tile as TileRef;
+                (tile, game.map.euclidean_dist_squared(from, tile))
+            })
+            .min_by_key(|&(_, dist)| dist)
+    }
+
+    fn nearest_port(&self, game: &Game, from: TileRef) -> Option<TileRef> {
+        self.nearest_port_candidate(game, from)
+            .map(|(tile, _)| tile)
+    }
+
+    fn nearest_available_port(
+        &self,
+        game: &Game,
+        from: TileRef,
+        exclude_unit_id: Option<i32>,
+    ) -> Option<TileRef> {
+        self.nearest_available_port_candidate(game, from, exclude_unit_id)
+            .map(|(tile, _)| tile)
+    }
+
+    fn refresh_retreat_port(&mut self, game: &Game, from: TileRef) -> bool {
+        let Some(current) = self.retreat_port else {
+            self.retreat_port = self.nearest_port(game, from);
+            return self.retreat_port.is_some();
+        };
+        let current_exists = game
+            .player_by_small_id(self.owner_small_id)
+            .is_some_and(|owner| {
+                owner
+                    .units
+                    .iter()
+                    .any(|unit| unit.unit_type == PORT && unit.tile as TileRef == current)
+            });
+        if !current_exists {
+            self.retreat_port = self.nearest_port(game, from);
+            self.target_tile = None;
+            self.path.clear();
+            self.path_idx = 0;
+            return self.retreat_port.is_some();
+        }
+
+        if game.warship_port_is_full(self.owner_small_id, current, None) {
+            if let Some(candidate) = self.nearest_available_port(game, from, None) {
+                self.retreat_port = Some(candidate);
+            }
+            return self.retreat_port.is_some();
+        }
+
+        if let Some((candidate, candidate_dist)) =
+            self.nearest_available_port_candidate(game, from, None)
+        {
+            let current_dist = game.map.euclidean_dist_squared(from, current);
+            // TS `findBetterPortTile`: switch only when the alternative is
+            // strictly closer than `currentDistance * warshipPortSwitchThreshold()`.
+            if candidate != current && (candidate_dist as u64) * 4 < (current_dist as u64) * 3 {
+                self.retreat_port = Some(candidate);
+            }
+        }
+        true
+    }
+
+    fn heal_at_dock(&mut self, game: &mut Game, unit_id: i32) {
         if self.owner_is_doomed(game) {
             return;
         }
-        let healing = self
-            .retreat_port
-            .and_then(|port| {
-                game.player_by_small_id(self.owner_small_id)?
+        let Some(port) = self.retreat_port else {
+            return;
+        };
+        let healing_pool = game
+            .player_by_small_id(self.owner_small_id)
+            .and_then(|owner| {
+                owner
                     .units
                     .iter()
                     .find(|unit| unit.unit_type == PORT && unit.tile as TileRef == port)
                     .map(|unit| unit.level * 5)
             })
             .unwrap_or(0);
-        if healing > 0 {
+        let mut docked_count = game.docked_warships_at_port(self.owner_small_id, port, None);
+        let self_registered = self.unit_id.is_some_and(|unit_id| {
+            game.live_warships().any(|warship| {
+                warship.owner_small_id() == self.owner_small_id
+                    && warship.unit_id() == Some(unit_id)
+            })
+        });
+        if !self_registered && self.docked && self.target_tile.is_none() {
+            docked_count += 1;
+        }
+        if healing_pool > 0 && docked_count > 0 {
+            self.active_healing_remainder += healing_pool as f64 / docked_count as f64;
+            let healing = self.active_healing_remainder.floor() as i32;
+            if healing <= 0 {
+                return;
+            }
+            self.active_healing_remainder -= healing as f64;
             let max_health = game.unit_max_health(self.owner_small_id, unit_id);
             if let Some(unit) = game.unit_mut(self.owner_small_id, unit_id) {
                 unit.health = (unit.health + healing).min(max_health);
@@ -439,35 +588,43 @@ impl WarshipExecution {
     }
 
     fn retreat(&mut self, game: &mut Game, from: TileRef, unit_id: i32) -> bool {
-        let Some(port) = self.retreat_port else {
+        if !self.refresh_retreat_port(game, from) {
             self.retreating = false;
+            self.retreat_port = None;
+            self.active_healing_remainder = 0.0;
+            self.target_tile = None;
+            self.path.clear();
+            self.path_idx = 0;
             return false;
         };
-        let port_exists = game
-            .player_by_small_id(self.owner_small_id)
-            .is_some_and(|owner| {
-                owner
-                    .units
-                    .iter()
-                    .any(|unit| unit.unit_type == PORT && unit.tile as TileRef == port)
-            });
-        if !port_exists {
-            self.retreat_port = self.nearest_port(game, from);
-            if self.retreat_port.is_none() {
-                self.retreating = false;
-                return false;
-            }
-            return self.retreat(game, from, unit_id);
-        }
+        let port = self.retreat_port.expect("refresh_retreat_port set a port");
 
         if let Some(target) = self.target(game, from, false) {
             self.shoot_target(game, game.ticks(), from, unit_id, target);
         }
         if game.map.euclidean_dist_squared(from, port) <= 25 {
-            self.docked = true;
-            self.target_tile = None;
-            self.path.clear();
-            self.path_idx = 0;
+            if !game.warship_port_is_full(self.owner_small_id, port, Some(unit_id)) {
+                self.docked = true;
+                self.retreating = false;
+                self.target_tile = None;
+                self.path.clear();
+                self.path_idx = 0;
+            } else {
+                let max_health = game.unit_max_health(self.owner_small_id, unit_id);
+                let fully_healed = game
+                    .unit(self.owner_small_id, unit_id)
+                    .is_none_or(|unit| unit.health >= max_health);
+                if fully_healed {
+                    self.docked = false;
+                    self.retreating = false;
+                    self.retreat_port = None;
+                    self.active_healing_remainder = 0.0;
+                    self.target_tile = None;
+                    self.path.clear();
+                    self.path_idx = 0;
+                    return false;
+                }
+            }
             return true;
         }
         if self.target_tile != Some(port) {
@@ -523,6 +680,7 @@ impl Execution for WarshipExecution {
             .map(|unit| unit.health)
             .unwrap_or(0);
         self.heal_near_port(game, from, unit_id);
+        self.handle_manual_patrol_override(tick);
 
         if self.docked {
             let port_exists = self.retreat_port.is_some_and(|port| {
@@ -538,6 +696,7 @@ impl Execution for WarshipExecution {
                 self.docked = false;
                 self.retreating = false;
                 self.retreat_port = None;
+                self.active_healing_remainder = 0.0;
             } else {
                 self.heal_at_dock(game, unit_id);
                 let max_health = game.unit_max_health(self.owner_small_id, unit_id);
@@ -550,6 +709,7 @@ impl Execution for WarshipExecution {
                 self.docked = false;
                 self.retreating = false;
                 self.retreat_port = None;
+                self.active_healing_remainder = 0.0;
             }
         }
 
@@ -558,13 +718,13 @@ impl Execution for WarshipExecution {
         }
         // TS `shouldStartRepairRetreat`: `Math.floor(maxHealth * warshipRetreatHealthPercent() / 100)`.
         let retreat_threshold = game.unit_max_health(self.owner_small_id, unit_id) * 75 / 100;
-        if health_before_healing < retreat_threshold {
+        if health_before_healing < retreat_threshold
+            && tick.saturating_sub(self.last_manual_move_tick_retreat_disabled) >= 50
+        {
             if let Some(port) = self.nearest_port(game, from) {
                 self.retreating = true;
                 self.retreat_port = Some(port);
-                self.target_tile = None;
-                self.path.clear();
-                self.path_idx = 0;
+                self.active_healing_remainder = 0.0;
                 if self.retreat(game, from, unit_id) {
                     return;
                 }
@@ -615,17 +775,17 @@ impl Execution for WarshipExecution {
     }
 }
 
-    // Ported from Disconnected.test.ts's "Disconnected team member interactions"
-    // (the two Warship-vs-teammate-ships cases). Full end-to-end coverage would
-    // need a real water map (patrol/pathfinding, ports, spawn tiles) that no
-    // native test currently constructs - `target()`'s own filtering is what the
-    // TS tests actually assert on, so exercise it directly instead.
-    #[cfg(test)]
-    mod tests {
+// Ported from Disconnected.test.ts's "Disconnected team member interactions"
+// (the two Warship-vs-teammate-ships cases). Full end-to-end coverage would
+// need a real water map (patrol/pathfinding, ports, spawn tiles) that no
+// native test currently constructs - `target()`'s own filtering is what the
+// TS tests actually assert on, so exercise it directly instead.
+#[cfg(test)]
+mod tests {
     use super::*;
     use crate::core::schemas::unit_type;
     use crate::execution::{Execution, TradeShipExecution};
-    use crate::game::{Player, PlayerType, PlayerInfo};
+    use crate::game::{Player, PlayerInfo, PlayerType};
     use crate::map::{GameMap, MapMeta};
 
     /// All-water `width`x`height` map wrapped in a `Game` with a real `mini_water_hpa`
@@ -721,7 +881,10 @@ impl Execution for WarshipExecution {
         let mut exec = WarshipExecution::new(sid, patrol);
         exec.init(&mut game, 1);
 
-        assert!(!exec.is_active(), "must deactivate like TS when canBuild fails");
+        assert!(
+            !exec.is_active(),
+            "must deactivate like TS when canBuild fails"
+        );
         assert!(exec.unit_id().is_none());
         assert_eq!(
             game.player_by_small_id(sid).unwrap().units.len(),
@@ -781,7 +944,11 @@ impl Execution for WarshipExecution {
         fn moves_multiple_warships_to_a_shared_target() {
             let mut game = water_game(60, 60);
             let p1 = add_human(&mut game, "p1");
-            let tiles = [game.ref_xy(10, 10), game.ref_xy(11, 10), game.ref_xy(12, 10)];
+            let tiles = [
+                game.ref_xy(10, 10),
+                game.ref_xy(11, 10),
+                game.ref_xy(12, 10),
+            ];
             let ids: Vec<i32> = tiles
                 .iter()
                 .map(|&t| game.build_unit(p1, unit_type::WARSHIP, t))
@@ -807,8 +974,12 @@ impl Execution for WarshipExecution {
             let t2 = game.ref_xy(11, 10);
             let w1 = game.build_unit(p1, unit_type::WARSHIP, t1);
             let w2 = game.build_unit(p1, unit_type::WARSHIP, t2);
-            game.add_execution(ExecEnum::Warship(WarshipExecution::new_for_test(p1, t1, w1)));
-            game.add_execution(ExecEnum::Warship(WarshipExecution::new_for_test(p1, t2, w2)));
+            game.add_execution(ExecEnum::Warship(WarshipExecution::new_for_test(
+                p1, t1, w1,
+            )));
+            game.add_execution(ExecEnum::Warship(WarshipExecution::new_for_test(
+                p1, t2, w2,
+            )));
             game.execute_next_tick();
 
             let target1 = game.ref_xy(20, 25);
@@ -846,7 +1017,9 @@ impl Execution for WarshipExecution {
             let p1 = add_human(&mut game, "p1");
             let tile = game.ref_xy(10, 10);
             let w1 = game.build_unit(p1, unit_type::WARSHIP, tile);
-            game.add_execution(ExecEnum::Warship(WarshipExecution::new_for_test(p1, tile, w1)));
+            game.add_execution(ExecEnum::Warship(WarshipExecution::new_for_test(
+                p1, tile, w1,
+            )));
             game.remove_unit(p1, w1);
 
             // Must not panic even though the warship no longer exists.
@@ -862,8 +1035,12 @@ impl Execution for WarshipExecution {
             let p2_tile = game.ref_xy(11, 10);
             let w1 = game.build_unit(p1, unit_type::WARSHIP, p1_tile);
             let w2 = game.build_unit(p2, unit_type::WARSHIP, p2_tile);
-            game.add_execution(ExecEnum::Warship(WarshipExecution::new_for_test(p1, p1_tile, w1)));
-            game.add_execution(ExecEnum::Warship(WarshipExecution::new_for_test(p2, p2_tile, w2)));
+            game.add_execution(ExecEnum::Warship(WarshipExecution::new_for_test(
+                p1, p1_tile, w1,
+            )));
+            game.add_execution(ExecEnum::Warship(WarshipExecution::new_for_test(
+                p2, p2_tile, w2,
+            )));
             game.execute_next_tick();
 
             let target = game.ref_xy(30, 30);
@@ -1203,7 +1380,9 @@ impl Execution for WarshipExecution {
             let ship_id = game.build_unit(p2, unit_type::TRADE_SHIP, ship_tile);
             let dst_port_id = game.build_unit(p3, unit_type::PORT, dst_tile);
             // Past its spawn-tick pirate-immunity window (see the "safe from pirates" test).
-            game.unit_mut(p2, ship_id).unwrap().last_safe_from_pirates_tick = -1000;
+            game.unit_mut(p2, ship_id)
+                .unwrap()
+                .last_safe_from_pirates_tick = -1000;
 
             game.add_execution(ExecEnum::TradeShip(TradeShipExecution::new_for_test(
                 p2,
@@ -1216,6 +1395,99 @@ impl Execution for WarshipExecution {
             assert_eq!(
                 exec.target(&game, warship_tile, true),
                 Some((p2, ship_id, unit_type::TRADE_SHIP))
+            );
+        }
+
+        #[test]
+        fn targets_trade_ship_when_destination_owner_is_unknown() {
+            let mut game = water_game(60, 60);
+            let p1 = add_nation(&mut game, "p1");
+            let p2 = add_human(&mut game, "p2");
+
+            let warship_tile = game.ref_xy(10, 10);
+            let ship_tile = game.ref_xy(11, 10);
+
+            game.build_unit(p1, unit_type::PORT, warship_tile);
+            let ship_id = game.build_unit(p2, unit_type::TRADE_SHIP, ship_tile);
+            game.unit_mut(p2, ship_id)
+                .unwrap()
+                .last_safe_from_pirates_tick = -1000;
+
+            let exec = WarshipExecution::new(p1, warship_tile);
+            assert_eq!(
+                exec.target(&game, warship_tile, true),
+                Some((p2, ship_id, unit_type::TRADE_SHIP)),
+                "TS optional-chains targetUnit owner checks, so undefined is not a rejection"
+            );
+        }
+
+        #[test]
+        fn targets_trade_ship_with_deleted_enemy_destination_port() {
+            let mut game = water_game(60, 60);
+            let p1 = add_nation(&mut game, "p1");
+            let p2 = add_human(&mut game, "p2");
+            let p3 = add_human(&mut game, "p3");
+
+            let warship_tile = game.ref_xy(10, 10);
+            let ship_tile = game.ref_xy(11, 10);
+            let dst_tile = game.ref_xy(12, 10);
+
+            game.build_unit(p1, unit_type::PORT, warship_tile);
+            let ship_id = game.build_unit(p2, unit_type::TRADE_SHIP, ship_tile);
+            let dst_port_id = game.build_unit(p3, unit_type::PORT, dst_tile);
+            game.unit_mut(p2, ship_id)
+                .unwrap()
+                .last_safe_from_pirates_tick = -1000;
+            game.add_execution(ExecEnum::TradeShip(
+                TradeShipExecution::new_for_test_with_destination_owner(
+                    p2,
+                    dst_port_id,
+                    ship_id,
+                    p3,
+                ),
+            ));
+            game.execute_next_tick();
+            game.remove_unit(p3, dst_port_id);
+
+            let exec = WarshipExecution::new(p1, warship_tile);
+            assert_eq!(
+                exec.target(&game, warship_tile, true),
+                Some((p2, ship_id, unit_type::TRADE_SHIP)),
+                "deleted destination keeps its last-known enemy owner like TS targetUnit.owner()"
+            );
+        }
+
+        #[test]
+        fn does_not_target_trade_ship_with_deleted_friendly_destination_port() {
+            let mut game = water_game(60, 60);
+            let p1 = add_nation(&mut game, "p1");
+            let p2 = add_human(&mut game, "p2");
+
+            let warship_tile = game.ref_xy(10, 10);
+            let ship_tile = game.ref_xy(11, 10);
+            let dst_tile = game.ref_xy(12, 10);
+
+            game.build_unit(p1, unit_type::PORT, warship_tile);
+            let dst_port_id = game.build_unit(p1, unit_type::PORT, dst_tile);
+            let ship_id = game.build_unit(p2, unit_type::TRADE_SHIP, ship_tile);
+            game.unit_mut(p2, ship_id)
+                .unwrap()
+                .last_safe_from_pirates_tick = -1000;
+            game.add_execution(ExecEnum::TradeShip(
+                TradeShipExecution::new_for_test_with_destination_owner(
+                    p2,
+                    dst_port_id,
+                    ship_id,
+                    p1,
+                ),
+            ));
+            game.execute_next_tick();
+            game.remove_unit(p1, dst_port_id);
+
+            let exec = WarshipExecution::new(p1, warship_tile);
+            assert!(
+                exec.target(&game, warship_tile, true).is_none(),
+                "cached friendly destination owner still suppresses piracy after port deletion"
             );
         }
 
@@ -1238,7 +1510,9 @@ impl Execution for WarshipExecution {
             game.build_unit(p1, unit_type::PORT, from);
             let ship_id = game.build_unit(p2, unit_type::TRADE_SHIP, trade_ship_tile);
             let dst_port_id = game.build_unit(p3, unit_type::PORT, dst_tile);
-            game.unit_mut(p2, ship_id).unwrap().last_safe_from_pirates_tick = -1000;
+            game.unit_mut(p2, ship_id)
+                .unwrap()
+                .last_safe_from_pirates_tick = -1000;
             game.add_execution(ExecEnum::TradeShip(TradeShipExecution::new_for_test(
                 p2,
                 dst_port_id,
@@ -1260,7 +1534,9 @@ impl Execution for WarshipExecution {
             game.build_unit(p1, unit_type::PORT, west_tile);
             let ship_id = game.build_unit(p2, unit_type::TRADE_SHIP, east_tile);
             let dst_port_id = game.build_unit(p3, unit_type::PORT, east_tile);
-            game.unit_mut(p2, ship_id).unwrap().last_safe_from_pirates_tick = -1000;
+            game.unit_mut(p2, ship_id)
+                .unwrap()
+                .last_safe_from_pirates_tick = -1000;
             game.add_execution(ExecEnum::TradeShip(TradeShipExecution::new_for_test(
                 p2,
                 dst_port_id,
@@ -1289,6 +1565,12 @@ impl Execution for WarshipExecution {
             exec.hunt_trade_ship(&mut game, ship_id, p2, trade_id);
 
             assert_eq!(game.find_unit_owner(trade_id), Some(p1));
+            // TS `recordTradeCapture()` after capture - progress toward veterancy.
+            assert_eq!(
+                game.unit(p1, ship_id).unwrap().veterancy_progress,
+                1,
+                "trade capture must call record_trade_capture"
+            );
         }
 
         #[test]
@@ -1339,6 +1621,70 @@ impl Execution for WarshipExecution {
                 game.unit(p1, ship_id).unwrap().health,
                 health_before + 5,
                 "port level (1) * 5"
+            );
+        }
+
+        #[test]
+        fn active_healing_matches_ts_unit_grid_boundary_miss() {
+            let mut game = water_game(120, 120);
+            let p1 = add_nation(&mut game, "p1");
+            let port_tile = game.ref_xy(10, 95);
+            let ship_tile = game.ref_xy(10, 100);
+            game.build_unit(p1, unit_type::PORT, port_tile);
+            let ship_id = game.build_unit(p1, unit_type::WARSHIP, ship_tile);
+            game.unit_mut(p1, ship_id).unwrap().health = 500;
+
+            let mut exec = WarshipExecution::new_for_test(p1, port_tile, ship_id);
+            exec.docked = true;
+            exec.retreat_port = Some(port_tile);
+            game.push_exec_for_test(ExecEnum::Warship(exec));
+            game.execute_next_tick();
+
+            assert_eq!(
+                game.unit(p1, ship_id).unwrap().health,
+                501,
+                "TS UnitGrid.nearbyUnits misses exact-radius units across a 100px cell boundary, so only passive healing applies"
+            );
+        }
+
+        #[test]
+        fn active_healing_is_split_between_docked_warships() {
+            let mut game = water_game(30, 30);
+            let p1 = add_nation(&mut game, "p1");
+            let port_tile = game.ref_xy(10, 10);
+            let ship_a_tile = game.ref_xy(10, 10);
+            let ship_b_tile = game.ref_xy(11, 10);
+            game.build_unit(p1, unit_type::PORT, port_tile);
+            let ship_a = game.build_unit(p1, unit_type::WARSHIP, ship_a_tile);
+            let ship_b = game.build_unit(p1, unit_type::WARSHIP, ship_b_tile);
+
+            for ship_id in [ship_a, ship_b] {
+                game.unit_mut(p1, ship_id).unwrap().health -= 100;
+            }
+            let health_a_before = game.unit(p1, ship_a).unwrap().health;
+            let health_b_before = game.unit(p1, ship_b).unwrap().health;
+
+            let mut exec_a = WarshipExecution::new_for_test(p1, ship_a_tile, ship_a);
+            exec_a.docked = true;
+            exec_a.retreat_port = Some(port_tile);
+            let mut exec_b = WarshipExecution::new_for_test(p1, ship_b_tile, ship_b);
+            exec_b.docked = true;
+            exec_b.retreat_port = Some(port_tile);
+            game.push_exec_for_test(ExecEnum::Warship(exec_a));
+            game.push_exec_for_test(ExecEnum::Warship(exec_b));
+
+            game.execute_next_tick();
+            game.execute_next_tick();
+
+            assert_eq!(
+                game.unit(p1, ship_a).unwrap().health,
+                health_a_before + 7,
+                "two docked warships share 5 active healing over two ticks, plus passive +1/tick"
+            );
+            assert_eq!(
+                game.unit(p1, ship_b).unwrap().health,
+                health_b_before + 7,
+                "fractional active healing remainder must be kept per warship"
             );
         }
 
@@ -1504,6 +1850,131 @@ impl Execution for WarshipExecution {
         }
 
         #[test]
+        fn retreat_switches_to_significantly_closer_port() {
+            let mut game = water_game(100, 30);
+            let p1 = add_nation(&mut game, "p1");
+            let old_port = game.ref_xy(10, 10);
+            let better_port = game.ref_xy(50, 10);
+            let ship_tile = game.ref_xy(60, 10);
+            game.build_unit(p1, unit_type::PORT, old_port);
+            game.build_unit(p1, unit_type::PORT, better_port);
+            let ship_id = game.build_unit(p1, unit_type::WARSHIP, ship_tile);
+
+            let mut exec = WarshipExecution::new_for_test(p1, ship_tile, ship_id);
+            exec.retreating = true;
+            exec.retreat_port = Some(old_port);
+
+            assert!(exec.retreat(&mut game, ship_tile, ship_id));
+            assert_eq!(
+                exec.retreat_port,
+                Some(better_port),
+                "TS refreshRetreatPortTile switches below the 0.75 distance threshold"
+            );
+            assert_eq!(exec.target_tile, Some(better_port));
+        }
+
+        #[test]
+        fn retreat_switches_when_current_port_is_full() {
+            let mut game = water_game(100, 30);
+            let p1 = add_nation(&mut game, "p1");
+            let full_port = game.ref_xy(10, 10);
+            let available_port = game.ref_xy(50, 10);
+            let docked_ship_tile = game.ref_xy(10, 10);
+            let retreating_ship_tile = game.ref_xy(20, 10);
+            game.build_unit(p1, unit_type::PORT, full_port);
+            game.build_unit(p1, unit_type::PORT, available_port);
+            let docked_ship = game.build_unit(p1, unit_type::WARSHIP, docked_ship_tile);
+            let retreating_ship = game.build_unit(p1, unit_type::WARSHIP, retreating_ship_tile);
+
+            let mut docked_exec = WarshipExecution::new_for_test(p1, docked_ship_tile, docked_ship);
+            docked_exec.docked = true;
+            docked_exec.retreat_port = Some(full_port);
+            game.push_exec_for_test(ExecEnum::Warship(docked_exec));
+
+            let mut exec =
+                WarshipExecution::new_for_test(p1, retreating_ship_tile, retreating_ship);
+            exec.retreating = true;
+            exec.retreat_port = Some(full_port);
+
+            assert!(exec.retreat(&mut game, retreating_ship_tile, retreating_ship));
+            assert_eq!(
+                exec.retreat_port,
+                Some(available_port),
+                "full current port must be replaced by the nearest available port"
+            );
+            assert_eq!(exec.target_tile, Some(available_port));
+        }
+
+        #[test]
+        fn initial_repair_retreat_does_not_count_self_as_docked_at_better_port() {
+            let mut game = water_game(40, 20);
+            let p1 = add_nation(&mut game, "p1");
+            let full_port = game.ref_xy(10, 10);
+            let available_port = game.ref_xy(16, 10);
+            let ship_tile = game.ref_xy(12, 10);
+            let stale_patrol_target = game.ref_xy(30, 10);
+            game.build_unit(p1, unit_type::PORT, full_port);
+            game.build_unit(p1, unit_type::PORT, available_port);
+            let docked_ship = game.build_unit(p1, unit_type::WARSHIP, full_port);
+            let retreating_ship = game.build_unit(p1, unit_type::WARSHIP, ship_tile);
+            let docked_max_health = game.unit_max_health(p1, docked_ship);
+            game.unit_mut(p1, docked_ship).unwrap().health = docked_max_health * 50 / 100;
+
+            for _ in 0..55 {
+                game.execute_next_tick();
+            }
+
+            let mut docked_exec = WarshipExecution::new_for_test(p1, full_port, docked_ship);
+            docked_exec.docked = true;
+            docked_exec.retreat_port = Some(full_port);
+            game.push_exec_for_test(ExecEnum::Warship(docked_exec));
+
+            let max_health = game.unit_max_health(p1, retreating_ship);
+            game.unit_mut(p1, retreating_ship).unwrap().health = max_health * 50 / 100;
+
+            let mut exec = WarshipExecution::new_for_test(p1, ship_tile, retreating_ship);
+            exec.target_tile = Some(stale_patrol_target);
+            game.push_exec_for_test(ExecEnum::Warship(exec));
+            game.execute_next_tick();
+
+            let exec = game
+                .live_warships()
+                .find(|warship| warship.unit_id() == Some(retreating_ship))
+                .expect("retreating warship execution after tick");
+            assert_eq!(
+                exec.retreat_port,
+                Some(available_port),
+                "the newly retreating ship still has its stale target while alternatives are checked"
+            );
+            assert!(exec.docked, "available nearby port should dock the ship immediately");
+            assert!(exec.target_tile.is_none(), "docking clears the target tile");
+        }
+
+        #[test]
+        fn recent_patrol_retarget_suppresses_repair_retreat() {
+            let mut game = water_game(80, 30);
+            let p1 = add_nation(&mut game, "p1");
+            let port_tile = game.ref_xy(10, 10);
+            let ship_tile = game.ref_xy(20, 10);
+            game.build_unit(p1, unit_type::PORT, port_tile);
+            let ship_id = game.build_unit(p1, unit_type::WARSHIP, ship_tile);
+
+            let mut exec = WarshipExecution::new_for_test(p1, ship_tile, ship_id);
+            exec.tick(&mut game, 100);
+            exec.set_patrol_tile(game.ref_xy(60, 10));
+            let max_health = game.unit_max_health(p1, ship_id);
+            game.unit_mut(p1, ship_id).unwrap().health = max_health * 50 / 100;
+
+            exec.tick(&mut game, 101);
+
+            assert!(
+                !exec.retreating,
+                "TS suppresses repair retreat for 50 ticks after a patrol tile change"
+            );
+            assert!(exec.retreat_port.is_none());
+        }
+
+        #[test]
         fn low_health_warship_retreats_and_fires_at_nearby_enemy_warship() {
             let mut game = water_game(30, 30);
             let p1 = add_nation(&mut game, "p1");
@@ -1517,9 +1988,9 @@ impl Execution for WarshipExecution {
             game.unit_mut(p1, ship_id).unwrap().health = max_health * 50 / 100;
 
             // `shoot_target`'s reload gate compares `game.ticks()` (not the tick argument
-            // passed to `exec.tick` below) against `last_shell_attack` - advance the game's
-            // own tick counter past the 20-tick reload window first.
-            for _ in 0..25 {
+            // passed to `exec.tick` below) against `last_shell_attack`; TS also suppresses
+            // repair retreat for the first 50 ticks after the initial observed patrol tile.
+            for _ in 0..55 {
                 game.execute_next_tick();
             }
             let tick = game.ticks();
@@ -1556,14 +2027,18 @@ impl Execution for WarshipExecution {
 
             // `retreat()`'s aggro shot (`self.target(game, from, false)`, run before the
             // docking check) reads `game.ticks()` for `shoot_target`'s reload gate, not
-            // the `tick` argument passed to `exec.tick` - advance the real counter first.
-            for _ in 0..25 {
+            // the `tick` argument passed to `exec.tick` - advance the real counter first,
+            // past both the 20-tick reload window and the initial 50-tick retreat cooldown.
+            for _ in 0..55 {
                 game.execute_next_tick();
             }
             let tick = game.ticks();
             let mut exec = WarshipExecution::new_for_test(p1, base_tile, ship_id);
             exec.tick(&mut game, tick);
-            assert!(exec.docked, "port is at the same tile - retreat docks immediately");
+            assert!(
+                exec.docked,
+                "port is at the same tile - retreat docks immediately"
+            );
 
             game.execute_next_tick(); // promotes the queued ShellExecution out of `uninit`.
             game.execute_next_tick(); // shell travels (distance 1) and hits this tick.
@@ -1592,7 +2067,7 @@ impl Execution for WarshipExecution {
             let max_health = game.unit_max_health(p1, ship_id);
             game.unit_mut(p1, ship_id).unwrap().health = max_health * 50 / 100;
 
-            for _ in 0..25 {
+            for _ in 0..55 {
                 game.execute_next_tick();
             }
             let tick = game.ticks();
