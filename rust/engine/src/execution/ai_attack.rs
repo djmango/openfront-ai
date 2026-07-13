@@ -788,6 +788,16 @@ fn find_very_weak_enemy(game: &Game, attacker_small_id: u16, bordering: &[u16]) 
 }
 
 fn player_center_tile(game: &Game, small_id: u16) -> Option<TileRef> {
+    if let Some(bb) = game
+        .player_by_small_id(small_id)
+        .and_then(|p| p.largest_cluster_bounding_box)
+    {
+        return Some(game.ref_xy(
+            bb.min_x + (bb.max_x - bb.min_x) / 2,
+            bb.min_y + (bb.max_y - bb.min_y) / 2,
+        ));
+    }
+
     let border = game.border_tiles_of(small_id)?;
     let mut tiles = border.iter();
     let first = tiles.next()?;
