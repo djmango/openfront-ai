@@ -19,6 +19,25 @@ use ofcore::translate::{translate, Choice, IntentTranslator};
 use crate::ae::{self, AeRaw};
 use crate::engine::{self, EngineKind, GameEngine, RawObs};
 
+/// CPU-owned foveated rollout payload. Grid samples cross the actor/learner
+/// boundary as fp16 values; masks and crop metadata stay explicit so the
+/// learner never has to reconstruct a full fine grid or infer coordinates.
+#[derive(Clone)]
+pub struct CompactGrid {
+    pub fine: Vec<half::f16>,       // (C_GRID, fine_h, fine_w)
+    pub fine_valid: Vec<f32>,       // (fine_h, fine_w)
+    pub fine_legal: Vec<f32>,       // (fine_h, fine_w)
+    pub fine_h: usize,
+    pub fine_w: usize,
+    pub origin_y: i64,
+    pub origin_x: i64,
+    pub coarse: Vec<half::f16>,     // (C_GRID, coarse_h, coarse_w)
+    pub coarse_valid: Vec<f32>,     // (coarse_h, coarse_w)
+    pub coarse_legal: Vec<f32>,     // (coarse_h, coarse_w)
+    pub coarse_h: usize,
+    pub coarse_w: usize,
+}
+
 #[derive(Clone)]
 pub struct EpisodeInfo {
     pub reward: f64,
@@ -46,6 +65,9 @@ pub struct EpisodeInfo {
 /// `grid` inside `build_obs`.
 #[derive(Clone)]
 pub struct PreparedObs {
+    /// Compact host ownership boundary used by `--compact-rollout`.
+    /// Contains no device handles and is consumed directly by policy/update.
+    pub compact: Option<CompactGrid>,
     /// Optional pre-assembled fine grid (C_GRID, gh, gw). Filled by the
     /// actor encode path so the learner can rebuild Obs without holding an
     /// AE (tch Optimizer/Tensor are !Sync across shard batch-build threads).
@@ -254,6 +276,7 @@ impl EnvWorker {
         };
 
         PreparedObs {
+            compact: None,
             grid: None,
             grid_coarse: None,
             cgh: 0,

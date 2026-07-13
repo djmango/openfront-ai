@@ -55,9 +55,9 @@
 //!   moment getters / `state_dict`. Handled via `--resume-warmup-updates`
 //!   (default 100) so LR warms in while moments rebuild after `--resume`
 //!   (documented on `Config::resume` / `Config::resume_warmup_updates`).
-//! - **fp16 host storage**: grids stay f32 on the host; `--fp16-rollout`
-//!   (opt-in) casts to Half only for the H2D upload then back to Float on
-//!   device.
+//! - **fp16 host storage**: `--compact-rollout` stores foveated grids as
+//!   host fp16. The legacy path stays f32; `--fp16-rollout` only changes
+//!   its H2D transfer dtype.
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -259,6 +259,9 @@ pub struct Config {
     /// `PreparedObs.grid` stays f32. Default off (opt-in); pod_train_v8
     /// enables it via EXTRA_ARGS.
     pub fp16_rollout: bool,
+    /// Host-owned fp16 foveated rollout payload. Effective only together
+    /// with `foveate`; no actor device tensor crosses into learner threads.
+    pub compact_rollout: bool,
     /// `--pipeline-groups`: split env workers into two halves and overlap
     /// act(g1) with step(g0) inside each rollout step (Python v4.1
     /// dual-group pipelining). Default on; with N=1 the second group is
@@ -620,13 +623,23 @@ fn act_group(
         return Ok((Vec::new(), Vec::new(), Vec::new()));
     }
     let obs_t = if let Some(ae) = actor.ae.as_ref() {
-        batch::build_rollout_obs(
-            &mut actor.cur_obs[start..end],
-            actor.device,
-            cfg.pinned_h2d,
-            cfg.fp16_rollout,
-            ae,
-        )?
+        if cfg.compact_rollout && cfg.foveate {
+            batch::build_compact_rollout_obs(
+                &mut actor.cur_obs[start..end],
+                actor.device,
+                cfg.pinned_h2d,
+                cfg.fp16_rollout,
+                ae,
+            )?
+        } else {
+            batch::build_rollout_obs(
+                &mut actor.cur_obs[start..end],
+                actor.device,
+                cfg.pinned_h2d,
+                cfg.fp16_rollout,
+                ae,
+            )?
+        }
     } else {
         let obs_refs: Vec<&PreparedObs> = actor.cur_obs[start..end].iter().collect();
         batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d, cfg.fp16_rollout)
@@ -748,13 +761,23 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config) -> Result<RolloutResult
     let bootstrap_v: Vec<f32> = {
         let obs_t = if let Some(ae) = actor.ae.as_ref() {
             let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
-            batch::build_obs_with_ae(
-                &obs_refs,
-                actor.device,
-                cfg.pinned_h2d,
-                cfg.fp16_rollout,
-                Some(ae),
-            )?
+            if cfg.compact_rollout && cfg.foveate {
+                batch::build_compact_obs_with_ae(
+                    &obs_refs,
+                    actor.device,
+                    cfg.pinned_h2d,
+                    cfg.fp16_rollout,
+                    ae,
+                )?
+            } else {
+                batch::build_obs_with_ae(
+                    &obs_refs,
+                    actor.device,
+                    cfg.pinned_h2d,
+                    cfg.fp16_rollout,
+                    Some(ae),
+                )?
+            }
         } else {
             let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
             batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d, cfg.fp16_rollout)
@@ -786,6 +809,7 @@ fn run_eval(
     engine: EngineKind,
     pinned_h2d: bool,
     fp16_rollout: bool,
+    compact_rollout: bool,
 ) -> Result<EvalResult> {
     if episodes == 0 {
         return Ok(EvalResult { win: 0.0, score: 0.0, episodes: 0 });
@@ -809,8 +833,11 @@ fn run_eval(
         }
         let batch: Vec<PreparedObs> = pending.iter().map(|&i| cur_obs[i].clone()).collect();
         let refs: Vec<&PreparedObs> = batch.iter().collect();
-        let obs_t =
-            batch::build_obs_with_ae(&refs, device, pinned_h2d, fp16_rollout, Some(ae))?;
+        let obs_t = if compact_rollout {
+            batch::build_compact_obs_with_ae(&refs, device, pinned_h2d, fp16_rollout, ae)?
+        } else {
+            batch::build_obs_with_ae(&refs, device, pinned_h2d, fp16_rollout, Some(ae))?
+        };
         let (a, player, tile, build, nuke, qty, _logp, _value) =
             tch::no_grad(|| policy.act(&obs_t, true));
         let a_v: Vec<i64> = (&a).try_into()?;
@@ -1919,6 +1946,7 @@ pub fn run(cfg: Config) -> Result<()> {
                 cfg.engine,
                 cfg.pinned_h2d,
                 cfg.fp16_rollout,
+                cfg.compact_rollout && cfg.foveate,
             )?;
             println!(
                 "[eval] stage {curr_stage}  win {:.2}  score {:.2}  ({} eps, {:.0}s)",
