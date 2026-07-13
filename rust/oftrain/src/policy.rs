@@ -1462,6 +1462,28 @@ mod tests {
         assert!(all_finite != 0.0, "{what} has non-finite values: {t:?}");
     }
 
+    #[test]
+    fn safetensors_variable_names_match_interchange_schema() {
+        let vs = nn::VarStore::new(Device::Cpu);
+        let _policy = PolicyNet::new(&vs.root(), false, true, GC, BLOCKS);
+        let variables = vs.variables();
+        for key in [
+            "grid_coarse.stem.weight",
+            "grid_fine.block.3.conv2.bias",
+            "local.c1.weight",
+            "tf.0.q.weight",
+            "tf.1.ln2.bias",
+            "trunk1.weight",
+            "htf2.bias",
+            "head_quantity.weight",
+        ] {
+            assert!(
+                variables.contains_key(key),
+                "missing interchange tensor {key}"
+            );
+        }
+    }
+
     /// Exercises `act()` (no_grad) + `evaluate()` + `backward()` for a
     /// given `PolicyNet` config, asserting every returned tensor and the
     /// summed loss stay finite. Shared by the amp/foveate/model-size

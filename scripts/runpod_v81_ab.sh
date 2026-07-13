@@ -9,7 +9,7 @@ Usage:
     bash scripts/runpod_v81_ab.sh [--dry-run]
 
 Required:
-  SOURCE_CHECKPOINT       Frozen starting .safetensors or .ot checkpoint.
+  SOURCE_CHECKPOINT       Frozen starting .safetensors checkpoint.
 
 Important overrides:
   RUN_ROOT                New, non-existent experiment directory.
@@ -77,8 +77,7 @@ SOURCE_CHECKPOINT="${SOURCE_CHECKPOINT:-}"
 SOURCE_CHECKPOINT="$(realpath -e "$SOURCE_CHECKPOINT")" || die "source checkpoint does not exist"
 case "$SOURCE_CHECKPOINT" in
   *.safetensors) CKPT_EXT=".safetensors"; SOURCE_STATE="${SOURCE_CHECKPOINT%.safetensors}.state.json" ;;
-  *.ot) CKPT_EXT=".ot"; SOURCE_STATE="${SOURCE_CHECKPOINT%.ot}.state.json" ;;
-  *) die "SOURCE_CHECKPOINT must end in .safetensors or .ot" ;;
+  *) die "SOURCE_CHECKPOINT must end in .safetensors" ;;
 esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

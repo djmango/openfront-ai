@@ -248,6 +248,12 @@ def main() -> None:
     ap.add_argument("--checkpoint-dir", default="runs/rl/frozen-eval")
     args = ap.parse_args()
 
+    rust_checkpoint = Path(args.rust_checkpoint).resolve()
+    if rust_checkpoint.suffix != ".safetensors":
+        raise SystemExit(
+            "--rust-checkpoint must be a current .safetensors checkpoint; "
+            "ppo_v5/ppo_v7 policy.pt files are frozen legacy fixtures only"
+        )
     out = Path(args.out).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
     checkpoint_dir = Path(args.checkpoint_dir).resolve()
@@ -266,7 +272,7 @@ def main() -> None:
         rust_command = [
             str(Path(args.rust_bin).resolve()),
             "--benchmark-out", str(raw["current_rust"]),
-            "--resume", str(Path(args.rust_checkpoint).resolve()),
+            "--resume", str(rust_checkpoint),
             "--ckpt", str(Path(args.rust_ae).resolve()),
             "--stage", str(args.stage), "--eval-episodes", str(args.episodes),
             "--max-episode-ticks", str(args.max_ticks), "--engine", "node",
@@ -284,7 +290,7 @@ def main() -> None:
         reports = {label: json.loads(path.read_text()) for label, path in raw.items()}
         for label, report in reports.items():
             report["checkpoint_sha256"] = sha256(
-                Path(args.rust_checkpoint).resolve() if label == "current_rust" else old[label]
+                rust_checkpoint if label == "current_rust" else old[label]
             )
         final = summarize(reports)
         final["inputs"] = {
