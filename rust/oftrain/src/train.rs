@@ -251,7 +251,8 @@ pub struct Config {
     /// `--amp`: manual bf16 mixed precision for the policy net's conv
     /// towers (see `policy::PolicyNet::amp` doc). CPU-safe (bf16 works on
     /// CPU, just slower - useful for correctness smoke tests without a
-    /// GPU), off by default.
+    /// GPU), off by default. Frozen AE bf16 is more strictly gated on CUDA
+    /// plus `persistent_actors`; legacy/nonpersistent AE inference stays f32.
     pub amp: bool,
     /// `--foveate`: real foveated crop for the fine-grid branch (see
     /// `policy::PolicyNet::foveate` doc). Default on (Python v7 parity).
@@ -1888,7 +1889,9 @@ fn build_actor_shard(
         path.display()
     );
     let coarse = cfg.coarse_ckpt.as_ref().map(std::path::Path::new);
-    let ae = Some(crate::ae::AePair::load(path, coarse, device)?);
+    let ae = Some(crate::ae::AePair::load(
+        path, coarse, device, cfg.amp, true,
+    )?);
     let mut workers = Vec::with_capacity(cfg.num_envs);
     let mut cur_obs = Vec::with_capacity(cfg.num_envs);
     for local_i in 0..cfg.num_envs {
@@ -3326,7 +3329,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 );
             }
             let coarse = cfg.coarse_ckpt.as_ref().map(std::path::Path::new);
-            let actor_ae = Some(crate::ae::AePair::load(path, coarse, device)?);
+            // The legacy ActorShard can move between ephemeral collector
+            // threads. Keep its AE byte-for-byte on the established f32 path
+            // even when policy AMP is enabled.
+            let actor_ae = Some(crate::ae::AePair::load(
+                path, coarse, device, cfg.amp, false,
+            )?);
             actors.push(ActorShard {
                 device,
                 workers,

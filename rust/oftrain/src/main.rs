@@ -134,7 +134,8 @@ struct Args {
     /// stay f32. tch-rs 0.24's `autocast()` has no dtype selector (always
     /// picks fp16 on CUDA), so this is a hand-rolled cast-in/cast-out path
     /// instead - see `policy.rs`/DEVLOG. Works (slower) on CPU too, so
-    /// it's smoke-testable without a GPU.
+    /// it's smoke-testable without a GPU. Frozen AE bf16 additionally
+    /// requires CUDA and --persistent-actors; all other AE paths stay f32.
     #[arg(long, default_value_t = false)]
     amp: bool,
 
