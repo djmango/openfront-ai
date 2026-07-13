@@ -735,33 +735,14 @@ impl Game {
         self.map.num_tiles_with_fallout()
     }
 
-    /// TS `Game.nearbyUnits(tile, range, DefensePost)` - first owned post in range.
+    /// TS `Game.nearbyUnits(tile, range, DefensePost)` - through the unit grid,
+    /// including its exact cell-window semantics and active/under-construction filters.
     pub fn has_defense_post_nearby(&self, tile: TileRef, owner_small_id: u16) -> bool {
         use crate::core::schemas::unit_type;
         let range = self.wire.defense_post_range();
-        let range_sq = (range * range) as u32;
-        let tx = self.map.x(tile);
-        let ty = self.map.y(tile);
-        for p in &self.players {
-            if p.small_id != owner_small_id {
-                continue;
-            }
-            for u in &p.units {
-                if u.unit_type != unit_type::DEFENSE_POST {
-                    continue;
-                }
-                if u.under_construction {
-                    continue;
-                }
-                let ut = u.tile as u32;
-                let dx = self.map.x(ut) as i32 - tx as i32;
-                let dy = self.map.y(ut) as i32 - ty as i32;
-                if (dx * dx + dy * dy) as u32 <= range_sq {
-                    return true;
-                }
-            }
-        }
-        false
+        self.nearby_structures_any(tile, range, &[unit_type::DEFENSE_POST])
+            .into_iter()
+            .any(|(owner, ..)| owner == owner_small_id)
     }
 
     /// TS `Config.attackLogic(gm, attackTroops, attacker, defender, tile)`.
@@ -4542,6 +4523,20 @@ mod player_tests {
         assert!(!game.has_defense_post_nearby(check_tile, 1));
         game.set_unit_under_construction(1, post_id, false);
         assert!(game.has_defense_post_nearby(check_tile, 1));
+    }
+
+    #[test]
+    fn defense_post_query_matches_unit_grid_boundary_window() {
+        let mut game = crate::test_util::plains_game(128, 128);
+        add_bot(&mut game, "player", 1);
+        let check_tile = game.map.ref_xy(25, 70);
+        let post_tile = game.map.ref_xy(25, 100);
+        game.conquer(1, post_tile);
+        game.build_unit(1, unit_type::DEFENSE_POST, post_tile);
+
+        // TS UnitGrid.getCellsInRange does not scan the next 100-tile cell
+        // when the search range lands exactly on that cell's boundary.
+        assert!(!game.has_defense_post_nearby(check_tile, 1));
     }
 
     /// TS `PlayerImpl.test.ts` "City can be upgraded" / "DefensePost cannot

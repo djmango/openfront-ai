@@ -171,11 +171,7 @@ impl Execution for AttackExecution {
             &mut self.active,
         );
         if !self.active {
-            game.unregister_land_attack(
-                &self.attack_id,
-                self.owner_small_id,
-                self.target_small_id,
-            );
+            self.kill_attack(game);
             return;
         }
         if self.source_tile.is_none() {
@@ -430,6 +426,7 @@ mod tests {
         assert_eq!(attacks[1].0, 2);
         assert_eq!(attacks[1].1, 1);
         assert!(!attacks[1].3);
+        assert!(!attacks[1].4);
     }
 
     // Ported from Disconnected.test.ts "Player can attack disconnected team
