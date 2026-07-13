@@ -52,6 +52,8 @@ EXTRA_ARGS="${EXTRA_ARGS:---amp --pinned-h2d}"
 REPO_DIR="${REPO_DIR:-/root/openfront-ai}"
 CKPT_DIR="$REPO_DIR/rust/checkpoints/$RUN_NAME"
 HF_SYNC_INTERVAL_SECONDS="${HF_SYNC_INTERVAL_SECONDS:-600}"
+HF_REPO_ID="${HF_REPO_ID:-djmango/openfront-rl}"
+HF_RUN_PREFIX="${HF_RUN_PREFIX:-$RUN_NAME}"
 # Nearest ROCm-published version to torch-sys 0.24's expected "2.11.0" -
 # see the HONESTY NOTE above. Override if a matching/newer ROCm wheel ships.
 ROCM_TORCH_VERSION="${ROCM_TORCH_VERSION:-2.10.0}"
@@ -135,53 +137,24 @@ PYTHON="$VENV/bin/python"
 
 mkdir -p "$CKPT_DIR"
 
-# --- resume seed (identical to pod_train_v8.sh) ---
-LATEST_CKPT=""
-[ -f "$CKPT_DIR/latest.safetensors" ] && LATEST_CKPT="$CKPT_DIR/latest.safetensors"
-[ -z "$LATEST_CKPT" ] && [ -f "$CKPT_DIR/latest.ot" ] && LATEST_CKPT="$CKPT_DIR/latest.ot"
-if [ -z "$LATEST_CKPT" ]; then
-  "$PYTHON" - "$RUN_NAME" "$CKPT_DIR" <<'PYEOF' || true
-import sys
-from pathlib import Path
-from huggingface_hub import hf_hub_download
-
-run, dest = sys.argv[1], Path(sys.argv[2])
-for f in ("latest.safetensors", "latest.ot", "latest.state.json"):
-    try:
-        p = hf_hub_download("djmango/openfront-rl", f"{run}/{f}")
-        dest.mkdir(parents=True, exist_ok=True)
-        (dest / f).write_bytes(Path(p).read_bytes())
-        print(f"restored {f} from HF")
-    except Exception as e:
-        print(f"{f}: no HF copy ({e.__class__.__name__})")
-PYEOF
+# --- resume seed: automated launches require the safetensors/state pair. ---
+if [ ! -f "$CKPT_DIR/latest.safetensors" ] || [ ! -f "$CKPT_DIR/latest.state.json" ]; then
+  "$PYTHON" "$REPO_DIR/scripts/hf_checkpoint_sync.py" \
+    --checkpoint-dir "$CKPT_DIR" --repo-id "$HF_REPO_ID" \
+    --run-prefix "$HF_RUN_PREFIX" --restore-latest || true
+fi
+if { [ -f "$CKPT_DIR/latest.safetensors" ] && [ ! -f "$CKPT_DIR/latest.state.json" ]; } \
+  || { [ ! -f "$CKPT_DIR/latest.safetensors" ] && [ -f "$CKPT_DIR/latest.state.json" ]; }
+then
+  echo "FATAL: latest.safetensors and latest.state.json must exist as a pair" >&2
+  exit 1
 fi
 
-# --- background HF sync (identical to pod_train_v8.sh) ---
-(
-  while true; do
-    sleep "$HF_SYNC_INTERVAL_SECONDS"
-    if [ -f "$CKPT_DIR/latest.safetensors" ] || [ -f "$CKPT_DIR/latest.ot" ]; then
-      "$PYTHON" - "$RUN_NAME" "$CKPT_DIR" <<'PYEOF' 2>&1 | sed 's/^/[hf-sync] /'
-import sys
-from pathlib import Path
-from huggingface_hub import HfApi
-
-run, ckpt_dir = sys.argv[1], Path(sys.argv[2])
-api = HfApi()
-try:
-    api.create_repo("djmango/openfront-rl", exist_ok=True, repo_type="model")
-    for f in ("latest.safetensors", "latest.ot", "latest.state.json"):
-        p = ckpt_dir / f
-        if p.exists():
-            api.upload_file(path_or_fileobj=str(p), path_in_repo=f"{run}/{f}", repo_id="djmango/openfront-rl")
-    print("synced latest checkpoint")
-except Exception as e:
-    print(f"sync failed: {e}")
-PYEOF
-    fi
-  done
-) &
+# --- background safetensors/state/manifest HF sync. ---
+"$PYTHON" "$REPO_DIR/scripts/hf_checkpoint_sync.py" \
+  --checkpoint-dir "$CKPT_DIR" --repo-id "$HF_REPO_ID" \
+  --run-prefix "$HF_RUN_PREFIX" --interval "$HF_SYNC_INTERVAL_SECONDS" \
+  >>"/tmp/hf_sync_$RUN_NAME.log" 2>&1 &
 SYNC_PID=$!
 trap 'kill "$SYNC_PID" 2>/dev/null' EXIT
 
@@ -196,8 +169,6 @@ while true; do
   RESUME=""
   if [ -f "$CKPT_DIR/latest.safetensors" ]; then
     RESUME="--resume $CKPT_DIR/latest.safetensors"
-  elif [ -f "$CKPT_DIR/latest.ot" ]; then
-    RESUME="--resume $CKPT_DIR/latest.ot"
   fi
   echo "=== $(date -u +%FT%TZ) launching $RUN_NAME (rocm) num_gpus=$NUM_GPUS envs/shard=$NUM_ENVS $RESUME ==="
   START_TS=$(date +%s)
