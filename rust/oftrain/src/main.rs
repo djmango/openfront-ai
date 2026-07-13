@@ -134,7 +134,8 @@ struct Args {
     /// stay f32. tch-rs 0.24's `autocast()` has no dtype selector (always
     /// picks fp16 on CUDA), so this is a hand-rolled cast-in/cast-out path
     /// instead - see `policy.rs`/DEVLOG. Works (slower) on CPU too, so
-    /// it's smoke-testable without a GPU.
+    /// it's smoke-testable without a GPU. Frozen AE bf16 additionally
+    /// requires CUDA and --persistent-actors; all other AE paths stay f32.
     #[arg(long, default_value_t = false)]
     amp: bool,
 
@@ -196,6 +197,13 @@ struct Args {
     /// Default on; with one env the second group is empty.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pipeline_groups: bool,
+
+    /// Keep one actor OS thread alive per GPU for the full run and, for the
+    /// one-GPU Phase 2 path, keep the learner on its own stable owner thread.
+    /// CUDA state never crosses channels. Autoscale uses the legacy path;
+    /// multi-GPU currently keeps persistent actors but uses legacy learners.
+    #[arg(long, default_value_t = false)]
+    persistent_actors: bool,
 
     /// "cpu", "cuda", or "cuda:N".
     #[arg(long, default_value = "cpu")]
@@ -456,6 +464,7 @@ fn main() -> anyhow::Result<()> {
         fp16_rollout: args.fp16_rollout,
         compact_rollout: args.compact_rollout,
         pipeline_groups: args.pipeline_groups,
+        persistent_actors: args.persistent_actors,
         device,
         engine: args.engine,
         node_fraction: args.node_fraction.clamp(0.0, 1.0),

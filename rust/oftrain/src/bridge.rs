@@ -10,11 +10,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use flate2::read::GzDecoder;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::engine::{decode_tiles, GameEngine, RawObs};
+use crate::engine::{GameEngine, RawObs, TileState, decode_tiles};
 
 /// Cap on buffered stderr lines per bridge; only kept so a crash/hang can
 /// be diagnosed (the Node engine's own `console.*` calls land here - see
@@ -48,7 +48,11 @@ pub(crate) fn repo_root() -> Result<PathBuf> {
 impl Bridge {
     pub fn spawn() -> Result<Self> {
         let root = repo_root()?;
-        let tsx = root.join("openfront").join("node_modules").join(".bin").join("tsx");
+        let tsx = root
+            .join("openfront")
+            .join("node_modules")
+            .join(".bin")
+            .join("tsx");
         let mut child = Command::new(&tsx)
             .arg(root.join("bridge").join("env.ts"))
             .current_dir(&root)
@@ -106,7 +110,10 @@ impl Bridge {
     fn read_exact_n(&mut self, n: usize) -> Result<Vec<u8>> {
         let mut buf = vec![0u8; n];
         if let Err(e) = self.stdout.read_exact(&mut buf) {
-            bail!("bridge died mid-frame: {e}\n--- stderr tail ---\n{}", self.stderr_context());
+            bail!(
+                "bridge died mid-frame: {e}\n--- stderr tail ---\n{}",
+                self.stderr_context()
+            );
         }
         Ok(buf)
     }
@@ -115,19 +122,27 @@ impl Bridge {
         let mut line = serde_json::to_string(msg)?;
         line.push('\n');
         if let Err(e) = self.stdin.write_all(line.as_bytes()) {
-            bail!("bridge stdin closed: {e}\n--- stderr tail ---\n{}", self.stderr_context());
+            bail!(
+                "bridge stdin closed: {e}\n--- stderr tail ---\n{}",
+                self.stderr_context()
+            );
         }
         self.stdin.flush()?;
         let mut resp = String::new();
-        let n = self
-            .stdout
-            .read_line(&mut resp)
-            .with_context(|| format!("bridge stdout closed\n--- stderr tail ---\n{}", self.stderr_context()))?;
+        let n = self.stdout.read_line(&mut resp).with_context(|| {
+            format!(
+                "bridge stdout closed\n--- stderr tail ---\n{}",
+                self.stderr_context()
+            )
+        })?;
         if n == 0 {
-            bail!("bridge died\n--- stderr tail ---\n{}", self.stderr_context());
+            bail!(
+                "bridge died\n--- stderr tail ---\n{}",
+                self.stderr_context()
+            );
         }
-        let mut out: Value = serde_json::from_str(&resp)
-            .with_context(|| format!("bad bridge response: {resp}"))?;
+        let mut out: Value =
+            serde_json::from_str(&resp).with_context(|| format!("bad bridge response: {resp}"))?;
         if let Some(e) = out.get("error") {
             bail!("bridge error: {e}");
         }
@@ -146,7 +161,14 @@ impl Bridge {
         if let Some(obj) = head.as_object_mut() {
             obj.remove("terrain");
         }
-        RawObs { head, owners, fallout, defense_bonus }
+        RawObs {
+            head,
+            tiles: TileState::Split {
+                owners,
+                fallout,
+                defense_bonus,
+            },
+        }
     }
 
     #[allow(dead_code)] // debug/replay tooling, not used by the training loop
@@ -173,8 +195,12 @@ impl GameEngine for Bridge {
             "nations": nations,
         }))?;
         self.width = head["width"].as_u64().ok_or_else(|| anyhow!("no width"))? as usize;
-        self.height = head["height"].as_u64().ok_or_else(|| anyhow!("no height"))? as usize;
-        let terr_b64 = head["terrain"].as_str().ok_or_else(|| anyhow!("no terrain"))?;
+        self.height = head["height"]
+            .as_u64()
+            .ok_or_else(|| anyhow!("no height"))? as usize;
+        let terr_b64 = head["terrain"]
+            .as_str()
+            .ok_or_else(|| anyhow!("no terrain"))?;
         let gz = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, terr_b64)?;
         let mut dec = GzDecoder::new(&gz[..]);
         let mut terrain = Vec::with_capacity(self.width * self.height);

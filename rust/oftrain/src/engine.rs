@@ -13,14 +13,27 @@ pub const OWNER_MASK: u16 = 0x0FFF;
 pub const FALLOUT_BIT: u16 = 13;
 pub const DEFENSE_BONUS_BIT: u16 = 14;
 
-/// Decoded observation: `head` is the raw JSON header (tick, width,
-/// height, spawnPhase, winner, me, alive, entities, legal, wasted), plus
-/// derived tile arrays split out of the binary tile-state frame.
+/// Tile state stays packed for the in-process engine.  Stream backends keep
+/// their historical split representation so the Node fallback is unchanged.
+pub enum TileState {
+    Split {
+        owners: Vec<u16>,
+        fallout: Vec<u8>,
+        defense_bonus: Vec<u8>,
+    },
+    Packed(Vec<u16>),
+}
+
+/// Observation header plus backend-appropriate tile storage.
 pub struct RawObs {
     pub head: Value,
-    pub owners: Vec<u16>, // raw small-ids, NOT slotted
-    pub fallout: Vec<u8>,
-    pub defense_bonus: Vec<u8>,
+    pub tiles: TileState,
+}
+
+pub struct PreparedTileState {
+    pub owners_slotted: Vec<u8>,
+    pub fallout_packed: Vec<u8>,
+    pub db: Vec<f32>,
 }
 
 impl RawObs {
@@ -48,6 +61,81 @@ impl RawObs {
     pub fn entities(&self) -> &Value {
         &self.head["entities"]
     }
+
+    #[inline]
+    pub fn owner_at(&self, i: usize) -> u16 {
+        match &self.tiles {
+            TileState::Split { owners, .. } => owners[i],
+            TileState::Packed(tiles) => tiles[i] & OWNER_MASK,
+        }
+    }
+
+    #[inline]
+    pub fn defense_bonus_at(&self, i: usize) -> u8 {
+        match &self.tiles {
+            TileState::Split { defense_bonus, .. } => defense_bonus[i],
+            TileState::Packed(tiles) => ((tiles[i] >> DEFENSE_BONUS_BIT) & 1) as u8,
+        }
+    }
+
+    /// Fuse trim, owner slotting, MSB-first fallout packing, and /`region`
+    /// defense pooling. This is the only full tile-state scan needed before
+    /// featurization, and packed native observations are decoded in place.
+    pub fn prepare_tiles(
+        &self,
+        lut: &[u8],
+        width: usize,
+        hr: usize,
+        wr: usize,
+        region: usize,
+    ) -> PreparedTileState {
+        assert!(region != 0 && hr % region == 0 && wr % region == 0);
+        let packed_wr = wr.div_ceil(8);
+        let gw = wr / region;
+        let mut owners_slotted = vec![0u8; hr * wr];
+        let mut fallout_packed = vec![0u8; hr * packed_wr];
+        let mut db_counts = vec![0u32; (hr / region) * gw];
+
+        for y in 0..hr {
+            let src_row = y * width;
+            let dst_row = y * wr;
+            for x in 0..wr {
+                let src = src_row + x;
+                let dst = dst_row + x;
+                let (owner, fallout, defense) = match &self.tiles {
+                    TileState::Split {
+                        owners,
+                        fallout,
+                        defense_bonus,
+                    } => (owners[src], fallout[src], defense_bonus[src]),
+                    TileState::Packed(tiles) => {
+                        let state = tiles[src];
+                        (
+                            state & OWNER_MASK,
+                            ((state >> FALLOUT_BIT) & 1) as u8,
+                            ((state >> DEFENSE_BONUS_BIT) & 1) as u8,
+                        )
+                    }
+                };
+                owners_slotted[dst] = lut.get(owner as usize).copied().unwrap_or(0);
+                if fallout != 0 {
+                    fallout_packed[y * packed_wr + x / 8] |= 1 << (7 - x % 8);
+                }
+                db_counts[(y / region) * gw + x / region] += defense as u32;
+            }
+        }
+
+        let norm = (region * region) as f32;
+        let db = db_counts
+            .into_iter()
+            .map(|count| count as f32 / norm)
+            .collect();
+        PreparedTileState {
+            owners_slotted,
+            fallout_packed,
+            db,
+        }
+    }
 }
 
 /// Splits a raw little-endian u16 tile-state buffer into the owner /
@@ -74,6 +162,7 @@ pub fn decode_tiles(tiles_raw: &[u8], n: usize) -> (Vec<u16>, Vec<u8>, Vec<u8>) 
 /// engine side and the byte-pair reassembly this function does. Same bit
 /// layout, so this is the exact same field extraction with one fewer
 /// (redundant, in-process) serialization round trip.
+#[cfg(test)]
 pub fn decode_tiles_u16(state: &[u16], n: usize) -> (Vec<u16>, Vec<u8>, Vec<u8>) {
     debug_assert_eq!(state.len(), n);
     let mut owners = vec![0u16; n];
@@ -86,6 +175,135 @@ pub fn decode_tiles_u16(state: &[u16], n: usize) -> (Vec<u16>, Vec<u8>, Vec<u8>)
         defense_bonus[i] = ((s >> DEFENSE_BONUS_BIT) & 1) as u8;
     }
     (owners, fallout, defense_bonus)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ae;
+    use rand::rngs::SmallRng;
+    use rand::{Rng, SeedableRng};
+
+    fn split_obs(state: &[u16]) -> RawObs {
+        let (owners, fallout, defense_bonus) = decode_tiles_u16(state, state.len());
+        RawObs {
+            head: Value::Null,
+            tiles: TileState::Split {
+                owners,
+                fallout,
+                defense_bonus,
+            },
+        }
+    }
+
+    fn packed_obs(state: &[u16]) -> RawObs {
+        RawObs {
+            head: Value::Null,
+            tiles: TileState::Packed(state.to_vec()),
+        }
+    }
+
+    #[test]
+    fn packed_prepare_exhaustively_matches_split_tile_semantics() {
+        // Every owner id and every fallout/defense combination appears once.
+        // Extra width exercises row stride and right/bottom trim behavior.
+        let (hr, wr, width, region) = (128, 128, 131, 8);
+        let mut state = vec![0xFFFF; hr * width];
+        for owner in 0..=OWNER_MASK {
+            for flags in 0..4 {
+                let dst = owner as usize * 4 + flags;
+                state[(dst / wr) * width + dst % wr] = owner
+                    | (((flags & 1) as u16) << FALLOUT_BIT)
+                    | (((flags >> 1) as u16) << DEFENSE_BONUS_BIT);
+            }
+        }
+        let lut: Vec<u8> = (0..=OWNER_MASK)
+            .map(|id| ((id as usize * 37) % 128) as u8)
+            .collect();
+        let old = split_obs(&state).prepare_tiles(&lut, width, hr, wr, region);
+        let new = packed_obs(&state).prepare_tiles(&lut, width, hr, wr, region);
+        assert_eq!(new.owners_slotted, old.owners_slotted);
+        assert_eq!(new.fallout_packed, old.fallout_packed);
+        assert_eq!(new.db, old.db);
+    }
+
+    #[test]
+    fn packed_prepare_randomized_parity_across_luts_and_flags() {
+        let mut rng = SmallRng::seed_from_u64(0x5eed_fa11_0def);
+        for _ in 0..200 {
+            let region = ofcore::feat::REGION;
+            let hr = region * rng.gen_range(1..=5);
+            let wr = region * rng.gen_range(1..=7);
+            let width = wr + rng.gen_range(0..=5);
+            let height = hr + rng.gen_range(0..=3);
+            let state: Vec<u16> = (0..width * height).map(|_| rng.r#gen()).collect();
+            let lut_len = rng.gen_range(0..=4096);
+            let lut: Vec<u8> = (0..lut_len).map(|_| rng.gen_range(0..128)).collect();
+
+            let split = split_obs(&state);
+            let packed = packed_obs(&state);
+            let new = packed.prepare_tiles(&lut, width, hr, wr, region);
+
+            // Reproduce the old prepare path independently: trim three split
+            // planes, then scan fallout and owner/defense again downstream.
+            let TileState::Split {
+                owners,
+                fallout,
+                defense_bonus,
+            } = &split.tiles
+            else {
+                unreachable!()
+            };
+            let mut old_owners = vec![0u8; hr * wr];
+            let mut old_fallout = vec![0u8; hr * wr];
+            let mut old_defense = vec![0u8; hr * wr];
+            for y in 0..hr {
+                for x in 0..wr {
+                    let src = y * width + x;
+                    let dst = y * wr + x;
+                    old_owners[dst] = lut.get(owners[src] as usize).copied().unwrap_or(0);
+                    old_fallout[dst] = fallout[src];
+                    old_defense[dst] = defense_bonus[src];
+                }
+            }
+            assert_eq!(new.owners_slotted, old_owners);
+            assert_eq!(new.fallout_packed, ae::pack_fallout(&old_fallout, hr, wr));
+
+            let mut clut = [0u8; ofcore::feat::MAX_SLOTS];
+            for cls in &mut clut[1..] {
+                *cls = rng.gen_range(1..=3);
+            }
+            let land: Vec<u8> = (0..hr * wr).map(|_| rng.gen_range(0..=1)).collect();
+            let (old_ego, old_db) =
+                ofcore::feat::pool_ego_db(&old_owners, &clut, &old_defense, hr, wr);
+            let (new_ego, center) =
+                ofcore::feat::pool_ego_and_center(&new.owners_slotted, &clut, hr, wr);
+            assert_eq!(new_ego, old_ego);
+            assert_eq!(new.db, old_db);
+            let local = 16.min(hr).min(wr);
+            let old_local =
+                ofcore::feat::local_crop(&old_owners, &clut, &land, &old_defense, hr, wr, local);
+            let new_local = ofcore::feat::local_crop_at_with_defense(
+                &new.owners_slotted,
+                &clut,
+                &land,
+                hr,
+                wr,
+                local,
+                center,
+                |i| {
+                    let y = i / wr;
+                    let x = i % wr;
+                    packed.defense_bonus_at(y * width + x)
+                },
+            );
+            assert_eq!(new_local, old_local);
+            for i in 0..state.len() {
+                assert_eq!(packed.owner_at(i), split.owner_at(i));
+                assert_eq!(packed.defense_bonus_at(i), split.defense_bonus_at(i));
+            }
+        }
+    }
 }
 
 /// Everything `EnvWorker` needs from a game simulation. `width`/`height`/
@@ -141,9 +359,7 @@ pub fn create(kind: EngineKind) -> Result<Box<dyn GameEngine>> {
             }
             #[cfg(not(feature = "native-engine"))]
             {
-                anyhow::bail!(
-                    "--engine native requires building with `--features native-engine`"
-                )
+                anyhow::bail!("--engine native requires building with `--features native-engine`")
             }
         }
     }
