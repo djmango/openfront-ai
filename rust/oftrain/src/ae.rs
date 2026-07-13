@@ -22,9 +22,18 @@ pub const LATENT_C: i64 = 32;
 pub const REGION: i64 = 8;
 pub const COARSE_REGION: i64 = 16;
 
+/// Run one convolution in bf16 without mutating its VarStore-owned f32
+/// parameters. This mirrors policy.rs's proven mixed-precision primitive.
+fn conv2d_bf16(conv: &nn::Conv2D, x: &Tensor, stride: [i64; 2], padding: [i64; 2]) -> Tensor {
+    let ws = conv.ws.to_kind(Kind::BFloat16);
+    let bs = conv.bs.as_ref().map(|b| b.to_kind(Kind::BFloat16));
+    x.conv2d(&ws, bs.as_ref(), stride, padding, [1i64, 1], 1)
+}
+
 struct ConvGn {
     conv: nn::Conv2D,
     gn: nn::GroupNorm,
+    stride: i64,
 }
 
 impl ConvGn {
@@ -35,11 +44,26 @@ impl ConvGn {
         Self {
             conv: nn::conv2d(vs / 0, c_in, c_out, 3, cfg),
             gn: nn::group_norm(vs / 1, 8, c_out, Default::default()),
+            stride,
         }
     }
 
-    fn forward(&self, xs: &Tensor) -> Tensor {
-        self.gn.forward(&self.conv.forward(xs)).silu()
+    fn forward(&self, xs: &Tensor, amp: bool) -> Tensor {
+        if amp {
+            // Autocast uses reduced precision for the convolution, not for
+            // GroupNorm. Round-trip each block so GN and silu remain f32.
+            let xb = xs.to_kind(Kind::BFloat16);
+            let conv = conv2d_bf16(
+                &self.conv,
+                &xb,
+                [self.stride, self.stride],
+                [1, 1],
+            )
+            .to_kind(Kind::Float);
+            self.gn.forward(&conv).silu()
+        } else {
+            self.gn.forward(&self.conv.forward(xs)).silu()
+        }
     }
 }
 
@@ -50,6 +74,7 @@ pub struct SpatialAE {
     enc_stem: Vec<ConvGn>,
     enc_fuse: ConvGn,
     enc_out: nn::Conv2D,
+    amp: bool,
     pub latent_c: i64,
     pub latent_down: i64,
 }
@@ -57,7 +82,7 @@ pub struct SpatialAE {
 impl SpatialAE {
     /// Build the encoder module tree under `vs` (typically `vs.root()`).
     /// Call [`SpatialAE::load`] afterward to copy weights in.
-    pub fn new(vs: &nn::Path, latent_c: i64, latent_down: i64) -> Result<Self> {
+    pub fn new(vs: &nn::Path, latent_c: i64, latent_down: i64, amp: bool) -> Result<Self> {
         if latent_down != 8 && latent_down != 16 {
             bail!("latent_down must be 8 or 16, got {latent_down}");
         }
@@ -96,6 +121,7 @@ impl SpatialAE {
             enc_stem,
             enc_fuse,
             enc_out,
+            amp,
             latent_c,
             latent_down,
         })
@@ -103,7 +129,12 @@ impl SpatialAE {
 
     /// Construct on `device`, load encoder weights from a `.safetensors`
     /// file produced by `scripts/export_safetensors.py`, then freeze.
-    pub fn load(path: impl AsRef<Path>, device: Device, expected_down: i64) -> Result<(nn::VarStore, Self)> {
+    pub fn load(
+        path: impl AsRef<Path>,
+        device: Device,
+        expected_down: i64,
+        amp: bool,
+    ) -> Result<(nn::VarStore, Self)> {
         let path = path.as_ref();
         let meta_path = path.with_extension("json");
         let (latent_c, latent_down) = if meta_path.exists() {
@@ -131,7 +162,7 @@ impl SpatialAE {
         }
 
         let mut vs = nn::VarStore::new(device);
-        let ae = Self::new(&vs.root(), latent_c, latent_down)?;
+        let ae = Self::new(&vs.root(), latent_c, latent_down, amp)?;
         vs.load(path)
             .with_context(|| format!("load AE encoder weights from {}", path.display()))?;
         vs.freeze();
@@ -141,12 +172,25 @@ impl SpatialAE {
     /// `owners` (B,H,W) int64, `terrain` (B,3,H,W) f32, `static_planes`
     /// (B,6,H/down,W/down) f32 → `z` (B,latent_c,H/down,W/down) f32.
     pub fn encode(&self, owners: &Tensor, terrain: &Tensor, static_planes: &Tensor) -> Tensor {
+        // Embedding and concatenated activations remain f32. Owners stay
+        // int64 as required by embedding lookup.
         let emb = self.owner_emb.forward(owners).permute([0, 3, 1, 2]);
         let mut g = Tensor::cat(&[&emb, terrain], 1);
         for block in &self.enc_stem {
-            g = block.forward(&g);
+            g = block.forward(&g, self.amp);
         }
-        self.enc_out.forward(&self.enc_fuse.forward(&Tensor::cat(&[&g, static_planes], 1)))
+        g = self.enc_fuse.forward(&Tensor::cat(&[&g, static_planes], 1), self.amp);
+        if self.amp {
+            conv2d_bf16(
+                &self.enc_out,
+                &g.to_kind(Kind::BFloat16),
+                [1, 1],
+                [0, 0],
+            )
+            .to_kind(Kind::Float)
+        } else {
+            self.enc_out.forward(&g)
+        }
     }
 }
 
@@ -160,11 +204,19 @@ pub struct AePair {
 }
 
 impl AePair {
-    pub fn load(fine_path: impl AsRef<Path>, coarse_path: Option<&Path>, device: Device) -> Result<Self> {
-        let (fine_vs, fine) = SpatialAE::load(fine_path.as_ref(), device, REGION)?;
+    pub fn load(
+        fine_path: impl AsRef<Path>,
+        coarse_path: Option<&Path>,
+        device: Device,
+        amp: bool,
+    ) -> Result<Self> {
+        // Python only autocasts the AE on CUDA. Preserve the exact f32 CPU
+        // path even if the policy's --amp flag is enabled.
+        let ae_amp = amp && device.is_cuda();
+        let (fine_vs, fine) = SpatialAE::load(fine_path.as_ref(), device, REGION, ae_amp)?;
         let (coarse_vs, coarse) = match coarse_path {
             Some(p) => {
-                let (vs, ae) = SpatialAE::load(p, device, COARSE_REGION)?;
+                let (vs, ae) = SpatialAE::load(p, device, COARSE_REGION, ae_amp)?;
                 (Some(vs), Some(ae))
             }
             None => (None, None),
@@ -326,7 +378,7 @@ mod tests {
     #[test]
     fn encoder_tree_key_count_d8() {
         let vs = nn::VarStore::new(Device::Cpu);
-        let _ae = SpatialAE::new(&vs.root(), 32, 8).unwrap();
+        let _ae = SpatialAE::new(&vs.root(), 32, 8, false).unwrap();
         // 1 emb + 4 stem*(conv.w/b + gn.w/b) + fuse_block + 1x1 out = 1+16+4+2 = 23
         assert_eq!(vs.variables().len(), 23);
     }
@@ -334,7 +386,7 @@ mod tests {
     #[test]
     fn encoder_tree_key_count_d16() {
         let vs = nn::VarStore::new(Device::Cpu);
-        let _ae = SpatialAE::new(&vs.root(), 32, 16).unwrap();
+        let _ae = SpatialAE::new(&vs.root(), 32, 16, false).unwrap();
         // +1 stem block (4 tensors) vs d8 → 27
         assert_eq!(vs.variables().len(), 27);
     }
@@ -347,7 +399,7 @@ mod tests {
             eprintln!("skip: {} missing (run scripts/fetch_ae_encoders.sh)", path.display());
             return;
         }
-        let (_vs, ae) = SpatialAE::load(&path, Device::Cpu, REGION).unwrap();
+        let (_vs, ae) = SpatialAE::load(&path, Device::Cpu, REGION, false).unwrap();
         assert_eq!(ae.latent_down, 8);
         let owners = Tensor::zeros([1, 32, 40], (Kind::Int64, Device::Cpu));
         let terrain = Tensor::zeros([1, 3, 32, 40], (Kind::Float, Device::Cpu));
@@ -355,5 +407,46 @@ mod tests {
         let z = tch::no_grad(|| ae.encode(&owners, &terrain, &static_p));
         assert_eq!(z.size(), &[1, 32, 4, 5]);
         assert!(z.isfinite().all().double_value(&[]) != 0.0);
+    }
+
+    #[test]
+    fn conv_only_bf16_is_finite_close_and_keeps_weights_f32() {
+        for latent_down in [REGION, COARSE_REGION] {
+            tch::manual_seed(17);
+            let fp_vs = nn::VarStore::new(Device::Cpu);
+            let fp_ae =
+                SpatialAE::new(&fp_vs.root(), LATENT_C, latent_down, false).unwrap();
+
+            let mut bf_vs = nn::VarStore::new(Device::Cpu);
+            let bf_ae =
+                SpatialAE::new(&bf_vs.root(), LATENT_C, latent_down, true).unwrap();
+            bf_vs.copy(&fp_vs).unwrap();
+
+            let side = 32;
+            let owners =
+                Tensor::randint(MAX_SLOTS, [2, side, side], (Kind::Int64, Device::Cpu));
+            let terrain = Tensor::rand(
+                [2, TERRAIN_CHANNELS, side, side],
+                (Kind::Float, Device::Cpu),
+            );
+            let static_p = Tensor::rand(
+                [2, NUM_STATIC, side / latent_down, side / latent_down],
+                (Kind::Float, Device::Cpu),
+            );
+            let fp = tch::no_grad(|| fp_ae.encode(&owners, &terrain, &static_p));
+            let bf = tch::no_grad(|| bf_ae.encode(&owners, &terrain, &static_p));
+
+            assert!(
+                bf_vs.variables().values().all(|v| v.kind() == Kind::Float),
+                "mixed precision must not mutate stored AE parameter dtypes"
+            );
+            assert_eq!(bf.kind(), Kind::Float);
+            assert!(bf.isfinite().all().int64_value(&[]) != 0);
+            let mean_abs_err = (&fp - &bf).abs().mean(Kind::Float).double_value(&[]);
+            assert!(
+                mean_abs_err < 0.02,
+                "1/{latent_down} bf16 mean absolute error {mean_abs_err} is too large"
+            );
+        }
     }
 }
