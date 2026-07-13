@@ -9,7 +9,7 @@
 //! - fine:  `ae_v31_d8c32`  — 32ch @ 1/8
 //! - coarse: `ae_v31_d16c32` — 32ch @ 1/16 (optional v7 coarse stream)
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::path::Path;
 use tch::nn::{self, Module};
 use tch::{Device, Kind, Tensor};
@@ -61,7 +61,12 @@ impl SpatialAE {
         if latent_down != 8 && latent_down != 16 {
             bail!("latent_down must be 8 or 16, got {latent_down}");
         }
-        let owner_emb = nn::embedding(vs / "owner_emb", MAX_SLOTS, OWNER_EMB_DIM, Default::default());
+        let owner_emb = nn::embedding(
+            vs / "owner_emb",
+            MAX_SLOTS,
+            OWNER_EMB_DIM,
+            Default::default(),
+        );
 
         let stem_specs: &[(i64, i64, i64)] = if latent_down == 16 {
             &[
@@ -103,7 +108,11 @@ impl SpatialAE {
 
     /// Construct on `device`, load encoder weights from a `.safetensors`
     /// file produced by `scripts/export_safetensors.py`, then freeze.
-    pub fn load(path: impl AsRef<Path>, device: Device, expected_down: i64) -> Result<(nn::VarStore, Self)> {
+    pub fn load(
+        path: impl AsRef<Path>,
+        device: Device,
+        expected_down: i64,
+    ) -> Result<(nn::VarStore, Self)> {
         let path = path.as_ref();
         let meta_path = path.with_extension("json");
         let (latent_c, latent_down) = if meta_path.exists() {
@@ -111,8 +120,12 @@ impl SpatialAE {
                 .with_context(|| format!("read AE meta {}", meta_path.display()))?;
             let v: serde_json::Value = serde_json::from_str(&raw)?;
             (
-                v.get("latent_c").and_then(|x| x.as_i64()).unwrap_or(LATENT_C),
-                v.get("latent_down").and_then(|x| x.as_i64()).unwrap_or(expected_down),
+                v.get("latent_c")
+                    .and_then(|x| x.as_i64())
+                    .unwrap_or(LATENT_C),
+                v.get("latent_down")
+                    .and_then(|x| x.as_i64())
+                    .unwrap_or(expected_down),
             )
         } else {
             (LATENT_C, expected_down)
@@ -146,7 +159,8 @@ impl SpatialAE {
         for block in &self.enc_stem {
             g = block.forward(&g);
         }
-        self.enc_out.forward(&self.enc_fuse.forward(&Tensor::cat(&[&g, static_planes], 1)))
+        self.enc_out
+            .forward(&self.enc_fuse.forward(&Tensor::cat(&[&g, static_planes], 1)))
     }
 }
 
@@ -160,7 +174,11 @@ pub struct AePair {
 }
 
 impl AePair {
-    pub fn load(fine_path: impl AsRef<Path>, coarse_path: Option<&Path>, device: Device) -> Result<Self> {
+    pub fn load(
+        fine_path: impl AsRef<Path>,
+        coarse_path: Option<&Path>,
+        device: Device,
+    ) -> Result<Self> {
         let (fine_vs, fine) = SpatialAE::load(fine_path.as_ref(), device, REGION)?;
         let (coarse_vs, coarse) = match coarse_path {
             Some(p) => {
@@ -181,9 +199,9 @@ impl AePair {
 /// Full-res AE inputs staged by `vecenv::prepare` for batched GPU encode.
 #[derive(Clone)]
 pub struct AeRaw {
-    pub owners: Vec<i64>, // (hr*wr) slotted
+    pub owners: Vec<i64>,  // (hr*wr) slotted
     pub terrain: Vec<f32>, // (3, hr, wr) row-major channels-first
-    pub stat: Vec<f32>, // (6, gh, gw)
+    pub stat: Vec<f32>,    // (6, gh, gw)
     pub hr: usize,
     pub wr: usize,
 }
@@ -223,6 +241,37 @@ pub fn encode_latent_batch_device(
     let mut groups: std::collections::HashMap<(usize, usize), Vec<usize>> =
         std::collections::HashMap::new();
     for (i, it) in items.iter().enumerate() {
+        let pix = it.hr * it.wr;
+        let fine_gh = it.hr / REGION as usize;
+        let fine_gw = it.wr / REGION as usize;
+        anyhow::ensure!(
+            it.owners.len() == pix,
+            "AE item {i} owners len {}, expected {pix}",
+            it.owners.len()
+        );
+        anyhow::ensure!(
+            it.terrain.len() == 3 * pix,
+            "AE item {i} terrain len {}, expected {}",
+            it.terrain.len(),
+            3 * pix
+        );
+        anyhow::ensure!(
+            it.stat.len() == NUM_STATIC as usize * fine_gh * fine_gw,
+            "AE item {i} stat len {}, expected {}",
+            it.stat.len(),
+            NUM_STATIC as usize * fine_gh * fine_gw
+        );
+        if let Some((offset, owner)) = it
+            .owners
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, owner)| !(0..MAX_SLOTS).contains(owner))
+        {
+            anyhow::bail!(
+                "AE item {i} owner[{offset}]={owner} is outside embedding range 0..{MAX_SLOTS}"
+            );
+        }
         groups.entry((it.hr, it.wr)).or_default().push(i);
     }
 
@@ -233,8 +282,13 @@ pub fn encode_latent_batch_device(
             let b = chunk.len() as i64;
             let mut owners = Vec::with_capacity(chunk.len() * pix);
             let mut terrain = Vec::with_capacity(chunk.len() * 3 * pix);
-            let gh = hr / ae.latent_down as usize;
-            let gw = wr / ae.latent_down as usize;
+            let fine_gh = hr / REGION as usize;
+            let fine_gw = wr / REGION as usize;
+            let (gh, gw) = if ae.latent_down == REGION {
+                (fine_gh, fine_gw)
+            } else {
+                (fine_gh.div_ceil(2), fine_gw.div_ceil(2))
+            };
             // static must be at latent resolution. Fine AE uses /8 = REGION
             // which matches `stat` from featurize. Coarse AE needs /16:
             // max-pool the /8 static 2x (ceil), matching encode_grids.
@@ -246,7 +300,7 @@ pub fn encode_latent_batch_device(
                 if ae.latent_down == REGION {
                     static_p.extend_from_slice(&it.stat);
                 } else {
-                    static_p.extend(max_pool2_stat(&it.stat, it.hr / REGION as usize, it.wr / REGION as usize));
+                    static_p.extend(max_pool2_stat(&it.stat, fine_gh, fine_gw));
                 }
             }
             let owners_t = Tensor::from_slice(&owners)
@@ -262,6 +316,12 @@ pub fn encode_latent_batch_device(
                 .to_device(device)
                 .to_kind(Kind::Float);
             let z = tch::no_grad(|| ae.encode(&owners_t, &terrain_t, &static_t));
+            anyhow::ensure!(
+                z.size() == [b, ae.latent_c, gh as i64, gw as i64],
+                "AE output shape {:?}, expected [{b}, {}, {gh}, {gw}]",
+                z.size(),
+                ae.latent_c
+            );
             // Split batch without changing device. `select` views retain the
             // batch storage after `z` leaves this scope.
             for (j, &i) in chunk.iter().enumerate() {
@@ -344,7 +404,10 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../weights/ae/ae_v31_d8c32.encoder.safetensors");
         if !path.exists() {
-            eprintln!("skip: {} missing (run scripts/fetch_ae_encoders.sh)", path.display());
+            eprintln!(
+                "skip: {} missing (run scripts/fetch_ae_encoders.sh)",
+                path.display()
+            );
             return;
         }
         let (_vs, ae) = SpatialAE::load(&path, Device::Cpu, REGION).unwrap();
