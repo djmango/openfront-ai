@@ -31,18 +31,34 @@ fn use_bf16_ae(amp: bool, persistent_actor: bool, device: Device) -> bool {
     amp && persistent_actor && device.is_cuda()
 }
 
-/// Run one convolution in bf16 without mutating its VarStore-owned f32
-/// parameters. This mirrors policy.rs's proven mixed-precision primitive.
-fn conv2d_bf16(conv: &nn::Conv2D, x: &Tensor, stride: [i64; 2], padding: [i64; 2]) -> Tensor {
-    let ws = conv.ws.to_kind(Kind::BFloat16);
-    let bs = conv.bs.as_ref().map(|b| b.to_kind(Kind::BFloat16));
-    x.conv2d(&ws, bs.as_ref(), stride, padding, [1i64, 1], 1)
+/// Frozen bf16 parameters corresponding to one f32 VarStore convolution.
+///
+/// Python autocast keeps the equivalent cast in its weight cache. These
+/// tensors are created once, after checkpoint loading, on the persistent
+/// actor thread and are never moved or refreshed.
+struct CachedBf16Conv {
+    ws: Tensor,
+    bs: Option<Tensor>,
+}
+
+impl CachedBf16Conv {
+    fn new(conv: &nn::Conv2D) -> Self {
+        Self {
+            ws: conv.ws.to_kind(Kind::BFloat16),
+            bs: conv.bs.as_ref().map(|b| b.to_kind(Kind::BFloat16)),
+        }
+    }
+
+    fn forward(&self, x: &Tensor, stride: [i64; 2], padding: [i64; 2]) -> Tensor {
+        x.conv2d(&self.ws, self.bs.as_ref(), stride, padding, [1i64, 1], 1)
+    }
 }
 
 struct ConvGn {
     conv: nn::Conv2D,
     gn: nn::GroupNorm,
     stride: i64,
+    bf16: Option<CachedBf16Conv>,
 }
 
 impl ConvGn {
@@ -54,15 +70,23 @@ impl ConvGn {
             conv: nn::conv2d(vs / 0, c_in, c_out, 3, cfg),
             gn: nn::group_norm(vs / 1, 8, c_out, Default::default()),
             stride,
+            bf16: None,
         }
     }
 
-    fn forward(&self, xs: &Tensor, amp: bool) -> Tensor {
-        if amp {
+    fn cache_bf16(&mut self) {
+        if self.bf16.is_none() {
+            self.bf16 = Some(CachedBf16Conv::new(&self.conv));
+        }
+    }
+
+    fn forward(&self, xs: &Tensor) -> Tensor {
+        if let Some(conv) = &self.bf16 {
             // Autocast uses reduced precision for the convolution, not for
             // GroupNorm. Round-trip each block so GN and silu remain f32.
             let xb = xs.to_kind(Kind::BFloat16);
-            let conv = conv2d_bf16(&self.conv, &xb, [self.stride, self.stride], [1, 1])
+            let conv = conv
+                .forward(&xb, [self.stride, self.stride], [1, 1])
                 .to_kind(Kind::Float);
             self.gn.forward(&conv).silu()
         } else {
@@ -78,7 +102,7 @@ pub struct SpatialAE {
     enc_stem: Vec<ConvGn>,
     enc_fuse: ConvGn,
     enc_out: nn::Conv2D,
-    amp: bool,
+    enc_out_bf16: Option<CachedBf16Conv>,
     pub latent_c: i64,
     pub latent_down: i64,
 }
@@ -86,7 +110,7 @@ pub struct SpatialAE {
 impl SpatialAE {
     /// Build the encoder module tree under `vs` (typically `vs.root()`).
     /// Call [`SpatialAE::load`] afterward to copy weights in.
-    pub fn new(vs: &nn::Path, latent_c: i64, latent_down: i64, amp: bool) -> Result<Self> {
+    pub fn new(vs: &nn::Path, latent_c: i64, latent_down: i64) -> Result<Self> {
         if latent_down != 8 && latent_down != 16 {
             bail!("latent_down must be 8 or 16, got {latent_down}");
         }
@@ -130,7 +154,7 @@ impl SpatialAE {
             enc_stem,
             enc_fuse,
             enc_out,
-            amp,
+            enc_out_bf16: None,
             latent_c,
             latent_down,
         })
@@ -175,11 +199,30 @@ impl SpatialAE {
         }
 
         let mut vs = nn::VarStore::new(device);
-        let ae = Self::new(&vs.root(), latent_c, latent_down, amp)?;
+        let mut ae = Self::new(&vs.root(), latent_c, latent_down)?;
         vs.load(path)
             .with_context(|| format!("load AE encoder weights from {}", path.display()))?;
         vs.freeze();
+        if amp {
+            // Build only after the strict checkpoint load: caching constructor
+            // values would leave stale random bf16 parameters.
+            ae.cache_bf16();
+        }
         Ok((vs, ae))
+    }
+
+    fn cache_bf16(&mut self) {
+        // no_grad makes the frozen-inference intent explicit even for tests
+        // that construct an AE without first freezing its VarStore.
+        tch::no_grad(|| {
+            for block in &mut self.enc_stem {
+                block.cache_bf16();
+            }
+            self.enc_fuse.cache_bf16();
+            if self.enc_out_bf16.is_none() {
+                self.enc_out_bf16 = Some(CachedBf16Conv::new(&self.enc_out));
+            }
+        });
     }
 
     /// `owners` (B,H,W) int64, `terrain` (B,3,H,W) f32, `static_planes`
@@ -190,13 +233,11 @@ impl SpatialAE {
         let emb = self.owner_emb.forward(owners).permute([0, 3, 1, 2]);
         let mut g = Tensor::cat(&[&emb, terrain], 1);
         for block in &self.enc_stem {
-            g = block.forward(&g, self.amp);
+            g = block.forward(&g);
         }
-        g = self
-            .enc_fuse
-            .forward(&Tensor::cat(&[&g, static_planes], 1), self.amp);
-        if self.amp {
-            conv2d_bf16(&self.enc_out, &g.to_kind(Kind::BFloat16), [1, 1], [0, 0])
+        g = self.enc_fuse.forward(&Tensor::cat(&[&g, static_planes], 1));
+        if let Some(conv) = &self.enc_out_bf16 {
+            conv.forward(&g.to_kind(Kind::BFloat16), [1, 1], [0, 0])
                 .to_kind(Kind::Float)
         } else {
             self.enc_out.forward(&g)
@@ -267,7 +308,7 @@ pub struct AeRaw {
     /// NumPy/ofrs-compatible row-major packbits: each row occupies
     /// `ceil(wr/8)` bytes and its leftmost pixel is bit 7.
     pub fallout: Vec<u8>, // (hr, ceil(wr/8)), fresh every decision
-    pub stat: Vec<f32>,    // (6, gh, gw)
+    pub stat: Vec<f32>, // (6, gh, gw)
     pub hr: usize,
     pub wr: usize,
 }
@@ -314,8 +355,7 @@ fn unpack_fallout_host(packed: &[u8], hr: usize, wr: usize) -> Vec<f32> {
     let mut fallout = vec![0.0f32; hr * wr];
     for y in 0..hr {
         for x in 0..wr {
-            fallout[y * wr + x] =
-                ((packed[y * packed_wr + x / 8] >> (7 - x % 8)) & 1) as f32;
+            fallout[y * wr + x] = ((packed[y * packed_wr + x / 8] >> (7 - x % 8)) & 1) as f32;
         }
     }
     fallout
@@ -1024,12 +1064,35 @@ mod tests {
         Vec::<f32>::try_from(tensor.reshape([-1])).unwrap()
     }
 
-    fn random_pair_with_amp(amp: bool) -> AePair {
+    fn bf16_cache_tensors(ae: &SpatialAE) -> Vec<&Tensor> {
+        let mut tensors = Vec::new();
+        for block in &ae.enc_stem {
+            let conv = block.bf16.as_ref().expect("stem bf16 cache");
+            tensors.push(&conv.ws);
+            tensors.extend(conv.bs.iter());
+        }
+        let fuse = ae.enc_fuse.bf16.as_ref().expect("fuse bf16 cache");
+        tensors.push(&fuse.ws);
+        tensors.extend(fuse.bs.iter());
+        let out = ae.enc_out_bf16.as_ref().expect("output bf16 cache");
+        tensors.push(&out.ws);
+        tensors.extend(out.bs.iter());
+        tensors
+    }
+
+    fn bf16_cache_ptrs(ae: &SpatialAE) -> Vec<usize> {
+        bf16_cache_tensors(ae)
+            .into_iter()
+            .map(|tensor| tensor.data_ptr() as usize)
+            .collect()
+    }
+
+    fn random_pair() -> AePair {
         tch::manual_seed(73);
         let fine_vs = nn::VarStore::new(Device::Cpu);
-        let fine = SpatialAE::new(&fine_vs.root(), LATENT_C, REGION, amp).unwrap();
+        let fine = SpatialAE::new(&fine_vs.root(), LATENT_C, REGION).unwrap();
         let coarse_vs = nn::VarStore::new(Device::Cpu);
-        let coarse = SpatialAE::new(&coarse_vs.root(), LATENT_C, COARSE_REGION, amp).unwrap();
+        let coarse = SpatialAE::new(&coarse_vs.root(), LATENT_C, COARSE_REGION).unwrap();
         AePair {
             fine,
             _fine_vs: fine_vs,
@@ -1038,14 +1101,10 @@ mod tests {
         }
     }
 
-    fn random_pair() -> AePair {
-        random_pair_with_amp(false)
-    }
-
     #[test]
     fn encoder_tree_key_count_d8() {
         let vs = nn::VarStore::new(Device::Cpu);
-        let _ae = SpatialAE::new(&vs.root(), 32, 8, false).unwrap();
+        let _ae = SpatialAE::new(&vs.root(), 32, 8).unwrap();
         // 1 emb + 4 stem*(conv.w/b + gn.w/b) + fuse_block + 1x1 out = 1+16+4+2 = 23
         assert_eq!(vs.variables().len(), 23);
     }
@@ -1053,7 +1112,7 @@ mod tests {
     #[test]
     fn encoder_tree_key_count_d16() {
         let vs = nn::VarStore::new(Device::Cpu);
-        let _ae = SpatialAE::new(&vs.root(), 32, 16, false).unwrap();
+        let _ae = SpatialAE::new(&vs.root(), 32, 16).unwrap();
         // +1 stem block (4 tensors) vs d8 → 27
         assert_eq!(vs.variables().len(), 27);
     }
@@ -1065,7 +1124,7 @@ mod tests {
         assert!(err.to_string().contains("owner[2]=128"));
 
         let vs = nn::VarStore::new(Device::Cpu);
-        let ae = SpatialAE::new(&vs.root(), LATENT_C, REGION, false).unwrap();
+        let ae = SpatialAE::new(&vs.root(), LATENT_C, REGION).unwrap();
         let mut raw = AeRaw {
             owners: vec![0; 8 * 8],
             static_terrain: terrain(1, 1, 8, 8, 0.0),
@@ -1084,9 +1143,9 @@ mod tests {
     fn packed_owner_embedding_and_latents_exactly_match_i64_reference() {
         tch::manual_seed(97);
         let fine_vs = nn::VarStore::new(Device::Cpu);
-        let fine = SpatialAE::new(&fine_vs.root(), LATENT_C, REGION, false).unwrap();
+        let fine = SpatialAE::new(&fine_vs.root(), LATENT_C, REGION).unwrap();
         let coarse_vs = nn::VarStore::new(Device::Cpu);
-        let coarse = SpatialAE::new(&coarse_vs.root(), LATENT_C, COARSE_REGION, false).unwrap();
+        let coarse = SpatialAE::new(&coarse_vs.root(), LATENT_C, COARSE_REGION).unwrap();
 
         let every_slot: Vec<u8> = (0..MAX_SLOTS as u8).collect();
         let packed = upload_owner_indices(&every_slot, [1, 8, 16], Device::Cpu).unwrap();
@@ -1144,11 +1203,8 @@ mod tests {
                 pixels.iter().map(|&v| v as f32).collect::<Vec<_>>(),
                 "host unpack byte {byte:#04x}"
             );
-            let device = unpack_fallout_device(
-                &Tensor::from_slice(&packed).view([1, 1, 1]),
-                8,
-                &shifts,
-            );
+            let device =
+                unpack_fallout_device(&Tensor::from_slice(&packed).view([1, 1, 1]), 8, &shifts);
             assert_eq!(
                 flat_f32(&device),
                 pixels.iter().map(|&v| v as f32).collect::<Vec<_>>(),
@@ -1173,11 +1229,8 @@ mod tests {
         );
 
         let shifts = Tensor::from_slice(&[7u8, 6, 5, 4, 3, 2, 1, 0]);
-        let unpacked = unpack_fallout_device(
-            &Tensor::from_slice(&packed).view([1, 3, 2]),
-            11,
-            &shifts,
-        );
+        let unpacked =
+            unpack_fallout_device(&Tensor::from_slice(&packed).view([1, 3, 2]), 11, &shifts);
         assert_eq!(
             flat_f32(&unpacked),
             pixels.iter().map(|&v| v as f32).collect::<Vec<_>>()
@@ -1202,7 +1255,7 @@ mod tests {
     #[test]
     fn coarse_encode_supports_odd_fine_dimensions() {
         let vs = nn::VarStore::new(Device::Cpu);
-        let ae = SpatialAE::new(&vs.root(), LATENT_C, 16, false).unwrap();
+        let ae = SpatialAE::new(&vs.root(), LATENT_C, 16).unwrap();
         let raw = AeRaw {
             owners: vec![0; 24 * 40],
             static_terrain: terrain(1, 1, 24, 40, 0.0),
@@ -1354,6 +1407,42 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_is_loaded_before_bf16_cache_is_created() {
+        tch::manual_seed(131);
+        let source_vs = nn::VarStore::new(Device::Cpu);
+        let source = SpatialAE::new(&source_vs.root(), LATENT_C, REGION).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "oftrain-ae-bf16-cache-{}.safetensors",
+            std::process::id()
+        ));
+        source_vs.save(&path).unwrap();
+
+        let (loaded_vs, loaded) = SpatialAE::load(&path, Device::Cpu, REGION, true).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        let source_variables = source_vs.variables();
+        let loaded_variables = loaded_vs.variables();
+        assert_eq!(source_variables.len(), loaded_variables.len());
+        for (name, expected) in source_variables {
+            let actual = &loaded_variables[&name];
+            assert!(
+                actual.equal(&expected),
+                "checkpoint parameter {name} did not load exactly"
+            );
+            assert_eq!(actual.kind(), Kind::Float, "{name}");
+        }
+        assert!(
+            loaded.enc_stem[0]
+                .bf16
+                .as_ref()
+                .unwrap()
+                .ws
+                .equal(&source.enc_stem[0].conv.ws.to_kind(Kind::BFloat16)),
+            "cache was not derived from loaded checkpoint weights"
+        );
+    }
+
+    #[test]
     fn static_terrain_arc_is_reused_and_float_packing_is_exact() {
         let land = [0, 1, 2, 0];
         let mag = [0, 1, 30, 31];
@@ -1406,7 +1495,7 @@ mod tests {
     fn cached_device_unpacked_and_legacy_host_unpacked_latents_are_exact() {
         tch::manual_seed(41);
         let vs = nn::VarStore::new(Device::Cpu);
-        let ae = SpatialAE::new(&vs.root(), LATENT_C, REGION, false).unwrap();
+        let ae = SpatialAE::new(&vs.root(), LATENT_C, REGION).unwrap();
         let static_terrain = terrain(2, 5, 8, 8, 0.375);
         let fallout_bits: Vec<u8> = (0..64).map(|i| ((i * 5 + 3) % 11 < 4) as u8).collect();
         let packed = pack_fallout(&fallout_bits, 8, 8);
@@ -1417,11 +1506,8 @@ mod tests {
 
         let mut cache = TerrainDeviceCache::new(Device::Cpu);
         let shifts = cache.fallout_shifts();
-        let device_fallout = unpack_fallout_device(
-            &Tensor::from_slice(&packed).view([1, 8, 1]),
-            8,
-            &shifts,
-        );
+        let device_fallout =
+            unpack_fallout_device(&Tensor::from_slice(&packed).view([1, 8, 1]), 8, &shifts);
         let cached = Tensor::cat(
             &[
                 cache.static_tensor(&static_terrain).unsqueeze(0),
@@ -1481,11 +1567,7 @@ mod tests {
         };
         let mut raw_b = raw_a.clone();
         raw_b.stat[3] = 7.0;
-        raw_b.fallout = pack_fallout(
-            &(0..64).map(|i| (i == 5) as u8).collect::<Vec<_>>(),
-            8,
-            8,
-        );
+        raw_b.fallout = pack_fallout(&(0..64).map(|i| (i == 5) as u8).collect::<Vec<_>>(), 8, 8);
         assert!(Arc::ptr_eq(
             &raw_a.static_terrain.land_mag,
             &raw_b.static_terrain.land_mag
@@ -1499,11 +1581,12 @@ mod tests {
         for latent_down in [REGION, COARSE_REGION] {
             tch::manual_seed(17);
             let fp_vs = nn::VarStore::new(Device::Cpu);
-            let fp_ae = SpatialAE::new(&fp_vs.root(), LATENT_C, latent_down, false).unwrap();
+            let fp_ae = SpatialAE::new(&fp_vs.root(), LATENT_C, latent_down).unwrap();
 
             let mut bf_vs = nn::VarStore::new(Device::Cpu);
-            let bf_ae = SpatialAE::new(&bf_vs.root(), LATENT_C, latent_down, true).unwrap();
+            let mut bf_ae = SpatialAE::new(&bf_vs.root(), LATENT_C, latent_down).unwrap();
             bf_vs.copy(&fp_vs).unwrap();
+            bf_ae.cache_bf16();
 
             let side = 32;
             let owners = Tensor::randint(MAX_SLOTS, [2, side, side], (Kind::Int64, Device::Cpu));
@@ -1533,6 +1616,56 @@ mod tests {
     }
 
     #[test]
+    fn bf16_conv_cache_has_expected_kind_and_allocates_only_once() {
+        for (latent_down, conv_count) in [(REGION, 6), (COARSE_REGION, 7)] {
+            let mut vs = nn::VarStore::new(Device::Cpu);
+            let mut ae = SpatialAE::new(&vs.root(), LATENT_C, latent_down).unwrap();
+            vs.freeze();
+            ae.cache_bf16();
+
+            let tensors = bf16_cache_tensors(&ae);
+            assert_eq!(
+                tensors.len(),
+                conv_count * 2,
+                "each cached convolution has one weight and one bias"
+            );
+            assert!(tensors.iter().all(|tensor| tensor.kind() == Kind::BFloat16));
+            assert!(tensors.iter().all(|tensor| !tensor.requires_grad()));
+            assert!(
+                vs.variables()
+                    .values()
+                    .all(|tensor| { tensor.kind() == Kind::Float && !tensor.requires_grad() })
+            );
+
+            let allocated = bf16_cache_ptrs(&ae);
+            ae.cache_bf16();
+            assert_eq!(
+                bf16_cache_ptrs(&ae),
+                allocated,
+                "cache initialization must be idempotent"
+            );
+
+            let side = 32;
+            let owners = Tensor::zeros([1, side, side], (Kind::Int64, Device::Cpu));
+            let terrain = Tensor::zeros(
+                [1, TERRAIN_CHANNELS, side, side],
+                (Kind::Float, Device::Cpu),
+            );
+            let static_planes = Tensor::zeros(
+                [1, NUM_STATIC, side / latent_down, side / latent_down],
+                (Kind::Float, Device::Cpu),
+            );
+            let _ = tch::no_grad(|| ae.encode(&owners, &terrain, &static_planes));
+            let _ = tch::no_grad(|| ae.encode(&owners, &terrain, &static_planes));
+            assert_eq!(
+                bf16_cache_ptrs(&ae),
+                allocated,
+                "forwards must reuse cached parameter allocations"
+            );
+        }
+    }
+
+    #[test]
     fn bf16_gate_requires_amp_cuda_and_persistent_actor() {
         for amp in [false, true] {
             for persistent in [false, true] {
@@ -1548,8 +1681,8 @@ mod tests {
 
     #[test]
     fn shared_fine_coarse_bf16_is_finite_close_and_has_exact_shapes() {
-        let fp_pair = random_pair_with_amp(false);
-        let mut bf_pair = random_pair_with_amp(true);
+        let fp_pair = random_pair();
+        let mut bf_pair = random_pair();
         bf_pair._fine_vs.copy(&fp_pair._fine_vs).unwrap();
         bf_pair
             ._coarse_vs
@@ -1557,6 +1690,8 @@ mod tests {
             .unwrap()
             .copy(fp_pair._coarse_vs.as_ref().unwrap())
             .unwrap();
+        bf_pair.fine.cache_bf16();
+        bf_pair.coarse.as_mut().unwrap().cache_bf16();
         let raws = [
             patterned_raw(21, 24, 40),
             patterned_raw(22, 16, 32),
