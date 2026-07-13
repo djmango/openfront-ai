@@ -237,9 +237,33 @@ gain and increased tail/CPU pressure; 48 envs/GPU remains the measured optimum.<
   <li>fused native tile trim/LUT/fallout/defense/ego/local preparation;</li>
   <li>persistent two-group actor pipeline, now safe because the actor remains on one stream-owning thread.</li>
 </ul>
-<p>Not retained: stale coarse-latent caching, reduced-precision AE inference, cross-thread resident
-rollouts, or any change to reward/PPO math. Performance claims use fleet policy decisions/s, not
+<p>Not retained: stale coarse-latent caching, cross-thread resident rollouts, or any change to
+reward/PPO math. Frozen AE convolution weights now have cached bf16 copies under persistent actor
+ownership; embedding, GroupNorm, and returned latents remain fp32. Performance claims use fleet policy decisions/s, not
 Python's game-ticks/s (which must be divided by <code>decision_ticks</code>).</p>
+
+<h3 id="rust-v8-multigpu">Four-GPU scale-out and old-model evidence (Jul 13 evening)</h3>
+<ul>
+  <li><b>Latest master engine parity integrated:</b> UnitGrid ordering, nation assist/alliance
+  behavior, raw attack budgets, warship repair/targeting, defense-post queries, ports/trade ships,
+  and spawn validity. These change the stage-4 MDP for correctness, not benchmark cosmetics.</li>
+  <li><b>Persistent multi-GPU learners:</b> one owner thread per GPU, deterministic shared
+  minibatch shuffles, shard-ordered CPU gradient averaging, global clipping, and identical optimizer
+  steps. Repeated 1-vs-2 tests measured zero gradient, replica, and final-weight difference.</li>
+  <li><b>Work-conserving actors:</b> independently ready envs are shape-bucketed into bounded
+  microbatches instead of waiting on the slowest member of a lockstep half.</li>
+  <li><b>Production topology:</b> GPUs 0-2 train continuously; GPU 3 performs nonblocking eval and
+  best-checkpoint promotion. Three-GPU stage-4 production sustains roughly 76-82 decisions/s versus
+  20-29 on one GPU. A six-update four-training-GPU stress passed at 74-83 decisions/s with only
+  8 envs/GPU.</li>
+  <li><b>Async eval:</b> stage-4 eval runs without pausing training and atomically maintains
+  <code>best_eval.safetensors</code>. A two-seed pass promoted score 0.88; larger passes remain the
+  confidence gate.</li>
+  <li><b>Old-model paired benchmark:</b> the engine supports one controllable policy, so this is an
+  indirect same-seed scripted-bot comparison. Over eight stage-1 seeds, current Rust beat ppo_v7
+  placement score by +0.458 (95% bootstrap CI [0.25, 0.625]). Versus ppo_v5 it led score by +0.167
+  but the CI crossed zero and v5 recorded one win; that comparison remains inconclusive.</li>
+</ul>
 
 <h3 id="rust-v8-plan">Plan and gates</h3>
 <ol>
