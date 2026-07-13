@@ -5,6 +5,7 @@ data/
 secrets/*
 !secrets/*.enc.yaml
 !secrets/README.md
+!secrets/secrets.yaml
 .venv/
 __pycache__/
 *.pt
