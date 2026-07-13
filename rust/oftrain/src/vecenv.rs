@@ -8,15 +8,17 @@ use anyhow::Result;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use serde_json::Value;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ofcore::curriculum::{
-    self, placement, placement_score, sample_episode, stages, terminal_reward, timeweight,
-    Stage, W_DEATH, W_DELTA_GAIN, W_DELTA_LOSS, W_STR, W_WASTE,
+    self, Stage, W_DEATH, W_DELTA_GAIN, W_DELTA_LOSS, W_STR, W_WASTE, placement, placement_score,
+    sample_episode, stages, terminal_reward, timeweight,
 };
 use ofcore::feat::{self, ACTIONS, IS_LAND_BIT, MAG_MASK, REGION};
-use ofcore::translate::{translate, Choice, IntentTranslator};
+use ofcore::translate::{Choice, IntentTranslator, translate};
 
-use crate::ae::{self, AeRaw};
+use crate::ae::{self, AeRaw, StaticTerrain, TerrainCacheKey};
 use crate::engine::{self, EngineKind, GameEngine, RawObs};
 
 /// CPU-owned foveated rollout payload. Grid samples cross the actor/learner
@@ -24,16 +26,16 @@ use crate::engine::{self, EngineKind, GameEngine, RawObs};
 /// learner never has to reconstruct a full fine grid or infer coordinates.
 #[derive(Clone)]
 pub struct CompactGrid {
-    pub fine: Vec<half::f16>,       // (C_GRID, fine_h, fine_w)
-    pub fine_valid: Vec<f32>,       // (fine_h, fine_w)
-    pub fine_legal: Vec<f32>,       // (fine_h, fine_w)
+    pub fine: Vec<half::f16>, // (C_GRID, fine_h, fine_w)
+    pub fine_valid: Vec<f32>, // (fine_h, fine_w)
+    pub fine_legal: Vec<f32>, // (fine_h, fine_w)
     pub fine_h: usize,
     pub fine_w: usize,
     pub origin_y: i64,
     pub origin_x: i64,
-    pub coarse: Vec<half::f16>,     // (C_GRID, coarse_h, coarse_w)
-    pub coarse_valid: Vec<f32>,     // (coarse_h, coarse_w)
-    pub coarse_legal: Vec<f32>,     // (coarse_h, coarse_w)
+    pub coarse: Vec<half::f16>, // (C_GRID, coarse_h, coarse_w)
+    pub coarse_valid: Vec<f32>, // (coarse_h, coarse_w)
+    pub coarse_legal: Vec<f32>, // (coarse_h, coarse_w)
     pub coarse_h: usize,
     pub coarse_w: usize,
 }
@@ -84,18 +86,18 @@ pub struct PreparedObs {
     pub db: Vec<f32>,
     /// Transient planes at /8: (53, gh, gw).
     pub transient: Vec<f32>,
-    pub legal_tile: Vec<f32>,   // (gh, gw)
+    pub legal_tile: Vec<f32>, // (gh, gw)
     pub gh: usize,
     pub gw: usize,
-    pub players: Vec<f32>,          // (MAX_SLOTS, P_FEAT)
+    pub players: Vec<f32>, // (MAX_SLOTS, P_FEAT)
     pub pmask: [f32; feat::MAX_SLOTS],
     pub scalars: [f32; feat::N_SCALARS],
     pub me_slot: i64,
     pub legal_actions: [f32; feat::N_ACTIONS],
-    pub legal_ptarget: Vec<f32>,    // (N_ACTIONS, MAX_SLOTS)
+    pub legal_ptarget: Vec<f32>, // (N_ACTIONS, MAX_SLOTS)
     pub legal_build: [f32; feat::N_BUILD],
     pub legal_nuke: [f32; feat::N_NUKE],
-    pub local: Vec<f32>,        // (5, LOCAL, LOCAL)
+    pub local: Vec<f32>, // (5, LOCAL, LOCAL)
 }
 
 pub struct EnvWorker {
@@ -122,10 +124,18 @@ pub struct EnvWorker {
     wr: usize,
     land: Vec<u8>,
     mag: Vec<u8>,
+    ae_static: StaticTerrain,
 }
 
+static NEXT_TERRAIN_ID: AtomicU64 = AtomicU64::new(1);
+
 impl EnvWorker {
-    pub fn new(idx: usize, stage: usize, max_episode_ticks: i64, engine: EngineKind) -> Result<Self> {
+    pub fn new(
+        idx: usize,
+        stage: usize,
+        max_episode_ticks: i64,
+        engine: EngineKind,
+    ) -> Result<Self> {
         let bridge = engine::create(engine)?;
         let mut w = EnvWorker {
             idx,
@@ -151,6 +161,17 @@ impl EnvWorker {
             wr: 0,
             land: Vec::new(),
             mag: Vec::new(),
+            ae_static: StaticTerrain {
+                key: TerrainCacheKey {
+                    env_id: idx as u64,
+                    episode: 0,
+                    static_id: 0,
+                    hr: 0,
+                    wr: 0,
+                },
+                map: Arc::from(""),
+                land_mag: Vec::<f32>::new().into(),
+            },
         };
         w.reset_episode()?;
         Ok(w)
@@ -168,7 +189,9 @@ impl EnvWorker {
             curriculum::Nations::Exact(n) => Value::from(n),
         };
         let seed = format!("w{}-ep{}", self.idx, self.episode);
-        let obs = self.bridge.reset(&map_name, &seed, bots, difficulty, nations_val)?;
+        let obs = self
+            .bridge
+            .reset(&map_name, &seed, bots, difficulty, nations_val)?;
 
         let width = self.bridge.width();
         let height = self.bridge.height();
@@ -188,6 +211,17 @@ impl EnvWorker {
         }
         self.land = land;
         self.mag = mag;
+        self.ae_static = StaticTerrain {
+            key: TerrainCacheKey {
+                env_id: self.idx as u64,
+                episode: self.episode,
+                static_id: NEXT_TERRAIN_ID.fetch_add(1, Ordering::Relaxed),
+                hr,
+                wr,
+            },
+            map: Arc::from(map_name.as_str()),
+            land_mag: ae::pack_static_terrain(&self.land, &self.mag, hr, wr),
+        };
         self.land_total = (self.land.iter().map(|&l| l as i64).sum::<i64>()).max(1);
         self.translator = Some(IntentTranslator::new(self.bridge.terrain(), width, hr, wr));
         self.lut.clear();
@@ -266,10 +300,10 @@ impl EnvWorker {
             crate::policy::LOCAL as usize,
         );
         let owners_i64: Vec<i64> = owners_slotted.iter().map(|&o| o as i64).collect();
-        let terrain = ae::pack_terrain(&self.land, &self.mag, &fallout, hr, wr);
         let ae_raw = AeRaw {
             owners: owners_i64,
-            terrain,
+            static_terrain: self.ae_static.clone(),
+            fallout: ae::pack_fallout(&fallout),
             stat: f.stat,
             hr,
             wr,
@@ -304,7 +338,10 @@ impl EnvWorker {
     /// returns the NEXT observation alongside the reward/done/info from
     /// applying `choice` to the current one. Drives the threaded rollout
     /// loop in `train.rs`.
-    pub fn step(&mut self, choice: &Choice) -> Result<(PreparedObs, f64, bool, Option<EpisodeInfo>)> {
+    pub fn step(
+        &mut self,
+        choice: &Choice,
+    ) -> Result<(PreparedObs, f64, bool, Option<EpisodeInfo>)> {
         let (reward, done, info) = self.apply(choice)?;
         let prepared = self.prepare();
         Ok((prepared, reward, done, info))
@@ -366,8 +403,12 @@ impl EnvWorker {
             .unwrap_or(0.0);
         let tw = timeweight(obs.tick());
         let delta = mine - self.prev_strength;
-        let mut reward =
-            W_STR * mine * tw + (if delta >= 0.0 { W_DELTA_GAIN } else { W_DELTA_LOSS }) * delta;
+        let mut reward = W_STR * mine * tw
+            + (if delta >= 0.0 {
+                W_DELTA_GAIN
+            } else {
+                W_DELTA_LOSS
+            }) * delta;
         reward -= W_WASTE * wasted as f64;
         self.ep_wasted += wasted;
         self.prev_strength = mine;
@@ -379,7 +420,10 @@ impl EnvWorker {
             done = true;
         } else if !obs.winner().is_null() {
             let w = obs.winner();
-            won = w.as_array().map(|a| a.len() > 1 && a[1] == "AGENTRL1").unwrap_or(false);
+            won = w
+                .as_array()
+                .map(|a| a.len() > 1 && a[1] == "AGENTRL1")
+                .unwrap_or(false);
             done = true;
         } else if obs.tick() >= self.max_episode_ticks {
             done = true;
@@ -436,7 +480,10 @@ impl EnvWorker {
         }
         let (y, x) = candidates[self.rng.gen_range(0..candidates.len())];
         let tile = y * width as i64 + x;
-        let new_obs = self.bridge.step(&[serde_json::json!({"type": "spawn", "tile": tile})], self.decision_ticks)?;
+        let new_obs = self.bridge.step(
+            &[serde_json::json!({"type": "spawn", "tile": tile})],
+            self.decision_ticks,
+        )?;
         self.obs = Some(new_obs);
         Ok(())
     }
