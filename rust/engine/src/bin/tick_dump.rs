@@ -42,6 +42,7 @@ struct UnitSnapshot {
     veterancy: i32,
     veterancy_progress: i32,
     target_tile: Option<i32>,
+    patrol_tile: Option<u32>,
     retreat_port: Option<u32>,
     retreating: bool,
     docked: bool,
@@ -131,6 +132,7 @@ fn snapshot(game: &openfront_engine::game::Game, dump_units: bool) -> TickSnapsh
                                 target_tile: warship
                                     .and_then(|w| w.target_tile())
                                     .map(|t| t as i32),
+                                patrol_tile: warship.map(|w| w.patrol_tile()),
                                 retreat_port: warship.and_then(|w| w.retreat_port()),
                                 retreating: warship.is_some_and(|w| w.is_retreating()),
                                 docked: warship.is_some_and(|w| w.is_docked()),

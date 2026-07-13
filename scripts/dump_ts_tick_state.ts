@@ -37,6 +37,7 @@ interface UnitSnapshot {
   veterancy: number;
   veterancyProgress: number;
   targetTile: number | null;
+  patrolTile: number | null;
   retreatPort: number | null;
   retreating: boolean;
   docked: boolean;
