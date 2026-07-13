@@ -2376,7 +2376,7 @@ impl Game {
                 continue;
             }
             if let Some(p) = self.player_by_small_id(attacker) {
-                if !p.alive {
+                if p.tiles_owned <= 0 {
                     continue;
                 }
             }
@@ -2437,7 +2437,7 @@ impl Game {
                 continue;
             }
             if let Some(p) = self.player_by_small_id(attacker) {
-                if !p.alive {
+                if p.tiles_owned <= 0 {
                     continue;
                 }
             }
