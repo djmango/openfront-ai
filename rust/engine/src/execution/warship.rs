@@ -81,6 +81,13 @@ pub fn warship_random_water_tile_near(
     None
 }
 
+fn ts_warship_patrol_offset_bounds(patrol_range: i32) -> (i32, i32) {
+    (
+        (-(patrol_range as f64) / 2.0).floor() as i32,
+        ((patrol_range as f64) / 2.0).floor() as i32,
+    )
+}
+
 pub struct WarshipExecution {
     owner_small_id: u16,
     patrol_tile: TileRef,
@@ -222,10 +229,9 @@ impl WarshipExecution {
         let mut expand_count = 0;
 
         while expand_count < 3 {
-            let x = game.x(self.patrol_tile) as i32
-                + random.next_int(-patrol_range / 2, patrol_range / 2);
-            let y = game.y(self.patrol_tile) as i32
-                + random.next_int(-patrol_range / 2, patrol_range / 2);
+            let (min_offset, max_offset) = ts_warship_patrol_offset_bounds(patrol_range);
+            let x = game.x(self.patrol_tile) as i32 + random.next_int(min_offset, max_offset);
+            let y = game.y(self.patrol_tile) as i32 + random.next_int(min_offset, max_offset);
             if !game.is_valid_coord(x, y) {
                 continue;
             }
@@ -895,6 +901,16 @@ mod tests {
             friends: Vec::new(),
             team: None,
         })
+    }
+
+    #[test]
+    fn patrol_random_offset_bounds_floor_negative_odd_ranges_like_ts_next_int() {
+        assert_eq!(ts_warship_patrol_offset_bounds(100), (-50, 50));
+        assert_eq!(ts_warship_patrol_offset_bounds(150), (-75, 75));
+        // TS calls `nextInt(-warshipPatrolRange / 2, warshipPatrolRange / 2)`;
+        // `nextInt` floors both bounds, so odd expanded ranges need the extra
+        // negative tile (`Math.floor(-112.5) == -113`).
+        assert_eq!(ts_warship_patrol_offset_bounds(225), (-113, 112));
     }
 
     /// TS `WarshipExecution.init` re-checks `canBuild` at spawn time. Same-tick structure
