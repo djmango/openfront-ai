@@ -260,7 +260,7 @@ pub fn tick_nation_post_spawn(
         .player_by_small_id(small_id)
         .is_some_and(|p| p.alive && p.tiles_owned > 0)
         && difficulty != "Easy"
-        && game.unit_count(small_id, unit_type::PORT) > 0
+        && game.units_constructed_count(small_id, unit_type::PORT) > 0
         && !game.wire.is_unit_disabled(unit_type::WARSHIP)
     {
         super::warship_ai::track_ships_and_retaliate(
