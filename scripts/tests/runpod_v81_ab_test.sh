@@ -40,6 +40,14 @@ after="$(sha256sum "$tmp/source.safetensors")"
 [[ "$output" == *"--ckpt-dir $tmp/new-run/control/checkpoints"* ]]
 [[ "$output" == *"--ckpt-dir $tmp/new-run/v81/checkpoints"* ]]
 
+printf 'legacy\n' >"$tmp/legacy.ot"
+if SOURCE_CHECKPOINT="$tmp/legacy.ot" RUN_ROOT="$tmp/nope" UPDATES=110 \
+  bash "$orchestrator" --dry-run >/dev/null 2>&1
+then
+  echo "legacy .ot unexpectedly passed new v8.1 launch validation" >&2
+  exit 1
+fi
+
 if SOURCE_CHECKPOINT="$tmp/source.safetensors" RUN_ROOT="$tmp/nope" \
   CONTROL_GPUS=0,1 V81_GPUS=1,2 UPDATES=110 \
   bash "$orchestrator" --dry-run >/dev/null 2>&1
