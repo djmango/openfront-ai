@@ -17,11 +17,12 @@
 //! rehearsal hit) takes a fast path with no per-item copy loop.
 
 use ofcore::feat;
+use std::sync::Arc;
 use tch::{Device, Kind, Tensor};
 
 use crate::ae::{self, AePair, TerrainDeviceCache};
 use crate::policy::{self, CompactObsMeta, Obs, PolicyNet};
-use crate::vecenv::{CompactGrid, PreparedObs};
+use crate::vecenv::{CompactGrid, CompactHostArena, PreparedObs};
 
 /// `--pinned-h2d`: host->device upload for one freshly-built CPU tensor.
 /// When `pinned && device` is CUDA, pins the CPU tensor's backing memory
@@ -628,8 +629,9 @@ pub fn build_compact_rollout_obs(
     fp16_rollout: bool,
     ae: &AePair,
     terrain_cache: &mut TerrainDeviceCache,
+    host_arena: &Arc<CompactHostArena>,
 ) -> anyhow::Result<Obs> {
-    let (compact, uniform) = {
+    let compact = {
         let refs: Vec<&PreparedObs> = items.iter().collect();
         let uniform = exact_uniform_shape(&refs);
         let full = if uniform {
@@ -644,13 +646,9 @@ pub fn build_compact_rollout_obs(
                 Some(terrain_cache),
             )?
         };
-        (PolicyNet::compact_observation(&full), uniform)
+        PolicyNet::compact_observation(&full)
     };
-    if uniform {
-        store_uniform_compact_host(items, &compact)?;
-    } else {
-        store_compact_host(items, &compact)?;
-    }
+    store_compact_host(items, &compact, host_arena)?;
     Ok(compact)
 }
 
@@ -1000,71 +998,47 @@ fn build_obs_from_parts(
     })
 }
 
-fn tensor_vec_f16(t: &Tensor) -> anyhow::Result<Vec<half::f16>> {
-    Vec::<half::f16>::try_from(t.to_device(Device::Cpu).to_kind(Kind::Half).reshape([-1]))
-    .map_err(|e| anyhow::anyhow!("compact fp16 host copy failed: {e}"))
+fn copy_tensor_f16(t: &Tensor, dst: &mut Vec<half::f16>) -> anyhow::Result<()> {
+    let cpu = t
+        .to_kind(Kind::Half)
+        .contiguous()
+        .to_device(Device::Cpu)
+        .reshape([-1]);
+    let len = cpu.numel();
+    dst.resize(len, half::f16::ZERO);
+    cpu.f_copy_data(dst, len)
+        .map_err(|e| anyhow::anyhow!("compact fp16 host copy failed: {e}"))
 }
 
-fn tensor_vec_f32(t: &Tensor) -> anyhow::Result<Vec<f32>> {
-    Vec::<f32>::try_from(t.to_device(Device::Cpu).to_kind(Kind::Float).reshape([-1]))
-    .map_err(|e| anyhow::anyhow!("compact mask host copy failed: {e}"))
+fn copy_tensor_f32(t: &Tensor, dst: &mut Vec<f32>) -> anyhow::Result<()> {
+    let cpu = t
+        .to_kind(Kind::Float)
+        .contiguous()
+        .to_device(Device::Cpu)
+        .reshape([-1]);
+    let len = cpu.numel();
+    dst.resize(len, 0.0);
+    cpu.f_copy_data(dst, len)
+        .map_err(|e| anyhow::anyhow!("compact mask host copy failed: {e}"))
 }
 
-fn store_compact_host(items: &mut [PreparedObs], obs: &Obs) -> anyhow::Result<()> {
-    let meta = obs.compact.as_ref().expect("compact metadata");
-    let (b, _, fh, fw) = obs.grid.size4()?;
-    let coarse = obs.grid_coarse.as_ref().expect("compact coarse grid");
-    let (_, _, ch, cw) = coarse.size4()?;
-    anyhow::ensure!(
-        b as usize == items.len(),
-        "compact batch/item length mismatch"
-    );
-
-    // Established mixed-shape fallback: one D2H per payload, then split on CPU.
-    let fine = tensor_vec_f16(&obs.grid)?;
-    let coarse = tensor_vec_f16(coarse)?;
-    let fine_valid = tensor_vec_f32(&obs.grid_valid)?;
-    let fine_legal = tensor_vec_f32(&obs.legal_tile)?;
-    let coarse_valid = tensor_vec_f32(&meta.coarse_valid)?;
-    let coarse_legal = tensor_vec_f32(&meta.coarse_legal)?;
-    let origin_y: Vec<i64> = Vec::try_from(meta.origin_y.to_device(Device::Cpu))?;
-    let origin_x: Vec<i64> = Vec::try_from(meta.origin_x.to_device(Device::Cpu))?;
-    let fine_n = policy::C_GRID as usize * fh as usize * fw as usize;
-    let fine_mask_n = fh as usize * fw as usize;
-    let coarse_n = policy::C_GRID as usize * ch as usize * cw as usize;
-    let coarse_mask_n = ch as usize * cw as usize;
-
-    for (i, it) in items.iter_mut().enumerate() {
-        it.compact = Some(CompactGrid {
-            fine: fine[i * fine_n..(i + 1) * fine_n].to_vec(),
-            fine_valid: fine_valid[i * fine_mask_n..(i + 1) * fine_mask_n].to_vec(),
-            fine_legal: fine_legal[i * fine_mask_n..(i + 1) * fine_mask_n].to_vec(),
-            fine_h: fh as usize,
-            fine_w: fw as usize,
-            origin_y: origin_y[i],
-            origin_x: origin_x[i],
-            coarse: coarse[i * coarse_n..(i + 1) * coarse_n].to_vec(),
-            coarse_valid: coarse_valid[i * coarse_mask_n..(i + 1) * coarse_mask_n].to_vec(),
-            coarse_legal: coarse_legal[i * coarse_mask_n..(i + 1) * coarse_mask_n].to_vec(),
-            coarse_h: ch as usize,
-            coarse_w: cw as usize,
-        });
-        clear_full_resolution_payload(it);
-    }
-    Ok(())
+fn copy_tensor_i64(t: &Tensor, dst: &mut Vec<i64>) -> anyhow::Result<()> {
+    let cpu = t
+        .to_kind(Kind::Int64)
+        .contiguous()
+        .to_device(Device::Cpu)
+        .reshape([-1]);
+    let len = cpu.numel();
+    dst.resize(len, 0);
+    cpu.f_copy_data(dst, len)
+        .map_err(|e| anyhow::anyhow!("compact origin host copy failed: {e}"))
 }
 
-fn tensor_vec_f16_device(t: &Tensor) -> anyhow::Result<Vec<half::f16>> {
-    Vec::<half::f16>::try_from(
-        t.to_kind(Kind::Half)
-            .contiguous()
-            .to_device(Device::Cpu)
-            .reshape([-1]),
-    )
-    .map_err(|e| anyhow::anyhow!("compact fp16 host copy failed: {e}"))
-}
-
-fn store_uniform_compact_host(items: &mut [PreparedObs], obs: &Obs) -> anyhow::Result<()> {
+fn store_compact_host(
+    items: &mut [PreparedObs],
+    obs: &Obs,
+    host_arena: &Arc<CompactHostArena>,
+) -> anyhow::Result<()> {
     let meta = obs.compact.as_ref().expect("compact metadata");
     let (b, _, fh, fw) = obs.grid.size4()?;
     let coarse = obs.grid_coarse.as_ref().expect("compact coarse grid");
@@ -1080,13 +1054,11 @@ fn store_uniform_compact_host(items: &mut [PreparedObs], obs: &Obs) -> anyhow::R
     let coarse_mask_n = ch as usize * cw as usize;
     let batch = b as usize;
 
-    // Three synchronous, native-width D2H transfers for the complete batch:
-    // fp16 grids, f32 masks, and i64 origins. Concatenation also materializes
-    // contiguous T-major/N-minor payloads before the host ownership boundary.
+    // Three synchronous D2H transfers into arena-owned buffers. Each env keeps
+    // immutable ranges into this batch payload: no per-env allocation or
+    // slice copy occurs, and T-major/N-minor ordering is unchanged.
     let grids = Tensor::cat(&[obs.grid.flatten(0, -1), coarse.flatten(0, -1)], 0);
-    let grids = tensor_vec_f16_device(&grids)?;
     let fine_len = batch * fine_n;
-    let (fine, coarse) = grids.split_at(fine_len);
     let masks = Tensor::cat(
         &[
             obs.grid_valid.flatten(0, -1),
@@ -1096,36 +1068,51 @@ fn store_uniform_compact_host(items: &mut [PreparedObs], obs: &Obs) -> anyhow::R
         ],
         0,
     );
-    let masks = tensor_vec_f32(&masks)?;
     let fine_mask_len = batch * fine_mask_n;
     let coarse_mask_len = batch * coarse_mask_n;
-    let (fine_valid, masks) = masks.split_at(fine_mask_len);
-    let (fine_legal, masks) = masks.split_at(fine_mask_len);
-    let (coarse_valid, coarse_legal) = masks.split_at(coarse_mask_len);
-    anyhow::ensure!(
-        coarse_legal.len() == coarse_mask_len,
-        "compact mask payload length mismatch"
-    );
-    let origins = Tensor::stack(&[&meta.origin_y, &meta.origin_x], 1)
-        .contiguous()
-        .to_device(Device::Cpu);
-    let origins: Vec<i64> = Vec::try_from(origins.reshape([-1]))?;
+    let origins = Tensor::stack(&[&meta.origin_y, &meta.origin_x], 1).contiguous();
+
+    let mut lease = host_arena.lease();
+    {
+        let buffers = lease.buffers_mut();
+        copy_tensor_f16(&grids, &mut buffers.grids)?;
+        copy_tensor_f32(&masks, &mut buffers.masks)?;
+        copy_tensor_i64(&origins, &mut buffers.origins)?;
+        anyhow::ensure!(
+            buffers.grids.len() == fine_len + batch * coarse_n,
+            "compact grid payload length mismatch"
+        );
+        anyhow::ensure!(
+            buffers.masks.len() == 2 * fine_mask_len + 2 * coarse_mask_len,
+            "compact mask payload length mismatch"
+        );
+        anyhow::ensure!(
+            buffers.origins.len() == 2 * batch,
+            "compact origin payload length mismatch"
+        );
+    }
+    let payload = lease.publish();
+    let fine_valid_base = 0;
+    let fine_legal_base = fine_mask_len;
+    let coarse_valid_base = 2 * fine_mask_len;
+    let coarse_legal_base = coarse_valid_base + coarse_mask_len;
 
     for (i, it) in items.iter_mut().enumerate() {
-        it.compact = Some(CompactGrid {
-            fine: fine[i * fine_n..(i + 1) * fine_n].to_vec(),
-            fine_valid: fine_valid[i * fine_mask_n..(i + 1) * fine_mask_n].to_vec(),
-            fine_legal: fine_legal[i * fine_mask_n..(i + 1) * fine_mask_n].to_vec(),
-            fine_h: fh as usize,
-            fine_w: fw as usize,
-            origin_y: origins[2 * i],
-            origin_x: origins[2 * i + 1],
-            coarse: coarse[i * coarse_n..(i + 1) * coarse_n].to_vec(),
-            coarse_valid: coarse_valid[i * coarse_mask_n..(i + 1) * coarse_mask_n].to_vec(),
-            coarse_legal: coarse_legal[i * coarse_mask_n..(i + 1) * coarse_mask_n].to_vec(),
-            coarse_h: ch as usize,
-            coarse_w: cw as usize,
-        });
+        it.compact = Some(CompactGrid::new(
+            Arc::clone(&payload),
+            i * fine_n..(i + 1) * fine_n,
+            fine_valid_base + i * fine_mask_n..fine_valid_base + (i + 1) * fine_mask_n,
+            fine_legal_base + i * fine_mask_n..fine_legal_base + (i + 1) * fine_mask_n,
+            fh as usize,
+            fw as usize,
+            payload.buffers.origins[2 * i],
+            payload.buffers.origins[2 * i + 1],
+            fine_len + i * coarse_n..fine_len + (i + 1) * coarse_n,
+            coarse_valid_base + i * coarse_mask_n..coarse_valid_base + (i + 1) * coarse_mask_n,
+            coarse_legal_base + i * coarse_mask_n..coarse_legal_base + (i + 1) * coarse_mask_n,
+            ch as usize,
+            cw as usize,
+        ));
         clear_full_resolution_payload(it);
     }
     Ok(())
@@ -1177,21 +1164,21 @@ fn build_compact_host_obs(
     let mut coarse_valid = Vec::with_capacity(b * ch * cw);
     let mut coarse_legal = Vec::with_capacity(b * ch * cw);
     for c in &compact {
-        fine.extend_from_slice(&c.fine);
-        fine_valid.extend_from_slice(&c.fine_valid);
-        fine_legal.extend_from_slice(&c.fine_legal);
+        fine.extend_from_slice(c.fine());
+        fine_valid.extend_from_slice(c.fine_valid());
+        fine_legal.extend_from_slice(c.fine_legal());
         for plane in 0..cg {
             let mut dst = vec![half::f16::ZERO; ch * cw];
             for y in 0..c.coarse_h {
                 let src = plane * c.coarse_h * c.coarse_w + y * c.coarse_w;
                 let out = y * cw;
-                dst[out..out + c.coarse_w].copy_from_slice(&c.coarse[src..src + c.coarse_w]);
+                dst[out..out + c.coarse_w].copy_from_slice(&c.coarse()[src..src + c.coarse_w]);
             }
             coarse.extend(dst);
         }
         for (src, dst) in [
-            (&c.coarse_valid, &mut coarse_valid),
-            (&c.coarse_legal, &mut coarse_legal),
+            (c.coarse_valid(), &mut coarse_valid),
+            (c.coarse_legal(), &mut coarse_legal),
         ] {
             let mut padded = vec![0.0f32; ch * cw];
             for y in 0..c.coarse_h {
@@ -1326,11 +1313,7 @@ mod tests {
                     map: std::sync::Arc::from("test"),
                     land_mag: vec![0.0f32; 2 * (gh * 8) * (gw * 8)].into(),
                 },
-                fallout: crate::ae::pack_fallout(
-                    &vec![0u8; (gh * 8) * (gw * 8)],
-                    gh * 8,
-                    gw * 8,
-                ),
+                fallout: crate::ae::pack_fallout(&vec![0u8; (gh * 8) * (gw * 8)], gh * 8, gw * 8),
                 stat: vec![0.0f32; 6 * plane],
                 hr: gh * 8,
                 wr: gw * 8,
@@ -1592,7 +1575,7 @@ mod tests {
             build_obs(&refs, Device::Cpu, false, false)
         };
         let direct = PolicyNet::compact_observation(&full);
-        store_compact_host(&mut items, &direct).unwrap();
+        store_compact_host(&mut items, &direct, &Arc::new(CompactHostArena::default())).unwrap();
 
         assert!(items.iter().all(|it| {
             it.compact.is_some()
@@ -1648,7 +1631,7 @@ mod tests {
             .iter()
             .map(|it| {
                 let c = it.compact.as_ref().unwrap();
-                2 * (c.fine.len() + c.coarse.len())
+                2 * (c.fine().len() + c.coarse().len())
             })
             .sum();
         let old_fine_bytes: usize = [52usize * 58, 56 * 60, 50 * 54, 54 * 56]
@@ -1663,16 +1646,16 @@ mod tests {
 
     fn compact_payload_bytes(c: &CompactGrid) -> Vec<u8> {
         let mut out = Vec::new();
-        for values in [&c.fine, &c.coarse] {
+        for values in [c.fine(), c.coarse()] {
             for value in values {
                 out.extend_from_slice(&value.to_bits().to_ne_bytes());
             }
         }
         for values in [
-            &c.fine_valid,
-            &c.fine_legal,
-            &c.coarse_valid,
-            &c.coarse_legal,
+            c.fine_valid(),
+            c.fine_legal(),
+            c.coarse_valid(),
+            c.coarse_legal(),
         ] {
             for value in values {
                 out.extend_from_slice(&value.to_bits().to_ne_bytes());
@@ -1689,6 +1672,215 @@ mod tests {
             out.extend_from_slice(&value.to_ne_bytes());
         }
         out
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct LegacyCompactPayload {
+        fine: Vec<u16>,
+        fine_valid: Vec<u32>,
+        fine_legal: Vec<u32>,
+        fine_h: usize,
+        fine_w: usize,
+        origin_y: i64,
+        origin_x: i64,
+        coarse: Vec<u16>,
+        coarse_valid: Vec<u32>,
+        coarse_legal: Vec<u32>,
+        coarse_h: usize,
+        coarse_w: usize,
+    }
+
+    /// Captures the former six `slice.to_vec()` results before the pooled
+    /// representation is stored. Comparing bits (not float equality) pins
+    /// down fp16 bytes, masks, origins, and N ordering exactly.
+    fn legacy_compact_payloads(obs: &Obs) -> Vec<LegacyCompactPayload> {
+        let meta = obs.compact.as_ref().unwrap();
+        let (b, _, fh, fw) = obs.grid.size4().unwrap();
+        let coarse_t = obs.grid_coarse.as_ref().unwrap();
+        let (_, _, ch, cw) = coarse_t.size4().unwrap();
+        let fine: Vec<half::f16> =
+            Vec::try_from(obs.grid.to_kind(Kind::Half).reshape([-1])).unwrap();
+        let coarse: Vec<half::f16> =
+            Vec::try_from(coarse_t.to_kind(Kind::Half).reshape([-1])).unwrap();
+        let fine_valid: Vec<f32> = Vec::try_from(meta_or(obs, false, false).reshape([-1])).unwrap();
+        let fine_legal: Vec<f32> = Vec::try_from(meta_or(obs, false, true).reshape([-1])).unwrap();
+        let coarse_valid: Vec<f32> =
+            Vec::try_from(meta_or(obs, true, false).reshape([-1])).unwrap();
+        let coarse_legal: Vec<f32> = Vec::try_from(meta_or(obs, true, true).reshape([-1])).unwrap();
+        let origin_y: Vec<i64> = Vec::try_from(&meta.origin_y).unwrap();
+        let origin_x: Vec<i64> = Vec::try_from(&meta.origin_x).unwrap();
+        let fine_n = policy::C_GRID as usize * fh as usize * fw as usize;
+        let fine_mask_n = fh as usize * fw as usize;
+        let coarse_n = policy::C_GRID as usize * ch as usize * cw as usize;
+        let coarse_mask_n = ch as usize * cw as usize;
+        (0..b as usize)
+            .map(|i| LegacyCompactPayload {
+                fine: fine[i * fine_n..(i + 1) * fine_n]
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect(),
+                fine_valid: fine_valid[i * fine_mask_n..(i + 1) * fine_mask_n]
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect(),
+                fine_legal: fine_legal[i * fine_mask_n..(i + 1) * fine_mask_n]
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect(),
+                fine_h: fh as usize,
+                fine_w: fw as usize,
+                origin_y: origin_y[i],
+                origin_x: origin_x[i],
+                coarse: coarse[i * coarse_n..(i + 1) * coarse_n]
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect(),
+                coarse_valid: coarse_valid[i * coarse_mask_n..(i + 1) * coarse_mask_n]
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect(),
+                coarse_legal: coarse_legal[i * coarse_mask_n..(i + 1) * coarse_mask_n]
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect(),
+                coarse_h: ch as usize,
+                coarse_w: cw as usize,
+            })
+            .collect()
+    }
+
+    fn meta_or(obs: &Obs, coarse: bool, legal: bool) -> &Tensor {
+        match (coarse, legal) {
+            (false, false) => &obs.grid_valid,
+            (false, true) => &obs.legal_tile,
+            (true, false) => &obs.compact.as_ref().unwrap().coarse_valid,
+            (true, true) => &obs.compact.as_ref().unwrap().coarse_legal,
+        }
+    }
+
+    fn stored_payload(c: &CompactGrid) -> LegacyCompactPayload {
+        LegacyCompactPayload {
+            fine: c.fine().iter().map(|v| v.to_bits()).collect(),
+            fine_valid: c.fine_valid().iter().map(|v| v.to_bits()).collect(),
+            fine_legal: c.fine_legal().iter().map(|v| v.to_bits()).collect(),
+            fine_h: c.fine_h,
+            fine_w: c.fine_w,
+            origin_y: c.origin_y,
+            origin_x: c.origin_x,
+            coarse: c.coarse().iter().map(|v| v.to_bits()).collect(),
+            coarse_valid: c.coarse_valid().iter().map(|v| v.to_bits()).collect(),
+            coarse_legal: c.coarse_legal().iter().map(|v| v.to_bits()).collect(),
+            coarse_h: c.coarse_h,
+            coarse_w: c.coarse_w,
+        }
+    }
+
+    fn direct_compact(items: &[PreparedObs]) -> Obs {
+        let refs: Vec<&PreparedObs> = items.iter().collect();
+        PolicyNet::compact_observation(&build_obs(&refs, Device::Cpu, false, false))
+    }
+
+    #[test]
+    fn pooled_compact_payload_is_bit_exact_to_legacy_slices() {
+        let mut items = vec![
+            tiny_prepared_obs(51, 57),
+            tiny_prepared_obs(56, 60),
+            tiny_prepared_obs(53, 55),
+        ];
+        for (bi, item) in items.iter_mut().enumerate() {
+            for (i, value) in item.grid.as_mut().unwrap().iter_mut().enumerate() {
+                *value = ((i * 31 + bi * 17) % 509) as f32 / 43.0;
+            }
+            for (i, value) in item.legal_tile.iter_mut().enumerate() {
+                *value = ((i + 2 * bi) % 5 != 0) as u8 as f32;
+            }
+        }
+        let direct = direct_compact(&items);
+        let legacy = legacy_compact_payloads(&direct);
+        let arena = Arc::new(CompactHostArena::default());
+        store_compact_host(&mut items, &direct, &arena).unwrap();
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| stored_payload(item.compact.as_ref().unwrap()))
+                .collect::<Vec<_>>(),
+            legacy
+        );
+    }
+
+    #[test]
+    fn compact_host_arena_reuses_batch_allocations_after_last_snapshot() {
+        let arena = Arc::new(CompactHostArena::default());
+        let mut first = vec![tiny_prepared_obs(53, 59), tiny_prepared_obs(53, 59)];
+        let direct = direct_compact(&first);
+        store_compact_host(&mut first, &direct, &arena).unwrap();
+        let compact = first[0].compact.as_ref().unwrap();
+        let pointers = (compact.grid_storage_ptr(), compact.mask_storage_ptr());
+        let capacities = compact.storage_capacities();
+        assert_eq!(arena.free_len(), 0, "live snapshots must retain payload");
+
+        for item in &mut first {
+            item.compact = None;
+        }
+        assert_eq!(
+            arena.free_len(),
+            1,
+            "last snapshot returns one batch payload"
+        );
+
+        let mut second = vec![tiny_prepared_obs(53, 59), tiny_prepared_obs(53, 59)];
+        let direct = direct_compact(&second);
+        store_compact_host(&mut second, &direct, &arena).unwrap();
+        let compact = second[0].compact.as_ref().unwrap();
+        assert_eq!(
+            (compact.grid_storage_ptr(), compact.mask_storage_ptr()),
+            pointers,
+            "same-shape rollover must reuse both backing allocations"
+        );
+        assert_eq!(compact.storage_capacities(), capacities);
+        assert_eq!(arena.free_len(), 0);
+    }
+
+    #[test]
+    fn mem_replace_rollover_keeps_old_step_snapshot_immutable() {
+        let arena = Arc::new(CompactHostArena::default());
+        let mut current_batch = vec![tiny_prepared_obs(53, 59)];
+        let direct = direct_compact(&current_batch);
+        store_compact_host(&mut current_batch, &direct, &arena).unwrap();
+        let mut cur_obs = current_batch.pop().unwrap();
+        let old_ptr = cur_obs.compact.as_ref().unwrap().grid_storage_ptr();
+        let old_bytes = compact_payload_bytes(cur_obs.compact.as_ref().unwrap());
+
+        // This is the collection boundary used by recv_group: the old value
+        // becomes Step.obs and the independently allocated worker result
+        // becomes the actor's next current observation.
+        // A different native shape also covers the auto-reset case where the
+        // worker starts the next episode on another curriculum map.
+        let next_obs = tiny_prepared_obs(55, 57);
+        let step_obs = std::mem::replace(&mut cur_obs, next_obs);
+        cur_obs.grid.as_mut().unwrap().fill(19.25);
+        cur_obs.legal_tile.fill(0.0);
+        let direct = direct_compact(std::slice::from_ref(&cur_obs));
+        store_compact_host(std::slice::from_mut(&mut cur_obs), &direct, &arena).unwrap();
+
+        assert_ne!(
+            cur_obs.compact.as_ref().unwrap().grid_storage_ptr(),
+            old_ptr,
+            "live Step storage must never be leased to next cur_obs"
+        );
+        assert_eq!(
+            compact_payload_bytes(step_obs.compact.as_ref().unwrap()),
+            old_bytes,
+            "next observation encoding mutated the prior Step snapshot"
+        );
+        assert_eq!(arena.free_len(), 0);
+        drop(step_obs);
+        assert_eq!(
+            arena.free_len(),
+            1,
+            "old Step returns only after ownership ends"
+        );
     }
 
     /// Forces equal-shaped data through the general mixed machinery and
@@ -1836,8 +2028,18 @@ mod tests {
 
         let mut uniform_items = items.clone();
         let mut mixed_items = items;
-        store_uniform_compact_host(&mut uniform_items, &uniform_compact).unwrap();
-        store_compact_host(&mut mixed_items, &mixed_compact).unwrap();
+        store_compact_host(
+            &mut uniform_items,
+            &uniform_compact,
+            &Arc::new(CompactHostArena::default()),
+        )
+        .unwrap();
+        store_compact_host(
+            &mut mixed_items,
+            &mixed_compact,
+            &Arc::new(CompactHostArena::default()),
+        )
+        .unwrap();
         for i in 0..b {
             assert_eq!(
                 compact_payload_bytes(uniform_items[i].compact.as_ref().unwrap()),
