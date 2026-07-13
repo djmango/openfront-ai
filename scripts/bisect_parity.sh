@@ -80,6 +80,11 @@ if (( FINE_MAX > MAX_TICKS )); then FINE_MAX=$MAX_TICKS; fi
 
 echo "[bisect_parity] coarse divergence near tick $DIVERGENT_TICK - fine pass up to tick $FINE_MAX (every=1)" >&2
 
+# Only retain snapshots near the divergence window so large bot-count games
+# do not blow past V8's JSON.stringify string limit.
+FINE_FROM=$((DIVERGENT_TICK > COARSE_EVERY ? DIVERGENT_TICK - COARSE_EVERY : 0))
+export OF_DUMP_TICKS_FROM="$FINE_FROM"
+
 cargo run --quiet --release --manifest-path "$ROOT/rust/Cargo.toml" -p openfront-engine --bin tick_dump -- \
   --repo "$ROOT" --record "$RECORD" --every 1 --max-ticks "$FINE_MAX" \
   --out "$TMP.native.fine.json" >&2
