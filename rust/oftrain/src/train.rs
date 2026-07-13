@@ -771,22 +771,107 @@ fn choice_from_act_values(
     (choice, scalars)
 }
 
-/// Encode + act for a contiguous worker slice `[start, end)`. Returns
-/// per-env choice scalars / logp / value aligned to the slice (length
-/// `end - start`).
-fn act_group(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ActorShape {
+    hr: usize,
+    wr: usize,
+    gh: usize,
+    gw: usize,
+    cgh: usize,
+    cgw: usize,
+}
+
+impl ActorShape {
+    fn of(obs: &PreparedObs) -> Self {
+        Self {
+            hr: obs.ae_raw.hr,
+            wr: obs.ae_raw.wr,
+            gh: obs.gh,
+            gw: obs.gw,
+            // Fresh actor observations have cgh/cgw == 0 until AE encode.
+            // The compact policy's native coarse shape is nevertheless
+            // determined exactly by the fine grid.
+            cgh: obs.gh.div_ceil(2),
+            cgw: obs.gw.div_ceil(2),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ActorShapeBuckets {
+    /// New bucket-major position -> original worker-slice position.
+    order: Vec<usize>,
+    ranges: Vec<std::ops::Range<usize>>,
+}
+
+/// Stable exact-shape partition. Bucket order is first occurrence order and
+/// each bucket retains worker order, making scheduling deterministic even for
+/// interleaved map shapes.
+fn actor_shape_buckets(items: &[PreparedObs]) -> ActorShapeBuckets {
+    let mut grouped: Vec<(ActorShape, Vec<usize>)> = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let shape = ActorShape::of(item);
+        if let Some((_, indices)) = grouped.iter_mut().find(|(key, _)| *key == shape) {
+            indices.push(index);
+        } else {
+            grouped.push((shape, vec![index]));
+        }
+    }
+
+    let mut order = Vec::with_capacity(items.len());
+    let mut ranges = Vec::with_capacity(grouped.len());
+    for (_, indices) in grouped {
+        let begin = order.len();
+        order.extend(indices);
+        ranges.push(begin..order.len());
+    }
+    ActorShapeBuckets { order, ranges }
+}
+
+/// Reorders without cloning the large host observation payloads.
+/// `order[new_position]` names the old position to place there.
+fn permute_slice<T>(items: &mut [T], order: &[usize]) {
+    debug_assert_eq!(items.len(), order.len());
+    let mut old_at_position: Vec<usize> = (0..items.len()).collect();
+    let mut position_of_old: Vec<usize> = (0..items.len()).collect();
+    for new_position in 0..items.len() {
+        let wanted_old = order[new_position];
+        let current_position = position_of_old[wanted_old];
+        if current_position == new_position {
+            continue;
+        }
+        let displaced_old = old_at_position[new_position];
+        items.swap(new_position, current_position);
+        old_at_position.swap(new_position, current_position);
+        position_of_old[wanted_old] = new_position;
+        position_of_old[displaced_old] = current_position;
+    }
+}
+
+fn inverse_permutation(order: &[usize]) -> Vec<usize> {
+    let mut inverse = vec![0; order.len()];
+    for (new_position, &old_position) in order.iter().enumerate() {
+        inverse[old_position] = new_position;
+    }
+    inverse
+}
+
+struct ActorRow {
+    choice: Choice,
+    scalars: ChoiceScalars,
+    logp: f32,
+    value: f32,
+}
+
+fn act_contiguous_obs(
     actor: &mut ActorShard,
     cfg: &Config,
     start: usize,
     end: usize,
-) -> Result<(Vec<ChoiceScalars>, Vec<f32>, Vec<f32>)> {
+) -> Result<PackedActHost> {
     let n = end - start;
-    if n == 0 {
-        return Ok((Vec::new(), Vec::new(), Vec::new()));
-    }
-    // `obs_t` and all shared AE input/output temporaries are created and
-    // consumed on this actor thread's CUDA stream. In compact mode the only
-    // rollout representation retained after this call is host-owned CompactGrid.
+    // Every device tensor is created, consumed, and synchronously copied to
+    // PackedActHost on this persistent actor thread.
     let obs_t = if let Some(ae) = actor.ae.as_ref() {
         if cfg.compact_rollout && cfg.foveate {
             batch::build_compact_rollout_obs(
@@ -813,29 +898,113 @@ fn act_group(
     };
     let (a, player, tile, build, nuke, qty, logp, value) =
         tch::no_grad(|| actor.policy.act(&obs_t, false));
+    transfer_act_results(&a, &player, &tile, &build, &nuke, &qty, &logp, &value, n)
+}
 
-    let packed = transfer_act_results(&a, &player, &tile, &build, &nuke, &qty, &logp, &value, n)?;
+/// Encode + act for a contiguous worker slice `[start, end)`. Returns
+/// per-env choice scalars / logp / value aligned to the slice (length
+/// `end - start`).
+fn act_group(
+    actor: &mut ActorShard,
+    cfg: &Config,
+    start: usize,
+    end: usize,
+) -> Result<(Vec<ChoiceScalars>, Vec<f32>, Vec<f32>)> {
+    let n = end - start;
+    if n == 0 {
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
+    }
+
+    // Bucketing is specific to the persistent AE + compact actor path. Any
+    // pre-encoded/compact extras are deliberately left on the established
+    // mixed builder, as are legacy/no-AE and non-foveated configurations.
+    let can_bucket = actor.ae.is_some()
+        && cfg.compact_rollout
+        && cfg.foveate
+        && actor.cur_obs[start..end]
+            .iter()
+            .all(|obs| obs.compact.is_none() && obs.grid.is_none() && obs.grid_coarse.is_none());
+    let buckets = actor_shape_buckets(&actor.cur_obs[start..end]);
+    let use_buckets = can_bucket && buckets.ranges.len() > 1;
+    let mut rows: Vec<Option<ActorRow>> = (0..n).map(|_| None).collect();
+
+    if use_buckets {
+        // Stochastic parity: each categorical remains an independent draw
+        // from exactly the same per-observation logits, and each beta remains
+        // an independent draw from the same (a,b), so regrouping has exact
+        // joint-distribution parity. It cannot preserve seeded samples
+        // bit-for-bit: libtorch multinomial consumes its thread-global stream
+        // per call, while sample_beta_host intentionally seeds from entropy.
+        // First-occurrence bucket order plus stable membership makes the call
+        // schedule deterministic without claiming nonexistent sample identity.
+        let inverse = inverse_permutation(&buckets.order);
+        permute_slice(&mut actor.cur_obs[start..end], &buckets.order);
+        // Restore worker observation order even when encode/inference returns
+        // an error; a successful call scatters only CPU-owned scalar rows.
+        let result = (|| -> Result<()> {
+            for range in &buckets.ranges {
+                let packed = act_contiguous_obs(
+                    actor,
+                    cfg,
+                    start + range.start,
+                    start + range.end,
+                )?;
+                for bucket_row in 0..range.len() {
+                    let original = buckets.order[range.start + bucket_row];
+                    let (discrete, floats) = packed.row(bucket_row)?;
+                    let (choice, scalars) = choice_from_act_values(
+                        discrete[0],
+                        discrete[1],
+                        discrete[2],
+                        discrete[3],
+                        discrete[4],
+                        floats[0],
+                    );
+                    rows[original] = Some(ActorRow {
+                        choice,
+                        scalars,
+                        logp: floats[1],
+                        value: floats[2],
+                    });
+                }
+            }
+            Ok(())
+        })();
+        permute_slice(&mut actor.cur_obs[start..end], &inverse);
+        result?;
+    } else {
+        let packed = act_contiguous_obs(actor, cfg, start, end)?;
+        for (i, row) in rows.iter_mut().enumerate() {
+            let (discrete, floats) = packed.row(i)?;
+            let (choice, scalars) = choice_from_act_values(
+                discrete[0],
+                discrete[1],
+                discrete[2],
+                discrete[3],
+                discrete[4],
+                floats[0],
+            );
+            *row = Some(ActorRow {
+                choice,
+                scalars,
+                logp: floats[1],
+                value: floats[2],
+            });
+        }
+    }
 
     let mut scalars = Vec::with_capacity(n);
     let mut logp_v = Vec::with_capacity(n);
     let mut value_v = Vec::with_capacity(n);
-    for i in 0..n {
-        let (discrete, floats) = packed.row(i)?;
-        let (choice, sc) = choice_from_act_values(
-            discrete[0],
-            discrete[1],
-            discrete[2],
-            discrete[3],
-            discrete[4],
-            floats[0],
-        );
+    for (i, row) in rows.into_iter().enumerate() {
+        let row = row.ok_or_else(|| anyhow!("missing actor result for env {}", start + i))?;
         actor.workers[start + i]
             .choice_tx
-            .send(choice)
+            .send(row.choice)
             .map_err(|_| anyhow!("env {} choice channel closed", start + i))?;
-        scalars.push(sc);
-        logp_v.push(floats[1]);
-        value_v.push(floats[2]);
+        scalars.push(row.scalars);
+        logp_v.push(row.logp);
+        value_v.push(row.value);
     }
     Ok((scalars, logp_v, value_v))
 }
@@ -843,6 +1012,7 @@ fn act_group(
 #[cfg(test)]
 mod packed_act_tests {
     use super::*;
+    use std::sync::Arc;
 
     fn choice_bits(
         c: &Choice,
@@ -873,6 +1043,211 @@ mod packed_act_tests {
             c.nuke_type,
             c.quantity_frac.to_bits(),
         )
+    }
+
+    fn shaped_obs(id: usize, gh: usize, gw: usize) -> PreparedObs {
+        let (hr, wr) = (gh * 8, gw * 8);
+        let plane = gh * gw;
+        let mut grid = vec![0.0; policy::C_GRID as usize * plane];
+        for (i, value) in grid.iter_mut().enumerate() {
+            *value = ((i * 13 + id * 17) % 97) as f32 / 97.0;
+        }
+        PreparedObs {
+            compact: None,
+            grid: Some(grid),
+            grid_coarse: None,
+            cgh: 0,
+            cgw: 0,
+            ae_raw: crate::ae::AeRaw {
+                owners: vec![0; hr * wr],
+                static_terrain: crate::ae::StaticTerrain {
+                    key: crate::ae::TerrainCacheKey {
+                        env_id: id as u64,
+                        episode: 0,
+                        static_id: id as u64,
+                        hr,
+                        wr,
+                    },
+                    map: Arc::from(format!("shape-{gh}x{gw}")),
+                    land_mag: vec![0.0; 2 * hr * wr].into(),
+                },
+                fallout: crate::ae::pack_fallout(&vec![0; hr * wr], hr, wr),
+                stat: vec![0.0; 6 * plane],
+                hr,
+                wr,
+            },
+            ego: vec![0.0; 3 * plane],
+            db: vec![0.0; plane],
+            transient: vec![0.0; ofcore::feat::N_TRANSIENT * plane],
+            legal_tile: vec![1.0; plane],
+            gh,
+            gw,
+            players: (0..ofcore::feat::MAX_SLOTS * ofcore::feat::P_FEAT)
+                .map(|i| ((i * 7 + id * 11) % 53) as f32 / 53.0)
+                .collect(),
+            pmask: [1.0; ofcore::feat::MAX_SLOTS],
+            scalars: {
+                let mut values = [0.1; ofcore::feat::N_SCALARS];
+                values[0] = id as f32;
+                values
+            },
+            me_slot: 0,
+            legal_actions: [1.0; ofcore::feat::N_ACTIONS],
+            legal_ptarget: vec![
+                1.0;
+                ofcore::feat::N_ACTIONS * ofcore::feat::MAX_SLOTS
+            ],
+            legal_build: [1.0; ofcore::feat::N_BUILD],
+            legal_nuke: [1.0; ofcore::feat::N_NUKE],
+            local: vec![0.1; 5 * policy::LOCAL as usize * policy::LOCAL as usize],
+        }
+    }
+
+    #[test]
+    fn exact_shape_buckets_are_stable_and_permutation_restores_worker_order() {
+        let mut obs = vec![
+            shaped_obs(0, 6, 8),
+            shaped_obs(1, 8, 6),
+            shaped_obs(2, 6, 8),
+            shaped_obs(3, 8, 6),
+            shaped_obs(4, 6, 8),
+        ];
+        let buckets = actor_shape_buckets(&obs);
+        assert_eq!(buckets.order, vec![0, 2, 4, 1, 3]);
+        assert_eq!(buckets.ranges, vec![0..3, 3..5]);
+
+        permute_slice(&mut obs, &buckets.order);
+        assert_eq!(
+            obs.iter().map(|item| item.scalars[0] as usize).collect::<Vec<_>>(),
+            buckets.order
+        );
+        permute_slice(&mut obs, &inverse_permutation(&buckets.order));
+        assert_eq!(
+            obs.iter().map(|item| item.scalars[0] as usize).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4]
+        );
+    }
+
+    fn policy_rows(
+        policy: &PolicyNet,
+        items: &[PreparedObs],
+        greedy: bool,
+    ) -> Vec<(Vec<i64>, Vec<f32>)> {
+        let buckets = actor_shape_buckets(items);
+        let mut rows: Vec<Option<(Vec<i64>, Vec<f32>)>> =
+            (0..items.len()).map(|_| None).collect();
+        for range in &buckets.ranges {
+            let refs: Vec<&PreparedObs> = buckets.order[range.clone()]
+                .iter()
+                .map(|&i| &items[i])
+                .collect();
+            let full = batch::build_obs(&refs, Device::Cpu, false, false);
+            let compact = PolicyNet::compact_observation(&full);
+            let (a, p, t, b, n, q, lp, v) = tch::no_grad(|| policy.act(&compact, greedy));
+            let packed =
+                transfer_act_results(&a, &p, &t, &b, &n, &q, &lp, &v, range.len()).unwrap();
+            for bucket_row in 0..range.len() {
+                let original = buckets.order[range.start + bucket_row];
+                let (discrete, floats) = packed.row(bucket_row).unwrap();
+                rows[original] = Some((discrete.to_vec(), floats.to_vec()));
+            }
+        }
+        rows.into_iter().map(Option::unwrap).collect()
+    }
+
+    fn initialize_test_policy(vs: &nn::VarStore) {
+        for (name, mut tensor) in vs.variables() {
+            let salt = name.bytes().map(usize::from).sum::<usize>();
+            let values: Vec<f32> = (0..tensor.numel())
+                .map(|i| ((i * 37 + salt * 11) % 101) as f32 / 500.0 - 0.1)
+                .collect();
+            let values = Tensor::from_slice(&values).view(tensor.size().as_slice());
+            tch::no_grad(|| tensor.copy_(&values));
+        }
+    }
+
+    #[test]
+    fn interleaved_exact_shape_greedy_outputs_scatter_like_singletons() {
+        let vs = nn::VarStore::new(Device::Cpu);
+        let policy = PolicyNet::new(&vs.root(), false, true, 8, 1);
+        initialize_test_policy(&vs);
+        let items = vec![
+            shaped_obs(0, 6, 8),
+            shaped_obs(1, 8, 6),
+            shaped_obs(2, 6, 8),
+            shaped_obs(3, 8, 6),
+            shaped_obs(4, 6, 8),
+        ];
+        let bucketed = policy_rows(&policy, &items, true);
+        for (i, item) in items.iter().enumerate() {
+            let singleton = policy_rows(&policy, std::slice::from_ref(item), true)
+                .pop()
+                .unwrap();
+            let normalized = |row: &(Vec<i64>, Vec<f32>)| {
+                choice_from_act_values(
+                    row.0[0], row.0[1], row.0[2], row.0[3], row.0[4], row.1[0],
+                )
+                .1
+            };
+            let actual_choice = normalized(&bucketed[i]);
+            let expected_choice = normalized(&singleton);
+            assert_eq!(
+                (
+                    actual_choice.action,
+                    actual_choice.player_slot,
+                    actual_choice.tile_region,
+                    actual_choice.build_type,
+                    actual_choice.nuke_type,
+                ),
+                (
+                    expected_choice.action,
+                    expected_choice.player_slot,
+                    expected_choice.tile_region,
+                    expected_choice.build_type,
+                    expected_choice.nuke_type,
+                ),
+                "semantic discrete choice row {i}"
+            );
+            assert!(
+                (actual_choice.quantity_frac - expected_choice.quantity_frac).abs() <= 1e-6,
+                "semantic quantity row {i}"
+            );
+            // Raw unused heads may choose different members of an exact tie;
+            // they are deliberately not part of ChoiceScalars or logp.
+            for (field, (&actual, &expected)) in bucketed[i].1[1..]
+                .iter()
+                .zip(&singleton.1[1..])
+                .enumerate()
+            {
+                assert!(
+                    (actual - expected).abs() <= 1e-5,
+                    "logp/value field {field} row {i}: {actual} != {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn interleaved_exact_shape_stochastic_samples_remain_valid() {
+        let vs = nn::VarStore::new(Device::Cpu);
+        let policy = PolicyNet::new(&vs.root(), false, true, 8, 1);
+        initialize_test_policy(&vs);
+        let items = vec![
+            shaped_obs(0, 6, 8),
+            shaped_obs(1, 8, 6),
+            shaped_obs(2, 6, 8),
+            shaped_obs(3, 8, 6),
+        ];
+        let sampled = policy_rows(&policy, &items, false);
+        for (i, (discrete, floats)) in sampled.iter().enumerate() {
+            assert!((0..ofcore::feat::N_ACTIONS as i64).contains(&discrete[0]));
+            assert!((0..ofcore::feat::MAX_SLOTS as i64).contains(&discrete[1]));
+            assert!((0..ofcore::feat::N_BUILD as i64).contains(&discrete[3]));
+            assert!((0..ofcore::feat::N_NUKE as i64).contains(&discrete[4]));
+            assert!(discrete[2] >= 0, "negative tile row {i}");
+            assert!((1e-4..=1.0 - 1e-4).contains(&floats[0]));
+            assert!(floats[1].is_finite() && floats[2].is_finite());
+        }
     }
 
     #[test]
@@ -1103,33 +1478,71 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config, policy_version: u64) ->
     }
 
     let bootstrap_v: Vec<f32> = {
-        let obs_t = if let Some(ae) = actor.ae.as_ref() {
-            let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
-            if cfg.compact_rollout && cfg.foveate {
-                batch::build_compact_obs_with_ae(
+        let buckets = actor_shape_buckets(&actor.cur_obs);
+        let can_bucket = actor.ae.is_some()
+            && cfg.compact_rollout
+            && cfg.foveate
+            && buckets.ranges.len() > 1
+            && actor
+                .cur_obs
+                .iter()
+                .all(|obs| obs.compact.is_none() && obs.grid.is_none() && obs.grid_coarse.is_none());
+        if can_bucket {
+            let ae = actor.ae.as_ref().expect("checked above");
+            let mut values = vec![0.0; n];
+            for range in &buckets.ranges {
+                let obs_refs: Vec<&PreparedObs> = buckets.order[range.clone()]
+                    .iter()
+                    .map(|&i| &actor.cur_obs[i])
+                    .collect();
+                let obs_t = batch::build_compact_obs_with_ae(
                     &obs_refs,
                     actor.device,
                     cfg.pinned_h2d,
                     cfg.fp16_rollout,
                     ae,
                     &mut actor.terrain_cache,
-                )?
-            } else {
-                batch::build_obs_with_ae_cached(
-                    &obs_refs,
-                    actor.device,
-                    cfg.pinned_h2d,
-                    cfg.fp16_rollout,
-                    ae,
-                    &mut actor.terrain_cache,
-                )?
+                )?;
+                let bucket_values: Vec<f32> =
+                    (&tch::no_grad(|| actor.policy.value_only(&obs_t))).try_into()?;
+                anyhow::ensure!(
+                    bucket_values.len() == range.len(),
+                    "bootstrap bucket width mismatch"
+                );
+                for (bucket_row, value) in bucket_values.into_iter().enumerate() {
+                    values[buckets.order[range.start + bucket_row]] = value;
+                }
             }
+            values
         } else {
-            let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
-            batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d, cfg.fp16_rollout)
-        };
-        let v = tch::no_grad(|| actor.policy.value_only(&obs_t));
-        (&v).try_into()?
+            let obs_t = if let Some(ae) = actor.ae.as_ref() {
+                let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
+                if cfg.compact_rollout && cfg.foveate {
+                    batch::build_compact_obs_with_ae(
+                        &obs_refs,
+                        actor.device,
+                        cfg.pinned_h2d,
+                        cfg.fp16_rollout,
+                        ae,
+                        &mut actor.terrain_cache,
+                    )?
+                } else {
+                    batch::build_obs_with_ae_cached(
+                        &obs_refs,
+                        actor.device,
+                        cfg.pinned_h2d,
+                        cfg.fp16_rollout,
+                        ae,
+                        &mut actor.terrain_cache,
+                    )?
+                }
+            } else {
+                let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
+                batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d, cfg.fp16_rollout)
+            };
+            let v = tch::no_grad(|| actor.policy.value_only(&obs_t));
+            (&v).try_into()?
+        }
     };
 
     // Libtorch uses thread-local CUDA streams. Finish actor work before
