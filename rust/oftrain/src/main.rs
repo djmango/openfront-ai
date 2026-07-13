@@ -205,6 +205,19 @@ struct Args {
     #[arg(long, default_value_t = false)]
     persistent_actors: bool,
 
+    /// Let persistent actors batch whichever envs are ready instead of
+    /// waiting for fixed worker halves. Requires --persistent-actors.
+    #[arg(long, default_value_t = false)]
+    work_conserving_actors: bool,
+
+    /// Maximum ready envs in one work-conserving actor inference batch.
+    #[arg(long, default_value_t = 32)]
+    actor_max_batch: usize,
+
+    /// Maximum time the oldest exact-shape ready bucket waits for a batch.
+    #[arg(long, default_value_t = 2)]
+    actor_max_wait_ms: u64,
+
     /// "cpu", "cuda", or "cuda:N".
     #[arg(long, default_value = "cpu")]
     device: String,
@@ -465,6 +478,9 @@ fn main() -> anyhow::Result<()> {
         compact_rollout: args.compact_rollout,
         pipeline_groups: args.pipeline_groups,
         persistent_actors: args.persistent_actors,
+        work_conserving_actors: args.work_conserving_actors,
+        actor_max_batch: args.actor_max_batch,
+        actor_max_wait: std::time::Duration::from_millis(args.actor_max_wait_ms),
         device,
         engine: args.engine,
         node_fraction: args.node_fraction.clamp(0.0, 1.0),

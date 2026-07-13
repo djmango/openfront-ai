@@ -49,6 +49,12 @@
 //! while g0's engines step → recv(g0) → … . With one env the second group
 //! is empty and the path degenerates to the classic lockstep loop. Default
 //! on.
+//! Gated persistent runs may instead use `--work-conserving-actors`: each
+//! worker publishes its CPU `PreparedObs` as soon as stepping finishes, and
+//! the actor drains a stable exact-shape ready queue into microbatches bounded
+//! by `--actor-max-batch` and `--actor-max-wait-ms`. Rollout slots remain
+//! T-major/N-minor regardless of completion order. The fixed-half collector is
+//! retained as the default and as the non-persistent fallback.
 //!
 //! Multi-GPU (see `LearnerShard`/`ActorShard`): one `PolicyNet`/`VarStore`
 //! replica per device, each owning a disjoint slice of envs, in a single
@@ -72,6 +78,7 @@
 //! - **fp16 host storage**: `--compact-rollout` stores foveated grids as
 //!   host fp16. The legacy path stays f32; `--fp16-rollout` only changes
 //!   its H2D transfer dtype.
+use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -289,6 +296,13 @@ pub struct Config {
     /// CPU-only f32 snapshots. Disabled by default; autoscaling selects the
     /// legacy path, and multi-GPU currently retains the legacy learner implementation.
     pub persistent_actors: bool,
+    /// Opt-in ready-queue scheduler for persistent actors. The default-off
+    /// fallback remains the fixed two-half collector.
+    pub work_conserving_actors: bool,
+    /// Maximum exact-shape actor inference microbatch.
+    pub actor_max_batch: usize,
+    /// Maximum age of the oldest item before a partial microbatch dispatches.
+    pub actor_max_wait: Duration,
     pub device: Device,
     /// Which simulation backend envs run against (Node bridge or the
     /// in-process native engine) for the `1.0 - node_fraction` majority of
@@ -466,8 +480,17 @@ impl Config {
 struct Worker {
     choice_tx: Sender<Choice>,
     stage_tx: Sender<usize>,
-    obs_rx: Receiver<Result<(PreparedObs, f64, bool, Option<EpisodeInfo>), String>>,
+    /// Legacy fixed-group collectors receive directly from each worker.
+    /// Ready-queue persistent actors instead use ActorShard::ready_rx.
+    obs_rx: Option<Receiver<EnvStepResult>>,
     handle: JoinHandle<()>,
+}
+
+type EnvStepResult = Result<(PreparedObs, f64, bool, Option<EpisodeInfo>), String>;
+
+struct ReadyEnv {
+    env: usize,
+    result: EnvStepResult,
 }
 
 /// Which engine worker `idx` (a stable, global env index - see both call
@@ -501,6 +524,17 @@ fn spawn_worker(
     max_ticks: i64,
     engine: EngineKind,
 ) -> Result<(Worker, PreparedObs)> {
+    spawn_worker_routed(idx, stage, max_ticks, engine, None)
+}
+
+fn spawn_worker_routed(
+    idx: usize,
+    stage: usize,
+    max_ticks: i64,
+    engine: EngineKind,
+    ready_route: Option<(usize, Sender<ReadyEnv>)>,
+) -> Result<(Worker, PreparedObs)> {
+    let routed = ready_route.is_some();
     let (choice_tx, choice_rx) = mpsc::channel::<Choice>();
     let (stage_tx, stage_rx) = mpsc::channel::<usize>();
     let (obs_tx, obs_rx) = mpsc::channel();
@@ -532,7 +566,16 @@ fn spawn_worker(
                     w.set_stage(s);
                 }
                 let result = w.step(&choice).map_err(|e| format!("{e:#}"));
-                if obs_tx.send(result).is_err() {
+                let sent = match &ready_route {
+                    Some((env, ready_tx)) => ready_tx
+                        .send(ReadyEnv {
+                            env: *env,
+                            result,
+                        })
+                        .is_ok(),
+                    None => obs_tx.send(result).is_ok(),
+                };
+                if !sent {
                     break;
                 }
             }
@@ -546,7 +589,7 @@ fn spawn_worker(
         Worker {
             choice_tx,
             stage_tx,
-            obs_rx,
+            obs_rx: (!routed).then_some(obs_rx),
             handle,
         },
         first,
@@ -656,6 +699,8 @@ struct ActorShard {
     device: Device,
     workers: Vec<Worker>,
     cur_obs: Vec<PreparedObs>,
+    /// One CPU-only completion queue shared by gated persistent env workers.
+    ready_rx: Option<Receiver<ReadyEnv>>,
     /// CPU-only compact payloads are recycled after the learner drops the
     /// final immutable Step view. CUDA tensors never enter this arena.
     compact_host_arena: Arc<crate::vecenv::CompactHostArena>,
@@ -808,6 +853,138 @@ struct ActorShapeBuckets {
     ranges: Vec<std::ops::Range<usize>>,
 }
 
+#[derive(Debug)]
+struct ReadyItem {
+    env: usize,
+    ready_at: Duration,
+}
+
+#[derive(Debug)]
+struct ReadyShapeBucket {
+    shape: ActorShape,
+    items: VecDeque<ReadyItem>,
+}
+
+/// Stable exact-shape ready queue. Shape buckets retain first-occurrence
+/// order, while each bucket is FIFO by publication order.
+#[derive(Debug)]
+struct ReadyScheduler {
+    buckets: Vec<ReadyShapeBucket>,
+    max_batch: usize,
+    max_wait: Duration,
+}
+
+impl ReadyScheduler {
+    fn new(max_batch: usize, max_wait: Duration) -> Self {
+        Self {
+            buckets: Vec::new(),
+            max_batch: max_batch.max(1),
+            max_wait,
+        }
+    }
+
+    fn push(&mut self, env: usize, shape: ActorShape, ready_at: Duration) {
+        if let Some(bucket) = self.buckets.iter_mut().find(|bucket| bucket.shape == shape) {
+            bucket.items.push_back(ReadyItem { env, ready_at });
+        } else {
+            self.buckets.push(ReadyShapeBucket {
+                shape,
+                items: VecDeque::from([ReadyItem { env, ready_at }]),
+            });
+        }
+    }
+
+    fn next_deadline(&self) -> Option<Duration> {
+        self.buckets
+            .iter()
+            .filter_map(|bucket| bucket.items.front())
+            .map(|item| item.ready_at.saturating_add(self.max_wait))
+            .min()
+    }
+
+    fn take_batch(&mut self, now: Duration) -> Option<Vec<usize>> {
+        let selected = self
+            .buckets
+            .iter()
+            .enumerate()
+            .filter_map(|(index, bucket)| {
+                let oldest = bucket.items.front()?;
+                let eligible = bucket.items.len() >= self.max_batch
+                    || now.saturating_sub(oldest.ready_at) >= self.max_wait;
+                eligible.then_some((index, oldest.ready_at))
+            })
+            .min_by_key(|&(index, oldest)| (oldest, index))
+            .map(|(index, _)| index)?;
+        let bucket = &mut self.buckets[selected];
+        let len = bucket.items.len().min(self.max_batch);
+        Some(
+            bucket
+                .items
+                .drain(..len)
+                .map(|item| item.env)
+                .collect(),
+        )
+    }
+
+    fn is_empty(&self) -> bool {
+        self.buckets.iter().all(|bucket| bucket.items.is_empty())
+    }
+}
+
+/// Fixed `(T, N)` storage filled in arbitrary completion order.
+struct RolloutSlots<T> {
+    rows: Vec<Vec<Option<T>>>,
+    next_t: Vec<usize>,
+}
+
+impl<T> RolloutSlots<T> {
+    fn new(t: usize, n: usize) -> Self {
+        Self {
+            rows: (0..t)
+                .map(|_| (0..n).map(|_| None).collect())
+                .collect(),
+            next_t: vec![0; n],
+        }
+    }
+
+    fn insert(&mut self, t: usize, env: usize, value: T) -> Result<()> {
+        anyhow::ensure!(env < self.next_t.len(), "rollout env {env} out of range");
+        anyhow::ensure!(
+            t == self.next_t[env],
+            "rollout env {env} completed t={t}, expected t={}",
+            self.next_t[env]
+        );
+        let slot = self
+            .rows
+            .get_mut(t)
+            .and_then(|row| row.get_mut(env))
+            .ok_or_else(|| anyhow!("rollout slot ({t}, {env}) out of range"))?;
+        anyhow::ensure!(slot.is_none(), "duplicate rollout slot ({t}, {env})");
+        *slot = Some(value);
+        self.next_t[env] += 1;
+        Ok(())
+    }
+
+    fn next_t(&self, env: usize) -> usize {
+        self.next_t[env]
+    }
+
+    fn finish(self) -> Result<Vec<Vec<T>>> {
+        self.rows
+            .into_iter()
+            .enumerate()
+            .map(|(t, row)| {
+                row.into_iter()
+                    .enumerate()
+                    .map(|(env, slot)| {
+                        slot.ok_or_else(|| anyhow!("missing rollout slot ({t}, {env})"))
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+}
+
 /// Stable exact-shape partition. Bucket order is first occurrence order and
 /// each bucket retains worker order, making scheduling deterministic even for
 /// interleaved map shapes.
@@ -904,6 +1081,62 @@ fn act_contiguous_obs(
     let (a, player, tile, build, nuke, qty, logp, value) =
         tch::no_grad(|| actor.policy.act(&obs_t, false));
     transfer_act_results(&a, &player, &tile, &build, &nuke, &qty, &logp, &value, n)
+}
+
+/// Act on arbitrary ready envs without cloning their large host payloads.
+/// The observations are temporarily packed into a contiguous prefix, restored
+/// even on inference failure, and only CPU scalar choices leave this function.
+fn act_ready_batch(
+    actor: &mut ActorShard,
+    cfg: &Config,
+    envs: &[usize],
+) -> Result<Vec<ActorRow>> {
+    anyhow::ensure!(!envs.is_empty(), "cannot act on an empty ready batch");
+    let n = actor.cur_obs.len();
+    let shape = ActorShape::of(
+        actor
+            .cur_obs
+            .get(envs[0])
+            .ok_or_else(|| anyhow!("ready env {} out of range", envs[0]))?,
+    );
+    let mut selected = vec![false; n];
+    for &env in envs {
+        anyhow::ensure!(env < n, "ready env {env} out of range");
+        anyhow::ensure!(!selected[env], "duplicate ready env {env}");
+        anyhow::ensure!(
+            ActorShape::of(&actor.cur_obs[env]) == shape,
+            "ready batch mixed exact observation shapes"
+        );
+        selected[env] = true;
+    }
+    let mut order = Vec::with_capacity(n);
+    order.extend_from_slice(envs);
+    order.extend((0..n).filter(|&env| !selected[env]));
+    let inverse = inverse_permutation(&order);
+    permute_slice(&mut actor.cur_obs, &order);
+    let packed = act_contiguous_obs(actor, cfg, 0, envs.len());
+    permute_slice(&mut actor.cur_obs, &inverse);
+    let packed = packed?;
+
+    let mut rows = Vec::with_capacity(envs.len());
+    for row in 0..envs.len() {
+        let (discrete, floats) = packed.row(row)?;
+        let (choice, scalars) = choice_from_act_values(
+            discrete[0],
+            discrete[1],
+            discrete[2],
+            discrete[3],
+            discrete[4],
+            floats[0],
+        );
+        rows.push(ActorRow {
+            choice,
+            scalars,
+            logp: floats[1],
+            value: floats[2],
+        });
+    }
+    Ok(rows)
 }
 
 /// Encode + act for a contiguous worker slice `[start, end)`. Returns
@@ -1131,6 +1364,118 @@ mod packed_act_tests {
             obs.iter().map(|item| item.scalars[0] as usize).collect::<Vec<_>>(),
             vec![0, 1, 2, 3, 4]
         );
+    }
+
+    #[test]
+    fn ready_scheduler_stable_buckets_exact_shapes_and_honors_thresholds() {
+        let shape_a = ActorShape::of(&shaped_obs(0, 6, 8));
+        let shape_b = ActorShape::of(&shaped_obs(1, 8, 6));
+        let mut ready = ReadyScheduler::new(2, Duration::from_millis(5));
+        ready.push(0, shape_a, Duration::ZERO);
+        ready.push(1, shape_b, Duration::ZERO);
+        ready.push(2, shape_a, Duration::from_millis(1));
+        ready.push(3, shape_b, Duration::from_millis(1));
+        assert_eq!(ready.take_batch(Duration::from_millis(1)), Some(vec![0, 2]));
+        assert_eq!(ready.take_batch(Duration::from_millis(1)), Some(vec![1, 3]));
+
+        ready.push(4, shape_b, Duration::from_millis(2));
+        assert_eq!(ready.take_batch(Duration::from_millis(6)), None);
+        assert_eq!(ready.next_deadline(), Some(Duration::from_millis(7)));
+        assert_eq!(ready.take_batch(Duration::from_millis(7)), Some(vec![4]));
+        assert!(ready.is_empty());
+    }
+
+    #[test]
+    fn rollout_slots_are_t_major_complete_despite_out_of_order_envs() {
+        let mut slots = RolloutSlots::new(3, 3);
+        for &(t, env) in &[
+            (0, 2),
+            (0, 0),
+            (1, 0),
+            (0, 1),
+            (1, 2),
+            (2, 2),
+            (1, 1),
+            (2, 0),
+            (2, 1),
+        ] {
+            slots.insert(t, env, (t, env)).unwrap();
+        }
+        assert_eq!(
+            slots.finish().unwrap(),
+            vec![
+                vec![(0, 0), (0, 1), (0, 2)],
+                vec![(1, 0), (1, 1), (1, 2)],
+                vec![(2, 0), (2, 1), (2, 2)],
+            ]
+        );
+    }
+
+    #[test]
+    fn staggered_mock_envs_do_not_block_fast_ready_batches() {
+        const T: usize = 3;
+        let shape = ActorShape::of(&shaped_obs(0, 6, 8));
+        let latency = [1u64, 1, 100];
+        let mut ready = ReadyScheduler::new(2, Duration::from_millis(10));
+        for env in 0..latency.len() {
+            ready.push(env, shape, Duration::ZERO);
+        }
+        let mut slots = RolloutSlots::new(T, latency.len());
+        let mut pending = vec![None; latency.len()];
+        let mut events: Vec<(u64, usize)> = Vec::new();
+        let mut dispatches: Vec<(u64, Vec<usize>)> = Vec::new();
+        let mut now = 0u64;
+        let mut completed = 0;
+
+        while completed < T * latency.len() {
+            while let Some(batch) = ready.take_batch(Duration::from_millis(now)) {
+                for &env in &batch {
+                    let t = slots.next_t(env);
+                    assert!(pending[env].replace(t).is_none());
+                    events.push((now + latency[env], env));
+                }
+                dispatches.push((now, batch));
+            }
+            if completed == T * latency.len() {
+                break;
+            }
+            let event_time = events.iter().map(|event| event.0).min();
+            let deadline = ready
+                .next_deadline()
+                .map(|deadline| deadline.as_millis() as u64);
+            now = match (event_time, deadline) {
+                (Some(event), Some(deadline)) => event.min(deadline),
+                (Some(event), None) => event,
+                (None, Some(deadline)) => deadline,
+                (None, None) => panic!("mock scheduler deadlocked"),
+            };
+            let mut arrived: Vec<usize> = events
+                .iter()
+                .filter(|event| event.0 == now)
+                .map(|event| event.1)
+                .collect();
+            events.retain(|event| event.0 != now);
+            arrived.sort_unstable();
+            for env in arrived {
+                let t = pending[env].take().unwrap();
+                slots.insert(t, env, (t, env)).unwrap();
+                completed += 1;
+                if t + 1 < T {
+                    ready.push(env, shape, Duration::from_millis(now));
+                }
+            }
+        }
+
+        assert!(
+            dispatches
+                .iter()
+                .any(|(at, batch)| *at < 100 && batch.iter().all(|&env| env != 2)),
+            "fast envs never formed another GPU batch before the slow env returned: {dispatches:?}"
+        );
+        let rows = slots.finish().unwrap();
+        for (t, row) in rows.iter().enumerate() {
+            assert_eq!(row, &vec![(t, 0), (t, 1), (t, 2)]);
+        }
     }
 
     fn policy_rows(
@@ -1396,6 +1741,8 @@ fn recv_group(
     for (j, i) in (start..end).enumerate() {
         let (next_obs, reward, done, info) = actor.workers[i]
             .obs_rx
+            .as_ref()
+            .ok_or_else(|| anyhow!("env {i} has no legacy obs receiver"))?
             .recv()
             .map_err(|_| anyhow!("env {i} obs channel closed"))?
             .map_err(|e| anyhow!("env {i}: {e}"))?;
@@ -1413,6 +1760,199 @@ fn recv_group(
         });
     }
     Ok(())
+}
+
+fn bootstrap_values(actor: &mut ActorShard, cfg: &Config) -> Result<Vec<f32>> {
+    let n = actor.cur_obs.len();
+    let buckets = actor_shape_buckets(&actor.cur_obs);
+    let can_bucket = actor.ae.is_some()
+        && cfg.compact_rollout
+        && cfg.foveate
+        && buckets.ranges.len() > 1
+        && actor
+            .cur_obs
+            .iter()
+            .all(|obs| obs.compact.is_none() && obs.grid.is_none() && obs.grid_coarse.is_none());
+    if can_bucket {
+        let ae = actor.ae.as_ref().expect("checked above");
+        let mut values = vec![0.0; n];
+        for range in &buckets.ranges {
+            let obs_refs: Vec<&PreparedObs> = buckets.order[range.clone()]
+                .iter()
+                .map(|&i| &actor.cur_obs[i])
+                .collect();
+            let obs_t = batch::build_compact_obs_with_ae(
+                &obs_refs,
+                actor.device,
+                cfg.pinned_h2d,
+                cfg.fp16_rollout,
+                ae,
+                &mut actor.terrain_cache,
+            )?;
+            let bucket_values: Vec<f32> =
+                (&tch::no_grad(|| actor.policy.value_only(&obs_t))).try_into()?;
+            anyhow::ensure!(
+                bucket_values.len() == range.len(),
+                "bootstrap bucket width mismatch"
+            );
+            for (bucket_row, value) in bucket_values.into_iter().enumerate() {
+                values[buckets.order[range.start + bucket_row]] = value;
+            }
+        }
+        Ok(values)
+    } else {
+        let obs_t = if let Some(ae) = actor.ae.as_ref() {
+            let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
+            if cfg.compact_rollout && cfg.foveate {
+                batch::build_compact_obs_with_ae(
+                    &obs_refs,
+                    actor.device,
+                    cfg.pinned_h2d,
+                    cfg.fp16_rollout,
+                    ae,
+                    &mut actor.terrain_cache,
+                )?
+            } else {
+                batch::build_obs_with_ae_cached(
+                    &obs_refs,
+                    actor.device,
+                    cfg.pinned_h2d,
+                    cfg.fp16_rollout,
+                    ae,
+                    &mut actor.terrain_cache,
+                )?
+            }
+        } else {
+            let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
+            batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d, cfg.fp16_rollout)
+        };
+        let v = tch::no_grad(|| actor.policy.value_only(&obs_t));
+        Ok((&v).try_into()?)
+    }
+}
+
+struct PendingAct {
+    t: usize,
+    scalars: ChoiceScalars,
+    logp: f32,
+    value: f32,
+}
+
+fn collect_rollout_ready(
+    actor: &mut ActorShard,
+    cfg: &Config,
+    policy_version: u64,
+) -> Result<RolloutResult> {
+    let collect_start = Instant::now();
+    let n = actor.workers.len();
+    anyhow::ensure!(n > 0, "ready collector has no envs");
+    let mut scheduler = ReadyScheduler::new(cfg.actor_max_batch, cfg.actor_max_wait);
+    for env in 0..n {
+        scheduler.push(env, ActorShape::of(&actor.cur_obs[env]), Duration::ZERO);
+    }
+    let mut pending: Vec<Option<PendingAct>> = (0..n).map(|_| None).collect();
+    let mut slots = RolloutSlots::new(cfg.rollout_len, n);
+    let mut episode_slots = RolloutSlots::new(cfg.rollout_len, n);
+    let target = cfg.rollout_len * n;
+    let mut completed = 0usize;
+
+    while completed < target {
+        while let Some(envs) = scheduler.take_batch(collect_start.elapsed()) {
+            let rows = act_ready_batch(actor, cfg, &envs)?;
+            anyhow::ensure!(rows.len() == envs.len(), "ready act batch width mismatch");
+            for (env, row) in envs.into_iter().zip(rows) {
+                anyhow::ensure!(pending[env].is_none(), "env {env} already has an action in flight");
+                let t = slots.next_t(env);
+                anyhow::ensure!(t < cfg.rollout_len, "env {env} exceeded rollout length");
+                actor.workers[env]
+                    .choice_tx
+                    .send(row.choice)
+                    .map_err(|_| anyhow!("env {env} choice channel closed"))?;
+                pending[env] = Some(PendingAct {
+                    t,
+                    scalars: row.scalars,
+                    logp: row.logp,
+                    value: row.value,
+                });
+            }
+        }
+        if completed == target {
+            break;
+        }
+
+        let now = collect_start.elapsed();
+        let timeout = scheduler
+            .next_deadline()
+            .map(|deadline| deadline.saturating_sub(now));
+        let ready_rx = actor
+            .ready_rx
+            .as_ref()
+            .ok_or_else(|| anyhow!("work-conserving actor has no ready receiver"))?;
+        let message = match timeout {
+            Some(duration) => match ready_rx.recv_timeout(duration) {
+                Ok(message) => message,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(anyhow!("ready env channel closed"));
+                }
+            },
+            None => ready_rx
+                .recv()
+                .map_err(|_| anyhow!("ready env channel closed"))?,
+        };
+        anyhow::ensure!(message.env < n, "ready env {} out of range", message.env);
+        let env = message.env;
+        let action = pending[env]
+            .take()
+            .ok_or_else(|| anyhow!("env {env} published without an action in flight"))?;
+        let (next_obs, reward, done, info) =
+            message.result.map_err(|error| anyhow!("env {env}: {error}"))?;
+        let prev_obs = std::mem::replace(&mut actor.cur_obs[env], next_obs);
+        episode_slots.insert(action.t, env, info)?;
+        slots.insert(
+            action.t,
+            env,
+            Step {
+                obs: prev_obs,
+                choice: action.scalars,
+                logp: action.logp,
+                value: action.value,
+                reward: reward as f32,
+                done,
+            },
+        )?;
+        completed += 1;
+        if slots.next_t(env) < cfg.rollout_len {
+            scheduler.push(
+                env,
+                ActorShape::of(&actor.cur_obs[env]),
+                collect_start.elapsed(),
+            );
+        }
+    }
+    anyhow::ensure!(scheduler.is_empty(), "ready items remain after rollout completion");
+    anyhow::ensure!(
+        pending.iter().all(Option::is_none),
+        "actions remain in flight after rollout completion"
+    );
+    let buffer = slots.finish()?;
+    let ep_infos = episode_slots
+        .finish()?
+        .into_iter()
+        .flatten()
+        .flatten()
+        .collect();
+    let bootstrap_v = bootstrap_values(actor, cfg)?;
+    if let Device::Cuda(index) = actor.device {
+        Cuda::synchronize(index as i64);
+    }
+    Ok(RolloutResult {
+        buffer,
+        bootstrap_v,
+        ep_infos,
+        policy_version,
+        collect_seconds: collect_start.elapsed().as_secs_f64(),
+    })
 }
 
 fn collect_rollout(actor: &mut ActorShard, cfg: &Config, policy_version: u64) -> Result<RolloutResult> {
@@ -1482,73 +2022,7 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config, policy_version: u64) ->
         );
     }
 
-    let bootstrap_v: Vec<f32> = {
-        let buckets = actor_shape_buckets(&actor.cur_obs);
-        let can_bucket = actor.ae.is_some()
-            && cfg.compact_rollout
-            && cfg.foveate
-            && buckets.ranges.len() > 1
-            && actor
-                .cur_obs
-                .iter()
-                .all(|obs| obs.compact.is_none() && obs.grid.is_none() && obs.grid_coarse.is_none());
-        if can_bucket {
-            let ae = actor.ae.as_ref().expect("checked above");
-            let mut values = vec![0.0; n];
-            for range in &buckets.ranges {
-                let obs_refs: Vec<&PreparedObs> = buckets.order[range.clone()]
-                    .iter()
-                    .map(|&i| &actor.cur_obs[i])
-                    .collect();
-                let obs_t = batch::build_compact_obs_with_ae(
-                    &obs_refs,
-                    actor.device,
-                    cfg.pinned_h2d,
-                    cfg.fp16_rollout,
-                    ae,
-                    &mut actor.terrain_cache,
-                )?;
-                let bucket_values: Vec<f32> =
-                    (&tch::no_grad(|| actor.policy.value_only(&obs_t))).try_into()?;
-                anyhow::ensure!(
-                    bucket_values.len() == range.len(),
-                    "bootstrap bucket width mismatch"
-                );
-                for (bucket_row, value) in bucket_values.into_iter().enumerate() {
-                    values[buckets.order[range.start + bucket_row]] = value;
-                }
-            }
-            values
-        } else {
-            let obs_t = if let Some(ae) = actor.ae.as_ref() {
-                let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
-                if cfg.compact_rollout && cfg.foveate {
-                    batch::build_compact_obs_with_ae(
-                        &obs_refs,
-                        actor.device,
-                        cfg.pinned_h2d,
-                        cfg.fp16_rollout,
-                        ae,
-                        &mut actor.terrain_cache,
-                    )?
-                } else {
-                    batch::build_obs_with_ae_cached(
-                        &obs_refs,
-                        actor.device,
-                        cfg.pinned_h2d,
-                        cfg.fp16_rollout,
-                        ae,
-                        &mut actor.terrain_cache,
-                    )?
-                }
-            } else {
-                let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
-                batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d, cfg.fp16_rollout)
-            };
-            let v = tch::no_grad(|| actor.policy.value_only(&obs_t));
-            (&v).try_into()?
-        }
-    };
+    let bootstrap_v = bootstrap_values(actor, cfg)?;
 
     // Libtorch uses thread-local CUDA streams. Finish actor work before
     // producing the CPU-only result. This is required by the legacy path
@@ -1669,6 +2143,8 @@ fn run_eval(
             let _ = bi;
             let (next_obs, _reward, _done, info) = workers[ei]
                 .obs_rx
+                .as_ref()
+                .ok_or_else(|| anyhow!("eval env {ei} has no obs receiver"))?
                 .recv()
                 .map_err(|_| anyhow!("eval env {ei} obs channel closed"))?
                 .map_err(|e| anyhow!("eval env {ei}: {e}"))?;
@@ -1892,12 +2368,20 @@ fn build_actor_shard(
     let ae = Some(crate::ae::AePair::load(
         path, coarse, device, cfg.amp, true,
     )?);
+    let (ready_tx, ready_rx) = if cfg.work_conserving_actors {
+        let (tx, rx) = mpsc::channel();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
     let mut workers = Vec::with_capacity(cfg.num_envs);
     let mut cur_obs = Vec::with_capacity(cfg.num_envs);
     for local_i in 0..cfg.num_envs {
         let idx = shard_index * cfg.num_envs + local_i;
         let engine = engine_for_idx(idx, cfg.engine, cfg.node_fraction);
-        let (worker, obs) = spawn_worker(idx, stage, cfg.max_episode_ticks, engine)?;
+        let route = ready_tx.as_ref().map(|tx| (local_i, tx.clone()));
+        let (worker, obs) =
+            spawn_worker_routed(idx, stage, cfg.max_episode_ticks, engine, route)?;
         workers.push(worker);
         cur_obs.push(obs);
     }
@@ -1905,6 +2389,7 @@ fn build_actor_shard(
         device,
         workers,
         cur_obs,
+        ready_rx,
         compact_host_arena: Arc::new(crate::vecenv::CompactHostArena::default()),
         vs,
         policy,
@@ -1951,8 +2436,14 @@ fn actor_loop(
             break;
         }
         let reply: Result<ActorReply> = match command {
-            ActorCommand::Collect { id } => collect_rollout(&mut actor, &cfg, protocol.policy_version)
-                .map(|result| ActorReply::Collected { id, result }),
+            ActorCommand::Collect { id } => {
+                let collected = if cfg.work_conserving_actors {
+                    collect_rollout_ready(&mut actor, &cfg, protocol.policy_version)
+                } else {
+                    collect_rollout(&mut actor, &cfg, protocol.policy_version)
+                };
+                collected.map(|result| ActorReply::Collected { id, result })
+            }
             ActorCommand::Refresh { id, weights, .. } => {
                 apply_weight_snapshot(&actor.vs, &weights).map(|_| {
                     if let Device::Cuda(index) = actor.device {
@@ -3148,6 +3639,14 @@ fn train_update(
 }
 
 pub fn run(mut cfg: Config) -> Result<()> {
+    anyhow::ensure!(cfg.actor_max_batch > 0, "--actor-max-batch must be at least 1");
+    if cfg.work_conserving_actors && !cfg.persistent_actors {
+        println!(
+            "[train] WARNING: --work-conserving-actors requires --persistent-actors; \
+             selecting the legacy collector path"
+        );
+        cfg.work_conserving_actors = false;
+    }
     if cfg.persistent_actors && cfg.auto_scale_envs {
         println!(
             "[train] WARNING: --persistent-actors Phase 1 does not support \
@@ -3155,6 +3654,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
              so existing autoscale behavior is preserved"
         );
         cfg.persistent_actors = false;
+        cfg.work_conserving_actors = false;
     }
     std::fs::create_dir_all(&cfg.ckpt_dir)?;
 
@@ -3339,6 +3839,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 device,
                 workers,
                 cur_obs,
+                ready_rx: None,
                 compact_host_arena: Arc::new(crate::vecenv::CompactHostArena::default()),
                 vs: actor_vs,
                 policy: actor_policy,
@@ -4319,6 +4820,9 @@ mod persistent_actor_tests {
             compact_rollout: false,
             pipeline_groups: false,
             persistent_actors: true,
+            work_conserving_actors: false,
+            actor_max_batch: 32,
+            actor_max_wait: Duration::from_millis(2),
             device: Device::Cpu,
             engine: EngineKind::Native,
             node_fraction: 0.0,
