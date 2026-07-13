@@ -84,6 +84,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
+use ofcore::curriculum::RewardConfig;
 use ofcore::feat::ACTIONS;
 use ofcore::translate::Choice;
 use rand::{RngCore, SeedableRng};
@@ -186,6 +187,7 @@ pub struct Config {
     pub updates: u64,
     pub lr: f64,
     pub gamma: f32,
+    pub reward_config: RewardConfig,
     pub lambda: f32,
     pub clip: f32,
     pub vf_coef: f32,
@@ -536,8 +538,9 @@ fn spawn_worker(
     stage: usize,
     max_ticks: i64,
     engine: EngineKind,
+    reward_config: RewardConfig,
 ) -> Result<(Worker, PreparedObs)> {
-    spawn_worker_routed(idx, stage, max_ticks, engine, None)
+    spawn_worker_routed(idx, stage, max_ticks, engine, reward_config, None)
 }
 
 fn spawn_worker_routed(
@@ -545,6 +548,7 @@ fn spawn_worker_routed(
     stage: usize,
     max_ticks: i64,
     engine: EngineKind,
+    reward_config: RewardConfig,
     ready_route: Option<(usize, Sender<ReadyEnv>)>,
 ) -> Result<(Worker, PreparedObs)> {
     let routed = ready_route.is_some();
@@ -555,7 +559,7 @@ fn spawn_worker_routed(
     let handle = std::thread::Builder::new()
         .name(format!("env{idx}"))
         .spawn(move || {
-            let mut w = match EnvWorker::new(idx, stage, max_ticks, engine) {
+            let mut w = match EnvWorker::new(idx, stage, max_ticks, engine, reward_config) {
                 Ok(w) => w,
                 Err(e) => {
                     let _ = init_tx.send(Err(format!("{e:#}")));
@@ -2076,6 +2080,7 @@ fn run_eval(
     pinned_h2d: bool,
     fp16_rollout: bool,
     compact_rollout: bool,
+    reward_config: RewardConfig,
 ) -> Result<EvalResult> {
     if episodes == 0 {
         return Ok(EvalResult {
@@ -2088,7 +2093,7 @@ fn run_eval(
     let mut workers = Vec::with_capacity(episodes);
     let mut cur_obs = Vec::with_capacity(episodes);
     for i in 0..episodes {
-        let (w, obs) = spawn_worker(i, stage, max_ticks, engine)?;
+        let (w, obs) = spawn_worker(i, stage, max_ticks, engine, reward_config)?;
         workers.push(w);
         cur_obs.push(obs);
     }
@@ -2224,6 +2229,7 @@ pub struct BenchmarkConfig<'a> {
     pub pinned_h2d: bool,
     pub fp16_rollout: bool,
     pub compact_rollout: bool,
+    pub reward_config: RewardConfig,
 }
 
 pub fn run_benchmark(cfg: BenchmarkConfig<'_>) -> Result<()> {
@@ -2248,6 +2254,7 @@ pub fn run_benchmark(cfg: BenchmarkConfig<'_>) -> Result<()> {
         cfg.pinned_h2d,
         cfg.fp16_rollout,
         cfg.compact_rollout,
+        cfg.reward_config,
     )?;
     let engine = match cfg.engine {
         EngineKind::Node => "node-ts",
@@ -2277,6 +2284,14 @@ pub fn run_benchmark(cfg: BenchmarkConfig<'_>) -> Result<()> {
                 "score": info.score,
                 "final_tick": info.final_tick,
                 "final_tiles": info.final_tiles,
+                "reward_components": {
+                    "strength": info.reward_components.strength,
+                    "strength_delta": info.reward_components.strength_delta,
+                    "dominance": info.reward_components.dominance,
+                    "waste": info.reward_components.waste,
+                    "death": info.reward_components.death,
+                    "terminal": info.reward_components.terminal,
+                },
             })
         })
         .collect();
@@ -2545,6 +2560,7 @@ impl AsyncEval {
                             cfg.pinned_h2d,
                             cfg.fp16_rollout,
                             cfg.compact_rollout && cfg.foveate,
+                            cfg.reward_config,
                         )?;
                         let promoted = eval_is_better(&result, best);
                         if promoted {
@@ -2944,8 +2960,9 @@ fn build_actor_shard(
         let idx = shard_index * cfg.num_envs + local_i;
         let engine = engine_for_idx(idx, cfg.engine, cfg.node_fraction);
         let route = ready_tx.as_ref().map(|tx| (local_i, tx.clone()));
-        let (worker, obs) =
-            spawn_worker_routed(idx, stage, cfg.max_episode_ticks, engine, route)?;
+        let (worker, obs) = spawn_worker_routed(
+            idx, stage, cfg.max_episode_ticks, engine, cfg.reward_config, route,
+        )?;
         workers.push(worker);
         cur_obs.push(obs);
     }
@@ -3037,6 +3054,7 @@ fn actor_loop(
                     cfg.pinned_h2d,
                     cfg.fp16_rollout,
                     cfg.compact_rollout && cfg.foveate,
+                    cfg.reward_config,
                 ))
                 .map(|result| ActorReply::Eval { id, result }),
             ActorCommand::Shutdown { id } => Ok(ActorReply::Ack { id }),
@@ -4644,7 +4662,9 @@ pub fn run(mut cfg: Config) -> Result<()> {
             for local_i in 0..cfg.num_envs {
                 let idx = gi * cfg.num_envs + local_i;
                 let worker_engine = engine_for_idx(idx, cfg.engine, cfg.node_fraction);
-                let (w, obs) = spawn_worker(idx, start_stage, cfg.max_episode_ticks, worker_engine)?;
+                let (w, obs) = spawn_worker(
+                    idx, start_stage, cfg.max_episode_ticks, worker_engine, cfg.reward_config,
+                )?;
                 workers.push(w);
                 cur_obs.push(obs);
             }
@@ -5086,8 +5106,14 @@ pub fn run(mut cfg: Config) -> Result<()> {
             for info in &result.ep_infos {
                 if debug_eps {
                     eprintln!(
-                        "[ep] reward={:.3} len={} tiles={:.1} tick={} place={}/{} score={:.3} won={} wasted={} stage={} rehearsal={} map={}",
+                        "[ep] reward={:.3} components[str={:.3} delta={:.3} dom={:.3} waste={:.3} death={:.3} terminal={:.3}] len={} tiles={:.1} tick={} place={}/{} score={:.3} won={} wasted={} stage={} rehearsal={} map={}",
                         info.reward,
+                        info.reward_components.strength,
+                        info.reward_components.strength_delta,
+                        info.reward_components.dominance,
+                        info.reward_components.waste,
+                        info.reward_components.death,
+                        info.reward_components.terminal,
                         info.length,
                         info.final_tiles,
                         info.final_tick,
@@ -5100,6 +5126,22 @@ pub fn run(mut cfg: Config) -> Result<()> {
                         info.rehearsal,
                         info.map
                     );
+                }
+                if let Err(e) = metrics.log(&serde_json::json!({
+                    "event": "episode",
+                    "update": update,
+                    "stage": info.stage,
+                    "map": &info.map,
+                    "rehearsal": info.rehearsal,
+                    "reward": info.reward,
+                    "reward/strength": info.reward_components.strength,
+                    "reward/strength_delta": info.reward_components.strength_delta,
+                    "reward/dominance": info.reward_components.dominance,
+                    "reward/waste": info.reward_components.waste,
+                    "reward/death": info.reward_components.death,
+                    "reward/terminal": info.reward_components.terminal,
+                })) {
+                    eprintln!("[train] WARNING: episode reward-component log failed: {e:#}");
                 }
                 ep_rewards.push(info.reward);
                 ep_lengths.push(info.length);
@@ -5273,6 +5315,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                             curr_stage,
                             cfg.max_episode_ticks,
                             worker_engine,
+                            cfg.reward_config,
                         ) {
                             Ok((w, obs)) => {
                                 next_env_idx += 1;
@@ -5384,6 +5427,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                         cfg.pinned_h2d,
                         cfg.fp16_rollout,
                         cfg.compact_rollout && cfg.foveate,
+                        cfg.reward_config,
                     )?
                 };
                 let promoted = eval_is_better(&result, current_best);
@@ -5759,6 +5803,15 @@ mod persistent_actor_tests {
             updates: 1,
             lr: 1e-4,
             gamma: 0.99,
+            reward_config: RewardConfig {
+                gamma: 0.99,
+                v81_dom_coef: 0.0,
+                v81_min_stage: 4,
+                v81_potential_clamp: 2.0,
+                v81_dominant_loss: false,
+                v81_dominance_threshold: 0.55,
+                v81_delta_loss_dominant: 5.25,
+            },
             lambda: 0.95,
             clip: 0.2,
             vf_coef: 0.5,
