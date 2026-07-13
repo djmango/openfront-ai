@@ -3488,6 +3488,10 @@ struct TrainReply {
     weights: Vec<CpuWeightSnapshot>,
     train_seconds: f64,
     snapshot_seconds: f64,
+    /// Test-only copies of the hub result at every optimizer barrier. This
+    /// proves parity before clipping/Adam can obscure the source of drift.
+    #[cfg(test)]
+    averaged_gradients: Vec<Vec<f32>>,
 }
 
 struct PersistentLearner {
@@ -3513,14 +3517,19 @@ impl PersistentLearner {
         let mut command_txs = Vec::with_capacity(devices.len());
         let mut gradient_txs = Vec::with_capacity(devices.len());
         let mut handles = Vec::with_capacity(devices.len());
+        // DDP ranks use the same epoch permutation over their disjoint local
+        // batches. Giving each owner a different permutation is mathematically
+        // equivalent in exact arithmetic, but changes floating-point reduction
+        // order. For duplicated-rollout parity that produces g0 != g1, and
+        // Adam's first-step normalization can amplify the tiny discrepancy.
+        let shuffle_seed = rng.next_u64();
         for (shard, &device) in devices.iter().enumerate() {
             let (command_tx, command_rx) = mpsc::channel();
             let (gradient_tx, gradient_rx) = mpsc::channel();
             let thread_reply = reply_tx.clone();
             let thread_cfg = cfg.clone();
             let thread_weights = initial_weights.clone();
-            let thread_rng =
-                rand::rngs::SmallRng::seed_from_u64(rng.next_u64() ^ shard as u64);
+            let thread_rng = rand::rngs::SmallRng::seed_from_u64(shuffle_seed);
             let handle = std::thread::Builder::new()
                 .name(format!("learner-gpu{shard}"))
                 .spawn(move || learner_loop(
@@ -3640,6 +3649,8 @@ impl PersistentLearner {
             })?;
         }
         let world = self.command_txs.len();
+        #[cfg(test)]
+        let mut averaged_gradients = Vec::with_capacity(self.epochs * self.minibatches);
         for epoch in 0..self.epochs {
             for minibatch in 0..self.minibatches {
                 let mut packets: Vec<Option<(bool, Vec<f32>)>> =
@@ -3681,6 +3692,8 @@ impl PersistentLearner {
                     .map(|packet| packet.expect("all packets present").1)
                     .collect();
                 let average = Arc::new(average_cpu_gradients(&ordered)?);
+                #[cfg(test)]
+                averaged_gradients.push(average.as_ref().clone());
                 for tx in &self.gradient_txs {
                     tx.send(GradientDecision::Apply(average.clone()))?;
                 }
@@ -3724,7 +3737,14 @@ impl PersistentLearner {
             train_seconds = train_seconds.max(train_s);
             snapshot_seconds = snapshot_seconds.max(snapshot_s);
         }
-        Ok(TrainReply { losses, weights, train_seconds, snapshot_seconds })
+        Ok(TrainReply {
+            losses,
+            weights,
+            train_seconds,
+            snapshot_seconds,
+            #[cfg(test)]
+            averaged_gradients,
+        })
     }
     fn abort_barrier(&self, error: &str) {
         for tx in &self.gradient_txs {
@@ -5963,36 +5983,82 @@ mod persistent_actor_tests {
         let source = nn::VarStore::new(Device::Cpu);
         let _ = PolicyNet::new(&source.root(), false, false, cfg.gc, cfg.blocks);
         let weights = snapshot_weights(&source).unwrap();
-        let (mut one, _) = PersistentLearner::spawn(
-            &[Device::Cpu],
-            cfg.clone(),
-            weights.clone(),
-            cfg.lr,
-            rand::rngs::SmallRng::seed_from_u64(77),
-        )
-        .unwrap();
-        let (mut two, _) = PersistentLearner::spawn(
-            &[Device::Cpu, Device::Cpu],
-            cfg.clone(),
-            weights,
-            cfg.lr,
-            rand::rngs::SmallRng::seed_from_u64(77),
-        )
-        .unwrap();
-        let one_reply = one.train(vec![parity_rollout()], cfg.lr, 0.01).unwrap();
-        let two_reply = two
-            .train(vec![parity_rollout(), parity_rollout()], cfg.lr, 0.01)
+        for repetition in 0..3 {
+            let (mut one, _) = PersistentLearner::spawn(
+                &[Device::Cpu],
+                cfg.clone(),
+                weights.clone(),
+                cfg.lr,
+                rand::rngs::SmallRng::seed_from_u64(77),
+            )
             .unwrap();
-        for (single, ddp) in one_reply
-            .weights[0]
-            .values
-            .iter()
-            .zip(two_reply.weights[0].values.iter())
-        {
-            assert!((single - ddp).abs() < 2e-5, "1-vs-2 shard weight mismatch");
+            let (mut two, _) = PersistentLearner::spawn(
+                &[Device::Cpu, Device::Cpu],
+                cfg.clone(),
+                weights.clone(),
+                cfg.lr,
+                rand::rngs::SmallRng::seed_from_u64(77),
+            )
+            .unwrap();
+            let one_reply = one.train(vec![parity_rollout()], cfg.lr, 0.01).unwrap();
+            let two_reply = two
+                .train(vec![parity_rollout(), parity_rollout()], cfg.lr, 0.01)
+                .unwrap();
+
+            assert_eq!(
+                one_reply.averaged_gradients.len(),
+                two_reply.averaged_gradients.len(),
+                "repetition {repetition}: optimizer barrier count differs"
+            );
+            let mut max_gradient_diff = 0.0f32;
+            for (barrier, (single, ddp)) in one_reply
+                .averaged_gradients
+                .iter()
+                .zip(&two_reply.averaged_gradients)
+                .enumerate()
+            {
+                let barrier_max = single
+                    .iter()
+                    .zip(ddp)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0f32, f32::max);
+                max_gradient_diff = max_gradient_diff.max(barrier_max);
+                assert!(
+                    barrier_max < 1e-7,
+                    "repetition {repetition}: pre-step averaged gradient differs at barrier \
+                     {barrier}: max_diff={barrier_max:e}"
+                );
+            }
+
+            let max_replica_diff = two_reply.weights[0]
+                .values
+                .iter()
+                .zip(&two_reply.weights[1].values)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            let max_weight_diff = one_reply.weights[0]
+                .values
+                .iter()
+                .zip(&two_reply.weights[0].values)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            eprintln!(
+                "[ddp-parity] repetition={repetition} max_gradient_diff={max_gradient_diff:e} \
+                 max_replica_diff={max_replica_diff:e} max_weight_diff={max_weight_diff:e}"
+            );
+            assert!(
+                max_replica_diff < 1e-7,
+                "repetition {repetition}: two-shard replicas diverged: \
+                 max_diff={max_replica_diff:e}"
+            );
+            assert!(
+                max_weight_diff < 1e-6,
+                "repetition {repetition}: 1-vs-2 shard weight mismatch: \
+                 max_diff={max_weight_diff:e}; pre-step max_diff={max_gradient_diff:e}"
+            );
+            one.shutdown().unwrap();
+            two.shutdown().unwrap();
         }
-        one.shutdown().unwrap();
-        two.shutdown().unwrap();
     }
 
     #[test]
