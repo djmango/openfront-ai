@@ -410,7 +410,7 @@ impl WarshipExecution {
         }
     }
 
-    fn nearest_port(&self, game: &Game, from: TileRef) -> Option<TileRef> {
+    fn nearest_port_candidate(&self, game: &Game, from: TileRef) -> Option<(TileRef, u32)> {
         let component = game.get_water_component(from)?;
         game.player_by_small_id(self.owner_small_id)?
             .units
@@ -418,8 +418,48 @@ impl WarshipExecution {
             .filter(|unit| {
                 unit.unit_type == PORT && game.has_water_component(unit.tile as TileRef, component)
             })
-            .min_by_key(|unit| game.map.euclidean_dist_squared(from, unit.tile as TileRef))
-            .map(|unit| unit.tile as TileRef)
+            .map(|unit| {
+                let tile = unit.tile as TileRef;
+                (tile, game.map.euclidean_dist_squared(from, tile))
+            })
+            .min_by_key(|&(_, dist)| dist)
+    }
+
+    fn nearest_port(&self, game: &Game, from: TileRef) -> Option<TileRef> {
+        self.nearest_port_candidate(game, from)
+            .map(|(tile, _)| tile)
+    }
+
+    fn refresh_retreat_port(&mut self, game: &Game, from: TileRef) -> bool {
+        let Some(current) = self.retreat_port else {
+            self.retreat_port = self.nearest_port(game, from);
+            return self.retreat_port.is_some();
+        };
+        let current_exists = game
+            .player_by_small_id(self.owner_small_id)
+            .is_some_and(|owner| {
+                owner
+                    .units
+                    .iter()
+                    .any(|unit| unit.unit_type == PORT && unit.tile as TileRef == current)
+            });
+        if !current_exists {
+            self.retreat_port = self.nearest_port(game, from);
+            self.target_tile = None;
+            self.path.clear();
+            self.path_idx = 0;
+            return self.retreat_port.is_some();
+        }
+
+        if let Some((candidate, candidate_dist)) = self.nearest_port_candidate(game, from) {
+            let current_dist = game.map.euclidean_dist_squared(from, current);
+            // TS `findBetterPortTile`: switch only when the alternative is
+            // strictly closer than `currentDistance * warshipPortSwitchThreshold()`.
+            if candidate != current && (candidate_dist as u64) * 4 < (current_dist as u64) * 3 {
+                self.retreat_port = Some(candidate);
+            }
+        }
+        true
     }
 
     fn heal_at_dock(&self, game: &mut Game, unit_id: i32) {
@@ -445,26 +485,15 @@ impl WarshipExecution {
     }
 
     fn retreat(&mut self, game: &mut Game, from: TileRef, unit_id: i32) -> bool {
-        let Some(port) = self.retreat_port else {
+        if !self.refresh_retreat_port(game, from) {
             self.retreating = false;
+            self.retreat_port = None;
+            self.target_tile = None;
+            self.path.clear();
+            self.path_idx = 0;
             return false;
         };
-        let port_exists = game
-            .player_by_small_id(self.owner_small_id)
-            .is_some_and(|owner| {
-                owner
-                    .units
-                    .iter()
-                    .any(|unit| unit.unit_type == PORT && unit.tile as TileRef == port)
-            });
-        if !port_exists {
-            self.retreat_port = self.nearest_port(game, from);
-            if self.retreat_port.is_none() {
-                self.retreating = false;
-                return false;
-            }
-            return self.retreat(game, from, unit_id);
-        }
+        let port = self.retreat_port.expect("refresh_retreat_port set a port");
 
         if let Some(target) = self.target(game, from, false) {
             self.shoot_target(game, game.ticks(), from, unit_id, target);
@@ -1513,6 +1542,30 @@ impl Execution for WarshipExecution {
                 !exec.retreating,
                 "the only port is unreachable by water - retreat never starts"
             );
+        }
+
+        #[test]
+        fn retreat_switches_to_significantly_closer_port() {
+            let mut game = water_game(100, 30);
+            let p1 = add_nation(&mut game, "p1");
+            let old_port = game.ref_xy(10, 10);
+            let better_port = game.ref_xy(50, 10);
+            let ship_tile = game.ref_xy(60, 10);
+            game.build_unit(p1, unit_type::PORT, old_port);
+            game.build_unit(p1, unit_type::PORT, better_port);
+            let ship_id = game.build_unit(p1, unit_type::WARSHIP, ship_tile);
+
+            let mut exec = WarshipExecution::new_for_test(p1, ship_tile, ship_id);
+            exec.retreating = true;
+            exec.retreat_port = Some(old_port);
+
+            assert!(exec.retreat(&mut game, ship_tile, ship_id));
+            assert_eq!(
+                exec.retreat_port,
+                Some(better_port),
+                "TS refreshRetreatPortTile switches below the 0.75 distance threshold"
+            );
+            assert_eq!(exec.target_tile, Some(better_port));
         }
 
         #[test]
