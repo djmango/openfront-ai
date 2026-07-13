@@ -305,21 +305,15 @@ impl TerrainDeviceCache {
 /// chunks by pixel budget (mirrors `rl/obs.py::MAX_ENC_PIX`).
 pub const MAX_ENC_PIX: usize = 16_000_000;
 
-/// Encode to per-item tensors on `device`. Keeping this operation separate
-/// from the host fallback lets rollout inference consume the same CUDA
-/// latents that the frozen AE produced.
-pub fn encode_latent_batch_device(
-    ae: &SpatialAE,
-    items: &[&AeRaw],
-    device: Device,
-    mut terrain_cache: Option<&mut TerrainDeviceCache>,
-) -> Result<Vec<Tensor>> {
-    // Returns one (latent_c, gh, gw) tensor per item, in input order.
-    let n = items.len();
-    let mut out: Vec<Option<Tensor>> = (0..n).map(|_| None).collect();
-    let mut groups: std::collections::HashMap<(usize, usize), Vec<usize>> =
-        std::collections::HashMap::new();
+fn validate_items(items: &[&AeRaw]) -> Result<HashMap<(usize, usize), Vec<usize>>> {
+    let mut groups: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
     for (i, it) in items.iter().enumerate() {
+        anyhow::ensure!(
+            it.hr > 0 && it.wr > 0,
+            "AE item {i} shape {}x{} must be non-zero",
+            it.hr,
+            it.wr
+        );
         anyhow::ensure!(
             it.hr % REGION as usize == 0 && it.wr % REGION as usize == 0,
             "AE item {i} shape {}x{} is not divisible by REGION={REGION}",
@@ -345,6 +339,20 @@ pub fn encode_latent_batch_device(
             it.stat.len(),
             NUM_STATIC as usize * fine_gh * fine_gw
         );
+        anyhow::ensure!(
+            it.static_terrain.key.hr == it.hr && it.static_terrain.key.wr == it.wr,
+            "AE item {i} static terrain shape {}x{} does not match raw shape {}x{}",
+            it.static_terrain.key.hr,
+            it.static_terrain.key.wr,
+            it.hr,
+            it.wr
+        );
+        anyhow::ensure!(
+            it.static_terrain.land_mag.len() == 2 * pix,
+            "AE item {i} static terrain len {}, expected {}",
+            it.static_terrain.land_mag.len(),
+            2 * pix
+        );
         if let Some((offset, owner)) = it
             .owners
             .iter()
@@ -358,6 +366,22 @@ pub fn encode_latent_batch_device(
         }
         groups.entry((it.hr, it.wr)).or_default().push(i);
     }
+    Ok(groups)
+}
+
+/// Encode to per-item tensors on `device`. Keeping this operation separate
+/// from the host fallback lets rollout inference consume the same CUDA
+/// latents that the frozen AE produced.
+pub fn encode_latent_batch_device(
+    ae: &SpatialAE,
+    items: &[&AeRaw],
+    device: Device,
+    mut terrain_cache: Option<&mut TerrainDeviceCache>,
+) -> Result<Vec<Tensor>> {
+    // Returns one (latent_c, gh, gw) tensor per item, in input order.
+    let n = items.len();
+    let mut out: Vec<Option<Tensor>> = (0..n).map(|_| None).collect();
+    let groups = validate_items(items)?;
 
     for ((hr, wr), idxs) in groups {
         let pix = hr * wr;
@@ -450,6 +474,153 @@ pub fn encode_latent_batch_device(
         .collect()
 }
 
+/// Per-item fine and coarse latent views produced by one shared input upload.
+#[derive(Debug)]
+pub struct DualLatents {
+    pub fine: Vec<Tensor>,
+    pub coarse: Vec<Tensor>,
+}
+
+/// Actor-thread-only paired encoder path. `terrain_cache` and every CUDA
+/// tensor created here remain exclusively owned by the caller. For each
+/// same-shape chunk, owners, assembled 3-channel terrain, and fine /8 static
+/// planes are packed and uploaded once. The coarse static input is derived on
+/// device with exact 2x ceil-mode max pooling.
+pub fn encode_dual_latent_batch_device(
+    pair: &AePair,
+    items: &[&AeRaw],
+    device: Device,
+    terrain_cache: &mut TerrainDeviceCache,
+) -> Result<DualLatents> {
+    let coarse = pair
+        .coarse
+        .as_ref()
+        .context("dual AE encode requires a coarse encoder")?;
+    anyhow::ensure!(
+        pair.fine.latent_down == REGION,
+        "dual AE fine latent_down {}, expected {REGION}",
+        pair.fine.latent_down
+    );
+    anyhow::ensure!(
+        coarse.latent_down == COARSE_REGION,
+        "dual AE coarse latent_down {}, expected {COARSE_REGION}",
+        coarse.latent_down
+    );
+    anyhow::ensure!(
+        terrain_cache.device == device,
+        "terrain cache device {:?} does not match encode device {:?}",
+        terrain_cache.device,
+        device
+    );
+
+    let n = items.len();
+    let groups = validate_items(items)?;
+    let mut fine_out: Vec<Option<Tensor>> = (0..n).map(|_| None).collect();
+    let mut coarse_out: Vec<Option<Tensor>> = (0..n).map(|_| None).collect();
+
+    for ((hr, wr), idxs) in groups {
+        let pix = hr * wr;
+        let per = (MAX_ENC_PIX / pix).max(1);
+        for chunk in idxs.chunks(per) {
+            let b = chunk.len() as i64;
+            let use_terrain_cache = device.is_cuda();
+            let mut owners = Vec::with_capacity(chunk.len() * pix);
+            let mut terrain = Vec::with_capacity(if use_terrain_cache {
+                0
+            } else {
+                chunk.len() * 3 * pix
+            });
+            let mut fallout = Vec::with_capacity(if use_terrain_cache {
+                chunk.len() * pix
+            } else {
+                0
+            });
+            let fine_gh = hr / REGION as usize;
+            let fine_gw = wr / REGION as usize;
+            let mut fine_static =
+                Vec::with_capacity(chunk.len() * NUM_STATIC as usize * fine_gh * fine_gw);
+            for &i in chunk {
+                let it = items[i];
+                owners.extend_from_slice(&it.owners);
+                if use_terrain_cache {
+                    fallout.extend_from_slice(&it.fallout);
+                } else {
+                    terrain.extend_from_slice(it.static_terrain.land_mag.as_ref());
+                    terrain.extend_from_slice(&it.fallout);
+                }
+                fine_static.extend_from_slice(&it.stat);
+            }
+
+            // All host-backed H2D copies remain synchronous. In particular,
+            // temporary pinned staging storage is never used non-blockingly.
+            let owners_t = Tensor::from_slice(&owners)
+                .view([b, hr as i64, wr as i64])
+                .to_device(device)
+                .to_kind(Kind::Int64);
+            let terrain_t = if use_terrain_cache {
+                let static_items: Vec<Tensor> = chunk
+                    .iter()
+                    .map(|&i| terrain_cache.static_tensor(&items[i].static_terrain))
+                    .collect();
+                let static_refs: Vec<&Tensor> = static_items.iter().collect();
+                let static_t = Tensor::stack(&static_refs, 0);
+                let fallout_t = Tensor::from_slice(&fallout)
+                    .view([b, 1, hr as i64, wr as i64])
+                    .to_device(device)
+                    .to_kind(Kind::Float);
+                Tensor::cat(&[static_t, fallout_t], 1)
+            } else {
+                Tensor::from_slice(&terrain)
+                    .view([b, TERRAIN_CHANNELS, hr as i64, wr as i64])
+                    .to_device(device)
+                    .to_kind(Kind::Float)
+            };
+            let fine_static_t = Tensor::from_slice(&fine_static)
+                .view([b, NUM_STATIC, fine_gh as i64, fine_gw as i64])
+                .to_device(device)
+                .to_kind(Kind::Float);
+
+            let (fine_z, coarse_z) = tch::no_grad(|| {
+                let fine_z = pair.fine.encode(&owners_t, &terrain_t, &fine_static_t);
+                let coarse_static_t =
+                    fine_static_t.max_pool2d([2, 2], [2, 2], [0, 0], [1, 1], true);
+                let coarse_z = coarse.encode(&owners_t, &terrain_t, &coarse_static_t);
+                (fine_z, coarse_z)
+            });
+            let cgh = fine_gh.div_ceil(2);
+            let cgw = fine_gw.div_ceil(2);
+            anyhow::ensure!(
+                fine_z.size() == [b, pair.fine.latent_c, fine_gh as i64, fine_gw as i64],
+                "fine AE output shape {:?}, expected [{b}, {}, {fine_gh}, {fine_gw}]",
+                fine_z.size(),
+                pair.fine.latent_c
+            );
+            anyhow::ensure!(
+                coarse_z.size() == [b, coarse.latent_c, cgh as i64, cgw as i64],
+                "coarse AE output shape {:?}, expected [{b}, {}, {cgh}, {cgw}]",
+                coarse_z.size(),
+                coarse.latent_c
+            );
+            for (j, &i) in chunk.iter().enumerate() {
+                fine_out[i] = Some(fine_z.select(0, j as i64));
+                coarse_out[i] = Some(coarse_z.select(0, j as i64));
+            }
+        }
+    }
+
+    let collect = |name: &str, values: Vec<Option<Tensor>>| {
+        values
+            .into_iter()
+            .enumerate()
+            .map(|(i, t)| t.with_context(|| format!("missing {name} AE latent for item {i}")))
+            .collect::<Result<Vec<_>>>()
+    };
+    Ok(DualLatents {
+        fine: collect("fine", fine_out)?,
+        coarse: collect("coarse", coarse_out)?,
+    })
+}
+
 /// 2x max-pool over (C,H,W) host planes with ceil mode (odd dims keep a
 /// 1-wide edge), matching `F.max_pool2d(..., ceil_mode=True)`.
 fn max_pool2_stat(stat: &[f32], gh: usize, gw: usize) -> Vec<f32> {
@@ -500,6 +671,48 @@ mod tests {
         }
     }
 
+    fn random_pair() -> AePair {
+        tch::manual_seed(73);
+        let fine_vs = nn::VarStore::new(Device::Cpu);
+        let fine = SpatialAE::new(&fine_vs.root(), LATENT_C, REGION).unwrap();
+        let coarse_vs = nn::VarStore::new(Device::Cpu);
+        let coarse = SpatialAE::new(&coarse_vs.root(), LATENT_C, COARSE_REGION).unwrap();
+        AePair {
+            fine,
+            _fine_vs: fine_vs,
+            coarse: Some(coarse),
+            _coarse_vs: Some(coarse_vs),
+        }
+    }
+
+    fn raw(env_id: u64, hr: usize, wr: usize) -> AeRaw {
+        let pix = hr * wr;
+        let gh = hr / REGION as usize;
+        let gw = wr / REGION as usize;
+        AeRaw {
+            owners: (0..pix).map(|i| (i % MAX_SLOTS as usize) as i64).collect(),
+            static_terrain: terrain(env_id, env_id + 10, hr, wr, env_id as f32 / 17.0),
+            fallout: (0..pix)
+                .map(|i| {
+                    if (i + env_id as usize) % 5 == 0 {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect(),
+            stat: (0..NUM_STATIC as usize * gh * gw)
+                .map(|i| ((i * 37 + env_id as usize * 11) % 101) as f32 / 13.0 - 2.0)
+                .collect(),
+            hr,
+            wr,
+        }
+    }
+
+    fn flat(t: &Tensor) -> Vec<f32> {
+        Vec::<f32>::try_from(t.reshape([-1])).unwrap()
+    }
+
     #[test]
     fn encoder_tree_key_count_d8() {
         let vs = nn::VarStore::new(Device::Cpu);
@@ -548,6 +761,58 @@ mod tests {
         };
         let z = encode_latent_batch_device(&ae, &[&raw], Device::Cpu, None).unwrap();
         assert_eq!(z[0].size(), [LATENT_C, 2, 3]);
+    }
+
+    #[test]
+    fn dual_encode_exactly_matches_separate_for_even_odd_and_mixed_order() {
+        let pair = random_pair();
+        // /8 dimensions are respectively odd 3x5, even 2x4, then odd 3x5.
+        // Repeating a shape out of order also verifies grouped output restore.
+        let raws = [raw(1, 24, 40), raw(2, 16, 32), raw(3, 24, 40)];
+        let refs: Vec<&AeRaw> = raws.iter().collect();
+
+        let fine = encode_latent_batch_device(&pair.fine, &refs, Device::Cpu, None).unwrap();
+        let coarse =
+            encode_latent_batch_device(pair.coarse.as_ref().unwrap(), &refs, Device::Cpu, None)
+                .unwrap();
+        let mut cache = TerrainDeviceCache::new(Device::Cpu);
+        let dual = encode_dual_latent_batch_device(&pair, &refs, Device::Cpu, &mut cache).unwrap();
+
+        assert_eq!(dual.fine.len(), refs.len());
+        assert_eq!(dual.coarse.len(), refs.len());
+        for i in 0..refs.len() {
+            assert_eq!(dual.fine[i].size(), fine[i].size(), "fine shape item {i}");
+            assert_eq!(
+                dual.coarse[i].size(),
+                coarse[i].size(),
+                "coarse shape item {i}"
+            );
+            assert_eq!(flat(&dual.fine[i]), flat(&fine[i]), "fine item {i}");
+            assert_eq!(flat(&dual.coarse[i]), flat(&coarse[i]), "coarse item {i}");
+        }
+    }
+
+    #[test]
+    fn dual_encode_validates_static_payload_and_pair() {
+        let pair = random_pair();
+        let mut malformed = raw(4, 16, 16);
+        malformed.static_terrain.land_mag = vec![0.0; 2 * 16 * 16 - 1].into();
+        let mut cache = TerrainDeviceCache::new(Device::Cpu);
+        let err = encode_dual_latent_batch_device(&pair, &[&malformed], Device::Cpu, &mut cache)
+            .expect_err("short static payload must fail");
+        assert!(err.to_string().contains("static terrain len"));
+
+        let fine_vs = nn::VarStore::new(Device::Cpu);
+        let fine_only = AePair {
+            fine: SpatialAE::new(&fine_vs.root(), LATENT_C, REGION).unwrap(),
+            _fine_vs: fine_vs,
+            coarse: None,
+            _coarse_vs: None,
+        };
+        let valid = raw(5, 16, 16);
+        let err = encode_dual_latent_batch_device(&fine_only, &[&valid], Device::Cpu, &mut cache)
+            .expect_err("missing coarse encoder must fail");
+        assert!(err.to_string().contains("requires a coarse encoder"));
     }
 
     #[test]
