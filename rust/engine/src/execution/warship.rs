@@ -703,7 +703,25 @@ impl Execution for WarshipExecution {
             .unit(self.owner_small_id, unit_id)
             .map(|unit| unit.health)
             .unwrap_or(0);
+        // TS `tick`: `healWarship()` (passive + active dock heal) before
+        // `handleManualPatrolOverride()`. Undocking on a same-tick patrol
+        // redirect must not skip that tick's docked active heal
+        // (`curr-b150-s1-pangaea` Egypt warship 1403 @5752: native +1 vs TS +6).
         self.heal_near_port(game, from, unit_id);
+        if self.docked {
+            let port_exists = self.retreat_port.is_some_and(|port| {
+                game.player_by_small_id(self.owner_small_id)
+                    .is_some_and(|owner| {
+                        owner
+                            .units
+                            .iter()
+                            .any(|unit| unit.unit_type == PORT && unit.tile as TileRef == port)
+                    })
+            });
+            if port_exists {
+                self.heal_at_dock(game, unit_id);
+            }
+        }
         self.handle_manual_patrol_override(tick);
 
         if self.docked {
@@ -722,18 +740,18 @@ impl Execution for WarshipExecution {
                 self.retreat_port = None;
                 self.active_healing_remainder = 0.0;
             } else {
-                self.heal_at_dock(game, unit_id);
                 let max_health = game.unit_max_health(self.owner_small_id, unit_id);
                 let fully_healed = game
                     .unit(self.owner_small_id, unit_id)
                     .is_none_or(|unit| unit.health >= max_health);
-                if !fully_healed {
+                if fully_healed {
+                    self.docked = false;
+                    self.retreating = false;
+                    self.retreat_port = None;
+                    self.active_healing_remainder = 0.0;
+                } else {
                     return;
                 }
-                self.docked = false;
-                self.retreating = false;
-                self.retreat_port = None;
-                self.active_healing_remainder = 0.0;
             }
         }
 
@@ -1182,6 +1200,40 @@ mod tests {
         assert!(
             !game.warship_is_docked(p1, ship_id),
             "the warship execution should process the patrol override on its own tick"
+        );
+    }
+
+    #[test]
+    fn docked_active_heal_applies_before_same_tick_patrol_undock() {
+        // TS heals while still docked, then `handleManualPatrolOverride` undocks.
+        // Native previously undocked first and skipped the +5 active heal.
+        let mut game = water_game(40, 40);
+        let p1 = add_nation(&mut game, "p1");
+        let port_tile = game.ref_xy(10, 10);
+        let ship_tile = game.ref_xy(10, 12); // within docking range 5
+        let new_patrol = game.ref_xy(25, 10);
+        game.build_unit(p1, unit_type::PORT, port_tile);
+        let ship_id = game.build_unit(p1, unit_type::WARSHIP, ship_tile);
+        game.unit_mut(p1, ship_id).unwrap().health = 500;
+
+        let mut exec = WarshipExecution::new_for_test(p1, port_tile, ship_id);
+        exec.docked = true;
+        exec.retreat_port = Some(port_tile);
+        exec.last_observed_patrol_tile = Some(port_tile);
+        game.push_exec_for_test(ExecEnum::Warship(exec));
+        game.reinit_unit_grid();
+
+        game.set_warship_patrol_tile(p1, ship_id, new_patrol);
+        game.execute_next_tick();
+
+        let health = game.unit(p1, ship_id).unwrap().health;
+        assert!(
+            !game.warship_is_docked(p1, ship_id),
+            "patrol redirect should undock on the warship tick"
+        );
+        assert_eq!(
+            health, 506,
+            "passive +1 and docked active +5 must apply before undock (got {health})"
         );
     }
 
