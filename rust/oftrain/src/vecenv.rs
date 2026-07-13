@@ -425,19 +425,9 @@ impl EnvWorker {
         let (hr, wr) = (self.hr, self.wr);
         let (gh, gw) = (hr / REGION, wr / REGION);
 
-        let mut owners_slotted = vec![0u8; hr * wr];
-        let mut fallout = vec![0u8; hr * wr];
-        let mut defense_bonus = vec![0u8; hr * wr];
-        for y in 0..hr {
-            for x in 0..wr {
-                let src = y * obs.head["width"].as_u64().unwrap_or(wr as u64) as usize + x;
-                let raw_id = obs.owners[src] as usize;
-                let dst = y * wr + x;
-                owners_slotted[dst] = *lut.get(raw_id).unwrap_or(&0);
-                fallout[dst] = obs.fallout[src];
-                defense_bonus[dst] = obs.defense_bonus[src];
-            }
-        }
+        let width = obs.head["width"].as_u64().unwrap_or(wr as u64) as usize;
+        let tiles = obs.prepare_tiles(&lut, width, hr, wr, REGION);
+        let owners_slotted = tiles.owners_slotted;
 
         let f = feat::featurize(
             gh,
@@ -454,20 +444,25 @@ impl EnvWorker {
             &legal,
         );
 
-        let (ego, db) = feat::pool_ego_db(&owners_slotted, &f.clut, &defense_bonus, hr, wr);
-        let local = feat::local_crop(
+        let (ego, center) = feat::pool_ego_and_center(&owners_slotted, &f.clut, hr, wr);
+        let local = feat::local_crop_at_with_defense(
             &owners_slotted,
             &f.clut,
             &self.land,
-            &defense_bonus,
             hr,
             wr,
             crate::policy::LOCAL as usize,
+            center,
+            |i| {
+                let y = i / wr;
+                let x = i % wr;
+                obs.defense_bonus_at(y * width + x)
+            },
         );
         let ae_raw = AeRaw {
             owners: owners_slotted,
             static_terrain: self.ae_static.clone(),
-            fallout: ae::pack_fallout(&fallout, hr, wr),
+            fallout: tiles.fallout_packed,
             stat: f.stat,
             hr,
             wr,
@@ -481,7 +476,7 @@ impl EnvWorker {
             cgw: 0,
             ae_raw,
             ego,
-            db,
+            db: tiles.db,
             transient: f.transient,
             legal_tile: f.legal_tile,
             gh,
@@ -518,14 +513,13 @@ impl EnvWorker {
         let obs = self.obs.as_ref().unwrap();
         let ents = feat::parse_ents(obs.entities());
         let legal = feat::parse_legal(obs.legal_actions());
-        let owners_raw: Vec<i64> = obs.owners.iter().map(|&o| o as i64).collect();
-        // obs.owners is at full (untrimmed width) resolution; translate
-        // wants it trimmed to (hr, wr) matching the translator's grids.
+        // Raw tiles are full (untrimmed width) resolution; translate wants
+        // owner ids trimmed to (hr, wr) matching the translator's grids.
         let width = obs.head["width"].as_u64().unwrap() as usize;
         let mut owners_trim = vec![0i64; self.hr * self.wr];
         for y in 0..self.hr {
             for x in 0..self.wr {
-                owners_trim[y * self.wr + x] = owners_raw[y * width + x];
+                owners_trim[y * self.wr + x] = obs.owner_at(y * width + x) as i64;
             }
         }
         let me = obs.me();
@@ -633,7 +627,7 @@ impl EnvWorker {
                 let src = y * width + x;
                 if self.land[i] == 1
                     && self.mag[i] < feat::IMPASSABLE_MAGNITUDE
-                    && obs.owners[src] == 0
+                    && obs.owner_at(src) == 0
                 {
                     candidates.push((y as i64, x as i64));
                 }
