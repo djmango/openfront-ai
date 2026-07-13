@@ -147,25 +147,15 @@ impl WarshipExecution {
         self.patrol_tile = tile;
     }
 
-    /// Same patrol-tile update as `set_patrol_tile`, but for updates flowing through
-    /// `Game::set_warship_patrol_tile` where native has the current engine tick at the
-    /// mutation site. TS observes these `warship.updateWarshipState({ patrolTile })`
-    /// changes in `handleManualPatrolOverride()` and suppresses repair retreats for the
-    /// next 50 ticks; recording the tick here keeps native aligned even when the redirect
-    /// happens after this execution's tick for the frame.
-    pub fn set_patrol_tile_at_tick(&mut self, tile: TileRef, tick: u32) {
+    /// Same patrol-tile update as `set_patrol_tile`, but kept separate for
+    /// `Game::set_warship_patrol_tile` call sites. TS only mutates the Unit's
+    /// `patrolTile` there; the WarshipExecution's own `handleManualPatrolOverride()`
+    /// observes the changed tile on its next tick and then clears dock/retreat state.
+    pub fn set_patrol_tile_at_tick(&mut self, tile: TileRef, _tick: u32) {
         if self.patrol_tile == tile {
             return;
         }
         self.patrol_tile = tile;
-        self.last_manual_move_tick_retreat_disabled = tick;
-        if !self.is_patrolling() {
-            self.retreating = false;
-            self.docked = false;
-            self.retreat_port = None;
-            self.active_healing_remainder = 0.0;
-        }
-        self.last_observed_patrol_tile = Some(tile);
     }
 
     /// TS `MoveWarshipExecution.init()`'s per-warship redirect (a manual player move) -
@@ -1163,6 +1153,36 @@ mod tests {
             // Must not panic even though unit id 123 was never built.
             game.move_warships(p1, &[123], game.ref_xy(30, 30));
         }
+    }
+
+    #[test]
+    fn ai_patrol_redirect_leaves_docked_ship_docked_until_its_tick() {
+        let mut game = water_game(40, 40);
+        let p1 = add_nation(&mut game, "p1");
+        let port_tile = game.ref_xy(10, 10);
+        let new_patrol = game.ref_xy(20, 10);
+        game.build_unit(p1, unit_type::PORT, port_tile);
+        let ship_id = game.build_unit(p1, unit_type::WARSHIP, port_tile);
+        let max_health = game.unit_max_health(p1, ship_id);
+        game.unit_mut(p1, ship_id).unwrap().health = max_health - 100;
+
+        let mut exec = WarshipExecution::new_for_test(p1, port_tile, ship_id);
+        exec.docked = true;
+        exec.retreat_port = Some(port_tile);
+        exec.last_observed_patrol_tile = Some(port_tile);
+        game.push_exec_for_test(ExecEnum::Warship(exec));
+
+        game.set_warship_patrol_tile(p1, ship_id, new_patrol);
+        assert!(
+            game.warship_is_docked(p1, ship_id),
+            "AI updateWarshipState({{ patrolTile }}) should not undock synchronously"
+        );
+
+        game.execute_next_tick();
+        assert!(
+            !game.warship_is_docked(p1, ship_id),
+            "the warship execution should process the patrol override on its own tick"
+        );
     }
 
     fn team_setup() -> (Game, u16, u16) {
