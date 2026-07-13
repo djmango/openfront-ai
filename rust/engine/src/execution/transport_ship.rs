@@ -320,6 +320,8 @@ impl TransportShipExecution {
             let target_owner = self.target_small_id.unwrap_or(live_dst_owner);
             if target_owner == 0 || target_owner == game.terra_nullius_id() {
                 game.add_land_attack_from(self.owner_small_id, None, Some(troops), Some(dst));
+            } else if game.is_friendly(self.owner_small_id, target_owner) {
+                game.add_troops(self.owner_small_id, troops);
             } else if let Some(def) = game.player_by_small_id(target_owner) {
                 let target_id = def.id.clone();
                 game.add_land_attack_from(
@@ -350,6 +352,19 @@ mod tests {
             friends: Vec::new(),
             team: None,
         })
+    }
+
+    fn two_tile_land_game() -> Game {
+        let mut game = Game::default();
+        let meta = crate::map::MapMeta {
+            width: 2,
+            height: 1,
+            num_land_tiles: 2,
+        };
+        let terrain = vec![0x80u8; 2];
+        game.map = crate::map::GameMap::from_terrain_bytes(&meta, &terrain).unwrap();
+        game.mini_map = crate::map::GameMap::from_terrain_bytes(&meta, &terrain).unwrap();
+        game
     }
 
     // Ported from the intent of Attack.test.ts's "Should cancel alliance
@@ -385,10 +400,12 @@ mod tests {
         let mut ship = TransportShipExecution::new(sender, only_tile, 100.0);
         ship.init(&mut game, 1);
 
-        assert!(game.alliance_requests.iter().any(|r| r.requestor_small_id
-            == target
-            && r.recipient_small_id == sender
-            && r.status == crate::game::AllianceRequestStatus::Rejected));
+        assert!(game
+            .alliance_requests
+            .iter()
+            .any(|r| r.requestor_small_id == target
+                && r.recipient_small_id == sender
+                && r.status == crate::game::AllianceRequestStatus::Rejected));
     }
 
     // Ported from Attack.test.ts's "Attack immunity" > "Should not be able to
@@ -477,10 +494,46 @@ mod tests {
         ship.tick(&mut game, 1);
 
         assert!(!ship.is_active());
-        assert_eq!(
-            game.player_by_small_id(owner).unwrap().troops,
-            1_000 + 375
-        );
+        assert_eq!(game.player_by_small_id(owner).unwrap().troops, 1_000 + 375);
+    }
+
+    // If the snapshotted target becomes friendly while the transport is in
+    // flight, TS conquers the landing tile but returns the carried troops
+    // instead of creating an attack against the new ally.
+    #[test]
+    fn transport_ship_landing_on_now_friendly_target_returns_carried_troops() {
+        let mut game = two_tile_land_game();
+        game.end_spawn_phase();
+        let owner = add_human(&mut game, "owner");
+        let target = add_human(&mut game, "target");
+
+        let landing = game.map.ref_xy(0, 0);
+        let target_survival_tile = game.map.ref_xy(1, 0);
+        game.conquer(target, landing);
+        game.conquer(target, target_survival_tile);
+        if let Some(p) = game.player_by_small_id_mut(owner) {
+            p.troops = 1_000;
+        }
+        assert!(game.create_alliance_request(owner, target, 1));
+        game.accept_alliance_request(owner, target, 2);
+        assert!(game.is_friendly(owner, target));
+
+        let uid = game.build_unit(owner, TRANSPORT, landing);
+        let mut ship = TransportShipExecution::new(owner, landing, 100.0);
+        ship.unit_id = Some(uid);
+        ship.dst = Some(landing);
+        ship.initialized = true;
+        ship.target_small_id = Some(target);
+
+        let exec_count_before = game.execs_len();
+        ship.land(&mut game, landing, uid, 100.0);
+
+        assert!(!ship.is_active());
+        assert!(!game.unit_exists(owner, uid));
+        assert_eq!(game.player_by_small_id(owner).unwrap().troops, 1_100);
+        assert_eq!(game.execs_len(), exec_count_before);
+        assert_eq!(game.map.owner_id(landing), owner);
+        assert!(game.player_by_small_id(target).unwrap().alive);
     }
 
     // Ported from the intent of Attack.test.ts's "Nuke reduce attacking boat
