@@ -299,9 +299,8 @@ impl EnvWorker {
             wr,
             crate::policy::LOCAL as usize,
         );
-        let owners_i64: Vec<i64> = owners_slotted.iter().map(|&o| o as i64).collect();
         let ae_raw = AeRaw {
-            owners: owners_i64,
+            owners: owners_slotted,
             static_terrain: self.ae_static.clone(),
             fallout: ae::pack_fallout(&fallout),
             stat: f.stat,
