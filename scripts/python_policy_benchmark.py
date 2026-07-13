@@ -97,7 +97,14 @@ def main() -> None:
     policy.load_state_dict(state["model_state_dict"], strict=True)
     policy.eval()
     ae = load_ae(args.ae, device)
-    coarse_ae = load_ae(args.coarse_ae, device) if args.coarse_ae else None
+    coarse_ae = None
+    if args.coarse_ae:
+        coarse_kwargs = (
+            {"expected_down": 16}
+            if "expected_down" in inspect.signature(load_ae).parameters
+            else {}
+        )
+        coarse_ae = load_ae(args.coarse_ae, device, **coarse_kwargs)
     encode_has_coarse = "coarse_ae" in inspect.signature(encode_grids).parameters
 
     vec = VecEnv(args.episodes, args.stage, args.max_ticks, 10)
