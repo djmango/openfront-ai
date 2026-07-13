@@ -2059,6 +2059,7 @@ pub struct EvalResult {
     pub win: f64,
     pub score: f64,
     pub episodes: usize,
+    pub details: Vec<(usize, EpisodeInfo)>,
 }
 
 /// Deployment-style eval: fresh fixed-seed envs (worker `i` always plays
@@ -2081,6 +2082,7 @@ fn run_eval(
             win: 0.0,
             score: 0.0,
             episodes: 0,
+            details: Vec::new(),
         });
     }
     let mut workers = Vec::with_capacity(episodes);
@@ -2179,6 +2181,7 @@ fn run_eval(
             win: 0.0,
             score: 0.0,
             episodes: 0,
+            details: Vec::new(),
         });
     }
     let n = finished.len() as f64;
@@ -2192,7 +2195,117 @@ fn run_eval(
         win,
         score,
         episodes: finished.len(),
+        details: results
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, info)| info.map(|info| (index, info)))
+            .collect(),
     })
+}
+
+/// Minimal inference-only entry point used by the paired old-policy
+/// benchmark. Loading into a fully constructed VarStore is intentionally
+/// strict: a v5 (43-channel/14-action) or otherwise incompatible checkpoint
+/// fails here instead of being partially loaded and mislabeled.
+pub struct BenchmarkConfig<'a> {
+    pub checkpoint: &'a str,
+    pub output: &'a str,
+    pub ae_ckpt: &'a str,
+    pub coarse_ckpt: Option<&'a str>,
+    pub stage: usize,
+    pub episodes: usize,
+    pub max_ticks: i64,
+    pub engine: EngineKind,
+    pub device: Device,
+    pub amp: bool,
+    pub foveate: bool,
+    pub gc: i64,
+    pub blocks: i64,
+    pub pinned_h2d: bool,
+    pub fp16_rollout: bool,
+    pub compact_rollout: bool,
+}
+
+pub fn run_benchmark(cfg: BenchmarkConfig<'_>) -> Result<()> {
+    let mut vs = nn::VarStore::new(cfg.device);
+    let policy = PolicyNet::new(&vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
+    vs.load(cfg.checkpoint)?;
+    let ae = crate::ae::AePair::load(
+        std::path::Path::new(cfg.ae_ckpt),
+        cfg.coarse_ckpt.map(std::path::Path::new),
+        cfg.device,
+        cfg.amp,
+        false,
+    )?;
+    let result = run_eval(
+        &policy,
+        &ae,
+        cfg.device,
+        cfg.stage,
+        cfg.episodes,
+        cfg.max_ticks,
+        cfg.engine,
+        cfg.pinned_h2d,
+        cfg.fp16_rollout,
+        cfg.compact_rollout,
+    )?;
+    let engine = match cfg.engine {
+        EngineKind::Node => "node-ts",
+        EngineKind::Native => "native-rust",
+    };
+    let stages = ofcore::curriculum::stages();
+    let stage_cfg = &stages[cfg.stage];
+    let nations = match stage_cfg.nations {
+        ofcore::curriculum::Nations::Default => serde_json::Value::String("default".into()),
+        ofcore::curriculum::Nations::Exact(n) => serde_json::Value::from(n),
+    };
+    let episodes: Vec<_> = result
+        .details
+        .iter()
+        .map(|(index, info)| {
+            serde_json::json!({
+                "index": index,
+                "seed": format!("w{index}-ep0"),
+                "map": info.map,
+                "bots": stage_cfg.bots,
+                "difficulty": stage_cfg.difficulty,
+                "nations": nations.clone(),
+                "decision_ticks": stage_cfg.decision_ticks,
+                "won": info.won,
+                "place": info.place,
+                "n_players": info.n_players,
+                "score": info.score,
+                "final_tick": info.final_tick,
+                "final_tiles": info.final_tiles,
+            })
+        })
+        .collect();
+    let report = serde_json::json!({
+        "format": 1,
+        "mode": "indirect-scripted-bot",
+        "runner": "rust",
+        "checkpoint": cfg.checkpoint,
+        "engine": engine,
+        "stage": cfg.stage,
+        "max_ticks": cfg.max_ticks,
+        "schema": {
+            "grid_channels": policy::C_GRID,
+            "player_features": policy::P_FEAT,
+            "scalars": policy::N_SCALARS,
+            "local_planes": policy::N_LOCAL,
+            "actions": policy::N_ACTIONS,
+            "build_types": policy::N_BUILD,
+            "nuke_types": policy::N_NUKE,
+            "quantity": "beta",
+        },
+        "episodes": episodes,
+    });
+    std::fs::write(cfg.output, serde_json::to_vec_pretty(&report)?)?;
+    println!(
+        "[benchmark] wrote {} completed episodes to {}",
+        result.episodes, cfg.output
+    );
+    Ok(())
 }
 
 /// Actor commands contain only ordinary CPU data. `weights` is a complete

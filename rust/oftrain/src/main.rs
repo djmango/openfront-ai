@@ -272,6 +272,12 @@ struct Args {
     #[arg(long)]
     eval_device: Option<String>,
 
+    /// Run one fixed-seed greedy benchmark and write its per-episode JSON,
+    /// then exit without training. The checkpoint must match the current
+    /// Rust observation/action schema exactly; VarStore loading is strict.
+    #[arg(long)]
+    benchmark_out: Option<String>,
+
     #[arg(long, default_value_t = 200)]
     ckpt_every: u64,
 
@@ -560,6 +566,32 @@ fn main() -> anyhow::Result<()> {
                  (set --eval-device cuda:N to override)"
             ),
         }
+    }
+
+    if let Some(out) = &args.benchmark_out {
+        let checkpoint = args
+            .resume
+            .as_deref()
+            .or(args.init.as_deref())
+            .ok_or_else(|| anyhow::anyhow!("--benchmark-out requires --resume or --init"))?;
+        return train::run_benchmark(train::BenchmarkConfig {
+            checkpoint,
+            output: out,
+            ae_ckpt: &args.ckpt,
+            coarse_ckpt: args.coarse_ckpt.as_deref(),
+            stage: args.stage,
+            episodes: args.eval_episodes,
+            max_ticks: args.max_episode_ticks,
+            engine: args.engine,
+            device,
+            amp: args.amp,
+            foveate: args.foveate,
+            gc: args.gc,
+            blocks: args.blocks,
+            pinned_h2d: args.pinned_h2d,
+            fp16_rollout: args.fp16_rollout,
+            compact_rollout: args.compact_rollout,
+        });
     }
 
     let cfg = train::Config {
