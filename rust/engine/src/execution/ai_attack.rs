@@ -607,7 +607,7 @@ fn collect_bordering_players(game: &Game, small_id: u16) -> Vec<u16> {
 /// call sites: they each already drop small ID `0` via
 /// `game.player_by_small_id(0) == None` (`filter_map`/`Option` chains) or an
 /// equivalent player-only filter.
-fn nearby_players_ts_order(game: &Game, small_id: u16) -> Vec<u16> {
+pub(crate) fn nearby_players_ts_order(game: &Game, small_id: u16) -> Vec<u16> {
     let mut seen = HashSet::new();
     let mut ordered: Vec<u16> = Vec::new();
     let mut push = |sid: u16| {
@@ -1034,17 +1034,23 @@ fn nation_attack_best_target(
                     true,
                 );
             }
+            if nation_strategy_assist(
+                game,
+                random,
+                attacker_small_id,
+                reserve_ratio,
+                expand_ratio,
+                bot_attack_troops_sent,
+                difficulty,
+                emoji.as_deref_mut(),
+            ) {
+                return true;
+            }
             // TS Easy order is [nuked, bots, retaliate, assist, betray, hated,
-            // weakest]. `assist` (TS `AiAttackBehavior.assistAllies`, ally
-            // target-following) has no native port yet - see DEVLOG; the
-            // remaining strategies were previously missing from this arm
-            // entirely (this file already implements `betray`/`hated`, used
-            // by the Medium arm below, just never wired in here), which made
-            // Easy nations skip straight from `retaliate` to `weakest`
-            // whenever TS would have taken a `betray`/`hated` branch instead
-            // - a real behavior divergence, not just an unlikely edge case
-            // (root-caused via a bots=5 curriculum-parity bisection, see
-            // docs/bot-ai-parity-*/ for the methodology).
+            // weakest]. The remaining strategies were previously missing from
+            // this arm entirely, which made Easy nations skip straight from
+            // `retaliate` to `weakest` whenever TS would have taken a
+            // `betray`/`hated` branch instead.
             if nation_strategy_betray(
                 game,
                 random,
@@ -1113,6 +1119,18 @@ fn nation_attack_best_target(
                     emoji.as_deref_mut(),
                     true,
                 );
+            }
+            if nation_strategy_assist(
+                game,
+                random,
+                attacker_small_id,
+                reserve_ratio,
+                expand_ratio,
+                bot_attack_troops_sent,
+                difficulty,
+                emoji.as_deref_mut(),
+            ) {
+                return true;
             }
             if nation_strategy_betray(
                 game,
@@ -1191,11 +1209,10 @@ fn nation_attack_best_target(
                 emoji.as_deref_mut(),
             )
         }
-        // TS Hard order (minus `assist`, dead code - see the Easy arm's
-        // comment - and `donate`, live only in `GameMode.Team`, not ported,
-        // see docs/bot-ai-parity-nation-relations/README.md's follow-up
-        // list): [bots, retaliate, betray, nuked, traitor, afk, hated,
-        // veryWeak, victim, weakest, island]. Previously this whole branch
+        // TS Hard order (minus `donate`, live only in `GameMode.Team`, not
+        // ported, see docs/bot-ai-parity-nation-relations/README.md's
+        // follow-up list): [bots, retaliate, assist, betray, nuked, traitor,
+        // afk, hated, veryWeak, victim, weakest, island]. Previously this whole branch
         // (shared with Impossible below, as a single `_` catch-all) only
         // implemented [bots, retaliate, weakest] - 8 of 11 strategies were
         // silently missing, found via a systematic audit of this match
@@ -1206,6 +1223,9 @@ fn nation_attack_best_target(
             }
             if let Some(attacker) = find_incoming_attacker(game, attacker_small_id) {
                 return nation_try_attack_player(game, random, attacker_small_id, attacker, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, emoji.as_deref_mut(), true);
+            }
+            if nation_strategy_assist(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, emoji.as_deref_mut()) {
+                return true;
             }
             if nation_strategy_betray(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut()) {
                 return true;
@@ -1233,9 +1253,9 @@ fn nation_attack_best_target(
             }
             nation_strategy_island(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut())
         }
-        // TS Impossible order (same dead-code exclusions as Hard above):
-        // [retaliate, bots, veryWeak, traitor, afk, betray, victim, nuked,
-        // hated, weakest, island]. Note this order genuinely differs from
+        // TS Impossible order (same `donate` exclusion as Hard above):
+        // [retaliate, bots, veryWeak, assist, traitor, afk, betray, victim,
+        // nuked, hated, weakest, island]. Note this order genuinely differs from
         // Hard's (retaliate before bots; veryWeak much earlier) - it is not
         // just Hard with a different set, so it needs its own arm rather
         // than falling back to a shared default.
@@ -1247,6 +1267,9 @@ fn nation_attack_best_target(
                 return true;
             }
             if nation_strategy_very_weak(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut()) {
+                return true;
+            }
+            if nation_strategy_assist(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, emoji.as_deref_mut()) {
                 return true;
             }
             if nation_strategy_traitor(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, bordering, emoji.as_deref_mut()) {
@@ -1388,6 +1411,53 @@ fn nation_strategy_hated(
             emoji,
             false,
         );
+    }
+    false
+}
+
+fn nation_strategy_assist(
+    game: &mut Game,
+    random: &mut PseudoRandom,
+    sid: u16,
+    reserve_ratio: f64,
+    expand_ratio: f64,
+    bot_attack_troops_sent: &mut f64,
+    difficulty: &str,
+    mut emoji: Option<&mut super::nation_emoji::NationEmojiState>,
+) -> bool {
+    if game.wire.disable_alliances() {
+        return false;
+    }
+    let allies = game.allied_small_ids(sid);
+    for ally in allies {
+        let targets = game.player_targets(ally);
+        if targets.is_empty() {
+            continue;
+        }
+        if game.relation(sid, ally) < Relation::Friendly {
+            continue;
+        }
+        for target in targets {
+            if target == sid || game.is_friendly(sid, target) {
+                continue;
+            }
+            if !nation_try_attack_player(
+                game,
+                random,
+                sid,
+                target,
+                reserve_ratio,
+                expand_ratio,
+                bot_attack_troops_sent,
+                difficulty,
+                emoji.as_deref_mut(),
+                false,
+            ) {
+                continue;
+            }
+            game.update_relation(sid, ally, -20);
+            return true;
+        }
     }
     false
 }
@@ -1628,6 +1698,9 @@ fn attack_with_random_boat(
             }
             let tile = game.ref_xy(rx as u32, ry as u32);
             if !game.is_land(tile) {
+                continue;
+            }
+            if game.is_impassable(tile) {
                 continue;
             }
             let owner = game.map.owner_id(tile);
