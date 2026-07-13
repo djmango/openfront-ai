@@ -2760,12 +2760,16 @@ impl Game {
     }
 
     pub fn trade_ship_destination_owner(&self, ship_unit_id: i32) -> Option<u16> {
-        let destination_port = self.execs.iter().find_map(|execution| match execution {
-            ExecEnum::TradeShip(trade) if trade.ship_unit_id() == Some(ship_unit_id) => {
-                Some(trade.destination_port_unit_id())
-            }
-            _ => None,
-        })?;
+        let destination_port = self
+            .execs
+            .iter()
+            .chain(self.uninit.iter())
+            .find_map(|execution| match execution {
+                ExecEnum::TradeShip(trade) if trade.ship_unit_id() == Some(ship_unit_id) => {
+                    Some(trade.destination_port_unit_id())
+                }
+                _ => None,
+            })?;
         self.find_unit_owner(destination_port)
     }
 

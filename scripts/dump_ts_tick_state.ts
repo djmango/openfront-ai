@@ -33,6 +33,7 @@ interface UnitSnapshot {
   unitType: string;
   tile: number;
   hash: number;
+  health: number;
 }
 
 interface PlayerSnapshot {
@@ -89,6 +90,7 @@ function snapshot(game: Game, dumpUnits: boolean): TickSnapshot {
         unitType: u.type(),
         tile: u.tile(),
         hash: u.hash(),
+        health: u.health(),
       }));
     }
     return base;
