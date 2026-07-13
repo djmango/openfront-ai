@@ -38,9 +38,10 @@
 //! no Tensor or VarStore crosses threads. Checkpoint weights are written by
 //! owner 0 and coordinator-ordered sidecars retain their format/order.
 //!
-//! Phase 1 deliberately does not implement live env-resize commands.
-//! Combining `--persistent-actors` with `--auto-scale-envs` selects the
-//! legacy path (with a startup warning), preserving existing autoscaling.
+//! Persistent owners deliberately do not accept live env-resize commands.
+//! Stage-aware sizing checkpoints at an update boundary and exits with a
+//! machine-readable restart request; utilization autoscale is disabled rather
+//! than silently falling back to legacy ownership.
 //!
 //! ## Dual env-group pipelining (`--pipeline-groups`)
 //!
@@ -181,6 +182,12 @@ pub struct Config {
     /// >1 requires `device` to be `Cuda(_)`; shards use `Cuda(0..num_gpus)`.
     pub num_gpus: usize,
     pub stage: usize,
+    /// Selects the V8.1 late-stage win gates while preserving stage identity.
+    pub v81_curriculum: bool,
+    /// Optional env workers-per-shard target for every curriculum stage.
+    /// A target change is applied by checkpointing and restarting so
+    /// persistent actor/learner CUDA ownership never changes threads.
+    pub stage_env_targets: Vec<usize>,
     pub max_episode_ticks: i64,
     pub rollout_len: usize,
     pub updates: u64,
@@ -292,8 +299,8 @@ pub struct Config {
     /// Opt-in persistent ownership. One long-lived OS thread per shard owns
     /// actor CUDA state; one stable learner thread per GPU owns that shard's
     /// learner CUDA state and PPO execution. Gradient and weight messages are
-    /// packed CPU-only f32 vectors. Disabled by default; autoscaling selects
-    /// the legacy path.
+    /// packed CPU-only f32 vectors. Disabled by default; incompatible live
+    /// utilization autoscaling is disabled without changing ownership mode.
     pub persistent_actors: bool,
     /// Opt-in ready-queue scheduler for persistent actors. The default-off
     /// fallback remains the fixed two-half collector.
@@ -389,6 +396,50 @@ pub struct TrainState {
     pub best_eval_win: Option<f64>,
     #[serde(default)]
     pub best_eval_score: Option<f64>,
+    /// Curriculum/sizing identity is persisted so a supervisor with stale
+    /// launch flags cannot silently resume under another schedule.
+    #[serde(default)]
+    pub v81_curriculum: bool,
+    #[serde(default)]
+    pub stage_env_targets: Vec<usize>,
+    #[serde(default)]
+    pub envs_per_shard: usize,
+    /// Non-null only on the checkpoint that requests a stage-boundary
+    /// restart at a new equal per-shard env count.
+    #[serde(default)]
+    pub requested_env_target: Option<usize>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct EnvResizeRequest {
+    format: u32,
+    reason: String,
+    update: u64,
+    stage: usize,
+    current_envs_per_shard: usize,
+    requested_envs_per_shard: usize,
+    num_shards: usize,
+    checkpoint: String,
+}
+
+fn restart_request_path(ckpt_dir: &str) -> String {
+    format!("{ckpt_dir}/restart_request.json")
+}
+
+fn should_advance(recent_wins: &std::collections::VecDeque<f64>, gate: f64) -> bool {
+    recent_wins.len() == ofcore::curriculum::WINDOW
+        && recent_wins.iter().sum::<f64>() / recent_wins.len() as f64 > gate
+}
+
+fn requested_stage_env_target(
+    targets: &[usize],
+    stage: usize,
+    current_envs_per_shard: usize,
+) -> Option<usize> {
+    targets
+        .get(stage)
+        .copied()
+        .filter(|&target| target != current_envs_per_shard)
 }
 
 fn state_sidecar_path(ckpt_path: &str) -> String {
@@ -433,6 +484,85 @@ mod sidecar_path_tests {
             atomic_tmp_path("checkpoints/latest.state.json"),
             "checkpoints/latest.state.tmp.json"
         );
+    }
+}
+
+#[cfg(test)]
+mod v81_state_and_gate_tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    #[test]
+    fn gate_requires_a_full_window_and_strictly_exceeds_threshold() {
+        let mut wins = VecDeque::from(vec![1.0; ofcore::curriculum::WINDOW - 1]);
+        assert!(!should_advance(&wins, 0.35), "39 wins must not advance");
+
+        wins = VecDeque::from(
+            (0..ofcore::curriculum::WINDOW)
+                .map(|index| if index < 14 { 1.0 } else { 0.0 })
+                .collect::<Vec<_>>(),
+        );
+        assert!(!should_advance(&wins, 0.35), "exactly 0.35 is below the strict gate");
+        wins[14] = 1.0;
+        assert!(should_advance(&wins, 0.35));
+    }
+
+    #[test]
+    fn train_state_round_trips_v81_sizing_and_reads_legacy_sidecars() {
+        let state = TrainState {
+            update: 41,
+            stage: 6,
+            ent_scale: 1.2,
+            lr_now: 1e-4,
+            total_env_steps: 9_999,
+            recent_wins: vec![1.0, 0.0],
+            best_eval_win: None,
+            best_eval_score: None,
+            v81_curriculum: true,
+            stage_env_targets: ofcore::curriculum::V81_ENV_TARGETS.to_vec(),
+            envs_per_shard: 24,
+            requested_env_target: Some(12),
+        };
+        let restored: TrainState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert!(restored.v81_curriculum);
+        assert_eq!(restored.stage_env_targets, ofcore::curriculum::V81_ENV_TARGETS);
+        assert_eq!(restored.requested_env_target, Some(12));
+
+        let legacy: TrainState = serde_json::from_str(
+            r#"{"update":1,"stage":0,"ent_scale":1.0,"lr_now":0.0001,
+                "total_env_steps":32,"recent_wins":[]}"#,
+        )
+        .unwrap();
+        assert!(!legacy.v81_curriculum);
+        assert!(legacy.stage_env_targets.is_empty());
+        assert_eq!(legacy.requested_env_target, None);
+    }
+
+    #[test]
+    fn resize_request_is_machine_readable_and_per_shard() {
+        let request = EnvResizeRequest {
+            format: 1,
+            reason: "curriculum_stage_env_target".to_string(),
+            update: 99,
+            stage: 6,
+            current_envs_per_shard: 24,
+            requested_envs_per_shard: 12,
+            num_shards: 4,
+            checkpoint: "checkpoints/latest.safetensors".to_string(),
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["requested_envs_per_shard"], 12);
+        assert_eq!(json["num_shards"], 4);
+        assert_eq!(json["reason"], "curriculum_stage_env_target");
+    }
+
+    #[test]
+    fn stage_resize_plans_equal_shard_shrink_and_growth_but_not_a_noop() {
+        let targets = [24, 12, 20];
+        assert_eq!(requested_stage_env_target(&targets, 1, 24), Some(12));
+        assert_eq!(requested_stage_env_target(&targets, 2, 12), Some(20));
+        assert_eq!(requested_stage_env_target(&targets, 0, 24), None);
     }
 }
 
@@ -2805,6 +2935,10 @@ mod async_eval_tests {
             recent_wins: vec![1.0],
             best_eval_win: Some(0.75),
             best_eval_score: Some(3.5),
+            v81_curriculum: true,
+            stage_env_targets: ofcore::curriculum::V81_ENV_TARGETS.to_vec(),
+            envs_per_shard: 24,
+            requested_env_target: None,
         };
         save_checkpoint_state(&best, &state).unwrap();
         assert!(seen_tmp.borrow().ends_with("best_eval.tmp.safetensors"));
@@ -2815,6 +2949,8 @@ mod async_eval_tests {
         .unwrap();
         assert_eq!(saved_state.update, 8);
         assert_eq!(saved_state.best_eval_win, Some(0.75));
+        assert!(saved_state.v81_curriculum);
+        assert_eq!(saved_state.envs_per_shard, 24);
         assert_eq!(std::fs::read(&latest).unwrap(), b"latest-sentinel");
         assert!(!std::path::Path::new(seen_tmp.borrow().as_str()).exists());
         std::fs::remove_dir_all(dir).unwrap();
@@ -4534,13 +4670,17 @@ pub fn run(mut cfg: Config) -> Result<()> {
     }
     if cfg.persistent_actors && cfg.auto_scale_envs {
         println!(
-            "[train] WARNING: --persistent-actors Phase 1 does not support \
-             --auto-scale-envs commands; selecting the legacy collector path \
-             so existing autoscale behavior is preserved"
+            "[train] WARNING: --persistent-actors does not support live \
+             --auto-scale-envs commands; disabling utilization autoscale while \
+             preserving persistent actor ownership"
         );
-        cfg.persistent_actors = false;
-        cfg.work_conserving_actors = false;
+        cfg.auto_scale_envs = false;
     }
+    anyhow::ensure!(
+        cfg.stage_env_targets.is_empty()
+            || cfg.stage_env_targets.len() == ofcore::curriculum::stages().len(),
+        "stage env target count must match the curriculum stage count"
+    );
     std::fs::create_dir_all(&cfg.ckpt_dir)?;
 
     // Resume / init: load weights before shards spawn. `--resume` restores
@@ -4584,7 +4724,38 @@ pub fn run(mut cfg: Config) -> Result<()> {
     } else {
         None
     };
+    if let Some(state) = &resumed_state {
+        if state.v81_curriculum && !cfg.v81_curriculum {
+            println!("[train] restoring --v81-curriculum from TrainState");
+            cfg.v81_curriculum = true;
+        }
+        if !state.stage_env_targets.is_empty() {
+            anyhow::ensure!(
+                state.stage_env_targets.len() == ofcore::curriculum::stages().len(),
+                "checkpoint has {} stage env targets, expected {}",
+                state.stage_env_targets.len(),
+                ofcore::curriculum::stages().len()
+            );
+            if cfg.stage_env_targets != state.stage_env_targets {
+                println!("[train] restoring stage env targets from TrainState");
+                cfg.stage_env_targets.clone_from(&state.stage_env_targets);
+            }
+        }
+    }
     let start_stage = resumed_state.as_ref().map(|s| s.stage).unwrap_or(cfg.stage);
+    anyhow::ensure!(
+        start_stage < ofcore::curriculum::stages().len(),
+        "curriculum stage {start_stage} is out of range"
+    );
+    if let Some(&target) = cfg.stage_env_targets.get(start_stage) {
+        if cfg.num_envs != target {
+            println!(
+                "[train] stage {start_stage} env target overrides startup count: {} -> {target} envs/shard",
+                cfg.num_envs
+            );
+        }
+        cfg.num_envs = target;
+    }
 
     let metrics = MetricsWriter::create(&cfg.ckpt_dir)?;
     println!("[train] metrics -> {}/metrics.jsonl", cfg.ckpt_dir);
@@ -4737,6 +4908,14 @@ pub fn run(mut cfg: Config) -> Result<()> {
         }
     }
     println!("[train] all {total_envs} envs ready");
+    // A prior process may have intentionally exited for this exact target.
+    // Once every equal shard is live, the machine-readable request is
+    // fulfilled and can be removed.
+    let request_path = restart_request_path(&cfg.ckpt_dir);
+    if std::path::Path::new(&request_path).exists() {
+        std::fs::remove_file(&request_path)?;
+        println!("[train] fulfilled stage env resize request at {} envs/shard", cfg.num_envs);
+    }
 
     let mut rng = Some(rand::rngs::SmallRng::from_entropy());
     let mut persistent_learner = if persistent_learner_enabled {
@@ -4847,7 +5026,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
     // stage count; advancing resets the window and rebroadcasts the new
     // stage to every env worker thread (see `spawn_worker`'s `stage_rx`)
     // plus decays the learning rate on every shard's optimizer.
-    let stages = ofcore::curriculum::stages();
+    let stages = ofcore::curriculum::stages_for(cfg.v81_curriculum);
     let mut curr_stage = start_stage;
     let mut recent_wins: std::collections::VecDeque<f64> = resumed_state
         .as_ref()
@@ -4880,6 +5059,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
         }
         _ => None,
     };
+    let mut requested_env_target: Option<usize> = None;
 
     // Prime the pipeline: collect the very first rollout (using the
     // actors' initial, freshly-copied-from-learner weights) before the
@@ -5117,9 +5297,8 @@ pub fn run(mut cfg: Config) -> Result<()> {
                             ofcore::curriculum::WINDOW
                         );
                     }
-                    if recent_wins.len() == ofcore::curriculum::WINDOW
-                        && win_rate > stages[curr_stage].win_at
-                        && curr_stage < stages.len() - 1
+                    if curr_stage < stages.len() - 1
+                        && should_advance(&recent_wins, stages[curr_stage].win_at)
                     {
                         curr_stage += 1;
                         recent_wins.clear();
@@ -5132,11 +5311,16 @@ pub fn run(mut cfg: Config) -> Result<()> {
             lr_now = cfg.lr * cfg.stage_lr_decay.powi(curr_stage as i32);
             lr_warmup_start_update = update + 1;
             lr_warmup_updates = LR_WARMUP_UPDATES;
-            if cfg.persistent_actors {
+            requested_env_target = requested_stage_env_target(
+                &cfg.stage_env_targets,
+                curr_stage,
+                live_total_envs / devices.len(),
+            );
+            if requested_env_target.is_none() && cfg.persistent_actors {
                 for actor in &mut persistent_actors {
                     actor.set_stage(curr_stage)?;
                 }
-            } else {
+            } else if requested_env_target.is_none() {
                 for actor in &actors {
                     for w in &actor.workers {
                         let _ = w.stage_tx.send(curr_stage);
@@ -5161,6 +5345,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 "=== curriculum advance -> stage {curr_stage}: maps={:?} bots={} {} lr->{lr_now:.2e}",
                 st.maps, st.bots, st.difficulty
             );
+            if let Some(target) = requested_env_target {
+                println!(
+                    "[train] stage {curr_stage} requests {target} envs/shard; \
+                     checkpointing at update boundary for a persistent-owner-safe restart"
+                );
+            }
         }
         total_env_steps += (live_total_envs * cfg.rollout_len) as u64;
         let eval_due = cfg.eval_every > 0 && update % cfg.eval_every == 0;
@@ -5187,7 +5377,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
         // that ran concurrently with it is done reading the *old*
         // weights) - the next update's collection will use these.
         let refresh_start = Instant::now();
-        if cfg.persistent_actors {
+        if requested_env_target.is_none() && cfg.persistent_actors {
             let snapshots = if persistent_learner_enabled {
                 learner_weights.ok_or_else(|| {
                     anyhow!("persistent learner completed without a weight snapshot")
@@ -5201,7 +5391,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             for (actor, weights) in persistent_actors.iter_mut().zip(snapshots) {
                 actor.refresh(update + 1, weights)?;
             }
-        } else {
+        } else if requested_env_target.is_none() {
             for (actor, learner) in actors.iter_mut().zip(learners.iter()) {
                 actor.vs.copy(&learner.vs)?;
             }
@@ -5228,6 +5418,75 @@ pub fn run(mut cfg: Config) -> Result<()> {
              (train={train_dt:.3}s collect={collect_dt:.3}s refresh={refresh_dt:.3}s)",
             update_start.elapsed().as_secs_f64()
         );
+
+        if let Some(target) = requested_env_target {
+            if let Some(eval) = async_eval.take() {
+                if let Some(completion) = eval.shutdown()? {
+                    current_best = report_eval_completion(completion, update, &metrics)?;
+                }
+            }
+            let current_envs_per_shard = live_total_envs / devices.len();
+            let state = TrainState {
+                update: update + 1,
+                stage: curr_stage,
+                ent_scale,
+                lr_now,
+                total_env_steps,
+                recent_wins: recent_wins.iter().copied().collect(),
+                best_eval_win: current_best.map(|best| best.0),
+                best_eval_score: current_best.map(|best| best.1),
+                v81_curriculum: cfg.v81_curriculum,
+                stage_env_targets: cfg.stage_env_targets.clone(),
+                envs_per_shard: current_envs_per_shard,
+                requested_env_target: Some(target),
+            };
+            let latest = format!("{}/latest.safetensors", cfg.ckpt_dir);
+            if persistent_learner_enabled {
+                persistent_learner
+                    .as_mut()
+                    .expect("persistent learner initialized")
+                    .0
+                    .save_weights(&latest)?;
+                save_checkpoint_state(&latest, &state)?;
+            } else {
+                save_checkpoint(&learners[0].vs, &latest, &state)?;
+            }
+            let request = EnvResizeRequest {
+                format: 1,
+                reason: "curriculum_stage_env_target".to_string(),
+                update: update + 1,
+                stage: curr_stage,
+                current_envs_per_shard,
+                requested_envs_per_shard: target,
+                num_shards: devices.len(),
+                checkpoint: latest,
+            };
+            let request_path = restart_request_path(&cfg.ckpt_dir);
+            save_atomic(&request_path, |tmp| {
+                std::fs::write(tmp, serde_json::to_string_pretty(&request)?)?;
+                Ok(())
+            })?;
+            if let Some((learner, _)) = persistent_learner.take() {
+                learner.shutdown()?;
+            }
+            if cfg.persistent_actors {
+                for actor in persistent_actors {
+                    actor.shutdown()?;
+                }
+            } else {
+                for actor in actors {
+                    for worker in actor.workers {
+                        drop(worker.choice_tx);
+                        let _ = worker.handle.join();
+                    }
+                }
+            }
+            println!(
+                "[train] resize checkpoint complete: {request_path}; exiting cleanly \
+                 for restart at {target} envs/shard"
+            );
+            return Ok(());
+        }
 
         // Auto-scale check: deliberately placed here, after this
         // update's `pending`/`next_pending` swap and *before* the next
@@ -5335,6 +5594,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 recent_wins: recent_wins.iter().copied().collect(),
                 best_eval_win: current_best.map(|best| best.0),
                 best_eval_score: current_best.map(|best| best.1),
+                v81_curriculum: cfg.v81_curriculum,
+                stage_env_targets: cfg.stage_env_targets.clone(),
+                envs_per_shard: live_total_envs / devices.len(),
+                requested_env_target: None,
             };
             if let Some(eval) = async_eval.as_mut() {
                 if let Some(weights) = eval_weights {
@@ -5506,6 +5769,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 recent_wins: recent_wins.iter().copied().collect(),
                 best_eval_win: current_best.map(|best| best.0),
                 best_eval_score: current_best.map(|best| best.1),
+                v81_curriculum: cfg.v81_curriculum,
+                stage_env_targets: cfg.stage_env_targets.clone(),
+                envs_per_shard: live_total_envs / devices.len(),
+                requested_env_target: None,
             };
             let path = format!("{}/policy_update{}.safetensors", cfg.ckpt_dir, update);
             if persistent_learner_enabled {
@@ -5553,6 +5820,14 @@ pub fn run(mut cfg: Config) -> Result<()> {
         recent_wins: recent_wins.iter().copied().collect(),
         best_eval_win: current_best.map(|best| best.0),
         best_eval_score: current_best.map(|best| best.1),
+        v81_curriculum: cfg.v81_curriculum,
+        stage_env_targets: cfg.stage_env_targets.clone(),
+        envs_per_shard: pending
+            .iter()
+            .map(|rollout| rollout.buffer.first().map(|row| row.len()).unwrap_or(0))
+            .sum::<usize>()
+            / devices.len(),
+        requested_env_target: None,
     };
     let final_path = format!("{}/policy_final.safetensors", cfg.ckpt_dir);
     let latest_path = format!("{}/latest.safetensors", cfg.ckpt_dir);
@@ -5648,6 +5923,18 @@ mod persistent_actor_tests {
             })
             .unwrap_err();
         assert!(err.to_string().contains("stale actor policy refresh"));
+    }
+
+    #[test]
+    fn stage_resize_boundary_uses_ordered_shutdown_not_a_live_resize_command() {
+        let mut protocol = ActorProtocol::new(12);
+        protocol.accept(&ActorCommand::Collect { id: 1 }).unwrap();
+        protocol.accept(&ActorCommand::Shutdown { id: 2 }).unwrap();
+        assert!(protocol.stopped);
+        assert!(
+            protocol.accept(&ActorCommand::Collect { id: 3 }).is_err(),
+            "a resize restart must leave no old actor accepting work"
+        );
     }
 
     #[test]
@@ -5754,6 +6041,8 @@ mod persistent_actor_tests {
             num_envs: 1,
             num_gpus: 1,
             stage: 0,
+            v81_curriculum: false,
+            stage_env_targets: Vec::new(),
             max_episode_ticks: 10,
             rollout_len: 2,
             updates: 1,
