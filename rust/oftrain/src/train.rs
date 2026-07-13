@@ -3935,7 +3935,11 @@ mod persistent_actor_tests {
                     map: Arc::from("parity"),
                     land_mag: vec![0.0; 2 * gh * 8 * gw * 8].into(),
                 },
-                fallout: vec![0.0; gh * 8 * gw * 8],
+                fallout: crate::ae::pack_fallout(
+                    &vec![0u8; gh * 8 * gw * 8],
+                    gh * 8,
+                    gw * 8,
+                ),
                 stat: vec![0.0; 6 * plane],
                 hr: gh * 8,
                 wr: gw * 8,

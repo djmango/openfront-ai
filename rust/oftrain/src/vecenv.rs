@@ -302,7 +302,7 @@ impl EnvWorker {
         let ae_raw = AeRaw {
             owners: owners_slotted,
             static_terrain: self.ae_static.clone(),
-            fallout: ae::pack_fallout(&fallout),
+            fallout: ae::pack_fallout(&fallout, hr, wr),
             stat: f.stat,
             hr,
             wr,

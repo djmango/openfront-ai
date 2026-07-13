@@ -223,7 +223,9 @@ pub struct StaticTerrain {
 pub struct AeRaw {
     pub owners: Vec<u8>, // (hr*wr) slotted, embedding indices 0..=127
     pub static_terrain: StaticTerrain,
-    pub fallout: Vec<f32>, // (hr, wr), fresh every decision
+    /// NumPy/ofrs-compatible row-major packbits: each row occupies
+    /// `ceil(wr/8)` bytes and its leftmost pixel is bit 7.
+    pub fallout: Vec<u8>, // (hr, ceil(wr/8)), fresh every decision
     pub stat: Vec<f32>,    // (6, gh, gw)
     pub hr: usize,
     pub wr: usize,
@@ -242,11 +244,57 @@ pub fn pack_static_terrain(land: &[u8], mag: &[u8], hr: usize, wr: usize) -> Arc
     out.into()
 }
 
-pub fn pack_fallout(fallout: &[u8]) -> Vec<f32> {
+pub const fn packed_fallout_row_bytes(wr: usize) -> usize {
+    wr.div_ceil(8)
+}
+
+/// Match `numpy.packbits(..., axis=1)` and ofrs exactly: MSB-first within
+/// each byte, with a new byte-aligned row and zero low-bit padding.
+pub fn pack_fallout(fallout: &[u8], hr: usize, wr: usize) -> Vec<u8> {
+    assert_eq!(fallout.len(), hr * wr, "fallout shape mismatch");
+    let packed_wr = packed_fallout_row_bytes(wr);
+    let mut packed = vec![0u8; hr * packed_wr];
+    for y in 0..hr {
+        for x in 0..wr {
+            if fallout[y * wr + x] != 0 {
+                packed[y * packed_wr + x / 8] |= 1 << (7 - x % 8);
+            }
+        }
+    }
+    packed
+}
+
+/// Exact legacy/CPU fallback. The persistent CUDA actor uses
+/// [`unpack_fallout_device`] instead, so its full f32 plane never exists on
+/// the host and never crosses PCIe.
+fn unpack_fallout_host(packed: &[u8], hr: usize, wr: usize) -> Vec<f32> {
+    let packed_wr = packed_fallout_row_bytes(wr);
+    debug_assert_eq!(packed.len(), hr * packed_wr);
+    let mut fallout = vec![0.0f32; hr * wr];
+    for y in 0..hr {
+        for x in 0..wr {
+            fallout[y * wr + x] =
+                ((packed[y * packed_wr + x / 8] >> (7 - x % 8)) & 1) as f32;
+        }
+    }
     fallout
-        .iter()
-        .map(|&v| if v != 0 { 1.0 } else { 0.0 })
-        .collect()
+}
+
+/// Expand `(B,H,ceil(W/8))` u8 packbits on `packed.device()` to the exact
+/// `(B,H,W)` f32 0/1 plane expected by the frozen encoder. Narrowing removes
+/// only the low padding bits from the final byte of each row.
+fn unpack_fallout_device(packed: &Tensor, wr: usize, shifts: &Tensor) -> Tensor {
+    let size = packed.size();
+    debug_assert_eq!(size.len(), 3);
+    debug_assert_eq!(size[2] as usize, packed_fallout_row_bytes(wr));
+    let full_wr = size[2] * 8;
+    packed
+        .unsqueeze(-1)
+        .bitwise_right_shift(shifts)
+        .bitwise_and(1)
+        .view([size[0], size[1], full_wr])
+        .narrow(2, 0, wr as i64)
+        .to_kind(Kind::Float)
 }
 
 /// Actor-thread-owned CUDA cache. Tensor is deliberately not Clone and this
@@ -256,6 +304,7 @@ pub struct TerrainDeviceCache {
     device: Device,
     shared_pair_inputs: bool,
     entries: HashMap<u64, (TerrainCacheKey, Arc<str>, Tensor)>,
+    fallout_shifts: Option<Tensor>,
     uploads: u64,
 }
 
@@ -265,6 +314,7 @@ impl TerrainDeviceCache {
             device,
             shared_pair_inputs: false,
             entries: HashMap::new(),
+            fallout_shifts: None,
             uploads: 0,
         }
     }
@@ -280,6 +330,16 @@ impl TerrainDeviceCache {
 
     pub(crate) fn supports_shared_pair_inputs(&self) -> bool {
         self.shared_pair_inputs
+    }
+
+    fn fallout_shifts(&mut self) -> Tensor {
+        self.fallout_shifts
+            .get_or_insert_with(|| {
+                // Synchronous by construction: this actor-owned tensor stays
+                // in the cache and no temporary host storage can outlive H2D.
+                Tensor::from_slice(&[7u8, 6, 5, 4, 3, 2, 1, 0]).to_device(self.device)
+            })
+            .shallow_clone()
     }
 
     fn static_tensor(&mut self, terrain: &StaticTerrain) -> Tensor {
@@ -343,9 +403,10 @@ fn validate_items(items: &[&AeRaw]) -> Result<HashMap<(usize, usize), Vec<usize>
             "AE item {i} owners len {}, expected {pix}",
             it.owners.len()
         );
+        let packed_pix = it.hr * packed_fallout_row_bytes(it.wr);
         anyhow::ensure!(
-            it.fallout.len() == pix,
-            "AE item {i} fallout len {}, expected {pix}",
+            it.fallout.len() == packed_pix,
+            "AE item {i} packed fallout len {}, expected {packed_pix}",
             it.fallout.len()
         );
         anyhow::ensure!(
@@ -417,6 +478,7 @@ pub fn encode_latent_batch_device(
 
     for ((hr, wr), idxs) in groups {
         let pix = hr * wr;
+        let packed_wr = packed_fallout_row_bytes(wr);
         let per = (MAX_ENC_PIX / pix.max(1)).max(1);
         for chunk in idxs.chunks(per) {
             let b = chunk.len() as i64;
@@ -428,7 +490,7 @@ pub fn encode_latent_batch_device(
                 chunk.len() * 3 * pix
             });
             let mut fallout = Vec::with_capacity(if use_terrain_cache {
-                chunk.len() * pix
+                chunk.len() * hr * packed_wr
             } else {
                 0
             });
@@ -448,7 +510,7 @@ pub fn encode_latent_batch_device(
                 owners.extend_from_slice(&it.owners);
                 if !use_terrain_cache {
                     terrain.extend_from_slice(it.static_terrain.land_mag.as_ref());
-                    terrain.extend_from_slice(&it.fallout);
+                    terrain.extend(unpack_fallout_host(&it.fallout, hr, wr));
                 } else {
                     fallout.extend_from_slice(&it.fallout);
                 }
@@ -464,16 +526,19 @@ pub fn encode_latent_batch_device(
             let owners_t = upload_owner_indices(&owners, [b, hr as i64, wr as i64], device)?;
             let terrain_t = if use_terrain_cache {
                 let cache = terrain_cache.as_deref_mut().expect("cache checked above");
+                let shifts = cache.fallout_shifts();
                 let static_items: Vec<Tensor> = chunk
                     .iter()
                     .map(|&i| cache.static_tensor(&items[i].static_terrain))
                     .collect();
                 let static_refs: Vec<&Tensor> = static_items.iter().collect();
                 let static_t = Tensor::stack(&static_refs, 0);
-                let fallout_t = Tensor::from_slice(&fallout)
-                    .view([b, 1, hr as i64, wr as i64])
-                    .to_device(device)
-                    .to_kind(Kind::Float);
+                // One synchronous packed-u8 H2D. Expansion and f32 conversion
+                // happen on the persistent actor device.
+                let packed_t = Tensor::from_slice(&fallout)
+                    .view([b, hr as i64, packed_wr as i64])
+                    .to_device(device);
+                let fallout_t = unpack_fallout_device(&packed_t, wr, &shifts).unsqueeze(1);
                 Tensor::cat(&[static_t, fallout_t], 1)
             } else {
                 Tensor::from_slice(&terrain)
@@ -557,6 +622,7 @@ pub fn encode_dual_latent_batch_device(
 
     for ((hr, wr), idxs) in groups {
         let pix = hr * wr;
+        let packed_wr = packed_fallout_row_bytes(wr);
         let per = (MAX_ENC_PIX / pix).max(1);
         for chunk in idxs.chunks(per) {
             let b = chunk.len() as i64;
@@ -568,7 +634,7 @@ pub fn encode_dual_latent_batch_device(
                 chunk.len() * TERRAIN_CHANNELS as usize * pix
             });
             let mut fallout = Vec::with_capacity(if use_terrain_cache {
-                chunk.len() * pix
+                chunk.len() * hr * packed_wr
             } else {
                 0
             });
@@ -583,7 +649,7 @@ pub fn encode_dual_latent_batch_device(
                     fallout.extend_from_slice(&item.fallout);
                 } else {
                     terrain.extend_from_slice(item.static_terrain.land_mag.as_ref());
-                    terrain.extend_from_slice(&item.fallout);
+                    terrain.extend(unpack_fallout_host(&item.fallout, hr, wr));
                 }
                 fine_static.extend_from_slice(&item.stat);
             }
@@ -593,16 +659,17 @@ pub fn encode_dual_latent_batch_device(
             // Owners cross as u8 and widen to int64 only on the target device.
             let owners_t = upload_owner_indices(&owners, [b, hr as i64, wr as i64], device)?;
             let terrain_t = if use_terrain_cache {
+                let shifts = terrain_cache.fallout_shifts();
                 let static_items: Vec<Tensor> = chunk
                     .iter()
                     .map(|&i| terrain_cache.static_tensor(&items[i].static_terrain))
                     .collect();
                 let static_refs: Vec<&Tensor> = static_items.iter().collect();
                 let static_t = Tensor::stack(&static_refs, 0);
-                let fallout_t = Tensor::from_slice(&fallout)
-                    .view([b, 1, hr as i64, wr as i64])
-                    .to_device(device)
-                    .to_kind(Kind::Float);
+                let packed_t = Tensor::from_slice(&fallout)
+                    .view([b, hr as i64, packed_wr as i64])
+                    .to_device(device);
+                let fallout_t = unpack_fallout_device(&packed_t, wr, &shifts).unsqueeze(1);
                 Tensor::cat(&[static_t, fallout_t], 1)
             } else {
                 Tensor::from_slice(&terrain)
@@ -714,14 +781,15 @@ mod tests {
         let pix = hr * wr;
         let gh = hr / REGION as usize;
         let gw = wr / REGION as usize;
+        let fallout: Vec<u8> = (0..pix)
+            .map(|i| ((i + env_id as usize) % 7 == 0) as u8)
+            .collect();
         AeRaw {
             owners: (0..pix)
                 .map(|i| ((i * 31 + env_id as usize * 17) % MAX_SLOTS as usize) as u8)
                 .collect(),
             static_terrain: terrain(env_id, env_id + 10, hr, wr, env_id as f32 / 19.0),
-            fallout: (0..pix)
-                .map(|i| ((i + env_id as usize) % 7 == 0) as u8 as f32)
-                .collect(),
+            fallout: pack_fallout(&fallout, hr, wr),
             stat: (0..NUM_STATIC as usize * gh * gw)
                 .map(|i| ((i * 13 + env_id as usize * 5) % 37) as f32 / 11.0)
                 .collect(),
@@ -734,7 +802,7 @@ mod tests {
         let owners_i64: Vec<i64> = raw.owners.iter().map(|&owner| owner as i64).collect();
         let owners = Tensor::from_slice(&owners_i64).view([1, raw.hr as i64, raw.wr as i64]);
         let mut terrain = raw.static_terrain.land_mag.to_vec();
-        terrain.extend_from_slice(&raw.fallout);
+        terrain.extend(unpack_fallout_host(&raw.fallout, raw.hr, raw.wr));
         let terrain =
             Tensor::from_slice(&terrain).view([1, TERRAIN_CHANNELS, raw.hr as i64, raw.wr as i64]);
         let fine_gh = raw.hr / REGION as usize;
@@ -797,7 +865,7 @@ mod tests {
         let mut raw = AeRaw {
             owners: vec![0; 8 * 8],
             static_terrain: terrain(1, 1, 8, 8, 0.0),
-            fallout: vec![0.0; 8 * 8],
+            fallout: pack_fallout(&vec![0; 8 * 8], 8, 8),
             stat: vec![0.0; NUM_STATIC as usize],
             hr: 8,
             wr: 8,
@@ -859,13 +927,82 @@ mod tests {
     }
 
     #[test]
+    fn fallout_packbits_exhaustively_matches_msb_first_order() {
+        let shifts = Tensor::from_slice(&[7u8, 6, 5, 4, 3, 2, 1, 0]);
+        for byte in 0u16..=255 {
+            let pixels: Vec<u8> = (0..8)
+                .map(|x| ((byte as u8 >> (7 - x)) & 1) as u8)
+                .collect();
+            let packed = pack_fallout(&pixels, 1, 8);
+            assert_eq!(packed, [byte as u8], "pack byte {byte:#04x}");
+            assert_eq!(
+                unpack_fallout_host(&packed, 1, 8),
+                pixels.iter().map(|&v| v as f32).collect::<Vec<_>>(),
+                "host unpack byte {byte:#04x}"
+            );
+            let device = unpack_fallout_device(
+                &Tensor::from_slice(&packed).view([1, 1, 1]),
+                8,
+                &shifts,
+            );
+            assert_eq!(
+                flat_f32(&device),
+                pixels.iter().map(|&v| v as f32).collect::<Vec<_>>(),
+                "device unpack byte {byte:#04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn fallout_packbits_resets_rows_and_zero_pads_odd_widths() {
+        let pixels = [
+            1, 0, 1, 0, 0, 0, 0, 1, 1, 0, 1, // a1 a0
+            0, 1, 0, 1, 1, 1, 1, 0, 0, 1, 0, // 5e 40
+            1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, // ff 00
+        ];
+        let packed = pack_fallout(&pixels, 3, 11);
+        assert_eq!(packed, [0xa1, 0xa0, 0x5e, 0x40, 0xff, 0x00]);
+        assert_eq!(packed.len(), 3 * 11usize.div_ceil(8));
+        assert!(
+            packed.chunks_exact(2).all(|row| row[1] & 0x1f == 0),
+            "low five row-padding bits must be zero"
+        );
+
+        let shifts = Tensor::from_slice(&[7u8, 6, 5, 4, 3, 2, 1, 0]);
+        let unpacked = unpack_fallout_device(
+            &Tensor::from_slice(&packed).view([1, 3, 2]),
+            11,
+            &shifts,
+        );
+        assert_eq!(
+            flat_f32(&unpacked),
+            pixels.iter().map(|&v| v as f32).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn packed_fallout_host_bytes_are_one_bit_per_pixel_plus_row_padding() {
+        for (hr, wr) in [(1, 1), (3, 11), (7, 16), (24, 40), (32, 24)] {
+            let raw = vec![1u8; hr * wr];
+            let packed = pack_fallout(&raw, hr, wr);
+            let packed_bytes = std::mem::size_of_val(packed.as_slice());
+            let old_f32_bytes = hr * wr * std::mem::size_of::<f32>();
+            assert_eq!(packed_bytes, hr * wr.div_ceil(8), "{hr}x{wr}");
+            assert!(packed_bytes < old_f32_bytes, "{hr}x{wr}");
+            if wr % 8 == 0 {
+                assert_eq!(packed_bytes * 32, old_f32_bytes);
+            }
+        }
+    }
+
+    #[test]
     fn coarse_encode_supports_odd_fine_dimensions() {
         let vs = nn::VarStore::new(Device::Cpu);
         let ae = SpatialAE::new(&vs.root(), LATENT_C, 16).unwrap();
         let raw = AeRaw {
             owners: vec![0; 24 * 40],
             static_terrain: terrain(1, 1, 24, 40, 0.0),
-            fallout: vec![0.0; 24 * 40],
+            fallout: pack_fallout(&vec![0; 24 * 40], 24, 40),
             stat: vec![0.0; NUM_STATIC as usize * 3 * 5],
             hr: 24,
             wr: 40,
@@ -1027,23 +1164,36 @@ mod tests {
     }
 
     #[test]
-    fn cached_and_uncached_encoder_inputs_produce_exact_output() {
+    fn cached_device_unpacked_and_legacy_host_unpacked_latents_are_exact() {
         tch::manual_seed(41);
         let vs = nn::VarStore::new(Device::Cpu);
         let ae = SpatialAE::new(&vs.root(), LATENT_C, REGION).unwrap();
         let static_terrain = terrain(2, 5, 8, 8, 0.375);
-        let fallout = vec![1.0f32; 64];
+        let fallout_bits: Vec<u8> = (0..64).map(|i| ((i * 5 + 3) % 11 < 4) as u8).collect();
+        let packed = pack_fallout(&fallout_bits, 8, 8);
+        let fallout = unpack_fallout_host(&packed, 8, 8);
         let mut uncached = static_terrain.land_mag.to_vec();
         uncached.extend_from_slice(&fallout);
         let uncached = Tensor::from_slice(&uncached).view([1, 3, 8, 8]);
 
         let mut cache = TerrainDeviceCache::new(Device::Cpu);
+        let shifts = cache.fallout_shifts();
+        let device_fallout = unpack_fallout_device(
+            &Tensor::from_slice(&packed).view([1, 8, 1]),
+            8,
+            &shifts,
+        );
         let cached = Tensor::cat(
             &[
                 cache.static_tensor(&static_terrain).unsqueeze(0),
-                Tensor::from_slice(&fallout).view([1, 1, 8, 8]),
+                device_fallout.unsqueeze(1),
             ],
             1,
+        );
+        assert_eq!(
+            Vec::<f32>::try_from(uncached.reshape([-1])).unwrap(),
+            Vec::<f32>::try_from(cached.reshape([-1])).unwrap(),
+            "packed device expansion changed the exact f32 encoder input"
         );
         let owners = Tensor::zeros([1, 8, 8], (Kind::Int64, Device::Cpu));
         let stat = Tensor::from_slice(&[0.0f32, 1.0, 2.0, 3.0, 4.0, 5.0]).view([1, 6, 1, 1]);
@@ -1085,14 +1235,18 @@ mod tests {
         let raw_a = AeRaw {
             owners: vec![0; 64],
             static_terrain: terrain.clone(),
-            fallout: vec![0.0; 64],
+            fallout: pack_fallout(&vec![0; 64], 8, 8),
             stat: vec![0.0; 6],
             hr: 8,
             wr: 8,
         };
         let mut raw_b = raw_a.clone();
         raw_b.stat[3] = 7.0;
-        raw_b.fallout[5] = 1.0;
+        raw_b.fallout = pack_fallout(
+            &(0..64).map(|i| (i == 5) as u8).collect::<Vec<_>>(),
+            8,
+            8,
+        );
         assert!(Arc::ptr_eq(
             &raw_a.static_terrain.land_mag,
             &raw_b.static_terrain.land_mag
