@@ -17,6 +17,7 @@ pub struct TradeShipExecution {
     orig_owner_small_id: u16,
     src_port_unit_id: i32,
     dst_port_unit_id: i32,
+    dst_port_owner_small_id: Option<u16>,
     ship_unit_id: Option<i32>,
     path: Vec<TileRef>,
     path_idx: usize,
@@ -27,11 +28,17 @@ pub struct TradeShipExecution {
 }
 
 impl TradeShipExecution {
-    pub fn new(orig_owner_small_id: u16, src_port_unit_id: i32, dst_port_unit_id: i32) -> Self {
+    pub fn new(
+        orig_owner_small_id: u16,
+        src_port_unit_id: i32,
+        dst_port_unit_id: i32,
+        dst_port_owner_small_id: u16,
+    ) -> Self {
         Self {
             orig_owner_small_id,
             src_port_unit_id,
             dst_port_unit_id,
+            dst_port_owner_small_id: Some(dst_port_owner_small_id),
             ship_unit_id: None,
             path: Vec::new(),
             path_idx: 0,
@@ -54,13 +61,39 @@ impl TradeShipExecution {
     /// Mirrors `WarshipExecution::new_for_test`'s naming/rationale.
     #[cfg(test)]
     pub(crate) fn new_for_test(orig_owner_small_id: u16, dst_port_unit_id: i32, ship_unit_id: i32) -> Self {
-        let mut exec = Self::new(orig_owner_small_id, 0, dst_port_unit_id);
-        exec.ship_unit_id = Some(ship_unit_id);
+        Self {
+            orig_owner_small_id,
+            src_port_unit_id: 0,
+            dst_port_unit_id,
+            dst_port_owner_small_id: None,
+            ship_unit_id: Some(ship_unit_id),
+            path: Vec::new(),
+            path_idx: 0,
+            path_dst: None,
+            tiles_traveled: 0,
+            was_captured: false,
+            active: true,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test_with_destination_owner(
+        orig_owner_small_id: u16,
+        dst_port_unit_id: i32,
+        ship_unit_id: i32,
+        dst_port_owner_small_id: u16,
+    ) -> Self {
+        let mut exec = Self::new_for_test(orig_owner_small_id, dst_port_unit_id, ship_unit_id);
+        exec.dst_port_owner_small_id = Some(dst_port_owner_small_id);
         exec
     }
 
     pub fn destination_port_unit_id(&self) -> i32 {
         self.dst_port_unit_id
+    }
+
+    pub fn cached_destination_port_owner_small_id(&self) -> Option<u16> {
+        self.dst_port_owner_small_id
     }
 
     fn refresh_path(&mut self, game: &mut Game, from: TileRef, to: TileRef) -> bool {
@@ -172,6 +205,9 @@ impl Execution for TradeShipExecution {
 
         // TS: `!this._dstPort.isActive()` (port destroyed/demolished since spawn).
         let mut dst_owner = game.find_unit_owner(self.dst_port_unit_id);
+        if let Some(owner) = dst_owner {
+            self.dst_port_owner_small_id = Some(owner);
+        }
 
         // TS: `dstPortOwner.id() === srcPort.owner().id()` - the src port (possibly
         // captured via land conquest since spawn) now belongs to the dst owner too.
@@ -210,6 +246,7 @@ impl Execution for TradeShipExecution {
             };
             if self.dst_port_unit_id != port_id {
                 self.dst_port_unit_id = port_id;
+                self.dst_port_owner_small_id = Some(ship_owner);
                 self.path.clear();
                 self.path_idx = 0;
                 self.path_dst = None;

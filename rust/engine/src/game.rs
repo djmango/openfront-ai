@@ -2763,17 +2763,20 @@ impl Game {
     }
 
     pub fn trade_ship_destination_owner(&self, ship_unit_id: i32) -> Option<u16> {
-        let destination_port = self
+        let (destination_port, cached_owner) = self
             .execs
             .iter()
             .chain(self.uninit.iter())
             .find_map(|execution| match execution {
                 ExecEnum::TradeShip(trade) if trade.ship_unit_id() == Some(ship_unit_id) => {
-                    Some(trade.destination_port_unit_id())
+                    Some((
+                        trade.destination_port_unit_id(),
+                        trade.cached_destination_port_owner_small_id(),
+                    ))
                 }
                 _ => None,
             })?;
-        self.find_unit_owner(destination_port)
+        self.find_unit_owner(destination_port).or(cached_owner)
     }
 
     pub fn trade_ship_is_safe_from_pirates(&self, owner: u16, unit_id: i32) -> bool {
