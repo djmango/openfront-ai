@@ -532,26 +532,27 @@ pub fn send_boat_attack_to_player(
     if troops < 1.0 {
         return false;
     }
+    let Some(dst_shore) = boat_attack_destination_to_player(game, attacker_small_id, target_small_id) else {
+        return false;
+    };
+    game.add_transport_attack(attacker_small_id, dst_shore, troops);
+    true
+}
+
+fn boat_attack_destination_to_player(
+    game: &mut Game,
+    attacker_small_id: u16,
+    target_small_id: u16,
+) -> Option<TileRef> {
     if game.wire.is_unit_disabled(crate::core::schemas::unit_type::TRANSPORT) {
-        return false;
-    }
-    if game.unit_count(attacker_small_id, crate::core::schemas::unit_type::TRANSPORT)
-        >= game.wire.boat_max_number()
-    {
-        return false;
+        return None;
     }
 
     let attacker_shores = shore_border_tiles(game, attacker_small_id);
     let target_shores = shore_border_tiles(game, target_small_id);
-    let Some((_src_shore, dst_shore)) = closest_two_tiles(game, &attacker_shores, &target_shores) else {
-        return false;
-    };
-    if can_build_transport_ship(game, attacker_small_id, dst_shore).is_none() {
-        return false;
-    }
-
-    game.add_transport_attack(attacker_small_id, dst_shore, troops);
-    true
+    let (_src_shore, dst_shore) = closest_two_tiles(game, &attacker_shores, &target_shores)?;
+    can_build_transport_ship(game, attacker_small_id, dst_shore)?;
+    Some(dst_shore)
 }
 
 pub fn collect_bordering_players_pub(game: &Game, small_id: u16) -> Vec<u16> {
@@ -1848,6 +1849,12 @@ fn try_send_nation_bot_attack(
         game.add_land_attack(attacker_small_id, Some(target_id), Some(troops));
         return true;
     }
+    // TS `sendBoatAttack` checks reachability before `calculateAttackTroops`;
+    // the bot-specific calculation mutates `botAttackTroopsSent`, so failed
+    // boat targets must not consume budget before later valid bot attacks.
+    let Some(dst_shore) = boat_attack_destination_to_player(game, attacker_small_id, target_small_id) else {
+        return false;
+    };
     let Some(raw_troops) = nation_bot_attack_troops(
         game,
         attacker_small_id,
@@ -1864,15 +1871,8 @@ fn try_send_nation_bot_attack(
     else {
         return false;
     };
-    if send_boat_attack_to_player(
-        game,
-        attacker_small_id,
-        target_small_id,
-        troops,
-    ) {
-        return true;
-    }
-    false
+    game.add_transport_attack(attacker_small_id, dst_shore, troops);
+    true
 }
 
 fn attack_bots(
@@ -3187,16 +3187,20 @@ mod random_boat_fallback_tests {
         game
     }
 
-    fn add_player(game: &mut Game, id: &str) -> u16 {
+    fn add_player_of_type(game: &mut Game, id: &str, player_type: PlayerType) -> u16 {
         game.add_from_info(&PlayerInfo {
             name: id.into(),
-            player_type: PlayerType::Nation,
-            client_id: Some(id.into()),
+            player_type,
+            client_id: (player_type != PlayerType::Bot).then(|| id.into()),
             id: id.into(),
             clan_tag: None,
             friends: Vec::new(),
             team: None,
         })
+    }
+
+    fn add_player(game: &mut Game, id: &str) -> u16 {
+        add_player_of_type(game, id, PlayerType::Nation)
     }
 
     /// Builds a fresh game with `attacker` owning every land tile (so
@@ -3277,5 +3281,57 @@ mod random_boat_fallback_tests {
             "a non-empty bordering_enemies list must not draw any extra PRNG values \
              when no boat target is found"
         );
+    }
+
+    #[test]
+    fn unreachable_bot_boat_target_does_not_consume_bot_attack_budget() {
+        let mut game = one_water_tile_game(8, 8);
+        let attacker = add_player(&mut game, "attacker");
+        let unreachable_bot = add_player_of_type(&mut game, "unreachable-bot", PlayerType::Bot);
+        let land_bot = add_player_of_type(&mut game, "land-bot", PlayerType::Bot);
+
+        for t in 1..(8 * 8) {
+            game.conquer(attacker, t);
+        }
+        game.conquer(land_bot, 63);
+        if let Some(p) = game.player_by_small_id_mut(attacker) {
+            p.troops = 100_000;
+        }
+        if let Some(p) = game.player_by_small_id_mut(unreachable_bot) {
+            p.troops = 10_000;
+        }
+        if let Some(p) = game.player_by_small_id_mut(land_bot) {
+            p.troops = 10_000;
+        }
+
+        let mut bot_attack_troops_sent = 0.0;
+        assert!(
+            !try_send_nation_bot_attack(
+                &mut game,
+                attacker,
+                unreachable_bot,
+                0.0,
+                &mut bot_attack_troops_sent,
+                "Easy",
+            ),
+            "the first bot has no tiles, so TS sendBoatAttack would fail before troop calculation"
+        );
+        assert_eq!(
+            bot_attack_troops_sent, 0.0,
+            "failed boat preflight must not consume bot attack budget"
+        );
+
+        assert!(
+            try_send_nation_bot_attack(
+                &mut game,
+                attacker,
+                land_bot,
+                0.0,
+                &mut bot_attack_troops_sent,
+                "Easy",
+            ),
+            "a later land-border bot target should still have the full budget available"
+        );
+        assert!(bot_attack_troops_sent > 0.0);
     }
 }
