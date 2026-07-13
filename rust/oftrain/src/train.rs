@@ -2713,6 +2713,7 @@ mod async_eval_tests {
             win,
             score,
             episodes: 8,
+            details: Vec::new(),
         }
     }
 
@@ -5151,7 +5152,9 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 learner_weights
                     .as_ref()
                     .ok_or_else(|| anyhow!("eval requires persistent learner weights"))?
-                    .clone()
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| anyhow!("eval requires at least one learner weight snapshot"))?
             } else {
                 snapshot_weights(&learners[0].vs)?
             })
@@ -5984,7 +5987,7 @@ mod persistent_actor_tests {
             .weights[0]
             .values
             .iter()
-            .zip(&two_reply.weights[0].values)
+            .zip(two_reply.weights[0].values.iter())
         {
             assert!((single - ddp).abs() < 2e-5, "1-vs-2 shard weight mismatch");
         }

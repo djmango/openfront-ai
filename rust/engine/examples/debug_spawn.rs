@@ -4,6 +4,7 @@ use openfront_engine::execution::spawn_util::get_spawn_tiles;
 use openfront_engine::prng::PseudoRandom;
 use openfront_engine::record::GameRecord;
 use openfront_engine::util::simple_hash;
+use openfront_engine::water::BfsScratch;
 
 fn main() {
     let repo = std::env::var("OPENFRONT_REPO")
@@ -16,6 +17,7 @@ fn main() {
     let rec = GameRecord::from_json_bytes(&json).unwrap().decompress();
     let mut game = game_from_record(std::path::Path::new(&repo), &rec).unwrap();
     game.execute_next_tick();
+    let mut spawn_scratch = BfsScratch::new((game.map.width * game.map.height) as usize);
 
     let centers: Vec<u32> =
         serde_json::from_str(&std::fs::read_to_string("/tmp/native_centers43.json").unwrap())
@@ -23,7 +25,7 @@ fn main() {
 
     for (i, &center) in centers.iter().enumerate() {
         let sid = 130u16 + i as u16;
-        if let Some(tiles) = get_spawn_tiles(&game.map, center, false) {
+        if let Some(tiles) = get_spawn_tiles(&game.map, &mut spawn_scratch, center, false) {
             for t in tiles {
                 game.conquer(sid, t);
             }
@@ -50,7 +52,7 @@ fn main() {
         if too_close {
             continue;
         }
-        if get_spawn_tiles(&game.map, center, true).is_some() {
+        if get_spawn_tiles(&game.map, &mut spawn_scratch, center, true).is_some() {
             successes += 1;
             if center == 631823 {
                 println!("found 631823 at try {try_n}");
