@@ -1436,6 +1436,94 @@ mod tests {
     //! exercised while keeping wall-clock trivial.
     use super::*;
 
+    /// Audits the exact VarStore schema consumed by
+    /// `scripts/export_oftrain_policy.py`. Conv2d is OIHW and Linear is
+    /// (out, in) in both tch and PyTorch, so every tensor is identity-layout;
+    /// only the separately stored q/k/v tensors require a Python-side
+    /// dim-0 concatenation into MultiheadAttention.in_proj_{weight,bias}.
+    #[test]
+    fn python_exporter_source_schema_matches_actual_varstore() {
+        use std::collections::BTreeMap;
+
+        let vs = nn::VarStore::new(Device::Cpu);
+        let _policy = PolicyNet::new(&vs.root(), false, false, GC, BLOCKS);
+        let actual: BTreeMap<String, Vec<i64>> = vs
+            .variables()
+            .into_iter()
+            .map(|(name, tensor)| (name, tensor.size()))
+            .collect();
+        let mut expected = BTreeMap::<String, Vec<i64>>::new();
+        let mut add = |name: String, shape: &[i64]| {
+            assert!(expected.insert(name, shape.to_vec()).is_none());
+        };
+
+        for (tower, input_channels) in [("grid_coarse", C_GRID), ("grid_fine", C_GRID_FINE)] {
+            add(format!("{tower}.stem.weight"), &[GC, input_channels, 3, 3]);
+            add(format!("{tower}.stem.bias"), &[GC]);
+            for block in 0..BLOCKS {
+                for conv in ["conv1", "conv2"] {
+                    add(
+                        format!("{tower}.block.{block}.{conv}.weight"),
+                        &[GC, GC, 3, 3],
+                    );
+                    add(format!("{tower}.block.{block}.{conv}.bias"), &[GC]);
+                }
+            }
+        }
+        for (name, output, input) in [("c1", 32, N_LOCAL), ("c2", 64, 32), ("c3", LC, 64)] {
+            add(format!("local.{name}.weight"), &[output, input, 3, 3]);
+            add(format!("local.{name}.bias"), &[output]);
+        }
+        add("player_in.weight".into(), &[PC, P_FEAT]);
+        add("player_in.bias".into(), &[PC]);
+        for layer in 0..TF_LAYERS {
+            for projection in ["q", "k", "v", "out"] {
+                add(format!("tf.{layer}.{projection}.weight"), &[PC, PC]);
+                add(format!("tf.{layer}.{projection}.bias"), &[PC]);
+            }
+            add(format!("tf.{layer}.ff1.weight"), &[TF_FF, PC]);
+            add(format!("tf.{layer}.ff1.bias"), &[TF_FF]);
+            add(format!("tf.{layer}.ff2.weight"), &[PC, TF_FF]);
+            add(format!("tf.{layer}.ff2.bias"), &[PC]);
+            for norm in ["ln1", "ln2"] {
+                add(format!("tf.{layer}.{norm}.weight"), &[PC]);
+                add(format!("tf.{layer}.{norm}.bias"), &[PC]);
+            }
+        }
+        add(
+            "trunk1.weight".into(),
+            &[HIDDEN, 2 * GC + PC + LC + N_SCALARS],
+        );
+        add("trunk1.bias".into(), &[HIDDEN]);
+        add("trunk2.weight".into(), &[HIDDEN, HIDDEN]);
+        add("trunk2.bias".into(), &[HIDDEN]);
+        for (name, output, input) in [
+            ("head_action", N_ACTIONS, HIDDEN),
+            ("head_player_q", PC, HIDDEN),
+            ("head_build", N_BUILD, HIDDEN),
+            ("head_nuke", N_NUKE, HIDDEN),
+            ("head_quantity", 2, HIDDEN),
+            ("head_value", 1, HIDDEN),
+        ] {
+            add(format!("{name}.weight"), &[output, input]);
+            add(format!("{name}.bias"), &[output]);
+        }
+        for (name, output, input) in [
+            ("htc1", 256, GC + HIDDEN),
+            ("htc2", 1, 256),
+            ("htf1", 256, GC + HIDDEN),
+            ("htf2", 1, 256),
+        ] {
+            add(format!("{name}.weight"), &[output, input, 1, 1]);
+            add(format!("{name}.bias"), &[output]);
+        }
+
+        assert_eq!(
+            actual, expected,
+            "VarStore schema changed; audit and update the strict Python exporter"
+        );
+    }
+
     fn synthetic_obs(device: Device, b: i64, gh: i64, gw: i64) -> Obs {
         let ms = MAX_SLOTS;
         let na = N_ACTIONS;
