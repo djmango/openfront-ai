@@ -49,6 +49,10 @@ done
 GAME_ID="$(basename "$RECORD" | sed -E 's/\.json(\.gz)?$//')"
 TMP="/tmp/bisect_parity.$GAME_ID"
 
+# Parent shells may export OF_DUMP_TICKS_FROM / OF_DUMP_UNITS from a prior fine
+# probe; coarse pass must always retain the full checkpoint series from tick 0.
+unset OF_DUMP_TICKS_FROM OF_DUMP_UNITS OF_DUMP_UNITS_FROM
+
 echo "[bisect_parity] $GAME_ID: coarse pass (every=$COARSE_EVERY, max=$MAX_TICKS)" >&2
 
 cargo run --quiet --release --manifest-path "$ROOT/rust/Cargo.toml" -p openfront-engine --bin tick_dump -- \
