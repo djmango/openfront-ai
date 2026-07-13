@@ -1598,9 +1598,35 @@ impl Game {
     /// unit already at the cap.
     fn increase_veterancy(&mut self, small_id: u16, unit_id: i32) {
         let max_veterancy = self.wire.warship_max_veterancy();
+        let mut updated_veterancy = None;
         if let Some(unit) = self.unit_mut(small_id, unit_id) {
             if unit.veterancy < max_veterancy {
                 unit.veterancy += 1;
+                updated_veterancy = Some(unit.veterancy);
+            }
+        }
+        if let Some(veterancy) = updated_veterancy {
+            self.refresh_shell_owner_veterancy(unit_id, veterancy);
+        }
+    }
+
+    fn refresh_shell_owner_veterancy(&mut self, unit_id: i32, veterancy: i32) {
+        for exec in &mut self.execs {
+            if let ExecEnum::Shell(shell) = exec {
+                shell.refresh_owner_veterancy(unit_id, veterancy);
+            }
+        }
+        for exec in &mut self.uninit {
+            if let ExecEnum::Shell(shell) = exec {
+                shell.refresh_owner_veterancy(unit_id, veterancy);
+            }
+        }
+        if let Some(ptr) = self.init_merge_batch {
+            let batch = unsafe { &mut *ptr };
+            for exec in batch.iter_mut() {
+                if let ExecEnum::Shell(shell) = exec {
+                    shell.refresh_owner_veterancy(unit_id, veterancy);
+                }
             }
         }
     }
@@ -2692,10 +2718,11 @@ impl Game {
     /// Redirects one of `small_id`'s existing warships to a new patrol tile - TS
     /// `warship.updateWarshipState({ patrolTile: tile })`.
     pub fn set_warship_patrol_tile(&mut self, small_id: u16, unit_id: i32, tile: TileRef) {
+        let tick = self.ticks();
         for exec in &mut self.execs {
             if let ExecEnum::Warship(w) = exec {
                 if w.owner_small_id() == small_id && w.unit_id() == Some(unit_id) {
-                    w.set_patrol_tile(tile);
+                    w.set_patrol_tile_at_tick(tile, tick);
                     return;
                 }
             }
