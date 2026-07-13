@@ -28,6 +28,7 @@
 
 <nav class="toc">
   <a href="#now">Now</a> ·
+  <a href="#rust-v8-stability">Jul 13 Rust trainer</a> ·
   <a href="#rust-port">Rust port</a> ·
   <a href="#v8-plan">ppo_v8 plan</a> ·
   <a href="#runs">Run ledger</a> ·
@@ -59,7 +60,23 @@
 </nav>
 
 <div class="now" id="now">
-  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 10th, 2026</h2>
+  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 13th, 2026</h2>
+  <p><b>The Rust trainer's CUDA failure is now diagnosed structurally, not hidden by a restart
+  loop.</b> LibTorch CUDA streams are thread-local, while <code>oftrain</code> was creating fresh
+  collector/batch/backward threads and moving CUDA-backed state between them before queued kernels
+  completed. NVIDIA Compute Sanitizer found no out-of-bounds memory errors; blocking launches and
+  named synchronization boundaries isolated cross-thread stream ownership as the failure mode.
+  The one-GPU trainer now uses persistent actor and learner owner threads and has advanced the
+  live curriculum to stage 2 without another CUDA fault. See
+  <a href="#rust-v8-stability">the Jul 13 writeup and plan</a>.</p>
+  <p><b>Throughput improved without weakening observations or PPO:</b> the stable one-A40 path
+  moved from roughly 53-60 decisions/s to 81-95 decisions/s on stage 1. Stage-2 mixed-map
+  throughput moved from a mature 32-46 decisions/s to roughly 50-56 with exact shape bucketing,
+  persistent pipeline overlap, compact host arenas, and fused native observation preparation.
+  At stage 3, cached bf16 AE convolution weights raised Rust to 34.2-34.7 decisions/s. A same-A40,
+  same-stage, same-48-env Python run measured 392 game-ticks/s = 26.1 decisions/s without compile;
+  Rust is therefore ~31-33% faster on the paired workload. Python <code>torch.compile</code> spent
+  many minutes tracing dynamic shapes and never completed update 1 in the benchmark.</p>
   <p><b>The Rust port is real and merged to master</b> (<a href="#rust-port">full session</a>):
   PPO trainer on tch-rs, the game engine itself running <i>in-process</i> as native Rust (no
   Node, no pipes, no JSON IPC), ~19 outcome-parity fixes landed, engine stepping at 130-150k
@@ -129,6 +146,148 @@
   no longer gates anything. <code>bc_v6</code> frozen; playable pure-BC baseline
   <code>v6_bc</code> on HF.</p>
 </div>
+
+<h2 class="date" id="rust-v8-stability">Jul 13, 2026 - Rust PPO CUDA diagnosis, persistent ownership, and the path past Python</h2>
+<p class="session">The goal was not "restart when CUDA dies." It was a stable trainer that can be
+made faster without reintroducing hidden races. All production validation below was deliberately
+returned to one A40 until the ownership model proved itself.</p>
+
+<h3 id="rust-v8-symptom">What failed, and why the early fixes were misleading</h3>
+<p>The four-A40 run repeatedly reached a few updates and then failed with
+<code>cudaErrorAssert</code>. Because CUDA reports errors at the next synchronization, traces named
+innocent operations such as <code>memcpy_and_sync</code>, <code>copy_device_to_device</code>, and
+reduction kernels. Several plausible optimizations passed CPU tests and then merely changed the
+time-to-crash:</p>
+<ul>
+  <li>CUDA-resident rollout tensors crossing collector/learner threads;</li>
+  <li>fine/coarse AE tensor sharing before actor ownership was persistent;</li>
+  <li>full-AE and conv-only bf16 inference;</li>
+  <li>pipelined env groups and temporary non-blocking pinned H2D buffers.</li>
+</ul>
+<p>Those variants were reverted rather than protected by recovery logic. A restart loop is useful
+for host failures, but it is actively harmful for deterministic GPU corruption: optimizer state is
+not restored, repeated warm restarts damaged entropy/reward, and a new process only delayed the same
+fault.</p>
+
+<h3 id="rust-v8-tools">The diagnostic method that replaced blind soak/restart cycles</h3>
+<ul>
+  <li><b>NVIDIA Compute Sanitizer:</b> <code>memcheck</code> with stream-ordered race tracking ran
+  six instrumented updates and reported no invalid global-memory access. <code>racecheck</code>,
+  <code>initcheck</code>, <code>synccheck</code>, CUDA core dumps, and <code>cuda-gdb</code> are
+  available on the pod for narrower kernel bugs. PyTorch CSAN exists only in the Python frontend,
+  so it cannot directly instrument tch-rs.</li>
+  <li><b><code>CUDA_LAUNCH_BLOCKING=1</code>:</b> the exact workload became stable, proving an
+  asynchronous ordering/lifetime failure. <code>TORCH_USE_CUDA_DSA</code> was not treated as a
+  magic environment variable; it is a PyTorch build-time option.</li>
+  <li><b>Named phase synchronization:</b> opt-in <code>--cuda-sync-diagnostics</code> records the
+  last successful actor AE/build, policy act, D2H, bootstrap, learner batch-build, forward/backward,
+  gradient, optimizer, and weight-copy boundary with device/shard/update context.</li>
+  <li><b>Single-GPU first:</b> one GPU removed cross-device all-reduce as a confound while retaining
+  actor/learner overlap and the same CUDA stream ownership problem.</li>
+</ul>
+
+<h3 id="rust-v8-root-cause">Root cause: CUDA state crossed ephemeral thread-local streams</h3>
+<p><code>std::thread::scope</code> created new collector, batch-builder, and backward OS threads
+every update/minibatch. LibTorch's default CUDA stream is thread-local. Host <code>join()</code>
+only waited for the Rust function; it did not guarantee kernels queued on that thread's CUDA stream
+were complete. Three unsafe ownership boundaries followed:</p>
+<ol>
+  <li>actor policy/AE tensors returned from a collector thread and were refreshed or reused by a
+  new collector thread;</li>
+  <li><code>ShardBatch</code> CUDA tensors were built on one temporary learner thread and consumed
+  by another;</li>
+  <li><code>VarStore::copy</code> could return before the learner-to-actor D2D refresh completed.</li>
+</ol>
+<p>The immediate correctness fix synchronizes collector exit, batch-builder handoff, initialization,
+and actor weight refresh. The durable architecture is opt-in <code>--persistent-actors</code>:
+one persistent actor thread owns each GPU's actor policy, frozen AEs, terrain cache, and env workers;
+on one GPU, a persistent learner owns the trainable policy, optimizer, batch tensors, backward, and
+PPO update. Only CPU-owned rollouts and a packed 43 MiB <code>Vec&lt;f32&gt;</code> weight snapshot
+cross channels. No CUDA tensor crosses an OS-thread boundary.</p>
+
+<h3 id="rust-v8-results">Measured one-A40 results</h3>
+<table>
+  <tr><th>Configuration</th><th>Evidence</th><th>Decisions/s</th></tr>
+  <tr><td>Barrier-hardened legacy ownership</td><td>34+ consecutive updates, healthy losses</td><td>53-60 (stage 1)</td></tr>
+  <tr><td>Persistent actor only</td><td>17+ updates; CPU weight archive exposed as overhead</td><td>50-55</td></tr>
+  <tr><td>Persistent actor + learner</td><td>packed CPU snapshot; learner time ~8.7-9.5s</td><td>62-69</td></tr>
+  <tr><td>u8 owners + packed action D2H</td><td>25 updates, no CUDA fault</td><td>70-81</td></tr>
+  <tr><td>shared AE uploads</td><td>24 updates under persistent actor ownership</td><td>72-79</td></tr>
+  <tr><td>bit-packed fallout</td><td>13+ updates; strong completed-episode rewards</td><td>81-95 (stage 1)</td></tr>
+  <tr><td>stage-2 shape buckets + pipeline</td><td>mixed maps; persistent stream ownership</td><td>50-56 vs 32-46 before</td></tr>
+  <tr><td>cached bf16 frozen-AE convolutions</td><td>stage 3; fp32 embedding/GroupNorm/output</td><td>34.2-34.7 vs Python 26.1</td></tr>
+</table>
+<p>The live run advanced stage 1 &rarr; 2 at update 262. Stage-1 recent reward reached roughly
+41-49; entropy stayed mostly 2.5-3.5. Value MSE sometimes spiked at curriculum/non-stationarity
+boundaries but repeatedly recovered instead of exploding. Stage 2 is intrinsically heavier:
+larger maps increase both frozen-AE work and policy training, and episodes take longer before reward
+telemetry becomes representative. The 64-env A/B was rejected: it produced no fleet-throughput
+gain and increased tail/CPU pressure; 48 envs/GPU remains the measured optimum.</p>
+
+<h3 id="rust-v8-exact-speedups">Exact speedups retained in the candidate stack</h3>
+<ul>
+  <li>compact fp16 host-owned foveated rollouts; no actor CUDA tensor enters a <code>Step</code>;</li>
+  <li>episode-static land/magnitude cached on the actor device while fallout/owners/structures stay fresh;</li>
+  <li>u8 owner slots (87.5% less owner H2D) and bit-packed fallout (96.875% less fallout H2D);</li>
+  <li>two packed action-result D2H transfers instead of eight synchronizations;</li>
+  <li>one shared fine/coarse AE input upload, gated to persistent actor ownership;</li>
+  <li>single foveation reused by all policy heads;</li>
+  <li>uniform compact fast path plus stable exact-shape bucketing for stage-2 mixed maps;</li>
+  <li>pooled immutable compact-host payloads instead of six allocations per env/step;</li>
+  <li>fused native tile trim/LUT/fallout/defense/ego/local preparation;</li>
+  <li>persistent two-group actor pipeline, now safe because the actor remains on one stream-owning thread.</li>
+</ul>
+<p>Not retained: stale coarse-latent caching, cross-thread resident rollouts, or any change to
+reward/PPO math. Frozen AE convolution weights now have cached bf16 copies under persistent actor
+ownership; embedding, GroupNorm, and returned latents remain fp32. Performance claims use fleet policy decisions/s, not
+Python's game-ticks/s (which must be divided by <code>decision_ticks</code>).</p>
+
+<h3 id="rust-v8-multigpu">Four-GPU scale-out and old-model evidence (Jul 13 evening)</h3>
+<ul>
+  <li><b>Latest master engine parity integrated:</b> UnitGrid ordering, nation assist/alliance
+  behavior, raw attack budgets, warship repair/targeting, defense-post queries, ports/trade ships,
+  and spawn validity. These change the stage-4 MDP for correctness, not benchmark cosmetics.</li>
+  <li><b>Persistent multi-GPU learners:</b> one owner thread per GPU, deterministic shared
+  minibatch shuffles, shard-ordered CPU gradient averaging, global clipping, and identical optimizer
+  steps. Repeated 1-vs-2 tests measured zero gradient, replica, and final-weight difference.</li>
+  <li><b>Work-conserving actors:</b> independently ready envs are shape-bucketed into bounded
+  microbatches instead of waiting on the slowest member of a lockstep half.</li>
+  <li><b>Production topology:</b> GPUs 0-2 train continuously; GPU 3 performs nonblocking eval and
+  best-checkpoint promotion. Three-GPU stage-4 production sustains roughly 76-82 decisions/s versus
+  20-29 on one GPU. A six-update four-training-GPU stress passed at 74-83 decisions/s with only
+  8 envs/GPU.</li>
+  <li><b>Async eval:</b> stage-4 eval runs without pausing training and atomically maintains
+  <code>best_eval.safetensors</code>. A two-seed pass promoted score 0.88; larger passes remain the
+  confidence gate.</li>
+  <li><b>Old-model paired benchmark:</b> the engine supports one controllable policy, so this is an
+  indirect same-seed scripted-bot comparison. Over eight stage-1 seeds, current Rust beat ppo_v7
+  placement score by +0.458 (95% bootstrap CI [0.25, 0.625]). Versus ppo_v5 it led score by +0.167
+  but the CI crossed zero and v5 recorded one win; that comparison remains inconclusive.</li>
+</ul>
+
+<h3 id="rust-v8-plan">Plan and gates</h3>
+<ol>
+  <li><b>Finish the final one-GPU stage-2 soak.</b> Gate: zero CUDA errors, zero NaN-guard events,
+  healthy entropy, bounded/recovering value loss, periodic checkpoints, and enough completed
+  episodes to judge reward. The candidate lives in draft PR
+  <a href="https://github.com/djmango/openfront-ai/pull/14">#14</a>, stacked on CUDA lifecycle PR
+  <a href="https://github.com/djmango/openfront-ai/pull/13">#13</a>.</li>
+  <li><b>Paired Python benchmark: done.</b> Same A40, stage 3, 48 envs, rollout 32, two epochs,
+  minibatch 128, fine+coarse AE, foveation, eval off. Python no-compile stabilized at
+  392 game-ticks/s = 26.1 decisions/s (<code>roll=43.6s</code>, <code>update=83.0s</code>).
+  Rust cached-bf16 stabilized at 34.2-34.7 decisions/s (<code>collect~44.4s</code>,
+  <code>train~18s</code>). Python compile was not a usable comparison on this dynamic workload:
+  it remained in Dynamo tracing for many minutes without completing update 1.</li>
+  <li><b>Keep one GPU until the paired benchmark and soak pass.</b> Then extend persistent learner
+  ownership to multi-GPU gradient synchronization. Do not simply turn four GPUs back on around the
+  legacy cross-thread learner path.</li>
+  <li><b>Scale by measured stage.</b> Keep 48 envs/GPU in early/mid curriculum; reduce env count for
+  Asia/World if memory or tail latency demands it. Optimize decisions/s/$, not snapshot utilization.</li>
+  <li><b>Quality gate against older models.</b> Fixed-seed greedy eval, stage-clear time, recent
+  reward, entropy, value-loss band, KL/clip fraction, and direct matches against frozen v5/v7
+  checkpoints. Speed alone does not promote a trainer.</li>
+</ol>
+
 <h3 id="status">Status snapshot (July 6th evening)</h3>
 <p>
 One PPO run is live: <code>ppo_v3</code>, trained from scratch on curriculum v2, now at stage 4

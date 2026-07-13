@@ -12,7 +12,7 @@ mod train;
 mod vecenv;
 
 use clap::Parser;
-use tch::Device;
+use tch::{Cuda, Device};
 
 /// Rust PPO trainer for OpenFront (v8 port of `rl/ppo.py`). See
 /// `rust/DEVLOG.md` for status, known deviations from the Python model,
@@ -134,7 +134,8 @@ struct Args {
     /// stay f32. tch-rs 0.24's `autocast()` has no dtype selector (always
     /// picks fp16 on CUDA), so this is a hand-rolled cast-in/cast-out path
     /// instead - see `policy.rs`/DEVLOG. Works (slower) on CPU too, so
-    /// it's smoke-testable without a GPU.
+    /// it's smoke-testable without a GPU. Frozen AE bf16 additionally
+    /// requires CUDA and --persistent-actors; all other AE paths stay f32.
     #[arg(long, default_value_t = false)]
     amp: bool,
 
@@ -197,6 +198,26 @@ struct Args {
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pipeline_groups: bool,
 
+    /// Keep one actor OS thread alive per GPU for the full run and, for the
+    /// one-GPU Phase 2 path, keep the learner on its own stable owner thread.
+    /// CUDA state never crosses channels. Autoscale uses the legacy path;
+    /// multi-GPU currently keeps persistent actors but uses legacy learners.
+    #[arg(long, default_value_t = false)]
+    persistent_actors: bool,
+
+    /// Let persistent actors batch whichever envs are ready instead of
+    /// waiting for fixed worker halves. Requires --persistent-actors.
+    #[arg(long, default_value_t = false)]
+    work_conserving_actors: bool,
+
+    /// Maximum ready envs in one work-conserving actor inference batch.
+    #[arg(long, default_value_t = 32)]
+    actor_max_batch: usize,
+
+    /// Maximum time the oldest exact-shape ready bucket waits for a batch.
+    #[arg(long, default_value_t = 2)]
+    actor_max_wait_ms: u64,
+
     /// "cpu", "cuda", or "cuda:N".
     #[arg(long, default_value = "cpu")]
     device: String,
@@ -238,6 +259,24 @@ struct Args {
     /// Episodes per greedy eval pass (fresh workers, seeds `w{i}-ep0`).
     #[arg(long, default_value_t = 8)]
     eval_episodes: usize,
+
+    /// Evaluate on a dedicated owner thread without pausing training.
+    /// Disable to retain the original synchronous actor evaluation.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    async_eval: bool,
+
+    /// Dedicated asynchronous evaluation device (for example `cuda:2`).
+    /// If omitted, `cuda:1` is selected when training uses one GPU on
+    /// cuda:0 and at least two CUDA devices are visible. Otherwise eval
+    /// falls back to the synchronous path.
+    #[arg(long)]
+    eval_device: Option<String>,
+
+    /// Run one fixed-seed greedy benchmark and write its per-episode JSON,
+    /// then exit without training. The checkpoint must match the current
+    /// Rust observation/action schema exactly; VarStore loading is strict.
+    #[arg(long)]
+    benchmark_out: Option<String>,
 
     #[arg(long, default_value_t = 200)]
     ckpt_every: u64,
@@ -341,6 +380,96 @@ fn parse_device(s: &str) -> Device {
     }
 }
 
+fn resolve_eval_device(
+    explicit: Option<&str>,
+    async_eval: bool,
+    train_device: Device,
+    num_gpus: usize,
+    cuda_devices: i64,
+) -> anyhow::Result<Option<Device>> {
+    if !async_eval {
+        return Ok(None);
+    }
+    if let Some(value) = explicit {
+        let device = match value {
+            "cuda" => Device::Cuda(0),
+            value if value.starts_with("cuda:") => {
+                let index = value["cuda:".len()..]
+                    .parse::<usize>()
+                    .map_err(|_| anyhow::anyhow!("invalid --eval-device {value:?}"))?;
+                Device::Cuda(index)
+            }
+            _ => anyhow::bail!("--eval-device must be cuda or cuda:N"),
+        };
+        if let Device::Cuda(index) = device {
+            anyhow::ensure!(
+                (index as i64) < cuda_devices,
+                "--eval-device cuda:{index} is not visible ({cuda_devices} CUDA device(s))"
+            );
+            let occupied = match train_device {
+                Device::Cuda(train_index) if num_gpus <= 1 => index == train_index,
+                Device::Cuda(_) => index < num_gpus,
+                _ => false,
+            };
+            anyhow::ensure!(
+                !occupied,
+                "--eval-device cuda:{index} is used by training; select a spare GPU"
+            );
+        }
+        return Ok(Some(device));
+    }
+    if num_gpus == 1 && train_device == Device::Cuda(0) && cuda_devices > 1 {
+        Ok(Some(Device::Cuda(1)))
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod eval_device_tests {
+    use super::resolve_eval_device;
+    use tch::Device;
+
+    #[test]
+    fn defaults_to_cuda_one_only_for_single_cuda_zero_training() {
+        assert_eq!(
+            resolve_eval_device(None, true, Device::Cuda(0), 1, 2).unwrap(),
+            Some(Device::Cuda(1))
+        );
+        assert_eq!(
+            resolve_eval_device(None, true, Device::Cuda(1), 1, 2).unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_eval_device(None, true, Device::Cuda(0), 2, 4).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_device_must_be_visible_and_spare() {
+        assert_eq!(
+            resolve_eval_device(Some("cuda:3"), true, Device::Cuda(0), 2, 4).unwrap(),
+            Some(Device::Cuda(3))
+        );
+        assert!(
+            resolve_eval_device(Some("cuda:1"), true, Device::Cuda(0), 2, 4)
+                .unwrap_err()
+                .to_string()
+                .contains("used by training")
+        );
+        assert!(resolve_eval_device(Some("cpu"), true, Device::Cuda(0), 1, 2).is_err());
+    }
+
+    #[test]
+    fn disabling_async_eval_forces_synchronous_fallback() {
+        assert_eq!(
+            resolve_eval_device(Some("cuda:1"), false, Device::Cuda(0), 1, 2).unwrap(),
+            None
+        );
+    }
+}
+
 /// Mirrors PyTorch's own `torch/__init__.py::_preload_cuda_deps()`: when
 /// libtorch is a "split" pip wheel install (each CUDA component - cublas,
 /// cudnn, cusparse, nccl, etc. - its own separate `nvidia-*-cu12` package,
@@ -421,7 +550,49 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     tch::manual_seed(0);
     let device = parse_device(&args.device);
+    let eval_device = resolve_eval_device(
+        args.eval_device.as_deref(),
+        args.async_eval,
+        device,
+        args.num_gpus,
+        Cuda::device_count(),
+    )?;
     println!("[oftrain] device={device:?}");
+    if args.async_eval {
+        match eval_device {
+            Some(eval_device) => println!("[oftrain] async eval device={eval_device:?}"),
+            None => println!(
+                "[oftrain] no spare eval GPU selected; using synchronous evaluation \
+                 (set --eval-device cuda:N to override)"
+            ),
+        }
+    }
+
+    if let Some(out) = &args.benchmark_out {
+        let checkpoint = args
+            .resume
+            .as_deref()
+            .or(args.init.as_deref())
+            .ok_or_else(|| anyhow::anyhow!("--benchmark-out requires --resume or --init"))?;
+        return train::run_benchmark(train::BenchmarkConfig {
+            checkpoint,
+            output: out,
+            ae_ckpt: &args.ckpt,
+            coarse_ckpt: args.coarse_ckpt.as_deref(),
+            stage: args.stage,
+            episodes: args.eval_episodes,
+            max_ticks: args.max_episode_ticks,
+            engine: args.engine,
+            device,
+            amp: args.amp,
+            foveate: args.foveate,
+            gc: args.gc,
+            blocks: args.blocks,
+            pinned_h2d: args.pinned_h2d,
+            fp16_rollout: args.fp16_rollout,
+            compact_rollout: args.compact_rollout,
+        });
+    }
 
     let cfg = train::Config {
         num_envs: args.num_envs,
@@ -456,12 +627,18 @@ fn main() -> anyhow::Result<()> {
         fp16_rollout: args.fp16_rollout,
         compact_rollout: args.compact_rollout,
         pipeline_groups: args.pipeline_groups,
+        persistent_actors: args.persistent_actors,
+        work_conserving_actors: args.work_conserving_actors,
+        actor_max_batch: args.actor_max_batch,
+        actor_max_wait: std::time::Duration::from_millis(args.actor_max_wait_ms),
         device,
         engine: args.engine,
         node_fraction: args.node_fraction.clamp(0.0, 1.0),
         log_every: args.log_every,
         eval_every: args.eval_every,
         eval_episodes: args.eval_episodes,
+        async_eval: args.async_eval,
+        eval_device,
         ckpt_every: args.ckpt_every,
         ckpt_dir: args.ckpt_dir,
         init: args.init,

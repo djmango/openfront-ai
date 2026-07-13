@@ -8,7 +8,9 @@ use anyhow::Result;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use serde_json::Value;
+use std::ops::Range;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ofcore::curriculum::{
@@ -24,20 +26,183 @@ use crate::engine::{self, EngineKind, GameEngine, RawObs};
 /// CPU-owned foveated rollout payload. Grid samples cross the actor/learner
 /// boundary as fp16 values; masks and crop metadata stay explicit so the
 /// learner never has to reconstruct a full fine grid or infer coordinates.
+#[derive(Default)]
+pub(crate) struct CompactHostBuffers {
+    pub grids: Vec<half::f16>,
+    pub masks: Vec<f32>,
+    pub origins: Vec<i64>,
+}
+
+/// Actor-created pool for compact D2H payloads. A payload is returned only
+/// when the last `CompactGrid` range into it is dropped (normally after the
+/// learner has finished with that rollout), so current observations can never
+/// alias or mutate an older `Step`.
+#[derive(Default)]
+pub(crate) struct CompactHostArena {
+    free: Mutex<Vec<CompactHostBuffers>>,
+}
+
+impl CompactHostArena {
+    pub fn lease(self: &Arc<Self>) -> CompactHostLease {
+        let buffers = self
+            .free
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop()
+            .unwrap_or_default();
+        CompactHostLease {
+            arena: Arc::clone(self),
+            buffers: Some(buffers),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn free_len(&self) -> usize {
+        self.free
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    }
+}
+
+pub(crate) struct CompactHostLease {
+    arena: Arc<CompactHostArena>,
+    buffers: Option<CompactHostBuffers>,
+}
+
+impl CompactHostLease {
+    pub fn buffers_mut(&mut self) -> &mut CompactHostBuffers {
+        self.buffers.as_mut().expect("compact host lease consumed")
+    }
+
+    pub fn publish(mut self) -> Arc<CompactHostPayload> {
+        Arc::new(CompactHostPayload {
+            arena: Arc::clone(&self.arena),
+            buffers: self.buffers.take().expect("compact host lease consumed"),
+        })
+    }
+}
+
+impl Drop for CompactHostLease {
+    fn drop(&mut self) {
+        if let Some(buffers) = self.buffers.take() {
+            self.arena
+                .free
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(buffers);
+        }
+    }
+}
+
+pub(crate) struct CompactHostPayload {
+    arena: Arc<CompactHostArena>,
+    pub buffers: CompactHostBuffers,
+}
+
+impl Drop for CompactHostPayload {
+    fn drop(&mut self) {
+        let buffers = std::mem::take(&mut self.buffers);
+        self.arena
+            .free
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(buffers);
+    }
+}
+
+/// An immutable per-environment view into one batch-contiguous host payload.
+/// Cloning this type clones only the `Arc` and ranges, never the fp16/mask
+/// bytes. Exact-shape buckets therefore need three host allocations/transfers
+/// per bucket rather than six allocations and six slice copies per env.
 #[derive(Clone)]
 pub struct CompactGrid {
-    pub fine: Vec<half::f16>, // (C_GRID, fine_h, fine_w)
-    pub fine_valid: Vec<f32>, // (fine_h, fine_w)
-    pub fine_legal: Vec<f32>, // (fine_h, fine_w)
+    payload: Arc<CompactHostPayload>,
+    fine: Range<usize>,       // (C_GRID, fine_h, fine_w)
+    fine_valid: Range<usize>, // (fine_h, fine_w)
+    fine_legal: Range<usize>, // (fine_h, fine_w)
     pub fine_h: usize,
     pub fine_w: usize,
     pub origin_y: i64,
     pub origin_x: i64,
-    pub coarse: Vec<half::f16>, // (C_GRID, coarse_h, coarse_w)
-    pub coarse_valid: Vec<f32>, // (coarse_h, coarse_w)
-    pub coarse_legal: Vec<f32>, // (coarse_h, coarse_w)
+    coarse: Range<usize>,       // (C_GRID, coarse_h, coarse_w)
+    coarse_valid: Range<usize>, // (coarse_h, coarse_w)
+    coarse_legal: Range<usize>, // (coarse_h, coarse_w)
     pub coarse_h: usize,
     pub coarse_w: usize,
+}
+
+impl CompactGrid {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        payload: Arc<CompactHostPayload>,
+        fine: Range<usize>,
+        fine_valid: Range<usize>,
+        fine_legal: Range<usize>,
+        fine_h: usize,
+        fine_w: usize,
+        origin_y: i64,
+        origin_x: i64,
+        coarse: Range<usize>,
+        coarse_valid: Range<usize>,
+        coarse_legal: Range<usize>,
+        coarse_h: usize,
+        coarse_w: usize,
+    ) -> Self {
+        Self {
+            payload,
+            fine,
+            fine_valid,
+            fine_legal,
+            fine_h,
+            fine_w,
+            origin_y,
+            origin_x,
+            coarse,
+            coarse_valid,
+            coarse_legal,
+            coarse_h,
+            coarse_w,
+        }
+    }
+
+    pub fn fine(&self) -> &[half::f16] {
+        &self.payload.buffers.grids[self.fine.clone()]
+    }
+    pub fn fine_valid(&self) -> &[f32] {
+        &self.payload.buffers.masks[self.fine_valid.clone()]
+    }
+    pub fn fine_legal(&self) -> &[f32] {
+        &self.payload.buffers.masks[self.fine_legal.clone()]
+    }
+    pub fn coarse(&self) -> &[half::f16] {
+        &self.payload.buffers.grids[self.coarse.clone()]
+    }
+    pub fn coarse_valid(&self) -> &[f32] {
+        &self.payload.buffers.masks[self.coarse_valid.clone()]
+    }
+    pub fn coarse_legal(&self) -> &[f32] {
+        &self.payload.buffers.masks[self.coarse_legal.clone()]
+    }
+
+    #[cfg(test)]
+    pub(crate) fn grid_storage_ptr(&self) -> *const half::f16 {
+        self.payload.buffers.grids.as_ptr()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mask_storage_ptr(&self) -> *const f32 {
+        self.payload.buffers.masks.as_ptr()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn storage_capacities(&self) -> (usize, usize, usize) {
+        (
+            self.payload.buffers.grids.capacity(),
+            self.payload.buffers.masks.capacity(),
+            self.payload.buffers.origins.capacity(),
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -260,19 +425,9 @@ impl EnvWorker {
         let (hr, wr) = (self.hr, self.wr);
         let (gh, gw) = (hr / REGION, wr / REGION);
 
-        let mut owners_slotted = vec![0u8; hr * wr];
-        let mut fallout = vec![0u8; hr * wr];
-        let mut defense_bonus = vec![0u8; hr * wr];
-        for y in 0..hr {
-            for x in 0..wr {
-                let src = y * obs.head["width"].as_u64().unwrap_or(wr as u64) as usize + x;
-                let raw_id = obs.owners[src] as usize;
-                let dst = y * wr + x;
-                owners_slotted[dst] = *lut.get(raw_id).unwrap_or(&0);
-                fallout[dst] = obs.fallout[src];
-                defense_bonus[dst] = obs.defense_bonus[src];
-            }
-        }
+        let width = obs.head["width"].as_u64().unwrap_or(wr as u64) as usize;
+        let tiles = obs.prepare_tiles(&lut, width, hr, wr, REGION);
+        let owners_slotted = tiles.owners_slotted;
 
         let f = feat::featurize(
             gh,
@@ -289,21 +444,25 @@ impl EnvWorker {
             &legal,
         );
 
-        let (ego, db) = feat::pool_ego_db(&owners_slotted, &f.clut, &defense_bonus, hr, wr);
-        let local = feat::local_crop(
+        let (ego, center) = feat::pool_ego_and_center(&owners_slotted, &f.clut, hr, wr);
+        let local = feat::local_crop_at_with_defense(
             &owners_slotted,
             &f.clut,
             &self.land,
-            &defense_bonus,
             hr,
             wr,
             crate::policy::LOCAL as usize,
+            center,
+            |i| {
+                let y = i / wr;
+                let x = i % wr;
+                obs.defense_bonus_at(y * width + x)
+            },
         );
-        let owners_i64: Vec<i64> = owners_slotted.iter().map(|&o| o as i64).collect();
         let ae_raw = AeRaw {
-            owners: owners_i64,
+            owners: owners_slotted,
             static_terrain: self.ae_static.clone(),
-            fallout: ae::pack_fallout(&fallout),
+            fallout: tiles.fallout_packed,
             stat: f.stat,
             hr,
             wr,
@@ -317,7 +476,7 @@ impl EnvWorker {
             cgw: 0,
             ae_raw,
             ego,
-            db,
+            db: tiles.db,
             transient: f.transient,
             legal_tile: f.legal_tile,
             gh,
@@ -354,14 +513,13 @@ impl EnvWorker {
         let obs = self.obs.as_ref().unwrap();
         let ents = feat::parse_ents(obs.entities());
         let legal = feat::parse_legal(obs.legal_actions());
-        let owners_raw: Vec<i64> = obs.owners.iter().map(|&o| o as i64).collect();
-        // obs.owners is at full (untrimmed width) resolution; translate
-        // wants it trimmed to (hr, wr) matching the translator's grids.
+        // Raw tiles are full (untrimmed width) resolution; translate wants
+        // owner ids trimmed to (hr, wr) matching the translator's grids.
         let width = obs.head["width"].as_u64().unwrap() as usize;
         let mut owners_trim = vec![0i64; self.hr * self.wr];
         for y in 0..self.hr {
             for x in 0..self.wr {
-                owners_trim[y * self.wr + x] = owners_raw[y * width + x];
+                owners_trim[y * self.wr + x] = obs.owner_at(y * width + x) as i64;
             }
         }
         let me = obs.me();
@@ -469,7 +627,7 @@ impl EnvWorker {
                 let src = y * width + x;
                 if self.land[i] == 1
                     && self.mag[i] < feat::IMPASSABLE_MAGNITUDE
-                    && obs.owners[src] == 0
+                    && obs.owner_at(src) == 0
                 {
                     candidates.push((y as i64, x as i64));
                 }
