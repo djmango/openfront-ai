@@ -4410,7 +4410,7 @@ fn build_actor_shard(
     let path = std::path::Path::new(&cfg.ae_ckpt);
     anyhow::ensure!(
         path.exists(),
-        "AE checkpoint not found at {} — run scripts/export_safetensors.py \
+        "AE checkpoint not found at {} - run `ofae train` / `bash scripts/fetch_ae_encoders.sh` \
          (or scripts/fetch_ae_encoders.sh) first",
         path.display()
     );
@@ -6874,7 +6874,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             let path = std::path::Path::new(&cfg.ae_ckpt);
             if !path.exists() {
                 anyhow::bail!(
-                    "AE checkpoint not found at {} — run scripts/export_safetensors.py \
+                    "AE checkpoint not found at {} - run `ofae train` / `bash scripts/fetch_ae_encoders.sh` \
                      (or scripts/fetch_ae_encoders.sh) first",
                     path.display()
                 );

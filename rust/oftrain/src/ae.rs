@@ -1,8 +1,8 @@
-//! Frozen SpatialAE encoder: tch port of `ae/model_v3.py::SpatialAE.encode`.
+//! Frozen SpatialAE encoder: tch port of ofae / former Python SpatialAE.encode.
 //!
 //! PPO only needs the encoder (owner embedding + stem + fuse). Weights are
 //! loaded from the safetensors files produced by
-//! `scripts/export_safetensors.py` (keys match PyTorch state_dict / tch's
+//! `ofae` / HF encoder safetensors (keys match tch's
 //! '.' path separator exactly). Decoder weights are intentionally absent.
 //!
 //! Production checkpoints:
@@ -161,7 +161,7 @@ impl SpatialAE {
     }
 
     /// Construct on `device`, load encoder weights from a `.safetensors`
-    /// file produced by `scripts/export_safetensors.py`, then freeze.
+    /// file produced by `ofae` (`.encoder.safetensors`), then freeze.
     pub fn load(
         path: impl AsRef<Path>,
         device: Device,
