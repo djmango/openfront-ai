@@ -141,28 +141,10 @@ struct HubInner {
     active: Arc<Mutex<ActiveLobby>>,
 }
 
-const PLAY_BUSY_HTML: &str = r#"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Play busy</title>
-  <style>
-    body { font-family: system-ui, sans-serif; text-align: center; padding: 3rem 1rem; }
-    a { font-weight: 700; }
-  </style>
-</head>
-<body>
-  <h1>Someone is already playing</h1>
-  <p>Only one live Play lobby runs at a time. Try again in a minute.</p>
-  <p><a href="/play">Retry Play</a> · <a href="/">Home</a></p>
-</body>
-</html>
-"#;
-
 #[derive(Default)]
 struct ActiveLobby {
     game_id: Option<String>,
+    worker_path: Option<String>,
     child: Option<Child>,
 }
 
@@ -346,22 +328,42 @@ fn launch_webbot(inner: &HubInner, game_id: &str, worker_path: &str) -> Result<C
         .with_context(|| format!("spawn webbot_launcher for {game_id}"))
 }
 
+fn lobby_has_clients(info: &Value) -> bool {
+    info.get("clients")
+        .and_then(|c| c.as_array())
+        .is_some_and(|a| !a.is_empty())
+        || info
+            .pointer("/lobby/clients")
+            .and_then(|c| c.as_array())
+            .is_some_and(|a| !a.is_empty())
+}
+
 async fn wait_for_webbot_join(inner: &HubInner, game_id: &str, worker_path: &str) -> bool {
-    let url = format!(
-        "http://{}/{}/api/game/{}",
-        inner.client_host, worker_path, game_id
-    );
+    // Prefer the worker's own API (vite proxy can lag); fall back to client path.
+    let urls = [
+        format!(
+            "http://127.0.0.1:{}/api/game/{}",
+            inner.worker_base_port as i64
+                + worker_path
+                    .trim_start_matches('w')
+                    .parse::<i64>()
+                    .unwrap_or(0),
+            game_id
+        ),
+        format!(
+            "http://{}/{}/api/game/{}",
+            inner.client_host, worker_path, game_id
+        ),
+    ];
     let client = reqwest::Client::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     while tokio::time::Instant::now() < deadline {
-        if let Ok(resp) = client.get(&url).timeout(Duration::from_secs(3)).send().await {
-            if let Ok(info) = resp.json::<Value>().await {
-                if info
-                    .get("clients")
-                    .and_then(|c| c.as_array())
-                    .is_some_and(|a| !a.is_empty())
-                {
-                    return true;
+        for url in &urls {
+            if let Ok(resp) = client.get(url).timeout(Duration::from_secs(3)).send().await {
+                if let Ok(info) = resp.json::<Value>().await {
+                    if lobby_has_clients(&info) {
+                        return true;
+                    }
                 }
             }
         }
@@ -482,17 +484,31 @@ async fn play_debug(
 }
 
 async fn play(State(inner): State<Arc<HubInner>>) -> Response {
-    // One live Play at a time. Don't kill an in-progress lobby - ask visitor to retry.
+    // One live Play at a time. Spectate the active lobby instead of a dead-end busy page.
     {
         let mut active = inner.active.lock().await;
         if let (Some(gid), Some(child)) = (active.game_id.clone(), active.child.as_mut()) {
             if child.try_wait().ok().flatten().is_none() {
-                eprintln!("[showcase_hub] play busy; active lobby {gid}");
-                return Html(PLAY_BUSY_HTML).into_response();
+                let worker_path = active
+                    .worker_path
+                    .clone()
+                    .or_else(|| {
+                        load_hub()
+                            .get("worker_path")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                    })
+                    .unwrap_or_else(|| "w0".into());
+                let redirect = play_redirect(&gid, &worker_path);
+                eprintln!(
+                    "[showcase_hub] play busy; spectating active lobby {gid} -> {redirect}"
+                );
+                return Redirect::temporary(&redirect).into_response();
             }
         }
         // Previous webbot exited - clear so we can start a fresh random map.
         active.game_id = None;
+        active.worker_path = None;
         active.child = None;
     }
 
@@ -532,6 +548,7 @@ async fn play(State(inner): State<Arc<HubInner>>) -> Response {
         match launch_webbot(&inner, &game_id, &worker_path) {
             Ok(child) => {
                 active.game_id = Some(game_id.clone());
+                active.worker_path = Some(worker_path.clone());
                 active.child = Some(child);
             }
             Err(e) => {

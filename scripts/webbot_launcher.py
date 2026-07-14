@@ -38,7 +38,17 @@ MAX_GAME_SECONDS = 30 * 60  # safety net if the page never signals game-over
 
 
 def chromium_args() -> list[str]:
-    return ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+    # Match showcase clip render: SwiftShader WebGL2 (OpenFront rejects a
+    # missing/disabled GPU context even for the headless webbot path).
+    return [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--use-gl=angle",
+        "--use-angle=swiftshader-webgl",
+        "--enable-unsafe-swiftshader",
+        "--enable-gpu",
+        "--ignore-gpu-blocklist",
+    ]
 
 
 # Local-dev Chromium console is flooded with ad/CORS/cosmetics noise that
@@ -195,6 +205,7 @@ def main() -> None:
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=not args.headed, args=chromium_args())
         page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.add_init_script('localStorage.setItem("rlAllowSoftwareGL", "1");')
         # Block third-party ad/telemetry so local join isn't fighting CORS.
         page.route(
             "**/*",
