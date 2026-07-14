@@ -36,7 +36,6 @@ docker run -d \
   -e RUN_NAME="${RUN_NAME:-ppo_v81}" \
   -e STAGE="${STAGE:-4}" \
   -e SHOWCASE_WATCH_STAGE="${SHOWCASE_WATCH_STAGE:-4}" \
-  -e SHOWCASE_MAPS="${SHOWCASE_MAPS:-Onion,Pangaea,Caucasus,BlackSea,BetweenTwoSeas,World,Asia}" \
   -e REFRESH_HOURS="${REFRESH_HOURS:-1}" \
   -e LIVE_SHOWCASE="${LIVE_SHOWCASE:-0}" \
   -e CLIP_MAX_SEC="${CLIP_MAX_SEC:-90}" \
