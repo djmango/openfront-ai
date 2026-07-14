@@ -13,6 +13,6 @@ pub use paths::{
     clips_dir, data_dir, policy_dir, records_dir, repo_root, revision_path, AE_REPO, POLICY_REPO,
 };
 pub use util::{
-    featured_game_id, featured_showcase_entry, load_json, map_seed, policy_meta, showcase_maps,
-    utc_now, write_json, LEGACY_POLICY_RUNS,
+    featured_game_id, featured_showcase_entry, game_map_api_name, load_json, map_seed, policy_meta,
+    showcase_maps, utc_now, write_json, LEGACY_POLICY_RUNS,
 };

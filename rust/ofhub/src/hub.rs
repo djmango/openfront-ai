@@ -18,7 +18,9 @@ use tokio::sync::Mutex;
 
 use crate::hf;
 use crate::paths::{hub_state_path, repo_root, state_path};
-use crate::util::{featured_showcase_entry, load_json, showcase_maps, utc_now, write_json};
+use crate::util::{
+    featured_showcase_entry, game_map_api_name, load_json, showcase_maps, utc_now, write_json,
+};
 use rand::seq::SliceRandom;
 
 const LANDING_HTML: &str = r#"<!doctype html>
@@ -161,7 +163,7 @@ fn play_config(inner: &HubInner) -> Value {
         inner.play_map.clone()
     };
     json!({
-        "gameMap": game_map,
+        "gameMap": game_map_api_name(&game_map),
         "gameType": "Private",
         "bots": inner.play_bots,
         "difficulty": "Easy",
