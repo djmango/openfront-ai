@@ -137,6 +137,7 @@ fi
 PY_TAG="$("$VENV/bin/python" -c 'import sys; print(f"python{sys.version_info.major}.{sys.version_info.minor}")')"
 TORCH_LIB="$VENV/lib/$PY_TAG/site-packages/torch"
 NVRTC_LIB="$VENV/lib/$PY_TAG/site-packages/nvidia/cuda_nvrtc/lib"
+CUDA_INCLUDE="$VENV/lib/$PY_TAG/site-packages/nvidia/cuda_runtime/include"
 NCCL_ROOT="$VENV/lib/$PY_TAG/site-packages/nvidia/nccl"
 NCCL_INCLUDE="$NCCL_ROOT/include"
 NCCL_LIB="$NCCL_ROOT/lib"
@@ -158,7 +159,9 @@ EOF
 
 cd "$REPO_DIR/rust"
 BUILD_FEATURES="native-engine"
-if [ "$NUM_GPUS" -gt 1 ] && [ -f "$NCCL_INCLUDE/nccl.h" ] && [ -f "$NCCL_LINK_LIB/libnccl.so" ]; then
+if [ "$NUM_GPUS" -gt 1 ] && [ -f "$CUDA_INCLUDE/cuda_runtime_api.h" ] \
+  && [ -f "$NCCL_INCLUDE/nccl.h" ] && [ -f "$NCCL_LINK_LIB/libnccl.so" ]; then
+  export CUDA_INCLUDE_DIR="$CUDA_INCLUDE"
   export NCCL_INCLUDE_DIR="$NCCL_INCLUDE"
   export NCCL_LIB_DIR="$NCCL_LINK_LIB"
   BUILD_FEATURES="$BUILD_FEATURES,nccl"

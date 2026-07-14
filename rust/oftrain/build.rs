@@ -30,6 +30,7 @@
 fn main() {
     println!("cargo:rerun-if-env-changed=LIBTORCH");
     println!("cargo:rerun-if-env-changed=LIBTORCH_CXX11_ABI");
+    println!("cargo:rerun-if-env-changed=CUDA_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=NCCL_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=NCCL_LIB_DIR");
     let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
@@ -70,6 +71,14 @@ fn main() {
             std::env::var("NCCL_INCLUDE_DIR").expect("the nccl feature requires NCCL_INCLUDE_DIR");
         let nccl_lib =
             std::env::var("NCCL_LIB_DIR").expect("the nccl feature requires NCCL_LIB_DIR");
+        let cuda_include =
+            std::env::var("CUDA_INCLUDE_DIR").expect("the nccl feature requires CUDA_INCLUDE_DIR");
+        assert!(
+            std::path::Path::new(&cuda_include)
+                .join("cuda_runtime_api.h")
+                .exists(),
+            "CUDA_INCLUDE_DIR does not contain cuda_runtime_api.h"
+        );
         assert!(
             std::path::Path::new(&nccl_include).join("nccl.h").exists(),
             "NCCL_INCLUDE_DIR does not contain nccl.h"
@@ -84,6 +93,7 @@ fn main() {
             .file("src/nccl_shim.cpp")
             .include(format!("{libtorch}/include"))
             .include(format!("{libtorch}/include/torch/csrc/api/include"))
+            .include(&cuda_include)
             .include(&nccl_include)
             .flag_if_supported("-std=c++17")
             .flag_if_supported("-fPIC")
