@@ -63,13 +63,13 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 14th, 2026</h2>
-  <p><b>V8.4 boat-outcome + tempo kicking off as <code>ppo_v84</code></b>
-  (<a href="#v84-boat-tempo">writeup</a>), resumed from <code>ppo_v83</code>
-  with checkpoint-compatible reward-only changes, BPTT/rollout 32/64, and
-  fast-win terminal shaping. V8.3 cleared its Easy closeout stage in ~40
-  updates with ~96% conversion among closeout reaches — then stage 6 exposed
-  that greedy play still boats randomly because launch is free under strength
-  and tile quality never gets a signal.</p>
+  <p><b>V8.4 live as <code>ppo_v84</code></b>
+  (<a href="#v84-boat-tempo">writeup</a>) on the 4×A40 pod (tmux
+  <code>v84-production</code>), resumed from <code>ppo_v83</code> update 361 /
+  stage 7 via <code>--migrate-v83-to-v84</code>. Reward profile
+  <code>v8.4-boat-tempo-v1</code>, BPTT/rollout 32/64, ~29 steps/s at kickoff.
+  V8.3’s Easy closeout converted well (~96%); later stages still greedy-boat
+  randomly because launch is free under strength and tile quality had no signal.</p>
   <p>Also today: curriculum outcome parity closed at 48/48 on v4
   (<a href="#parity-v4-closeout">writeup</a>).</p>
   <p class="d" style="margin:.75rem 0 0">Previous: Jul 13 Rust trainer CUDA
@@ -156,6 +156,10 @@ heuristics. Metrics: <code>reward/boat_outcome</code>, <code>reward/tempo</code>
 <ul>
   <li>Launch: <code>SKIP_SYNC=1 V84_MODE=1</code> from a tree with this branch;
   seeds once from local/HF <code>ppo_v83</code>.</li>
+  <li>Negative boat rewards must use <code>--flag=-0.20</code> form; bare
+  <code>-0.20</code> is parsed by clap as an unexpected flag.</li>
+  <li>Shallow clones lack <code>openfront/resources/maps</code> — symlink the
+  maps tree from a populated checkout before spawn.</li>
   <li>Play the bot with <code>--greedy</code> or you will re-learn the sampling lesson.</li>
   <li>NCCL on this A40 host still needs <code>NCCL_P2P_DISABLE=1</code> /
   <code>NCCL_IB_DISABLE=1</code> (SHM collectives).</li>
