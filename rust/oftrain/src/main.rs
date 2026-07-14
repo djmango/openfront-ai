@@ -1428,8 +1428,10 @@ fn main() -> anyhow::Result<()> {
         auto_scale_envs: args.auto_scale_envs,
         target_gpu_util: args.target_gpu_util,
         // Never scale below whatever the run was explicitly started with
-        // unless the user gave an explicit floor of their own.
-        min_envs: args.min_envs.unwrap_or(initial_num_envs),
+        // (`--num-envs`) unless the user gave an explicit floor of their own.
+        // Do not seed from `initial_num_envs` (stage_env_targets[--stage]),
+        // which is often an early-stage 24 and would fight late-stage floors.
+        min_envs: args.min_envs.unwrap_or(args.num_envs),
         max_envs: args.max_envs,
         autoscale_check_every: args.autoscale_check_every,
         autoscale_step: args.autoscale_step,
