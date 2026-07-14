@@ -2,10 +2,18 @@
 from __future__ import annotations
 
 import unittest
+import json
+import tempfile
+from pathlib import Path
+from unittest import mock
 
 import torch
 
-from scripts.policy_safetensors import _python_key, map_oftrain_state
+from scripts.policy_safetensors import (
+    _python_key,
+    load_oftrain_safetensors,
+    map_oftrain_state,
+)
 
 
 class PolicySafetensorsMappingTest(unittest.TestCase):
@@ -39,6 +47,27 @@ class PolicySafetensorsMappingTest(unittest.TestCase):
                 {"head_action.weight": torch.zeros(2, 2)},
                 {"head_action.weight": torch.empty(3, 2)},
             )
+
+    def test_transient_python_mapping_rejects_recurrent_schema_v2(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            checkpoint = directory / "latest.safetensors"
+            checkpoint.write_bytes(b"not-read")
+            (directory / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "format": "oftrain-safetensors",
+                        "manifest_schema_version": 1,
+                        "architecture": {
+                            "schema_version": 2,
+                            "recurrent": {"cell": "gru"},
+                        },
+                    }
+                )
+            )
+            with mock.patch("safetensors.torch.load_file"):
+                with self.assertRaisesRegex(ValueError, "recurrent.*v2"):
+                    load_oftrain_safetensors(torch.nn.Linear(1, 1), checkpoint)
 
     def test_variable_architecture_schema_is_strict_in_both_directions(self) -> None:
         base_source = {"head_action.weight": torch.zeros(3, 4)}
