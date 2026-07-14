@@ -82,7 +82,7 @@ CKPT_DIR="$REPO_DIR/rust/checkpoints/$RUN_NAME"
 HF_SYNC_INTERVAL_SECONDS="${HF_SYNC_INTERVAL_SECONDS:-600}"
 HF_REPO_ID="${HF_REPO_ID:-djmango/openfront-rl}"
 HF_RUN_PREFIX="${HF_RUN_PREFIX:-$RUN_NAME}"
-TENSORBOARD_PORT="${TENSORBOARD_PORT:-19123}"
+TENSORBOARD_PORT="${TENSORBOARD_PORT:-19124}"
 TORCH_VERSION="2.11.0" # tch 0.24's C++ shim needs this exact version - see devlog
 AE_DIR="${AE_DIR:-$REPO_DIR/weights/ae}"
 
@@ -192,12 +192,12 @@ mkdir -p "$CKPT_DIR"
 # is reached securely with scripts/tensorboard_tunnel.sh. ---
 TB_DIR="$REPO_DIR/runs/rl/$RUN_NAME"
 mkdir -p "$TB_DIR"
-if ! pgrep -f "metrics_jsonl_to_tensorboard.py --metrics $CKPT_DIR/metrics.jsonl" >/dev/null; then
+if ! pgrep -f "[m]etrics_jsonl_to_tensorboard.py --metrics $CKPT_DIR/metrics.jsonl" >/dev/null; then
   "$PYTHON" "$REPO_DIR/scripts/metrics_jsonl_to_tensorboard.py" \
     --metrics "$CKPT_DIR/metrics.jsonl" --out-dir "$TB_DIR" \
     >>"/tmp/tb_bridge_$RUN_NAME.log" 2>&1 &
 fi
-if ! pgrep -f "tensorboard.*--port $TENSORBOARD_PORT" >/dev/null; then
+if ! pgrep -f "[t]ensorboard.*--port $TENSORBOARD_PORT" >/dev/null; then
   "$VENV/bin/tensorboard" --logdir "$REPO_DIR/runs/rl" \
     --port "$TENSORBOARD_PORT" --host 127.0.0.1 \
     >>"/tmp/tensorboard.log" 2>&1 &

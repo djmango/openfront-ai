@@ -10,7 +10,9 @@ set -euo pipefail
 
 POD="${1:-ppo-v8-4xA40-fresh}"
 LOCAL_PORT="${LOCAL_PORT:-19123}"
-REMOTE_PORT="${REMOTE_PORT:-19123}"
+# RunPod's GoTTY web terminal owns 19123 inside this pod. TensorBoard uses
+# an unexposed loopback-only port and is reached through the SSH tunnel.
+REMOTE_PORT="${REMOTE_PORT:-19124}"
 RUN_NAME="${RUN_NAME:-ppo_v82}"
 REMOTE_REPO_DIR="${REMOTE_REPO_DIR:-/root/openfront-ai}"
 OPEN_BROWSER="${OPEN_BROWSER:-1}"
@@ -129,11 +131,11 @@ ssh -i "$KEY" \
    if ! \"\$python\" -c 'import tensorboard' >/dev/null 2>&1; then \
      \"\$python\" -m pip install --quiet tensorboard; \
    fi; \
-   if ! pgrep -f \"metrics_jsonl_to_tensorboard.py --metrics \$metrics\" >/dev/null; then \
+   if ! pgrep -f \"[m]etrics_jsonl_to_tensorboard.py --metrics \$metrics\" >/dev/null; then \
      nohup \"\$python\" \"\$repo/scripts/metrics_jsonl_to_tensorboard.py\" \
        --metrics \"\$metrics\" --out-dir \"\$out\" >/tmp/tb_bridge_$RUN_NAME.log 2>&1 & \
    fi; \
-   if ! pgrep -f 'tensorboard.*--port ${REMOTE_PORT}' >/dev/null; then \
+   if ! pgrep -f '[t]ensorboard.*--port ${REMOTE_PORT}' >/dev/null; then \
      nohup \"\$repo/rust/.libtorch-venv/bin/tensorboard\" --logdir \"\$repo/runs/rl\" \
        --port ${REMOTE_PORT} --host 127.0.0.1 >/tmp/tensorboard.log 2>&1 & \
    fi"
