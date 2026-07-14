@@ -657,7 +657,9 @@ impl WarshipExecution {
             }
             return true;
         }
-        if self.target_tile != Some(port) {
+        let path_matches_from =
+            self.path_idx > 0 && self.path.get(self.path_idx - 1) == Some(&from);
+        if self.target_tile != Some(port) || !path_matches_from {
             self.target_tile = Some(port);
             if !self.refresh_path(game, from, port) {
                 self.retreating = false;
@@ -694,6 +696,7 @@ impl Execution for WarshipExecution {
         };
         self.random = Some(PseudoRandom::new(tick as i32));
         self.unit_id = Some(game.build_unit(self.owner_small_id, WARSHIP, spawn));
+        self.last_observed_patrol_tile = Some(self.patrol_tile);
     }
 
     fn tick(&mut self, game: &mut Game, tick: u32) {
@@ -1850,6 +1853,32 @@ mod tests {
             assert!(!exec.docked);
         }
 
+        #[test]
+        fn first_patrol_redirect_suppresses_low_health_auto_retreat() {
+            let mut game = water_game(40, 40);
+            let p1 = add_nation(&mut game, "p1");
+            let port_tile = game.ref_xy(10, 10);
+            let original_patrol = game.ref_xy(20, 10);
+            let redirected_patrol = game.ref_xy(25, 10);
+
+            game.player_by_small_id_mut(p1).unwrap().gold = 1_000_000;
+            game.build_unit(p1, unit_type::PORT, port_tile);
+            let mut exec = WarshipExecution::new(p1, original_patrol);
+            exec.init(&mut game, 100);
+            let ship_id = exec.unit_id.expect("warship should spawn from port");
+            let max_health = game.unit_max_health(p1, ship_id);
+            game.unit_mut(p1, ship_id).unwrap().health = max_health / 2;
+
+            exec.set_patrol_tile_at_tick(redirected_patrol, 101);
+            exec.tick(&mut game, 101);
+
+            assert!(
+                !exec.retreating,
+                "a first observed patrol redirect should suppress auto-retreat for 50 ticks"
+            );
+            assert!(exec.retreat_port.is_none());
+        }
+
         /// Two water pools divided by a land strip, each wrapped in a real `mini_water_hpa`
         /// (`get_water_component`/`has_water_component` are permissive/no-ops without one -
         /// see `Game::has_water_component`'s "disableNavMesh" fallback - so a real navmesh is
@@ -2073,6 +2102,37 @@ mod tests {
                 "available nearby port should dock the ship immediately"
             );
             assert!(exec.target_tile.is_none(), "docking clears the target tile");
+        }
+
+        #[test]
+        fn retreat_refreshes_stale_path_when_target_already_matches_port() {
+            let mut game = water_game(80, 30);
+            let p1 = add_nation(&mut game, "p1");
+            let port_tile = game.ref_xy(60, 10);
+            let stale_from = game.ref_xy(10, 10);
+            let ship_tile = game.ref_xy(20, 10);
+
+            game.build_unit(p1, unit_type::PORT, port_tile);
+            let ship_id = game.build_unit(p1, unit_type::WARSHIP, ship_tile);
+            let mut exec = WarshipExecution::new_for_test(p1, ship_tile, ship_id);
+            assert!(exec.refresh_path(&mut game, stale_from, port_tile));
+            exec.target_tile = Some(port_tile);
+            exec.retreating = true;
+            exec.retreat_port = Some(port_tile);
+
+            assert!(exec.retreat(&mut game, ship_tile, ship_id));
+
+            let next_tile = game.unit_tile_of(p1, ship_id).unwrap();
+            assert_ne!(
+                next_tile,
+                *exec.path.first().unwrap(),
+                "retreat must not reuse a cached path whose previous node is not the current tile"
+            );
+            assert_eq!(
+                exec.path.first(),
+                Some(&ship_tile),
+                "refreshed retreat path should start at the current ship tile"
+            );
         }
 
         #[test]
