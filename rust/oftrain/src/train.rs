@@ -197,6 +197,7 @@ pub struct Config {
     pub migrate_v82_to_v83: bool,
     /// Allows V8.3 -> V8.4 reward-profile migration (same weights/schedule).
     pub migrate_v83_to_v84: bool,
+    pub migrate_v84_to_v85: bool,
     /// Optional env workers-per-shard target for every curriculum stage.
     /// A target change is applied by checkpointing and restarting so
     /// persistent actor/learner CUDA ownership never changes threads.
@@ -476,7 +477,9 @@ fn reconcile_resume_schedule(
     migrate_v811_stage5_to_v82: bool,
     migrate_v82_to_v83: bool,
     migrate_v83_to_v84: bool,
+    migrate_v84_to_v85: bool,
     want_v84_reward: bool,
+    want_v85_reward: bool,
 ) -> Result<()> {
     use ofcore::curriculum::CurriculumSchedule;
     let saved = state.schedule()?;
@@ -487,13 +490,51 @@ fn reconcile_resume_schedule(
             requested.id()
         );
         if requested == CurriculumSchedule::V83 {
-            if want_v84_reward {
+            if want_v85_reward {
+                match state.reward_profile.as_deref() {
+                    Some(ofcore::curriculum::V85_REWARD_PROFILE) => {
+                        anyhow::ensure!(
+                            !migrate_v84_to_v85 && !migrate_v83_to_v84,
+                            "a V8.5 migration flag was supplied but checkpoint already uses {}",
+                            ofcore::curriculum::V85_REWARD_PROFILE
+                        );
+                    }
+                    Some(ofcore::curriculum::V84_REWARD_PROFILE) if migrate_v84_to_v85 => {
+                        state.reward_profile =
+                            Some(ofcore::curriculum::V85_REWARD_PROFILE.to_string());
+                        println!(
+                            "[train] migrated reward profile {} -> {} (weights unchanged)",
+                            ofcore::curriculum::V84_REWARD_PROFILE,
+                            ofcore::curriculum::V85_REWARD_PROFILE
+                        );
+                    }
+                    Some(ofcore::curriculum::V84_REWARD_PROFILE) => {
+                        anyhow::bail!(
+                            "V8.5 reward flags require --migrate-v84-to-v85 when resuming a \
+                             {} checkpoint",
+                            ofcore::curriculum::V84_REWARD_PROFILE
+                        );
+                    }
+                    other => {
+                        anyhow::bail!(
+                            "V8.5 checkpoint reward profile mismatch: found {:?}",
+                            other
+                        );
+                    }
+                }
+            } else if want_v84_reward {
                 match state.reward_profile.as_deref() {
                     Some(ofcore::curriculum::V84_REWARD_PROFILE) => {
                         anyhow::ensure!(
                             !migrate_v83_to_v84,
                             "a V8.4 migration flag was supplied but checkpoint already uses {}",
                             ofcore::curriculum::V84_REWARD_PROFILE
+                        );
+                    }
+                    Some(ofcore::curriculum::V85_REWARD_PROFILE) => {
+                        anyhow::bail!(
+                            "checkpoint already uses {}; resume with V8.5 reward flags",
+                            ofcore::curriculum::V85_REWARD_PROFILE
                         );
                     }
                     Some(ofcore::curriculum::V83_REWARD_PROFILE) if migrate_v83_to_v84 => {
@@ -521,8 +562,8 @@ fn reconcile_resume_schedule(
                 }
             } else {
                 anyhow::ensure!(
-                    !migrate_v83_to_v84,
-                    "--migrate-v83-to-v84 requires V8.4 reward coefficients"
+                    !migrate_v83_to_v84 && !migrate_v84_to_v85,
+                    "reward-profile migration flags require matching reward coefficients"
                 );
                 anyhow::ensure!(
                     state.reward_profile.as_deref()
@@ -554,7 +595,9 @@ fn reconcile_resume_schedule(
         state.recent_wins.clear();
         state.recent_conversions.clear();
         if requested == CurriculumSchedule::V83 {
-            state.reward_profile = Some(if want_v84_reward {
+            state.reward_profile = Some(if want_v85_reward {
+                ofcore::curriculum::V85_REWARD_PROFILE.to_string()
+            } else if want_v84_reward {
                 ofcore::curriculum::V84_REWARD_PROFILE.to_string()
             } else {
                 ofcore::curriculum::V83_REWARD_PROFILE.to_string()
@@ -569,7 +612,7 @@ fn reconcile_resume_schedule(
         "checkpoint curriculum schedule {} is incompatible with requested {}; \
          supported migrations are V8.1 stage 5 -> V8.1.1 and \
          V8.1.1 stage 5 -> V8.2, and V8.2 stage 5 -> V8.3 with their \
-         explicit migration flags (V8.3 -> V8.4 is a reward-profile migrate)",
+         explicit migration flags (V8.3 -> V8.4 / V8.4 -> V8.5 are reward-profile migrates)",
         saved.id(),
         requested.id()
     )
@@ -1075,17 +1118,17 @@ mod v81_state_and_gate_tests {
         use ofcore::curriculum::CurriculumSchedule;
         let mut v81 = state_for_schedule(Some("v8.1"), true, 5);
         assert!(
-            reconcile_resume_schedule(&mut v81, CurriculumSchedule::V81, false, false, false, false, false)
+            reconcile_resume_schedule(&mut v81, CurriculumSchedule::V81, false, false, false, false, false, false, false)
                 .is_ok()
         );
         let error =
-            reconcile_resume_schedule(&mut v81, CurriculumSchedule::V811, false, false, false, false, false)
+            reconcile_resume_schedule(&mut v81, CurriculumSchedule::V811, false, false, false, false, false, false, false)
                 .unwrap_err();
         assert!(error.to_string().contains("incompatible"));
 
         let mut legacy = state_for_schedule(None, false, 5);
         assert!(
-            reconcile_resume_schedule(&mut legacy, CurriculumSchedule::V811, true, false, false, false, false)
+            reconcile_resume_schedule(&mut legacy, CurriculumSchedule::V811, true, false, false, false, false, false, false)
                 .is_err()
         );
     }
@@ -1094,7 +1137,7 @@ mod v81_state_and_gate_tests {
     fn explicit_v81_stage5_migration_maps_to_v811_stage5() {
         use ofcore::curriculum::CurriculumSchedule;
         let mut state = state_for_schedule(None, true, 5);
-        reconcile_resume_schedule(&mut state, CurriculumSchedule::V811, true, false, false, false, false)
+        reconcile_resume_schedule(&mut state, CurriculumSchedule::V811, true, false, false, false, false, false, false)
             .unwrap();
         assert_eq!(state.stage, 5);
         assert_eq!(state.schedule().unwrap(), CurriculumSchedule::V811);
@@ -1111,8 +1154,7 @@ mod v81_state_and_gate_tests {
                 false,
                 false,
                 false,
-                false,
-            )
+                false, false, false)
             .is_err()
         );
     }
@@ -1121,7 +1163,7 @@ mod v81_state_and_gate_tests {
     fn explicit_v811_stage5_migration_maps_to_v82_stage5() {
         use ofcore::curriculum::CurriculumSchedule;
         let mut state = state_for_schedule(Some("v8.1.1"), true, 5);
-        reconcile_resume_schedule(&mut state, CurriculumSchedule::V82, false, true, false, false, false).unwrap();
+        reconcile_resume_schedule(&mut state, CurriculumSchedule::V82, false, true, false, false, false, false, false).unwrap();
         assert_eq!(state.stage, 5);
         assert_eq!(state.schedule().unwrap(), CurriculumSchedule::V82);
         assert!(state.recent_wins.is_empty());
@@ -1137,8 +1179,7 @@ mod v81_state_and_gate_tests {
                 true,
                 false,
                 false,
-                false,
-            )
+                false, false, false)
             .is_err()
         );
         let mut wrong_source = state_for_schedule(Some("v8.1"), true, 5);
@@ -1150,8 +1191,7 @@ mod v81_state_and_gate_tests {
                 true,
                 false,
                 false,
-                false,
-            )
+                false, false, false)
             .is_err()
         );
     }
@@ -1169,7 +1209,7 @@ mod v81_state_and_gate_tests {
         state.best_eval_score = Some(0.9);
         state.return_stats = Some(serde_json::json!({"mean": 12.0, "count": 44}));
 
-        reconcile_resume_schedule(&mut state, CurriculumSchedule::V83, false, false, true, false, false).unwrap();
+        reconcile_resume_schedule(&mut state, CurriculumSchedule::V83, false, false, true, false, false, false, false).unwrap();
         assert_eq!(state.stage, 5);
         assert_eq!(state.update, 321);
         assert_eq!(state.total_env_steps, 99_000);
@@ -1197,8 +1237,7 @@ mod v81_state_and_gate_tests {
                     false,
                     true,
                     false,
-                    false,
-                )
+                    false, false, false)
                 .is_err()
             );
         }
@@ -1210,7 +1249,7 @@ mod v81_state_and_gate_tests {
         let mut state = state_for_schedule(Some("v8.3"), true, 5);
         state.reward_profile = Some("wrong".to_string());
         assert!(
-            reconcile_resume_schedule(&mut state, CurriculumSchedule::V83, false, false, false, false, false)
+            reconcile_resume_schedule(&mut state, CurriculumSchedule::V83, false, false, false, false, false, false, false)
                 .unwrap_err()
                 .to_string()
                 .contains("reward profile mismatch")
@@ -3492,6 +3531,8 @@ pub fn run_benchmark(cfg: BenchmarkConfig<'_>) -> Result<()> {
                     "action_churn": info.reward_components.action_churn,
                     "boat_outcome": info.reward_components.boat_outcome,
                     "tempo": info.reward_components.tempo,
+                    "embargo_outcome": info.reward_components.embargo_outcome,
+                    "combat_outcome": info.reward_components.combat_outcome,
                     "waste": info.reward_components.waste,
                     "death": info.reward_components.death,
                     "terminal": info.reward_components.terminal,
@@ -6346,12 +6387,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     && recurrent["context_features"] == policy::RECURRENT_CONTEXT_FLOATS,
                 "V8.2 recurrent context schema mismatch"
             );
-            if cfg.migrate_v83_to_v84
+            if (cfg.migrate_v83_to_v84 || cfg.migrate_v84_to_v85)
                 && (recurrent["bptt_length"] != cfg.bptt_chunk_len
                     || recurrent["rollout_length"] != cfg.rollout_len)
             {
                 println!(
-                    "[train] V8.4 migration: BPTT/rollout {}/{} -> {}/{} (weights unchanged)",
+                    "[train] reward-profile migration: BPTT/rollout {}/{} -> {}/{} (weights unchanged)",
                     recurrent["bptt_length"],
                     recurrent["rollout_length"],
                     cfg.bptt_chunk_len,
@@ -6461,7 +6502,9 @@ pub fn run(mut cfg: Config) -> Result<()> {
             cfg.migrate_v811_stage5_to_v82,
             cfg.migrate_v82_to_v83,
             cfg.migrate_v83_to_v84,
+            cfg.migrate_v84_to_v85,
             cfg.reward_config.v84_reward_active(),
+            cfg.reward_config.v85_reward_active(),
         )?;
         if saved_schedule != cfg.curriculum_schedule {
             println!(
@@ -7129,6 +7172,8 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     "reward/action_churn": info.reward_components.action_churn,
                     "reward/boat_outcome": info.reward_components.boat_outcome,
                     "reward/tempo": info.reward_components.tempo,
+                    "reward/embargo_outcome": info.reward_components.embargo_outcome,
+                    "reward/combat_outcome": info.reward_components.combat_outcome,
                     "reward/waste": info.reward_components.waste,
                     "reward/death": info.reward_components.death,
                     "reward/terminal": info.reward_components.terminal,
@@ -7137,6 +7182,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     "boats/own_shore_return": info.boat_outcome_counts.own_shore_return,
                     "boats/cancelled": info.boat_outcome_counts.cancelled,
                     "boats/destroyed": info.boat_outcome_counts.destroyed,
+                    "embargo/bad_stops": info.embargo_bad_stops,
+                    "embargo/good_stops": info.embargo_good_stops,
+                    "combat/premature_retreats": info.premature_retreats,
+                    "combat/thrash_reengages": info.thrash_reengages,
                     "action_pairs/embargo_embargo_stop": info.action_pair_counts.embargo_embargo_stop,
                     "action_pairs/attack_retreat": info.action_pair_counts.attack_retreat,
                     "action_pairs/retreat_attack": info.action_pair_counts.retreat_attack,
@@ -7358,7 +7407,9 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 reward_profile: (cfg.curriculum_schedule
                     == ofcore::curriculum::CurriculumSchedule::V83)
                     .then(|| {
-                        if cfg.reward_config.v84_reward_active() {
+                        if cfg.reward_config.v85_reward_active() {
+                            ofcore::curriculum::V85_REWARD_PROFILE.to_string()
+                        } else if cfg.reward_config.v84_reward_active() {
                             ofcore::curriculum::V84_REWARD_PROFILE.to_string()
                         } else {
                             ofcore::curriculum::V83_REWARD_PROFILE.to_string()
@@ -7539,7 +7590,9 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 reward_profile: (cfg.curriculum_schedule
                     == ofcore::curriculum::CurriculumSchedule::V83)
                     .then(|| {
-                        if cfg.reward_config.v84_reward_active() {
+                        if cfg.reward_config.v85_reward_active() {
+                            ofcore::curriculum::V85_REWARD_PROFILE.to_string()
+                        } else if cfg.reward_config.v84_reward_active() {
                             ofcore::curriculum::V84_REWARD_PROFILE.to_string()
                         } else {
                             ofcore::curriculum::V83_REWARD_PROFILE.to_string()
@@ -7747,7 +7800,9 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 reward_profile: (cfg.curriculum_schedule
                     == ofcore::curriculum::CurriculumSchedule::V83)
                     .then(|| {
-                        if cfg.reward_config.v84_reward_active() {
+                        if cfg.reward_config.v85_reward_active() {
+                            ofcore::curriculum::V85_REWARD_PROFILE.to_string()
+                        } else if cfg.reward_config.v84_reward_active() {
                             ofcore::curriculum::V84_REWARD_PROFILE.to_string()
                         } else {
                             ofcore::curriculum::V83_REWARD_PROFILE.to_string()
@@ -7816,7 +7871,9 @@ pub fn run(mut cfg: Config) -> Result<()> {
         curriculum_schedule: Some(cfg.curriculum_schedule.id().to_string()),
         reward_profile: (cfg.curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V83)
             .then(|| {
-                if cfg.reward_config.v84_reward_active() {
+                if cfg.reward_config.v85_reward_active() {
+                    ofcore::curriculum::V85_REWARD_PROFILE.to_string()
+                } else if cfg.reward_config.v84_reward_active() {
                     ofcore::curriculum::V84_REWARD_PROFILE.to_string()
                 } else {
                     ofcore::curriculum::V83_REWARD_PROFILE.to_string()
@@ -8052,6 +8109,7 @@ mod persistent_actor_tests {
             migrate_v811_stage5_to_v82: false,
             migrate_v82_to_v83: false,
             migrate_v83_to_v84: false,
+            migrate_v84_to_v85: false,
             stage_env_targets: Vec::new(),
             max_episode_ticks: 10,
             rollout_len: 2,
@@ -8079,6 +8137,14 @@ mod persistent_actor_tests {
                 v84_tempo_coef: 0.0,
                 v84_tempo_min_stage: 4,
                 v84_fast_win_coef: 0.0,
+                v85_tempo_share_threshold: 0.0,
+                v85_extra_win_bonus: 0.0,
+                v85_embargo_bad_stop: 0.0,
+                v85_embargo_good_stop: 0.0,
+                v85_embargo_min_stage: 4,
+                v85_premature_retreat: 0.0,
+                v85_thrash_reengage: 0.0,
+                v85_combat_min_stage: 4,
             },
             lambda: 0.95,
             clip: 0.2,

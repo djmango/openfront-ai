@@ -170,6 +170,40 @@ struct Args {
     #[arg(long, default_value_t = 0.0)]
     v84_fast_win_coef: f64,
 
+    /// V8.5: tempo share threshold (0 = use --v81-dominance-threshold).
+    #[arg(long, default_value_t = 0.0)]
+    v85_tempo_share_threshold: f64,
+
+    /// V8.5: extra terminal bonus on win (on top of W_WIN).
+    #[arg(long, default_value_t = 0.0)]
+    v85_extra_win_bonus: f64,
+
+    /// V8.5: penalty for embargo_stop while Hostile/Distrustful.
+    #[arg(long, default_value_t = 0.0)]
+    v85_embargo_bad_stop: f64,
+
+    /// V8.5: small reward for embargo_stop after relation recovered.
+    #[arg(long, default_value_t = 0.0)]
+    v85_embargo_good_stop: f64,
+
+    #[arg(long, default_value_t = 4)]
+    v85_embargo_min_stage: usize,
+
+    /// V8.5: penalty for retreating a just-opened attack.
+    #[arg(long, default_value_t = 0.0)]
+    v85_premature_retreat: f64,
+
+    /// V8.5: penalty for re-attacking right after retreat.
+    #[arg(long, default_value_t = 0.0)]
+    v85_thrash_reengage: f64,
+
+    #[arg(long, default_value_t = 4)]
+    v85_combat_min_stage: usize,
+
+    /// Resume a V8.4 reward-profile checkpoint under V8.5 coeffs (weights unchanged).
+    #[arg(long, default_value_t = false, requires_all = ["v83_curriculum", "resume"])]
+    migrate_v84_to_v85: bool,
+
     #[arg(long, default_value_t = 0.95)]
     lambda_: f32,
 
@@ -1084,6 +1118,31 @@ fn main() -> anyhow::Result<()> {
         args.v84_fast_win_coef.is_finite() && args.v84_fast_win_coef >= 0.0,
         "--v84-fast-win-coef must be finite and non-negative"
     );
+    anyhow::ensure!(
+        args.v85_tempo_share_threshold.is_finite()
+            && (0.0..=1.0).contains(&args.v85_tempo_share_threshold),
+        "--v85-tempo-share-threshold must be in [0, 1]"
+    );
+    anyhow::ensure!(
+        args.v85_extra_win_bonus.is_finite() && args.v85_extra_win_bonus >= 0.0,
+        "--v85-extra-win-bonus must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.v85_embargo_bad_stop.is_finite(),
+        "--v85-embargo-bad-stop must be finite"
+    );
+    anyhow::ensure!(
+        args.v85_embargo_good_stop.is_finite(),
+        "--v85-embargo-good-stop must be finite"
+    );
+    anyhow::ensure!(
+        args.v85_premature_retreat.is_finite(),
+        "--v85-premature-retreat must be finite"
+    );
+    anyhow::ensure!(
+        args.v85_thrash_reengage.is_finite(),
+        "--v85-thrash-reengage must be finite"
+    );
     let reward_config = ofcore::curriculum::RewardConfig {
         gamma: args.gamma as f64,
         v81_dom_coef: args.v81_dom_coef,
@@ -1105,6 +1164,14 @@ fn main() -> anyhow::Result<()> {
         v84_tempo_coef: args.v84_tempo_coef,
         v84_tempo_min_stage: args.v84_tempo_min_stage,
         v84_fast_win_coef: args.v84_fast_win_coef,
+        v85_tempo_share_threshold: args.v85_tempo_share_threshold,
+        v85_extra_win_bonus: args.v85_extra_win_bonus,
+        v85_embargo_bad_stop: args.v85_embargo_bad_stop,
+        v85_embargo_good_stop: args.v85_embargo_good_stop,
+        v85_embargo_min_stage: args.v85_embargo_min_stage,
+        v85_premature_retreat: args.v85_premature_retreat,
+        v85_thrash_reengage: args.v85_thrash_reengage,
+        v85_combat_min_stage: args.v85_combat_min_stage,
     };
     let curriculum_schedule = if args.v83_curriculum {
         ofcore::curriculum::CurriculumSchedule::V83
@@ -1269,6 +1336,7 @@ fn main() -> anyhow::Result<()> {
         migrate_v811_stage5_to_v82: args.migrate_v811_stage5_to_v82,
         migrate_v82_to_v83: args.migrate_v82_to_v83,
         migrate_v83_to_v84: args.migrate_v83_to_v84,
+        migrate_v84_to_v85: args.migrate_v84_to_v85,
         stage_env_targets,
         max_episode_ticks: args.max_episode_ticks,
         rollout_len: args.rollout_len,

@@ -25,6 +25,11 @@ pub const V83_CLOSEOUT_SHARE_START: f64 = 0.45;
 pub const V83_CLOSEOUT_SHARE_FULL: f64 = 0.80;
 pub const V83_REWARD_PROFILE: &str = "v8.3-closeout-v1";
 pub const V84_REWARD_PROFILE: &str = "v8.4-boat-tempo-v1";
+pub const V85_REWARD_PROFILE: &str = "v8.5-win-urgency-v1";
+/// Relation score bands mirror engine `Relation` / TS `PlayerImpl.relation()`.
+pub const RELATION_HOSTILE_LT: f64 = -50.0;
+pub const RELATION_DISTRUSTFUL_LT: f64 = 0.0;
+pub const RELATION_NEUTRAL_LT: f64 = 50.0;
 /// `feat::unit_class("Transport")`.
 pub const TRANSPORT_UNIT_CLASS: usize = 7;
 
@@ -56,6 +61,20 @@ pub struct RewardConfig {
     pub v84_tempo_min_stage: usize,
     /// Extra terminal bonus for faster wins: coef * (1 - tick/max_ticks).
     pub v84_fast_win_coef: f64,
+    /// V8.5: land/strength share threshold for tempo (0 = use v81_dominance_threshold).
+    pub v85_tempo_share_threshold: f64,
+    /// Extra terminal win bonus on top of W_WIN (win must dominate shaping).
+    pub v85_extra_win_bonus: f64,
+    /// Penalty for embargo_stop while still Hostile/Distrustful.
+    pub v85_embargo_bad_stop: f64,
+    /// Small reward for embargo_stop after relation recovered (Neutral+).
+    pub v85_embargo_good_stop: f64,
+    pub v85_embargo_min_stage: usize,
+    /// Penalty for retreating an attack that was just opened on the same target.
+    pub v85_premature_retreat: f64,
+    /// Penalty for re-attacking a target just after retreating.
+    pub v85_thrash_reengage: f64,
+    pub v85_combat_min_stage: usize,
 }
 
 impl RewardConfig {
@@ -97,6 +116,38 @@ impl RewardConfig {
             || self.v84_tempo_coef != 0.0
             || self.v84_fast_win_coef != 0.0
     }
+
+    pub fn tempo_share_threshold(self) -> f64 {
+        if self.v85_tempo_share_threshold > 0.0 {
+            self.v85_tempo_share_threshold
+        } else {
+            self.v81_dominance_threshold
+        }
+    }
+
+    pub fn embargo_outcome_active(self, stage: usize) -> bool {
+        stage >= self.v85_embargo_min_stage
+            && (self.v85_embargo_bad_stop != 0.0 || self.v85_embargo_good_stop != 0.0)
+    }
+
+    pub fn combat_outcome_active(self, stage: usize) -> bool {
+        stage >= self.v85_combat_min_stage
+            && (self.v85_premature_retreat != 0.0 || self.v85_thrash_reengage != 0.0)
+    }
+
+    pub fn v85_reward_active(self) -> bool {
+        self.v85_tempo_share_threshold > 0.0
+            || self.v85_extra_win_bonus != 0.0
+            || self.v85_embargo_bad_stop != 0.0
+            || self.v85_embargo_good_stop != 0.0
+            || self.v85_premature_retreat != 0.0
+            || self.v85_thrash_reengage != 0.0
+    }
+
+    /// V8.4 boat/tempo knobs and/or V8.5 win-urgency knobs.
+    pub fn v84_or_v85_reward_active(self) -> bool {
+        self.v84_reward_active() || self.v85_reward_active()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -108,6 +159,8 @@ pub struct RewardComponents {
     pub action_churn: f64,
     pub boat_outcome: f64,
     pub tempo: f64,
+    pub embargo_outcome: f64,
+    pub combat_outcome: f64,
     pub waste: f64,
     pub death: f64,
     pub terminal: f64,
@@ -122,6 +175,8 @@ impl RewardComponents {
         self.action_churn += other.action_churn;
         self.boat_outcome += other.boat_outcome;
         self.tempo += other.tempo;
+        self.embargo_outcome += other.embargo_outcome;
+        self.combat_outcome += other.combat_outcome;
         self.waste += other.waste;
         self.death += other.death;
         self.terminal += other.terminal;
@@ -211,6 +266,52 @@ pub fn fast_win_bonus(won: bool, tick: i64, max_ticks: i64, coef: f64) -> f64 {
         return 0.0;
     }
     coef * (1.0 - (tick as f64 / max_ticks as f64).clamp(0.0, 1.0))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelationBand {
+    Hostile,
+    Distrustful,
+    Neutral,
+    Friendly,
+}
+
+pub fn relation_band(value: f64) -> RelationBand {
+    if value < RELATION_HOSTILE_LT {
+        RelationBand::Hostile
+    } else if value < RELATION_DISTRUSTFUL_LT {
+        RelationBand::Distrustful
+    } else if value < RELATION_NEUTRAL_LT {
+        RelationBand::Neutral
+    } else {
+        RelationBand::Friendly
+    }
+}
+
+pub fn relation_is_hostileish(band: RelationBand) -> bool {
+    matches!(band, RelationBand::Hostile | RelationBand::Distrustful)
+}
+
+/// Embargo-stop outcome vs current relation to the target (expert sticky Hostile).
+pub fn embargo_stop_outcome_reward(relation_value: f64, config: RewardConfig) -> f64 {
+    if relation_is_hostileish(relation_band(relation_value)) {
+        config.v85_embargo_bad_stop
+    } else {
+        config.v85_embargo_good_stop
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CombatOutcome {
+    PrematureRetreat,
+    ThrashReengage,
+}
+
+pub fn combat_outcome_reward(outcome: CombatOutcome, config: RewardConfig) -> f64 {
+    match outcome {
+        CombatOutcome::PrematureRetreat => config.v85_premature_retreat,
+        CombatOutcome::ThrashReengage => config.v85_thrash_reengage,
+    }
 }
 
 /// Stable identifier relevant to deciding whether two chosen actions undo one
@@ -955,6 +1056,14 @@ mod tests {
             v84_tempo_coef: 0.005,
             v84_tempo_min_stage: 4,
             v84_fast_win_coef: 8.0,
+            v85_tempo_share_threshold: 0.0,
+            v85_extra_win_bonus: 0.0,
+            v85_embargo_bad_stop: -0.15,
+            v85_embargo_good_stop: 0.02,
+            v85_embargo_min_stage: 4,
+            v85_premature_retreat: -0.10,
+            v85_thrash_reengage: -0.10,
+            v85_combat_min_stage: 4,
         }
     }
 
@@ -1335,6 +1444,35 @@ mod tests {
         assert!((fast_win_bonus(true, 0, 1000, 8.0) - 8.0).abs() < 1e-12);
         assert!((fast_win_bonus(true, 500, 1000, 8.0) - 4.0).abs() < 1e-12);
         assert!((fast_win_bonus(true, 1000, 1000, 8.0) - 0.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn relation_bands_match_engine_thresholds() {
+        assert_eq!(relation_band(-51.0), RelationBand::Hostile);
+        assert_eq!(relation_band(-1.0), RelationBand::Distrustful);
+        assert_eq!(relation_band(0.0), RelationBand::Neutral);
+        assert_eq!(relation_band(49.0), RelationBand::Neutral);
+        assert_eq!(relation_band(50.0), RelationBand::Friendly);
+    }
+
+    #[test]
+    fn embargo_stop_prices_hostile_vs_recovered() {
+        let mut cfg = config();
+        cfg.v85_embargo_bad_stop = -0.15;
+        cfg.v85_embargo_good_stop = 0.02;
+        assert!((embargo_stop_outcome_reward(-80.0, cfg) - (-0.15)).abs() < 1e-12);
+        assert!((embargo_stop_outcome_reward(-10.0, cfg) - (-0.15)).abs() < 1e-12);
+        assert!((embargo_stop_outcome_reward(10.0, cfg) - 0.02).abs() < 1e-12);
+        assert!((embargo_stop_outcome_reward(80.0, cfg) - 0.02).abs() < 1e-12);
+    }
+
+    #[test]
+    fn tempo_share_threshold_prefers_v85_when_set() {
+        let mut cfg = config();
+        cfg.v81_dominance_threshold = 0.55;
+        assert!((cfg.tempo_share_threshold() - 0.55).abs() < 1e-12);
+        cfg.v85_tempo_share_threshold = 0.30;
+        assert!((cfg.tempo_share_threshold() - 0.30).abs() < 1e-12);
     }
 }
 

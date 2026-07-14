@@ -28,6 +28,7 @@
 
 <nav class="toc">
   <a href="#now">Now</a> ·
+  <a href="#v85-win-urgency">Jul 14 V8.5</a> ·
   <a href="#v84-boat-tempo">Jul 14 V8.4</a> ·
   <a href="#parity-v4-closeout">Jul 14 parity</a> ·
   <a href="#rust-v8-stability">Jul 13 Rust trainer</a> ·
@@ -63,19 +64,48 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 14th, 2026</h2>
-  <p><b>V8.4 live as <code>ppo_v84</code></b>
-  (<a href="#v84-boat-tempo">writeup</a>) on the 4×A40 pod (tmux
-  <code>v84-production</code>), resumed from <code>ppo_v83</code> update 361 /
-  stage 7 via <code>--migrate-v83-to-v84</code>. Reward profile
-  <code>v8.4-boat-tempo-v1</code>, BPTT/rollout 32/64, ~29 steps/s at kickoff.
-  V8.3’s Easy closeout converted well (~96%); later stages still greedy-boat
-  randomly because launch is free under strength and tile quality had no signal.</p>
+  <p><b>V8.5 win-urgency kicking off as <code>ppo_v85</code></b>
+  (<a href="#v85-win-urgency">writeup</a>), resumed from live <code>ppo_v84</code>.
+  Win terminal gets +30 extra; tempo starts at share 0.30 (was 0.55);
+  embargo-stop and attack/retreat get outcome pricing. Overnight V8.4 reached
+  stage 8 with ~57% useful boat landings — but ~80% of eps never hit dominance,
+  so urgency never fired, and winners still embargo-thrashed.</p>
   <p>Also today: curriculum outcome parity closed at 48/48 on v4
   (<a href="#parity-v4-closeout">writeup</a>).</p>
   <p class="d" style="margin:.75rem 0 0">Previous: Jul 13 Rust trainer CUDA
   diagnosis / persistent ownership
   (<a href="#rust-v8-stability">writeup</a>).</p>
 </div>
+
+<h2 class="date" id="v85-win-urgency">Jul 14, 2026 - V8.5: win-first urgency, embargo + combat outcomes</h2>
+<p class="session">Overnight <code>ppo_v84</code> audit → reward-only <code>ppo_v85</code>
+that resumes the same weights.</p>
+
+<h3>What V8.4 taught overnight</h3>
+<ul>
+  <li>Boats improved: useful landing fraction ~53–59% on stages 7–8; boat reward positive.</li>
+  <li><b>~80% of stage-8 episodes never reach dominance (0.55)</b>; median max land ~0.09.
+    Tempo (gated on 0.55) only fired on ~14% of episodes.</li>
+  <li>Embargo thrash remains the main dumb pattern — even on <i>closeout winners</i>
+    (~7.5 embargo pairs/ep). Attack↔retreat secondary.</li>
+  <li>On winners, terminal (~42) already dwarfs shaping; on the other 80%, PPO mostly
+    trains strength/death/boat crumbs because win never arrives.</li>
+</ul>
+
+<h3>V8.5 design (still checkpoint-compatible)</h3>
+<table>
+  <tr><th>Knob</th><th>V8.4</th><th>V8.5</th></tr>
+  <tr><td>Reward profile</td><td><code>v8.4-boat-tempo-v1</code></td><td><code>v8.5-win-urgency-v1</code></td></tr>
+  <tr><td>Extra win bonus</td><td>—</td><td>+30 on win (W_WIN 30 → effective 60)</td></tr>
+  <tr><td>Fast-win coef</td><td>8</td><td>12</td></tr>
+  <tr><td>Tempo coef / threshold</td><td>0.005 @ 0.55</td><td>0.015 @ <b>0.30</b></td></tr>
+  <tr><td>Embargo</td><td>flat churn only</td><td>stop while Hostile/Distrustful −0.15; recovered +0.02</td></tr>
+  <tr><td>Attack/retreat</td><td>flat churn only</td><td>premature retreat / thrash reengage −0.10 each</td></tr>
+  <tr><td>Migrate</td><td><code>--migrate-v83-to-v84</code></td><td><code>--migrate-v84-to-v85</code></td></tr>
+</table>
+<p>Relations are now emitted in native entities obs (reward-only; policy tensors unchanged).
+Embargo-stop is priced from the pre-step relation score. Combat outcomes use a sticky
+decision window (same length as churn window).</p>
 
 <h2 class="date" id="v84-boat-tempo">Jul 14, 2026 - V8.3 → V8.4: what we learned about boats, greedy, and churn</h2>
 <p class="session">Live <code>ppo_v83</code> on 4×A40 (optimized trainer), then design of

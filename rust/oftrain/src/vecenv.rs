@@ -18,10 +18,11 @@ use ofcore::curriculum::{
     self, ActionChurnTracker, ActionPairCounts, ActionTarget, BoatOutcomeCounts,
     ChosenAction, CurriculumSchedule, DominanceShaper, RewardComponents, RewardConfig, Stage,
     TRANSPORT_UNIT_CLASS, V83_CLOSEOUT_SHARE_START, W_DEATH, W_STR, W_WASTE, action_churn_penalty,
-    boat_outcome_reward, classify_boat_resolution, closeout_potential, dominance_potential,
-    fast_win_bonus, land_share, normalized_strength_share, placement, placement_score,
-    sample_episode, stages_for_schedule, strength_delta_weight, tempo_pressure, terminal_reward,
-    timeweight, v83_action_churn_penalty,
+    boat_outcome_reward, classify_boat_resolution, closeout_potential, combat_outcome_reward,
+    dominance_potential, embargo_stop_outcome_reward, fast_win_bonus, land_share,
+    normalized_strength_share, placement, placement_score, sample_episode, stages_for_schedule,
+    strength_delta_weight, tempo_pressure, terminal_reward, timeweight, v83_action_churn_penalty,
+    CombatOutcome,
 };
 use ofcore::feat::{
     self, A_ATTACK, A_BOAT, A_CANCEL_BOAT, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, ACTIONS,
@@ -239,6 +240,10 @@ pub struct EpisodeInfo {
     pub reward_components: RewardComponents,
     pub action_pair_counts: ActionPairCounts,
     pub boat_outcome_counts: BoatOutcomeCounts,
+    pub embargo_bad_stops: u64,
+    pub embargo_good_stops: u64,
+    pub premature_retreats: u64,
+    pub thrash_reengages: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -504,6 +509,89 @@ fn player_troops(ents: &feat::EntsData, me: usize) -> f64 {
         .unwrap_or(0.0)
 }
 
+#[derive(Clone, Debug, Default)]
+struct CombatStickyTracker {
+    last_attack_decision: HashMap<usize, i64>,
+    last_retreat_decision: HashMap<usize, i64>,
+    decision_i: i64,
+    premature_retreats: u64,
+    thrash_reengages: u64,
+    embargo_bad_stops: u64,
+    embargo_good_stops: u64,
+}
+
+impl CombatStickyTracker {
+    fn reset(&mut self) {
+        self.last_attack_decision.clear();
+        self.last_retreat_decision.clear();
+        self.decision_i = 0;
+        self.premature_retreats = 0;
+        self.thrash_reengages = 0;
+        self.embargo_bad_stops = 0;
+        self.embargo_good_stops = 0;
+    }
+
+    fn observe_combat(
+        &mut self,
+        action: i64,
+        target: Option<usize>,
+        window: usize,
+        config: RewardConfig,
+        stage: usize,
+    ) -> f64 {
+        self.decision_i = self.decision_i.saturating_add(1);
+        let Some(player) = target else {
+            return 0.0;
+        };
+        if !config.combat_outcome_active(stage) || window == 0 {
+            if action == A_ATTACK {
+                self.last_attack_decision.insert(player, self.decision_i);
+            } else if action == A_RETREAT {
+                self.last_retreat_decision.insert(player, self.decision_i);
+            }
+            return 0.0;
+        }
+        let mut reward = 0.0;
+        if action == A_RETREAT {
+            if let Some(atk_at) = self.last_attack_decision.get(&player).copied() {
+                if self.decision_i - atk_at <= window as i64 {
+                    self.premature_retreats += 1;
+                    reward += combat_outcome_reward(CombatOutcome::PrematureRetreat, config);
+                }
+            }
+            self.last_retreat_decision.insert(player, self.decision_i);
+        } else if action == A_ATTACK {
+            if let Some(ret_at) = self.last_retreat_decision.get(&player).copied() {
+                if self.decision_i - ret_at <= window as i64 {
+                    self.thrash_reengages += 1;
+                    reward += combat_outcome_reward(CombatOutcome::ThrashReengage, config);
+                }
+            }
+            self.last_attack_decision.insert(player, self.decision_i);
+        }
+        reward
+    }
+
+    fn observe_embargo_stop(
+        &mut self,
+        relation_value: f64,
+        config: RewardConfig,
+        stage: usize,
+    ) -> f64 {
+        if !config.embargo_outcome_active(stage) {
+            return 0.0;
+        }
+        let reward = embargo_stop_outcome_reward(relation_value, config);
+        if reward < 0.0 {
+            self.embargo_bad_stops += 1;
+        } else if reward > 0.0 {
+            self.embargo_good_stops += 1;
+        }
+        reward
+    }
+}
+
+
 fn transport_unit_ids(ents: &feat::EntsData, me: usize) -> HashSet<usize> {
     ents.units
         .iter()
@@ -580,6 +668,7 @@ pub struct EnvWorker {
     closeout_tracker: CloseoutTracker,
     action_churn_tracker: ActionChurnTracker,
     boat_tracker: PendingBoatTracker,
+    combat_tracker: CombatStickyTracker,
     prev_action: ActionOutcome,
     last_commitment: Option<(i64, i64, i64, i64, i64, u64)>,
     ep_reward_components: RewardComponents,
@@ -630,6 +719,7 @@ impl EnvWorker {
             closeout_tracker: CloseoutTracker::default(),
             action_churn_tracker: ActionChurnTracker::default(),
             boat_tracker: PendingBoatTracker::default(),
+            combat_tracker: CombatStickyTracker::default(),
             prev_action: ActionOutcome::default(),
             last_commitment: None,
             ep_reward_components: RewardComponents::default(),
@@ -725,6 +815,7 @@ impl EnvWorker {
         self.ep_reward = 0.0;
         self.action_churn_tracker.reset();
         self.boat_tracker.reset();
+        self.combat_tracker.reset();
         self.ep_reward_components = RewardComponents::default();
         self.ep_len = 0;
         self.ep_wasted = 0;
@@ -844,6 +935,7 @@ impl EnvWorker {
         self.ep_reward = 0.0;
         self.action_churn_tracker.reset();
         self.boat_tracker.reset();
+        self.combat_tracker.reset();
         self.prev_action = ActionOutcome::default();
         self.last_commitment = None;
         self.ep_reward_components = RewardComponents::default();
@@ -1006,6 +1098,38 @@ impl EnvWorker {
         };
         let chosen_action =
             churn_action(choice, &lut, &ents, &intents, &boats_before, &boats_after);
+
+        // Snapshot relation before the intent lands (embargo_stop outcome).
+        let mut embargo_outcome_r = 0.0;
+        if choice.action == A_EMBARGO_STOP {
+            if let Some(ActionTarget::Player(target)) = chosen_action.target {
+                let rel = ents
+                    .players
+                    .iter()
+                    .find(|p| p.id == me_pre)
+                    .map(|p| p.relation_to(target))
+                    .unwrap_or(0.0);
+                embargo_outcome_r = self.combat_tracker.observe_embargo_stop(
+                    rel,
+                    self.reward_config,
+                    self.episode_stage,
+                );
+            }
+        }
+        let combat_target = match chosen_action.target {
+            Some(ActionTarget::Player(id)) if choice.action == A_ATTACK || choice.action == A_RETREAT => {
+                Some(id)
+            }
+            _ => None,
+        };
+        let combat_outcome_r = self.combat_tracker.observe_combat(
+            choice.action,
+            combat_target,
+            self.reward_config.v81_churn_window,
+            self.reward_config,
+            self.episode_stage,
+        );
+
         if let Some(ActionTarget::Unit(unit_id)) = chosen_action.target {
             if choice.action == A_BOAT && !intents.is_empty() {
                 let after_ents = feat::parse_ents(new_obs.entities());
@@ -1151,6 +1275,14 @@ impl EnvWorker {
         if components.action_churn != 0.0 {
             reward += components.action_churn;
         }
+        components.embargo_outcome = embargo_outcome_r;
+        if components.embargo_outcome != 0.0 {
+            reward += components.embargo_outcome;
+        }
+        components.combat_outcome = combat_outcome_r;
+        if components.combat_outcome != 0.0 {
+            reward += components.combat_outcome;
+        }
         let next_potential = if self.curriculum_schedule == CurriculumSchedule::V83 && done {
             0.0
         } else {
@@ -1213,7 +1345,7 @@ impl EnvWorker {
                     obs.tick(),
                     self.max_episode_ticks,
                     tempo_share,
-                    self.reward_config.v81_dominance_threshold,
+                    self.reward_config.tempo_share_threshold(),
                 )
                 * tw;
             if components.tempo != 0.0 {
@@ -1241,6 +1373,9 @@ impl EnvWorker {
                     self.max_episode_ticks,
                     self.reward_config.v84_fast_win_coef,
                 );
+            if won {
+                components.terminal += self.reward_config.v85_extra_win_bonus;
+            }
             reward += components.terminal;
             self.ep_reward_components.add_assign(components);
             self.ep_reward += reward;
@@ -1269,6 +1404,10 @@ impl EnvWorker {
                 reward_components: self.ep_reward_components,
                 action_pair_counts: self.action_churn_tracker.counts(),
                 boat_outcome_counts: self.boat_tracker.counts(),
+                embargo_bad_stops: self.combat_tracker.embargo_bad_stops,
+                embargo_good_stops: self.combat_tracker.embargo_good_stops,
+                premature_retreats: self.combat_tracker.premature_retreats,
+                thrash_reengages: self.combat_tracker.thrash_reengages,
             });
             self.reset_episode()?;
         } else {
