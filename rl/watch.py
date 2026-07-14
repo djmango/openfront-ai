@@ -47,10 +47,22 @@ def load_policy_checkpoint(
     )
 
 
+def action_tile_xy(choice: dict) -> tuple[int, int] | None:
+    """World tile (x, y) for a choice that selects a tile_region."""
+    from rl.curriculum import GW_MAX
+    from rl.obs import REGION
+
+    tr = choice.get("tile_region")
+    if tr is None or int(tr) < 0:
+        return None
+    gy, gx = divmod(int(tr), GW_MAX)
+    return gx * REGION + REGION // 2, gy * REGION + REGION // 2
+
+
 def describe(choice: dict, obs: dict) -> str:
     """One-line human description of a policy choice."""
     from rl.curriculum import GW_MAX
-    from rl.obs import BUILD_TYPES, NUKE_TYPES, REGION
+    from rl.obs import BUILD_TYPES, NUKE_TYPES
 
     name = ACTIONS[choice["action"]]
     parts = [name]
@@ -164,6 +176,9 @@ def main() -> None:
                 "tiles": me["tiles"] if me else 0,
                 "troops": int(me["troops"]) if me else 0,
             }
+            xy = action_tile_xy(choice)
+            if xy is not None:
+                entry["tile_x"], entry["tile_y"] = xy
             dbg = choice.get("debug")
             if dbg is not None:
                 entry["value"] = round(float(dbg["value"]), 3)
