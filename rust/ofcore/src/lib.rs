@@ -1,12 +1,8 @@
 //! Shared, Python-free core for the V8 Rust PPO trainer (`oftrain`).
 //!
-//! This is a *fresh* v7 port of `rl/obs.py` + `rl/curriculum.py` +
-//! `rl/ppo_translate.py`, independent of `rust/ofrs`. `ofrs::feat` is
-//! deliberately frozen at obs v4 (it is the on-disk BC cache format), so
-//! it cannot be "upgraded in place" to v7 without breaking every existing
-//! cache-bc blob. `ofcore` instead re-implements the current (v7)
-//! featurization straight from the live bridge JSON, matching
-//! `rl/obs.py::ObsBuilder.prepare()` field-for-field.
+//! Fresh v7 port of the former Python `rl/obs.py` + `rl/curriculum.py` +
+//! `rl/ppo_translate.py`. Re-implements current (v7) featurization from
+//! live bridge / native engine JSON.
 
 pub mod curriculum;
 pub mod feat;

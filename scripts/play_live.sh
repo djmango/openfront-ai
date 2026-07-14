@@ -17,14 +17,11 @@ cd "$REPO_DIR"
 
 HOST="${HOST:-localhost:9000}"
 RUN_NAME="${RUN_NAME:-ppo_v81}"
-if [[ "$RUN_NAME" == "ppo_v5" || "$RUN_NAME" == "ppo_v7" ]]; then
-  DEFAULT_POLICY="runs/rl/$RUN_NAME/policy.pt"
-else
-  DEFAULT_POLICY="rust/checkpoints/$RUN_NAME/latest.safetensors"
-fi
+DEFAULT_POLICY="rust/checkpoints/$RUN_NAME/latest.safetensors"
 POLICY="${POLICY:-$DEFAULT_POLICY}"
 AE="${AE:-runs/ae_v31_d8c32/ae_v3.pt}"
 ONNX_DIR="${ONNX_DIR:-openfront/resources/webbot/models}"
+HF_POLICY_REPO="${HF_POLICY_REPO:-djmango/openfront-rl}"
 DEBUG_PORT="${DEBUG_PORT:-8988}"
 GAME=""
 WORKER_PATH=""
@@ -43,11 +40,7 @@ while [[ $# -gt 0 ]]; do
     --game) GAME="${2:?}"; shift ;;
     --run-name)
       RUN_NAME="$2"
-      if [[ "$RUN_NAME" == "ppo_v5" || "$RUN_NAME" == "ppo_v7" ]]; then
-        POLICY="runs/rl/$RUN_NAME/policy.pt"
-      else
-        POLICY="rust/checkpoints/$RUN_NAME/latest.safetensors"
-      fi
+      POLICY="rust/checkpoints/$RUN_NAME/latest.safetensors"
       shift
       ;;
     --policy) POLICY="$2"; shift ;;
@@ -204,21 +197,22 @@ fi
 # Ensure policy + ONNX (re-export if policy is newer than the onnx).
 mkdir -p "$ONNX_DIR"
 POLICY_STATE="${POLICY%.safetensors}.state.json"
-if [[ ! -f "$POLICY" || ( "$POLICY" == *.safetensors && ! -f "$POLICY_STATE" ) ]]; then
+if [[ ! -f "$POLICY" || ! -f "$POLICY_STATE" ]]; then
   mkdir -p "$(dirname "$POLICY")"
   echo "fetching policy checkpoint for $RUN_NAME from HF ..."
-  RUN_NAME="$RUN_NAME" POLICY="$POLICY" uv run python - <<'PY'
+  RUN_NAME="$RUN_NAME" POLICY="$POLICY" HF_POLICY_REPO="$HF_POLICY_REPO" uv run python - <<'PY'
 import os, shutil
 from pathlib import Path
 from huggingface_hub import hf_hub_download
-from rl.showcase_util import HF_POLICY_REPO, hf_policy_paths
 
 dest = Path(os.environ["POLICY"])
-weights_path, state_path = hf_policy_paths(os.environ["RUN_NAME"])
-shutil.copy2(hf_hub_download(HF_POLICY_REPO, weights_path), dest)
-if state_path:
-    state_dest = dest.with_name(f"{dest.stem}.state.json")
-    shutil.copy2(hf_hub_download(HF_POLICY_REPO, state_path), state_dest)
+repo = os.environ["HF_POLICY_REPO"]
+run = os.environ["RUN_NAME"]
+weights = f"{run}/latest.safetensors"
+state = f"{run}/latest.state.json"
+shutil.copy2(hf_hub_download(repo, weights), dest)
+state_dest = dest.with_name(f"{dest.stem}.state.json")
+shutil.copy2(hf_hub_download(repo, state), state_dest)
 print(f"saved {dest}")
 PY
 fi
@@ -235,18 +229,7 @@ PY
 fi
 if [[ ! -f "$ONNX_DIR/policy.onnx" || "$POLICY" -nt "$ONNX_DIR/policy.onnx" ]]; then
   echo "exporting ONNX ($POLICY) -> $ONNX_DIR ..."
-  # Frozen Python fixtures can still require the matching legacy worktree.
-  export_root="$REPO_DIR"
-  v6="$(cd "$REPO_DIR/.." && pwd)/openfront-ai-v6"
-  if [[ "$POLICY" == *.pt && -d "$v6/rl" ]]; then
-    ckpt_c=$(uv run python - "$POLICY" <<'PY'
-import sys, torch
-print(int(torch.load(sys.argv[1], map_location="cpu", weights_only=False)["model_state_dict"]["grid_net.0.weight"].shape[1]))
-PY
-)
-    [[ "$ckpt_c" == "43" ]] && export_root="$v6"
-  fi
-  PYTHONPATH="$export_root:$REPO_DIR" uv run python "$REPO_DIR/scripts/export_onnx.py" \
+  PYTHONPATH="$REPO_DIR" uv run python "$REPO_DIR/scripts/export_onnx.py" \
     --ae "$AE" --policy "$POLICY" --out "$ONNX_DIR"
 fi
 
