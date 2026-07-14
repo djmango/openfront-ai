@@ -15,21 +15,87 @@ RUN_NAME="${RUN_NAME:-ppo_v82}"
 REMOTE_REPO_DIR="${REMOTE_REPO_DIR:-/root/openfront-ai}"
 OPEN_BROWSER="${OPEN_BROWSER:-1}"
 
-command -v runpodctl >/dev/null || {
-  echo "runpodctl is required" >&2
-  exit 1
-}
 command -v python3 >/dev/null || {
   echo "python3 is required" >&2
   exit 1
 }
+command -v ssh >/dev/null || {
+  echo "ssh is required" >&2
+  exit 1
+}
 SCRIPT_DIR="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve().parent)' "$0")"
+REPO_DIR="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve().parent)' "$SCRIPT_DIR")"
 LOCAL_BRIDGE="$SCRIPT_DIR/metrics_jsonl_to_tensorboard.py"
+TEMP_KEY=""
+cleanup() {
+  if [ -n "$TEMP_KEY" ]; then
+    rm -f "$TEMP_KEY"
+  fi
+}
+trap cleanup EXIT
 
-INFO="$(runpodctl ssh info "$POD")"
-IP="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["ip"])' <<<"$INFO")"
-PORT="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["port"])' <<<"$INFO")"
-KEY="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["ssh_key"]["path"])' <<<"$INFO")"
+CONNECTION=""
+if command -v runpodctl >/dev/null; then
+  INFO="$(runpodctl ssh info "$POD" 2>/dev/null || true)"
+  CONNECTION="$(python3 -c '
+import json, sys
+try:
+    info = json.load(sys.stdin)
+    print(info["ip"], info["port"], info["ssh_key"]["path"], sep="\t")
+except Exception:
+    pass
+' <<<"$INFO")"
+fi
+
+if [ -n "$CONNECTION" ]; then
+  IFS=$'\t' read -r IP PORT KEY <<<"$CONNECTION"
+else
+  echo "runpodctl is not authenticated; using encrypted repository credentials."
+  SOPS_BIN="$(command -v sops || true)"
+  if [ -z "$SOPS_BIN" ] && [ -x "$HOME/.local/bin/sops" ]; then
+    SOPS_BIN="$HOME/.local/bin/sops"
+  fi
+  if [ -z "$SOPS_BIN" ]; then
+    echo "sops is required to decrypt secrets/runpod*.enc.yaml" >&2
+    exit 1
+  fi
+  command -v curl >/dev/null || {
+    echo "curl is required for the RunPod API fallback" >&2
+    exit 1
+  }
+
+  RUNPOD_API_KEY="$("$SOPS_BIN" --decrypt --output-type json \
+    "$REPO_DIR/secrets/runpod.enc.yaml" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["runpod_api_key"])')"
+  PODS="$(curl -fsS -H 'content-type: application/json' \
+    --data '{"query":"query Pods { myself { pods { id name desiredStatus runtime { ports { ip isIpPublic privatePort publicPort type } } } } }"}' \
+    "https://api.runpod.io/graphql?api_key=$RUNPOD_API_KEY")"
+  unset RUNPOD_API_KEY
+  CONNECTION="$(python3 -c '
+import json, sys
+target = sys.argv[1]
+for pod in json.load(sys.stdin).get("data", {}).get("myself", {}).get("pods", []):
+    if target not in (pod.get("id"), pod.get("name")):
+        continue
+    for port in (pod.get("runtime") or {}).get("ports", []):
+        if port.get("privatePort") == 22 and port.get("isIpPublic"):
+            print(port["ip"], port["publicPort"], sep="\t")
+            raise SystemExit
+' "$POD" <<<"$PODS")"
+  if [ -z "$CONNECTION" ]; then
+    echo "No running RunPod named or identified by '$POD' has public SSH." >&2
+    exit 1
+  fi
+  IFS=$'\t' read -r IP PORT <<<"$CONNECTION"
+
+  TEMP_KEY="$(mktemp "${TMPDIR:-/tmp}/openfront-runpod-key.XXXXXX")"
+  KEY="$TEMP_KEY"
+  umask 077
+  "$SOPS_BIN" --decrypt --output-type json "$REPO_DIR/secrets/runpod_ssh.enc.yaml" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["runpod_ssh_private_key"])' \
+    > "$KEY"
+  chmod 600 "$KEY"
+fi
 
 if command -v lsof >/dev/null && lsof -nP -iTCP:"$LOCAL_PORT" -sTCP:LISTEN >/dev/null; then
   echo "localhost:$LOCAL_PORT is already in use. Try: LOCAL_PORT=19124 $0 $POD" >&2
@@ -87,7 +153,7 @@ if [ "$OPEN_BROWSER" != "0" ]; then
     fi
   ) >/dev/null 2>&1 &
 fi
-exec ssh -N \
+ssh -N \
   -i "$KEY" \
   -o StrictHostKeyChecking=accept-new \
   -o ExitOnForwardFailure=yes \
