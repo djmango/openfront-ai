@@ -535,9 +535,9 @@ impl WarshipExecution {
             .map(|(tile, _)| tile)
     }
 
-    fn refresh_retreat_port(&mut self, game: &Game, from: TileRef) -> bool {
+    fn refresh_retreat_port(&mut self, game: &Game, from: TileRef, unit_id: i32) -> bool {
         let Some(current) = self.retreat_port else {
-            self.retreat_port = self.nearest_port(game, from);
+            self.retreat_port = self.nearest_available_port(game, from, Some(unit_id));
             return self.retreat_port.is_some();
         };
         let current_exists = game
@@ -549,7 +549,9 @@ impl WarshipExecution {
                     .any(|unit| unit.unit_type == PORT && unit.tile as TileRef == current)
             });
         if !current_exists {
-            self.retreat_port = self.nearest_port(game, from);
+            // TS `findNearestAvailablePortTile()` excludes the retreating ship itself
+            // when the old port disappeared, so a full nearby port is skipped.
+            self.retreat_port = self.nearest_available_port(game, from, Some(unit_id));
             self.target_tile = None;
             self.path.clear();
             self.path_idx = 0;
@@ -618,7 +620,7 @@ impl WarshipExecution {
     }
 
     fn retreat(&mut self, game: &mut Game, from: TileRef, unit_id: i32) -> bool {
-        if !self.refresh_retreat_port(game, from) {
+        if !self.refresh_retreat_port(game, from, unit_id) {
             self.retreating = false;
             self.retreat_port = None;
             self.active_healing_remainder = 0.0;
@@ -809,7 +811,9 @@ impl Execution for WarshipExecution {
         }
 
         if self.path_idx >= self.path.len() {
-            self.target_tile = None;
+            if let Some(target) = self.target_tile.take() {
+                game.move_unit(self.owner_small_id, unit_id, target);
+            }
             return;
         }
         let next = self.path[self.path_idx];
@@ -2136,6 +2140,40 @@ mod tests {
         }
 
         #[test]
+        fn missing_retreat_port_skips_full_nearby_port() {
+            let mut game = water_game(80, 30);
+            let p1 = add_nation(&mut game, "p1");
+            let removed_port_tile = game.ref_xy(20, 20);
+            let full_port = game.ref_xy(10, 10);
+            let docked_ship_tile = game.ref_xy(15, 10);
+            let ship_tile = game.ref_xy(20, 10);
+            let available_port = game.ref_xy(50, 10);
+
+            let removed_port = game.build_unit(p1, unit_type::PORT, removed_port_tile);
+            game.build_unit(p1, unit_type::PORT, full_port);
+            game.build_unit(p1, unit_type::PORT, available_port);
+            let docked_ship = game.build_unit(p1, unit_type::WARSHIP, docked_ship_tile);
+            let ship_id = game.build_unit(p1, unit_type::WARSHIP, ship_tile);
+            game.remove_unit(p1, removed_port);
+
+            let mut docked_exec = WarshipExecution::new_for_test(p1, docked_ship_tile, docked_ship);
+            docked_exec.docked = true;
+            docked_exec.retreat_port = Some(full_port);
+            game.push_exec_for_test(ExecEnum::Warship(docked_exec));
+
+            let mut exec = WarshipExecution::new_for_test(p1, ship_tile, ship_id);
+            exec.retreating = true;
+            exec.retreat_port = Some(removed_port_tile);
+
+            assert!(exec.retreat(&mut game, ship_tile, ship_id));
+            assert_eq!(
+                exec.retreat_port,
+                Some(available_port),
+                "TS findNearestAvailablePortTile skips full ports when the old retreat port is gone"
+            );
+        }
+
+        #[test]
         fn recent_patrol_retarget_suppresses_repair_retreat() {
             let mut game = water_game(80, 30);
             let p1 = add_nation(&mut game, "p1");
@@ -2157,6 +2195,32 @@ mod tests {
                 "TS suppresses repair retreat for 50 ticks after a patrol tile change"
             );
             assert!(exec.retreat_port.is_none());
+        }
+
+        #[test]
+        fn completed_patrol_leg_moves_to_target_before_clearing_it() {
+            let mut game = water_game(80, 30);
+            let p1 = add_nation(&mut game, "p1");
+            let ship_tile = game.ref_xy(20, 10);
+            let target_tile = game.ref_xy(21, 10);
+            let ship_id = game.build_unit(p1, unit_type::WARSHIP, ship_tile);
+
+            let mut exec = WarshipExecution::new_for_test(p1, ship_tile, ship_id);
+            exec.target_tile = Some(target_tile);
+            exec.path.clear();
+            exec.path_idx = 0;
+
+            exec.tick(&mut game, 100);
+
+            assert_eq!(
+                game.unit_tile_of(p1, ship_id),
+                Some(target_tile),
+                "TS PathStatus.COMPLETE moves to result.node before clearing targetTile"
+            );
+            assert!(
+                exec.target_tile.is_none(),
+                "completed patrol target should be cleared"
+            );
         }
 
         #[test]
