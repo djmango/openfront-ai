@@ -602,7 +602,13 @@ pub struct PolicyNet {
     head_nuke: nn::Linear,
     head_quantity: nn::Linear,
     head_value: nn::Linear,
-    device: Device,
+    // Device-local constants used by action-dependent masks. Keeping these
+    // beside the policy avoids rebuilding and uploading the same tiny tables
+    // in every actor forward and every PPO sequence chunk.
+    needs_player: Tensor,
+    needs_tile: Tensor,
+    needs_quantity: Tensor,
+    refine_tile: Tensor,
     /// `--amp`: run the conv-heavy submodules (grid towers, local net,
     /// tile heads) in manually-managed bf16 instead of f32 (see
     /// `conv2d_bf16`'s doc comment - tch-rs 0.24 has no dtype-selectable
@@ -654,7 +660,10 @@ impl PolicyNet {
             head_nuke: nn::linear(vs / "head_nuke", HIDDEN, N_NUKE, Default::default()),
             head_quantity: nn::linear(vs / "head_quantity", HIDDEN, 2, Default::default()),
             head_value: nn::linear(vs / "head_value", HIDDEN, 1, Default::default()),
-            device: vs.device(),
+            needs_player: action_table(NEEDS_PLAYER, vs.device()),
+            needs_tile: action_table(NEEDS_TILE, vs.device()),
+            needs_quantity: action_table(NEEDS_QUANTITY, vs.device()),
+            refine_tile: action_table(REFINE_TILE, vs.device()),
             amp,
             foveate,
         }
@@ -1008,7 +1017,7 @@ impl PolicyNet {
         action: &Tensor,
     ) -> Tensor {
         let base = gc_valid * legal_tile_coarse;
-        let refine_action = action_table(REFINE_TILE, self.device).index_select(0, action);
+        let refine_action = self.refine_tile.index_select(0, action);
         let has_fine =
             fine_coarse.flatten(1, -1).sum_dim_intlist(1i64, false, Kind::Float).gt(0.0).to_kind(Kind::Float);
         let use_fine = (refine_action * has_fine).unsqueeze(-1).unsqueeze(-1);
@@ -1164,10 +1173,9 @@ impl PolicyNet {
             if greedy { &qa / (&qa + &qb) } else { sample_beta_host(&qa, &qb) }.clamp(1e-4, 1.0 - 1e-4);
         let q_lp = beta_log_prob(&q, &qa, &qb);
 
-        let dev = self.device;
-        let needs_p = action_table(NEEDS_PLAYER, dev).index_select(0, &a);
-        let needs_t = action_table(NEEDS_TILE, dev).index_select(0, &a);
-        let needs_q = action_table(NEEDS_QUANTITY, dev).index_select(0, &a);
+        let needs_p = self.needs_player.index_select(0, &a);
+        let needs_t = self.needs_tile.index_select(0, &a);
+        let needs_q = self.needs_quantity.index_select(0, &a);
         let is_build =
             a.eq(ACTIONS.iter().position(|&x| x == "build").unwrap() as i64).to_kind(Kind::Float);
         let is_nuke =
@@ -1182,7 +1190,7 @@ impl PolicyNet {
         let fine_logits = self.fine_logits_for_coarse_any(&tile_fine, o, &fov, &coarse, cgw);
         let (fine, fine_lp) = categorical_sample(&fine_logits, greedy);
 
-        let refine_bool = action_table(REFINE_TILE, dev).index_select(0, &a).to_kind(Kind::Bool);
+        let refine_bool = self.refine_tile.index_select(0, &a).to_kind(Kind::Bool);
         let fine_global = self.fine_local_to_global_any(&fine, &fov);
         let coarse_global = coarse_local_to_global(&coarse, cgw);
         let eff_coarse_local = global_to_coarse_local(&fine_global, cgw).where_self(&refine_bool, &coarse);
@@ -1230,6 +1238,62 @@ impl PolicyNet {
         (logp, ent, ent_q, value, hidden_out)
     }
 
+    /// Fused truncated-BPTT learner forward.
+    ///
+    /// `o`, `c`, `context`, and `reset_mask` are flattened time-major as
+    /// `[steps * envs, ...]`; `hidden_in` is the detached actor state at the
+    /// chunk boundary `[envs, RECURRENT_HIDDEN]`. The observation trunk runs
+    /// once over the full flattened chunk. Only the GRU transition remains
+    /// sequential, after which every policy/value head runs once in a fused
+    /// batch. Returned policy tensors preserve the same time-major order.
+    pub fn evaluate_sequence_fused(
+        &self,
+        o: &Obs,
+        c: &ChoiceBatch,
+        hidden_in: &Tensor,
+        context: &Tensor,
+        reset_mask: &Tensor,
+        steps: i64,
+    ) -> (Tensor, Tensor, Tensor, Tensor, Tensor) {
+        assert!(
+            steps > 0,
+            "recurrent sequence must contain at least one step"
+        );
+        let total = o.grid.size()[0];
+        assert_eq!(
+            total % steps,
+            0,
+            "recurrent sequence batch is not time-major rectangular"
+        );
+        let envs = total / steps;
+        assert_eq!(hidden_in.size(), [envs, RECURRENT_HIDDEN]);
+        assert_eq!(context.size(), [total, RECURRENT_CONTEXT_FLOATS]);
+        assert_eq!(reset_mask.size(), [total]);
+
+        let mut trunk = self.trunk_forward(o);
+        let recurrent = self
+            .recurrent
+            .as_ref()
+            .expect("recurrent API requires PolicyNet::new_with_recurrence(..., true)");
+        let mut hidden = hidden_in.shallow_clone();
+        let mut recurrent_h = Vec::with_capacity(steps as usize);
+        for t in 0..steps {
+            let offset = t * envs;
+            let (h, hidden_out) = recurrent.forward(
+                &trunk.h.narrow(0, offset, envs),
+                &context.narrow(0, offset, envs),
+                &hidden,
+                &reset_mask.narrow(0, offset, envs),
+            );
+            recurrent_h.push(h);
+            hidden = hidden_out;
+        }
+        trunk.h = Tensor::cat(&recurrent_h.iter().collect::<Vec<_>>(), 0);
+        let output = self.forward_from_trunk(o, trunk);
+        let (logp, ent, ent_q, value) = self.evaluate_from_forward(o, c, output);
+        (logp, ent, ent_q, value, hidden)
+    }
+
     fn evaluate_from_forward(
         &self,
         o: &Obs,
@@ -1271,7 +1335,7 @@ impl PolicyNet {
         logp = logp + &t_used * categorical_logp(&coarse_logits, &coarse_target_c);
         ent = ent + &t_used * categorical_entropy(&coarse_logits);
 
-        let refine = action_table(REFINE_TILE, self.device).index_select(0, &action_c) * &t_used;
+        let refine = self.refine_tile.index_select(0, &action_c) * &t_used;
         let fine_target = self.global_to_fine_local_any(&tr_c, &fov);
         let fine_target_c = fine_target.clamp(0, fov.fine_h * fov.fine_w - 1);
         let fine_logits = self.fine_logits_for_coarse_any(&tile_fine, o, &fov, &coarse_target_c, cgw);
@@ -1315,7 +1379,10 @@ impl PolicyNet {
     }
 
     pub fn initial_hidden(&self, batch: i64) -> Tensor {
-        Tensor::zeros([batch, RECURRENT_HIDDEN], (Kind::Float, self.device))
+        Tensor::zeros(
+            [batch, RECURRENT_HIDDEN],
+            (Kind::Float, self.refine_tile.device()),
+        )
     }
 
     pub fn value_with_state(
@@ -1973,6 +2040,129 @@ mod tests {
         let (_, reset_reference) =
             policy.value_with_state(&obs, &reset_hidden, &contexts[2]);
         assert_exact(&hidden_out[2].get(0), &reset_reference.get(0), "done reset replay");
+    }
+
+    #[test]
+    fn fused_sequence_matches_reference_forward_and_gradients_with_mid_chunk_resets() {
+        tch::manual_seed(292);
+        let vs = nn::VarStore::new(Device::Cpu);
+        let mut policy =
+            PolicyNet::new_with_recurrence(&vs.root(), false, false, 8, 1, true);
+        // The production warm start zeros this projection. Make it nonzero
+        // so the test exercises gradients through the complete GRU, not only
+        // the otherwise-identical observation/head paths.
+        tch::no_grad(|| {
+            let recurrent = policy.recurrent.as_mut().unwrap();
+            let _ = recurrent.residual.ws.normal_(0.0, 0.02);
+            if let Some(bias) = recurrent.residual.bs.as_mut() {
+                let _ = bias.normal_(0.0, 0.02);
+            }
+        });
+
+        let (steps, envs) = (3i64, 2i64);
+        let obs = synthetic_obs(Device::Cpu, steps * envs, 5, 5);
+        let choice = ChoiceBatch {
+            action: Tensor::from_slice(&[0i64, 1, 2, 3, 4, 5]),
+            player_slot: Tensor::zeros([steps * envs], (Kind::Int64, Device::Cpu)),
+            tile_region: Tensor::zeros([steps * envs], (Kind::Int64, Device::Cpu)),
+            build_type: Tensor::zeros([steps * envs], (Kind::Int64, Device::Cpu)),
+            nuke_type: Tensor::zeros([steps * envs], (Kind::Int64, Device::Cpu)),
+            quantity_frac: Tensor::full(
+                [steps * envs],
+                0.4,
+                (Kind::Float, Device::Cpu),
+            ),
+        };
+        let context = no_previous_context(steps * envs);
+        for row in 0..steps * envs {
+            let _ = context
+                .get(row)
+                .select(0, CONTEXT_ACTION)
+                .fill_((row % N_ACTIONS) as f64);
+            let _ = context
+                .get(row)
+                .select(0, CONTEXT_SUCCESS)
+                .fill_((row % 2) as f64);
+        }
+        // Reset env 0 before t=1 and env 1 before t=2: both are inside this
+        // BPTT chunk, rather than only at its detached initial boundary.
+        let reset = Tensor::from_slice(&[0.0f32, 0.0, 1.0, 0.0, 0.0, 1.0]);
+        let initial_hidden =
+            Tensor::randn([envs, RECURRENT_HIDDEN], (Kind::Float, Device::Cpu));
+
+        let mut hidden = initial_hidden.shallow_clone();
+        let mut reference_parts: [Vec<Tensor>; 4] = Default::default();
+        for t in 0..steps {
+            let idx = Tensor::arange_start(
+                t * envs,
+                (t + 1) * envs,
+                (Kind::Int64, Device::Cpu),
+            );
+            let (lp, en, eq, value, next) = policy.evaluate_with_state(
+                &obs.index_select(&idx),
+                &choice.index_select(&idx),
+                &hidden,
+                &context.index_select(0, &idx),
+                &reset.index_select(0, &idx),
+            );
+            for (parts, value) in reference_parts.iter_mut().zip([lp, en, eq, value]) {
+                parts.push(value);
+            }
+            hidden = next;
+        }
+        let reference: Vec<Tensor> = reference_parts
+            .iter()
+            .map(|parts| Tensor::cat(&parts.iter().collect::<Vec<_>>(), 0))
+            .collect();
+        let reference_hidden = hidden;
+        let reference_loss: Tensor = &reference[0].mean(Kind::Float)
+            + 0.07 * &reference[1].mean(Kind::Float)
+            + 0.03 * &reference[2].mean(Kind::Float)
+            + 0.11 * &reference[3].mean(Kind::Float);
+        reference_loss.backward();
+        let reference_grads: std::collections::HashMap<_, _> = vs
+            .variables()
+            .into_iter()
+            .filter_map(|(name, tensor)| {
+                let grad = tensor.grad();
+                grad.defined().then(|| (name, grad.copy()))
+            })
+            .collect();
+        for (_, tensor) in vs.variables() {
+            let mut grad = tensor.grad();
+            if grad.defined() {
+                let _ = grad.zero_();
+            }
+        }
+
+        let (lp, en, eq, value, fused_hidden) = policy.evaluate_sequence_fused(
+            &obs,
+            &choice,
+            &initial_hidden,
+            &context,
+            &reset,
+            steps,
+        );
+        for (name, fused, expected) in [
+            ("logp", &lp, &reference[0]),
+            ("entropy", &en, &reference[1]),
+            ("quantity entropy", &eq, &reference[2]),
+            ("value", &value, &reference[3]),
+            ("hidden", &fused_hidden, &reference_hidden),
+        ] {
+            let max = (fused - expected).abs().max().double_value(&[]);
+            assert!(max < 2e-5, "fused/reference {name} mismatch: {max:e}");
+        }
+        let fused_loss: Tensor = lp.mean(Kind::Float)
+            + 0.07 * en.mean(Kind::Float)
+            + 0.03 * eq.mean(Kind::Float)
+            + 0.11 * value.mean(Kind::Float);
+        fused_loss.backward();
+        for (name, expected) in reference_grads {
+            let actual = vs.variables()[&name].grad();
+            let max = (&actual - &expected).abs().max().double_value(&[]);
+            assert!(max < 2e-4, "fused/reference gradient {name} mismatch: {max:e}");
+        }
     }
 
     #[test]

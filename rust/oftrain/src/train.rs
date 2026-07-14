@@ -5180,36 +5180,46 @@ fn train_update(
                                     let mut entqs = Vec::with_capacity(t_len);
                                     let mut values = Vec::with_capacity(t_len);
                                     let mut quantities = Vec::with_capacity(t_len);
-                                    let mut target_indices = Vec::with_capacity(t_len);
+                                    let mut target_indices =
+                                        Vec::with_capacity(t_len.div_ceil(cfg.bptt_chunk_len));
                                     for range in bptt_ranges(t_len, cfg.bptt_chunk_len) {
                                         let first = &idx_t + (range.start * n) as i64;
                                         // Actor state at the boundary is a
                                         // detached BPTT initial condition.
-                                        let mut hidden = hidden_all.index_select(0, &first);
-                                        for t in range {
-                                            let step_idx = &idx_t + (t * n) as i64;
-                                            let obs_t = sb.obs.index_select(&step_idx);
-                                            let choice_t = sb.choice.index_select(&step_idx);
-                                            let context_t =
-                                                context_all.index_select(0, &step_idx);
-                                            let reset_t =
-                                                reset_all.index_select(0, &step_idx);
-                                            let (lp, en, eq, v, hidden_out) =
-                                                shard.policy.evaluate_with_state(
-                                                    &obs_t,
-                                                    &choice_t,
-                                                    &hidden,
-                                                    &context_t,
-                                                    &reset_t,
-                                                );
-                                            hidden = hidden_out;
-                                            logps.push(lp);
-                                            ents.push(en);
-                                            entqs.push(eq);
-                                            values.push(v);
-                                            quantities.push(choice_t.quantity_frac);
-                                            target_indices.push(step_idx);
-                                        }
+                                        let hidden = hidden_all.index_select(0, &first);
+                                        // One time-major gather per field and
+                                        // one full trunk/head pass per BPTT
+                                        // chunk. Only the GRU recurrence is
+                                        // evaluated timestep by timestep.
+                                        let time_offsets = Tensor::arange_start(
+                                            range.start as i64,
+                                            range.end as i64,
+                                            (Kind::Int64, shard.device),
+                                        ) * n as i64;
+                                        let chunk_idx = (
+                                            time_offsets.unsqueeze(1) + idx_t.unsqueeze(0)
+                                        ).flatten(0, -1);
+                                        let obs_chunk = sb.obs.index_select(&chunk_idx);
+                                        let choice_chunk = sb.choice.index_select(&chunk_idx);
+                                        let context_chunk =
+                                            context_all.index_select(0, &chunk_idx);
+                                        let reset_chunk =
+                                            reset_all.index_select(0, &chunk_idx);
+                                        let (lp, en, eq, v, _) =
+                                            shard.policy.evaluate_sequence_fused(
+                                                &obs_chunk,
+                                                &choice_chunk,
+                                                &hidden,
+                                                &context_chunk,
+                                                &reset_chunk,
+                                                range.len() as i64,
+                                            );
+                                        logps.push(lp);
+                                        ents.push(en);
+                                        entqs.push(eq);
+                                        values.push(v);
+                                        quantities.push(choice_chunk.quantity_frac);
+                                        target_indices.push(chunk_idx);
                                     }
                                     let target_idx = Tensor::cat(
                                         &target_indices.iter().collect::<Vec<_>>(),
@@ -7313,7 +7323,9 @@ mod persistent_actor_tests {
         tch::manual_seed(808);
         let mut cfg = parity_config();
         cfg.recurrent_policy = true;
-        cfg.bptt_chunk_len = 1;
+        // Exercise the fused multi-step train-update path. The rollout below
+        // terminates env 0 at t=0, so t=1 also covers an in-chunk hidden reset.
+        cfg.bptt_chunk_len = 2;
         cfg.epochs = 1;
         let source = nn::VarStore::new(Device::Cpu);
         let _ = PolicyNet::new_with_recurrence(
