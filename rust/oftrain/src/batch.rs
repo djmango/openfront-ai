@@ -1132,6 +1132,122 @@ fn clear_full_resolution_payload(it: &mut PreparedObs) {
     it.legal_tile.clear();
 }
 
+#[derive(Debug, Default, PartialEq)]
+struct PackedCompactHost {
+    fine: Vec<half::f16>,
+    fine_valid: Vec<f32>,
+    fine_legal: Vec<f32>,
+    coarse: Vec<half::f16>,
+    coarse_valid: Vec<f32>,
+    coarse_legal: Vec<f32>,
+    players: Vec<f32>,
+    pmask: Vec<f32>,
+    local: Vec<f32>,
+    scalars: Vec<f32>,
+    legal_actions: Vec<f32>,
+    legal_ptarget: Vec<f32>,
+    legal_build: Vec<f32>,
+    legal_nuke: Vec<f32>,
+    origin_y: Vec<i64>,
+    origin_x: Vec<i64>,
+}
+
+impl PackedCompactHost {
+    fn append(&mut self, mut other: Self) {
+        self.fine.append(&mut other.fine);
+        self.fine_valid.append(&mut other.fine_valid);
+        self.fine_legal.append(&mut other.fine_legal);
+        self.coarse.append(&mut other.coarse);
+        self.coarse_valid.append(&mut other.coarse_valid);
+        self.coarse_legal.append(&mut other.coarse_legal);
+        self.players.append(&mut other.players);
+        self.pmask.append(&mut other.pmask);
+        self.local.append(&mut other.local);
+        self.scalars.append(&mut other.scalars);
+        self.legal_actions.append(&mut other.legal_actions);
+        self.legal_ptarget.append(&mut other.legal_ptarget);
+        self.legal_build.append(&mut other.legal_build);
+        self.legal_nuke.append(&mut other.legal_nuke);
+        self.origin_y.append(&mut other.origin_y);
+        self.origin_x.append(&mut other.origin_x);
+    }
+}
+
+/// Pure host packing for one deterministic contiguous item range. Tensor
+/// construction and H2D intentionally happen only after all ranges rejoin.
+fn pack_compact_host_range(
+    items: &[&PreparedObs],
+    compact: &[&CompactGrid],
+    ch: usize,
+    cw: usize,
+) -> PackedCompactHost {
+    let cg = policy::C_GRID as usize;
+    let mut out = PackedCompactHost::default();
+    for (it, c) in items.iter().zip(compact) {
+        out.fine.extend_from_slice(c.fine());
+        out.fine_valid.extend_from_slice(c.fine_valid());
+        out.fine_legal.extend_from_slice(c.fine_legal());
+        for plane in 0..cg {
+            let mut dst = vec![half::f16::ZERO; ch * cw];
+            for y in 0..c.coarse_h {
+                let src = plane * c.coarse_h * c.coarse_w + y * c.coarse_w;
+                let dst_row = y * cw;
+                dst[dst_row..dst_row + c.coarse_w]
+                    .copy_from_slice(&c.coarse()[src..src + c.coarse_w]);
+            }
+            out.coarse.extend(dst);
+        }
+        for (src, dst) in [
+            (c.coarse_valid(), &mut out.coarse_valid),
+            (c.coarse_legal(), &mut out.coarse_legal),
+        ] {
+            let mut padded = vec![0.0f32; ch * cw];
+            for y in 0..c.coarse_h {
+                padded[y * cw..y * cw + c.coarse_w]
+                    .copy_from_slice(&src[y * c.coarse_w..(y + 1) * c.coarse_w]);
+            }
+            dst.extend(padded);
+        }
+        out.players.extend_from_slice(&it.players);
+        out.pmask.extend_from_slice(&it.pmask);
+        out.local.extend_from_slice(&it.local);
+        out.scalars.extend_from_slice(&it.scalars);
+        out.legal_actions.extend_from_slice(&it.legal_actions);
+        out.legal_ptarget.extend_from_slice(&it.legal_ptarget);
+        out.legal_build.extend_from_slice(&it.legal_build);
+        out.legal_nuke.extend_from_slice(&it.legal_nuke);
+        out.origin_y.push(c.origin_y);
+        out.origin_x.push(c.origin_x);
+    }
+    out
+}
+
+fn pack_compact_host(
+    items: &[&PreparedObs],
+    compact: &[&CompactGrid],
+    ch: usize,
+    cw: usize,
+    workers: usize,
+) -> PackedCompactHost {
+    let workers = workers.max(1).min(items.len());
+    let chunk = items.len().div_ceil(workers);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = items
+            .chunks(chunk)
+            .zip(compact.chunks(chunk))
+            .map(|(item_range, compact_range)| {
+                scope.spawn(move || pack_compact_host_range(item_range, compact_range, ch, cw))
+            })
+            .collect();
+        // Joining in range order preserves exact T-major/N-minor layout.
+        let mut packed = PackedCompactHost::default();
+        for handle in handles {
+            packed.append(handle.join().expect("compact host packing thread panicked"));
+        }
+        packed
+    })
+}
+
 fn build_compact_host_obs(
     items: &[&PreparedObs],
     device: Device,
@@ -1155,40 +1271,28 @@ fn build_compact_host_obs(
     let ch = compact.iter().map(|c| c.coarse_h).max().unwrap();
     let cw = compact.iter().map(|c| c.coarse_w).max().unwrap();
     let b = items.len();
-    let cg = policy::C_GRID as usize;
-
-    let mut fine = Vec::with_capacity(b * cg * fh * fw);
-    let mut fine_valid = Vec::with_capacity(b * fh * fw);
-    let mut fine_legal = Vec::with_capacity(b * fh * fw);
-    let mut coarse = Vec::with_capacity(b * cg * ch * cw);
-    let mut coarse_valid = Vec::with_capacity(b * ch * cw);
-    let mut coarse_legal = Vec::with_capacity(b * ch * cw);
-    for c in &compact {
-        fine.extend_from_slice(c.fine());
-        fine_valid.extend_from_slice(c.fine_valid());
-        fine_legal.extend_from_slice(c.fine_legal());
-        for plane in 0..cg {
-            let mut dst = vec![half::f16::ZERO; ch * cw];
-            for y in 0..c.coarse_h {
-                let src = plane * c.coarse_h * c.coarse_w + y * c.coarse_w;
-                let out = y * cw;
-                dst[out..out + c.coarse_w].copy_from_slice(&c.coarse()[src..src + c.coarse_w]);
-            }
-            coarse.extend(dst);
-        }
-        for (src, dst) in [
-            (c.coarse_valid(), &mut coarse_valid),
-            (c.coarse_legal(), &mut coarse_legal),
-        ] {
-            let mut padded = vec![0.0f32; ch * cw];
-            for y in 0..c.coarse_h {
-                padded[y * cw..y * cw + c.coarse_w]
-                    .copy_from_slice(&src[y * c.coarse_w..(y + 1) * c.coarse_w]);
-            }
-            dst.extend(padded);
-        }
-    }
-
+    let workers = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(8);
+    let packed = pack_compact_host(items, &compact, ch, cw, workers);
+    let PackedCompactHost {
+        fine,
+        fine_valid,
+        fine_legal,
+        coarse,
+        coarse_valid,
+        coarse_legal,
+        players,
+        pmask,
+        local,
+        scalars,
+        legal_actions,
+        legal_ptarget,
+        legal_build,
+        legal_nuke,
+        origin_y,
+        origin_x,
+    } = packed;
     let half_up = |v: Vec<half::f16>, shape: &[i64]| {
         to_device_maybe_pinned(&Tensor::from_slice(&v).view(shape), device, pinned_h2d)
             .to_kind(Kind::Float)
@@ -1196,24 +1300,6 @@ fn build_compact_host_obs(
     let up = |v: Vec<f32>, shape: &[i64]| {
         to_device_maybe_pinned(&Tensor::from_slice(&v).view(shape), device, pinned_h2d)
     };
-    let mut players = Vec::new();
-    let mut pmask = Vec::new();
-    let mut local = Vec::new();
-    let mut scalars = Vec::new();
-    let mut legal_actions = Vec::new();
-    let mut legal_ptarget = Vec::new();
-    let mut legal_build = Vec::new();
-    let mut legal_nuke = Vec::new();
-    for it in items {
-        players.extend_from_slice(&it.players);
-        pmask.extend_from_slice(&it.pmask);
-        local.extend_from_slice(&it.local);
-        scalars.extend_from_slice(&it.scalars);
-        legal_actions.extend_from_slice(&it.legal_actions);
-        legal_ptarget.extend_from_slice(&it.legal_ptarget);
-        legal_build.extend_from_slice(&it.legal_build);
-        legal_nuke.extend_from_slice(&it.legal_nuke);
-    }
     let bi = b as i64;
     Ok(Obs {
         grid: half_up(fine, &[bi, policy::C_GRID, fh as i64, fw as i64]),
@@ -1232,16 +1318,8 @@ fn build_compact_host_obs(
         legal_build: up(legal_build, &[bi, feat::N_BUILD as i64]),
         legal_nuke: up(legal_nuke, &[bi, feat::N_NUKE as i64]),
         compact: Some(CompactObsMeta {
-            origin_y: to_device_maybe_pinned(
-                &Tensor::from_slice(&compact.iter().map(|c| c.origin_y).collect::<Vec<_>>()),
-                device,
-                pinned_h2d,
-            ),
-            origin_x: to_device_maybe_pinned(
-                &Tensor::from_slice(&compact.iter().map(|c| c.origin_x).collect::<Vec<_>>()),
-                device,
-                pinned_h2d,
-            ),
+            origin_y: to_device_maybe_pinned(&Tensor::from_slice(&origin_y), device, pinned_h2d),
+            origin_x: to_device_maybe_pinned(&Tensor::from_slice(&origin_x), device, pinned_h2d),
             coarse_valid: up(coarse_valid, &[bi, ch as i64, cw as i64]),
             coarse_legal: up(coarse_legal, &[bi, ch as i64, cw as i64]),
         }),
@@ -1587,6 +1665,15 @@ mod tests {
                 && it.legal_tile.is_empty()
         }));
         let refs: Vec<&PreparedObs> = items.iter().collect();
+        let compact: Vec<&CompactGrid> =
+            refs.iter().map(|it| it.compact.as_ref().unwrap()).collect();
+        let ch = compact.iter().map(|c| c.coarse_h).max().unwrap();
+        let cw = compact.iter().map(|c| c.coarse_w).max().unwrap();
+        assert_eq!(
+            pack_compact_host(&refs, &compact, ch, cw, 1),
+            pack_compact_host(&refs, &compact, ch, cw, 3),
+            "parallel disjoint-range packing must preserve every host bit and item order"
+        );
         let rebuilt = build_obs(&refs, Device::Cpu, false, false);
         assert!(rebuilt.compact.is_some());
         assert_eq!(
