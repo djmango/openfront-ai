@@ -3,12 +3,12 @@ use openfront_engine::replay::{
     compare_outcomes, replay_outcome_native, GameOutcome, OutcomeComparison, OutcomeOracleCache,
     OUTCOME_EXPECTED_RECORDS, OUTCOME_REQUIRED_PASSES, OUTCOME_SCHEMA_VERSION,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
 #[command(name = "openfront-outcome-gate")]
@@ -41,6 +41,12 @@ struct Args {
     /// the whole gate silently (there was no timeout at all before this).
     #[arg(long, default_value_t = 300)]
     record_timeout_seconds: u64,
+    /// Optional native-outcome cache. On hit (same schema/commit/record-set
+    /// hash/engine fingerprint), skip every native replay and compare the
+    /// cached outcomes against the TypeScript oracle. Written after a full
+    /// cold run so iterative gate loops are near-instant.
+    #[arg(long)]
+    native_cache: Option<PathBuf>,
 }
 
 #[derive(Serialize)]
@@ -91,6 +97,16 @@ struct GateReport {
     records: Vec<RecordReport>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeOutcomeCache {
+    schema_version: u32,
+    parity_commit: String,
+    record_set_hash: String,
+    engine_fingerprint: String,
+    outcomes: Vec<GameOutcome>,
+}
+
 fn record_paths(records: &Path, limit: Option<usize>) -> Result<Vec<PathBuf>, String> {
     let mut paths = std::fs::read_dir(records)
         .map_err(|e| format!("read records directory {}: {e}", records.display()))?
@@ -132,6 +148,127 @@ fn increment(counts: &mut CategoryCounts, category: &str) {
     }
 }
 
+fn engine_fingerprint() -> String {
+    let Ok(exe) = std::env::current_exe() else {
+        return "unknown-exe".to_string();
+    };
+    let Ok(meta) = std::fs::metadata(&exe) else {
+        return format!("{}:unreadable", exe.display());
+    };
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("{}:{}:{}", exe.display(), meta.len(), modified)
+}
+
+fn load_native_cache(
+    path: &Path,
+    parity_commit: &str,
+    record_set_hash: &str,
+    fingerprint: &str,
+    expected_count: usize,
+) -> Option<BTreeMap<String, GameOutcome>> {
+    let bytes = std::fs::read(path).ok()?;
+    let cache: NativeOutcomeCache = serde_json::from_slice(&bytes).ok()?;
+    if cache.schema_version != OUTCOME_SCHEMA_VERSION
+        || cache.parity_commit != parity_commit
+        || cache.record_set_hash != record_set_hash
+        || cache.engine_fingerprint != fingerprint
+        || cache.outcomes.len() != expected_count
+    {
+        return None;
+    }
+    Some(
+        cache
+            .outcomes
+            .into_iter()
+            .map(|outcome| (outcome.game_id.clone(), outcome))
+            .collect(),
+    )
+}
+
+fn write_native_cache(
+    path: &Path,
+    parity_commit: &str,
+    record_set_hash: &str,
+    fingerprint: &str,
+    outcomes: &[GameOutcome],
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create native cache dir {}: {e}", parent.display()))?;
+    }
+    let cache = NativeOutcomeCache {
+        schema_version: OUTCOME_SCHEMA_VERSION,
+        parity_commit: parity_commit.to_string(),
+        record_set_hash: record_set_hash.to_string(),
+        engine_fingerprint: fingerprint.to_string(),
+        outcomes: outcomes.to_vec(),
+    };
+    let temporary = path.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let payload = serde_json::to_vec_pretty(&cache)
+        .map_err(|e| format!("serialize native cache: {e}"))?;
+    std::fs::write(&temporary, payload)
+        .map_err(|e| format!("write native cache {}: {e}", temporary.display()))?;
+    std::fs::rename(&temporary, path)
+        .map_err(|e| format!("rename native cache onto {}: {e}", path.display()))?;
+    Ok(())
+}
+
+fn report_from_pair(
+    game_id: String,
+    record: String,
+    expected: Option<GameOutcome>,
+    actual: Result<GameOutcome, String>,
+) -> RecordReport {
+    match (expected, actual) {
+        (Some(expected), Ok(actual)) => {
+            let comparison = compare_outcomes(&expected, &actual);
+            let category = comparison.category.clone();
+            RecordReport {
+                game_id,
+                record,
+                category,
+                diagnostics: comparison.diagnostics.clone(),
+                expected: Some(expected),
+                actual: Some(actual),
+                comparison: Some(comparison),
+                error: None,
+            }
+        }
+        (None, _) => RecordReport {
+            game_id,
+            record,
+            category: "replay_error".to_string(),
+            diagnostics: vec!["replay_error".to_string()],
+            expected: None,
+            actual: None,
+            comparison: None,
+            error: Some("record missing from TypeScript oracle".to_string()),
+        },
+        (Some(expected), Err(error)) => RecordReport {
+            game_id,
+            record,
+            category: "replay_error".to_string(),
+            diagnostics: vec!["replay_error".to_string()],
+            expected: Some(expected),
+            actual: None,
+            comparison: None,
+            error: Some(error),
+        },
+    }
+}
+
 fn run(args: Args) -> Result<GateReport, String> {
     let cache: OutcomeOracleCache = serde_json::from_slice(
         &std::fs::read(&args.oracle)
@@ -150,131 +287,159 @@ fn run(args: Args) -> Result<GateReport, String> {
             cache.parity_commit, args.parity_commit
         ));
     }
+    let record_set_hash = cache.record_set_hash.clone();
     let oracle_by_id: BTreeMap<String, GameOutcome> = cache
         .outcomes
         .into_iter()
         .map(|outcome| (outcome.game_id.clone(), outcome))
         .collect();
+    let oracle_len = oracle_by_id.len();
     let paths = record_paths(&args.records, args.limit)?;
     let total_paths = paths.len();
     let jobs = args.jobs.max(1);
     let timeout = Duration::from_secs(args.record_timeout_seconds);
-    eprintln!(
-        "[outcome_gate] comparing {total_paths} records across {jobs} worker thread(s), \
-         per-record timeout {}s",
-        timeout.as_secs()
-    );
-
-    let next_idx = Arc::new(AtomicUsize::new(0));
-    let done = Arc::new(AtomicUsize::new(0));
-    let paths = Arc::new(paths);
-    let oracle_by_id = Arc::new(oracle_by_id);
-    let repo = Arc::new(args.repo.clone());
+    let fingerprint = engine_fingerprint();
     let start = Instant::now();
 
-    let mut results: Vec<Option<RecordReport>> = (0..total_paths).map(|_| None).collect();
-    std::thread::scope(|scope| {
-        let (tx, rx) = std::sync::mpsc::channel::<(usize, RecordReport)>();
-        for _ in 0..jobs.min(total_paths.max(1)) {
-            let tx = tx.clone();
-            let next_idx = Arc::clone(&next_idx);
-            let done = Arc::clone(&done);
-            let paths = Arc::clone(&paths);
-            let oracle_by_id = Arc::clone(&oracle_by_id);
-            let repo = Arc::clone(&repo);
-            scope.spawn(move || loop {
-                let idx = next_idx.fetch_add(1, Ordering::Relaxed);
-                if idx >= paths.len() {
-                    return;
-                }
-                let path = paths[idx].clone();
-                let game_id = game_id_from_path(&path);
-                let record = path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("")
-                    .to_string();
-                let expected = oracle_by_id.get(&game_id).cloned();
-
-                // Run the actual replay on its own thread with a bounded
-                // wait, so one pathologically slow/hung record (e.g. a
-                // very long real multiplayer game) can't stall the whole
-                // gate forever with no signal - it just gets recorded as
-                // a timeout and the pool moves on.
-                let (replay_tx, replay_rx) = std::sync::mpsc::channel();
-                let repo_for_replay = Arc::clone(&repo);
-                let path_for_replay = path.clone();
-                let record_t0 = Instant::now();
-                std::thread::spawn(move || {
-                    let actual = replay_outcome_native(&repo_for_replay, &path_for_replay);
-                    let _ = replay_tx.send(actual);
-                });
-                let actual = match replay_rx.recv_timeout(timeout) {
-                    Ok(actual) => actual,
-                    Err(_) => Err(format!(
-                        "replay exceeded {}s timeout (still running when abandoned)",
-                        timeout.as_secs()
-                    )),
-                };
-                let record_dt = record_t0.elapsed().as_secs_f64();
-
-                let report = match (expected, actual) {
-                    (Some(expected), Ok(actual)) => {
-                        let comparison = compare_outcomes(&expected, &actual);
-                        let category = comparison.category.clone();
-                        RecordReport {
-                            game_id: game_id.clone(),
-                            record: record.clone(),
-                            category,
-                            diagnostics: comparison.diagnostics.clone(),
-                            expected: Some(expected),
-                            actual: Some(actual),
-                            comparison: Some(comparison),
-                            error: None,
-                        }
-                    }
-                    (None, _) => RecordReport {
-                        game_id: game_id.clone(),
-                        record: record.clone(),
-                        category: "replay_error".to_string(),
-                        diagnostics: vec!["replay_error".to_string()],
-                        expected: None,
-                        actual: None,
-                        comparison: None,
-                        error: Some("record missing from TypeScript oracle".to_string()),
-                    },
-                    (Some(expected), Err(error)) => RecordReport {
-                        game_id: game_id.clone(),
-                        record: record.clone(),
-                        category: "replay_error".to_string(),
-                        diagnostics: vec!["replay_error".to_string()],
-                        expected: Some(expected),
-                        actual: None,
-                        comparison: None,
-                        error: Some(error),
-                    },
-                };
-                let n_done = done.fetch_add(1, Ordering::Relaxed) + 1;
-                eprintln!(
-                    "[outcome_gate] {n_done}/{total_paths} {record} -> {} ({record_dt:.1}s)",
-                    report.category
-                );
-                if tx.send((idx, report)).is_err() {
-                    return;
-                }
-            });
-        }
-        drop(tx);
-        for (idx, report) in rx {
-            results[idx] = Some(report);
-        }
+    let cached_native = args.native_cache.as_ref().and_then(|path| {
+        load_native_cache(
+            path,
+            &args.parity_commit,
+            &record_set_hash,
+            &fingerprint,
+            total_paths,
+        )
     });
+
+    let mut records = if let Some(native_by_id) = cached_native {
+        eprintln!(
+            "[outcome_gate] native cache hit ({total_paths} records, fingerprint={fingerprint}); \
+             comparing without replaying"
+        );
+        let mut reports = Vec::with_capacity(total_paths);
+        for path in &paths {
+            let game_id = game_id_from_path(path);
+            let record = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("")
+                .to_string();
+            let expected = oracle_by_id.get(&game_id).cloned();
+            let actual = native_by_id
+                .get(&game_id)
+                .cloned()
+                .ok_or_else(|| format!("native cache missing {game_id}"));
+            reports.push(report_from_pair(game_id, record, expected, actual));
+        }
+        reports
+    } else {
+        eprintln!(
+            "[outcome_gate] comparing {total_paths} records across {jobs} worker thread(s), \
+             per-record timeout {}s",
+            timeout.as_secs()
+        );
+
+        let next_idx = Arc::new(AtomicUsize::new(0));
+        let done = Arc::new(AtomicUsize::new(0));
+        let paths = Arc::new(paths);
+        let oracle_by_id = Arc::new(oracle_by_id);
+        let repo = Arc::new(args.repo.clone());
+
+        let mut results: Vec<Option<RecordReport>> = (0..total_paths).map(|_| None).collect();
+        std::thread::scope(|scope| {
+            let (tx, rx) = std::sync::mpsc::channel::<(usize, RecordReport)>();
+            for _ in 0..jobs.min(total_paths.max(1)) {
+                let tx = tx.clone();
+                let next_idx = Arc::clone(&next_idx);
+                let done = Arc::clone(&done);
+                let paths = Arc::clone(&paths);
+                let oracle_by_id = Arc::clone(&oracle_by_id);
+                let repo = Arc::clone(&repo);
+                scope.spawn(move || loop {
+                    let idx = next_idx.fetch_add(1, Ordering::Relaxed);
+                    if idx >= paths.len() {
+                        return;
+                    }
+                    let path = paths[idx].clone();
+                    let game_id = game_id_from_path(&path);
+                    let record = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let expected = oracle_by_id.get(&game_id).cloned();
+
+                    let (replay_tx, replay_rx) = std::sync::mpsc::channel();
+                    let repo_for_replay = Arc::clone(&repo);
+                    let path_for_replay = path.clone();
+                    let record_t0 = Instant::now();
+                    std::thread::spawn(move || {
+                        let actual = replay_outcome_native(&repo_for_replay, &path_for_replay);
+                        let _ = replay_tx.send(actual);
+                    });
+                    let actual = match replay_rx.recv_timeout(timeout) {
+                        Ok(actual) => actual,
+                        Err(_) => Err(format!(
+                            "replay exceeded {}s timeout (still running when abandoned)",
+                            timeout.as_secs()
+                        )),
+                    };
+                    let record_dt = record_t0.elapsed().as_secs_f64();
+                    let report = report_from_pair(game_id, record.clone(), expected, actual);
+                    let n_done = done.fetch_add(1, Ordering::Relaxed) + 1;
+                    eprintln!(
+                        "[outcome_gate] {n_done}/{total_paths} {record} -> {} ({record_dt:.1}s)",
+                        report.category
+                    );
+                    if tx.send((idx, report)).is_err() {
+                        return;
+                    }
+                });
+            }
+            drop(tx);
+            for (idx, report) in rx {
+                results[idx] = Some(report);
+            }
+        });
+        let reports: Vec<RecordReport> = results.into_iter().flatten().collect();
+
+        if let Some(cache_path) = &args.native_cache {
+            let mut outcomes: Vec<GameOutcome> = reports
+                .iter()
+                .filter_map(|report| report.actual.clone())
+                .collect();
+            outcomes.sort_by(|a, b| a.game_id.cmp(&b.game_id));
+            if outcomes.len() == total_paths {
+                match write_native_cache(
+                    cache_path,
+                    &args.parity_commit,
+                    &record_set_hash,
+                    &fingerprint,
+                    &outcomes,
+                ) {
+                    Ok(()) => eprintln!(
+                        "[outcome_gate] wrote native cache -> {} ({} outcomes)",
+                        cache_path.display(),
+                        outcomes.len()
+                    ),
+                    Err(error) => eprintln!("[outcome_gate] native cache write skipped: {error}"),
+                }
+            } else {
+                eprintln!(
+                    "[outcome_gate] native cache not written (only {}/{} outcomes succeeded)",
+                    outcomes.len(),
+                    total_paths
+                );
+            }
+        }
+        reports
+    };
+
     eprintln!(
         "[outcome_gate] all {total_paths} records compared in {:.1}s",
         start.elapsed().as_secs_f64()
     );
 
-    let mut records: Vec<RecordReport> = results.into_iter().flatten().collect();
     records.sort_by(|a, b| a.record.cmp(&b.record));
     let mut categories = CategoryCounts::default();
     let mut diagnostics = CategoryCounts::default();
@@ -289,13 +454,13 @@ fn run(args: Args) -> Result<GateReport, String> {
     }
     let total = records.len();
     let pass = categories.pass;
-    let record_count_match = total == args.expected_records && oracle_by_id.len() == total;
+    let record_count_match = total == args.expected_records && oracle_len == total;
     let threshold_met = pass >= args.required_passes;
     let gate_pass = record_count_match && threshold_met;
     Ok(GateReport {
         schema_version: OUTCOME_SCHEMA_VERSION,
         parity_commit: args.parity_commit,
-        oracle_record_set_hash: cache.record_set_hash,
+        oracle_record_set_hash: record_set_hash,
         summary: GateSummary {
             pass,
             total,
