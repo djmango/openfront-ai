@@ -132,6 +132,9 @@ pub struct Player {
     pub target_marks: Vec<(u16, u32)>,
     /// TS `PlayerImpl.lastDeleteUnitTick` - defaults to -1 (never deleted).
     pub last_delete_unit_tick: i32,
+    /// TS `PlayerImpl.outgoingEmojis_` - `(recipient small_id | AllPlayers, createdAt)`.
+    /// `None` recipient matches TS `AllPlayers`. Used by `canSendEmoji` cooldown.
+    pub outgoing_emoji_sends: Vec<(Option<u16>, u32)>,
 }
 
 impl Default for Player {
@@ -168,6 +171,7 @@ impl Default for Player {
             attacks_sent_net: 0,
             target_marks: Vec::new(),
             last_delete_unit_tick: -1,
+            outgoing_emoji_sends: Vec::new(),
         }
     }
 }
@@ -3490,7 +3494,31 @@ impl Game {
         if recipient.is_some_and(|r| r == sender_small_id) {
             return false;
         }
+        // TS `Config.emojiMessageCooldown()` = 5 * 10.
+        const EMOJI_MESSAGE_COOLDOWN: u32 = 50;
+        let Some(sender) = self.player_by_small_id(sender_small_id) else {
+            return false;
+        };
+        for &(prev_recipient, created_at) in &sender.outgoing_emoji_sends {
+            if prev_recipient == recipient && self.ticks.saturating_sub(created_at) < EMOJI_MESSAGE_COOLDOWN
+            {
+                return false;
+            }
+        }
         true
+    }
+
+    /// Record a sent emoji for `can_send_emoji` cooldown (TS `outgoingEmojis_`).
+    ///
+    /// Native emoji is hash-neutral (no `EmojiExecution`), but TS records
+    /// `createdAt` when that execution *ticks* — always the tick after
+    /// `addExecution` (init same tick, tick next). Store `ticks + 1` so the
+    /// 50-tick cooldown window matches TS.
+    pub fn record_emoji_send(&mut self, sender_small_id: u16, recipient: Option<u16>) {
+        let created_at = self.ticks.saturating_add(1);
+        if let Some(sender) = self.player_by_small_id_mut(sender_small_id) {
+            sender.outgoing_emoji_sends.push((recipient, created_at));
+        }
     }
 
     pub fn can_donate_troops(&self, sender_small_id: u16, recipient_small_id: u16) -> bool {
