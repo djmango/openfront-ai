@@ -263,6 +263,7 @@ while true; do
   echo "=== $(date -u +%FT%TZ) launching $RUN_NAME num_gpus=$NUM_GPUS envs/shard=$NUM_ENVS $RESUME ==="
   START_TS=$(date +%s)
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  OFTRAIN_NCCL_TIMEOUT_SECONDS="${OFTRAIN_NCCL_TIMEOUT_SECONDS:-60}" \
   LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB:$NCCL_LIB:$NCCL_LINK_LIB" \
     ./target/release/oftrain --engine native --node-fraction "$NODE_FRACTION" --num-envs "$NUM_ENVS" --num-gpus "$NUM_GPUS" \
     --rollout-len "$ROLLOUT_LEN" --minibatches "$MINIBATCHES" --stage "$STAGE" --device cuda:0 \

@@ -4502,7 +4502,10 @@ fn learner_loop(
                             // Any error after entering a collective is fatal.
                             // Falling back here could strand another rank or
                             // apply a partially reduced optimizer step.
-                            comm.all_reduce_average(&mut flat)?;
+                            comm.all_reduce_average(
+                                &mut flat,
+                                &format!("command={id} epoch={epoch} minibatch={minibatch}"),
+                            )?;
                             apply_device_flat_grad(owned, &flat)?;
                             Ok(true)
                         }
