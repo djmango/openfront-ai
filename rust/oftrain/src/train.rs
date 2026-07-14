@@ -99,7 +99,8 @@ use crate::engine::EngineKind;
 use crate::gpu_util::GpuUtilSampler;
 use crate::metrics::MetricsWriter;
 use crate::policy::{self, PolicyNet};
-use crate::vecenv::{EnvWorker, EpisodeInfo, PreparedObs};
+use crate::recurrent::{ActorRecurrentState, RecurrentPolicyApi};
+use crate::vecenv::{ActionOutcome, EnvTransition, EnvWorker, EpisodeInfo, PreparedObs};
 
 /// Pixel budget for one forward/backward sub-batch during the PPO update
 /// (mirrors `rl/ppo.py::MAX_UPD_PIX`). When `mb_size * (gh*gw + cgh*cgw)`
@@ -306,6 +307,11 @@ pub struct Config {
     /// packed CPU-only f32 vectors. Disabled by default; incompatible live
     /// utilization autoscaling is disabled without changing ownership mode.
     pub persistent_actors: bool,
+    /// Opt-in recurrent actor state. This is restricted to persistent actors
+    /// so the device hidden tensor never changes owner threads.
+    pub recurrent_policy: bool,
+    /// Per-environment hidden width in f32 values (default 256).
+    pub recurrent_hidden_size: usize,
     /// Opt-in ready-queue scheduler for persistent actors. The default-off
     /// fallback remains the fixed two-half collector.
     pub work_conserving_actors: bool,
@@ -847,7 +853,7 @@ struct Worker {
     handle: JoinHandle<()>,
 }
 
-type EnvStepResult = Result<(PreparedObs, f64, bool, Option<EpisodeInfo>), String>;
+type EnvStepResult = Result<EnvTransition, String>;
 
 struct ReadyEnv {
     env: usize,
@@ -1062,6 +1068,13 @@ fn transfer_act_results(
 /// One (T, N) rollout buffer slot (N = envs in this shard).
 struct Step {
     obs: PreparedObs,
+    /// CPU copy of the actor's recurrent input row, for learner BPTT.
+    hidden_in: Vec<f32>,
+    /// Previous action/result consumed with `obs`, stored explicitly so the
+    /// learner does not need to infer temporal alignment.
+    context: ActionOutcome,
+    /// Outcome produced by this step (including terminal actions).
+    outcome: ActionOutcome,
     choice: ChoiceScalars,
     logp: f32,
     value: f32,
@@ -1089,6 +1102,9 @@ struct ActorShard {
     /// on its one owner thread; no policy/AE tensor is sent through a channel.
     vs: nn::VarStore,
     policy: PolicyNet,
+    /// Present only for --recurrent-policy persistent actors. Device tensor
+    /// lifetime is wholly contained by the actor owner thread.
+    recurrent: Option<ActorRecurrentState>,
     ae: Option<crate::ae::AePair>,
     /// Shares that same actor-thread CUDA stream ownership. Cached terrain,
     /// shared fine/coarse inputs, and encoder outputs never enter a rollout.
@@ -1418,10 +1434,17 @@ fn inverse_permutation(order: &[usize]) -> Vec<usize> {
 }
 
 struct ActorRow {
-    choice: Choice,
+    choice: Option<Choice>,
     scalars: ChoiceScalars,
     logp: f32,
     value: f32,
+    hidden_in: Vec<f32>,
+    context: ActionOutcome,
+}
+
+struct ActorBatchHost {
+    packed: PackedActHost,
+    hidden_in: Vec<Vec<f32>>,
 }
 
 fn act_contiguous_obs(
@@ -1429,8 +1452,10 @@ fn act_contiguous_obs(
     cfg: &Config,
     start: usize,
     end: usize,
-) -> Result<PackedActHost> {
+    envs: &[usize],
+) -> Result<ActorBatchHost> {
     let n = end - start;
+    anyhow::ensure!(envs.len() == n, "actor env identity width mismatch");
     // Every device tensor is created, consumed, and synchronously copied to
     // PackedActHost on this persistent actor thread.
     let obs_t = if let Some(ae) = actor.ae.as_ref() {
@@ -1458,9 +1483,38 @@ fn act_contiguous_obs(
         let obs_refs: Vec<&PreparedObs> = actor.cur_obs[start..end].iter().collect();
         batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d, cfg.fp16_rollout)
     };
-    let (a, player, tile, build, nuke, qty, logp, value) =
-        tch::no_grad(|| actor.policy.act(&obs_t, false));
-    transfer_act_results(&a, &player, &tile, &build, &nuke, &qty, &logp, &value, n)
+    let (action, hidden_in) = if let Some(state) = actor.recurrent.as_mut() {
+        let hidden = state.gather(envs);
+        let contexts: Vec<ActionOutcome> = actor.cur_obs[start..end]
+            .iter()
+            .map(|obs| obs.prev_action.clone())
+            .collect();
+        let context_t = crate::recurrent::context_tensor(&contexts, actor.device);
+        let output = tch::no_grad(|| {
+            actor
+                .policy
+                .act_recurrent(&obs_t, &hidden, &context_t, false)
+        })?;
+        let hidden_cpu: Vec<f32> = hidden.to_device(Device::Cpu).reshape([-1]).try_into()?;
+        let hidden_rows = hidden_cpu
+            .chunks_exact(state.hidden_size())
+            .map(<[f32]>::to_vec)
+            .collect();
+        state.scatter(envs, &output.hidden_out)?;
+        (output.action, hidden_rows)
+    } else {
+        (
+            tch::no_grad(|| actor.policy.act(&obs_t, false)),
+            vec![Vec::new(); n],
+        )
+    };
+    let (a, player, tile, build, nuke, qty, logp, value) = action;
+    Ok(ActorBatchHost {
+        packed: transfer_act_results(
+            &a, &player, &tile, &build, &nuke, &qty, &logp, &value, n,
+        )?,
+        hidden_in,
+    })
 }
 
 /// Act on arbitrary ready envs without cloning their large host payloads.
@@ -1494,13 +1548,13 @@ fn act_ready_batch(
     order.extend((0..n).filter(|&env| !selected[env]));
     let inverse = inverse_permutation(&order);
     permute_slice(&mut actor.cur_obs, &order);
-    let packed = act_contiguous_obs(actor, cfg, 0, envs.len());
+    let packed = act_contiguous_obs(actor, cfg, 0, envs.len(), envs);
     permute_slice(&mut actor.cur_obs, &inverse);
     let packed = packed?;
 
     let mut rows = Vec::with_capacity(envs.len());
     for row in 0..envs.len() {
-        let (discrete, floats) = packed.row(row)?;
+        let (discrete, floats) = packed.packed.row(row)?;
         let (choice, scalars) = choice_from_act_values(
             discrete[0],
             discrete[1],
@@ -1510,10 +1564,12 @@ fn act_ready_batch(
             floats[0],
         );
         rows.push(ActorRow {
-            choice,
+            choice: Some(choice),
             scalars,
             logp: floats[1],
             value: floats[2],
+            hidden_in: packed.hidden_in[row].clone(),
+            context: actor.cur_obs[envs[row]].prev_action.clone(),
         });
     }
     Ok(rows)
@@ -1527,10 +1583,10 @@ fn act_group(
     cfg: &Config,
     start: usize,
     end: usize,
-) -> Result<(Vec<ChoiceScalars>, Vec<f32>, Vec<f32>)> {
+) -> Result<Vec<ActorRow>> {
     let n = end - start;
     if n == 0 {
-        return Ok((Vec::new(), Vec::new(), Vec::new()));
+        return Ok(Vec::new());
     }
 
     // Bucketing is specific to the persistent AE + compact actor path. Any
@@ -1561,15 +1617,20 @@ fn act_group(
         // an error; a successful call scatters only CPU-owned scalar rows.
         let result = (|| -> Result<()> {
             for range in &buckets.ranges {
+                let identities: Vec<usize> = buckets.order[range.clone()]
+                    .iter()
+                    .map(|&original| start + original)
+                    .collect();
                 let packed = act_contiguous_obs(
                     actor,
                     cfg,
                     start + range.start,
                     start + range.end,
+                    &identities,
                 )?;
                 for bucket_row in 0..range.len() {
                     let original = buckets.order[range.start + bucket_row];
-                    let (discrete, floats) = packed.row(bucket_row)?;
+                    let (discrete, floats) = packed.packed.row(bucket_row)?;
                     let (choice, scalars) = choice_from_act_values(
                         discrete[0],
                         discrete[1],
@@ -1579,10 +1640,14 @@ fn act_group(
                         floats[0],
                     );
                     rows[original] = Some(ActorRow {
-                        choice,
+                        choice: Some(choice),
                         scalars,
                         logp: floats[1],
                         value: floats[2],
+                        hidden_in: packed.hidden_in[bucket_row].clone(),
+                        context: actor.cur_obs[start + range.start + bucket_row]
+                            .prev_action
+                            .clone(),
                     });
                 }
             }
@@ -1591,9 +1656,10 @@ fn act_group(
         permute_slice(&mut actor.cur_obs[start..end], &inverse);
         result?;
     } else {
-        let packed = act_contiguous_obs(actor, cfg, start, end)?;
+        let identities: Vec<usize> = (start..end).collect();
+        let packed = act_contiguous_obs(actor, cfg, start, end, &identities)?;
         for (i, row) in rows.iter_mut().enumerate() {
-            let (discrete, floats) = packed.row(i)?;
+            let (discrete, floats) = packed.packed.row(i)?;
             let (choice, scalars) = choice_from_act_values(
                 discrete[0],
                 discrete[1],
@@ -1603,28 +1669,26 @@ fn act_group(
                 floats[0],
             );
             *row = Some(ActorRow {
-                choice,
+                choice: Some(choice),
                 scalars,
                 logp: floats[1],
                 value: floats[2],
+                hidden_in: packed.hidden_in[i].clone(),
+                context: actor.cur_obs[start + i].prev_action.clone(),
             });
         }
     }
 
-    let mut scalars = Vec::with_capacity(n);
-    let mut logp_v = Vec::with_capacity(n);
-    let mut value_v = Vec::with_capacity(n);
+    let mut completed = Vec::with_capacity(n);
     for (i, row) in rows.into_iter().enumerate() {
-        let row = row.ok_or_else(|| anyhow!("missing actor result for env {}", start + i))?;
+        let mut row = row.ok_or_else(|| anyhow!("missing actor result for env {}", start + i))?;
         actor.workers[start + i]
             .choice_tx
-            .send(row.choice)
+            .send(row.choice.take().expect("unsent actor choice"))
             .map_err(|_| anyhow!("env {} choice channel closed", start + i))?;
-        scalars.push(row.scalars);
-        logp_v.push(row.logp);
-        value_v.push(row.value);
+        completed.push(row);
     }
-    Ok((scalars, logp_v, value_v))
+    Ok(completed)
 }
 
 #[cfg(test)]
@@ -1671,6 +1735,7 @@ mod packed_act_tests {
             *value = ((i * 13 + id * 17) % 97) as f32 / 97.0;
         }
         PreparedObs {
+            prev_action: ActionOutcome::default(),
             compact: None,
             grid: Some(grid),
             grid_coarse: None,
@@ -1792,6 +1857,46 @@ mod packed_act_tests {
     }
 
     #[test]
+    fn recurrent_step_payloads_remain_t_major() {
+        let make_step = |t: usize, env: usize| {
+            let mut context = ActionOutcome::default();
+            context.action = (t * 10 + env) as i64;
+            let mut outcome = context.clone();
+            outcome.success = true;
+            Step {
+                obs: shaped_obs(env, 2, 2),
+                hidden_in: vec![env as f32, t as f32],
+                context,
+                outcome,
+                choice: ChoiceScalars {
+                    action: 0,
+                    player_slot: -1,
+                    tile_region: -1,
+                    build_type: -1,
+                    nuke_type: -1,
+                    quantity_frac: -1.0,
+                },
+                logp: 0.0,
+                value: 0.0,
+                reward: 0.0,
+                done: false,
+            }
+        };
+        let mut slots = RolloutSlots::new(2, 3);
+        for &(t, env) in &[(0, 2), (0, 0), (0, 1), (1, 1), (1, 2), (1, 0)] {
+            slots.insert(t, env, make_step(t, env)).unwrap();
+        }
+        let rows = slots.finish().unwrap();
+        for (t, row) in rows.iter().enumerate() {
+            for (env, step) in row.iter().enumerate() {
+                assert_eq!(step.hidden_in, vec![env as f32, t as f32]);
+                assert_eq!(step.context.action, (t * 10 + env) as i64);
+                assert!(step.outcome.success);
+            }
+        }
+    }
+
+    #[test]
     fn staggered_mock_envs_do_not_block_fast_ready_batches() {
         const T: usize = 3;
         let shape = ActorShape::of(&shaped_obs(0, 6, 8));
@@ -1856,6 +1961,30 @@ mod packed_act_tests {
         for (t, row) in rows.iter().enumerate() {
             assert_eq!(row, &vec![(t, 0), (t, 1), (t, 2)]);
         }
+    }
+
+    #[test]
+    fn staggered_ready_batches_gather_hidden_by_env_not_batch_position() {
+        let shape = ActorShape::of(&shaped_obs(0, 6, 8));
+        let mut ready = ReadyScheduler::new(2, Duration::ZERO);
+        let mut state = ActorRecurrentState::new(3, 2, Device::Cpu);
+
+        ready.push(2, shape, Duration::ZERO);
+        ready.push(0, shape, Duration::ZERO);
+        let first = ready.take_batch(Duration::ZERO).unwrap();
+        assert_eq!(first, vec![2, 0]);
+        let first_in = state.gather(&first);
+        let first_delta = Tensor::from_slice(&[20.0f32, 20.0, 10.0, 10.0]).view([2, 2]);
+        state.scatter(&first, &(first_in + first_delta)).unwrap();
+
+        // Env 2 now appears in a different row alongside a previously unseen
+        // env. Its row must start from 20, while env 1 starts from zero.
+        ready.push(1, shape, Duration::from_millis(1));
+        ready.push(2, shape, Duration::from_millis(1));
+        let second = ready.take_batch(Duration::from_millis(1)).unwrap();
+        assert_eq!(second, vec![1, 2]);
+        let second_in: Vec<f32> = state.gather(&second).reshape([-1]).try_into().unwrap();
+        assert_eq!(second_in, vec![0.0, 0.0, 20.0, 20.0]);
     }
 
     fn policy_rows(
@@ -2112,34 +2241,54 @@ fn recv_group(
     actor: &mut ActorShard,
     start: usize,
     end: usize,
-    scalars: &[ChoiceScalars],
-    logp_v: &[f32],
-    value_v: &[f32],
+    rows: &[ActorRow],
     step_row: &mut [Option<Step>],
     ep_infos: &mut Vec<EpisodeInfo>,
 ) -> Result<()> {
     for (j, i) in (start..end).enumerate() {
-        let (next_obs, reward, done, info) = actor.workers[i]
+        let transition = actor.workers[i]
             .obs_rx
             .as_ref()
             .ok_or_else(|| anyhow!("env {i} has no legacy obs receiver"))?
             .recv()
             .map_err(|_| anyhow!("env {i} obs channel closed"))?
             .map_err(|e| anyhow!("env {i}: {e}"))?;
-        if let Some(info) = info {
+        if let Some(info) = transition.info {
             ep_infos.push(info);
         }
-        let prev_obs = std::mem::replace(&mut actor.cur_obs[i], next_obs);
+        let prev_obs = std::mem::replace(&mut actor.cur_obs[i], transition.next_obs);
+        if transition.done {
+            if let Some(state) = actor.recurrent.as_mut() {
+                state.reset(i)?;
+            }
+        }
         step_row[i] = Some(Step {
             obs: prev_obs,
-            choice: scalars[j].clone(),
-            logp: logp_v[j],
-            value: value_v[j],
-            reward: reward as f32,
-            done,
+            hidden_in: rows[j].hidden_in.clone(),
+            context: rows[j].context.clone(),
+            outcome: transition.outcome,
+            choice: rows[j].scalars.clone(),
+            logp: rows[j].logp,
+            value: rows[j].value,
+            reward: transition.reward as f32,
+            done: transition.done,
         });
     }
     Ok(())
+}
+
+fn actor_value_rows(actor: &ActorShard, obs: &policy::Obs, envs: &[usize]) -> Result<Tensor> {
+    if let Some(state) = actor.recurrent.as_ref() {
+        let hidden = state.gather(envs);
+        let contexts: Vec<ActionOutcome> = envs
+            .iter()
+            .map(|&env| actor.cur_obs[env].prev_action.clone())
+            .collect();
+        let context = crate::recurrent::context_tensor(&contexts, actor.device);
+        tch::no_grad(|| actor.policy.value_recurrent(obs, &hidden, &context))
+    } else {
+        Ok(tch::no_grad(|| actor.policy.value_only(obs)))
+    }
 }
 
 fn bootstrap_values(actor: &mut ActorShard, cfg: &Config) -> Result<Vec<f32>> {
@@ -2169,8 +2318,8 @@ fn bootstrap_values(actor: &mut ActorShard, cfg: &Config) -> Result<Vec<f32>> {
                 ae,
                 &mut actor.terrain_cache,
             )?;
-            let bucket_values: Vec<f32> =
-                (&tch::no_grad(|| actor.policy.value_only(&obs_t))).try_into()?;
+            let envs = &buckets.order[range.clone()];
+            let bucket_values: Vec<f32> = (&actor_value_rows(actor, &obs_t, envs)?).try_into()?;
             anyhow::ensure!(
                 bucket_values.len() == range.len(),
                 "bootstrap bucket width mismatch"
@@ -2206,7 +2355,8 @@ fn bootstrap_values(actor: &mut ActorShard, cfg: &Config) -> Result<Vec<f32>> {
             let obs_refs: Vec<&PreparedObs> = actor.cur_obs.iter().collect();
             batch::build_obs(&obs_refs, actor.device, cfg.pinned_h2d, cfg.fp16_rollout)
         };
-        let v = tch::no_grad(|| actor.policy.value_only(&obs_t));
+        let envs: Vec<usize> = (0..n).collect();
+        let v = actor_value_rows(actor, &obs_t, &envs)?;
         Ok((&v).try_into()?)
     }
 }
@@ -2216,6 +2366,8 @@ struct PendingAct {
     scalars: ChoiceScalars,
     logp: f32,
     value: f32,
+    hidden_in: Vec<f32>,
+    context: ActionOutcome,
 }
 
 fn collect_rollout_ready(
@@ -2240,19 +2392,21 @@ fn collect_rollout_ready(
         while let Some(envs) = scheduler.take_batch(collect_start.elapsed()) {
             let rows = act_ready_batch(actor, cfg, &envs)?;
             anyhow::ensure!(rows.len() == envs.len(), "ready act batch width mismatch");
-            for (env, row) in envs.into_iter().zip(rows) {
+            for (env, mut row) in envs.into_iter().zip(rows) {
                 anyhow::ensure!(pending[env].is_none(), "env {env} already has an action in flight");
                 let t = slots.next_t(env);
                 anyhow::ensure!(t < cfg.rollout_len, "env {env} exceeded rollout length");
                 actor.workers[env]
                     .choice_tx
-                    .send(row.choice)
+                    .send(row.choice.take().expect("unsent actor choice"))
                     .map_err(|_| anyhow!("env {env} choice channel closed"))?;
                 pending[env] = Some(PendingAct {
                     t,
                     scalars: row.scalars,
                     logp: row.logp,
                     value: row.value,
+                    hidden_in: row.hidden_in,
+                    context: row.context,
                 });
             }
         }
@@ -2285,20 +2439,27 @@ fn collect_rollout_ready(
         let action = pending[env]
             .take()
             .ok_or_else(|| anyhow!("env {env} published without an action in flight"))?;
-        let (next_obs, reward, done, info) =
-            message.result.map_err(|error| anyhow!("env {env}: {error}"))?;
-        let prev_obs = std::mem::replace(&mut actor.cur_obs[env], next_obs);
-        episode_slots.insert(action.t, env, info)?;
+        let transition = message.result.map_err(|error| anyhow!("env {env}: {error}"))?;
+        let prev_obs = std::mem::replace(&mut actor.cur_obs[env], transition.next_obs);
+        if transition.done {
+            if let Some(state) = actor.recurrent.as_mut() {
+                state.reset(env)?;
+            }
+        }
+        episode_slots.insert(action.t, env, transition.info)?;
         slots.insert(
             action.t,
             env,
             Step {
                 obs: prev_obs,
+                hidden_in: action.hidden_in,
+                context: action.context,
+                outcome: transition.outcome,
                 choice: action.scalars,
                 logp: action.logp,
                 value: action.value,
-                reward: reward as f32,
-                done,
+                reward: transition.reward as f32,
+                done: transition.done,
             },
         )?;
         completed += 1;
@@ -2351,12 +2512,12 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config, policy_version: u64) ->
 
     // Prime: act+send group 0 before the step loop (matches Python's
     // `pack0 = act_group(groups[0]); vec.send_group(...)` before `for t`).
-    let (mut pack0_sc, mut pack0_lp, mut pack0_v) = act_group(actor, cfg, g0.0, g0.1)?;
+    let mut pack0 = act_group(actor, cfg, g0.0, g0.1)?;
 
     for t in 0..cfg.rollout_len {
         let mut step_row: Vec<Option<Step>> = (0..n).map(|_| None).collect();
 
-        let mut pack1: Option<(Vec<ChoiceScalars>, Vec<f32>, Vec<f32>)> = None;
+        let mut pack1: Option<Vec<ActorRow>> = None;
         if g1.0 < g1.1 {
             // Overlaps group 0 stepping (choices already in flight).
             pack1 = Some(act_group(actor, cfg, g1.0, g1.1)?);
@@ -2366,9 +2527,7 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config, policy_version: u64) ->
             actor,
             g0.0,
             g0.1,
-            &pack0_sc,
-            &pack0_lp,
-            &pack0_v,
+            &pack0,
             &mut step_row,
             &mut ep_infos,
         )?;
@@ -2376,19 +2535,15 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config, policy_version: u64) ->
         if t + 1 < cfg.rollout_len {
             // Next-step act for g0 overlaps g1 stepping when pack1 is live.
             let next = act_group(actor, cfg, g0.0, g0.1)?;
-            pack0_sc = next.0;
-            pack0_lp = next.1;
-            pack0_v = next.2;
+            pack0 = next;
         }
 
-        if let Some((sc1, lp1, v1)) = pack1.as_ref() {
+        if let Some(rows) = pack1.as_ref() {
             recv_group(
                 actor,
                 g1.0,
                 g1.1,
-                sc1,
-                lp1,
-                v1,
+                rows,
                 &mut step_row,
                 &mut ep_infos,
             )?;
@@ -2532,15 +2687,15 @@ fn run_eval(
         }
         for (bi, &ei) in pending.iter().enumerate() {
             let _ = bi;
-            let (next_obs, _reward, _done, info) = workers[ei]
+            let transition = workers[ei]
                 .obs_rx
                 .as_ref()
                 .ok_or_else(|| anyhow!("eval env {ei} has no obs receiver"))?
                 .recv()
                 .map_err(|_| anyhow!("eval env {ei} obs channel closed"))?
                 .map_err(|e| anyhow!("eval env {ei}: {e}"))?;
-            cur_obs[ei] = next_obs;
-            if let Some(info) = info {
+            cur_obs[ei] = transition.next_obs;
+            if let Some(info) = transition.info {
                 results[ei] = Some(info);
             }
         }
@@ -3361,6 +3516,9 @@ fn build_actor_shard(
         workers.push(worker);
         cur_obs.push(obs);
     }
+    let recurrent = cfg
+        .recurrent_policy
+        .then(|| ActorRecurrentState::new(workers.len(), cfg.recurrent_hidden_size, device));
     Ok(ActorShard {
         device,
         workers,
@@ -3369,6 +3527,7 @@ fn build_actor_shard(
         compact_host_arena: Arc::new(crate::vecenv::CompactHostArena::default()),
         vs,
         policy,
+        recurrent,
         ae,
         terrain_cache: crate::ae::TerrainDeviceCache::new_persistent_actor(device),
     })
@@ -5189,6 +5348,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 compact_host_arena: Arc::new(crate::vecenv::CompactHostArena::default()),
                 vs: actor_vs,
                 policy: actor_policy,
+                recurrent: None,
                 ae: actor_ae,
                 terrain_cache: crate::ae::TerrainDeviceCache::new(device),
             });
@@ -6430,6 +6590,8 @@ mod persistent_actor_tests {
             compact_rollout: false,
             pipeline_groups: false,
             persistent_actors: true,
+            recurrent_policy: false,
+            recurrent_hidden_size: 256,
             work_conserving_actors: false,
             actor_max_batch: 32,
             actor_max_wait: Duration::from_millis(2),
@@ -6460,6 +6622,7 @@ mod persistent_actor_tests {
         let (gh, gw) = (4usize, 4usize);
         let plane = gh * gw;
         PreparedObs {
+            prev_action: ActionOutcome::default(),
             compact: None,
             grid: Some(vec![0.1; policy::C_GRID as usize * plane]),
             grid_coarse: None,
@@ -6512,6 +6675,9 @@ mod persistent_actor_tests {
         let wait = ACTIONS.iter().position(|&action| action == "noop").unwrap() as i64;
         let step = |reward| Step {
             obs: parity_obs(),
+            hidden_in: Vec::new(),
+            context: ActionOutcome::default(),
+            outcome: ActionOutcome::default(),
             choice: ChoiceScalars {
                 action: wait,
                 player_slot: -1,

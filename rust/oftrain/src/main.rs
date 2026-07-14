@@ -8,6 +8,7 @@ mod metrics;
 #[cfg(feature = "native-engine")]
 mod native;
 mod policy;
+mod recurrent;
 mod train;
 mod vecenv;
 
@@ -260,6 +261,15 @@ struct Args {
     /// is disabled without changing ownership mode.
     #[arg(long, default_value_t = false)]
     persistent_actors: bool,
+
+    /// Enable per-environment recurrent policy state. Requires persistent
+    /// CUDA actors. The hidden width is set by --recurrent-hidden-size.
+    #[arg(long, default_value_t = false, requires = "persistent_actors")]
+    recurrent_policy: bool,
+
+    /// Number of f32 values in each environment's recurrent hidden state.
+    #[arg(long, default_value_t = 256)]
+    recurrent_hidden_size: usize,
 
     /// Let persistent actors batch whichever envs are ready instead of
     /// waiting for fixed worker halves. Requires --persistent-actors.
@@ -654,6 +664,31 @@ mod curriculum_flag_tests {
     }
 }
 
+#[cfg(test)]
+mod recurrent_flag_tests {
+    use super::Args;
+    use clap::Parser;
+
+    #[test]
+    fn recurrent_policy_is_opt_in_and_requires_persistent_actors() {
+        let defaults = Args::try_parse_from(["oftrain"]).unwrap();
+        assert!(!defaults.recurrent_policy);
+        assert_eq!(defaults.recurrent_hidden_size, 256);
+        assert!(Args::try_parse_from(["oftrain", "--recurrent-policy"]).is_err());
+
+        let enabled = Args::try_parse_from([
+            "oftrain",
+            "--persistent-actors",
+            "--recurrent-policy",
+            "--recurrent-hidden-size",
+            "128",
+        ])
+        .unwrap();
+        assert!(enabled.recurrent_policy);
+        assert_eq!(enabled.recurrent_hidden_size, 128);
+    }
+}
+
 /// Mirrors PyTorch's own `torch/__init__.py::_preload_cuda_deps()`: when
 /// libtorch is a "split" pip wheel install (each CUDA component - cublas,
 /// cudnn, cusparse, nccl, etc. - its own separate `nvidia-*-cu12` package,
@@ -790,6 +825,14 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or(args.num_envs);
     tch::manual_seed(0);
     let device = parse_device(&args.device);
+    anyhow::ensure!(
+        !args.recurrent_policy || matches!(device, Device::Cuda(_)),
+        "--recurrent-policy requires a CUDA --device"
+    );
+    anyhow::ensure!(
+        args.recurrent_hidden_size > 0,
+        "--recurrent-hidden-size must be positive"
+    );
     let eval_device = resolve_eval_device(
         args.eval_device.as_deref(),
         args.async_eval,
@@ -890,6 +933,8 @@ fn main() -> anyhow::Result<()> {
         compact_rollout: args.compact_rollout,
         pipeline_groups: args.pipeline_groups,
         persistent_actors: args.persistent_actors,
+        recurrent_policy: args.recurrent_policy,
+        recurrent_hidden_size: args.recurrent_hidden_size,
         work_conserving_actors: args.work_conserving_actors,
         actor_max_batch: args.actor_max_batch,
         actor_max_wait: std::time::Duration::from_millis(args.actor_max_wait_ms),
