@@ -6674,6 +6674,17 @@ pub fn run(mut cfg: Config) -> Result<()> {
         );
     }
     cfg.num_envs = resolved;
+    // main() may default `--min-envs` from `stage_env_targets[--stage]`
+    // (often an early-stage 24) before this resume/stage-floor resolve.
+    // Snap the autoscale floor down to the live startup count so growth
+    // steps from reality instead of jumping to a stale stage-5 default.
+    if cfg.auto_scale_envs && cfg.min_envs > cfg.num_envs {
+        println!(
+            "[autoscale] lowering min_envs {} -> {} to match resolved startup count",
+            cfg.min_envs, cfg.num_envs
+        );
+        cfg.min_envs = cfg.num_envs;
+    }
 
     let metrics = MetricsWriter::create(&cfg.ckpt_dir)?;
     println!("[train] metrics -> {}/metrics.jsonl", cfg.ckpt_dir);
