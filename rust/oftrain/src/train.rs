@@ -2519,9 +2519,17 @@ pub fn run_benchmark(cfg: BenchmarkConfig<'_>) -> Result<()> {
                     "strength": info.reward_components.strength,
                     "strength_delta": info.reward_components.strength_delta,
                     "dominance": info.reward_components.dominance,
+                    "action_churn": info.reward_components.action_churn,
                     "waste": info.reward_components.waste,
                     "death": info.reward_components.death,
                     "terminal": info.reward_components.terminal,
+                },
+                "action_pair_counts": {
+                    "boat_cancel_boat": info.action_pair_counts.boat_cancel_boat,
+                    "embargo_embargo_stop": info.action_pair_counts.embargo_embargo_stop,
+                    "attack_retreat": info.action_pair_counts.attack_retreat,
+                    "retreat_attack": info.action_pair_counts.retreat_attack,
+                    "total": info.action_pair_counts.total(),
                 },
             })
         })
@@ -5387,14 +5395,19 @@ pub fn run(mut cfg: Config) -> Result<()> {
             for info in &result.ep_infos {
                 if debug_eps {
                     eprintln!(
-                        "[ep] reward={:.3} components[str={:.3} delta={:.3} dom={:.3} waste={:.3} death={:.3} terminal={:.3}] len={} tiles={:.1} tick={} place={}/{} score={:.3} won={} wasted={} stage={} rehearsal={} map={}",
+                        "[ep] reward={:.3} components[str={:.3} delta={:.3} dom={:.3} churn={:.3} waste={:.3} death={:.3} terminal={:.3}] churn_pairs[boat_cancel={} embargo_stop={} attack_retreat={} retreat_attack={}] len={} tiles={:.1} tick={} place={}/{} score={:.3} won={} wasted={} stage={} rehearsal={} map={}",
                         info.reward,
                         info.reward_components.strength,
                         info.reward_components.strength_delta,
                         info.reward_components.dominance,
+                        info.reward_components.action_churn,
                         info.reward_components.waste,
                         info.reward_components.death,
                         info.reward_components.terminal,
+                        info.action_pair_counts.boat_cancel_boat,
+                        info.action_pair_counts.embargo_embargo_stop,
+                        info.action_pair_counts.attack_retreat,
+                        info.action_pair_counts.retreat_attack,
                         info.length,
                         info.final_tiles,
                         info.final_tick,
@@ -5418,9 +5431,15 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     "reward/strength": info.reward_components.strength,
                     "reward/strength_delta": info.reward_components.strength_delta,
                     "reward/dominance": info.reward_components.dominance,
+                    "reward/action_churn": info.reward_components.action_churn,
                     "reward/waste": info.reward_components.waste,
                     "reward/death": info.reward_components.death,
                     "reward/terminal": info.reward_components.terminal,
+                    "action_pairs/boat_cancel_boat": info.action_pair_counts.boat_cancel_boat,
+                    "action_pairs/embargo_embargo_stop": info.action_pair_counts.embargo_embargo_stop,
+                    "action_pairs/attack_retreat": info.action_pair_counts.attack_retreat,
+                    "action_pairs/retreat_attack": info.action_pair_counts.retreat_attack,
+                    "action_pairs/total": info.action_pair_counts.total(),
                 })) {
                     eprintln!("[train] WARNING: episode reward-component log failed: {e:#}");
                 }
@@ -6204,6 +6223,9 @@ mod persistent_actor_tests {
                 v81_dominant_loss: false,
                 v81_dominance_threshold: 0.55,
                 v81_delta_loss_dominant: 5.25,
+                v81_churn_coef: 0.0,
+                v81_churn_window: 2,
+                v81_churn_min_stage: 4,
             },
             lambda: 0.95,
             clip: 0.2,

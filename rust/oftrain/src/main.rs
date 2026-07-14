@@ -91,6 +91,18 @@ struct Args {
     #[arg(long, default_value_t = 5.25)]
     v81_delta_loss_dominant: f64,
 
+    /// Penalty for reversing a matching recent action (0 disables).
+    #[arg(long, default_value_t = 0.0)]
+    v81_churn_coef: f64,
+
+    /// Number of prior decisions searched for a matching inverse action.
+    #[arg(long, default_value_t = 2)]
+    v81_churn_window: usize,
+
+    /// First curriculum stage where the action-churn penalty may apply.
+    #[arg(long, default_value_t = 4)]
+    v81_churn_min_stage: usize,
+
     #[arg(long, default_value_t = 0.95)]
     lambda_: f32,
 
@@ -679,6 +691,10 @@ fn main() -> anyhow::Result<()> {
         args.v81_delta_loss_dominant.is_finite() && args.v81_delta_loss_dominant >= 0.0,
         "--v81-delta-loss-dominant must be finite and non-negative"
     );
+    anyhow::ensure!(
+        args.v81_churn_coef.is_finite() && args.v81_churn_coef >= 0.0,
+        "--v81-churn-coef must be finite and non-negative"
+    );
     let reward_config = ofcore::curriculum::RewardConfig {
         gamma: args.gamma as f64,
         v81_dom_coef: args.v81_dom_coef,
@@ -687,6 +703,9 @@ fn main() -> anyhow::Result<()> {
         v81_dominant_loss: args.v81_dominant_loss,
         v81_dominance_threshold: args.v81_dominance_threshold,
         v81_delta_loss_dominant: args.v81_delta_loss_dominant,
+        v81_churn_coef: args.v81_churn_coef,
+        v81_churn_window: args.v81_churn_window,
+        v81_churn_min_stage: args.v81_churn_min_stage,
     };
     let stage_count = ofcore::curriculum::stages().len();
     anyhow::ensure!(args.stage < stage_count, "--stage {} is outside 0..{}", args.stage, stage_count - 1);
@@ -711,7 +730,8 @@ fn main() -> anyhow::Result<()> {
     println!("[oftrain] device={device:?}");
     println!(
         "[oftrain] v81 reward: min_stage={} K_DOM={} gamma={} phi_clamp={} \
-         dominant_loss={} threshold={} W_DELTA_LOSS_DOMINANT={}",
+         dominant_loss={} threshold={} W_DELTA_LOSS_DOMINANT={} \
+         churn_coef={} churn_window={} churn_min_stage={}",
         reward_config.v81_min_stage,
         reward_config.v81_dom_coef,
         reward_config.gamma,
@@ -719,6 +739,9 @@ fn main() -> anyhow::Result<()> {
         reward_config.v81_dominant_loss,
         reward_config.v81_dominance_threshold,
         reward_config.v81_delta_loss_dominant,
+        reward_config.v81_churn_coef,
+        reward_config.v81_churn_window,
+        reward_config.v81_churn_min_stage,
     );
     if args.async_eval {
         match eval_device {
