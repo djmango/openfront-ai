@@ -95,6 +95,34 @@ impl TradeShipExecution {
         exec
     }
 
+    /// Test helper for the deleted-src-port same-owner delete path (TS `Unit.owner()`
+    /// retains the last owner after `delete()`).
+    #[cfg(test)]
+    pub(crate) fn new_for_test_with_src_port(
+        orig_owner_small_id: u16,
+        src_port_unit_id: i32,
+        src_port_owner_small_id: u16,
+        dst_port_unit_id: i32,
+        dst_port_owner_small_id: u16,
+        ship_unit_id: i32,
+        was_captured: bool,
+    ) -> Self {
+        Self {
+            orig_owner_small_id,
+            src_port_unit_id,
+            src_port_owner_small_id: Some(src_port_owner_small_id),
+            dst_port_unit_id,
+            dst_port_owner_small_id: Some(dst_port_owner_small_id),
+            ship_unit_id: Some(ship_unit_id),
+            path: Vec::new(),
+            path_idx: 0,
+            path_dst: None,
+            tiles_traveled: 0,
+            was_captured,
+            active: true,
+        }
+    }
+
     pub fn destination_port_unit_id(&self) -> i32 {
         self.dst_port_unit_id
     }
@@ -236,7 +264,15 @@ impl Execution for TradeShipExecution {
 
         // TS: `dstPortOwner.id() === srcPort.owner().id()` - the src port (possibly
         // captured via land conquest since spawn) now belongs to the dst owner too.
-        if dst_owner.is_some() && game.find_unit_owner(self.src_port_unit_id) == dst_owner {
+        //
+        // TS `UnitImpl.owner()` still returns the last owner after `delete()`; the unit
+        // is only removed from the player's unit list. Native `find_unit_owner` returns
+        // None for removed units, so fall back to the cached owner to match TS
+        // (`curr-b150-s14-britannia` TradeShip 3386 @ tick ~11323).
+        let src_owner = game
+            .find_unit_owner(self.src_port_unit_id)
+            .or(self.src_port_owner_small_id);
+        if dst_owner.is_some() && src_owner == dst_owner {
             game.remove_unit(ship_owner, uid);
             self.active = false;
             return;
@@ -512,6 +548,49 @@ mod piracy_tests {
         assert!(
             game.find_unit_owner(ship_id).is_none(),
             "ship removed on complete"
+        );
+    }
+
+    /// TS `srcPort.owner()` still returns the last owner after the port unit is
+    /// deleted. When that stale owner equals the (possibly newly captured) dst
+    /// owner, the voyage must be deleted — not redirected via `wasCaptured`.
+    /// Regression: `curr-b150-s14-britannia` TradeShip 3386 @ ~11323.
+    #[test]
+    fn deleted_src_port_uses_cached_owner_for_same_owner_delete() {
+        let mut game = water_game(40, 40);
+        let mayo = add_nation(&mut game, "mayo");
+        let hampshire = add_nation(&mut game, "hampshire");
+
+        let src_port = game.build_unit(mayo, unit_type::PORT, game.ref_xy(2, 2));
+        let dst_port = game.build_unit(hampshire, unit_type::PORT, game.ref_xy(20, 20));
+        let _other_hampshire_port =
+            game.build_unit(hampshire, unit_type::PORT, game.ref_xy(22, 22));
+        let ship_id = game.build_unit(hampshire, unit_type::TRADE_SHIP, game.ref_xy(10, 10));
+
+        let mut exec = TradeShipExecution::new_for_test_with_src_port(
+            mayo,
+            src_port,
+            mayo,
+            dst_port,
+            hampshire,
+            ship_id,
+            true, // was_captured — without the cache fallback this redirects instead of deleting
+        );
+
+        game.remove_unit(mayo, src_port);
+        assert_eq!(game.find_unit_owner(src_port), None);
+        game.capture_unit(hampshire, mayo, dst_port);
+        assert_eq!(game.find_unit_owner(dst_port), Some(mayo));
+
+        exec.tick(&mut game, 1);
+
+        assert!(
+            !exec.is_active(),
+            "same-owner delete must fire using cached src owner"
+        );
+        assert!(
+            game.find_unit_owner(ship_id).is_none(),
+            "trade ship must be removed, not redirected to another Hampshire port"
         );
     }
 }
