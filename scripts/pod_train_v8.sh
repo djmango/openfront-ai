@@ -44,7 +44,12 @@ V83_MODE="${V83_MODE:-0}"
 V84_MODE="${V84_MODE:-0}"
 V85_MODE="${V85_MODE:-0}"
 V86_MODE="${V86_MODE:-0}"
-if [ "$V86_MODE" = "1" ]; then
+# Parallel sparse-win experiment (not a V8.x migrate). Fresh stage-0 ladder.
+V9_MODE="${V9_MODE:-0}"
+if [ "$V9_MODE" = "1" ]; then
+  RUN_NAME="${RUN_NAME:-ppo_v9}"
+  NUM_GPUS="${NUM_GPUS:-4}"
+elif [ "$V86_MODE" = "1" ]; then
   RUN_NAME="${RUN_NAME:-ppo_v86}"
   NUM_GPUS="${NUM_GPUS:-4}"
 elif [ "$V85_MODE" = "1" ]; then
@@ -64,9 +69,10 @@ V81_CURRICULUM="${V81_CURRICULUM:-0}"
 # Envs per GPU/shard. Live A40 A/Bs found 48 faster than 64 once the
 # persistent compact path was enabled (64 increased stage-2 tail latency).
 # V8.4 doubles rollout length, so default fewer envs to keep VRAM in band.
+# V9 starts at the small-map 24-env floor (schedule env targets take over).
 if [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ]; then
   NUM_ENVS="${NUM_ENVS:-16}"
-elif [ "$V81_CURRICULUM" = "1" ] || [ "$V83_MODE" = "1" ]; then
+elif [ "$V9_MODE" = "1" ] || [ "$V81_CURRICULUM" = "1" ] || [ "$V83_MODE" = "1" ]; then
   NUM_ENVS="${NUM_ENVS:-24}"
 else
   NUM_ENVS="${NUM_ENVS:-48}"
@@ -75,7 +81,7 @@ STAGE_ENV_TARGETS="${STAGE_ENV_TARGETS:-}"
 # Persistent owners cannot live-spawn env workers; autoscale grows via the same
 # restart_request.json path as stage env targets. Default on for V8.3+ so late
 # stages (floors of 8–12) can climb toward GPU util without shortening episodes.
-if [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ] || [ "$V83_MODE" = "1" ]; then
+if [ "$V9_MODE" = "1" ] || [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ] || [ "$V83_MODE" = "1" ]; then
   AUTO_SCALE_ENVS="${AUTO_SCALE_ENVS:-1}"
 else
   AUTO_SCALE_ENVS="${AUTO_SCALE_ENVS:-0}"
@@ -84,7 +90,7 @@ MAX_ENVS="${MAX_ENVS:-20}"
 TARGET_GPU_UTIL="${TARGET_GPU_UTIL:-0.85}"
 AUTOSCALE_CHECK_EVERY="${AUTOSCALE_CHECK_EVERY:-5}"
 AUTOSCALE_STEP="${AUTOSCALE_STEP:-2}"
-if [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ]; then
+if [ "$V9_MODE" = "1" ] || [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ]; then
   ROLLOUT_LEN="${ROLLOUT_LEN:-64}"
   BPTT_CHUNK_LEN="${BPTT_CHUNK_LEN:-32}"
 else
@@ -100,6 +106,7 @@ MINIBATCHES=$((NUM_ENVS * ROLLOUT_LEN / MINIBATCH_SIZE))
 if [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ] || [ "$V83_MODE" = "1" ]; then
   STAGE="${STAGE:-5}"
 else
+  # V9 and legacy/V8.0 start at stage 0 (fresh ladder).
   STAGE="${STAGE:-0}"
 fi
 # Fraction (0.0-1.0) of env workers that run the real Node/TS engine
@@ -112,7 +119,7 @@ NODE_FRACTION="${NODE_FRACTION:-0}"
 # persistent owner threads, rollout payloads cross threads as compact host
 # data, and two env groups overlap stepping with actor inference. Keep
 # fp16-rollout opt-in until it receives the same extended CUDA soak.
-if [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ]; then
+if [ "$V9_MODE" = "1" ] || [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ]; then
   EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --fp16-rollout --persistent-actors --work-conserving-actors --pipeline-groups=true --recurrent-policy --bptt-chunk-len $BPTT_CHUNK_LEN --ckpt-every 5 --eval-every 0 --log-every 1 --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
 elif [ "$V83_MODE" = "1" ]; then
   EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --fp16-rollout --persistent-actors --work-conserving-actors --pipeline-groups=true --recurrent-policy --bptt-chunk-len 16 --ckpt-every 5 --eval-every 0 --log-every 1 --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
@@ -120,7 +127,13 @@ else
   EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --persistent-actors --pipeline-groups=true --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
 fi
 V81_ARGS=""
-if [ "$V86_MODE" = "1" ]; then
+if [ "$V9_MODE" = "1" ]; then
+  # V9: parallel sparse-win experiment. Extremely gradual 25-stage ladder with
+  # 0.90–0.975 graduation gates; reward is terminal +1/-1 only (no strength /
+  # boat / tempo / closeout shaping). Longer horizon (gamma=0.9997) for credit
+  # assignment under sparse terminals. Fresh run: no V8.x migrate.
+  V81_ARGS="--v9-curriculum --v9-sparse-win --gamma 0.9997 --ret-clip 2"
+elif [ "$V86_MODE" = "1" ]; then
   # V8.6: attack-fair fixes on top of V8.5. Dominance threshold matches tempo
   # (0.30), softened delta loss, symmetric loss while attacking, sticky combat
   # without reinforce-refresh / churn stack, bigger death penalty.
