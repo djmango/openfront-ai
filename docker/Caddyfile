@@ -1,32 +1,38 @@
 {
-  auto_https off
-  admin off
+	auto_https off
+	admin off
 }
 
 :8086 {
-  handle /archive/* {
-    uri strip_prefix /archive
-    reverse_proxy 127.0.0.1:8987
-  }
-  handle /play/debug/* {
-    reverse_proxy 127.0.0.1:8988
-  }
-  handle /play {
-    reverse_proxy 127.0.0.1:8988
-  }
-  handle /watch {
-    reverse_proxy 127.0.0.1:8988
-  }
-  handle /replay {
-    reverse_proxy 127.0.0.1:8988
-  }
-  handle /status {
-    reverse_proxy 127.0.0.1:8988
-  }
-  handle / {
-    reverse_proxy 127.0.0.1:8988
-  }
-  handle {
-    reverse_proxy 127.0.0.1:9000
-  }
+	@icons path /favicon.ico /favicon.png /favicon-16.png /favicon-32.png /favicon-48.png /favicon-180.png /favicon-192.png /favicon-512.png /apple-touch-icon.png /icon-1024.png
+	handle @icons {
+		root * /app/docker/static
+		file_server
+	}
+
+	handle /archive/* {
+		uri strip_prefix /archive
+		reverse_proxy 127.0.0.1:8987
+	}
+	handle /play/debug/* {
+		reverse_proxy 127.0.0.1:8988
+	}
+	handle /play {
+		reverse_proxy 127.0.0.1:8988
+	}
+	handle /watch {
+		reverse_proxy 127.0.0.1:8988
+	}
+	handle /replay {
+		reverse_proxy 127.0.0.1:8988
+	}
+	handle /status {
+		reverse_proxy 127.0.0.1:8988
+	}
+	handle / {
+		reverse_proxy 127.0.0.1:8988
+	}
+	handle {
+		reverse_proxy 127.0.0.1:9000
+	}
 }

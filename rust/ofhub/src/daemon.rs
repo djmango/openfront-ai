@@ -295,13 +295,18 @@ async fn generate_showcase(
             }
         }
     }
+    // Keep every clip URL so landing/watch aren't stuck on a single map.
+    let hero_urls: Vec<Value> = clip_infos
+        .iter()
+        .filter_map(|c| c.get("url").cloned())
+        .collect();
+    if !hero_urls.is_empty() {
+        state["hero_clips"] = Value::Array(hero_urls);
+    }
     if let Some(featured) = featured_showcase_entry(&state) {
         state["game_id"] = featured.get("game_id").cloned().unwrap_or(Value::Null);
         state["map"] = featured.get("map").cloned().unwrap_or(Value::Null);
         state["record"] = featured.get("record").cloned().unwrap_or(Value::Null);
-        if let Some(url) = featured.get("url") {
-            state["hero_clips"] = json!([url]);
-        }
     }
     write_json(&state_path(), &state)?;
     let rev = hf::policy_revision(client, run_name).await?;
