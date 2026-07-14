@@ -21,6 +21,18 @@ pub const K_ECO: f64 = 0.25;
 pub const K_BUILD: f64 = 0.15;
 
 pub const DOMINANCE_EPS: f64 = 1e-9;
+pub const V83_CLOSEOUT_SHARE_START: f64 = 0.45;
+pub const V83_CLOSEOUT_SHARE_FULL: f64 = 0.80;
+pub const V83_REWARD_PROFILE: &str = "v8.3-closeout-v1";
+pub const V84_REWARD_PROFILE: &str = "v8.4-boat-tempo-v1";
+pub const V85_REWARD_PROFILE: &str = "v8.5-win-urgency-v1";
+pub const V86_REWARD_PROFILE: &str = "v8.6-attack-fair-v1";
+/// Relation score bands mirror engine `Relation` / TS `PlayerImpl.relation()`.
+pub const RELATION_HOSTILE_LT: f64 = -50.0;
+pub const RELATION_DISTRUSTFUL_LT: f64 = 0.0;
+pub const RELATION_NEUTRAL_LT: f64 = 50.0;
+/// `feat::unit_class("Transport")`.
+pub const TRANSPORT_UNIT_CLASS: usize = 7;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RewardConfig {
@@ -34,6 +46,44 @@ pub struct RewardConfig {
     pub v81_churn_coef: f64,
     pub v81_churn_window: usize,
     pub v81_churn_min_stage: usize,
+    pub v83_close_coef: f64,
+    pub v83_churn_coef: f64,
+    /// Reward when a boat resolves into a sourced land attack (enemy or TN).
+    pub v84_boat_useful: f64,
+    /// Penalty when a boat is destroyed without landing an attack.
+    pub v84_boat_destroyed: f64,
+    /// Mild penalty when a boat is cancelled (churn already covers the pair).
+    pub v84_boat_cancelled: f64,
+    /// Penalty when a boat returns to own shore without invading.
+    pub v84_boat_own_shore: f64,
+    pub v84_boat_min_stage: usize,
+    /// Late-game tempo pressure while dominant (finish the win).
+    pub v84_tempo_coef: f64,
+    pub v84_tempo_min_stage: usize,
+    /// Extra terminal bonus for faster wins: coef * (1 - tick/max_ticks).
+    pub v84_fast_win_coef: f64,
+    /// V8.5: land/strength share threshold for tempo (0 = use v81_dominance_threshold).
+    pub v85_tempo_share_threshold: f64,
+    /// Extra terminal win bonus on top of W_WIN (win must dominate shaping).
+    pub v85_extra_win_bonus: f64,
+    /// Penalty for embargo_stop while still Hostile/Distrustful.
+    pub v85_embargo_bad_stop: f64,
+    /// Small reward for embargo_stop after relation recovered (Neutral+).
+    pub v85_embargo_good_stop: f64,
+    pub v85_embargo_min_stage: usize,
+    /// Penalty for retreating an attack that was just opened on the same target.
+    pub v85_premature_retreat: f64,
+    /// Penalty for re-attacking a target just after retreating.
+    pub v85_thrash_reengage: f64,
+    pub v85_combat_min_stage: usize,
+    /// V8.6: override `W_DELTA_LOSS` when > 0 (soften attack variance tax).
+    pub v86_delta_loss: f64,
+    /// V8.6: while the agent has an open attack, price losses like gains.
+    pub v86_attack_symmetric_loss: bool,
+    /// V8.6: do not stack flat attack↔retreat churn on top of combat outcomes.
+    pub v86_skip_combat_churn: bool,
+    /// V8.6: override `W_DEATH` when > 0 (death must hurt more than mid-place).
+    pub v86_death_penalty: f64,
 }
 
 impl RewardConfig {
@@ -54,6 +104,95 @@ impl RewardConfig {
             && self.v81_churn_coef != 0.0
             && self.v81_churn_window != 0
     }
+
+    pub fn boat_outcome_active(self, stage: usize) -> bool {
+        stage >= self.v84_boat_min_stage
+            && (self.v84_boat_useful != 0.0
+                || self.v84_boat_destroyed != 0.0
+                || self.v84_boat_cancelled != 0.0
+                || self.v84_boat_own_shore != 0.0)
+    }
+
+    pub fn tempo_active(self, stage: usize) -> bool {
+        stage >= self.v84_tempo_min_stage && self.v84_tempo_coef != 0.0
+    }
+
+    pub fn v84_reward_active(self) -> bool {
+        self.v84_boat_useful != 0.0
+            || self.v84_boat_destroyed != 0.0
+            || self.v84_boat_cancelled != 0.0
+            || self.v84_boat_own_shore != 0.0
+            || self.v84_tempo_coef != 0.0
+            || self.v84_fast_win_coef != 0.0
+    }
+
+    pub fn tempo_share_threshold(self) -> f64 {
+        if self.v85_tempo_share_threshold > 0.0 {
+            self.v85_tempo_share_threshold
+        } else {
+            self.v81_dominance_threshold
+        }
+    }
+
+    pub fn embargo_outcome_active(self, stage: usize) -> bool {
+        stage >= self.v85_embargo_min_stage
+            && (self.v85_embargo_bad_stop != 0.0 || self.v85_embargo_good_stop != 0.0)
+    }
+
+    pub fn combat_outcome_active(self, stage: usize) -> bool {
+        stage >= self.v85_combat_min_stage
+            && (self.v85_premature_retreat != 0.0 || self.v85_thrash_reengage != 0.0)
+    }
+
+    pub fn v85_reward_active(self) -> bool {
+        self.v85_tempo_share_threshold > 0.0
+            || self.v85_extra_win_bonus != 0.0
+            || self.v85_embargo_bad_stop != 0.0
+            || self.v85_embargo_good_stop != 0.0
+            || self.v85_premature_retreat != 0.0
+            || self.v85_thrash_reengage != 0.0
+    }
+
+    pub fn v86_reward_active(self) -> bool {
+        self.v86_delta_loss > 0.0
+            || self.v86_attack_symmetric_loss
+            || self.v86_skip_combat_churn
+            || self.v86_death_penalty > 0.0
+    }
+
+    /// V8.4 boat/tempo knobs and/or V8.5 win-urgency knobs.
+    pub fn v84_or_v85_reward_active(self) -> bool {
+        self.v84_reward_active() || self.v85_reward_active()
+    }
+
+    pub fn delta_loss(self) -> f64 {
+        if self.v86_delta_loss > 0.0 {
+            self.v86_delta_loss
+        } else {
+            W_DELTA_LOSS
+        }
+    }
+
+    pub fn death_penalty(self) -> f64 {
+        if self.v86_death_penalty > 0.0 {
+            self.v86_death_penalty
+        } else {
+            W_DEATH
+        }
+    }
+
+    /// Active V8.3+ reward profile id for TrainState sidecars.
+    pub fn reward_profile_id(self) -> &'static str {
+        if self.v86_reward_active() {
+            V86_REWARD_PROFILE
+        } else if self.v85_reward_active() {
+            V85_REWARD_PROFILE
+        } else if self.v84_reward_active() {
+            V84_REWARD_PROFILE
+        } else {
+            V83_REWARD_PROFILE
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -61,7 +200,12 @@ pub struct RewardComponents {
     pub strength: f64,
     pub strength_delta: f64,
     pub dominance: f64,
+    pub closeout: f64,
     pub action_churn: f64,
+    pub boat_outcome: f64,
+    pub tempo: f64,
+    pub embargo_outcome: f64,
+    pub combat_outcome: f64,
     pub waste: f64,
     pub death: f64,
     pub terminal: f64,
@@ -72,10 +216,154 @@ impl RewardComponents {
         self.strength += other.strength;
         self.strength_delta += other.strength_delta;
         self.dominance += other.dominance;
+        self.closeout += other.closeout;
         self.action_churn += other.action_churn;
+        self.boat_outcome += other.boat_outcome;
+        self.tempo += other.tempo;
+        self.embargo_outcome += other.embargo_outcome;
+        self.combat_outcome += other.combat_outcome;
         self.waste += other.waste;
         self.death += other.death;
         self.terminal += other.terminal;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoatOutcome {
+    UsefulLanding,
+    OwnShoreReturn,
+    Cancelled,
+    Destroyed,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BoatOutcomeCounts {
+    pub useful_landing: u64,
+    pub own_shore_return: u64,
+    pub cancelled: u64,
+    pub destroyed: u64,
+}
+
+impl BoatOutcomeCounts {
+    pub fn record(&mut self, outcome: BoatOutcome) {
+        match outcome {
+            BoatOutcome::UsefulLanding => self.useful_landing += 1,
+            BoatOutcome::OwnShoreReturn => self.own_shore_return += 1,
+            BoatOutcome::Cancelled => self.cancelled += 1,
+            BoatOutcome::Destroyed => self.destroyed += 1,
+        }
+    }
+
+    pub fn total(self) -> u64 {
+        self.useful_landing + self.own_shore_return + self.cancelled + self.destroyed
+    }
+}
+
+/// Classify a resolved transport. Strength already counts fielded troops, so
+/// this is a small categorical signal for the tile/action heads — not a
+/// re-pricing of troop deltas.
+///
+/// `has_sourced_attack` covers landings that merge into an already-open
+/// sourced attack (no *new* attack id): without it those resolve as
+/// Destroyed because refund ≈ 0.
+pub fn classify_boat_resolution(
+    cancel_requested: bool,
+    committed_troops: f64,
+    troops_before: f64,
+    troops_after: f64,
+    new_sourced_attack: bool,
+    has_sourced_attack: bool,
+) -> BoatOutcome {
+    if cancel_requested {
+        return BoatOutcome::Cancelled;
+    }
+    let refund = troops_after - troops_before;
+    if new_sourced_attack
+        || (has_sourced_attack
+            && !(committed_troops > 0.0 && refund >= 0.5 * committed_troops))
+    {
+        return BoatOutcome::UsefulLanding;
+    }
+    if committed_troops > 0.0 && refund >= 0.5 * committed_troops {
+        return BoatOutcome::OwnShoreReturn;
+    }
+    BoatOutcome::Destroyed
+}
+
+pub fn boat_outcome_reward(outcome: BoatOutcome, config: RewardConfig) -> f64 {
+    match outcome {
+        BoatOutcome::UsefulLanding => config.v84_boat_useful,
+        BoatOutcome::OwnShoreReturn => config.v84_boat_own_shore,
+        BoatOutcome::Cancelled => config.v84_boat_cancelled,
+        BoatOutcome::Destroyed => config.v84_boat_destroyed,
+    }
+}
+
+/// Quadratic late-game pressure while already dominant: finish the win.
+pub fn tempo_pressure(
+    tick: i64,
+    max_ticks: i64,
+    normalized_share: f64,
+    threshold: f64,
+) -> f64 {
+    if max_ticks <= 0 || normalized_share < threshold {
+        return 0.0;
+    }
+    let late = (tick as f64 / max_ticks as f64).clamp(0.0, 1.0);
+    late * late
+}
+
+/// Terminal bonus for winning earlier in the episode budget.
+pub fn fast_win_bonus(won: bool, tick: i64, max_ticks: i64, coef: f64) -> f64 {
+    if !won || coef == 0.0 || max_ticks <= 0 {
+        return 0.0;
+    }
+    coef * (1.0 - (tick as f64 / max_ticks as f64).clamp(0.0, 1.0))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelationBand {
+    Hostile,
+    Distrustful,
+    Neutral,
+    Friendly,
+}
+
+pub fn relation_band(value: f64) -> RelationBand {
+    if value < RELATION_HOSTILE_LT {
+        RelationBand::Hostile
+    } else if value < RELATION_DISTRUSTFUL_LT {
+        RelationBand::Distrustful
+    } else if value < RELATION_NEUTRAL_LT {
+        RelationBand::Neutral
+    } else {
+        RelationBand::Friendly
+    }
+}
+
+pub fn relation_is_hostileish(band: RelationBand) -> bool {
+    matches!(band, RelationBand::Hostile | RelationBand::Distrustful)
+}
+
+/// Embargo-stop outcome vs current relation to the target (expert sticky Hostile).
+pub fn embargo_stop_outcome_reward(relation_value: f64, config: RewardConfig) -> f64 {
+    if relation_is_hostileish(relation_band(relation_value)) {
+        config.v85_embargo_bad_stop
+    } else {
+        config.v85_embargo_good_stop
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CombatOutcome {
+    PrematureRetreat,
+    ThrashReengage,
+}
+
+pub fn combat_outcome_reward(outcome: CombatOutcome, config: RewardConfig) -> f64 {
+    match outcome {
+        CombatOutcome::PrematureRetreat => config.v85_premature_retreat,
+        CombatOutcome::ThrashReengage => config.v85_thrash_reengage,
     }
 }
 
@@ -209,6 +497,24 @@ pub fn action_churn_penalty(
     }
 }
 
+pub fn v83_action_churn_penalty(
+    reversal: Option<InverseActionPair>,
+    stage: usize,
+    land_share: f64,
+    config: RewardConfig,
+) -> f64 {
+    if reversal.is_some()
+        && stage >= 5
+        && land_share >= V83_CLOSEOUT_SHARE_START
+        && config.v83_churn_coef != 0.0
+        && config.v81_churn_window != 0
+    {
+        -config.v83_churn_coef
+    } else {
+        action_churn_penalty(reversal, stage, config)
+    }
+}
+
 /// Per-environment Φ(current), reset at each new episode.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DominanceShaper {
@@ -230,6 +536,21 @@ impl DominanceShaper {
         self.prior = next;
         finite_or_zero(increment)
     }
+}
+
+/// V8.3 land-share closeout potential. `land_total` is fixed at reset.
+pub fn land_share(agent_tiles: f64, land_total: i64) -> f64 {
+    if !agent_tiles.is_finite() || land_total <= 0 {
+        return 0.0;
+    }
+    (agent_tiles / land_total as f64).clamp(0.0, 1.0)
+}
+
+pub fn closeout_potential(share: f64) -> f64 {
+    let x = ((finite_or_zero(share).clamp(0.0, 1.0) - V83_CLOSEOUT_SHARE_START)
+        / (V83_CLOSEOUT_SHARE_FULL - V83_CLOSEOUT_SHARE_START))
+        .clamp(0.0, 1.0);
+    x * x
 }
 
 pub const WINDOW: usize = 40;
@@ -315,6 +636,7 @@ pub enum CurriculumSchedule {
     V81,
     V811,
     V82,
+    V83,
 }
 
 impl CurriculumSchedule {
@@ -324,6 +646,7 @@ impl CurriculumSchedule {
             Self::V81 => "v8.1",
             Self::V811 => "v8.1.1",
             Self::V82 => "v8.2",
+            Self::V83 => "v8.3",
         }
     }
 
@@ -333,6 +656,7 @@ impl CurriculumSchedule {
             "v8.1" => Some(Self::V81),
             "v8.1.1" => Some(Self::V811),
             "v8.2" => Some(Self::V82),
+            "v8.3" => Some(Self::V83),
             _ => None,
         }
     }
@@ -350,8 +674,8 @@ pub const V811_ENV_TARGETS: [usize; 12] = [24, 24, 24, 24, 24, 24, 24, 12, 10, 8
 /// V8.2 envs per GPU/shard. The eight-map bridge can sustain 16; the broad
 /// pool uses 12/10/8 as player count and simulation cost increase. Stage 8
 /// safely grows back to 12 when the player count resets from 80 to 30.
-pub const V82_ENV_TARGETS: [usize; 14] =
-    [24, 24, 24, 24, 24, 16, 12, 10, 12, 10, 8, 8, 8, 8];
+pub const V82_ENV_TARGETS: [usize; 14] = [24, 24, 24, 24, 24, 16, 12, 10, 12, 10, 8, 8, 8, 8];
+pub const V83_ENV_TARGETS: [usize; 15] = [24, 24, 24, 24, 24, 24, 16, 12, 10, 12, 10, 8, 8, 8, 8];
 
 pub fn stages() -> Vec<Stage> {
     stages_for_schedule(CurriculumSchedule::Legacy)
@@ -491,7 +815,7 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
                 stage.win_at = gate;
             }
         }
-        CurriculumSchedule::V82 => {
+        CurriculumSchedule::V82 | CurriculumSchedule::V83 => {
             // Stages 0-4 retain the V8.1/V8.1.1 identities and gate. The
             // 30-player/eight-map Easy bridge precedes broad-pool Easy at
             // 50 and 80 players. Medium only begins after all three Easy
@@ -572,6 +896,19 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
                     win_at: 0.12,
                 },
             ]);
+            if schedule == CurriculumSchedule::V83 {
+                stages.insert(
+                    5,
+                    Stage {
+                        maps: &["Onion", "Pangaea", "Caucasus"],
+                        bots: 10,
+                        difficulty: "Easy",
+                        nations: NE(6),
+                        decision_ticks: 10,
+                        win_at: 0.45,
+                    },
+                );
+            }
         }
     }
     stages
@@ -702,15 +1039,20 @@ pub fn strength_delta_weight(
     normalized_share: f64,
     stage: usize,
     config: RewardConfig,
+    has_active_attack: bool,
 ) -> f64 {
     if delta >= 0.0 {
+        W_DELTA_GAIN
+    } else if config.v86_attack_symmetric_loss && has_active_attack {
+        // Attack burns troops before land accrues; don't asymmetrically tax
+        // the intentional dip while an attack the agent opened is in flight.
         W_DELTA_GAIN
     } else if config.dominant_loss_active(stage)
         && normalized_share >= config.v81_dominance_threshold
     {
         config.v81_delta_loss_dominant
     } else {
-        W_DELTA_LOSS
+        config.delta_loss()
     }
 }
 
@@ -762,6 +1104,28 @@ mod tests {
             v81_churn_coef: 0.05,
             v81_churn_window: 2,
             v81_churn_min_stage: 4,
+            v83_close_coef: 4.0,
+            v83_churn_coef: 0.06,
+            v84_boat_useful: 0.15,
+            v84_boat_destroyed: -0.20,
+            v84_boat_cancelled: -0.03,
+            v84_boat_own_shore: -0.05,
+            v84_boat_min_stage: 4,
+            v84_tempo_coef: 0.005,
+            v84_tempo_min_stage: 4,
+            v84_fast_win_coef: 8.0,
+            v85_tempo_share_threshold: 0.0,
+            v85_extra_win_bonus: 0.0,
+            v85_embargo_bad_stop: -0.15,
+            v85_embargo_good_stop: 0.02,
+            v85_embargo_min_stage: 4,
+            v85_premature_retreat: -0.10,
+            v85_thrash_reengage: -0.10,
+            v85_combat_min_stage: 4,
+            v86_delta_loss: 0.0,
+            v86_attack_symmetric_loss: false,
+            v86_skip_combat_churn: false,
+            v86_death_penalty: 0.0,
         }
     }
 
@@ -788,6 +1152,42 @@ mod tests {
             coefficient * (-phi[0] + gamma.powi((phi.len() - 1) as i32) * phi[phi.len() - 1]);
         assert!((discounted - expected).abs() < 1e-12);
         assert_eq!(shaper.prior().to_bits(), phi[phi.len() - 1].to_bits());
+    }
+
+    #[test]
+    fn closeout_potential_telescopes_and_terminal_zero_prevents_positive_cycles() {
+        assert_eq!(closeout_potential(0.45), 0.0);
+        assert_eq!(closeout_potential(0.80), 1.0);
+        let shares = [0.45, 0.60, 0.52, 0.60];
+        let mut shaper = DominanceShaper::default();
+        shaper.reset(closeout_potential(shares[0]));
+        let shaped: Vec<_> = shares[1..]
+            .iter()
+            .map(|&q| shaper.transition(closeout_potential(q), 0.9, 4.0))
+            .collect();
+        let discounted: f64 = shaped
+            .iter()
+            .enumerate()
+            .map(|(t, value)| 0.9f64.powi(t as i32) * value)
+            .sum();
+        assert!(discounted >= 0.0);
+        let terminal = shaper.transition(0.0, 0.9, 4.0);
+        let full_return = discounted + 0.9f64.powi(shaped.len() as i32) * terminal;
+        assert!(full_return.abs() < 1e-12);
+        assert!(
+            terminal < 0.0,
+            "timeout after closeout must repay potential"
+        );
+    }
+
+    #[test]
+    fn v83_churn_increase_is_closeout_only_and_v82_path_is_unchanged() {
+        let cfg = config();
+        let pair = Some(InverseActionPair::AttackRetreat);
+        assert_eq!(action_churn_penalty(pair, 5, cfg), -0.05);
+        assert_eq!(v83_action_churn_penalty(pair, 4, 0.9, cfg), -0.05);
+        assert_eq!(v83_action_churn_penalty(pair, 5, 0.449, cfg), -0.05);
+        assert_eq!(v83_action_churn_penalty(pair, 5, 0.45, cfg), -0.06);
     }
 
     #[test]
@@ -818,18 +1218,34 @@ mod tests {
         assert!(!cfg.dominant_loss_active(3));
         assert!(cfg.dominance_shaping_active(4));
         assert!(cfg.dominant_loss_active(4));
-        assert_eq!(strength_delta_weight(-0.1, 0.9, 3, cfg), W_DELTA_LOSS);
+        assert_eq!(strength_delta_weight(-0.1, 0.9, 3, cfg, false), W_DELTA_LOSS);
     }
 
     #[test]
     fn dominant_threshold_relaxes_only_losses_at_or_above_threshold() {
         let cfg = config();
-        assert_eq!(strength_delta_weight(-0.1, 0.549, 4, cfg), W_DELTA_LOSS);
+        assert_eq!(strength_delta_weight(-0.1, 0.549, 4, cfg, false), W_DELTA_LOSS);
         assert_eq!(
-            strength_delta_weight(-0.1, 0.55, 4, cfg),
+            strength_delta_weight(-0.1, 0.55, 4, cfg, false),
             cfg.v81_delta_loss_dominant
         );
-        assert_eq!(strength_delta_weight(0.1, 0.99, 4, cfg), W_DELTA_GAIN);
+        assert_eq!(strength_delta_weight(0.1, 0.99, 4, cfg, false), W_DELTA_GAIN);
+    }
+
+    #[test]
+    fn v86_softens_loss_and_symmetrizes_during_active_attack() {
+        let mut cfg = config();
+        cfg.v86_delta_loss = 5.5;
+        cfg.v86_attack_symmetric_loss = true;
+        assert_eq!(strength_delta_weight(-0.1, 0.1, 4, cfg, false), 5.5);
+        assert_eq!(
+            strength_delta_weight(-0.1, 0.1, 4, cfg, true),
+            W_DELTA_GAIN
+        );
+        assert_eq!(cfg.death_penalty(), W_DEATH);
+        cfg.v86_death_penalty = 10.0;
+        assert_eq!(cfg.death_penalty(), 10.0);
+        assert_eq!(cfg.reward_profile_id(), V86_REWARD_PROFILE);
     }
 
     #[test]
@@ -845,7 +1261,8 @@ mod tests {
             } else {
                 W_DELTA_LOSS
             }) * delta;
-        let current = W_STR * mine * tw + strength_delta_weight(delta, 0.99, 10, cfg) * delta;
+        let current =
+            W_STR * mine * tw + strength_delta_weight(delta, 0.99, 10, cfg, false) * delta;
         assert_eq!(legacy.to_bits(), current.to_bits());
         assert!(!cfg.dominance_shaping_active(10));
     }
@@ -1050,6 +1467,103 @@ mod tests {
         cfg.v81_churn_window = 0;
         assert!(!cfg.churn_penalty_active(10));
     }
+
+    #[test]
+    fn boat_outcome_classifies_landing_cancel_return_and_destroy() {
+        assert_eq!(
+            classify_boat_resolution(false, 100.0, 500.0, 500.0, true, false),
+            BoatOutcome::UsefulLanding
+        );
+        assert_eq!(
+            classify_boat_resolution(true, 100.0, 500.0, 575.0, false, false),
+            BoatOutcome::Cancelled
+        );
+        assert_eq!(
+            classify_boat_resolution(false, 100.0, 500.0, 575.0, false, false),
+            BoatOutcome::OwnShoreReturn
+        );
+        assert_eq!(
+            classify_boat_resolution(false, 100.0, 500.0, 500.0, false, false),
+            BoatOutcome::Destroyed
+        );
+        // Landing merges into an already-open sourced attack: no new attack id,
+        // no troop refund → used to misclassify as Destroyed.
+        assert_eq!(
+            classify_boat_resolution(false, 100.0, 500.0, 500.0, false, true),
+            BoatOutcome::UsefulLanding
+        );
+        // Own-shore refund still wins over a concurrent land attack.
+        assert_eq!(
+            classify_boat_resolution(false, 100.0, 500.0, 575.0, false, true),
+            BoatOutcome::OwnShoreReturn
+        );
+    }
+
+    #[test]
+    fn boat_outcome_rewards_are_opt_in_and_stage_gated() {
+        let mut cfg = config();
+        assert!(cfg.boat_outcome_active(4));
+        assert!(!cfg.boat_outcome_active(3));
+        assert_eq!(
+            boat_outcome_reward(BoatOutcome::UsefulLanding, cfg),
+            0.15
+        );
+        assert_eq!(
+            boat_outcome_reward(BoatOutcome::Destroyed, cfg),
+            -0.20
+        );
+        cfg.v84_boat_useful = 0.0;
+        cfg.v84_boat_destroyed = 0.0;
+        cfg.v84_boat_cancelled = 0.0;
+        cfg.v84_boat_own_shore = 0.0;
+        assert!(!cfg.boat_outcome_active(10));
+    }
+
+    #[test]
+    fn tempo_pressure_is_zero_until_dominant_and_grows_late() {
+        assert_eq!(tempo_pressure(9000, 10000, 0.40, 0.55), 0.0);
+        let early = tempo_pressure(1000, 10000, 0.70, 0.55);
+        let late = tempo_pressure(9000, 10000, 0.70, 0.55);
+        assert!(early < late);
+        assert!((late - 0.81).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fast_win_bonus_scales_with_remaining_budget() {
+        assert_eq!(fast_win_bonus(false, 100, 1000, 8.0), 0.0);
+        assert!((fast_win_bonus(true, 0, 1000, 8.0) - 8.0).abs() < 1e-12);
+        assert!((fast_win_bonus(true, 500, 1000, 8.0) - 4.0).abs() < 1e-12);
+        assert!((fast_win_bonus(true, 1000, 1000, 8.0) - 0.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn relation_bands_match_engine_thresholds() {
+        assert_eq!(relation_band(-51.0), RelationBand::Hostile);
+        assert_eq!(relation_band(-1.0), RelationBand::Distrustful);
+        assert_eq!(relation_band(0.0), RelationBand::Neutral);
+        assert_eq!(relation_band(49.0), RelationBand::Neutral);
+        assert_eq!(relation_band(50.0), RelationBand::Friendly);
+    }
+
+    #[test]
+    fn embargo_stop_prices_hostile_vs_recovered() {
+        let mut cfg = config();
+        cfg.v85_embargo_bad_stop = -0.15;
+        cfg.v85_embargo_good_stop = 0.02;
+        assert!((embargo_stop_outcome_reward(-80.0, cfg) - (-0.15)).abs() < 1e-12);
+        assert!((embargo_stop_outcome_reward(-10.0, cfg) - (-0.15)).abs() < 1e-12);
+        assert!((embargo_stop_outcome_reward(10.0, cfg) - 0.02).abs() < 1e-12);
+        assert!((embargo_stop_outcome_reward(80.0, cfg) - 0.02).abs() < 1e-12);
+    }
+
+    #[test]
+    fn tempo_share_threshold_prefers_v85_when_set() {
+        let mut cfg = config();
+        cfg.v81_dominance_threshold = 0.55;
+        assert!((cfg.tempo_share_threshold() - 0.55).abs() < 1e-12);
+        cfg.v85_tempo_share_threshold = 0.30;
+        assert!((cfg.tempo_share_threshold() - 0.30).abs() < 1e-12);
+    }
 }
 
 #[cfg(test)]
@@ -1120,7 +1634,9 @@ mod curriculum_v81_tests {
         let v811 = stages_for_schedule(CurriculumSchedule::V811);
         assert_eq!(
             v811.iter().map(|stage| stage.win_at).collect::<Vec<_>>(),
-            vec![0.9, 0.8, 0.75, 0.65, 0.35, 0.30, 0.25, 0.25, 0.22, 0.20, 0.18, 0.15]
+            vec![
+                0.9, 0.8, 0.75, 0.65, 0.35, 0.30, 0.25, 0.25, 0.22, 0.20, 0.18, 0.15
+            ]
         );
         assert_eq!(V811_ENV_TARGETS.len(), v811.len());
         assert_eq!(&V811_ENV_TARGETS[..7], &[24; 7]);
@@ -1148,11 +1664,19 @@ mod curriculum_v81_tests {
         for (index, (stage, &(bots, difficulty, gate))) in
             v82[5..].iter().zip(&expected).enumerate()
         {
-            let expected_maps: &[&str] =
-                if index == 0 { &V82_STAGE5_MAPS } else { &V82_MAPS };
+            let expected_maps: &[&str] = if index == 0 {
+                &V82_STAGE5_MAPS
+            } else {
+                &V82_MAPS
+            };
             assert_eq!(stage.maps, expected_maps, "stage {} maps", index + 5);
             assert_eq!(stage.bots, bots, "stage {} bots", index + 5);
-            assert_eq!(stage.difficulty, difficulty, "stage {} difficulty", index + 5);
+            assert_eq!(
+                stage.difficulty,
+                difficulty,
+                "stage {} difficulty",
+                index + 5
+            );
             assert_eq!(stage.win_at, gate, "stage {} gate", index + 5);
             assert_eq!(stage.nations, Nations::Default);
             assert_eq!(stage.decision_ticks, 10);
@@ -1199,4 +1723,30 @@ mod curriculum_v81_tests {
             Some(CurriculumSchedule::V82)
         );
     }
+
+    #[test]
+    fn v83_inserts_exact_closeout_stage_and_shifts_v82_tail() {
+        let v82 = stages_for_schedule(CurriculumSchedule::V82);
+        let v83 = stages_for_schedule(CurriculumSchedule::V83);
+        assert_eq!(&v83[..5], &v82[..5]);
+        assert_eq!(v83.len(), 15);
+        assert_eq!(v83[5].maps, &["Onion", "Pangaea", "Caucasus"]);
+        assert_eq!(v83[5].bots, 10);
+        assert_eq!(v83[5].difficulty, "Easy");
+        assert_eq!(v83[5].nations, Nations::Exact(6));
+        assert_eq!(v83[5].decision_ticks, 10);
+        assert_eq!(v83[5].win_at, 0.45);
+        assert_eq!(&v83[6..], &v82[5..]);
+        assert_eq!(
+            V83_ENV_TARGETS,
+            [24, 24, 24, 24, 24, 24, 16, 12, 10, 12, 10, 8, 8, 8, 8]
+        );
+        assert_eq!(V83_ENV_TARGETS.len(), v83.len());
+        assert_eq!(CurriculumSchedule::V83.id(), "v8.3");
+        assert_eq!(
+            CurriculumSchedule::from_id("v8.3"),
+            Some(CurriculumSchedule::V83)
+        );
+    }
+
 }
