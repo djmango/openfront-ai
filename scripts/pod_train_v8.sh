@@ -82,6 +82,12 @@ CKPT_DIR="$REPO_DIR/rust/checkpoints/$RUN_NAME"
 HF_SYNC_INTERVAL_SECONDS="${HF_SYNC_INTERVAL_SECONDS:-600}"
 HF_REPO_ID="${HF_REPO_ID:-djmango/openfront-rl}"
 HF_RUN_PREFIX="${HF_RUN_PREFIX:-$RUN_NAME}"
+# The current RunPod A40 host advertises direct CUDA P2P, but its first NCCL
+# collective wedges on that transport. Shared-memory transport reduced the
+# same 48 MiB gradient in ~113 ms. Override only after a host-specific P2P
+# smoke succeeds (for example on a validated NVLink box).
+NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
+NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
 TORCH_VERSION="2.11.0" # tch 0.24's C++ shim needs this exact version - see devlog
 AE_DIR="${AE_DIR:-$REPO_DIR/weights/ae}"
 
@@ -267,6 +273,8 @@ while true; do
   echo "=== $(date -u +%FT%TZ) launching $RUN_NAME num_gpus=$NUM_GPUS envs/shard=$NUM_ENVS $RESUME ==="
   START_TS=$(date +%s)
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  NCCL_P2P_DISABLE="$NCCL_P2P_DISABLE" \
+  NCCL_IB_DISABLE="$NCCL_IB_DISABLE" \
   OFTRAIN_NCCL_TIMEOUT_SECONDS="${OFTRAIN_NCCL_TIMEOUT_SECONDS:-60}" \
   LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB:$CUDA_LIB:$NCCL_LIB:$NCCL_LINK_LIB" \
     ./target/release/oftrain --engine native --node-fraction "$NODE_FRACTION" --num-envs "$NUM_ENVS" --num-gpus "$NUM_GPUS" \
