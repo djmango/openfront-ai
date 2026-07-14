@@ -33,7 +33,7 @@ docker run --rm -p 8086:8086 -v openfront-eval-data:/data openfront-eval
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RUN_NAME` | `ppo_v4` | HF policy run |
+| `RUN_NAME` | `ppo_v81` | HF policy run |
 | `PLAY_MAP` | `Onion` | Live play map |
 | `PLAY_BOTS` | `10` | Tribe bots |
 | `PLAY_NATIONS` | `1` | Nation opponents |

@@ -15,6 +15,8 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 POLICY_DIR = DATA_DIR / "policy"
 CLIPS_DIR = DATA_DIR / "clips"
 REVISION_PATH = DATA_DIR / "policy_revision.txt"
+HF_POLICY_REPO = "djmango/openfront-rl"
+LEGACY_POLICY_RUNS = frozenset({"ppo_v5", "ppo_v7"})
 
 
 def showcase_seeds() -> list[str]:
@@ -55,10 +57,18 @@ def featured_game_id(state: dict) -> str | None:
     return str(gid) if gid else None
 
 
+def hf_policy_paths(run_name: str) -> tuple[str, str | None]:
+    """Return the weights and state paths published for a policy run."""
+    if run_name in LEGACY_POLICY_RUNS:
+        return f"{run_name}/policy.pt", None
+    return f"{run_name}/latest.safetensors", f"{run_name}/latest.state.json"
+
+
 def hf_policy_revision(run_name: str) -> str:
     from huggingface_hub import HfApi
 
-    info = HfApi().get_paths_info("djmango/openfront-rl", [f"{run_name}/policy.pt"])[0]
+    weights_path, _ = hf_policy_paths(run_name)
+    info = HfApi().get_paths_info(HF_POLICY_REPO, [weights_path])[0]
     return str(getattr(info, "blob_id", "") or getattr(info, "last_modified", ""))
 
 
@@ -78,26 +88,44 @@ def ensure_ae(ae_path: Path) -> Path:
 
 
 def ensure_policy(run_name: str) -> Path:
-    dest = POLICY_DIR / run_name / "policy.pt"
+    weights_path, state_path = hf_policy_paths(run_name)
+    dest = POLICY_DIR / weights_path
+    state_dest = POLICY_DIR / state_path if state_path else None
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists() and REVISION_PATH.exists():
+    cache_complete = dest.exists() and (state_dest is None or state_dest.exists())
+    if cache_complete and REVISION_PATH.exists():
         if REVISION_PATH.read_text().strip() == hf_policy_revision(run_name):
             return dest
     from huggingface_hub import hf_hub_download
 
-    src = hf_hub_download("djmango/openfront-rl", f"{run_name}/policy.pt")
+    revision = hf_policy_revision(run_name)
+    src = hf_hub_download(HF_POLICY_REPO, weights_path)
     shutil.copy2(src, dest)
-    REVISION_PATH.write_text(hf_policy_revision(run_name))
+    if state_path and state_dest:
+        state_src = hf_hub_download(HF_POLICY_REPO, state_path)
+        shutil.copy2(state_src, state_dest)
+    REVISION_PATH.write_text(revision)
     return dest
 
 
 def policy_meta(policy: Path) -> dict:
-    import torch
+    if policy.suffix == ".safetensors":
+        state_path = policy.with_name(f"{policy.stem}.state.json")
+        if not state_path.is_file():
+            raise FileNotFoundError(f"missing safetensors state metadata: {state_path}")
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    elif policy.suffix == ".pt" and policy.parent.name in LEGACY_POLICY_RUNS:
+        import torch
 
-    pt = torch.load(policy, map_location="cpu", weights_only=False)
+        state = torch.load(policy, map_location="cpu", weights_only=False)
+    else:
+        raise ValueError(
+            "policy must be a current .safetensors checkpoint or an explicitly "
+            "legacy ppo_v5/ppo_v7 policy.pt"
+        )
     return {
-        "policy_update": pt.get("update"),
-        "policy_stage": pt.get("stage"),
+        "policy_update": state.get("update"),
+        "policy_stage": state.get("stage"),
         "policy_sha256": hashlib.sha256(policy.read_bytes()).hexdigest()[:16],
     }
 
