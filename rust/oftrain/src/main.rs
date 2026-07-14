@@ -40,11 +40,18 @@ struct Args {
     #[arg(long, default_value_t = false)]
     v81_curriculum: bool,
 
+    /// Opt into the V8.1.1 high-player bridge schedule. Stage 5 is the
+    /// V8.1 30-bot map pool at Easy, stage 6 repeats it at Medium, and the
+    /// World/Asia challenge moves to stage 7. Incompatible with V8.1 state
+    /// unless the explicit stage-5 migration flag is also supplied.
+    #[arg(long, default_value_t = false, conflicts_with = "v81_curriculum")]
+    v811_curriculum: bool,
+
     /// Per-stage env worker targets, per GPU/shard. Accepts either one
     /// comma-separated value per stage (`24,24,...`) or ranges such as
-    /// `0-5=24,6=12,7=10,8+=8`. With --v81-curriculum, defaults to
-    /// `0-5=24,6=12,7=10,8+=8`. A stage change with a different target
-    /// checkpoints and exits cleanly for the supervisor to restart.
+    /// `0-5=24,6=12,7=10,8+=8`. Schedule flags select versioned defaults;
+    /// V8.1.1 keeps stages 0-6 at 24 and uses 12 or fewer from stage 7.
+    /// A target change checkpoints and exits for supervisor restart.
     #[arg(long)]
     stage_env_targets: Option<String>,
 
@@ -90,6 +97,18 @@ struct Args {
     /// Strength-loss weight while dominant (global legacy weight is 6.5).
     #[arg(long, default_value_t = 5.25)]
     v81_delta_loss_dominant: f64,
+
+    /// Penalty for reversing a matching recent action (0 disables).
+    #[arg(long, default_value_t = 0.0)]
+    v81_churn_coef: f64,
+
+    /// Number of prior decisions searched for a matching inverse action.
+    #[arg(long, default_value_t = 2)]
+    v81_churn_window: usize,
+
+    /// First curriculum stage where the action-churn penalty may apply.
+    #[arg(long, default_value_t = 4)]
+    v81_churn_min_stage: usize,
 
     #[arg(long, default_value_t = 0.95)]
     lambda_: f32,
@@ -341,6 +360,17 @@ struct Args {
     #[arg(long)]
     resume: Option<String>,
 
+    /// Permit the one supported cross-schedule resume: a V8.1 stage-5
+    /// checkpoint becomes V8.1.1 stage 5 (the new Easy bridge), with its
+    /// old Medium-stage win window cleared.
+    #[arg(
+        long,
+        alias = "migrate-v81-stage5",
+        default_value_t = false,
+        requires_all = ["v811_curriculum", "resume"]
+    )]
+    migrate_v81_stage5_to_v811: bool,
+
     /// Extra LR warmup updates applied after `--resume` while AdamW
     /// moments rebuild from scratch (tch cannot dump/restore optimizer
     /// state). 0 disables the post-resume boost (stage warmup still
@@ -584,6 +614,46 @@ mod stage_env_target_tests {
     }
 }
 
+#[cfg(test)]
+mod curriculum_flag_tests {
+    use super::Args;
+    use clap::Parser;
+
+    #[test]
+    fn v811_is_opt_in_and_mutually_exclusive_with_v81() {
+        let defaults = Args::try_parse_from(["oftrain"]).unwrap();
+        assert!(!defaults.v81_curriculum);
+        assert!(!defaults.v811_curriculum);
+
+        let v811 = Args::try_parse_from(["oftrain", "--v811-curriculum"]).unwrap();
+        assert!(v811.v811_curriculum);
+        assert!(
+            Args::try_parse_from([
+                "oftrain",
+                "--v81-curriculum",
+                "--v811-curriculum"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn migration_requires_v811_and_resume() {
+        assert!(
+            Args::try_parse_from(["oftrain", "--migrate-v81-stage5-to-v811"]).is_err()
+        );
+        let args = Args::try_parse_from([
+            "oftrain",
+            "--v811-curriculum",
+            "--resume",
+            "latest.safetensors",
+            "--migrate-v81-stage5",
+        ])
+        .unwrap();
+        assert!(args.migrate_v81_stage5_to_v811);
+    }
+}
+
 /// Mirrors PyTorch's own `torch/__init__.py::_preload_cuda_deps()`: when
 /// libtorch is a "split" pip wheel install (each CUDA component - cublas,
 /// cudnn, cusparse, nccl, etc. - its own separate `nvidia-*-cu12` package,
@@ -679,6 +749,10 @@ fn main() -> anyhow::Result<()> {
         args.v81_delta_loss_dominant.is_finite() && args.v81_delta_loss_dominant >= 0.0,
         "--v81-delta-loss-dominant must be finite and non-negative"
     );
+    anyhow::ensure!(
+        args.v81_churn_coef.is_finite() && args.v81_churn_coef >= 0.0,
+        "--v81-churn-coef must be finite and non-negative"
+    );
     let reward_config = ofcore::curriculum::RewardConfig {
         gamma: args.gamma as f64,
         v81_dom_coef: args.v81_dom_coef,
@@ -687,12 +761,27 @@ fn main() -> anyhow::Result<()> {
         v81_dominant_loss: args.v81_dominant_loss,
         v81_dominance_threshold: args.v81_dominance_threshold,
         v81_delta_loss_dominant: args.v81_delta_loss_dominant,
+        v81_churn_coef: args.v81_churn_coef,
+        v81_churn_window: args.v81_churn_window,
+        v81_churn_min_stage: args.v81_churn_min_stage,
     };
-    let stage_count = ofcore::curriculum::stages().len();
+    let curriculum_schedule = if args.v811_curriculum {
+        ofcore::curriculum::CurriculumSchedule::V811
+    } else if args.v81_curriculum {
+        ofcore::curriculum::CurriculumSchedule::V81
+    } else {
+        ofcore::curriculum::CurriculumSchedule::Legacy
+    };
+    let stage_count = ofcore::curriculum::stages_for_schedule(curriculum_schedule).len();
     anyhow::ensure!(args.stage < stage_count, "--stage {} is outside 0..{}", args.stage, stage_count - 1);
     let stage_env_targets = match args.stage_env_targets.as_deref() {
         Some(spec) => parse_stage_env_targets(spec, stage_count)?,
-        None if args.v81_curriculum => ofcore::curriculum::V81_ENV_TARGETS.to_vec(),
+        None if curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V811 => {
+            ofcore::curriculum::V811_ENV_TARGETS.to_vec()
+        }
+        None if curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V81 => {
+            ofcore::curriculum::V81_ENV_TARGETS.to_vec()
+        }
         None => Vec::new(),
     };
     let initial_num_envs = stage_env_targets
@@ -709,9 +798,11 @@ fn main() -> anyhow::Result<()> {
         Cuda::device_count(),
     )?;
     println!("[oftrain] device={device:?}");
+    println!("[oftrain] curriculum schedule={}", curriculum_schedule.id());
     println!(
         "[oftrain] v81 reward: min_stage={} K_DOM={} gamma={} phi_clamp={} \
-         dominant_loss={} threshold={} W_DELTA_LOSS_DOMINANT={}",
+         dominant_loss={} threshold={} W_DELTA_LOSS_DOMINANT={} \
+         churn_coef={} churn_window={} churn_min_stage={}",
         reward_config.v81_min_stage,
         reward_config.v81_dom_coef,
         reward_config.gamma,
@@ -719,6 +810,9 @@ fn main() -> anyhow::Result<()> {
         reward_config.v81_dominant_loss,
         reward_config.v81_dominance_threshold,
         reward_config.v81_delta_loss_dominant,
+        reward_config.v81_churn_coef,
+        reward_config.v81_churn_window,
+        reward_config.v81_churn_min_stage,
     );
     if args.async_eval {
         match eval_device {
@@ -754,6 +848,7 @@ fn main() -> anyhow::Result<()> {
             fp16_rollout: args.fp16_rollout,
             compact_rollout: args.compact_rollout,
             reward_config,
+            curriculum_schedule,
         });
     }
 
@@ -761,7 +856,8 @@ fn main() -> anyhow::Result<()> {
         num_envs: initial_num_envs,
         num_gpus: args.num_gpus,
         stage: args.stage,
-        v81_curriculum: args.v81_curriculum,
+        curriculum_schedule,
+        migrate_v81_stage5_to_v811: args.migrate_v81_stage5_to_v811,
         stage_env_targets,
         max_episode_ticks: args.max_episode_ticks,
         rollout_len: args.rollout_len,

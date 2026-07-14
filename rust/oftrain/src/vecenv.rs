@@ -14,11 +14,16 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ofcore::curriculum::{
-    self, DominanceShaper, RewardComponents, RewardConfig, Stage, W_DEATH, W_STR, W_WASTE,
-    dominance_potential, normalized_strength_share, placement, placement_score, sample_episode,
-    stages, strength_delta_weight, terminal_reward, timeweight,
+    self, ActionChurnTracker, ActionPairCounts, ActionTarget, ChosenAction, CurriculumSchedule,
+    DominanceShaper, RewardComponents, RewardConfig, Stage, W_DEATH, W_STR, W_WASTE,
+    action_churn_penalty, dominance_potential, normalized_strength_share, placement,
+    placement_score, sample_episode, stages_for_schedule, strength_delta_weight, terminal_reward,
+    timeweight,
 };
-use ofcore::feat::{self, ACTIONS, IS_LAND_BIT, MAG_MASK, REGION};
+use ofcore::feat::{
+    self, A_ATTACK, A_BOAT, A_CANCEL_BOAT, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, ACTIONS,
+    IS_LAND_BIT, MAG_MASK, REGION,
+};
 use ofcore::translate::{Choice, IntentTranslator, translate};
 
 use crate::ae::{self, AeRaw, StaticTerrain, TerrainCacheKey};
@@ -221,6 +226,7 @@ pub struct EpisodeInfo {
     pub map: String,
     pub rehearsal: bool,
     pub reward_components: RewardComponents,
+    pub action_pair_counts: ActionPairCounts,
 }
 
 /// Per-env observation ready to batch into `policy::Obs`.
@@ -267,6 +273,61 @@ pub struct PreparedObs {
     pub local: Vec<f32>, // (5, LOCAL, LOCAL)
 }
 
+fn selected_player_id(choice: &Choice, lut: &[u8], ents: &feat::EntsData) -> Option<usize> {
+    choice.player_slot.and_then(|slot| {
+        ents.players
+            .iter()
+            .find(|player| {
+                lut.get(player.id)
+                    .is_some_and(|&mapped| i64::from(mapped) == slot)
+            })
+            .map(|player| player.id)
+    })
+}
+
+fn churn_action(
+    choice: &Choice,
+    lut: &[u8],
+    ents: &feat::EntsData,
+    intents: &[Value],
+    boats_before: &[usize],
+    boats_after: &[usize],
+) -> ChosenAction {
+    let target = match choice.action {
+        A_ATTACK | A_EMBARGO | A_EMBARGO_STOP if !intents.is_empty() => {
+            selected_player_id(choice, lut, ents).map(ActionTarget::Player)
+        }
+        A_RETREAT => intents
+            .first()
+            .and_then(|intent| intent["attackID"].as_str())
+            .and_then(|attack_id| {
+                ents.attacks
+                .iter()
+                    .find(|attack| attack.aid == attack_id && attack.to != 0)
+                    .map(|attack| ActionTarget::Player(attack.to))
+            }),
+        A_BOAT if !intents.is_empty() => {
+            let mut created = boats_after
+                .iter()
+                .copied()
+                .filter(|unit| !boats_before.contains(unit));
+            let first = created.next();
+            if created.next().is_none() {
+                first.map(ActionTarget::Unit)
+            } else {
+                None
+            }
+        }
+        A_CANCEL_BOAT => intents
+            .first()
+            .and_then(|intent| intent["unitID"].as_u64())
+            .and_then(|unit| usize::try_from(unit).ok())
+            .map(ActionTarget::Unit),
+        _ => None,
+    };
+    ChosenAction::new(choice.action, target)
+}
+
 pub struct EnvWorker {
     pub idx: usize,
     bridge: Box<dyn GameEngine>,
@@ -287,6 +348,7 @@ pub struct EnvWorker {
     land_total: i64,
     prev_strength: f64,
     dominance_shaper: DominanceShaper,
+    action_churn_tracker: ActionChurnTracker,
     ep_reward_components: RewardComponents,
     spawn_steps: i64,
     map_name: String,
@@ -307,12 +369,13 @@ impl EnvWorker {
         max_episode_ticks: i64,
         engine: EngineKind,
         reward_config: RewardConfig,
+        curriculum_schedule: CurriculumSchedule,
     ) -> Result<Self> {
         let bridge = engine::create(engine)?;
         let mut w = EnvWorker {
             idx,
             bridge,
-            stages: stages(),
+            stages: stages_for_schedule(curriculum_schedule),
             stage,
             episode_stage: stage,
             max_episode_ticks,
@@ -329,6 +392,7 @@ impl EnvWorker {
             land_total: 1,
             prev_strength: 0.0,
             dominance_shaper: DominanceShaper::default(),
+            action_churn_tracker: ActionChurnTracker::default(),
             ep_reward_components: RewardComponents::default(),
             spawn_steps: 0,
             map_name: String::new(),
@@ -412,6 +476,7 @@ impl EnvWorker {
         ));
         self.spawn_steps = 0;
         self.ep_reward = 0.0;
+        self.action_churn_tracker.reset();
         self.ep_reward_components = RewardComponents::default();
         self.ep_len = 0;
         self.ep_wasted = 0;
@@ -533,6 +598,7 @@ impl EnvWorker {
         let obs = self.obs.as_ref().unwrap();
         let ents = feat::parse_ents(obs.entities());
         let legal = feat::parse_legal(obs.legal_actions());
+        let boats_before = legal.boats.clone();
         // Raw tiles are full (untrimmed width) resolution; translate wants
         // owner ids trimmed to (hr, wr) matching the translator's grids.
         let width = obs.head["width"].as_u64().unwrap() as usize;
@@ -554,6 +620,22 @@ impl EnvWorker {
         );
 
         let new_obs = self.bridge.step(&intents, self.decision_ticks)?;
+        let boats_after = if choice.action == A_BOAT {
+            feat::parse_legal(new_obs.legal_actions()).boats
+        } else {
+            Vec::new()
+        };
+        let chosen_action = churn_action(
+            choice,
+            &lut,
+            &ents,
+            &intents,
+            &boats_before,
+            &boats_after,
+        );
+        let inverse_pair = self
+            .action_churn_tracker
+            .observe(chosen_action, self.reward_config.v81_churn_window);
         let mut wasted = new_obs.wasted();
         if intents.is_empty() && name != "noop" && name != "spawn" {
             wasted += 1;
@@ -595,17 +677,29 @@ impl EnvWorker {
         } else {
             0.0
         };
-        let delta_weight =
-            strength_delta_weight(delta, normalized_share, self.episode_stage, self.reward_config);
+        let delta_weight = strength_delta_weight(
+            delta,
+            normalized_share,
+            self.episode_stage,
+            self.reward_config,
+        );
         let mut components = RewardComponents {
             strength: W_STR * mine * tw,
             strength_delta: delta_weight * delta,
             ..RewardComponents::default()
         };
         let mut reward = components.strength + components.strength_delta;
+        components.action_churn =
+            action_churn_penalty(inverse_pair, self.episode_stage, self.reward_config);
+        if components.action_churn != 0.0 {
+            reward += components.action_churn;
+        }
         let next_potential =
             dominance_potential(&composite, me, self.reward_config.v81_potential_clamp);
-        if self.reward_config.dominance_shaping_active(self.episode_stage) {
+        if self
+            .reward_config
+            .dominance_shaping_active(self.episode_stage)
+        {
             components.dominance = self.dominance_shaper.transition(
                 next_potential,
                 self.reward_config.gamma,
@@ -660,6 +754,7 @@ impl EnvWorker {
                 map: self.map_name.clone(),
                 rehearsal: self.rehearsal,
                 reward_components: self.ep_reward_components,
+                action_pair_counts: self.action_churn_tracker.counts(),
             });
             self.reset_episode()?;
         } else {
@@ -707,5 +802,119 @@ impl EnvWorker {
 
     pub fn close(&mut self) {
         self.bridge.close();
+    }
+}
+
+#[cfg(test)]
+mod churn_action_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn choice(action: i64, player_slot: Option<i64>, tile_region: Option<i64>) -> Choice {
+        Choice {
+            action,
+            player_slot,
+            tile_region,
+            build_type: None,
+            nuke_type: None,
+            quantity_frac: None,
+        }
+    }
+
+    #[test]
+    fn records_only_resolved_player_and_transport_targets() {
+        let ents = feat::parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "me", "alive": true},
+                {"id": 5, "pid": "target", "alive": true}
+            ],
+            "units": [],
+            "attacks": [
+                {"aid": "attack-5", "from": 1, "to": 5, "retreating": false}
+            ],
+            "alliances": []
+        }));
+        let lut = feat::make_lut(&[1, 5]);
+        let target_slot = i64::from(lut[5]);
+
+        assert_eq!(
+            churn_action(
+                &choice(A_ATTACK, Some(target_slot), None),
+                &lut,
+                &ents,
+                &[json!({"type": "attack", "targetID": "target"})],
+                &[],
+                &[]
+            ),
+            ChosenAction::new(A_ATTACK, Some(ActionTarget::Player(5)))
+        );
+        assert_eq!(
+            churn_action(
+                &choice(A_RETREAT, Some(target_slot), None),
+                &lut,
+                &ents,
+                &[json!({"type": "cancel_attack", "attackID": "attack-5"})],
+                &[],
+                &[]
+            ),
+            ChosenAction::new(A_RETREAT, Some(ActionTarget::Player(5)))
+        );
+        assert_eq!(
+            churn_action(
+                &choice(A_BOAT, None, Some(27)),
+                &lut,
+                &ents,
+                &[json!({"type": "boat", "dst": 27})],
+                &[9],
+                &[9, 42]
+            ),
+            ChosenAction::new(A_BOAT, Some(ActionTarget::Unit(42)))
+        );
+        assert_eq!(
+            churn_action(
+                &choice(A_CANCEL_BOAT, None, Some(27)),
+                &lut,
+                &ents,
+                &[json!({"type": "cancel_boat", "unitID": 42})],
+                &[42],
+                &[]
+            ),
+            ChosenAction::new(A_CANCEL_BOAT, Some(ActionTarget::Unit(42)))
+        );
+        assert_eq!(
+            churn_action(
+                &choice(feat::A_DONATE_GOLD, Some(target_slot), None),
+                &lut,
+                &ents,
+                &[json!({"type": "donate_gold"})],
+                &[],
+                &[]
+            ),
+            ChosenAction::new(feat::A_DONATE_GOLD, None)
+        );
+        assert_eq!(
+            churn_action(
+                &choice(A_ATTACK, Some(target_slot), None),
+                &lut,
+                &ents,
+                &[],
+                &[],
+                &[]
+            ),
+            ChosenAction::new(A_ATTACK, None),
+            "an untranslated choice is not a clear committed action"
+        );
+        assert_eq!(
+            churn_action(
+                &choice(A_BOAT, None, Some(27)),
+                &lut,
+                &ents,
+                &[json!({"type": "boat", "dst": 27})],
+                &[],
+                &[41, 42]
+            ),
+            ChosenAction::new(A_BOAT, None),
+            "ambiguous transport creation must not create a false match"
+        );
     }
 }

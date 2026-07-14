@@ -183,8 +183,10 @@ pub struct Config {
     /// >1 requires `device` to be `Cuda(_)`; shards use `Cuda(0..num_gpus)`.
     pub num_gpus: usize,
     pub stage: usize,
-    /// Selects the V8.1 late-stage win gates while preserving stage identity.
-    pub v81_curriculum: bool,
+    /// Versioned schedule identity; legacy remains the default.
+    pub curriculum_schedule: ofcore::curriculum::CurriculumSchedule,
+    /// Allows only the documented V8.1 stage-5 -> V8.1.1 stage-5 bridge.
+    pub migrate_v81_stage5_to_v811: bool,
     /// Optional env workers-per-shard target for every curriculum stage.
     /// A target change is applied by checkpointing and restarting so
     /// persistent actor/learner CUDA ownership never changes threads.
@@ -402,6 +404,10 @@ pub struct TrainState {
     /// launch flags cannot silently resume under another schedule.
     #[serde(default)]
     pub v81_curriculum: bool,
+    /// Explicit identity for new checkpoints. Older sidecars omit this and
+    /// are identified from `v81_curriculum`.
+    #[serde(default)]
+    pub curriculum_schedule: Option<String>,
     #[serde(default)]
     pub stage_env_targets: Vec<usize>,
     #[serde(default)]
@@ -410,6 +416,54 @@ pub struct TrainState {
     /// restart at a new equal per-shard env count.
     #[serde(default)]
     pub requested_env_target: Option<usize>,
+}
+
+impl TrainState {
+    fn schedule(&self) -> Result<ofcore::curriculum::CurriculumSchedule> {
+        use ofcore::curriculum::CurriculumSchedule;
+        match self.curriculum_schedule.as_deref() {
+            Some(id) => CurriculumSchedule::from_id(id)
+                .ok_or_else(|| anyhow!("checkpoint has unknown curriculum schedule {id:?}")),
+            None if self.v81_curriculum => Ok(CurriculumSchedule::V81),
+            None => Ok(CurriculumSchedule::Legacy),
+        }
+    }
+}
+
+fn reconcile_resume_schedule(
+    state: &mut TrainState,
+    requested: ofcore::curriculum::CurriculumSchedule,
+    allow_v81_stage5_migration: bool,
+) -> Result<()> {
+    use ofcore::curriculum::CurriculumSchedule;
+    let saved = state.schedule()?;
+    if saved == requested {
+        anyhow::ensure!(
+            !allow_v81_stage5_migration,
+            "--migrate-v81-stage5-to-v811 was supplied but checkpoint already uses {}",
+            requested.id()
+        );
+        return Ok(());
+    }
+    if allow_v81_stage5_migration
+        && saved == CurriculumSchedule::V81
+        && requested == CurriculumSchedule::V811
+        && state.stage == 5
+    {
+        state.curriculum_schedule = Some(requested.id().to_string());
+        state.v81_curriculum = true;
+        state.stage_env_targets.clear();
+        state.recent_wins.clear();
+        state.requested_env_target = None;
+        return Ok(());
+    }
+    anyhow::bail!(
+        "checkpoint curriculum schedule {} is incompatible with requested {}; \
+         only V8.1 stage 5 may migrate to V8.1.1 with \
+         --migrate-v81-stage5-to-v811",
+        saved.id(),
+        requested.id()
+    )
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -521,6 +575,7 @@ mod v81_state_and_gate_tests {
             best_eval_win: None,
             best_eval_score: None,
             v81_curriculum: true,
+            curriculum_schedule: Some("v8.1".to_string()),
             stage_env_targets: ofcore::curriculum::V81_ENV_TARGETS.to_vec(),
             envs_per_shard: 24,
             requested_env_target: Some(12),
@@ -528,6 +583,7 @@ mod v81_state_and_gate_tests {
         let restored: TrainState =
             serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
         assert!(restored.v81_curriculum);
+        assert_eq!(restored.schedule().unwrap(), ofcore::curriculum::CurriculumSchedule::V81);
         assert_eq!(restored.stage_env_targets, ofcore::curriculum::V81_ENV_TARGETS);
         assert_eq!(restored.requested_env_target, Some(12));
 
@@ -537,6 +593,7 @@ mod v81_state_and_gate_tests {
         )
         .unwrap();
         assert!(!legacy.v81_curriculum);
+        assert_eq!(legacy.schedule().unwrap(), ofcore::curriculum::CurriculumSchedule::Legacy);
         assert!(legacy.stage_env_targets.is_empty());
         assert_eq!(legacy.requested_env_target, None);
     }
@@ -553,6 +610,7 @@ mod v81_state_and_gate_tests {
             best_eval_win: None,
             best_eval_score: None,
             v81_curriculum: true,
+            curriculum_schedule: Some("v8.1".to_string()),
             stage_env_targets: vec![],
             envs_per_shard: 24,
             requested_env_target: None,
@@ -578,6 +636,7 @@ mod v81_state_and_gate_tests {
         assert_eq!(manifest["autoencoders"]["fine"]["format"], "safetensors");
         assert_eq!(manifest["update"], 81);
         assert_eq!(manifest["stage"], 4);
+        assert_eq!(manifest["curriculum_schedule"], "v8.1");
     }
 
     #[test]
@@ -604,6 +663,61 @@ mod v81_state_and_gate_tests {
         assert_eq!(requested_stage_env_target(&targets, 1, 24), Some(12));
         assert_eq!(requested_stage_env_target(&targets, 2, 12), Some(20));
         assert_eq!(requested_stage_env_target(&targets, 0, 24), None);
+
+        let v811 = ofcore::curriculum::V811_ENV_TARGETS;
+        assert_eq!(requested_stage_env_target(&v811, 6, 24), None);
+        assert_eq!(requested_stage_env_target(&v811, 7, 24), Some(12));
+        assert_eq!(requested_stage_env_target(&v811, 8, 12), Some(10));
+    }
+
+    fn state_for_schedule(id: Option<&str>, v81: bool, stage: usize) -> TrainState {
+        TrainState {
+            update: 1,
+            stage,
+            ent_scale: 1.0,
+            lr_now: 1e-4,
+            total_env_steps: 32,
+            recent_wins: vec![0.0; ofcore::curriculum::WINDOW],
+            best_eval_win: None,
+            best_eval_score: None,
+            v81_curriculum: v81,
+            curriculum_schedule: id.map(str::to_string),
+            stage_env_targets: ofcore::curriculum::V81_ENV_TARGETS.to_vec(),
+            envs_per_shard: 24,
+            requested_env_target: Some(12),
+        }
+    }
+
+    #[test]
+    fn resume_requires_matching_schedule_identity() {
+        use ofcore::curriculum::CurriculumSchedule;
+        let mut v81 = state_for_schedule(Some("v8.1"), true, 5);
+        assert!(reconcile_resume_schedule(&mut v81, CurriculumSchedule::V81, false).is_ok());
+        let error =
+            reconcile_resume_schedule(&mut v81, CurriculumSchedule::V811, false).unwrap_err();
+        assert!(error.to_string().contains("incompatible"));
+
+        let mut legacy = state_for_schedule(None, false, 5);
+        assert!(
+            reconcile_resume_schedule(&mut legacy, CurriculumSchedule::V811, true).is_err()
+        );
+    }
+
+    #[test]
+    fn explicit_v81_stage5_migration_maps_to_v811_stage5() {
+        use ofcore::curriculum::CurriculumSchedule;
+        let mut state = state_for_schedule(None, true, 5);
+        reconcile_resume_schedule(&mut state, CurriculumSchedule::V811, true).unwrap();
+        assert_eq!(state.stage, 5);
+        assert_eq!(state.schedule().unwrap(), CurriculumSchedule::V811);
+        assert!(state.recent_wins.is_empty());
+        assert!(state.stage_env_targets.is_empty());
+        assert_eq!(state.requested_env_target, None);
+
+        let mut wrong_stage = state_for_schedule(Some("v8.1"), true, 4);
+        assert!(
+            reconcile_resume_schedule(&mut wrong_stage, CurriculumSchedule::V811, true).is_err()
+        );
     }
 }
 
@@ -690,6 +804,7 @@ fn policy_manifest_value(
         },
         "update": state.update,
         "stage": state.stage,
+        "curriculum_schedule": state.schedule().map(|schedule| schedule.id()).unwrap_or("unknown"),
     })
 }
 
@@ -770,8 +885,17 @@ fn spawn_worker(
     max_ticks: i64,
     engine: EngineKind,
     reward_config: RewardConfig,
+    curriculum_schedule: ofcore::curriculum::CurriculumSchedule,
 ) -> Result<(Worker, PreparedObs)> {
-    spawn_worker_routed(idx, stage, max_ticks, engine, reward_config, None)
+    spawn_worker_routed(
+        idx,
+        stage,
+        max_ticks,
+        engine,
+        reward_config,
+        curriculum_schedule,
+        None,
+    )
 }
 
 fn spawn_worker_routed(
@@ -780,6 +904,7 @@ fn spawn_worker_routed(
     max_ticks: i64,
     engine: EngineKind,
     reward_config: RewardConfig,
+    curriculum_schedule: ofcore::curriculum::CurriculumSchedule,
     ready_route: Option<(usize, Sender<ReadyEnv>)>,
 ) -> Result<(Worker, PreparedObs)> {
     let routed = ready_route.is_some();
@@ -790,7 +915,14 @@ fn spawn_worker_routed(
     let handle = std::thread::Builder::new()
         .name(format!("env{idx}"))
         .spawn(move || {
-            let mut w = match EnvWorker::new(idx, stage, max_ticks, engine, reward_config) {
+            let mut w = match EnvWorker::new(
+                idx,
+                stage,
+                max_ticks,
+                engine,
+                reward_config,
+                curriculum_schedule,
+            ) {
                 Ok(w) => w,
                 Err(e) => {
                     let _ = init_tx.send(Err(format!("{e:#}")));
@@ -2312,6 +2444,7 @@ fn run_eval(
     fp16_rollout: bool,
     compact_rollout: bool,
     reward_config: RewardConfig,
+    curriculum_schedule: ofcore::curriculum::CurriculumSchedule,
 ) -> Result<EvalResult> {
     if episodes == 0 {
         return Ok(EvalResult {
@@ -2324,11 +2457,18 @@ fn run_eval(
     let mut workers = Vec::with_capacity(episodes);
     let mut cur_obs = Vec::with_capacity(episodes);
     for i in 0..episodes {
-        let (w, obs) = spawn_worker(i, stage, max_ticks, engine, reward_config)?;
+        let (w, obs) = spawn_worker(
+            i,
+            stage,
+            max_ticks,
+            engine,
+            reward_config,
+            curriculum_schedule,
+        )?;
         workers.push(w);
         cur_obs.push(obs);
     }
-    let stages = ofcore::curriculum::stages();
+    let stages = ofcore::curriculum::stages_for_schedule(curriculum_schedule);
     let decision_ticks = stages[stage.min(stages.len().saturating_sub(1))]
         .decision_ticks
         .max(1) as u64;
@@ -2461,6 +2601,7 @@ pub struct BenchmarkConfig<'a> {
     pub fp16_rollout: bool,
     pub compact_rollout: bool,
     pub reward_config: RewardConfig,
+    pub curriculum_schedule: ofcore::curriculum::CurriculumSchedule,
 }
 
 pub fn run_benchmark(cfg: BenchmarkConfig<'_>) -> Result<()> {
@@ -2486,12 +2627,13 @@ pub fn run_benchmark(cfg: BenchmarkConfig<'_>) -> Result<()> {
         cfg.fp16_rollout,
         cfg.compact_rollout,
         cfg.reward_config,
+        cfg.curriculum_schedule,
     )?;
     let engine = match cfg.engine {
         EngineKind::Node => "node-ts",
         EngineKind::Native => "native-rust",
     };
-    let stages = ofcore::curriculum::stages();
+    let stages = ofcore::curriculum::stages_for_schedule(cfg.curriculum_schedule);
     let stage_cfg = &stages[cfg.stage];
     let nations = match stage_cfg.nations {
         ofcore::curriculum::Nations::Default => serde_json::Value::String("default".into()),
@@ -2519,9 +2661,17 @@ pub fn run_benchmark(cfg: BenchmarkConfig<'_>) -> Result<()> {
                     "strength": info.reward_components.strength,
                     "strength_delta": info.reward_components.strength_delta,
                     "dominance": info.reward_components.dominance,
+                    "action_churn": info.reward_components.action_churn,
                     "waste": info.reward_components.waste,
                     "death": info.reward_components.death,
                     "terminal": info.reward_components.terminal,
+                },
+                "action_pair_counts": {
+                    "boat_cancel_boat": info.action_pair_counts.boat_cancel_boat,
+                    "embargo_embargo_stop": info.action_pair_counts.embargo_embargo_stop,
+                    "attack_retreat": info.action_pair_counts.attack_retreat,
+                    "retreat_attack": info.action_pair_counts.retreat_attack,
+                    "total": info.action_pair_counts.total(),
                 },
             })
         })
@@ -2792,6 +2942,7 @@ impl AsyncEval {
                             cfg.fp16_rollout,
                             cfg.compact_rollout && cfg.foveate,
                             cfg.reward_config,
+                            cfg.curriculum_schedule,
                         )?;
                         let promoted = eval_is_better(&result, best);
                         if promoted {
@@ -3053,6 +3204,7 @@ mod async_eval_tests {
             best_eval_win: Some(0.75),
             best_eval_score: Some(3.5),
             v81_curriculum: true,
+            curriculum_schedule: Some("v8.1".to_string()),
             stage_env_targets: ofcore::curriculum::V81_ENV_TARGETS.to_vec(),
             envs_per_shard: 24,
             requested_env_target: None,
@@ -3198,7 +3350,13 @@ fn build_actor_shard(
         let engine = engine_for_idx(idx, cfg.engine, cfg.node_fraction);
         let route = ready_tx.as_ref().map(|tx| (local_i, tx.clone()));
         let (worker, obs) = spawn_worker_routed(
-            idx, stage, cfg.max_episode_ticks, engine, cfg.reward_config, route,
+            idx,
+            stage,
+            cfg.max_episode_ticks,
+            engine,
+            cfg.reward_config,
+            cfg.curriculum_schedule,
+            route,
         )?;
         workers.push(worker);
         cur_obs.push(obs);
@@ -3292,6 +3450,7 @@ fn actor_loop(
                     cfg.fp16_rollout,
                     cfg.compact_rollout && cfg.foveate,
                     cfg.reward_config,
+                    cfg.curriculum_schedule,
                 ))
                 .map(|result| ActorReply::Eval { id, result }),
             ActorCommand::Shutdown { id } => Ok(ActorReply::Ack { id }),
@@ -4795,9 +4954,11 @@ pub fn run(mut cfg: Config) -> Result<()> {
         );
         cfg.auto_scale_envs = false;
     }
+    let stage_count =
+        ofcore::curriculum::stages_for_schedule(cfg.curriculum_schedule).len();
     anyhow::ensure!(
         cfg.stage_env_targets.is_empty()
-            || cfg.stage_env_targets.len() == ofcore::curriculum::stages().len(),
+            || cfg.stage_env_targets.len() == stage_count,
         "stage env target count must match the curriculum stage count"
     );
     std::fs::create_dir_all(&cfg.ckpt_dir)?;
@@ -4843,17 +5004,26 @@ pub fn run(mut cfg: Config) -> Result<()> {
     } else {
         None
     };
-    if let Some(state) = &resumed_state {
-        if state.v81_curriculum && !cfg.v81_curriculum {
-            println!("[train] restoring --v81-curriculum from TrainState");
-            cfg.v81_curriculum = true;
+    if let Some(state) = &mut resumed_state {
+        let saved_schedule = state.schedule()?;
+        reconcile_resume_schedule(
+            state,
+            cfg.curriculum_schedule,
+            cfg.migrate_v81_stage5_to_v811,
+        )?;
+        if saved_schedule != cfg.curriculum_schedule {
+            println!(
+                "[train] migrated curriculum schedule {} stage 5 -> {} stage 5",
+                saved_schedule.id(),
+                cfg.curriculum_schedule.id()
+            );
         }
         if !state.stage_env_targets.is_empty() {
             anyhow::ensure!(
-                state.stage_env_targets.len() == ofcore::curriculum::stages().len(),
+                state.stage_env_targets.len() == stage_count,
                 "checkpoint has {} stage env targets, expected {}",
                 state.stage_env_targets.len(),
-                ofcore::curriculum::stages().len()
+                stage_count
             );
             if cfg.stage_env_targets != state.stage_env_targets {
                 println!("[train] restoring stage env targets from TrainState");
@@ -4863,7 +5033,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
     }
     let start_stage = resumed_state.as_ref().map(|s| s.stage).unwrap_or(cfg.stage);
     anyhow::ensure!(
-        start_stage < ofcore::curriculum::stages().len(),
+        start_stage < stage_count,
         "curriculum stage {start_stage} is out of range"
     );
     if let Some(&target) = cfg.stage_env_targets.get(start_stage) {
@@ -4935,7 +5105,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 let idx = gi * cfg.num_envs + local_i;
                 let worker_engine = engine_for_idx(idx, cfg.engine, cfg.node_fraction);
                 let (w, obs) = spawn_worker(
-                    idx, start_stage, cfg.max_episode_ticks, worker_engine, cfg.reward_config,
+                    idx,
+                    start_stage,
+                    cfg.max_episode_ticks,
+                    worker_engine,
+                    cfg.reward_config,
+                    cfg.curriculum_schedule,
                 )?;
                 workers.push(w);
                 cur_obs.push(obs);
@@ -5147,7 +5322,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
     // stage count; advancing resets the window and rebroadcasts the new
     // stage to every env worker thread (see `spawn_worker`'s `stage_rx`)
     // plus decays the learning rate on every shard's optimizer.
-    let stages = ofcore::curriculum::stages_for(cfg.v81_curriculum);
+    let stages = ofcore::curriculum::stages_for_schedule(cfg.curriculum_schedule);
     let mut curr_stage = start_stage;
     let mut recent_wins: std::collections::VecDeque<f64> = resumed_state
         .as_ref()
@@ -5387,14 +5562,19 @@ pub fn run(mut cfg: Config) -> Result<()> {
             for info in &result.ep_infos {
                 if debug_eps {
                     eprintln!(
-                        "[ep] reward={:.3} components[str={:.3} delta={:.3} dom={:.3} waste={:.3} death={:.3} terminal={:.3}] len={} tiles={:.1} tick={} place={}/{} score={:.3} won={} wasted={} stage={} rehearsal={} map={}",
+                        "[ep] reward={:.3} components[str={:.3} delta={:.3} dom={:.3} churn={:.3} waste={:.3} death={:.3} terminal={:.3}] churn_pairs[boat_cancel={} embargo_stop={} attack_retreat={} retreat_attack={}] len={} tiles={:.1} tick={} place={}/{} score={:.3} won={} wasted={} stage={} rehearsal={} map={}",
                         info.reward,
                         info.reward_components.strength,
                         info.reward_components.strength_delta,
                         info.reward_components.dominance,
+                        info.reward_components.action_churn,
                         info.reward_components.waste,
                         info.reward_components.death,
                         info.reward_components.terminal,
+                        info.action_pair_counts.boat_cancel_boat,
+                        info.action_pair_counts.embargo_embargo_stop,
+                        info.action_pair_counts.attack_retreat,
+                        info.action_pair_counts.retreat_attack,
                         info.length,
                         info.final_tiles,
                         info.final_tick,
@@ -5418,9 +5598,15 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     "reward/strength": info.reward_components.strength,
                     "reward/strength_delta": info.reward_components.strength_delta,
                     "reward/dominance": info.reward_components.dominance,
+                    "reward/action_churn": info.reward_components.action_churn,
                     "reward/waste": info.reward_components.waste,
                     "reward/death": info.reward_components.death,
                     "reward/terminal": info.reward_components.terminal,
+                    "action_pairs/boat_cancel_boat": info.action_pair_counts.boat_cancel_boat,
+                    "action_pairs/embargo_embargo_stop": info.action_pair_counts.embargo_embargo_stop,
+                    "action_pairs/attack_retreat": info.action_pair_counts.attack_retreat,
+                    "action_pairs/retreat_attack": info.action_pair_counts.retreat_attack,
+                    "action_pairs/total": info.action_pair_counts.total(),
                 })) {
                     eprintln!("[train] WARNING: episode reward-component log failed: {e:#}");
                 }
@@ -5578,7 +5764,9 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 recent_wins: recent_wins.iter().copied().collect(),
                 best_eval_win: current_best.map(|best| best.0),
                 best_eval_score: current_best.map(|best| best.1),
-                v81_curriculum: cfg.v81_curriculum,
+                v81_curriculum: cfg.curriculum_schedule
+                    != ofcore::curriculum::CurriculumSchedule::Legacy,
+                curriculum_schedule: Some(cfg.curriculum_schedule.id().to_string()),
                 stage_env_targets: cfg.stage_env_targets.clone(),
                 envs_per_shard: current_envs_per_shard,
                 requested_env_target: Some(target),
@@ -5677,6 +5865,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                             cfg.max_episode_ticks,
                             worker_engine,
                             cfg.reward_config,
+                            cfg.curriculum_schedule,
                         ) {
                             Ok((w, obs)) => {
                                 next_env_idx += 1;
@@ -5739,7 +5928,9 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 recent_wins: recent_wins.iter().copied().collect(),
                 best_eval_win: current_best.map(|best| best.0),
                 best_eval_score: current_best.map(|best| best.1),
-                v81_curriculum: cfg.v81_curriculum,
+                v81_curriculum: cfg.curriculum_schedule
+                    != ofcore::curriculum::CurriculumSchedule::Legacy,
+                curriculum_schedule: Some(cfg.curriculum_schedule.id().to_string()),
                 stage_env_targets: cfg.stage_env_targets.clone(),
                 envs_per_shard: live_total_envs / devices.len(),
                 requested_env_target: None,
@@ -5793,6 +5984,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                         cfg.fp16_rollout,
                         cfg.compact_rollout && cfg.foveate,
                         cfg.reward_config,
+                        cfg.curriculum_schedule,
                     )?
                 };
                 let promoted = eval_is_better(&result, current_best);
@@ -5915,7 +6107,9 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 recent_wins: recent_wins.iter().copied().collect(),
                 best_eval_win: current_best.map(|best| best.0),
                 best_eval_score: current_best.map(|best| best.1),
-                v81_curriculum: cfg.v81_curriculum,
+                v81_curriculum: cfg.curriculum_schedule
+                    != ofcore::curriculum::CurriculumSchedule::Legacy,
+                curriculum_schedule: Some(cfg.curriculum_schedule.id().to_string()),
                 stage_env_targets: cfg.stage_env_targets.clone(),
                 envs_per_shard: live_total_envs / devices.len(),
                 requested_env_target: None,
@@ -5967,7 +6161,9 @@ pub fn run(mut cfg: Config) -> Result<()> {
         recent_wins: recent_wins.iter().copied().collect(),
         best_eval_win: current_best.map(|best| best.0),
         best_eval_score: current_best.map(|best| best.1),
-        v81_curriculum: cfg.v81_curriculum,
+        v81_curriculum: cfg.curriculum_schedule
+            != ofcore::curriculum::CurriculumSchedule::Legacy,
+        curriculum_schedule: Some(cfg.curriculum_schedule.id().to_string()),
         stage_env_targets: cfg.stage_env_targets.clone(),
         envs_per_shard: pending
             .iter()
@@ -6189,7 +6385,8 @@ mod persistent_actor_tests {
             num_envs: 1,
             num_gpus: 1,
             stage: 0,
-            v81_curriculum: false,
+            curriculum_schedule: ofcore::curriculum::CurriculumSchedule::Legacy,
+            migrate_v81_stage5_to_v811: false,
             stage_env_targets: Vec::new(),
             max_episode_ticks: 10,
             rollout_len: 2,
@@ -6204,6 +6401,9 @@ mod persistent_actor_tests {
                 v81_dominant_loss: false,
                 v81_dominance_threshold: 0.55,
                 v81_delta_loss_dominant: 5.25,
+                v81_churn_coef: 0.0,
+                v81_churn_window: 2,
+                v81_churn_min_stage: 4,
             },
             lambda: 0.95,
             clip: 0.2,
