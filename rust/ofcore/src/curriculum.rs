@@ -688,10 +688,10 @@ pub const V811_ENV_TARGETS: [usize; 12] = [24, 24, 24, 24, 24, 24, 24, 12, 10, 8
 /// safely grows back to 12 when the player count resets from 80 to 30.
 pub const V82_ENV_TARGETS: [usize; 14] = [24, 24, 24, 24, 24, 16, 12, 10, 12, 10, 8, 8, 8, 8];
 pub const V83_ENV_TARGETS: [usize; 15] = [24, 24, 24, 24, 24, 24, 16, 12, 10, 12, 10, 8, 8, 8, 8];
-/// V9 envs/GPU. Early solo/tiny maps stay saturated; later broad-pool stages
-/// drop toward 8 like V8.3 as map/player cost grows.
+/// V9 envs/GPU. Early Onion bot-food maps stay saturated; later broad-pool
+/// stages drop toward 8 like V8.3 as map/player cost grows.
 pub const V9_ENV_TARGETS: [usize; 25] = [
-    24, 24, 24, 24, 24, // 0-4 solo / tiny bot counts
+    24, 24, 24, 24, 24, // 0-4 bots-only → first nations
     24, 24, 24, 24, 24, // 5-9 map + nation bridges
     24, 20, 16, 16, 12, // 10-14 Easy load climb
     12, 10, 10, 10, // 15-18 Easy 40→80
@@ -936,50 +936,54 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
             // Parallel sparse-win curriculum: extremely gradual difficulty,
             // high gates (0.90–0.975). win_at never hits 1.0 because
             // should_advance uses strict `mean > gate` over WINDOW=40.
+            //
+            // Bots are always present — they are food for the agent and for
+            // nations. Never start nation-only (nations are harder than bots).
+            // Early stages are bots-only, then nations are introduced on top.
             stages = vec![
                 Stage {
                     maps: &["Onion"],
-                    bots: 0,
+                    bots: 5,
                     difficulty: "Easy",
-                    nations: NE(1),
+                    nations: NE(0),
                     decision_ticks: 15,
                     win_at: 0.975,
                 },
                 Stage {
                     maps: &["Onion"],
-                    bots: 0,
+                    bots: 10,
                     difficulty: "Easy",
-                    nations: NE(2),
+                    nations: NE(0),
                     decision_ticks: 15,
                     win_at: 0.95,
                 },
                 Stage {
                     maps: &["Onion"],
-                    bots: 0,
+                    bots: 10,
                     difficulty: "Easy",
-                    nations: NE(3),
+                    nations: NE(1),
                     decision_ticks: 15,
                     win_at: 0.95,
                 },
                 Stage {
                     maps: &["Onion"],
-                    bots: 2,
+                    bots: 15,
                     difficulty: "Easy",
-                    nations: NE(3),
+                    nations: NE(1),
                     decision_ticks: 15,
                     win_at: 0.925,
                 },
                 Stage {
                     maps: &["Onion"],
-                    bots: 5,
+                    bots: 15,
                     difficulty: "Easy",
-                    nations: NE(3),
+                    nations: NE(2),
                     decision_ticks: 15,
                     win_at: 0.925,
                 },
                 Stage {
                     maps: &["Onion", "Pangaea"],
-                    bots: 5,
+                    bots: 20,
                     difficulty: "Easy",
                     nations: NE(3),
                     decision_ticks: 15,
@@ -987,15 +991,15 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
                 },
                 Stage {
                     maps: &["Pangaea"],
-                    bots: 5,
+                    bots: 20,
                     difficulty: "Easy",
-                    nations: NE(6),
+                    nations: NE(3),
                     decision_ticks: 15,
                     win_at: 0.90,
                 },
                 Stage {
                     maps: &["Pangaea"],
-                    bots: 10,
+                    bots: 25,
                     difficulty: "Easy",
                     nations: NE(6),
                     decision_ticks: 15,
@@ -1003,39 +1007,39 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
                 },
                 Stage {
                     maps: &["Pangaea", "Caucasus"],
-                    bots: 10,
-                    difficulty: "Easy",
-                    nations: NE(6),
-                    decision_ticks: 15,
-                    win_at: 0.90,
-                },
-                Stage {
-                    maps: &["Pangaea", "Caucasus"],
-                    bots: 15,
-                    difficulty: "Easy",
-                    nations: NE(6),
-                    decision_ticks: 10,
-                    win_at: 0.90,
-                },
-                Stage {
-                    maps: &["Pangaea", "Caucasus", "BlackSea"],
-                    bots: 15,
-                    difficulty: "Easy",
-                    nations: ND,
-                    decision_ticks: 10,
-                    win_at: 0.90,
-                },
-                Stage {
-                    maps: &["Pangaea", "Caucasus", "BlackSea"],
-                    bots: 20,
-                    difficulty: "Easy",
-                    nations: ND,
-                    decision_ticks: 10,
-                    win_at: 0.90,
-                },
-                Stage {
-                    maps: &["Pangaea", "Caucasus", "BlackSea"],
                     bots: 30,
+                    difficulty: "Easy",
+                    nations: NE(6),
+                    decision_ticks: 15,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &["Pangaea", "Caucasus"],
+                    bots: 30,
+                    difficulty: "Easy",
+                    nations: NE(6),
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &["Pangaea", "Caucasus", "BlackSea"],
+                    bots: 40,
+                    difficulty: "Easy",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &["Pangaea", "Caucasus", "BlackSea"],
+                    bots: 40,
+                    difficulty: "Easy",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &["Pangaea", "Caucasus", "BlackSea"],
+                    bots: 50,
                     difficulty: "Easy",
                     nations: ND,
                     decision_ticks: 10,
@@ -1043,23 +1047,7 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
                 },
                 Stage {
                     maps: &V82_STAGE5_MAPS,
-                    bots: 30,
-                    difficulty: "Easy",
-                    nations: ND,
-                    decision_ticks: 10,
-                    win_at: 0.90,
-                },
-                Stage {
-                    maps: &V82_MAPS,
-                    bots: 30,
-                    difficulty: "Easy",
-                    nations: ND,
-                    decision_ticks: 10,
-                    win_at: 0.90,
-                },
-                Stage {
-                    maps: &V82_MAPS,
-                    bots: 40,
+                    bots: 50,
                     difficulty: "Easy",
                     nations: ND,
                     decision_ticks: 10,
@@ -1076,6 +1064,22 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
                 Stage {
                     maps: &V82_MAPS,
                     bots: 65,
+                    difficulty: "Easy",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &V82_MAPS,
+                    bots: 80,
+                    difficulty: "Easy",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &V82_MAPS,
+                    bots: 80,
                     difficulty: "Easy",
                     nations: ND,
                     decision_ticks: 10,
@@ -2008,10 +2012,17 @@ mod curriculum_v81_tests {
             CurriculumSchedule::from_id("v9"),
             Some(CurriculumSchedule::V9)
         );
-        assert_eq!(v9[0].bots, 0);
-        assert_eq!(v9[0].nations, Nations::Exact(1));
+        // Bots are always present (food); early stages are bots-only before
+        // nations are layered on.
+        assert!(v9.iter().all(|s| s.bots > 0));
+        assert_eq!(v9[0].bots, 5);
+        assert_eq!(v9[0].nations, Nations::Exact(0));
         assert_eq!(v9[0].win_at, 0.975);
-        assert_eq!(v9[4].bots, 5);
+        assert_eq!(v9[1].bots, 10);
+        assert_eq!(v9[1].nations, Nations::Exact(0));
+        assert_eq!(v9[2].nations, Nations::Exact(1));
+        assert_eq!(v9[4].bots, 15);
+        assert_eq!(v9[4].nations, Nations::Exact(2));
         assert_eq!(v9[4].win_at, 0.925);
         assert!(v9.iter().all(|s| s.win_at >= 0.90 && s.win_at < 1.0));
         // Difficulty only steps after Easy player-count ladder completes.

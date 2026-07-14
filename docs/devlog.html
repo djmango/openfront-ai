@@ -152,7 +152,7 @@ is a new schedule + a hard sparse branch in reward assembly, not
   <tr><td>Reward profile</td><td><code>v8.6-attack-fair-v1</code></td><td><code>v9-sparse-win-v1</code></td></tr>
   <tr><td>Step reward</td><td>strength + delta + closeout + boat + tempo + thrash + …</td><td><b>0</b> every step</td></tr>
   <tr><td>Terminal</td><td>place + W_WIN(+extra) + fast-win; death penalty mid-episode</td><td><b>+1 win / −1</b> loss, death, or timeout</td></tr>
-  <tr><td>Stages</td><td>15 (V8.3 insert + Easy/Med/Hard ladder)</td><td><b>25</b> micro-steps (bots 0→2→5→10→15→20→30→40→50→65→80, then Med/Hard/Imp)</td></tr>
+  <tr><td>Stages</td><td>15 (V8.3 insert + Easy/Med/Hard ladder)</td><td><b>25</b> micro-steps (bots always on: 5→10→…→80 Easy, then Med/Hard/Imp; nations layered after bots-only start)</td></tr>
   <tr><td>Graduation</td><td>often 0.12–0.45; V83 stages 5–6 also conversion gates</td><td><b>0.90–0.975</b> win rate only (no conversion gate)</td></tr>
   <tr><td>Start stage</td><td>5 (migrate lineage)</td><td><b>0</b> fresh</td></tr>
   <tr><td>Gamma / ret_clip</td><td>0.999 / 3000</td><td><b>0.9997</b> / <b>2</b> (longer credit for sparse terminals)</td></tr>
@@ -160,13 +160,15 @@ is a new schedule + a hard sparse branch in reward assembly, not
 </table>
 
 <h3 id="v9-stages">Stage sketch (high gates)</h3>
+<p>Bots are always present (food for the agent and for nations). Early stages
+are bots-only; nations are introduced on top — never nation-only, since nations
+are harder than bots.</p>
 <table>
   <tr><th>#</th><th>maps</th><th>bots</th><th>diff</th><th>nations</th><th>win_at</th></tr>
-  <tr><td>0</td><td>Onion</td><td>0</td><td>Easy</td><td>Exact(1)</td><td>0.975</td></tr>
-  <tr><td>1–2</td><td>Onion</td><td>0</td><td>Easy</td><td>Exact(2→3)</td><td>0.95</td></tr>
-  <tr><td>3–4</td><td>Onion</td><td>2→5</td><td>Easy</td><td>Exact(3)</td><td>0.925</td></tr>
-  <tr><td>5–9</td><td>Onion→Pangaea→Caucasus</td><td>5→15</td><td>Easy</td><td>Exact(3→6)</td><td>0.90</td></tr>
-  <tr><td>10–18</td><td>3-map → V82 pool</td><td>15→80</td><td>Easy</td><td>Default</td><td>0.90</td></tr>
+  <tr><td>0–1</td><td>Onion</td><td>5→10</td><td>Easy</td><td>Exact(0) bots-only</td><td>0.975→0.95</td></tr>
+  <tr><td>2–4</td><td>Onion</td><td>10→15</td><td>Easy</td><td>Exact(1→2)</td><td>0.95→0.925</td></tr>
+  <tr><td>5–9</td><td>Onion→Pangaea→Caucasus</td><td>20→30</td><td>Easy</td><td>Exact(3→6)</td><td>0.90</td></tr>
+  <tr><td>10–18</td><td>3-map → V82 pool</td><td>40→80</td><td>Easy</td><td>Default</td><td>0.90</td></tr>
   <tr><td>19–21</td><td>V82_MAPS</td><td>30/50/80</td><td>Medium</td><td>Default</td><td>0.90</td></tr>
   <tr><td>22–24</td><td>V82_MAPS</td><td>80/120/150</td><td>Hard→Impossible</td><td>Default</td><td>0.90</td></tr>
 </table>
@@ -223,6 +225,12 @@ on a second pod.</p>
     ~210–217 steps/s on 3×A40, <code>recent_reward=-1.0</code> (sparse terminals;
     early losses expected). Checkpoints at update 5/10 under
     <code>rust/checkpoints/ppo_v9/</code>.</li>
+  <li><b>Curriculum fix (same evening):</b> stage 0–2 were nation-only
+    (<code>bots: 0</code>, <code>Exact(1→3)</code>) — nations are harder than bots,
+    so the sparse ladder never saw a win (~650 eps, win_rate 0, land share decaying).
+    Reladdered so bots are always on (food); stages 0–1 bots-only
+    (<code>Exact(0)</code>), then nations layered on. Fresh restart from stage 0
+    on the same pod after rebuild.</li>
 </ul>
 
 <h2 class="date" id="persistent-autoscale-restart">Jul 14, 2026 - persistent actors + GPU-util autoscale via restart</h2>
