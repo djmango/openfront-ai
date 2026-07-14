@@ -1,71 +1,14 @@
 //! Recurrent-policy transport and actor-state ownership.
 //!
-//! The current `PolicyNet` is feed-forward.  This module is the intentionally
-//! small integration seam for the future recurrent policy: replace the
-//! compatibility adapter's `act_recurrent`/`value_recurrent` bodies when that
-//! API lands.  Observation tensors are deliberately not extended; previous
-//! action/result context is a separate tensor.
+//! Policy transitions live in `PolicyNet::{act,evaluate,value}_with_state`;
+//! this module owns only device-state rows and host context packing.
 
 use anyhow::Result;
 use tch::{Device, Kind, Tensor};
 
-use crate::policy::{Obs, PolicyNet};
 use crate::vecenv::ActionOutcome;
 
 pub const CONTEXT_FLOATS: usize = 14;
-
-pub type ActTensors = (
-    Tensor,
-    Tensor,
-    Tensor,
-    Tensor,
-    Tensor,
-    Tensor,
-    Tensor,
-    Tensor,
-);
-
-pub struct RecurrentAct {
-    pub action: ActTensors,
-    pub hidden_out: Tensor,
-}
-
-/// Adapter implemented by the eventual recurrent policy API.
-///
-/// `hidden_in` is `(B, H)` and `context` is `(B, CONTEXT_FLOATS)`, both on
-/// the policy device. `hidden_out` must have the same shape as `hidden_in`.
-pub trait RecurrentPolicyApi {
-    fn act_recurrent(
-        &self,
-        obs: &Obs,
-        hidden_in: &Tensor,
-        context: &Tensor,
-        greedy: bool,
-    ) -> Result<RecurrentAct>;
-
-    fn value_recurrent(&self, obs: &Obs, hidden_in: &Tensor, context: &Tensor) -> Result<Tensor>;
-}
-
-/// Compatibility adapter used until `PolicyNet` exposes recurrence. It keeps
-/// the legacy policy's outputs byte-for-byte and makes state transport a no-op.
-impl RecurrentPolicyApi for PolicyNet {
-    fn act_recurrent(
-        &self,
-        obs: &Obs,
-        hidden_in: &Tensor,
-        _context: &Tensor,
-        greedy: bool,
-    ) -> Result<RecurrentAct> {
-        Ok(RecurrentAct {
-            action: self.act(obs, greedy),
-            hidden_out: hidden_in.shallow_clone(),
-        })
-    }
-
-    fn value_recurrent(&self, obs: &Obs, _hidden_in: &Tensor, _context: &Tensor) -> Result<Tensor> {
-        Ok(self.value_only(obs))
-    }
-}
 
 pub fn context_tensor(contexts: &[ActionOutcome], device: Device) -> Tensor {
     let mut values = Vec::with_capacity(contexts.len() * CONTEXT_FLOATS);
@@ -139,42 +82,6 @@ mod tests {
     use super::*;
 
     struct MockRecurrentPolicy;
-
-    impl RecurrentPolicyApi for MockRecurrentPolicy {
-        fn act_recurrent(
-            &self,
-            _obs: &Obs,
-            hidden_in: &Tensor,
-            context: &Tensor,
-            _greedy: bool,
-        ) -> Result<RecurrentAct> {
-            let batch = hidden_in.size()[0];
-            let long = || Tensor::zeros([batch], (Kind::Int64, hidden_in.device()));
-            let float = || Tensor::zeros([batch], (Kind::Float, hidden_in.device()));
-            Ok(RecurrentAct {
-                action: (
-                    long(),
-                    long(),
-                    long(),
-                    long(),
-                    long(),
-                    float(),
-                    float(),
-                    float(),
-                ),
-                hidden_out: self.advance(hidden_in, context),
-            })
-        }
-
-        fn value_recurrent(
-            &self,
-            _obs: &Obs,
-            hidden_in: &Tensor,
-            _context: &Tensor,
-        ) -> Result<Tensor> {
-            Ok(hidden_in.sum_dim_intlist(1, false, Kind::Float))
-        }
-    }
 
     impl MockRecurrentPolicy {
         fn advance(&self, hidden_in: &Tensor, context: &Tensor) -> Tensor {
