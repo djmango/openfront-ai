@@ -595,14 +595,11 @@ struct Args {
     #[arg(long, default_value = "mse", value_parser = ["huber", "mse"])]
     value_loss: String,
 
-    /// Opt-in: automatically grow `--num-envs` at runtime toward the
-    /// `--target-gpu-util` set point instead of relying on manual
-    /// trial-and-error (see the "V8 Rust PPO Trainer" devlog entry that
-    /// found `--num-envs 4` gave ~40% util vs 64's 98-100% on the same
-    /// A100 box, by hand). Off by default so existing training behavior/
-    /// configs are unaffected. See `autoscale.rs` for the decision logic
-    /// (grow-only in this version - see its module doc for why) and
-    /// `train::run`'s update loop for where it's checked.
+    /// Opt-in: automatically grow `--num-envs` toward `--target-gpu-util`.
+    /// With `--persistent-actors`, growth checkpoints and exits via
+    /// `restart_request.json` (same path as stage env targets); legacy
+    /// collectors still spawn workers in-process. See `autoscale.rs` and
+    /// `train::run`. Off by default; `pod_train_v8.sh` enables it for V8.3+.
     #[arg(long, default_value_t = false)]
     auto_scale_envs: bool,
 

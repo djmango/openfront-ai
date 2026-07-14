@@ -41,9 +41,10 @@
 //! sidecars retain their format/order.
 //!
 //! Persistent owners deliberately do not accept live env-resize commands.
-//! Stage-aware sizing checkpoints at an update boundary and exits with a
-//! machine-readable restart request; utilization autoscale is disabled rather
-//! than silently falling back to legacy ownership.
+//! Stage-aware sizing and GPU-util autoscale both checkpoint at an update
+//! boundary and exit with a machine-readable restart request
+//! (`restart_request.json`); pod_train relaunches at the new per-shard count.
+//! Legacy (non-persistent) runs still grow env workers in-process.
 //!
 //! ## Dual env-group pipelining (`--pipeline-groups`)
 //!
@@ -316,8 +317,9 @@ pub struct Config {
     /// actor CUDA state; one stable learner thread per GPU owns that shard's
     /// learner CUDA state and PPO execution. Weights remain packed CPU-only
     /// messages; gradients use owner-local NCCL when available and a packed
-    /// CPU fallback otherwise. Disabled by default; incompatible live
-    /// utilization autoscaling is disabled without changing ownership mode.
+    /// CPU fallback otherwise. Disabled by default. With `--auto-scale-envs`,
+    /// growth uses the same restart-resize path as stage env targets (no
+    /// live mid-run spawn under persistent CUDA ownership).
     pub persistent_actors: bool,
     /// Opt-in recurrent actor state. This is restricted to persistent actors
     /// so the device hidden tensor never changes owner threads.
@@ -751,6 +753,35 @@ fn requested_stage_env_target(
         .filter(|&target| target != current_envs_per_shard)
 }
 
+/// Resolve per-shard env count at process start.
+///
+/// Stage schedule values are a *floor* within a stage: an autoscale restart
+/// (or operator `--num-envs`) above the floor must stick across resume.
+/// Explicit `TrainState.requested_env_target` always wins (stage shrink/grow
+/// or GPU-util autoscale restart). Cold start with no resume uses the stage
+/// floor when present.
+fn resolve_startup_envs_per_shard(
+    cli_num_envs: usize,
+    stage_target: Option<usize>,
+    resumed: Option<&TrainState>,
+    fulfilling_restart: bool,
+) -> usize {
+    if let Some(req) = resumed.and_then(|s| s.requested_env_target) {
+        return req.max(1);
+    }
+    let Some(stage) = stage_target else {
+        return cli_num_envs.max(1);
+    };
+    if fulfilling_restart {
+        // pod_train already applied restart_request.json → --num-envs.
+        return cli_num_envs.max(1);
+    }
+    if let Some(prev) = resumed.map(|s| s.envs_per_shard).filter(|&n| n > 0) {
+        return prev.max(stage);
+    }
+    stage
+}
+
 fn state_sidecar_path(ckpt_path: &str) -> String {
     let stem = ckpt_path
         .strip_suffix(".safetensors")
@@ -1142,6 +1173,48 @@ mod v81_state_and_gate_tests {
         assert_eq!(requested_stage_env_target(&v82, 10, 10), Some(8));
     }
 
+    #[test]
+    fn startup_envs_keep_autoscale_gains_above_stage_floor() {
+        let mut resumed = TrainState {
+            checkpoint_schema_version: 1,
+            hidden_reset_policy: "none".to_string(),
+            update: 10,
+            stage: 8,
+            ent_scale: 1.0,
+            lr_now: 1e-4,
+            total_env_steps: 0,
+            recent_wins: vec![],
+            recent_conversions: vec![],
+            best_eval_win: None,
+            best_eval_score: None,
+            v81_curriculum: true,
+            curriculum_schedule: Some("v8.3".to_string()),
+            reward_profile: None,
+            return_stats: None,
+            stage_env_targets: ofcore::curriculum::V83_ENV_TARGETS.to_vec(),
+            envs_per_shard: 16,
+            requested_env_target: None,
+        };
+        // Within-stage resume after autoscale grew 10 → 16: keep 16.
+        assert_eq!(
+            resolve_startup_envs_per_shard(10, Some(10), Some(&resumed), false),
+            16
+        );
+        // Explicit resize request always wins (stage shrink or autoscale).
+        resumed.requested_env_target = Some(20);
+        assert_eq!(
+            resolve_startup_envs_per_shard(10, Some(10), Some(&resumed), false),
+            20
+        );
+        // Fulfilled restart: trust CLI (pod already applied request).
+        assert_eq!(
+            resolve_startup_envs_per_shard(20, Some(10), Some(&resumed), true),
+            20
+        );
+        // Cold start: honor stage floor.
+        assert_eq!(resolve_startup_envs_per_shard(24, Some(10), None, false), 10);
+    }
+
     fn state_for_schedule(id: Option<&str>, v81: bool, stage: usize) -> TrainState {
         TrainState {
             checkpoint_schema_version: 1,
@@ -1170,17 +1243,17 @@ mod v81_state_and_gate_tests {
         use ofcore::curriculum::CurriculumSchedule;
         let mut v81 = state_for_schedule(Some("v8.1"), true, 5);
         assert!(
-            reconcile_resume_schedule(&mut v81, CurriculumSchedule::V81, false, false, false, false, false, false, false)
+            reconcile_resume_schedule(&mut v81, CurriculumSchedule::V81, false, false, false, false, false, false, false, false, false)
                 .is_ok()
         );
         let error =
-            reconcile_resume_schedule(&mut v81, CurriculumSchedule::V811, false, false, false, false, false, false, false)
+            reconcile_resume_schedule(&mut v81, CurriculumSchedule::V811, false, false, false, false, false, false, false, false, false)
                 .unwrap_err();
         assert!(error.to_string().contains("incompatible"));
 
         let mut legacy = state_for_schedule(None, false, 5);
         assert!(
-            reconcile_resume_schedule(&mut legacy, CurriculumSchedule::V811, true, false, false, false, false, false, false)
+            reconcile_resume_schedule(&mut legacy, CurriculumSchedule::V811, true, false, false, false, false, false, false, false, false)
                 .is_err()
         );
     }
@@ -1189,7 +1262,7 @@ mod v81_state_and_gate_tests {
     fn explicit_v81_stage5_migration_maps_to_v811_stage5() {
         use ofcore::curriculum::CurriculumSchedule;
         let mut state = state_for_schedule(None, true, 5);
-        reconcile_resume_schedule(&mut state, CurriculumSchedule::V811, true, false, false, false, false, false, false)
+        reconcile_resume_schedule(&mut state, CurriculumSchedule::V811, true, false, false, false, false, false, false, false, false)
             .unwrap();
         assert_eq!(state.stage, 5);
         assert_eq!(state.schedule().unwrap(), CurriculumSchedule::V811);
@@ -1206,7 +1279,7 @@ mod v81_state_and_gate_tests {
                 false,
                 false,
                 false,
-                false, false, false)
+                false, false, false, false, false)
             .is_err()
         );
     }
@@ -1215,7 +1288,7 @@ mod v81_state_and_gate_tests {
     fn explicit_v811_stage5_migration_maps_to_v82_stage5() {
         use ofcore::curriculum::CurriculumSchedule;
         let mut state = state_for_schedule(Some("v8.1.1"), true, 5);
-        reconcile_resume_schedule(&mut state, CurriculumSchedule::V82, false, true, false, false, false, false, false).unwrap();
+        reconcile_resume_schedule(&mut state, CurriculumSchedule::V82, false, true, false, false, false, false, false, false, false).unwrap();
         assert_eq!(state.stage, 5);
         assert_eq!(state.schedule().unwrap(), CurriculumSchedule::V82);
         assert!(state.recent_wins.is_empty());
@@ -1231,7 +1304,7 @@ mod v81_state_and_gate_tests {
                 true,
                 false,
                 false,
-                false, false, false)
+                false, false, false, false, false)
             .is_err()
         );
         let mut wrong_source = state_for_schedule(Some("v8.1"), true, 5);
@@ -1243,7 +1316,7 @@ mod v81_state_and_gate_tests {
                 true,
                 false,
                 false,
-                false, false, false)
+                false, false, false, false, false)
             .is_err()
         );
     }
@@ -1261,7 +1334,7 @@ mod v81_state_and_gate_tests {
         state.best_eval_score = Some(0.9);
         state.return_stats = Some(serde_json::json!({"mean": 12.0, "count": 44}));
 
-        reconcile_resume_schedule(&mut state, CurriculumSchedule::V83, false, false, true, false, false, false, false).unwrap();
+        reconcile_resume_schedule(&mut state, CurriculumSchedule::V83, false, false, true, false, false, false, false, false, false).unwrap();
         assert_eq!(state.stage, 5);
         assert_eq!(state.update, 321);
         assert_eq!(state.total_env_steps, 99_000);
@@ -1289,7 +1362,7 @@ mod v81_state_and_gate_tests {
                     false,
                     true,
                     false,
-                    false, false, false)
+                    false, false, false, false, false)
                 .is_err()
             );
         }
@@ -1301,7 +1374,7 @@ mod v81_state_and_gate_tests {
         let mut state = state_for_schedule(Some("v8.3"), true, 5);
         state.reward_profile = Some("wrong".to_string());
         assert!(
-            reconcile_resume_schedule(&mut state, CurriculumSchedule::V83, false, false, false, false, false, false, false)
+            reconcile_resume_schedule(&mut state, CurriculumSchedule::V83, false, false, false, false, false, false, false, false, false)
                 .unwrap_err()
                 .to_string()
                 .contains("reward profile mismatch")
@@ -6406,11 +6479,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
     );
     if cfg.persistent_actors && cfg.auto_scale_envs {
         println!(
-            "[train] WARNING: --persistent-actors does not support live \
-             --auto-scale-envs commands; disabling utilization autoscale while \
-             preserving persistent actor ownership"
+            "[train] --persistent-actors + --auto-scale-envs: GPU-util growth uses \
+             restart_request.json (same path as stage env targets); live in-process \
+             spawn remains legacy-only"
         );
-        cfg.auto_scale_envs = false;
     }
     let stage_count = ofcore::curriculum::stages_for_schedule(cfg.curriculum_schedule).len();
     anyhow::ensure!(
@@ -6585,15 +6657,23 @@ pub fn run(mut cfg: Config) -> Result<()> {
         start_stage < stage_count,
         "curriculum stage {start_stage} is out of range"
     );
-    if let Some(&target) = cfg.stage_env_targets.get(start_stage) {
-        if cfg.num_envs != target {
-            println!(
-                "[train] stage {start_stage} env target overrides startup count: {} -> {target} envs/shard",
-                cfg.num_envs
-            );
-        }
-        cfg.num_envs = target;
+    let restart_path = restart_request_path(&cfg.ckpt_dir);
+    let fulfilling_restart = std::path::Path::new(&restart_path).exists();
+    let stage_target = cfg.stage_env_targets.get(start_stage).copied();
+    let resolved = resolve_startup_envs_per_shard(
+        cfg.num_envs,
+        stage_target,
+        resumed_state.as_ref(),
+        fulfilling_restart,
+    );
+    if cfg.num_envs != resolved {
+        println!(
+            "[train] stage {start_stage} env sizing: {} -> {resolved} envs/shard \
+             (stage_floor={:?}, fulfilling_restart={fulfilling_restart})",
+            cfg.num_envs, stage_target
+        );
     }
+    cfg.num_envs = resolved;
 
     let metrics = MetricsWriter::create(&cfg.ckpt_dir)?;
     println!("[train] metrics -> {}/metrics.jsonl", cfg.ckpt_dir);
@@ -6942,6 +7022,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
         _ => None,
     };
     let mut requested_env_target: Option<usize> = None;
+    let mut resize_reason = String::new();
 
     // Prime the pipeline: collect the very first rollout (using the
     // actors' initial, freshly-copied-from-learner weights) before the
@@ -7306,6 +7387,9 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 curr_stage,
                 live_total_envs / devices.len(),
             );
+            if requested_env_target.is_some() {
+                resize_reason = "curriculum_stage_env_target".to_string();
+            }
             if requested_env_target.is_none() && cfg.persistent_actors {
                 for actor in &mut persistent_actors {
                     actor.set_stage(curr_stage)?;
@@ -7432,6 +7516,95 @@ pub fn run(mut cfg: Config) -> Result<()> {
             update_start.elapsed().as_secs_f64()
         );
 
+        // Auto-scale check: after this update's pending swap and *before*
+        // the next collect. Persistent owners cannot live-spawn workers
+        // (CUDA ownership stays on the actor thread), so growth sets
+        // `requested_env_target` and shares the restart path below with
+        // curriculum stage env targets. Legacy collectors still grow
+        // in-process.
+        if requested_env_target.is_none()
+            && cfg.auto_scale_envs
+            && update % cfg.autoscale_check_every.max(1) == 0
+        {
+            let gpu_util_frac = gpu_sampler
+                .as_ref()
+                .map(|g| g.snapshot().min_mean_util() / 100.0);
+            let current = live_total_envs / devices.len().max(1);
+            let target_n = autoscale::next_env_count(
+                current,
+                gpu_util_frac,
+                cfg.target_gpu_util,
+                autoscale_min_envs,
+                autoscale_max_envs,
+                cfg.autoscale_step,
+            );
+            if target_n > current {
+                let gpu_str = gpu_util_frac
+                    .map(|f| format!("{:.1}%", f * 100.0))
+                    .unwrap_or_else(|| "n/a (no GPU)".to_string());
+                if cfg.persistent_actors {
+                    requested_env_target = Some(target_n);
+                    resize_reason = "gpu_util_autoscale".to_string();
+                    println!(
+                        "[autoscale] persistent: {current} -> {target_n} envs/shard \
+                         (gpu_util={gpu_str} target={:.0}%); checkpointing for restart",
+                        cfg.target_gpu_util * 100.0
+                    );
+                } else {
+                    let add = target_n - current;
+                    let mut spawned: Vec<(usize, Worker, PreparedObs)> =
+                        Vec::with_capacity(add * actors.len());
+                    let mut spawn_err: Option<anyhow::Error> = None;
+                    'grow: for gi in 0..actors.len() {
+                        for _ in 0..add {
+                            let worker_engine =
+                                engine_for_idx(next_env_idx, cfg.engine, cfg.node_fraction);
+                            match spawn_worker(
+                                next_env_idx,
+                                curr_stage,
+                                cfg.max_episode_ticks,
+                                worker_engine,
+                                cfg.reward_config,
+                                cfg.curriculum_schedule,
+                            ) {
+                                Ok((w, obs)) => {
+                                    next_env_idx += 1;
+                                    spawned.push((gi, w, obs));
+                                }
+                                Err(e) => {
+                                    spawn_err = Some(e);
+                                    break 'grow;
+                                }
+                            }
+                        }
+                    }
+                    match spawn_err {
+                        Some(e) => {
+                            println!(
+                                "[autoscale] scale-up {current} -> {target_n} envs/shard FAILED ({e:#}); \
+                                 closing partially-spawned workers, staying at {current}"
+                            );
+                            for (_, w, _) in spawned {
+                                drop(w.choice_tx);
+                                let _ = w.handle.join();
+                            }
+                        }
+                        None => {
+                            for (gi, w, obs) in spawned {
+                                actors[gi].workers.push(w);
+                                actors[gi].cur_obs.push(obs);
+                            }
+                            println!(
+                                "[autoscale] all shards: {current} -> {target_n} envs (gpu_util={gpu_str} \
+                                 target={:.0}% cpu_cap={autoscale_max_envs})",
+                                cfg.target_gpu_util * 100.0
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         if let Some(target) = requested_env_target {
             if let Some(eval) = async_eval.take() {
                 if let Some(completion) = eval.shutdown()? {
@@ -7439,6 +7612,11 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 }
             }
             let current_envs_per_shard = live_total_envs / devices.len();
+            let reason = if resize_reason.is_empty() {
+                "curriculum_stage_env_target".to_string()
+            } else {
+                resize_reason.clone()
+            };
             let state = TrainState {
                 checkpoint_schema_version: if cfg.recurrent_policy { 2 } else { 1 },
                 hidden_reset_policy: if cfg.recurrent_policy {
@@ -7480,7 +7658,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             save_policy_manifest(&cfg, &state)?;
             let request = EnvResizeRequest {
                 format: 1,
-                reason: "curriculum_stage_env_target".to_string(),
+                reason,
                 update: update + 1,
                 stage: curr_stage,
                 current_envs_per_shard,
@@ -7515,92 +7693,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             return Ok(());
         }
 
-        // Auto-scale check: deliberately placed here, after this
-        // update's `pending`/`next_pending` swap and *before* the next
-        // loop iteration spawns its `collect_rollout` calls - growing
-        // `actor.workers`/`actor.cur_obs` mid-rollout (inside
-        // `collect_rollout`'s per-step send/recv loop) would desync the
-        // `n = actor.workers.len()` it captured at the top of that call.
-        if cfg.auto_scale_envs && update % cfg.autoscale_check_every.max(1) == 0 {
-            let gpu_util_frac = gpu_sampler
-                .as_ref()
-                .map(|g| g.snapshot().min_mean_util() / 100.0);
-            let current = actors[0].workers.len();
-            let target_n = autoscale::next_env_count(
-                current,
-                gpu_util_frac,
-                cfg.target_gpu_util,
-                autoscale_min_envs,
-                autoscale_max_envs,
-                cfg.autoscale_step,
-            );
-            if target_n > current {
-                let add = target_n - current;
-                // Grow every shard by the same amount in lockstep so all
-                // shards keep an identical env count (see `train_update`'s
-                // derivation of a single shared `n` from shard 0's data,
-                // and this module's doc for why uniform growth is the
-                // simplifying choice) - spawn everything first, and only
-                // commit (push onto the real shards) if every single spawn
-                // across every shard succeeded; otherwise close whatever
-                // was spawned in this attempt and keep the old count. A
-                // partial commit would leave shards with different env
-                // counts, which the rest of this file assumes never
-                // happens.
-                let mut spawned: Vec<(usize, Worker, PreparedObs)> =
-                    Vec::with_capacity(add * actors.len());
-                let mut spawn_err: Option<anyhow::Error> = None;
-                'grow: for gi in 0..actors.len() {
-                    for _ in 0..add {
-                        let worker_engine =
-                            engine_for_idx(next_env_idx, cfg.engine, cfg.node_fraction);
-                        match spawn_worker(
-                            next_env_idx,
-                            curr_stage,
-                            cfg.max_episode_ticks,
-                            worker_engine,
-                            cfg.reward_config,
-                            cfg.curriculum_schedule,
-                        ) {
-                            Ok((w, obs)) => {
-                                next_env_idx += 1;
-                                spawned.push((gi, w, obs));
-                            }
-                            Err(e) => {
-                                spawn_err = Some(e);
-                                break 'grow;
-                            }
-                        }
-                    }
-                }
-                let gpu_str = gpu_util_frac
-                    .map(|f| format!("{:.1}%", f * 100.0))
-                    .unwrap_or_else(|| "n/a (no GPU)".to_string());
-                match spawn_err {
-                    Some(e) => {
-                        println!(
-                            "[autoscale] scale-up {current} -> {target_n} envs/shard FAILED ({e:#}); \
-                             closing partially-spawned workers, staying at {current}"
-                        );
-                        for (_, w, _) in spawned {
-                            drop(w.choice_tx);
-                            let _ = w.handle.join();
-                        }
-                    }
-                    None => {
-                        for (gi, w, obs) in spawned {
-                            actors[gi].workers.push(w);
-                            actors[gi].cur_obs.push(obs);
-                        }
-                        println!(
-                            "[autoscale] all shards: {current} -> {target_n} envs (gpu_util={gpu_str} \
-                             target={:.0}% cpu_cap={autoscale_max_envs})",
-                            cfg.target_gpu_util * 100.0
-                        );
-                    }
-                }
-            }
-        }
+        // Legacy live autoscale already applied above when !persistent_actors.
 
         if eval_due {
             let win_rate = if recent_wins.is_empty() {
