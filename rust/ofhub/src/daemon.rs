@@ -225,7 +225,11 @@ fn generate_clip(
             "clip {map_name}: render client video -> {}",
             clip.display()
         ));
-        render_client_clip(&record, &clip)?;
+        // Watch works from the GameRecord alone; don't fail the map if
+        // Playwright times out (common while Vite is still warming).
+        if let Err(e) = render_client_clip(&record, &clip) {
+            log(&format!("clip {map_name}: render failed ({e}); keeping record for Watch"));
+        }
     } else {
         log(&format!("clip {map_name}: reusing {}", clip.display()));
     }
