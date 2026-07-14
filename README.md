@@ -14,11 +14,12 @@ lessons, and the full AE v3.1 bake-off. **Living spec:**
   deterministically from the public archive.
 - **Spatial AE v3.1** concluded: latent *resolution* (1/8, not channel count)
   fixes the human/bot border-accuracy gap. Policy encoder: **`ae_v31_d8c32`**
-  (32ch @ 1/8, 88.2% human / 95.5% bot borders). AE training remains Python.
+  (32ch @ 1/8, 88.2% human / 95.5% bot borders). AE train/prefeaturize via
+  Rust **`ofae`** (Python `ae/` removed).
 - **PPO via Rust `oftrain`** (Python `rl/` stack removed). ~6M-param policy,
   win-gated curriculum, safetensors checkpoints, native + Node engine hedge.
 - Showcase / live play: `ofshowcase` + webbot ONNX (`scripts/export_onnx.py`,
-  `scripts/play_live.sh`).
+  `scripts/play_live.sh`). Thin Python remains for ONNX/Playwright/libtorch.
 
 ## Architecture: compress the map, bypass the rest
 
@@ -121,15 +122,14 @@ Condensed from the [devlog](https://djmango.github.io/openfront-ai/devlog.html#l
 - `datagen/` - TypeScript headless game runner. Boots the real
   (deterministic) OpenFront engine in Node, plays bot/nation games, dumps
   full-state snapshots every 10 ticks.
-- `ae/` - PyTorch spatial AE (`model_v3.py`, `train_v3.py`, `load.py`).
-  Encodes ownership/terrain; exports encoder safetensors for `oftrain`.
-- `rust/` - `oftrain` (PPO), `ofhub` (HF sync + showcase), `ofcore` (feat/
-  curriculum), `engine` (native sim). Primary training path.
-- `webbot_export/` - slim Policy + safetensors→ONNX helpers for browser play.
+- `rust/` - `oftrain` (PPO), `ofae` (spatial AE train/prefeaturize), `ofhub`
+  (HF sync + showcase), `ofcore` (feat/curriculum), `engine` (native sim).
+- `webbot_export/` - slim Policy + AE encoder + safetensors→ONNX helpers for
+  browser play (thin Python island; Torch also provides libtorch for `tch`).
 - `bridge/` - persistent Node process wrapping the engine (JSONL reset/step
   over stdio, binary tile IPC).
-- `scripts/` - AE prefeaturize/eval, ONNX export, client replay render, HF
-  upload, `pod_train_v8.sh` cloud supervisors.
+- `scripts/` - ONNX export, client replay render, HF upload, `pod_train_v8.sh`
+  cloud supervisors, `fetch_ae_encoders.sh`.
 - `docs/` - devlog and training graphs.
 - `openfront/` - git submodule of
   [openfrontio/OpenFrontIO](https://github.com/openfrontio/OpenFrontIO),
@@ -162,20 +162,25 @@ Snapshots are written every 10 ticks (1s of game time). Format details in the
 ## Train
 
 ```bash
-# one-time: convert gzip+JSON snapshots to fast zstd caches (~10ms → ~0.5ms/sample)
-PYTHONPATH=. uv run python scripts/prefeaturize.py --data data --workers 8
+# one-time: convert gzip+JSON snapshots to fast zstd caches
+cd rust && cargo run --release -p ofae -- prefeaturize --data ../data --workers 8
 
-# spatial AE (v3.1) - still Python; not yet ported to Rust
-uv run python -m ae.train_v3 --data data --data-human data-human \
-    --steps 40000 --batch-size 64 --latent-down 8 --latent-c 32
+# spatial AE (v3.1) - writes ae_v3.safetensors + ae_v3.encoder.safetensors
+cargo run --release -p ofae -- train \
+    --data ../data,../data-human \
+    --steps 40000 --batch-size 64 --latent-down 8 --latent-c 32 \
+    --out ../runs/ae_v31_d8c32
 
-# export encoder for oftrain
-PYTHONPATH=. uv run python scripts/export_safetensors.py \
-    --ae runs/ae_v31_d8c32/ae_v3.pt \
-    --out weights/ae/ae_v31_d8c32.encoder.safetensors
+# optional: filter a full ckpt → encoder-only (train already writes encoder)
+cargo run --release -p ofae -- export-encoder \
+    --ckpt ../runs/ae_v31_d8c32/ae_v3.safetensors \
+    --out ../weights/ae/ae_v31_d8c32.encoder.safetensors
 
-# PPO (Rust oftrain) - see scripts/pod_train_v8.sh for the RunPod launcher
-cd rust && cargo build --release -p oftrain --features native-engine
+# or pull frozen encoders from HF
+bash ../scripts/fetch_ae_encoders.sh
+
+# PPO (oftrain) - see scripts/pod_train_v8.sh for the RunPod launcher
+cargo build --release -p oftrain --features native-engine
 # then: ./target/release/oftrain --help  /  bash ../scripts/pod_train_v8.sh
 ```
 
@@ -252,4 +257,4 @@ PYTHONPATH=. uv run python scripts/export_onnx.py \
 3. ~~AE v3.1 border-accuracy push + policy stack~~ (done)
 4. ~~Rust oftrain PPO + native engine~~ (done; Python RL removed)
 5. Scale PPO: reward shaping audit, recurrence, self-play league
-6. Port AE training to Rust (still Python today)
+6. ~~Port AE training to Rust (`ofae`)~~ (done; Python `ae/` removed)

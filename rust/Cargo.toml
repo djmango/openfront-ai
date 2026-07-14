@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["engine", "ofcore", "oftrain", "ofhub"]
+members = ["engine", "ofcore", "oftrain", "ofhub", "ofae"]
 
 [workspace.package]
 edition = "2021"

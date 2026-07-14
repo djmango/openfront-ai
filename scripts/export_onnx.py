@@ -16,7 +16,7 @@ graphs simple and shape-flexible.
 
 Usage:
   uv run python scripts/export_onnx.py \\
-      --ae runs/ae_v31_d8c32/ae_v3.pt \\
+      --ae weights/ae/ae_v31_d8c32.encoder.safetensors \\
       --policy rust/checkpoints/ppo_v81/latest.safetensors \\
       --out openfront/resources/webbot/models
 """
@@ -30,8 +30,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from ae.load import load_ae
-from ae.units import STATIC_CLASSES
+from webbot_export.ae_encoder import NUM_STATIC, load_ae_encoder
 from webbot_export.consts import (
     ACTIONS,
     BUILD_TYPES,
@@ -104,7 +103,7 @@ class PolicyWrapper(nn.Module):
 
 
 def make_dummy_inputs(gh: int = 19, gw: int = 31, h: int = 152, w: int = 248):
-    n_static = len(STATIC_CLASSES)
+    n_static = NUM_STATIC
     owners = torch.randint(0, MAX_SLOTS, (1, h, w), dtype=torch.int64)
     terrain = torch.rand(1, 3, h, w, dtype=torch.float32)
     static = torch.rand(1, n_static, gh, gw, dtype=torch.float32)
@@ -279,7 +278,11 @@ def load_export_policy(checkpoint: str | Path) -> tuple[Policy, dict]:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ae", default="runs/ae_v31_d8c32/ae_v3.pt")
+    ap.add_argument(
+        "--ae",
+        default="weights/ae/ae_v31_d8c32.encoder.safetensors",
+        help="ofae/oftrain encoder .safetensors",
+    )
     ap.add_argument(
         "--policy", default="rust/checkpoints/ppo_v81/latest.safetensors"
     )
@@ -290,7 +293,7 @@ def main() -> None:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    ae = load_ae(args.ae, "cpu")
+    ae = load_ae_encoder(args.ae, "cpu")
     policy, ck = load_export_policy(args.policy)
     policy.eval()
     policy.player_tf.enable_nested_tensor = False
