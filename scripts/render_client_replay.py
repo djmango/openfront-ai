@@ -170,7 +170,7 @@ def client_worktree(commit: str):
 
 
 def load_episode_meta(record: Path) -> dict:
-    """Outcome + end tick from rl.watch debug sidecar (fallback: record info)."""
+    """Outcome + end tick from oftrain --watch debug sidecar (fallback: record info)."""
     sidecar = record.with_suffix(".debug.json")
     meta = {"outcome": "death", "end_tick": None}
     if sidecar.exists():
@@ -403,7 +403,7 @@ def render_record(
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--record", required=True, help="GameRecord JSON from rl.watch --record")
+    ap.add_argument("--record", required=True, help="GameRecord JSON from oftrain --watch")
     ap.add_argument("--out", default=None, help="output .webm (default: <record>.client.webm)")
     ap.add_argument("--speed", default="max", choices=["0.5", "1", "2", "max"])
     ap.add_argument("--width", type=int, default=1920)

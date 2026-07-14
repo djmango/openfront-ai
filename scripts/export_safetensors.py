@@ -24,7 +24,7 @@ from pathlib import Path
 
 from safetensors.torch import save_file
 
-from rl.obs import COARSE_REGION, LATENT_C, REGION, load_ae
+from ae.load import COARSE_REGION, LATENT_C, REGION, load_ae
 
 ENCODER_PREFIXES = ("owner_emb.", "enc_stem.", "enc_fuse.")
 
@@ -71,13 +71,21 @@ def main() -> None:
     save_file(enc, str(out), metadata=meta)
 
     meta_full = {
-        **{k: (int(v) if k in ("latent_c", "latent_down") else v == "True" if k in ("terrain_cond", "upsample_decoder") else v)
-           for k, v in meta.items() if k != "format"},
+        **{
+            k: (
+                int(v)
+                if k in ("latent_c", "latent_down")
+                else v == "True"
+                if k in ("terrain_cond", "upsample_decoder")
+                else v
+            )
+            for k, v in meta.items()
+            if k != "format"
+        },
         "format": meta["format"],
         "keys": sorted(enc.keys()),
         "num_tensors": len(enc),
     }
-    # Keep types clean for the sidecar JSON.
     meta_full["latent_c"] = ae.latent_c
     meta_full["latent_down"] = ae.latent_down
     meta_full["terrain_cond"] = ae.terrain_cond

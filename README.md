@@ -8,22 +8,17 @@ encoder, and PPO self-play over the full action surface.
 lessons, and the full AE v3.1 bake-off. **Living spec:**
 [DESIGN.md](DESIGN.md).
 
-## Status (Jul 6)
+## Status (Jul 14)
 
 - **375k bot + 420k human** full-state snapshots; human games replayed
   deterministically from the public archive.
 - **Spatial AE v3.1** concluded: latent *resolution* (1/8, not channel count)
   fixes the human/bot border-accuracy gap. Policy encoder: **`ae_v31_d8c32`**
-  (32ch @ 1/8, 88.2% human / 95.5% bot borders).
-- **PPO v4** training from scratch on curriculum v2 with the full 1/8 policy
-  stack (learned spawns, local owner-crop bypass, GPU featurization). Cleared
-  stages 0→3 in ~2h, stage 4 by ~3.6h. **`ppo_v3`** retired after reaching
-  stage 4 at 60–70% rolling win rate - first genuine engine wins.
-- **BC v4** on 291 cached human games (~56 ex/s GPU-bound); temporal
-  transformer experiment (`bc_seq_v4`) running in parallel. Conditional
-  **BC→RL** warm start when BC plateaus.
-- **5.9M-param policy**, 11 win-gated curriculum stages over 7 maps, restart-proof
-  cloud training, full visualization suite (real-client replays, live play).
+  (32ch @ 1/8, 88.2% human / 95.5% bot borders). AE training remains Python.
+- **PPO via Rust `oftrain`** (Python `rl/` stack removed). ~6M-param policy,
+  win-gated curriculum, safetensors checkpoints, native + Node engine hedge.
+- Showcase / live play: `ofshowcase` + webbot ONNX (`scripts/export_onnx.py`,
+  `scripts/play_live.sh`).
 
 ## Architecture: compress the map, bypass the rest
 
@@ -92,8 +87,8 @@ Graphs from `scripts/make_progress_graphs.py`. Highlights:
 - **Throughput:** fp16 transfers + pinned staging + prefetch took stage-3–4
   game-ticks/s from ~590 → ~2100; v4.1 async rollout/update overlap hides
   the rollout phase inside the update.
-- **BC:** prefeaturized cache (`scripts/prefeaturize_bc.py`) cut sample cost
-  from ~15–20 ms to ~1.5 ms, moving the bottleneck from CPU to GPU.
+- **BC (historical):** prefeaturized cache cut sample cost from ~15–20 ms to
+  ~1.5 ms; Python BC trainer since removed (moratorium / oftrain-only path).
 
 Sample agent replay: [assets/replay_v2_stage3.webm](assets/replay_v2_stage3.webm)
 (`ppo_v2c` on stage 3 - Onion, 80 Medium bots; peaks ~13k tiles before dying
@@ -126,15 +121,15 @@ Condensed from the [devlog](https://djmango.github.io/openfront-ai/devlog.html#l
 - `datagen/` - TypeScript headless game runner. Boots the real
   (deterministic) OpenFront engine in Node, plays bot/nation games, dumps
   full-state snapshots every 10 ticks.
-- `ae/` - PyTorch: dataset loaders, spatial AE (`model_v3.py`), training
-  (`train_v3.py`). Earlier iterations in `model.py`/`model_v2.py`.
-- `rl/` - PPO (`ppo.py`), behavior cloning (`bc.py`), obs builder (`obs.py`),
-  factorized policy (`policy.py`), curriculum/reward (`curriculum.py`), env
-  bridge wrapper (`env.py`), watch/play/replay tooling.
+- `ae/` - PyTorch spatial AE (`model_v3.py`, `train_v3.py`, `load.py`).
+  Encodes ownership/terrain; exports encoder safetensors for `oftrain`.
+- `rust/` - `oftrain` (PPO), `ofhub` (HF sync + showcase), `ofcore` (feat/
+  curriculum), `engine` (native sim). Primary training path.
+- `webbot_export/` - slim Policy + safetensors→ONNX helpers for browser play.
 - `bridge/` - persistent Node process wrapping the engine (JSONL reset/step
-  over stdio, binary tile IPC, live websocket client for human play).
-- `scripts/` - prefeaturization, evals, progress graphs, client replay
-  rendering, HF upload, cloud pod supervisors.
+  over stdio, binary tile IPC).
+- `scripts/` - AE prefeaturize/eval, ONNX export, client replay render, HF
+  upload, `pod_train_v8.sh` cloud supervisors.
 - `docs/` - devlog and training graphs.
 - `openfront/` - git submodule of
   [openfrontio/OpenFrontIO](https://github.com/openfrontio/OpenFrontIO),
@@ -170,17 +165,18 @@ Snapshots are written every 10 ticks (1s of game time). Format details in the
 # one-time: convert gzip+JSON snapshots to fast zstd caches (~10ms → ~0.5ms/sample)
 PYTHONPATH=. uv run python scripts/prefeaturize.py --data data --workers 8
 
-# spatial AE (v3.1)
+# spatial AE (v3.1) - still Python; not yet ported to Rust
 uv run python -m ae.train_v3 --data data --data-human data-human \
     --steps 40000 --batch-size 64 --latent-down 8 --latent-c 32
 
-# PPO v4 (default encoder: runs/ae_v31_d8c32/ae_v3.pt)
-uv run python -m rl.ppo --name ppo_v4 --updates 10000
-uv run tensorboard --logdir runs/rl
+# export encoder for oftrain
+PYTHONPATH=. uv run python scripts/export_safetensors.py \
+    --ae runs/ae_v31_d8c32/ae_v3.pt \
+    --out weights/ae/ae_v31_d8c32.encoder.safetensors
 
-# behavior cloning on cached human games
-PYTHONPATH=. uv run python scripts/prefeaturize_bc.py --data data-human --workers 8
-uv run python -m rl.bc --name bc_v4 --steps 60000
+# PPO (Rust oftrain) - see scripts/pod_train_v8.sh for the RunPod launcher
+cd rust && cargo build --release -p oftrain --features native-engine
+# then: ./target/release/oftrain --help  /  bash ../scripts/pod_train_v8.sh
 ```
 
 AE details: owner IDs relabeled to static per-game spawn slots (any player
@@ -198,41 +194,33 @@ all-zeros on 99.9%-empty grids).
   (`ae_v31_d8c32.pt`, `ae_v31_d8.pt`, `ae_v3.pt`)
 - Current Rust RL runs on HF use `latest.safetensors`,
   `latest.state.json`, best-eval/milestone safetensors, and `manifest.json`
-  under the run name. Historical Python runs retain legacy fixtures such as
-  `ppo_v4/policy.pt` and `bc_v4/bc.pt`.
+  under the run name.
 
-## RL stack (v4)
+## RL stack (Rust oftrain)
 
 - **`bridge/env.ts`** - persistent Node process: JSONL reset/step, binary tile
-  IPC, exact legality masks from engine calls each decision step.
-- **`rl/obs.py`** - frozen AE latent (32ch @ 1/8) + ego ownership planes +
-  raw 64×64 local owner crop + transient-unit planes + per-player bypass +
-  legality masks. 43 channels at H/8 × W/8.
-- **`rl/policy.py`** - conv trunk, factorized masked heads: action type,
-  player-target pointer, tile-region pointer (8×8 regions), build/nuke type,
-  quantity. Learned spawn placement end-to-end.
-- **`rl/ppo.py`** - PPO + GAE, entropy anneal, stage LR warmdown, win-gate
-  window persisted in checkpoint, periodic fixed-seed greedy eval,
-  v4.1 async rollout/update overlap.
+  IPC, exact legality masks from engine calls each decision step (TS engine
+  path / `--node-fraction` hedge).
+- **`rust/ofcore`** - obs featurization + curriculum (port of the old Python
+  obs/curriculum). Frozen AE latent + ego planes + local crop + bypass.
+- **`rust/oftrain`** - PPO + GAE, entropy anneal, stage LR warmdown, win-gate,
+  safetensors checkpoints, native or Node engine.
+- **`rust/ofhub`** - HF sync (`ofhf`), showcase hub/archive (`ofshowcase`),
+  encoder filter (`ofexport`).
 
 ### Watching the agent play
 
-`rl/watch.py` runs one greedy episode and saves an engine `GameRecord` - the
-same format openfront.io archives - which the **real game client** replays with
-the full UI:
+`oftrain --watch` runs a greedy episode and saves an engine `GameRecord` -
+the same format openfront.io archives - which the **real game client**
+replays with the full UI. Showcase automation: `ofshowcase daemon`.
 
 ```bash
-uv run python -m rl.watch --policy runs/rl/ppo_v4/policy.pt --stage 4 \
-    --record records-rl/game.json
-openfront/node_modules/.bin/tsx scripts/verify_record.ts records-rl/game.json
+# after building oftrain (see rust/README.md)
+./rust/target/release/oftrain --watch --help
 ```
 
 **Client video** - `scripts/render_client_replay.py` replays the record in the
-actual OpenFront client (headless Chromium): full game UI, terrain art, units,
-boats, nukes, leaderboard. Client hooks give the agent **AGENT** identity on
-the leaderboard, gold spawn ring, crown when first, "You Won!" modal. With a
-`.debug.json` sidecar (written by `rl.watch --record`), the video also gets a
-live MODEL panel synced to the sim tick:
+actual OpenFront client (headless Chromium):
 
 ```bash
 uv run playwright install chromium   # one-time
@@ -240,28 +228,28 @@ uv run python scripts/render_client_replay.py \
     --record records-rl/game.json --out replays/game_client.webm
 ```
 
-The bridge mirrors the client's `createGameRunner()` init exactly, so records
-replay bit-identically: `verify_record.ts` re-simulates from intents alone.
-
 ### Playing against the agent
 
-`bridge/play.ts` speaks the real client websocket protocol:
+In-browser webbot (ONNX) via showcase hub `/play` or locally:
 
 ```bash
-(cd openfront && npm run dev)      # client :9000 + game server
-uv run python -m rl.play --policy runs/rl/ppo_v4/policy.pt --game <LOBBY_ID>
-# "AgentRL" appears in the lobby; Start Game and fight it.
+bash scripts/play_live.sh --game '<lobby URL or 8-char ID>'
 ```
 
-The MODEL panel tracks the agent in real time on `--debug-port` (default 8988).
+Export ONNX from an oftrain checkpoint:
+
+```bash
+PYTHONPATH=. uv run python scripts/export_onnx.py \
+    --ae runs/ae_v31_d8c32/ae_v3.pt \
+    --policy rust/checkpoints/ppo_v81/latest.safetensors \
+    --out openfront/resources/webbot/models
+```
 
 ## Roadmap
 
 1. ~~Headless datagen + spatial autoencoder~~ (done)
 2. ~~Environment bridge + obs builder + PPO scaffold~~ (done)
-3. ~~AE v3.1 border-accuracy push + v4 policy stack~~ (done)
-4. **In flight:** PPO v4 curriculum climb, BC warm-start bake-off (feedforward
-   vs temporal), BC→RL conditional launch
-5. Scale PPO: remaining action heads (upgrade/delete/move-warship/cancel-boat),
-   reward shaping audit (asymmetric loss aversion), recurrence (LSTM)
-6. Self-play league
+3. ~~AE v3.1 border-accuracy push + policy stack~~ (done)
+4. ~~Rust oftrain PPO + native engine~~ (done; Python RL removed)
+5. Scale PPO: reward shaping audit, recurrence, self-play league
+6. Port AE training to Rust (still Python today)
