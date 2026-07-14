@@ -7,6 +7,7 @@ mod gpu_util;
 mod metrics;
 #[cfg(feature = "native-engine")]
 mod native;
+mod nccl;
 mod policy;
 mod recurrent;
 mod train;
