@@ -5514,105 +5514,136 @@ fn train_update(
                 // starts on a plain sequential loop.
                 macro_rules! backward_shard {
                     ($shard:expr, $sb:expr, $idx_t:expr) => {{
-                        let shard = $shard;
-                        let sb = $sb;
-                        let idx_t = $idx_t;
-                        let (logp, ent, ent_q, value, quantity, adv_t, ret_t, old_logp_t) = if cfg
-                            .recurrent_policy
-                        {
-                            let hidden_all = sb.hidden_in.as_ref().expect("recurrent hidden batch");
-                            let context_all = sb.context.as_ref().expect("recurrent context batch");
-                            let reset_all =
-                                sb.reset_before.as_ref().expect("recurrent reset batch");
-                            let mut logps = Vec::with_capacity(t_len);
-                            let mut ents = Vec::with_capacity(t_len);
-                            let mut entqs = Vec::with_capacity(t_len);
-                            let mut values = Vec::with_capacity(t_len);
-                            let mut quantities = Vec::with_capacity(t_len);
-                            let mut target_indices = Vec::with_capacity(t_len);
-                            for range in bptt_ranges(t_len, cfg.bptt_chunk_len) {
-                                let first = &idx_t + (range.start * n) as i64;
-                                // Actor state at the boundary is a
-                                // detached BPTT initial condition.
-                                let mut hidden = hidden_all.index_select(0, &first);
-                                for t in range {
-                                    let step_idx = &idx_t + (t * n) as i64;
-                                    let obs_t = sb.obs.index_select(&step_idx);
-                                    let choice_t = sb.choice.index_select(&step_idx);
-                                    let context_t = context_all.index_select(0, &step_idx);
-                                    let reset_t = reset_all.index_select(0, &step_idx);
-                                    let (lp, en, eq, v, hidden_out) =
-                                        shard.policy.evaluate_with_state(
-                                            &obs_t, &choice_t, &hidden, &context_t, &reset_t,
-                                        );
-                                    hidden = hidden_out;
-                                    logps.push(lp);
-                                    ents.push(en);
-                                    entqs.push(eq);
-                                    values.push(v);
-                                    quantities.push(choice_t.quantity_frac);
-                                    target_indices.push(step_idx);
-                                }
-                            }
-                            let target_idx =
-                                Tensor::cat(&target_indices.iter().collect::<Vec<_>>(), 0);
-                            (
-                                Tensor::cat(&logps.iter().collect::<Vec<_>>(), 0),
-                                Tensor::cat(&ents.iter().collect::<Vec<_>>(), 0),
-                                Tensor::cat(&entqs.iter().collect::<Vec<_>>(), 0),
-                                Tensor::cat(&values.iter().collect::<Vec<_>>(), 0),
-                                Tensor::cat(&quantities.iter().collect::<Vec<_>>(), 0),
-                                sb.adv.index_select(0, &target_idx),
-                                sb.ret.index_select(0, &target_idx),
-                                sb.old_logp.index_select(0, &target_idx),
-                            )
-                        } else {
-                            let obs_t = sb.obs.index_select(&idx_t);
-                            let choice_t = sb.choice.index_select(&idx_t);
-                            let (lp, en, eq, v) = shard.policy.evaluate(&obs_t, &choice_t);
-                            (
-                                lp,
-                                en,
-                                eq,
-                                v,
-                                choice_t.quantity_frac,
-                                sb.adv.index_select(0, &idx_t),
-                                sb.ret.index_select(0, &idx_t),
-                                sb.old_logp.index_select(0, &idx_t),
-                            )
-                        };
-                        // Bound log-ratio before exp (see prior
-                        // pg_loss trillion-spike incident).
-                        let log_ratio = (&logp - &old_logp_t).clamp(-20.0, 20.0);
-                        let ratio = log_ratio.exp();
-                        let surr1 = &ratio * &adv_t;
-                        let surr2 =
-                            ratio.clamp(1.0 - cfg.clip as f64, 1.0 + cfg.clip as f64) * &adv_t;
-                        let pg_loss = -surr1.minimum(&surr2).mean(Kind::Float);
-                        // Value loss: Huber (default Rust
-                        // stabilizer; see Config::vf_clip) or MSE
-                        // (Python F.mse_loss). Phase 5 (final)
-                        // switches the CLI default to mse once
-                        // training is stable under Huber.
-                        let v_loss = match cfg.value_loss {
-                            ValueLoss::Huber => value.huber_loss(
-                                &ret_t,
-                                tch::Reduction::Mean,
-                                cfg.vf_clip.max(1e-3) as f64,
-                            ),
-                            ValueLoss::Mse => value.mse_loss(&ret_t, tch::Reduction::Mean),
-                        };
-                        let ent_loss = ent.mean(Kind::Float);
-                        let n_active = quantity
-                            .ge(0.0)
-                            .to_kind(Kind::Float)
-                            .sum(Kind::Float)
-                            .clamp_min(1.0);
-                        let entq_loss = ent_q.sum(Kind::Float) / &n_active;
-                        let loss = (&pg_loss + cfg.vf_coef as f64 * &v_loss
-                            - ent_coef as f64 * &ent_loss
-                            - cfg.entq_coef as f64 * &entq_loss)
-                            * w_sub;
+                                let shard = $shard;
+                                let sb = $sb;
+                                let idx_t = $idx_t;
+                                let (
+                                    logp,
+                                    ent,
+                                    ent_q,
+                                    value,
+                                    quantity,
+                                    adv_t,
+                                    ret_t,
+                                    old_logp_t,
+                                ) = if cfg.recurrent_policy {
+                                    let hidden_all =
+                                        sb.hidden_in.as_ref().expect("recurrent hidden batch");
+                                    let context_all =
+                                        sb.context.as_ref().expect("recurrent context batch");
+                                    let reset_all = sb
+                                        .reset_before
+                                        .as_ref()
+                                        .expect("recurrent reset batch");
+                                    let mut logps = Vec::with_capacity(t_len);
+                                    let mut ents = Vec::with_capacity(t_len);
+                                    let mut entqs = Vec::with_capacity(t_len);
+                                    let mut values = Vec::with_capacity(t_len);
+                                    let mut quantities = Vec::with_capacity(t_len);
+                                    let mut target_indices =
+                                        Vec::with_capacity(t_len.div_ceil(cfg.bptt_chunk_len));
+                                    for range in bptt_ranges(t_len, cfg.bptt_chunk_len) {
+                                        let first = &idx_t + (range.start * n) as i64;
+                                        // Actor state at the boundary is a
+                                        // detached BPTT initial condition.
+                                        let hidden = hidden_all.index_select(0, &first);
+                                        // One time-major gather per field and
+                                        // one full trunk/head pass per BPTT
+                                        // chunk. Only the GRU recurrence is
+                                        // evaluated timestep by timestep.
+                                        let time_offsets = Tensor::arange_start(
+                                            range.start as i64,
+                                            range.end as i64,
+                                            (Kind::Int64, shard.device),
+                                        ) * n as i64;
+                                        let chunk_idx = (
+                                            time_offsets.unsqueeze(1) + idx_t.unsqueeze(0)
+                                        ).flatten(0, -1);
+                                        let obs_chunk = sb.obs.index_select(&chunk_idx);
+                                        let choice_chunk = sb.choice.index_select(&chunk_idx);
+                                        let context_chunk =
+                                            context_all.index_select(0, &chunk_idx);
+                                        let reset_chunk =
+                                            reset_all.index_select(0, &chunk_idx);
+                                        let (lp, en, eq, v, _) =
+                                            shard.policy.evaluate_sequence_fused(
+                                                &obs_chunk,
+                                                &choice_chunk,
+                                                &hidden,
+                                                &context_chunk,
+                                                &reset_chunk,
+                                                range.len() as i64,
+                                            );
+                                        logps.push(lp);
+                                        ents.push(en);
+                                        entqs.push(eq);
+                                        values.push(v);
+                                        quantities.push(choice_chunk.quantity_frac);
+                                        target_indices.push(chunk_idx);
+                                    }
+                                    let target_idx = Tensor::cat(
+                                        &target_indices.iter().collect::<Vec<_>>(),
+                                        0,
+                                    );
+                                    (
+                                        Tensor::cat(&logps.iter().collect::<Vec<_>>(), 0),
+                                        Tensor::cat(&ents.iter().collect::<Vec<_>>(), 0),
+                                        Tensor::cat(&entqs.iter().collect::<Vec<_>>(), 0),
+                                        Tensor::cat(&values.iter().collect::<Vec<_>>(), 0),
+                                        Tensor::cat(&quantities.iter().collect::<Vec<_>>(), 0),
+                                        sb.adv.index_select(0, &target_idx),
+                                        sb.ret.index_select(0, &target_idx),
+                                        sb.old_logp.index_select(0, &target_idx),
+                                    )
+                                } else {
+                                    let obs_t = sb.obs.index_select(&idx_t);
+                                    let choice_t = sb.choice.index_select(&idx_t);
+                                    let (lp, en, eq, v) =
+                                        shard.policy.evaluate(&obs_t, &choice_t);
+                                    (
+                                        lp,
+                                        en,
+                                        eq,
+                                        v,
+                                        choice_t.quantity_frac,
+                                        sb.adv.index_select(0, &idx_t),
+                                        sb.ret.index_select(0, &idx_t),
+                                        sb.old_logp.index_select(0, &idx_t),
+                                    )
+                                };
+                                // Bound log-ratio before exp (see prior
+                                // pg_loss trillion-spike incident).
+                                let log_ratio = (&logp - &old_logp_t).clamp(-20.0, 20.0);
+                                let ratio = log_ratio.exp();
+                                let surr1 = &ratio * &adv_t;
+                                let surr2 = ratio
+                                    .clamp(1.0 - cfg.clip as f64, 1.0 + cfg.clip as f64)
+                                    * &adv_t;
+                                let pg_loss = -surr1.minimum(&surr2).mean(Kind::Float);
+                                // Value loss: Huber (default Rust
+                                // stabilizer; see Config::vf_clip) or MSE
+                                // (Python F.mse_loss). Phase 5 (final)
+                                // switches the CLI default to mse once
+                                // training is stable under Huber.
+                                let v_loss = match cfg.value_loss {
+                                    ValueLoss::Huber => value.huber_loss(
+                                        &ret_t,
+                                        tch::Reduction::Mean,
+                                        cfg.vf_clip.max(1e-3) as f64,
+                                    ),
+                                    ValueLoss::Mse => value.mse_loss(&ret_t, tch::Reduction::Mean),
+                                };
+                                let ent_loss = ent.mean(Kind::Float);
+                                let n_active = quantity
+                                    .ge(0.0)
+                                    .to_kind(Kind::Float)
+                                    .sum(Kind::Float)
+                                    .clamp_min(1.0);
+                                let entq_loss = ent_q.sum(Kind::Float) / &n_active;
+                                let loss = (&pg_loss + cfg.vf_coef as f64 * &v_loss
+                                    - ent_coef as f64 * &ent_loss
+                                    - cfg.entq_coef as f64 * &entq_loss)
+                                    * w_sub;
 
                         // Grads accumulate across pixel-budget
                         // subs (zero_grad ran once above).
@@ -7763,7 +7794,9 @@ mod persistent_actor_tests {
         tch::manual_seed(808);
         let mut cfg = parity_config();
         cfg.recurrent_policy = true;
-        cfg.bptt_chunk_len = 1;
+        // Exercise the fused multi-step train-update path. The rollout below
+        // terminates env 0 at t=0, so t=1 also covers an in-chunk hidden reset.
+        cfg.bptt_chunk_len = 2;
         cfg.epochs = 1;
         let source = nn::VarStore::new(Device::Cpu);
         let _ =
