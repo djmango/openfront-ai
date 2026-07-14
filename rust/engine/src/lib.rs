@@ -1,9 +1,9 @@
-//! OpenFront engine - Rust port in four phases:
+//! OpenFront engine - Rust port:
 //!
 //! 1. **harness** - GameRecord load, decompress, hash/prng parity, replay CLI
 //! 2. **tick** - `Game`, `Execution`, `execute_next_tick`
 //! 3. **bot** - tribe spawner + `TribeExecution` + attack behavior
-//! 4. **env** - `ofenv` PyO3 crate (see `rust/ofenv`)
+//! 4. **RL session** - consumed in-process by `oftrain` (`native-engine`)
 
 pub mod backend;
 pub mod bootstrap;

@@ -122,7 +122,7 @@ def load_oftrain_safetensors(
         if isinstance(architecture, dict) and architecture.get("schema_version") == 2:
             raise ValueError(
                 "recurrent oftrain architecture schema v2 is not supported by "
-                "the transient Python Policy mapping"
+                "the webbot_export Policy mapping"
             )
         if not isinstance(architecture, dict) or architecture.get("schema_version") != 1:
             raise ValueError("unsupported oftrain architecture schema")
