@@ -1,10 +1,11 @@
 """Observation / action-space constants shared with oftrain + webbot.
 
-Kept in sync with rust/ofcore feat layout and the former rl/obs.py schema.
+Kept in sync with rust/ofcore feat layout.
 """
 
-from ae.model_v3 import MAX_SLOTS
-from ae.load import LATENT_C, REGION
+MAX_SLOTS = 128
+REGION = 8
+LATENT_C = 32
 
 # Transient planes + defense-bonus bypass (must match oftrain C_GRID).
 N_TRANSIENT = 53

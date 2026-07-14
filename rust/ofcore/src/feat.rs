@@ -176,7 +176,7 @@ pub fn nuke_index(unit: &str, up: bool) -> Option<i64> {
     })
 }
 
-/// UNIT_CLASSES order from ae/units.py (v7: +SAMMissile, MIRV Warhead,
+/// UNIT_CLASSES order from ofae / former ae/units.py (v7: +SAMMissile, MIRV Warhead,
 /// Train). The first N_STATIC classes are the static structures, and
 /// their class index IS their position in the static-plane array.
 fn unit_class(ty: &str) -> Option<usize> {

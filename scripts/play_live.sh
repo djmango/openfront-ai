@@ -19,9 +19,10 @@ HOST="${HOST:-localhost:9000}"
 RUN_NAME="${RUN_NAME:-ppo_v81}"
 DEFAULT_POLICY="rust/checkpoints/$RUN_NAME/latest.safetensors"
 POLICY="${POLICY:-$DEFAULT_POLICY}"
-AE="${AE:-runs/ae_v31_d8c32/ae_v3.pt}"
+AE="${AE:-weights/ae/ae_v31_d8c32.encoder.safetensors}"
 ONNX_DIR="${ONNX_DIR:-openfront/resources/webbot/models}"
 HF_POLICY_REPO="${HF_POLICY_REPO:-djmango/openfront-rl}"
+HF_AE_REPO="${HF_AE_REPO:-djmango/openfront-tile-autoencoder}"
 DEBUG_PORT="${DEBUG_PORT:-8988}"
 GAME=""
 WORKER_PATH=""
@@ -218,12 +219,29 @@ PY
 fi
 if [[ ! -f "$AE" ]]; then
   mkdir -p "$(dirname "$AE")"
-  AE="$AE" uv run python - <<'PY'
+  AE="$AE" HF_AE_REPO="$HF_AE_REPO" uv run python - <<'PY'
 import os, shutil
 from pathlib import Path
 from huggingface_hub import hf_hub_download
 dest = Path(os.environ["AE"])
-shutil.copy(hf_hub_download("djmango/openfront-tile-autoencoder", "ae_v31_d8c32.pt"), dest)
+repo = os.environ["HF_AE_REPO"]
+# Prefer published encoder safetensors; fall back to legacy name.
+for name in ("ae_v31_d8c32.encoder.safetensors", "ae_v31_d8c32.pt"):
+    try:
+        src = hf_hub_download(repo, name)
+        break
+    except Exception:
+        src = None
+if src is None:
+    raise SystemExit(f"could not fetch AE encoder from {repo}")
+if src.endswith(".pt"):
+    raise SystemExit(
+        f"only found legacy .pt at {src}; publish/download .encoder.safetensors"
+    )
+shutil.copy(src, dest)
+meta = Path(src).with_suffix(".json")
+if meta.exists():
+    shutil.copy(meta, dest.with_suffix(".json"))
 print(f"saved {dest}")
 PY
 fi
