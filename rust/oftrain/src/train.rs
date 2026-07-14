@@ -494,6 +494,20 @@ fn reconcile_resume_schedule(
             "a curriculum migration flag was supplied but checkpoint already uses {}",
             requested.id()
         );
+        if requested == CurriculumSchedule::V9 {
+            anyhow::ensure!(
+                !migrate_v83_to_v84 && !migrate_v84_to_v85 && !migrate_v85_to_v86,
+                "V8.x reward-profile migration flags are incompatible with V9"
+            );
+            anyhow::ensure!(
+                state.reward_profile.as_deref()
+                    == Some(ofcore::curriculum::V9_REWARD_PROFILE),
+                "V9 checkpoint reward profile mismatch: expected {:?}, found {:?}",
+                ofcore::curriculum::V9_REWARD_PROFILE,
+                state.reward_profile
+            );
+            return Ok(());
+        }
         if requested == CurriculumSchedule::V83 {
             if want_v86_reward {
                 match state.reward_profile.as_deref() {
@@ -665,7 +679,8 @@ fn reconcile_resume_schedule(
         "checkpoint curriculum schedule {} is incompatible with requested {}; \
          supported migrations are V8.1 stage 5 -> V8.1.1 and \
          V8.1.1 stage 5 -> V8.2, and V8.2 stage 5 -> V8.3 with their \
-         explicit migration flags (V8.3 -> V8.4 / V8.4 -> V8.5 / V8.5 -> V8.6 are reward-profile migrates)",
+         explicit migration flags (V8.3 -> V8.4 / V8.4 -> V8.5 / V8.5 -> V8.6 are reward-profile migrates; \
+         V9 is a parallel fresh schedule with no migrate-from-V8 path)",
         saved.id(),
         requested.id()
     )
@@ -7671,9 +7686,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 v81_curriculum: cfg.curriculum_schedule
                     != ofcore::curriculum::CurriculumSchedule::Legacy,
                 curriculum_schedule: Some(cfg.curriculum_schedule.id().to_string()),
-                reward_profile: (cfg.curriculum_schedule
-                    == ofcore::curriculum::CurriculumSchedule::V83)
-                    .then(|| cfg.reward_config.reward_profile_id().to_string()),
+                reward_profile: matches!(
+                    cfg.curriculum_schedule,
+                    ofcore::curriculum::CurriculumSchedule::V83
+                        | ofcore::curriculum::CurriculumSchedule::V9
+                )
+                .then(|| cfg.reward_config.reward_profile_id().to_string()),
                 return_stats: return_stats.clone(),
                 stage_env_targets: cfg.stage_env_targets.clone(),
                 envs_per_shard: current_envs_per_shard,
@@ -7761,9 +7779,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 v81_curriculum: cfg.curriculum_schedule
                     != ofcore::curriculum::CurriculumSchedule::Legacy,
                 curriculum_schedule: Some(cfg.curriculum_schedule.id().to_string()),
-                reward_profile: (cfg.curriculum_schedule
-                    == ofcore::curriculum::CurriculumSchedule::V83)
-                    .then(|| cfg.reward_config.reward_profile_id().to_string()),
+                reward_profile: matches!(
+                    cfg.curriculum_schedule,
+                    ofcore::curriculum::CurriculumSchedule::V83
+                        | ofcore::curriculum::CurriculumSchedule::V9
+                )
+                .then(|| cfg.reward_config.reward_profile_id().to_string()),
                 return_stats: return_stats.clone(),
                 stage_env_targets: cfg.stage_env_targets.clone(),
                 envs_per_shard: live_total_envs / devices.len(),
@@ -7963,9 +7984,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 v81_curriculum: cfg.curriculum_schedule
                     != ofcore::curriculum::CurriculumSchedule::Legacy,
                 curriculum_schedule: Some(cfg.curriculum_schedule.id().to_string()),
-                reward_profile: (cfg.curriculum_schedule
-                    == ofcore::curriculum::CurriculumSchedule::V83)
-                    .then(|| cfg.reward_config.reward_profile_id().to_string()),
+                reward_profile: matches!(
+                    cfg.curriculum_schedule,
+                    ofcore::curriculum::CurriculumSchedule::V83
+                        | ofcore::curriculum::CurriculumSchedule::V9
+                )
+                .then(|| cfg.reward_config.reward_profile_id().to_string()),
                 return_stats: return_stats.clone(),
                 stage_env_targets: cfg.stage_env_targets.clone(),
                 envs_per_shard: live_total_envs / devices.len(),
@@ -8027,8 +8051,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
         best_eval_score: current_best.map(|best| best.1),
         v81_curriculum: cfg.curriculum_schedule != ofcore::curriculum::CurriculumSchedule::Legacy,
         curriculum_schedule: Some(cfg.curriculum_schedule.id().to_string()),
-        reward_profile: (cfg.curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V83)
-            .then(|| cfg.reward_config.reward_profile_id().to_string()),
+        reward_profile: matches!(
+            cfg.curriculum_schedule,
+            ofcore::curriculum::CurriculumSchedule::V83
+                | ofcore::curriculum::CurriculumSchedule::V9
+        )
+        .then(|| cfg.reward_config.reward_profile_id().to_string()),
         return_stats,
         stage_env_targets: cfg.stage_env_targets.clone(),
         envs_per_shard: pending
@@ -8300,6 +8328,7 @@ mod persistent_actor_tests {
                 v86_attack_symmetric_loss: false,
                 v86_skip_combat_churn: false,
                 v86_death_penalty: 0.0,
+                v9_sparse_win: false,
             },
             lambda: 0.95,
             clip: 0.2,
