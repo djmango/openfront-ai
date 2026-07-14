@@ -138,8 +138,10 @@ PY_TAG="$("$VENV/bin/python" -c 'import sys; print(f"python{sys.version_info.maj
 TORCH_LIB="$VENV/lib/$PY_TAG/site-packages/torch"
 NVRTC_LIB="$VENV/lib/$PY_TAG/site-packages/nvidia/cuda_nvrtc/lib"
 CUDA_INCLUDE="/usr/local/cuda/include"
+CUDA_LIB="/usr/local/cuda/lib64"
 if [ ! -f "$CUDA_INCLUDE/cuda_runtime_api.h" ]; then
   CUDA_INCLUDE="$VENV/lib/$PY_TAG/site-packages/nvidia/cuda_runtime/include"
+  CUDA_LIB="$VENV/lib/$PY_TAG/site-packages/nvidia/cuda_runtime/lib"
 fi
 NCCL_ROOT="$VENV/lib/$PY_TAG/site-packages/nvidia/nccl"
 NCCL_INCLUDE="$NCCL_ROOT/include"
@@ -157,14 +159,16 @@ cat > "$REPO_DIR/rust/.cargo/config.toml" <<EOF
 [env]
 LIBTORCH = "$TORCH_LIB"
 LIBTORCH_CXX11_ABI = "$LIBTORCH_CXX11_ABI"
-LD_LIBRARY_PATH = "$TORCH_LIB/lib:$NVRTC_LIB:$NCCL_LIB:$NCCL_LINK_LIB"
+LD_LIBRARY_PATH = "$TORCH_LIB/lib:$NVRTC_LIB:$CUDA_LIB:$NCCL_LIB:$NCCL_LINK_LIB"
 EOF
 
 cd "$REPO_DIR/rust"
 BUILD_FEATURES="native-engine"
 if [ "$NUM_GPUS" -gt 1 ] && [ -f "$CUDA_INCLUDE/cuda_runtime_api.h" ] \
+  && [ -f "$CUDA_LIB/libcudart.so" ] \
   && [ -f "$NCCL_INCLUDE/nccl.h" ] && [ -f "$NCCL_LINK_LIB/libnccl.so" ]; then
   export CUDA_INCLUDE_DIR="$CUDA_INCLUDE"
+  export CUDA_LIB_DIR="$CUDA_LIB"
   export NCCL_INCLUDE_DIR="$NCCL_INCLUDE"
   export NCCL_LIB_DIR="$NCCL_LINK_LIB"
   BUILD_FEATURES="$BUILD_FEATURES,nccl"
@@ -188,7 +192,7 @@ if ! readelf -d target/release/oftrain | grep -q libtorch_cuda.so; then
   exit 1
 fi
 if [[ "$BUILD_FEATURES" == *nccl* ]]; then
-  if ! LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB:$NCCL_LIB:$NCCL_LINK_LIB" ldd target/release/oftrain \
+  if ! LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB:$CUDA_LIB:$NCCL_LIB:$NCCL_LINK_LIB" ldd target/release/oftrain \
     | grep -q 'libnccl.so.*=>'; then
     echo "WARNING: NCCL runtime preflight failed; rebuilding with the CPU gradient fallback" >&2
     BUILD_FEATURES="native-engine"
@@ -206,7 +210,7 @@ fi
 # panic masks any other failure mode this specific shape could have; a bug
 # *in this check itself* must never be able to kill a launch the real
 # trainer, with its own crash-loop/backoff, would have survived).
-if ! LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB:$NCCL_LIB:$NCCL_LINK_LIB" OFTRAIN_EXPLICIT_CUINIT=1 \
+if ! LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB:$CUDA_LIB:$NCCL_LIB:$NCCL_LINK_LIB" OFTRAIN_EXPLICIT_CUINIT=1 \
   timeout 30 ./target/release/oftrain --engine native --node-fraction 0 --num-envs 1 --num-gpus 1 \
   --rollout-len 1 --updates 0 --device cuda:0 --ckpt-dir /tmp/oftrain_cuda_preflight \
   2>&1 | grep -q "explicit cuInit(0) -> 0"; then
@@ -264,7 +268,7 @@ while true; do
   START_TS=$(date +%s)
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   OFTRAIN_NCCL_TIMEOUT_SECONDS="${OFTRAIN_NCCL_TIMEOUT_SECONDS:-60}" \
-  LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB:$NCCL_LIB:$NCCL_LINK_LIB" \
+  LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB:$CUDA_LIB:$NCCL_LIB:$NCCL_LINK_LIB" \
     ./target/release/oftrain --engine native --node-fraction "$NODE_FRACTION" --num-envs "$NUM_ENVS" --num-gpus "$NUM_GPUS" \
     --rollout-len "$ROLLOUT_LEN" --minibatches "$MINIBATCHES" --stage "$STAGE" --device cuda:0 \
     --ckpt-dir "$CKPT_DIR" $V81_ARGS $EXTRA_ARGS $RESUME \

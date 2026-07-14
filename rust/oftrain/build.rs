@@ -31,6 +31,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LIBTORCH");
     println!("cargo:rerun-if-env-changed=LIBTORCH_CXX11_ABI");
     println!("cargo:rerun-if-env-changed=CUDA_INCLUDE_DIR");
+    println!("cargo:rerun-if-env-changed=CUDA_LIB_DIR");
     println!("cargo:rerun-if-env-changed=NCCL_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=NCCL_LIB_DIR");
     let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
@@ -73,11 +74,17 @@ fn main() {
             std::env::var("NCCL_LIB_DIR").expect("the nccl feature requires NCCL_LIB_DIR");
         let cuda_include =
             std::env::var("CUDA_INCLUDE_DIR").expect("the nccl feature requires CUDA_INCLUDE_DIR");
+        let cuda_lib =
+            std::env::var("CUDA_LIB_DIR").expect("the nccl feature requires CUDA_LIB_DIR");
         assert!(
             std::path::Path::new(&cuda_include)
                 .join("cuda_runtime_api.h")
                 .exists(),
             "CUDA_INCLUDE_DIR does not contain cuda_runtime_api.h"
+        );
+        assert!(
+            std::path::Path::new(&cuda_lib).join("libcudart.so").exists(),
+            "CUDA_LIB_DIR does not contain libcudart.so"
         );
         assert!(
             std::path::Path::new(&nccl_include).join("nccl.h").exists(),
@@ -105,6 +112,8 @@ fn main() {
             )
             .compile("oftrain_nccl");
         println!("cargo:rerun-if-changed=src/nccl_shim.cpp");
+        println!("cargo:rustc-link-search=native={cuda_lib}");
+        println!("cargo:rustc-link-lib=dylib=cudart");
         println!("cargo:rustc-link-search=native={nccl_lib}");
         println!("cargo:rustc-link-arg=-Wl,-rpath,{nccl_lib}");
         println!("cargo:rustc-link-lib=dylib=nccl");
