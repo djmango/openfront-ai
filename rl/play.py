@@ -3,7 +3,8 @@
 Workflow:
   1. (cd openfront && npm run dev)   # client :9000 + game server
   2. In the browser: Create Lobby (private), copy the lobby ID.
-  3. uv run python -m rl.play --policy /tmp/policy.pt --game <LOBBY_ID>
+  3. uv run python -m rl.play \\
+       --policy rust/checkpoints/ppo_v81/latest.safetensors --game <LOBBY_ID>
      -> "AgentRL" appears in the lobby; click Start.
   4. Fight it.
 
@@ -28,7 +29,7 @@ from rl.obs import ACTIONS, ObsBuilder, encode_grids, load_ae
 from rl.policy import Policy
 from rl.ppo import OBS_KEYS
 from rl.ppo_translate import IntentTranslator, my_tiles
-from rl.watch import describe
+from rl.watch import describe, load_policy_checkpoint
 
 
 class _EnvShim:
@@ -108,8 +109,7 @@ def main() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     ae = load_ae(args.ckpt, device)
     policy = Policy().to(device)
-    state = torch.load(args.policy, map_location=device, weights_only=False)
-    policy.load_state_dict(state["model_state_dict"])
+    state = load_policy_checkpoint(policy, args.policy, device)
     policy.eval()
     print(f"device: {device}")
     print(f"policy loaded (update {state.get('update', '?')}); joining {args.game}")
