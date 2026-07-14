@@ -370,12 +370,12 @@ async fn start_play_lobby(inner: &HubInner, game_id: &str, worker_index: i64) ->
     .await
 }
 
-async fn create_play_lobby(inner: &HubInner) -> Result<Value> {
+async fn create_play_lobby(inner: &HubInner, config: &Value) -> Result<Value> {
     let base = format!("http://{}", inner.client_host);
     http_json(
         "POST",
         &format!("{base}/api/adminbot/create_game"),
-        Some(play_config(inner)),
+        Some(config.clone()),
         &inner.admin_key,
     )
     .await
@@ -465,17 +465,27 @@ async fn play_debug(
 }
 
 async fn play(State(inner): State<Arc<HubInner>>) -> Response {
-    let mut active = inner.active.lock().await;
-    if let (Some(gid), Some(child)) = (active.game_id.clone(), active.child.as_mut()) {
-        if child.try_wait().ok().flatten().is_none() {
-            eprintln!("[showcase_hub] reusing active lobby {gid}");
-            let hub = load_hub();
-            let wp = worker_path_for(&gid, &hub);
-            return Redirect::temporary(&play_redirect(&gid, &wp)).into_response();
+    // Each Play click gets a fresh random map. Tear down any previous webbot
+    // so we don't keep redirecting everyone into the same Onion lobby.
+    {
+        let mut active = inner.active.lock().await;
+        if let Some(mut child) = active.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Some(gid) = active.game_id.take() {
+            eprintln!("[showcase_hub] replacing previous lobby {gid}");
         }
     }
 
-    let info = match create_play_lobby(&inner).await {
+    let config = play_config(&inner);
+    let map_label = config
+        .get("gameMap")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    eprintln!("[showcase_hub] creating play lobby map={map_label}");
+
+    let info = match create_play_lobby(&inner, &config).await {
         Ok(v) => v,
         Err(e) => {
             eprintln!("[showcase_hub] lobby create failed: {e}");
@@ -499,22 +509,25 @@ async fn play(State(inner): State<Arc<HubInner>>) -> Response {
         .map(str::to_string)
         .unwrap_or_else(|| format!("w{worker_index}"));
 
-    match launch_webbot(&inner, &game_id, &worker_path) {
-        Ok(child) => {
-            active.game_id = Some(game_id.clone());
-            active.child = Some(child);
-        }
-        Err(e) => {
-            let mut res = Json(json!({"error": e.to_string()})).into_response();
-            *res.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
-            return res;
+    {
+        let mut active = inner.active.lock().await;
+        match launch_webbot(&inner, &game_id, &worker_path) {
+            Ok(child) => {
+                active.game_id = Some(game_id.clone());
+                active.child = Some(child);
+            }
+            Err(e) => {
+                let mut res = Json(json!({"error": e.to_string()})).into_response();
+                *res.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                return res;
+            }
         }
     }
 
     let mut hub_payload = json!({
         "game_id": game_id,
         "status": "lobby",
-        "config": play_config(&inner),
+        "config": config,
         "run_name": inner.run_name,
         "started_at": utc_now(),
         "worker_index": worker_index,
@@ -537,7 +550,9 @@ async fn play(State(inner): State<Arc<HubInner>>) -> Response {
     }
     let _ = write_json(&hub_state_path(), &hub_payload);
     let redirect = play_redirect(&game_id, &worker_path);
-    eprintln!("[showcase_hub] agent joining {game_id}; redirect -> {redirect}");
+    eprintln!(
+        "[showcase_hub] agent joining {game_id} map={map_label}; redirect -> {redirect}"
+    );
     Redirect::temporary(&redirect).into_response()
 }
 
