@@ -18,7 +18,8 @@ use tokio::sync::Mutex;
 
 use crate::hf;
 use crate::paths::{hub_state_path, repo_root, state_path};
-use crate::util::{featured_showcase_entry, load_json, utc_now, write_json};
+use crate::util::{featured_showcase_entry, load_json, showcase_maps, utc_now, write_json};
+use rand::seq::SliceRandom;
 
 const LANDING_HTML: &str = r#"<!doctype html>
 <html lang="en">
@@ -26,6 +27,9 @@ const LANDING_HTML: &str = r#"<!doctype html>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>OpenFront RL Agent</title>
+  <link rel="icon" href="/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" href="/favicon-32.png" sizes="32x32" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   <style>
     * { box-sizing: border-box; margin: 0; }
     body {
@@ -145,8 +149,19 @@ fn env_or(key: &str, default: &str) -> String {
 }
 
 fn play_config(inner: &HubInner) -> Value {
+    // PLAY_MAP=random (default) picks uniformly from SHOWCASE_MAPS each lobby.
+    let game_map = if inner.play_map.is_empty()
+        || inner.play_map.eq_ignore_ascii_case("random")
+    {
+        let maps = showcase_maps();
+        maps.choose(&mut rand::thread_rng())
+            .cloned()
+            .unwrap_or_else(|| "World".into())
+    } else {
+        inner.play_map.clone()
+    };
     json!({
-        "gameMap": inner.play_map,
+        "gameMap": game_map,
         "gameType": "Private",
         "bots": inner.play_bots,
         "difficulty": "Easy",
@@ -543,7 +558,7 @@ pub async fn run_hub(port: u16) -> Result<()> {
             "ADMIN_BOT_API_KEY",
             "WARNING_DEV_ADMIN_BOT_KEY_DO_NOT_USE_IN_PRODUCTION",
         ),
-        play_map: env_or("PLAY_MAP", "Onion"),
+        play_map: env_or("PLAY_MAP", "random"),
         play_bots: env_or("PLAY_BOTS", "10").parse().unwrap_or(10),
         play_nations: env_or("PLAY_NATIONS", "1").parse().unwrap_or(1),
         play_start_delay: env_or("PLAY_START_DELAY", "30").parse().unwrap_or(30),

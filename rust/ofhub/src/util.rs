@@ -13,7 +13,7 @@ use crate::paths::clips_dir;
 pub const LEGACY_POLICY_RUNS: &[&str] = &["ppo_v5", "ppo_v7"];
 
 pub fn showcase_maps() -> Vec<String> {
-    if let Ok(raw) = std::env::var("SHOWCASE_MAPS") {
+    let mut maps = if let Ok(raw) = std::env::var("SHOWCASE_MAPS") {
         let maps: Vec<String> = raw
             .split(',')
             .map(str::trim)
@@ -21,13 +21,22 @@ pub fn showcase_maps() -> Vec<String> {
             .map(str::to_string)
             .collect();
         if !maps.is_empty() {
-            return maps;
+            maps
+        } else {
+            ofcore::curriculum::ALL_MAPS
+                .iter()
+                .map(|m| (*m).to_string())
+                .collect()
         }
-    }
-    ofcore::curriculum::ALL_MAPS
-        .iter()
-        .map(|m| (*m).to_string())
-        .collect()
+    } else {
+        ofcore::curriculum::ALL_MAPS
+            .iter()
+            .map(|m| (*m).to_string())
+            .collect()
+    };
+    // Shuffle so generation / featured bias isn't fixed to list order.
+    maps.shuffle(&mut rand::thread_rng());
+    maps
 }
 
 pub fn map_seed(map_name: &str) -> String {
