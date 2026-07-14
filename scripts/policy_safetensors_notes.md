@@ -19,6 +19,19 @@ that is not automated. Prefer:
   architecture schema versions, model dimensions, AE references, update,
   and curriculum stage.
 
+Recurrent V8.2 checkpoints use architecture schema 2. The manifest records the
+256-wide GRU, `action-outcome-v1` 14-float context, 128-wide context embedding,
+`--bptt-chunk-len`, rollout length, zero-output residual initialization, and
+the `episode_done` per-environment hidden reset policy. Full recurrent
+`--resume` requires this v2 manifest plus matching v2 `TrainState`.
+
+Migrate V8.1 explicitly with `--init-v81-recurrent latest.safetensors`.
+That path requires a schema-v1 manifest, copies every legacy tensor exactly,
+and permits only the actual `recurrent.*` tensors to remain newly initialized.
+The residual projection stays zero, making all initial policy/value outputs
+bit-identical to V8.1. Python consumers reject schema 2 until stateful
+recurrent inference is implemented there.
+
 AE encoders remain independent (`scripts/export_safetensors.py` +
 `--ckpt` / `--coarse-ckpt`).
 

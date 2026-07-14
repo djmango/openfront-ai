@@ -97,7 +97,11 @@ class CheckpointSyncTest(unittest.TestCase):
                 {
                     "ppo_v81/latest.safetensors": b"weights",
                     "ppo_v81/latest.state.json": b'{"update": 8}',
-                    "ppo_v81/manifest.json": b'{"format":"oftrain-safetensors"}',
+                    "ppo_v81/manifest.json": (
+                        b'{"format":"oftrain-safetensors",'
+                        b'"manifest_schema_version":1,'
+                        b'"architecture":{"schema_version":1}}'
+                    ),
                     "ppo_v81/latest.ot": b"legacy",
                     "ppo_v81/policy.pt": b"legacy-python",
                 }
@@ -125,6 +129,44 @@ class CheckpointSyncTest(unittest.TestCase):
                 )
             )
             self.assertFalse((destination / "latest.safetensors").exists())
+
+    def test_recurrent_manifest_validation_and_mismatch_failures(self) -> None:
+        valid = {
+            "format": "oftrain-safetensors",
+            "manifest_schema_version": 1,
+            "architecture": {
+                "schema_version": 2,
+                "recurrent": {
+                    "cell": "gru",
+                    "hidden_size": 256,
+                    "context_schema": "action-outcome-v1",
+                    "context_features": 14,
+                    "context_embedding": 128,
+                    "bptt_length": 16,
+                    "rollout_length": 32,
+                    "residual_initialization": "zero-output-projection",
+                    "hidden_reset_policy": "episode_done",
+                },
+            },
+        }
+        self.assertEqual(
+            sync_module.validate_manifest_bytes(json.dumps(valid).encode()),
+            valid,
+        )
+        for mutate in (
+            lambda value: value["architecture"].update(schema_version=3),
+            lambda value: value["architecture"]["recurrent"].update(hidden_size=0),
+            lambda value: value["architecture"]["recurrent"].update(
+                context_schema="unknown"
+            ),
+            lambda value: value["architecture"]["recurrent"].update(
+                hidden_reset_policy="never"
+            ),
+        ):
+            candidate = json.loads(json.dumps(valid))
+            mutate(candidate)
+            with self.assertRaises(ValueError):
+                sync_module.validate_manifest_bytes(json.dumps(candidate).encode())
 
 
 if __name__ == "__main__":

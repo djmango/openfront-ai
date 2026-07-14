@@ -119,6 +119,11 @@ def load_oftrain_safetensors(
         if manifest.get("manifest_schema_version") != 1:
             raise ValueError("unsupported oftrain manifest schema")
         architecture = manifest.get("architecture", {})
+        if isinstance(architecture, dict) and architecture.get("schema_version") == 2:
+            raise ValueError(
+                "recurrent oftrain architecture schema v2 is not supported by "
+                "the transient Python Policy mapping"
+            )
         if not isinstance(architecture, dict) or architecture.get("schema_version") != 1:
             raise ValueError("unsupported oftrain architecture schema")
     mapped = map_oftrain_state(load_file(str(path), device="cpu"), policy.state_dict())
