@@ -29,6 +29,8 @@
 <nav class="toc">
   <a href="#now">Now</a> ·
   <a href="#persistent-autoscale-restart">Jul 14 persistent+autoscale</a> ·
+  <a href="#persistent-autoscale-game-time">game time</a> ·
+  <a href="#persistent-autoscale-deploy">deploy lessons</a> ·
   <a href="#v86-attack-fair">Jul 14 V8.6</a> ·
   <a href="#v85-win-urgency">Jul 14 V8.5</a> ·
   <a href="#v84-boat-tempo">Jul 14 V8.4</a> ·
@@ -66,43 +68,111 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 14th, 2026</h2>
-  <p><b>Persistent + autoscale no longer cancel each other</b>
-  (<a href="#persistent-autoscale-restart">writeup</a>): GPU-util growth uses the same
-  <code>restart_request.json</code> path as stage env targets, and stage targets are a
-  floor so autoscale gains stick. Keep <code>max_episode_ticks=15000</code>
-  (~25 min game time at 10 ticks/s) — do not shorten episodes for util.</p>
-  <p><b>V8.6 attack-fair as <code>ppo_v86</code></b>
-  (<a href="#v86-attack-fair">writeup</a>), resumed from live <code>ppo_v85</code>.
-  Reward audit: sticky combat refresh + churn stack made attacking a trap;
-  tempo@0.30 vs dominant-loss@0.55 left a punishment valley; strength asymmetry
-  taxed attack variance; death was cheaper than mid-place; boats merging into
-  open attacks misclassified Destroyed; first-step strength delta was free.
-  All fixed reward-only.</p>
-  <p>Also today: V8.5 win-urgency
-  (<a href="#v85-win-urgency">writeup</a>) and curriculum outcome parity closed
-  at 48/48 on v4 (<a href="#parity-v4-closeout">writeup</a>).</p>
+  <p><b>Persistent + autoscale shipped and live on <code>ppo_v86</code></b>
+  (<a href="#persistent-autoscale-restart">writeup</a>). Merged
+  <a href="https://github.com/djmango/openfront-ai/pull/30">#30</a>–<a href="https://github.com/djmango/openfront-ai/pull/33">#33</a>
+  (<code>4c0e01fe</code>). Pod resumed at update ~651, stage 8, <b>16 envs/shard</b>,
+  <code>--max-envs 20</code>, <code>max_episode_ticks=15000</code> (~25&nbsp;min game time).
+  Do <b>not</b> shorten episodes for GPU util — grow env count via restart instead.</p>
+  <p><b>V8.6 attack-fair</b>
+  (<a href="#v86-attack-fair">writeup</a>) still the reward profile
+  (<code>v8.6-attack-fair-v1</code>). Earlier today: V8.5 win-urgency
+  (<a href="#v85-win-urgency">writeup</a>) and curriculum outcome parity 48/48
+  (<a href="#parity-v4-closeout">writeup</a>).</p>
   <p class="d" style="margin:.75rem 0 0">Previous: Jul 13 Rust trainer CUDA
   diagnosis / persistent ownership
   (<a href="#rust-v8-stability">writeup</a>).</p>
 </div>
 
 <h2 class="date" id="persistent-autoscale-restart">Jul 14, 2026 - persistent actors + GPU-util autoscale via restart</h2>
-<p class="session">Util was stuck because <code>--persistent-actors</code> forced
-<code>--auto-scale-envs</code> off, while late-stage env floors (8–12) left collects
-long and GPUs idle. Shortening <code>max_episode_ticks</code> was the wrong lever.</p>
+<p class="session">Clarified game-time vs wall-clock, then fixed the inverse
+<code>--persistent-actors</code> / <code>--auto-scale-envs</code> relationship and
+deployed it onto live <code>ppo_v86</code>.</p>
+
+<h3 id="persistent-autoscale-game-time">Game time: 15000 ticks is ~25 minutes, not 3–4</h3>
+<p>OpenFront’s config is <code>msPerTick() = 100</code> → <b>10 ticks/s</b> of normal
+game time. So:</p>
+<table>
+  <tr><th>Ticks</th><th>In-game time</th><th>Notes</th></tr>
+  <tr><td>600</td><td>~1 min</td><td>e.g. nuke “recent” window comments in client</td></tr>
+  <tr><td>15000</td><td><b>~25 min</b></td><td>oftrain / Python PPO default <code>max_episode_ticks</code></td></tr>
+  <tr><td>lobby <code>maxTimerValue</code> 15–40</td><td>15–40 min</td><td>same order as our episode cap</td></tr>
+</table>
+<p>Half-hour games are fine and desired — we want episodes long enough to actually
+win. The earlier “collectors install in 3–4 minute games” figure was
+<b>pod wall-clock collect stall</b> (one PPO update’s collect phase), not match
+length. Shortening <code>max_episode_ticks</code> for util would train the wrong
+horizon.</p>
+
+<h3 id="persistent-autoscale-why-inverse">Why persistent and autoscale looked inversely proportionate</h3>
+<p>Persistent owners pin actor/learner CUDA state to long-lived OS threads. Live
+mid-run <code>spawn_worker</code> growth (the legacy autoscale path) is unsafe under
+that ownership model. The trainer therefore used to print a warning and
+<code>cfg.auto_scale_envs = false</code> whenever both flags were set.</p>
+<p>Meanwhile V8.3 stage env targets drop late stages to ~8–12 envs/GPU for host
+memory / engine tail latency. With autoscale forced off, stage 8 stuck at ~10
+envs/shard → long collects, GPUs often idle (VRAM full, util spiky/uneven). It
+looked like “persistent ⇒ bad util” and “more envs ⇒ need shorter episodes,”
+but the real coupling was <b>autoscale disabled + low stage floor</b>.</p>
+<p>Curriculum stage env changes already used a safe path: checkpoint →
+<code>restart_request.json</code> → clean exit → <code>pod_train_v8.sh</code> relaunches at
+the new count. Util autoscale just wasn’t wired into that path.</p>
+
+<h3 id="persistent-autoscale-fix">What we changed</h3>
 <ul>
-  <li><b>Game time:</b> OpenFront is 100&nbsp;ms/tick (10 ticks/s). Cap 15000 ≈ 25 minutes
-    of normal game time; lobby timers of 15–40 minutes are the same order. The earlier
-    “3–4 minute” figure was <i>wall-clock collect stall on the pod</i>, not match length.</li>
-  <li><b>Fix:</b> with persistent owners, autoscale growth writes
-    <code>restart_request.json</code> (<code>reason=gpu_util_autoscale</code>) and exits;
-    <code>pod_train_v8.sh</code> relaunches at the new per-shard count (same as stage
-    env-target resizes). Legacy collectors still live-spawn.</li>
-  <li><b>Floor semantics:</b> stage env targets no longer snap an autoscaled resume back
-    down; they remain the cold-start / stage-advance baseline.</li>
-  <li><b>Pod default:</b> V8.3+ enables <code>--auto-scale-envs --max-envs 32</code>
-    (<code>AUTO_SCALE_ENVS=0</code> to disable).</li>
+  <li><b>Restart-based autoscale:</b> with <code>--persistent-actors</code>, GPU-util growth
+    sets <code>requested_env_target</code>, writes
+    <code>restart_request.json</code> with <code>reason=gpu_util_autoscale</code>, and exits.
+    Same supervisor path as stage env-target resizes. Legacy (non-persistent)
+    collectors still live-spawn.</li>
+  <li><b>Stage targets as floors:</b> within a stage, resume keeps
+    <code>max(previous envs_per_shard, stage_floor)</code> so autoscale gains stick.
+    Cold start still honors the stage schedule. Explicit
+    <code>requested_env_target</code> always wins (stage shrink/grow or autoscale).</li>
+  <li><b><code>min_envs</code> alignment:</b> default floor is CLI <code>--num-envs</code>, not
+    <code>stage_env_targets[--stage]</code> (often an early-stage 24). After resolve, if
+    <code>min_envs &gt; live count</code>, snap down so we don’t jump from 10→24 on the
+    first check.</li>
+  <li><b>Pod defaults:</b> V8.3+ sets <code>AUTO_SCALE_ENVS=1</code>,
+    <code>MAX_ENVS=20</code>, <code>TARGET_GPU_UTIL=0.85</code>, step 2. Override with
+    <code>AUTO_SCALE_ENVS=0</code>.</li>
 </ul>
+<p>PRs: <a href="https://github.com/djmango/openfront-ai/pull/30">#30</a> (core),
+<a href="https://github.com/djmango/openfront-ai/pull/31">#31</a> (min_envs),
+<a href="https://github.com/djmango/openfront-ai/pull/32">#32</a> (minibatch / restart consume),
+<a href="https://github.com/djmango/openfront-ai/pull/33">#33</a> (clamp to max-envs).</p>
+
+<h3 id="persistent-autoscale-deploy">Deploy lessons (live <code>ppo_v86</code> on 4×A40)</h3>
+<p>First autoscale check correctly requested <b>10 → 26</b> envs/shard
+(<code>reason=gpu_util_autoscale</code>). Then three failure modes stacked:</p>
+<ol>
+  <li><b>Recurrent minibatch gate:</b> startup required
+    <code>minibatches ≤ every stage_env_targets entry</code> (late floors are 8). Growing
+    to 26 recomputed <code>minibatches=13</code> → instant
+    <code>Error: recurrent PPO requires minibatches &lt;= envs per shard</code>. Fix: check
+    only the <i>resolved</i> live env count after sizing, not the whole stage table.</li>
+  <li><b>Restart-request pin loop:</b> oftrain left <code>restart_request.json</code> on
+    failed boot; <code>pod_train</code> re-read it forever (<code>26 → 26</code> every ~1s).
+    Fix: supervisor <code>mv</code>s the request to <code>.last</code> when consuming it.</li>
+  <li><b>OOM at 26×4=104 envs:</b> prime/rollout allocated ~43&nbsp;GiB/GPU and died.
+    Fix: default <code>MAX_ENVS=20</code>; clamp resolved startup count to
+    <code>--max-envs</code> so a stale <code>requested_env_target</code> cannot OOM the next boot.
+    Cleared the pending 26 request and relaunched at 16.</li>
+</ol>
+
+<h3 id="persistent-autoscale-live">Live status after redeploy</h3>
+<ul>
+  <li>Tree: master <code>4c0e01fe</code> under <code>/tmp/v86-validation</code>, tmux
+    <code>v86-production</code>.</li>
+  <li>Resume: <code>ppo_v86/latest.safetensors</code> @ update <b>651</b>, stage 8,
+    profile <code>v8.6-attack-fair-v1</code>.</li>
+  <li>Sizing: <b>16 envs/shard</b> (64 total), <code>--auto-scale-envs --max-envs 20</code>,
+    <code>max_ticks=15000</code>.</li>
+  <li>First post-fix update completed (~142s collect-bound; util still uneven —
+    expected until/unless autoscale climbs 16→18→20).</li>
+</ul>
+<p>Next: let util-driven restarts step toward 20; watch OOM; leave reward settling
+alone until env count moves. Still do not cut episode ticks.</p>
 
 <h2 class="date" id="v86-attack-fair">Jul 14, 2026 - V8.6: attack-fair reward fixes</h2>
 <p class="session">V8.5 mid-run “unlearning” audit → reward-only <code>ppo_v86</code>
