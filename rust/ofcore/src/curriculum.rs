@@ -688,14 +688,14 @@ pub const V811_ENV_TARGETS: [usize; 12] = [24, 24, 24, 24, 24, 24, 24, 12, 10, 8
 /// safely grows back to 12 when the player count resets from 80 to 30.
 pub const V82_ENV_TARGETS: [usize; 14] = [24, 24, 24, 24, 24, 16, 12, 10, 12, 10, 8, 8, 8, 8];
 pub const V83_ENV_TARGETS: [usize; 15] = [24, 24, 24, 24, 24, 24, 16, 12, 10, 12, 10, 8, 8, 8, 8];
-/// V9 envs/GPU. Early Onion bot-food maps stay saturated; later broad-pool
-/// stages drop toward 8 like V8.3 as map/player cost grows.
+/// V9 envs/GPU. Early Onion bot-food maps stay saturated; later 200–350-bot
+/// broad-pool stages drop toward 8 like V8.3 as sim cost grows.
 pub const V9_ENV_TARGETS: [usize; 25] = [
-    24, 24, 24, 24, 24, // 0-4 bots-only → first nations
-    24, 24, 24, 24, 24, // 5-9 map + nation bridges
-    24, 20, 16, 16, 12, // 10-14 Easy load climb
-    12, 10, 10, 10, // 15-18 Easy 40→80
-    12, 10, 8, // 19-21 Medium
+    24, 24, 24, 24, 24, // 0-4 bots-only → 30/5
+    24, 24, 24, 20, 20, // 5-9 map bridge (50→100 bots)
+    16, 16, 12, 12, 10, // 10-14 climb toward 200/30
+    10, 10, 8, 8, // 15-18 Easy 200→250 bots
+    10, 8, 8, // 19-21 Medium
     8, 8, 8, // 22-24 Hard / Impossible
 ];
 
@@ -937,13 +937,15 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
             // high gates (0.90–0.975). win_at never hits 1.0 because
             // should_advance uses strict `mean > gate` over WINDOW=40.
             //
-            // Bots are always present — they are food for the agent and for
-            // nations. Never start nation-only (nations are harder than bots).
-            // Early stages are bots-only, then nations are introduced on top.
+            // Bots are always present and always far outnumber nations
+            // (~6:1+, e.g. 30 bots / 5 nations, 200 bots / 30 nations).
+            // Never use Nations::Default — that dumps the full map manifest
+            // (World ~72 nations) and inverts the bot:nation ratio.
+            // Early stages are bots-only, then nations are layered on top.
             stages = vec![
                 Stage {
                     maps: &["Onion"],
-                    bots: 5,
+                    bots: 15,
                     difficulty: "Easy",
                     nations: NE(0),
                     decision_ticks: 15,
@@ -951,7 +953,7 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
                 },
                 Stage {
                     maps: &["Onion"],
-                    bots: 10,
+                    bots: 30,
                     difficulty: "Easy",
                     nations: NE(0),
                     decision_ticks: 15,
@@ -959,185 +961,185 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
                 },
                 Stage {
                     maps: &["Onion"],
-                    bots: 10,
+                    bots: 30,
                     difficulty: "Easy",
-                    nations: NE(1),
+                    nations: NE(2),
                     decision_ticks: 15,
                     win_at: 0.95,
                 },
                 Stage {
                     maps: &["Onion"],
-                    bots: 15,
+                    bots: 30,
                     difficulty: "Easy",
-                    nations: NE(1),
+                    nations: NE(5),
                     decision_ticks: 15,
                     win_at: 0.925,
                 },
                 Stage {
                     maps: &["Onion"],
-                    bots: 15,
+                    bots: 40,
                     difficulty: "Easy",
-                    nations: NE(2),
+                    nations: NE(5),
                     decision_ticks: 15,
                     win_at: 0.925,
                 },
                 Stage {
                     maps: &["Onion", "Pangaea"],
-                    bots: 20,
-                    difficulty: "Easy",
-                    nations: NE(3),
-                    decision_ticks: 15,
-                    win_at: 0.90,
-                },
-                Stage {
-                    maps: &["Pangaea"],
-                    bots: 20,
-                    difficulty: "Easy",
-                    nations: NE(3),
-                    decision_ticks: 15,
-                    win_at: 0.90,
-                },
-                Stage {
-                    maps: &["Pangaea"],
-                    bots: 25,
-                    difficulty: "Easy",
-                    nations: NE(6),
-                    decision_ticks: 15,
-                    win_at: 0.90,
-                },
-                Stage {
-                    maps: &["Pangaea", "Caucasus"],
-                    bots: 30,
-                    difficulty: "Easy",
-                    nations: NE(6),
-                    decision_ticks: 15,
-                    win_at: 0.90,
-                },
-                Stage {
-                    maps: &["Pangaea", "Caucasus"],
-                    bots: 30,
-                    difficulty: "Easy",
-                    nations: NE(6),
-                    decision_ticks: 10,
-                    win_at: 0.90,
-                },
-                Stage {
-                    maps: &["Pangaea", "Caucasus", "BlackSea"],
-                    bots: 40,
-                    difficulty: "Easy",
-                    nations: ND,
-                    decision_ticks: 10,
-                    win_at: 0.90,
-                },
-                Stage {
-                    maps: &["Pangaea", "Caucasus", "BlackSea"],
-                    bots: 40,
-                    difficulty: "Easy",
-                    nations: ND,
-                    decision_ticks: 10,
-                    win_at: 0.90,
-                },
-                Stage {
-                    maps: &["Pangaea", "Caucasus", "BlackSea"],
                     bots: 50,
                     difficulty: "Easy",
-                    nations: ND,
+                    nations: NE(6),
+                    decision_ticks: 15,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &["Pangaea"],
+                    bots: 60,
+                    difficulty: "Easy",
+                    nations: NE(8),
+                    decision_ticks: 15,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &["Pangaea"],
+                    bots: 80,
+                    difficulty: "Easy",
+                    nations: NE(10),
+                    decision_ticks: 15,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &["Pangaea", "Caucasus"],
+                    bots: 100,
+                    difficulty: "Easy",
+                    nations: NE(12),
+                    decision_ticks: 15,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &["Pangaea", "Caucasus"],
+                    bots: 100,
+                    difficulty: "Easy",
+                    nations: NE(15),
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &["Pangaea", "Caucasus", "BlackSea"],
+                    bots: 120,
+                    difficulty: "Easy",
+                    nations: NE(15),
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &["Pangaea", "Caucasus", "BlackSea"],
+                    bots: 150,
+                    difficulty: "Easy",
+                    nations: NE(20),
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &["Pangaea", "Caucasus", "BlackSea"],
+                    bots: 150,
+                    difficulty: "Easy",
+                    nations: NE(20),
                     decision_ticks: 10,
                     win_at: 0.90,
                 },
                 Stage {
                     maps: &V82_STAGE5_MAPS,
-                    bots: 50,
+                    bots: 180,
                     difficulty: "Easy",
-                    nations: ND,
+                    nations: NE(25),
                     decision_ticks: 10,
                     win_at: 0.90,
                 },
                 Stage {
                     maps: &V82_MAPS,
-                    bots: 50,
+                    bots: 200,
                     difficulty: "Easy",
-                    nations: ND,
+                    nations: NE(30),
                     decision_ticks: 10,
                     win_at: 0.90,
                 },
                 Stage {
                     maps: &V82_MAPS,
-                    bots: 65,
+                    bots: 200,
                     difficulty: "Easy",
-                    nations: ND,
+                    nations: NE(30),
                     decision_ticks: 10,
                     win_at: 0.90,
                 },
                 Stage {
                     maps: &V82_MAPS,
-                    bots: 80,
+                    bots: 220,
                     difficulty: "Easy",
-                    nations: ND,
+                    nations: NE(30),
                     decision_ticks: 10,
                     win_at: 0.90,
                 },
                 Stage {
                     maps: &V82_MAPS,
-                    bots: 80,
+                    bots: 250,
                     difficulty: "Easy",
-                    nations: ND,
+                    nations: NE(35),
                     decision_ticks: 10,
                     win_at: 0.90,
                 },
                 Stage {
                     maps: &V82_MAPS,
-                    bots: 80,
+                    bots: 250,
                     difficulty: "Easy",
-                    nations: ND,
+                    nations: NE(35),
                     decision_ticks: 10,
                     win_at: 0.90,
                 },
                 Stage {
                     maps: &V82_MAPS,
-                    bots: 30,
+                    bots: 200,
                     difficulty: "Medium",
-                    nations: ND,
+                    nations: NE(30),
                     decision_ticks: 10,
                     win_at: 0.90,
                 },
                 Stage {
                     maps: &V82_MAPS,
-                    bots: 50,
+                    bots: 250,
                     difficulty: "Medium",
-                    nations: ND,
+                    nations: NE(35),
                     decision_ticks: 10,
                     win_at: 0.90,
                 },
                 Stage {
                     maps: &V82_MAPS,
-                    bots: 80,
+                    bots: 300,
                     difficulty: "Medium",
-                    nations: ND,
+                    nations: NE(40),
                     decision_ticks: 10,
                     win_at: 0.90,
                 },
                 Stage {
                     maps: &V82_MAPS,
-                    bots: 80,
+                    bots: 250,
                     difficulty: "Hard",
-                    nations: ND,
+                    nations: NE(35),
                     decision_ticks: 10,
                     win_at: 0.90,
                 },
                 Stage {
                     maps: &V82_MAPS,
-                    bots: 120,
+                    bots: 300,
                     difficulty: "Hard",
-                    nations: ND,
+                    nations: NE(40),
                     decision_ticks: 10,
                     win_at: 0.90,
                 },
                 Stage {
                     maps: &V82_MAPS,
-                    bots: 150,
+                    bots: 350,
                     difficulty: "Impossible",
-                    nations: ND,
+                    nations: NE(50),
                     decision_ticks: 10,
                     win_at: 0.90,
                 },
@@ -2012,17 +2014,33 @@ mod curriculum_v81_tests {
             CurriculumSchedule::from_id("v9"),
             Some(CurriculumSchedule::V9)
         );
-        // Bots are always present (food); early stages are bots-only before
-        // nations are layered on.
+        // Bots always on, and always far outnumber nations (~6:1+). Never
+        // Nations::Default (full map manifests invert the ratio on World/etc).
         assert!(v9.iter().all(|s| s.bots > 0));
-        assert_eq!(v9[0].bots, 5);
+        assert!(v9.iter().all(|s| !matches!(s.nations, Nations::Default)));
+        for stage in &v9 {
+            if let Nations::Exact(n) = stage.nations {
+                if n > 0 {
+                    assert!(
+                        stage.bots >= 5 * n,
+                        "bots {} must be >= 5x nations {} ({:?}/{})",
+                        stage.bots,
+                        n,
+                        stage.maps,
+                        stage.difficulty
+                    );
+                }
+            }
+        }
+        assert_eq!(v9[0].bots, 15);
         assert_eq!(v9[0].nations, Nations::Exact(0));
         assert_eq!(v9[0].win_at, 0.975);
-        assert_eq!(v9[1].bots, 10);
+        assert_eq!(v9[1].bots, 30);
         assert_eq!(v9[1].nations, Nations::Exact(0));
-        assert_eq!(v9[2].nations, Nations::Exact(1));
-        assert_eq!(v9[4].bots, 15);
-        assert_eq!(v9[4].nations, Nations::Exact(2));
+        assert_eq!(v9[3].bots, 30);
+        assert_eq!(v9[3].nations, Nations::Exact(5));
+        assert_eq!(v9[14].bots, 200);
+        assert_eq!(v9[14].nations, Nations::Exact(30));
         assert_eq!(v9[4].win_at, 0.925);
         assert!(v9.iter().all(|s| s.win_at >= 0.90 && s.win_at < 1.0));
         // Difficulty only steps after Easy player-count ladder completes.
@@ -2030,7 +2048,8 @@ mod curriculum_v81_tests {
         assert_eq!(v9[19].difficulty, "Medium");
         assert_eq!(v9[22].difficulty, "Hard");
         assert_eq!(v9[24].difficulty, "Impossible");
-        assert_eq!(v9[24].bots, 150);
+        assert_eq!(v9[24].bots, 350);
+        assert_eq!(v9[24].nations, Nations::Exact(50));
         assert_eq!(v9[24].maps, &V82_MAPS);
         // Bot counts are non-decreasing within each difficulty band.
         for window in v9[..19].windows(2) {
