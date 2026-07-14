@@ -249,6 +249,10 @@ export async function replayOutcome(record: GameRecord): Promise<GameOutcome> {
         if (winner !== null) {
           terminalTick = game.ticks();
           reason = terminalReason(game, winner);
+          // Match native outcome replay: once a winner is decided, later
+          // recorded turns are irrelevant to the outcome gate and dominate
+          // wall clock on long curriculum records.
+          break;
         }
       }
     }
@@ -1078,7 +1082,7 @@ async function main() {
     const parityCommit = getArg("parity-commit", path.basename(recordsDir));
     const limit = parseInt(getArg("limit", "0"), 10);
     const jobs = parseInt(
-      getArg("jobs", String(Math.min(4, availableParallelism()))),
+      getArg("jobs", String(availableParallelism())),
       10,
     );
     const timeoutSeconds = parseInt(
