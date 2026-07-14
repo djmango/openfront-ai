@@ -71,12 +71,15 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 14th, 2026</h2>
-  <p><b>V9 sparse-win parallel experiment ready</b>
+  <p><b>V9 sparse-win parallel experiment launched</b>
   (<a href="#v9-sparse-win">writeup</a>,
   <a href="https://github.com/djmango/openfront-ai/pull/35">#35</a>).
-  Fresh <code>ppo_v9</code> ladder: terminal <code>+1/−1</code> only, 25 micro-stages,
-  graduate at 90–97.5% win rate. Intended to run on a <b>second GPU box</b> while
-  <code>ppo_v86</code> continues the dense-shaping path.</p>
+  Fresh <code>ppo_v9</code> on RunPod <code>wq7acsw606cc9q</code>
+  (3×A40 secure, $1.32/hr — 4×A40 was out of stock). Branch
+  <code>sully/v9-sparse-win</code> @ <code>2532544</code> via
+  <code>SKIP_SYNC=1</code> (not yet on master). Terminal <code>+1/−1</code> only,
+  25 micro-stages, gates 0.90–0.975. Runs beside live
+  <code>ppo-v8-4xA40-fresh</code> / <code>ppo_v86</code>.</p>
   <p><b>Persistent + autoscale still live on <code>ppo_v86</code></b>
   (<a href="#persistent-autoscale-restart">writeup</a>). Merged
   <a href="https://github.com/djmango/openfront-ai/pull/30">#30</a>–<a href="https://github.com/djmango/openfront-ai/pull/33">#33</a>.
@@ -199,6 +202,28 @@ Rehearsal 25% still applies; rehearsal eps do not count toward the gate.</p>
 <p>PR: <a href="https://github.com/djmango/openfront-ai/pull/35">#35</a>
 (<code>sully/v9-sparse-win</code>). Intended to A/B against live <code>ppo_v86</code>
 on a second pod.</p>
+
+<h3 id="v9-launch">Launch notes (Jul 14 evening)</h3>
+<ul>
+  <li>Worktree: <code>/workspace/oftrain-v9-sparse-win</code> on
+    <code>sully/v9-sparse-win</code>.</li>
+  <li>4×A40 secure was out of stock; took 3×A40
+    (<code>ppo-v9-sparse-win-3xA40</code> / <code>wq7acsw606cc9q</code>).</li>
+  <li>Custom <code>dockerArgs</code> that curl+train before sshd is ready left the
+    first pod SSH-stuck (“pod not ready”); relaunched with the image default
+    entrypoint, then started training over SSH via
+    <code>/root/start_v9.sh</code> (clone branch +
+    <code>SKIP_SYNC=1 NUM_GPUS=3 bash scripts/pod_train_v9.sh</code>).</li>
+  <li><code>HF_TOKEN</code> must be exported in the SSH launcher — RunPod
+    <code>--env</code> did not land in the login shell for this create path.</li>
+  <li>Account balance was ~$29 with V8 already at $1.76/hr; V9 adds $1.32/hr.
+    Top up before a long overnight if both stay up.</li>
+  <li>First updates healthy: profile <code>v9-sparse-win-v1</code>,
+    <code>gamma=0.9997</code>, <code>ret-clip=2</code>, stage 0,
+    ~210–217 steps/s on 3×A40, <code>recent_reward=-1.0</code> (sparse terminals;
+    early losses expected). Checkpoints at update 5/10 under
+    <code>rust/checkpoints/ppo_v9/</code>.</li>
+</ul>
 
 <h2 class="date" id="persistent-autoscale-restart">Jul 14, 2026 - persistent actors + GPU-util autoscale via restart</h2>
 <p class="session">Clarified game-time vs wall-clock, then fixed the inverse
@@ -709,10 +734,14 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <code>ae_v3.pt</code> until the v3.1 winner is wired into <code>rl/obs.py</code>.</p>
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
-  <tr><td><code>ppo_v9</code></td><td><b>ready</b> Jul 14 (parallel sparse-win)</td>
+  <tr><td><code>ppo_v9</code></td><td><b>live</b> Jul 14 (parallel sparse-win)</td>
     <td>Fresh ladder on schedule <code>v9</code> / profile <code>v9-sparse-win-v1</code>:
     terminal <code>+1/−1</code> only, 25 micro-stages, gates 0.90–0.975. No V8 migrate.
-    Launch <code>NUM_GPUS=4 bash scripts/pod_train_v9.sh</code>. See
+    Pod <code>wq7acsw606cc9q</code> 3×A40 secure (<code>NUM_GPUS=3</code>; 4× stock
+    unavailable). Code from <code>sully/v9-sparse-win</code> with
+    <code>SKIP_SYNC=1</code>. SSH
+    <code>root@69.30.85.4 -p 22193</code>; logs
+    <code>/root/bootstrap.log</code>, <code>/tmp/train_ppo_v9.log</code>. See
     <a href="#v9-sparse-win">V9 writeup</a> and
     <a href="https://github.com/djmango/openfront-ai/pull/35">#35</a>. Runs beside
     <code>ppo_v86</code>, not instead of it.</td></tr>
