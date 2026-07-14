@@ -1937,7 +1937,6 @@ fn attack_bots(
     });
 
     let parallelism = bot_attack_max_parallelism(random, difficulty);
-    let mut sent = false;
     for target in sorted.into_iter().take(parallelism) {
         // TS `calculateAttackTroops`: keep less in reserve (use `expandRatio`)
         // when the bot target owns structures, so we recapture them ASAP.
@@ -1946,18 +1945,22 @@ fn attack_bots(
         } else {
             reserve_ratio
         };
-        if try_send_nation_bot_attack(
+        let _ = try_send_nation_bot_attack(
             game,
             attacker_small_id,
             target,
             target_reserve_ratio,
             bot_attack_troops_sent,
             difficulty,
-        ) {
-            sent = true;
-        }
+        );
     }
-    sent
+    // TS `attackBots` returns `botAttackTroopsSent > 0`, NOT whether any
+    // AttackExecution was actually enqueued. `calculateBotAttackTroops`
+    // increments that budget before `troopSendCap` / `isAttackTooWeak` can
+    // still null the send. Matching the budget>0 short-circuit is required
+    // so later strategies (e.g. `weakest`) do not fire when TS already left
+    // the bot-attack pipeline (curr-b120-s14-britannia @ tick 1910).
+    *bot_attack_troops_sent > 0.0
 }
 
 pub fn nation_maybe_attack(
