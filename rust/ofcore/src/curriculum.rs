@@ -1,8 +1,10 @@
 //! Curriculum stages and the strength-based reward. Port of
 //! `rl/curriculum.py`; see that file for the design rationale in comments.
 
-use crate::feat::EntsData;
-use std::collections::HashMap;
+use crate::feat::{
+    A_ATTACK, A_BOAT, A_CANCEL_BOAT, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, EntsData,
+};
+use std::collections::{HashMap, VecDeque};
 
 pub const W_STR: f64 = 0.02;
 pub const W_DELTA_GAIN: f64 = 5.0;
@@ -29,6 +31,9 @@ pub struct RewardConfig {
     pub v81_dominant_loss: bool,
     pub v81_dominance_threshold: f64,
     pub v81_delta_loss_dominant: f64,
+    pub v81_churn_coef: f64,
+    pub v81_churn_window: usize,
+    pub v81_churn_min_stage: usize,
 }
 
 impl RewardConfig {
@@ -43,6 +48,12 @@ impl RewardConfig {
     pub fn dominant_loss_active(self, stage: usize) -> bool {
         self.v81_active(stage) && self.v81_dominant_loss
     }
+
+    pub fn churn_penalty_active(self, stage: usize) -> bool {
+        stage >= self.v81_churn_min_stage
+            && self.v81_churn_coef != 0.0
+            && self.v81_churn_window != 0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -50,6 +61,7 @@ pub struct RewardComponents {
     pub strength: f64,
     pub strength_delta: f64,
     pub dominance: f64,
+    pub action_churn: f64,
     pub waste: f64,
     pub death: f64,
     pub terminal: f64,
@@ -60,9 +72,140 @@ impl RewardComponents {
         self.strength += other.strength;
         self.strength_delta += other.strength_delta;
         self.dominance += other.dominance;
+        self.action_churn += other.action_churn;
         self.waste += other.waste;
         self.death += other.death;
         self.terminal += other.terminal;
+    }
+}
+
+/// Stable identifier relevant to deciding whether two chosen actions undo one
+/// another. Player slots are converted to player ids and boat actions to the
+/// newly created transport unit id by the environment before recording.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActionTarget {
+    Player(usize),
+    Unit(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChosenAction {
+    pub action: i64,
+    pub target: Option<ActionTarget>,
+}
+
+impl ChosenAction {
+    pub const fn new(action: i64, target: Option<ActionTarget>) -> Self {
+        Self { action, target }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InverseActionPair {
+    BoatCancelBoat,
+    EmbargoEmbargoStop,
+    AttackRetreat,
+    RetreatAttack,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ActionPairCounts {
+    pub boat_cancel_boat: u64,
+    pub embargo_embargo_stop: u64,
+    pub attack_retreat: u64,
+    pub retreat_attack: u64,
+}
+
+impl ActionPairCounts {
+    pub fn record(&mut self, pair: InverseActionPair) {
+        match pair {
+            InverseActionPair::BoatCancelBoat => self.boat_cancel_boat += 1,
+            InverseActionPair::EmbargoEmbargoStop => self.embargo_embargo_stop += 1,
+            InverseActionPair::AttackRetreat => self.attack_retreat += 1,
+            InverseActionPair::RetreatAttack => self.retreat_attack += 1,
+        }
+    }
+
+    pub fn total(self) -> u64 {
+        self.boat_cancel_boat
+            + self.embargo_embargo_stop
+            + self.attack_retreat
+            + self.retreat_attack
+    }
+}
+
+/// Per-environment history of actual policy choices. Every choice consumes one
+/// position in the decision window, including noops and unrelated actions.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ActionChurnTracker {
+    history: VecDeque<ChosenAction>,
+    counts: ActionPairCounts,
+}
+
+impl ActionChurnTracker {
+    pub fn reset(&mut self) {
+        self.history.clear();
+        self.counts = ActionPairCounts::default();
+    }
+
+    pub fn counts(&self) -> ActionPairCounts {
+        self.counts
+    }
+
+    /// Record a chosen action and return a clear inverse pair, if any.
+    ///
+    /// A same-action/same-target record newer than the possible inverse means
+    /// the current choice is a repeat, not another reversal.
+    pub fn observe(&mut self, current: ChosenAction, window: usize) -> Option<InverseActionPair> {
+        if window == 0 {
+            self.history.clear();
+            return None;
+        }
+
+        let mut reversal = None;
+        for &previous in self.history.iter().rev() {
+            if previous.action == current.action && previous.target == current.target {
+                break;
+            }
+            if let Some(pair) = inverse_action_pair(previous, current) {
+                reversal = Some(pair);
+                break;
+            }
+        }
+
+        self.history.push_back(current);
+        while self.history.len() > window {
+            self.history.pop_front();
+        }
+        if let Some(pair) = reversal {
+            self.counts.record(pair);
+        }
+        reversal
+    }
+}
+
+fn inverse_action_pair(previous: ChosenAction, current: ChosenAction) -> Option<InverseActionPair> {
+    if previous.target.is_none() || previous.target != current.target {
+        return None;
+    }
+    match (previous.action, current.action) {
+        (A_BOAT, A_CANCEL_BOAT) => Some(InverseActionPair::BoatCancelBoat),
+        (A_EMBARGO, A_EMBARGO_STOP) => Some(InverseActionPair::EmbargoEmbargoStop),
+        (A_ATTACK, A_RETREAT) => Some(InverseActionPair::AttackRetreat),
+        (A_RETREAT, A_ATTACK) => Some(InverseActionPair::RetreatAttack),
+        _ => None,
+    }
+}
+
+pub fn action_churn_penalty(
+    reversal: Option<InverseActionPair>,
+    stage: usize,
+    config: RewardConfig,
+) -> f64 {
+    if reversal.is_some() && config.churn_penalty_active(stage) {
+        -config.v81_churn_coef
+    } else {
+        0.0
     }
 }
 
@@ -120,43 +263,190 @@ pub struct Stage {
     pub win_at: f64,
 }
 
-pub const ALL_MAPS: [&str; 7] =
-    ["Onion", "Pangaea", "Caucasus", "BlackSea", "BetweenTwoSeas", "World", "Asia"];
+pub const ALL_MAPS: [&str; 7] = [
+    "Onion",
+    "Pangaea",
+    "Caucasus",
+    "BlackSea",
+    "BetweenTwoSeas",
+    "World",
+    "Asia",
+];
+
+/// Stable curriculum identities persisted in trainer checkpoints.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CurriculumSchedule {
+    #[default]
+    Legacy,
+    V81,
+    V811,
+}
+
+impl CurriculumSchedule {
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::V81 => "v8.1",
+            Self::V811 => "v8.1.1",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "legacy" => Some(Self::Legacy),
+            "v8.1" => Some(Self::V81),
+            "v8.1.1" => Some(Self::V811),
+            _ => None,
+        }
+    }
+}
 
 /// V8.1 env workers per GPU/shard. Early maps are cheap enough to keep the
 /// actor full; later, larger maps use fewer workers to bound host memory and
 /// engine tail latency.
 pub const V81_ENV_TARGETS: [usize; 11] = [24, 24, 24, 24, 24, 24, 12, 10, 8, 8, 8];
 
+/// V8.1.1 keeps the new same-map Medium bridge at the small-map target, then
+/// uses at most 12 envs/GPU once World/Asia enter the pool.
+pub const V811_ENV_TARGETS: [usize; 12] = [24, 24, 24, 24, 24, 24, 24, 12, 10, 8, 8, 8];
+
 pub fn stages() -> Vec<Stage> {
-    stages_for(false)
+    stages_for_schedule(CurriculumSchedule::Legacy)
 }
 
 /// Return the selected gate schedule. V8.1 deliberately changes only
 /// `win_at`: stage indices, maps, opponents, difficulty, and decision cadence
 /// remain stable so checkpoints and episode metadata retain their identity.
 pub fn stages_for(v81: bool) -> Vec<Stage> {
+    stages_for_schedule(if v81 {
+        CurriculumSchedule::V81
+    } else {
+        CurriculumSchedule::Legacy
+    })
+}
+
+pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
     use Nations::{Default as ND, Exact as NE};
     let mut stages = vec![
-        Stage { maps: &["Onion"], bots: 0, difficulty: "Easy", nations: NE(1), decision_ticks: 15, win_at: 0.9 },
-        Stage { maps: &["Onion"], bots: 0, difficulty: "Easy", nations: NE(3), decision_ticks: 15, win_at: 0.8 },
-        Stage { maps: &["Onion", "Pangaea"], bots: 5, difficulty: "Easy", nations: NE(3), decision_ticks: 15, win_at: 0.75 },
-        Stage { maps: &["Pangaea", "Caucasus"], bots: 10, difficulty: "Easy", nations: NE(6), decision_ticks: 15, win_at: 0.65 },
-        Stage { maps: &["Pangaea", "Caucasus", "BlackSea"], bots: 30, difficulty: "Easy", nations: ND, decision_ticks: 10, win_at: 0.55 },
-        Stage { maps: &["BlackSea", "BetweenTwoSeas", "Caucasus"], bots: 30, difficulty: "Medium", nations: ND, decision_ticks: 10, win_at: 0.5 },
-        Stage { maps: &["World", "Asia", "BlackSea"], bots: 50, difficulty: "Medium", nations: ND, decision_ticks: 10, win_at: 0.5 },
-        Stage { maps: &["World", "Asia", "BetweenTwoSeas", "Caucasus"], bots: 80, difficulty: "Medium", nations: ND, decision_ticks: 10, win_at: 0.45 },
-        Stage { maps: &ALL_MAPS, bots: 80, difficulty: "Hard", nations: ND, decision_ticks: 10, win_at: 0.4 },
-        Stage { maps: &ALL_MAPS, bots: 120, difficulty: "Hard", nations: ND, decision_ticks: 10, win_at: 0.35 },
-        Stage { maps: &ALL_MAPS, bots: 150, difficulty: "Impossible", nations: ND, decision_ticks: 10, win_at: 0.3 },
+        Stage {
+            maps: &["Onion"],
+            bots: 0,
+            difficulty: "Easy",
+            nations: NE(1),
+            decision_ticks: 15,
+            win_at: 0.9,
+        },
+        Stage {
+            maps: &["Onion"],
+            bots: 0,
+            difficulty: "Easy",
+            nations: NE(3),
+            decision_ticks: 15,
+            win_at: 0.8,
+        },
+        Stage {
+            maps: &["Onion", "Pangaea"],
+            bots: 5,
+            difficulty: "Easy",
+            nations: NE(3),
+            decision_ticks: 15,
+            win_at: 0.75,
+        },
+        Stage {
+            maps: &["Pangaea", "Caucasus"],
+            bots: 10,
+            difficulty: "Easy",
+            nations: NE(6),
+            decision_ticks: 15,
+            win_at: 0.65,
+        },
+        Stage {
+            maps: &["Pangaea", "Caucasus", "BlackSea"],
+            bots: 30,
+            difficulty: "Easy",
+            nations: ND,
+            decision_ticks: 10,
+            win_at: 0.55,
+        },
+        Stage {
+            maps: &["BlackSea", "BetweenTwoSeas", "Caucasus"],
+            bots: 30,
+            difficulty: "Medium",
+            nations: ND,
+            decision_ticks: 10,
+            win_at: 0.5,
+        },
+        Stage {
+            maps: &["World", "Asia", "BlackSea"],
+            bots: 50,
+            difficulty: "Medium",
+            nations: ND,
+            decision_ticks: 10,
+            win_at: 0.5,
+        },
+        Stage {
+            maps: &["World", "Asia", "BetweenTwoSeas", "Caucasus"],
+            bots: 80,
+            difficulty: "Medium",
+            nations: ND,
+            decision_ticks: 10,
+            win_at: 0.45,
+        },
+        Stage {
+            maps: &ALL_MAPS,
+            bots: 80,
+            difficulty: "Hard",
+            nations: ND,
+            decision_ticks: 10,
+            win_at: 0.4,
+        },
+        Stage {
+            maps: &ALL_MAPS,
+            bots: 120,
+            difficulty: "Hard",
+            nations: ND,
+            decision_ticks: 10,
+            win_at: 0.35,
+        },
+        Stage {
+            maps: &ALL_MAPS,
+            bots: 150,
+            difficulty: "Impossible",
+            nations: ND,
+            decision_ticks: 10,
+            win_at: 0.3,
+        },
     ];
-    if v81 {
-        // Stages 0-3 are intentionally unchanged. Crowded-map wins are much
-        // rarer than placement success, so require repeatable wins without
-        // making the old 0.5 gate an effectively permanent lock.
-        let gates = [0.35, 0.30, 0.25, 0.22, 0.20, 0.18, 0.15];
-        for (stage, gate) in stages[4..].iter_mut().zip(gates) {
-            stage.win_at = gate;
+    match schedule {
+        CurriculumSchedule::Legacy => {}
+        CurriculumSchedule::V81 => {
+            // Stages 0-3 are intentionally unchanged. Crowded-map wins are
+            // much rarer than placement success, so require repeatable wins
+            // without making the old 0.5 gate a permanent lock.
+            let gates = [0.35, 0.30, 0.25, 0.22, 0.20, 0.18, 0.15];
+            for (stage, gate) in stages[4..].iter_mut().zip(gates) {
+                stage.win_at = gate;
+            }
+        }
+        CurriculumSchedule::V811 => {
+            // Stage 5 is the opt-in Easy bridge. Stage 6 repeats its exact
+            // map/bot/nation setup at Medium before World/Asia first appear
+            // at stage 7. The old stages 6+ retain their challenge and gate
+            // after shifting by one.
+            stages[5].difficulty = "Easy";
+            let medium_bridge = Stage {
+                maps: stages[5].maps,
+                bots: stages[5].bots,
+                difficulty: "Medium",
+                nations: stages[5].nations,
+                decision_ticks: stages[5].decision_ticks,
+                win_at: 0.25,
+            };
+            stages.insert(6, medium_bridge);
+            let gates = [0.35, 0.30, 0.25, 0.25, 0.22, 0.20, 0.18, 0.15];
+            for (stage, gate) in stages[4..].iter_mut().zip(gates) {
+                stage.win_at = gate;
+            }
         }
     }
     stages
@@ -222,7 +512,11 @@ pub fn strengths(ents: &EntsData, land_total: i64) -> HashMap<usize, f64> {
     let troops = |p: &crate::feat::PlayerE| p.troops + fielded.get(&p.id).copied().unwrap_or(0.0);
     let tot_troops: f64 = alive.iter().map(|p| troops(p)).sum::<f64>() + 1e-9;
     let tot_gold: f64 = alive.iter().map(|p| p.gold).sum::<f64>() + 1e-9;
-    let tot_sv: f64 = alive.iter().map(|p| sv.get(&p.id).copied().unwrap_or(0.0)).sum::<f64>() + 1e-9;
+    let tot_sv: f64 = alive
+        .iter()
+        .map(|p| sv.get(&p.id).copied().unwrap_or(0.0))
+        .sum::<f64>()
+        + 1e-9;
     alive
         .iter()
         .map(|p| {
@@ -236,7 +530,11 @@ pub fn strengths(ents: &EntsData, land_total: i64) -> HashMap<usize, f64> {
 }
 
 fn finite_nonnegative(value: f64) -> f64 {
-    if value.is_finite() && value > 0.0 { value } else { 0.0 }
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        0.0
+    }
 }
 
 fn finite_or_zero(value: f64) -> f64 {
@@ -263,8 +561,15 @@ pub fn dominance_potential(composite: &HashMap<usize, f64>, me: usize, clamp: f6
 /// Agent share after normalizing the placement composite over living players.
 pub fn normalized_strength_share(composite: &HashMap<usize, f64>, me: usize) -> f64 {
     let mine = finite_nonnegative(composite.get(&me).copied().unwrap_or(0.0));
-    let total: f64 = composite.values().map(|&value| finite_nonnegative(value)).sum();
-    if total > 0.0 { (mine / total).clamp(0.0, 1.0) } else { 0.0 }
+    let total: f64 = composite
+        .values()
+        .map(|&value| finite_nonnegative(value))
+        .sum();
+    if total > 0.0 {
+        (mine / total).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 pub fn strength_delta_weight(
@@ -295,7 +600,10 @@ pub fn placement(ents: &EntsData, me: i64, agent_alive: bool, land_total: i64) -
         return ((1 + others_alive).min(n), n);
     }
     let mine = s[&me_u];
-    let better = s.iter().filter(|&(&pid, &v)| pid != me_u && v > mine).count() as i64;
+    let better = s
+        .iter()
+        .filter(|&(&pid, &v)| pid != me_u && v > mine)
+        .count() as i64;
     (1 + better, n)
 }
 
@@ -326,6 +634,9 @@ mod tests {
             v81_dominant_loss: true,
             v81_dominance_threshold: 0.55,
             v81_delta_loss_dominant: 5.25,
+            v81_churn_coef: 0.05,
+            v81_churn_window: 2,
+            v81_churn_min_stage: 4,
         }
     }
 
@@ -372,9 +683,7 @@ mod tests {
         let _ = shaper.transition(-0.7, 0.9, 0.25);
         shaper.reset(0.3);
         assert_eq!(shaper.prior().to_bits(), 0.3f64.to_bits());
-        assert!(
-            (shaper.transition(0.5, 0.9, 0.25) - 0.25 * (0.9 * 0.5 - 0.3)).abs() < 1e-15
-        );
+        assert!((shaper.transition(0.5, 0.9, 0.25) - 0.25 * (0.9 * 0.5 - 0.3)).abs() < 1e-15);
     }
 
     #[test]
@@ -411,8 +720,7 @@ mod tests {
             } else {
                 W_DELTA_LOSS
             }) * delta;
-        let current =
-            W_STR * mine * tw + strength_delta_weight(delta, 0.99, 10, cfg) * delta;
+        let current = W_STR * mine * tw + strength_delta_weight(delta, 0.99, 10, cfg) * delta;
         assert_eq!(legacy.to_bits(), current.to_bits());
         assert!(!cfg.dominance_shaping_active(10));
     }
@@ -446,6 +754,177 @@ mod tests {
         assert!((dominance_potential(&exact, 1, 10.0) - expected).abs() < 1e-15);
         assert_eq!(placement(&ents, 1, true, 100), (1, 2));
     }
+
+    fn player_action(action: i64, player: usize) -> ChosenAction {
+        ChosenAction::new(action, Some(ActionTarget::Player(player)))
+    }
+
+    fn unit_action(action: i64, unit: usize) -> ChosenAction {
+        ChosenAction::new(action, Some(ActionTarget::Unit(unit)))
+    }
+
+    #[test]
+    fn churn_detects_every_supported_inverse_pair() {
+        let cases = [
+            (
+                unit_action(A_BOAT, 17),
+                unit_action(A_CANCEL_BOAT, 17),
+                InverseActionPair::BoatCancelBoat,
+            ),
+            (
+                player_action(A_EMBARGO, 3),
+                player_action(A_EMBARGO_STOP, 3),
+                InverseActionPair::EmbargoEmbargoStop,
+            ),
+            (
+                player_action(A_ATTACK, 3),
+                player_action(A_RETREAT, 3),
+                InverseActionPair::AttackRetreat,
+            ),
+            (
+                player_action(A_RETREAT, 3),
+                player_action(A_ATTACK, 3),
+                InverseActionPair::RetreatAttack,
+            ),
+        ];
+        for (first, second, expected) in cases {
+            let mut tracker = ActionChurnTracker::default();
+            assert_eq!(tracker.observe(first, 2), None);
+            assert_eq!(tracker.observe(second, 2), Some(expected));
+            assert_eq!(tracker.counts().total(), 1);
+        }
+    }
+
+    #[test]
+    fn churn_does_not_treat_one_way_pairs_as_symmetric() {
+        for (first, second) in [
+            (unit_action(A_CANCEL_BOAT, 17), unit_action(A_BOAT, 17)),
+            (
+                player_action(A_EMBARGO_STOP, 3),
+                player_action(A_EMBARGO, 3),
+            ),
+        ] {
+            let mut tracker = ActionChurnTracker::default();
+            tracker.observe(first, 2);
+            assert_eq!(tracker.observe(second, 2), None);
+            assert_eq!(tracker.counts().total(), 0);
+        }
+    }
+
+    #[test]
+    fn churn_requires_the_same_relevant_target_and_target_kind() {
+        let cases = [
+            (player_action(A_ATTACK, 3), player_action(A_RETREAT, 4)),
+            (
+                player_action(A_EMBARGO, 3),
+                player_action(A_EMBARGO_STOP, 4),
+            ),
+            (unit_action(A_BOAT, 17), unit_action(A_CANCEL_BOAT, 18)),
+            (
+                ChosenAction::new(A_ATTACK, None),
+                ChosenAction::new(A_RETREAT, None),
+            ),
+            (
+                ChosenAction::new(A_ATTACK, Some(ActionTarget::Player(17))),
+                ChosenAction::new(A_RETREAT, Some(ActionTarget::Unit(17))),
+            ),
+        ];
+        for (first, second) in cases {
+            let mut tracker = ActionChurnTracker::default();
+            tracker.observe(first, 2);
+            assert_eq!(tracker.observe(second, 2), None);
+            assert_eq!(tracker.counts().total(), 0);
+        }
+    }
+
+    #[test]
+    fn churn_window_counts_decisions_and_expires_old_actions() {
+        let attack = player_action(A_ATTACK, 3);
+        let retreat = player_action(A_RETREAT, 3);
+        let noop = ChosenAction::new(crate::feat::A_NOOP, None);
+
+        let mut within = ActionChurnTracker::default();
+        within.observe(attack, 2);
+        within.observe(noop, 2);
+        assert_eq!(
+            within.observe(retreat, 2),
+            Some(InverseActionPair::AttackRetreat)
+        );
+
+        let mut expired = ActionChurnTracker::default();
+        expired.observe(attack, 2);
+        expired.observe(noop, 2);
+        expired.observe(noop, 2);
+        assert_eq!(expired.observe(retreat, 2), None);
+        assert_eq!(expired.counts().total(), 0);
+    }
+
+    #[test]
+    fn churn_ignores_repeats_noops_and_unrelated_actions() {
+        let attack = player_action(A_ATTACK, 3);
+        let retreat = player_action(A_RETREAT, 3);
+        let noop = ChosenAction::new(crate::feat::A_NOOP, None);
+        let unrelated = player_action(crate::feat::A_DONATE_GOLD, 3);
+        let mut tracker = ActionChurnTracker::default();
+
+        tracker.observe(attack, 4);
+        assert_eq!(tracker.observe(attack, 4), None);
+        assert_eq!(tracker.observe(noop, 4), None);
+        assert_eq!(tracker.observe(unrelated, 4), None);
+        assert_eq!(
+            tracker.observe(retreat, 4),
+            Some(InverseActionPair::AttackRetreat)
+        );
+        assert_eq!(tracker.observe(noop, 4), None);
+        assert_eq!(tracker.observe(retreat, 4), None);
+        assert_eq!(tracker.counts().attack_retreat, 1);
+    }
+
+    #[test]
+    fn churn_reset_clears_history_and_episode_counters() {
+        let mut tracker = ActionChurnTracker::default();
+        tracker.observe(player_action(A_ATTACK, 3), 2);
+        tracker.reset();
+        assert_eq!(tracker.observe(player_action(A_RETREAT, 3), 2), None);
+        assert_eq!(tracker.counts(), ActionPairCounts::default());
+    }
+
+    #[test]
+    fn churn_zero_window_disables_detection_and_drops_history() {
+        let mut tracker = ActionChurnTracker::default();
+        tracker.observe(player_action(A_ATTACK, 3), 2);
+        assert_eq!(tracker.observe(player_action(A_RETREAT, 3), 0), None);
+        assert_eq!(
+            tracker.observe(player_action(A_RETREAT, 3), 2),
+            None,
+            "zero window must not leave an old action to match later"
+        );
+    }
+
+    #[test]
+    fn churn_penalty_gate_is_opt_in_and_stage_specific() {
+        let mut cfg = config();
+        assert!(!cfg.churn_penalty_active(3));
+        assert!(cfg.churn_penalty_active(4));
+        assert_eq!(
+            action_churn_penalty(Some(InverseActionPair::AttackRetreat), 3, cfg),
+            0.0
+        );
+        assert_eq!(
+            action_churn_penalty(Some(InverseActionPair::AttackRetreat), 4, cfg),
+            -0.05
+        );
+        assert_eq!(action_churn_penalty(None, 4, cfg), 0.0);
+        cfg.v81_churn_coef = 0.0;
+        assert!(!cfg.churn_penalty_active(10));
+        let legacy_reward = 1.25f64;
+        let current =
+            legacy_reward + action_churn_penalty(Some(InverseActionPair::AttackRetreat), 10, cfg);
+        assert_eq!(current.to_bits(), legacy_reward.to_bits());
+        cfg.v81_churn_coef = 0.05;
+        cfg.v81_churn_window = 0;
+        assert!(!cfg.churn_penalty_active(10));
+    }
 }
 
 #[cfg(test)]
@@ -472,7 +951,9 @@ mod curriculum_v81_tests {
         }
         assert_eq!(
             v81.iter().map(|stage| stage.win_at).collect::<Vec<_>>(),
-            vec![0.9, 0.8, 0.75, 0.65, 0.35, 0.30, 0.25, 0.22, 0.20, 0.18, 0.15]
+            vec![
+                0.9, 0.8, 0.75, 0.65, 0.35, 0.30, 0.25, 0.22, 0.20, 0.18, 0.15
+            ]
         );
         for index in 0..4 {
             assert_eq!(legacy[index].win_at, v81[index].win_at);
@@ -484,5 +965,40 @@ mod curriculum_v81_tests {
         assert_eq!(&V81_ENV_TARGETS[..6], &[24; 6]);
         assert_eq!(&V81_ENV_TARGETS[6..], &[12, 10, 8, 8, 8]);
         assert_eq!(V81_ENV_TARGETS.len(), stages().len());
+    }
+
+    #[test]
+    fn v811_adds_easy_then_medium_bridge_before_world_scale() {
+        let v81 = stages_for_schedule(CurriculumSchedule::V81);
+        let v811 = stages_for_schedule(CurriculumSchedule::V811);
+        assert_eq!(v811.len(), v81.len() + 1);
+        assert_eq!(v811[5].maps, v81[5].maps);
+        assert_eq!(v811[5].bots, v81[5].bots);
+        assert_eq!(v811[5].nations, v81[5].nations);
+        assert_eq!(v811[5].difficulty, "Easy");
+        assert_eq!(v811[6].maps, v81[5].maps);
+        assert_eq!(v811[6].bots, 30);
+        assert_eq!(v811[6].nations, v81[5].nations);
+        assert_eq!(v811[6].difficulty, "Medium");
+        for (old, shifted) in v81[6..].iter().zip(&v811[7..]) {
+            assert_eq!(old.maps, shifted.maps);
+            assert_eq!(old.bots, shifted.bots);
+            assert_eq!(old.difficulty, shifted.difficulty);
+            assert_eq!(old.nations, shifted.nations);
+        }
+        assert_eq!(&v811[7].maps[..2], &["World", "Asia"]);
+        assert_eq!(v811[7].bots, 50);
+    }
+
+    #[test]
+    fn v811_gates_and_env_targets_follow_shifted_progression() {
+        let v811 = stages_for_schedule(CurriculumSchedule::V811);
+        assert_eq!(
+            v811.iter().map(|stage| stage.win_at).collect::<Vec<_>>(),
+            vec![0.9, 0.8, 0.75, 0.65, 0.35, 0.30, 0.25, 0.25, 0.22, 0.20, 0.18, 0.15]
+        );
+        assert_eq!(V811_ENV_TARGETS.len(), v811.len());
+        assert_eq!(&V811_ENV_TARGETS[..7], &[24; 7]);
+        assert!(V811_ENV_TARGETS[7..].iter().all(|&target| target <= 12));
     }
 }
