@@ -4,7 +4,7 @@ The real OpenFront client replays the record (see scripts/serve_replay.py).
 For real-graphics video, render it with scripts/render_client_replay.py.
 
 Usage:
-  uv run python -m rl.watch --policy /tmp/policy.pt --stage 3 \\
+  uv run python -m rl.watch --policy rust/checkpoints/ppo_v81/latest.safetensors --stage 3 \\
       --record records-rl/game.json
 """
 
@@ -21,6 +21,30 @@ from rl.obs import ACTIONS, ObsBuilder, encode_grids, load_ae
 from rl.policy import Policy
 from rl.ppo import OBS_KEYS
 from rl.ppo_translate import IntentTranslator, my_tiles, spawn_randomly
+from rl.showcase_util import LEGACY_POLICY_RUNS
+
+
+def load_policy_checkpoint(
+    policy: Policy, checkpoint: str | Path, device: str
+) -> dict:
+    """Strictly dispatch current safetensors and frozen legacy checkpoints."""
+    path = Path(checkpoint)
+    if path.suffix == ".safetensors":
+        from scripts.policy_safetensors import load_oftrain_safetensors
+
+        metadata = load_oftrain_safetensors(policy, path)
+        state = metadata["state"]
+        if not isinstance(state, dict):
+            raise ValueError("invalid safetensors state metadata")
+        return state
+    if path.suffix == ".pt" and path.parent.name in LEGACY_POLICY_RUNS:
+        state = torch.load(path, map_location=device, weights_only=False)
+        policy.load_state_dict(state["model_state_dict"], strict=True)
+        return state
+    raise ValueError(
+        "policy must be .safetensors; policy.pt is supported only for "
+        "explicitly legacy ppo_v5/ppo_v7 runs"
+    )
 
 
 def describe(choice: dict, obs: dict) -> str:
@@ -91,8 +115,7 @@ def main() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     ae = load_ae(args.ckpt, device)
     policy = Policy().to(device)
-    state = torch.load(args.policy, map_location=device, weights_only=False)
-    policy.load_state_dict(state["model_state_dict"])
+    state = load_policy_checkpoint(policy, args.policy, device)
     policy.eval()
     print(f"device: {device}")
     print(f"policy from update {state.get('update', '?')}, stage {state.get('stage', '?')}")

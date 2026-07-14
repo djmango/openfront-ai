@@ -30,6 +30,7 @@ import torch.nn as nn
 
 from rl.obs import load_ae, C_GRID, MAX_SLOTS, N_LOCAL, N_SCALARS, LOCAL, P_FEAT
 from rl.policy import Policy
+from rl.showcase_util import LEGACY_POLICY_RUNS
 
 
 class AEEncoderWrapper(nn.Module):
@@ -218,6 +219,28 @@ def verify(out_dir: Path, ae, policy, dummy) -> None:
     print("parity OK")
 
 
+def load_export_policy(checkpoint: str | Path) -> tuple[Policy, dict]:
+    """Load an export source in memory without creating a policy.pt."""
+    path = Path(checkpoint)
+    policy = Policy()
+    if path.suffix == ".safetensors":
+        from scripts.policy_safetensors import load_oftrain_safetensors
+
+        metadata = load_oftrain_safetensors(policy, path)
+        state = metadata["state"]
+        if not isinstance(state, dict):
+            raise ValueError("invalid safetensors state metadata")
+    elif path.suffix == ".pt" and path.parent.name in LEGACY_POLICY_RUNS:
+        state = torch.load(path, map_location="cpu", weights_only=False)
+        policy.load_state_dict(state["model_state_dict"], strict=True)
+    else:
+        raise ValueError(
+            "ONNX export requires .safetensors; policy.pt is supported only "
+            "for explicitly legacy ppo_v5/ppo_v7 runs"
+        )
+    return policy, state
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ae", default="runs/ae_v31_d8c32/ae_v3.pt")
@@ -232,17 +255,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     ae = load_ae(args.ae, "cpu")
-    policy = Policy()
-    if Path(args.policy).suffix == ".safetensors":
-        from scripts.policy_safetensors import load_oftrain_safetensors
-
-        metadata = load_oftrain_safetensors(policy, args.policy)
-        ck = metadata["state"]
-    else:
-        # Explicit legacy Python fixture compatibility. New oftrain runs never
-        # create this format.
-        ck = torch.load(args.policy, map_location="cpu", weights_only=False)
-        policy.load_state_dict(ck["model_state_dict"], strict=True)
+    policy, ck = load_export_policy(args.policy)
     policy.eval()
     # TransformerEncoder's nested-tensor fast path (autoselected whenever a
     # key_padding_mask is passed) diverges under ONNX tracing - not a
