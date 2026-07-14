@@ -286,7 +286,7 @@ def main() -> None:
         if args.rust_coarse_ae:
             rust_command += ["--coarse-ckpt", str(Path(args.rust_coarse_ae).resolve())]
         if args.rust_recurrent:
-            rust_command.append("--recurrent-policy")
+            rust_command += ["--persistent-actors", "--recurrent-policy"]
         subprocess.run(rust_command, cwd=REPO, check=True)
         for label in ("ppo_v5", "ppo_v7"):
             run_python(
