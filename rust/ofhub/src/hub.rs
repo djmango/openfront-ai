@@ -199,20 +199,6 @@ async fn http_json(
     Ok(serde_json::from_str(&text).unwrap_or_else(|_| json!({})))
 }
 
-fn worker_path_for(game_id: &str, hub: &Value) -> String {
-    if hub.get("game_id").and_then(|v| v.as_str()) == Some(game_id) {
-        if let Some(wp) = hub.get("worker_path").and_then(|v| v.as_str()) {
-            return wp.to_string();
-        }
-    }
-    let num_workers: i64 = env_or("NUM_WORKERS", "2").parse().unwrap_or(2);
-    let mut h: i32 = 0;
-    for ch in game_id.chars() {
-        h = h.wrapping_shl(5).wrapping_sub(h).wrapping_add(ch as i32);
-    }
-    format!("w{}", (h as i64).rem_euclid(num_workers))
-}
-
 fn play_redirect(game_id: &str, worker_path: &str) -> String {
     format!("/{worker_path}/game/{game_id}")
 }
