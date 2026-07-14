@@ -137,7 +137,10 @@ fi
 PY_TAG="$("$VENV/bin/python" -c 'import sys; print(f"python{sys.version_info.major}.{sys.version_info.minor}")')"
 TORCH_LIB="$VENV/lib/$PY_TAG/site-packages/torch"
 NVRTC_LIB="$VENV/lib/$PY_TAG/site-packages/nvidia/cuda_nvrtc/lib"
-CUDA_INCLUDE="$VENV/lib/$PY_TAG/site-packages/nvidia/cuda_runtime/include"
+CUDA_INCLUDE="/usr/local/cuda/include"
+if [ ! -f "$CUDA_INCLUDE/cuda_runtime_api.h" ]; then
+  CUDA_INCLUDE="$VENV/lib/$PY_TAG/site-packages/nvidia/cuda_runtime/include"
+fi
 NCCL_ROOT="$VENV/lib/$PY_TAG/site-packages/nvidia/nccl"
 NCCL_INCLUDE="$NCCL_ROOT/include"
 NCCL_LIB="$NCCL_ROOT/lib"
