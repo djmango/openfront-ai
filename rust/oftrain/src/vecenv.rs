@@ -15,10 +15,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use ofcore::curriculum::{
     self, ActionChurnTracker, ActionPairCounts, ActionTarget, ChosenAction, CurriculumSchedule,
-    DominanceShaper, RewardComponents, RewardConfig, Stage, W_DEATH, W_STR, W_WASTE,
-    action_churn_penalty, dominance_potential, normalized_strength_share, placement,
-    placement_score, sample_episode, stages_for_schedule, strength_delta_weight, terminal_reward,
-    timeweight,
+    DominanceShaper, RewardComponents, RewardConfig, Stage, V83_CLOSEOUT_SHARE_START, W_DEATH,
+    W_STR, W_WASTE, action_churn_penalty, closeout_potential, dominance_potential, land_share,
+    normalized_strength_share, placement, placement_score, sample_episode, stages_for_schedule,
+    strength_delta_weight, terminal_reward, timeweight, v83_action_churn_penalty,
 };
 use ofcore::feat::{
     self, A_ATTACK, A_BOAT, A_CANCEL_BOAT, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, ACTIONS,
@@ -216,6 +216,14 @@ pub struct EpisodeInfo {
     pub reward: f64,
     pub length: i64,
     pub final_tiles: f64,
+    pub final_land_share: f64,
+    pub max_land_share: f64,
+    pub closeout_reached: bool,
+    pub closeout_entry_tick: Option<i64>,
+    pub decisions_after_closeout: u64,
+    pub converted: bool,
+    pub timeout_after_closeout: bool,
+    pub post_closeout_churn_pairs: u64,
     pub final_tick: i64,
     pub place: i64,
     pub n_players: i64,
@@ -227,6 +235,39 @@ pub struct EpisodeInfo {
     pub rehearsal: bool,
     pub reward_components: RewardComponents,
     pub action_pair_counts: ActionPairCounts,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct CloseoutTracker {
+    max_land_share: f64,
+    entry_tick: Option<i64>,
+    decisions_after_entry: u64,
+    post_entry_churn_pairs: u64,
+}
+
+impl CloseoutTracker {
+    fn reset(&mut self, share: f64, tick: i64) {
+        self.max_land_share = share;
+        self.entry_tick = (share >= V83_CLOSEOUT_SHARE_START).then_some(tick);
+        self.decisions_after_entry = 0;
+        self.post_entry_churn_pairs = 0;
+    }
+
+    fn observe(&mut self, share: f64, tick: i64, inverse_pair: bool) {
+        self.max_land_share = self.max_land_share.max(share);
+        if self.entry_tick.is_some() {
+            self.decisions_after_entry += 1;
+        } else if share >= V83_CLOSEOUT_SHARE_START {
+            self.entry_tick = Some(tick);
+        }
+        if self.entry_tick.is_some() && inverse_pair {
+            self.post_entry_churn_pairs += 1;
+        }
+    }
+
+    fn reached(self) -> bool {
+        self.entry_tick.is_some()
+    }
 }
 
 /// Outcome of the action immediately preceding an observation. This stays on
@@ -391,7 +432,7 @@ fn churn_action(
             .and_then(|intent| intent["attackID"].as_str())
             .and_then(|attack_id| {
                 ents.attacks
-                .iter()
+                    .iter()
                     .find(|attack| attack.aid == attack_id && attack.to != 0)
                     .map(|attack| ActionTarget::Player(attack.to))
             }),
@@ -421,6 +462,7 @@ pub struct EnvWorker {
     pub idx: usize,
     bridge: Box<dyn GameEngine>,
     stages: Vec<Stage>,
+    curriculum_schedule: CurriculumSchedule,
     stage: usize,
     episode_stage: usize,
     max_episode_ticks: i64,
@@ -437,6 +479,8 @@ pub struct EnvWorker {
     land_total: i64,
     prev_strength: f64,
     dominance_shaper: DominanceShaper,
+    closeout_shaper: DominanceShaper,
+    closeout_tracker: CloseoutTracker,
     action_churn_tracker: ActionChurnTracker,
     prev_action: ActionOutcome,
     last_commitment: Option<(i64, i64, i64, i64, i64, u64)>,
@@ -467,6 +511,7 @@ impl EnvWorker {
             idx,
             bridge,
             stages: stages_for_schedule(curriculum_schedule),
+            curriculum_schedule,
             stage,
             episode_stage: stage,
             max_episode_ticks,
@@ -483,6 +528,8 @@ impl EnvWorker {
             land_total: 1,
             prev_strength: 0.0,
             dominance_shaper: DominanceShaper::default(),
+            closeout_shaper: DominanceShaper::default(),
+            closeout_tracker: CloseoutTracker::default(),
             action_churn_tracker: ActionChurnTracker::default(),
             prev_action: ActionOutcome::default(),
             last_commitment: None,
@@ -568,6 +615,13 @@ impl EnvWorker {
             obs.me().max(0) as usize,
             self.reward_config.v81_potential_clamp,
         ));
+        let initial_share = land_share(
+            ofcore::translate::my_tiles(&feat::parse_ents(obs.entities()), obs.me()),
+            self.land_total,
+        );
+        self.closeout_shaper
+            .reset(closeout_potential(initial_share));
+        self.closeout_tracker.reset(initial_share, obs.tick());
         self.spawn_steps = 0;
         self.ep_reward = 0.0;
         self.action_churn_tracker.reset();
@@ -679,6 +733,13 @@ impl EnvWorker {
             obs.me().max(0) as usize,
             self.reward_config.v81_potential_clamp,
         ));
+        let initial_share = land_share(
+            ofcore::translate::my_tiles(&feat::parse_ents(obs.entities()), obs.me()),
+            self.land_total,
+        );
+        self.closeout_shaper
+            .reset(closeout_potential(initial_share));
+        self.closeout_tracker.reset(initial_share, obs.tick());
         self.spawn_steps = 0;
         self.ep_reward = 0.0;
         self.action_churn_tracker.reset();
@@ -790,10 +851,7 @@ impl EnvWorker {
     /// returns the NEXT observation alongside the reward/done/info from
     /// applying `choice` to the current one. Drives the threaded rollout
     /// loop in `train.rs`.
-    pub fn step(
-        &mut self,
-        choice: &Choice,
-    ) -> Result<EnvTransition> {
+    pub fn step(&mut self, choice: &Choice) -> Result<EnvTransition> {
         let (reward, done, info, outcome) = self.apply(choice)?;
         let prepared = self.prepare();
         Ok(EnvTransition {
@@ -842,14 +900,8 @@ impl EnvWorker {
         } else {
             Vec::new()
         };
-        let chosen_action = churn_action(
-            choice,
-            &lut,
-            &ents,
-            &intents,
-            &boats_before,
-            &boats_after,
-        );
+        let chosen_action =
+            churn_action(choice, &lut, &ents, &intents, &boats_before, &boats_after);
         let inverse_pair = self
             .action_churn_tracker
             .observe(chosen_action, self.reward_config.v81_churn_window);
@@ -916,6 +968,11 @@ impl EnvWorker {
                     obs.me().max(0) as usize,
                     self.reward_config.v81_potential_clamp,
                 ));
+                let share = land_share(
+                    ofcore::translate::my_tiles(&next_ents, obs.me()),
+                    self.land_total,
+                );
+                self.closeout_shaper.reset(closeout_potential(share));
                 self.ep_len += 1;
                 return Ok((0.0, false, None, outcome));
             }
@@ -924,8 +981,27 @@ impl EnvWorker {
         let obs = self.obs.as_ref().unwrap();
         let ents = feat::parse_ents(obs.entities());
         let tiles = ofcore::translate::my_tiles(&ents, obs.me());
+        let share = land_share(tiles, self.land_total);
+        self.closeout_tracker
+            .observe(share, obs.tick(), inverse_pair.is_some());
         let composite = curriculum::strengths(&ents, self.land_total);
         let me = obs.me().max(0) as usize;
+        let mut done = false;
+        let mut won = false;
+        let mut timed_out = false;
+        if !obs.alive() {
+            done = true;
+        } else if !obs.winner().is_null() {
+            let w = obs.winner();
+            won = w
+                .as_array()
+                .map(|a| a.len() > 1 && a[1] == "AGENTRL1")
+                .unwrap_or(false);
+            done = true;
+        } else if obs.tick() >= self.max_episode_ticks {
+            done = true;
+            timed_out = true;
+        }
         let mine = composite
             .get(&(obs.me().max(0) as usize))
             .copied()
@@ -949,13 +1025,19 @@ impl EnvWorker {
             ..RewardComponents::default()
         };
         let mut reward = components.strength + components.strength_delta;
-        components.action_churn =
-            action_churn_penalty(inverse_pair, self.episode_stage, self.reward_config);
+        components.action_churn = if self.curriculum_schedule == CurriculumSchedule::V83 {
+            v83_action_churn_penalty(inverse_pair, self.episode_stage, share, self.reward_config)
+        } else {
+            action_churn_penalty(inverse_pair, self.episode_stage, self.reward_config)
+        };
         if components.action_churn != 0.0 {
             reward += components.action_churn;
         }
-        let next_potential =
-            dominance_potential(&composite, me, self.reward_config.v81_potential_clamp);
+        let next_potential = if self.curriculum_schedule == CurriculumSchedule::V83 && done {
+            0.0
+        } else {
+            dominance_potential(&composite, me, self.reward_config.v81_potential_clamp)
+        };
         if self
             .reward_config
             .dominance_shaping_active(self.episode_stage)
@@ -970,26 +1052,25 @@ impl EnvWorker {
             // Avoid even adding zero in the disabled legacy-parity path.
             self.dominance_shaper.reset(next_potential);
         }
+        let next_closeout_potential = if done { 0.0 } else { closeout_potential(share) };
+        if self.curriculum_schedule == CurriculumSchedule::V83 && self.episode_stage >= 5 {
+            components.closeout = self.closeout_shaper.transition(
+                next_closeout_potential,
+                self.reward_config.gamma,
+                self.reward_config.v83_close_coef,
+            );
+            reward += components.closeout;
+        } else {
+            self.closeout_shaper.reset(next_closeout_potential);
+        }
         reward -= W_WASTE * wasted as f64;
         components.waste = -W_WASTE * wasted as f64;
         self.ep_wasted += wasted;
         self.prev_strength = mine;
 
-        let mut done = false;
-        let mut won = false;
         if !obs.alive() {
             reward -= W_DEATH;
             components.death = -W_DEATH;
-            done = true;
-        } else if !obs.winner().is_null() {
-            let w = obs.winner();
-            won = w
-                .as_array()
-                .map(|a| a.len() > 1 && a[1] == "AGENTRL1")
-                .unwrap_or(false);
-            done = true;
-        } else if obs.tick() >= self.max_episode_ticks {
-            done = true;
         }
 
         let mut info = None;
@@ -1004,6 +1085,14 @@ impl EnvWorker {
                 reward: self.ep_reward,
                 length: self.ep_len,
                 final_tiles: tiles,
+                final_land_share: share,
+                max_land_share: self.closeout_tracker.max_land_share,
+                closeout_reached: self.closeout_tracker.reached(),
+                closeout_entry_tick: self.closeout_tracker.entry_tick,
+                decisions_after_closeout: self.closeout_tracker.decisions_after_entry,
+                converted: self.closeout_tracker.reached() && won,
+                timeout_after_closeout: timed_out && self.closeout_tracker.reached(),
+                post_closeout_churn_pairs: self.closeout_tracker.post_entry_churn_pairs,
                 final_tick: obs.tick(),
                 place,
                 n_players: n,
@@ -1184,5 +1273,32 @@ mod churn_action_tests {
         let (y, x) = normalized_tile_target(tile, 10, 20);
         assert!((y - 0.35).abs() < 1e-6);
         assert!((x - 0.375).abs() < 1e-6);
+    }
+
+    #[test]
+    fn closeout_tracker_records_entry_max_decisions_conversion_inputs_and_reset() {
+        let mut tracker = CloseoutTracker::default();
+        tracker.reset(0.10, 100);
+        tracker.observe(0.44, 200, true);
+        assert!(!tracker.reached());
+        assert_eq!(tracker.post_entry_churn_pairs, 0);
+
+        tracker.observe(0.45, 300, false);
+        tracker.observe(0.62, 400, true);
+        tracker.observe(0.50, 500, false);
+        assert!(tracker.reached());
+        assert_eq!(tracker.entry_tick, Some(300));
+        assert_eq!(tracker.max_land_share, 0.62);
+        assert_eq!(tracker.decisions_after_entry, 2);
+        assert_eq!(tracker.post_entry_churn_pairs, 1);
+
+        tracker.reset(0.20, 600);
+        assert_eq!(
+            tracker,
+            CloseoutTracker {
+                max_land_share: 0.20,
+                ..CloseoutTracker::default()
+            }
+        );
     }
 }

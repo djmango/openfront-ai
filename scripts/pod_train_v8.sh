@@ -40,12 +40,18 @@
 
 set -uo pipefail
 
-RUN_NAME="${RUN_NAME:-ppo_v8}"
-NUM_GPUS="${NUM_GPUS:-1}"
+V83_MODE="${V83_MODE:-0}"
+if [ "$V83_MODE" = "1" ]; then
+  RUN_NAME="${RUN_NAME:-ppo_v83}"
+  NUM_GPUS="${NUM_GPUS:-4}"
+else
+  RUN_NAME="${RUN_NAME:-ppo_v8}"
+  NUM_GPUS="${NUM_GPUS:-1}"
+fi
 V81_CURRICULUM="${V81_CURRICULUM:-0}"
 # Envs per GPU/shard. Live A40 A/Bs found 48 faster than 64 once the
 # persistent compact path was enabled (64 increased stage-2 tail latency).
-if [ "$V81_CURRICULUM" = "1" ]; then
+if [ "$V81_CURRICULUM" = "1" ] || [ "$V83_MODE" = "1" ]; then
   NUM_ENVS="${NUM_ENVS:-24}"
 else
   NUM_ENVS="${NUM_ENVS:-48}"
@@ -58,7 +64,11 @@ ROLLOUT_LEN="${ROLLOUT_LEN:-32}"
 MINIBATCH_SIZE="${MINIBATCH_SIZE:-128}"
 MINIBATCHES=$((NUM_ENVS * ROLLOUT_LEN / MINIBATCH_SIZE))
 [ "$MINIBATCHES" -ge 1 ] || MINIBATCHES=1
-STAGE="${STAGE:-0}"
+if [ "$V83_MODE" = "1" ]; then
+  STAGE="${STAGE:-5}"
+else
+  STAGE="${STAGE:-0}"
+fi
 # Fraction (0.0-1.0) of env workers that run the real Node/TS engine
 # instead of native, to hedge native's known parity gaps at higher bot
 # counts (see oftrain's `--engine` doc comment) while still getting
@@ -69,9 +79,15 @@ NODE_FRACTION="${NODE_FRACTION:-0}"
 # persistent owner threads, rollout payloads cross threads as compact host
 # data, and two env groups overlap stepping with actor inference. Keep
 # fp16-rollout opt-in until it receives the same extended CUDA soak.
-EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --persistent-actors --pipeline-groups=true --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
+if [ "$V83_MODE" = "1" ]; then
+  EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --fp16-rollout --persistent-actors --work-conserving-actors --pipeline-groups=true --recurrent-policy --bptt-chunk-len 16 --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
+else
+  EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --persistent-actors --pipeline-groups=true --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
+fi
 V81_ARGS=""
-if [ "$V81_CURRICULUM" = "1" ]; then
+if [ "$V83_MODE" = "1" ]; then
+  V81_ARGS="--v83-curriculum --v83-close-coef 4.0 --v83-churn-coef 0.06 --v81-dom-coef 0.25 --v81-dominant-loss=true --v81-churn-coef 0.05"
+elif [ "$V81_CURRICULUM" = "1" ]; then
   V81_ARGS="--v81-curriculum"
 fi
 if [ -n "$STAGE_ENV_TARGETS" ]; then
@@ -82,6 +98,7 @@ CKPT_DIR="$REPO_DIR/rust/checkpoints/$RUN_NAME"
 HF_SYNC_INTERVAL_SECONDS="${HF_SYNC_INTERVAL_SECONDS:-600}"
 HF_REPO_ID="${HF_REPO_ID:-djmango/openfront-rl}"
 HF_RUN_PREFIX="${HF_RUN_PREFIX:-$RUN_NAME}"
+V83_SOURCE_PREFIX="${V83_SOURCE_PREFIX:-ppo_v82}"
 # The current RunPod A40 host advertises direct CUDA P2P, but its first NCCL
 # collective wedges on that transport. Shared-memory transport reduced the
 # same 48 MiB gradient in ~113 ms. Override only after a host-specific P2P
@@ -258,6 +275,36 @@ then
   echo "FATAL: latest.safetensors and latest.state.json must exist as a pair" >&2
   exit 1
 fi
+if [ "$V83_MODE" = "1" ] && [ -f "$CKPT_DIR/latest.safetensors" ] \
+  && [ ! -f "$CKPT_DIR/manifest.json" ]; then
+  echo "FATAL: V8.3 resume requires manifest.json beside the checkpoint pair" >&2
+  exit 1
+fi
+
+# V8.3 starts from the immutable V8.2 latest pair exactly once. The source
+# remains in ppo_v82 (or a separate read-only restore directory); all output
+# and subsequent resumes use ppo_v83.
+V83_SEED_DIR=""
+if [ "$V83_MODE" = "1" ] && [ ! -f "$CKPT_DIR/latest.safetensors" ]; then
+  LOCAL_V82_DIR="$REPO_DIR/rust/checkpoints/$V83_SOURCE_PREFIX"
+  if [ -f "$LOCAL_V82_DIR/latest.safetensors" ] \
+    && [ -f "$LOCAL_V82_DIR/latest.state.json" ] \
+    && [ -f "$LOCAL_V82_DIR/manifest.json" ]; then
+    V83_SEED_DIR="$LOCAL_V82_DIR"
+  else
+    V83_SEED_DIR="$REPO_DIR/rust/checkpoints/.v83-seed-v82"
+    rm -rf "$V83_SEED_DIR"
+    mkdir -p "$V83_SEED_DIR"
+    "$OFHF" pull --checkpoint-dir "$V83_SEED_DIR" --repo-id "$HF_REPO_ID" \
+      --run-prefix "$V83_SOURCE_PREFIX"
+  fi
+  if [ ! -f "$V83_SEED_DIR/latest.safetensors" ] \
+    || [ ! -f "$V83_SEED_DIR/latest.state.json" ] \
+    || [ ! -f "$V83_SEED_DIR/manifest.json" ]; then
+    echo "FATAL: V8.3 migration requires a complete V8.2 safetensors/state/manifest seed" >&2
+    exit 1
+  fi
+fi
 
 # --- background HF sync: immutable snapshots of latest, best-eval,
 # milestones, state sidecars, and the run manifest. Fail loud without token. ---
@@ -280,6 +327,8 @@ while true; do
   RESUME=""
   if [ -f "$CKPT_DIR/latest.safetensors" ]; then
     RESUME="--resume $CKPT_DIR/latest.safetensors"
+  elif [ "$V83_MODE" = "1" ] && [ -n "$V83_SEED_DIR" ]; then
+    RESUME="--resume $V83_SEED_DIR/latest.safetensors --migrate-v82-to-v83"
   fi
   echo "=== $(date -u +%FT%TZ) launching $RUN_NAME num_gpus=$NUM_GPUS envs/shard=$NUM_ENVS $RESUME ==="
   START_TS=$(date +%s)
