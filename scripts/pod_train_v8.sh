@@ -82,6 +82,7 @@ CKPT_DIR="$REPO_DIR/rust/checkpoints/$RUN_NAME"
 HF_SYNC_INTERVAL_SECONDS="${HF_SYNC_INTERVAL_SECONDS:-600}"
 HF_REPO_ID="${HF_REPO_ID:-djmango/openfront-rl}"
 HF_RUN_PREFIX="${HF_RUN_PREFIX:-$RUN_NAME}"
+TENSORBOARD_PORT="${TENSORBOARD_PORT:-19123}"
 TORCH_VERSION="2.11.0" # tch 0.24's C++ shim needs this exact version - see devlog
 AE_DIR="${AE_DIR:-$REPO_DIR/weights/ae}"
 
@@ -172,7 +173,7 @@ if ! LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB" OFTRAIN_EXPLICIT_CUINIT=1 \
        "crash-loop will retry/backoff if this host genuinely can't init CUDA." >&2
 fi
 
-"$VENV/bin/pip" install --quiet huggingface_hub safetensors numpy 2>/dev/null || true
+"$VENV/bin/pip" install --quiet huggingface_hub safetensors numpy tensorboard 2>/dev/null || true
 PYTHON="$VENV/bin/python"
 
 # Fine + coarse AE encoder safetensors for oftrain --ckpt / --coarse-ckpt.
@@ -183,6 +184,25 @@ if [ ! -f "$AE_DIR/ae_v31_d8c32.encoder.safetensors" ] || [ ! -f "$AE_DIR/ae_v31
 fi
 
 mkdir -p "$CKPT_DIR"
+
+# --- live metrics: relay Rust JSONL to TensorBoard's event format. The
+# bridge discovers every numeric JSON field, so new recurrent/churn/system
+# metrics appear without another dashboard integration change. It replays
+# existing history after pod/script restarts. TensorBoard binds loopback and
+# is reached securely with scripts/tensorboard_tunnel.sh. ---
+TB_DIR="$REPO_DIR/runs/rl/$RUN_NAME"
+mkdir -p "$TB_DIR"
+if ! pgrep -f "metrics_jsonl_to_tensorboard.py --metrics $CKPT_DIR/metrics.jsonl" >/dev/null; then
+  "$PYTHON" "$REPO_DIR/scripts/metrics_jsonl_to_tensorboard.py" \
+    --metrics "$CKPT_DIR/metrics.jsonl" --out-dir "$TB_DIR" \
+    >>"/tmp/tb_bridge_$RUN_NAME.log" 2>&1 &
+fi
+if ! pgrep -f "tensorboard.*--port $TENSORBOARD_PORT" >/dev/null; then
+  "$VENV/bin/tensorboard" --logdir "$REPO_DIR/runs/rl" \
+    --port "$TENSORBOARD_PORT" --host 127.0.0.1 \
+    >>"/tmp/tensorboard.log" 2>&1 &
+fi
+echo "live metrics: TensorBoard on pod port $TENSORBOARD_PORT (run $RUN_NAME)"
 
 # --- resume seed: current/future runs restore a complete safetensors pair
 # only. Explicit `oftrain --resume old.ot` remains available for manual
