@@ -772,7 +772,11 @@ fn rand_coastal_tile_array(
             if ok || !game.is_water(neighbor) {
                 return;
             }
-            if game.map.is_ocean(neighbor) && shared.contains(&u32::MAX) {
+            // TS `randCoastalTileArray`: ocean neighbors are always valid port
+            // sites (skip component lookup). Do not require `shared` to contain
+            // the ocean sentinel — lake-only `shared` sets still accept ocean
+            // shores in TS.
+            if game.map.is_ocean(neighbor) {
                 ok = true;
                 return;
             }

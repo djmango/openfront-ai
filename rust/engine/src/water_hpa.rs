@@ -4,7 +4,7 @@ use crate::map::{GameMap, TileRef};
 use crate::water::AstarHeap;
 use std::collections::HashMap;
 
-pub const LAND_MARKER: u32 = 0xff;
+pub const LAND_MARKER: u32 = 0xffff;
 pub const CLUSTER_SIZE: u32 = 32;
 
 // ── Connected components (mini-map, TS `ConnectedComponents`) ───────────────
@@ -679,10 +679,6 @@ impl<'a> AbstractGraphBuilder<'a> {
             let node = self.tile_bfs.queue[head] as TileRef;
             head += 1;
             let dist = self.tile_bfs.dist[node as usize] as u32;
-            let next_dist = dist + 1;
-            if next_dist > max_distance {
-                continue;
-            }
 
             let x = node % width;
             let y = node / width;
@@ -696,6 +692,11 @@ impl<'a> AbstractGraphBuilder<'a> {
                 if found_count == target_len {
                     break;
                 }
+            }
+
+            let next_dist = dist + 1;
+            if next_dist > max_distance {
+                continue;
             }
 
             let try_push = |nb: TileRef, bfs: &mut BfsGrid, tail: &mut usize| {
@@ -850,7 +851,10 @@ impl BoundedWaterAstar {
             let dx_n = nx as i32 - goal_x as i32;
             let dy_n = ny as i32 - goal_y as i32;
             let cross = (dx_goal * dy_n - dy_goal * dx_n).unsigned_abs();
-            ((cross * (BOUNDED_COST_SCALE - 1)) / cross_norm / cross_norm) as u32
+            ((cross as f64 * (BOUNDED_COST_SCALE - 1) as f64)
+                / cross_norm as f64
+                / cross_norm as f64)
+                .floor() as u32
         };
 
         self.heap.clear();
@@ -1136,6 +1140,100 @@ impl AbstractGraphAstar {
         }
         path.reverse();
         Some(path)
+    }
+}
+
+#[cfg(test)]
+mod abstract_astar_tests {
+    use super::{
+        AbstractEdge, AbstractGraph, AbstractGraphAstar, AbstractNode, Cluster,
+        ConnectedComponents, CLUSTER_SIZE,
+    };
+
+    fn graph_with_equal_f_neighbors() -> AbstractGraph {
+        let nodes = vec![
+            AbstractNode {
+                id: 0,
+                x: 900,
+                y: 0,
+                tile: 900,
+                component_id: 1,
+            },
+            AbstractNode {
+                id: 1,
+                x: 250,
+                y: 0,
+                tile: 793_328,
+                component_id: 1,
+            },
+            AbstractNode {
+                id: 2,
+                x: 300,
+                y: 0,
+                tile: 806_943,
+                component_id: 1,
+            },
+            AbstractNode {
+                id: 3,
+                x: 0,
+                y: 0,
+                tile: 0,
+                component_id: 1,
+            },
+        ];
+        let mut graph = AbstractGraph {
+            cluster_size: CLUSTER_SIZE,
+            clusters_x: 1,
+            clusters_y: 1,
+            nodes,
+            edges: Vec::new(),
+            node_edge_ids: vec![Vec::new(); 4],
+            clusters: vec![Cluster {
+                x: 0,
+                y: 0,
+                node_ids: vec![0, 1, 2, 3],
+            }],
+            path_cache: Vec::new(),
+            water_components: ConnectedComponents {
+                component_ids: Vec::new(),
+                component_sizes: vec![0, 4],
+            },
+        };
+
+        for (id, node_a, node_b, cost) in [
+            (0, 0, 1, 251), // 251 + h(250) = f 501
+            (1, 0, 2, 201), // 201 + h(300) = f 501
+            (2, 1, 3, 250),
+            (3, 2, 3, 300),
+        ] {
+            graph.add_edge(AbstractEdge {
+                id,
+                node_a,
+                node_b,
+                cost,
+                cluster_x: 0,
+                cluster_y: 0,
+            });
+        }
+        graph
+    }
+
+    #[test]
+    fn equal_f_neighbors_follow_ts_edge_insertion_order() {
+        let graph = graph_with_equal_f_neighbors();
+
+        let start_neighbors: Vec<usize> = graph
+            .get_node_edges(0)
+            .iter()
+            .map(|&edge_id| graph.other_node(graph.get_edge(edge_id).unwrap(), 0))
+            .collect();
+        assert_eq!(start_neighbors, vec![1, 2]);
+
+        let mut astar = AbstractGraphAstar::new(graph.node_count(), graph.edge_count());
+        let path = astar.find_path(&graph, 0, 3).unwrap();
+
+        assert_eq!(path, vec![0, 1, 3]);
+        assert_eq!(graph.get_node(path[1]).unwrap().tile, 793_328);
     }
 }
 
