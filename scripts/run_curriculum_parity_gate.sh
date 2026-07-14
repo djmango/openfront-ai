@@ -17,7 +17,8 @@
 # CURRICULUM_JOBS, CURRICULUM_RECORD_TIMEOUT_SECONDS, CURRICULUM_BUCKETS
 # (comma-separated bot counts, e.g. "0,5" - passed through to
 # gen_curriculum_parity.ts's --buckets, for fast targeted re-checks of one
-# bucket instead of paying for all 8), CURRICULUM_PARITY_COMMIT.
+# bucket instead of paying for all 8), CURRICULUM_PARITY_COMMIT,
+# CURRICULUM_SKIP_NATIVE_CACHE=1 to force a cold native replay.
 set -euo pipefail
 
 ROOT="$(dirname "$(dirname "$(realpath "$0")")")"
@@ -56,16 +57,22 @@ GAMES_PER_BUCKET="${CURRICULUM_GAMES_PER_BUCKET:-5}"
 TICKS="${CURRICULUM_TICKS:-4500}"
 MAX_TIMER="${CURRICULUM_MAX_TIMER:-6}"
 PARITY_LABEL="${CURRICULUM_PARITY_LABEL:-curriculum-parity-v1}"
-JOBS="${CURRICULUM_JOBS:-$( (command -v nproc >/dev/null && nproc) || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
+NPROC="$( (command -v nproc >/dev/null && nproc) || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+JOBS="${CURRICULUM_JOBS:-$NPROC}"
 RECORD_TIMEOUT_SECONDS="${CURRICULUM_RECORD_TIMEOUT_SECONDS:-300}"
+
+if [[ "$JOBS" =~ ^[0-9]+$ ]] && (( JOBS < NPROC / 2 && JOBS < 8 )); then
+  echo "[curriculum_parity] warning: CURRICULUM_JOBS=$JOBS on ${NPROC}-core host; unset it to use all cores" >&2
+fi
 
 CACHE_ROOT="${OUTCOME_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/openfront-ai/outcomes}"
 CACHE_FILE="$CACHE_ROOT/$PARITY_LABEL.json"
+NATIVE_CACHE_FILE="$CACHE_ROOT/$PARITY_LABEL.native.json"
 mkdir -p "$CACHE_ROOT"
 
 if [[ "${1:-}" == "--regenerate" || ! -d "$RECORDS_DIR" ]]; then
   echo "[curriculum_parity] generating self-play records -> $RECORDS_DIR" >&2
-  rm -rf "$RECORDS_DIR" "$RECORDS_DIR.manifest.json" "$CACHE_FILE" "$CACHE_FILE.records"
+  rm -rf "$RECORDS_DIR" "$RECORDS_DIR.manifest.json" "$CACHE_FILE" "$CACHE_FILE.records" "$NATIVE_CACHE_FILE"
   GEN_ARGS=(
     --out "$RECORDS_DIR"
     --games-per-bucket "$GAMES_PER_BUCKET"
@@ -93,14 +100,24 @@ pushd "$ROOT" >/dev/null
   --record-timeout-seconds "$RECORD_TIMEOUT_SECONDS" 1>&2
 popd >/dev/null
 
-CARGO_ARGS=(
-  run
-  --quiet
-  --manifest-path "$ROOT/rust/Cargo.toml"
-  -p openfront-engine
-  --release
-  --bin outcome_gate
-  --
+if [[ -n "${OUTCOME_TARGET_DIR:-}" ]]; then
+  export CARGO_TARGET_DIR="$OUTCOME_TARGET_DIR"
+fi
+TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/rust/target}"
+BIN="$TARGET_DIR/release/outcome_gate"
+
+# Build once, then exec the binary. `cargo run` re-checks/rebuilds on every
+# gate invocation and was dominating iterative loops even when sources were
+# unchanged.
+echo "[curriculum_parity] building outcome_gate (release) -> $BIN" >&2
+cargo build --quiet --manifest-path "$ROOT/rust/Cargo.toml" -p openfront-engine --release --bin outcome_gate
+
+if [[ "${CURRICULUM_SKIP_NATIVE_CACHE:-0}" == "1" ]]; then
+  rm -f "$NATIVE_CACHE_FILE"
+fi
+
+REPORT_FILE="$(mktemp -t curriculum_gate_report.XXXXXX).json"
+GATE_ARGS=(
   --repo "$ROOT"
   --records "$RECORDS_DIR"
   --oracle "$CACHE_FILE"
@@ -109,12 +126,9 @@ CARGO_ARGS=(
   --required-passes 0
   --jobs "$JOBS"
   --record-timeout-seconds "$RECORD_TIMEOUT_SECONDS"
+  --native-cache "$NATIVE_CACHE_FILE"
 )
-if [[ -n "${OUTCOME_TARGET_DIR:-}" ]]; then
-  export CARGO_TARGET_DIR="$OUTCOME_TARGET_DIR"
-fi
-REPORT_FILE="$(mktemp -t curriculum_gate_report.XXXXXX).json"
-cargo "${CARGO_ARGS[@]}" > "$REPORT_FILE"
+"$BIN" "${GATE_ARGS[@]}" > "$REPORT_FILE"
 echo "[curriculum_parity] full report -> $REPORT_FILE" >&2
 
 python3 "$ROOT/scripts/analyze_curriculum_parity.py" "$REPORT_FILE"

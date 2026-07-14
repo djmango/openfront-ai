@@ -255,6 +255,14 @@ pub fn replay_outcome_native(
         game.execute_next_tick();
         if terminal.is_none() {
             terminal = terminal_candidate(&game);
+            // Outcome compare for winner games only needs terminal tick /
+            // land-share / identity. Continuing through the remaining
+            // recorded turns (often 50-75% of a 20k-tick curriculum game)
+            // is pure wall-clock waste. No-winner stalemates still run to
+            // the end so final rankings stay comparable.
+            if terminal.is_some() {
+                break;
+            }
         }
     }
     Ok(outcome_from_game(&game, terminal))
