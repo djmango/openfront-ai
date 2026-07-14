@@ -1,11 +1,14 @@
+#include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
 #include <nccl.h>
 #include <torch/torch.h>
 
+#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <new>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -26,6 +29,18 @@ int fail(const std::string &message) {
 
 int fail_nccl(const char *operation, ncclResult_t result) {
   return fail(std::string(operation) + ": " + ncclGetErrorString(result));
+}
+
+int abort_with_error(OftrainNcclComm *owner, const std::string &message) {
+  if (owner->comm == nullptr) {
+    return fail(message);
+  }
+  const ncclResult_t abort_result = ncclCommAbort(owner->comm);
+  owner->comm = nullptr;
+  if (abort_result == ncclSuccess) {
+    return fail(message + "; communicator aborted");
+  }
+  return fail(message + "; ncclCommAbort: " + ncclGetErrorString(abort_result));
 }
 
 } // namespace
@@ -57,7 +72,8 @@ int oftrain_nccl_init_all(int world, const int *devices, void **out) {
   }
 }
 
-int oftrain_nccl_all_reduce(void *opaque, void *tensor_pointer) {
+int oftrain_nccl_all_reduce(void *opaque, void *tensor_pointer,
+                            uint64_t timeout_ms) {
   last_error.clear();
   if (opaque == nullptr || tensor_pointer == nullptr) {
     return fail("NCCL all-reduce received a null handle");
@@ -65,17 +81,24 @@ int oftrain_nccl_all_reduce(void *opaque, void *tensor_pointer) {
   auto *owner = static_cast<OftrainNcclComm *>(opaque);
   auto *flat = static_cast<torch::Tensor *>(tensor_pointer);
   try {
+    if (owner->comm == nullptr) {
+      return fail("NCCL communicator was already aborted");
+    }
     if (!flat->defined() || !flat->is_cuda() || !flat->is_contiguous() ||
         flat->scalar_type() != torch::kFloat || flat->dim() != 1) {
-      return fail(
+      return abort_with_error(
+          owner,
           "NCCL all-reduce requires a contiguous 1-D CUDA float tensor");
     }
     if (flat->get_device() != owner->device) {
-      return fail("NCCL communicator and gradient tensor devices differ");
+      return abort_with_error(
+          owner, "NCCL communicator and gradient tensor devices differ");
     }
 
-    // c10's current stream is thread-local. The caller guarantees that this
-    // communicator and every tensor operation stay on the learner owner.
+    // PyTorch guards individual CUDA operations and may restore this thread's
+    // previous device afterward. Raw NCCL requires the calling thread's
+    // current device to match both the communicator and stream.
+    const c10::cuda::CUDAGuard device_guard(owner->device);
     const c10::cuda::CUDAStream stream =
         c10::cuda::getCurrentCUDAStream(owner->device);
     ncclResult_t result =
@@ -83,26 +106,50 @@ int oftrain_nccl_all_reduce(void *opaque, void *tensor_pointer) {
                       static_cast<size_t>(flat->numel()), ncclFloat, ncclSum,
                       owner->comm, stream.stream());
     if (result != ncclSuccess) {
-      return fail_nccl("ncclAllReduce", result);
+      return abort_with_error(
+          owner, std::string("ncclAllReduce: ") + ncclGetErrorString(result));
     }
 
     // Queue division after the sum on the same current stream, exactly
     // matching dist.all_reduce(flat); flat /= world.
     flat->div_(owner->world);
-    stream.synchronize();
-    ncclResult_t asynchronous = ncclSuccess;
-    result = ncclCommGetAsyncError(owner->comm, &asynchronous);
-    if (result != ncclSuccess) {
-      return fail_nccl("ncclCommGetAsyncError", result);
+
+    // Never block in cudaStreamSynchronize: a missing/misconfigured peer can
+    // otherwise wedge its learner owner forever. Polling keeps the owner able
+    // to abort its communicator and turn the failure into a hard train error.
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (true) {
+      ncclResult_t asynchronous = ncclSuccess;
+      result = ncclCommGetAsyncError(owner->comm, &asynchronous);
+      if (result != ncclSuccess) {
+        return abort_with_error(
+            owner, std::string("ncclCommGetAsyncError: ") +
+                       ncclGetErrorString(result));
+      }
+      if (asynchronous != ncclSuccess) {
+        return abort_with_error(
+            owner, std::string("NCCL asynchronous collective: ") +
+                       ncclGetErrorString(asynchronous));
+      }
+      if (stream.query()) {
+        return 0;
+      }
+      if (std::chrono::steady_clock::now() >= deadline) {
+        return abort_with_error(
+            owner, "NCCL all-reduce timed out after " +
+                       std::to_string(timeout_ms) + "ms on rank " +
+                       std::to_string(owner->rank) + " cuda:" +
+                       std::to_string(owner->device));
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    if (asynchronous != ncclSuccess) {
-      return fail_nccl("NCCL asynchronous collective", asynchronous);
-    }
-    return 0;
   } catch (const std::exception &error) {
-    return fail(std::string("NCCL all-reduce wrapper: ") + error.what());
+    return abort_with_error(
+        owner, std::string("NCCL all-reduce wrapper: ") + error.what());
   } catch (...) {
-    return fail("NCCL all-reduce wrapper: unknown exception");
+    return abort_with_error(owner,
+                            "NCCL all-reduce wrapper: unknown exception");
   }
 }
 
@@ -112,7 +159,8 @@ int oftrain_nccl_destroy(void *opaque) {
     return 0;
   }
   auto *owner = static_cast<OftrainNcclComm *>(opaque);
-  const ncclResult_t result = ncclCommDestroy(owner->comm);
+  const ncclResult_t result =
+      owner->comm == nullptr ? ncclSuccess : ncclCommDestroy(owner->comm);
   delete owner;
   return result == ncclSuccess ? 0 : fail_nccl("ncclCommDestroy", result);
 }
