@@ -103,6 +103,59 @@ impl TrainExecution {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::schemas::unit_type;
+    use crate::game::{Game, PlayerInfo, PlayerType};
+    use crate::rail;
+    use crate::test_util::plains_game;
+
+    fn add_nation(game: &mut Game, id: &str) -> u16 {
+        game.add_from_info(&PlayerInfo {
+            name: id.into(),
+            player_type: PlayerType::Nation,
+            client_id: None,
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        })
+    }
+
+    #[test]
+    fn destination_trade_gate_uses_live_station_owner() {
+        let mut game = plains_game(40, 40);
+        let stale_owner = add_nation(&mut game, "stale");
+        let live_owner = add_nation(&mut game, "live");
+        let train_owner = add_nation(&mut game, "train");
+
+        let tile = game.map.ref_xy(5, 5);
+        game.conquer(stale_owner, tile);
+        let city_id = game.build_unit(stale_owner, unit_type::CITY, tile);
+        let station_id = rail::connect_station(&mut game, stale_owner, city_id, unit_type::CITY);
+
+        game.capture_unit(stale_owner, live_owner, city_id);
+        // Regression shape from curriculum parity: a TrainStation object follows
+        // the live Unit owner in TS, so this lifecycle gate must not trust a
+        // stale cached station owner.
+        game.rail_network
+            .stations
+            .get_mut(&station_id)
+            .unwrap()
+            .owner_small_id = stale_owner;
+        game.add_embargo(stale_owner, train_owner, false, 0);
+
+        let mut exec = TrainExecution::new(train_owner, station_id, station_id, 0);
+        exec.stations = vec![station_id, station_id];
+
+        assert!(
+            exec.can_trade_with_destination(&game),
+            "live owner can trade with train owner even when cached owner is embargoed"
+        );
+    }
+}
+
 impl Execution for TrainExecution {
     fn init(&mut self, game: &mut Game, _tick: u32) {
         self.init_impl(game);
@@ -120,7 +173,9 @@ impl Execution for TrainExecution {
             self.delete_train(game);
             return;
         };
-        if !game.unit_exists(self.owner_small_id, train_id) || !self.active_source_or_destination(game) {
+        if !game.unit_exists(self.owner_small_id, train_id)
+            || !self.active_source_or_destination(game)
+        {
             self.delete_train(game);
             return;
         }
@@ -157,8 +212,10 @@ impl TrainExecution {
                 .stations
                 .get(&self.stations[1])
                 .is_some_and(|st| {
-                    st.owner_small_id == self.owner_small_id
-                        || game.can_trade(st.owner_small_id, self.owner_small_id)
+                    let owner = game
+                        .find_unit_owner(st.unit_id)
+                        .unwrap_or(st.owner_small_id);
+                    owner == self.owner_small_id || game.can_trade(owner, self.owner_small_id)
                 })
     }
 
@@ -184,9 +241,11 @@ impl TrainExecution {
     fn next_station(&mut self, game: &Game) -> bool {
         if self.stations.len() > 2 {
             self.stations.remove(0);
-            if let Some(tiles) =
-                rail::oriented_railroad_tiles(&game.rail_network, self.stations[0], self.stations[1])
-            {
+            if let Some(tiles) = rail::oriented_railroad_tiles(
+                &game.rail_network,
+                self.stations[0],
+                self.stations[1],
+            ) {
                 self.current_railroad_tiles = tiles;
                 return true;
             }
@@ -228,7 +287,11 @@ impl TrainExecution {
             for i in (0..self.car_unit_ids.len()).rev() {
                 let car_tile_index = (i + 1) * self.spacing + 2;
                 if used.len() > car_tile_index {
-                    game.move_unit(self.owner_small_id, self.car_unit_ids[i], used[car_tile_index]);
+                    game.move_unit(
+                        self.owner_small_id,
+                        self.car_unit_ids[i],
+                        used[car_tile_index],
+                    );
                 }
             }
         }
