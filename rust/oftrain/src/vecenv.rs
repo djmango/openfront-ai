@@ -14,10 +14,11 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ofcore::curriculum::{
-    self, ActionChurnTracker, ActionPairCounts, ActionTarget, ChosenAction, DominanceShaper,
-    RewardComponents, RewardConfig, Stage, W_DEATH, W_STR, W_WASTE, action_churn_penalty,
-    dominance_potential, normalized_strength_share, placement, placement_score, sample_episode,
-    stages, strength_delta_weight, terminal_reward, timeweight,
+    self, ActionChurnTracker, ActionPairCounts, ActionTarget, ChosenAction, CurriculumSchedule,
+    DominanceShaper, RewardComponents, RewardConfig, Stage, W_DEATH, W_STR, W_WASTE,
+    action_churn_penalty, dominance_potential, normalized_strength_share, placement,
+    placement_score, sample_episode, stages_for_schedule, strength_delta_weight, terminal_reward,
+    timeweight,
 };
 use ofcore::feat::{
     self, A_ATTACK, A_BOAT, A_CANCEL_BOAT, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, ACTIONS,
@@ -368,12 +369,13 @@ impl EnvWorker {
         max_episode_ticks: i64,
         engine: EngineKind,
         reward_config: RewardConfig,
+        curriculum_schedule: CurriculumSchedule,
     ) -> Result<Self> {
         let bridge = engine::create(engine)?;
         let mut w = EnvWorker {
             idx,
             bridge,
-            stages: stages(),
+            stages: stages_for_schedule(curriculum_schedule),
             stage,
             episode_stage: stage,
             max_episode_ticks,
