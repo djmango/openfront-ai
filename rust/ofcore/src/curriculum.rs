@@ -24,6 +24,9 @@ pub const DOMINANCE_EPS: f64 = 1e-9;
 pub const V83_CLOSEOUT_SHARE_START: f64 = 0.45;
 pub const V83_CLOSEOUT_SHARE_FULL: f64 = 0.80;
 pub const V83_REWARD_PROFILE: &str = "v8.3-closeout-v1";
+pub const V84_REWARD_PROFILE: &str = "v8.4-boat-tempo-v1";
+/// `feat::unit_class("Transport")`.
+pub const TRANSPORT_UNIT_CLASS: usize = 7;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RewardConfig {
@@ -39,6 +42,20 @@ pub struct RewardConfig {
     pub v81_churn_min_stage: usize,
     pub v83_close_coef: f64,
     pub v83_churn_coef: f64,
+    /// Reward when a boat resolves into a sourced land attack (enemy or TN).
+    pub v84_boat_useful: f64,
+    /// Penalty when a boat is destroyed without landing an attack.
+    pub v84_boat_destroyed: f64,
+    /// Mild penalty when a boat is cancelled (churn already covers the pair).
+    pub v84_boat_cancelled: f64,
+    /// Penalty when a boat returns to own shore without invading.
+    pub v84_boat_own_shore: f64,
+    pub v84_boat_min_stage: usize,
+    /// Late-game tempo pressure while dominant (finish the win).
+    pub v84_tempo_coef: f64,
+    pub v84_tempo_min_stage: usize,
+    /// Extra terminal bonus for faster wins: coef * (1 - tick/max_ticks).
+    pub v84_fast_win_coef: f64,
 }
 
 impl RewardConfig {
@@ -59,6 +76,27 @@ impl RewardConfig {
             && self.v81_churn_coef != 0.0
             && self.v81_churn_window != 0
     }
+
+    pub fn boat_outcome_active(self, stage: usize) -> bool {
+        stage >= self.v84_boat_min_stage
+            && (self.v84_boat_useful != 0.0
+                || self.v84_boat_destroyed != 0.0
+                || self.v84_boat_cancelled != 0.0
+                || self.v84_boat_own_shore != 0.0)
+    }
+
+    pub fn tempo_active(self, stage: usize) -> bool {
+        stage >= self.v84_tempo_min_stage && self.v84_tempo_coef != 0.0
+    }
+
+    pub fn v84_reward_active(self) -> bool {
+        self.v84_boat_useful != 0.0
+            || self.v84_boat_destroyed != 0.0
+            || self.v84_boat_cancelled != 0.0
+            || self.v84_boat_own_shore != 0.0
+            || self.v84_tempo_coef != 0.0
+            || self.v84_fast_win_coef != 0.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -68,6 +106,8 @@ pub struct RewardComponents {
     pub dominance: f64,
     pub closeout: f64,
     pub action_churn: f64,
+    pub boat_outcome: f64,
+    pub tempo: f64,
     pub waste: f64,
     pub death: f64,
     pub terminal: f64,
@@ -80,10 +120,97 @@ impl RewardComponents {
         self.dominance += other.dominance;
         self.closeout += other.closeout;
         self.action_churn += other.action_churn;
+        self.boat_outcome += other.boat_outcome;
+        self.tempo += other.tempo;
         self.waste += other.waste;
         self.death += other.death;
         self.terminal += other.terminal;
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoatOutcome {
+    UsefulLanding,
+    OwnShoreReturn,
+    Cancelled,
+    Destroyed,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BoatOutcomeCounts {
+    pub useful_landing: u64,
+    pub own_shore_return: u64,
+    pub cancelled: u64,
+    pub destroyed: u64,
+}
+
+impl BoatOutcomeCounts {
+    pub fn record(&mut self, outcome: BoatOutcome) {
+        match outcome {
+            BoatOutcome::UsefulLanding => self.useful_landing += 1,
+            BoatOutcome::OwnShoreReturn => self.own_shore_return += 1,
+            BoatOutcome::Cancelled => self.cancelled += 1,
+            BoatOutcome::Destroyed => self.destroyed += 1,
+        }
+    }
+
+    pub fn total(self) -> u64 {
+        self.useful_landing + self.own_shore_return + self.cancelled + self.destroyed
+    }
+}
+
+/// Classify a resolved transport. Strength already counts fielded troops, so
+/// this is a small categorical signal for the tile/action heads — not a
+/// re-pricing of troop deltas.
+pub fn classify_boat_resolution(
+    cancel_requested: bool,
+    committed_troops: f64,
+    troops_before: f64,
+    troops_after: f64,
+    new_sourced_attack: bool,
+) -> BoatOutcome {
+    if cancel_requested {
+        return BoatOutcome::Cancelled;
+    }
+    if new_sourced_attack {
+        return BoatOutcome::UsefulLanding;
+    }
+    let refund = troops_after - troops_before;
+    if committed_troops > 0.0 && refund >= 0.5 * committed_troops {
+        return BoatOutcome::OwnShoreReturn;
+    }
+    BoatOutcome::Destroyed
+}
+
+pub fn boat_outcome_reward(outcome: BoatOutcome, config: RewardConfig) -> f64 {
+    match outcome {
+        BoatOutcome::UsefulLanding => config.v84_boat_useful,
+        BoatOutcome::OwnShoreReturn => config.v84_boat_own_shore,
+        BoatOutcome::Cancelled => config.v84_boat_cancelled,
+        BoatOutcome::Destroyed => config.v84_boat_destroyed,
+    }
+}
+
+/// Quadratic late-game pressure while already dominant: finish the win.
+pub fn tempo_pressure(
+    tick: i64,
+    max_ticks: i64,
+    normalized_share: f64,
+    threshold: f64,
+) -> f64 {
+    if max_ticks <= 0 || normalized_share < threshold {
+        return 0.0;
+    }
+    let late = (tick as f64 / max_ticks as f64).clamp(0.0, 1.0);
+    late * late
+}
+
+/// Terminal bonus for winning earlier in the episode budget.
+pub fn fast_win_bonus(won: bool, tick: i64, max_ticks: i64, coef: f64) -> f64 {
+    if !won || coef == 0.0 || max_ticks <= 0 {
+        return 0.0;
+    }
+    coef * (1.0 - (tick as f64 / max_ticks as f64).clamp(0.0, 1.0))
 }
 
 /// Stable identifier relevant to deciding whether two chosen actions undo one
@@ -820,6 +947,14 @@ mod tests {
             v81_churn_min_stage: 4,
             v83_close_coef: 4.0,
             v83_churn_coef: 0.06,
+            v84_boat_useful: 0.15,
+            v84_boat_destroyed: -0.20,
+            v84_boat_cancelled: -0.03,
+            v84_boat_own_shore: -0.05,
+            v84_boat_min_stage: 4,
+            v84_tempo_coef: 0.005,
+            v84_tempo_min_stage: 4,
+            v84_fast_win_coef: 8.0,
         }
     }
 
@@ -1144,6 +1279,63 @@ mod tests {
         cfg.v81_churn_window = 0;
         assert!(!cfg.churn_penalty_active(10));
     }
+
+    #[test]
+    fn boat_outcome_classifies_landing_cancel_return_and_destroy() {
+        assert_eq!(
+            classify_boat_resolution(false, 100.0, 500.0, 500.0, true),
+            BoatOutcome::UsefulLanding
+        );
+        assert_eq!(
+            classify_boat_resolution(true, 100.0, 500.0, 575.0, false),
+            BoatOutcome::Cancelled
+        );
+        assert_eq!(
+            classify_boat_resolution(false, 100.0, 500.0, 575.0, false),
+            BoatOutcome::OwnShoreReturn
+        );
+        assert_eq!(
+            classify_boat_resolution(false, 100.0, 500.0, 500.0, false),
+            BoatOutcome::Destroyed
+        );
+    }
+
+    #[test]
+    fn boat_outcome_rewards_are_opt_in_and_stage_gated() {
+        let mut cfg = config();
+        assert!(cfg.boat_outcome_active(4));
+        assert!(!cfg.boat_outcome_active(3));
+        assert_eq!(
+            boat_outcome_reward(BoatOutcome::UsefulLanding, cfg),
+            0.15
+        );
+        assert_eq!(
+            boat_outcome_reward(BoatOutcome::Destroyed, cfg),
+            -0.20
+        );
+        cfg.v84_boat_useful = 0.0;
+        cfg.v84_boat_destroyed = 0.0;
+        cfg.v84_boat_cancelled = 0.0;
+        cfg.v84_boat_own_shore = 0.0;
+        assert!(!cfg.boat_outcome_active(10));
+    }
+
+    #[test]
+    fn tempo_pressure_is_zero_until_dominant_and_grows_late() {
+        assert_eq!(tempo_pressure(9000, 10000, 0.40, 0.55), 0.0);
+        let early = tempo_pressure(1000, 10000, 0.70, 0.55);
+        let late = tempo_pressure(9000, 10000, 0.70, 0.55);
+        assert!(early < late);
+        assert!((late - 0.81).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fast_win_bonus_scales_with_remaining_budget() {
+        assert_eq!(fast_win_bonus(false, 100, 1000, 8.0), 0.0);
+        assert!((fast_win_bonus(true, 0, 1000, 8.0) - 8.0).abs() < 1e-12);
+        assert!((fast_win_bonus(true, 500, 1000, 8.0) - 4.0).abs() < 1e-12);
+        assert!((fast_win_bonus(true, 1000, 1000, 8.0) - 0.0).abs() < 1e-12);
+    }
 }
 
 #[cfg(test)]
@@ -1328,4 +1520,5 @@ mod curriculum_v81_tests {
             Some(CurriculumSchedule::V83)
         );
     }
+
 }

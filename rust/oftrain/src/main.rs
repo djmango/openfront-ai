@@ -140,6 +140,36 @@ struct Args {
     #[arg(long, default_value_t = 0.06)]
     v83_churn_coef: f64,
 
+    /// V8.4 boat-outcome: reward for a sourced landing attack.
+    #[arg(long, default_value_t = 0.0)]
+    v84_boat_useful: f64,
+
+    /// V8.4 boat-outcome: penalty when a boat is destroyed without landing.
+    #[arg(long, default_value_t = 0.0)]
+    v84_boat_destroyed: f64,
+
+    /// V8.4 boat-outcome: mild cancel penalty (churn already covers the pair).
+    #[arg(long, default_value_t = 0.0)]
+    v84_boat_cancelled: f64,
+
+    /// V8.4 boat-outcome: penalty for returning to own shore without invading.
+    #[arg(long, default_value_t = 0.0)]
+    v84_boat_own_shore: f64,
+
+    #[arg(long, default_value_t = 4)]
+    v84_boat_min_stage: usize,
+
+    /// V8.4 late-game tempo pressure while dominant.
+    #[arg(long, default_value_t = 0.0)]
+    v84_tempo_coef: f64,
+
+    #[arg(long, default_value_t = 4)]
+    v84_tempo_min_stage: usize,
+
+    /// V8.4 terminal bonus for faster wins: coef * (1 - tick/max_ticks).
+    #[arg(long, default_value_t = 0.0)]
+    v84_fast_win_coef: f64,
+
     #[arg(long, default_value_t = 0.95)]
     lambda_: f32,
 
@@ -488,6 +518,15 @@ struct Args {
         requires_all = ["v83_curriculum", "resume"]
     )]
     migrate_v82_to_v83: bool,
+
+    /// Permit a V8.3 checkpoint to adopt the V8.4 reward profile (same
+    /// curriculum schedule / weights; BPTT/rollout may change).
+    #[arg(
+        long,
+        default_value_t = false,
+        requires_all = ["v83_curriculum", "resume"]
+    )]
+    migrate_v83_to_v84: bool,
 
     /// Extra LR warmup updates applied after `--resume` while AdamW
     /// moments rebuild from scratch (tch cannot dump/restore optimizer
@@ -1021,6 +1060,30 @@ fn main() -> anyhow::Result<()> {
         args.v83_churn_coef.is_finite() && args.v83_churn_coef >= 0.0,
         "--v83-churn-coef must be finite and non-negative"
     );
+    anyhow::ensure!(
+        args.v84_boat_useful.is_finite(),
+        "--v84-boat-useful must be finite"
+    );
+    anyhow::ensure!(
+        args.v84_boat_destroyed.is_finite(),
+        "--v84-boat-destroyed must be finite"
+    );
+    anyhow::ensure!(
+        args.v84_boat_cancelled.is_finite(),
+        "--v84-boat-cancelled must be finite"
+    );
+    anyhow::ensure!(
+        args.v84_boat_own_shore.is_finite(),
+        "--v84-boat-own-shore must be finite"
+    );
+    anyhow::ensure!(
+        args.v84_tempo_coef.is_finite() && args.v84_tempo_coef >= 0.0,
+        "--v84-tempo-coef must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.v84_fast_win_coef.is_finite() && args.v84_fast_win_coef >= 0.0,
+        "--v84-fast-win-coef must be finite and non-negative"
+    );
     let reward_config = ofcore::curriculum::RewardConfig {
         gamma: args.gamma as f64,
         v81_dom_coef: args.v81_dom_coef,
@@ -1034,6 +1097,14 @@ fn main() -> anyhow::Result<()> {
         v81_churn_min_stage: args.v81_churn_min_stage,
         v83_close_coef: args.v83_close_coef,
         v83_churn_coef: args.v83_churn_coef,
+        v84_boat_useful: args.v84_boat_useful,
+        v84_boat_destroyed: args.v84_boat_destroyed,
+        v84_boat_cancelled: args.v84_boat_cancelled,
+        v84_boat_own_shore: args.v84_boat_own_shore,
+        v84_boat_min_stage: args.v84_boat_min_stage,
+        v84_tempo_coef: args.v84_tempo_coef,
+        v84_tempo_min_stage: args.v84_tempo_min_stage,
+        v84_fast_win_coef: args.v84_fast_win_coef,
     };
     let curriculum_schedule = if args.v83_curriculum {
         ofcore::curriculum::CurriculumSchedule::V83
@@ -1197,6 +1268,7 @@ fn main() -> anyhow::Result<()> {
         migrate_v81_stage5_to_v811: args.migrate_v81_stage5_to_v811,
         migrate_v811_stage5_to_v82: args.migrate_v811_stage5_to_v82,
         migrate_v82_to_v83: args.migrate_v82_to_v83,
+        migrate_v83_to_v84: args.migrate_v83_to_v84,
         stage_env_targets,
         max_episode_ticks: args.max_episode_ticks,
         rollout_len: args.rollout_len,
