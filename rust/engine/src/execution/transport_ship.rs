@@ -14,6 +14,7 @@ pub struct TransportShipExecution {
     path: Vec<TileRef>,
     path_idx: usize,
     path_dst: Option<TileRef>,
+    motion_plan_dst: Option<TileRef>,
     unit_id: Option<i32>,
     active: bool,
     initialized: bool,
@@ -39,6 +40,7 @@ impl TransportShipExecution {
             path: Vec::with_capacity(64),
             path_idx: 0,
             path_dst: None,
+            motion_plan_dst: None,
             unit_id: None,
             active: true,
             initialized: false,
@@ -245,12 +247,20 @@ impl Execution for TransportShipExecution {
         let uid = game.build_unit(self.owner_small_id, TRANSPORT, src);
         self.unit_id = Some(uid);
 
-        // TS records a motion plan but does not move the unit in `init`.
-        if !self.refresh_path(game, src, dst) {
+        // TS `TransportShipExecution.init` records a motion plan with
+        // `pathFinder.findPath(src, dst)`, which warms the shared HPA edge cache
+        // but does not populate the stepper's movement path. The first movement
+        // tick recomputes the path through `next()` using that warmed cache.
+        if !game.plan_water_path(src, dst) {
             game.add_troops(self.owner_small_id, troops);
             game.remove_unit(self.owner_small_id, uid);
             self.active = false;
+            return;
         }
+        self.path.clear();
+        self.path_idx = 0;
+        self.path_dst = None;
+        self.motion_plan_dst = Some(dst);
     }
 
     fn tick(&mut self, game: &mut Game, tick: u32) {
@@ -293,11 +303,19 @@ impl Execution for TransportShipExecution {
             return;
         }
 
+        let records_new_motion_plan = self.motion_plan_dst != Some(dst);
         let Some(next) = self.next_path_tile(game, from, dst) else {
             self.land(game, dst, uid, troops);
             return;
         };
         game.move_unit(self.owner_small_id, uid, next);
+        if records_new_motion_plan {
+            // TS records a new grid motion plan after moving when the
+            // destination changes (retreat/re-target), warming shared HPA
+            // caches with `findPath(boat.tile(), dst)`.
+            let _ = game.plan_water_path(next, dst);
+            self.motion_plan_dst = Some(dst);
+        }
     }
 
     fn is_active(&self) -> bool {

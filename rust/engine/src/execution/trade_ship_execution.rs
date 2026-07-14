@@ -295,10 +295,18 @@ impl Execution for TradeShipExecution {
             return;
         }
 
+        let records_new_motion_plan = self.path_dst != Some(dst_tile);
         let Some(next) = self.next_path_tile(game, cur_tile, dst_tile) else {
             self.complete(game);
             return;
         };
+        if records_new_motion_plan {
+            // TS records a grid motion plan when the destination changes by
+            // running a second `findPath(result.node, dst)`. That lookup also
+            // warms the shared HPA edge-path cache; without this side effect,
+            // later trade ships can choose different equal-cost water routes.
+            let _ = game.plan_water_path(next, dst_tile);
+        }
         if game.map.is_water(next) && game.map.is_shoreline(next) {
             let tick = game.ticks() as i32;
             if let Some(ship) = game.unit_mut(ship_owner, uid) {
