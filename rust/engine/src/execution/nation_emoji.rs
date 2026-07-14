@@ -23,7 +23,7 @@ pub struct NationEmojiState {
 }
 
 pub fn maybe_send_casual_emoji(
-    game: &Game,
+    game: &mut Game,
     random: &mut PseudoRandom,
     small_id: u16,
     state: &mut NationEmojiState,
@@ -43,7 +43,7 @@ pub fn maybe_send_casual_emoji(
 }
 
 fn check_overwhelmed_by_attacks(
-    game: &Game,
+    game: &mut Game,
     random: &mut PseudoRandom,
     small_id: u16,
     state: &mut NationEmojiState,
@@ -68,7 +68,7 @@ fn check_overwhelmed_by_attacks(
 }
 
 fn check_very_small_attack(
-    game: &Game,
+    game: &mut Game,
     random: &mut PseudoRandom,
     small_id: u16,
     state: &mut NationEmojiState,
@@ -116,7 +116,7 @@ fn check_very_small_attack(
 }
 
 fn congratulate_winner(
-    game: &Game,
+    game: &mut Game,
     random: &mut PseudoRandom,
     small_id: u16,
     state: &mut NationEmojiState,
@@ -162,7 +162,7 @@ fn congratulate_winner(
     );
 }
 
-fn brag(game: &Game, random: &mut PseudoRandom, small_id: u16, state: &mut NationEmojiState) {
+fn brag(game: &mut Game, random: &mut PseudoRandom, small_id: u16, state: &mut NationEmojiState) {
     if !random.chance(300) {
         return;
     }
@@ -181,7 +181,7 @@ fn brag(game: &Game, random: &mut PseudoRandom, small_id: u16, state: &mut Natio
     send_emoji(random, game, small_id, state, None, EMOJI_BRAG_LEN);
 }
 
-fn charm_allies(game: &Game, random: &mut PseudoRandom, small_id: u16, state: &mut NationEmojiState) {
+fn charm_allies(game: &mut Game, random: &mut PseudoRandom, small_id: u16, state: &mut NationEmojiState) {
     if !random.chance(250) {
         return;
     }
@@ -209,7 +209,7 @@ fn charm_allies(game: &Game, random: &mut PseudoRandom, small_id: u16, state: &m
     send_emoji(random, game, small_id, state, Some(ally), emoji_len);
 }
 
-fn annoy_traitors(game: &Game, random: &mut PseudoRandom, small_id: u16, state: &mut NationEmojiState) {
+fn annoy_traitors(game: &mut Game, random: &mut PseudoRandom, small_id: u16, state: &mut NationEmojiState) {
     if !random.chance(40) {
         return;
     }
@@ -234,7 +234,7 @@ fn annoy_traitors(game: &Game, random: &mut PseudoRandom, small_id: u16, state: 
     send_emoji(random, game, small_id, state, Some(traitor), EMOJI_CLOWN_LEN);
 }
 
-fn find_rat(game: &Game, random: &mut PseudoRandom, small_id: u16, state: &mut NationEmojiState) {
+fn find_rat(game: &mut Game, random: &mut PseudoRandom, small_id: u16, state: &mut NationEmojiState) {
     if game.ticks() < 6000 {
         return;
     }
@@ -264,7 +264,7 @@ fn find_rat(game: &Game, random: &mut PseudoRandom, small_id: u16, state: &mut N
 }
 
 fn greet_nearby_players(
-    game: &Game,
+    game: &mut Game,
     random: &mut PseudoRandom,
     small_id: u16,
     state: &mut NationEmojiState,
@@ -295,7 +295,7 @@ fn greet_nearby_players(
 
 /// TS `maybeSendAttackEmoji` - RNG only; execution is hash-neutral.
 pub fn maybe_send_attack_emoji(
-    game: &Game,
+    game: &mut Game,
     random: &mut PseudoRandom,
     small_id: u16,
     state: &mut NationEmojiState,
@@ -341,7 +341,7 @@ pub fn maybe_send_attack_emoji(
 /// `warship_ai.rs`).
 pub(crate) fn maybe_send_emoji(
     random: &mut PseudoRandom,
-    game: &Game,
+    game: &mut Game,
     small_id: u16,
     state: &mut NationEmojiState,
     recipient: Option<u16>,
@@ -356,7 +356,7 @@ pub(crate) fn maybe_send_emoji(
 /// TS `sendEmoji` - consumes `randElement` when allowed; execution is hash-neutral.
 pub fn send_emoji(
     random: &mut PseudoRandom,
-    game: &Game,
+    game: &mut Game,
     small_id: u16,
     state: &mut NationEmojiState,
     recipient: Option<u16>,
@@ -369,18 +369,23 @@ pub fn send_emoji(
         return;
     }
     let _ = random.next_int(0, emoji_list_len);
+    game.record_emoji_send(small_id, recipient);
 }
 
 /// TS `respondToMIRV()` - the MIRV *target*'s reaction, not the launching
-/// nation's, so it skips `shouldSendEmoji`'s per-recipient cooldown (only
-/// ever sent to `AllPlayers`, which that check treats as unconditionally OK
-/// anyway) and only gates on the `canSendEmoji` self-check, which is always
-/// true for an `AllPlayers` recipient.
-pub(crate) fn respond_to_mirv(random: &mut PseudoRandom) {
+/// nation's. Skips `shouldSendEmoji` (AllPlayers is always OK there) but still
+/// gates on the target's `canSendEmoji(AllPlayers)` cooldown before drawing
+/// `randElement` — otherwise native burns an extra PRNG draw whenever the
+/// target is on AllPlayers emoji cooldown (`curr-b010-s13-blacksea` @ 15710).
+pub(crate) fn respond_to_mirv(game: &mut Game, random: &mut PseudoRandom, mirv_target_small_id: u16) {
     if !random.chance(8) {
         return;
     }
+    if !game.can_send_emoji(mirv_target_small_id, None) {
+        return;
+    }
     let _ = random.next_int(0, EMOJI_OVERWHELMED_LEN);
+    game.record_emoji_send(mirv_target_small_id, None);
 }
 
 fn should_send_emoji(
@@ -420,4 +425,83 @@ fn should_send_emoji(
     }
 
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::PlayerInfo;
+
+    fn add_nation(game: &mut Game, id: &str) -> u16 {
+        game.add_from_info(&PlayerInfo {
+            name: id.into(),
+            player_type: PlayerType::Nation,
+            client_id: Some(id.into()),
+            id: id.into(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        })
+    }
+
+    fn seed_with_chance8_true() -> i32 {
+        for seed in 1..500 {
+            if PseudoRandom::new(seed).chance(8) {
+                return seed;
+            }
+        }
+        panic!("no seed with chance(8)=true in 1..500");
+    }
+
+    fn advance(game: &mut Game, n: u32) {
+        for _ in 0..n {
+            game.execute_next_tick();
+        }
+    }
+
+    /// `respondToMIRV` must not burn `randElement` while the target is on
+    /// AllPlayers emoji cooldown (`curr-b010-s13-blacksea` @ 15710).
+    #[test]
+    fn respond_to_mirv_skips_draw_when_allplayers_on_cooldown() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let target = add_nation(&mut game, "bulgaria");
+        game.record_emoji_send(target, None);
+        advance(&mut game, 30); // still within 50-tick cooldown
+
+        assert!(!game.can_send_emoji(target, None));
+
+        let seed = seed_with_chance8_true();
+        let mut random = PseudoRandom::new(seed);
+        let mut expected = PseudoRandom::new(seed);
+        assert!(expected.chance(8));
+
+        respond_to_mirv(&mut game, &mut random, target);
+
+        // Only `chance(8)` should have been consumed — no `randElement`.
+        assert_eq!(
+            format!("{:?}", random),
+            format!("{:?}", expected),
+            "cooldown must skip the EMOJI_OVERWHELMED randElement draw"
+        );
+    }
+
+    #[test]
+    fn respond_to_mirv_draws_when_allplayers_not_on_cooldown() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let target = add_nation(&mut game, "bulgaria");
+        assert!(game.can_send_emoji(target, None));
+
+        let seed = seed_with_chance8_true();
+        let mut random = PseudoRandom::new(seed);
+        let mut expected = PseudoRandom::new(seed);
+        assert!(expected.chance(8));
+        let _ = expected.next_int(0, EMOJI_OVERWHELMED_LEN);
+
+        respond_to_mirv(&mut game, &mut random, target);
+
+        assert_eq!(format!("{:?}", random), format!("{:?}", expected));
+        assert!(!game.can_send_emoji(target, None));
+    }
 }
