@@ -137,20 +137,57 @@ fi
 PY_TAG="$("$VENV/bin/python" -c 'import sys; print(f"python{sys.version_info.major}.{sys.version_info.minor}")')"
 TORCH_LIB="$VENV/lib/$PY_TAG/site-packages/torch"
 NVRTC_LIB="$VENV/lib/$PY_TAG/site-packages/nvidia/cuda_nvrtc/lib"
+NCCL_ROOT="$VENV/lib/$PY_TAG/site-packages/nvidia/nccl"
+NCCL_INCLUDE="$NCCL_ROOT/include"
+NCCL_LIB="$NCCL_ROOT/lib"
+NCCL_LINK_LIB="$NCCL_LIB"
+if [ ! -f "$NCCL_LIB/libnccl.so" ] && [ -f "$NCCL_LIB/libnccl.so.2" ]; then
+  # NVIDIA runtime wheels may omit the unversioned linker name.
+  NCCL_LINK_LIB="$REPO_DIR/rust/.nccl-link"
+  mkdir -p "$NCCL_LINK_LIB"
+  ln -sf "$NCCL_LIB/libnccl.so.2" "$NCCL_LINK_LIB/libnccl.so"
+fi
+LIBTORCH_CXX11_ABI="$("$VENV/bin/python" -c 'import torch; print(int(torch._C._GLIBCXX_USE_CXX11_ABI))')"
 mkdir -p "$REPO_DIR/rust/.cargo"
 cat > "$REPO_DIR/rust/.cargo/config.toml" <<EOF
 [env]
 LIBTORCH = "$TORCH_LIB"
-LD_LIBRARY_PATH = "$TORCH_LIB/lib:$NVRTC_LIB"
+LIBTORCH_CXX11_ABI = "$LIBTORCH_CXX11_ABI"
+LD_LIBRARY_PATH = "$TORCH_LIB/lib:$NVRTC_LIB:$NCCL_LIB:$NCCL_LINK_LIB"
 EOF
 
 cd "$REPO_DIR/rust"
-cargo build --release -p oftrain --features native-engine
+BUILD_FEATURES="native-engine"
+if [ "$NUM_GPUS" -gt 1 ] && [ -f "$NCCL_INCLUDE/nccl.h" ] && [ -f "$NCCL_LINK_LIB/libnccl.so" ]; then
+  export NCCL_INCLUDE_DIR="$NCCL_INCLUDE"
+  export NCCL_LIB_DIR="$NCCL_LINK_LIB"
+  BUILD_FEATURES="$BUILD_FEATURES,nccl"
+  echo "NCCL preflight: headers and runtime found; enabling device gradient all-reduce"
+else
+  echo "NCCL preflight: unavailable or single-GPU launch; building CPU gradient fallback"
+fi
+if ! cargo build --release -p oftrain --features "$BUILD_FEATURES"; then
+  if [[ "$BUILD_FEATURES" == *nccl* ]]; then
+    echo "WARNING: NCCL build preflight failed; rebuilding with the CPU gradient fallback" >&2
+    BUILD_FEATURES="native-engine"
+    cargo build --release -p oftrain --features "$BUILD_FEATURES" || exit 1
+  else
+    exit 1
+  fi
+fi
 # CUDA-not-actually-linked footgun (see devlog 2026-07-09): confirm before
 # spending any GPU-hours, not after wondering why util is stuck near 0.
 if ! readelf -d target/release/oftrain | grep -q libtorch_cuda.so; then
   echo "FATAL: libtorch_cuda.so not linked into oftrain - CUDA is silently missing (see devlog)"
   exit 1
+fi
+if [[ "$BUILD_FEATURES" == *nccl* ]]; then
+  if ! LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB:$NCCL_LIB:$NCCL_LINK_LIB" ldd target/release/oftrain \
+    | grep -q 'libnccl.so.*=>'; then
+    echo "WARNING: NCCL runtime preflight failed; rebuilding with the CPU gradient fallback" >&2
+    BUILD_FEATURES="native-engine"
+    cargo build --release -p oftrain --features "$BUILD_FEATURES" || exit 1
+  fi
 fi
 # Host-level CUDA-init footgun (see devlog 2026-07-09 "v8 launch" entry): a
 # RunPod community-cloud host once had a working nvidia-smi/driver but a
@@ -163,7 +200,7 @@ fi
 # panic masks any other failure mode this specific shape could have; a bug
 # *in this check itself* must never be able to kill a launch the real
 # trainer, with its own crash-loop/backoff, would have survived).
-if ! LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB" OFTRAIN_EXPLICIT_CUINIT=1 \
+if ! LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB:$NCCL_LIB:$NCCL_LINK_LIB" OFTRAIN_EXPLICIT_CUINIT=1 \
   timeout 30 ./target/release/oftrain --engine native --node-fraction 0 --num-envs 1 --num-gpus 1 \
   --rollout-len 1 --updates 0 --device cuda:0 --ckpt-dir /tmp/oftrain_cuda_preflight \
   2>&1 | grep -q "explicit cuInit(0) -> 0"; then
@@ -220,7 +257,7 @@ while true; do
   echo "=== $(date -u +%FT%TZ) launching $RUN_NAME num_gpus=$NUM_GPUS envs/shard=$NUM_ENVS $RESUME ==="
   START_TS=$(date +%s)
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-  LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB" \
+  LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB:$NCCL_LIB:$NCCL_LINK_LIB" \
     ./target/release/oftrain --engine native --node-fraction "$NODE_FRACTION" --num-envs "$NUM_ENVS" --num-gpus "$NUM_GPUS" \
     --rollout-len "$ROLLOUT_LEN" --minibatches "$MINIBATCHES" --stage "$STAGE" --device cuda:0 \
     --ckpt-dir "$CKPT_DIR" $V81_ARGS $EXTRA_ARGS $RESUME \
