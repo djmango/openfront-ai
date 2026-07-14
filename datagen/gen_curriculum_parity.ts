@@ -51,7 +51,7 @@
  *   openfront/node_modules/.bin/tsx datagen/gen_curriculum_parity.ts \
  *     --out records/curriculum-parity-v1 [--games-per-bucket 5] \
  *     [--ticks 4500] [--max-timer 6] [--buckets 0,5,10] \
- *     [--seed-offset 0] [--skip-manifest]
+ *     [--seed-offset 0] [--skip-manifest] [--skip-inline-outcome]
  *
  * Generation itself is a single-threaded, CPU-bound Node loop with no
  * internal parallelism (unlike the later oracle/native gate steps, which
@@ -87,61 +87,100 @@ interface Bucket {
 // bots=80 each appear in two stages (Easy/Medium and Medium/Hard
 // respectively); we use the first (lower-difficulty) occurrence for both -
 // see rust/ofcore/src/curriculum.rs `stages()`.
+// Curriculum / V8.2 map keys (rust/ofcore/src/curriculum.rs ALL_MAPS +
+ // V82_MAPS). Early buckets stay on the small maps the schedule actually
+ // uses; mid/late buckets deliberately fan out across the broad V8.2 pool
+ // so the outcome gate stress-tests continents and naval maps, not just
+ // the seven legacy names curriculum-parity-v4 covered.
+const EARLY_MAPS = ["Onion", "Pangaea", "Caucasus", "BlackSea", "GreatLakes"];
+const MID_MAPS = [
+  "BlackSea",
+  "BetweenTwoSeas",
+  "Caucasus",
+  "Europe",
+  "Britannia",
+  "GreatLakes",
+  "Asia",
+  "World",
+];
+const BROAD_MAPS = [
+  "Onion",
+  "Pangaea",
+  "Caucasus",
+  "BlackSea",
+  "BetweenTwoSeas",
+  "Europe",
+  "Asia",
+  "World",
+  "NorthAmerica",
+  "SouthAmerica",
+  "Africa",
+  "Australia",
+  "EastAsia",
+  "MiddleEast",
+  "Britannia",
+  "GreatLakes",
+  "Japan",
+  "Caribbean",
+  "Iceland",
+  "FourIslands",
+];
+
 const BUCKETS: Bucket[] = [
   {
     bots: 0,
     nations: 1,
     difficulty: Difficulty.Easy,
-    mapKeys: ["Onion"],
+    mapKeys: ["Onion", "Pangaea", "GreatLakes"],
     stageLabel: "stage0 (bots=0, nations=1, Easy)",
   },
   {
     bots: 5,
     nations: 3,
     difficulty: Difficulty.Easy,
-    mapKeys: ["Onion", "Pangaea"],
+    mapKeys: EARLY_MAPS,
     stageLabel: "stage2 (bots=5, nations=3, Easy)",
   },
   {
     bots: 10,
     nations: 6,
     difficulty: Difficulty.Easy,
-    mapKeys: ["Pangaea", "Caucasus"],
+    mapKeys: EARLY_MAPS,
     stageLabel: "stage3 (bots=10, nations=6, Easy)",
   },
   {
     bots: 30,
     nations: "default",
     difficulty: Difficulty.Easy,
-    mapKeys: ["Pangaea", "Caucasus", "BlackSea"],
+    mapKeys: MID_MAPS,
     stageLabel: "stage4 (bots=30, nations=default, Easy)",
   },
   {
     bots: 50,
     nations: "default",
     difficulty: Difficulty.Medium,
-    mapKeys: ["World", "Asia", "BlackSea"],
+    mapKeys: MID_MAPS,
     stageLabel: "stage6 (bots=50, nations=default, Medium)",
   },
   {
     bots: 80,
     nations: "default",
     difficulty: Difficulty.Medium,
-    mapKeys: ["World", "Asia", "BetweenTwoSeas", "Caucasus"],
+    mapKeys: BROAD_MAPS,
     stageLabel: "stage7 (bots=80, nations=default, Medium)",
   },
   {
     bots: 120,
     nations: "default",
     difficulty: Difficulty.Hard,
-    mapKeys: ["Onion", "Pangaea", "Caucasus", "BlackSea", "BetweenTwoSeas", "World", "Asia"],
+    mapKeys: BROAD_MAPS,
     stageLabel: "stage9 (bots=120, nations=default, Hard)",
   },
   {
     bots: 150,
     nations: "default",
     difficulty: Difficulty.Impossible,
-    mapKeys: ["Onion", "Pangaea", "Caucasus", "BlackSea", "BetweenTwoSeas", "World", "Asia"],
+    mapKeys: BROAD_MAPS,
     stageLabel: "stage10 (bots=150, nations=default, Impossible)",
   },
 ];
@@ -250,6 +289,11 @@ async function main() {
   // nothing downstream reads it).
   const seedOffset = parseInt(getArg("seed-offset", "0"), 10);
   const skipManifest = args.includes("--skip-manifest");
+  // Inline TS replayOutcome() at generation time is useful for a one-shot
+  // manifest, but it duplicates the gate's cached oracle step and dominates
+  // wall clock when spinning a large map-diverse set. Prefer skipping it and
+  // letting `run_curriculum_parity_gate.sh` build the oracle once.
+  const skipInlineOutcome = args.includes("--skip-inline-outcome");
 
   fs.mkdirSync(outDir, { recursive: true });
   const manifest: ManifestEntry[] = [];
@@ -270,14 +314,30 @@ async function main() {
       const record = buildRecord(gameId, config, numTurns);
       const file = writeRecord(outDir, gameId, record);
 
-      const started = Date.now();
-      const outcome = await replayOutcome(decompressGameRecord(record as never));
-      const secs = ((Date.now() - started) / 1000).toFixed(1);
-      console.log(
-        `[${gameId}] map=${mapKey} winner=${JSON.stringify(outcome.winner)} ` +
-          `terminalTick=${outcome.terminalTick} reason=${outcome.terminalReason} ` +
-          `landShare=${outcome.winnerLandShare?.toFixed(3)} (${secs}s)`,
-      );
+      let outcome: GameOutcome;
+      if (skipInlineOutcome) {
+        outcome = {
+          schemaVersion: 1,
+          gameId,
+          winner: null,
+          terminalTick: null,
+          terminalReason: null,
+          winnerLandShare: null,
+          finalTick: 0,
+          landTilesWithoutFallout: 0,
+          finalRanking: [],
+        };
+        console.log(`[${gameId}] map=${mapKey} wrote (inline outcome skipped)`);
+      } else {
+        const started = Date.now();
+        outcome = await replayOutcome(decompressGameRecord(record as never));
+        const secs = ((Date.now() - started) / 1000).toFixed(1);
+        console.log(
+          `[${gameId}] map=${mapKey} winner=${JSON.stringify(outcome.winner)} ` +
+            `terminalTick=${outcome.terminalTick} reason=${outcome.terminalReason} ` +
+            `landShare=${outcome.winnerLandShare?.toFixed(3)} (${secs}s)`,
+        );
+      }
       manifest.push({
         gameId,
         file: path.relative(REPO_ROOT, file),
