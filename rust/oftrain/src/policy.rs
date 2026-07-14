@@ -1031,6 +1031,29 @@ impl PolicyNet {
         (a, player, tile_region, build_s, nuke_s, q, logp, value)
     }
 
+    /// Greedy/stochastic act plus masked action probabilities for debug overlays.
+    pub fn act_with_debug(
+        &self,
+        o: &Obs,
+        greedy: bool,
+    ) -> (
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+    ) {
+        let output = self.forward(o);
+        let action_probs = sanitize_logits(&output.act_logits).softmax(-1, Kind::Float);
+        let (a, player, tile, build, nuke, q, logp, value) =
+            self.act_from_forward(o, greedy, output);
+        (a, player, tile, build, nuke, q, logp, value, action_probs)
+    }
+
     #[cfg(test)]
     fn act_recomputing_foveation_reference(
         &self,
