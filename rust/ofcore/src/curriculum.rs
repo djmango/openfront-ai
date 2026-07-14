@@ -21,6 +21,9 @@ pub const K_ECO: f64 = 0.25;
 pub const K_BUILD: f64 = 0.15;
 
 pub const DOMINANCE_EPS: f64 = 1e-9;
+pub const V83_CLOSEOUT_SHARE_START: f64 = 0.45;
+pub const V83_CLOSEOUT_SHARE_FULL: f64 = 0.80;
+pub const V83_REWARD_PROFILE: &str = "v8.3-closeout-v1";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RewardConfig {
@@ -34,6 +37,8 @@ pub struct RewardConfig {
     pub v81_churn_coef: f64,
     pub v81_churn_window: usize,
     pub v81_churn_min_stage: usize,
+    pub v83_close_coef: f64,
+    pub v83_churn_coef: f64,
 }
 
 impl RewardConfig {
@@ -61,6 +66,7 @@ pub struct RewardComponents {
     pub strength: f64,
     pub strength_delta: f64,
     pub dominance: f64,
+    pub closeout: f64,
     pub action_churn: f64,
     pub waste: f64,
     pub death: f64,
@@ -72,6 +78,7 @@ impl RewardComponents {
         self.strength += other.strength;
         self.strength_delta += other.strength_delta;
         self.dominance += other.dominance;
+        self.closeout += other.closeout;
         self.action_churn += other.action_churn;
         self.waste += other.waste;
         self.death += other.death;
@@ -209,6 +216,24 @@ pub fn action_churn_penalty(
     }
 }
 
+pub fn v83_action_churn_penalty(
+    reversal: Option<InverseActionPair>,
+    stage: usize,
+    land_share: f64,
+    config: RewardConfig,
+) -> f64 {
+    if reversal.is_some()
+        && stage >= 5
+        && land_share >= V83_CLOSEOUT_SHARE_START
+        && config.v83_churn_coef != 0.0
+        && config.v81_churn_window != 0
+    {
+        -config.v83_churn_coef
+    } else {
+        action_churn_penalty(reversal, stage, config)
+    }
+}
+
 /// Per-environment Φ(current), reset at each new episode.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DominanceShaper {
@@ -230,6 +255,21 @@ impl DominanceShaper {
         self.prior = next;
         finite_or_zero(increment)
     }
+}
+
+/// V8.3 land-share closeout potential. `land_total` is fixed at reset.
+pub fn land_share(agent_tiles: f64, land_total: i64) -> f64 {
+    if !agent_tiles.is_finite() || land_total <= 0 {
+        return 0.0;
+    }
+    (agent_tiles / land_total as f64).clamp(0.0, 1.0)
+}
+
+pub fn closeout_potential(share: f64) -> f64 {
+    let x = ((finite_or_zero(share).clamp(0.0, 1.0) - V83_CLOSEOUT_SHARE_START)
+        / (V83_CLOSEOUT_SHARE_FULL - V83_CLOSEOUT_SHARE_START))
+        .clamp(0.0, 1.0);
+    x * x
 }
 
 pub const WINDOW: usize = 40;
@@ -315,6 +355,7 @@ pub enum CurriculumSchedule {
     V81,
     V811,
     V82,
+    V83,
 }
 
 impl CurriculumSchedule {
@@ -324,6 +365,7 @@ impl CurriculumSchedule {
             Self::V81 => "v8.1",
             Self::V811 => "v8.1.1",
             Self::V82 => "v8.2",
+            Self::V83 => "v8.3",
         }
     }
 
@@ -333,6 +375,7 @@ impl CurriculumSchedule {
             "v8.1" => Some(Self::V81),
             "v8.1.1" => Some(Self::V811),
             "v8.2" => Some(Self::V82),
+            "v8.3" => Some(Self::V83),
             _ => None,
         }
     }
@@ -350,8 +393,8 @@ pub const V811_ENV_TARGETS: [usize; 12] = [24, 24, 24, 24, 24, 24, 24, 12, 10, 8
 /// V8.2 envs per GPU/shard. The eight-map bridge can sustain 16; the broad
 /// pool uses 12/10/8 as player count and simulation cost increase. Stage 8
 /// safely grows back to 12 when the player count resets from 80 to 30.
-pub const V82_ENV_TARGETS: [usize; 14] =
-    [24, 24, 24, 24, 24, 16, 12, 10, 12, 10, 8, 8, 8, 8];
+pub const V82_ENV_TARGETS: [usize; 14] = [24, 24, 24, 24, 24, 16, 12, 10, 12, 10, 8, 8, 8, 8];
+pub const V83_ENV_TARGETS: [usize; 15] = [24, 24, 24, 24, 24, 24, 16, 12, 10, 12, 10, 8, 8, 8, 8];
 
 pub fn stages() -> Vec<Stage> {
     stages_for_schedule(CurriculumSchedule::Legacy)
@@ -491,7 +534,7 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
                 stage.win_at = gate;
             }
         }
-        CurriculumSchedule::V82 => {
+        CurriculumSchedule::V82 | CurriculumSchedule::V83 => {
             // Stages 0-4 retain the V8.1/V8.1.1 identities and gate. The
             // 30-player/eight-map Easy bridge precedes broad-pool Easy at
             // 50 and 80 players. Medium only begins after all three Easy
@@ -572,6 +615,19 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
                     win_at: 0.12,
                 },
             ]);
+            if schedule == CurriculumSchedule::V83 {
+                stages.insert(
+                    5,
+                    Stage {
+                        maps: &["Onion", "Pangaea", "Caucasus"],
+                        bots: 10,
+                        difficulty: "Easy",
+                        nations: NE(6),
+                        decision_ticks: 10,
+                        win_at: 0.45,
+                    },
+                );
+            }
         }
     }
     stages
@@ -762,6 +818,8 @@ mod tests {
             v81_churn_coef: 0.05,
             v81_churn_window: 2,
             v81_churn_min_stage: 4,
+            v83_close_coef: 4.0,
+            v83_churn_coef: 0.06,
         }
     }
 
@@ -788,6 +846,42 @@ mod tests {
             coefficient * (-phi[0] + gamma.powi((phi.len() - 1) as i32) * phi[phi.len() - 1]);
         assert!((discounted - expected).abs() < 1e-12);
         assert_eq!(shaper.prior().to_bits(), phi[phi.len() - 1].to_bits());
+    }
+
+    #[test]
+    fn closeout_potential_telescopes_and_terminal_zero_prevents_positive_cycles() {
+        assert_eq!(closeout_potential(0.45), 0.0);
+        assert_eq!(closeout_potential(0.80), 1.0);
+        let shares = [0.45, 0.60, 0.52, 0.60];
+        let mut shaper = DominanceShaper::default();
+        shaper.reset(closeout_potential(shares[0]));
+        let shaped: Vec<_> = shares[1..]
+            .iter()
+            .map(|&q| shaper.transition(closeout_potential(q), 0.9, 4.0))
+            .collect();
+        let discounted: f64 = shaped
+            .iter()
+            .enumerate()
+            .map(|(t, value)| 0.9f64.powi(t as i32) * value)
+            .sum();
+        assert!(discounted >= 0.0);
+        let terminal = shaper.transition(0.0, 0.9, 4.0);
+        let full_return = discounted + 0.9f64.powi(shaped.len() as i32) * terminal;
+        assert!(full_return.abs() < 1e-12);
+        assert!(
+            terminal < 0.0,
+            "timeout after closeout must repay potential"
+        );
+    }
+
+    #[test]
+    fn v83_churn_increase_is_closeout_only_and_v82_path_is_unchanged() {
+        let cfg = config();
+        let pair = Some(InverseActionPair::AttackRetreat);
+        assert_eq!(action_churn_penalty(pair, 5, cfg), -0.05);
+        assert_eq!(v83_action_churn_penalty(pair, 4, 0.9, cfg), -0.05);
+        assert_eq!(v83_action_churn_penalty(pair, 5, 0.449, cfg), -0.05);
+        assert_eq!(v83_action_churn_penalty(pair, 5, 0.45, cfg), -0.06);
     }
 
     #[test]
@@ -1120,7 +1214,9 @@ mod curriculum_v81_tests {
         let v811 = stages_for_schedule(CurriculumSchedule::V811);
         assert_eq!(
             v811.iter().map(|stage| stage.win_at).collect::<Vec<_>>(),
-            vec![0.9, 0.8, 0.75, 0.65, 0.35, 0.30, 0.25, 0.25, 0.22, 0.20, 0.18, 0.15]
+            vec![
+                0.9, 0.8, 0.75, 0.65, 0.35, 0.30, 0.25, 0.25, 0.22, 0.20, 0.18, 0.15
+            ]
         );
         assert_eq!(V811_ENV_TARGETS.len(), v811.len());
         assert_eq!(&V811_ENV_TARGETS[..7], &[24; 7]);
@@ -1148,11 +1244,19 @@ mod curriculum_v81_tests {
         for (index, (stage, &(bots, difficulty, gate))) in
             v82[5..].iter().zip(&expected).enumerate()
         {
-            let expected_maps: &[&str] =
-                if index == 0 { &V82_STAGE5_MAPS } else { &V82_MAPS };
+            let expected_maps: &[&str] = if index == 0 {
+                &V82_STAGE5_MAPS
+            } else {
+                &V82_MAPS
+            };
             assert_eq!(stage.maps, expected_maps, "stage {} maps", index + 5);
             assert_eq!(stage.bots, bots, "stage {} bots", index + 5);
-            assert_eq!(stage.difficulty, difficulty, "stage {} difficulty", index + 5);
+            assert_eq!(
+                stage.difficulty,
+                difficulty,
+                "stage {} difficulty",
+                index + 5
+            );
             assert_eq!(stage.win_at, gate, "stage {} gate", index + 5);
             assert_eq!(stage.nations, Nations::Default);
             assert_eq!(stage.decision_ticks, 10);
@@ -1197,6 +1301,31 @@ mod curriculum_v81_tests {
         assert_eq!(
             CurriculumSchedule::from_id("v8.2"),
             Some(CurriculumSchedule::V82)
+        );
+    }
+
+    #[test]
+    fn v83_inserts_exact_closeout_stage_and_shifts_v82_tail() {
+        let v82 = stages_for_schedule(CurriculumSchedule::V82);
+        let v83 = stages_for_schedule(CurriculumSchedule::V83);
+        assert_eq!(&v83[..5], &v82[..5]);
+        assert_eq!(v83.len(), 15);
+        assert_eq!(v83[5].maps, &["Onion", "Pangaea", "Caucasus"]);
+        assert_eq!(v83[5].bots, 10);
+        assert_eq!(v83[5].difficulty, "Easy");
+        assert_eq!(v83[5].nations, Nations::Exact(6));
+        assert_eq!(v83[5].decision_ticks, 10);
+        assert_eq!(v83[5].win_at, 0.45);
+        assert_eq!(&v83[6..], &v82[5..]);
+        assert_eq!(
+            V83_ENV_TARGETS,
+            [24, 24, 24, 24, 24, 24, 16, 12, 10, 12, 10, 8, 8, 8, 8]
+        );
+        assert_eq!(V83_ENV_TARGETS.len(), v83.len());
+        assert_eq!(CurriculumSchedule::V83.id(), "v8.3");
+        assert_eq!(
+            CurriculumSchedule::from_id("v8.3"),
+            Some(CurriculumSchedule::V83)
         );
     }
 }

@@ -59,6 +59,14 @@ struct Args {
     )]
     v82_curriculum: bool,
 
+    /// Opt into the V8.3 closeout schedule and reward profile.
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with_all = ["v81_curriculum", "v811_curriculum", "v82_curriculum"]
+    )]
+    v83_curriculum: bool,
+
     /// Per-stage env worker targets, per GPU/shard. Accepts either one
     /// comma-separated value per stage (`24,24,...`) or ranges such as
     /// `0-5=24,6=12,7=10,8+=8`. Schedule flags select versioned defaults;
@@ -121,6 +129,14 @@ struct Args {
     /// First curriculum stage where the action-churn penalty may apply.
     #[arg(long, default_value_t = 4)]
     v81_churn_min_stage: usize,
+
+    /// V8.3 land-share closeout potential coefficient.
+    #[arg(long, default_value_t = 4.0)]
+    v83_close_coef: f64,
+
+    /// V8.3 closeout-region action-churn penalty.
+    #[arg(long, default_value_t = 0.06)]
+    v83_churn_coef: f64,
 
     #[arg(long, default_value_t = 0.95)]
     lambda_: f32,
@@ -463,6 +479,14 @@ struct Args {
     )]
     migrate_v811_stage5_to_v82: bool,
 
+    /// Permit only a V8.2 stage-5 checkpoint to adopt V8.3 stage 5.
+    #[arg(
+        long,
+        default_value_t = false,
+        requires_all = ["v83_curriculum", "resume"]
+    )]
+    migrate_v82_to_v83: bool,
+
     /// Extra LR warmup updates applied after `--resume` while AdamW
     /// moments rebuild from scratch (tch cannot dump/restore optimizer
     /// state). 0 disables the post-resume boost (stage warmup still
@@ -727,29 +751,21 @@ mod curriculum_flag_tests {
         assert!(!defaults.v81_curriculum);
         assert!(!defaults.v811_curriculum);
         assert!(!defaults.v82_curriculum);
+        assert!(!defaults.v83_curriculum);
 
         let v811 = Args::try_parse_from(["oftrain", "--v811-curriculum"]).unwrap();
         assert!(v811.v811_curriculum);
         let v82 = Args::try_parse_from(["oftrain", "--v82-curriculum"]).unwrap();
         assert!(v82.v82_curriculum);
+        let v83 = Args::try_parse_from(["oftrain", "--v83-curriculum"]).unwrap();
+        assert!(v83.v83_curriculum);
         assert!(
             Args::try_parse_from(["oftrain", "--v81-curriculum", "--v811-curriculum"]).is_err()
         );
+        assert!(Args::try_parse_from(["oftrain", "--v81-curriculum", "--v82-curriculum"]).is_err());
+        assert!(Args::try_parse_from(["oftrain", "--v82-curriculum", "--v83-curriculum"]).is_err());
         assert!(
-            Args::try_parse_from([
-                "oftrain",
-                "--v81-curriculum",
-                "--v82-curriculum"
-            ])
-            .is_err()
-        );
-        assert!(
-            Args::try_parse_from([
-                "oftrain",
-                "--v811-curriculum",
-                "--v82-curriculum"
-            ])
-            .is_err()
+            Args::try_parse_from(["oftrain", "--v811-curriculum", "--v82-curriculum"]).is_err()
         );
     }
 
@@ -776,12 +792,23 @@ mod curriculum_flag_tests {
         ])
         .unwrap();
         assert!(args.migrate_v811_stage5_to_v82);
+
+        assert!(Args::try_parse_from(["oftrain", "--migrate-v82-to-v83"]).is_err());
+        let args = Args::try_parse_from([
+            "oftrain",
+            "--v83-curriculum",
+            "--resume",
+            "latest.safetensors",
+            "--migrate-v82-to-v83",
+        ])
+        .unwrap();
+        assert!(args.migrate_v82_to_v83);
     }
 
     #[cfg(feature = "native-engine")]
     #[test]
     fn v82_maps_all_load_through_the_rust_engine() {
-        use openfront_engine::core::terrain::{load_fresh_terrain, GameMapSize};
+        use openfront_engine::core::terrain::{GameMapSize, load_fresh_terrain};
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
@@ -984,6 +1011,14 @@ fn main() -> anyhow::Result<()> {
         args.v81_churn_coef.is_finite() && args.v81_churn_coef >= 0.0,
         "--v81-churn-coef must be finite and non-negative"
     );
+    anyhow::ensure!(
+        args.v83_close_coef.is_finite() && args.v83_close_coef >= 0.0,
+        "--v83-close-coef must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.v83_churn_coef.is_finite() && args.v83_churn_coef >= 0.0,
+        "--v83-churn-coef must be finite and non-negative"
+    );
     let reward_config = ofcore::curriculum::RewardConfig {
         gamma: args.gamma as f64,
         v81_dom_coef: args.v81_dom_coef,
@@ -995,8 +1030,12 @@ fn main() -> anyhow::Result<()> {
         v81_churn_coef: args.v81_churn_coef,
         v81_churn_window: args.v81_churn_window,
         v81_churn_min_stage: args.v81_churn_min_stage,
+        v83_close_coef: args.v83_close_coef,
+        v83_churn_coef: args.v83_churn_coef,
     };
-    let curriculum_schedule = if args.v82_curriculum {
+    let curriculum_schedule = if args.v83_curriculum {
+        ofcore::curriculum::CurriculumSchedule::V83
+    } else if args.v82_curriculum {
         ofcore::curriculum::CurriculumSchedule::V82
     } else if args.v811_curriculum {
         ofcore::curriculum::CurriculumSchedule::V811
@@ -1016,6 +1055,9 @@ fn main() -> anyhow::Result<()> {
         Some(spec) => parse_stage_env_targets(spec, stage_count)?,
         None if curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V82 => {
             ofcore::curriculum::V82_ENV_TARGETS.to_vec()
+        }
+        None if curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V83 => {
+            ofcore::curriculum::V83_ENV_TARGETS.to_vec()
         }
         None if curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V811 => {
             ofcore::curriculum::V811_ENV_TARGETS.to_vec()
@@ -1089,9 +1131,10 @@ fn main() -> anyhow::Result<()> {
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
             .unwrap_or("policy");
-        let record = args.record.clone().unwrap_or_else(|| {
-            format!("records-rl/{run}_s{}_{}.json", args.stage, args.seed)
-        });
+        let record = args
+            .record
+            .clone()
+            .unwrap_or_else(|| format!("records-rl/{run}_s{}_{}.json", args.stage, args.seed));
         return watch::run_watch(watch::WatchConfig {
             policy,
             record: std::path::PathBuf::from(record),
@@ -1151,6 +1194,7 @@ fn main() -> anyhow::Result<()> {
         curriculum_schedule,
         migrate_v81_stage5_to_v811: args.migrate_v81_stage5_to_v811,
         migrate_v811_stage5_to_v82: args.migrate_v811_stage5_to_v82,
+        migrate_v82_to_v83: args.migrate_v82_to_v83,
         stage_env_targets,
         max_episode_ticks: args.max_episode_ticks,
         rollout_len: args.rollout_len,
