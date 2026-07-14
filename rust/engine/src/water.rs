@@ -291,7 +291,7 @@ pub fn coerce_shore_to_water(map: &GameMap, tile: TileRef) -> Option<TileRef> {
 }
 
 pub(crate) struct AstarHeap {
-    f: Vec<u32>,
+    f: Vec<f32>,
     tile: Vec<TileRef>,
 }
 
@@ -313,20 +313,21 @@ impl AstarHeap {
     }
 
     pub(crate) fn push(&mut self, tile: TileRef, priority: u32) {
+        // TS `MinHeap` stores priorities in a Float32Array, so comparisons use
+        // f32-rounded values even when callers compute integer f-scores.
+        let priority = priority as f32;
         let mut i = self.f.len();
-        self.f.push(0);
-        self.tile.push(0);
+        self.f.push(priority);
+        self.tile.push(tile);
         while i > 0 {
             let parent = (i - 1) >> 1;
-            if priority >= self.f[parent] {
+            if self.f[parent] <= self.f[i] {
                 break;
             }
-            self.f[i] = self.f[parent];
-            self.tile[i] = self.tile[parent];
+            self.f.swap(parent, i);
+            self.tile.swap(parent, i);
             i = parent;
         }
-        self.f[i] = priority;
-        self.tile[i] = tile;
     }
 
     pub(crate) fn pop(&mut self) -> TileRef {
@@ -336,6 +337,8 @@ impl AstarHeap {
         if self.f.is_empty() {
             return top;
         }
+        self.f[0] = last_f;
+        self.tile[0] = last_tile;
         let mut i = 0usize;
         loop {
             let left = (i << 1) + 1;
@@ -343,20 +346,56 @@ impl AstarHeap {
                 break;
             }
             let right = left + 1;
-            let mut smallest = left;
-            if right < self.f.len() && self.f[right] < self.f[left] {
+            let mut smallest = i;
+            if self.f[left] < self.f[smallest] {
+                smallest = left;
+            }
+            if right < self.f.len() && self.f[right] < self.f[smallest] {
                 smallest = right;
             }
-            if last_f <= self.f[smallest] {
+            if smallest == i {
                 break;
             }
-            self.f[i] = self.f[smallest];
-            self.tile[i] = self.tile[smallest];
+            self.f.swap(smallest, i);
+            self.tile.swap(smallest, i);
             i = smallest;
         }
-        self.f[i] = last_f;
-        self.tile[i] = last_tile;
         top
+    }
+}
+
+#[cfg(test)]
+mod astar_heap_tests {
+    use super::AstarHeap;
+
+    #[test]
+    fn equal_priorities_match_ts_minheap_structure_order() {
+        let mut heap = AstarHeap::new(8);
+        for tile in [10u32, 20, 30, 40] {
+            heap.push(tile, 1);
+        }
+
+        let mut out = Vec::new();
+        while !heap.is_empty() {
+            out.push(heap.pop());
+        }
+
+        // Equal priorities do not form a FIFO queue; this is the exact order
+        // produced by TS MinHeap's strict bubble-down comparisons.
+        assert_eq!(out, vec![10, 40, 30, 20]);
+    }
+
+    #[test]
+    fn priorities_are_compared_at_ts_float32_precision() {
+        let mut heap = AstarHeap::new(4);
+
+        heap.push(1, 16_777_217);
+        heap.push(2, 16_777_216);
+
+        // Float32Array rounds both priorities to 16_777_216. With exact u32
+        // storage the second push would bubble above the first.
+        assert_eq!(heap.pop(), 1);
+        assert_eq!(heap.pop(), 2);
     }
 }
 
@@ -425,7 +464,8 @@ pub fn astar_water_path_into(
         let dx_n = nx as i32 - goal_x as i32;
         let dy_n = ny as i32 - goal_y as i32;
         let cross = (dx_goal * dy_n - dy_goal * dx_n).unsigned_abs();
-        ((cross * (COST_SCALE - 1)) / cross_norm / cross_norm) as u32
+        ((cross as f64 * (COST_SCALE - 1) as f64) / cross_norm as f64 / cross_norm as f64).floor()
+            as u32
     };
 
     scratch.heap.clear();
@@ -586,7 +626,8 @@ pub fn bounded_water_path(
         let dx_n = nx as i32 - goal_x as i32;
         let dy_n = ny as i32 - goal_y as i32;
         let cross = (dx_goal * dy_n - dy_goal * dx_n).unsigned_abs();
-        ((cross * (COST_SCALE - 1)) / cross_norm / cross_norm) as u32
+        ((cross as f64 * (COST_SCALE - 1) as f64) / cross_norm as f64 / cross_norm as f64).floor()
+            as u32
     };
 
     heap.clear();

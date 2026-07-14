@@ -688,6 +688,36 @@ pub const V811_ENV_TARGETS: [usize; 12] = [24, 24, 24, 24, 24, 24, 24, 12, 10, 8
 /// safely grows back to 12 when the player count resets from 80 to 30.
 pub const V82_ENV_TARGETS: [usize; 14] = [24, 24, 24, 24, 24, 16, 12, 10, 12, 10, 8, 8, 8, 8];
 pub const V83_ENV_TARGETS: [usize; 15] = [24, 24, 24, 24, 24, 24, 16, 12, 10, 12, 10, 8, 8, 8, 8];
+
+/// `(bots, nations)` for each V8.3 stage. Ratios stay ~6–8× bots over
+/// nations so maps with large manifests (World/Europe) never invert the
+/// intended OpenFront mix under `Nations::Default`.
+pub const V83_BOT_NATION_DENSITY: [(u32, u32); 15] = [
+    (30, 5),   // 0 Onion Easy — normal small lobby
+    (30, 5),   // 1 Onion Easy
+    (40, 5),   // 2 Onion/Pangaea Easy
+    (50, 6),   // 3 Pangaea/Caucasus Easy
+    (80, 10),  // 4 three-map Easy
+    (50, 6),   // 5 closeout Easy
+    (80, 10),  // 6 eight-map Easy bridge
+    (100, 12), // 7 broad Easy
+    (120, 15), // 8 broad Easy
+    (100, 12), // 9 Medium (was 30 bots + Default — inverted on World)
+    (120, 15), // 10 Medium
+    (150, 20), // 11 Medium
+    (150, 20), // 12 Hard
+    (180, 25), // 13 Hard
+    (200, 30), // 14 Impossible — normal large lobby
+];
+
+fn apply_v83_bot_heavy_density(stages: &mut [Stage]) {
+    debug_assert_eq!(stages.len(), V83_BOT_NATION_DENSITY.len());
+    for (stage, &(bots, nations)) in stages.iter_mut().zip(V83_BOT_NATION_DENSITY.iter()) {
+        stage.bots = bots;
+        stage.nations = Nations::Exact(nations);
+    }
+}
+
 /// V9 envs/GPU. Early Onion bot-food maps stay saturated; later 200–350-bot
 /// broad-pool stages drop toward 8 like V8.3 as sim cost grows.
 pub const V9_ENV_TARGETS: [usize; 25] = [
@@ -930,6 +960,11 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
                         win_at: 0.45,
                     },
                 );
+                // OpenFront games are bot-heavy: ~30 bots / ~5 nations on
+                // small maps, ~200 bots / ~30 nations at world scale. Never
+                // start nation-only (bots=0), and never let Nations::Default
+                // outnumber bots on World/Europe (50–72 nations).
+                apply_v83_bot_heavy_density(&mut stages);
             }
         }
         CurriculumSchedule::V9 => {
@@ -1983,15 +2018,55 @@ mod curriculum_v81_tests {
     fn v83_inserts_exact_closeout_stage_and_shifts_v82_tail() {
         let v82 = stages_for_schedule(CurriculumSchedule::V82);
         let v83 = stages_for_schedule(CurriculumSchedule::V83);
-        assert_eq!(&v83[..5], &v82[..5]);
         assert_eq!(v83.len(), 15);
+        // Maps / difficulty / gates still follow the V8.2 ladder + closeout
+        // insert; only bot/nation density is rewritten for OpenFront realism.
+        for index in 0..5 {
+            assert_eq!(v83[index].maps, v82[index].maps, "stage {index} maps");
+            assert_eq!(
+                v83[index].difficulty, v82[index].difficulty,
+                "stage {index} difficulty"
+            );
+            assert_eq!(v83[index].win_at, v82[index].win_at, "stage {index} win_at");
+            assert_eq!(
+                v83[index].decision_ticks, v82[index].decision_ticks,
+                "stage {index} decision_ticks"
+            );
+        }
         assert_eq!(v83[5].maps, &["Onion", "Pangaea", "Caucasus"]);
-        assert_eq!(v83[5].bots, 10);
         assert_eq!(v83[5].difficulty, "Easy");
-        assert_eq!(v83[5].nations, Nations::Exact(6));
         assert_eq!(v83[5].decision_ticks, 10);
         assert_eq!(v83[5].win_at, 0.45);
-        assert_eq!(&v83[6..], &v82[5..]);
+        for (index, stage) in v83[6..].iter().enumerate() {
+            let v82_stage = &v82[index + 5];
+            assert_eq!(stage.maps, v82_stage.maps, "stage {} maps", index + 6);
+            assert_eq!(
+                stage.difficulty, v82_stage.difficulty,
+                "stage {} difficulty",
+                index + 6
+            );
+            assert_eq!(stage.win_at, v82_stage.win_at, "stage {} win_at", index + 6);
+        }
+        for (index, (stage, &(bots, nations))) in
+            v83.iter().zip(V83_BOT_NATION_DENSITY.iter()).enumerate()
+        {
+            assert_eq!(stage.bots, bots, "stage {index} bots");
+            assert_eq!(
+                stage.nations,
+                Nations::Exact(nations),
+                "stage {index} nations"
+            );
+            assert!(
+                stage.bots > nations * 5,
+                "stage {index}: bots {} should stay >> nations {}",
+                stage.bots,
+                nations
+            );
+        }
+        assert_eq!(v83[0].bots, 30);
+        assert_eq!(v83[0].nations, Nations::Exact(5));
+        assert_eq!(v83[14].bots, 200);
+        assert_eq!(v83[14].nations, Nations::Exact(30));
         assert_eq!(
             V83_ENV_TARGETS,
             [24, 24, 24, 24, 24, 24, 16, 12, 10, 12, 10, 8, 8, 8, 8]
