@@ -1022,7 +1022,7 @@ fn nation_attack_best_target(
                 return true;
             }
             if let Some(attacker) = find_incoming_attacker(game, attacker_small_id) {
-                return nation_try_attack_player(
+                if nation_try_attack_player(
                     game,
                     random,
                     attacker_small_id,
@@ -1033,7 +1033,9 @@ fn nation_attack_best_target(
                     difficulty,
                     emoji.as_deref_mut(),
                     true,
-                );
+                ) {
+                    return true;
+                }
             }
             if nation_strategy_assist(
                 game,
@@ -1108,7 +1110,7 @@ fn nation_attack_best_target(
                 return true;
             }
             if let Some(attacker) = find_incoming_attacker(game, attacker_small_id) {
-                return nation_try_attack_player(
+                if nation_try_attack_player(
                     game,
                     random,
                     attacker_small_id,
@@ -1119,7 +1121,9 @@ fn nation_attack_best_target(
                     difficulty,
                     emoji.as_deref_mut(),
                     true,
-                );
+                ) {
+                    return true;
+                }
             }
             if nation_strategy_assist(
                 game,
@@ -1223,7 +1227,9 @@ fn nation_attack_best_target(
                 return true;
             }
             if let Some(attacker) = find_incoming_attacker(game, attacker_small_id) {
-                return nation_try_attack_player(game, random, attacker_small_id, attacker, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, emoji.as_deref_mut(), true);
+                if nation_try_attack_player(game, random, attacker_small_id, attacker, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, emoji.as_deref_mut(), true) {
+                    return true;
+                }
             }
             if nation_strategy_assist(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, emoji.as_deref_mut()) {
                 return true;
@@ -1262,7 +1268,9 @@ fn nation_attack_best_target(
         // than falling back to a shared default.
         _ => {
             if let Some(attacker) = find_incoming_attacker(game, attacker_small_id) {
-                return nation_try_attack_player(game, random, attacker_small_id, attacker, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, emoji.as_deref_mut(), true);
+                if nation_try_attack_player(game, random, attacker_small_id, attacker, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty, emoji.as_deref_mut(), true) {
+                    return true;
+                }
             }
             if attack_bots(game, random, attacker_small_id, reserve_ratio, expand_ratio, bot_attack_troops_sent, difficulty) {
                 return true;
@@ -2927,6 +2935,70 @@ mod ai_attack_nuked_territory_tests {
         for a in &attacks {
             assert_eq!(a.1, enemy, "expected retaliation against the enemy, not TerraNullius");
         }
+    }
+
+    #[test]
+    fn failed_retaliation_continues_to_later_strategy() {
+        let Some(mut game) = new_game(
+            "Medium",
+            Some(vec![crate::core::schemas::unit_type::TRANSPORT.to_string()]),
+        ) else {
+            return;
+        };
+        let nation = add_player(&mut game, "nation_id", PlayerType::Nation);
+        let weak_enemy = add_player(&mut game, "weak_enemy_id", PlayerType::Nation);
+        let remote_attacker = add_player(&mut game, "remote_attacker_id", PlayerType::Nation);
+
+        conquer_rect(&mut game, weak_enemy, 40, 60, 60, 80);
+        conquer_rect(&mut game, nation, 60, 60, 80, 80);
+        conquer_rect(&mut game, remote_attacker, 120, 60, 140, 80);
+        game.add_troops(nation, 100_000.0);
+        game.add_troops(weak_enemy, 1_000.0);
+        game.add_troops(remote_attacker, 10_000.0);
+
+        // Active source-tile attack, like a landed transport attack, but the
+        // attacker itself is not land-adjacent and transports are disabled, so
+        // `retaliate` finds a target but `sendAttack` returns false.
+        let nation_id = game.player_by_small_id(nation).unwrap().id.clone();
+        let source_tile = game.ref_xy(60, 60);
+        game.add_land_attack_from(
+            remote_attacker,
+            Some(nation_id),
+            Some(10_000.0),
+            Some(source_tile),
+        );
+        game.execute_next_tick();
+        assert_eq!(find_incoming_attacker(&game, nation), Some(remote_attacker));
+
+        let before = game.active_attacks_debug();
+        let mut random = PseudoRandom::new(42);
+        let mut sent = 0.0;
+        assert!(
+            nation_attack_best_target(
+                &mut game,
+                &mut random,
+                nation,
+                0.0,
+                0.0,
+                0.0,
+                &mut sent,
+                "Medium",
+                &[weak_enemy],
+                None,
+            ),
+            "failed retaliation should not suppress later TS strategies"
+        );
+        game.execute_next_tick();
+
+        let attacks = new_outgoing_attacks(&game, nation, &before);
+        assert!(
+            attacks.iter().any(|a| a.1 == weak_enemy),
+            "expected fallback weakest attack, got {attacks:?}"
+        );
+        assert!(
+            attacks.iter().all(|a| a.1 != remote_attacker),
+            "remote retaliation should be unreachable with transports disabled: {attacks:?}"
+        );
     }
 
     #[test]
