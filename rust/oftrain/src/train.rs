@@ -350,6 +350,8 @@ pub struct Config {
     /// legacy `.ot` VarStore dump without restoring `TrainState`
     /// (BC→RL / exported weights). Ignored when `resume` is also set.
     pub init: Option<String>,
+    /// Explicit strict V8.1 -> recurrent V8.2 safetensors migration.
+    pub init_v81_recurrent: Option<String>,
     /// `--resume`: path to a previously-saved `.safetensors` (preferred) or
     /// legacy `.ot` weights file (its training-state sidecar is found by
     /// swapping the extension for `.state.json` - see `TrainState`).
@@ -396,6 +398,12 @@ pub struct Config {
 /// to write every checkpoint without it being the bottleneck.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TrainState {
+    /// Architecture/checkpoint contract. Recurrent full resumes require 2.
+    #[serde(default)]
+    pub checkpoint_schema_version: u32,
+    /// Per-environment hidden state reset semantics.
+    #[serde(default)]
+    pub hidden_reset_policy: String,
     pub update: u64,
     pub stage: usize,
     pub ent_scale: f64,
@@ -514,6 +522,76 @@ fn state_sidecar_path(ckpt_path: &str) -> String {
     format!("{stem}.state.json")
 }
 
+fn manifest_path(ckpt_path: &str) -> std::path::PathBuf {
+    std::path::Path::new(ckpt_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("manifest.json")
+}
+
+fn read_architecture_manifest(ckpt_path: &str, expected_schema: u64) -> Result<serde_json::Value> {
+    anyhow::ensure!(
+        ckpt_path.ends_with(".safetensors"),
+        "schema-aware policy loading requires a .safetensors checkpoint"
+    );
+    let path = manifest_path(ckpt_path);
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| anyhow!("checkpoint manifest {} is required: {error}", path.display()))?;
+    let manifest: serde_json::Value = serde_json::from_str(&text)?;
+    anyhow::ensure!(manifest["format"] == "oftrain-safetensors", "unsupported checkpoint format");
+    anyhow::ensure!(manifest["manifest_schema_version"] == 1, "unsupported manifest schema");
+    anyhow::ensure!(
+        manifest["architecture"]["schema_version"] == expected_schema,
+        "checkpoint architecture schema mismatch: expected v{expected_schema}, found {}",
+        manifest["architecture"]["schema_version"]
+    );
+    Ok(manifest)
+}
+
+pub(crate) fn warm_start_v81_recurrent(vs: &nn::VarStore, checkpoint: &str) -> Result<()> {
+    let _ = read_architecture_manifest(checkpoint, 1)?;
+    let source: std::collections::HashMap<_, _> =
+        Tensor::read_safetensors(checkpoint)?.into_iter().collect();
+    let destination = vs.variables();
+    let source_names: std::collections::HashSet<_> = source.keys().cloned().collect();
+    let destination_names: std::collections::HashSet<_> = destination.keys().cloned().collect();
+    let extra: Vec<_> = source_names.difference(&destination_names).cloned().collect();
+    let missing: Vec<_> = destination_names.difference(&source_names).cloned().collect();
+    anyhow::ensure!(extra.is_empty(), "V8.1 checkpoint has unexpected tensors: {extra:?}");
+    anyhow::ensure!(
+        !missing.is_empty() && missing.iter().all(|name| name.starts_with("recurrent.")),
+        "V8.1 migration may initialize only recurrent tensors; missing={missing:?}"
+    );
+    anyhow::ensure!(
+        source.keys().all(|name| !name.starts_with("recurrent.")),
+        "--init-v81-recurrent requires a non-recurrent V8.1 checkpoint"
+    );
+    for (name, source_tensor) in &source {
+        let mut target = destination[name].shallow_clone();
+        anyhow::ensure!(
+            source_tensor.size() == target.size(),
+            "V8.1 tensor shape mismatch for {name}: source {:?}, V8.2 {:?}",
+            source_tensor.size(),
+            target.size()
+        );
+        anyhow::ensure!(
+            source_tensor.kind() == target.kind(),
+            "V8.1 tensor dtype mismatch for {name}: source {:?}, V8.2 {:?}",
+            source_tensor.kind(),
+            target.kind()
+        );
+        tch::no_grad(|| target.f_copy_(source_tensor))?;
+        anyhow::ensure!(target.equal(source_tensor), "V8.1 tensor copy was not exact: {name}");
+    }
+    for name in ["recurrent.residual.weight", "recurrent.residual.bias"] {
+        anyhow::ensure!(
+            destination[name].abs().max().double_value(&[]) == 0.0,
+            "zero-residual initialization was not preserved for {name}"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod sidecar_path_tests {
     use super::{atomic_tmp_path, state_sidecar_path};
@@ -574,6 +652,8 @@ mod v81_state_and_gate_tests {
     #[test]
     fn train_state_round_trips_v81_sizing_and_reads_legacy_sidecars() {
         let state = TrainState {
+            checkpoint_schema_version: 1,
+            hidden_reset_policy: "none".to_string(),
             update: 41,
             stage: 6,
             ent_scale: 1.2,
@@ -601,6 +681,8 @@ mod v81_state_and_gate_tests {
         )
         .unwrap();
         assert!(!legacy.v81_curriculum);
+        assert_eq!(legacy.checkpoint_schema_version, 0);
+        assert!(legacy.hidden_reset_policy.is_empty());
         assert_eq!(legacy.schedule().unwrap(), ofcore::curriculum::CurriculumSchedule::Legacy);
         assert!(legacy.stage_env_targets.is_empty());
         assert_eq!(legacy.requested_env_target, None);
@@ -609,6 +691,8 @@ mod v81_state_and_gate_tests {
     #[test]
     fn policy_manifest_is_machine_readable_and_versioned() {
         let state = TrainState {
+            checkpoint_schema_version: 2,
+            hidden_reset_policy: "episode_done".to_string(),
             update: 81,
             stage: 4,
             ent_scale: 1.0,
@@ -626,13 +710,22 @@ mod v81_state_and_gate_tests {
         let manifest = policy_manifest_value(
             128,
             2,
+            true,
+            256,
+            16,
+            32,
             "weights/ae/fine.encoder.safetensors",
             Some("weights/ae/coarse.encoder.safetensors"),
             &state,
         );
         assert_eq!(manifest["format"], "oftrain-safetensors");
         assert_eq!(manifest["manifest_schema_version"], 1);
-        assert_eq!(manifest["architecture"]["schema_version"], 1);
+        assert_eq!(manifest["architecture"]["schema_version"], 2);
+        assert_eq!(manifest["architecture"]["recurrent"]["hidden_size"], 256);
+        assert_eq!(manifest["architecture"]["recurrent"]["context_schema"], "action-outcome-v1");
+        assert_eq!(manifest["architecture"]["recurrent"]["context_features"], 14);
+        assert_eq!(manifest["architecture"]["recurrent"]["bptt_length"], 16);
+        assert_eq!(manifest["architecture"]["recurrent"]["rollout_length"], 32);
         assert_eq!(
             manifest["architecture"]["dimensions"]["grid_channels"],
             policy::C_GRID
@@ -680,6 +773,8 @@ mod v81_state_and_gate_tests {
 
     fn state_for_schedule(id: Option<&str>, v81: bool, stage: usize) -> TrainState {
         TrainState {
+            checkpoint_schema_version: 1,
+            hidden_reset_policy: "none".to_string(),
             update: 1,
             stage,
             ent_scale: 1.0,
@@ -771,35 +866,54 @@ fn save_checkpoint_state(path: &str, state: &TrainState) -> Result<()> {
 fn policy_manifest_value(
     gc: i64,
     blocks: i64,
+    recurrent_policy: bool,
+    recurrent_hidden_size: usize,
+    bptt_chunk_len: usize,
+    rollout_len: usize,
     ae_ckpt: &str,
     coarse_ckpt: Option<&str>,
     state: &TrainState,
 ) -> serde_json::Value {
+    let mut architecture = serde_json::json!({
+        "name": "oftrain-policy",
+        "schema_version": 1,
+        "dimensions": {
+            "grid_channels": policy::C_GRID,
+            "fine_grid_channels": policy::C_GRID_FINE,
+            "player_features": policy::P_FEAT,
+            "scalars": policy::N_SCALARS,
+            "local_planes": policy::N_LOCAL,
+            "actions": policy::N_ACTIONS,
+            "build_types": policy::N_BUILD,
+            "nuke_types": policy::N_NUKE,
+            "quantity_params": 2,
+            "grid_tower_channels": gc,
+            "grid_tower_blocks": blocks,
+            "hidden": policy::HIDDEN,
+            "player_hidden": policy::PC,
+            "local_hidden": policy::LC,
+            "transformer_layers": policy::TF_LAYERS,
+            "attention_heads": policy::N_HEAD,
+        },
+    });
+    if recurrent_policy {
+        architecture["schema_version"] = 2.into();
+        architecture["recurrent"] = serde_json::json!({
+            "cell": "gru",
+            "hidden_size": recurrent_hidden_size,
+            "context_schema": policy::RECURRENT_CONTEXT_SCHEMA,
+            "context_features": policy::RECURRENT_CONTEXT_FLOATS,
+            "context_embedding": policy::RECURRENT_CONTEXT_EMBEDDED,
+            "bptt_length": bptt_chunk_len,
+            "rollout_length": rollout_len,
+            "residual_initialization": "zero-output-projection",
+            "hidden_reset_policy": "episode_done",
+        });
+    }
     serde_json::json!({
         "format": "oftrain-safetensors",
         "manifest_schema_version": 1,
-        "architecture": {
-            "name": "oftrain-policy",
-            "schema_version": 1,
-            "dimensions": {
-                "grid_channels": policy::C_GRID,
-                "fine_grid_channels": policy::C_GRID_FINE,
-                "player_features": policy::P_FEAT,
-                "scalars": policy::N_SCALARS,
-                "local_planes": policy::N_LOCAL,
-                "actions": policy::N_ACTIONS,
-                "build_types": policy::N_BUILD,
-                "nuke_types": policy::N_NUKE,
-                "quantity_params": 2,
-                "grid_tower_channels": gc,
-                "grid_tower_blocks": blocks,
-                "hidden": policy::HIDDEN,
-                "player_hidden": policy::PC,
-                "local_hidden": policy::LC,
-                "transformer_layers": policy::TF_LAYERS,
-                "attention_heads": policy::N_HEAD,
-            },
-        },
+        "architecture": architecture,
         "autoencoders": {
             "fine": {"ref": ae_ckpt, "format": "safetensors"},
             "coarse": coarse_ckpt.map(|reference| {
@@ -821,6 +935,10 @@ fn save_policy_manifest(cfg: &Config, state: &TrainState) -> Result<()> {
     let manifest = policy_manifest_value(
         cfg.gc,
         cfg.blocks,
+        cfg.recurrent_policy,
+        cfg.recurrent_hidden_size,
+        cfg.bptt_chunk_len,
+        cfg.rollout_len,
         &cfg.ae_ckpt,
         cfg.coarse_ckpt.as_deref(),
         state,
@@ -3375,6 +3493,8 @@ mod async_eval_tests {
         })
         .unwrap();
         let state = TrainState {
+            checkpoint_schema_version: 1,
+            hidden_reset_policy: "none".to_string(),
             update: 8,
             stage: 2,
             ent_scale: 1.0,
@@ -5331,6 +5451,29 @@ pub fn run(mut cfg: Config) -> Result<()> {
     // TrainState; `--init` is warm-start only (fresh counters/stage).
     let mut resumed_state: Option<TrainState> = None;
     let mut hub_vs: Option<nn::VarStore> = if let Some(resume_path) = &cfg.resume {
+        if cfg.recurrent_policy {
+            let manifest = read_architecture_manifest(resume_path, 2)?;
+            let recurrent = &manifest["architecture"]["recurrent"];
+            anyhow::ensure!(recurrent["cell"] == "gru", "V8.2 resume requires a GRU manifest");
+            anyhow::ensure!(
+                recurrent["hidden_size"] == cfg.recurrent_hidden_size,
+                "V8.2 recurrent hidden-size mismatch"
+            );
+            anyhow::ensure!(
+                recurrent["context_schema"] == policy::RECURRENT_CONTEXT_SCHEMA
+                    && recurrent["context_features"] == policy::RECURRENT_CONTEXT_FLOATS,
+                "V8.2 recurrent context schema mismatch"
+            );
+            anyhow::ensure!(
+                recurrent["bptt_length"] == cfg.bptt_chunk_len
+                    && recurrent["rollout_length"] == cfg.rollout_len,
+                "V8.2 recurrent BPTT/rollout configuration mismatch"
+            );
+            anyhow::ensure!(
+                recurrent["hidden_reset_policy"] == "episode_done",
+                "unsupported V8.2 hidden reset policy"
+            );
+        }
         let mut snapshot = nn::VarStore::new(Device::Cpu);
         let _ = PolicyNet::new_with_recurrence(
             &snapshot.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks, cfg.recurrent_policy,
@@ -5339,6 +5482,9 @@ pub fn run(mut cfg: Config) -> Result<()> {
         let state_path = state_sidecar_path(resume_path);
         resumed_state = match std::fs::read_to_string(&state_path) {
             Ok(s) => Some(serde_json::from_str(&s)?),
+            Err(e) if cfg.recurrent_policy => {
+                anyhow::bail!("V8.2 resume requires TrainState sidecar {state_path}: {e}")
+            }
             Err(e) => {
                 println!(
                     "[train] WARNING: resuming weights from {resume_path} but no readable state \
@@ -5348,6 +5494,16 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 None
             }
         };
+        if let Some(state) = resumed_state.as_ref().filter(|_| cfg.recurrent_policy) {
+            anyhow::ensure!(
+                state.checkpoint_schema_version == 2,
+                "V8.2 resume requires TrainState checkpoint_schema_version=2"
+            );
+            anyhow::ensure!(
+                state.hidden_reset_policy == "episode_done",
+                "V8.2 resume requires TrainState hidden_reset_policy=episode_done"
+            );
+        }
         println!(
             "[train] resumed weights from {resume_path}{}",
             resumed_state
@@ -5359,20 +5515,26 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 .unwrap_or_default()
         );
         Some(snapshot)
+    } else if let Some(init_path) = &cfg.init_v81_recurrent {
+        let snapshot = nn::VarStore::new(Device::Cpu);
+        let _ = PolicyNet::new_with_recurrence(
+            &snapshot.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks, true,
+        );
+        warm_start_v81_recurrent(&snapshot, init_path)?;
+        println!(
+            "[train] migrated V8.1 weights from {init_path} \
+             (--init-v81-recurrent; fresh TrainState / optimizer)"
+        );
+        Some(snapshot)
     } else if let Some(init_path) = &cfg.init {
+        if cfg.recurrent_policy {
+            let _ = read_architecture_manifest(init_path, 2)?;
+        }
         let mut snapshot = nn::VarStore::new(Device::Cpu);
         let _ = PolicyNet::new_with_recurrence(
             &snapshot.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks, cfg.recurrent_policy,
         );
-        if cfg.recurrent_policy {
-            let missing = snapshot.load_partial(init_path)?;
-            anyhow::ensure!(
-                missing.iter().all(|name| name.starts_with("recurrent.")),
-                "recurrent warm start is missing non-recurrent tensors: {missing:?}"
-            );
-        } else {
-            snapshot.load(init_path)?;
-        }
+        snapshot.load(init_path)?;
         println!(
             "[train] warm-started weights from {init_path} (--init; fresh TrainState / optimizer)"
         );
@@ -6139,6 +6301,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
             }
             let current_envs_per_shard = live_total_envs / devices.len();
             let state = TrainState {
+                checkpoint_schema_version: if cfg.recurrent_policy { 2 } else { 1 },
+                hidden_reset_policy: if cfg.recurrent_policy {
+                    "episode_done".to_string()
+                } else {
+                    "none".to_string()
+                },
                 update: update + 1,
                 stage: curr_stage,
                 ent_scale,
@@ -6303,6 +6471,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 total_env_steps,
             };
             let state = TrainState {
+                checkpoint_schema_version: if cfg.recurrent_policy { 2 } else { 1 },
+                hidden_reset_policy: if cfg.recurrent_policy {
+                    "episode_done".to_string()
+                } else {
+                    "none".to_string()
+                },
                 update: update + 1,
                 stage: curr_stage,
                 ent_scale,
@@ -6483,6 +6657,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
 
         if cfg.ckpt_every > 0 && (update % cfg.ckpt_every == 0) && update > 0 {
             let state = TrainState {
+                checkpoint_schema_version: if cfg.recurrent_policy { 2 } else { 1 },
+                hidden_reset_policy: if cfg.recurrent_policy {
+                    "episode_done".to_string()
+                } else {
+                    "none".to_string()
+                },
                 update: update + 1, // resume must start at the *next* update, not repeat this one
                 stage: curr_stage,
                 ent_scale,
@@ -6537,6 +6717,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
         }
     }
     let final_state = TrainState {
+        checkpoint_schema_version: if cfg.recurrent_policy { 2 } else { 1 },
+        hidden_reset_policy: if cfg.recurrent_policy {
+            "episode_done".to_string()
+        } else {
+            "none".to_string()
+        },
         update: cfg.updates,
         stage: curr_stage,
         ent_scale,
@@ -6831,6 +7017,7 @@ mod persistent_actor_tests {
             ckpt_every: 0,
             ckpt_dir: String::new(),
             init: None,
+            init_v81_recurrent: None,
             resume: None,
             resume_warmup_updates: 0,
             value_loss: ValueLoss::Mse,

@@ -51,6 +51,8 @@ pub const TF_LAYERS: i64 = 2;
 pub const RECURRENT_HIDDEN: i64 = 256;
 /// `ActionOutcome::as_floats` context width from actor commit 6468e46.
 pub const RECURRENT_CONTEXT_FLOATS: i64 = 14;
+pub const RECURRENT_CONTEXT_SCHEMA: &str = "action-outcome-v1";
+pub const RECURRENT_CONTEXT_EMBEDDED: i64 = 128;
 
 const CONTEXT_ACTION: i64 = 0;
 const CONTEXT_PLAYER: i64 = 1;
@@ -65,7 +67,6 @@ const CONTEXT_QUANTITY: i64 = 10;
 const CONTEXT_COMMITMENT_AGE: i64 = 11;
 const CONTEXT_HAD_ACTION: i64 = 12;
 const CONTEXT_TARGET_KIND: i64 = 13;
-const CONTEXT_EMBEDDED: i64 = 128;
 
 const MASKED_NEG: f64 = -1e9;
 
@@ -504,9 +505,17 @@ impl RecurrentCore {
         let target_kind = nn::embedding(p / "context_target_kind", 4, 8, Default::default());
         let build = nn::embedding(p / "context_build", N_BUILD + 1, 8, Default::default());
         let nuke = nn::embedding(p / "context_nuke", N_NUKE + 1, 8, Default::default());
-        let context = nn::linear(p / "context_projection", 80, CONTEXT_EMBEDDED, Default::default());
+        let context = nn::linear(
+            p / "context_projection",
+            80,
+            RECURRENT_CONTEXT_EMBEDDED,
+            Default::default(),
+        );
         let gru_input = nn::linear(
-            p / "gru_input", HIDDEN + CONTEXT_EMBEDDED, 3 * RECURRENT_HIDDEN, Default::default(),
+            p / "gru_input",
+            HIDDEN + RECURRENT_CONTEXT_EMBEDDED,
+            3 * RECURRENT_HIDDEN,
+            Default::default(),
         );
         let gru_hidden = nn::linear(
             p / "gru_hidden", RECURRENT_HIDDEN, 3 * RECURRENT_HIDDEN, Default::default(),
@@ -1656,13 +1665,6 @@ mod tests {
         ]).view([1, RECURRENT_CONTEXT_FLOATS]).repeat([batch, 1])
     }
 
-    fn copy_legacy_variables(source: &nn::VarStore, destination: &nn::VarStore) {
-        let destination = destination.variables();
-        tch::no_grad(|| for (name, value) in source.variables() {
-            destination[&name].shallow_clone().copy_(&value);
-        });
-    }
-
     fn assert_exact(actual: &Tensor, expected: &Tensor, name: &str) {
         let difference = (actual - expected).abs().max().double_value(&[]);
         assert_eq!(difference, 0.0, "{name} is not bit-identical");
@@ -1746,7 +1748,35 @@ mod tests {
         let recurrent_vs = nn::VarStore::new(Device::Cpu);
         let recurrent =
             PolicyNet::new_with_recurrence(&recurrent_vs.root(), false, false, 8, 1, true);
-        copy_legacy_variables(&base_vs, &recurrent_vs);
+        let recurrent_before: std::collections::HashMap<_, _> = recurrent_vs
+            .variables()
+            .into_iter()
+            .filter(|(name, _)| name.starts_with("recurrent."))
+            .map(|(name, tensor)| (name, tensor.copy()))
+            .collect();
+        let dir = std::env::temp_dir().join(format!(
+            "oftrain-v82-output-warm-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let checkpoint = dir.join("latest.safetensors");
+        base_vs.save(&checkpoint).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            r#"{"format":"oftrain-safetensors","manifest_schema_version":1,
+                 "architecture":{"schema_version":1}}"#,
+        ).unwrap();
+        crate::train::warm_start_v81_recurrent(
+            &recurrent_vs,
+            checkpoint.to_str().unwrap(),
+        ).unwrap();
+        for (name, expected) in recurrent_before {
+            assert!(
+                recurrent_vs.variables()[&name].equal(&expected),
+                "V8.1 migration changed new tensor {name}"
+            );
+        }
         let obs = synthetic_obs(Device::Cpu, 2, 6, 6);
         let expected = base.forward(&obs);
         let hidden = Tensor::randn([2, RECURRENT_HIDDEN], (Kind::Float, Device::Cpu));
@@ -1768,6 +1798,40 @@ mod tests {
         ] {
             assert_exact(actual, expected, name);
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn strict_v81_migration_rejects_missing_legacy_tensor() {
+        let base_vs = nn::VarStore::new(Device::Cpu);
+        let _base = PolicyNet::new(&base_vs.root(), false, false, 8, 1);
+        let recurrent_vs = nn::VarStore::new(Device::Cpu);
+        let _recurrent =
+            PolicyNet::new_with_recurrence(&recurrent_vs.root(), false, false, 8, 1, true);
+        let dir = std::env::temp_dir().join(format!(
+            "oftrain-v82-mismatch-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let checkpoint = dir.join("latest.safetensors");
+        let incomplete: Vec<_> = base_vs
+            .variables()
+            .into_iter()
+            .filter(|(name, _)| name != "head_action.weight")
+            .collect();
+        Tensor::write_safetensors(&incomplete, &checkpoint).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            r#"{"format":"oftrain-safetensors","manifest_schema_version":1,
+                 "architecture":{"schema_version":1}}"#,
+        ).unwrap();
+        let error = crate::train::warm_start_v81_recurrent(
+            &recurrent_vs,
+            checkpoint.to_str().unwrap(),
+        ).unwrap_err();
+        assert!(error.to_string().contains("only recurrent tensors"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

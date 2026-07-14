@@ -362,6 +362,16 @@ struct Args {
     #[arg(long)]
     init: Option<String>,
 
+    /// Explicit strict V8.1 schema-v1 safetensors migration into the
+    /// recurrent V8.2 policy. Existing tensors are copied exactly and only
+    /// `recurrent.*` tensors retain their V8.2 initialization.
+    #[arg(
+        long,
+        requires = "recurrent_policy",
+        conflicts_with_all = ["init", "resume"]
+    )]
+    init_v81_recurrent: Option<String>,
+
     /// Resume from a previously-saved checkpoint (e.g.
     /// `checkpoints/latest.safetensors`; legacy `.ot` still accepted).
     /// Restores weights and training state (curriculum stage,
@@ -694,6 +704,17 @@ mod recurrent_flag_tests {
         assert!(enabled.recurrent_policy);
         assert_eq!(enabled.recurrent_hidden_size, 128);
         assert_eq!(enabled.bptt_chunk_len, 32);
+
+        let warm = Args::try_parse_from([
+            "oftrain", "--persistent-actors", "--recurrent-policy",
+            "--init-v81-recurrent", "v81.safetensors",
+        ]).unwrap();
+        assert_eq!(warm.init_v81_recurrent.as_deref(), Some("v81.safetensors"));
+        assert!(Args::try_parse_from([
+            "oftrain", "--persistent-actors", "--recurrent-policy",
+            "--init-v81-recurrent", "v81.safetensors",
+            "--resume", "v81.safetensors",
+        ]).is_err());
     }
 }
 
@@ -963,6 +984,7 @@ fn main() -> anyhow::Result<()> {
         ckpt_every: args.ckpt_every,
         ckpt_dir: args.ckpt_dir,
         init: args.init,
+        init_v81_recurrent: args.init_v81_recurrent,
         resume: args.resume,
         resume_warmup_updates: args.resume_warmup_updates,
         value_loss: match args.value_loss.as_str() {

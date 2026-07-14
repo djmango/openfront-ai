@@ -27,6 +27,43 @@ class UnstableSourceError(RuntimeError):
     """A trainer output changed while it was being snapshotted."""
 
 
+def validate_manifest_bytes(body: bytes) -> dict[str, Any]:
+    """Validate checkpoint identity before a restore is made visible."""
+    manifest = json.loads(body)
+    if manifest.get("format") != "oftrain-safetensors":
+        raise ValueError("unsupported checkpoint format")
+    if manifest.get("manifest_schema_version") != 1:
+        raise ValueError("unsupported checkpoint manifest schema")
+    architecture = manifest.get("architecture")
+    if not isinstance(architecture, dict):
+        raise ValueError("missing checkpoint architecture")
+    schema = architecture.get("schema_version")
+    if schema not in {1, 2}:
+        raise ValueError(f"unsupported checkpoint architecture schema: {schema!r}")
+    if schema == 2:
+        recurrent = architecture.get("recurrent")
+        required = {
+            "cell": "gru",
+            "context_schema": "action-outcome-v1",
+            "residual_initialization": "zero-output-projection",
+            "hidden_reset_policy": "episode_done",
+        }
+        if not isinstance(recurrent, dict) or any(
+            recurrent.get(key) != value for key, value in required.items()
+        ):
+            raise ValueError("invalid recurrent architecture schema")
+        for positive in (
+            "hidden_size",
+            "context_features",
+            "context_embedding",
+            "bptt_length",
+            "rollout_length",
+        ):
+            if not isinstance(recurrent.get(positive), int) or recurrent[positive] <= 0:
+                raise ValueError(f"invalid recurrent {positive}")
+    return manifest
+
+
 def utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -223,30 +260,24 @@ class CheckpointSync:
 
 
 def restore_latest(api: Any, repo_id: str, run_prefix: str, destination: Path) -> bool:
-    """Restore only a complete safetensors latest pair plus optional manifest."""
+    """Restore only a complete, manifest-validated safetensors checkpoint."""
     prefix = normalize_prefix(run_prefix)
     destination.mkdir(parents=True, exist_ok=True)
     staged: dict[str, Path] = {}
     try:
-        for name in RESTORE_FILES[:2]:
+        for name in RESTORE_FILES:
             staged[name] = Path(
                 api.hf_hub_download(repo_id, f"{prefix}/{name}", repo_type="model")
             )
+        validate_manifest_bytes(staged["manifest.json"].read_bytes())
     except Exception as error:
-        print(f"[hf-sync] no complete safetensors checkpoint to restore: {error}")
+        print(f"[hf-sync] no complete compatible safetensors checkpoint to restore: {error}")
         return False
-    for name in RESTORE_FILES[:2]:
+    for name in RESTORE_FILES:
         target = destination / name
         tmp = target.with_name(f".{name}.restore.tmp")
         tmp.write_bytes(staged[name].read_bytes())
         os.replace(tmp, target)
-    try:
-        manifest = Path(
-            api.hf_hub_download(repo_id, f"{prefix}/manifest.json", repo_type="model")
-        )
-        (destination / "manifest.json").write_bytes(manifest.read_bytes())
-    except Exception:
-        pass
     print(f"[hf-sync] restored {prefix}/latest.safetensors and state")
     return True
 
