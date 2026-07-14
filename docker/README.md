@@ -14,13 +14,17 @@ View-only replay of the latest RL checkpoint by default, with an on-demand
 
 ## Flow
 
-**Watch (default):** `eval_daemon.py` keeps the latest `rl.watch` replay on HF
-policy changes. `/watch` opens it in the real client with the MODEL overlay.
+**Watch (default):** `ofshowcase daemon` keeps the latest `oftrain --watch`
+replay on HF policy changes. `/watch` opens it in the real client with the
+MODEL overlay.
 
-**Play (on click):** `showcase_hub.py` creates a private lobby (Onion, 1
-nation, 10 bots by default), launches `rl.play` for AgentRL, redirects you to
-the lobby. Set start delay to 90s in the host modal, wait for AgentRL, then
-Start Game.
+**Play (on click):** `ofshowcase hub` creates a private lobby (Onion, 1
+nation, 10 bots by default), launches `scripts/webbot_launcher.py` for the
+in-browser ONNX agent, redirects you to the lobby. Set start delay in the
+host modal, wait for AgentRL, then Start Game.
+
+**Archive:** `ofshowcase archive` serves GameRecords + clips for the client
+replay API (`/archive/*`).
 
 ## Run locally
 
