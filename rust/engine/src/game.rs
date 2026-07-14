@@ -3636,8 +3636,16 @@ impl Game {
         out
     }
 
-    pub fn too_close_to_existing_spawn(&self, center: TileRef, min_dist: u32) -> bool {
+    pub fn too_close_to_existing_spawn(
+        &self,
+        center: TileRef,
+        min_dist: u32,
+        except_small_id: Option<u16>,
+    ) -> bool {
         for p in &self.players {
+            if except_small_id == Some(p.small_id) {
+                continue;
+            }
             let Some(spawn) = p.spawn_tile else {
                 continue;
             };
@@ -4356,6 +4364,33 @@ mod conquer_gold_tests {
         game.conquer_player(1, 2);
         assert_eq!(game.player_by_small_id(1).unwrap().gold, 0);
         assert_eq!(game.player_by_small_id(2).unwrap().gold, 1000);
+    }
+}
+
+#[cfg(test)]
+mod spawn_distance_tests {
+    use super::Player;
+
+    #[test]
+    fn distance_check_can_ignore_current_player_previous_spawn() {
+        let mut game = crate::test_util::plains_game(20, 20);
+        game.add_player(Player {
+            id: "p1".into(),
+            small_id: 1,
+            spawn_tile: Some(game.ref_xy(10, 10)),
+            ..Default::default()
+        });
+        game.add_player(Player {
+            id: "p2".into(),
+            small_id: 2,
+            spawn_tile: Some(game.ref_xy(1, 1)),
+            ..Default::default()
+        });
+
+        let near_p1 = game.ref_xy(11, 10);
+        assert!(game.too_close_to_existing_spawn(near_p1, 5, None));
+        assert!(!game.too_close_to_existing_spawn(near_p1, 5, Some(1)));
+        assert!(game.too_close_to_existing_spawn(near_p1, 5, Some(2)));
     }
 }
 
