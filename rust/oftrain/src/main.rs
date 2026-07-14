@@ -123,7 +123,9 @@ struct Args {
     v81_churn_coef: f64,
 
     /// Number of prior decisions searched for a matching inverse action.
-    #[arg(long, default_value_t = 2)]
+    /// Default 16 matches BPTT length so delayed undos (boat → other → cancel)
+    /// are still attributed; 2 only caught immediately adjacent reversals.
+    #[arg(long, default_value_t = 16)]
     v81_churn_window: usize,
 
     /// First curriculum stage where the action-churn penalty may apply.
