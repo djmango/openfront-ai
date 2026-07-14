@@ -1181,7 +1181,7 @@ re-roll bug.</p>
     <code>sessionStorage</code> so a human tab and a bot tab in the same browser don't fight
     over <code>player_persistent_id</code>.</li>
   <li><code>scripts/webbot_launcher.py</code>: headless Chromium (Playwright) opens that URL;
-    <code>showcase_hub.py</code>'s <code>/play</code> launches it instead of
+    <code>ofshowcase hub</code>'s <code>/play</code> launches it instead of
     <code>rl.play</code>. A small HTTP sidecar on <code>--debug-port</code> serves
     <code>window.__webbotDebug</code> so the existing MODEL overlay keeps working.</li>
   <li>Deploy: forked <code>djmango/OpenFrontIO</code> (upstream submodule we can't push to),
@@ -2389,7 +2389,7 @@ from intents alone.</p>
   <li><code>scripts/render_client_replay.py</code>: headless Chromium replays the record in the
     <b>actual game client</b> → WebM with real graphics. Agent renders as AGENT with the gold spawn
     ring, crown when first, "You Won!" modal; camera starts fit to the whole map.</li>
-  <li><code>scripts/serve_replay.py</code>: archive-API shim so a normal browser replays agent
+  <li><code>ofshowcase archive</code>: archive-API shim so a normal browser replays agent
     records interactively.</li>
   <li>MODEL overlay (<code>RlDebugOverlay.ts</code>): in-client panel synced to the sim tick: chosen
     action, value, probability bars, recent-actions log. Works in rendered videos, browser replays,

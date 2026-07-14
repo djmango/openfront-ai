@@ -68,10 +68,10 @@ s = json.loads(p.read_text()) if p.exists() else {}
 s['hero_clips'] = []
 p.write_text(json.dumps(s, indent=2) + '\n')
 "
-docker exec openfront-eval pkill -f eval_daemon.py || true
+docker exec openfront-eval pkill -f 'ofshowcase daemon' || true
 sleep 2
-# entrypoint will not restart eval_daemon after pkill; start manually
-docker exec -d openfront-eval /app/.venv/bin/python scripts/eval_daemon.py
+# entrypoint will not restart ofshowcase daemon after pkill; start manually
+docker exec -d openfront-eval /app/rust/target/release/ofshowcase daemon
 
 echo "done. check: curl -s http://127.0.0.1:8086/status | python3 -m json.tool"
 echo "clips: ls -la $DATA/clips/"
