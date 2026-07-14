@@ -4,7 +4,7 @@ use crate::map::{GameMap, TileRef};
 use crate::water::AstarHeap;
 use std::collections::HashMap;
 
-pub const LAND_MARKER: u32 = 0xff;
+pub const LAND_MARKER: u32 = 0xffff;
 pub const CLUSTER_SIZE: u32 = 32;
 
 // ── Connected components (mini-map, TS `ConnectedComponents`) ───────────────
@@ -679,10 +679,6 @@ impl<'a> AbstractGraphBuilder<'a> {
             let node = self.tile_bfs.queue[head] as TileRef;
             head += 1;
             let dist = self.tile_bfs.dist[node as usize] as u32;
-            let next_dist = dist + 1;
-            if next_dist > max_distance {
-                continue;
-            }
 
             let x = node % width;
             let y = node / width;
@@ -696,6 +692,11 @@ impl<'a> AbstractGraphBuilder<'a> {
                 if found_count == target_len {
                     break;
                 }
+            }
+
+            let next_dist = dist + 1;
+            if next_dist > max_distance {
+                continue;
             }
 
             let try_push = |nb: TileRef, bfs: &mut BfsGrid, tail: &mut usize| {
@@ -850,7 +851,10 @@ impl BoundedWaterAstar {
             let dx_n = nx as i32 - goal_x as i32;
             let dy_n = ny as i32 - goal_y as i32;
             let cross = (dx_goal * dy_n - dy_goal * dx_n).unsigned_abs();
-            ((cross * (BOUNDED_COST_SCALE - 1)) / cross_norm / cross_norm) as u32
+            ((cross as f64 * (BOUNDED_COST_SCALE - 1) as f64)
+                / cross_norm as f64
+                / cross_norm as f64)
+                .floor() as u32
         };
 
         self.heap.clear();
