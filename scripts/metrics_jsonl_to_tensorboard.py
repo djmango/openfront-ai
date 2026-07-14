@@ -45,6 +45,10 @@ def numeric_items(value: Any, prefix: str = "") -> Iterator[tuple[str, float]]:
         for key, child in value.items():
             child_prefix = f"{prefix}/{key}" if prefix else str(key)
             yield from numeric_items(child, child_prefix)
+    elif isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            child_prefix = f"{prefix}/{index}" if prefix else str(index)
+            yield from numeric_items(child, child_prefix)
 
 
 def write_row(writer: Any, row: dict[str, Any], episode_step: int) -> int:

@@ -34,7 +34,7 @@ class MetricsBridgeTest(unittest.TestCase):
                 "stage": 2,
                 "loss/pg": 0.25,
                 "win_rate": None,
-                "gpu": {"util_pct": 97.0},
+                "gpu": {"util_pct": 97.0, "per_gpu": [96.0, 98.0]},
             },
             0,
         )
@@ -42,6 +42,7 @@ class MetricsBridgeTest(unittest.TestCase):
         self.assertIn(("loss/policy", 0.25, 1234), writer.scalars)
         self.assertIn(("curriculum/stage", 2.0, 1234), writer.scalars)
         self.assertIn(("gpu/util_pct", 97.0, 1234), writer.scalars)
+        self.assertIn(("gpu/per_gpu/1", 98.0, 1234), writer.scalars)
         self.assertFalse(any(tag == "win_rate" for tag, _, _ in writer.scalars))
 
     def test_episode_rows_get_monotonic_steps_and_reward_tags(self) -> None:
