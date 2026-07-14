@@ -273,6 +273,40 @@ pub const ALL_MAPS: [&str; 7] = [
     "Asia",
 ];
 
+/// Smaller V8.2 bridge pool: production maps with varied terrain and naval
+/// pressure, without introducing the largest world-scale maps all at once.
+pub const V82_STAGE5_MAPS: [&str; 8] = [
+    "Onion",
+    "Pangaea",
+    "Caucasus",
+    "BlackSea",
+    "BetweenTwoSeas",
+    "Europe",
+    "Scandinavia",
+    "GreatLakes",
+];
+
+/// Broad V8.2 pool. These are `GameMapType` enum keys (the values accepted
+/// by the Node bridge and normalized to asset-directory names by Rust).
+pub const V82_MAPS: [&str; 16] = [
+    "Onion",
+    "Pangaea",
+    "Caucasus",
+    "BlackSea",
+    "BetweenTwoSeas",
+    "Europe",
+    "Asia",
+    "World",
+    "NorthAmerica",
+    "SouthAmerica",
+    "Africa",
+    "Australia",
+    "EastAsia",
+    "MiddleEast",
+    "Scandinavia",
+    "GreatLakes",
+];
+
 /// Stable curriculum identities persisted in trainer checkpoints.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CurriculumSchedule {
@@ -280,6 +314,7 @@ pub enum CurriculumSchedule {
     Legacy,
     V81,
     V811,
+    V82,
 }
 
 impl CurriculumSchedule {
@@ -288,6 +323,7 @@ impl CurriculumSchedule {
             Self::Legacy => "legacy",
             Self::V81 => "v8.1",
             Self::V811 => "v8.1.1",
+            Self::V82 => "v8.2",
         }
     }
 
@@ -296,6 +332,7 @@ impl CurriculumSchedule {
             "legacy" => Some(Self::Legacy),
             "v8.1" => Some(Self::V81),
             "v8.1.1" => Some(Self::V811),
+            "v8.2" => Some(Self::V82),
             _ => None,
         }
     }
@@ -309,6 +346,12 @@ pub const V81_ENV_TARGETS: [usize; 11] = [24, 24, 24, 24, 24, 24, 12, 10, 8, 8, 
 /// V8.1.1 keeps the new same-map Medium bridge at the small-map target, then
 /// uses at most 12 envs/GPU once World/Asia enter the pool.
 pub const V811_ENV_TARGETS: [usize; 12] = [24, 24, 24, 24, 24, 24, 24, 12, 10, 8, 8, 8];
+
+/// V8.2 envs per GPU/shard. The eight-map bridge can sustain 16; the broad
+/// pool uses 12/10/8 as player count and simulation cost increase. Stage 8
+/// safely grows back to 12 when the player count resets from 80 to 30.
+pub const V82_ENV_TARGETS: [usize; 14] =
+    [24, 24, 24, 24, 24, 16, 12, 10, 12, 10, 8, 8, 8, 8];
 
 pub fn stages() -> Vec<Stage> {
     stages_for_schedule(CurriculumSchedule::Legacy)
@@ -447,6 +490,88 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
             for (stage, gate) in stages[4..].iter_mut().zip(gates) {
                 stage.win_at = gate;
             }
+        }
+        CurriculumSchedule::V82 => {
+            // Stages 0-4 retain the V8.1/V8.1.1 identities and gate. The
+            // 30-player/eight-map Easy bridge precedes broad-pool Easy at
+            // 50 and 80 players. Medium only begins after all three Easy
+            // loads, then repeats 30/50/80 before Hard and Impossible.
+            stages.truncate(5);
+            stages[4].win_at = 0.35;
+            stages.extend([
+                Stage {
+                    maps: &V82_STAGE5_MAPS,
+                    bots: 30,
+                    difficulty: "Easy",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.30,
+                },
+                Stage {
+                    maps: &V82_MAPS,
+                    bots: 50,
+                    difficulty: "Easy",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.25,
+                },
+                Stage {
+                    maps: &V82_MAPS,
+                    bots: 80,
+                    difficulty: "Easy",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.20,
+                },
+                Stage {
+                    maps: &V82_MAPS,
+                    bots: 30,
+                    difficulty: "Medium",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.25,
+                },
+                Stage {
+                    maps: &V82_MAPS,
+                    bots: 50,
+                    difficulty: "Medium",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.22,
+                },
+                Stage {
+                    maps: &V82_MAPS,
+                    bots: 80,
+                    difficulty: "Medium",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.20,
+                },
+                Stage {
+                    maps: &V82_MAPS,
+                    bots: 80,
+                    difficulty: "Hard",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.18,
+                },
+                Stage {
+                    maps: &V82_MAPS,
+                    bots: 120,
+                    difficulty: "Hard",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.15,
+                },
+                Stage {
+                    maps: &V82_MAPS,
+                    bots: 150,
+                    difficulty: "Impossible",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.12,
+                },
+            ]);
         }
     }
     stages
@@ -1000,5 +1125,78 @@ mod curriculum_v81_tests {
         assert_eq!(V811_ENV_TARGETS.len(), v811.len());
         assert_eq!(&V811_ENV_TARGETS[..7], &[24; 7]);
         assert!(V811_ENV_TARGETS[7..].iter().all(|&target| target <= 12));
+    }
+
+    #[test]
+    fn v82_preserves_stages_zero_through_four_and_uses_broad_progression() {
+        let v811 = stages_for_schedule(CurriculumSchedule::V811);
+        let v82 = stages_for_schedule(CurriculumSchedule::V82);
+        assert_eq!(&v82[..5], &v811[..5]);
+        assert_eq!(v82.len(), 14);
+
+        let expected = [
+            (30, "Easy", 0.30),
+            (50, "Easy", 0.25),
+            (80, "Easy", 0.20),
+            (30, "Medium", 0.25),
+            (50, "Medium", 0.22),
+            (80, "Medium", 0.20),
+            (80, "Hard", 0.18),
+            (120, "Hard", 0.15),
+            (150, "Impossible", 0.12),
+        ];
+        for (index, (stage, &(bots, difficulty, gate))) in
+            v82[5..].iter().zip(&expected).enumerate()
+        {
+            let expected_maps: &[&str] =
+                if index == 0 { &V82_STAGE5_MAPS } else { &V82_MAPS };
+            assert_eq!(stage.maps, expected_maps, "stage {} maps", index + 5);
+            assert_eq!(stage.bots, bots, "stage {} bots", index + 5);
+            assert_eq!(stage.difficulty, difficulty, "stage {} difficulty", index + 5);
+            assert_eq!(stage.win_at, gate, "stage {} gate", index + 5);
+            assert_eq!(stage.nations, Nations::Default);
+            assert_eq!(stage.decision_ticks, 10);
+        }
+    }
+
+    #[test]
+    fn v82_map_pool_and_env_targets_are_exact_and_versioned() {
+        assert_eq!(
+            V82_MAPS,
+            [
+                "Onion",
+                "Pangaea",
+                "Caucasus",
+                "BlackSea",
+                "BetweenTwoSeas",
+                "Europe",
+                "Asia",
+                "World",
+                "NorthAmerica",
+                "SouthAmerica",
+                "Africa",
+                "Australia",
+                "EastAsia",
+                "MiddleEast",
+                "Scandinavia",
+                "GreatLakes",
+            ]
+        );
+        let unique: std::collections::HashSet<_> = V82_MAPS.into_iter().collect();
+        assert_eq!(unique.len(), V82_MAPS.len());
+        assert!(V82_STAGE5_MAPS.iter().all(|map| V82_MAPS.contains(map)));
+        assert_eq!(
+            V82_ENV_TARGETS,
+            [24, 24, 24, 24, 24, 16, 12, 10, 12, 10, 8, 8, 8, 8]
+        );
+        assert_eq!(
+            V82_ENV_TARGETS.len(),
+            stages_for_schedule(CurriculumSchedule::V82).len()
+        );
+        assert_eq!(CurriculumSchedule::V82.id(), "v8.2");
+        assert_eq!(
+            CurriculumSchedule::from_id("v8.2"),
+            Some(CurriculumSchedule::V82)
+        );
     }
 }
