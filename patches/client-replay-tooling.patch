@@ -8,27 +8,34 @@ index 474ddc811..41d3087d9 100644
  import { translateText } from "../client/Utils";
  import { EventBus } from "../core/EventBus";
  import {
-@@ -829,6 +830,10 @@ export class ClientGameRunner {
+@@ -829,6 +830,17 @@ export class ClientGameRunner {
          this.eventBus.emit(new SendHashEvent(hu.tick, hu.hash));
        });
        this.gameView.update(gu);
 +      // RL replay tooling: expose the sim tick for the debug overlay.
 +      (window as { __replayTick?: number }).__replayTick =
 +        this.gameView.ticks();
++      // World tile -> screen CSS px for the action target marker.
++      (window as {
++        __worldToScreen?: (x: number, y: number) => { x: number; y: number };
++      }).__worldToScreen = (x, y) =>
++        this.renderer.transformHandler.worldToScreenCoordinates(
++          { x, y } as import("../core/game/Game").Cell,
++        );
 +      initRlDebugOverlay(this.lobby.gameID);
        this.webglBuilder?.update(this.gameView);
        this.renderer.tick();
  
-@@ -882,7 +887,9 @@ export class ClientGameRunner {
+@@ -882,7 +894,9 @@ export class ClientGameRunner {
                return;
              }
- 
+
 -            this.eventBus.emit(new GoToPlayerEvent(myPlayer, 10));
 +            if (this.userSettings.goToPlayer()) {
 +              this.eventBus.emit(new GoToPlayerEvent(myPlayer, 10));
 +            }
            };
- 
+
            goToPlayer();
 diff --git a/src/client/LocalServer.ts b/src/client/LocalServer.ts
 index 0304224bf..4bc0c5b0e 100644
@@ -79,14 +86,15 @@ new file mode 100644
 index 000000000..111111111
 --- /dev/null
 +++ b/src/client/RlDebugOverlay.ts
-@@ -0,0 +1,186 @@
+@@ -0,0 +1,263 @@
 +/**
 + * RL replay tooling: live model-debug panel.
 + *
 + * Fetches per-decision policy debug data (chosen action, action
 + * probabilities, value estimate) for the current game and renders a small
 + * draggable panel that follows the sim via window.__replayTick (set in
-+ * ClientGameRunner).
++ * ClientGameRunner). When the decision includes a tile target, draws a red
++ * X on the map at that world coordinate.
 + */
 +
 +interface RlDebugEntry {
@@ -97,6 +105,10 @@ index 000000000..111111111
 +  troops: number;
 +  value?: number;
 +  probs?: number[];
++  /** World tile x (optional; preferred over parsing desc). */
++  tile_x?: number;
++  /** World tile y (optional; preferred over parsing desc). */
++  tile_y?: number;
 +}
 +
 +interface RlDebugPayload {
@@ -105,10 +117,33 @@ index 000000000..111111111
 +  live?: boolean;
 +}
 +
++/** Region size used by the policy tile head (rl.obs.REGION). */
++const REGION = 8;
++
 +let initialized = false;
 +
 +function esc(s: string): string {
 +  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
++}
++
++/** Resolve world (x, y) from explicit fields or legacy `@(gx,gy)` in desc. */
++function entryTile(e: RlDebugEntry): { x: number; y: number } | null {
++  if (
++    typeof e.tile_x === "number" &&
++    typeof e.tile_y === "number" &&
++    Number.isFinite(e.tile_x) &&
++    Number.isFinite(e.tile_y)
++  ) {
++    return { x: e.tile_x, y: e.tile_y };
++  }
++  const m = /@\((-?\d+),(-?\d+)\)/.exec(e.desc);
++  if (!m) return null;
++  const gx = Number(m[1]);
++  const gy = Number(m[2]);
++  return {
++    x: gx * REGION + Math.floor(REGION / 2),
++    y: gy * REGION + Math.floor(REGION / 2),
++  };
 +}
 +
 +function makeDraggable(el: HTMLElement): void {
@@ -155,6 +190,53 @@ index 000000000..111111111
 +      // localStorage unavailable
 +    }
 +  });
++}
++
++function makeTargetMarker(): HTMLElement {
++  const marker = document.createElement("div");
++  marker.id = "rl-action-target";
++  marker.setAttribute("aria-hidden", "true");
++  marker.style.cssText =
++    "position:fixed;z-index:10004;pointer-events:none;display:none;" +
++    "width:28px;height:28px;margin-left:-14px;margin-top:-14px;" +
++    "color:#e02020;font:700 28px/28px ui-monospace,monospace;" +
++    "text-align:center;text-shadow:0 0 2px #000,0 0 4px #000,1px 1px 0 #000,-1px -1px 0 #000;" +
++    "transform:translateZ(0)";
++  marker.textContent = "✕";
++  document.body.appendChild(marker);
++  return marker;
++}
++
++function updateTargetMarker(
++  marker: HTMLElement,
++  e: RlDebugEntry | null,
++): void {
++  if (!e || e.action === "noop") {
++    marker.style.display = "none";
++    return;
++  }
++  const tile = entryTile(e);
++  if (!tile) {
++    marker.style.display = "none";
++    return;
++  }
++  const w2s = (
++    window as {
++      __worldToScreen?: (x: number, y: number) => { x: number; y: number };
++    }
++  ).__worldToScreen;
++  if (!w2s) {
++    marker.style.display = "none";
++    return;
++  }
++  try {
++    const screen = w2s(tile.x + 0.5, tile.y + 0.5);
++    marker.style.left = `${screen.x}px`;
++    marker.style.top = `${screen.y}px`;
++    marker.style.display = "block";
++  } catch {
++    marker.style.display = "none";
++  }
 +}
 +
 +export function initRlDebugOverlay(gameID: string): void {
@@ -205,6 +287,7 @@ index 000000000..111111111
 +    "box-shadow:0 8px 28px rgba(0,0,0,.45)";
 +  document.body.appendChild(el);
 +  makeDraggable(el);
++  const marker = makeTargetMarker();
 +
 +  let log = data.log;
 +  let idx = 0;
@@ -232,6 +315,7 @@ index 000000000..111111111
 +      }
 +    }
 +    const e = idx > 0 ? log[idx - 1] : null;
++    updateTargetMarker(marker, e);
 +    let html =
 +      '<b style="color:#fff;font-size:15px">MODEL</b> ' +
 +      `<span style="color:#787e8c;font-size:13px">tick ${t}</span><br>`;

@@ -249,7 +249,7 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
                     (p * 10000.0).round() / 10000.0
                 })
                 .collect();
-            debug_log.push(json!({
+            let mut entry = json!({
                 "tick": tick,
                 "desc": desc,
                 "action": ACTIONS[choice.action as usize],
@@ -257,7 +257,16 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
                 "troops": troops,
                 "value": value,
                 "probs": probs_v,
-            }));
+            });
+            // World tile for MODEL overlay red X (matches rl/watch.action_tile_xy).
+            if let Some(region) = choice.tile_region {
+                let gy = region / GW_MAX;
+                let gx = region % GW_MAX;
+                let r = feat::REGION as i64;
+                entry["tile_x"] = json!(gx * r + r / 2);
+                entry["tile_y"] = json!(gy * r + r / 2);
+            }
+            debug_log.push(entry);
         }
 
         worker.apply_watch(&choice)?;

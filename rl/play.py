@@ -29,7 +29,7 @@ from rl.obs import ACTIONS, ObsBuilder, encode_grids, load_ae
 from rl.policy import Policy
 from rl.ppo import OBS_KEYS
 from rl.ppo_translate import IntentTranslator, my_tiles
-from rl.watch import describe, load_policy_checkpoint
+from rl.watch import action_tile_xy, describe, load_policy_checkpoint
 
 
 class _EnvShim:
@@ -207,6 +207,9 @@ def main() -> None:
                     "tiles": me["tiles"] if me else 0,
                     "troops": int(me["troops"]) if me else 0,
                 }
+                xy = action_tile_xy(choice)
+                if xy is not None:
+                    entry["tile_x"], entry["tile_y"] = xy
                 dbg = choice.get("debug")
                 if dbg is not None:
                     entry["value"] = round(float(dbg["value"]), 3)
