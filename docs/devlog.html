@@ -28,6 +28,9 @@
 
 <nav class="toc">
   <a href="#now">Now</a> ·
+  <a href="#v9-sparse-win">Jul 14 V9 sparse-win</a> ·
+  <a href="#v9-alphastar-oa5">AlphaStar / OA5</a> ·
+  <a href="#v9-design">V9 design</a> ·
   <a href="#persistent-autoscale-restart">Jul 14 persistent+autoscale</a> ·
   <a href="#persistent-autoscale-game-time">game time</a> ·
   <a href="#persistent-autoscale-deploy">deploy lessons</a> ·
@@ -68,21 +71,134 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 14th, 2026</h2>
-  <p><b>Persistent + autoscale shipped and live on <code>ppo_v86</code></b>
+  <p><b>V9 sparse-win parallel experiment ready</b>
+  (<a href="#v9-sparse-win">writeup</a>,
+  <a href="https://github.com/djmango/openfront-ai/pull/35">#35</a>).
+  Fresh <code>ppo_v9</code> ladder: terminal <code>+1/−1</code> only, 25 micro-stages,
+  graduate at 90–97.5% win rate. Intended to run on a <b>second GPU box</b> while
+  <code>ppo_v86</code> continues the dense-shaping path.</p>
+  <p><b>Persistent + autoscale still live on <code>ppo_v86</code></b>
   (<a href="#persistent-autoscale-restart">writeup</a>). Merged
-  <a href="https://github.com/djmango/openfront-ai/pull/30">#30</a>–<a href="https://github.com/djmango/openfront-ai/pull/33">#33</a>
-  (<code>4c0e01fe</code>). Pod resumed at update ~651, stage 8, <b>16 envs/shard</b>,
-  <code>--max-envs 20</code>, <code>max_episode_ticks=15000</code> (~25&nbsp;min game time).
-  Do <b>not</b> shorten episodes for GPU util — grow env count via restart instead.</p>
-  <p><b>V8.6 attack-fair</b>
-  (<a href="#v86-attack-fair">writeup</a>) still the reward profile
-  (<code>v8.6-attack-fair-v1</code>). Earlier today: V8.5 win-urgency
-  (<a href="#v85-win-urgency">writeup</a>) and curriculum outcome parity 48/48
+  <a href="https://github.com/djmango/openfront-ai/pull/30">#30</a>–<a href="https://github.com/djmango/openfront-ai/pull/33">#33</a>.
+  Do <b>not</b> shorten episodes for GPU util; grow env count via restart instead.</p>
+  <p class="d" style="margin:.75rem 0 0">Earlier today: V8.6 attack-fair
+  (<a href="#v86-attack-fair">writeup</a>), V8.5 win-urgency
+  (<a href="#v85-win-urgency">writeup</a>), curriculum parity 48/48
   (<a href="#parity-v4-closeout">writeup</a>).</p>
-  <p class="d" style="margin:.75rem 0 0">Previous: Jul 13 Rust trainer CUDA
-  diagnosis / persistent ownership
-  (<a href="#rust-v8-stability">writeup</a>).</p>
 </div>
+
+<h2 class="date" id="v9-sparse-win">Jul 14, 2026 - V9: sparse win/loss as a parallel to V8.x</h2>
+<p class="session">Hypothesis: we have been doing a lot of reward engineering
+(V8.3 closeout → V8.4 boats/tempo → V8.5 urgency → V8.6 attack-fair) to force the
+behaviors we want. Instead, try an extremely gradual curriculum with sparse
+win/loss only, and require near-perfect win rate to graduate. Parallel run, not
+a migrate-from-V8.</p>
+
+<h3 id="v9-why">Why parallel, not another V8.x reward profile</h3>
+<p>V8.3–V8.6 share the same curriculum schedule and keep stacking dense terms
+(strength, delta, closeout Φ, boat outcomes, tempo, embargo/combat thrash, death
+overrides). That path is valuable, but each knob is another hand-written prior.
+Zeroing V8.x coeffs is <b>not</b> enough for win-only: <code>vecenv</code> still
+always applies strength, strength-delta, waste, death, and place terminal. So V9
+is a new schedule + a hard sparse branch in reward assembly, not
+<code>--migrate-v86-to-v9</code>.</p>
+
+<h3 id="v9-alphastar-oa5">What AlphaStar and OpenAI Five actually did</h3>
+<p>Neither system was pure win/loss with no scaffolding. The useful contrast is
+<i>what kind</i> of scaffolding they used.</p>
+<table>
+  <tr><th></th><th>AlphaStar (SC2)</th><th>OpenAI Five (Dota)</th><th>Our V9 bet</th></tr>
+  <tr>
+    <td>True objective</td>
+    <td>terminal <code>+1 / 0 / −1</code>, undiscounted</td>
+    <td>win + dense human metrics</td>
+    <td>terminal <code>+1 / −1</code> only</td>
+  </tr>
+  <tr>
+    <td>Scaffolding</td>
+    <td>supervised init on replays; continual KL to SL policy; <code>z</code> pseudo-rewards (build-order edit distance, Hamming on cumulative stats, each ~25% active)</td>
+    <td>hand-shaped gold/XP/kills/deaths/last-hits/buildings; zero-sum vs enemy; team-spirit anneal; early-game reward time-weighting</td>
+    <td>environment curriculum (tiny steps, high gates) instead of dense reward</td>
+  </tr>
+  <tr>
+    <td>Curriculum</td>
+    <td>league / PFSP opponent selection (hardest, near-level, exploiters)</td>
+    <td>mostly scale + self-play; shaped rewards from day one</td>
+    <td>25-stage map/bot/difficulty ladder, <code>win_at</code> 0.90–0.975</td>
+  </tr>
+  <tr>
+    <td>Sparse ablation</td>
+    <td>they kept human <code>z</code> + imitation; called sparsity a core hard problem</td>
+    <td>win/loss-only worked but ~10× slower in 1v1 and plateaued mid-run; 5v5 sparse beat scripted bots with a large sample-efficiency hit</td>
+    <td>accept slower learning; make early stages trivial enough that wins arrive often</td>
+  </tr>
+</table>
+<p>Takeaways we are acting on:</p>
+<ul>
+  <li><b>Win-only can work</b>, but expects worse sample efficiency unless early games are easy enough that the policy almost always wins.</li>
+  <li><b>OA5 shaped once and froze</b>; they did not keep stacking mid-run terms the way V8.4→8.5→8.6 did. If V9 stalls, prefer a cheap bootstrap (BC / light strategy targets) over more dense shaping.</li>
+  <li><b>AlphaStar’s scaffold was imitation + strategy targets</b>, not per-tick gold/kill crumbs. Different from both OA5 and our V8.x stack.</li>
+  <li><b>Do not use <code>win_at: 1.0</code></b> with current <code>should_advance</code> (<code>mean &gt; gate</code> over <code>WINDOW=40</code>): perfect 40/40 still fails <code>&gt; 1.0</code>. Use 0.975 for “essentially locked.”</li>
+</ul>
+
+<h3 id="v9-design">V9 design</h3>
+<table>
+  <tr><th>Knob</th><th>V8.6 (live)</th><th>V9 (parallel)</th></tr>
+  <tr><td>Run name</td><td><code>ppo_v86</code></td><td><code>ppo_v9</code></td></tr>
+  <tr><td>Schedule id</td><td><code>v8.3</code></td><td><code>v9</code></td></tr>
+  <tr><td>Reward profile</td><td><code>v8.6-attack-fair-v1</code></td><td><code>v9-sparse-win-v1</code></td></tr>
+  <tr><td>Step reward</td><td>strength + delta + closeout + boat + tempo + thrash + …</td><td><b>0</b> every step</td></tr>
+  <tr><td>Terminal</td><td>place + W_WIN(+extra) + fast-win; death penalty mid-episode</td><td><b>+1 win / −1</b> loss, death, or timeout</td></tr>
+  <tr><td>Stages</td><td>15 (V8.3 insert + Easy/Med/Hard ladder)</td><td><b>25</b> micro-steps (bots 0→2→5→10→15→20→30→40→50→65→80, then Med/Hard/Imp)</td></tr>
+  <tr><td>Graduation</td><td>often 0.12–0.45; V83 stages 5–6 also conversion gates</td><td><b>0.90–0.975</b> win rate only (no conversion gate)</td></tr>
+  <tr><td>Start stage</td><td>5 (migrate lineage)</td><td><b>0</b> fresh</td></tr>
+  <tr><td>Gamma / ret_clip</td><td>0.999 / 3000</td><td><b>0.9997</b> / <b>2</b> (longer credit for sparse terminals)</td></tr>
+  <tr><td>Migrate from V8</td><td>yes (reward-profile chain)</td><td><b>none</b> (parallel experiment)</td></tr>
+</table>
+
+<h3 id="v9-stages">Stage sketch (high gates)</h3>
+<table>
+  <tr><th>#</th><th>maps</th><th>bots</th><th>diff</th><th>nations</th><th>win_at</th></tr>
+  <tr><td>0</td><td>Onion</td><td>0</td><td>Easy</td><td>Exact(1)</td><td>0.975</td></tr>
+  <tr><td>1–2</td><td>Onion</td><td>0</td><td>Easy</td><td>Exact(2→3)</td><td>0.95</td></tr>
+  <tr><td>3–4</td><td>Onion</td><td>2→5</td><td>Easy</td><td>Exact(3)</td><td>0.925</td></tr>
+  <tr><td>5–9</td><td>Onion→Pangaea→Caucasus</td><td>5→15</td><td>Easy</td><td>Exact(3→6)</td><td>0.90</td></tr>
+  <tr><td>10–18</td><td>3-map → V82 pool</td><td>15→80</td><td>Easy</td><td>Default</td><td>0.90</td></tr>
+  <tr><td>19–21</td><td>V82_MAPS</td><td>30/50/80</td><td>Medium</td><td>Default</td><td>0.90</td></tr>
+  <tr><td>22–24</td><td>V82_MAPS</td><td>80/120/150</td><td>Hard→Impossible</td><td>Default</td><td>0.90</td></tr>
+</table>
+<p>Env targets: 24 early, taper to 8 on late broad-pool stages (same spirit as V8.3).
+Rehearsal 25% still applies; rehearsal eps do not count toward the gate.</p>
+
+<h3 id="v9-impl">Implementation notes</h3>
+<ul>
+  <li><code>CurriculumSchedule::V9</code> + <code>V9_ENV_TARGETS</code> in
+    <code>rust/ofcore/src/curriculum.rs</code>.</li>
+  <li><code>RewardConfig.v9_sparse_win</code> → profile <code>v9-sparse-win-v1</code>;
+    <code>sparse_terminal_reward(won)</code>.</li>
+  <li><code>vecenv</code> early-returns the sparse path before strength/delta/shaping.</li>
+  <li>CLI: <code>--v9-curriculum</code> and <code>--v9-sparse-win</code> must be used
+    together (mutually exclusive with V8.x schedule flags).</li>
+  <li>Sidecar writes <code>reward_profile</code> for V9; resume requires matching
+    <code>v9-sparse-win-v1</code>. No migrate-from-V8 path.</li>
+  <li>Launch: <code>NUM_GPUS=4 bash scripts/pod_train_v9.sh</code>
+    (or <code>V9_MODE=1 bash scripts/pod_train_v8.sh</code>). Smoke:
+    <code>bash scripts/tests/pod_train_v9_test.sh</code>.</li>
+</ul>
+
+<h3 id="v9-success">What success / failure looks like</h3>
+<ul>
+  <li><b>Good:</b> stage 0–4 clear with locked win rates; policy invents attack/boat/build
+    without being told; later stages stay above 0.90 without new shaping knobs.</li>
+  <li><b>Expected pain:</b> much slower wall-clock than V8.x; long plateaus if a stage
+    jump is still too hard under sparse credit.</li>
+  <li><b>If stuck:</b> split the failing stage further (smaller bot/map step) before
+    adding reward terms. Only then consider a cheap AlphaStar-style bootstrap
+    (BC init or light strategy targets), not another boat/tempo stack.</li>
+</ul>
+<p>PR: <a href="https://github.com/djmango/openfront-ai/pull/35">#35</a>
+(<code>sully/v9-sparse-win</code>). Intended to A/B against live <code>ppo_v86</code>
+on a second pod.</p>
 
 <h2 class="date" id="persistent-autoscale-restart">Jul 14, 2026 - persistent actors + GPU-util autoscale via restart</h2>
 <p class="session">Clarified game-time vs wall-clock, then fixed the inverse
@@ -593,6 +709,13 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <code>ae_v3.pt</code> until the v3.1 winner is wired into <code>rl/obs.py</code>.</p>
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
+  <tr><td><code>ppo_v9</code></td><td><b>ready</b> Jul 14 (parallel sparse-win)</td>
+    <td>Fresh ladder on schedule <code>v9</code> / profile <code>v9-sparse-win-v1</code>:
+    terminal <code>+1/−1</code> only, 25 micro-stages, gates 0.90–0.975. No V8 migrate.
+    Launch <code>NUM_GPUS=4 bash scripts/pod_train_v9.sh</code>. See
+    <a href="#v9-sparse-win">V9 writeup</a> and
+    <a href="https://github.com/djmango/openfront-ai/pull/35">#35</a>. Runs beside
+    <code>ppo_v86</code>, not instead of it.</td></tr>
   <tr><td><code>ppo_v7</code></td><td><b>killed</b> Jul 9 (openfront-v7, 4x H200)</td>
     <td>From scratch on the merged <a href="#v7-obs">v7 obs</a>: full-state expansion +
     <a href="#v7-fovea">foveated two-stream</a> (fine /8 over own territory + border band,
