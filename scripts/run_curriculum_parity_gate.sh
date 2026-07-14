@@ -87,7 +87,11 @@ if [[ "${1:-}" == "--regenerate" || ! -d "$RECORDS_DIR" ]]; then
   popd >/dev/null
 fi
 
-NUM_RECORDS="$(find "$RECORDS_DIR" -maxdepth 1 \( -name '*.json' -o -name '*.json.gz' \) | wc -l | tr -d ' ')"
+# Follow symlinks (curriculum-parity-v4 is often a link into /workspace/records).
+NUM_RECORDS="$(find -L "$RECORDS_DIR" -maxdepth 1 \( -name '*.json' -o -name '*.json.gz' \) | wc -l | tr -d ' ')"
+if [[ "$NUM_RECORDS" == "0" ]]; then
+  echo "[curriculum_parity] warning: found 0 records under $RECORDS_DIR; skipping expected-count check" >&2
+fi
 
 pushd "$ROOT" >/dev/null
 "$ROOT/openfront/node_modules/.bin/tsx" "$ROOT/datagen/replay.ts" \
