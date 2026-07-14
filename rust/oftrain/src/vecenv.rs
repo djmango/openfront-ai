@@ -417,6 +417,118 @@ impl EnvWorker {
         Ok(w)
     }
 
+    /// Fixed map/seed/bots episode for showcase watch (Node bridge + GameRecord).
+    pub fn reset_watch(
+        &mut self,
+        map_name: &str,
+        seed: &str,
+        bots: u32,
+        difficulty: &str,
+        nations: Value,
+    ) -> Result<()> {
+        self.episode_stage = self.stage;
+        // rl.watch always steps 10 ticks per decision, not stage.decision_ticks.
+        self.decision_ticks = 10;
+        self.map_name = map_name.to_string();
+        self.rehearsal = false;
+        let obs = self
+            .bridge
+            .reset(map_name, seed, bots, difficulty, nations)?;
+
+        let width = self.bridge.width();
+        let height = self.bridge.height();
+        let hr = height - height % REGION;
+        let wr = width - width % REGION;
+        self.hr = hr;
+        self.wr = wr;
+        let terrain = self.bridge.terrain();
+        let mut land = vec![0u8; hr * wr];
+        let mut mag = vec![0u8; hr * wr];
+        for y in 0..hr {
+            for x in 0..wr {
+                let t = terrain[y * width + x];
+                land[y * wr + x] = (t >> IS_LAND_BIT) & 1;
+                mag[y * wr + x] = t & MAG_MASK;
+            }
+        }
+        self.land = land;
+        self.mag = mag;
+        self.ae_static = StaticTerrain {
+            key: TerrainCacheKey {
+                env_id: self.idx as u64,
+                episode: self.episode,
+                static_id: NEXT_TERRAIN_ID.fetch_add(1, Ordering::Relaxed),
+                hr,
+                wr,
+            },
+            map: Arc::from(map_name),
+            land_mag: ae::pack_static_terrain(&self.land, &self.mag, hr, wr),
+        };
+        self.land_total = (self.land.iter().map(|&l| l as i64).sum::<i64>()).max(1);
+        self.translator = Some(IntentTranslator::new(self.bridge.terrain(), width, hr, wr));
+        self.lut.clear();
+        self.prev_strength = 0.0;
+        let initial_strengths =
+            curriculum::strengths(&feat::parse_ents(obs.entities()), self.land_total);
+        self.dominance_shaper.reset(dominance_potential(
+            &initial_strengths,
+            obs.me().max(0) as usize,
+            self.reward_config.v81_potential_clamp,
+        ));
+        self.spawn_steps = 0;
+        self.ep_reward = 0.0;
+        self.action_churn_tracker.reset();
+        self.ep_reward_components = RewardComponents::default();
+        self.ep_len = 0;
+        self.ep_wasted = 0;
+        self.episode += 1;
+        self.obs = Some(obs);
+        Ok(())
+    }
+
+    pub fn save_record(&mut self, path: &str) -> Result<serde_json::Value> {
+        self.bridge.save_record(path)
+    }
+
+    pub fn current_obs(&self) -> Option<&RawObs> {
+        self.obs.as_ref()
+    }
+
+    pub fn spawn_randomly_public(&mut self) -> Result<()> {
+        self.spawn_randomly()
+    }
+
+    /// Translate + step without auto-reset (for watch/record episodes).
+    pub fn apply_watch(&mut self, choice: &Choice) -> Result<()> {
+        let lut = self.current_lut();
+        let obs = self.obs.as_ref().unwrap();
+        let ents = feat::parse_ents(obs.entities());
+        let legal = feat::parse_legal(obs.legal_actions());
+        let width = obs.head["width"].as_u64().unwrap() as usize;
+        let mut owners_trim = vec![0i64; self.hr * self.wr];
+        for y in 0..self.hr {
+            for x in 0..self.wr {
+                owners_trim[y * self.wr + x] = obs.owner_at(y * width + x) as i64;
+            }
+        }
+        let me = obs.me();
+        let intents = translate(
+            choice,
+            self.translator.as_mut().unwrap(),
+            &owners_trim,
+            me,
+            &ents,
+            &legal,
+            &lut,
+        );
+        let new_obs = self.bridge.step(&intents, self.decision_ticks)?;
+        if new_obs.spawn_phase() {
+            self.spawn_steps += 1;
+        }
+        self.obs = Some(new_obs);
+        Ok(())
+    }
+
     pub fn reset_episode(&mut self) -> Result<()> {
         self.episode_stage = self.stage;
         let stg = &self.stages[self.stage];

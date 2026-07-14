@@ -326,6 +326,11 @@ pub trait GameEngine: Send {
     fn terrain(&self) -> &[u8];
 
     fn close(&mut self);
+
+    /// Persist a client GameRecord JSON (Node bridge only).
+    fn save_record(&mut self, _path: &str) -> Result<serde_json::Value> {
+        anyhow::bail!("save_record is only supported on the Node engine bridge")
+    }
 }
 
 /// Which simulation backend to run envs against.

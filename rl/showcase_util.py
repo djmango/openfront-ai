@@ -5,8 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
 import shutil
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -25,7 +25,7 @@ def showcase_seeds() -> list[str]:
 
 
 def showcase_maps() -> list[str]:
-    """Maps to pre-render for /watch; rotates one per hour on the hub."""
+    """Maps to pre-render for /watch; hub picks a random featured entry."""
     raw = os.environ.get("SHOWCASE_MAPS")
     if raw:
         return [m.strip() for m in raw.split(",") if m.strip()]
@@ -39,11 +39,15 @@ def map_seed(map_name: str) -> str:
 
 
 def featured_showcase_entry(state: dict, now: float | None = None) -> dict | None:
-    """Pick the replay entry for the current hour (UTC)."""
+    """Pick a random replay entry from ``state["maps"]``.
+
+    ``now`` is accepted for call-site compatibility but ignored. Falls back to
+    a legacy top-level ``game_id`` entry when ``maps`` is empty.
+    """
+    del now  # formerly used for hourly UTC rotation
     entries = state.get("maps")
     if entries:
-        t = time.time() if now is None else now
-        return entries[int(t // 3600) % len(entries)]
+        return random.choice(entries)
     if state.get("game_id"):
         return state
     return None
