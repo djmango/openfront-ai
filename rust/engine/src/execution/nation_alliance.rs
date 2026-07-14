@@ -89,11 +89,15 @@ pub fn maybe_send_alliance_requests(
         if !random.chance(30) {
             continue;
         }
-        let Some(enemy) = game.player_by_small_id(enemy_sid) else {
-            continue;
+        let (acceptable, enemy_id) = {
+            let Some(enemy) = game.player_by_small_id(enemy_sid) else {
+                continue;
+            };
+            (
+                enemy.player_type != PlayerType::Bot || difficulty == "Easy",
+                enemy.id.clone(),
+            )
         };
-        let acceptable =
-            enemy.player_type != PlayerType::Bot || difficulty == "Easy";
         if !acceptable {
             continue;
         }
@@ -102,14 +106,14 @@ pub fn maybe_send_alliance_requests(
         }
         if get_alliance_decision(game, random, small_id, enemy_sid, false, emoji) {
             game.add_execution(ExecEnum::AllianceRequest(
-                AllianceRequestExecution::new(small_id, enemy.id.clone()),
+                AllianceRequestExecution::new(small_id, enemy_id),
             ));
         }
     }
 }
 
 fn get_alliance_decision(
-    game: &Game,
+    game: &mut Game,
     random: &mut PseudoRandom,
     small_id: u16,
     other_small_id: u16,
