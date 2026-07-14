@@ -1849,6 +1849,69 @@ mod tests {
     }
 
     #[test]
+    fn actor_hidden_trajectory_replays_exactly_across_bptt_and_done_reset() {
+        tch::manual_seed(272);
+        let vs = nn::VarStore::new(Device::Cpu);
+        let policy = PolicyNet::new_with_recurrence(&vs.root(), false, false, 8, 1, true);
+        let obs = synthetic_obs(Device::Cpu, 2, 5, 5);
+        let done = [[false, false], [true, false], [false, false], [false, true], [false, false]];
+        let mut actor_hidden = policy.initial_hidden(2);
+        let mut hidden_in = Vec::new();
+        let mut hidden_out = Vec::new();
+        let mut contexts = Vec::new();
+        let mut resets = Vec::new();
+        let mut choices = Vec::new();
+        for t in 0..done.len() {
+            let context = no_previous_context(2);
+            let _ = context.get(0).select(0, CONTEXT_ACTION).fill_(t as f64);
+            let _ = context.get(1).select(0, CONTEXT_ACTION).fill_((t + 3) as f64);
+            let reset = if t == 0 {
+                Tensor::zeros([2], (Kind::Float, Device::Cpu))
+            } else {
+                Tensor::from_slice(&[
+                    done[t - 1][0] as u8 as f32,
+                    done[t - 1][1] as u8 as f32,
+                ])
+            };
+            hidden_in.push(actor_hidden.shallow_clone());
+            let ((action, player, tile, build, nuke, quantity, _, _), next) =
+                policy.act_with_state_masked(&obs, &actor_hidden, &context, &reset, true);
+            choices.push(ChoiceBatch {
+                action,
+                player_slot: player,
+                tile_region: tile,
+                build_type: build,
+                nuke_type: nuke,
+                quantity_frac: quantity,
+            });
+            hidden_out.push(next.shallow_clone());
+            contexts.push(context);
+            resets.push(reset);
+            actor_hidden = next;
+        }
+
+        for range in [0..2, 2..4, 4..5] {
+            let mut replay = hidden_in[range.start].shallow_clone();
+            for t in range {
+                let (_, _, _, _, next) = policy.evaluate_with_state(
+                    &obs,
+                    &choices[t],
+                    &replay,
+                    &contexts[t],
+                    &resets[t],
+                );
+                assert_exact(&next, &hidden_out[t], &format!("replay hidden t={t}"));
+                replay = next;
+            }
+        }
+        let reset_hidden = hidden_in[2].copy();
+        let _ = reset_hidden.get(0).zero_();
+        let (_, reset_reference) =
+            policy.value_with_state(&obs, &reset_hidden, &contexts[2]);
+        assert_exact(&hidden_out[2].get(0), &reset_reference.get(0), "done reset replay");
+    }
+
+    #[test]
     fn gradients_reach_gru_after_zero_residual_starts_learning() {
         tch::manual_seed(303);
         let vs = nn::VarStore::new(Device::Cpu);

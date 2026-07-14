@@ -271,6 +271,10 @@ struct Args {
     #[arg(long, default_value_t = 256)]
     recurrent_hidden_size: usize,
 
+    /// Timesteps per truncated-BPTT chunk for recurrent PPO.
+    #[arg(long, default_value_t = 16)]
+    bptt_chunk_len: usize,
+
     /// Let persistent actors batch whichever envs are ready instead of
     /// waiting for fixed worker halves. Requires --persistent-actors.
     #[arg(long, default_value_t = false)]
@@ -674,6 +678,7 @@ mod recurrent_flag_tests {
         let defaults = Args::try_parse_from(["oftrain"]).unwrap();
         assert!(!defaults.recurrent_policy);
         assert_eq!(defaults.recurrent_hidden_size, 256);
+        assert_eq!(defaults.bptt_chunk_len, 16);
         assert!(Args::try_parse_from(["oftrain", "--recurrent-policy"]).is_err());
 
         let enabled = Args::try_parse_from([
@@ -682,10 +687,13 @@ mod recurrent_flag_tests {
             "--recurrent-policy",
             "--recurrent-hidden-size",
             "128",
+            "--bptt-chunk-len",
+            "32",
         ])
         .unwrap();
         assert!(enabled.recurrent_policy);
         assert_eq!(enabled.recurrent_hidden_size, 128);
+        assert_eq!(enabled.bptt_chunk_len, 32);
     }
 }
 
@@ -829,10 +837,14 @@ fn main() -> anyhow::Result<()> {
         !args.recurrent_policy || matches!(device, Device::Cuda(_)),
         "--recurrent-policy requires a CUDA --device"
     );
-    anyhow::ensure!(
-        args.recurrent_hidden_size > 0,
-        "--recurrent-hidden-size must be positive"
-    );
+    if args.recurrent_policy {
+        anyhow::ensure!(
+            args.recurrent_hidden_size == policy::RECURRENT_HIDDEN as usize,
+            "--recurrent-hidden-size must match the policy core ({})",
+            policy::RECURRENT_HIDDEN
+        );
+        anyhow::ensure!(args.bptt_chunk_len > 0, "--bptt-chunk-len must be positive");
+    }
     let eval_device = resolve_eval_device(
         args.eval_device.as_deref(),
         args.async_eval,
@@ -887,6 +899,7 @@ fn main() -> anyhow::Result<()> {
             foveate: args.foveate,
             gc: args.gc,
             blocks: args.blocks,
+            recurrent_policy: args.recurrent_policy,
             pinned_h2d: args.pinned_h2d,
             fp16_rollout: args.fp16_rollout,
             compact_rollout: args.compact_rollout,
@@ -935,6 +948,7 @@ fn main() -> anyhow::Result<()> {
         persistent_actors: args.persistent_actors,
         recurrent_policy: args.recurrent_policy,
         recurrent_hidden_size: args.recurrent_hidden_size,
+        bptt_chunk_len: args.bptt_chunk_len,
         work_conserving_actors: args.work_conserving_actors,
         actor_max_batch: args.actor_max_batch,
         actor_max_wait: std::time::Duration::from_millis(args.actor_max_wait_ms),
