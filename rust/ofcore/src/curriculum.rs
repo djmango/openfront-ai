@@ -27,6 +27,10 @@ pub const V83_REWARD_PROFILE: &str = "v8.3-closeout-v1";
 pub const V84_REWARD_PROFILE: &str = "v8.4-boat-tempo-v1";
 pub const V85_REWARD_PROFILE: &str = "v8.5-win-urgency-v1";
 pub const V86_REWARD_PROFILE: &str = "v8.6-attack-fair-v1";
+/// Parallel sparse experiment: terminal win/loss only (±1), no dense shaping.
+pub const V9_REWARD_PROFILE: &str = "v9-sparse-win-v1";
+pub const V9_SPARSE_WIN: f64 = 1.0;
+pub const V9_SPARSE_LOSS: f64 = -1.0;
 /// Relation score bands mirror engine `Relation` / TS `PlayerImpl.relation()`.
 pub const RELATION_HOSTILE_LT: f64 = -50.0;
 pub const RELATION_DISTRUSTFUL_LT: f64 = 0.0;
@@ -84,6 +88,8 @@ pub struct RewardConfig {
     pub v86_skip_combat_churn: bool,
     /// V8.6: override `W_DEATH` when > 0 (death must hurt more than mid-place).
     pub v86_death_penalty: f64,
+    /// V9: terminal win/loss only (`+1` / `-1`); disables all dense shaping.
+    pub v9_sparse_win: bool,
 }
 
 impl RewardConfig {
@@ -181,9 +187,11 @@ impl RewardConfig {
         }
     }
 
-    /// Active V8.3+ reward profile id for TrainState sidecars.
+    /// Active V8.3+ / V9 reward profile id for TrainState sidecars.
     pub fn reward_profile_id(self) -> &'static str {
-        if self.v86_reward_active() {
+        if self.v9_sparse_win {
+            V9_REWARD_PROFILE
+        } else if self.v86_reward_active() {
             V86_REWARD_PROFILE
         } else if self.v85_reward_active() {
             V85_REWARD_PROFILE
@@ -637,6 +645,8 @@ pub enum CurriculumSchedule {
     V811,
     V82,
     V83,
+    /// Parallel sparse-win ladder: many tiny steps, high graduation gates.
+    V9,
 }
 
 impl CurriculumSchedule {
@@ -647,6 +657,7 @@ impl CurriculumSchedule {
             Self::V811 => "v8.1.1",
             Self::V82 => "v8.2",
             Self::V83 => "v8.3",
+            Self::V9 => "v9",
         }
     }
 
@@ -657,6 +668,7 @@ impl CurriculumSchedule {
             "v8.1.1" => Some(Self::V811),
             "v8.2" => Some(Self::V82),
             "v8.3" => Some(Self::V83),
+            "v9" => Some(Self::V9),
             _ => None,
         }
     }
@@ -676,6 +688,16 @@ pub const V811_ENV_TARGETS: [usize; 12] = [24, 24, 24, 24, 24, 24, 24, 12, 10, 8
 /// safely grows back to 12 when the player count resets from 80 to 30.
 pub const V82_ENV_TARGETS: [usize; 14] = [24, 24, 24, 24, 24, 16, 12, 10, 12, 10, 8, 8, 8, 8];
 pub const V83_ENV_TARGETS: [usize; 15] = [24, 24, 24, 24, 24, 24, 16, 12, 10, 12, 10, 8, 8, 8, 8];
+/// V9 envs/GPU. Early solo/tiny maps stay saturated; later broad-pool stages
+/// drop toward 8 like V8.3 as map/player cost grows.
+pub const V9_ENV_TARGETS: [usize; 25] = [
+    24, 24, 24, 24, 24, // 0-4 solo / tiny bot counts
+    24, 24, 24, 24, 24, // 5-9 map + nation bridges
+    24, 20, 16, 16, 12, // 10-14 Easy load climb
+    12, 10, 10, 10, // 15-18 Easy 40→80
+    12, 10, 8, // 19-21 Medium
+    8, 8, 8, // 22-24 Hard / Impossible
+];
 
 pub fn stages() -> Vec<Stage> {
     stages_for_schedule(CurriculumSchedule::Legacy)
@@ -910,6 +932,213 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
                 );
             }
         }
+        CurriculumSchedule::V9 => {
+            // Parallel sparse-win curriculum: extremely gradual difficulty,
+            // high gates (0.90–0.975). win_at never hits 1.0 because
+            // should_advance uses strict `mean > gate` over WINDOW=40.
+            stages = vec![
+                Stage {
+                    maps: &["Onion"],
+                    bots: 0,
+                    difficulty: "Easy",
+                    nations: NE(1),
+                    decision_ticks: 15,
+                    win_at: 0.975,
+                },
+                Stage {
+                    maps: &["Onion"],
+                    bots: 0,
+                    difficulty: "Easy",
+                    nations: NE(2),
+                    decision_ticks: 15,
+                    win_at: 0.95,
+                },
+                Stage {
+                    maps: &["Onion"],
+                    bots: 0,
+                    difficulty: "Easy",
+                    nations: NE(3),
+                    decision_ticks: 15,
+                    win_at: 0.95,
+                },
+                Stage {
+                    maps: &["Onion"],
+                    bots: 2,
+                    difficulty: "Easy",
+                    nations: NE(3),
+                    decision_ticks: 15,
+                    win_at: 0.925,
+                },
+                Stage {
+                    maps: &["Onion"],
+                    bots: 5,
+                    difficulty: "Easy",
+                    nations: NE(3),
+                    decision_ticks: 15,
+                    win_at: 0.925,
+                },
+                Stage {
+                    maps: &["Onion", "Pangaea"],
+                    bots: 5,
+                    difficulty: "Easy",
+                    nations: NE(3),
+                    decision_ticks: 15,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &["Pangaea"],
+                    bots: 5,
+                    difficulty: "Easy",
+                    nations: NE(6),
+                    decision_ticks: 15,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &["Pangaea"],
+                    bots: 10,
+                    difficulty: "Easy",
+                    nations: NE(6),
+                    decision_ticks: 15,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &["Pangaea", "Caucasus"],
+                    bots: 10,
+                    difficulty: "Easy",
+                    nations: NE(6),
+                    decision_ticks: 15,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &["Pangaea", "Caucasus"],
+                    bots: 15,
+                    difficulty: "Easy",
+                    nations: NE(6),
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &["Pangaea", "Caucasus", "BlackSea"],
+                    bots: 15,
+                    difficulty: "Easy",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &["Pangaea", "Caucasus", "BlackSea"],
+                    bots: 20,
+                    difficulty: "Easy",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &["Pangaea", "Caucasus", "BlackSea"],
+                    bots: 30,
+                    difficulty: "Easy",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &V82_STAGE5_MAPS,
+                    bots: 30,
+                    difficulty: "Easy",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &V82_MAPS,
+                    bots: 30,
+                    difficulty: "Easy",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &V82_MAPS,
+                    bots: 40,
+                    difficulty: "Easy",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &V82_MAPS,
+                    bots: 50,
+                    difficulty: "Easy",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &V82_MAPS,
+                    bots: 65,
+                    difficulty: "Easy",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &V82_MAPS,
+                    bots: 80,
+                    difficulty: "Easy",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &V82_MAPS,
+                    bots: 30,
+                    difficulty: "Medium",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &V82_MAPS,
+                    bots: 50,
+                    difficulty: "Medium",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &V82_MAPS,
+                    bots: 80,
+                    difficulty: "Medium",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &V82_MAPS,
+                    bots: 80,
+                    difficulty: "Hard",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &V82_MAPS,
+                    bots: 120,
+                    difficulty: "Hard",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+                Stage {
+                    maps: &V82_MAPS,
+                    bots: 150,
+                    difficulty: "Impossible",
+                    nations: ND,
+                    decision_ticks: 10,
+                    win_at: 0.90,
+                },
+            ];
+        }
     }
     stages
 }
@@ -1086,6 +1315,15 @@ pub fn terminal_reward(place: i64, won: bool) -> f64 {
     r
 }
 
+/// V9 sparse terminal: win = +1, anything else (loss / death / timeout) = -1.
+pub fn sparse_terminal_reward(won: bool) -> f64 {
+    if won {
+        V9_SPARSE_WIN
+    } else {
+        V9_SPARSE_LOSS
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1126,6 +1364,7 @@ mod tests {
             v86_attack_symmetric_loss: false,
             v86_skip_combat_churn: false,
             v86_death_penalty: 0.0,
+            v9_sparse_win: false,
         }
     }
 
@@ -1246,6 +1485,16 @@ mod tests {
         cfg.v86_death_penalty = 10.0;
         assert_eq!(cfg.death_penalty(), 10.0);
         assert_eq!(cfg.reward_profile_id(), V86_REWARD_PROFILE);
+    }
+
+    #[test]
+    fn v9_sparse_win_selects_sparse_reward_profile() {
+        let mut cfg = config();
+        cfg.v9_sparse_win = true;
+        assert_eq!(cfg.reward_profile_id(), V9_REWARD_PROFILE);
+        // Sparse wins over V8.6 knobs if both were somehow set.
+        cfg.v86_death_penalty = 10.0;
+        assert_eq!(cfg.reward_profile_id(), V9_REWARD_PROFILE);
     }
 
     #[test]
@@ -1747,6 +1996,37 @@ mod curriculum_v81_tests {
             CurriculumSchedule::from_id("v8.3"),
             Some(CurriculumSchedule::V83)
         );
+    }
+
+    #[test]
+    fn v9_sparse_ladder_is_gradual_with_high_gates() {
+        let v9 = stages_for_schedule(CurriculumSchedule::V9);
+        assert_eq!(v9.len(), 25);
+        assert_eq!(V9_ENV_TARGETS.len(), v9.len());
+        assert_eq!(CurriculumSchedule::V9.id(), "v9");
+        assert_eq!(
+            CurriculumSchedule::from_id("v9"),
+            Some(CurriculumSchedule::V9)
+        );
+        assert_eq!(v9[0].bots, 0);
+        assert_eq!(v9[0].nations, Nations::Exact(1));
+        assert_eq!(v9[0].win_at, 0.975);
+        assert_eq!(v9[4].bots, 5);
+        assert_eq!(v9[4].win_at, 0.925);
+        assert!(v9.iter().all(|s| s.win_at >= 0.90 && s.win_at < 1.0));
+        // Difficulty only steps after Easy player-count ladder completes.
+        assert!(v9[..19].iter().all(|s| s.difficulty == "Easy"));
+        assert_eq!(v9[19].difficulty, "Medium");
+        assert_eq!(v9[22].difficulty, "Hard");
+        assert_eq!(v9[24].difficulty, "Impossible");
+        assert_eq!(v9[24].bots, 150);
+        assert_eq!(v9[24].maps, &V82_MAPS);
+        // Bot counts are non-decreasing within each difficulty band.
+        for window in v9[..19].windows(2) {
+            assert!(window[1].bots >= window[0].bots);
+        }
+        assert_eq!(sparse_terminal_reward(true), V9_SPARSE_WIN);
+        assert_eq!(sparse_terminal_reward(false), V9_SPARSE_LOSS);
     }
 
 }

@@ -40,14 +40,18 @@ struct Args {
 
     /// Opt into the V8.1 curriculum gates. Stage identities/maps are
     /// unchanged; only stages 4+ use recalibrated crowded-map win gates.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = false, conflicts_with = "v9_curriculum")]
     v81_curriculum: bool,
 
     /// Opt into the V8.1.1 high-player bridge schedule. Stage 5 is the
     /// V8.1 30-bot map pool at Easy, stage 6 repeats it at Medium, and the
     /// World/Asia challenge moves to stage 7. Incompatible with V8.1 state
     /// unless the explicit stage-5 migration flag is also supplied.
-    #[arg(long, default_value_t = false, conflicts_with = "v81_curriculum")]
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with_all = ["v81_curriculum", "v9_curriculum"]
+    )]
     v811_curriculum: bool,
 
     /// Opt into the recurrent V8.2 broad-map schedule. Stages 0-4 are
@@ -55,7 +59,7 @@ struct Args {
     #[arg(
         long,
         default_value_t = false,
-        conflicts_with_all = ["v81_curriculum", "v811_curriculum"]
+        conflicts_with_all = ["v81_curriculum", "v811_curriculum", "v9_curriculum"]
     )]
     v82_curriculum: bool,
 
@@ -63,9 +67,18 @@ struct Args {
     #[arg(
         long,
         default_value_t = false,
-        conflicts_with_all = ["v81_curriculum", "v811_curriculum", "v82_curriculum"]
+        conflicts_with_all = ["v81_curriculum", "v811_curriculum", "v82_curriculum", "v9_curriculum"]
     )]
     v83_curriculum: bool,
+
+    /// Opt into the parallel V9 sparse-win curriculum (high-gate micro-ladder).
+    /// Pair with `--v9-sparse-win` for the ±1 terminal reward profile.
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with_all = ["v81_curriculum", "v811_curriculum", "v82_curriculum", "v83_curriculum"]
+    )]
+    v9_curriculum: bool,
 
     /// Per-stage env worker targets, per GPU/shard. Accepts either one
     /// comma-separated value per stage (`24,24,...`) or ranges such as
@@ -215,6 +228,10 @@ struct Args {
     /// V8.6: override W_DEATH when > 0.
     #[arg(long, default_value_t = 0.0)]
     v86_death_penalty: f64,
+
+    /// V9: terminal win/loss only (+1 / -1). Disables dense strength shaping.
+    #[arg(long, default_value_t = false)]
+    v9_sparse_win: bool,
 
     /// Resume a V8.4 reward-profile checkpoint under V8.5 coeffs (weights unchanged).
     #[arg(long, default_value_t = false, requires_all = ["v83_curriculum", "resume"])]
@@ -844,6 +861,8 @@ mod curriculum_flag_tests {
         assert!(!defaults.v811_curriculum);
         assert!(!defaults.v82_curriculum);
         assert!(!defaults.v83_curriculum);
+        assert!(!defaults.v9_curriculum);
+        assert!(!defaults.v9_sparse_win);
 
         let v811 = Args::try_parse_from(["oftrain", "--v811-curriculum"]).unwrap();
         assert!(v811.v811_curriculum);
@@ -851,6 +870,9 @@ mod curriculum_flag_tests {
         assert!(v82.v82_curriculum);
         let v83 = Args::try_parse_from(["oftrain", "--v83-curriculum"]).unwrap();
         assert!(v83.v83_curriculum);
+        let v9 = Args::try_parse_from(["oftrain", "--v9-curriculum", "--v9-sparse-win"]).unwrap();
+        assert!(v9.v9_curriculum);
+        assert!(v9.v9_sparse_win);
         assert!(
             Args::try_parse_from(["oftrain", "--v81-curriculum", "--v811-curriculum"]).is_err()
         );
@@ -859,6 +881,7 @@ mod curriculum_flag_tests {
         assert!(
             Args::try_parse_from(["oftrain", "--v811-curriculum", "--v82-curriculum"]).is_err()
         );
+        assert!(Args::try_parse_from(["oftrain", "--v83-curriculum", "--v9-curriculum"]).is_err());
     }
 
     #[test]
@@ -1201,8 +1224,15 @@ fn main() -> anyhow::Result<()> {
         v86_attack_symmetric_loss: args.v86_attack_symmetric_loss,
         v86_skip_combat_churn: args.v86_skip_combat_churn,
         v86_death_penalty: args.v86_death_penalty,
+        v9_sparse_win: args.v9_sparse_win,
     };
-    let curriculum_schedule = if args.v83_curriculum {
+    anyhow::ensure!(
+        args.v9_curriculum == args.v9_sparse_win,
+        "--v9-curriculum and --v9-sparse-win must be used together"
+    );
+    let curriculum_schedule = if args.v9_curriculum {
+        ofcore::curriculum::CurriculumSchedule::V9
+    } else if args.v83_curriculum {
         ofcore::curriculum::CurriculumSchedule::V83
     } else if args.v82_curriculum {
         ofcore::curriculum::CurriculumSchedule::V82
@@ -1227,6 +1257,9 @@ fn main() -> anyhow::Result<()> {
         }
         None if curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V83 => {
             ofcore::curriculum::V83_ENV_TARGETS.to_vec()
+        }
+        None if curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V9 => {
+            ofcore::curriculum::V9_ENV_TARGETS.to_vec()
         }
         None if curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V811 => {
             ofcore::curriculum::V811_ENV_TARGETS.to_vec()
@@ -1263,6 +1296,14 @@ fn main() -> anyhow::Result<()> {
     )?;
     println!("[oftrain] device={device:?}");
     println!("[oftrain] curriculum schedule={}", curriculum_schedule.id());
+    if curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V9
+        || curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V83
+    {
+        println!(
+            "[oftrain] reward profile={}",
+            reward_config.reward_profile_id()
+        );
+    }
     println!(
         "[oftrain] v81 reward: min_stage={} K_DOM={} gamma={} phi_clamp={} \
          dominant_loss={} threshold={} W_DELTA_LOSS_DOMINANT={} \
