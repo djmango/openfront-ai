@@ -87,7 +87,8 @@ fn find_spawn(
         if !game.is_land(center) || game.has_owner(center) || game.is_border(center) {
             continue;
         }
-        if game.too_close_to_existing_spawn(center, min_dist) {
+        let current_small_id = game.player_by_id(player_id).map(|p| p.small_id);
+        if game.too_close_to_existing_spawn(center, min_dist, current_small_id) {
             continue;
         }
         let Some(tiles) = get_spawn_tiles(&game.map, &mut game.bfs, center, true) else {
