@@ -1,4 +1,4 @@
-# Rust workspace (`rust-ofrs-fast` worktree)
+# Rust workspace
 
 ## Architecture
 
@@ -18,12 +18,13 @@ export LIBTORCH_USE_PYTORCH=1
 export LIBTORCH="$(python -c 'import torch, os; print(os.path.dirname(torch.__file__))')"
 export LD_LIBRARY_PATH="$LIBTORCH/lib:${LD_LIBRARY_PATH:-}"
 
-cargo build --release -p openfront-engine    # from rust/
+cargo build --release -p openfront-engine -p oftrain -p ofhub -p ofae   # from rust/
 cargo test -p oftrain --bin oftrain
-cd rust/ofenv && maturin develop --release
+
+# AE train (needs cached games under data/)
+cargo run --release -p ofae -- train --data ../data --steps 100 --out /tmp/ofae_smoke
 
 # Parity checks
-PYTHONPATH=. python scripts/env_parity.py
 ./scripts/parity_check.sh 5
 ```
 
@@ -66,20 +67,17 @@ the pirate on voyage complete).
 workers on the Node/TS engine so ground-truth episodes still flow while most
 ticking stays on native (~10× faster).
 
-## oftrain Python-parity plan (phased)
+## oftrain notes
 
-| Phase | Status | What |
-|-------|--------|------|
-| 0 | Done | `scripts/export_safetensors.py`, `fetch_ae_encoders.sh` |
-| 1 | Done | Frozen AE encode (`C_GRID=89`), `--ckpt`/`--coarse-ckpt`, foveate default on |
-| 2 | Done | `MAX_UPD_PIX` sub-batches, greedy `--eval-every`, `metrics.jsonl` |
-| 3 | Done | `.safetensors` checkpoints/manifests for all new runs; explicit legacy `.ot` reads only; see `scripts/policy_safetensors_notes.md` |
-| 4 | Docs | Native gaps + `--node-fraction` hedge (this section) |
-| **5 (final)** | Done | `--value-loss` default **`mse`** (Python `F.mse_loss`); `--value-loss huber` escape hatch |
+| Item | Status |
+|------|--------|
+| AE encoders | `ofae train` / `ofae export-encoder` + `fetch_ae_encoders.sh` → `--ckpt` / `--coarse-ckpt` |
+| Checkpoints | `.safetensors` + `manifest.json` / `*.state.json` (legacy `.ot` explicit only) |
+| Value loss | default `mse`; `--value-loss huber` escape hatch |
+| Pipelining | `--pipeline-groups` (default on), `--fp16-rollout` (opt-in) |
 
-Also landed (see `oftrain` module docs): dual env-group pipelining
-(`--pipeline-groups`, default on), `--fp16-rollout` (opt-in Half H2D),
-`--resume-warmup-updates` (Adam moments not restorable in tch).
+Also: dual env-group pipelining, `--resume-warmup-updates` (Adam moments not
+restorable in tch).
 
 ## Native port progress (engine)
 
@@ -97,7 +95,6 @@ Run `./scripts/port_status.sh` for LOC ratio.
 
 ## Performance
 
-- `ofrs` - GIL-free BC collate/decode (~2.4× collate)
-- `engine_daemon` - eliminates per-env `tsx` spawn (default for `ofenv`)
+- `engine_daemon` - eliminates per-env `tsx` spawn (default for TS bridge envs)
 - Set `OPENFRONT_DAEMON=0` to use legacy one-subprocess-per-env bridge
 - `oftrain --engine native` - in-process tick (~10× vs Node bridge)

@@ -86,7 +86,7 @@ are simply unrewarding; the policy must learn to ignore them.
 
 ### Spatial autoencoder (v3) + raw bypass
 
-**Compress only what is big.** The spatial AE (`ae/model_v3.py`) consumes
+**Compress only what is big.** The spatial AE (`rust/ofae`) consumes
 tile ownership + terrain + fallout + static-structure planes (city, port,
 defense post, missile silo, SAM launcher, factory) and produces the grid
 latent (H/16 x W/16 x 64). Losses: border-weighted CE over owner slots;
@@ -218,7 +218,7 @@ trade-ship destinations, per-unit health/cooldown, tile defense bonus,
 target-painting, income rate, the doomsday clock, and the rail network.
 v7 closes these gaps, entirely through the existing AE-bypass paths (raw
 grid channels, player-feature vectors, global scalars) - the frozen
-spatial AE (`ae/model_v3.py`) is untouched by this part, so it needs no
+spatial AE (`rust/ofae`) is untouched by this part, so it needs no
 AE retraining (the foveation part needs an AE /16 fine-tune; see below).
 
 - **Transient grid planes reworked and expanded** (`N_TRANSIENT`: 8 ->
@@ -236,7 +236,7 @@ AE retraining (the foveation part needs an AE /16 fine-tune; see below).
   boat/nuke arrivals - are visible on the map, including whether the
   attack is retreating.
 - **Tile defense bonus** decoded from the engine's raw tile-state bit
-  (`DEFENSE_BONUS_BIT`, `rl/env.py`) and exposed two ways: a
+  (`DEFENSE_BONUS_BIT` in the bridge / native engine) and exposed two ways: a
   region-averaged grid channel (`N_DEFENSE_BONUS`) and a 5th local-crop
   plane (`N_LOCAL`: 4 -> 5), consistent with the exact-borders bypass
   philosophy for anything the policy needs pixel-accurate.
@@ -250,7 +250,7 @@ AE retraining (the foveation part needs an AE /16 fine-tune; see below).
   (in-clock flag, ticks).
 - **Global scalars** (`N_SCALARS`: 8 -> 11) gain self troop/gold income
   and a doomsday-clock-enabled flag.
-- **New unit taxonomy** (`ae/units.py`): SAM Missile, MIRV Warhead, Train
+- **New unit taxonomy** (ofae / ofcore feat): SAM Missile, MIRV Warhead, Train
   added to `TRANSIENT_CLASSES` (rail network support stays lightweight -
   trains render as a transient unit plane plus the active-station flag,
   no separate graph/edge representation).
@@ -263,17 +263,12 @@ AE retraining (the foveation part needs an AE /16 fine-tune; see below).
   every new engine method (`hasFn` helper) because `replay_all.sh`
   replays archived games at the exact historical engine commit they ran
   on, and these APIs postdate some of those commits.
-- **Backward compatibility during the BC data migration.** `rl/obs.py`
-  reads every new field with `.get()` + a zero/null default, so BC
-  training keeps working against not-yet-replayed archive data; the
-  cached-frame format also bumped (`CACHE_FORMAT` 1 -> 2, adds a packed
-  defense-bonus plane) with a stale-cache rebuild guard in
-  `scripts/prefeaturize_bc.py`. The Rust fast-path sampler
-  (`rust/ofrs/src/sampler.rs`) is frozen at the pre-v7 schema; `rl/bc_data.py`
-  compares its compiled-in `(P_FEAT, N_TRANSIENT, N_SCALARS)` against the
-  live constants and falls back to the pure-Python sampler on mismatch,
-  so training is always correct, just slower until the Rust side is
-  ported.
+- **Backward compatibility during the BC data migration (historical).** The
+  removed Python `rl/obs.py` read every new field with `.get()` + a zero/null
+  default so BC training kept working against not-yet-replayed archive data;
+  the cached-frame format also bumped (`CACHE_FORMAT` 1 -> 2). BC training
+  and `rust/ofrs` were removed with the Python RL stack (recover from git if
+  needed); live featurization lives in `rust/ofcore`.
 
 **Part 2 - foveated two-stream resolution.** The v3.1 AE ablation
 rejected *uniform* /16 latents (border accuracy 78.5% at /16 vs 89.3% at
@@ -285,16 +280,16 @@ rejected *uniform* /16 latents (border accuracy 78.5% at /16 vs 89.3% at
   AE) plus the transient/bypass channel stack region-averaged to /16.
   Every tile of the map is always represented.
 - **Fine stream, /8, restricted to own territory + the border band**:
-  the full `C_GRID` channel stack, extending the existing exact-borders
-  local-crop machinery in `rl/obs.py`, plus a coverage-mask channel so
+  the full `C_GRID` channel stack, extending the exact-borders local-crop
+  machinery in `rust/ofcore`, plus a coverage-mask channel so
   the trunk can tell "empty" from "outside the fovea". Cells outside
   coverage are zeroed and masked out of fine-stream pointer logits.
 - **Two-level tile pointer heads**: near targets (attacks, expansion,
   structure placement) refine on the fine stream; far targets (nuke aim
   points, cross-map boat destinations) resolve at coarse-cell precision.
   Coarse-cell softmax first, masked fine refinement where the picked
-  cell has fine coverage. Legality masks in `rl/env.py` follow the same
-  two-level structure.
+  cell has fine coverage. Legality masks in the bridge / native engine
+  follow the same two-level structure.
 
 This cuts update, rollout, and (later, async Phase C) transport cost -
 ~4x fewer global latent cells on the big maps that dominate late
@@ -318,9 +313,11 @@ game logic. Decision cadence: one policy step per ~10 game ticks.
 
 ## Behavior cloning from archived human games
 
-Two BC variants train on the replayed human archive (see `datagen/replay.ts
---bc` and `rl/bc.py`), both on the exact PPO policy architecture so BC
-weights double as PPO initialization (`load_state_dict(strict=False)`):
+BC is under moratorium and the Python trainer (`rl/bc.py`) was removed with
+the rest of the Python RL stack (recover from git if needed). Historical
+design: two BC variants trained on the replayed human archive (see
+`datagen/replay.ts --bc`), both on the PPO policy architecture so BC
+weights doubled as PPO initialization (`load_state_dict(strict=False)`):
 
 1. **Outcome-conditioned (feedforward, `bc_v1`)** - every player's actions
    are supervision, not just winners'. A final-placement embedding (8

@@ -2,7 +2,7 @@
 
 Usage:
   python scripts/hf_upload.py dataset        # uploads hf-dataset/*.tar
-  python scripts/hf_upload.py model          # uploads runs/ae_v1/ae.pt + card
+  python scripts/hf_upload.py model          # uploads ofae encoder safetensors + card
   python scripts/hf_upload.py human-dataset  # uploads hf-human/*.tar + records
 """
 
@@ -131,24 +131,18 @@ RL agents: compresses tile ownership + terrain + fallout + static structures
 into a latent grid (any map size). Structure detection is at precision/recall
 1.0 per class for every model below.
 
-**Current best: `ae_v31_d8.pt`** - v3.1 architecture (terrain-conditioned
-nearest-upsample decoder, focal loss, border-dense sampling, cosine LR) with
-the latent at 1/8 resolution instead of 1/16. Trained 40k steps on a mixed
-corpus of bot self-play and real archived human games.
+**Current best: `ae_v31_d8c32.encoder.safetensors`** - v3.1 architecture
+(terrain-conditioned nearest-upsample decoder, focal loss, border-dense
+sampling, cosine LR) with the latent at 1/8 resolution, 32 channels. Trained
+with the Rust `ofae` trainer on mixed bot + human caches.
 
 Border-tile accuracy (the hard metric - overall tile accuracy saturates at
 ~99% for all models), uniform 256-crop eval:
 
 | checkpoint | latent | human border | bot border | human tiles | bot tiles |
 |---|---|---|---|---|---|
-| `ae_v31_d8.pt` | 64ch @ 1/8 | **89.3%** | **96.1%** | 99.6% | 99.8% |
-| `ae_v31.pt` | 64ch @ 1/16 | 78.5% | 90.7% | 99.1% | 99.6% |
-| `ae_v3.pt` (bot-only) | 64ch @ 1/16 | 71.8% | 87.5% | 99.2% | 99.4% |
-
-The ablation story: mixing human games into training fixes the human-domain
-gap, the v3.1 decoder/loss fixes add a few points, and latent *resolution*
-(not channel count) is what finally cracks border geometry - borders are
-high-frequency spatial detail that can't be bought back with more channels.
+| `ae_v31_d8c32` | 32ch @ 1/8 | **89.3%** | **96.1%** | 99.6% | 99.8% |
+| `ae_v31_d16c32` | 32ch @ 1/16 | 78.5% | 90.7% | 99.1% | 99.6% |
 
 Full details, training code, results, and roadmap:
 **[github.com/djmango/openfront-ai](https://github.com/djmango/openfront-ai)**
@@ -161,24 +155,14 @@ Trained on
 [djmango/openfront-human-games](https://huggingface.co/datasets/djmango/openfront-human-games)
 (human).
 
-```python
-import torch
-from ae.model_v3 import SpatialAE
-
-ckpt = torch.load("ae_v31_d8.pt", map_location="cpu", weights_only=False)
-a = ckpt["args"]
-model = SpatialAE(
-    latent_c=a["latent_c"],
-    terrain_cond=a.get("terrain_cond", False),
-    upsample_decoder=a.get("upsample_decoder", False),
-    latent_down=a.get("latent_down", 16),
-)
-model.load_state_dict(ckpt["model_state_dict"])
-model.eval()
-z = model.encode(owner_slots, terrain, static_planes)  # (B, 64, H/8, W/8)
+```bash
+# train + export (Rust)
+cd rust && cargo run --release -p ofae -- train \\
+  --data ../data,../data-human --latent-down 8 --out ../runs/ae_v31_d8c32
+# oftrain / webbot load *.encoder.safetensors directly
 ```
 
-`ae.pt` (v1 tile-only `TileAutoencoder` in `model.py`) is kept for history.
+Legacy `.pt` full checkpoints remain on the Hub for history.
 """
 
 
@@ -212,14 +196,28 @@ def main() -> None:
             repo_id=MODEL_REPO,
         )
         for src, dst in [
-            ("runs/ae_v31_d8/ae_v3.pt", "ae_v31_d8.pt"),
-            ("runs/ae_v31/ae_v3.pt", "ae_v31.pt"),
-            ("runs/ae_v3/ae_v3.pt", "ae_v3.pt"),
-            ("ae/model_v3.py", "model_v3.py"),
-            ("ae/units.py", "units.py"),
+            (
+                "runs/ae_v31_d8c32/ae_v3.encoder.safetensors",
+                "ae_v31_d8c32.encoder.safetensors",
+            ),
+            (
+                "runs/ae_v31_d8c32/ae_v3.encoder.json",
+                "ae_v31_d8c32.encoder.json",
+            ),
+            (
+                "runs/ae_v31_d16c32/ae_v3.encoder.safetensors",
+                "ae_v31_d16c32.encoder.safetensors",
+            ),
+            (
+                "runs/ae_v31_d16c32/ae_v3.encoder.json",
+                "ae_v31_d16c32.encoder.json",
+            ),
             ("assets/loss_curve_v3.png", "loss_curve_v3.png"),
             ("assets/recon_v3_world.png", "recon_v3_world.png"),
         ]:
+            if not Path(src).exists():
+                print(f"skip missing {src}", flush=True)
+                continue
             api.upload_file(path_or_fileobj=src, path_in_repo=dst, repo_id=MODEL_REPO)
         print(f"done: https://huggingface.co/{MODEL_REPO}")
 

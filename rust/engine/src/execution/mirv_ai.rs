@@ -331,7 +331,7 @@ fn maybe_send_mirv(
     game.add_execution(ExecEnum::Mirv(MirvExecution::new(small_id, center_tile)));
     record_mirv_hit(game, target_small_id);
     nation_emoji::send_emoji(random, game, small_id, emoji_state, None, EMOJI_NUKE_LEN);
-    nation_emoji::respond_to_mirv(random);
+    nation_emoji::respond_to_mirv(game, random, target_small_id);
 }
 
 // TS `NationMIRV.test.ts` - ported at the AI-decision level (the underlying

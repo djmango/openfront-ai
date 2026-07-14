@@ -95,6 +95,34 @@ impl TradeShipExecution {
         exec
     }
 
+    /// Test helper for the deleted-src-port same-owner delete path (TS `Unit.owner()`
+    /// retains the last owner after `delete()`).
+    #[cfg(test)]
+    pub(crate) fn new_for_test_with_src_port(
+        orig_owner_small_id: u16,
+        src_port_unit_id: i32,
+        src_port_owner_small_id: u16,
+        dst_port_unit_id: i32,
+        dst_port_owner_small_id: u16,
+        ship_unit_id: i32,
+        was_captured: bool,
+    ) -> Self {
+        Self {
+            orig_owner_small_id,
+            src_port_unit_id,
+            src_port_owner_small_id: Some(src_port_owner_small_id),
+            dst_port_unit_id,
+            dst_port_owner_small_id: Some(dst_port_owner_small_id),
+            ship_unit_id: Some(ship_unit_id),
+            path: Vec::new(),
+            path_idx: 0,
+            path_dst: None,
+            tiles_traveled: 0,
+            was_captured,
+            active: true,
+        }
+    }
+
     pub fn destination_port_unit_id(&self) -> i32 {
         self.dst_port_unit_id
     }
@@ -130,12 +158,15 @@ impl TradeShipExecution {
         if self.path_idx > 0 {
             let expected = self.path[self.path_idx - 1];
             if from != expected {
-                if let Some(pos) = self.path.iter().position(|&t| t == from) {
-                    self.path_idx = pos + 1;
-                } else {
-                    self.path.clear();
-                    self.path_idx = 0;
-                    return self.next_path_tile(game, from, to);
+                // TS `PathFinderStepper.next` invalidates the cached path on
+                // any expected-position mismatch.  Do not scan forward in the
+                // stale path: if `from` appears later, skipping to `pos + 1`
+                // drops intermediate movement ticks and makes ships arrive or
+                // get captured early.
+                self.path.clear();
+                self.path_idx = 0;
+                if !self.refresh_path(game, from, to) {
+                    return None;
                 }
             }
         }
@@ -233,7 +264,15 @@ impl Execution for TradeShipExecution {
 
         // TS: `dstPortOwner.id() === srcPort.owner().id()` - the src port (possibly
         // captured via land conquest since spawn) now belongs to the dst owner too.
-        if dst_owner.is_some() && game.find_unit_owner(self.src_port_unit_id) == dst_owner {
+        //
+        // TS `UnitImpl.owner()` still returns the last owner after `delete()`; the unit
+        // is only removed from the player's unit list. Native `find_unit_owner` returns
+        // None for removed units, so fall back to the cached owner to match TS
+        // (`curr-b150-s14-britannia` TradeShip 3386 @ tick ~11323).
+        let src_owner = game
+            .find_unit_owner(self.src_port_unit_id)
+            .or(self.src_port_owner_small_id);
+        if dst_owner.is_some() && src_owner == dst_owner {
             game.remove_unit(ship_owner, uid);
             self.active = false;
             return;
@@ -292,10 +331,18 @@ impl Execution for TradeShipExecution {
             return;
         }
 
+        let records_new_motion_plan = self.path_dst != Some(dst_tile);
         let Some(next) = self.next_path_tile(game, cur_tile, dst_tile) else {
             self.complete(game);
             return;
         };
+        if records_new_motion_plan {
+            // TS records a grid motion plan when the destination changes by
+            // running a second `findPath(result.node, dst)`. That lookup also
+            // warms the shared HPA edge-path cache; without this side effect,
+            // later trade ships can choose different equal-cost water routes.
+            let _ = game.plan_water_path(next, dst_tile);
+        }
         if game.map.is_water(next) && game.map.is_shoreline(next) {
             let tick = game.ticks() as i32;
             if let Some(ship) = game.unit_mut(ship_owner, uid) {
@@ -371,6 +418,32 @@ mod piracy_tests {
             friends: Vec::new(),
             team: None,
         })
+    }
+
+    #[test]
+    fn stale_cached_path_replans_instead_of_skipping_ahead() {
+        let mut game = water_game(40, 40);
+        let from = game.ref_xy(8, 8);
+        let dst = game.ref_xy(30, 8);
+        let mut exec = TradeShipExecution::new_for_test(1, 0, 123);
+
+        exec.path = vec![
+            game.ref_xy(1, 1),
+            game.ref_xy(2, 1),
+            from,
+            game.ref_xy(9, 8),
+        ];
+        exec.path_idx = 1;
+        exec.path_dst = Some(dst);
+
+        exec.next_path_tile(&mut game, from, dst)
+            .expect("fresh path from current tile");
+
+        assert_eq!(
+            exec.path.first(),
+            Some(&from),
+            "PathFinderStepper invalidates on expected-position mismatch; it must not scan forward in the stale path"
+        );
     }
 
     /// Warship capture mid-voyage: TradeShipExecution must detect the owner
@@ -475,6 +548,49 @@ mod piracy_tests {
         assert!(
             game.find_unit_owner(ship_id).is_none(),
             "ship removed on complete"
+        );
+    }
+
+    /// TS `srcPort.owner()` still returns the last owner after the port unit is
+    /// deleted. When that stale owner equals the (possibly newly captured) dst
+    /// owner, the voyage must be deleted — not redirected via `wasCaptured`.
+    /// Regression: `curr-b150-s14-britannia` TradeShip 3386 @ ~11323.
+    #[test]
+    fn deleted_src_port_uses_cached_owner_for_same_owner_delete() {
+        let mut game = water_game(40, 40);
+        let mayo = add_nation(&mut game, "mayo");
+        let hampshire = add_nation(&mut game, "hampshire");
+
+        let src_port = game.build_unit(mayo, unit_type::PORT, game.ref_xy(2, 2));
+        let dst_port = game.build_unit(hampshire, unit_type::PORT, game.ref_xy(20, 20));
+        let _other_hampshire_port =
+            game.build_unit(hampshire, unit_type::PORT, game.ref_xy(22, 22));
+        let ship_id = game.build_unit(hampshire, unit_type::TRADE_SHIP, game.ref_xy(10, 10));
+
+        let mut exec = TradeShipExecution::new_for_test_with_src_port(
+            mayo,
+            src_port,
+            mayo,
+            dst_port,
+            hampshire,
+            ship_id,
+            true, // was_captured — without the cache fallback this redirects instead of deleting
+        );
+
+        game.remove_unit(mayo, src_port);
+        assert_eq!(game.find_unit_owner(src_port), None);
+        game.capture_unit(hampshire, mayo, dst_port);
+        assert_eq!(game.find_unit_owner(dst_port), Some(mayo));
+
+        exec.tick(&mut game, 1);
+
+        assert!(
+            !exec.is_active(),
+            "same-owner delete must fire using cached src owner"
+        );
+        assert!(
+            game.find_unit_owner(ship_id).is_none(),
+            "trade ship must be removed, not redirected to another Hampshire port"
         );
     }
 }
