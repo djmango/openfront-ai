@@ -279,7 +279,17 @@ fn preview_markup(featured: Option<&Value>, replay: &Value) -> String {
             r#"<video autoplay muted loop playsinline preload="auto" src="{url}" title="{title}"></video>"#
         )
     } else {
-        r#"<div class="placeholder">Preview loading...</div>"#.to_string()
+        let msg = replay
+            .get("status_message")
+            .and_then(|v| v.as_str())
+            .or_else(|| replay.get("error").and_then(|v| v.as_str()))
+            .unwrap_or("Generating first replay…");
+        // Escape minimal HTML entities for status text from state.json.
+        let safe = msg
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+        format!(r#"<div class="placeholder">{safe}</div>"#)
     }
 }
 

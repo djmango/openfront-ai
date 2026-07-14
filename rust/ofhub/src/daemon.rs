@@ -99,6 +99,8 @@ fn run_watch(
     if let Some(parent) = record.parent() {
         fs::create_dir_all(parent)?;
     }
+    let device = env_or("SHOWCASE_DEVICE", "cuda");
+    let max_steps = env_or("SHOWCASE_MAX_STEPS", "600");
     let status = Command::new(&bin)
         .args([
             "--watch",
@@ -120,6 +122,13 @@ fn run_watch(
             &bots.to_string(),
             "--difficulty",
             difficulty,
+            "--device",
+            &device,
+            "--max-steps",
+            &max_steps,
+            // Sidecar debug JSON makes CPU/GPU watch much slower.
+            "--debug",
+            "false",
         ])
         .current_dir(repo_root())
         .status()
@@ -232,14 +241,17 @@ fn generate_clip(
         .and_then(|v| v.as_str())
         .unwrap_or(map_name)
         .to_string();
-    Ok(json!({
+    let mut info = json!({
         "seed": seed,
         "game_id": game_id,
         "map": map,
         "record": record.display().to_string(),
         "clip": clip.display().to_string(),
-        "url": format!("/archive/clips/{}.webm", seed),
-    }))
+    });
+    if clip.is_file() {
+        info["url"] = json!(format!("/archive/clips/{}.webm", seed));
+    }
+    Ok(info)
 }
 
 fn write_showcase_state(
@@ -298,13 +310,30 @@ async fn generate_showcase(
     fs::create_dir_all(records_dir())?;
     fs::create_dir_all(clips_dir())?;
 
+    let maps = showcase_maps();
+    let first_map = maps.first().map(String::as_str).unwrap_or("showcase");
     let mut clip_infos = Vec::new();
-    let mut state = json!({});
-    for map_name in showcase_maps() {
+    let mut state = json!({
+        "status": "generating",
+        "status_message": format!("Generating {first_map} replay…"),
+        "run_name": run_name,
+        "stage": stage,
+        "watch_stage": watch_stage,
+        "maps": [],
+        "updated_at": utc_now(),
+    });
+    write_json(&state_path(), &state)?;
+
+    for map_name in &maps {
+        state["status"] = json!("generating");
+        state["status_message"] = json!(format!("Generating {map_name} replay…"));
+        state["updated_at"] = json!(utc_now());
+        let _ = write_json(&state_path(), &state);
+
         match generate_clip(
             policy,
             ae,
-            &map_name,
+            map_name,
             run_name,
             watch_stage,
             stage,
@@ -316,6 +345,14 @@ async fn generate_showcase(
                 clip_infos.push(info);
                 // Publish after each map so Watch works before the full cycle finishes.
                 state = write_showcase_state(&clip_infos, policy, run_name, stage, watch_stage)?;
+                if let Some(obj) = state.as_object_mut() {
+                    obj.insert("status".into(), json!("partial"));
+                    obj.insert(
+                        "status_message".into(),
+                        json!(format!("Ready: {} / {} maps", clip_infos.len(), maps.len())),
+                    );
+                }
+                write_json(&state_path(), &state)?;
                 log(&format!(
                     "showcase partial: {} clip(s) after {map_name}",
                     clip_infos.len()
@@ -330,6 +367,11 @@ async fn generate_showcase(
 
     let rev = hf::policy_revision(client, run_name).await?;
     fs::write(revision_path(), rev)?;
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert("status".into(), json!("ready"));
+        obj.insert("status_message".into(), Value::Null);
+    }
+    write_json(&state_path(), &state)?;
     log(&format!(
         "showcase ready: {} clip(s), game_id={} update={:?}",
         state

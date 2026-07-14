@@ -38,6 +38,15 @@ WORKDIR /build
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config libssl-dev ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
+# Link oftrain against the CUDA PyTorch wheel (same as runtime) so showcase
+# watch can use the host GPU instead of a CPU-only download-libtorch build.
+COPY --from=py-deps /build/.venv /opt/venv
+ENV LIBTORCH=/opt/venv/lib/python3.12/site-packages/torch
+ENV LIBTORCH_CXX11_ABI=1
+ENV LIBTORCH_BYPASS_VERSION_CHECK=1
+ENV LD_LIBRARY_PATH=/opt/venv/lib/python3.12/site-packages/torch/lib:/opt/venv/lib/python3.12/site-packages/nvidia/cu13/lib:/opt/venv/lib/python3.12/site-packages/nvidia/cudnn/lib:/opt/venv/lib/python3.12/site-packages/nvidia/nccl/lib:/opt/venv/lib/python3.12/site-packages/nvidia/cusparselt/lib:/opt/venv/lib/python3.12/site-packages/nvidia/nvshmem/lib
+RUN ln -sf libcudart.so.13 /opt/venv/lib/python3.12/site-packages/nvidia/cu13/lib/libcudart.so \
+    && ln -sf libnccl.so.2 /opt/venv/lib/python3.12/site-packages/nvidia/nccl/lib/libnccl.so
 COPY rust ./rust
 WORKDIR /build/rust
 # ofhub has no libtorch dependency.
@@ -46,10 +55,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release -p ofhub \
     && mkdir -p /out \
     && cp target/release/ofhf target/release/ofexport target/release/ofshowcase /out/
-# oftrain watch uses download-libtorch (CPU) for showcase inference.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/rust/target \
-    cargo build --release -p oftrain --features download-libtorch \
+    cargo build --release -p oftrain \
     && cp target/release/oftrain /out/
 
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm AS runtime
