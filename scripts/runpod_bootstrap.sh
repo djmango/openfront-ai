@@ -12,9 +12,8 @@
 #   bash /workspace/openfront-ai/scripts/runpod_bootstrap.sh
 #
 # The HF tars contain raw snapshots (states/*.gz) without the cache/ subdirs,
-# so after download+extract this runs scripts/prefeaturize.py and
-# scripts/build_static_cache.py (both CPU-parallel). On a 48-vCPU community
-# pod the whole thing is bounded by download + prefeaturize CPU time.
+# so after download+extract this runs `ofae prefeaturize` (CPU-parallel). On a
+# 48-vCPU community pod the whole thing is bounded by download + prefeaturize.
 
 set -euo pipefail
 
@@ -29,13 +28,18 @@ if [ ! -d "$REPO_DIR" ]; then
 fi
 cd "$REPO_DIR"
 
-# --- python deps (image torch matches the driver; add the small extras) ---
-pip install -q numpy zstandard "huggingface_hub[hf_transfer]" tensorboard
+# --- rust toolchain + ofae (needs libtorch via setup_libtorch / torch venv) ---
+if [ ! -x rust/target/release/ofae ]; then
+  bash scripts/setup_libtorch.sh || true
+  (cd rust && cargo build --release -p ofae)
+fi
+OFAE="${OFAE:-$REPO_DIR/rust/target/release/ofae}"
 
 # --- download + extract datasets from HF ---
 # maps/<map>.tar extracts to <map>/<game-id>/{terrain.bin,meta.json,states/}
 # HF cache must live on the big /workspace volume; the default ~/.cache is on
 # the small container disk and fills up.
+pip install -q "huggingface_hub[hf_transfer]"
 export HF_HOME=/workspace/hf-cache
 stage_dataset() { # $1 = hf dataset repo, $2 = local root (data | data-human)
   local repo="$1" root="$2"
@@ -81,16 +85,8 @@ stage_dataset djmango/openfront-human-games data-human
 rm -rf /workspace/hf-cache  # reclaim the transient download cache
 
 # --- featurize (skips games whose cache/index.json already exists) ---
-PYTHONPATH=. python scripts/prefeaturize.py --data data --workers "$WORKERS"
-PYTHONPATH=. python scripts/prefeaturize.py --data data-human --workers "$WORKERS"
-PYTHONPATH=. python scripts/build_static_cache.py --data data,data-human --workers "$WORKERS"
+"$OFAE" prefeaturize --data data --workers "$WORKERS"
+"$OFAE" prefeaturize --data data-human --workers "$WORKERS"
 
-# --- sanity check: GPU + 5 batches through the cached data pipeline ---
-python -c "import torch; assert torch.cuda.is_available(); print('cuda ok:', torch.cuda.get_device_name(0))"
-PYTHONPATH=. python -c "
-from ae.train_v3 import CachedDataset
-it = iter(CachedDataset('data,data-human', 256, seed=1))
-for _ in range(5): next(it)
-print('data ok')
-"
-echo "bootstrap complete"
+echo "bootstrap complete - train with:"
+echo "  $OFAE train --data data,data-human --steps 40000 --batch-size 64 --latent-down 8 --out runs/ae_v31_d8c32"

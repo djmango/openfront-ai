@@ -86,7 +86,7 @@ are simply unrewarding; the policy must learn to ignore them.
 
 ### Spatial autoencoder (v3) + raw bypass
 
-**Compress only what is big.** The spatial AE (`ae/model_v3.py`) consumes
+**Compress only what is big.** The spatial AE (`rust/ofae`) consumes
 tile ownership + terrain + fallout + static-structure planes (city, port,
 defense post, missile silo, SAM launcher, factory) and produces the grid
 latent (H/16 x W/16 x 64). Losses: border-weighted CE over owner slots;
@@ -218,7 +218,7 @@ trade-ship destinations, per-unit health/cooldown, tile defense bonus,
 target-painting, income rate, the doomsday clock, and the rail network.
 v7 closes these gaps, entirely through the existing AE-bypass paths (raw
 grid channels, player-feature vectors, global scalars) - the frozen
-spatial AE (`ae/model_v3.py`) is untouched by this part, so it needs no
+spatial AE (`rust/ofae`) is untouched by this part, so it needs no
 AE retraining (the foveation part needs an AE /16 fine-tune; see below).
 
 - **Transient grid planes reworked and expanded** (`N_TRANSIENT`: 8 ->
@@ -250,7 +250,7 @@ AE retraining (the foveation part needs an AE /16 fine-tune; see below).
   (in-clock flag, ticks).
 - **Global scalars** (`N_SCALARS`: 8 -> 11) gain self troop/gold income
   and a doomsday-clock-enabled flag.
-- **New unit taxonomy** (`ae/units.py`): SAM Missile, MIRV Warhead, Train
+- **New unit taxonomy** (ofae / ofcore feat): SAM Missile, MIRV Warhead, Train
   added to `TRANSIENT_CLASSES` (rail network support stays lightweight -
   trains render as a transient unit plane plus the active-station flag,
   no separate graph/edge representation).

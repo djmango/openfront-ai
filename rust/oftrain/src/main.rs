@@ -334,14 +334,14 @@ struct Args {
     #[arg(long, default_value_t = true)]
     foveate: bool,
 
-    /// Frozen fine AE encoder safetensors (from
-    /// `scripts/export_safetensors.py` on `ae_v31_d8c32.pt`). Required for
+    /// Frozen fine AE encoder safetensors (from `ofae` / HF
+    /// `ae_v31_d8c32.encoder.safetensors`). Required for
     /// production obs parity (`C_GRID=89`).
     #[arg(long, default_value = "weights/ae/ae_v31_d8c32.encoder.safetensors")]
     ckpt: String,
 
     /// Optional frozen coarse /16 AE encoder safetensors (from
-    /// `ae_v31_d16c32.pt`). When set, the coarse stream uses a native /16
+    /// `ae_v31_d16c32.encoder.safetensors`). When set, the coarse stream uses a native /16
     /// latent instead of 2x-pooling the fine grid.
     #[arg(long)]
     coarse_ckpt: Option<String>,

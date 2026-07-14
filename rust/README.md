@@ -18,8 +18,11 @@ export LIBTORCH_USE_PYTORCH=1
 export LIBTORCH="$(python -c 'import torch, os; print(os.path.dirname(torch.__file__))')"
 export LD_LIBRARY_PATH="$LIBTORCH/lib:${LD_LIBRARY_PATH:-}"
 
-cargo build --release -p openfront-engine -p oftrain -p ofhub   # from rust/
+cargo build --release -p openfront-engine -p oftrain -p ofhub -p ofae   # from rust/
 cargo test -p oftrain --bin oftrain
+
+# AE train (needs cached games under data/)
+cargo run --release -p ofae -- train --data ../data --steps 100 --out /tmp/ofae_smoke
 
 # Parity checks
 ./scripts/parity_check.sh 5
@@ -68,7 +71,7 @@ ticking stays on native (~10× faster).
 
 | Item | Status |
 |------|--------|
-| AE encoders | `scripts/export_safetensors.py` + `fetch_ae_encoders.sh` → `--ckpt` / `--coarse-ckpt` |
+| AE encoders | `ofae train` / `ofae export-encoder` + `fetch_ae_encoders.sh` → `--ckpt` / `--coarse-ckpt` |
 | Checkpoints | `.safetensors` + `manifest.json` / `*.state.json` (legacy `.ot` explicit only) |
 | Value loss | default `mse`; `--value-loss huber` escape hatch |
 | Pipelining | `--pipeline-groups` (default on), `--fp16-rollout` (opt-in) |
