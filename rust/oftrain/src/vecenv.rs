@@ -229,6 +229,92 @@ pub struct EpisodeInfo {
     pub action_pair_counts: ActionPairCounts,
 }
 
+/// Outcome of the action immediately preceding an observation. This stays on
+/// the host and is supplied separately to recurrent policies; legacy
+/// observation tensors are unchanged.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActionOutcome {
+    pub action: i64,
+    pub player_slot: i64,
+    pub tile_region: i64,
+    pub build_type: i64,
+    pub nuke_type: i64,
+    pub success: bool,
+    pub wasted: bool,
+    /// Stable engine player/unit identity, or -1 when no identity applies.
+    pub target_identity: i64,
+    /// Region-center coordinates normalized to [0, 1], or -1 when unused.
+    pub target_y: f32,
+    pub target_x: f32,
+    pub quantity: f32,
+    /// Number of consecutive decisions with the same semantic commitment.
+    pub commitment_age: u32,
+    pub had_action: bool,
+    /// 0 = none, 1 = player, 2 = unit.
+    pub target_kind: u8,
+}
+
+impl Default for ActionOutcome {
+    fn default() -> Self {
+        Self {
+            action: -1,
+            player_slot: -1,
+            tile_region: -1,
+            build_type: -1,
+            nuke_type: -1,
+            success: false,
+            wasted: false,
+            target_identity: -1,
+            target_y: -1.0,
+            target_x: -1.0,
+            quantity: -1.0,
+            commitment_age: 0,
+            had_action: false,
+            target_kind: 0,
+        }
+    }
+}
+
+impl ActionOutcome {
+    pub fn as_floats(&self) -> [f32; crate::recurrent::CONTEXT_FLOATS] {
+        [
+            self.action as f32,
+            self.player_slot as f32,
+            self.tile_region as f32,
+            self.build_type as f32,
+            self.nuke_type as f32,
+            self.success as u8 as f32,
+            self.wasted as u8 as f32,
+            self.target_identity as f32,
+            self.target_y,
+            self.target_x,
+            self.quantity,
+            self.commitment_age as f32,
+            self.had_action as u8 as f32,
+            self.target_kind as f32,
+        ]
+    }
+}
+
+fn normalized_tile_target(tile: i64, gh: usize, gw: usize) -> (f32, f32) {
+    // Policy tile ids use the fixed GW_MAX global stride, not this map's
+    // compact width (see policy::fine_local_to_global).
+    let y = tile.div_euclid(feat::GW_MAX as i64);
+    let x = tile.rem_euclid(feat::GW_MAX as i64);
+    (
+        (y as f32 + 0.5) / gh.max(1) as f32,
+        (x as f32 + 0.5) / gw.max(1) as f32,
+    )
+}
+
+pub struct EnvTransition {
+    pub next_obs: PreparedObs,
+    pub reward: f64,
+    pub done: bool,
+    pub info: Option<EpisodeInfo>,
+    pub outcome: ActionOutcome,
+}
+
 /// Per-env observation ready to batch into `policy::Obs`.
 ///
 /// Production path (`batch::build_obs` with an `AePair`): GPU AE encode
@@ -240,6 +326,9 @@ pub struct EpisodeInfo {
 /// `grid` inside `build_obs`.
 #[derive(Clone)]
 pub struct PreparedObs {
+    /// Previous action/result context for a recurrent policy. It is not
+    /// included by any legacy `batch::build_obs*` path.
+    pub prev_action: ActionOutcome,
     /// Compact host ownership boundary used by `--compact-rollout`.
     /// Contains no device handles and is consumed directly by policy/update.
     pub compact: Option<CompactGrid>,
@@ -349,6 +438,8 @@ pub struct EnvWorker {
     prev_strength: f64,
     dominance_shaper: DominanceShaper,
     action_churn_tracker: ActionChurnTracker,
+    prev_action: ActionOutcome,
+    last_commitment: Option<(i64, i64, i64, i64, i64, u64)>,
     ep_reward_components: RewardComponents,
     spawn_steps: i64,
     map_name: String,
@@ -393,6 +484,8 @@ impl EnvWorker {
             prev_strength: 0.0,
             dominance_shaper: DominanceShaper::default(),
             action_churn_tracker: ActionChurnTracker::default(),
+            prev_action: ActionOutcome::default(),
+            last_commitment: None,
             ep_reward_components: RewardComponents::default(),
             spawn_steps: 0,
             map_name: String::new(),
@@ -477,6 +570,8 @@ impl EnvWorker {
         self.spawn_steps = 0;
         self.ep_reward = 0.0;
         self.action_churn_tracker.reset();
+        self.prev_action = ActionOutcome::default();
+        self.last_commitment = None;
         self.ep_reward_components = RewardComponents::default();
         self.ep_len = 0;
         self.ep_wasted = 0;
@@ -554,6 +649,7 @@ impl EnvWorker {
         };
 
         PreparedObs {
+            prev_action: self.prev_action.clone(),
             compact: None,
             grid: None,
             grid_coarse: None,
@@ -585,14 +681,23 @@ impl EnvWorker {
     pub fn step(
         &mut self,
         choice: &Choice,
-    ) -> Result<(PreparedObs, f64, bool, Option<EpisodeInfo>)> {
-        let (reward, done, info) = self.apply(choice)?;
+    ) -> Result<EnvTransition> {
+        let (reward, done, info, outcome) = self.apply(choice)?;
         let prepared = self.prepare();
-        Ok((prepared, reward, done, info))
+        Ok(EnvTransition {
+            next_obs: prepared,
+            reward,
+            done,
+            info,
+            outcome,
+        })
     }
 
     /// Translate + step. Auto-resets on episode end.
-    pub fn apply(&mut self, choice: &Choice) -> Result<(f64, bool, Option<EpisodeInfo>)> {
+    pub fn apply(
+        &mut self,
+        choice: &Choice,
+    ) -> Result<(f64, bool, Option<EpisodeInfo>, ActionOutcome)> {
         let name = ACTIONS[choice.action as usize];
         let lut = self.current_lut();
         let obs = self.obs.as_ref().unwrap();
@@ -636,10 +741,53 @@ impl EnvWorker {
         let inverse_pair = self
             .action_churn_tracker
             .observe(chosen_action, self.reward_config.v81_churn_window);
-        let mut wasted = new_obs.wasted();
+        let engine_wasted = new_obs.wasted();
+        let mut wasted = engine_wasted;
         if intents.is_empty() && name != "noop" && name != "spawn" {
             wasted += 1;
         }
+        let (target_kind, target_identity) = match chosen_action.target {
+            Some(ActionTarget::Player(id)) => (1, id as i64),
+            Some(ActionTarget::Unit(id)) => (2, id as i64),
+            None => (0, -1),
+        };
+        let (target_y, target_x) = choice
+            .tile_region
+            .map(|tile| normalized_tile_target(tile, self.hr / REGION, self.wr / REGION))
+            .unwrap_or((-1.0, -1.0));
+        let commitment = (
+            choice.action,
+            choice.player_slot.unwrap_or(-1),
+            choice.tile_region.unwrap_or(-1),
+            choice.build_type.unwrap_or(-1),
+            choice.nuke_type.unwrap_or(-1),
+            choice.quantity_frac.unwrap_or(-1.0).to_bits(),
+        );
+        let commitment_age = if self.last_commitment == Some(commitment) {
+            self.prev_action.commitment_age.saturating_add(1)
+        } else {
+            0
+        };
+        self.last_commitment = Some(commitment);
+        let outcome = ActionOutcome {
+            action: choice.action,
+            player_slot: choice.player_slot.unwrap_or(-1),
+            tile_region: choice.tile_region.unwrap_or(-1),
+            build_type: choice.build_type.unwrap_or(-1),
+            nuke_type: choice.nuke_type.unwrap_or(-1),
+            // The engine reports a count, so a multi-intent action can have
+            // both accepted and wasted components.
+            success: name == "noop" || intents.len() as i64 > engine_wasted,
+            wasted: wasted > 0,
+            target_identity,
+            target_y,
+            target_x,
+            quantity: choice.quantity_frac.unwrap_or(-1.0) as f32,
+            commitment_age,
+            had_action: true,
+            target_kind,
+        };
+        self.prev_action = outcome.clone();
         self.obs = Some(new_obs);
         let obs = self.obs.as_ref().unwrap();
 
@@ -657,7 +805,7 @@ impl EnvWorker {
                     self.reward_config.v81_potential_clamp,
                 ));
                 self.ep_len += 1;
-                return Ok((0.0, false, None));
+                return Ok((0.0, false, None, outcome));
             }
         }
 
@@ -762,7 +910,7 @@ impl EnvWorker {
             self.ep_reward += reward;
             self.ep_len += 1;
         }
-        Ok((reward, done, info))
+        Ok((reward, done, info, outcome))
     }
 
     /// Emergency fallback matching `rl/ppo_translate.py::spawn_randomly`:
@@ -916,5 +1064,13 @@ mod churn_action_tests {
             ChosenAction::new(A_BOAT, None),
             "ambiguous transport creation must not create a false match"
         );
+    }
+
+    #[test]
+    fn recurrent_tile_context_uses_global_policy_stride() {
+        let tile = 3 * feat::GW_MAX as i64 + 7;
+        let (y, x) = normalized_tile_target(tile, 10, 20);
+        assert!((y - 0.35).abs() < 1e-6);
+        assert!((x - 0.375).abs() < 1e-6);
     }
 }
