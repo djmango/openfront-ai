@@ -43,6 +43,39 @@ pub fn map_seed(map_name: &str) -> String {
     map_name.to_ascii_lowercase().replace(' ', "_")
 }
 
+/// Convert a training/showcase map key (`BlackSea`) to the OpenFront
+/// `GameMapType` value accepted by adminbot (`"Black Sea"`).
+///
+/// Training and `oftrain --map` use enum keys; `/api/adminbot/create_game`
+/// validates against the string enum values from `Maps.gen.ts`.
+pub fn game_map_api_name(map_key: &str) -> String {
+    let key = map_key.trim();
+    if key.is_empty() || key.contains(' ') {
+        return key.to_string();
+    }
+    // Explicit overrides where camelCase-splitting is wrong.
+    match key {
+        "ArchipelagoSea" | "MilkyWay" | "SoutheastAsia" => return key.to_string(),
+        "GatewayToTheAtlantic" => return "Gateway to the Atlantic".into(),
+        "GulfOfStLawrence" => return "Gulf of St. Lawrence".into(),
+        "StraitOfGibraltar" => return "Strait of Gibraltar".into(),
+        "StraitOfHormuz" => return "Strait of Hormuz".into(),
+        "Tourney1" => return "Tourney 2 Teams".into(),
+        "Tourney2" => return "Tourney 3 Teams".into(),
+        "Tourney3" => return "Tourney 4 Teams".into(),
+        "Tourney4" => return "Tourney 8 Teams".into(),
+        _ => {}
+    }
+    let mut out = String::with_capacity(key.len() + 4);
+    for (i, ch) in key.chars().enumerate() {
+        if i > 0 && ch.is_ascii_uppercase() {
+            out.push(' ');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 /// Pick a random replay entry from `state["maps"]`.
 ///
 /// Falls back to a legacy top-level `game_id` entry when `maps` is empty.
@@ -206,5 +239,13 @@ mod tests {
         let state = json!({"game_id": "deadbeef"});
         let entry = featured_showcase_entry(&state).unwrap();
         assert_eq!(entry["game_id"], "deadbeef");
+    }
+
+    #[test]
+    fn game_map_api_name_resolves_showcase_keys() {
+        assert_eq!(game_map_api_name("Onion"), "Onion");
+        assert_eq!(game_map_api_name("BlackSea"), "Black Sea");
+        assert_eq!(game_map_api_name("BetweenTwoSeas"), "Between Two Seas");
+        assert_eq!(game_map_api_name("Black Sea"), "Black Sea");
     }
 }
