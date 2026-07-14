@@ -42,9 +42,15 @@ set -uo pipefail
 
 RUN_NAME="${RUN_NAME:-ppo_v8}"
 NUM_GPUS="${NUM_GPUS:-1}"
+V81_CURRICULUM="${V81_CURRICULUM:-0}"
 # Envs per GPU/shard. Live A40 A/Bs found 48 faster than 64 once the
 # persistent compact path was enabled (64 increased stage-2 tail latency).
-NUM_ENVS="${NUM_ENVS:-48}"
+if [ "$V81_CURRICULUM" = "1" ]; then
+  NUM_ENVS="${NUM_ENVS:-24}"
+else
+  NUM_ENVS="${NUM_ENVS:-48}"
+fi
+STAGE_ENV_TARGETS="${STAGE_ENV_TARGETS:-}"
 ROLLOUT_LEN="${ROLLOUT_LEN:-32}"
 # Match rl/ppo.py's optimizer cadence: its --minibatch is a target sample
 # count (128), while oftrain's --minibatches is a count. Derive the latter
@@ -64,9 +70,18 @@ NODE_FRACTION="${NODE_FRACTION:-0}"
 # data, and two env groups overlap stepping with actor inference. Keep
 # fp16-rollout opt-in until it receives the same extended CUDA soak.
 EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --persistent-actors --pipeline-groups=true --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
+V81_ARGS=""
+if [ "$V81_CURRICULUM" = "1" ]; then
+  V81_ARGS="--v81-curriculum"
+fi
+if [ -n "$STAGE_ENV_TARGETS" ]; then
+  V81_ARGS="$V81_ARGS --stage-env-targets $STAGE_ENV_TARGETS"
+fi
 REPO_DIR="${REPO_DIR:-/root/openfront-ai}"
 CKPT_DIR="$REPO_DIR/rust/checkpoints/$RUN_NAME"
 HF_SYNC_INTERVAL_SECONDS="${HF_SYNC_INTERVAL_SECONDS:-600}"
+HF_REPO_ID="${HF_REPO_ID:-djmango/openfront-rl}"
+HF_RUN_PREFIX="${HF_RUN_PREFIX:-$RUN_NAME}"
 TORCH_VERSION="2.11.0" # tch 0.24's C++ shim needs this exact version - see devlog
 AE_DIR="${AE_DIR:-$REPO_DIR/weights/ae}"
 
@@ -169,56 +184,27 @@ fi
 
 mkdir -p "$CKPT_DIR"
 
-# --- resume seed: if the local checkpoint is gone (fresh pod, disk wiped)
-# but a synced copy exists on HF, pull it down before starting ---
-# Prefer `.safetensors`; fall back to legacy `.ot` if that is all HF has.
-LATEST_CKPT=""
-[ -f "$CKPT_DIR/latest.safetensors" ] && LATEST_CKPT="$CKPT_DIR/latest.safetensors"
-[ -z "$LATEST_CKPT" ] && [ -f "$CKPT_DIR/latest.ot" ] && LATEST_CKPT="$CKPT_DIR/latest.ot"
-if [ -z "$LATEST_CKPT" ]; then
-  "$PYTHON" - "$RUN_NAME" "$CKPT_DIR" <<'PYEOF' || true
-import sys
-from pathlib import Path
-from huggingface_hub import hf_hub_download
-
-run, dest = sys.argv[1], Path(sys.argv[2])
-for f in ("latest.safetensors", "latest.ot", "latest.state.json"):
-    try:
-        p = hf_hub_download("djmango/openfront-rl", f"{run}/{f}")
-        dest.mkdir(parents=True, exist_ok=True)
-        (dest / f).write_bytes(Path(p).read_bytes())
-        print(f"restored {f} from HF")
-    except Exception as e:
-        print(f"{f}: no HF copy ({e.__class__.__name__})")
-PYEOF
+# --- resume seed: current/future runs restore a complete safetensors pair
+# only. Explicit `oftrain --resume old.ot` remains available for manual
+# legacy migrations, but automated launches never select it. ---
+if [ ! -f "$CKPT_DIR/latest.safetensors" ] || [ ! -f "$CKPT_DIR/latest.state.json" ]; then
+  "$PYTHON" "$REPO_DIR/scripts/hf_checkpoint_sync.py" \
+    --checkpoint-dir "$CKPT_DIR" --repo-id "$HF_REPO_ID" \
+    --run-prefix "$HF_RUN_PREFIX" --restore-latest || true
+fi
+if { [ -f "$CKPT_DIR/latest.safetensors" ] && [ ! -f "$CKPT_DIR/latest.state.json" ]; } \
+  || { [ ! -f "$CKPT_DIR/latest.safetensors" ] && [ -f "$CKPT_DIR/latest.state.json" ]; }
+then
+  echo "FATAL: latest.safetensors and latest.state.json must exist as a pair" >&2
+  exit 1
 fi
 
-# --- background HF sync: push the latest checkpoint periodically so
-# training survives total pod/disk loss, not just an in-pod crash ---
-(
-  while true; do
-    sleep "$HF_SYNC_INTERVAL_SECONDS"
-    if [ -f "$CKPT_DIR/latest.safetensors" ] || [ -f "$CKPT_DIR/latest.ot" ]; then
-      "$PYTHON" - "$RUN_NAME" "$CKPT_DIR" <<'PYEOF' 2>&1 | sed 's/^/[hf-sync] /'
-import sys
-from pathlib import Path
-from huggingface_hub import HfApi
-
-run, ckpt_dir = sys.argv[1], Path(sys.argv[2])
-api = HfApi()
-try:
-    api.create_repo("djmango/openfront-rl", exist_ok=True, repo_type="model")
-    for f in ("latest.safetensors", "latest.ot", "latest.state.json"):
-        p = ckpt_dir / f
-        if p.exists():
-            api.upload_file(path_or_fileobj=str(p), path_in_repo=f"{run}/{f}", repo_id="djmango/openfront-rl")
-    print("synced latest checkpoint")
-except Exception as e:
-    print(f"sync failed: {e}")
-PYEOF
-    fi
-  done
-) &
+# --- background HF sync: immutable snapshots of latest, best-eval,
+# milestones, state sidecars, and the run manifest. ---
+"$PYTHON" "$REPO_DIR/scripts/hf_checkpoint_sync.py" \
+  --checkpoint-dir "$CKPT_DIR" --repo-id "$HF_REPO_ID" \
+  --run-prefix "$HF_RUN_PREFIX" --interval "$HF_SYNC_INTERVAL_SECONDS" \
+  >>"/tmp/hf_sync_$RUN_NAME.log" 2>&1 &
 SYNC_PID=$!
 trap 'kill "$SYNC_PID" 2>/dev/null' EXIT
 
@@ -230,8 +216,6 @@ while true; do
   RESUME=""
   if [ -f "$CKPT_DIR/latest.safetensors" ]; then
     RESUME="--resume $CKPT_DIR/latest.safetensors"
-  elif [ -f "$CKPT_DIR/latest.ot" ]; then
-    RESUME="--resume $CKPT_DIR/latest.ot"
   fi
   echo "=== $(date -u +%FT%TZ) launching $RUN_NAME num_gpus=$NUM_GPUS envs/shard=$NUM_ENVS $RESUME ==="
   START_TS=$(date +%s)
@@ -239,10 +223,20 @@ while true; do
   LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB" \
     ./target/release/oftrain --engine native --node-fraction "$NODE_FRACTION" --num-envs "$NUM_ENVS" --num-gpus "$NUM_GPUS" \
     --rollout-len "$ROLLOUT_LEN" --minibatches "$MINIBATCHES" --stage "$STAGE" --device cuda:0 \
-    --ckpt-dir "$CKPT_DIR" $EXTRA_ARGS $RESUME \
+    --ckpt-dir "$CKPT_DIR" $V81_ARGS $EXTRA_ARGS $RESUME \
     >> "/tmp/train_$RUN_NAME.log" 2>&1
   RC=$?
   ELAPSED=$(( $(date +%s) - START_TS ))
+  if [ -f "$CKPT_DIR/restart_request.json" ]; then
+    REQUESTED_ENVS=$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["requested_envs_per_shard"])' "$CKPT_DIR/restart_request.json")
+    echo "=== intentional stage resize requested: $NUM_ENVS -> $REQUESTED_ENVS envs/shard; restarting now ===" \
+      | tee -a "/tmp/train_$RUN_NAME.log"
+    NUM_ENVS="$REQUESTED_ENVS"
+    MINIBATCHES=$((NUM_ENVS * ROLLOUT_LEN / MINIBATCH_SIZE))
+    [ "$MINIBATCHES" -ge 1 ] || MINIBATCHES=1
+    FAST_EXITS=0
+    continue
+  fi
   if [ "$ELAPSED" -lt 120 ]; then
     FAST_EXITS=$((FAST_EXITS + 1))
   else
