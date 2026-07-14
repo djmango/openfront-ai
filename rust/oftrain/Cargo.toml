@@ -8,6 +8,7 @@ name = "oftrain"
 path = "src/main.rs"
 
 [build-dependencies]
+cc = "1"
 
 [dependencies]
 ofcore = { path = "../ofcore" }
@@ -30,3 +31,6 @@ half = "2.7.1"
 default = []
 download-libtorch = ["tch/download-libtorch"]
 native-engine = ["dep:openfront-engine"]
+# Compiles the device-resident persistent-learner gradient reducer. Builds
+# without NCCL retain the CPU gradient hub with no runtime dependency.
+nccl = []

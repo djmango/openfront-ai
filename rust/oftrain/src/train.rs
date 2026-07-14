@@ -33,10 +33,12 @@
 //! training).
 //! The same flag starts one persistent learner owner per GPU. Each constructs
 //! and retains its LearnerShard, ShardBatch, and shuffle RNG on one stable OS
-//! thread. At each optimizer barrier owners send flat `Vec<f32>` gradients to
-//! a CPU hub, which reduces in shard-index order and returns CPU averages;
-//! no Tensor or VarStore crosses threads. Checkpoint weights are written by
-//! owner 0 and coordinator-ordered sidecars retain their format/order.
+//! thread. At each optimizer barrier an optional feature-gated NCCL path
+//! reduces flat gradients on each owner's current CUDA stream; builds or
+//! launches without NCCL retain the CPU `Vec<f32>` hub. A single owner steps
+//! its already-final device gradient directly. No Tensor or VarStore crosses
+//! threads. Checkpoint weights are written by owner 0 and coordinator-ordered
+//! sidecars retain their format/order.
 //!
 //! Persistent owners deliberately do not accept live env-resize commands.
 //! Stage-aware sizing checkpoints at an update boundary and exits with a
@@ -52,10 +54,11 @@
 //! on.
 //! Gated persistent runs may instead use `--work-conserving-actors`: each
 //! worker publishes its CPU `PreparedObs` as soon as stepping finishes, and
-//! the actor drains a stable exact-shape ready queue into microbatches bounded
-//! by `--actor-max-batch` and `--actor-max-wait-ms`. Rollout slots remain
-//! T-major/N-minor regardless of completion order. The fixed-half collector is
-//! retained as the default and as the non-persistent fallback.
+//! the actor drains a stable FIFO ready queue into microbatches bounded by
+//! target/max size, compact-coarse padding waste, and `--actor-max-wait-ms`.
+//! AE encoding and foveated cropping stay exact-shape; only compact observations
+//! are coalesced. Rollout slots remain T-major/N-minor regardless of completion
+//! order. The fixed-half collector remains the default/non-persistent fallback.
 //!
 //! Multi-GPU (see `LearnerShard`/`ActorShard`): one `PolicyNet`/`VarStore`
 //! replica per device, each owning a disjoint slice of envs, in a single
@@ -65,9 +68,9 @@
 //! optimizer step - see the comment above `dist.all_reduce(flat)` there)
 //! rather than wrapping in `nn.parallel.DistributedDataParallel`. `tch`/
 //! `torch-sys` has no NCCL bindings. The legacy path uses P2P copies;
-//! persistent owners use explicit CPU flat-gradient messages so CUDA objects
-//! remain strictly thread-owned. Both implement "average grad before step"
-//! semantics; the CPU hub prioritizes correctness over NCCL throughput.
+//! persistent owners use the small exact-libtorch NCCL shim when compiled and
+//! initialized, or explicit CPU flat-gradient messages otherwise. Both
+//! implement "average grad before step" semantics.
 //!
 //! ## Remaining Python-parity gaps (oftrain)
 //!
@@ -88,8 +91,8 @@ use anyhow::{Result, anyhow};
 use ofcore::curriculum::RewardConfig;
 use ofcore::feat::ACTIONS;
 use ofcore::translate::Choice;
-use rand::{RngCore, SeedableRng};
 use rand::seq::SliceRandom;
+use rand::{RngCore, SeedableRng};
 use tch::nn::OptimizerConfig;
 use tch::{Cuda, Device, Kind, Tensor, nn};
 
@@ -305,8 +308,9 @@ pub struct Config {
     pub pipeline_groups: bool,
     /// Opt-in persistent ownership. One long-lived OS thread per shard owns
     /// actor CUDA state; one stable learner thread per GPU owns that shard's
-    /// learner CUDA state and PPO execution. Gradient and weight messages are
-    /// packed CPU-only f32 vectors. Disabled by default; incompatible live
+    /// learner CUDA state and PPO execution. Weights remain packed CPU-only
+    /// messages; gradients use owner-local NCCL when available and a packed
+    /// CPU fallback otherwise. Disabled by default; incompatible live
     /// utilization autoscaling is disabled without changing ownership mode.
     pub persistent_actors: bool,
     /// Opt-in recurrent actor state. This is restricted to persistent actors
@@ -319,8 +323,12 @@ pub struct Config {
     /// Opt-in ready-queue scheduler for persistent actors. The default-off
     /// fallback remains the fixed two-half collector.
     pub work_conserving_actors: bool,
-    /// Maximum exact-shape actor inference microbatch.
+    /// Hard maximum coalesced actor inference batch.
     pub actor_max_batch: usize,
+    /// Preferred cross-shape compact inference batch.
+    pub actor_target_batch: usize,
+    /// Maximum fraction of padded compact coarse cells in one dispatch.
+    pub actor_max_padding_waste: f64,
     /// Maximum age of the oldest item before a partial microbatch dispatches.
     pub actor_max_wait: Duration,
     pub device: Device,
@@ -542,11 +550,21 @@ fn read_architecture_manifest(ckpt_path: &str, expected_schema: u64) -> Result<s
         "schema-aware policy loading requires a .safetensors checkpoint"
     );
     let path = manifest_path(ckpt_path);
-    let text = std::fs::read_to_string(&path)
-        .map_err(|error| anyhow!("checkpoint manifest {} is required: {error}", path.display()))?;
+    let text = std::fs::read_to_string(&path).map_err(|error| {
+        anyhow!(
+            "checkpoint manifest {} is required: {error}",
+            path.display()
+        )
+    })?;
     let manifest: serde_json::Value = serde_json::from_str(&text)?;
-    anyhow::ensure!(manifest["format"] == "oftrain-safetensors", "unsupported checkpoint format");
-    anyhow::ensure!(manifest["manifest_schema_version"] == 1, "unsupported manifest schema");
+    anyhow::ensure!(
+        manifest["format"] == "oftrain-safetensors",
+        "unsupported checkpoint format"
+    );
+    anyhow::ensure!(
+        manifest["manifest_schema_version"] == 1,
+        "unsupported manifest schema"
+    );
     anyhow::ensure!(
         manifest["architecture"]["schema_version"] == expected_schema,
         "checkpoint architecture schema mismatch: expected v{expected_schema}, found {}",
@@ -562,9 +580,18 @@ pub(crate) fn warm_start_v81_recurrent(vs: &nn::VarStore, checkpoint: &str) -> R
     let destination = vs.variables();
     let source_names: std::collections::HashSet<_> = source.keys().cloned().collect();
     let destination_names: std::collections::HashSet<_> = destination.keys().cloned().collect();
-    let extra: Vec<_> = source_names.difference(&destination_names).cloned().collect();
-    let missing: Vec<_> = destination_names.difference(&source_names).cloned().collect();
-    anyhow::ensure!(extra.is_empty(), "V8.1 checkpoint has unexpected tensors: {extra:?}");
+    let extra: Vec<_> = source_names
+        .difference(&destination_names)
+        .cloned()
+        .collect();
+    let missing: Vec<_> = destination_names
+        .difference(&source_names)
+        .cloned()
+        .collect();
+    anyhow::ensure!(
+        extra.is_empty(),
+        "V8.1 checkpoint has unexpected tensors: {extra:?}"
+    );
     anyhow::ensure!(
         !missing.is_empty() && missing.iter().all(|name| name.starts_with("recurrent.")),
         "V8.1 migration may initialize only recurrent tensors; missing={missing:?}"
@@ -588,7 +615,10 @@ pub(crate) fn warm_start_v81_recurrent(vs: &nn::VarStore, checkpoint: &str) -> R
             target.kind()
         );
         tch::no_grad(|| target.f_copy_(source_tensor))?;
-        anyhow::ensure!(target.equal(source_tensor), "V8.1 tensor copy was not exact: {name}");
+        anyhow::ensure!(
+            target.equal(source_tensor),
+            "V8.1 tensor copy was not exact: {name}"
+        );
     }
     for name in ["recurrent.residual.weight", "recurrent.residual.bias"] {
         anyhow::ensure!(
@@ -651,7 +681,10 @@ mod v81_state_and_gate_tests {
                 .map(|index| if index < 14 { 1.0 } else { 0.0 })
                 .collect::<Vec<_>>(),
         );
-        assert!(!should_advance(&wins, 0.35), "exactly 0.35 is below the strict gate");
+        assert!(
+            !should_advance(&wins, 0.35),
+            "exactly 0.35 is below the strict gate"
+        );
         wins[14] = 1.0;
         assert!(should_advance(&wins, 0.35));
     }
@@ -678,8 +711,14 @@ mod v81_state_and_gate_tests {
         let restored: TrainState =
             serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
         assert!(restored.v81_curriculum);
-        assert_eq!(restored.schedule().unwrap(), ofcore::curriculum::CurriculumSchedule::V81);
-        assert_eq!(restored.stage_env_targets, ofcore::curriculum::V81_ENV_TARGETS);
+        assert_eq!(
+            restored.schedule().unwrap(),
+            ofcore::curriculum::CurriculumSchedule::V81
+        );
+        assert_eq!(
+            restored.stage_env_targets,
+            ofcore::curriculum::V81_ENV_TARGETS
+        );
         assert_eq!(restored.requested_env_target, Some(12));
 
         let legacy: TrainState = serde_json::from_str(
@@ -690,7 +729,10 @@ mod v81_state_and_gate_tests {
         assert!(!legacy.v81_curriculum);
         assert_eq!(legacy.checkpoint_schema_version, 0);
         assert!(legacy.hidden_reset_policy.is_empty());
-        assert_eq!(legacy.schedule().unwrap(), ofcore::curriculum::CurriculumSchedule::Legacy);
+        assert_eq!(
+            legacy.schedule().unwrap(),
+            ofcore::curriculum::CurriculumSchedule::Legacy
+        );
         assert!(legacy.stage_env_targets.is_empty());
         assert_eq!(legacy.requested_env_target, None);
     }
@@ -729,8 +771,14 @@ mod v81_state_and_gate_tests {
         assert_eq!(manifest["manifest_schema_version"], 1);
         assert_eq!(manifest["architecture"]["schema_version"], 2);
         assert_eq!(manifest["architecture"]["recurrent"]["hidden_size"], 256);
-        assert_eq!(manifest["architecture"]["recurrent"]["context_schema"], "action-outcome-v1");
-        assert_eq!(manifest["architecture"]["recurrent"]["context_features"], 14);
+        assert_eq!(
+            manifest["architecture"]["recurrent"]["context_schema"],
+            "action-outcome-v1"
+        );
+        assert_eq!(
+            manifest["architecture"]["recurrent"]["context_features"],
+            14
+        );
         assert_eq!(manifest["architecture"]["recurrent"]["bptt_length"], 16);
         assert_eq!(manifest["architecture"]["recurrent"]["rollout_length"], 32);
         assert_eq!(
@@ -1142,12 +1190,7 @@ fn spawn_worker_routed(
                 }
                 let result = w.step(&choice).map_err(|e| format!("{e:#}"));
                 let sent = match &ready_route {
-                    Some((env, ready_tx)) => ready_tx
-                        .send(ReadyEnv {
-                            env: *env,
-                            result,
-                        })
-                        .is_ok(),
+                    Some((env, ready_tx)) => ready_tx.send(ReadyEnv { env: *env, result }).is_ok(),
                     None => obs_tx.send(result).is_ok(),
                 };
                 if !sent {
@@ -1322,6 +1365,55 @@ struct RolloutResult {
     ep_infos: Vec<EpisodeInfo>,
     policy_version: u64,
     collect_seconds: f64,
+    actor_batches: ActorBatchStats,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ActorBatchStats {
+    dispatches: usize,
+    observations: usize,
+    singletons: usize,
+    shape_dispatches: usize,
+    padded_cells: usize,
+    allocated_cells: usize,
+}
+
+impl ActorBatchStats {
+    fn observe(&mut self, envs: &[usize], observations: &[PreparedObs]) {
+        let mut shapes = Vec::new();
+        let mut max_h = 0usize;
+        let mut max_w = 0usize;
+        let mut native = 0usize;
+        for &env in envs {
+            let shape = ActorShape::of(&observations[env]);
+            if !shapes.contains(&shape) {
+                shapes.push(shape);
+            }
+            max_h = max_h.max(shape.cgh);
+            max_w = max_w.max(shape.cgw);
+            native += shape.cgh * shape.cgw;
+        }
+        let allocated = envs.len() * max_h * max_w;
+        self.dispatches += 1;
+        self.observations += envs.len();
+        self.singletons += usize::from(envs.len() == 1);
+        self.shape_dispatches += shapes.len();
+        self.padded_cells += allocated.saturating_sub(native);
+        self.allocated_cells += allocated;
+    }
+
+    fn mean_size(&self) -> f64 {
+        self.observations as f64 / self.dispatches.max(1) as f64
+    }
+    fn singleton_fraction(&self) -> f64 {
+        self.singletons as f64 / self.dispatches.max(1) as f64
+    }
+    fn shapes_per_dispatch(&self) -> f64 {
+        self.shape_dispatches as f64 / self.dispatches.max(1) as f64
+    }
+    fn padding_ratio(&self) -> f64 {
+        self.padded_cells as f64 / self.allocated_cells.max(1) as f64
+    }
 }
 
 fn validate_rollout_set(results: &[RolloutResult], expected_policy_version: u64) -> Result<()> {
@@ -1442,6 +1534,7 @@ struct ActorShapeBuckets {
 struct ReadyItem {
     env: usize,
     ready_at: Duration,
+    sequence: u64,
 }
 
 #[derive(Debug)]
@@ -1455,26 +1548,44 @@ struct ReadyShapeBucket {
 #[derive(Debug)]
 struct ReadyScheduler {
     buckets: Vec<ReadyShapeBucket>,
+    target_batch: usize,
     max_batch: usize,
+    max_padding_waste: f64,
     max_wait: Duration,
+    next_sequence: u64,
 }
 
 impl ReadyScheduler {
-    fn new(max_batch: usize, max_wait: Duration) -> Self {
+    fn new(
+        target_batch: usize,
+        max_batch: usize,
+        max_padding_waste: f64,
+        max_wait: Duration,
+    ) -> Self {
+        let max_batch = max_batch.max(1);
         Self {
             buckets: Vec::new(),
-            max_batch: max_batch.max(1),
+            target_batch: target_batch.max(1).min(max_batch),
+            max_batch,
+            max_padding_waste: max_padding_waste.clamp(0.0, 1.0),
             max_wait,
+            next_sequence: 0,
         }
     }
 
     fn push(&mut self, env: usize, shape: ActorShape, ready_at: Duration) {
+        let item = ReadyItem {
+            env,
+            ready_at,
+            sequence: self.next_sequence,
+        };
+        self.next_sequence += 1;
         if let Some(bucket) = self.buckets.iter_mut().find(|bucket| bucket.shape == shape) {
-            bucket.items.push_back(ReadyItem { env, ready_at });
+            bucket.items.push_back(item);
         } else {
             self.buckets.push(ReadyShapeBucket {
                 shape,
-                items: VecDeque::from([ReadyItem { env, ready_at }]),
+                items: VecDeque::from([item]),
             });
         }
     }
@@ -1488,25 +1599,52 @@ impl ReadyScheduler {
     }
 
     fn take_batch(&mut self, now: Duration) -> Option<Vec<usize>> {
-        let selected = self
+        let total: usize = self.buckets.iter().map(|bucket| bucket.items.len()).sum();
+        let oldest = self
+            .buckets
+            .iter()
+            .filter_map(|bucket| bucket.items.front())
+            .min_by_key(|item| item.sequence)?;
+        if total < self.target_batch && now.saturating_sub(oldest.ready_at) < self.max_wait {
+            return None;
+        }
+
+        // Global publication FIFO, independent of shape-bucket placement.
+        let mut candidates: Vec<(u64, usize, ActorShape)> = self
             .buckets
             .iter()
             .enumerate()
-            .filter_map(|(index, bucket)| {
-                let oldest = bucket.items.front()?;
-                let eligible = bucket.items.len() >= self.max_batch
-                    || now.saturating_sub(oldest.ready_at) >= self.max_wait;
-                eligible.then_some((index, oldest.ready_at))
+            .flat_map(|(bucket, values)| {
+                values
+                    .items
+                    .iter()
+                    .map(move |item| (item.sequence, bucket, values.shape))
             })
-            .min_by_key(|&(index, oldest)| (oldest, index))
-            .map(|(index, _)| index)?;
-        let bucket = &mut self.buckets[selected];
-        let len = bucket.items.len().min(self.max_batch);
+            .collect();
+        candidates.sort_unstable_by_key(|candidate| candidate.0);
+        let mut selected = Vec::new();
+        let mut sum_area = 0usize;
+        let mut max_h = 0usize;
+        let mut max_w = 0usize;
+        for &(_, bucket, shape) in candidates.iter().take(self.max_batch) {
+            let next_n = selected.len() + 1;
+            let next_h = max_h.max(shape.cgh);
+            let next_w = max_w.max(shape.cgw);
+            let next_sum = sum_area + shape.cgh * shape.cgw;
+            let allocated = next_n * next_h * next_w;
+            let waste = 1.0 - next_sum as f64 / allocated.max(1) as f64;
+            if !selected.is_empty() && waste > self.max_padding_waste {
+                break;
+            }
+            selected.push(bucket);
+            sum_area = next_sum;
+            max_h = next_h;
+            max_w = next_w;
+        }
         Some(
-            bucket
-                .items
-                .drain(..len)
-                .map(|item| item.env)
+            selected
+                .into_iter()
+                .map(|bucket| self.buckets[bucket].items.pop_front().unwrap().env)
                 .collect(),
         )
     }
@@ -1525,9 +1663,7 @@ struct RolloutSlots<T> {
 impl<T> RolloutSlots<T> {
     fn new(t: usize, n: usize) -> Self {
         Self {
-            rows: (0..t)
-                .map(|_| (0..n).map(|_| None).collect())
-                .collect(),
+            rows: (0..t).map(|_| (0..n).map(|_| None).collect()).collect(),
             next_t: vec![0; n],
         }
     }
@@ -1679,8 +1815,11 @@ fn act_contiguous_obs(
             .map(|obs| obs.prev_action.clone())
             .collect();
         let context_t = crate::recurrent::context_tensor(&contexts, actor.device);
-        let (action, hidden_out) =
-            tch::no_grad(|| actor.policy.act_with_state(&obs_t, &hidden, &context_t, false));
+        let (action, hidden_out) = tch::no_grad(|| {
+            actor
+                .policy
+                .act_with_state(&obs_t, &hidden, &context_t, false)
+        });
         let hidden_cpu: Vec<f32> = hidden.to_device(Device::Cpu).reshape([-1]).try_into()?;
         let hidden_rows = hidden_cpu
             .chunks_exact(state.hidden_size())
@@ -1696,9 +1835,7 @@ fn act_contiguous_obs(
     };
     let (a, player, tile, build, nuke, qty, logp, value) = action;
     Ok(ActorBatchHost {
-        packed: transfer_act_results(
-            &a, &player, &tile, &build, &nuke, &qty, &logp, &value, n,
-        )?,
+        packed: transfer_act_results(&a, &player, &tile, &build, &nuke, &qty, &logp, &value, n)?,
         hidden_in,
     })
 }
@@ -1706,27 +1843,13 @@ fn act_contiguous_obs(
 /// Act on arbitrary ready envs without cloning their large host payloads.
 /// The observations are temporarily packed into a contiguous prefix, restored
 /// even on inference failure, and only CPU scalar choices leave this function.
-fn act_ready_batch(
-    actor: &mut ActorShard,
-    cfg: &Config,
-    envs: &[usize],
-) -> Result<Vec<ActorRow>> {
+fn act_ready_batch(actor: &mut ActorShard, cfg: &Config, envs: &[usize]) -> Result<Vec<ActorRow>> {
     anyhow::ensure!(!envs.is_empty(), "cannot act on an empty ready batch");
     let n = actor.cur_obs.len();
-    let shape = ActorShape::of(
-        actor
-            .cur_obs
-            .get(envs[0])
-            .ok_or_else(|| anyhow!("ready env {} out of range", envs[0]))?,
-    );
     let mut selected = vec![false; n];
     for &env in envs {
         anyhow::ensure!(env < n, "ready env {env} out of range");
         anyhow::ensure!(!selected[env], "duplicate ready env {env}");
-        anyhow::ensure!(
-            ActorShape::of(&actor.cur_obs[env]) == shape,
-            "ready batch mixed exact observation shapes"
-        );
         selected[env] = true;
     }
     let mut order = Vec::with_capacity(n);
@@ -1962,10 +2085,7 @@ mod packed_act_tests {
             },
             me_slot: 0,
             legal_actions: [1.0; ofcore::feat::N_ACTIONS],
-            legal_ptarget: vec![
-                1.0;
-                ofcore::feat::N_ACTIONS * ofcore::feat::MAX_SLOTS
-            ],
+            legal_ptarget: vec![1.0; ofcore::feat::N_ACTIONS * ofcore::feat::MAX_SLOTS],
             legal_build: [1.0; ofcore::feat::N_BUILD],
             legal_nuke: [1.0; ofcore::feat::N_NUKE],
             local: vec![0.1; 5 * policy::LOCAL as usize * policy::LOCAL as usize],
@@ -1987,32 +2107,52 @@ mod packed_act_tests {
 
         permute_slice(&mut obs, &buckets.order);
         assert_eq!(
-            obs.iter().map(|item| item.scalars[0] as usize).collect::<Vec<_>>(),
+            obs.iter()
+                .map(|item| item.scalars[0] as usize)
+                .collect::<Vec<_>>(),
             buckets.order
         );
         permute_slice(&mut obs, &inverse_permutation(&buckets.order));
         assert_eq!(
-            obs.iter().map(|item| item.scalars[0] as usize).collect::<Vec<_>>(),
+            obs.iter()
+                .map(|item| item.scalars[0] as usize)
+                .collect::<Vec<_>>(),
             vec![0, 1, 2, 3, 4]
         );
     }
 
     #[test]
-    fn ready_scheduler_stable_buckets_exact_shapes_and_honors_thresholds() {
+    fn ready_scheduler_coalesces_shapes_in_global_fifo_order() {
         let shape_a = ActorShape::of(&shaped_obs(0, 6, 8));
         let shape_b = ActorShape::of(&shaped_obs(1, 8, 6));
-        let mut ready = ReadyScheduler::new(2, Duration::from_millis(5));
+        let mut ready = ReadyScheduler::new(2, 2, 1.0, Duration::from_millis(5));
         ready.push(0, shape_a, Duration::ZERO);
         ready.push(1, shape_b, Duration::ZERO);
         ready.push(2, shape_a, Duration::from_millis(1));
         ready.push(3, shape_b, Duration::from_millis(1));
-        assert_eq!(ready.take_batch(Duration::from_millis(1)), Some(vec![0, 2]));
-        assert_eq!(ready.take_batch(Duration::from_millis(1)), Some(vec![1, 3]));
+        assert_eq!(ready.take_batch(Duration::from_millis(1)), Some(vec![0, 1]));
+        assert_eq!(ready.take_batch(Duration::from_millis(1)), Some(vec![2, 3]));
 
         ready.push(4, shape_b, Duration::from_millis(2));
         assert_eq!(ready.take_batch(Duration::from_millis(6)), None);
         assert_eq!(ready.next_deadline(), Some(Duration::from_millis(7)));
         assert_eq!(ready.take_batch(Duration::from_millis(7)), Some(vec![4]));
+        assert!(ready.is_empty());
+    }
+
+    #[test]
+    fn ready_scheduler_padding_bound_splits_fifo_without_bypass() {
+        let small = ActorShape::of(&shaped_obs(0, 4, 4));
+        let large = ActorShape::of(&shaped_obs(1, 20, 20));
+        let mut ready = ReadyScheduler::new(2, 8, 0.20, Duration::from_millis(5));
+        ready.push(7, small, Duration::ZERO);
+        ready.push(8, large, Duration::from_millis(1));
+        ready.push(9, large, Duration::from_millis(2));
+
+        // Coalescing small+large would waste far more than 20%, so the
+        // globally oldest item dispatches alone; no later env bypasses it.
+        assert_eq!(ready.take_batch(Duration::from_millis(2)), Some(vec![7]));
+        assert_eq!(ready.take_batch(Duration::from_millis(2)), Some(vec![8, 9]));
         assert!(ready.is_empty());
     }
 
@@ -2087,7 +2227,7 @@ mod packed_act_tests {
         const T: usize = 3;
         let shape = ActorShape::of(&shaped_obs(0, 6, 8));
         let latency = [1u64, 1, 100];
-        let mut ready = ReadyScheduler::new(2, Duration::from_millis(10));
+        let mut ready = ReadyScheduler::new(2, 2, 1.0, Duration::from_millis(10));
         for env in 0..latency.len() {
             ready.push(env, shape, Duration::ZERO);
         }
@@ -2152,7 +2292,7 @@ mod packed_act_tests {
     #[test]
     fn staggered_ready_batches_gather_hidden_by_env_not_batch_position() {
         let shape = ActorShape::of(&shaped_obs(0, 6, 8));
-        let mut ready = ReadyScheduler::new(2, Duration::ZERO);
+        let mut ready = ReadyScheduler::new(2, 2, 1.0, Duration::ZERO);
         let mut state = ActorRecurrentState::new(3, 2, Device::Cpu);
 
         ready.push(2, shape, Duration::ZERO);
@@ -2179,8 +2319,7 @@ mod packed_act_tests {
         greedy: bool,
     ) -> Vec<(Vec<i64>, Vec<f32>)> {
         let buckets = actor_shape_buckets(items);
-        let mut rows: Vec<Option<(Vec<i64>, Vec<f32>)>> =
-            (0..items.len()).map(|_| None).collect();
+        let mut rows: Vec<Option<(Vec<i64>, Vec<f32>)>> = (0..items.len()).map(|_| None).collect();
         for range in &buckets.ranges {
             let refs: Vec<&PreparedObs> = buckets.order[range.clone()]
                 .iter()
@@ -2229,10 +2368,7 @@ mod packed_act_tests {
                 .pop()
                 .unwrap();
             let normalized = |row: &(Vec<i64>, Vec<f32>)| {
-                choice_from_act_values(
-                    row.0[0], row.0[1], row.0[2], row.0[3], row.0[4], row.1[0],
-                )
-                .1
+                choice_from_act_values(row.0[0], row.0[1], row.0[2], row.0[3], row.0[4], row.1[0]).1
             };
             let actual_choice = normalized(&bucketed[i]);
             let expected_choice = normalized(&singleton);
@@ -2259,10 +2395,8 @@ mod packed_act_tests {
             );
             // Raw unused heads may choose different members of an exact tie;
             // they are deliberately not part of ChoiceScalars or logp.
-            for (field, (&actual, &expected)) in bucketed[i].1[1..]
-                .iter()
-                .zip(&singleton.1[1..])
-                .enumerate()
+            for (field, (&actual, &expected)) in
+                bucketed[i].1[1..].iter().zip(&singleton.1[1..]).enumerate()
             {
                 assert!(
                     (actual - expected).abs() <= 1e-5,
@@ -2566,7 +2700,12 @@ fn collect_rollout_ready(
     let collect_start = Instant::now();
     let n = actor.workers.len();
     anyhow::ensure!(n > 0, "ready collector has no envs");
-    let mut scheduler = ReadyScheduler::new(cfg.actor_max_batch, cfg.actor_max_wait);
+    let mut scheduler = ReadyScheduler::new(
+        cfg.actor_target_batch,
+        cfg.actor_max_batch,
+        cfg.actor_max_padding_waste,
+        cfg.actor_max_wait,
+    );
     for env in 0..n {
         scheduler.push(env, ActorShape::of(&actor.cur_obs[env]), Duration::ZERO);
     }
@@ -2575,13 +2714,18 @@ fn collect_rollout_ready(
     let mut episode_slots = RolloutSlots::new(cfg.rollout_len, n);
     let target = cfg.rollout_len * n;
     let mut completed = 0usize;
+    let mut actor_batches = ActorBatchStats::default();
 
     while completed < target {
         while let Some(envs) = scheduler.take_batch(collect_start.elapsed()) {
+            actor_batches.observe(&envs, &actor.cur_obs);
             let rows = act_ready_batch(actor, cfg, &envs)?;
             anyhow::ensure!(rows.len() == envs.len(), "ready act batch width mismatch");
             for (env, mut row) in envs.into_iter().zip(rows) {
-                anyhow::ensure!(pending[env].is_none(), "env {env} already has an action in flight");
+                anyhow::ensure!(
+                    pending[env].is_none(),
+                    "env {env} already has an action in flight"
+                );
                 let t = slots.next_t(env);
                 anyhow::ensure!(t < cfg.rollout_len, "env {env} exceeded rollout length");
                 actor.workers[env]
@@ -2627,7 +2771,9 @@ fn collect_rollout_ready(
         let action = pending[env]
             .take()
             .ok_or_else(|| anyhow!("env {env} published without an action in flight"))?;
-        let transition = message.result.map_err(|error| anyhow!("env {env}: {error}"))?;
+        let transition = message
+            .result
+            .map_err(|error| anyhow!("env {env}: {error}"))?;
         let prev_obs = std::mem::replace(&mut actor.cur_obs[env], transition.next_obs);
         if transition.done {
             if let Some(state) = actor.recurrent.as_mut() {
@@ -2659,7 +2805,10 @@ fn collect_rollout_ready(
             );
         }
     }
-    anyhow::ensure!(scheduler.is_empty(), "ready items remain after rollout completion");
+    anyhow::ensure!(
+        scheduler.is_empty(),
+        "ready items remain after rollout completion"
+    );
     anyhow::ensure!(
         pending.iter().all(Option::is_none),
         "actions remain in flight after rollout completion"
@@ -2675,16 +2824,30 @@ fn collect_rollout_ready(
     if let Device::Cuda(index) = actor.device {
         Cuda::synchronize(index as i64);
     }
+    eprintln!(
+        "[actor-batch] mean_size={:.2} singleton_fraction={:.3} \
+         shapes_per_dispatch={:.2} dispatches={} padding_ratio={:.3}",
+        actor_batches.mean_size(),
+        actor_batches.singleton_fraction(),
+        actor_batches.shapes_per_dispatch(),
+        actor_batches.dispatches,
+        actor_batches.padding_ratio(),
+    );
     Ok(RolloutResult {
         buffer,
         bootstrap_v,
         ep_infos,
         policy_version,
         collect_seconds: collect_start.elapsed().as_secs_f64(),
+        actor_batches,
     })
 }
 
-fn collect_rollout(actor: &mut ActorShard, cfg: &Config, policy_version: u64) -> Result<RolloutResult> {
+fn collect_rollout(
+    actor: &mut ActorShard,
+    cfg: &Config,
+    policy_version: u64,
+) -> Result<RolloutResult> {
     let collect_start = Instant::now();
     let n = actor.workers.len();
     let mut buffer: Vec<Vec<Step>> = Vec::with_capacity(cfg.rollout_len);
@@ -2711,14 +2874,7 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config, policy_version: u64) ->
             pack1 = Some(act_group(actor, cfg, g1.0, g1.1)?);
         }
 
-        recv_group(
-            actor,
-            g0.0,
-            g0.1,
-            &pack0,
-            &mut step_row,
-            &mut ep_infos,
-        )?;
+        recv_group(actor, g0.0, g0.1, &pack0, &mut step_row, &mut ep_infos)?;
 
         if t + 1 < cfg.rollout_len {
             // Next-step act for g0 overlaps g1 stepping when pack1 is live.
@@ -2727,14 +2883,7 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config, policy_version: u64) ->
         }
 
         if let Some(rows) = pack1.as_ref() {
-            recv_group(
-                actor,
-                g1.0,
-                g1.1,
-                rows,
-                &mut step_row,
-                &mut ep_infos,
-            )?;
+            recv_group(actor, g1.0, g1.1, rows, &mut step_row, &mut ep_infos)?;
         }
 
         buffer.push(
@@ -2761,6 +2910,7 @@ fn collect_rollout(actor: &mut ActorShard, cfg: &Config, policy_version: u64) ->
         ep_infos,
         policy_version,
         collect_seconds: collect_start.elapsed().as_secs_f64(),
+        actor_batches: ActorBatchStats::default(),
     })
 }
 
@@ -2967,7 +3117,12 @@ pub struct BenchmarkConfig<'a> {
 pub fn run_benchmark(cfg: BenchmarkConfig<'_>) -> Result<()> {
     let mut vs = nn::VarStore::new(cfg.device);
     let policy = PolicyNet::new_with_recurrence(
-        &vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks, cfg.recurrent_policy,
+        &vs.root(),
+        cfg.amp,
+        cfg.foveate,
+        cfg.gc,
+        cfg.blocks,
+        cfg.recurrent_policy,
     );
     vs.load(cfg.checkpoint)?;
     let ae = crate::ae::AePair::load(
@@ -3199,7 +3354,12 @@ fn save_snapshot_checkpoint(
     // the eval job and no training CUDA state or VarStore is touched.
     let vs = nn::VarStore::new(Device::Cpu);
     let _ = PolicyNet::new_with_recurrence(
-        &vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks, cfg.recurrent_policy,
+        &vs.root(),
+        cfg.amp,
+        cfg.foveate,
+        cfg.gc,
+        cfg.blocks,
+        cfg.recurrent_policy,
     );
     apply_weight_snapshot(&vs, snapshot)?;
     save_checkpoint(&vs, path, state)
@@ -3260,7 +3420,12 @@ impl AsyncEval {
                 let initialized = (|| -> Result<(nn::VarStore, PolicyNet, crate::ae::AePair)> {
                     let vs = nn::VarStore::new(device);
                     let policy = PolicyNet::new_with_recurrence(
-                        &vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks, cfg.recurrent_policy,
+                        &vs.root(),
+                        cfg.amp,
+                        cfg.foveate,
+                        cfg.gc,
+                        cfg.blocks,
+                        cfg.recurrent_policy,
                     );
                     let path = std::path::Path::new(&cfg.ae_ckpt);
                     anyhow::ensure!(
@@ -3596,15 +3761,26 @@ mod async_eval_tests {
 }
 
 enum ActorCommand {
-    Collect { id: u64 },
+    Collect {
+        id: u64,
+    },
     Refresh {
         id: u64,
         policy_version: u64,
         weights: CpuWeightSnapshot,
     },
-    SetStage { id: u64, stage: usize },
-    Eval { id: u64, stage: usize, episodes: usize },
-    Shutdown { id: u64 },
+    SetStage {
+        id: u64,
+        stage: usize,
+    },
+    Eval {
+        id: u64,
+        stage: usize,
+        episodes: usize,
+    },
+    Shutdown {
+        id: u64,
+    },
 }
 
 impl ActorCommand {
@@ -3629,11 +3805,25 @@ impl ActorCommand {
 }
 
 enum ActorReply {
-    Ready { envs: usize },
-    Collected { id: u64, result: RolloutResult },
-    Eval { id: u64, result: EvalResult },
-    Ack { id: u64 },
-    Failed { id: u64, command: &'static str, error: String },
+    Ready {
+        envs: usize,
+    },
+    Collected {
+        id: u64,
+        result: RolloutResult,
+    },
+    Eval {
+        id: u64,
+        result: EvalResult,
+    },
+    Ack {
+        id: u64,
+    },
+    Failed {
+        id: u64,
+        command: &'static str,
+        error: String,
+    },
 }
 
 /// Enforces strict command ordering and monotonic policy snapshots.
@@ -3646,7 +3836,11 @@ struct ActorProtocol {
 
 impl ActorProtocol {
     fn new(policy_version: u64) -> Self {
-        Self { next_command_id: 1, policy_version, stopped: false }
+        Self {
+            next_command_id: 1,
+            policy_version,
+            stopped: false,
+        }
     }
     fn accept(&mut self, command: &ActorCommand) -> Result<()> {
         anyhow::ensure!(!self.stopped, "command received after shutdown");
@@ -3691,7 +3885,12 @@ fn build_actor_shard(
     // persistent actor thread.
     let vs = nn::VarStore::new(device);
     let policy = PolicyNet::new_with_recurrence(
-        &vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks, cfg.recurrent_policy,
+        &vs.root(),
+        cfg.amp,
+        cfg.foveate,
+        cfg.gc,
+        cfg.blocks,
+        cfg.recurrent_policy,
     );
     apply_weight_snapshot(&vs, &initial_weights)?;
     if let Device::Cuda(index) = device {
@@ -3770,7 +3969,12 @@ fn actor_loop(
             return;
         }
     };
-    if reply_tx.send(ActorReply::Ready { envs: actor.workers.len() }).is_err() {
+    if reply_tx
+        .send(ActorReply::Ready {
+            envs: actor.workers.len(),
+        })
+        .is_err()
+    {
         close_actor(actor);
         return;
     }
@@ -3795,39 +3999,44 @@ fn actor_loop(
                 };
                 collected.map(|result| ActorReply::Collected { id, result })
             }
-            ActorCommand::Refresh { id, weights, .. } => {
-                apply_weight_snapshot(&actor.vs, &weights).map(|_| {
+            ActorCommand::Refresh { id, weights, .. } => apply_weight_snapshot(&actor.vs, &weights)
+                .map(|_| {
                     if let Device::Cuda(index) = actor.device {
                         Cuda::synchronize(index as i64);
                     }
                     ActorReply::Ack { id }
-                })
-            }
+                }),
             ActorCommand::SetStage { id, stage } => {
                 for worker in &actor.workers {
                     let _ = worker.stage_tx.send(stage);
                 }
                 Ok(ActorReply::Ack { id })
             }
-            ActorCommand::Eval { id, stage, episodes } => actor
+            ActorCommand::Eval {
+                id,
+                stage,
+                episodes,
+            } => actor
                 .ae
                 .as_ref()
                 .ok_or_else(|| anyhow!("eval requires AE encoders"))
-                .and_then(|ae| run_eval(
-                    &actor.policy,
-                    ae,
-                    actor.device,
-                    stage,
-                    episodes,
-                    cfg.max_episode_ticks,
-                    cfg.engine,
-                    cfg.pinned_h2d,
-                    cfg.fp16_rollout,
-                    cfg.compact_rollout && cfg.foveate,
-                    cfg.recurrent_policy,
-                    cfg.reward_config,
-                    cfg.curriculum_schedule,
-                ))
+                .and_then(|ae| {
+                    run_eval(
+                        &actor.policy,
+                        ae,
+                        actor.device,
+                        stage,
+                        episodes,
+                        cfg.max_episode_ticks,
+                        cfg.engine,
+                        cfg.pinned_h2d,
+                        cfg.fp16_rollout,
+                        cfg.compact_rollout && cfg.foveate,
+                        cfg.recurrent_policy,
+                        cfg.reward_config,
+                        cfg.curriculum_schedule,
+                    )
+                })
                 .map(|result| ActorReply::Eval { id, result }),
             ActorCommand::Shutdown { id } => Ok(ActorReply::Ack { id }),
         };
@@ -3856,9 +4065,9 @@ fn actor_loop(
 
 fn actor_reply_error(shard_index: usize, expected: &str, reply: &ActorReply) -> anyhow::Error {
     match reply {
-        ActorReply::Failed { id, command, error } => anyhow!(
-            "persistent actor {shard_index} command {id} ({command}) failed: {error}"
-        ),
+        ActorReply::Failed { id, command, error } => {
+            anyhow!("persistent actor {shard_index} command {id} ({command}) failed: {error}")
+        }
         _ => anyhow!("persistent actor {shard_index} protocol error: expected {expected}"),
     }
 }
@@ -3885,16 +4094,18 @@ impl PersistentActor {
         let (reply_tx, reply_rx) = mpsc::channel();
         let handle = std::thread::Builder::new()
             .name(format!("actor-gpu{shard_index}"))
-            .spawn(move || actor_loop(
-                shard_index,
-                device,
-                cfg,
-                stage,
-                initial_policy_version,
-                initial_weights,
-                command_rx,
-                reply_tx,
-            ))?;
+            .spawn(move || {
+                actor_loop(
+                    shard_index,
+                    device,
+                    cfg,
+                    stage,
+                    initial_policy_version,
+                    initial_weights,
+                    command_rx,
+                    reply_tx,
+                )
+            })?;
         let mut actor = Self {
             shard_index,
             command_tx,
@@ -3905,7 +4116,10 @@ impl PersistentActor {
         };
         match actor.recv_reply("initialization")? {
             ActorReply::Ready { envs } => {
-                anyhow::ensure!(envs > 0, "persistent actor {shard_index} initialized with no envs");
+                anyhow::ensure!(
+                    envs > 0,
+                    "persistent actor {shard_index} initialized with no envs"
+                );
                 Ok(actor)
             }
             reply => Err(actor_reply_error(shard_index, "ready", &reply)),
@@ -3934,11 +4148,15 @@ impl PersistentActor {
         }
     }
     fn join_status(&mut self) -> String {
-        let Some(handle) = self.handle.take() else { return String::new() };
+        let Some(handle) = self.handle.take() else {
+            return String::new();
+        };
         match handle.join() {
             Ok(()) => " (thread exited)".to_string(),
             Err(payload) => {
-                let reason = payload.downcast_ref::<&str>().copied()
+                let reason = payload
+                    .downcast_ref::<&str>()
+                    .copied()
                     .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
                     .unwrap_or("non-string panic");
                 format!(" (thread panicked: {reason})")
@@ -3951,18 +4169,30 @@ impl PersistentActor {
         id
     }
     fn send_collect(&mut self) -> Result<()> {
-        anyhow::ensure!(self.pending_collect_id.is_none(), "persistent actor {} already collecting", self.shard_index);
+        anyhow::ensure!(
+            self.pending_collect_id.is_none(),
+            "persistent actor {} already collecting",
+            self.shard_index
+        );
         let id = self.next_id();
         self.command_tx.send(ActorCommand::Collect { id })?;
         self.pending_collect_id = Some(id);
         Ok(())
     }
     fn finish_collect(&mut self) -> Result<RolloutResult> {
-        let expected = self.pending_collect_id.take()
-            .ok_or_else(|| anyhow!("persistent actor {} has no pending collect", self.shard_index))?;
+        let expected = self.pending_collect_id.take().ok_or_else(|| {
+            anyhow!(
+                "persistent actor {} has no pending collect",
+                self.shard_index
+            )
+        })?;
         match self.recv_reply("rollout collection")? {
             ActorReply::Collected { id, result } if id == expected => Ok(result),
-            reply => Err(actor_reply_error(self.shard_index, "matching collect result", &reply)),
+            reply => Err(actor_reply_error(
+                self.shard_index,
+                "matching collect result",
+                &reply,
+            )),
         }
     }
     fn request_ack(&mut self, command: ActorCommand) -> Result<()> {
@@ -3971,12 +4201,20 @@ impl PersistentActor {
         self.command_tx.send(command)?;
         match self.recv_reply(phase)? {
             ActorReply::Ack { id } if id == expected => Ok(()),
-            reply => Err(actor_reply_error(self.shard_index, "matching acknowledgement", &reply)),
+            reply => Err(actor_reply_error(
+                self.shard_index,
+                "matching acknowledgement",
+                &reply,
+            )),
         }
     }
     fn refresh(&mut self, policy_version: u64, weights: CpuWeightSnapshot) -> Result<()> {
         let id = self.next_id();
-        self.request_ack(ActorCommand::Refresh { id, policy_version, weights })
+        self.request_ack(ActorCommand::Refresh {
+            id,
+            policy_version,
+            weights,
+        })
     }
     fn set_stage(&mut self, stage: usize) -> Result<()> {
         let id = self.next_id();
@@ -3984,17 +4222,31 @@ impl PersistentActor {
     }
     fn eval(&mut self, stage: usize, episodes: usize) -> Result<EvalResult> {
         let id = self.next_id();
-        self.command_tx.send(ActorCommand::Eval { id, stage, episodes })?;
+        self.command_tx.send(ActorCommand::Eval {
+            id,
+            stage,
+            episodes,
+        })?;
         match self.recv_reply("evaluation")? {
-            ActorReply::Eval { id: reply_id, result } if reply_id == id => Ok(result),
-            reply => Err(actor_reply_error(self.shard_index, "matching eval result", &reply)),
+            ActorReply::Eval {
+                id: reply_id,
+                result,
+            } if reply_id == id => Ok(result),
+            reply => Err(actor_reply_error(
+                self.shard_index,
+                "matching eval result",
+                &reply,
+            )),
         }
     }
     fn shutdown(mut self) -> Result<()> {
         let id = self.next_id();
         self.request_ack(ActorCommand::Shutdown { id })?;
         let status = self.join_status();
-        anyhow::ensure!(!status.contains("panicked"), "actor shutdown failed{status}");
+        anyhow::ensure!(
+            !status.contains("panicked"),
+            "actor shutdown failed{status}"
+        );
         Ok(())
     }
 }
@@ -4021,8 +4273,13 @@ enum LearnerCommand {
         /// owner therefore computes the same adaptive return bound.
         ret_stat: RetStat,
     },
-    SaveWeights { id: u64, path: String },
-    Shutdown { id: u64 },
+    SaveWeights {
+        id: u64,
+        path: String,
+    },
+    Shutdown {
+        id: u64,
+    },
 }
 
 impl LearnerCommand {
@@ -4041,13 +4298,17 @@ impl LearnerCommand {
 }
 
 enum GradientDecision {
-    Apply(Arc<Vec<f32>>),
+    ApplyCpu(Arc<Vec<f32>>),
+    Collective,
     Discard,
     Abort(String),
 }
 
 enum LearnerReply {
-    Ready { shard: usize, params: i64 },
+    Ready {
+        shard: usize,
+        params: i64,
+    },
     Gradient {
         id: u64,
         shard: usize,
@@ -4064,9 +4325,18 @@ enum LearnerReply {
         ret_stat: RetStat,
         train_seconds: f64,
         snapshot_seconds: f64,
+        timings: TrainTimings,
     },
-    Ack { id: u64, shard: usize },
-    Failed { id: u64, shard: usize, command: &'static str, error: String },
+    Ack {
+        id: u64,
+        shard: usize,
+    },
+    Failed {
+        id: u64,
+        shard: usize,
+        command: &'static str,
+        error: String,
+    },
 }
 
 #[derive(Debug)]
@@ -4077,7 +4347,10 @@ struct LearnerProtocol {
 
 impl LearnerProtocol {
     fn new() -> Self {
-        Self { next_command_id: 1, stopped: false }
+        Self {
+            next_command_id: 1,
+            stopped: false,
+        }
     }
     fn accept(&mut self, command: &LearnerCommand) -> Result<()> {
         anyhow::ensure!(!self.stopped, "learner command received after shutdown");
@@ -4104,21 +4377,32 @@ fn learner_loop(
     mut rng: rand::rngs::SmallRng,
     command_rx: Receiver<LearnerCommand>,
     reply_tx: Sender<LearnerReply>,
-    gradient_rx: Receiver<GradientDecision>,
+    gradient_rx: Option<Receiver<GradientDecision>>,
+    mut nccl_comm: Option<crate::nccl::Comm>,
 ) {
     let init_started = Instant::now();
     eprintln!("[phase] persistent learner initialization started");
     let initialized = (|| -> Result<LearnerShard> {
         let vs = nn::VarStore::new(device);
         let policy = PolicyNet::new_with_recurrence(
-            &vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks, cfg.recurrent_policy,
+            &vs.root(),
+            cfg.amp,
+            cfg.foveate,
+            cfg.gc,
+            cfg.blocks,
+            cfg.recurrent_policy,
         );
         apply_weight_snapshot(&vs, &initial_weights)?;
         let opt = nn::AdamW::default().build(&vs, initial_lr)?;
         if let Device::Cuda(index) = device {
             Cuda::synchronize(index as i64);
         }
-        Ok(LearnerShard { device, vs, policy, opt })
+        Ok(LearnerShard {
+            device,
+            vs,
+            policy,
+            opt,
+        })
     })();
     let mut learner = match initialized {
         Ok(learner) => {
@@ -4144,7 +4428,13 @@ fn learner_loop(
         .iter()
         .map(|tensor| tensor.numel() as i64)
         .sum();
-    if reply_tx.send(LearnerReply::Ready { shard: shard_index, params }).is_err() {
+    if reply_tx
+        .send(LearnerReply::Ready {
+            shard: shard_index,
+            params,
+        })
+        .is_err()
+    {
         return;
     }
     let mut protocol = LearnerProtocol::new();
@@ -4169,8 +4459,7 @@ fn learner_loop(
                 ret_stat: initial_ret_stat,
             } => {
                 learner.opt.set_lr(lr);
-                let adaptive_ret_bound =
-                    (RET_ADAPTIVE_N_STD * initial_ret_stat.std()).max(1.0);
+                let adaptive_ret_bound = (RET_ADAPTIVE_N_STD * initial_ret_stat.std()).max(1.0);
                 // Keep only this shard's exact contribution here. The hub
                 // folds these partials into the global statistic in shard
                 // order after all owners finish.
@@ -4183,7 +4472,7 @@ fn learner_loop(
                                 minibatch: usize,
                                 finite: bool|
                  -> Result<bool> {
-                    let values = if finite {
+                    let values = if finite && nccl_comm.is_none() {
                         flat_grad_to_cpu(owned)?
                     } else {
                         Vec::new()
@@ -4196,26 +4485,65 @@ fn learner_loop(
                         finite,
                         values,
                     })?;
-                    match gradient_rx.recv()? {
-                        GradientDecision::Apply(values) => {
+                    match gradient_rx
+                        .as_ref()
+                        .expect("gradient hub receiver")
+                        .recv()?
+                    {
+                        GradientDecision::ApplyCpu(values) => {
                             apply_cpu_flat_grad(owned, values.as_slice())?;
+                            Ok(true)
+                        }
+                        GradientDecision::Collective => {
+                            let comm = nccl_comm.as_mut().ok_or_else(|| {
+                                anyhow!("NCCL collective requested without communicator")
+                            })?;
+                            let mut flat = flat_grad_on_device(owned);
+                            // Any error after entering a collective is fatal.
+                            // Falling back here could strand another rank or
+                            // apply a partially reduced optimizer step.
+                            comm.all_reduce_average(
+                                &mut flat,
+                                &format!("command={id} epoch={epoch} minibatch={minibatch}"),
+                            )?;
+                            apply_device_flat_grad(owned, &flat)?;
                             Ok(true)
                         }
                         GradientDecision::Discard => Ok(false),
                         GradientDecision::Abort(error) => Err(anyhow!(error)),
                     }
                 };
-                let losses = train_update(
-                    std::slice::from_mut(&mut learner),
-                    std::slice::from_ref(&rollout),
-                    &cfg,
-                    &mut rng,
-                    ent_coef,
-                    &mut ret_stat,
-                    true,
-                    Some(adaptive_ret_bound),
-                    Some(&mut sync),
-                );
+                let mut timings = TrainTimings::default();
+                let losses = if gradient_rx.is_some() {
+                    train_update(
+                        std::slice::from_mut(&mut learner),
+                        std::slice::from_ref(&rollout),
+                        &cfg,
+                        &mut rng,
+                        ent_coef,
+                        &mut ret_stat,
+                        true,
+                        Some(adaptive_ret_bound),
+                        Some(&mut sync),
+                        &mut timings,
+                    )
+                } else {
+                    // A single persistent owner already has the final gradient
+                    // in place. Avoid flattening it through CPU and rewriting
+                    // it to the same device.
+                    train_update(
+                        std::slice::from_mut(&mut learner),
+                        std::slice::from_ref(&rollout),
+                        &cfg,
+                        &mut rng,
+                        ent_coef,
+                        &mut ret_stat,
+                        true,
+                        Some(adaptive_ret_bound),
+                        None,
+                        &mut timings,
+                    )
+                };
                 let train_seconds = train_start.elapsed().as_secs_f64();
                 losses.and_then(|losses| {
                     eprintln!(
@@ -4238,19 +4566,24 @@ fn learner_loop(
                         ret_stat,
                         train_seconds,
                         snapshot_seconds,
+                        timings,
                     })
                 })
             }
-            LearnerCommand::SaveWeights { id, path } => {
-                (|| -> Result<()> {
-                    if shard_index == 0 {
-                        save_atomic(&path, |tmp| Ok(learner.vs.save(tmp)?))?;
-                    }
-                    Ok(())
-                })()
-                .map(|_| LearnerReply::Ack { id, shard: shard_index })
-            }
-            LearnerCommand::Shutdown { id } => Ok(LearnerReply::Ack { id, shard: shard_index }),
+            LearnerCommand::SaveWeights { id, path } => (|| -> Result<()> {
+                if shard_index == 0 {
+                    save_atomic(&path, |tmp| Ok(learner.vs.save(tmp)?))?;
+                }
+                Ok(())
+            })()
+            .map(|_| LearnerReply::Ack {
+                id,
+                shard: shard_index,
+            }),
+            LearnerCommand::Shutdown { id } => Ok(LearnerReply::Ack {
+                id,
+                shard: shard_index,
+            }),
         };
         match reply {
             Ok(reply) => {
@@ -4280,10 +4613,17 @@ struct TrainReply {
     weights: Vec<CpuWeightSnapshot>,
     train_seconds: f64,
     snapshot_seconds: f64,
+    timings: TrainTimings,
     /// Test-only copies of the hub result at every optimizer barrier. This
     /// proves parity before clipping/Adam can obscure the source of drift.
     #[cfg(test)]
     averaged_gradients: Vec<Vec<f32>>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TrainTimings {
+    batch_build_seconds: f64,
+    gradient_sync_seconds: f64,
 }
 
 struct PersistentLearner {
@@ -4295,6 +4635,7 @@ struct PersistentLearner {
     ret_stat: RetStat,
     epochs: usize,
     minibatches: usize,
+    nccl_enabled: bool,
 }
 
 impl PersistentLearner {
@@ -4309,34 +4650,76 @@ impl PersistentLearner {
         let mut command_txs = Vec::with_capacity(devices.len());
         let mut gradient_txs = Vec::with_capacity(devices.len());
         let mut handles = Vec::with_capacity(devices.len());
+        // ncclCommInitAll is the only cross-rank initialization point. Each
+        // resulting rank handle is then moved once into its permanent owner.
+        // Startup failure is safe to fall back from because no collective or
+        // optimizer step has begun.
+        let mut nccl_comms: Vec<Option<crate::nccl::Comm>> = match crate::nccl::try_init(devices) {
+            Ok(Some(comms)) => {
+                anyhow::ensure!(
+                    comms.len() == devices.len(),
+                    "NCCL returned {} communicators for {} learners",
+                    comms.len(),
+                    devices.len()
+                );
+                eprintln!(
+                    "[nccl] device-resident gradient all-reduce enabled for {} learner owners",
+                    devices.len()
+                );
+                comms.into_iter().map(Some).collect()
+            }
+            Ok(None) => {
+                if devices.len() > 1 {
+                    eprintln!("[nccl] unavailable; using CPU persistent gradient hub");
+                }
+                (0..devices.len()).map(|_| None).collect()
+            }
+            Err(error) => {
+                eprintln!(
+                    "[nccl] initialization failed before training ({error:#}); using CPU persistent gradient hub"
+                );
+                (0..devices.len()).map(|_| None).collect()
+            }
+        };
+        let nccl_enabled = nccl_comms.iter().all(Option::is_some);
         // DDP ranks use the same epoch permutation over their disjoint local
         // batches. Giving each owner a different permutation is mathematically
         // equivalent in exact arithmetic, but changes floating-point reduction
         // order. For duplicated-rollout parity that produces g0 != g1, and
         // Adam's first-step normalization can amplify the tiny discrepancy.
         let shuffle_seed = rng.next_u64();
+        let use_gradient_hub = devices.len() > 1;
         for (shard, &device) in devices.iter().enumerate() {
             let (command_tx, command_rx) = mpsc::channel();
-            let (gradient_tx, gradient_rx) = mpsc::channel();
+            let (gradient_tx, gradient_rx) = if use_gradient_hub {
+                let (tx, rx) = mpsc::channel();
+                (Some(tx), Some(rx))
+            } else {
+                (None, None)
+            };
             let thread_reply = reply_tx.clone();
             let thread_cfg = cfg.clone();
             let thread_weights = initial_weights.clone();
             let thread_rng = rand::rngs::SmallRng::seed_from_u64(shuffle_seed);
+            let nccl_comm = nccl_comms[shard].take();
             let handle = std::thread::Builder::new()
                 .name(format!("learner-gpu{shard}"))
-                .spawn(move || learner_loop(
-                    shard,
-                    device,
-                    thread_cfg,
-                    thread_weights,
-                    initial_lr,
-                    thread_rng,
-                    command_rx,
-                    thread_reply,
-                    gradient_rx,
-                ))?;
+                .spawn(move || {
+                    learner_loop(
+                        shard,
+                        device,
+                        thread_cfg,
+                        thread_weights,
+                        initial_lr,
+                        thread_rng,
+                        command_rx,
+                        thread_reply,
+                        gradient_rx,
+                        nccl_comm,
+                    )
+                })?;
             command_txs.push(command_tx);
-            gradient_txs.push(gradient_tx);
+            gradient_txs.extend(gradient_tx);
             handles.push(Some(handle));
         }
         drop(reply_tx);
@@ -4349,11 +4732,15 @@ impl PersistentLearner {
             ret_stat: RetStat::default(),
             epochs: cfg.epochs,
             minibatches: cfg.minibatches.max(1),
+            nccl_enabled,
         };
         let mut params = vec![None; devices.len()];
         for _ in devices {
             match learner.recv_reply("initialization")? {
-                LearnerReply::Ready { shard, params: count } if shard < params.len() => {
+                LearnerReply::Ready {
+                    shard,
+                    params: count,
+                } if shard < params.len() => {
                     params[shard] = Some(count);
                 }
                 reply => return Err(learner_reply_error("ready", &reply)),
@@ -4374,18 +4761,26 @@ impl PersistentLearner {
     fn join_status(&mut self) -> String {
         let mut statuses = Vec::new();
         for (shard, handle) in self.handles.iter_mut().enumerate() {
-            let Some(handle) = handle.take() else { continue };
+            let Some(handle) = handle.take() else {
+                continue;
+            };
             match handle.join() {
                 Ok(()) => statuses.push(format!("shard {shard} exited")),
                 Err(payload) => {
-                    let reason = payload.downcast_ref::<&str>().copied()
+                    let reason = payload
+                        .downcast_ref::<&str>()
+                        .copied()
                         .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
                         .unwrap_or("non-string panic");
                     statuses.push(format!("shard {shard} panicked: {reason}"));
                 }
             }
         }
-        if statuses.is_empty() { String::new() } else { format!(" ({})", statuses.join(", ")) }
+        if statuses.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", statuses.join(", "))
+        }
     }
     fn recv_reply(&mut self, phase: &str) -> Result<LearnerReply> {
         let started = Instant::now();
@@ -4404,7 +4799,10 @@ impl PersistentLearner {
                             .iter()
                             .enumerate()
                             .filter_map(|(shard, handle)| {
-                                handle.as_ref().is_some_and(JoinHandle::is_finished).then_some(shard)
+                                handle
+                                    .as_ref()
+                                    .is_some_and(JoinHandle::is_finished)
+                                    .then_some(shard)
                             })
                             .collect();
                         return Err(anyhow!(
@@ -4423,7 +4821,12 @@ impl PersistentLearner {
             }
         }
     }
-    fn train(&mut self, rollouts: Vec<RolloutResult>, lr: f64, ent_coef: f32) -> Result<TrainReply> {
+    fn train(
+        &mut self,
+        rollouts: Vec<RolloutResult>,
+        lr: f64,
+        ent_coef: f32,
+    ) -> Result<TrainReply> {
         anyhow::ensure!(
             rollouts.len() == self.command_txs.len(),
             "persistent learner got {} rollouts for {} shards",
@@ -4443,56 +4846,83 @@ impl PersistentLearner {
         let world = self.command_txs.len();
         #[cfg(test)]
         let mut averaged_gradients = Vec::with_capacity(self.epochs * self.minibatches);
-        for epoch in 0..self.epochs {
-            for minibatch in 0..self.minibatches {
-                let mut packets: Vec<Option<(bool, Vec<f32>)>> =
-                    (0..world).map(|_| None).collect();
-                for _ in 0..world {
-                    match self.recv_reply("CPU gradient barrier")? {
-                        LearnerReply::Gradient {
-                            id: reply_id,
-                            shard,
-                            epoch: reply_epoch,
-                            minibatch: reply_mb,
-                            finite,
-                            values,
-                        } if reply_id == id
-                            && reply_epoch == epoch
-                            && reply_mb == minibatch
-                            && shard < world
-                            && packets[shard].is_none() =>
-                        {
-                            packets[shard] = Some((finite, values));
-                        }
-                        reply => {
-                            self.abort_barrier("gradient barrier protocol failure");
-                            return Err(learner_reply_error("matching gradient packet", &reply));
+        if world > 1 {
+            for epoch in 0..self.epochs {
+                for minibatch in 0..self.minibatches {
+                    let mut packets: Vec<Option<(bool, Vec<f32>)>> =
+                        (0..world).map(|_| None).collect();
+                    for _ in 0..world {
+                        match self.recv_reply("finite gradient barrier")? {
+                            LearnerReply::Gradient {
+                                id: reply_id,
+                                shard,
+                                epoch: reply_epoch,
+                                minibatch: reply_mb,
+                                finite,
+                                values,
+                            } if reply_id == id
+                                && reply_epoch == epoch
+                                && reply_mb == minibatch
+                                && shard < world
+                                && packets[shard].is_none() =>
+                            {
+                                packets[shard] = Some((finite, values));
+                            }
+                            reply => {
+                                self.abort_barrier("gradient barrier protocol failure");
+                                return Err(learner_reply_error(
+                                    "matching gradient packet",
+                                    &reply,
+                                ));
+                            }
                         }
                     }
-                }
-                let all_finite = packets
-                    .iter()
-                    .all(|packet| packet.as_ref().is_some_and(|(finite, _)| *finite));
-                if !all_finite {
+                    let all_finite = packets
+                        .iter()
+                        .all(|packet| packet.as_ref().is_some_and(|(finite, _)| *finite));
+                    if !all_finite {
+                        for tx in &self.gradient_txs {
+                            let _ = tx.send(GradientDecision::Discard);
+                        }
+                        continue;
+                    }
+                    if self.nccl_enabled {
+                        anyhow::ensure!(
+                            packets.iter().all(|packet| packet
+                                .as_ref()
+                                .is_some_and(|(_, values)| values.is_empty())),
+                            "NCCL readiness packet unexpectedly contained host gradients"
+                        );
+                        // Enter the collective only after every owner reports
+                        // a finite minibatch, so no rank can be stranded.
+                        for tx in &self.gradient_txs {
+                            tx.send(GradientDecision::Collective)?;
+                        }
+                        continue;
+                    }
+                    let ordered: Vec<Vec<f32>> = packets
+                        .into_iter()
+                        .map(|packet| packet.expect("all packets present").1)
+                        .collect();
+                    let average = Arc::new(average_cpu_gradients(&ordered)?);
+                    #[cfg(test)]
+                    averaged_gradients.push(average.as_ref().clone());
                     for tx in &self.gradient_txs {
-                        let _ = tx.send(GradientDecision::Discard);
+                        tx.send(GradientDecision::ApplyCpu(average.clone()))?;
                     }
-                    continue;
-                }
-                let ordered: Vec<Vec<f32>> = packets
-                    .into_iter()
-                    .map(|packet| packet.expect("all packets present").1)
-                    .collect();
-                let average = Arc::new(average_cpu_gradients(&ordered)?);
-                #[cfg(test)]
-                averaged_gradients.push(average.as_ref().clone());
-                for tx in &self.gradient_txs {
-                    tx.send(GradientDecision::Apply(average.clone()))?;
                 }
             }
         }
-        let mut trained: Vec<Option<((f64, f64, f64, f64), CpuWeightSnapshot, RetStat, f64, f64)>> =
-            (0..world).map(|_| None).collect();
+        let mut trained: Vec<
+            Option<(
+                (f64, f64, f64, f64),
+                CpuWeightSnapshot,
+                RetStat,
+                f64,
+                f64,
+                TrainTimings,
+            )>,
+        > = (0..world).map(|_| None).collect();
         for _ in 0..world {
             match self.recv_reply("training and CPU weight snapshots")? {
                 LearnerReply::Trained {
@@ -4503,9 +4933,16 @@ impl PersistentLearner {
                     ret_stat,
                     train_seconds,
                     snapshot_seconds,
+                    timings,
                 } if reply_id == id && shard < world && trained[shard].is_none() => {
-                    trained[shard] =
-                        Some((losses, weights, ret_stat, train_seconds, snapshot_seconds));
+                    trained[shard] = Some((
+                        losses,
+                        weights,
+                        ret_stat,
+                        train_seconds,
+                        snapshot_seconds,
+                        timings,
+                    ));
                 }
                 reply => return Err(learner_reply_error("matching train result", &reply)),
             }
@@ -4514,26 +4951,31 @@ impl PersistentLearner {
         let mut weights = Vec::with_capacity(world);
         let mut train_seconds = 0.0f64;
         let mut snapshot_seconds = 0.0f64;
+        let mut timings = TrainTimings::default();
         for entry in trained {
-            let (local, snapshot, stat, train_s, snapshot_s) = entry.expect("all shards trained");
+            let (local, snapshot, stat, train_s, snapshot_s, local_timings) =
+                entry.expect("all shards trained");
             losses.0 += local.0 / world as f64;
             losses.1 += local.1 / world as f64;
             losses.2 += local.2 / world as f64;
             losses.3 += local.3 / world as f64;
-            self.ret_stat.add_batch(
-                stat.count,
-                stat.sum,
-                stat.sum_sq,
-            );
+            self.ret_stat.add_batch(stat.count, stat.sum, stat.sum_sq);
             weights.push(snapshot);
             train_seconds = train_seconds.max(train_s);
             snapshot_seconds = snapshot_seconds.max(snapshot_s);
+            timings.batch_build_seconds = timings
+                .batch_build_seconds
+                .max(local_timings.batch_build_seconds);
+            timings.gradient_sync_seconds = timings
+                .gradient_sync_seconds
+                .max(local_timings.gradient_sync_seconds);
         }
         Ok(TrainReply {
             losses,
             weights,
             train_seconds,
             snapshot_seconds,
+            timings,
             #[cfg(test)]
             averaged_gradients,
         })
@@ -4554,9 +4996,10 @@ impl PersistentLearner {
         let mut seen = vec![false; self.command_txs.len()];
         for _ in 0..self.command_txs.len() {
             match self.recv_reply("checkpoint save")? {
-                LearnerReply::Ack { id: reply_id, shard }
-                    if reply_id == id && shard < seen.len() && !seen[shard] =>
-                {
+                LearnerReply::Ack {
+                    id: reply_id,
+                    shard,
+                } if reply_id == id && shard < seen.len() && !seen[shard] => {
                     seen[shard] = true;
                 }
                 reply => return Err(learner_reply_error("matching save acknowledgement", &reply)),
@@ -4572,16 +5015,25 @@ impl PersistentLearner {
         let mut seen = vec![false; self.command_txs.len()];
         for _ in 0..self.command_txs.len() {
             match self.recv_reply("shutdown")? {
-                LearnerReply::Ack { id: reply_id, shard }
-                    if reply_id == id && shard < seen.len() && !seen[shard] =>
-                {
+                LearnerReply::Ack {
+                    id: reply_id,
+                    shard,
+                } if reply_id == id && shard < seen.len() && !seen[shard] => {
                     seen[shard] = true;
                 }
-                reply => return Err(learner_reply_error("matching shutdown acknowledgement", &reply)),
+                reply => {
+                    return Err(learner_reply_error(
+                        "matching shutdown acknowledgement",
+                        &reply,
+                    ));
+                }
             }
         }
         let status = self.join_status();
-        anyhow::ensure!(!status.contains("panicked"), "learner shutdown failed{status}");
+        anyhow::ensure!(
+            !status.contains("panicked"),
+            "learner shutdown failed{status}"
+        );
         Ok(())
     }
 }
@@ -4605,7 +5057,12 @@ impl Drop for PersistentLearner {
 
 fn learner_reply_error(expected: &str, reply: &LearnerReply) -> anyhow::Error {
     match reply {
-        LearnerReply::Failed { id, shard, command, error } => {
+        LearnerReply::Failed {
+            id,
+            shard,
+            command,
+            error,
+        } => {
             anyhow!("persistent learner shard {shard} command {id} ({command}) failed: {error}")
         }
         _ => anyhow!("persistent learner protocol error: expected {expected}"),
@@ -4613,18 +5070,32 @@ fn learner_reply_error(expected: &str, reply: &LearnerReply) -> anyhow::Error {
 }
 
 fn flat_grad_to_cpu(shard: &LearnerShard) -> Result<Vec<f32>> {
+    let flat = flat_grad_on_device(shard).to_device(Device::Cpu);
+    Ok((&flat).try_into()?)
+}
+
+fn flat_grad_on_device(shard: &LearnerShard) -> Tensor {
     let parts: Vec<Tensor> = shard
         .vs
         .trainable_variables()
         .iter()
         .map(|v| v.grad().reshape([-1]))
         .collect();
-    let flat = Tensor::cat(&parts, 0).to_device(Device::Cpu).to_kind(Kind::Float);
-    Ok((&flat).try_into()?)
+    Tensor::cat(&parts, 0).to_kind(Kind::Float)
 }
 
 fn apply_cpu_flat_grad(shard: &mut LearnerShard, values: &[f32]) -> Result<()> {
     let flat = Tensor::from_slice(values).to_device(shard.device);
+    apply_device_flat_grad(shard, &flat)
+}
+
+fn apply_device_flat_grad(shard: &mut LearnerShard, flat: &Tensor) -> Result<()> {
+    anyhow::ensure!(
+        flat.device() == shard.device,
+        "flat gradient device mismatch: {:?} != {:?}",
+        flat.device(),
+        shard.device
+    );
     let mut offset = 0i64;
     for variable in shard.vs.trainable_variables() {
         let mut grad = variable.grad();
@@ -4633,7 +5104,10 @@ fn apply_cpu_flat_grad(shard: &mut LearnerShard, values: &[f32]) -> Result<()> {
         grad.f_copy_(&source)?;
         offset += len;
     }
-    anyhow::ensure!(offset as usize == values.len(), "flat gradient length mismatch");
+    anyhow::ensure!(
+        offset as usize == flat.numel(),
+        "flat gradient length mismatch"
+    );
     Ok(())
 }
 
@@ -4719,6 +5193,19 @@ fn any_loss_non_finite(losses: &[(f64, f64, f64, f64)]) -> bool {
     losses.iter().any(|(pg, v, ent, entq)| {
         !pg.is_finite() || !v.is_finite() || !ent.is_finite() || !entq.is_finite()
     })
+}
+
+fn read_loss_scalars(losses: [&Tensor; 4]) -> (f64, f64, f64, f64) {
+    // One packed D2H read replaces four scalar synchronizations. PPO losses
+    // are Float tensors, so widening each returned f32 preserves every bit.
+    let packed = Tensor::stack(&losses, 0).to_device(Device::Cpu);
+    let values = Vec::<f32>::try_from(&packed).unwrap_or_else(|_| vec![0.0; 4]);
+    (
+        values[0] as f64,
+        values[1] as f64,
+        values[2] as f64,
+        values[3] as f64,
+    )
 }
 
 /// Running (all-updates-so-far) mean/variance of the value-loss target,
@@ -4810,6 +5297,7 @@ fn train_update(
     mut persistent_sync: Option<
         &mut dyn FnMut(&mut LearnerShard, usize, usize, bool) -> Result<bool>,
     >,
+    timings: &mut TrainTimings,
 ) -> Result<(f64, f64, f64, f64)> {
     debug_assert!(!exclusive_owner || learners.len() == 1);
     let t_len = cfg.rollout_len;
@@ -5054,10 +5542,12 @@ fn train_update(
                     });
                     let reset_before =
                         reset_flat.map(|values| Tensor::from_slice(&values).to_device(device));
-                    // ShardBatch crosses from this short-lived builder thread
-                    // to newly spawned learner threads. Complete its
-                    // thread-local stream before handing device tensors over.
-                    if let Device::Cuda(index) = device {
+                    // Legacy multi-shard batches cross from this short-lived
+                    // builder thread to a different consumer thread, so its
+                    // stream must complete first. An exclusive persistent
+                    // owner constructs and consumes on this same stable thread;
+                    // synchronizing there only drains its own stream early.
+                    if !exclusive_owner && let Device::Cuda(index) = device {
                         Cuda::synchronize(index as i64);
                     }
                     (
@@ -5094,26 +5584,29 @@ fn train_update(
                     s.spawn(move || build_shard!(gi, device, result))
                 })
                 .collect();
-            handles.into_iter().map(|h| {
-                h.join().unwrap_or_else(|e| {
-                    // `.expect()` on a `thread::Result` only ever prints
-                    // "Any { .. }" - the panic payload's `Box<dyn Any>` only
-                    // downcasts cleanly for the exact type the panicking
-                    // code used (usually `&str`/`String` for a `panic!()`,
-                    // but a `.unwrap()` on a tensor op's `Result` carries a
-                    // different payload type tch/libtorch chooses, which is
-                    // exactly the case this session's crashes hit and had
-                    // zero visibility into). Try both common payload shapes
-                    // before giving up, so a future crash's actual message
-                    // - not just its opaque type - ends up in the log.
-                    let msg = e
-                        .downcast_ref::<&str>()
-                        .map(|s| s.to_string())
-                        .or_else(|| e.downcast_ref::<String>().cloned())
-                        .unwrap_or_else(|| format!("{e:?}"));
-                    panic!("batch-build thread panicked: {msg}");
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join().unwrap_or_else(|e| {
+                        // `.expect()` on a `thread::Result` only ever prints
+                        // "Any { .. }" - the panic payload's `Box<dyn Any>` only
+                        // downcasts cleanly for the exact type the panicking
+                        // code used (usually `&str`/`String` for a `panic!()`,
+                        // but a `.unwrap()` on a tensor op's `Result` carries a
+                        // different payload type tch/libtorch chooses, which is
+                        // exactly the case this session's crashes hit and had
+                        // zero visibility into). Try both common payload shapes
+                        // before giving up, so a future crash's actual message
+                        // - not just its opaque type - ends up in the log.
+                        let msg = e
+                            .downcast_ref::<&str>()
+                            .map(|s| s.to_string())
+                            .or_else(|| e.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| format!("{e:?}"));
+                        panic!("batch-build thread panicked: {msg}");
+                    })
                 })
-            }).collect()
+                .collect()
         })
     };
     if std::env::var("OFTRAIN_DIAG").is_ok() {
@@ -5122,6 +5615,7 @@ fn train_update(
             batch_build_t0.elapsed().as_secs_f64()
         );
     }
+    timings.batch_build_seconds += batch_build_t0.elapsed().as_secs_f64();
     // Fold this update's per-shard partial sums into the running total
     // *after* they were used to compute `adaptive_ret_bound` above - the
     // bound applied to a given batch always reflects only prior updates
@@ -5141,7 +5635,11 @@ fn train_update(
     for _epoch in 0..cfg.epochs {
         let epoch_started = Instant::now();
         if exclusive_owner {
-            eprintln!("[phase] learner PPO epoch {}/{} started", _epoch + 1, cfg.epochs);
+            eprintln!(
+                "[phase] learner PPO epoch {}/{} started",
+                _epoch + 1,
+                cfg.epochs
+            );
         }
         // Per-shard shuffled index tensor, built once per epoch (CPU
         // shuffle + one tiny (total,) i64 upload) and resident on that
@@ -5223,137 +5721,123 @@ fn train_update(
                 // starts on a plain sequential loop.
                 macro_rules! backward_shard {
                     ($shard:expr, $sb:expr, $idx_t:expr) => {{
-                                let shard = $shard;
-                                let sb = $sb;
-                                let idx_t = $idx_t;
-                                let (
-                                    logp,
-                                    ent,
-                                    ent_q,
-                                    value,
-                                    quantity,
-                                    adv_t,
-                                    ret_t,
-                                    old_logp_t,
-                                ) = if cfg.recurrent_policy {
-                                    let hidden_all =
-                                        sb.hidden_in.as_ref().expect("recurrent hidden batch");
-                                    let context_all =
-                                        sb.context.as_ref().expect("recurrent context batch");
-                                    let reset_all = sb
-                                        .reset_before
-                                        .as_ref()
-                                        .expect("recurrent reset batch");
-                                    let mut logps = Vec::with_capacity(t_len);
-                                    let mut ents = Vec::with_capacity(t_len);
-                                    let mut entqs = Vec::with_capacity(t_len);
-                                    let mut values = Vec::with_capacity(t_len);
-                                    let mut quantities = Vec::with_capacity(t_len);
-                                    let mut target_indices = Vec::with_capacity(t_len);
-                                    for range in bptt_ranges(t_len, cfg.bptt_chunk_len) {
-                                        let first = &idx_t + (range.start * n) as i64;
-                                        // Actor state at the boundary is a
-                                        // detached BPTT initial condition.
-                                        let mut hidden = hidden_all.index_select(0, &first);
-                                        for t in range {
-                                            let step_idx = &idx_t + (t * n) as i64;
-                                            let obs_t = sb.obs.index_select(&step_idx);
-                                            let choice_t = sb.choice.index_select(&step_idx);
-                                            let context_t =
-                                                context_all.index_select(0, &step_idx);
-                                            let reset_t =
-                                                reset_all.index_select(0, &step_idx);
-                                            let (lp, en, eq, v, hidden_out) =
-                                                shard.policy.evaluate_with_state(
-                                                    &obs_t,
-                                                    &choice_t,
-                                                    &hidden,
-                                                    &context_t,
-                                                    &reset_t,
-                                                );
-                                            hidden = hidden_out;
-                                            logps.push(lp);
-                                            ents.push(en);
-                                            entqs.push(eq);
-                                            values.push(v);
-                                            quantities.push(choice_t.quantity_frac);
-                                            target_indices.push(step_idx);
-                                        }
-                                    }
-                                    let target_idx = Tensor::cat(
-                                        &target_indices.iter().collect::<Vec<_>>(),
-                                        0,
-                                    );
-                                    (
-                                        Tensor::cat(&logps.iter().collect::<Vec<_>>(), 0),
-                                        Tensor::cat(&ents.iter().collect::<Vec<_>>(), 0),
-                                        Tensor::cat(&entqs.iter().collect::<Vec<_>>(), 0),
-                                        Tensor::cat(&values.iter().collect::<Vec<_>>(), 0),
-                                        Tensor::cat(&quantities.iter().collect::<Vec<_>>(), 0),
-                                        sb.adv.index_select(0, &target_idx),
-                                        sb.ret.index_select(0, &target_idx),
-                                        sb.old_logp.index_select(0, &target_idx),
-                                    )
-                                } else {
-                                    let obs_t = sb.obs.index_select(&idx_t);
-                                    let choice_t = sb.choice.index_select(&idx_t);
-                                    let (lp, en, eq, v) =
-                                        shard.policy.evaluate(&obs_t, &choice_t);
-                                    (
-                                        lp,
-                                        en,
-                                        eq,
-                                        v,
-                                        choice_t.quantity_frac,
-                                        sb.adv.index_select(0, &idx_t),
-                                        sb.ret.index_select(0, &idx_t),
-                                        sb.old_logp.index_select(0, &idx_t),
-                                    )
-                                };
-                                // Bound log-ratio before exp (see prior
-                                // pg_loss trillion-spike incident).
-                                let log_ratio = (&logp - &old_logp_t).clamp(-20.0, 20.0);
-                                let ratio = log_ratio.exp();
-                                let surr1 = &ratio * &adv_t;
-                                let surr2 = ratio
-                                    .clamp(1.0 - cfg.clip as f64, 1.0 + cfg.clip as f64)
-                                    * &adv_t;
-                                let pg_loss = -surr1.minimum(&surr2).mean(Kind::Float);
-                                // Value loss: Huber (default Rust
-                                // stabilizer; see Config::vf_clip) or MSE
-                                // (Python F.mse_loss). Phase 5 (final)
-                                // switches the CLI default to mse once
-                                // training is stable under Huber.
-                                let v_loss = match cfg.value_loss {
-                                    ValueLoss::Huber => value.huber_loss(
-                                        &ret_t,
-                                        tch::Reduction::Mean,
-                                        cfg.vf_clip.max(1e-3) as f64,
-                                    ),
-                                    ValueLoss::Mse => value.mse_loss(&ret_t, tch::Reduction::Mean),
-                                };
-                                let ent_loss = ent.mean(Kind::Float);
-                                let n_active = quantity
-                                    .ge(0.0)
-                                    .to_kind(Kind::Float)
-                                    .sum(Kind::Float)
-                                    .clamp_min(1.0);
-                                let entq_loss = ent_q.sum(Kind::Float) / &n_active;
-                                let loss = (&pg_loss + cfg.vf_coef as f64 * &v_loss
-                                    - ent_coef as f64 * &ent_loss
-                                    - cfg.entq_coef as f64 * &entq_loss)
-                                    * w_sub;
+                        let shard = $shard;
+                        let sb = $sb;
+                        let idx_t = $idx_t;
+                        let (logp, ent, ent_q, value, quantity, adv_t, ret_t, old_logp_t) = if cfg
+                            .recurrent_policy
+                        {
+                            let hidden_all = sb.hidden_in.as_ref().expect("recurrent hidden batch");
+                            let context_all = sb.context.as_ref().expect("recurrent context batch");
+                            let reset_all =
+                                sb.reset_before.as_ref().expect("recurrent reset batch");
+                            let mut logps = Vec::with_capacity(t_len);
+                            let mut ents = Vec::with_capacity(t_len);
+                            let mut entqs = Vec::with_capacity(t_len);
+                            let mut values = Vec::with_capacity(t_len);
+                            let mut quantities = Vec::with_capacity(t_len);
+                            let mut target_indices =
+                                Vec::with_capacity(t_len.div_ceil(cfg.bptt_chunk_len));
+                            for range in bptt_ranges(t_len, cfg.bptt_chunk_len) {
+                                let first = &idx_t + (range.start * n) as i64;
+                                // Actor state at the boundary is a
+                                // detached BPTT initial condition.
+                                let hidden = hidden_all.index_select(0, &first);
+                                // One time-major gather per field and
+                                // one full trunk/head pass per BPTT
+                                // chunk. Only the GRU recurrence is
+                                // evaluated timestep by timestep.
+                                let time_offsets = Tensor::arange_start(
+                                    range.start as i64,
+                                    range.end as i64,
+                                    (Kind::Int64, shard.device),
+                                ) * n as i64;
+                                let chunk_idx =
+                                    (time_offsets.unsqueeze(1) + idx_t.unsqueeze(0)).flatten(0, -1);
+                                let obs_chunk = sb.obs.index_select(&chunk_idx);
+                                let choice_chunk = sb.choice.index_select(&chunk_idx);
+                                let context_chunk = context_all.index_select(0, &chunk_idx);
+                                let reset_chunk = reset_all.index_select(0, &chunk_idx);
+                                let (lp, en, eq, v, _) = shard.policy.evaluate_sequence_fused(
+                                    &obs_chunk,
+                                    &choice_chunk,
+                                    &hidden,
+                                    &context_chunk,
+                                    &reset_chunk,
+                                    range.len() as i64,
+                                );
+                                logps.push(lp);
+                                ents.push(en);
+                                entqs.push(eq);
+                                values.push(v);
+                                quantities.push(choice_chunk.quantity_frac);
+                                target_indices.push(chunk_idx);
+                            }
+                            let target_idx =
+                                Tensor::cat(&target_indices.iter().collect::<Vec<_>>(), 0);
+                            (
+                                Tensor::cat(&logps.iter().collect::<Vec<_>>(), 0),
+                                Tensor::cat(&ents.iter().collect::<Vec<_>>(), 0),
+                                Tensor::cat(&entqs.iter().collect::<Vec<_>>(), 0),
+                                Tensor::cat(&values.iter().collect::<Vec<_>>(), 0),
+                                Tensor::cat(&quantities.iter().collect::<Vec<_>>(), 0),
+                                sb.adv.index_select(0, &target_idx),
+                                sb.ret.index_select(0, &target_idx),
+                                sb.old_logp.index_select(0, &target_idx),
+                            )
+                        } else {
+                            let obs_t = sb.obs.index_select(&idx_t);
+                            let choice_t = sb.choice.index_select(&idx_t);
+                            let (lp, en, eq, v) = shard.policy.evaluate(&obs_t, &choice_t);
+                            (
+                                lp,
+                                en,
+                                eq,
+                                v,
+                                choice_t.quantity_frac,
+                                sb.adv.index_select(0, &idx_t),
+                                sb.ret.index_select(0, &idx_t),
+                                sb.old_logp.index_select(0, &idx_t),
+                            )
+                        };
+                        // Bound log-ratio before exp (see prior
+                        // pg_loss trillion-spike incident).
+                        let log_ratio = (&logp - &old_logp_t).clamp(-20.0, 20.0);
+                        let ratio = log_ratio.exp();
+                        let surr1 = &ratio * &adv_t;
+                        let surr2 =
+                            ratio.clamp(1.0 - cfg.clip as f64, 1.0 + cfg.clip as f64) * &adv_t;
+                        let pg_loss = -surr1.minimum(&surr2).mean(Kind::Float);
+                        // Value loss: Huber (default Rust
+                        // stabilizer; see Config::vf_clip) or MSE
+                        // (Python F.mse_loss). Phase 5 (final)
+                        // switches the CLI default to mse once
+                        // training is stable under Huber.
+                        let v_loss = match cfg.value_loss {
+                            ValueLoss::Huber => value.huber_loss(
+                                &ret_t,
+                                tch::Reduction::Mean,
+                                cfg.vf_clip.max(1e-3) as f64,
+                            ),
+                            ValueLoss::Mse => value.mse_loss(&ret_t, tch::Reduction::Mean),
+                        };
+                        let ent_loss = ent.mean(Kind::Float);
+                        let n_active = quantity
+                            .ge(0.0)
+                            .to_kind(Kind::Float)
+                            .sum(Kind::Float)
+                            .clamp_min(1.0);
+                        let entq_loss = ent_q.sum(Kind::Float) / &n_active;
+                        let loss = (&pg_loss + cfg.vf_coef as f64 * &v_loss
+                            - ent_coef as f64 * &ent_loss
+                            - cfg.entq_coef as f64 * &entq_loss)
+                            * w_sub;
 
-                                // Grads accumulate across pixel-budget
-                                // subs (zero_grad ran once above).
-                                loss.backward();
+                        // Grads accumulate across pixel-budget
+                        // subs (zero_grad ran once above).
+                        loss.backward();
 
-                                (
-                                    f64::try_from(&pg_loss).unwrap_or(0.0),
-                                    f64::try_from(&v_loss).unwrap_or(0.0),
-                                    f64::try_from(&ent_loss).unwrap_or(0.0),
-                                    f64::try_from(&entq_loss).unwrap_or(0.0),
-                                )
+                        read_loss_scalars([&pg_loss, &v_loss, &ent_loss, &entq_loss])
                     }};
                 }
                 let per_shard_losses: Vec<(f64, f64, f64, f64)> = if exclusive_owner {
@@ -5373,16 +5857,19 @@ fn train_update(
                                 s.spawn(move || backward_shard!(shard, sb, idx_t))
                             })
                             .collect();
-                        handles.into_iter().map(|h| {
-                            h.join().unwrap_or_else(|e| {
-                                let msg = e
-                                    .downcast_ref::<&str>()
-                                    .map(|s| s.to_string())
-                                    .or_else(|| e.downcast_ref::<String>().cloned())
-                                    .unwrap_or_else(|| format!("{e:?}"));
-                                panic!("backward thread panicked: {msg}");
+                        handles
+                            .into_iter()
+                            .map(|h| {
+                                h.join().unwrap_or_else(|e| {
+                                    let msg = e
+                                        .downcast_ref::<&str>()
+                                        .map(|s| s.to_string())
+                                        .or_else(|| e.downcast_ref::<String>().cloned())
+                                        .unwrap_or_else(|| format!("{e:?}"));
+                                    panic!("backward thread panicked: {msg}");
+                                })
                             })
-                        }).collect()
+                            .collect()
                     })
                 };
                 let n_shards = per_shard_losses.len() as f64;
@@ -5407,14 +5894,16 @@ fn train_update(
             }
 
             // Persistent multi-GPU owners cannot inspect another thread's
-            // tensors.  They rendezvous here with a CPU flat-gradient
-            // message; the hub deterministically reduces in shard order and
-            // writes the average back through this callback.  A non-finite
-            // shard participates with `finite=false`, causing every owner to
-            // discard the same minibatch.
+            // tensors. They first rendezvous here with finite status. The
+            // selected backend then either enters owner-local NCCL or sends a
+            // CPU flat gradient to the deterministic hub. A non-finite shard
+            // causes every owner to discard the same minibatch before any
+            // collective starts.
             if let Some(sync) = persistent_sync.as_deref_mut() {
+                let sync_t0 = Instant::now();
                 debug_assert_eq!(learners.len(), 1);
                 let global_finite = sync(&mut learners[0], _epoch, m, !discard_mb)?;
+                timings.gradient_sync_seconds += sync_t0.elapsed().as_secs_f64();
                 if !global_finite {
                     discard_mb = true;
                 }
@@ -5441,6 +5930,7 @@ fn train_update(
                 sync_grads(learners);
             }
             let sync_dt = sync_t0.elapsed().as_secs_f64();
+            timings.gradient_sync_seconds += sync_dt;
             let step_t0 = Instant::now();
             for shard in learners.iter_mut() {
                 // Matches `rl/ppo.py`'s `clip_grad_norm_(..., 0.5)`.
@@ -5475,7 +5965,10 @@ fn train_update(
 }
 
 pub fn run(mut cfg: Config) -> Result<()> {
-    anyhow::ensure!(cfg.actor_max_batch > 0, "--actor-max-batch must be at least 1");
+    anyhow::ensure!(
+        cfg.actor_max_batch > 0,
+        "--actor-max-batch must be at least 1"
+    );
     if cfg.recurrent_policy {
         anyhow::ensure!(
             cfg.recurrent_hidden_size == policy::RECURRENT_HIDDEN as usize,
@@ -5499,6 +5992,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
         );
         cfg.work_conserving_actors = false;
     }
+    anyhow::ensure!(
+        !cfg.work_conserving_actors || (cfg.compact_rollout && cfg.foveate),
+        "--work-conserving-actors requires --compact-rollout and --foveate=true"
+    );
     if cfg.persistent_actors && cfg.auto_scale_envs {
         println!(
             "[train] WARNING: --persistent-actors does not support live \
@@ -5507,11 +6004,9 @@ pub fn run(mut cfg: Config) -> Result<()> {
         );
         cfg.auto_scale_envs = false;
     }
-    let stage_count =
-        ofcore::curriculum::stages_for_schedule(cfg.curriculum_schedule).len();
+    let stage_count = ofcore::curriculum::stages_for_schedule(cfg.curriculum_schedule).len();
     anyhow::ensure!(
-        cfg.stage_env_targets.is_empty()
-            || cfg.stage_env_targets.len() == stage_count,
+        cfg.stage_env_targets.is_empty() || cfg.stage_env_targets.len() == stage_count,
         "stage env target count must match the curriculum stage count"
     );
     std::fs::create_dir_all(&cfg.ckpt_dir)?;
@@ -5523,7 +6018,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
         if cfg.recurrent_policy {
             let manifest = read_architecture_manifest(resume_path, 2)?;
             let recurrent = &manifest["architecture"]["recurrent"];
-            anyhow::ensure!(recurrent["cell"] == "gru", "V8.2 resume requires a GRU manifest");
+            anyhow::ensure!(
+                recurrent["cell"] == "gru",
+                "V8.2 resume requires a GRU manifest"
+            );
             anyhow::ensure!(
                 recurrent["hidden_size"] == cfg.recurrent_hidden_size,
                 "V8.2 recurrent hidden-size mismatch"
@@ -5545,7 +6043,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
         }
         let mut snapshot = nn::VarStore::new(Device::Cpu);
         let _ = PolicyNet::new_with_recurrence(
-            &snapshot.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks, cfg.recurrent_policy,
+            &snapshot.root(),
+            cfg.amp,
+            cfg.foveate,
+            cfg.gc,
+            cfg.blocks,
+            cfg.recurrent_policy,
         );
         snapshot.load(resume_path)?;
         let state_path = state_sidecar_path(resume_path);
@@ -5587,7 +6090,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
     } else if let Some(init_path) = &cfg.init_v81_recurrent {
         let snapshot = nn::VarStore::new(Device::Cpu);
         let _ = PolicyNet::new_with_recurrence(
-            &snapshot.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks, true,
+            &snapshot.root(),
+            cfg.amp,
+            cfg.foveate,
+            cfg.gc,
+            cfg.blocks,
+            true,
         );
         warm_start_v81_recurrent(&snapshot, init_path)?;
         println!(
@@ -5601,7 +6109,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
         }
         let mut snapshot = nn::VarStore::new(Device::Cpu);
         let _ = PolicyNet::new_with_recurrence(
-            &snapshot.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks, cfg.recurrent_policy,
+            &snapshot.root(),
+            cfg.amp,
+            cfg.foveate,
+            cfg.gc,
+            cfg.blocks,
+            cfg.recurrent_policy,
         );
         snapshot.load(init_path)?;
         println!(
@@ -5662,7 +6175,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
     if persistent_learner_enabled && hub_vs.is_none() {
         let snapshot = nn::VarStore::new(Device::Cpu);
         let _ = PolicyNet::new_with_recurrence(
-            &snapshot.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks, cfg.recurrent_policy,
+            &snapshot.root(),
+            cfg.amp,
+            cfg.foveate,
+            cfg.gc,
+            cfg.blocks,
+            cfg.recurrent_policy,
         );
         hub_vs = Some(snapshot);
     }
@@ -5728,7 +6246,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
         }
         let mut learner_vs = nn::VarStore::new(device);
         let learner_policy = PolicyNet::new_with_recurrence(
-            &learner_vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks, cfg.recurrent_policy,
+            &learner_vs.root(),
+            cfg.amp,
+            cfg.foveate,
+            cfg.gc,
+            cfg.blocks,
+            cfg.recurrent_policy,
         );
         if let Some(hub) = &hub_vs {
             learner_vs.copy(hub)?;
@@ -5740,7 +6263,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 // transfer).
                 let mut snapshot = nn::VarStore::new(Device::Cpu);
                 let _ = PolicyNet::new_with_recurrence(
-                    &snapshot.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks, cfg.recurrent_policy,
+                    &snapshot.root(),
+                    cfg.amp,
+                    cfg.foveate,
+                    cfg.gc,
+                    cfg.blocks,
+                    cfg.recurrent_policy,
                 );
                 snapshot.copy(&learner_vs)?;
                 snapshot
@@ -5777,7 +6305,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
         } else {
             let mut actor_vs = nn::VarStore::new(device);
             let actor_policy = PolicyNet::new_with_recurrence(
-                &actor_vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks, cfg.recurrent_policy,
+                &actor_vs.root(),
+                cfg.amp,
+                cfg.foveate,
+                cfg.gc,
+                cfg.blocks,
+                cfg.recurrent_policy,
             );
             actor_vs.copy(&learners[gi].vs)?;
             let path = std::path::Path::new(&cfg.ae_ckpt);
@@ -5825,7 +6358,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
     let request_path = restart_request_path(&cfg.ckpt_dir);
     if std::path::Path::new(&request_path).exists() {
         std::fs::remove_file(&request_path)?;
-        println!("[train] fulfilled stage env resize request at {} envs/shard", cfg.num_envs);
+        println!(
+            "[train] fulfilled stage env resize request at {} envs/shard",
+            cfg.num_envs
+        );
     }
 
     let mut rng = Some(rand::rngs::SmallRng::from_entropy());
@@ -6013,8 +6549,11 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 current_best = report_eval_completion(completion, update, &metrics)?;
             }
         }
-        let expected_pending_version =
-            if update == start_update { start_update } else { update - 1 };
+        let expected_pending_version = if update == start_update {
+            start_update
+        } else {
+            update - 1
+        };
         validate_rollout_set(&pending, expected_pending_version)?;
 
         // Overlap: collect update `update+1`'s rollout on every shard's
@@ -6055,42 +6594,58 @@ pub fn run(mut cfg: Config) -> Result<()> {
         // `train_dt` (the `.join()` calls after `train_update` returns
         // will block, adding to `collect_dt` but not `train_dt`).
         let collect_start = Instant::now();
-        let (train_result, next_pending, train_dt, learner_weights, learner_snapshot_dt) =
-            if persistent_learner_enabled {
-                for actor in &mut persistent_actors {
-                    actor.send_collect()?;
-                }
-                let train_t0 = Instant::now();
-                let train_reply = persistent_learner
-                    .as_mut()
-                    .expect("persistent learner initialized")
-                    .0
-                    .train(std::mem::take(&mut pending), lr_now * warmup_frac, ent_coef_now);
-                let next_pending = persistent_actors
-                    .iter_mut()
-                    .map(PersistentActor::finish_collect)
-                    .collect::<Result<Vec<_>>>();
-                match train_reply {
-                    Ok(reply) => (
-                        Ok(reply.losses),
-                        next_pending,
-                        reply.train_seconds,
-                        Some(reply.weights),
-                        reply.snapshot_seconds,
-                    ),
-                    Err(error) => (
-                        Err(error),
-                        next_pending,
-                        train_t0.elapsed().as_secs_f64(),
-                        None,
-                        0.0,
-                    ),
-                }
-            } else if cfg.persistent_actors {
+        let (
+            train_result,
+            next_pending,
+            train_dt,
+            learner_weights,
+            learner_snapshot_dt,
+            batch_build_dt,
+            gradient_sync_dt,
+        ) = if persistent_learner_enabled {
             for actor in &mut persistent_actors {
                 actor.send_collect()?;
             }
             let train_t0 = Instant::now();
+            let train_reply = persistent_learner
+                .as_mut()
+                .expect("persistent learner initialized")
+                .0
+                .train(
+                    std::mem::take(&mut pending),
+                    lr_now * warmup_frac,
+                    ent_coef_now,
+                );
+            let next_pending = persistent_actors
+                .iter_mut()
+                .map(PersistentActor::finish_collect)
+                .collect::<Result<Vec<_>>>();
+            match train_reply {
+                Ok(reply) => (
+                    Ok(reply.losses),
+                    next_pending,
+                    reply.train_seconds,
+                    Some(reply.weights),
+                    reply.snapshot_seconds,
+                    reply.timings.batch_build_seconds,
+                    reply.timings.gradient_sync_seconds,
+                ),
+                Err(error) => (
+                    Err(error),
+                    next_pending,
+                    train_t0.elapsed().as_secs_f64(),
+                    None,
+                    0.0,
+                    0.0,
+                    0.0,
+                ),
+            }
+        } else if cfg.persistent_actors {
+            for actor in &mut persistent_actors {
+                actor.send_collect()?;
+            }
+            let train_t0 = Instant::now();
+            let mut timings = TrainTimings::default();
             let train_result = train_update(
                 &mut learners,
                 &pending,
@@ -6101,13 +6656,22 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 false,
                 None,
                 None,
+                &mut timings,
             );
             let train_dt = train_t0.elapsed().as_secs_f64();
             let next_pending = persistent_actors
                 .iter_mut()
                 .map(PersistentActor::finish_collect)
                 .collect::<Result<Vec<_>>>();
-            (train_result, next_pending, train_dt, None, 0.0)
+            (
+                train_result,
+                next_pending,
+                train_dt,
+                None,
+                0.0,
+                timings.batch_build_seconds,
+                timings.gradient_sync_seconds,
+            )
         } else {
             std::thread::scope(|s| {
                 let collect_handles: Vec<_> = actors
@@ -6115,6 +6679,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     .map(|actor| s.spawn(move || collect_rollout(actor, cfg_ref, update)))
                     .collect();
                 let train_t0 = Instant::now();
+                let mut timings = TrainTimings::default();
                 let train_result = train_update(
                     &mut learners,
                     &pending,
@@ -6125,13 +6690,22 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     false,
                     None,
                     None,
+                    &mut timings,
                 );
                 let train_dt = train_t0.elapsed().as_secs_f64();
                 let next_pending: Result<Vec<RolloutResult>> = collect_handles
                     .into_iter()
                     .map(|h| h.join().map_err(|_| anyhow!("collector thread panicked"))?)
                     .collect();
-                (train_result, next_pending, train_dt, None, 0.0)
+                (
+                    train_result,
+                    next_pending,
+                    train_dt,
+                    None,
+                    0.0,
+                    timings.batch_build_seconds,
+                    timings.gradient_sync_seconds,
+                )
             })
         };
         let collect_dt = collect_start.elapsed().as_secs_f64();
@@ -6356,6 +6930,29 @@ pub fn run(mut cfg: Config) -> Result<()> {
             .iter()
             .map(|result| result.collect_seconds)
             .fold(0.0f64, f64::max);
+        let actor_batch_stats =
+            next_pending
+                .iter()
+                .fold(ActorBatchStats::default(), |mut total, result| {
+                    let stats = &result.actor_batches;
+                    total.dispatches += stats.dispatches;
+                    total.observations += stats.observations;
+                    total.singletons += stats.singletons;
+                    total.shape_dispatches += stats.shape_dispatches;
+                    total.padded_cells += stats.padded_cells;
+                    total.allocated_cells += stats.allocated_cells;
+                    total
+                });
+        if actor_batch_stats.dispatches > 0 {
+            metrics.log_actor_batches(
+                update,
+                actor_batch_stats.mean_size(),
+                actor_batch_stats.singleton_fraction(),
+                actor_batch_stats.shapes_per_dispatch(),
+                actor_batch_stats.dispatches,
+                actor_batch_stats.padding_ratio(),
+            )?;
+        }
         pending = next_pending;
         eprintln!(
             "[phase] update {update} train+collect+refresh finished in {:.3}s \
@@ -6687,7 +7284,8 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 "[update {:>5}] steps/s={:>7.1} decisions_total={:>9} eps_done={:>5} recent_reward={:>8.3} \
                  pg={:>+.4} v={:>.4} ent={:>.3} entq={:>+.3} ecoef={:.4} stage={} lr={:.2e} elapsed={:.0}s \
                  update_s={:.1} collect_s={:.1} train_s={:.1} actor_work_s={:.1} \
-                 learner_snapshot_s={:.3} refresh_s={:.3}{gpu_str}",
+                 batch_build_s={:.3} gradient_sync_s={:.3} learner_snapshot_s={:.3} \
+                 refresh_s={:.3}{gpu_str}",
                 update,
                 sps,
                 total_env_steps,
@@ -6705,9 +7303,19 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 collect_dt,
                 train_dt,
                 actor_work_dt,
+                batch_build_dt,
+                gradient_sync_dt,
                 learner_snapshot_dt,
                 refresh_dt,
             );
+            if let Err(e) = metrics.log(&serde_json::json!({
+                "event": "host_pipeline_timing",
+                "update": update,
+                "timing/batch_build_s": batch_build_dt,
+                "timing/gradient_sync_s": gradient_sync_dt,
+            })) {
+                eprintln!("[train] WARNING: host-pipeline timing log failed: {e:#}");
+            }
             if let Err(e) = metrics.log_update(
                 update,
                 curr_stage,
@@ -6801,8 +7409,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
         recent_wins: recent_wins.iter().copied().collect(),
         best_eval_win: current_best.map(|best| best.0),
         best_eval_score: current_best.map(|best| best.1),
-        v81_curriculum: cfg.curriculum_schedule
-            != ofcore::curriculum::CurriculumSchedule::Legacy,
+        v81_curriculum: cfg.curriculum_schedule != ofcore::curriculum::CurriculumSchedule::Legacy,
         curriculum_schedule: Some(cfg.curriculum_schedule.id().to_string()),
         stage_env_targets: cfg.stage_env_targets.clone(),
         envs_per_shard: pending
@@ -6968,6 +7575,7 @@ mod persistent_actor_tests {
             ep_infos: Vec::new(),
             policy_version: 0,
             collect_seconds: 0.0,
+            actor_batches: ActorBatchStats::default(),
         }
     }
 
@@ -6989,7 +7597,9 @@ mod persistent_actor_tests {
                 path: "checkpoint.safetensors".to_string(),
             })
             .unwrap();
-        protocol.accept(&LearnerCommand::Shutdown { id: 3 }).unwrap();
+        protocol
+            .accept(&LearnerCommand::Shutdown { id: 3 })
+            .unwrap();
         assert!(protocol.stopped);
         assert!(
             protocol
@@ -7076,6 +7686,8 @@ mod persistent_actor_tests {
             bptt_chunk_len: 16,
             work_conserving_actors: false,
             actor_max_batch: 32,
+            actor_target_batch: 8,
+            actor_max_padding_waste: 0.25,
             actor_max_wait: Duration::from_millis(2),
             device: Device::Cpu,
             engine: EngineKind::Native,
@@ -7124,11 +7736,7 @@ mod persistent_actor_tests {
                     map: Arc::from("parity"),
                     land_mag: vec![0.0; 2 * gh * 8 * gw * 8].into(),
                 },
-                fallout: crate::ae::pack_fallout(
-                    &vec![0u8; gh * 8 * gw * 8],
-                    gh * 8,
-                    gw * 8,
-                ),
+                fallout: crate::ae::pack_fallout(&vec![0u8; gh * 8 * gw * 8], gh * 8, gw * 8),
                 stat: vec![0.0; 6 * plane],
                 hr: gh * 8,
                 wr: gw * 8,
@@ -7144,10 +7752,7 @@ mod persistent_actor_tests {
             scalars: [0.1; ofcore::feat::N_SCALARS],
             me_slot: 0,
             legal_actions: [1.0; ofcore::feat::N_ACTIONS],
-            legal_ptarget: vec![
-                1.0;
-                ofcore::feat::N_ACTIONS * ofcore::feat::MAX_SLOTS
-            ],
+            legal_ptarget: vec![1.0; ofcore::feat::N_ACTIONS * ofcore::feat::MAX_SLOTS],
             legal_build: [1.0; ofcore::feat::N_BUILD],
             legal_nuke: [1.0; ofcore::feat::N_NUKE],
             local: vec![0.1; 5 * policy::LOCAL as usize * policy::LOCAL as usize],
@@ -7180,13 +7785,19 @@ mod persistent_actor_tests {
             ep_infos: Vec::new(),
             policy_version: 0,
             collect_seconds: 0.0,
+            actor_batches: ActorBatchStats::default(),
         }
     }
 
     fn parity_learner(cfg: &Config, weights: &CpuWeightSnapshot) -> LearnerShard {
         let vs = nn::VarStore::new(Device::Cpu);
         let policy = PolicyNet::new_with_recurrence(
-            &vs.root(), false, false, cfg.gc, cfg.blocks, cfg.recurrent_policy,
+            &vs.root(),
+            false,
+            false,
+            cfg.gc,
+            cfg.blocks,
+            cfg.recurrent_policy,
         );
         apply_weight_snapshot(&vs, weights).unwrap();
         let opt = nn::AdamW::default().build(&vs, cfg.lr).unwrap();
@@ -7211,6 +7822,8 @@ mod persistent_actor_tests {
         let mut owned_rng = rand::rngs::SmallRng::seed_from_u64(919);
         let mut legacy_ret = RetStat::default();
         let mut owned_ret = RetStat::default();
+        let mut legacy_timings = TrainTimings::default();
+        let mut owned_timings = TrainTimings::default();
         let legacy_rollout = parity_rollout();
         let owned_rollout = parity_rollout();
 
@@ -7224,6 +7837,7 @@ mod persistent_actor_tests {
             false,
             None,
             None,
+            &mut legacy_timings,
         )
         .unwrap();
         let owned_losses = train_update(
@@ -7236,6 +7850,7 @@ mod persistent_actor_tests {
             true,
             None,
             None,
+            &mut owned_timings,
         )
         .unwrap();
 
@@ -7274,6 +7889,37 @@ mod persistent_actor_tests {
     }
 
     #[test]
+    fn packed_loss_read_preserves_individual_scalar_bits() {
+        let tensors = [
+            Tensor::from(1.25f32),
+            Tensor::from(-0.0f32),
+            Tensor::from(f32::from_bits(0x3f80_0001)),
+            Tensor::from(-17.5f32),
+        ];
+        let packed = read_loss_scalars([&tensors[0], &tensors[1], &tensors[2], &tensors[3]]);
+        let individual = (
+            f64::try_from(&tensors[0]).unwrap(),
+            f64::try_from(&tensors[1]).unwrap(),
+            f64::try_from(&tensors[2]).unwrap(),
+            f64::try_from(&tensors[3]).unwrap(),
+        );
+        assert_eq!(
+            [
+                packed.0.to_bits(),
+                packed.1.to_bits(),
+                packed.2.to_bits(),
+                packed.3.to_bits(),
+            ],
+            [
+                individual.0.to_bits(),
+                individual.1.to_bits(),
+                individual.2.to_bits(),
+                individual.3.to_bits(),
+            ]
+        );
+    }
+
+    #[test]
     fn persistent_one_and_two_shard_updates_have_ddp_parity() {
         tch::manual_seed(606);
         let cfg = parity_config();
@@ -7289,6 +7935,10 @@ mod persistent_actor_tests {
                 rand::rngs::SmallRng::seed_from_u64(77),
             )
             .unwrap();
+            assert!(
+                one.gradient_txs.is_empty(),
+                "world=1 must not create a persistent CPU gradient hub"
+            );
             let (mut two, _) = PersistentLearner::spawn(
                 &[Device::Cpu, Device::Cpu],
                 cfg.clone(),
@@ -7302,30 +7952,11 @@ mod persistent_actor_tests {
                 .train(vec![parity_rollout(), parity_rollout()], cfg.lr, 0.01)
                 .unwrap();
 
+            assert!(one_reply.averaged_gradients.is_empty());
             assert_eq!(
-                one_reply.averaged_gradients.len(),
                 two_reply.averaged_gradients.len(),
-                "repetition {repetition}: optimizer barrier count differs"
+                cfg.epochs * cfg.minibatches.max(1)
             );
-            let mut max_gradient_diff = 0.0f32;
-            for (barrier, (single, ddp)) in one_reply
-                .averaged_gradients
-                .iter()
-                .zip(&two_reply.averaged_gradients)
-                .enumerate()
-            {
-                let barrier_max = single
-                    .iter()
-                    .zip(ddp)
-                    .map(|(a, b)| (a - b).abs())
-                    .fold(0.0f32, f32::max);
-                max_gradient_diff = max_gradient_diff.max(barrier_max);
-                assert!(
-                    barrier_max < 1e-7,
-                    "repetition {repetition}: pre-step averaged gradient differs at barrier \
-                     {barrier}: max_diff={barrier_max:e}"
-                );
-            }
 
             let max_replica_diff = two_reply.weights[0]
                 .values
@@ -7340,8 +7971,8 @@ mod persistent_actor_tests {
                 .map(|(a, b)| (a - b).abs())
                 .fold(0.0f32, f32::max);
             eprintln!(
-                "[ddp-parity] repetition={repetition} max_gradient_diff={max_gradient_diff:e} \
-                 max_replica_diff={max_replica_diff:e} max_weight_diff={max_weight_diff:e}"
+                "[ddp-parity] repetition={repetition} max_replica_diff={max_replica_diff:e} \
+                 max_weight_diff={max_weight_diff:e}"
             );
             assert!(
                 max_replica_diff < 1e-7,
@@ -7351,7 +7982,7 @@ mod persistent_actor_tests {
             assert!(
                 max_weight_diff < 1e-6,
                 "repetition {repetition}: 1-vs-2 shard weight mismatch: \
-                 max_diff={max_weight_diff:e}; pre-step max_diff={max_gradient_diff:e}"
+                 max_diff={max_weight_diff:e}"
             );
             one.shutdown().unwrap();
             two.shutdown().unwrap();
@@ -7384,12 +8015,13 @@ mod persistent_actor_tests {
         tch::manual_seed(808);
         let mut cfg = parity_config();
         cfg.recurrent_policy = true;
-        cfg.bptt_chunk_len = 1;
+        // Exercise the fused multi-step train-update path. The rollout below
+        // terminates env 0 at t=0, so t=1 also covers an in-chunk hidden reset.
+        cfg.bptt_chunk_len = 2;
         cfg.epochs = 1;
         let source = nn::VarStore::new(Device::Cpu);
-        let _ = PolicyNet::new_with_recurrence(
-            &source.root(), false, false, cfg.gc, cfg.blocks, true,
-        );
+        let _ =
+            PolicyNet::new_with_recurrence(&source.root(), false, false, cfg.gc, cfg.blocks, true);
         let weights = snapshot_weights(&source).unwrap();
         let rollout = || {
             let mut rollout = parity_rollout();
@@ -7420,19 +8052,11 @@ mod persistent_actor_tests {
         .unwrap();
         let one_reply = one.train(vec![rollout()], cfg.lr, 0.01).unwrap();
         let two_reply = two.train(vec![rollout(), rollout()], cfg.lr, 0.01).unwrap();
-        assert_eq!(one_reply.averaged_gradients.len(), two_reply.averaged_gradients.len());
-        for (single, ddp) in one_reply
-            .averaged_gradients
-            .iter()
-            .zip(&two_reply.averaged_gradients)
-        {
-            let max = single
-                .iter()
-                .zip(ddp)
-                .map(|(a, b)| (a - b).abs())
-                .fold(0.0f32, f32::max);
-            assert!(max < 1e-7, "recurrent gradient mismatch: {max:e}");
-        }
+        assert!(one_reply.averaged_gradients.is_empty());
+        assert_eq!(
+            two_reply.averaged_gradients.len(),
+            cfg.epochs * cfg.minibatches.max(1)
+        );
         assert_eq!(two_reply.weights[0].values, two_reply.weights[1].values);
         let max_weight = one_reply.weights[0]
             .values
@@ -7440,7 +8064,10 @@ mod persistent_actor_tests {
             .zip(two_reply.weights[0].values.iter())
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
-        assert!(max_weight < 1e-6, "recurrent weight mismatch: {max_weight:e}");
+        assert!(
+            max_weight < 1e-6,
+            "recurrent weight mismatch: {max_weight:e}"
+        );
         one.shutdown().unwrap();
         two.shutdown().unwrap();
     }

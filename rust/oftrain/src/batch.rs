@@ -634,22 +634,157 @@ pub fn build_compact_rollout_obs(
     let compact = {
         let refs: Vec<&PreparedObs> = items.iter().collect();
         let uniform = exact_uniform_shape(&refs);
-        let full = if uniform {
-            build_uniform_device_ae_obs(&refs, device, pinned_h2d, fp16_rollout, ae, terrain_cache)?
-        } else {
-            build_device_ae_obs(
+        if uniform {
+            let full = build_uniform_device_ae_obs(
                 &refs,
                 device,
                 pinned_h2d,
                 fp16_rollout,
                 ae,
-                Some(terrain_cache),
-            )?
-        };
-        PolicyNet::compact_observation(&full)
+                terrain_cache,
+            )?;
+            PolicyNet::compact_observation(&full)
+        } else {
+            // Encode and crop each exact native shape before combining. This
+            // prevents full-map AE/convolution padding from changing edge
+            // values; only already-compact coarse maps are padded below.
+            build_native_compact_mixed(&refs, device, pinned_h2d, fp16_rollout, ae, terrain_cache)?
+        }
     };
     store_compact_host(items, &compact, host_arena)?;
     Ok(compact)
+}
+
+fn cat_rows(rows: &[Tensor]) -> Tensor {
+    let refs: Vec<&Tensor> = rows.iter().collect();
+    Tensor::cat(&refs, 0)
+}
+
+/// Exact-shape AE/crop first, compact padding second. Returned tensors remain
+/// on the caller's persistent actor thread and preserve the input row order.
+fn build_native_compact_mixed(
+    items: &[&PreparedObs],
+    device: Device,
+    pinned_h2d: bool,
+    fp16_rollout: bool,
+    ae: &AePair,
+    terrain_cache: &mut TerrainDeviceCache,
+) -> anyhow::Result<Obs> {
+    anyhow::ensure!(!items.is_empty(), "empty mixed compact batch");
+    let mut groups: Vec<((usize, usize, usize, usize), Vec<usize>)> = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let key = (item.ae_raw.hr, item.ae_raw.wr, item.gh, item.gw);
+        if let Some((_, members)) = groups.iter_mut().find(|(shape, _)| *shape == key) {
+            members.push(i);
+        } else {
+            groups.push((key, vec![i]));
+        }
+    }
+
+    let mut location = vec![(0usize, 0usize); items.len()];
+    let mut compact_groups = Vec::with_capacity(groups.len());
+    for (group_index, (_, members)) in groups.iter().enumerate() {
+        let refs: Vec<&PreparedObs> = members.iter().map(|&i| items[i]).collect();
+        debug_assert!(exact_uniform_shape(&refs));
+        let full = build_uniform_device_ae_obs(
+            &refs,
+            device,
+            pinned_h2d,
+            fp16_rollout,
+            ae,
+            terrain_cache,
+        )?;
+        let compact = PolicyNet::compact_observation(&full);
+        for (row, &original) in members.iter().enumerate() {
+            location[original] = (group_index, row);
+        }
+        compact_groups.push(compact);
+    }
+
+    let max_ch = compact_groups
+        .iter()
+        .map(|obs| obs.grid_coarse.as_ref().unwrap().size()[2])
+        .max()
+        .unwrap();
+    let max_cw = compact_groups
+        .iter()
+        .map(|obs| obs.grid_coarse.as_ref().unwrap().size()[3])
+        .max()
+        .unwrap();
+    let mut fine = Vec::with_capacity(items.len());
+    let mut fine_valid = Vec::with_capacity(items.len());
+    let mut fine_legal = Vec::with_capacity(items.len());
+    let mut coarse = Vec::with_capacity(items.len());
+    let mut coarse_valid = Vec::with_capacity(items.len());
+    let mut coarse_legal = Vec::with_capacity(items.len());
+    let mut origin_y = Vec::with_capacity(items.len());
+    let mut origin_x = Vec::with_capacity(items.len());
+    let mut players = Vec::with_capacity(items.len());
+    let mut pmask = Vec::with_capacity(items.len());
+    let mut local = Vec::with_capacity(items.len());
+    let mut scalars = Vec::with_capacity(items.len());
+    let mut legal_actions = Vec::with_capacity(items.len());
+    let mut legal_ptarget = Vec::with_capacity(items.len());
+    let mut legal_build = Vec::with_capacity(items.len());
+    let mut legal_nuke = Vec::with_capacity(items.len());
+    for &(group, row) in &location {
+        let obs = &compact_groups[group];
+        let row = row as i64;
+        let meta = obs.compact.as_ref().unwrap();
+        let native = obs.grid_coarse.as_ref().unwrap();
+        let ch = native.size()[2];
+        let cw = native.size()[3];
+        fine.push(obs.grid.narrow(0, row, 1));
+        fine_valid.push(obs.grid_valid.narrow(0, row, 1));
+        fine_legal.push(obs.legal_tile.narrow(0, row, 1));
+        coarse.push(
+            native
+                .narrow(0, row, 1)
+                .constant_pad_nd([0, max_cw - cw, 0, max_ch - ch]),
+        );
+        coarse_valid.push(meta.coarse_valid.narrow(0, row, 1).constant_pad_nd([
+            0,
+            max_cw - cw,
+            0,
+            max_ch - ch,
+        ]));
+        coarse_legal.push(meta.coarse_legal.narrow(0, row, 1).constant_pad_nd([
+            0,
+            max_cw - cw,
+            0,
+            max_ch - ch,
+        ]));
+        origin_y.push(meta.origin_y.narrow(0, row, 1));
+        origin_x.push(meta.origin_x.narrow(0, row, 1));
+        players.push(obs.players.narrow(0, row, 1));
+        pmask.push(obs.pmask.narrow(0, row, 1));
+        local.push(obs.local.narrow(0, row, 1));
+        scalars.push(obs.scalars.narrow(0, row, 1));
+        legal_actions.push(obs.legal_actions.narrow(0, row, 1));
+        legal_ptarget.push(obs.legal_ptarget.narrow(0, row, 1));
+        legal_build.push(obs.legal_build.narrow(0, row, 1));
+        legal_nuke.push(obs.legal_nuke.narrow(0, row, 1));
+    }
+    Ok(Obs {
+        grid: cat_rows(&fine),
+        grid_valid: cat_rows(&fine_valid),
+        legal_tile: cat_rows(&fine_legal),
+        grid_coarse: Some(cat_rows(&coarse)),
+        players: cat_rows(&players),
+        pmask: cat_rows(&pmask),
+        local: cat_rows(&local),
+        scalars: cat_rows(&scalars),
+        legal_actions: cat_rows(&legal_actions),
+        legal_ptarget: cat_rows(&legal_ptarget),
+        legal_build: cat_rows(&legal_build),
+        legal_nuke: cat_rows(&legal_nuke),
+        compact: Some(CompactObsMeta {
+            origin_y: cat_rows(&origin_y),
+            origin_x: cat_rows(&origin_x),
+            coarse_valid: cat_rows(&coarse_valid),
+            coarse_legal: cat_rows(&coarse_legal),
+        }),
+    })
 }
 
 /// Compact an observation for immediate actor/evaluation/bootstrap use
@@ -662,19 +797,26 @@ pub fn build_compact_obs_with_ae(
     ae: &AePair,
     terrain_cache: &mut TerrainDeviceCache,
 ) -> anyhow::Result<Obs> {
-    let full = if exact_uniform_shape(items) {
-        build_uniform_device_ae_obs(items, device, pinned_h2d, fp16_rollout, ae, terrain_cache)?
-    } else {
-        build_device_ae_obs(
+    if exact_uniform_shape(items) {
+        let full = build_uniform_device_ae_obs(
             items,
             device,
             pinned_h2d,
             fp16_rollout,
             ae,
-            Some(terrain_cache),
-        )?
-    };
-    Ok(PolicyNet::compact_observation(&full))
+            terrain_cache,
+        )?;
+        Ok(PolicyNet::compact_observation(&full))
+    } else {
+        Ok(build_native_compact_mixed(
+            items,
+            device,
+            pinned_h2d,
+            fp16_rollout,
+            ae,
+            terrain_cache,
+        )?)
+    }
 }
 
 /// Rollout-only builder. Uniform batches retain AE output on `device` for
@@ -1132,6 +1274,122 @@ fn clear_full_resolution_payload(it: &mut PreparedObs) {
     it.legal_tile.clear();
 }
 
+#[derive(Debug, Default, PartialEq)]
+struct PackedCompactHost {
+    fine: Vec<half::f16>,
+    fine_valid: Vec<f32>,
+    fine_legal: Vec<f32>,
+    coarse: Vec<half::f16>,
+    coarse_valid: Vec<f32>,
+    coarse_legal: Vec<f32>,
+    players: Vec<f32>,
+    pmask: Vec<f32>,
+    local: Vec<f32>,
+    scalars: Vec<f32>,
+    legal_actions: Vec<f32>,
+    legal_ptarget: Vec<f32>,
+    legal_build: Vec<f32>,
+    legal_nuke: Vec<f32>,
+    origin_y: Vec<i64>,
+    origin_x: Vec<i64>,
+}
+
+impl PackedCompactHost {
+    fn append(&mut self, mut other: Self) {
+        self.fine.append(&mut other.fine);
+        self.fine_valid.append(&mut other.fine_valid);
+        self.fine_legal.append(&mut other.fine_legal);
+        self.coarse.append(&mut other.coarse);
+        self.coarse_valid.append(&mut other.coarse_valid);
+        self.coarse_legal.append(&mut other.coarse_legal);
+        self.players.append(&mut other.players);
+        self.pmask.append(&mut other.pmask);
+        self.local.append(&mut other.local);
+        self.scalars.append(&mut other.scalars);
+        self.legal_actions.append(&mut other.legal_actions);
+        self.legal_ptarget.append(&mut other.legal_ptarget);
+        self.legal_build.append(&mut other.legal_build);
+        self.legal_nuke.append(&mut other.legal_nuke);
+        self.origin_y.append(&mut other.origin_y);
+        self.origin_x.append(&mut other.origin_x);
+    }
+}
+
+/// Pure host packing for one deterministic contiguous item range. Tensor
+/// construction and H2D intentionally happen only after all ranges rejoin.
+fn pack_compact_host_range(
+    items: &[&PreparedObs],
+    compact: &[&CompactGrid],
+    ch: usize,
+    cw: usize,
+) -> PackedCompactHost {
+    let cg = policy::C_GRID as usize;
+    let mut out = PackedCompactHost::default();
+    for (it, c) in items.iter().zip(compact) {
+        out.fine.extend_from_slice(c.fine());
+        out.fine_valid.extend_from_slice(c.fine_valid());
+        out.fine_legal.extend_from_slice(c.fine_legal());
+        for plane in 0..cg {
+            let mut dst = vec![half::f16::ZERO; ch * cw];
+            for y in 0..c.coarse_h {
+                let src = plane * c.coarse_h * c.coarse_w + y * c.coarse_w;
+                let dst_row = y * cw;
+                dst[dst_row..dst_row + c.coarse_w]
+                    .copy_from_slice(&c.coarse()[src..src + c.coarse_w]);
+            }
+            out.coarse.extend(dst);
+        }
+        for (src, dst) in [
+            (c.coarse_valid(), &mut out.coarse_valid),
+            (c.coarse_legal(), &mut out.coarse_legal),
+        ] {
+            let mut padded = vec![0.0f32; ch * cw];
+            for y in 0..c.coarse_h {
+                padded[y * cw..y * cw + c.coarse_w]
+                    .copy_from_slice(&src[y * c.coarse_w..(y + 1) * c.coarse_w]);
+            }
+            dst.extend(padded);
+        }
+        out.players.extend_from_slice(&it.players);
+        out.pmask.extend_from_slice(&it.pmask);
+        out.local.extend_from_slice(&it.local);
+        out.scalars.extend_from_slice(&it.scalars);
+        out.legal_actions.extend_from_slice(&it.legal_actions);
+        out.legal_ptarget.extend_from_slice(&it.legal_ptarget);
+        out.legal_build.extend_from_slice(&it.legal_build);
+        out.legal_nuke.extend_from_slice(&it.legal_nuke);
+        out.origin_y.push(c.origin_y);
+        out.origin_x.push(c.origin_x);
+    }
+    out
+}
+
+fn pack_compact_host(
+    items: &[&PreparedObs],
+    compact: &[&CompactGrid],
+    ch: usize,
+    cw: usize,
+    workers: usize,
+) -> PackedCompactHost {
+    let workers = workers.max(1).min(items.len());
+    let chunk = items.len().div_ceil(workers);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = items
+            .chunks(chunk)
+            .zip(compact.chunks(chunk))
+            .map(|(item_range, compact_range)| {
+                scope.spawn(move || pack_compact_host_range(item_range, compact_range, ch, cw))
+            })
+            .collect();
+        // Joining in range order preserves exact T-major/N-minor layout.
+        let mut packed = PackedCompactHost::default();
+        for handle in handles {
+            packed.append(handle.join().expect("compact host packing thread panicked"));
+        }
+        packed
+    })
+}
+
 fn build_compact_host_obs(
     items: &[&PreparedObs],
     device: Device,
@@ -1155,40 +1413,28 @@ fn build_compact_host_obs(
     let ch = compact.iter().map(|c| c.coarse_h).max().unwrap();
     let cw = compact.iter().map(|c| c.coarse_w).max().unwrap();
     let b = items.len();
-    let cg = policy::C_GRID as usize;
-
-    let mut fine = Vec::with_capacity(b * cg * fh * fw);
-    let mut fine_valid = Vec::with_capacity(b * fh * fw);
-    let mut fine_legal = Vec::with_capacity(b * fh * fw);
-    let mut coarse = Vec::with_capacity(b * cg * ch * cw);
-    let mut coarse_valid = Vec::with_capacity(b * ch * cw);
-    let mut coarse_legal = Vec::with_capacity(b * ch * cw);
-    for c in &compact {
-        fine.extend_from_slice(c.fine());
-        fine_valid.extend_from_slice(c.fine_valid());
-        fine_legal.extend_from_slice(c.fine_legal());
-        for plane in 0..cg {
-            let mut dst = vec![half::f16::ZERO; ch * cw];
-            for y in 0..c.coarse_h {
-                let src = plane * c.coarse_h * c.coarse_w + y * c.coarse_w;
-                let out = y * cw;
-                dst[out..out + c.coarse_w].copy_from_slice(&c.coarse()[src..src + c.coarse_w]);
-            }
-            coarse.extend(dst);
-        }
-        for (src, dst) in [
-            (c.coarse_valid(), &mut coarse_valid),
-            (c.coarse_legal(), &mut coarse_legal),
-        ] {
-            let mut padded = vec![0.0f32; ch * cw];
-            for y in 0..c.coarse_h {
-                padded[y * cw..y * cw + c.coarse_w]
-                    .copy_from_slice(&src[y * c.coarse_w..(y + 1) * c.coarse_w]);
-            }
-            dst.extend(padded);
-        }
-    }
-
+    let workers = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(8);
+    let packed = pack_compact_host(items, &compact, ch, cw, workers);
+    let PackedCompactHost {
+        fine,
+        fine_valid,
+        fine_legal,
+        coarse,
+        coarse_valid,
+        coarse_legal,
+        players,
+        pmask,
+        local,
+        scalars,
+        legal_actions,
+        legal_ptarget,
+        legal_build,
+        legal_nuke,
+        origin_y,
+        origin_x,
+    } = packed;
     let half_up = |v: Vec<half::f16>, shape: &[i64]| {
         to_device_maybe_pinned(&Tensor::from_slice(&v).view(shape), device, pinned_h2d)
             .to_kind(Kind::Float)
@@ -1196,24 +1442,6 @@ fn build_compact_host_obs(
     let up = |v: Vec<f32>, shape: &[i64]| {
         to_device_maybe_pinned(&Tensor::from_slice(&v).view(shape), device, pinned_h2d)
     };
-    let mut players = Vec::new();
-    let mut pmask = Vec::new();
-    let mut local = Vec::new();
-    let mut scalars = Vec::new();
-    let mut legal_actions = Vec::new();
-    let mut legal_ptarget = Vec::new();
-    let mut legal_build = Vec::new();
-    let mut legal_nuke = Vec::new();
-    for it in items {
-        players.extend_from_slice(&it.players);
-        pmask.extend_from_slice(&it.pmask);
-        local.extend_from_slice(&it.local);
-        scalars.extend_from_slice(&it.scalars);
-        legal_actions.extend_from_slice(&it.legal_actions);
-        legal_ptarget.extend_from_slice(&it.legal_ptarget);
-        legal_build.extend_from_slice(&it.legal_build);
-        legal_nuke.extend_from_slice(&it.legal_nuke);
-    }
     let bi = b as i64;
     Ok(Obs {
         grid: half_up(fine, &[bi, policy::C_GRID, fh as i64, fw as i64]),
@@ -1232,16 +1460,8 @@ fn build_compact_host_obs(
         legal_build: up(legal_build, &[bi, feat::N_BUILD as i64]),
         legal_nuke: up(legal_nuke, &[bi, feat::N_NUKE as i64]),
         compact: Some(CompactObsMeta {
-            origin_y: to_device_maybe_pinned(
-                &Tensor::from_slice(&compact.iter().map(|c| c.origin_y).collect::<Vec<_>>()),
-                device,
-                pinned_h2d,
-            ),
-            origin_x: to_device_maybe_pinned(
-                &Tensor::from_slice(&compact.iter().map(|c| c.origin_x).collect::<Vec<_>>()),
-                device,
-                pinned_h2d,
-            ),
+            origin_y: to_device_maybe_pinned(&Tensor::from_slice(&origin_y), device, pinned_h2d),
+            origin_x: to_device_maybe_pinned(&Tensor::from_slice(&origin_x), device, pinned_h2d),
             coarse_valid: up(coarse_valid, &[bi, ch as i64, cw as i64]),
             coarse_legal: up(coarse_legal, &[bi, ch as i64, cw as i64]),
         }),
@@ -1587,6 +1807,15 @@ mod tests {
                 && it.legal_tile.is_empty()
         }));
         let refs: Vec<&PreparedObs> = items.iter().collect();
+        let compact: Vec<&CompactGrid> =
+            refs.iter().map(|it| it.compact.as_ref().unwrap()).collect();
+        let ch = compact.iter().map(|c| c.coarse_h).max().unwrap();
+        let cw = compact.iter().map(|c| c.coarse_w).max().unwrap();
+        assert_eq!(
+            pack_compact_host(&refs, &compact, ch, cw, 1),
+            pack_compact_host(&refs, &compact, ch, cw, 3),
+            "parallel disjoint-range packing must preserve every host bit and item order"
+        );
         let rebuilt = build_obs(&refs, Device::Cpu, false, false);
         assert!(rebuilt.compact.is_some());
         assert_eq!(
@@ -2054,5 +2283,170 @@ mod tests {
             Vec::<f32>::try_from(rebuilt.scalars.select(1, 0)).unwrap(),
             vec![700.0, 701.0, 702.0, 703.0]
         );
+    }
+
+    #[test]
+    fn mixed_native_ae_crop_matches_singletons_including_odd_edges() {
+        tch::manual_seed(812);
+        let pair = crate::ae::AePair::random_for_test(Device::Cpu).unwrap();
+        let mut mixed_items = vec![tiny_prepared_obs(5, 7), tiny_prepared_obs(7, 5)];
+        for (row, item) in mixed_items.iter_mut().enumerate() {
+            let pix = item.ae_raw.hr * item.ae_raw.wr;
+            for (i, owner) in item.ae_raw.owners.iter_mut().enumerate() {
+                *owner = ((i * 11 + row * 17) % 127) as u8;
+            }
+            item.ae_raw.fallout = crate::ae::pack_fallout(
+                &(0..pix)
+                    .map(|i| ((i + row * 3) % 13 == 0) as u8)
+                    .collect::<Vec<_>>(),
+                item.ae_raw.hr,
+                item.ae_raw.wr,
+            );
+            item.ego[..item.gh * item.gw].fill(0.0);
+            let edge = if row == 0 { 0 } else { item.gh * item.gw - 1 };
+            item.ego[edge] = 1.0;
+            item.prev_action.action = (row + 1) as i64;
+            item.prev_action.had_action = true;
+            item.legal_actions.fill(0.0);
+            item.legal_actions[0] = 1.0;
+        }
+        let singleton_sources = mixed_items.clone();
+        let arena = Arc::new(CompactHostArena::default());
+        let mut mixed_cache = TerrainDeviceCache::new_persistent_actor(Device::Cpu);
+        let mixed = build_compact_rollout_obs(
+            &mut mixed_items,
+            Device::Cpu,
+            false,
+            false,
+            &pair,
+            &mut mixed_cache,
+            &arena,
+        )
+        .unwrap();
+
+        let mut singletons = Vec::new();
+        for (row, source) in singleton_sources.into_iter().enumerate() {
+            let mut one = vec![source];
+            let mut cache = TerrainDeviceCache::new_persistent_actor(Device::Cpu);
+            let single = build_compact_rollout_obs(
+                &mut one,
+                Device::Cpu,
+                false,
+                false,
+                &pair,
+                &mut cache,
+                &Arc::new(CompactHostArena::default()),
+            )
+            .unwrap();
+            let max_diff = |actual: Tensor, expected: &Tensor| {
+                (actual - expected).abs().max().double_value(&[])
+            };
+            assert!(
+                max_diff(mixed.grid.narrow(0, row as i64, 1), &single.grid) <= 1e-5,
+                "fine compact row {row}"
+            );
+            assert_eq!(
+                mixed
+                    .compact
+                    .as_ref()
+                    .unwrap()
+                    .origin_y
+                    .int64_value(&[row as i64]),
+                single.compact.as_ref().unwrap().origin_y.int64_value(&[0])
+            );
+            assert_eq!(
+                mixed
+                    .compact
+                    .as_ref()
+                    .unwrap()
+                    .origin_x
+                    .int64_value(&[row as i64]),
+                single.compact.as_ref().unwrap().origin_x.int64_value(&[0])
+            );
+            let native = single.grid_coarse.as_ref().unwrap();
+            let ch = native.size()[2];
+            let cw = native.size()[3];
+            let actual = mixed
+                .grid_coarse
+                .as_ref()
+                .unwrap()
+                .narrow(0, row as i64, 1)
+                .narrow(2, 0, ch)
+                .narrow(3, 0, cw);
+            assert!(max_diff(actual, native) <= 1e-5, "coarse compact row {row}");
+            let actual_valid = mixed
+                .compact
+                .as_ref()
+                .unwrap()
+                .coarse_valid
+                .narrow(0, row as i64, 1)
+                .narrow(1, 0, ch)
+                .narrow(2, 0, cw);
+            assert_eq!(
+                max_diff(actual_valid, &single.compact.as_ref().unwrap().coarse_valid),
+                0.0
+            );
+            singletons.push(single);
+        }
+
+        // The padded compact batch must preserve actions and recurrent rows,
+        // not merely encoder/crop values.
+        let vs = tch::nn::VarStore::new(Device::Cpu);
+        let policy = PolicyNet::new_with_recurrence(&vs.root(), false, true, 8, 2, true);
+        for (name, mut tensor) in vs.variables() {
+            let salt = name.bytes().map(usize::from).sum::<usize>();
+            let values: Vec<f32> = (0..tensor.numel())
+                .map(|i| ((i * 37 + salt * 11) % 101) as f32 / 500.0 - 0.1)
+                .collect();
+            tch::no_grad(|| {
+                tensor.copy_(&Tensor::from_slice(&values).view(tensor.size().as_slice()))
+            });
+        }
+        let hidden = Tensor::from_slice(
+            &(0..2 * policy::RECURRENT_HIDDEN as usize)
+                .map(|i| (i as f32 - 100.0) / 1000.0)
+                .collect::<Vec<_>>(),
+        )
+        .view([2, policy::RECURRENT_HIDDEN]);
+        let contexts: Vec<_> = mixed_items
+            .iter()
+            .map(|item| item.prev_action.clone())
+            .collect();
+        let context = crate::recurrent::context_tensor(&contexts, Device::Cpu);
+        let (mixed_action, mixed_hidden) =
+            tch::no_grad(|| policy.act_with_state(&mixed, &hidden, &context, true));
+        for (row, single) in singletons.iter().enumerate() {
+            let single_context =
+                crate::recurrent::context_tensor(&[contexts[row].clone()], Device::Cpu);
+            let (single_action, single_hidden) = tch::no_grad(|| {
+                policy.act_with_state(
+                    single,
+                    &hidden.narrow(0, row as i64, 1),
+                    &single_context,
+                    true,
+                )
+            });
+            assert_eq!(mixed_action.0.int64_value(&[row as i64]), 0);
+            assert_eq!(single_action.0.int64_value(&[0]), 0);
+            for (name, actual, expected) in [
+                ("quantity", &mixed_action.5, &single_action.5),
+                ("logp", &mixed_action.6, &single_action.6),
+                ("value", &mixed_action.7, &single_action.7),
+            ] {
+                let diff = (actual.narrow(0, row as i64, 1) - expected)
+                    .abs()
+                    .max()
+                    .double_value(&[]);
+                assert!(diff <= 1e-3, "{name} row {row} differs by {diff}");
+            }
+            let hidden_diff = (mixed_hidden.narrow(0, row as i64, 1) - &single_hidden)
+                .abs()
+                .max()
+                .double_value(&[]);
+            assert!(
+                hidden_diff <= 1e-3,
+                "recurrent state row {row} differs by {hidden_diff}"
+            );
+        }
     }
 }

@@ -29,8 +29,16 @@
 //! available) - see rust/oftrain/ROCM.md.
 fn main() {
     println!("cargo:rerun-if-env-changed=LIBTORCH");
+    println!("cargo:rerun-if-env-changed=LIBTORCH_CXX11_ABI");
+    println!("cargo:rerun-if-env-changed=CUDA_INCLUDE_DIR");
+    println!("cargo:rerun-if-env-changed=CUDA_LIB_DIR");
+    println!("cargo:rerun-if-env-changed=NCCL_INCLUDE_DIR");
+    println!("cargo:rerun-if-env-changed=NCCL_LIB_DIR");
     let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if os != "linux" {
+        if std::env::var_os("CARGO_FEATURE_NCCL").is_some() {
+            panic!("the oftrain nccl feature is supported only on Linux");
+        }
         return;
     }
     let lib_dir = std::env::var("LIBTORCH").ok().map(|p| format!("{p}/lib"));
@@ -51,6 +59,64 @@ fn main() {
         println!("cargo:rustc-link-arg=-ltorch_cuda");
         println!("cargo:rustc-link-arg=-lc10_cuda");
         println!("cargo:rustc-link-arg=-Wl,--as-needed");
+    }
+
+    if std::env::var_os("CARGO_FEATURE_NCCL").is_some() {
+        let libtorch = std::env::var("LIBTORCH")
+            .expect("the nccl feature requires LIBTORCH to identify the exact torch headers");
+        assert!(
+            has_cuda,
+            "the nccl feature requires a CUDA-enabled LIBTORCH (libtorch_cuda.so is missing)"
+        );
+        let nccl_include =
+            std::env::var("NCCL_INCLUDE_DIR").expect("the nccl feature requires NCCL_INCLUDE_DIR");
+        let nccl_lib =
+            std::env::var("NCCL_LIB_DIR").expect("the nccl feature requires NCCL_LIB_DIR");
+        let cuda_include =
+            std::env::var("CUDA_INCLUDE_DIR").expect("the nccl feature requires CUDA_INCLUDE_DIR");
+        let cuda_lib =
+            std::env::var("CUDA_LIB_DIR").expect("the nccl feature requires CUDA_LIB_DIR");
+        assert!(
+            std::path::Path::new(&cuda_include)
+                .join("cuda_runtime_api.h")
+                .exists(),
+            "CUDA_INCLUDE_DIR does not contain cuda_runtime_api.h"
+        );
+        assert!(
+            std::path::Path::new(&cuda_lib).join("libcudart.so").exists(),
+            "CUDA_LIB_DIR does not contain libcudart.so"
+        );
+        assert!(
+            std::path::Path::new(&nccl_include).join("nccl.h").exists(),
+            "NCCL_INCLUDE_DIR does not contain nccl.h"
+        );
+        assert!(
+            std::path::Path::new(&nccl_lib).join("libnccl.so").exists(),
+            "NCCL_LIB_DIR does not contain libnccl.so"
+        );
+
+        cc::Build::new()
+            .cpp(true)
+            .file("src/nccl_shim.cpp")
+            .include(format!("{libtorch}/include"))
+            .include(format!("{libtorch}/include/torch/csrc/api/include"))
+            .include(&cuda_include)
+            .include(&nccl_include)
+            .flag_if_supported("-std=c++17")
+            .flag_if_supported("-fPIC")
+            .define(
+                "_GLIBCXX_USE_CXX11_ABI",
+                std::env::var("LIBTORCH_CXX11_ABI")
+                    .unwrap_or_else(|_| "1".to_string())
+                    .as_str(),
+            )
+            .compile("oftrain_nccl");
+        println!("cargo:rerun-if-changed=src/nccl_shim.cpp");
+        println!("cargo:rustc-link-search=native={cuda_lib}");
+        println!("cargo:rustc-link-lib=dylib=cudart");
+        println!("cargo:rustc-link-search=native={nccl_lib}");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{nccl_lib}");
+        println!("cargo:rustc-link-lib=dylib=nccl");
     }
 
     println!("cargo:rerun-if-env-changed=OFTRAIN_ROCM");
