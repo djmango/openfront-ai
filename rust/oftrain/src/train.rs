@@ -191,6 +191,8 @@ pub struct Config {
     pub curriculum_schedule: ofcore::curriculum::CurriculumSchedule,
     /// Allows only the documented V8.1 stage-5 -> V8.1.1 stage-5 bridge.
     pub migrate_v81_stage5_to_v811: bool,
+    /// Allows only the documented V8.1.1 stage-5 -> V8.2 stage-5 bridge.
+    pub migrate_v811_stage5_to_v82: bool,
     /// Optional env workers-per-shard target for every curriculum stage.
     /// A target change is applied by checkpointing and restarting so
     /// persistent actor/learner CUDA ownership never changes threads.
@@ -457,23 +459,28 @@ impl TrainState {
 fn reconcile_resume_schedule(
     state: &mut TrainState,
     requested: ofcore::curriculum::CurriculumSchedule,
-    allow_v81_stage5_migration: bool,
+    migrate_v81_stage5_to_v811: bool,
+    migrate_v811_stage5_to_v82: bool,
 ) -> Result<()> {
     use ofcore::curriculum::CurriculumSchedule;
     let saved = state.schedule()?;
     if saved == requested {
         anyhow::ensure!(
-            !allow_v81_stage5_migration,
-            "--migrate-v81-stage5-to-v811 was supplied but checkpoint already uses {}",
+            !migrate_v81_stage5_to_v811 && !migrate_v811_stage5_to_v82,
+            "a curriculum migration flag was supplied but checkpoint already uses {}",
             requested.id()
         );
         return Ok(());
     }
-    if allow_v81_stage5_migration
+    let supported = (migrate_v81_stage5_to_v811
         && saved == CurriculumSchedule::V81
         && requested == CurriculumSchedule::V811
-        && state.stage == 5
-    {
+        && state.stage == 5)
+        || (migrate_v811_stage5_to_v82
+            && saved == CurriculumSchedule::V811
+            && requested == CurriculumSchedule::V82
+            && state.stage == 5);
+    if supported {
         state.curriculum_schedule = Some(requested.id().to_string());
         state.v81_curriculum = true;
         state.stage_env_targets.clear();
@@ -483,8 +490,8 @@ fn reconcile_resume_schedule(
     }
     anyhow::bail!(
         "checkpoint curriculum schedule {} is incompatible with requested {}; \
-         only V8.1 stage 5 may migrate to V8.1.1 with \
-         --migrate-v81-stage5-to-v811",
+         supported migrations are V8.1 stage 5 -> V8.1.1 and \
+         V8.1.1 stage 5 -> V8.2 with their explicit migration flags",
         saved.id(),
         requested.id()
     )
@@ -817,6 +824,13 @@ mod v81_state_and_gate_tests {
         assert_eq!(requested_stage_env_target(&v811, 6, 24), None);
         assert_eq!(requested_stage_env_target(&v811, 7, 24), Some(12));
         assert_eq!(requested_stage_env_target(&v811, 8, 12), Some(10));
+
+        let v82 = ofcore::curriculum::V82_ENV_TARGETS;
+        assert_eq!(requested_stage_env_target(&v82, 5, 24), Some(16));
+        assert_eq!(requested_stage_env_target(&v82, 6, 16), Some(12));
+        assert_eq!(requested_stage_env_target(&v82, 7, 12), Some(10));
+        assert_eq!(requested_stage_env_target(&v82, 8, 10), Some(12));
+        assert_eq!(requested_stage_env_target(&v82, 10, 10), Some(8));
     }
 
     fn state_for_schedule(id: Option<&str>, v81: bool, stage: usize) -> TrainState {
@@ -843,20 +857,25 @@ mod v81_state_and_gate_tests {
     fn resume_requires_matching_schedule_identity() {
         use ofcore::curriculum::CurriculumSchedule;
         let mut v81 = state_for_schedule(Some("v8.1"), true, 5);
-        assert!(reconcile_resume_schedule(&mut v81, CurriculumSchedule::V81, false).is_ok());
+        assert!(
+            reconcile_resume_schedule(&mut v81, CurriculumSchedule::V81, false, false).is_ok()
+        );
         let error =
-            reconcile_resume_schedule(&mut v81, CurriculumSchedule::V811, false).unwrap_err();
+            reconcile_resume_schedule(&mut v81, CurriculumSchedule::V811, false, false)
+                .unwrap_err();
         assert!(error.to_string().contains("incompatible"));
 
         let mut legacy = state_for_schedule(None, false, 5);
-        assert!(reconcile_resume_schedule(&mut legacy, CurriculumSchedule::V811, true).is_err());
+        assert!(
+            reconcile_resume_schedule(&mut legacy, CurriculumSchedule::V811, true, false).is_err()
+        );
     }
 
     #[test]
     fn explicit_v81_stage5_migration_maps_to_v811_stage5() {
         use ofcore::curriculum::CurriculumSchedule;
         let mut state = state_for_schedule(None, true, 5);
-        reconcile_resume_schedule(&mut state, CurriculumSchedule::V811, true).unwrap();
+        reconcile_resume_schedule(&mut state, CurriculumSchedule::V811, true, false).unwrap();
         assert_eq!(state.stage, 5);
         assert_eq!(state.schedule().unwrap(), CurriculumSchedule::V811);
         assert!(state.recent_wins.is_empty());
@@ -865,8 +884,60 @@ mod v81_state_and_gate_tests {
 
         let mut wrong_stage = state_for_schedule(Some("v8.1"), true, 4);
         assert!(
-            reconcile_resume_schedule(&mut wrong_stage, CurriculumSchedule::V811, true).is_err()
+            reconcile_resume_schedule(
+                &mut wrong_stage,
+                CurriculumSchedule::V811,
+                true,
+                false
+            )
+            .is_err()
         );
+    }
+
+    #[test]
+    fn explicit_v811_stage5_migration_maps_to_v82_stage5() {
+        use ofcore::curriculum::CurriculumSchedule;
+        let mut state = state_for_schedule(Some("v8.1.1"), true, 5);
+        reconcile_resume_schedule(&mut state, CurriculumSchedule::V82, false, true).unwrap();
+        assert_eq!(state.stage, 5);
+        assert_eq!(state.schedule().unwrap(), CurriculumSchedule::V82);
+        assert!(state.recent_wins.is_empty());
+        assert!(state.stage_env_targets.is_empty());
+        assert_eq!(state.requested_env_target, None);
+
+        let mut wrong_stage = state_for_schedule(Some("v8.1.1"), true, 6);
+        assert!(
+            reconcile_resume_schedule(&mut wrong_stage, CurriculumSchedule::V82, false, true)
+                .is_err()
+        );
+        let mut wrong_source = state_for_schedule(Some("v8.1"), true, 5);
+        assert!(
+            reconcile_resume_schedule(&mut wrong_source, CurriculumSchedule::V82, false, true)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn v82_train_state_round_trips_schedule_and_resize_identity() {
+        let mut state = state_for_schedule(Some("v8.2"), true, 8);
+        state.checkpoint_schema_version = 2;
+        state.hidden_reset_policy = "episode_done".to_string();
+        state.stage_env_targets = ofcore::curriculum::V82_ENV_TARGETS.to_vec();
+        state.envs_per_shard = 10;
+        state.requested_env_target = Some(12);
+
+        let json = serde_json::to_string(&state).unwrap();
+        let restored: TrainState = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            restored.schedule().unwrap(),
+            ofcore::curriculum::CurriculumSchedule::V82
+        );
+        assert_eq!(
+            restored.stage_env_targets,
+            ofcore::curriculum::V82_ENV_TARGETS
+        );
+        assert_eq!(restored.envs_per_shard, 10);
+        assert_eq!(restored.requested_env_target, Some(12));
     }
 }
 
@@ -6056,6 +6127,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             state,
             cfg.curriculum_schedule,
             cfg.migrate_v81_stage5_to_v811,
+            cfg.migrate_v811_stage5_to_v82,
         )?;
         if saved_schedule != cfg.curriculum_schedule {
             println!(
@@ -7562,6 +7634,7 @@ mod persistent_actor_tests {
             stage: 0,
             curriculum_schedule: ofcore::curriculum::CurriculumSchedule::Legacy,
             migrate_v81_stage5_to_v811: false,
+            migrate_v811_stage5_to_v82: false,
             stage_env_targets: Vec::new(),
             max_episode_ticks: 10,
             rollout_len: 2,

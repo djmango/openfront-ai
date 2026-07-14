@@ -49,10 +49,19 @@ struct Args {
     #[arg(long, default_value_t = false, conflicts_with = "v81_curriculum")]
     v811_curriculum: bool,
 
+    /// Opt into the recurrent V8.2 broad-map schedule. Stages 0-4 are
+    /// unchanged; Easy progresses through 30/50/80 players before Medium.
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with_all = ["v81_curriculum", "v811_curriculum"]
+    )]
+    v82_curriculum: bool,
+
     /// Per-stage env worker targets, per GPU/shard. Accepts either one
     /// comma-separated value per stage (`24,24,...`) or ranges such as
     /// `0-5=24,6=12,7=10,8+=8`. Schedule flags select versioned defaults;
-    /// V8.1.1 keeps stages 0-6 at 24 and uses 12 or fewer from stage 7.
+    /// V8.2 uses 16 envs at its eight-map bridge, then 12/10/8 by load.
     /// A target change checkpoints and exits for supervisor restart.
     #[arg(long)]
     stage_env_targets: Option<String>,
@@ -404,6 +413,15 @@ struct Args {
     )]
     migrate_v81_stage5_to_v811: bool,
 
+    /// Permit a V8.1.1 stage-5 checkpoint to adopt the V8.2 stage 5.
+    /// The old win window and env sizing are cleared.
+    #[arg(
+        long,
+        default_value_t = false,
+        requires_all = ["v82_curriculum", "resume"]
+    )]
+    migrate_v811_stage5_to_v82: bool,
+
     /// Extra LR warmup updates applied after `--resume` while AdamW
     /// moments rebuild from scratch (tch cannot dump/restore optimizer
     /// state). 0 disables the post-resume boost (stage warmup still
@@ -663,15 +681,26 @@ mod curriculum_flag_tests {
     use clap::Parser;
 
     #[test]
-    fn v811_is_opt_in_and_mutually_exclusive_with_v81() {
+    fn versioned_curricula_are_opt_in_and_mutually_exclusive() {
         let defaults = Args::try_parse_from(["oftrain"]).unwrap();
         assert!(!defaults.v81_curriculum);
         assert!(!defaults.v811_curriculum);
+        assert!(!defaults.v82_curriculum);
 
         let v811 = Args::try_parse_from(["oftrain", "--v811-curriculum"]).unwrap();
         assert!(v811.v811_curriculum);
+        let v82 = Args::try_parse_from(["oftrain", "--v82-curriculum"]).unwrap();
+        assert!(v82.v82_curriculum);
         assert!(
             Args::try_parse_from(["oftrain", "--v81-curriculum", "--v811-curriculum"]).is_err()
+        );
+        assert!(
+            Args::try_parse_from([
+                "oftrain",
+                "--v811-curriculum",
+                "--v82-curriculum"
+            ])
+            .is_err()
         );
     }
 
@@ -687,6 +716,34 @@ mod curriculum_flag_tests {
         ])
         .unwrap();
         assert!(args.migrate_v81_stage5_to_v811);
+
+        assert!(Args::try_parse_from(["oftrain", "--migrate-v811-stage5-to-v82"]).is_err());
+        let args = Args::try_parse_from([
+            "oftrain",
+            "--v82-curriculum",
+            "--resume",
+            "latest.safetensors",
+            "--migrate-v811-stage5-to-v82",
+        ])
+        .unwrap();
+        assert!(args.migrate_v811_stage5_to_v82);
+    }
+
+    #[cfg(feature = "native-engine")]
+    #[test]
+    fn v82_maps_all_load_through_the_rust_engine() {
+        use openfront_engine::core::terrain::{load_fresh_terrain, GameMapSize};
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("repository root");
+        for map in ofcore::curriculum::V82_MAPS {
+            let terrain = load_fresh_terrain(&root, map, GameMapSize::Normal)
+                .unwrap_or_else(|error| panic!("V8.2 map key {map:?} failed to load: {error}"));
+            assert!(terrain.game_map.width > 0, "{map} has zero width");
+            assert!(terrain.game_map.height > 0, "{map} has zero height");
+            assert!(!terrain.nations.is_empty(), "{map} has no nations");
+        }
     }
 }
 
@@ -890,7 +947,9 @@ fn main() -> anyhow::Result<()> {
         v81_churn_window: args.v81_churn_window,
         v81_churn_min_stage: args.v81_churn_min_stage,
     };
-    let curriculum_schedule = if args.v811_curriculum {
+    let curriculum_schedule = if args.v82_curriculum {
+        ofcore::curriculum::CurriculumSchedule::V82
+    } else if args.v811_curriculum {
         ofcore::curriculum::CurriculumSchedule::V811
     } else if args.v81_curriculum {
         ofcore::curriculum::CurriculumSchedule::V81
@@ -906,6 +965,9 @@ fn main() -> anyhow::Result<()> {
     );
     let stage_env_targets = match args.stage_env_targets.as_deref() {
         Some(spec) => parse_stage_env_targets(spec, stage_count)?,
+        None if curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V82 => {
+            ofcore::curriculum::V82_ENV_TARGETS.to_vec()
+        }
         None if curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V811 => {
             ofcore::curriculum::V811_ENV_TARGETS.to_vec()
         }
@@ -1001,6 +1063,7 @@ fn main() -> anyhow::Result<()> {
         stage: args.stage,
         curriculum_schedule,
         migrate_v81_stage5_to_v811: args.migrate_v81_stage5_to_v811,
+        migrate_v811_stage5_to_v82: args.migrate_v811_stage5_to_v82,
         stage_env_targets,
         max_episode_ticks: args.max_episode_ticks,
         rollout_len: args.rollout_len,
