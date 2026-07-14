@@ -16,7 +16,11 @@ FROM node:22-bookworm AS openfront-src
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY openfront.commit patches/client-replay-tooling.patch /tmp/
+COPY openfront.commit \
+     patches/client-replay-tooling.patch \
+     patches/showcase-spawn-window.patch \
+     patches/showcase-webbot-tile.patch \
+     /tmp/
 ARG OPENFRONT_COMMIT
 RUN set -eux; \
     commit="${OPENFRONT_COMMIT:-$(tr -d '[:space:]' < /tmp/openfront.commit)}"; \
@@ -25,7 +29,9 @@ RUN set -eux; \
     git -C openfront remote add origin https://github.com/djmango/OpenFrontIO.git; \
     git -C openfront fetch --depth 1 origin "${commit}"; \
     git -C openfront checkout FETCH_HEAD; \
-    git apply --directory=openfront /tmp/client-replay-tooling.patch
+    git apply --directory=openfront /tmp/client-replay-tooling.patch; \
+    git apply --directory=openfront /tmp/showcase-spawn-window.patch; \
+    git apply --directory=openfront /tmp/showcase-webbot-tile.patch
 
 FROM rust:bookworm AS rust-builder
 WORKDIR /build

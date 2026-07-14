@@ -132,6 +132,7 @@ struct HubInner {
     play_bots: i64,
     play_nations: i64,
     play_start_delay: i64,
+    play_greedy: bool,
     debug_port: u16,
     live_debug_port: u16,
     live_showcase: bool,
@@ -139,6 +140,25 @@ struct HubInner {
     repo: PathBuf,
     active: Arc<Mutex<ActiveLobby>>,
 }
+
+const PLAY_BUSY_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Play busy</title>
+  <style>
+    body { font-family: system-ui, sans-serif; text-align: center; padding: 3rem 1rem; }
+    a { font-weight: 700; }
+  </style>
+</head>
+<body>
+  <h1>Someone is already playing</h1>
+  <p>Only one live Play lobby runs at a time. Try again in a minute.</p>
+  <p><a href="/play">Retry Play</a> · <a href="/">Home</a></p>
+</body>
+</html>
+"#;
 
 #[derive(Default)]
 struct ActiveLobby {
@@ -211,24 +231,19 @@ fn load_hub() -> Value {
     load_json(&hub_state_path()).unwrap_or_else(|_| json!({}))
 }
 
-fn watch_target() -> (String, String, Option<Value>) {
-    let replay = load_replay();
-    let featured = featured_showcase_entry(&replay);
+fn watch_target_with_featured(replay: &Value, featured: Option<&Value>) -> (String, String) {
     let gid = featured
-        .as_ref()
         .and_then(|e| e.get("game_id"))
         .and_then(|v| v.as_str())
         .or_else(|| replay.get("game_id").and_then(|v| v.as_str()));
     if let Some(gid) = gid {
-        return (format!("/game/{gid}"), "replay".into(), featured);
+        return (format!("/game/{gid}"), "replay".into());
     }
-    (String::new(), "none".into(), None)
+    (String::new(), "none".into())
 }
 
-fn preview_markup(replay: &Value) -> String {
-    let featured = featured_showcase_entry(replay);
+fn preview_markup(featured: Option<&Value>, replay: &Value) -> String {
     let mut clip_url = featured
-        .as_ref()
         .and_then(|e| e.get("url"))
         .and_then(|v| v.as_str())
         .map(str::to_string);
@@ -252,7 +267,6 @@ fn preview_markup(replay: &Value) -> String {
     }
     if let Some(url) = clip_url {
         let map_label = featured
-            .as_ref()
             .and_then(|e| e.get("map"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
@@ -270,7 +284,9 @@ fn preview_markup(replay: &Value) -> String {
 }
 
 fn render_landing(replay: &Value, run_name: &str) -> String {
-    let (_, mode, featured) = watch_target();
+    // One featured pick for preview + Watch label so they never disagree.
+    let featured = featured_showcase_entry(replay);
+    let (_, mode) = watch_target_with_featured(replay, featured.as_ref());
     let map_name = featured
         .as_ref()
         .and_then(|e| e.get("map"))
@@ -292,26 +308,28 @@ fn render_landing(replay: &Value, run_name: &str) -> String {
                 .and_then(|v| v.as_str())
                 .unwrap_or(run_name),
         )
-        .replace("%%PREVIEW%%", &preview_markup(replay))
+        .replace("%%PREVIEW%%", &preview_markup(featured.as_ref(), replay))
         .replace("%%WATCH_LABEL%%", &watch_label)
 }
 
 fn launch_webbot(inner: &HubInner, game_id: &str, worker_path: &str) -> Result<Child> {
     let script = inner.repo.join("scripts/webbot_launcher.py");
     let py = std::env::var("PYTHON").unwrap_or_else(|_| "python3".into());
-    Command::new(py)
-        .arg(&script)
-        .args([
-            "--host",
-            &inner.client_host,
-            "--game",
-            game_id,
-            "--worker-path",
-            worker_path,
-            "--debug-port",
-            &inner.debug_port.to_string(),
-        ])
-        .current_dir(&inner.repo)
+    let mut cmd = Command::new(py);
+    cmd.arg(&script).args([
+        "--host",
+        &inner.client_host,
+        "--game",
+        game_id,
+        "--worker-path",
+        worker_path,
+        "--debug-port",
+        &inner.debug_port.to_string(),
+    ]);
+    if inner.play_greedy {
+        cmd.arg("--greedy");
+    }
+    cmd.current_dir(&inner.repo)
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()
@@ -373,7 +391,9 @@ async fn landing(State(inner): State<Arc<HubInner>>) -> impl IntoResponse {
 }
 
 async fn watch() -> Response {
-    let (target, mode, featured) = watch_target();
+    let replay = load_replay();
+    let featured = featured_showcase_entry(&replay);
+    let (target, mode) = watch_target_with_featured(&replay, featured.as_ref());
     if target.is_empty() {
         return Json(json!({"status":"warming","message":"no replay yet"}))
             .into_response();
@@ -397,8 +417,9 @@ async fn watch() -> Response {
 }
 
 async fn status(State(inner): State<Arc<HubInner>>) -> impl IntoResponse {
-    let (target, mode, featured) = watch_target();
     let replay = load_replay();
+    let featured = featured_showcase_entry(&replay);
+    let (target, mode) = watch_target_with_featured(&replay, featured.as_ref());
     Json(json!({
         "watch": {
             "url": if target.is_empty() { Value::Null } else { json!(target) },
@@ -451,17 +472,18 @@ async fn play_debug(
 }
 
 async fn play(State(inner): State<Arc<HubInner>>) -> Response {
-    // Each Play click gets a fresh random map. Tear down any previous webbot
-    // so we don't keep redirecting everyone into the same Onion lobby.
+    // One live Play at a time. Don't kill an in-progress lobby - ask visitor to retry.
     {
         let mut active = inner.active.lock().await;
-        if let Some(mut child) = active.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let (Some(gid), Some(child)) = (active.game_id.clone(), active.child.as_mut()) {
+            if child.try_wait().ok().flatten().is_none() {
+                eprintln!("[showcase_hub] play busy; active lobby {gid}");
+                return Html(PLAY_BUSY_HTML).into_response();
+            }
         }
-        if let Some(gid) = active.game_id.take() {
-            eprintln!("[showcase_hub] replacing previous lobby {gid}");
-        }
+        // Previous webbot exited - clear so we can start a fresh random map.
+        active.game_id = None;
+        active.child = None;
     }
 
     let config = play_config(&inner);
@@ -565,6 +587,8 @@ pub async fn run_hub(port: u16) -> Result<()> {
         play_bots: env_or("PLAY_BOTS", "10").parse().unwrap_or(10),
         play_nations: env_or("PLAY_NATIONS", "1").parse().unwrap_or(1),
         play_start_delay: env_or("PLAY_START_DELAY", "30").parse().unwrap_or(30),
+        // Default on: showcase Play should be argmax, not stochastic.
+        play_greedy: env_or("PLAY_GREEDY", "1") != "0",
         debug_port: env_or("PLAY_DEBUG_PORT", "8989").parse().unwrap_or(8989),
         live_debug_port: env_or("LIVE_DEBUG_PORT", "8990").parse().unwrap_or(8990),
         live_showcase: env_or("LIVE_SHOWCASE", "0") != "0",

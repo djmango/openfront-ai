@@ -18,10 +18,10 @@ View-only replay of the latest RL checkpoint by default, with an on-demand
 replay on HF policy changes. `/watch` opens it in the real client with the
 MODEL overlay.
 
-**Play (on click):** `ofshowcase hub` creates a private lobby (Onion, 1
-nation, 10 bots by default), launches `scripts/webbot_launcher.py` for the
-in-browser ONNX agent, redirects you to the lobby. Set start delay in the
-host modal, wait for AgentRL, then Start Game.
+**Play (on click):** `ofshowcase hub` creates a private lobby (random map from
+`SHOWCASE_MAPS` by default), launches `scripts/webbot_launcher.py` (greedy)
+for the in-browser ONNX agent, redirects you to the lobby. Only one Play
+lobby runs at a time - a second click gets a short busy page.
 
 **Archive:** `ofshowcase archive` serves GameRecords + clips for the client
 replay API (`/archive/*`).
@@ -37,11 +37,14 @@ docker run --rm -p 8086:8086 -v openfront-eval-data:/data openfront-eval
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RUN_NAME` | `ppo_v81` | HF policy run |
-| `PLAY_MAP` | `Onion` | Live play map |
+| `RUN_NAME` | `ppo_v81` | HF policy run under `djmango/openfront-rl` |
+| `SHOWCASE_MAPS` | curriculum `ALL_MAPS` | Comma-separated map **keys** for Watch clips + random Play |
+| `PLAY_MAP` | `random` | Live play map key, or `random` to sample `SHOWCASE_MAPS` |
 | `PLAY_BOTS` | `10` | Tribe bots |
 | `PLAY_NATIONS` | `1` | Nation opponents |
-| `PLAY_START_DELAY` | `90` | Lobby countdown (seconds) |
+| `PLAY_START_DELAY` | `30` | Lobby countdown (seconds) |
+| `PLAY_GREEDY` | `1` | Pass `--greedy` to webbot (`0` to sample) |
 | `STAGE` | `4` | Curriculum stage for replay generation |
+| `SHOWCASE_WATCH_STAGE` | (stage) | Stage passed to `oftrain --watch` |
 
 Homelab: [homelab README](https://github.com/djmango/homelab), `openfrontai.skg.gg`.
