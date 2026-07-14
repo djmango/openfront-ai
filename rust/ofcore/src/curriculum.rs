@@ -123,19 +123,59 @@ pub struct Stage {
 pub const ALL_MAPS: [&str; 7] =
     ["Onion", "Pangaea", "Caucasus", "BlackSea", "BetweenTwoSeas", "World", "Asia"];
 
+/// Stable curriculum identities persisted in trainer checkpoints.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CurriculumSchedule {
+    #[default]
+    Legacy,
+    V81,
+    V811,
+}
+
+impl CurriculumSchedule {
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::V81 => "v8.1",
+            Self::V811 => "v8.1.1",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "legacy" => Some(Self::Legacy),
+            "v8.1" => Some(Self::V81),
+            "v8.1.1" => Some(Self::V811),
+            _ => None,
+        }
+    }
+}
+
 /// V8.1 env workers per GPU/shard. Early maps are cheap enough to keep the
 /// actor full; later, larger maps use fewer workers to bound host memory and
 /// engine tail latency.
 pub const V81_ENV_TARGETS: [usize; 11] = [24, 24, 24, 24, 24, 24, 12, 10, 8, 8, 8];
 
+/// V8.1.1 keeps the new same-map Medium bridge at the small-map target, then
+/// uses at most 12 envs/GPU once World/Asia enter the pool.
+pub const V811_ENV_TARGETS: [usize; 12] = [24, 24, 24, 24, 24, 24, 24, 12, 10, 8, 8, 8];
+
 pub fn stages() -> Vec<Stage> {
-    stages_for(false)
+    stages_for_schedule(CurriculumSchedule::Legacy)
 }
 
 /// Return the selected gate schedule. V8.1 deliberately changes only
 /// `win_at`: stage indices, maps, opponents, difficulty, and decision cadence
 /// remain stable so checkpoints and episode metadata retain their identity.
 pub fn stages_for(v81: bool) -> Vec<Stage> {
+    stages_for_schedule(if v81 {
+        CurriculumSchedule::V81
+    } else {
+        CurriculumSchedule::Legacy
+    })
+}
+
+pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
     use Nations::{Default as ND, Exact as NE};
     let mut stages = vec![
         Stage { maps: &["Onion"], bots: 0, difficulty: "Easy", nations: NE(1), decision_ticks: 15, win_at: 0.9 },
@@ -150,13 +190,36 @@ pub fn stages_for(v81: bool) -> Vec<Stage> {
         Stage { maps: &ALL_MAPS, bots: 120, difficulty: "Hard", nations: ND, decision_ticks: 10, win_at: 0.35 },
         Stage { maps: &ALL_MAPS, bots: 150, difficulty: "Impossible", nations: ND, decision_ticks: 10, win_at: 0.3 },
     ];
-    if v81 {
-        // Stages 0-3 are intentionally unchanged. Crowded-map wins are much
-        // rarer than placement success, so require repeatable wins without
-        // making the old 0.5 gate an effectively permanent lock.
-        let gates = [0.35, 0.30, 0.25, 0.22, 0.20, 0.18, 0.15];
-        for (stage, gate) in stages[4..].iter_mut().zip(gates) {
-            stage.win_at = gate;
+    match schedule {
+        CurriculumSchedule::Legacy => {}
+        CurriculumSchedule::V81 => {
+            // Stages 0-3 are intentionally unchanged. Crowded-map wins are
+            // much rarer than placement success, so require repeatable wins
+            // without making the old 0.5 gate a permanent lock.
+            let gates = [0.35, 0.30, 0.25, 0.22, 0.20, 0.18, 0.15];
+            for (stage, gate) in stages[4..].iter_mut().zip(gates) {
+                stage.win_at = gate;
+            }
+        }
+        CurriculumSchedule::V811 => {
+            // Stage 5 is the opt-in Easy bridge. Stage 6 repeats its exact
+            // map/bot/nation setup at Medium before World/Asia first appear
+            // at stage 7. The old stages 6+ retain their challenge and gate
+            // after shifting by one.
+            stages[5].difficulty = "Easy";
+            let medium_bridge = Stage {
+                maps: stages[5].maps,
+                bots: stages[5].bots,
+                difficulty: "Medium",
+                nations: stages[5].nations,
+                decision_ticks: stages[5].decision_ticks,
+                win_at: 0.25,
+            };
+            stages.insert(6, medium_bridge);
+            let gates = [0.35, 0.30, 0.25, 0.25, 0.22, 0.20, 0.18, 0.15];
+            for (stage, gate) in stages[4..].iter_mut().zip(gates) {
+                stage.win_at = gate;
+            }
         }
     }
     stages
@@ -484,5 +547,40 @@ mod curriculum_v81_tests {
         assert_eq!(&V81_ENV_TARGETS[..6], &[24; 6]);
         assert_eq!(&V81_ENV_TARGETS[6..], &[12, 10, 8, 8, 8]);
         assert_eq!(V81_ENV_TARGETS.len(), stages().len());
+    }
+
+    #[test]
+    fn v811_adds_easy_then_medium_bridge_before_world_scale() {
+        let v81 = stages_for_schedule(CurriculumSchedule::V81);
+        let v811 = stages_for_schedule(CurriculumSchedule::V811);
+        assert_eq!(v811.len(), v81.len() + 1);
+        assert_eq!(v811[5].maps, v81[5].maps);
+        assert_eq!(v811[5].bots, v81[5].bots);
+        assert_eq!(v811[5].nations, v81[5].nations);
+        assert_eq!(v811[5].difficulty, "Easy");
+        assert_eq!(v811[6].maps, v81[5].maps);
+        assert_eq!(v811[6].bots, 30);
+        assert_eq!(v811[6].nations, v81[5].nations);
+        assert_eq!(v811[6].difficulty, "Medium");
+        for (old, shifted) in v81[6..].iter().zip(&v811[7..]) {
+            assert_eq!(old.maps, shifted.maps);
+            assert_eq!(old.bots, shifted.bots);
+            assert_eq!(old.difficulty, shifted.difficulty);
+            assert_eq!(old.nations, shifted.nations);
+        }
+        assert_eq!(&v811[7].maps[..2], &["World", "Asia"]);
+        assert_eq!(v811[7].bots, 50);
+    }
+
+    #[test]
+    fn v811_gates_and_env_targets_follow_shifted_progression() {
+        let v811 = stages_for_schedule(CurriculumSchedule::V811);
+        assert_eq!(
+            v811.iter().map(|stage| stage.win_at).collect::<Vec<_>>(),
+            vec![0.9, 0.8, 0.75, 0.65, 0.35, 0.30, 0.25, 0.25, 0.22, 0.20, 0.18, 0.15]
+        );
+        assert_eq!(V811_ENV_TARGETS.len(), v811.len());
+        assert_eq!(&V811_ENV_TARGETS[..7], &[24; 7]);
+        assert!(V811_ENV_TARGETS[7..].iter().all(|&target| target <= 12));
     }
 }

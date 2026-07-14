@@ -27,6 +27,25 @@ PYTHONPATH=. python scripts/env_parity.py
 ./scripts/parity_check.sh 5
 ```
 
+## Versioned curricula
+
+No flag selects the 11-stage legacy schedule. `--v81-curriculum` preserves
+the existing 11-stage V8.1 schedule and sizing. The opt-in
+`--v811-curriculum` selects schedule identity `v8.1.1`:
+
+| Stage | Maps | Bots | Difficulty | Win gate | Envs/GPU |
+|-------|------|------|------------|----------|----------|
+| 4 | Pangaea, Caucasus, BlackSea | 30 | Easy | 0.35 | 24 |
+| 5 | BlackSea, BetweenTwoSeas, Caucasus | 30 | Easy | 0.30 | 24 |
+| 6 | BlackSea, BetweenTwoSeas, Caucasus | 30 | Medium | 0.25 | 24 |
+| 7 | World, Asia, BlackSea | 50 | Medium | 0.25 | 12 |
+| 8 | World, Asia, BetweenTwoSeas, Caucasus | 80 | Medium | 0.22 | 10 |
+| 9–11 | Existing all-map Hard/Impossible progression | 80/120/150 | Hard/Hard/Impossible | 0.20/0.18/0.15 | 8 |
+
+Checkpoint state records the schedule identity and cross-schedule resume is
+rejected. The sole migration is V8.1 stage 5 to V8.1.1 stage 5:
+`--v811-curriculum --resume PATH --migrate-v81-stage5-to-v811`.
+
 ## Native port / training gaps
 
 Native is validated end-to-end for early curriculum stages (bots 0/5/10:
