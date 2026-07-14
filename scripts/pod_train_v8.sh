@@ -104,7 +104,8 @@ if [ "$V84_MODE" = "1" ]; then
   # V8.4: boat-outcome + tempo + fast-win on top of V8.3 closeout curriculum.
   # Longer BPTT/rollout (32/64) for delayed boat credit; still reward-only
   # so ppo_v83 weights resume with --migrate-v83-to-v84.
-  V81_ARGS="--v83-curriculum --v83-close-coef 4.0 --v83-churn-coef 0.06 --v81-dom-coef 0.25 --v81-dominant-loss=true --v81-churn-coef 0.05 --v81-churn-window 16 --v84-boat-useful 0.15 --v84-boat-destroyed -0.20 --v84-boat-cancelled -0.03 --v84-boat-own-shore -0.05 --v84-boat-min-stage 4 --v84-tempo-coef 0.005 --v84-tempo-min-stage 4 --v84-fast-win-coef 8.0"
+  # Negative values must use --flag=val form; clap otherwise treats "-0.20" as a flag.
+  V81_ARGS="--v83-curriculum --v83-close-coef 4.0 --v83-churn-coef 0.06 --v81-dom-coef 0.25 --v81-dominant-loss=true --v81-churn-coef 0.05 --v81-churn-window 16 --v84-boat-useful 0.15 --v84-boat-destroyed=-0.20 --v84-boat-cancelled=-0.03 --v84-boat-own-shore=-0.05 --v84-boat-min-stage 4 --v84-tempo-coef 0.005 --v84-tempo-min-stage 4 --v84-fast-win-coef 8.0"
 elif [ "$V83_MODE" = "1" ]; then
   # churn_window=16: catch delayed undos (boat→…→cancel), not just adjacent pairs.
   # This is still a band-aid — fundamental fix is gating free inverse actions.
