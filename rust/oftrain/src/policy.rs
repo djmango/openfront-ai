@@ -13,7 +13,7 @@
 
 use ofcore::feat::{ACTIONS, GW_MAX};
 use tch::nn::Module;
-use tch::{nn, Device, Kind, Tensor};
+use tch::{Device, Kind, Tensor, nn};
 
 pub const N_ACTIONS: i64 = ofcore::feat::N_ACTIONS as i64;
 pub const MAX_SLOTS: i64 = ofcore::feat::MAX_SLOTS as i64;
@@ -51,15 +51,35 @@ pub const TF_LAYERS: i64 = 2;
 const MASKED_NEG: f64 = -1e9;
 
 const NEEDS_PLAYER: &[&str] = &[
-    "attack", "alliance_request", "alliance_reject", "break_alliance", "donate_gold",
-    "donate_troops", "embargo", "retreat", "embargo_stop", "target_player", "alliance_extension",
+    "attack",
+    "alliance_request",
+    "alliance_reject",
+    "break_alliance",
+    "donate_gold",
+    "donate_troops",
+    "embargo",
+    "retreat",
+    "embargo_stop",
+    "target_player",
+    "alliance_extension",
 ];
 const NEEDS_TILE: &[&str] = &[
-    "boat", "build", "launch_nuke", "spawn", "upgrade_structure", "move_warship", "cancel_boat",
+    "boat",
+    "build",
+    "launch_nuke",
+    "spawn",
+    "upgrade_structure",
+    "move_warship",
+    "cancel_boat",
     "delete_unit",
 ];
-const REFINE_TILE: &[&str] =
-    &["spawn", "build", "upgrade_structure", "cancel_boat", "delete_unit"];
+const REFINE_TILE: &[&str] = &[
+    "spawn",
+    "build",
+    "upgrade_structure",
+    "cancel_boat",
+    "delete_unit",
+];
 const NEEDS_QUANTITY: &[&str] = &["attack", "expand", "boat", "donate_gold", "donate_troops"];
 
 pub fn needs_player(action_name: &str) -> bool {
@@ -73,7 +93,10 @@ pub fn needs_quantity(action_name: &str) -> bool {
 }
 
 fn action_table(names: &[&str], device: Device) -> Tensor {
-    let v: Vec<f32> = ACTIONS.iter().map(|a| if names.contains(a) { 1.0 } else { 0.0 }).collect();
+    let v: Vec<f32> = ACTIONS
+        .iter()
+        .map(|a| if names.contains(a) { 1.0 } else { 0.0 })
+        .collect();
     Tensor::from_slice(&v).to_device(device)
 }
 
@@ -187,7 +210,9 @@ const LOGIT_CLAMP_MAX: f64 = 30.0;
 /// bounds `clamp_max`/`MASKED_NEG` already use, so this must run *before*
 /// clamping to actually make softmax/log_softmax's input safe.
 fn sanitize_logits(logits: &Tensor) -> Tensor {
-    logits.nan_to_num(0.0, LOGIT_CLAMP_MAX, MASKED_NEG).clamp_max(LOGIT_CLAMP_MAX)
+    logits
+        .nan_to_num(0.0, LOGIT_CLAMP_MAX, MASKED_NEG)
+        .clamp_max(LOGIT_CLAMP_MAX)
 }
 
 fn categorical_sample(logits: &Tensor, greedy: bool) -> (Tensor, Tensor) {
@@ -199,7 +224,9 @@ fn categorical_sample(logits: &Tensor, greedy: bool) -> (Tensor, Tensor) {
         let probs = logits.softmax(-1, Kind::Float);
         probs.multinomial(1, true).squeeze_dim(-1)
     };
-    let logp = logp_all.gather(-1, &idx.unsqueeze(-1), false).squeeze_dim(-1);
+    let logp = logp_all
+        .gather(-1, &idx.unsqueeze(-1), false)
+        .squeeze_dim(-1);
     (idx, logp)
 }
 
@@ -293,8 +320,14 @@ struct ResBlock {
 
 impl ResBlock {
     fn new(p: &nn::Path, c: i64) -> Self {
-        let cfg = nn::ConvConfig { padding: 1, ..Default::default() };
-        ResBlock { conv1: nn::conv2d(p / "conv1", c, c, 3, cfg), conv2: nn::conv2d(p / "conv2", c, c, 3, cfg) }
+        let cfg = nn::ConvConfig {
+            padding: 1,
+            ..Default::default()
+        };
+        ResBlock {
+            conv1: nn::conv2d(p / "conv1", c, c, 3, cfg),
+            conv2: nn::conv2d(p / "conv2", c, c, 3, cfg),
+        }
     }
     fn forward(&self, x: &Tensor, amp: bool) -> Tensor {
         if amp {
@@ -314,9 +347,14 @@ struct GridTower {
 
 impl GridTower {
     fn new(p: &nn::Path, c_in: i64, gc: i64, blocks: i64) -> Self {
-        let cfg = nn::ConvConfig { padding: 1, ..Default::default() };
+        let cfg = nn::ConvConfig {
+            padding: 1,
+            ..Default::default()
+        };
         let stem = nn::conv2d(p / "stem", c_in, gc, 3, cfg);
-        let blocks = (0..blocks).map(|i| ResBlock::new(&(p / "block" / i), gc)).collect();
+        let blocks = (0..blocks)
+            .map(|i| ResBlock::new(&(p / "block" / i), gc))
+            .collect();
         GridTower { stem, blocks }
     }
     /// `amp=true` runs the whole tower (stem + every residual block) in
@@ -349,7 +387,11 @@ struct LocalNet {
 
 impl LocalNet {
     fn new(p: &nn::Path) -> Self {
-        let cfg = |pad| nn::ConvConfig { padding: pad, stride: 2, ..Default::default() };
+        let cfg = |pad| nn::ConvConfig {
+            padding: pad,
+            stride: 2,
+            ..Default::default()
+        };
         LocalNet {
             c1: nn::conv2d(p / "c1", N_LOCAL, 32, 3, cfg(1)),
             c2: nn::conv2d(p / "c2", 32, 64, 3, cfg(1)),
@@ -362,7 +404,9 @@ impl LocalNet {
             let h = conv2d_bf16(&self.c1, &xb, [2, 2], [1, 1]).silu();
             let h = conv2d_bf16(&self.c2, &h, [2, 2], [1, 1]).silu();
             let h = conv2d_bf16(&self.c3, &h, [2, 2], [1, 1]).silu();
-            h.adaptive_avg_pool2d([1, 1]).flatten(1, -1).to_kind(Kind::Float)
+            h.adaptive_avg_pool2d([1, 1])
+                .flatten(1, -1)
+                .to_kind(Kind::Float)
         } else {
             let h = self.c1.forward(x).silu();
             let h = self.c2.forward(&h).silu();
@@ -463,6 +507,34 @@ struct ForwardOutput {
     fov: Foveation,
 }
 
+/// Minimal recurrent adapter used by the opt-in PPO sequence path.  Keeping
+/// this cell behind `Option` is important: a legacy PolicyNet creates no
+/// additional variables and executes the exact pre-recurrent trunk.
+struct RecurrentCore {
+    input: nn::Linear,
+    hidden: nn::Linear,
+}
+
+impl RecurrentCore {
+    fn new(p: &nn::Path) -> Self {
+        Self {
+            input: nn::linear(p / "input", HIDDEN, 3 * HIDDEN, Default::default()),
+            hidden: nn::linear(p / "hidden", HIDDEN, 3 * HIDDEN, Default::default()),
+        }
+    }
+
+    fn forward(&self, input: &Tensor, hidden: &Tensor) -> Tensor {
+        let x = self.input.forward(input);
+        let h = self.hidden.forward(hidden);
+        let xc = x.chunk(3, -1);
+        let hc = h.chunk(3, -1);
+        let reset = (&xc[0] + &hc[0]).sigmoid();
+        let update = (&xc[1] + &hc[1]).sigmoid();
+        let candidate = (&xc[2] + reset * &hc[2]).tanh();
+        (1.0 - &update) * candidate + update * hidden
+    }
+}
+
 pub struct PolicyNet {
     grid_coarse_net: GridTower,
     grid_fine_net: GridTower,
@@ -471,6 +543,7 @@ pub struct PolicyNet {
     tf_layers: Vec<EncoderLayer>,
     trunk1: nn::Linear,
     trunk2: nn::Linear,
+    recurrent: Option<RecurrentCore>,
     head_action: nn::Linear,
     head_player_q: nn::Linear,
     head_tile_coarse: (nn::Conv2D, nn::Conv2D),
@@ -501,15 +574,34 @@ impl PolicyNet {
     /// towers (coarse + fine) and the tile heads scale with `gc`; `trunk1`'s
     /// input width scales with `gc` too since it pools both towers' outputs.
     pub fn new(vs: &nn::Path, amp: bool, foveate: bool, gc: i64, blocks: i64) -> Self {
+        Self::new_with_recurrence(vs, amp, foveate, gc, blocks, false)
+    }
+
+    pub fn new_with_recurrence(
+        vs: &nn::Path,
+        amp: bool,
+        foveate: bool,
+        gc: i64,
+        blocks: i64,
+        recurrent: bool,
+    ) -> Self {
         let conv1 = |p: &nn::Path, ci, co| nn::conv2d(p, ci, co, 1, Default::default());
         PolicyNet {
             grid_coarse_net: GridTower::new(&(vs / "grid_coarse"), C_GRID, gc, blocks),
             grid_fine_net: GridTower::new(&(vs / "grid_fine"), C_GRID_FINE, gc, blocks),
             local_net: LocalNet::new(&(vs / "local")),
             player_in: nn::linear(vs / "player_in", P_FEAT, PC, Default::default()),
-            tf_layers: (0..TF_LAYERS).map(|i| EncoderLayer::new(&(vs / "tf" / i), PC, TF_FF)).collect(),
-            trunk1: nn::linear(vs / "trunk1", 2 * gc + PC + LC + N_SCALARS, HIDDEN, Default::default()),
+            tf_layers: (0..TF_LAYERS)
+                .map(|i| EncoderLayer::new(&(vs / "tf" / i), PC, TF_FF))
+                .collect(),
+            trunk1: nn::linear(
+                vs / "trunk1",
+                2 * gc + PC + LC + N_SCALARS,
+                HIDDEN,
+                Default::default(),
+            ),
             trunk2: nn::linear(vs / "trunk2", HIDDEN, HIDDEN, Default::default()),
+            recurrent: recurrent.then(|| RecurrentCore::new(&(vs / "recurrent"))),
             head_action: nn::linear(vs / "head_action", HIDDEN, N_ACTIONS, Default::default()),
             head_player_q: nn::linear(vs / "head_player_q", HIDDEN, PC, Default::default()),
             head_tile_coarse: (
@@ -589,12 +681,20 @@ impl PolicyNet {
         }
         let grid_coarse = match &o.grid_coarse {
             Some(gc) => gc.shallow_clone(),
-            None => o.grid.avg_pool2d([2, 2], [2, 2], [0, 0], true, false, None::<i64>),
+            None => o
+                .grid
+                .avg_pool2d([2, 2], [2, 2], [0, 0], true, false, None::<i64>),
         };
-        let gc_valid =
-            o.grid_valid.unsqueeze(1).max_pool2d([2, 2], [2, 2], [0, 0], [1, 1], true).squeeze_dim(1);
-        let legal_tile_coarse =
-            o.legal_tile.unsqueeze(1).max_pool2d([2, 2], [2, 2], [0, 0], [1, 1], true).squeeze_dim(1);
+        let gc_valid = o
+            .grid_valid
+            .unsqueeze(1)
+            .max_pool2d([2, 2], [2, 2], [0, 0], [1, 1], true)
+            .squeeze_dim(1);
+        let legal_tile_coarse = o
+            .legal_tile
+            .unsqueeze(1)
+            .max_pool2d([2, 2], [2, 2], [0, 0], [1, 1], true)
+            .squeeze_dim(1);
 
         if !use_crop {
             let grid_fine = Tensor::cat(&[&o.grid, &o.grid_valid.unsqueeze(1)], 1);
@@ -617,7 +717,10 @@ impl PolicyNet {
             };
         }
 
-        debug_assert!(gh >= 2 && gw >= 2, "foveate crop needs a grid at least 2x2, got ({gh}, {gw})");
+        debug_assert!(
+            gh >= 2 && gw >= 2,
+            "foveate crop needs a grid at least 2x2, got ({gh}, {gw})"
+        );
         let fine_h = (FOVEATE_SIZE.min(gh)).max(2);
         let fine_w = (FOVEATE_SIZE.min(gw)).max(2);
         let fine_h = fine_h - fine_h % 2;
@@ -625,8 +728,15 @@ impl PolicyNet {
         let mine = o.grid.select(1, EGO_OWN_CH); // (B, gh, gw): own-tile occupancy fraction
         let (origin_y, origin_x) = crop_origin(&mine, gh, gw, fine_h, fine_w);
 
-        let grid_cropped =
-            crop_and_pad(&o.grid, &origin_y, &origin_x, fine_h, fine_w, FOVEATE_SIZE, FOVEATE_SIZE);
+        let grid_cropped = crop_and_pad(
+            &o.grid,
+            &origin_y,
+            &origin_x,
+            fine_h,
+            fine_w,
+            FOVEATE_SIZE,
+            FOVEATE_SIZE,
+        );
         let grid_valid_fine = crop_and_pad(
             &o.grid_valid.unsqueeze(1),
             &origin_y,
@@ -709,20 +819,28 @@ impl PolicyNet {
         }
     }
 
-    fn trunk_forward(&self, o: &Obs) -> TrunkOutput {
+    fn trunk_forward_with_hidden(
+        &self,
+        o: &Obs,
+        hidden: Option<&Tensor>,
+    ) -> (TrunkOutput, Option<Tensor>) {
         let fov = Self::foveate(o, self.foveate);
 
         let gc_map = self.grid_coarse_net.forward(&fov.grid_coarse, self.amp);
         let gc_valid_b = fov.gc_valid.unsqueeze(1);
         let gc_map = &gc_map * &gc_valid_b;
         let gc_pool = gc_map.sum_dim_intlist([2, 3].as_slice(), false, Kind::Float)
-            / gc_valid_b.sum_dim_intlist([2, 3].as_slice(), false, Kind::Float).clamp_min(1.0);
+            / gc_valid_b
+                .sum_dim_intlist([2, 3].as_slice(), false, Kind::Float)
+                .clamp_min(1.0);
 
         let gf_map = self.grid_fine_net.forward(&fov.grid_fine, self.amp);
         let gf_valid_b = fov.grid_valid_fine.unsqueeze(1);
         let gf_map = &gf_map * &gf_valid_b;
         let gf_pool = gf_map.sum_dim_intlist([2, 3].as_slice(), false, Kind::Float)
-            / gf_valid_b.sum_dim_intlist([2, 3].as_slice(), false, Kind::Float).clamp_min(1.0);
+            / gf_valid_b
+                .sum_dim_intlist([2, 3].as_slice(), false, Kind::Float)
+                .clamp_min(1.0);
 
         let mut p = self.player_in.forward(&o.players); // (B, S, PC)
         let key_pad_bias = (&o.pmask - 1.0).unsqueeze(1).unsqueeze(1) * (-MASKED_NEG); // (B,1,1,S)
@@ -730,11 +848,19 @@ impl PolicyNet {
             p = layer.forward(&p, &key_pad_bias);
         }
         let m = o.pmask.unsqueeze(-1);
-        let p_pool = (&p * &m).sum_dim_intlist(1i64, false, Kind::Float) / m.sum_dim_intlist(1i64, false, Kind::Float).clamp_min(1.0);
+        let p_pool = (&p * &m).sum_dim_intlist(1i64, false, Kind::Float)
+            / m.sum_dim_intlist(1i64, false, Kind::Float).clamp_min(1.0);
 
         let l_pool = self.local_net.forward(&o.local, self.amp);
         let cat = Tensor::cat(&[&gc_pool, &gf_pool, &p_pool, &l_pool, &o.scalars], -1);
         let h = self.trunk1.forward(&cat).silu();
+        let next_hidden = self.recurrent.as_ref().map(|core| {
+            let state = hidden
+                .map(Tensor::shallow_clone)
+                .unwrap_or_else(|| Tensor::zeros([h.size()[0], HIDDEN], (h.kind(), h.device())));
+            core.forward(&h, &state)
+        });
+        let h = next_hidden.as_ref().unwrap_or(&h);
         let h = self.trunk2.forward(&h).silu();
         // Single chokepoint for the whole forward pass: every head (value,
         // action logits, quantity, tile, player) is derived from `h`/`p`/
@@ -752,12 +878,28 @@ impl PolicyNet {
         let gc_map = sanitize(&gc_map);
         let gf_map = sanitize(&gf_map);
         let p = sanitize(&p);
-        TrunkOutput { h, gc_map, gf_map, p, fov }
+        (
+            TrunkOutput {
+                h,
+                gc_map,
+                gf_map,
+                p,
+                fov,
+            },
+            next_hidden,
+        )
+    }
+
+    fn trunk_forward(&self, o: &Obs) -> TrunkOutput {
+        self.trunk_forward_with_hidden(o, None).0
     }
 
     fn tile_head(head: &(nn::Conv2D, nn::Conv2D), map: &Tensor, h: &Tensor, amp: bool) -> Tensor {
         let (b, _, gh, gw) = map.size4().unwrap();
-        let hb = h.unsqueeze(-1).unsqueeze(-1).expand([b, HIDDEN, gh, gw], false);
+        let hb = h
+            .unsqueeze(-1)
+            .unsqueeze(-1)
+            .expand([b, HIDDEN, gh, gw], false);
         let cat = Tensor::cat(&[map, &hb], 1);
         // 1x1 convs over the full grid (up to GW_MAX x GH_MAX cells, GC +
         // HIDDEN input channels) - real compute, not just a cheap
@@ -767,7 +909,9 @@ impl PolicyNet {
         if amp {
             let cat_b = cat.to_kind(Kind::BFloat16);
             let mid = conv2d_bf16(&head.0, &cat_b, [1, 1], [0, 0]).silu();
-            conv2d_bf16(&head.1, &mid, [1, 1], [0, 0]).flatten(1, -1).to_kind(Kind::Float)
+            conv2d_bf16(&head.1, &mid, [1, 1], [0, 0])
+                .flatten(1, -1)
+                .to_kind(Kind::Float)
         } else {
             head.1.forward(&head.0.forward(&cat).silu()).flatten(1, -1)
         }
@@ -776,7 +920,41 @@ impl PolicyNet {
     /// Full forward pass. Returns raw head tensors; callers combine with
     /// masks (see `act`/`evaluate`).
     fn forward(&self, o: &Obs) -> ForwardOutput {
-        let TrunkOutput { h, gc_map, gf_map, p, fov } = self.trunk_forward(o);
+        let TrunkOutput {
+            h,
+            gc_map,
+            gf_map,
+            p,
+            fov,
+        } = self.trunk_forward(o);
+        self.forward_from_trunk(
+            o,
+            TrunkOutput {
+                h,
+                gc_map,
+                gf_map,
+                p,
+                fov,
+            },
+        )
+    }
+
+    fn forward_with_hidden(&self, o: &Obs, hidden: &Tensor) -> (ForwardOutput, Tensor) {
+        let (trunk, next) = self.trunk_forward_with_hidden(o, Some(hidden));
+        (
+            self.forward_from_trunk(o, trunk),
+            next.expect("recurrent forward requires recurrent policy"),
+        )
+    }
+
+    fn forward_from_trunk(&self, o: &Obs, trunk: TrunkOutput) -> ForwardOutput {
+        let TrunkOutput {
+            h,
+            gc_map,
+            gf_map,
+            p,
+            fov,
+        } = trunk;
         let act_logits = self.head_action.forward(&h) + (&o.legal_actions - 1.0) * (-MASKED_NEG);
         let q = self.head_player_q.forward(&h); // (B, PC)
         let player_logits = q.unsqueeze(1).matmul(&p.transpose(-2, -1)).squeeze_dim(1); // (B, S)
@@ -864,8 +1042,11 @@ impl PolicyNet {
     ) -> Tensor {
         let base = gc_valid * legal_tile_coarse;
         let refine_action = action_table(REFINE_TILE, self.device).index_select(0, action);
-        let has_fine =
-            fine_coarse.flatten(1, -1).sum_dim_intlist(1i64, false, Kind::Float).gt(0.0).to_kind(Kind::Float);
+        let has_fine = fine_coarse
+            .flatten(1, -1)
+            .sum_dim_intlist(1i64, false, Kind::Float)
+            .gt(0.0)
+            .to_kind(Kind::Float);
         let use_fine = (refine_action * has_fine).unsqueeze(-1).unsqueeze(-1);
         let one_minus_use_fine: Tensor = use_fine.neg() + 1.0;
         let mask: Tensor = fine_coarse * &use_fine + &base * one_minus_use_fine;
@@ -878,7 +1059,10 @@ impl PolicyNet {
     /// case needs (see `fine_to_coarse_mask_cropped`). Kept byte-for-byte
     /// as it always was so the `!foveate` path is provably unchanged.
     fn fine_to_coarse_mask(o: &Obs) -> Tensor {
-        o.legal_tile.unsqueeze(1).max_pool2d([2, 2], [2, 2], [0, 0], [1, 1], true).squeeze_dim(1)
+        o.legal_tile
+            .unsqueeze(1)
+            .max_pool2d([2, 2], [2, 2], [0, 0], [1, 1], true)
+            .squeeze_dim(1)
     }
 
     /// Legacy (`fine_origin` always 0) path: mask fine cells whose parent
@@ -900,9 +1084,13 @@ impl PolicyNet {
             .logical_and(&gx.eq_tensor(&cx.view([b, 1, 1])))
             .to_kind(Kind::Float);
         let mask = mask * &o.legal_tile * &o.grid_valid;
-        let mask_sum = mask.flatten(1, -1).sum_dim_intlist(1i64, false, Kind::Float);
+        let mask_sum = mask
+            .flatten(1, -1)
+            .sum_dim_intlist(1i64, false, Kind::Float);
         let fallback = &o.legal_tile * &o.grid_valid;
-        let fb_sum = fallback.flatten(1, -1).sum_dim_intlist(1i64, false, Kind::Float);
+        let fb_sum = fallback
+            .flatten(1, -1)
+            .sum_dim_intlist(1i64, false, Kind::Float);
         let has_fb = fb_sum.gt(0.0).to_kind(Kind::Float).view([b, 1, 1]);
         let one_minus_has_fb: Tensor = has_fb.neg() + 1.0;
         let fallback2: Tensor = &fallback * &has_fb + &o.grid_valid * one_minus_has_fb;
@@ -915,7 +1103,14 @@ impl PolicyNet {
     /// Dispatches to the legacy or real-crop coordinate math based on
     /// `self.foveate` - kept as thin `self`-branching wrappers so
     /// `act`/`evaluate` don't repeat the branch at every call site.
-    fn fine_logits_for_coarse_any(&self, tile_fine: &Tensor, o: &Obs, fov: &Foveation, coarse: &Tensor, cgw: i64) -> Tensor {
+    fn fine_logits_for_coarse_any(
+        &self,
+        tile_fine: &Tensor,
+        o: &Obs,
+        fov: &Foveation,
+        coarse: &Tensor,
+        cgw: i64,
+    ) -> Tensor {
         if self.foveate {
             fine_logits_for_coarse_cropped(
                 tile_fine,
@@ -943,7 +1138,13 @@ impl PolicyNet {
 
     fn global_to_fine_local_any(&self, region: &Tensor, fov: &Foveation) -> Tensor {
         if self.foveate {
-            global_to_fine_local_cropped(region, fov.fine_h, fov.fine_w, &fov.origin_y, &fov.origin_x)
+            global_to_fine_local_cropped(
+                region,
+                fov.fine_h,
+                fov.fine_w,
+                &fov.origin_y,
+                &fov.origin_x,
+            )
         } else {
             global_to_fine_local(region, fov.fine_w)
         }
@@ -959,9 +1160,41 @@ impl PolicyNet {
         &self,
         o: &Obs,
         greedy: bool,
-    ) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor) {
+    ) -> (
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+    ) {
         let output = self.forward(o);
         self.act_from_forward(o, greedy, output)
+    }
+
+    /// Recurrent actor API. `hidden` is `(B, HIDDEN)` and the returned state
+    /// is the state after consuming this observation.
+    pub fn act_recurrent(
+        &self,
+        o: &Obs,
+        hidden: &Tensor,
+        greedy: bool,
+    ) -> (
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+    ) {
+        let (output, next_hidden) = self.forward_with_hidden(o, hidden);
+        let (a, p, t, b, n, q, logp, value) = self.act_from_forward(o, greedy, output);
+        (a, p, t, b, n, q, logp, value, next_hidden)
     }
 
     fn act_from_forward(
@@ -969,7 +1202,16 @@ impl PolicyNet {
         o: &Obs,
         greedy: bool,
         output: ForwardOutput,
-    ) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor) {
+    ) -> (
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+    ) {
         let ForwardOutput {
             act_logits,
             player_logits: player_logits_raw,
@@ -985,7 +1227,11 @@ impl PolicyNet {
 
         let pmask = o
             .legal_ptarget
-            .gather(1, &a.view([-1, 1, 1]).expand([-1, 1, MAX_SLOTS as i64], false), false)
+            .gather(
+                1,
+                &a.view([-1, 1, 1]).expand([-1, 1, MAX_SLOTS as i64], false),
+                false,
+            )
             .squeeze_dim(1);
         let player_logits = &player_logits_raw + (&pmask - 1.0) * (-MASKED_NEG);
         let (player, player_lp) = categorical_sample(&player_logits, greedy);
@@ -993,32 +1239,46 @@ impl PolicyNet {
         let (nuke_s, nuke_lp) = categorical_sample(&nuke, greedy);
 
         let (qa, qb) = quantity_ab(&quantity);
-        let q =
-            if greedy { &qa / (&qa + &qb) } else { sample_beta_host(&qa, &qb) }.clamp(1e-4, 1.0 - 1e-4);
+        let q = if greedy {
+            &qa / (&qa + &qb)
+        } else {
+            sample_beta_host(&qa, &qb)
+        }
+        .clamp(1e-4, 1.0 - 1e-4);
         let q_lp = beta_log_prob(&q, &qa, &qb);
 
         let dev = self.device;
         let needs_p = action_table(NEEDS_PLAYER, dev).index_select(0, &a);
         let needs_t = action_table(NEEDS_TILE, dev).index_select(0, &a);
         let needs_q = action_table(NEEDS_QUANTITY, dev).index_select(0, &a);
-        let is_build =
-            a.eq(ACTIONS.iter().position(|&x| x == "build").unwrap() as i64).to_kind(Kind::Float);
-        let is_nuke =
-            a.eq(ACTIONS.iter().position(|&x| x == "launch_nuke").unwrap() as i64).to_kind(Kind::Float);
+        let is_build = a
+            .eq(ACTIONS.iter().position(|&x| x == "build").unwrap() as i64)
+            .to_kind(Kind::Float);
+        let is_nuke = a
+            .eq(ACTIONS.iter().position(|&x| x == "launch_nuke").unwrap() as i64)
+            .to_kind(Kind::Float);
 
         logp = logp + &needs_p * &player_lp;
 
         let (_cgh, cgw) = Self::coarse_dims(&fov.grid_coarse);
-        let coarse_logits =
-            self.coarse_logits_for_action(&tile_coarse, &fov.legal_tile_coarse, &fov.gc_valid, &fov.fine_coarse, &a);
+        let coarse_logits = self.coarse_logits_for_action(
+            &tile_coarse,
+            &fov.legal_tile_coarse,
+            &fov.gc_valid,
+            &fov.fine_coarse,
+            &a,
+        );
         let (coarse, _coarse_lp_sampled) = categorical_sample(&coarse_logits, greedy);
         let fine_logits = self.fine_logits_for_coarse_any(&tile_fine, o, &fov, &coarse, cgw);
         let (fine, fine_lp) = categorical_sample(&fine_logits, greedy);
 
-        let refine_bool = action_table(REFINE_TILE, dev).index_select(0, &a).to_kind(Kind::Bool);
+        let refine_bool = action_table(REFINE_TILE, dev)
+            .index_select(0, &a)
+            .to_kind(Kind::Bool);
         let fine_global = self.fine_local_to_global_any(&fine, &fov);
         let coarse_global = coarse_local_to_global(&coarse, cgw);
-        let eff_coarse_local = global_to_coarse_local(&fine_global, cgw).where_self(&refine_bool, &coarse);
+        let eff_coarse_local =
+            global_to_coarse_local(&fine_global, cgw).where_self(&refine_bool, &coarse);
         let coarse_lp = categorical_logp(&coarse_logits, &eff_coarse_local);
         let tile_lp = (&coarse_lp + &fine_lp).where_self(&refine_bool, &coarse_lp);
         let tile_region = fine_global.where_self(&refine_bool, &coarse_global);
@@ -1036,7 +1296,16 @@ impl PolicyNet {
         &self,
         o: &Obs,
         greedy: bool,
-    ) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor) {
+    ) -> (
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+    ) {
         let mut output = self.forward(o);
         output.fov = Self::foveate(o, self.foveate);
         self.act_from_forward(o, greedy, output)
@@ -1050,6 +1319,17 @@ impl PolicyNet {
     pub fn evaluate(&self, o: &Obs, c: &ChoiceBatch) -> (Tensor, Tensor, Tensor, Tensor) {
         let output = self.forward(o);
         self.evaluate_from_forward(o, c, output)
+    }
+
+    pub fn evaluate_recurrent(
+        &self,
+        o: &Obs,
+        c: &ChoiceBatch,
+        hidden: &Tensor,
+    ) -> (Tensor, Tensor, Tensor, Tensor, Tensor) {
+        let (output, next_hidden) = self.forward_with_hidden(o, hidden);
+        let (logp, ent, ent_q, value) = self.evaluate_from_forward(o, c, output);
+        (logp, ent, ent_q, value, next_hidden)
     }
 
     fn evaluate_from_forward(
@@ -1075,7 +1355,13 @@ impl PolicyNet {
         let action_c = c.action.clamp(0, N_ACTIONS - 1);
         let pmask = o
             .legal_ptarget
-            .gather(1, &action_c.view([-1, 1, 1]).expand([-1, 1, MAX_SLOTS as i64], false), false)
+            .gather(
+                1,
+                &action_c
+                    .view([-1, 1, 1])
+                    .expand([-1, 1, MAX_SLOTS as i64], false),
+                false,
+            )
             .squeeze_dim(1);
         let player_logits = &player_logits_raw + (&pmask - 1.0) * (-MASKED_NEG);
         let p_used = c.player_slot.ge(0).to_kind(Kind::Float);
@@ -1087,8 +1373,13 @@ impl PolicyNet {
         let t_used = c.tile_region.ge(0).to_kind(Kind::Float);
         let tr_c = c.tile_region.clamp(0, i64::MAX / 2);
         let coarse_target = global_to_coarse_local(&tr_c, cgw);
-        let coarse_logits =
-            self.coarse_logits_for_action(&tile_coarse, &fov.legal_tile_coarse, &fov.gc_valid, &fov.fine_coarse, &action_c);
+        let coarse_logits = self.coarse_logits_for_action(
+            &tile_coarse,
+            &fov.legal_tile_coarse,
+            &fov.gc_valid,
+            &fov.fine_coarse,
+            &action_c,
+        );
         let coarse_target_c = coarse_target.clamp(0, cgw * cgh - 1);
         logp = logp + &t_used * categorical_logp(&coarse_logits, &coarse_target_c);
         ent = ent + &t_used * categorical_entropy(&coarse_logits);
@@ -1096,7 +1387,8 @@ impl PolicyNet {
         let refine = action_table(REFINE_TILE, self.device).index_select(0, &action_c) * &t_used;
         let fine_target = self.global_to_fine_local_any(&tr_c, &fov);
         let fine_target_c = fine_target.clamp(0, fov.fine_h * fov.fine_w - 1);
-        let fine_logits = self.fine_logits_for_coarse_any(&tile_fine, o, &fov, &coarse_target_c, cgw);
+        let fine_logits =
+            self.fine_logits_for_coarse_any(&tile_fine, o, &fov, &coarse_target_c, cgw);
         logp = logp + &refine * categorical_logp(&fine_logits, &fine_target_c);
         ent = ent + &refine * categorical_entropy(&fine_logits);
 
@@ -1135,6 +1427,18 @@ impl PolicyNet {
         let output = self.trunk_forward(o);
         Self::sanitize_value(&self.head_value.forward(&output.h).squeeze_dim(-1))
     }
+
+    pub fn value_recurrent(&self, o: &Obs, hidden: &Tensor) -> (Tensor, Tensor) {
+        let (output, next) = self.trunk_forward_with_hidden(o, Some(hidden));
+        (
+            Self::sanitize_value(&self.head_value.forward(&output.h).squeeze_dim(-1)),
+            next.expect("recurrent value requires recurrent policy"),
+        )
+    }
+
+    pub fn is_recurrent(&self) -> bool {
+        self.recurrent.is_some()
+    }
 }
 
 /// Coarse local index -> global index, in the SAME (fine-scale) global
@@ -1170,8 +1474,8 @@ fn global_to_fine_local(region: &Tensor, gw: i64) -> Tensor {
 /// differentiable-agnostic Gamma sampler in tch, and this path never
 /// needs gradients).
 fn sample_beta_host(a: &Tensor, b: &Tensor) -> Tensor {
-    use rand::rngs::SmallRng;
     use rand::SeedableRng;
+    use rand::rngs::SmallRng;
     use rand_distr::{Beta, Distribution};
     let dev = a.device();
     let a_cpu = a.to_device(Device::Cpu).to_kind(Kind::Float);
@@ -1185,7 +1489,9 @@ fn sample_beta_host(a: &Tensor, b: &Tensor) -> Tensor {
         let d = Beta::new(av[i].max(1e-3) as f64, bv[i].max(1e-3) as f64).unwrap();
         out.push(d.sample(&mut rng) as f32);
     }
-    Tensor::from_slice(&out).view(a.size().as_slice()).to_device(dev)
+    Tensor::from_slice(&out)
+        .view(a.size().as_slice())
+        .to_device(dev)
 }
 
 /// `--foveate` crop origin: the top-left (row, col) of a `ch`x`cw` window
@@ -1211,8 +1517,12 @@ fn crop_origin(mask: &Tensor, h: i64, w: i64, ch: i64, cw: i64) -> (Tensor, Tens
     let centroid_y = &sum_y / &n_safe;
     let centroid_x = &sum_x / &n_safe;
     let no_owned: Tensor = has_any.neg() + 1.0;
-    let cy = (&has_any * &centroid_y + &no_owned * ((h - 1) as f64 / 2.0)).round().to_kind(Kind::Int64);
-    let cx = (&has_any * &centroid_x + &no_owned * ((w - 1) as f64 / 2.0)).round().to_kind(Kind::Int64);
+    let cy = (&has_any * &centroid_y + &no_owned * ((h - 1) as f64 / 2.0))
+        .round()
+        .to_kind(Kind::Int64);
+    let cx = (&has_any * &centroid_x + &no_owned * ((w - 1) as f64 / 2.0))
+        .round()
+        .to_kind(Kind::Int64);
 
     let h_half = ch / 2;
     let w_half = cw / 2;
@@ -1246,10 +1556,14 @@ fn crop_and_pad(
     let target_x = Tensor::arange(crop_w, (Kind::Int64, dev)).view([1, 1, crop_w]);
     let abs_y = (&target_y + origin_y.view([-1, 1, 1])).clamp(0, src_h - 1);
     let abs_x = (&target_x + origin_x.view([-1, 1, 1])).clamp(0, src_w - 1);
-    let flat_idx = (abs_y * src_w + abs_x).view([b, 1, crop_h * crop_w]).expand([b, c, crop_h * crop_w], false);
+    let flat_idx = (abs_y * src_w + abs_x)
+        .view([b, 1, crop_h * crop_w])
+        .expand([b, c, crop_h * crop_w], false);
 
     let src_flat = src.flatten(2, -1); // (B, C, src_h * src_w)
-    let cropped = src_flat.gather(-1, &flat_idx, false).view([b, c, crop_h, crop_w]);
+    let cropped = src_flat
+        .gather(-1, &flat_idx, false)
+        .view([b, c, crop_h, crop_w]);
 
     if crop_h == out_h && crop_w == out_w {
         cropped
@@ -1321,7 +1635,15 @@ fn fine_to_coarse_mask_cropped(
         .squeeze_dim(1); // (B, fine_h/2, fine_w/2)
     let origin_cy = origin_y.divide_scalar_mode(2, "floor");
     let origin_cx = origin_x.divide_scalar_mode(2, "floor");
-    place_crop(&local_coarse, &origin_cy, &origin_cx, fine_h / 2, fine_w / 2, cgh, cgw)
+    place_crop(
+        &local_coarse,
+        &origin_cy,
+        &origin_cx,
+        fine_h / 2,
+        fine_w / 2,
+        cgh,
+        cgw,
+    )
 }
 
 /// `--foveate` real-crop path: mask fine cells (in the crop's LOCAL
@@ -1367,9 +1689,13 @@ fn fine_logits_for_coarse_cropped(
         .to_kind(Kind::Float);
 
     let mask = mask * legal_tile_fine * grid_valid_fine;
-    let mask_sum = mask.flatten(1, -1).sum_dim_intlist(1i64, false, Kind::Float);
+    let mask_sum = mask
+        .flatten(1, -1)
+        .sum_dim_intlist(1i64, false, Kind::Float);
     let fallback = legal_tile_fine * grid_valid_fine;
-    let fb_sum = fallback.flatten(1, -1).sum_dim_intlist(1i64, false, Kind::Float);
+    let fb_sum = fallback
+        .flatten(1, -1)
+        .sum_dim_intlist(1i64, false, Kind::Float);
     let has_fb = fb_sum.gt(0.0).to_kind(Kind::Float).view([b, 1, 1]);
     let one_minus_has_fb: Tensor = has_fb.neg() + 1.0;
     let fallback2: Tensor = &fallback * &has_fb + grid_valid_fine * one_minus_has_fb;
@@ -1385,7 +1711,12 @@ fn fine_logits_for_coarse_cropped(
 /// absolute origin then flattening at the *global* map width (see the
 /// legacy `fine_local_to_global`, whose `local` is already global-frame
 /// since it has no crop to translate out of).
-fn fine_local_to_global_cropped(local: &Tensor, fine_w: i64, origin_y: &Tensor, origin_x: &Tensor) -> Tensor {
+fn fine_local_to_global_cropped(
+    local: &Tensor,
+    fine_w: i64,
+    origin_y: &Tensor,
+    origin_x: &Tensor,
+) -> Tensor {
     // `local`/`origin_*` are all (B,) here (see the legacy `fine_local_to_global`,
     // which is the same shape contract without a crop to translate out of).
     let ly = local.divide_scalar_mode(fine_w, "floor");
@@ -1414,7 +1745,11 @@ fn global_to_fine_local_cropped(
     let ly = gy - origin_y;
     let lx = gx - origin_x;
 
-    let mask = ly.ge(0).logical_and(&ly.lt(fine_h)).logical_and(&lx.ge(0)).logical_and(&lx.lt(fine_w));
+    let mask = ly
+        .ge(0)
+        .logical_and(&ly.lt(fine_h))
+        .logical_and(&lx.ge(0))
+        .logical_and(&lx.lt(fine_w));
 
     let local = &ly * fine_w + &lx;
     local.where_self(&mask, &(local.zeros_like() - 1))
@@ -1489,7 +1824,8 @@ mod tests {
     /// summed loss stay finite. Shared by the amp/foveate/model-size
     /// tests below so each only has to say what's different about it.
     fn check_policy_finite(policy: &PolicyNet, o: &Obs) {
-        let (a, player, tile, build, nuke, qty, logp, value) = tch::no_grad(|| policy.act(o, false));
+        let (a, player, tile, build, nuke, qty, logp, value) =
+            tch::no_grad(|| policy.act(o, false));
         for (name, t) in [
             ("act.logp", &logp),
             ("act.value", &value),
@@ -1512,7 +1848,9 @@ mod tests {
         assert_finite(&ent_q, "evaluate.ent_q");
         assert_finite(&value2, "evaluate.value");
 
-        let loss = logp2.mean(Kind::Float) + ent.mean(Kind::Float) + ent_q.mean(Kind::Float)
+        let loss = logp2.mean(Kind::Float)
+            + ent.mean(Kind::Float)
+            + ent_q.mean(Kind::Float)
             + value2.mean(Kind::Float);
         loss.backward();
         let loss_v = loss.double_value(&[]);
@@ -1528,7 +1866,8 @@ mod tests {
         let vs = nn::VarStore::new(Device::Cpu);
         let policy = PolicyNet::new(&vs.root(), false, false, GC, BLOCKS);
         let o = synthetic_obs(Device::Cpu, 2, 6, 6);
-        let (a, player, tile, build, nuke, qty, _logp, _value) = tch::no_grad(|| policy.act(&o, false));
+        let (a, player, tile, build, nuke, qty, _logp, _value) =
+            tch::no_grad(|| policy.act(&o, false));
         let choice = ChoiceBatch {
             action: a,
             player_slot: player,
@@ -1541,7 +1880,9 @@ mod tests {
         fn trunk_grad_norm(vs: &nn::VarStore) -> f64 {
             let mut total = 0.0;
             for (name, mut t) in vs.variables() {
-                if (name.contains("trunk") || name.contains("grid_coarse_net") || name.contains("grid_fine_net"))
+                if (name.contains("trunk")
+                    || name.contains("grid_coarse_net")
+                    || name.contains("grid_fine_net"))
                     && t.grad().defined()
                 {
                     total += f64::try_from(t.grad().abs().sum(Kind::Float)).unwrap();
@@ -1562,7 +1903,10 @@ mod tests {
         let (logp2, _ent, _ent_q, _value2) = policy.evaluate(&o, &choice);
         logp2.mean(Kind::Float).backward();
         let policy_norm = trunk_grad_norm(&vs);
-        assert!(policy_norm > 0.0, "trunk MUST see nonzero gradient from the policy output, got {policy_norm}");
+        assert!(
+            policy_norm > 0.0,
+            "trunk MUST see nonzero gradient from the policy output, got {policy_norm}"
+        );
     }
 
     #[test]
@@ -1655,8 +1999,9 @@ mod tests {
         let ox1 = Tensor::from_slice(&[10i64]).to_device(dev);
         let cropped = crop_and_pad(&src, &oy1, &ox1, ch, cw, ch, cw);
         let cropped_v: Vec<f32> = cropped.reshape([-1]).try_into().unwrap();
-        let expected: Vec<f32> =
-            (0..ch).flat_map(|dy| (0..cw).map(move |dx| ((8 + dy) * w + 10 + dx) as f32)).collect();
+        let expected: Vec<f32> = (0..ch)
+            .flat_map(|dy| (0..cw).map(move |dx| ((8 + dy) * w + 10 + dx) as f32))
+            .collect();
         assert_eq!(cropped_v, expected);
 
         // place_crop is the inverse: placing that same 4x4 block back at
@@ -1673,7 +2018,11 @@ mod tests {
                 } else {
                     0.0
                 };
-                assert_eq!(placed_v[(y * w + x) as usize], expect, "mismatch at ({y}, {x})");
+                assert_eq!(
+                    placed_v[(y * w + x) as usize],
+                    expect,
+                    "mismatch at ({y}, {x})"
+                );
             }
         }
 
@@ -1707,7 +2056,11 @@ mod tests {
         let mut mine = o.grid.select(1, EGO_OWN_CH);
         let _ = mine.zero_();
         let _ = mine.get(0).get(3).get(5).fill_(1.0);
-        let _ = mine.get(1).get(FOVEATE_SIZE + 3).get(FOVEATE_SIZE + 7).fill_(1.0);
+        let _ = mine
+            .get(1)
+            .get(FOVEATE_SIZE + 3)
+            .get(FOVEATE_SIZE + 7)
+            .fill_(1.0);
 
         let old_fov = PolicyNet::foveate(&o, true);
         let compact = PolicyNet::compact_observation(&o);
@@ -1718,8 +2071,16 @@ mod tests {
         };
         close(&old_fov.grid_fine, &new_fov.grid_fine, "fine grid");
         close(&old_fov.grid_coarse, &new_fov.grid_coarse, "coarse grid");
-        close(&old_fov.fine_coarse, &new_fov.fine_coarse, "fine/coarse mask");
-        close(&old_fov.legal_tile_fine, &new_fov.legal_tile_fine, "fine legality");
+        close(
+            &old_fov.fine_coarse,
+            &new_fov.fine_coarse,
+            "fine/coarse mask",
+        );
+        close(
+            &old_fov.legal_tile_fine,
+            &new_fov.legal_tile_fine,
+            "fine legality",
+        );
         assert_eq!(
             Vec::<i64>::try_from(&old_fov.origin_y).unwrap(),
             Vec::<i64>::try_from(&new_fov.origin_y).unwrap()
@@ -1777,7 +2138,10 @@ mod tests {
         ChoiceBatch {
             action: Tensor::from_slice(&[spawn, spawn]).to_device(device),
             player_slot: Tensor::from_slice(&[-1i64, -1]).to_device(device),
-            tile_region: Tensor::from_slice(&[4 * GW_MAX + 6, (FOVEATE_SIZE + 2) * GW_MAX + FOVEATE_SIZE + 4])
+            tile_region: Tensor::from_slice(&[
+                4 * GW_MAX + 6,
+                (FOVEATE_SIZE + 2) * GW_MAX + FOVEATE_SIZE + 4,
+            ])
                 .to_device(device),
             build_type: Tensor::from_slice(&[-1i64, -1]).to_device(device),
             nuke_type: Tensor::from_slice(&[-1i64, -1]).to_device(device),
@@ -1815,7 +2179,11 @@ mod tests {
         let mut mine = full.grid.select(1, EGO_OWN_CH);
         let _ = mine.zero_();
         let _ = mine.get(0).get(4).get(6).fill_(1.0);
-        let _ = mine.get(1).get(FOVEATE_SIZE + 2).get(FOVEATE_SIZE + 4).fill_(1.0);
+        let _ = mine
+            .get(1)
+            .get(FOVEATE_SIZE + 2)
+            .get(FOVEATE_SIZE + 4)
+            .fill_(1.0);
         let compact = PolicyNet::compact_observation(&full);
         let choice = reference_choice(Device::Cpu);
 
@@ -1824,12 +2192,32 @@ mod tests {
             let recomputed = PolicyNet::foveate(obs, true);
             for (field, carried, reference) in [
                 ("grid_fine", &forward.fov.grid_fine, &recomputed.grid_fine),
-                ("legal_tile_fine", &forward.fov.legal_tile_fine, &recomputed.legal_tile_fine),
-                ("grid_valid_fine", &forward.fov.grid_valid_fine, &recomputed.grid_valid_fine),
-                ("grid_coarse", &forward.fov.grid_coarse, &recomputed.grid_coarse),
+                (
+                    "legal_tile_fine",
+                    &forward.fov.legal_tile_fine,
+                    &recomputed.legal_tile_fine,
+                ),
+                (
+                    "grid_valid_fine",
+                    &forward.fov.grid_valid_fine,
+                    &recomputed.grid_valid_fine,
+                ),
+                (
+                    "grid_coarse",
+                    &forward.fov.grid_coarse,
+                    &recomputed.grid_coarse,
+                ),
                 ("gc_valid", &forward.fov.gc_valid, &recomputed.gc_valid),
-                ("legal_tile_coarse", &forward.fov.legal_tile_coarse, &recomputed.legal_tile_coarse),
-                ("fine_coarse", &forward.fov.fine_coarse, &recomputed.fine_coarse),
+                (
+                    "legal_tile_coarse",
+                    &forward.fov.legal_tile_coarse,
+                    &recomputed.legal_tile_coarse,
+                ),
+                (
+                    "fine_coarse",
+                    &forward.fov.fine_coarse,
+                    &recomputed.fine_coarse,
+                ),
                 ("origin_y", &forward.fov.origin_y, &recomputed.origin_y),
                 ("origin_x", &forward.fov.origin_x, &recomputed.origin_x),
             ] {
@@ -1842,7 +2230,8 @@ mod tests {
             // deterministic; the stochastic actor path intentionally keeps
             // its existing RNG behavior and is not reseeded here.
             let optimized_act = tch::no_grad(|| policy.act(obs, true));
-            let reference_act = tch::no_grad(|| policy.act_recomputing_foveation_reference(obs, true));
+            let reference_act =
+                tch::no_grad(|| policy.act_recomputing_foveation_reference(obs, true));
             for (field, optimized, reference) in [
                 ("action", &optimized_act.0, &reference_act.0),
                 ("player", &optimized_act.1, &reference_act.1),
@@ -1864,7 +2253,11 @@ mod tests {
                 ("quantity_entropy", &optimized_eval.2, &reference_eval.2),
                 ("value", &optimized_eval.3, &reference_eval.3),
             ] {
-                assert_same_tensor(optimized, reference, &format!("{obs_name}.evaluate.{field}"));
+                assert_same_tensor(
+                    optimized,
+                    reference,
+                    &format!("{obs_name}.evaluate.{field}"),
+                );
             }
 
             zero_parameter_gradients(&vs);
@@ -1884,13 +2277,86 @@ mod tests {
             reference_loss.backward();
             let reference_grads = parameter_gradients(&vs);
 
-            assert_eq!(optimized_grads.len(), reference_grads.len(), "{obs_name} gradient count");
+            assert_eq!(
+                optimized_grads.len(),
+                reference_grads.len(),
+                "{obs_name} gradient count"
+            );
             for (name, optimized) in &optimized_grads {
-                let reference =
-                    reference_grads.get(name).unwrap_or_else(|| panic!("{obs_name} missing reference gradient {name}"));
+                let reference = reference_grads
+                    .get(name)
+                    .unwrap_or_else(|| panic!("{obs_name} missing reference gradient {name}"));
                 assert_same_tensor(optimized, reference, &format!("{obs_name}.gradient.{name}"));
             }
         }
+    }
+
+    #[test]
+    fn recurrent_replay_matches_actor_trajectory_resets_and_has_no_env_leakage() {
+        tch::manual_seed(73);
+        let vs = nn::VarStore::new(Device::Cpu);
+        let policy = PolicyNet::new_with_recurrence(&vs.root(), false, false, 8, 1, true);
+        let t_len = 5usize;
+        let dones = [
+            [false, false],
+            [true, false],
+            [false, false],
+            [false, true],
+            [false, false],
+        ];
+        let observations: Vec<Obs> = (0..t_len)
+            .map(|t| {
+                let obs = synthetic_obs(Device::Cpu, 2, 4, 4);
+                let _ = obs
+                    .scalars
+                    .select(1, 0)
+                    .copy_(&Tensor::from_slice(&[t as f32 + 0.25, 100.0 + t as f32]));
+                obs
+            })
+            .collect();
+
+        let mut actor_hidden = Tensor::zeros([2, HIDDEN], (Kind::Float, Device::Cpu));
+        let mut hidden_in = Vec::new();
+        let mut actor_out = Vec::new();
+        for t in 0..t_len {
+            hidden_in.push(actor_hidden.shallow_clone());
+            let (_, next) = policy.value_recurrent(&observations[t], &actor_hidden);
+            actor_out.push(next.shallow_clone());
+            let keep =
+                Tensor::from_slice(&[(!dones[t][0]) as u8 as f32, (!dones[t][1]) as u8 as f32])
+                    .unsqueeze(-1);
+            actor_hidden = next * keep;
+        }
+        assert_eq!(
+            hidden_in[2].get(0).abs().max().double_value(&[]),
+            0.0,
+            "terminal env state must reset before its next observation"
+        );
+
+        for chunk_start in (0..t_len).step_by(2) {
+            let mut replay = hidden_in[chunk_start].shallow_clone();
+            for t in chunk_start..(chunk_start + 2).min(t_len) {
+                let (_, next) = policy.value_recurrent(&observations[t], &replay);
+                let error = (&next - &actor_out[t]).abs().max().double_value(&[]);
+                assert!(error < 1e-6, "replay diverged at t={t}: {error}");
+                let keep =
+                    Tensor::from_slice(&[(!dones[t][0]) as u8 as f32, (!dones[t][1]) as u8 as f32])
+                        .unsqueeze(-1);
+                replay = next * keep;
+            }
+        }
+
+        let baseline = policy.value_recurrent(&observations[0], &hidden_in[0]).1;
+        let env0_index = Tensor::from_slice(&[0i64]);
+        let env0_obs = observations[0].index_select(&env0_index);
+        let env0_out = policy
+            .value_recurrent(&env0_obs, &hidden_in[0].get(0).unsqueeze(0))
+            .1;
+        let env0_error = (baseline.get(0) - env0_out.get(0))
+            .abs()
+            .max()
+            .double_value(&[]);
+        assert!(env0_error < 1e-6, "env 1 leaked into env 0: {env0_error}");
     }
 }
 
@@ -1910,7 +2376,12 @@ mod logit_clamp_tests {
         // One wildly dominant legal logit among otherwise-illegal (masked)
         // alternatives - exactly the shape that, pre-clamp, drove entropy
         // toward zero as training pushed the winning logit ever higher.
-        let logits = Tensor::from_slice(&[1.0e6f32, MASKED_NEG as f32, MASKED_NEG as f32, MASKED_NEG as f32])
+        let logits = Tensor::from_slice(&[
+            1.0e6f32,
+            MASKED_NEG as f32,
+            MASKED_NEG as f32,
+            MASKED_NEG as f32,
+        ])
             .reshape([1, 4]);
         let ent: f64 = categorical_entropy(&logits).double_value(&[0]);
         assert!(ent.is_finite(), "entropy must stay finite, got {ent}");
@@ -1925,10 +2396,16 @@ mod logit_clamp_tests {
         let logits = Tensor::from_slice(&[-1.0e8f32, 1.0e8f32, 5.0f32]).reshape([1, 3]);
         let (idx, logp) = categorical_sample(&logits, false);
         let logp_v: f64 = logp.double_value(&[0]);
-        assert!(logp_v.is_finite(), "sampled logp must be finite, got {logp_v}");
+        assert!(
+            logp_v.is_finite(),
+            "sampled logp must be finite, got {logp_v}"
+        );
         let logp2 = categorical_logp(&logits, &idx);
         let logp2_v: f64 = logp2.double_value(&[0]);
-        assert!(logp2_v.is_finite(), "categorical_logp must be finite, got {logp2_v}");
+        assert!(
+            logp2_v.is_finite(),
+            "categorical_logp must be finite, got {logp2_v}"
+        );
     }
 
     #[test]
@@ -1949,9 +2426,15 @@ mod logit_clamp_tests {
         let logits = Tensor::from_slice(&[f32::NAN, 2.0f32, f32::INFINITY]).reshape([1, 3]);
         let (idx, logp) = categorical_sample(&logits, false);
         let idx_v: i64 = idx.int64_value(&[0]);
-        assert!((0..3).contains(&idx_v), "sampled index must be valid, got {idx_v}");
+        assert!(
+            (0..3).contains(&idx_v),
+            "sampled index must be valid, got {idx_v}"
+        );
         let logp_v: f64 = logp.double_value(&[0]);
-        assert!(logp_v.is_finite(), "logp must be finite for a NaN/Inf-containing logit row, got {logp_v}");
+        assert!(
+            logp_v.is_finite(),
+            "logp must be finite for a NaN/Inf-containing logit row, got {logp_v}"
+        );
     }
 
     #[test]
@@ -1960,8 +2443,14 @@ mod logit_clamp_tests {
         let (a, b) = quantity_ab(&params);
         let a_v: f64 = a.double_value(&[0, 0]);
         let b_v: f64 = b.double_value(&[0, 0]);
-        assert!(a_v.is_finite(), "alpha must be finite for a NaN raw param, got {a_v}");
-        assert!(b_v.is_finite(), "beta must be finite for a -inf raw param, got {b_v}");
+        assert!(
+            a_v.is_finite(),
+            "alpha must be finite for a NaN raw param, got {a_v}"
+        );
+        assert!(
+            b_v.is_finite(),
+            "beta must be finite for a -inf raw param, got {b_v}"
+        );
     }
 
     #[test]
@@ -1976,7 +2465,10 @@ mod logit_clamp_tests {
         let v: Vec<f64> = (0..4).map(|i| sanitized.double_value(&[i])).collect();
         for x in &v {
             assert!(x.is_finite(), "value must stay finite, got {v:?}");
-            assert!(x.abs() <= PolicyNet::VALUE_CLAMP_ABS, "value must stay bounded, got {v:?}");
+            assert!(
+                x.abs() <= PolicyNet::VALUE_CLAMP_ABS,
+                "value must stay bounded, got {v:?}"
+            );
         }
     }
 
@@ -1992,7 +2484,10 @@ mod logit_clamp_tests {
         out.backward();
         let grad = raw.grad();
         let g: f64 = grad.double_value(&[0]);
-        assert!(g.is_finite() && g > 0.0, "gradient must be finite and nonzero (pulling back toward the bound), got {g}");
+        assert!(
+            g.is_finite() && g > 0.0,
+            "gradient must be finite and nonzero (pulling back toward the bound), got {g}"
+        );
     }
 
     #[test]
@@ -2008,7 +2503,10 @@ mod logit_clamp_tests {
             // |x|/C is at most 100/1e4 = 0.01 here, so the relative error
             // introduced by the "+ |x|/C" denominator term is small but
             // not vanishingly so - use a relative, not absolute, bound.
-            assert!((got - want).abs() / want.abs().max(1.0) < 0.02, "expected near-identity for small inputs, got {got} want ~{want}");
+            assert!(
+                (got - want).abs() / want.abs().max(1.0) < 0.02,
+                "expected near-identity for small inputs, got {got} want ~{want}"
+            );
         }
     }
 
@@ -2019,14 +2517,22 @@ mod logit_clamp_tests {
         // a hard clamp_max here (the pre-fix behavior) would give zero
         // gradient once alpha/beta drift past QUANTITY_AB_MAX, which is
         // exactly the "stuck forever" failure mode this replaces.
-        let params = Tensor::from_slice(&[1.0e6f32, 1.0e6f32]).reshape([1, 1, 2]).set_requires_grad(true);
+        let params = Tensor::from_slice(&[1.0e6f32, 1.0e6f32])
+            .reshape([1, 1, 2])
+            .set_requires_grad(true);
         let (a, b) = quantity_ab(&params);
         (&a + &b).backward();
         let grad = params.grad();
         let g0: f64 = grad.double_value(&[0, 0, 0]);
         let g1: f64 = grad.double_value(&[0, 0, 1]);
-        assert!(g0.is_finite() && g0 > 0.0, "alpha's gradient must be finite and nonzero, got {g0}");
-        assert!(g1.is_finite() && g1 > 0.0, "beta's gradient must be finite and nonzero, got {g1}");
+        assert!(
+            g0.is_finite() && g0 > 0.0,
+            "alpha's gradient must be finite and nonzero, got {g0}"
+        );
+        assert!(
+            g1.is_finite() && g1 > 0.0,
+            "beta's gradient must be finite and nonzero, got {g1}"
+        );
     }
 
     #[test]
@@ -2035,7 +2541,13 @@ mod logit_clamp_tests {
         let (a, b) = quantity_ab(&params);
         let a_v: f64 = a.double_value(&[0, 0]);
         let b_v: f64 = b.double_value(&[0, 0]);
-        assert!(a_v.is_finite() && a_v <= QUANTITY_AB_MAX, "alpha must be bounded, got {a_v}");
-        assert!(b_v.is_finite() && b_v <= QUANTITY_AB_MAX, "beta must be bounded, got {b_v}");
+        assert!(
+            a_v.is_finite() && a_v <= QUANTITY_AB_MAX,
+            "alpha must be bounded, got {a_v}"
+        );
+        assert!(
+            b_v.is_finite() && b_v <= QUANTITY_AB_MAX,
+            "beta must be bounded, got {b_v}"
+        );
     }
 }

@@ -1,5 +1,5 @@
-mod autoscale;
 mod ae;
+mod autoscale;
 mod batch;
 mod bridge;
 mod engine;
@@ -184,6 +184,14 @@ struct Args {
     /// 128-sample minibatches for the default 4 envs x 32 rollout.
     #[arg(long, default_value_t = 1)]
     minibatches: usize,
+
+    /// Enable recurrent policy state and sequence-preserving PPO/BPTT.
+    #[arg(long, default_value_t = false)]
+    recurrent_policy: bool,
+
+    /// Timesteps per truncated-BPTT chunk. Only used with --recurrent-policy.
+    #[arg(long, default_value_t = 16)]
+    bptt_chunk_len: usize,
 
     /// Manual bf16 mixed precision for the policy net's conv towers
     /// (grid towers, local net, tile heads); logits/loss/optimizer state
@@ -448,7 +456,11 @@ fn parse_device(s: &str) -> Device {
 }
 
 fn parse_stage_env_targets(spec: &str, stage_count: usize) -> anyhow::Result<Vec<usize>> {
-    let parts: Vec<&str> = spec.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    let parts: Vec<&str> = spec
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
     anyhow::ensure!(!parts.is_empty(), "--stage-env-targets cannot be empty");
     if !parts.iter().any(|part| part.contains('=')) {
         let values = parts
@@ -460,7 +472,10 @@ fn parse_stage_env_targets(spec: &str, stage_count: usize) -> anyhow::Result<Vec
             "--stage-env-targets requires {stage_count} values, got {}",
             values.len()
         );
-        anyhow::ensure!(values.iter().all(|&value| value > 0), "env targets must be positive");
+        anyhow::ensure!(
+            values.iter().all(|&value| value > 0),
+            "env targets must be positive"
+        );
         return Ok(values);
     }
 
@@ -486,7 +501,10 @@ fn parse_stage_env_targets(spec: &str, stage_count: usize) -> anyhow::Result<Vec
             stage_count.saturating_sub(1)
         );
         for stage in start..=end {
-            anyhow::ensure!(!assigned[stage], "stage {stage} has more than one env target");
+            anyhow::ensure!(
+                !assigned[stage],
+                "stage {stage} has more than one env target"
+            );
             values[stage] = value;
             assigned[stage] = true;
         }
@@ -496,7 +514,10 @@ fn parse_stage_env_targets(spec: &str, stage_count: usize) -> anyhow::Result<Vec
         .enumerate()
         .filter_map(|(stage, assigned)| (!assigned).then_some(stage))
         .collect();
-    anyhow::ensure!(missing.is_empty(), "missing env targets for stages {missing:?}");
+    anyhow::ensure!(
+        missing.is_empty(),
+        "missing env targets for stages {missing:?}"
+    );
     Ok(values)
 }
 
@@ -604,10 +625,7 @@ mod stage_env_target_tests {
 
     #[test]
     fn parses_full_list_and_rejects_gaps_or_duplicates() {
-        assert_eq!(
-            parse_stage_env_targets("4,4,3", 3).unwrap(),
-            vec![4, 4, 3]
-        );
+        assert_eq!(parse_stage_env_targets("4,4,3", 3).unwrap(), vec![4, 4, 3]);
         assert!(parse_stage_env_targets("0=4,2+=2", 4).is_err());
         assert!(parse_stage_env_targets("0-2=4,2+=2", 4).is_err());
         assert!(parse_stage_env_targets("4,4", 3).is_err());
@@ -628,20 +646,13 @@ mod curriculum_flag_tests {
         let v811 = Args::try_parse_from(["oftrain", "--v811-curriculum"]).unwrap();
         assert!(v811.v811_curriculum);
         assert!(
-            Args::try_parse_from([
-                "oftrain",
-                "--v81-curriculum",
-                "--v811-curriculum"
-            ])
-            .is_err()
+            Args::try_parse_from(["oftrain", "--v81-curriculum", "--v811-curriculum"]).is_err()
         );
     }
 
     #[test]
     fn migration_requires_v811_and_resume() {
-        assert!(
-            Args::try_parse_from(["oftrain", "--migrate-v81-stage5-to-v811"]).is_err()
-        );
+        assert!(Args::try_parse_from(["oftrain", "--migrate-v81-stage5-to-v811"]).is_err());
         let args = Args::try_parse_from([
             "oftrain",
             "--v811-curriculum",
@@ -675,13 +686,28 @@ fn preload_cuda_deps() {
     // hunts for (`<venv>/.../site-packages/{torch,nvidia}/`) - reuse
     // whichever the binary was actually linked against (LD_LIBRARY_PATH,
     // set by the launch script) rather than hardcoding a venv path.
-    let Ok(ld_path) = std::env::var("LD_LIBRARY_PATH") else { return };
+    let Ok(ld_path) = std::env::var("LD_LIBRARY_PATH") else {
+        return;
+    };
     // Rough dependency order (cublasLt before cublas, cusparse/cublas
     // before cusolver, etc.) - matches the order torch's own preloader
     // uses; harmless if a library has no such ordering constraint.
     const ORDER: &[&str] = &[
-        "cusparselt", "nvtx", "nvjitlink", "cuda_nvrtc", "cuda_runtime", "cuda_cupti", "cublas",
-        "cufft", "curand", "cudnn", "cusparse", "cusolver", "nccl", "cufile", "nvshmem",
+        "cusparselt",
+        "nvtx",
+        "nvjitlink",
+        "cuda_nvrtc",
+        "cuda_runtime",
+        "cuda_cupti",
+        "cublas",
+        "cufft",
+        "curand",
+        "cudnn",
+        "cusparse",
+        "cusolver",
+        "nccl",
+        "cufile",
+        "nvshmem",
     ];
     let dirs: Vec<&str> = ld_path.split(':').collect();
     // Drive the walk from ORDER, not from LD_LIBRARY_PATH's own entry
@@ -689,15 +715,22 @@ fn preload_cuda_deps() {
     // script happened to list these directories.
     for pkg in ORDER {
         let Some(base) = dirs.iter().find(|dir| {
-            std::path::Path::new(dir).parent().and_then(|p| p.file_name()).and_then(|n| n.to_str())
+            std::path::Path::new(dir)
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
                 == Some(*pkg)
         }) else {
             continue;
         };
-        let Ok(entries) = std::fs::read_dir(base) else { continue };
+        let Ok(entries) = std::fs::read_dir(base) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
             if !name.starts_with("lib") || !name.contains(".so") {
                 continue;
             }
@@ -718,7 +751,10 @@ fn main() -> anyhow::Result<()> {
         unsafe {
             let handle = libc::dlopen(c"libcuda.so.1".as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
             if handle.is_null() {
-                eprintln!("[oftrain] dlopen(libcuda.so.1) failed: {:?}", std::ffi::CStr::from_ptr(libc::dlerror()));
+                eprintln!(
+                    "[oftrain] dlopen(libcuda.so.1) failed: {:?}",
+                    std::ffi::CStr::from_ptr(libc::dlerror())
+                );
             } else {
                 let sym = libc::dlsym(handle, c"cuInit".as_ptr());
                 if sym.is_null() {
@@ -753,6 +789,7 @@ fn main() -> anyhow::Result<()> {
         args.v81_churn_coef.is_finite() && args.v81_churn_coef >= 0.0,
         "--v81-churn-coef must be finite and non-negative"
     );
+    anyhow::ensure!(args.bptt_chunk_len > 0, "--bptt-chunk-len must be positive");
     let reward_config = ofcore::curriculum::RewardConfig {
         gamma: args.gamma as f64,
         v81_dom_coef: args.v81_dom_coef,
@@ -773,7 +810,12 @@ fn main() -> anyhow::Result<()> {
         ofcore::curriculum::CurriculumSchedule::Legacy
     };
     let stage_count = ofcore::curriculum::stages_for_schedule(curriculum_schedule).len();
-    anyhow::ensure!(args.stage < stage_count, "--stage {} is outside 0..{}", args.stage, stage_count - 1);
+    anyhow::ensure!(
+        args.stage < stage_count,
+        "--stage {} is outside 0..{}",
+        args.stage,
+        stage_count - 1
+    );
     let stage_env_targets = match args.stage_env_targets.as_deref() {
         Some(spec) => parse_stage_env_targets(spec, stage_count)?,
         None if curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V811 => {
@@ -844,6 +886,7 @@ fn main() -> anyhow::Result<()> {
             foveate: args.foveate,
             gc: args.gc,
             blocks: args.blocks,
+            recurrent_policy: args.recurrent_policy,
             pinned_h2d: args.pinned_h2d,
             fp16_rollout: args.fp16_rollout,
             compact_rollout: args.compact_rollout,
@@ -879,6 +922,8 @@ fn main() -> anyhow::Result<()> {
         stage_lr_decay: args.stage_lr_decay,
         epochs: args.epochs,
         minibatches: args.minibatches,
+        recurrent_policy: args.recurrent_policy,
+        bptt_chunk_len: args.bptt_chunk_len,
         amp: args.amp,
         foveate: args.foveate,
         ae_ckpt: args.ckpt,
