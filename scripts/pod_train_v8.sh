@@ -86,7 +86,9 @@ else
 fi
 V81_ARGS=""
 if [ "$V83_MODE" = "1" ]; then
-  V81_ARGS="--v83-curriculum --v83-close-coef 4.0 --v83-churn-coef 0.06 --v81-dom-coef 0.25 --v81-dominant-loss=true --v81-churn-coef 0.05"
+  # churn_window=16: catch delayed undos (boat→…→cancel), not just adjacent pairs.
+  # This is still a band-aid — fundamental fix is gating free inverse actions.
+  V81_ARGS="--v83-curriculum --v83-close-coef 4.0 --v83-churn-coef 0.06 --v81-dom-coef 0.25 --v81-dominant-loss=true --v81-churn-coef 0.05 --v81-churn-window 16"
 elif [ "$V81_CURRICULUM" = "1" ]; then
   V81_ARGS="--v81-curriculum"
 fi
