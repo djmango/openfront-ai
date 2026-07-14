@@ -28,6 +28,7 @@
 
 <nav class="toc">
   <a href="#now">Now</a> ·
+  <a href="#parity-v4-closeout">Jul 14 parity</a> ·
   <a href="#rust-v8-stability">Jul 13 Rust trainer</a> ·
   <a href="#rust-port">Rust port</a> ·
   <a href="#v8-plan">ppo_v8 plan</a> ·
@@ -60,92 +61,114 @@
 </nav>
 
 <div class="now" id="now">
-  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 13th, 2026</h2>
-  <p><b>The Rust trainer's CUDA failure is now diagnosed structurally, not hidden by a restart
-  loop.</b> LibTorch CUDA streams are thread-local, while <code>oftrain</code> was creating fresh
-  collector/batch/backward threads and moving CUDA-backed state between them before queued kernels
-  completed. NVIDIA Compute Sanitizer found no out-of-bounds memory errors; blocking launches and
-  named synchronization boundaries isolated cross-thread stream ownership as the failure mode.
-  The one-GPU trainer now uses persistent actor and learner owner threads and has advanced the
-  live curriculum to stage 2 without another CUDA fault. See
-  <a href="#rust-v8-stability">the Jul 13 writeup and plan</a>.</p>
-  <p><b>Throughput improved without weakening observations or PPO:</b> the stable one-A40 path
-  moved from roughly 53-60 decisions/s to 81-95 decisions/s on stage 1. Stage-2 mixed-map
-  throughput moved from a mature 32-46 decisions/s to roughly 50-56 with exact shape bucketing,
-  persistent pipeline overlap, compact host arenas, and fused native observation preparation.
-  At stage 3, cached bf16 AE convolution weights raised Rust to 34.2-34.7 decisions/s. A same-A40,
-  same-stage, same-48-env Python run measured 392 game-ticks/s = 26.1 decisions/s without compile;
-  Rust is therefore ~31-33% faster on the paired workload. Python <code>torch.compile</code> spent
-  many minutes tracing dynamic shapes and never completed update 1 in the benchmark.</p>
-  <p><b>The Rust port is real and merged to master</b> (<a href="#rust-port">full session</a>):
-  PPO trainer on tch-rs, the game engine itself running <i>in-process</i> as native Rust (no
-  Node, no pipes, no JSON IPC), ~19 outcome-parity fixes landed, engine stepping at 130-150k
-  ticks/s standalone (~10x the old IPC ceiling), and <b>81-82% sustained GPU utilization</b>
-  (honest time-averaged, not snapshot) through a 150-update A100 stability run. The sweep
-  taught a law: utilization tracks the train/collect compute ratio, so cheaper networks buy
-  throughput and cost util% - decisions/s/$ is the real metric. Pod torn down after
-  validation.</p>
-  <p><b>The stage-0 learning stall is fixed and validated end to end</b>
-  (<a href="#rust-stall-solved">root cause</a>, <a href="#rust-six-done">validation</a>): three
-  silent port omissions (3000 vs Python's 15000-tick episode budget, the never-ported adaptive
-  entropy-floor controller, and the native engine's <code>SpawnExecution</code> missing TS's
-  singleplayer <code>endSpawnPhase()</code> call - every native RL episode was running entirely
-  inside the spawn phase). All three fixed, and on a real A100 run the curriculum now advances
-  stage 0 &rarr; 1 &rarr; 2 within ~2200s. <code>--engine native</code> is now the default.</p>
-  <p><b>Outcome parity got a real fix too:</b> a subagent pair built a curriculum-bot-count
-  parity check (the 78-record archive is uniformly 400 bots, useless for this) and root-caused
-  a genuine bug via tick-level tracing - <code>GameMap::for_each_neighbor4</code> iterated
-  neighbors in the wrong order, silently desyncing PRNG draws in every conquest computation.
-  Fixed; tile-attribution error dropped 46%. Curriculum-relevant parity (bots 0-10) is now
-  genuinely good - real wins, right magnitude, occasional coin-flip on exact winner identity in
-  tight multi-way races. Higher bot counts (30+) still have a smaller residual gap, tracked as
-  a next step, not a blocker.</p>
-  <p>Also: clean AMP A/B (0.505s &rarr; 0.318s per minibatch, real 37% win, no confounds), a
-  model-size re-ask (both sizes learn, full policy more smoothly at this budget - not the clean
-  win hypothesized), and a 4-GPU sanity check (256 envs, ~520 steps/s, curriculum advanced
-  there too). Nothing left blocking a real training run - see
-  <a href="#rust-next">next steps</a>.</p>
-  <p><b>The <code>ppo_v8</code> must-fix prerequisites are done</b> (<a href="#v8-prereqs">details</a>):
-  checkpoint resume (<code>--resume</code>, weights + curriculum stage + entropy-scale + step counters,
-  smoke-tested end to end), HF sync + a crash-loop wrapper (<code>scripts/pod_train_v8.sh</code>), and -
-  found while smoke-testing resume against a stage-2 state - <b>the actual bug that likely killed
-  yesterday's pod1 validation run</b>: the observation batcher assumed every env shares one grid
-  resolution, which is false for every curriculum stage past stage 1 (multiple differently-sized maps)
-  and even earlier stages via rehearsal sampling. Fixed (pad to batch max, real
-  <code>grid_valid</code> mask - <a href="#v8-batch-fix">writeup</a>). Also surfaced a real residual
-  risk while investigating: the proven-safe 64-envs/GPU sizing only covers roughly stage 0-5 -
-  <code>Asia</code>/<code>World</code> (entering at stage 6) are ~9x more grid cells than
-  <code>Onion</code>, so expect to need fewer envs once training gets there; resume makes that a cheap
-  relaunch-with-smaller-config event rather than a lost run. <b>Still not started</b> - model-size/
-  foveation is still an open decision, and launching is the next actual step once that's settled.</p>
-  <p class="d" style="margin:.75rem 0 0">Previous: <b><code>ppo_v7</code> killed</b> (update
-  355, checkpoint on HF) after the <a href="#gpu-util-killed">Python GPU-utilization push</a>
-  plateaued at 70-72% against the Node subprocess bridge - the wall that motivated this whole
-  port.</p>
-  <p>Prior to the util push: the <a href="#v7-fovea">foveated two-stream</a> policy trained
-  from scratch on that pod, coarse /16 stream on the fine-tuned <code>ae_v31_d16c32</code>.
-  rl5 / <code>ppo_v61</code> was killed once v7 cleared stage 0 stably. Two mid-run fixes
-  shipped and held up: the <a href="#v7-boatfix">coarse-boat translator fix</a> (coarse-head
-  tile picks only searched the top-left quarter of the chosen /16 cell) and the
-  <a href="#v7-audit">entropy-controller audit</a> (pegged at its 30x cap in a dead band,
-  drowning the policy gradient for 100+ updates).</p>
-  <p><b>Browser-side live play is deployed</b> on
-  <a href="https://openfrontai.skg.gg">openfrontai.skg.gg</a>: "Play vs Agent" no longer
-  spins up a server GPU/CPU <code>rl.play</code> process. A headless Chromium tab joins the
-  lobby and runs the AE encoder + policy via <code>onnxruntime-web</code> (WASM, Web Worker)
-  - same lobby, same MODEL overlay, inference on the client. See
-  <a href="#webbot">webbot</a>. First live bug after deploy: the bot re-rolled its spawn every
-  decision tick (engine <code>SpawnExecution</code> relinquish+re-place) until a bad pick left
-  it with 0 tiles - fixed by gating spawn on <code>!hasSpawned()</code>.</p>
-  <p class="d" style="margin:.75rem 0 0"><b><a href="#v7-obs">v7</a></b> scope amended late
-  evening: full-state obs expansion (implemented) <b>plus</b> the
-  <a href="#v7-fovea">foveated two-stream resolution</a> (to build) ship as one version, one
-  from-scratch retrain. <b>BC is on moratorium</b> (<a href="#bc-moratorium">why</a>):
-  no <code>bc_v7</code>, <code>ppo_v7</code> launches from scratch. BC re-replay of the 303
-  human games keeps running on the homelab (raw sidecars are cheap and shape-agnostic), but it
-  no longer gates anything. <code>bc_v6</code> frozen; playable pure-BC baseline
-  <code>v6_bc</code> on HF.</p>
+  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 14th, 2026</h2>
+  <p><b>Curriculum outcome parity closed at 48/48 on v4</b>
+  (<a href="#parity-v4-closeout">writeup</a>). The remaining misses were soft
+  desyncs that still left both engines without a winner on a 20k-tick /
+  40-min-timer horizon; fixing rail-station duplicate lookup, warship patrol
+  random bounds (TS <code>nextInt</code> floor on odd negatives), water-path
+  duplicate stalls, and docked-warship heal-before-undock got the set to full
+  pass. Agreed no-winner stalemates with matching rankings now count as a
+  pass (the timer never fires under this record budget).</p>
+  <p><b>The gate itself was the other fire:</b> Node outcomes were already
+  cached; native was replaying every game to tick 20000 and often under
+  <code>CURRICULUM_JOBS=4</code>. Early-exit after a winner, a native outcome
+  cache keyed by engine fingerprint, and exec'ing the prebuilt binary turned
+  iterative re-runs from ~12 minutes into <b>~6ms</b>. Cold wall is still
+  bounded by the longest late/no-winner game.</p>
+  <p>Next: expand the curriculum gate across the broad V8.2 map pool
+  (continents + naval maps, more seeds) and keep chip away at tick-by-tick
+  soft desyncs where curiosity demands it - outcome parity is the training
+  bar; exact hash parity is still the wrong one for RL.</p>
+  <p class="d" style="margin:.75rem 0 0">Previous: Jul 13 Rust trainer CUDA
+  diagnosis / persistent ownership
+  (<a href="#rust-v8-stability">writeup</a>).</p>
 </div>
+
+<h2 class="date" id="parity-v4-closeout">Jul 14, 2026 - curriculum parity closeout: what we learned</h2>
+<p class="session">Outcome gate on <code>curriculum-parity-v4</code> (48 self-play records,
+8 bot-count buckets × 6 seeds, 20k-tick / 40-min timer horizon), plus the gate
+speed work that made iterating on it bearable.</p>
+
+<h3>The bar that matters</h3>
+<p>Exact tick/hash parity is still the wrong instrument for RL. Training needs
+the native engine to produce the <i>same kind of game</i> as TS: same winner
+when one exists, similar terminal timing, similar land share, and - when both
+sides honestly fail to crown a winner before the record ends - matching final
+rankings. The archive of 78 real 400-bot human games answers a different
+question (extreme bot density) and remains a poor curriculum proxy.</p>
+
+<h3>What closed the last gaps on v4</h3>
+<ul>
+  <li><b>Water-path duplicate stalls.</b> TS <code>PathFinderStepper</code> keeps
+  consecutive MiniMapTransformer duplicates as one-tick stalls; native was
+  collapsing them, so transport boats arrived a tick early and everything
+  downstream drifted.</li>
+  <li><b>Docked warship heal-before-undock.</b> TS applies passive+active heal,
+  then handles manual patrol undock; native undocked first and permanently lost
+  5 HP on that tick.</li>
+  <li><b>Warship patrol random bounds.</b> TS <code>nextInt(-range/2, range/2)</code>
+  floors both ends. Rust's integer division rounded odd negative bounds toward
+  zero (<code>-225/2 → -112</code> vs TS <code>-113</code>), shifting the PRNG
+  draw and sending RF warship 241 down a different path by tick ~3115.</li>
+  <li><b>Duplicate TrainStation lookup.</b> TS <code>findStation(unit)</code>
+  returns the first inserted station for a unit; Rust's
+  <code>station_by_unit.insert</code> overwrote with the newest. Moroccan train
+  trade gold then missed a +35k payout and gold desynced at tick 8245.</li>
+  <li><b>Agreed-stalemate policy.</b> With <code>maxTimerValue=40</code> on a
+  20k-tick record, max_timer never fires (~24k ticks needed). Soft-identical
+  boards that both report <code>winner=None</code> are now a pass when
+  final tick, land tiles, and rankings match (ignoring leftover alive bits on
+  zero-tile players).</li>
+</ul>
+<p><b>Result: 48/48 on curriculum-parity-v4.</b> Earlier mid-run scoreboard was
+~36 → 43 → 44 → 46 → 48 as each class of bug landed.</p>
+
+<h3>Why the gate felt "CPU isn't even pinned"</h3>
+<p>Because it wasn't. The shell had <code>CURRICULUM_JOBS=4</code> exported on a
+20-core box while the script default is <code>nproc</code>. Separately:</p>
+<ul>
+  <li>TS oracle was already a cache hit - Node was not the cost.</li>
+  <li>Native replayed every record to the full 20k-tick horizon even after a
+  land-share win at tick ~5k (often 40%+ wasted ticks on winner games).</li>
+  <li><code>cargo run</code> re-checked/rebuilt the binary every invocation.</li>
+</ul>
+<p>Fixes shipped: early-exit after a winner on both TS and native (oracle
+fingerprint rotates once), native outcome cache keyed by engine fingerprint +
+record-set hash, exec the prebuilt <code>outcome_gate</code> binary, default TS
+oracle workers to all cores (was capped at 4). Measured on this host: cold
+compare ~691s (still bounded by the longest late/no-winner game), <b>cached
+re-run ~6ms</b>.</p>
+
+<h3>Tick-by-tick parity, out of curiosity</h3>
+<p>Soft field agreement (<code>alive,tiles,troops,gold,numUnits</code>, and unit
+dumps when needed) is the useful zoom lens when an outcome fails - it is not
+the gate. On the road to 48/48 we routinely saw:</p>
+<ul>
+  <li>Early curriculum games (0-10 bots, small maps) soft-agree for thousands of
+  ticks after the neighbor-order fix; many now soft-agree through the whole
+  record once the boat/warship/rail bugs above landed.</li>
+  <li>Mid/high bot games can still soft-diverge (gold, unit tiles, shell range)
+  long before rankings disagree enough to flip the outcome. That is expected:
+  autonomous bot AI amplifies any PRNG/path difference every tick.</li>
+  <li>Exact <code>game.hash()</code> bit-identity remains fragile (IEEE noise,
+  intentional early-exit changing <code>finalTick</code> on winner games) and
+  is not what training needs.</li>
+</ul>
+<p>Tooling that made the grind possible: <code>scripts/bisect_parity.sh</code>
+(coarse then fine), <code>OF_DUMP_TICKS_FROM</code> / unit dumps including
+<code>patrolTile</code>, and clearing leaked dump env vars before coarse passes
+so bisects stop lying about first divergence.</p>
+
+<h3>What we are expanding next</h3>
+<p>v4's map coverage was thin at the high end (mostly the seven legacy
+curriculum names, 6 seeds/bucket). The generator now fans mid/late buckets
+across the broad V8.2-ish pool available on the pinned openfront
+(Europe, Britannia, GreatLakes, continents, EastAsia, MiddleEast, Japan,
+Caribbean, Iceland, FourIslands, …) and we are spinning a larger
+<code>curriculum-parity-v5</code> set (128 games, 16 seeds/bucket) to see
+whether 48/48 was "these 48" or "the class of games the trainer actually
+samples."</p>
 
 <h2 class="date" id="rust-v8-stability">Jul 13, 2026 - Rust PPO CUDA diagnosis, persistent ownership, and the path past Python</h2>
 <p class="session">The goal was not "restart when CUDA dies." It was a stable trainer that can be
