@@ -42,7 +42,11 @@ set -uo pipefail
 
 V83_MODE="${V83_MODE:-0}"
 V84_MODE="${V84_MODE:-0}"
-if [ "$V84_MODE" = "1" ]; then
+V85_MODE="${V85_MODE:-0}"
+if [ "$V85_MODE" = "1" ]; then
+  RUN_NAME="${RUN_NAME:-ppo_v85}"
+  NUM_GPUS="${NUM_GPUS:-4}"
+elif [ "$V84_MODE" = "1" ]; then
   RUN_NAME="${RUN_NAME:-ppo_v84}"
   NUM_GPUS="${NUM_GPUS:-4}"
 elif [ "$V83_MODE" = "1" ]; then
@@ -56,7 +60,7 @@ V81_CURRICULUM="${V81_CURRICULUM:-0}"
 # Envs per GPU/shard. Live A40 A/Bs found 48 faster than 64 once the
 # persistent compact path was enabled (64 increased stage-2 tail latency).
 # V8.4 doubles rollout length, so default fewer envs to keep VRAM in band.
-if [ "$V84_MODE" = "1" ]; then
+if [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ]; then
   NUM_ENVS="${NUM_ENVS:-16}"
 elif [ "$V81_CURRICULUM" = "1" ] || [ "$V83_MODE" = "1" ]; then
   NUM_ENVS="${NUM_ENVS:-24}"
@@ -64,7 +68,7 @@ else
   NUM_ENVS="${NUM_ENVS:-48}"
 fi
 STAGE_ENV_TARGETS="${STAGE_ENV_TARGETS:-}"
-if [ "$V84_MODE" = "1" ]; then
+if [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ]; then
   ROLLOUT_LEN="${ROLLOUT_LEN:-64}"
   BPTT_CHUNK_LEN="${BPTT_CHUNK_LEN:-32}"
 else
@@ -77,7 +81,7 @@ fi
 MINIBATCH_SIZE="${MINIBATCH_SIZE:-128}"
 MINIBATCHES=$((NUM_ENVS * ROLLOUT_LEN / MINIBATCH_SIZE))
 [ "$MINIBATCHES" -ge 1 ] || MINIBATCHES=1
-if [ "$V84_MODE" = "1" ] || [ "$V83_MODE" = "1" ]; then
+if [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ] || [ "$V83_MODE" = "1" ]; then
   STAGE="${STAGE:-5}"
 else
   STAGE="${STAGE:-0}"
@@ -92,7 +96,7 @@ NODE_FRACTION="${NODE_FRACTION:-0}"
 # persistent owner threads, rollout payloads cross threads as compact host
 # data, and two env groups overlap stepping with actor inference. Keep
 # fp16-rollout opt-in until it receives the same extended CUDA soak.
-if [ "$V84_MODE" = "1" ]; then
+if [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ]; then
   EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --fp16-rollout --persistent-actors --work-conserving-actors --pipeline-groups=true --recurrent-policy --bptt-chunk-len $BPTT_CHUNK_LEN --ckpt-every 5 --eval-every 0 --log-every 1 --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
 elif [ "$V83_MODE" = "1" ]; then
   EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --fp16-rollout --persistent-actors --work-conserving-actors --pipeline-groups=true --recurrent-policy --bptt-chunk-len 16 --ckpt-every 5 --eval-every 0 --log-every 1 --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
@@ -100,7 +104,12 @@ else
   EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --persistent-actors --pipeline-groups=true --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
 fi
 V81_ARGS=""
-if [ "$V84_MODE" = "1" ]; then
+if [ "$V85_MODE" = "1" ]; then
+  # V8.5: win-first urgency + embargo/combat outcomes on top of V8.4 boats.
+  # Tempo kicks at land/strength share 0.30 (was 0.55). Extra win bonus makes
+  # terminal win dominate shaping. Negative coeffs use --flag=val for clap.
+  V81_ARGS="--v83-curriculum --v83-close-coef 4.0 --v83-churn-coef 0.06 --v81-dom-coef 0.25 --v81-dominant-loss=true --v81-churn-coef 0.05 --v81-churn-window 16 --v84-boat-useful 0.15 --v84-boat-destroyed=-0.20 --v84-boat-cancelled=-0.03 --v84-boat-own-shore=-0.05 --v84-boat-min-stage 4 --v84-tempo-coef 0.015 --v84-tempo-min-stage 4 --v84-fast-win-coef 12.0 --v85-tempo-share-threshold 0.30 --v85-extra-win-bonus 30.0 --v85-embargo-bad-stop=-0.15 --v85-embargo-good-stop 0.02 --v85-embargo-min-stage 4 --v85-premature-retreat=-0.10 --v85-thrash-reengage=-0.10 --v85-combat-min-stage 4"
+elif [ "$V84_MODE" = "1" ]; then
   # V8.4: boat-outcome + tempo + fast-win on top of V8.3 closeout curriculum.
   # Longer BPTT/rollout (32/64) for delayed boat credit; still reward-only
   # so ppo_v83 weights resume with --migrate-v83-to-v84.
@@ -123,6 +132,7 @@ HF_REPO_ID="${HF_REPO_ID:-djmango/openfront-rl}"
 HF_RUN_PREFIX="${HF_RUN_PREFIX:-$RUN_NAME}"
 V83_SOURCE_PREFIX="${V83_SOURCE_PREFIX:-ppo_v82}"
 V84_SOURCE_PREFIX="${V84_SOURCE_PREFIX:-ppo_v83}"
+V85_SOURCE_PREFIX="${V85_SOURCE_PREFIX:-ppo_v84}"
 # The current RunPod A40 host advertises direct CUDA P2P, but its first NCCL
 # collective wedges on that transport. Shared-memory transport reduced the
 # same 48 MiB gradient in ~113 ms. Override only after a host-specific P2P
@@ -309,6 +319,11 @@ if [ "$V84_MODE" = "1" ] && [ -f "$CKPT_DIR/latest.safetensors" ] \
   echo "FATAL: V8.4 resume requires manifest.json beside the checkpoint pair" >&2
   exit 1
 fi
+if [ "$V85_MODE" = "1" ] && [ -f "$CKPT_DIR/latest.safetensors" ] \
+  && [ ! -f "$CKPT_DIR/manifest.json" ]; then
+  echo "FATAL: V8.5 resume requires manifest.json beside the checkpoint pair" >&2
+  exit 1
+fi
 
 # V8.3 starts from the immutable V8.2 latest pair exactly once. The source
 # remains in ppo_v82 (or a separate read-only restore directory); all output
@@ -358,6 +373,30 @@ if [ "$V84_MODE" = "1" ] && [ ! -f "$CKPT_DIR/latest.safetensors" ]; then
   fi
 fi
 
+
+# V8.5 seeds once from ppo_v84 (reward-only win-urgency + thrash outcomes).
+V85_SEED_DIR=""
+if [ "$V85_MODE" = "1" ] && [ ! -f "$CKPT_DIR/latest.safetensors" ]; then
+  LOCAL_V84_DIR="$REPO_DIR/rust/checkpoints/$V85_SOURCE_PREFIX"
+  if [ -f "$LOCAL_V84_DIR/latest.safetensors" ] \
+    && [ -f "$LOCAL_V84_DIR/latest.state.json" ] \
+    && [ -f "$LOCAL_V84_DIR/manifest.json" ]; then
+    V85_SEED_DIR="$LOCAL_V84_DIR"
+  else
+    V85_SEED_DIR="$REPO_DIR/rust/checkpoints/.v85-seed-v84"
+    rm -rf "$V85_SEED_DIR"
+    mkdir -p "$V85_SEED_DIR"
+    "$OFHF" pull --checkpoint-dir "$V85_SEED_DIR" --repo-id "$HF_REPO_ID" \
+      --run-prefix "$V85_SOURCE_PREFIX"
+  fi
+  if [ ! -f "$V85_SEED_DIR/latest.safetensors" ] \
+    || [ ! -f "$V85_SEED_DIR/latest.state.json" ] \
+    || [ ! -f "$V85_SEED_DIR/manifest.json" ]; then
+    echo "FATAL: V8.5 migration requires a complete V8.4 safetensors/state/manifest seed" >&2
+    exit 1
+  fi
+fi
+
 # --- background HF sync: immutable snapshots of latest, best-eval,
 # milestones, state sidecars, and the run manifest. Fail loud without token. ---
 if [ -z "${HF_TOKEN:-}" ]; then
@@ -379,13 +418,19 @@ while true; do
   RESUME=""
   if [ -f "$CKPT_DIR/latest.safetensors" ]; then
     RESUME="--resume $CKPT_DIR/latest.safetensors"
-    if [ "$V84_MODE" = "1" ]; then
+    if [ "$V85_MODE" = "1" ]; then
+      if ! grep -q "v8.5-win-urgency-v1" "$CKPT_DIR/latest.state.json" 2>/dev/null; then
+        RESUME="$RESUME --migrate-v84-to-v85"
+      fi
+    elif [ "$V84_MODE" = "1" ]; then
       # First resume from a V8.3 seed writes V8.4 profile into the new run
       # dir; subsequent resumes already carry the V8.4 profile.
       if ! grep -q "v8.4-boat-tempo-v1" "$CKPT_DIR/latest.state.json" 2>/dev/null; then
         RESUME="$RESUME --migrate-v83-to-v84"
       fi
     fi
+  elif [ "$V85_MODE" = "1" ] && [ -n "$V85_SEED_DIR" ]; then
+    RESUME="--resume $V85_SEED_DIR/latest.safetensors --migrate-v84-to-v85"
   elif [ "$V84_MODE" = "1" ] && [ -n "$V84_SEED_DIR" ]; then
     RESUME="--resume $V84_SEED_DIR/latest.safetensors --migrate-v83-to-v84"
   elif [ "$V83_MODE" = "1" ] && [ -n "$V83_SEED_DIR" ]; then
