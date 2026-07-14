@@ -171,7 +171,7 @@ fn env_or(key: &str, default: &str) -> String {
 }
 
 fn play_config(inner: &HubInner) -> Value {
-    // PLAY_MAP=random (default) picks uniformly from SHOWCASE_MAPS each lobby.
+    // PLAY_MAP=random (default) picks uniformly from curriculum ALL_MAPS each lobby.
     let game_map = if inner.play_map.is_empty()
         || inner.play_map.eq_ignore_ascii_case("random")
     {

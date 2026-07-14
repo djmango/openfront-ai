@@ -26,9 +26,6 @@ def showcase_seeds() -> list[str]:
 
 def showcase_maps() -> list[str]:
     """Maps to pre-render for /watch; hub picks a random featured entry."""
-    raw = os.environ.get("SHOWCASE_MAPS")
-    if raw:
-        return [m.strip() for m in raw.split(",") if m.strip()]
     from rl.curriculum import ALL_MAPS
 
     return list(ALL_MAPS)

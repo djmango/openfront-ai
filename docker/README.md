@@ -19,9 +19,9 @@ replay on HF policy changes. `/watch` opens it in the real client with the
 MODEL overlay.
 
 **Play (on click):** `ofshowcase hub` creates a private lobby (random map from
-`SHOWCASE_MAPS` by default), launches `scripts/webbot_launcher.py` (greedy)
-for the in-browser ONNX agent, redirects you to the lobby. Only one Play
-lobby runs at a time - a second click gets a short busy page.
+the curriculum pool), launches `scripts/webbot_launcher.py` (greedy) for the
+in-browser ONNX agent, redirects you to the lobby. Only one Play lobby runs
+at a time - a second click gets a short busy page.
 
 **Archive:** `ofshowcase archive` serves GameRecords + clips for the client
 replay API (`/archive/*`).
@@ -38,8 +38,7 @@ docker run --rm -p 8086:8086 -v openfront-eval-data:/data openfront-eval
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RUN_NAME` | `ppo_v81` | HF policy run under `djmango/openfront-rl` |
-| `SHOWCASE_MAPS` | curriculum `ALL_MAPS` | Comma-separated map **keys** for Watch clips + random Play |
-| `PLAY_MAP` | `random` | Live play map key, or `random` to sample `SHOWCASE_MAPS` |
+| `PLAY_MAP` | `random` | Live play map key, or `random` to sample the curriculum pool |
 | `PLAY_BOTS` | `10` | Tribe bots |
 | `PLAY_NATIONS` | `1` | Nation opponents |
 | `PLAY_START_DELAY` | `30` | Lobby countdown (seconds) |
