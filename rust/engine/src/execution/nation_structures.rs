@@ -219,7 +219,7 @@ fn build_reachable_stations(game: &Game, small_id: u16) -> Vec<ReachableStation>
             if !station_types.contains(&u.unit_type.as_str()) {
                 continue;
             }
-            if let Some(station_id) = rn.find_station_by_unit(u.id) {
+            if let Some(station_id) = rn.find_latest_station_by_unit(u.id) {
                 let cluster = rn.stations.get(&station_id).and_then(|s| s.cluster);
                 result.push(ReachableStation {
                     tile: u.tile as TileRef,
@@ -252,7 +252,7 @@ fn build_reachable_stations(game: &Game, small_id: u16) -> Vec<ReachableStation>
             if !station_types.contains(&u.unit_type.as_str()) {
                 continue;
             }
-            if let Some(station_id) = rn.find_station_by_unit(u.id) {
+            if let Some(station_id) = rn.find_latest_station_by_unit(u.id) {
                 let cluster = rn.stations.get(&station_id).and_then(|s| s.cluster);
                 result.push(ReachableStation {
                     tile: u.tile as TileRef,

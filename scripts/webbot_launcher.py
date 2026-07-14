@@ -5,17 +5,17 @@ place of the old server-side GPU/CPU process (rl.play).
 The agent's observation featurization + AE/policy inference all run inside
 the page via onnxruntime-web (WASM, single-threaded, off the main thread in
 a Web Worker) - this process just drives the browser tab and stays alive for
-the lifetime of the game so showcase_hub.py can track/terminate it exactly
-like it did the old rl.play subprocess (poll/wait/terminate on this PID).
+the lifetime of the game so `ofshowcase hub` can track/terminate it exactly
+like the old rl.play subprocess (poll/wait/terminate on this PID).
 
 Exits as soon as src/client/webbot/main.ts sets window.__webbotDone (game
-won/lost) so showcase_hub.py's `_active_proc.poll()` frees up and the next
-/play visitor gets a fresh lobby instead of piling into a finished game.
+won/lost) so the hub's active-lobby poll frees up and the next /play visitor
+gets a fresh lobby instead of piling into a finished game.
 
 If --debug-port is given, serves the same {actions, log} JSON shape the old
 rl.play --debug-port server did at /debug/<gameID>, so the client's MODEL
 overlay (patches/client-replay-tooling.patch's RlDebugOverlay, proxied by
-showcase_hub.py's /play/debug/<id>) keeps working - just sourced from this
+`ofshowcase hub`'s /play/debug/<id>) keeps working - just sourced from this
 page's window.__webbotDebug instead of a separate Python inference process.
 
 Usage:

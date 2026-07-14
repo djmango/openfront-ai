@@ -13,16 +13,18 @@ record's engine commit so the openfront submodule stays clean):
     it fetches <apiHost>/debug/<gameID>, which the shim serves from the
     rl.watch debug sidecar (<record>.debug.json)
 
-The same overlay works in a normal browser (manual serve_replay workflow)
-and in live games against rl.play --debug-port (localStorage rlDebugHost).
+The same overlay works in a normal browser (manual `ofshowcase archive`
+workflow) and in live games against webbot / rl.play --debug-port
+(localStorage rlDebugHost).
 
 Usage:
   uv run python scripts/render_client_replay.py \
       --record replays/v3_stage0.json --out replays/v3_client.webm
 
-Requires: `uv run playwright install chromium` (one-time). Starts
-serve_replay.py itself; starts the vite client too unless one is already
-on --client-port.
+Requires: `uv run playwright install chromium` (one-time) and a built
+`ofshowcase` (`cargo build --release -p ofhub`). Starts `ofshowcase
+archive` itself; starts the vite client too unless one is already on
+--client-port.
 """
 
 from __future__ import annotations
@@ -42,6 +44,27 @@ import urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+
+
+def ofshowcase_bin() -> Path:
+    env = os.environ.get("OFSHOWCASE")
+    if env:
+        p = Path(env)
+        if p.is_file():
+            return p
+    for candidate in (
+        REPO / "rust/target/release/ofshowcase",
+        REPO / "rust/target/debug/ofshowcase",
+    ):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    which = shutil.which("ofshowcase")
+    if which:
+        return Path(which)
+    raise FileNotFoundError(
+        "ofshowcase not found; build with: cargo build --release -p ofhub "
+        "(or set OFSHOWCASE=/path/to/ofshowcase)"
+    )
 
 
 def port_open(port: int) -> bool:
@@ -196,9 +219,19 @@ def render_record(
         try:
             if not reuse_services or not port_open(api_port):
                 procs.append(subprocess.Popen(
-                    [sys.executable, "scripts/serve_replay.py",
-                     "--records", str(record.parent), "--port", str(api_port)],
-                    cwd=REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    [
+                        str(ofshowcase_bin()),
+                        "archive",
+                        "--records",
+                        str(record.parent),
+                        "--port",
+                        str(api_port),
+                        "--bind",
+                        "127.0.0.1",
+                    ],
+                    cwd=REPO,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                 ))
             if not reuse_services or not port_open(client_port):
                 print("starting vite client (first boot takes ~15s)...")
@@ -357,7 +390,7 @@ def main() -> None:
     ap.add_argument("--overlay", action=argparse.BooleanOptionalAction, default=True,
                     help="model debug panel from <record>.debug.json (--no-overlay to disable)")
     ap.add_argument("--reuse-services", action="store_true",
-                    help="use existing serve_replay + vite on api/client ports")
+                    help="use existing ofshowcase archive + vite on api/client ports")
     ap.add_argument("--trim-gameplay", action="store_true",
                     help="ffmpeg-trim load-in before replay starts")
     ap.add_argument("--max-duration", type=int, default=0,

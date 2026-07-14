@@ -94,6 +94,16 @@ impl RailNetwork {
         self.station_by_unit.get(&unit_id).copied()
     }
 
+    /// TS callers that scan `StationManager.getAll()` and assign into a `Map<Unit, ...>`
+    /// keep the last active station object for duplicate station executions.
+    pub(crate) fn find_latest_station_by_unit(&self, unit_id: i32) -> Option<u32> {
+        self.stations
+            .values()
+            .filter(|station| station.unit_id == unit_id)
+            .map(|station| station.id)
+            .max()
+    }
+
     fn station_neighbors(&self, station_id: u32) -> Vec<u32> {
         let Some(st) = self.stations.get(&station_id) else {
             return Vec::new();
@@ -1184,12 +1194,22 @@ mod tests {
             Some(first),
             "lookup should preserve TS first-insertion semantics"
         );
+        assert_eq!(
+            game.rail_network.find_latest_station_by_unit(factory),
+            Some(second),
+            "StationManager.getAll()+Map.set callers should observe the newest duplicate"
+        );
 
         remove_station(&mut game, factory);
         assert_eq!(
             game.rail_network.find_station_by_unit(factory),
             Some(second),
             "after the first duplicate is removed, lookup advances to the next"
+        );
+        assert_eq!(
+            game.rail_network.find_latest_station_by_unit(factory),
+            Some(second),
+            "with only one active duplicate, both lookup modes agree"
         );
     }
 }
