@@ -782,6 +782,21 @@ fn resolve_startup_envs_per_shard(
     stage
 }
 
+/// Cap a pending resize request to `--max-envs` when autoscale is on, so a
+/// stale oversized `requested_env_target` (or an old restart request) cannot
+/// OOM the next boot.
+fn clamp_resolved_envs_to_autoscale_max(
+    resolved: usize,
+    auto_scale_envs: bool,
+    max_envs: usize,
+) -> usize {
+    if auto_scale_envs && max_envs > 0 {
+        resolved.min(max_envs).max(1)
+    } else {
+        resolved.max(1)
+    }
+}
+
 fn state_sidecar_path(ckpt_path: &str) -> String {
     let stem = ckpt_path
         .strip_suffix(".safetensors")
@@ -6656,11 +6671,15 @@ pub fn run(mut cfg: Config) -> Result<()> {
     let restart_path = restart_request_path(&cfg.ckpt_dir);
     let fulfilling_restart = std::path::Path::new(&restart_path).exists();
     let stage_target = cfg.stage_env_targets.get(start_stage).copied();
-    let resolved = resolve_startup_envs_per_shard(
-        cfg.num_envs,
-        stage_target,
-        resumed_state.as_ref(),
-        fulfilling_restart,
+    let resolved = clamp_resolved_envs_to_autoscale_max(
+        resolve_startup_envs_per_shard(
+            cfg.num_envs,
+            stage_target,
+            resumed_state.as_ref(),
+            fulfilling_restart,
+        ),
+        cfg.auto_scale_envs,
+        cfg.max_envs,
     );
     if cfg.num_envs != resolved {
         println!(
