@@ -265,6 +265,8 @@ pub struct PlayerE {
     pub alive: bool,
     pub traitor: bool,
     pub embargoes: Vec<usize>,
+    /// `(other_player_id, relation_score)` from engine obs (reward-only).
+    pub relations: Vec<(usize, f64)>,
     pub reqs_in: usize,
     pub reqs_out: usize,
     pub targets: Vec<usize>,
@@ -272,6 +274,31 @@ pub struct PlayerE {
     pub gold_income: f64,
     pub doomsday: bool,
     pub doomsday_ticks: f64,
+}
+
+fn relation_list(v: &Value) -> Vec<(usize, f64)> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|pair| {
+                    let arr = pair.as_array()?;
+                    let id = arr.first()?.as_u64()? as usize;
+                    let score = arr.get(1).map(num).unwrap_or(0.0);
+                    Some((id, score))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+impl PlayerE {
+    pub fn relation_to(&self, other: usize) -> f64 {
+        self.relations
+            .iter()
+            .find(|(id, _)| *id == other)
+            .map(|(_, v)| *v)
+            .unwrap_or(0.0)
+    }
 }
 
 pub struct AttackE {
@@ -310,6 +337,7 @@ pub fn parse_ents(v: &Value) -> EntsData {
                         alive: p["alive"].as_bool().unwrap_or(false),
                         traitor: p["traitor"].as_bool().unwrap_or(false),
                         embargoes: id_list(&p["embargoes"]),
+                        relations: relation_list(&p["relations"]),
                         reqs_in: p["reqsIn"].as_array().map_or(0, |x| x.len()),
                         reqs_out: p["reqsOut"].as_array().map_or(0, |x| x.len()),
                         targets: id_list(&p["targets"]),

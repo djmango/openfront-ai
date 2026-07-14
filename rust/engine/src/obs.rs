@@ -88,6 +88,13 @@ pub fn entities(game: &Game) -> Value {
                 "alive": p.alive,
                 "traitor": game.is_traitor(sid),
                 "embargoes": value_array(p.embargoes.keys()),
+                // Sparse relation scores for RL reward (V8.5 embargo outcome).
+                // Not consumed by the policy featurizer — reward-only.
+                "relations": p
+                    .relations
+                    .iter()
+                    .map(|(other, &v)| json!([other, v]))
+                    .collect::<Vec<_>>(),
                 "reqsIn": value_array(
                     game.incoming_alliance_requests(sid)
                         .iter()

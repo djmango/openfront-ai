@@ -28,6 +28,9 @@
 
 <nav class="toc">
   <a href="#now">Now</a> ·
+  <a href="#v86-attack-fair">Jul 14 V8.6</a> ·
+  <a href="#v85-win-urgency">Jul 14 V8.5</a> ·
+  <a href="#v84-boat-tempo">Jul 14 V8.4</a> ·
   <a href="#parity-v4-closeout">Jul 14 parity</a> ·
   <a href="#rust-v8-stability">Jul 13 Rust trainer</a> ·
   <a href="#rust-port">Rust port</a> ·
@@ -62,28 +65,170 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 14th, 2026</h2>
-  <p><b>Curriculum outcome parity closed at 48/48 on v4</b>
-  (<a href="#parity-v4-closeout">writeup</a>). The remaining misses were soft
-  desyncs that still left both engines without a winner on a 20k-tick /
-  40-min-timer horizon; fixing rail-station duplicate lookup, warship patrol
-  random bounds (TS <code>nextInt</code> floor on odd negatives), water-path
-  duplicate stalls, and docked-warship heal-before-undock got the set to full
-  pass. Agreed no-winner stalemates with matching rankings now count as a
-  pass (the timer never fires under this record budget).</p>
-  <p><b>The gate itself was the other fire:</b> Node outcomes were already
-  cached; native was replaying every game to tick 20000 and often under
-  <code>CURRICULUM_JOBS=4</code>. Early-exit after a winner, a native outcome
-  cache keyed by engine fingerprint, and exec'ing the prebuilt binary turned
-  iterative re-runs from ~12 minutes into <b>~6ms</b>. Cold wall is still
-  bounded by the longest late/no-winner game.</p>
-  <p>Next: expand the curriculum gate across the broad V8.2 map pool
-  (continents + naval maps, more seeds) and keep chip away at tick-by-tick
-  soft desyncs where curiosity demands it - outcome parity is the training
-  bar; exact hash parity is still the wrong one for RL.</p>
+  <p><b>V8.6 attack-fair as <code>ppo_v86</code></b>
+  (<a href="#v86-attack-fair">writeup</a>), resumed from live <code>ppo_v85</code>.
+  Reward audit: sticky combat refresh + churn stack made attacking a trap;
+  tempo@0.30 vs dominant-loss@0.55 left a punishment valley; strength asymmetry
+  taxed attack variance; death was cheaper than mid-place; boats merging into
+  open attacks misclassified Destroyed; first-step strength delta was free.
+  All fixed reward-only.</p>
+  <p>Also today: V8.5 win-urgency
+  (<a href="#v85-win-urgency">writeup</a>) and curriculum outcome parity closed
+  at 48/48 on v4 (<a href="#parity-v4-closeout">writeup</a>).</p>
   <p class="d" style="margin:.75rem 0 0">Previous: Jul 13 Rust trainer CUDA
   diagnosis / persistent ownership
   (<a href="#rust-v8-stability">writeup</a>).</p>
 </div>
+
+<h2 class="date" id="v86-attack-fair">Jul 14, 2026 - V8.6: attack-fair reward fixes</h2>
+<p class="session">V8.5 mid-run “unlearning” audit → reward-only <code>ppo_v86</code>
+that resumes the same weights.</p>
+
+<h3>What the audit found</h3>
+<ul>
+  <li><b>Sticky combat refresh:</b> every reinforce rewrote <code>last_attack_decision</code>,
+    so nearly every retreat paid premature −0.10 <i>and</i> AttackRetreat churn −0.05.</li>
+  <li><b>Tempo / dominant-loss mismatch:</b> tempo drains from share 0.30, but loss-weight
+    relief only at 0.55 — and ~80% of stage-8 eps never reach 0.55.</li>
+  <li><b>Strength asymmetry:</b> <code>W_DELTA_GAIN=5</code> vs <code>W_DELTA_LOSS=6.5</code>
+    taxes the troop-burn-before-land shape of every attack.</li>
+  <li><b>Death too cheap:</b> <code>W_DEATH=1</code> vs positive place terminal.</li>
+  <li><b>Boat merge → Destroyed:</b> landing into an existing sourced attack has no new
+    attack id and ~0 refund.</li>
+  <li><b>First-step windfall:</b> <code>prev_strength=0</code> at reset → free +gain×share.</li>
+</ul>
+
+<h3>V8.6 design (still checkpoint-compatible)</h3>
+<table>
+  <tr><th>Knob</th><th>V8.5</th><th>V8.6</th></tr>
+  <tr><td>Reward profile</td><td><code>v8.5-win-urgency-v1</code></td><td><code>v8.6-attack-fair-v1</code></td></tr>
+  <tr><td>Dominance threshold</td><td>0.55</td><td><b>0.30</b> (matches tempo)</td></tr>
+  <tr><td>Delta loss / dominant</td><td>6.5 / 5.25</td><td><b>5.5</b> / 5.0; symmetric while attack open</td></tr>
+  <tr><td>Premature / thrash</td><td>−0.10 / −0.10 + churn stack</td><td>−0.03 / −0.03; first-open sticky; skip combat churn</td></tr>
+  <tr><td>Death</td><td>1.0</td><td><b>10.0</b></td></tr>
+  <tr><td>Boat landing</td><td>new sourced attack only</td><td>also any open sourced attack (no big refund)</td></tr>
+  <tr><td>prev_strength</td><td>0 at reset</td><td>seeded from initial / spawn composite</td></tr>
+  <tr><td>Migrate</td><td><code>--migrate-v84-to-v85</code></td><td><code>--migrate-v85-to-v86</code></td></tr>
+</table>
+<p>Launch: <code>SKIP_SYNC=1 V86_MODE=1</code> → <code>ppo_v86</code>, seed from <code>ppo_v85</code>.</p>
+
+<h2 class="date" id="v85-win-urgency">Jul 14, 2026 - V8.5: win-first urgency, embargo + combat outcomes</h2>
+<p class="session">Overnight <code>ppo_v84</code> audit → reward-only <code>ppo_v85</code>
+that resumes the same weights.</p>
+
+<h3>What V8.4 taught overnight</h3>
+<ul>
+  <li>Boats improved: useful landing fraction ~53–59% on stages 7–8; boat reward positive.</li>
+  <li><b>~80% of stage-8 episodes never reach dominance (0.55)</b>; median max land ~0.09.
+    Tempo (gated on 0.55) only fired on ~14% of episodes.</li>
+  <li>Embargo thrash remains the main dumb pattern — even on <i>closeout winners</i>
+    (~7.5 embargo pairs/ep). Attack↔retreat secondary.</li>
+  <li>On winners, terminal (~42) already dwarfs shaping; on the other 80%, PPO mostly
+    trains strength/death/boat crumbs because win never arrives.</li>
+</ul>
+
+<h3>V8.5 design (still checkpoint-compatible)</h3>
+<table>
+  <tr><th>Knob</th><th>V8.4</th><th>V8.5</th></tr>
+  <tr><td>Reward profile</td><td><code>v8.4-boat-tempo-v1</code></td><td><code>v8.5-win-urgency-v1</code></td></tr>
+  <tr><td>Extra win bonus</td><td>—</td><td>+30 on win (W_WIN 30 → effective 60)</td></tr>
+  <tr><td>Fast-win coef</td><td>8</td><td>12</td></tr>
+  <tr><td>Tempo coef / threshold</td><td>0.005 @ 0.55</td><td>0.015 @ <b>0.30</b></td></tr>
+  <tr><td>Embargo</td><td>flat churn only</td><td>stop while Hostile/Distrustful −0.15; recovered +0.02</td></tr>
+  <tr><td>Attack/retreat</td><td>flat churn only</td><td>premature retreat / thrash reengage −0.10 each</td></tr>
+  <tr><td>Migrate</td><td><code>--migrate-v83-to-v84</code></td><td><code>--migrate-v84-to-v85</code></td></tr>
+</table>
+<p>Relations are now emitted in native entities obs (reward-only; policy tensors unchanged).
+Embargo-stop is priced from the pre-step relation score. Combat outcomes use a sticky
+decision window (same length as churn window).</p>
+
+<h2 class="date" id="v84-boat-tempo">Jul 14, 2026 - V8.3 → V8.4: what we learned about boats, greedy, and churn</h2>
+<p class="session">Live <code>ppo_v83</code> on 4×A40 (optimized trainer), then design of
+reward-only <code>ppo_v84</code> that resumes the same weights.</p>
+
+<h3>V8.3 closeout worked — then the real failure mode showed up</h3>
+<p>Migrated from V8.2 stage 5 into V8.3’s inserted Easy closeout stage
+(Onion/Pangaea/Caucasus, 10 Easy bots, Exact(6) nations, win_at 0.45) with
+land-share potential Φ from 0.45→0.80 and a dual advancement gate (wins +
+conversion). Early episodes were deaths at ~0.15–0.18 max land; within ~15
+updates it was hitting ~0.80 land and converting. At advance: <b>14/25 wins</b>,
+<b>14/14 conversions</b> among qualifiers. Across 57 finished stage-5 episodes:
+26 wins, 27 closeout reaches, 26/27 converted. Optimized infra held ~80–100%
+GPU util after the NCCL SHM / fused BPTT / cross-map batching work.</p>
+<p>Stage 6 (30 Easy, broader maps, 16 envs/shard) is where playtesting hurt:
+under <b>greedy</b> the mode action is often <code>boat</code>, and coordinate
+overlays show destinations are effectively random. Stochastic training still
+explores attack/build, so train metrics look “kind of OK” while deployment-style
+play looks brain-dead.</p>
+
+<h3>Greedy vs sampling is not the training bug</h3>
+<p>Play/eval should be greedy; PPO rollouts must stay stochastic. Mixing greedy
+trajectories into training does not invent a better mode — if greedy boat-spam
+is already bad, you either reinforce a free launch or add noisy on-policy junk.
+Temperature does not exist in this stack; exploration is softmax + entropy
+floor. The webbot path has <code>--greedy</code>; <code>rl/play</code> /
+<code>play_live.sh</code> default to sampling and will lie to you.</p>
+
+<h3>Why it does not “just learn boats are bad”</h3>
+<ol>
+  <li><b>Launch is nearly free under strength.</b> Fielded troops aboard
+  transports still count in the military share (v6.2 fixed cancel-farming).
+  So <code>boat</code> does not create an immediate <code>strength_delta</code>
+  slap for a stupid destination.</li>
+  <li><b>Real cost is delayed past credit assignment.</b> Land/die/cancel
+  happens many decisions later; BPTT was 16. The action head learns “boat is
+  an okay spam,” the tile head never sees which (x,y) caused pain.</li>
+  <li><b>Legal ≠ good.</b> Boat tile mask is reachable non-owned land, not
+  useful shore. Random among legal cells is reward-equivalent until much later.</li>
+  <li><b>Waste is tiny and wrong-shaped.</b> <code>W_WASTE=0.01</code> only
+  when translate fails. A successfully launched stupid boat is not waste.</li>
+  <li><b>Win is too sparse to train the tile head.</b> “Random boats slightly
+  lower P(win)” loses to dense strength that treats launch as neutral.</li>
+</ol>
+<p>Longer GRU/BPTT helps a little; it does not invent a boat-quality signal.
+Bigger GRU also breaks the checkpoint. So V8.4 keeps hidden size 256, bumps
+BPTT/rollout to <b>32/64</b>, and adds an explicit outcome term.</p>
+
+<h3>Churn is a band-aid; embargo thrash dominated</h3>
+<p>Across 161 V8.3 episodes the inverse-pair counts were roughly:
+embargo↔stop <b>333</b>, attack↔retreat <b>211</b>, boat↔cancel <b>70</b>.
+Window=2 only caught adjacent undos; we bumped to 16. That still does not
+explain boat addiction — and explicit churn is not the fundamental fix for
+free reversible actions (mask/gate inverses or price outcomes).</p>
+
+<h3>V8.4 design (reward-only, resume from <code>ppo_v83</code>)</h3>
+<table>
+  <tr><th>Knob</th><th>V8.3</th><th>V8.4</th></tr>
+  <tr><td>Weights / schema</td><td>recurrent v2</td><td>unchanged</td></tr>
+  <tr><td>Curriculum</td><td>v8.3 stages</td><td>same (<code>--v83-curriculum</code>)</td></tr>
+  <tr><td>Reward profile</td><td><code>v8.3-closeout-v1</code></td><td><code>v8.4-boat-tempo-v1</code></td></tr>
+  <tr><td>BPTT / rollout</td><td>16 / 32</td><td><b>32 / 64</b></td></tr>
+  <tr><td>Envs/shard default</td><td>24</td><td>16 (VRAM headroom)</td></tr>
+  <tr><td>Boat outcome</td><td>—</td><td>useful +0.15 / destroyed −0.20 / cancel −0.03 / own-shore −0.05</td></tr>
+  <tr><td>Tempo</td><td>—</td><td>−0.005 × late² while dominant</td></tr>
+  <tr><td>Fast win</td><td>—</td><td>+8 × (1 − tick/max) on win</td></tr>
+  <tr><td>Migrate</td><td><code>--migrate-v82-to-v83</code></td><td><code>--migrate-v83-to-v84</code></td></tr>
+</table>
+<p>Boat outcome is categorical at <i>resolution</i> (not launch/cancel Δtroops),
+so it does not reintroduce the old churn farm. Pending transports are tracked
+by unit id; classification uses sourced land attacks, cancel flags, and refund
+heuristics. Metrics: <code>reward/boat_outcome</code>, <code>reward/tempo</code>,
+<code>boats/*</code>.</p>
+<p>What we are <b>not</b> doing yet: hard-masking boats when land attack exists
+(user wants learning, not forbidding), bigger GRU, mixing greedy into PPO.</p>
+
+<h3>Operational notes</h3>
+<ul>
+  <li>Launch: <code>SKIP_SYNC=1 V84_MODE=1</code> from a tree with this branch;
+  seeds once from local/HF <code>ppo_v83</code>.</li>
+  <li>Negative boat rewards must use <code>--flag=-0.20</code> form; bare
+  <code>-0.20</code> is parsed by clap as an unexpected flag.</li>
+  <li>Shallow clones lack <code>openfront/resources/maps</code> — symlink the
+  maps tree from a populated checkout before spawn.</li>
+  <li>Play the bot with <code>--greedy</code> or you will re-learn the sampling lesson.</li>
+  <li>NCCL on this A40 host still needs <code>NCCL_P2P_DISABLE=1</code> /
+  <code>NCCL_IB_DISABLE=1</code> (SHM collectives).</li>
+</ul>
 
 <h2 class="date" id="parity-v4-closeout">Jul 14, 2026 - curriculum parity closeout: what we learned</h2>
 <p class="session">Outcome gate on <code>curriculum-parity-v4</code> (48 self-play records,
