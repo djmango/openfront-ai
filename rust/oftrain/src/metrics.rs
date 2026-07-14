@@ -27,7 +27,10 @@ impl MetricsWriter {
     }
 
     pub fn log<T: Serialize>(&self, row: &T) -> anyhow::Result<()> {
-        let mut f = OpenOptions::new().create(true).append(true).open(&self.path)?;
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
         serde_json::to_writer(&mut f, row)?;
         f.write_all(b"\n")?;
         Ok(())
@@ -59,6 +62,25 @@ impl MetricsWriter {
             "win_rate": win_rate,
             "eval/win": eval_win,
             "eval/score": eval_score,
+        }))
+    }
+
+    pub fn log_actor_batches(
+        &self,
+        update: u64,
+        mean_size: f64,
+        singleton_fraction: f64,
+        shapes_per_dispatch: f64,
+        dispatches: usize,
+        padding_ratio: f64,
+    ) -> anyhow::Result<()> {
+        self.log(&json!({
+            "update": update,
+            "actor_batch/mean_size": mean_size,
+            "actor_batch/singleton_fraction": singleton_fraction,
+            "actor_batch/shapes_per_dispatch": shapes_per_dispatch,
+            "actor_batch/dispatches": dispatches,
+            "actor_batch/padding_ratio": padding_ratio,
         }))
     }
 }

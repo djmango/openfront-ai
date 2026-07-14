@@ -54,10 +54,11 @@
 //! on.
 //! Gated persistent runs may instead use `--work-conserving-actors`: each
 //! worker publishes its CPU `PreparedObs` as soon as stepping finishes, and
-//! the actor drains a stable exact-shape ready queue into microbatches bounded
-//! by `--actor-max-batch` and `--actor-max-wait-ms`. Rollout slots remain
-//! T-major/N-minor regardless of completion order. The fixed-half collector is
-//! retained as the default and as the non-persistent fallback.
+//! the actor drains a stable FIFO ready queue into microbatches bounded by
+//! target/max size, compact-coarse padding waste, and `--actor-max-wait-ms`.
+//! AE encoding and foveated cropping stay exact-shape; only compact observations
+//! are coalesced. Rollout slots remain T-major/N-minor regardless of completion
+//! order. The fixed-half collector remains the default/non-persistent fallback.
 //!
 //! Multi-GPU (see `LearnerShard`/`ActorShard`): one `PolicyNet`/`VarStore`
 //! replica per device, each owning a disjoint slice of envs, in a single
@@ -320,8 +321,12 @@ pub struct Config {
     /// Opt-in ready-queue scheduler for persistent actors. The default-off
     /// fallback remains the fixed two-half collector.
     pub work_conserving_actors: bool,
-    /// Maximum exact-shape actor inference microbatch.
+    /// Hard maximum coalesced actor inference batch.
     pub actor_max_batch: usize,
+    /// Preferred cross-shape compact inference batch.
+    pub actor_target_batch: usize,
+    /// Maximum fraction of padded compact coarse cells in one dispatch.
+    pub actor_max_padding_waste: f64,
     /// Maximum age of the oldest item before a partial microbatch dispatches.
     pub actor_max_wait: Duration,
     pub device: Device,
@@ -1289,6 +1294,55 @@ struct RolloutResult {
     ep_infos: Vec<EpisodeInfo>,
     policy_version: u64,
     collect_seconds: f64,
+    actor_batches: ActorBatchStats,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ActorBatchStats {
+    dispatches: usize,
+    observations: usize,
+    singletons: usize,
+    shape_dispatches: usize,
+    padded_cells: usize,
+    allocated_cells: usize,
+}
+
+impl ActorBatchStats {
+    fn observe(&mut self, envs: &[usize], observations: &[PreparedObs]) {
+        let mut shapes = Vec::new();
+        let mut max_h = 0usize;
+        let mut max_w = 0usize;
+        let mut native = 0usize;
+        for &env in envs {
+            let shape = ActorShape::of(&observations[env]);
+            if !shapes.contains(&shape) {
+                shapes.push(shape);
+            }
+            max_h = max_h.max(shape.cgh);
+            max_w = max_w.max(shape.cgw);
+            native += shape.cgh * shape.cgw;
+        }
+        let allocated = envs.len() * max_h * max_w;
+        self.dispatches += 1;
+        self.observations += envs.len();
+        self.singletons += usize::from(envs.len() == 1);
+        self.shape_dispatches += shapes.len();
+        self.padded_cells += allocated.saturating_sub(native);
+        self.allocated_cells += allocated;
+    }
+
+    fn mean_size(&self) -> f64 {
+        self.observations as f64 / self.dispatches.max(1) as f64
+    }
+    fn singleton_fraction(&self) -> f64 {
+        self.singletons as f64 / self.dispatches.max(1) as f64
+    }
+    fn shapes_per_dispatch(&self) -> f64 {
+        self.shape_dispatches as f64 / self.dispatches.max(1) as f64
+    }
+    fn padding_ratio(&self) -> f64 {
+        self.padded_cells as f64 / self.allocated_cells.max(1) as f64
+    }
 }
 
 fn validate_rollout_set(results: &[RolloutResult], expected_policy_version: u64) -> Result<()> {
@@ -1409,6 +1463,7 @@ struct ActorShapeBuckets {
 struct ReadyItem {
     env: usize,
     ready_at: Duration,
+    sequence: u64,
 }
 
 #[derive(Debug)]
@@ -1422,26 +1477,44 @@ struct ReadyShapeBucket {
 #[derive(Debug)]
 struct ReadyScheduler {
     buckets: Vec<ReadyShapeBucket>,
+    target_batch: usize,
     max_batch: usize,
+    max_padding_waste: f64,
     max_wait: Duration,
+    next_sequence: u64,
 }
 
 impl ReadyScheduler {
-    fn new(max_batch: usize, max_wait: Duration) -> Self {
+    fn new(
+        target_batch: usize,
+        max_batch: usize,
+        max_padding_waste: f64,
+        max_wait: Duration,
+    ) -> Self {
+        let max_batch = max_batch.max(1);
         Self {
             buckets: Vec::new(),
-            max_batch: max_batch.max(1),
+            target_batch: target_batch.max(1).min(max_batch),
+            max_batch,
+            max_padding_waste: max_padding_waste.clamp(0.0, 1.0),
             max_wait,
+            next_sequence: 0,
         }
     }
 
     fn push(&mut self, env: usize, shape: ActorShape, ready_at: Duration) {
+        let item = ReadyItem {
+            env,
+            ready_at,
+            sequence: self.next_sequence,
+        };
+        self.next_sequence += 1;
         if let Some(bucket) = self.buckets.iter_mut().find(|bucket| bucket.shape == shape) {
-            bucket.items.push_back(ReadyItem { env, ready_at });
+            bucket.items.push_back(item);
         } else {
             self.buckets.push(ReadyShapeBucket {
                 shape,
-                items: VecDeque::from([ReadyItem { env, ready_at }]),
+                items: VecDeque::from([item]),
             });
         }
     }
@@ -1455,21 +1528,54 @@ impl ReadyScheduler {
     }
 
     fn take_batch(&mut self, now: Duration) -> Option<Vec<usize>> {
-        let selected = self
+        let total: usize = self.buckets.iter().map(|bucket| bucket.items.len()).sum();
+        let oldest = self
+            .buckets
+            .iter()
+            .filter_map(|bucket| bucket.items.front())
+            .min_by_key(|item| item.sequence)?;
+        if total < self.target_batch && now.saturating_sub(oldest.ready_at) < self.max_wait {
+            return None;
+        }
+
+        // Global publication FIFO, independent of shape-bucket placement.
+        let mut candidates: Vec<(u64, usize, ActorShape)> = self
             .buckets
             .iter()
             .enumerate()
-            .filter_map(|(index, bucket)| {
-                let oldest = bucket.items.front()?;
-                let eligible = bucket.items.len() >= self.max_batch
-                    || now.saturating_sub(oldest.ready_at) >= self.max_wait;
-                eligible.then_some((index, oldest.ready_at))
+            .flat_map(|(bucket, values)| {
+                values
+                    .items
+                    .iter()
+                    .map(move |item| (item.sequence, bucket, values.shape))
             })
-            .min_by_key(|&(index, oldest)| (oldest, index))
-            .map(|(index, _)| index)?;
-        let bucket = &mut self.buckets[selected];
-        let len = bucket.items.len().min(self.max_batch);
-        Some(bucket.items.drain(..len).map(|item| item.env).collect())
+            .collect();
+        candidates.sort_unstable_by_key(|candidate| candidate.0);
+        let mut selected = Vec::new();
+        let mut sum_area = 0usize;
+        let mut max_h = 0usize;
+        let mut max_w = 0usize;
+        for &(_, bucket, shape) in candidates.iter().take(self.max_batch) {
+            let next_n = selected.len() + 1;
+            let next_h = max_h.max(shape.cgh);
+            let next_w = max_w.max(shape.cgw);
+            let next_sum = sum_area + shape.cgh * shape.cgw;
+            let allocated = next_n * next_h * next_w;
+            let waste = 1.0 - next_sum as f64 / allocated.max(1) as f64;
+            if !selected.is_empty() && waste > self.max_padding_waste {
+                break;
+            }
+            selected.push(bucket);
+            sum_area = next_sum;
+            max_h = next_h;
+            max_w = next_w;
+        }
+        Some(
+            selected
+                .into_iter()
+                .map(|bucket| self.buckets[bucket].items.pop_front().unwrap().env)
+                .collect(),
+        )
     }
 
     fn is_empty(&self) -> bool {
@@ -1669,20 +1775,10 @@ fn act_contiguous_obs(
 fn act_ready_batch(actor: &mut ActorShard, cfg: &Config, envs: &[usize]) -> Result<Vec<ActorRow>> {
     anyhow::ensure!(!envs.is_empty(), "cannot act on an empty ready batch");
     let n = actor.cur_obs.len();
-    let shape = ActorShape::of(
-        actor
-            .cur_obs
-            .get(envs[0])
-            .ok_or_else(|| anyhow!("ready env {} out of range", envs[0]))?,
-    );
     let mut selected = vec![false; n];
     for &env in envs {
         anyhow::ensure!(env < n, "ready env {env} out of range");
         anyhow::ensure!(!selected[env], "duplicate ready env {env}");
-        anyhow::ensure!(
-            ActorShape::of(&actor.cur_obs[env]) == shape,
-            "ready batch mixed exact observation shapes"
-        );
         selected[env] = true;
     }
     let mut order = Vec::with_capacity(n);
@@ -1955,21 +2051,37 @@ mod packed_act_tests {
     }
 
     #[test]
-    fn ready_scheduler_stable_buckets_exact_shapes_and_honors_thresholds() {
+    fn ready_scheduler_coalesces_shapes_in_global_fifo_order() {
         let shape_a = ActorShape::of(&shaped_obs(0, 6, 8));
         let shape_b = ActorShape::of(&shaped_obs(1, 8, 6));
-        let mut ready = ReadyScheduler::new(2, Duration::from_millis(5));
+        let mut ready = ReadyScheduler::new(2, 2, 1.0, Duration::from_millis(5));
         ready.push(0, shape_a, Duration::ZERO);
         ready.push(1, shape_b, Duration::ZERO);
         ready.push(2, shape_a, Duration::from_millis(1));
         ready.push(3, shape_b, Duration::from_millis(1));
-        assert_eq!(ready.take_batch(Duration::from_millis(1)), Some(vec![0, 2]));
-        assert_eq!(ready.take_batch(Duration::from_millis(1)), Some(vec![1, 3]));
+        assert_eq!(ready.take_batch(Duration::from_millis(1)), Some(vec![0, 1]));
+        assert_eq!(ready.take_batch(Duration::from_millis(1)), Some(vec![2, 3]));
 
         ready.push(4, shape_b, Duration::from_millis(2));
         assert_eq!(ready.take_batch(Duration::from_millis(6)), None);
         assert_eq!(ready.next_deadline(), Some(Duration::from_millis(7)));
         assert_eq!(ready.take_batch(Duration::from_millis(7)), Some(vec![4]));
+        assert!(ready.is_empty());
+    }
+
+    #[test]
+    fn ready_scheduler_padding_bound_splits_fifo_without_bypass() {
+        let small = ActorShape::of(&shaped_obs(0, 4, 4));
+        let large = ActorShape::of(&shaped_obs(1, 20, 20));
+        let mut ready = ReadyScheduler::new(2, 8, 0.20, Duration::from_millis(5));
+        ready.push(7, small, Duration::ZERO);
+        ready.push(8, large, Duration::from_millis(1));
+        ready.push(9, large, Duration::from_millis(2));
+
+        // Coalescing small+large would waste far more than 20%, so the
+        // globally oldest item dispatches alone; no later env bypasses it.
+        assert_eq!(ready.take_batch(Duration::from_millis(2)), Some(vec![7]));
+        assert_eq!(ready.take_batch(Duration::from_millis(2)), Some(vec![8, 9]));
         assert!(ready.is_empty());
     }
 
@@ -2044,7 +2156,7 @@ mod packed_act_tests {
         const T: usize = 3;
         let shape = ActorShape::of(&shaped_obs(0, 6, 8));
         let latency = [1u64, 1, 100];
-        let mut ready = ReadyScheduler::new(2, Duration::from_millis(10));
+        let mut ready = ReadyScheduler::new(2, 2, 1.0, Duration::from_millis(10));
         for env in 0..latency.len() {
             ready.push(env, shape, Duration::ZERO);
         }
@@ -2109,7 +2221,7 @@ mod packed_act_tests {
     #[test]
     fn staggered_ready_batches_gather_hidden_by_env_not_batch_position() {
         let shape = ActorShape::of(&shaped_obs(0, 6, 8));
-        let mut ready = ReadyScheduler::new(2, Duration::ZERO);
+        let mut ready = ReadyScheduler::new(2, 2, 1.0, Duration::ZERO);
         let mut state = ActorRecurrentState::new(3, 2, Device::Cpu);
 
         ready.push(2, shape, Duration::ZERO);
@@ -2517,7 +2629,12 @@ fn collect_rollout_ready(
     let collect_start = Instant::now();
     let n = actor.workers.len();
     anyhow::ensure!(n > 0, "ready collector has no envs");
-    let mut scheduler = ReadyScheduler::new(cfg.actor_max_batch, cfg.actor_max_wait);
+    let mut scheduler = ReadyScheduler::new(
+        cfg.actor_target_batch,
+        cfg.actor_max_batch,
+        cfg.actor_max_padding_waste,
+        cfg.actor_max_wait,
+    );
     for env in 0..n {
         scheduler.push(env, ActorShape::of(&actor.cur_obs[env]), Duration::ZERO);
     }
@@ -2526,9 +2643,11 @@ fn collect_rollout_ready(
     let mut episode_slots = RolloutSlots::new(cfg.rollout_len, n);
     let target = cfg.rollout_len * n;
     let mut completed = 0usize;
+    let mut actor_batches = ActorBatchStats::default();
 
     while completed < target {
         while let Some(envs) = scheduler.take_batch(collect_start.elapsed()) {
+            actor_batches.observe(&envs, &actor.cur_obs);
             let rows = act_ready_batch(actor, cfg, &envs)?;
             anyhow::ensure!(rows.len() == envs.len(), "ready act batch width mismatch");
             for (env, mut row) in envs.into_iter().zip(rows) {
@@ -2634,12 +2753,22 @@ fn collect_rollout_ready(
     if let Device::Cuda(index) = actor.device {
         Cuda::synchronize(index as i64);
     }
+    eprintln!(
+        "[actor-batch] mean_size={:.2} singleton_fraction={:.3} \
+         shapes_per_dispatch={:.2} dispatches={} padding_ratio={:.3}",
+        actor_batches.mean_size(),
+        actor_batches.singleton_fraction(),
+        actor_batches.shapes_per_dispatch(),
+        actor_batches.dispatches,
+        actor_batches.padding_ratio(),
+    );
     Ok(RolloutResult {
         buffer,
         bootstrap_v,
         ep_infos,
         policy_version,
         collect_seconds: collect_start.elapsed().as_secs_f64(),
+        actor_batches,
     })
 }
 
@@ -2710,6 +2839,7 @@ fn collect_rollout(
         ep_infos,
         policy_version,
         collect_seconds: collect_start.elapsed().as_secs_f64(),
+        actor_batches: ActorBatchStats::default(),
     })
 }
 
@@ -4900,7 +5030,10 @@ fn apply_device_flat_grad(shard: &mut LearnerShard, flat: &Tensor) -> Result<()>
         grad.f_copy_(&source)?;
         offset += len;
     }
-    anyhow::ensure!(offset as usize == flat.numel(), "flat gradient length mismatch");
+    anyhow::ensure!(
+        offset as usize == flat.numel(),
+        "flat gradient length mismatch"
+    );
     Ok(())
 }
 
@@ -5514,136 +5647,117 @@ fn train_update(
                 // starts on a plain sequential loop.
                 macro_rules! backward_shard {
                     ($shard:expr, $sb:expr, $idx_t:expr) => {{
-                                let shard = $shard;
-                                let sb = $sb;
-                                let idx_t = $idx_t;
-                                let (
-                                    logp,
-                                    ent,
-                                    ent_q,
-                                    value,
-                                    quantity,
-                                    adv_t,
-                                    ret_t,
-                                    old_logp_t,
-                                ) = if cfg.recurrent_policy {
-                                    let hidden_all =
-                                        sb.hidden_in.as_ref().expect("recurrent hidden batch");
-                                    let context_all =
-                                        sb.context.as_ref().expect("recurrent context batch");
-                                    let reset_all = sb
-                                        .reset_before
-                                        .as_ref()
-                                        .expect("recurrent reset batch");
-                                    let mut logps = Vec::with_capacity(t_len);
-                                    let mut ents = Vec::with_capacity(t_len);
-                                    let mut entqs = Vec::with_capacity(t_len);
-                                    let mut values = Vec::with_capacity(t_len);
-                                    let mut quantities = Vec::with_capacity(t_len);
-                                    let mut target_indices =
-                                        Vec::with_capacity(t_len.div_ceil(cfg.bptt_chunk_len));
-                                    for range in bptt_ranges(t_len, cfg.bptt_chunk_len) {
-                                        let first = &idx_t + (range.start * n) as i64;
-                                        // Actor state at the boundary is a
-                                        // detached BPTT initial condition.
-                                        let hidden = hidden_all.index_select(0, &first);
-                                        // One time-major gather per field and
-                                        // one full trunk/head pass per BPTT
-                                        // chunk. Only the GRU recurrence is
-                                        // evaluated timestep by timestep.
-                                        let time_offsets = Tensor::arange_start(
-                                            range.start as i64,
-                                            range.end as i64,
-                                            (Kind::Int64, shard.device),
-                                        ) * n as i64;
-                                        let chunk_idx = (
-                                            time_offsets.unsqueeze(1) + idx_t.unsqueeze(0)
-                                        ).flatten(0, -1);
-                                        let obs_chunk = sb.obs.index_select(&chunk_idx);
-                                        let choice_chunk = sb.choice.index_select(&chunk_idx);
-                                        let context_chunk =
-                                            context_all.index_select(0, &chunk_idx);
-                                        let reset_chunk =
-                                            reset_all.index_select(0, &chunk_idx);
-                                        let (lp, en, eq, v, _) =
-                                            shard.policy.evaluate_sequence_fused(
-                                                &obs_chunk,
-                                                &choice_chunk,
-                                                &hidden,
-                                                &context_chunk,
-                                                &reset_chunk,
-                                                range.len() as i64,
-                                            );
-                                        logps.push(lp);
-                                        ents.push(en);
-                                        entqs.push(eq);
-                                        values.push(v);
-                                        quantities.push(choice_chunk.quantity_frac);
-                                        target_indices.push(chunk_idx);
-                                    }
-                                    let target_idx = Tensor::cat(
-                                        &target_indices.iter().collect::<Vec<_>>(),
-                                        0,
-                                    );
-                                    (
-                                        Tensor::cat(&logps.iter().collect::<Vec<_>>(), 0),
-                                        Tensor::cat(&ents.iter().collect::<Vec<_>>(), 0),
-                                        Tensor::cat(&entqs.iter().collect::<Vec<_>>(), 0),
-                                        Tensor::cat(&values.iter().collect::<Vec<_>>(), 0),
-                                        Tensor::cat(&quantities.iter().collect::<Vec<_>>(), 0),
-                                        sb.adv.index_select(0, &target_idx),
-                                        sb.ret.index_select(0, &target_idx),
-                                        sb.old_logp.index_select(0, &target_idx),
-                                    )
-                                } else {
-                                    let obs_t = sb.obs.index_select(&idx_t);
-                                    let choice_t = sb.choice.index_select(&idx_t);
-                                    let (lp, en, eq, v) =
-                                        shard.policy.evaluate(&obs_t, &choice_t);
-                                    (
-                                        lp,
-                                        en,
-                                        eq,
-                                        v,
-                                        choice_t.quantity_frac,
-                                        sb.adv.index_select(0, &idx_t),
-                                        sb.ret.index_select(0, &idx_t),
-                                        sb.old_logp.index_select(0, &idx_t),
-                                    )
-                                };
-                                // Bound log-ratio before exp (see prior
-                                // pg_loss trillion-spike incident).
-                                let log_ratio = (&logp - &old_logp_t).clamp(-20.0, 20.0);
-                                let ratio = log_ratio.exp();
-                                let surr1 = &ratio * &adv_t;
-                                let surr2 = ratio
-                                    .clamp(1.0 - cfg.clip as f64, 1.0 + cfg.clip as f64)
-                                    * &adv_t;
-                                let pg_loss = -surr1.minimum(&surr2).mean(Kind::Float);
-                                // Value loss: Huber (default Rust
-                                // stabilizer; see Config::vf_clip) or MSE
-                                // (Python F.mse_loss). Phase 5 (final)
-                                // switches the CLI default to mse once
-                                // training is stable under Huber.
-                                let v_loss = match cfg.value_loss {
-                                    ValueLoss::Huber => value.huber_loss(
-                                        &ret_t,
-                                        tch::Reduction::Mean,
-                                        cfg.vf_clip.max(1e-3) as f64,
-                                    ),
-                                    ValueLoss::Mse => value.mse_loss(&ret_t, tch::Reduction::Mean),
-                                };
-                                let ent_loss = ent.mean(Kind::Float);
-                                let n_active = quantity
-                                    .ge(0.0)
-                                    .to_kind(Kind::Float)
-                                    .sum(Kind::Float)
-                                    .clamp_min(1.0);
-                                let entq_loss = ent_q.sum(Kind::Float) / &n_active;
-                                let loss = (&pg_loss + cfg.vf_coef as f64 * &v_loss
-                                    - ent_coef as f64 * &ent_loss
-                                    - cfg.entq_coef as f64 * &entq_loss)
-                                    * w_sub;
+                        let shard = $shard;
+                        let sb = $sb;
+                        let idx_t = $idx_t;
+                        let (logp, ent, ent_q, value, quantity, adv_t, ret_t, old_logp_t) = if cfg
+                            .recurrent_policy
+                        {
+                            let hidden_all = sb.hidden_in.as_ref().expect("recurrent hidden batch");
+                            let context_all = sb.context.as_ref().expect("recurrent context batch");
+                            let reset_all =
+                                sb.reset_before.as_ref().expect("recurrent reset batch");
+                            let mut logps = Vec::with_capacity(t_len);
+                            let mut ents = Vec::with_capacity(t_len);
+                            let mut entqs = Vec::with_capacity(t_len);
+                            let mut values = Vec::with_capacity(t_len);
+                            let mut quantities = Vec::with_capacity(t_len);
+                            let mut target_indices =
+                                Vec::with_capacity(t_len.div_ceil(cfg.bptt_chunk_len));
+                            for range in bptt_ranges(t_len, cfg.bptt_chunk_len) {
+                                let first = &idx_t + (range.start * n) as i64;
+                                // Actor state at the boundary is a
+                                // detached BPTT initial condition.
+                                let hidden = hidden_all.index_select(0, &first);
+                                // One time-major gather per field and
+                                // one full trunk/head pass per BPTT
+                                // chunk. Only the GRU recurrence is
+                                // evaluated timestep by timestep.
+                                let time_offsets = Tensor::arange_start(
+                                    range.start as i64,
+                                    range.end as i64,
+                                    (Kind::Int64, shard.device),
+                                ) * n as i64;
+                                let chunk_idx =
+                                    (time_offsets.unsqueeze(1) + idx_t.unsqueeze(0)).flatten(0, -1);
+                                let obs_chunk = sb.obs.index_select(&chunk_idx);
+                                let choice_chunk = sb.choice.index_select(&chunk_idx);
+                                let context_chunk = context_all.index_select(0, &chunk_idx);
+                                let reset_chunk = reset_all.index_select(0, &chunk_idx);
+                                let (lp, en, eq, v, _) = shard.policy.evaluate_sequence_fused(
+                                    &obs_chunk,
+                                    &choice_chunk,
+                                    &hidden,
+                                    &context_chunk,
+                                    &reset_chunk,
+                                    range.len() as i64,
+                                );
+                                logps.push(lp);
+                                ents.push(en);
+                                entqs.push(eq);
+                                values.push(v);
+                                quantities.push(choice_chunk.quantity_frac);
+                                target_indices.push(chunk_idx);
+                            }
+                            let target_idx =
+                                Tensor::cat(&target_indices.iter().collect::<Vec<_>>(), 0);
+                            (
+                                Tensor::cat(&logps.iter().collect::<Vec<_>>(), 0),
+                                Tensor::cat(&ents.iter().collect::<Vec<_>>(), 0),
+                                Tensor::cat(&entqs.iter().collect::<Vec<_>>(), 0),
+                                Tensor::cat(&values.iter().collect::<Vec<_>>(), 0),
+                                Tensor::cat(&quantities.iter().collect::<Vec<_>>(), 0),
+                                sb.adv.index_select(0, &target_idx),
+                                sb.ret.index_select(0, &target_idx),
+                                sb.old_logp.index_select(0, &target_idx),
+                            )
+                        } else {
+                            let obs_t = sb.obs.index_select(&idx_t);
+                            let choice_t = sb.choice.index_select(&idx_t);
+                            let (lp, en, eq, v) = shard.policy.evaluate(&obs_t, &choice_t);
+                            (
+                                lp,
+                                en,
+                                eq,
+                                v,
+                                choice_t.quantity_frac,
+                                sb.adv.index_select(0, &idx_t),
+                                sb.ret.index_select(0, &idx_t),
+                                sb.old_logp.index_select(0, &idx_t),
+                            )
+                        };
+                        // Bound log-ratio before exp (see prior
+                        // pg_loss trillion-spike incident).
+                        let log_ratio = (&logp - &old_logp_t).clamp(-20.0, 20.0);
+                        let ratio = log_ratio.exp();
+                        let surr1 = &ratio * &adv_t;
+                        let surr2 =
+                            ratio.clamp(1.0 - cfg.clip as f64, 1.0 + cfg.clip as f64) * &adv_t;
+                        let pg_loss = -surr1.minimum(&surr2).mean(Kind::Float);
+                        // Value loss: Huber (default Rust
+                        // stabilizer; see Config::vf_clip) or MSE
+                        // (Python F.mse_loss). Phase 5 (final)
+                        // switches the CLI default to mse once
+                        // training is stable under Huber.
+                        let v_loss = match cfg.value_loss {
+                            ValueLoss::Huber => value.huber_loss(
+                                &ret_t,
+                                tch::Reduction::Mean,
+                                cfg.vf_clip.max(1e-3) as f64,
+                            ),
+                            ValueLoss::Mse => value.mse_loss(&ret_t, tch::Reduction::Mean),
+                        };
+                        let ent_loss = ent.mean(Kind::Float);
+                        let n_active = quantity
+                            .ge(0.0)
+                            .to_kind(Kind::Float)
+                            .sum(Kind::Float)
+                            .clamp_min(1.0);
+                        let entq_loss = ent_q.sum(Kind::Float) / &n_active;
+                        let loss = (&pg_loss + cfg.vf_coef as f64 * &v_loss
+                            - ent_coef as f64 * &ent_loss
+                            - cfg.entq_coef as f64 * &entq_loss)
+                            * w_sub;
 
                         // Grads accumulate across pixel-budget
                         // subs (zero_grad ran once above).
@@ -5804,6 +5918,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
         );
         cfg.work_conserving_actors = false;
     }
+    anyhow::ensure!(
+        !cfg.work_conserving_actors || (cfg.compact_rollout && cfg.foveate),
+        "--work-conserving-actors requires --compact-rollout and --foveate=true"
+    );
     if cfg.persistent_actors && cfg.auto_scale_envs {
         println!(
             "[train] WARNING: --persistent-actors does not support live \
@@ -6737,6 +6855,29 @@ pub fn run(mut cfg: Config) -> Result<()> {
             .iter()
             .map(|result| result.collect_seconds)
             .fold(0.0f64, f64::max);
+        let actor_batch_stats =
+            next_pending
+                .iter()
+                .fold(ActorBatchStats::default(), |mut total, result| {
+                    let stats = &result.actor_batches;
+                    total.dispatches += stats.dispatches;
+                    total.observations += stats.observations;
+                    total.singletons += stats.singletons;
+                    total.shape_dispatches += stats.shape_dispatches;
+                    total.padded_cells += stats.padded_cells;
+                    total.allocated_cells += stats.allocated_cells;
+                    total
+                });
+        if actor_batch_stats.dispatches > 0 {
+            metrics.log_actor_batches(
+                update,
+                actor_batch_stats.mean_size(),
+                actor_batch_stats.singleton_fraction(),
+                actor_batch_stats.shapes_per_dispatch(),
+                actor_batch_stats.dispatches,
+                actor_batch_stats.padding_ratio(),
+            )?;
+        }
         pending = next_pending;
         eprintln!(
             "[phase] update {update} train+collect+refresh finished in {:.3}s \
@@ -7359,6 +7500,7 @@ mod persistent_actor_tests {
             ep_infos: Vec::new(),
             policy_version: 0,
             collect_seconds: 0.0,
+            actor_batches: ActorBatchStats::default(),
         }
     }
 
@@ -7468,6 +7610,8 @@ mod persistent_actor_tests {
             bptt_chunk_len: 16,
             work_conserving_actors: false,
             actor_max_batch: 32,
+            actor_target_batch: 8,
+            actor_max_padding_waste: 0.25,
             actor_max_wait: Duration::from_millis(2),
             device: Device::Cpu,
             engine: EngineKind::Native,
@@ -7565,6 +7709,7 @@ mod persistent_actor_tests {
             ep_infos: Vec::new(),
             policy_version: 0,
             collect_seconds: 0.0,
+            actor_batches: ActorBatchStats::default(),
         }
     }
 
