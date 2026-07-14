@@ -6457,14 +6457,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
             policy::RECURRENT_HIDDEN
         );
         anyhow::ensure!(cfg.bptt_chunk_len > 0, "BPTT chunk length must be positive");
-        anyhow::ensure!(
-            cfg.minibatches.max(1) <= cfg.num_envs
-                && cfg
-                    .stage_env_targets
-                    .iter()
-                    .all(|&envs| cfg.minibatches.max(1) <= envs),
-            "recurrent PPO requires minibatches <= envs per shard"
-        );
+        // Minibatch vs env-count is re-checked after startup env resolve below.
+        // Do not require minibatches <= every stage_env_targets entry: those are
+        // within-stage floors, and GPU-util autoscale may run above a late-stage
+        // floor with a matching --minibatches derived from the live count.
     }
     if cfg.work_conserving_actors && !cfg.persistent_actors {
         println!(
@@ -6674,6 +6670,15 @@ pub fn run(mut cfg: Config) -> Result<()> {
         );
     }
     cfg.num_envs = resolved;
+    if cfg.recurrent_policy {
+        anyhow::ensure!(
+            cfg.minibatches.max(1) <= cfg.num_envs,
+            "recurrent PPO requires minibatches <= envs per shard \
+             (minibatches={}, envs/shard={})",
+            cfg.minibatches,
+            cfg.num_envs
+        );
+    }
     // main() may default `--min-envs` from `stage_env_targets[--stage]`
     // (often an early-stage 24) before this resume/stage-floor resolve.
     // Snap the autoscale floor down to the live startup count so growth
