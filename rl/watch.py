@@ -1,6 +1,6 @@
 """Run one greedy episode and save an engine GameRecord for client replay.
 
-The real OpenFront client replays the record (see scripts/serve_replay.py).
+The real OpenFront client replays the record via `ofshowcase archive`.
 For real-graphics video, render it with scripts/render_client_replay.py.
 
 Usage:

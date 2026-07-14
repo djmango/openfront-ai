@@ -12,6 +12,7 @@ mod policy;
 mod recurrent;
 mod train;
 mod vecenv;
+mod watch;
 
 use clap::Parser;
 use tch::{Cuda, Device};
@@ -366,6 +367,46 @@ struct Args {
     #[arg(long)]
     benchmark_out: Option<String>,
 
+    /// Run one greedy Node-engine episode, save GameRecord + `.debug.json`, exit.
+    #[arg(long, default_value_t = false)]
+    watch: bool,
+
+    /// Policy safetensors for `--watch` (also accepted via `--resume`/`--init`).
+    #[arg(long)]
+    policy: Option<String>,
+
+    /// GameRecord JSON output path for `--watch`.
+    #[arg(long)]
+    record: Option<String>,
+
+    /// Episode seed for `--watch` (default watch0).
+    #[arg(long, default_value = "watch0")]
+    seed: String,
+
+    /// Map override for `--watch` (default: first map in stage pool).
+    #[arg(long)]
+    map: Option<String>,
+
+    /// Bot count override for `--watch`.
+    #[arg(long)]
+    bots: Option<u32>,
+
+    /// Difficulty override for `--watch`.
+    #[arg(long)]
+    difficulty: Option<String>,
+
+    /// Nations override for `--watch` (`default` / `disabled` / integer).
+    #[arg(long)]
+    nations: Option<String>,
+
+    /// Max post-spawn decisions for `--watch`.
+    #[arg(long, default_value_t = 1200)]
+    max_steps: usize,
+
+    /// Write `.debug.json` sidecar with `--watch` (default true).
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    debug: bool,
+
     #[arg(long, default_value_t = 200)]
     ckpt_every: u64,
 
@@ -693,6 +734,14 @@ mod curriculum_flag_tests {
         assert!(v82.v82_curriculum);
         assert!(
             Args::try_parse_from(["oftrain", "--v81-curriculum", "--v811-curriculum"]).is_err()
+        );
+        assert!(
+            Args::try_parse_from([
+                "oftrain",
+                "--v81-curriculum",
+                "--v82-curriculum"
+            ])
+            .is_err()
         );
         assert!(
             Args::try_parse_from([
@@ -1026,6 +1075,44 @@ fn main() -> anyhow::Result<()> {
                  (set --eval-device cuda:N to override)"
             ),
         }
+    }
+
+    if args.watch {
+        let policy = args
+            .policy
+            .as_deref()
+            .or(args.resume.as_deref())
+            .or(args.init.as_deref())
+            .ok_or_else(|| anyhow::anyhow!("--watch requires --policy (or --resume/--init)"))?;
+        let run = std::path::Path::new(policy)
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("policy");
+        let record = args.record.clone().unwrap_or_else(|| {
+            format!("records-rl/{run}_s{}_{}.json", args.stage, args.seed)
+        });
+        return watch::run_watch(watch::WatchConfig {
+            policy,
+            record: std::path::PathBuf::from(record),
+            ae_ckpt: &args.ckpt,
+            coarse_ckpt: args.coarse_ckpt.as_deref(),
+            stage: args.stage,
+            seed: args.seed.clone(),
+            map: args.map.clone(),
+            bots: args.bots,
+            difficulty: args.difficulty.clone(),
+            nations: args.nations.clone(),
+            max_steps: args.max_steps,
+            debug: args.debug,
+            device,
+            amp: args.amp,
+            foveate: args.foveate,
+            gc: args.gc,
+            blocks: args.blocks,
+            curriculum_schedule,
+            reward_config,
+        });
     }
 
     if let Some(out) = &args.benchmark_out {

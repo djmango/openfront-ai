@@ -6,7 +6,8 @@ cd /app
 DATA_DIR="${DATA_DIR:-/data}"
 export DATA_DIR
 export PYTHONPATH=/app
-export PATH="/app/.venv/bin:/app/openfront/node_modules/.bin:${PATH}"
+export PATH="/app/.venv/bin:/app/openfront/node_modules/.bin:/app/rust/target/release:${PATH}"
+export OFTRAIN_BIN="${OFTRAIN_BIN:-/app/rust/target/release/oftrain}"
 PY="/app/.venv/bin/python"
 
 mkdir -p "${DATA_DIR}/records" "${DATA_DIR}/policy" "${DATA_DIR}/clips"
@@ -28,8 +29,10 @@ for _ in $(seq 1 120); do
   sleep 1
 done
 
+OFSHOWCASE="${OFSHOWCASE:-/app/rust/target/release/ofshowcase}"
+
 echo "[entrypoint] replay archive API on :8987"
-"$PY" scripts/serve_replay.py \
+"$OFSHOWCASE" archive \
   --records "${DATA_DIR}/records" \
   --clips "${DATA_DIR}/clips" \
   --state "${DATA_DIR}/state.json" \
@@ -37,10 +40,10 @@ echo "[entrypoint] replay archive API on :8987"
   --port 8987 &
 
 echo "[entrypoint] replay showcase daemon (RUN_NAME=${RUN_NAME:-ppo_v81})"
-"$PY" scripts/eval_daemon.py &
+"$OFSHOWCASE" daemon &
 
-echo "[entrypoint] showcase hub on :8988 (watch + on-demand play)"
-"$PY" scripts/showcase_hub.py &
+echo "[entrypoint] showcase hub on :8988 (watch + on-demand play; featured map=random)"
+"$OFSHOWCASE" hub --port 8988 &
 
 echo "[entrypoint] Caddy on :8086"
 exec caddy run --config /app/docker/Caddyfile --adapter caddyfile

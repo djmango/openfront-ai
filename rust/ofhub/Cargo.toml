@@ -1,0 +1,38 @@
+[package]
+name = "ofhub"
+version = "0.1.0"
+edition = "2021"
+description = "HF sync, safetensors export glue, and showcase hub/archive/eval orchestration"
+
+[[bin]]
+name = "ofhf"
+path = "src/bin/ofhf.rs"
+
+[[bin]]
+name = "ofexport"
+path = "src/bin/ofexport.rs"
+
+[[bin]]
+name = "ofshowcase"
+path = "src/bin/ofshowcase.rs"
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4", features = ["derive", "env"] }
+futures = "0.3"
+hf-hub = "1.0.0"
+memmap2 = "0.9"
+ofcore = { path = "../ofcore" }
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+safetensors = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tower-http = { version = "0.6", features = ["cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+walkdir = "2"
