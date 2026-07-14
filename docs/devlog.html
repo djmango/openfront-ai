@@ -28,6 +28,7 @@
 
 <nav class="toc">
   <a href="#now">Now</a> ·
+  <a href="#persistent-autoscale-restart">Jul 14 persistent+autoscale</a> ·
   <a href="#v86-attack-fair">Jul 14 V8.6</a> ·
   <a href="#v85-win-urgency">Jul 14 V8.5</a> ·
   <a href="#v84-boat-tempo">Jul 14 V8.4</a> ·
@@ -65,6 +66,11 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 14th, 2026</h2>
+  <p><b>Persistent + autoscale no longer cancel each other</b>
+  (<a href="#persistent-autoscale-restart">writeup</a>): GPU-util growth uses the same
+  <code>restart_request.json</code> path as stage env targets, and stage targets are a
+  floor so autoscale gains stick. Keep <code>max_episode_ticks=15000</code>
+  (~25 min game time at 10 ticks/s) — do not shorten episodes for util.</p>
   <p><b>V8.6 attack-fair as <code>ppo_v86</code></b>
   (<a href="#v86-attack-fair">writeup</a>), resumed from live <code>ppo_v85</code>.
   Reward audit: sticky combat refresh + churn stack made attacking a trap;
@@ -79,6 +85,24 @@
   diagnosis / persistent ownership
   (<a href="#rust-v8-stability">writeup</a>).</p>
 </div>
+
+<h2 class="date" id="persistent-autoscale-restart">Jul 14, 2026 - persistent actors + GPU-util autoscale via restart</h2>
+<p class="session">Util was stuck because <code>--persistent-actors</code> forced
+<code>--auto-scale-envs</code> off, while late-stage env floors (8–12) left collects
+long and GPUs idle. Shortening <code>max_episode_ticks</code> was the wrong lever.</p>
+<ul>
+  <li><b>Game time:</b> OpenFront is 100&nbsp;ms/tick (10 ticks/s). Cap 15000 ≈ 25 minutes
+    of normal game time; lobby timers of 15–40 minutes are the same order. The earlier
+    “3–4 minute” figure was <i>wall-clock collect stall on the pod</i>, not match length.</li>
+  <li><b>Fix:</b> with persistent owners, autoscale growth writes
+    <code>restart_request.json</code> (<code>reason=gpu_util_autoscale</code>) and exits;
+    <code>pod_train_v8.sh</code> relaunches at the new per-shard count (same as stage
+    env-target resizes). Legacy collectors still live-spawn.</li>
+  <li><b>Floor semantics:</b> stage env targets no longer snap an autoscaled resume back
+    down; they remain the cold-start / stage-advance baseline.</li>
+  <li><b>Pod default:</b> V8.3+ enables <code>--auto-scale-envs --max-envs 32</code>
+    (<code>AUTO_SCALE_ENVS=0</code> to disable).</li>
+</ul>
 
 <h2 class="date" id="v86-attack-fair">Jul 14, 2026 - V8.6: attack-fair reward fixes</h2>
 <p class="session">V8.5 mid-run “unlearning” audit → reward-only <code>ppo_v86</code>
