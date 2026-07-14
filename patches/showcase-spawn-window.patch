@@ -1,0 +1,12 @@
+--- a/src/core/configuration/Config.ts
++++ b/src/core/configuration/Config.ts
+@@ -591,7 +591,8 @@
+     if (this.isRandomSpawn()) {
+       return 150;
+     }
+-    return 300;
++    // Showcase / private lobbies: ~10s spawn window (100 ticks @ 10/s).
++    return 100;
+   }
+   numBots(): number {
+     return this.bots();

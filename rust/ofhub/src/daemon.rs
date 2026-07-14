@@ -242,41 +242,13 @@ fn generate_clip(
     }))
 }
 
-async fn generate_showcase(
-    client: &hf_hub::HFClient,
+fn write_showcase_state(
+    clip_infos: &[Value],
     policy: &Path,
-    ae: &Path,
     run_name: &str,
     stage: i64,
     watch_stage: i64,
-    nations: &str,
-    bots: i64,
-    difficulty: &str,
 ) -> Result<Value> {
-    fs::create_dir_all(records_dir())?;
-    fs::create_dir_all(clips_dir())?;
-
-    let mut clip_infos = Vec::new();
-    for map_name in showcase_maps() {
-        match generate_clip(
-            policy,
-            ae,
-            &map_name,
-            run_name,
-            watch_stage,
-            stage,
-            nations,
-            bots,
-            difficulty,
-        ) {
-            Ok(info) => clip_infos.push(info),
-            Err(e) => log(&format!("clip {map_name} failed: {e}")),
-        }
-    }
-    if clip_infos.is_empty() {
-        bail!("no showcase clips generated");
-    }
-
     let mut state = json!({
         "maps": clip_infos,
         "run_name": run_name,
@@ -309,6 +281,53 @@ async fn generate_showcase(
         state["record"] = featured.get("record").cloned().unwrap_or(Value::Null);
     }
     write_json(&state_path(), &state)?;
+    Ok(state)
+}
+
+async fn generate_showcase(
+    client: &hf_hub::HFClient,
+    policy: &Path,
+    ae: &Path,
+    run_name: &str,
+    stage: i64,
+    watch_stage: i64,
+    nations: &str,
+    bots: i64,
+    difficulty: &str,
+) -> Result<Value> {
+    fs::create_dir_all(records_dir())?;
+    fs::create_dir_all(clips_dir())?;
+
+    let mut clip_infos = Vec::new();
+    let mut state = json!({});
+    for map_name in showcase_maps() {
+        match generate_clip(
+            policy,
+            ae,
+            &map_name,
+            run_name,
+            watch_stage,
+            stage,
+            nations,
+            bots,
+            difficulty,
+        ) {
+            Ok(info) => {
+                clip_infos.push(info);
+                // Publish after each map so Watch works before the full cycle finishes.
+                state = write_showcase_state(&clip_infos, policy, run_name, stage, watch_stage)?;
+                log(&format!(
+                    "showcase partial: {} clip(s) after {map_name}",
+                    clip_infos.len()
+                ));
+            }
+            Err(e) => log(&format!("clip {map_name} failed: {e}")),
+        }
+    }
+    if clip_infos.is_empty() {
+        bail!("no showcase clips generated");
+    }
+
     let rev = hf::policy_revision(client, run_name).await?;
     fs::write(revision_path(), rev)?;
     log(&format!(

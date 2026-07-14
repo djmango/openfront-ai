@@ -21,13 +21,19 @@ echo "[entrypoint] starting OpenFront dev stack (needed when a visitor clicks Pl
   exec npm run dev:host
 ) &
 
-for _ in $(seq 1 120); do
+ready=0
+for _ in $(seq 1 180); do
   if curl -sf "http://127.0.0.1:9000" >/dev/null 2>&1; then
     echo "[entrypoint] dev stack ready"
+    ready=1
     break
   fi
   sleep 1
 done
+if [ "$ready" != "1" ]; then
+  echo "[entrypoint] FATAL: OpenFront dev stack on :9000 never became ready" >&2
+  exit 1
+fi
 
 OFSHOWCASE="${OFSHOWCASE:-/app/rust/target/release/ofshowcase}"
 

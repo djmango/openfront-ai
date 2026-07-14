@@ -1,0 +1,64 @@
+--- a/src/client/webbot/bot.ts	2026-07-14 11:33:03
++++ b/src/client/webbot/bot.ts	2026-07-14 11:33:03
+@@ -14,6 +14,7 @@
+   NEEDS_PLAYER,
+   NEEDS_QUANTITY,
+   NEEDS_TILE,
++  REGION,
+ } from "./constants";
+ import { WebBotFeaturizer } from "./features";
+ import { betaParams, sampleBeta, sampleCategorical } from "./sampling";
+@@ -28,6 +29,9 @@
+   tiles: number;
+   troops: number;
+   probs: number[];
++  /** World tile for MODEL overlay red X (tile-head actions only). */
++  tile_x?: number;
++  tile_y?: number;
+ }
+ 
+ export interface WebBotOptions {
+@@ -159,6 +163,14 @@
+ 
+     if (this.onDebug) {
+       const me = game.playerByClientID(clientID);
++      let tile_x: number | undefined;
++      let tile_y: number | undefined;
++      if (choice.tileRegion !== undefined && choice.tileRegion >= 0) {
++        const gy = Math.floor(choice.tileRegion / GW_MAX);
++        const gx = choice.tileRegion % GW_MAX;
++        tile_x = gx * REGION + Math.floor(REGION / 2);
++        tile_y = gy * REGION + Math.floor(REGION / 2);
++      }
+       this.onDebug({
+         tick: game.ticks(),
+         action: name,
+@@ -166,6 +178,8 @@
+         tiles: me?.numTilesOwned() ?? 0,
+         troops: me?.troops() ?? 0,
+         probs: softmax(out.action),
++        tile_x,
++        tile_y,
+       });
+     }
+ 
+--- a/src/client/webbot/main.ts	2026-07-14 11:33:03
++++ b/src/client/webbot/main.ts	2026-07-14 11:33:03
+@@ -16,6 +16,8 @@
+   troops: number;
+   value?: number;
+   probs?: number[];
++  tile_x?: number;
++  tile_y?: number;
+ }
+ 
+ declare global {
+@@ -43,6 +45,8 @@
+       troops: info.troops,
+       value: info.value,
+       probs: info.probs,
++      tile_x: info.tile_x,
++      tile_y: info.tile_y,
+     });
+     if (log.length > MAX_DEBUG_LOG) log.shift();
+   };
