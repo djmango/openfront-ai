@@ -80,7 +80,7 @@ if [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ] || [ 
 else
   AUTO_SCALE_ENVS="${AUTO_SCALE_ENVS:-0}"
 fi
-MAX_ENVS="${MAX_ENVS:-32}"
+MAX_ENVS="${MAX_ENVS:-20}"
 TARGET_GPU_UTIL="${TARGET_GPU_UTIL:-0.85}"
 AUTOSCALE_CHECK_EVERY="${AUTOSCALE_CHECK_EVERY:-5}"
 AUTOSCALE_STEP="${AUTOSCALE_STEP:-2}"
@@ -514,6 +514,10 @@ while true; do
     RESIZE_REASON=$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("reason","resize"))' "$CKPT_DIR/restart_request.json")
     echo "=== intentional resize ($RESIZE_REASON): $NUM_ENVS -> $REQUESTED_ENVS envs/shard; restarting now ===" \
       | tee -a "/tmp/train_$RUN_NAME.log"
+    # Consume the request here. oftrain also deletes it after a successful
+    # spawn, but if startup fails the file would otherwise pin the supervisor
+    # in a tight 26→26 relaunch loop.
+    mv -f "$CKPT_DIR/restart_request.json" "$CKPT_DIR/restart_request.json.last"
     NUM_ENVS="$REQUESTED_ENVS"
     MINIBATCHES=$((NUM_ENVS * ROLLOUT_LEN / MINIBATCH_SIZE))
     [ "$MINIBATCHES" -ge 1 ] || MINIBATCHES=1
