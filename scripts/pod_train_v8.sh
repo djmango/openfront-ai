@@ -72,6 +72,18 @@ else
   NUM_ENVS="${NUM_ENVS:-48}"
 fi
 STAGE_ENV_TARGETS="${STAGE_ENV_TARGETS:-}"
+# Persistent owners cannot live-spawn env workers; autoscale grows via the same
+# restart_request.json path as stage env targets. Default on for V8.3+ so late
+# stages (floors of 8–12) can climb toward GPU util without shortening episodes.
+if [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ] || [ "$V83_MODE" = "1" ]; then
+  AUTO_SCALE_ENVS="${AUTO_SCALE_ENVS:-1}"
+else
+  AUTO_SCALE_ENVS="${AUTO_SCALE_ENVS:-0}"
+fi
+MAX_ENVS="${MAX_ENVS:-32}"
+TARGET_GPU_UTIL="${TARGET_GPU_UTIL:-0.85}"
+AUTOSCALE_CHECK_EVERY="${AUTOSCALE_CHECK_EVERY:-5}"
+AUTOSCALE_STEP="${AUTOSCALE_STEP:-2}"
 if [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ]; then
   ROLLOUT_LEN="${ROLLOUT_LEN:-64}"
   BPTT_CHUNK_LEN="${BPTT_CHUNK_LEN:-32}"
@@ -134,6 +146,9 @@ elif [ "$V81_CURRICULUM" = "1" ]; then
 fi
 if [ -n "$STAGE_ENV_TARGETS" ]; then
   V81_ARGS="$V81_ARGS --stage-env-targets $STAGE_ENV_TARGETS"
+fi
+if [ "$AUTO_SCALE_ENVS" = "1" ]; then
+  EXTRA_ARGS="$EXTRA_ARGS --auto-scale-envs --max-envs $MAX_ENVS --target-gpu-util $TARGET_GPU_UTIL --autoscale-check-every $AUTOSCALE_CHECK_EVERY --autoscale-step $AUTOSCALE_STEP"
 fi
 REPO_DIR="${REPO_DIR:-/root/openfront-ai}"
 CKPT_DIR="$REPO_DIR/rust/checkpoints/$RUN_NAME"
@@ -496,7 +511,8 @@ while true; do
   ELAPSED=$(( $(date +%s) - START_TS ))
   if [ -f "$CKPT_DIR/restart_request.json" ]; then
     REQUESTED_ENVS=$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["requested_envs_per_shard"])' "$CKPT_DIR/restart_request.json")
-    echo "=== intentional stage resize requested: $NUM_ENVS -> $REQUESTED_ENVS envs/shard; restarting now ===" \
+    RESIZE_REASON=$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("reason","resize"))' "$CKPT_DIR/restart_request.json")
+    echo "=== intentional resize ($RESIZE_REASON): $NUM_ENVS -> $REQUESTED_ENVS envs/shard; restarting now ===" \
       | tee -a "/tmp/train_$RUN_NAME.log"
     NUM_ENVS="$REQUESTED_ENVS"
     MINIBATCHES=$((NUM_ENVS * ROLLOUT_LEN / MINIBATCH_SIZE))
