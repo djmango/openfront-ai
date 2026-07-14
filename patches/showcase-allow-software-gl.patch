@@ -1,0 +1,42 @@
+diff --git a/src/client/render/gl/initGL.ts b/src/client/render/gl/initGL.ts
+index 9e7d8b1c6..dbc4bbc72 100644
+--- a/src/client/render/gl/initGL.ts
++++ b/src/client/render/gl/initGL.ts
+@@ -35,6 +35,15 @@ const REQUIRED_TEXTURE_SIZE = getPaletteSize();
+ // in utilities/Diagnostic.ts.
+ const SOFTWARE_RENDERER = /swiftshader|llvmpipe|software/i;
+ 
++/** Showcase headless clip render sets this so SwiftShader is allowed. */
++function allowSoftwareGL(): boolean {
++  try {
++    return localStorage.getItem("rlAllowSoftwareGL") === "1";
++  } catch {
++    return false;
++  }
++}
++
+ /** Read the unmasked GPU renderer string, or "unknown" if unavailable. */
+ function readRenderer(gl: WebGL2RenderingContext): string {
+   const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+@@ -53,10 +62,11 @@ export function initGL(
+   canvas: HTMLCanvasElement,
+   attrs: WebGLContextAttributes = {},
+ ): GLResult {
++  const allowSoft = allowSoftwareGL();
+   // 1. demand a GPU-accelerated context
+   const accel = canvas.getContext("webgl2", {
+     ...attrs,
+-    failIfMajorPerformanceCaveat: true,
++    failIfMajorPerformanceCaveat: !allowSoft,
+   });
+   if (accel) {
+     // failIfMajorPerformanceCaveat does NOT reliably reject a software context
+@@ -65,7 +75,7 @@ export function initGL(
+     // So inspect the renderer and gate if it's software; the game is unplayable
+     // (~1fps) on it either way.
+     const renderer = readRenderer(accel);
+-    if (SOFTWARE_RENDERER.test(renderer)) {
++    if (SOFTWARE_RENDERER.test(renderer) && !allowSoft) {
+       return { gl: null, status: "software", renderer };
+     }
+     // Fingerprinting protection caps texture sizes on an otherwise

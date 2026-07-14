@@ -20,6 +20,7 @@ COPY openfront.commit \
      patches/client-replay-tooling.patch \
      patches/showcase-spawn-window.patch \
      patches/showcase-webbot-tile.patch \
+     patches/showcase-allow-software-gl.patch \
      /tmp/
 ARG OPENFRONT_COMMIT
 RUN set -eux; \
@@ -31,7 +32,8 @@ RUN set -eux; \
     git -C openfront checkout FETCH_HEAD; \
     git apply --directory=openfront /tmp/client-replay-tooling.patch; \
     git apply --directory=openfront /tmp/showcase-spawn-window.patch; \
-    git apply --directory=openfront /tmp/showcase-webbot-tile.patch
+    git apply --directory=openfront /tmp/showcase-webbot-tile.patch; \
+    git apply --directory=openfront /tmp/showcase-allow-software-gl.patch
 
 FROM rust:bookworm AS rust-builder
 WORKDIR /build

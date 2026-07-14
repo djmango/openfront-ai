@@ -104,7 +104,15 @@ def chromium_args() -> list[str]:
     base = ["--no-sandbox", "--disable-dev-shm-usage"]
     if platform.system() == "Darwin":
         return base + ["--use-angle=metal", "--enable-gpu", "--ignore-gpu-blocklist"]
-    return base + ["--use-gl=angle", "--enable-gpu", "--ignore-gpu-blocklist"]
+    # Docker/Linux showcase has no GPU display stack for Chromium; SwiftShader
+    # WebGL2 works once the client allows it via rlAllowSoftwareGL=1.
+    return base + [
+        "--use-gl=angle",
+        "--use-angle=swiftshader-webgl",
+        "--enable-unsafe-swiftshader",
+        "--enable-gpu",
+        "--ignore-gpu-blocklist",
+    ]
 
 
 def trim_video(
@@ -262,6 +270,9 @@ def render_record(
                     'localStorage.setItem("replayViewAs", "1");'
                     'localStorage.setItem("replayFitMap", "1");'
                     f'localStorage.setItem("rlDebugOverlay", "{overlay_flag}");'
+                    # OpenFront rejects SwiftShader unless this flag is set
+                    # (see patches/showcase-allow-software-gl.patch).
+                    'localStorage.setItem("rlAllowSoftwareGL", "1");'
                     'localStorage.setItem("settings.goToPlayer", "false");'
                     'localStorage.setItem("username", "AGENT");'
                 )
@@ -275,13 +286,19 @@ def render_record(
 
                 toggle = page.locator('img[alt="replay"]')
                 toggle.wait_for(state="visible", timeout=120_000)
-                toggle.click()
+                # DOM click: Playwright's real click hangs under SwiftShader when
+                # overlays/hit-testing stall ("performing click action" forever).
+                toggle.evaluate("el => el.click()")
                 panel = page.locator("replay-panel button").first
-                panel.wait_for(state="visible", timeout=10_000)
+                panel.wait_for(state="visible", timeout=30_000)
                 if speed_label:
-                    page.locator("replay-panel button", has_text=speed_label).click()
+                    page.locator("replay-panel button", has_text=speed_label).evaluate(
+                        "el => el.click()"
+                    )
                 else:
-                    page.locator("replay-panel button").last.click()
+                    page.locator("replay-panel button").last.evaluate(
+                        "el => el.click()"
+                    )
                 page.wait_for_timeout(800)
                 gameplay_t0 = time.time()
                 print("replay running...")
@@ -297,6 +314,17 @@ def render_record(
                 gameplay_duration: float | None = None
                 win_hold_t0: float | None = None
                 while time.time() - t0 < timeout:
+                    # Wall-clock cap for headless SwiftShader (tick hooks can lag).
+                    if (
+                        max_duration is not None
+                        and time.time() - gameplay_t0 >= float(max_duration)
+                    ):
+                        gameplay_duration = float(max_duration)
+                        print(
+                            f"max-duration {max_duration}s reached "
+                            f"(tick={page.evaluate('() => window.__replayTick ?? null')})"
+                        )
+                        break
                     tick = page.evaluate(
                         "() => (typeof window.__replayTick === 'number' "
                         "? window.__replayTick : null)"
