@@ -33,10 +33,11 @@
 //! training).
 //! The same flag starts one persistent learner owner per GPU. Each constructs
 //! and retains its LearnerShard, ShardBatch, and shuffle RNG on one stable OS
-//! thread. At each optimizer barrier owners send flat `Vec<f32>` gradients to
-//! a CPU hub, which reduces in shard-index order and returns CPU averages;
-//! no Tensor or VarStore crosses threads. Checkpoint weights are written by
-//! owner 0 and coordinator-ordered sidecars retain their format/order.
+//! thread. At each optimizer barrier an optional feature-gated NCCL path
+//! reduces flat gradients on each owner's current CUDA stream; builds or
+//! launches without NCCL retain the CPU `Vec<f32>` hub. No Tensor or VarStore
+//! crosses threads. Checkpoint weights are written by owner 0 and
+//! coordinator-ordered sidecars retain their format/order.
 //!
 //! Persistent owners deliberately do not accept live env-resize commands.
 //! Stage-aware sizing checkpoints at an update boundary and exits with a
@@ -65,9 +66,9 @@
 //! optimizer step - see the comment above `dist.all_reduce(flat)` there)
 //! rather than wrapping in `nn.parallel.DistributedDataParallel`. `tch`/
 //! `torch-sys` has no NCCL bindings. The legacy path uses P2P copies;
-//! persistent owners use explicit CPU flat-gradient messages so CUDA objects
-//! remain strictly thread-owned. Both implement "average grad before step"
-//! semantics; the CPU hub prioritizes correctness over NCCL throughput.
+//! persistent owners use the small exact-libtorch NCCL shim when compiled and
+//! initialized, or explicit CPU flat-gradient messages otherwise. Both
+//! implement "average grad before step" semantics.
 //!
 //! ## Remaining Python-parity gaps (oftrain)
 //!
@@ -303,8 +304,9 @@ pub struct Config {
     pub pipeline_groups: bool,
     /// Opt-in persistent ownership. One long-lived OS thread per shard owns
     /// actor CUDA state; one stable learner thread per GPU owns that shard's
-    /// learner CUDA state and PPO execution. Gradient and weight messages are
-    /// packed CPU-only f32 vectors. Disabled by default; incompatible live
+    /// learner CUDA state and PPO execution. Weights remain packed CPU-only
+    /// messages; gradients use owner-local NCCL when available and a packed
+    /// CPU fallback otherwise. Disabled by default; incompatible live
     /// utilization autoscaling is disabled without changing ownership mode.
     pub persistent_actors: bool,
     /// Opt-in recurrent actor state. This is restricted to persistent actors
@@ -3972,7 +3974,8 @@ impl LearnerCommand {
 }
 
 enum GradientDecision {
-    Apply(Arc<Vec<f32>>),
+    ApplyCpu(Arc<Vec<f32>>),
+    Collective,
     Discard,
     Abort(String),
 }
@@ -4036,6 +4039,7 @@ fn learner_loop(
     command_rx: Receiver<LearnerCommand>,
     reply_tx: Sender<LearnerReply>,
     gradient_rx: Receiver<GradientDecision>,
+    mut nccl_comm: Option<crate::nccl::Comm>,
 ) {
     let init_started = Instant::now();
     eprintln!("[phase] persistent learner initialization started");
@@ -4114,7 +4118,7 @@ fn learner_loop(
                                 minibatch: usize,
                                 finite: bool|
                  -> Result<bool> {
-                    let values = if finite {
+                    let values = if finite && nccl_comm.is_none() {
                         flat_grad_to_cpu(owned)?
                     } else {
                         Vec::new()
@@ -4128,8 +4132,20 @@ fn learner_loop(
                         values,
                     })?;
                     match gradient_rx.recv()? {
-                        GradientDecision::Apply(values) => {
+                        GradientDecision::ApplyCpu(values) => {
                             apply_cpu_flat_grad(owned, values.as_slice())?;
+                            Ok(true)
+                        }
+                        GradientDecision::Collective => {
+                            let comm = nccl_comm.as_mut().ok_or_else(|| {
+                                anyhow!("NCCL collective requested without communicator")
+                            })?;
+                            let mut flat = flat_grad_on_device(owned);
+                            // Any error after entering a collective is fatal.
+                            // Falling back here could strand another rank or
+                            // apply a partially reduced optimizer step.
+                            comm.all_reduce_average(&mut flat)?;
+                            apply_device_flat_grad(owned, &flat)?;
                             Ok(true)
                         }
                         GradientDecision::Discard => Ok(false),
@@ -4226,6 +4242,7 @@ struct PersistentLearner {
     ret_stat: RetStat,
     epochs: usize,
     minibatches: usize,
+    nccl_enabled: bool,
 }
 
 impl PersistentLearner {
@@ -4240,6 +4257,38 @@ impl PersistentLearner {
         let mut command_txs = Vec::with_capacity(devices.len());
         let mut gradient_txs = Vec::with_capacity(devices.len());
         let mut handles = Vec::with_capacity(devices.len());
+        // ncclCommInitAll is the only cross-rank initialization point. Each
+        // resulting rank handle is then moved once into its permanent owner.
+        // Startup failure is safe to fall back from because no collective or
+        // optimizer step has begun.
+        let mut nccl_comms: Vec<Option<crate::nccl::Comm>> = match crate::nccl::try_init(devices) {
+            Ok(Some(comms)) => {
+                anyhow::ensure!(
+                    comms.len() == devices.len(),
+                    "NCCL returned {} communicators for {} learners",
+                    comms.len(),
+                    devices.len()
+                );
+                eprintln!(
+                    "[nccl] device-resident gradient all-reduce enabled for {} learner owners",
+                    devices.len()
+                );
+                comms.into_iter().map(Some).collect()
+            }
+            Ok(None) => {
+                if devices.len() > 1 {
+                    eprintln!("[nccl] unavailable; using CPU persistent gradient hub");
+                }
+                (0..devices.len()).map(|_| None).collect()
+            }
+            Err(error) => {
+                eprintln!(
+                    "[nccl] initialization failed before training ({error:#}); using CPU persistent gradient hub"
+                );
+                (0..devices.len()).map(|_| None).collect()
+            }
+        };
+        let nccl_enabled = nccl_comms.iter().all(Option::is_some);
         // DDP ranks use the same epoch permutation over their disjoint local
         // batches. Giving each owner a different permutation is mathematically
         // equivalent in exact arithmetic, but changes floating-point reduction
@@ -4253,6 +4302,7 @@ impl PersistentLearner {
             let thread_cfg = cfg.clone();
             let thread_weights = initial_weights.clone();
             let thread_rng = rand::rngs::SmallRng::seed_from_u64(shuffle_seed);
+            let nccl_comm = nccl_comms[shard].take();
             let handle = std::thread::Builder::new()
                 .name(format!("learner-gpu{shard}"))
                 .spawn(move || learner_loop(
@@ -4265,6 +4315,7 @@ impl PersistentLearner {
                     command_rx,
                     thread_reply,
                     gradient_rx,
+                    nccl_comm,
                 ))?;
             command_txs.push(command_tx);
             gradient_txs.push(gradient_tx);
@@ -4280,6 +4331,7 @@ impl PersistentLearner {
             ret_stat: RetStat::default(),
             epochs: cfg.epochs,
             minibatches: cfg.minibatches.max(1),
+            nccl_enabled,
         };
         let mut params = vec![None; devices.len()];
         for _ in devices {
@@ -4379,7 +4431,7 @@ impl PersistentLearner {
                 let mut packets: Vec<Option<(bool, Vec<f32>)>> =
                     (0..world).map(|_| None).collect();
                 for _ in 0..world {
-                    match self.recv_reply("CPU gradient barrier")? {
+                    match self.recv_reply("finite gradient barrier")? {
                         LearnerReply::Gradient {
                             id: reply_id,
                             shard,
@@ -4410,6 +4462,21 @@ impl PersistentLearner {
                     }
                     continue;
                 }
+                if self.nccl_enabled {
+                    anyhow::ensure!(
+                        packets.iter().all(|packet| packet
+                            .as_ref()
+                            .is_some_and(|(_, values)| values.is_empty())),
+                        "NCCL readiness packet unexpectedly contained host gradients"
+                    );
+                    // This decision is sent only after every owner reports a
+                    // finite minibatch. Thus no rank can enter NCCL while a
+                    // peer discards the optimizer step.
+                    for tx in &self.gradient_txs {
+                        tx.send(GradientDecision::Collective)?;
+                    }
+                    continue;
+                }
                 let ordered: Vec<Vec<f32>> = packets
                     .into_iter()
                     .map(|packet| packet.expect("all packets present").1)
@@ -4418,7 +4485,7 @@ impl PersistentLearner {
                 #[cfg(test)]
                 averaged_gradients.push(average.as_ref().clone());
                 for tx in &self.gradient_txs {
-                    tx.send(GradientDecision::Apply(average.clone()))?;
+                    tx.send(GradientDecision::ApplyCpu(average.clone()))?;
                 }
             }
         }
@@ -4544,18 +4611,32 @@ fn learner_reply_error(expected: &str, reply: &LearnerReply) -> anyhow::Error {
 }
 
 fn flat_grad_to_cpu(shard: &LearnerShard) -> Result<Vec<f32>> {
+    let flat = flat_grad_on_device(shard).to_device(Device::Cpu);
+    Ok((&flat).try_into()?)
+}
+
+fn flat_grad_on_device(shard: &LearnerShard) -> Tensor {
     let parts: Vec<Tensor> = shard
         .vs
         .trainable_variables()
         .iter()
         .map(|v| v.grad().reshape([-1]))
         .collect();
-    let flat = Tensor::cat(&parts, 0).to_device(Device::Cpu).to_kind(Kind::Float);
-    Ok((&flat).try_into()?)
+    Tensor::cat(&parts, 0).to_kind(Kind::Float)
 }
 
 fn apply_cpu_flat_grad(shard: &mut LearnerShard, values: &[f32]) -> Result<()> {
     let flat = Tensor::from_slice(values).to_device(shard.device);
+    apply_device_flat_grad(shard, &flat)
+}
+
+fn apply_device_flat_grad(shard: &mut LearnerShard, flat: &Tensor) -> Result<()> {
+    anyhow::ensure!(
+        flat.device() == shard.device,
+        "flat gradient device mismatch: {:?} != {:?}",
+        flat.device(),
+        shard.device
+    );
     let mut offset = 0i64;
     for variable in shard.vs.trainable_variables() {
         let mut grad = variable.grad();
@@ -4564,7 +4645,7 @@ fn apply_cpu_flat_grad(shard: &mut LearnerShard, values: &[f32]) -> Result<()> {
         grad.f_copy_(&source)?;
         offset += len;
     }
-    anyhow::ensure!(offset as usize == values.len(), "flat gradient length mismatch");
+    anyhow::ensure!(offset as usize == flat.numel(), "flat gradient length mismatch");
     Ok(())
 }
 
@@ -5338,11 +5419,11 @@ fn train_update(
             }
 
             // Persistent multi-GPU owners cannot inspect another thread's
-            // tensors.  They rendezvous here with a CPU flat-gradient
-            // message; the hub deterministically reduces in shard order and
-            // writes the average back through this callback.  A non-finite
-            // shard participates with `finite=false`, causing every owner to
-            // discard the same minibatch.
+            // tensors. They first rendezvous here with finite status. The
+            // selected backend then either enters owner-local NCCL or sends a
+            // CPU flat gradient to the deterministic hub. A non-finite shard
+            // causes every owner to discard the same minibatch before any
+            // collective starts.
             if let Some(sync) = persistent_sync.as_deref_mut() {
                 debug_assert_eq!(learners.len(), 1);
                 let global_finite = sync(&mut learners[0], _epoch, m, !discard_mb)?;
