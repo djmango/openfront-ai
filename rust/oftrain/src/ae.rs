@@ -278,6 +278,20 @@ impl AePair {
             _coarse_vs: coarse_vs,
         })
     }
+
+    #[cfg(test)]
+    pub(crate) fn random_for_test(device: Device) -> Result<Self> {
+        let fine_vs = nn::VarStore::new(device);
+        let fine = SpatialAE::new(&fine_vs.root(), LATENT_C, REGION)?;
+        let coarse_vs = nn::VarStore::new(device);
+        let coarse = SpatialAE::new(&coarse_vs.root(), LATENT_C, COARSE_REGION)?;
+        Ok(Self {
+            fine,
+            _fine_vs: fine_vs,
+            coarse: Some(coarse),
+            _coarse_vs: Some(coarse_vs),
+        })
+    }
 }
 
 /// Identity of one environment's episode-static terrain. Every reset gets

@@ -239,6 +239,11 @@ def main() -> None:
     ap.add_argument("--rust-bin", default="rust/target/release/oftrain")
     ap.add_argument("--rust-ae", required=True, help="exported encoder safetensors")
     ap.add_argument("--rust-coarse-ae")
+    ap.add_argument(
+        "--rust-recurrent",
+        action="store_true",
+        help="construct the V8.2 recurrent policy when loading the Rust checkpoint",
+    )
     ap.add_argument("--python-ae", required=True, help="PyTorch AE checkpoint")
     ap.add_argument("--python-coarse-ae")
     ap.add_argument("--stage", type=int, default=1)
@@ -280,6 +285,8 @@ def main() -> None:
         ]
         if args.rust_coarse_ae:
             rust_command += ["--coarse-ckpt", str(Path(args.rust_coarse_ae).resolve())]
+        if args.rust_recurrent:
+            rust_command += ["--persistent-actors", "--recurrent-policy"]
         subprocess.run(rust_command, cwd=REPO, check=True)
         for label in ("ppo_v5", "ppo_v7"):
             run_python(
