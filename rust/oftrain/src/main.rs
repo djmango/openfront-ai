@@ -200,9 +200,29 @@ struct Args {
     #[arg(long, default_value_t = 4)]
     v85_combat_min_stage: usize,
 
+    /// V8.6: override W_DELTA_LOSS when > 0 (soften attack variance tax).
+    #[arg(long, default_value_t = 0.0)]
+    v86_delta_loss: f64,
+
+    /// V8.6: price strength losses like gains while an attack is open.
+    #[arg(long, default_value_t = false)]
+    v86_attack_symmetric_loss: bool,
+
+    /// V8.6: skip flat attack↔retreat churn (combat sticky already prices it).
+    #[arg(long, default_value_t = false)]
+    v86_skip_combat_churn: bool,
+
+    /// V8.6: override W_DEATH when > 0.
+    #[arg(long, default_value_t = 0.0)]
+    v86_death_penalty: f64,
+
     /// Resume a V8.4 reward-profile checkpoint under V8.5 coeffs (weights unchanged).
     #[arg(long, default_value_t = false, requires_all = ["v83_curriculum", "resume"])]
     migrate_v84_to_v85: bool,
+
+    /// Resume a V8.5 reward-profile checkpoint under V8.6 coeffs (weights unchanged).
+    #[arg(long, default_value_t = false, requires_all = ["v83_curriculum", "resume"])]
+    migrate_v85_to_v86: bool,
 
     #[arg(long, default_value_t = 0.95)]
     lambda_: f32,
@@ -1143,6 +1163,14 @@ fn main() -> anyhow::Result<()> {
         args.v85_thrash_reengage.is_finite(),
         "--v85-thrash-reengage must be finite"
     );
+    anyhow::ensure!(
+        args.v86_delta_loss.is_finite() && args.v86_delta_loss >= 0.0,
+        "--v86-delta-loss must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.v86_death_penalty.is_finite() && args.v86_death_penalty >= 0.0,
+        "--v86-death-penalty must be finite and non-negative"
+    );
     let reward_config = ofcore::curriculum::RewardConfig {
         gamma: args.gamma as f64,
         v81_dom_coef: args.v81_dom_coef,
@@ -1172,6 +1200,10 @@ fn main() -> anyhow::Result<()> {
         v85_premature_retreat: args.v85_premature_retreat,
         v85_thrash_reengage: args.v85_thrash_reengage,
         v85_combat_min_stage: args.v85_combat_min_stage,
+        v86_delta_loss: args.v86_delta_loss,
+        v86_attack_symmetric_loss: args.v86_attack_symmetric_loss,
+        v86_skip_combat_churn: args.v86_skip_combat_churn,
+        v86_death_penalty: args.v86_death_penalty,
     };
     let curriculum_schedule = if args.v83_curriculum {
         ofcore::curriculum::CurriculumSchedule::V83
@@ -1337,6 +1369,7 @@ fn main() -> anyhow::Result<()> {
         migrate_v82_to_v83: args.migrate_v82_to_v83,
         migrate_v83_to_v84: args.migrate_v83_to_v84,
         migrate_v84_to_v85: args.migrate_v84_to_v85,
+        migrate_v85_to_v86: args.migrate_v85_to_v86,
         stage_env_targets,
         max_episode_ticks: args.max_episode_ticks,
         rollout_len: args.rollout_len,

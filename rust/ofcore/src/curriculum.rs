@@ -26,6 +26,7 @@ pub const V83_CLOSEOUT_SHARE_FULL: f64 = 0.80;
 pub const V83_REWARD_PROFILE: &str = "v8.3-closeout-v1";
 pub const V84_REWARD_PROFILE: &str = "v8.4-boat-tempo-v1";
 pub const V85_REWARD_PROFILE: &str = "v8.5-win-urgency-v1";
+pub const V86_REWARD_PROFILE: &str = "v8.6-attack-fair-v1";
 /// Relation score bands mirror engine `Relation` / TS `PlayerImpl.relation()`.
 pub const RELATION_HOSTILE_LT: f64 = -50.0;
 pub const RELATION_DISTRUSTFUL_LT: f64 = 0.0;
@@ -75,6 +76,14 @@ pub struct RewardConfig {
     /// Penalty for re-attacking a target just after retreating.
     pub v85_thrash_reengage: f64,
     pub v85_combat_min_stage: usize,
+    /// V8.6: override `W_DELTA_LOSS` when > 0 (soften attack variance tax).
+    pub v86_delta_loss: f64,
+    /// V8.6: while the agent has an open attack, price losses like gains.
+    pub v86_attack_symmetric_loss: bool,
+    /// V8.6: do not stack flat attack↔retreat churn on top of combat outcomes.
+    pub v86_skip_combat_churn: bool,
+    /// V8.6: override `W_DEATH` when > 0 (death must hurt more than mid-place).
+    pub v86_death_penalty: f64,
 }
 
 impl RewardConfig {
@@ -144,9 +153,45 @@ impl RewardConfig {
             || self.v85_thrash_reengage != 0.0
     }
 
+    pub fn v86_reward_active(self) -> bool {
+        self.v86_delta_loss > 0.0
+            || self.v86_attack_symmetric_loss
+            || self.v86_skip_combat_churn
+            || self.v86_death_penalty > 0.0
+    }
+
     /// V8.4 boat/tempo knobs and/or V8.5 win-urgency knobs.
     pub fn v84_or_v85_reward_active(self) -> bool {
         self.v84_reward_active() || self.v85_reward_active()
+    }
+
+    pub fn delta_loss(self) -> f64 {
+        if self.v86_delta_loss > 0.0 {
+            self.v86_delta_loss
+        } else {
+            W_DELTA_LOSS
+        }
+    }
+
+    pub fn death_penalty(self) -> f64 {
+        if self.v86_death_penalty > 0.0 {
+            self.v86_death_penalty
+        } else {
+            W_DEATH
+        }
+    }
+
+    /// Active V8.3+ reward profile id for TrainState sidecars.
+    pub fn reward_profile_id(self) -> &'static str {
+        if self.v86_reward_active() {
+            V86_REWARD_PROFILE
+        } else if self.v85_reward_active() {
+            V85_REWARD_PROFILE
+        } else if self.v84_reward_active() {
+            V84_REWARD_PROFILE
+        } else {
+            V83_REWARD_PROFILE
+        }
     }
 }
 
@@ -217,20 +262,28 @@ impl BoatOutcomeCounts {
 /// Classify a resolved transport. Strength already counts fielded troops, so
 /// this is a small categorical signal for the tile/action heads — not a
 /// re-pricing of troop deltas.
+///
+/// `has_sourced_attack` covers landings that merge into an already-open
+/// sourced attack (no *new* attack id): without it those resolve as
+/// Destroyed because refund ≈ 0.
 pub fn classify_boat_resolution(
     cancel_requested: bool,
     committed_troops: f64,
     troops_before: f64,
     troops_after: f64,
     new_sourced_attack: bool,
+    has_sourced_attack: bool,
 ) -> BoatOutcome {
     if cancel_requested {
         return BoatOutcome::Cancelled;
     }
-    if new_sourced_attack {
+    let refund = troops_after - troops_before;
+    if new_sourced_attack
+        || (has_sourced_attack
+            && !(committed_troops > 0.0 && refund >= 0.5 * committed_troops))
+    {
         return BoatOutcome::UsefulLanding;
     }
-    let refund = troops_after - troops_before;
     if committed_troops > 0.0 && refund >= 0.5 * committed_troops {
         return BoatOutcome::OwnShoreReturn;
     }
@@ -986,15 +1039,20 @@ pub fn strength_delta_weight(
     normalized_share: f64,
     stage: usize,
     config: RewardConfig,
+    has_active_attack: bool,
 ) -> f64 {
     if delta >= 0.0 {
+        W_DELTA_GAIN
+    } else if config.v86_attack_symmetric_loss && has_active_attack {
+        // Attack burns troops before land accrues; don't asymmetrically tax
+        // the intentional dip while an attack the agent opened is in flight.
         W_DELTA_GAIN
     } else if config.dominant_loss_active(stage)
         && normalized_share >= config.v81_dominance_threshold
     {
         config.v81_delta_loss_dominant
     } else {
-        W_DELTA_LOSS
+        config.delta_loss()
     }
 }
 
@@ -1064,6 +1122,10 @@ mod tests {
             v85_premature_retreat: -0.10,
             v85_thrash_reengage: -0.10,
             v85_combat_min_stage: 4,
+            v86_delta_loss: 0.0,
+            v86_attack_symmetric_loss: false,
+            v86_skip_combat_churn: false,
+            v86_death_penalty: 0.0,
         }
     }
 
@@ -1156,18 +1218,34 @@ mod tests {
         assert!(!cfg.dominant_loss_active(3));
         assert!(cfg.dominance_shaping_active(4));
         assert!(cfg.dominant_loss_active(4));
-        assert_eq!(strength_delta_weight(-0.1, 0.9, 3, cfg), W_DELTA_LOSS);
+        assert_eq!(strength_delta_weight(-0.1, 0.9, 3, cfg, false), W_DELTA_LOSS);
     }
 
     #[test]
     fn dominant_threshold_relaxes_only_losses_at_or_above_threshold() {
         let cfg = config();
-        assert_eq!(strength_delta_weight(-0.1, 0.549, 4, cfg), W_DELTA_LOSS);
+        assert_eq!(strength_delta_weight(-0.1, 0.549, 4, cfg, false), W_DELTA_LOSS);
         assert_eq!(
-            strength_delta_weight(-0.1, 0.55, 4, cfg),
+            strength_delta_weight(-0.1, 0.55, 4, cfg, false),
             cfg.v81_delta_loss_dominant
         );
-        assert_eq!(strength_delta_weight(0.1, 0.99, 4, cfg), W_DELTA_GAIN);
+        assert_eq!(strength_delta_weight(0.1, 0.99, 4, cfg, false), W_DELTA_GAIN);
+    }
+
+    #[test]
+    fn v86_softens_loss_and_symmetrizes_during_active_attack() {
+        let mut cfg = config();
+        cfg.v86_delta_loss = 5.5;
+        cfg.v86_attack_symmetric_loss = true;
+        assert_eq!(strength_delta_weight(-0.1, 0.1, 4, cfg, false), 5.5);
+        assert_eq!(
+            strength_delta_weight(-0.1, 0.1, 4, cfg, true),
+            W_DELTA_GAIN
+        );
+        assert_eq!(cfg.death_penalty(), W_DEATH);
+        cfg.v86_death_penalty = 10.0;
+        assert_eq!(cfg.death_penalty(), 10.0);
+        assert_eq!(cfg.reward_profile_id(), V86_REWARD_PROFILE);
     }
 
     #[test]
@@ -1183,7 +1261,8 @@ mod tests {
             } else {
                 W_DELTA_LOSS
             }) * delta;
-        let current = W_STR * mine * tw + strength_delta_weight(delta, 0.99, 10, cfg) * delta;
+        let current =
+            W_STR * mine * tw + strength_delta_weight(delta, 0.99, 10, cfg, false) * delta;
         assert_eq!(legacy.to_bits(), current.to_bits());
         assert!(!cfg.dominance_shaping_active(10));
     }
@@ -1392,20 +1471,31 @@ mod tests {
     #[test]
     fn boat_outcome_classifies_landing_cancel_return_and_destroy() {
         assert_eq!(
-            classify_boat_resolution(false, 100.0, 500.0, 500.0, true),
+            classify_boat_resolution(false, 100.0, 500.0, 500.0, true, false),
             BoatOutcome::UsefulLanding
         );
         assert_eq!(
-            classify_boat_resolution(true, 100.0, 500.0, 575.0, false),
+            classify_boat_resolution(true, 100.0, 500.0, 575.0, false, false),
             BoatOutcome::Cancelled
         );
         assert_eq!(
-            classify_boat_resolution(false, 100.0, 500.0, 575.0, false),
+            classify_boat_resolution(false, 100.0, 500.0, 575.0, false, false),
             BoatOutcome::OwnShoreReturn
         );
         assert_eq!(
-            classify_boat_resolution(false, 100.0, 500.0, 500.0, false),
+            classify_boat_resolution(false, 100.0, 500.0, 500.0, false, false),
             BoatOutcome::Destroyed
+        );
+        // Landing merges into an already-open sourced attack: no new attack id,
+        // no troop refund → used to misclassify as Destroyed.
+        assert_eq!(
+            classify_boat_resolution(false, 100.0, 500.0, 500.0, false, true),
+            BoatOutcome::UsefulLanding
+        );
+        // Own-shore refund still wins over a concurrent land attack.
+        assert_eq!(
+            classify_boat_resolution(false, 100.0, 500.0, 575.0, false, true),
+            BoatOutcome::OwnShoreReturn
         );
     }
 
