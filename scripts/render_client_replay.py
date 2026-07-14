@@ -9,7 +9,8 @@ record's engine commit so the openfront submodule stays clean):
     styling, gold spawn ring, crown when first, "You Won!" modal
   - replayFitMap: camera starts centered on the whole map
   - RlDebugOverlay: in-client model panel (chosen action, value,
-    action-probability bars, recent-actions log) synced to the sim tick;
+    action-probability bars, recent-actions log) synced to the sim tick,
+    plus a red ✕ on the map when the decision includes a tile target;
     it fetches <apiHost>/debug/<gameID>, which the shim serves from the
     rl.watch debug sidecar (<record>.debug.json)
 
