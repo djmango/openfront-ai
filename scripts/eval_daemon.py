@@ -215,6 +215,7 @@ def generate_showcase(policy: Path, ae: Path) -> dict:
         "run_name": RUN_NAME,
         "stage": STAGE,
         "watch_stage": SHOWCASE_WATCH_STAGE,
+        # Legacy field: featured map is now chosen at random, not hourly.
         "rotate_hours": 1,
         "generated_at": utc_now(),
         **policy_meta(policy),

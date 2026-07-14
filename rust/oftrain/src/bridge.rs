@@ -231,6 +231,10 @@ impl GameEngine for Bridge {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+
+    fn save_record(&mut self, path: &str) -> Result<Value> {
+        Bridge::save_record(self, path)
+    }
 }
 
 impl Drop for Bridge {

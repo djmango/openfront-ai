@@ -1,5 +1,7 @@
 # syntax=docker/dockerfile:1
 # OpenFront RL eval showcase: live agent games + archive replay + MODEL overlay.
+# Rust owns HF + HTTP + watch orchestration (ofhub / oftrain --watch);
+# Playwright + webbot_launcher remain thin Python subprocesses.
 
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm AS py-deps
 WORKDIR /build
@@ -25,6 +27,25 @@ RUN set -eux; \
     git -C openfront checkout FETCH_HEAD; \
     git apply --directory=openfront /tmp/client-replay-tooling.patch
 
+FROM rust:bookworm AS rust-builder
+WORKDIR /build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config libssl-dev ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+COPY rust ./rust
+WORKDIR /build/rust
+# ofhub has no libtorch dependency.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/rust/target \
+    cargo build --release -p ofhub \
+    && mkdir -p /out \
+    && cp target/release/ofhf target/release/ofexport target/release/ofshowcase /out/
+# oftrain watch uses download-libtorch (CPU) for showcase inference.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/rust/target \
+    cargo build --release -p oftrain --features download-libtorch \
+    && cp target/release/oftrain /out/
+
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm AS runtime
 WORKDIR /app
 
@@ -40,21 +61,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=py-deps /build/.venv /app/.venv
+COPY --from=rust-builder /out/ofhf /out/ofexport /out/ofshowcase /out/oftrain /app/rust/target/release/
 
 COPY rl ./rl
-COPY ae ./ae
 COPY bridge ./bridge
-COPY datagen ./datagen
 COPY scripts ./scripts
 COPY docker ./docker
 COPY patches ./patches
 COPY pyproject.toml uv.lock openfront.commit ./
+RUN mkdir -p /app/weights/ae
 
 COPY --from=openfront-src /src/openfront ./openfront
 RUN --mount=type=cache,target=/root/.npm \
     cd openfront && npm ci --ignore-scripts
 
-ENV PATH="/app/.venv/bin:/app/openfront/node_modules/.bin:${PATH}"
+ENV PATH="/app/.venv/bin:/app/openfront/node_modules/.bin:/app/rust/target/release:${PATH}"
 ENV PYTHONPATH=/app
 ENV DATA_DIR=/data
 ENV RUN_NAME=ppo_v81
@@ -65,12 +86,18 @@ ENV SHOWCASE_MAPS=Onion,Pangaea,Caucasus,BlackSea,BetweenTwoSeas,World,Asia
 ENV CLIP_MAX_SEC=90
 ENV REFRESH_HOURS=1
 ENV LIVE_SHOWCASE=0
-ENV AE_CKPT=runs/ae_v31_d8c32/ae_v3.pt
+ENV AE_CKPT=weights/ae/ae_v31_d8c32.encoder.safetensors
+ENV OFTRAIN_BIN=/app/rust/target/release/oftrain
+ENV OFSHOWCASE=/app/rust/target/release/ofshowcase
 
-RUN mkdir -p /data/records /data/policy /data/clips \
+RUN mkdir -p /data/records /data/policy /data/clips /app/rust/target/release \
     && /app/.venv/bin/python -m playwright install-deps chromium \
     && /app/.venv/bin/python -m playwright install chromium \
-    && chmod +x /app/docker/entrypoint.sh
+    && chmod +x /app/docker/entrypoint.sh \
+    && chmod +x /app/rust/target/release/ofhf \
+                 /app/rust/target/release/ofexport \
+                 /app/rust/target/release/ofshowcase \
+                 /app/rust/target/release/oftrain
 
 EXPOSE 8086
 VOLUME ["/data"]
