@@ -182,15 +182,22 @@ if [ ! -f "$AE_DIR/ae_v31_d8c32.encoder.safetensors" ] || [ ! -f "$AE_DIR/ae_v31
   AE_DIR="$AE_DIR" PYTHON="$PYTHON" bash "$REPO_DIR/scripts/fetch_ae_encoders.sh"
 fi
 
+# Build ofhub (HF sync) alongside oftrain.
+cargo build --release -p ofhub
+OFHF="$REPO_DIR/rust/target/release/ofhf"
+
 mkdir -p "$CKPT_DIR"
 
 # --- resume seed: current/future runs restore a complete safetensors pair
 # only. Explicit `oftrain --resume old.ot` remains available for manual
 # legacy migrations, but automated launches never select it. ---
 if [ ! -f "$CKPT_DIR/latest.safetensors" ] || [ ! -f "$CKPT_DIR/latest.state.json" ]; then
-  "$PYTHON" "$REPO_DIR/scripts/hf_checkpoint_sync.py" \
-    --checkpoint-dir "$CKPT_DIR" --repo-id "$HF_REPO_ID" \
-    --run-prefix "$HF_RUN_PREFIX" --restore-latest || true
+  if [ -z "${HF_TOKEN:-}" ]; then
+    echo "FATAL: HF_TOKEN is required to restore checkpoints from Hugging Face" >&2
+    exit 1
+  fi
+  "$OFHF" pull --checkpoint-dir "$CKPT_DIR" --repo-id "$HF_REPO_ID" \
+    --run-prefix "$HF_RUN_PREFIX" || true
 fi
 if { [ -f "$CKPT_DIR/latest.safetensors" ] && [ ! -f "$CKPT_DIR/latest.state.json" ]; } \
   || { [ ! -f "$CKPT_DIR/latest.safetensors" ] && [ -f "$CKPT_DIR/latest.state.json" ]; }
@@ -200,8 +207,12 @@ then
 fi
 
 # --- background HF sync: immutable snapshots of latest, best-eval,
-# milestones, state sidecars, and the run manifest. ---
-"$PYTHON" "$REPO_DIR/scripts/hf_checkpoint_sync.py" \
+# milestones, state sidecars, and the run manifest. Fail loud without token. ---
+if [ -z "${HF_TOKEN:-}" ]; then
+  echo "FATAL: HF_TOKEN is required for ofhf sync-loop (fail loud)" >&2
+  exit 1
+fi
+"$OFHF" sync-loop \
   --checkpoint-dir "$CKPT_DIR" --repo-id "$HF_REPO_ID" \
   --run-prefix "$HF_RUN_PREFIX" --interval "$HF_SYNC_INTERVAL_SECONDS" \
   >>"/tmp/hf_sync_$RUN_NAME.log" 2>&1 &

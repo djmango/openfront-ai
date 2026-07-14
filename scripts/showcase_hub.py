@@ -1,7 +1,7 @@
-"""Homelab showcase hub: hourly replay spectate, on-demand 1v1 play.
+"""Homelab showcase hub: random featured replay spectate, on-demand 1v1 play.
 
   GET /         -> landing (featured map clip; watch link)
-  GET /watch    -> archived replay for the current hour's map
+  GET /watch    -> archived replay for a randomly chosen showcase map
   GET /replay   -> alias for /watch
   GET /play     -> create 1v1+bots lobby, launch agent, join as human
   GET /play/debug/<id> -> MODEL overlay feed for the active play lobby
@@ -453,18 +453,13 @@ class HubHandler(BaseHTTPRequestHandler):
         if path == "/status":
             target, mode, featured = watch_target()
             replay = load_replay_state()
-            next_rotate = None
-            maps = replay.get("maps") or []
-            if maps:
-                hour = int(time.time() // 3600)
-                next_rotate = (hour + 1) * 3600
             payload = {
                 "watch": {
                     "url": target or None,
                     "mode": mode,
                     "map": featured.get("map") if featured else replay.get("map"),
                     "game_id": featured.get("game_id") if featured else replay.get("game_id"),
-                    "next_rotate_at": next_rotate,
+                    "selection": "random",
                 },
                 "replay": replay,
                 "hub": load_hub_state(),
