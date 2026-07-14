@@ -143,12 +143,15 @@ impl TransportShipExecution {
         if self.path_idx > 0 {
             let expected = self.path[self.path_idx - 1];
             if from != expected {
-                if let Some(pos) = self.path.iter().position(|&t| t == from) {
-                    self.path_idx = pos + 1;
-                } else {
-                    self.path.clear();
-                    self.path_idx = 0;
-                    return self.next_path_tile(game, from, to);
+                // TS `PathFinderStepper.next` invalidates the cached path on
+                // any expected-position mismatch.  Do not scan forward in the
+                // stale path: if `from` appears later, skipping to `pos + 1`
+                // drops intermediate movement ticks and makes ships arrive or
+                // get captured early.
+                self.path.clear();
+                self.path_idx = 0;
+                if !self.refresh_path(game, from, to) {
+                    return None;
                 }
             }
         }

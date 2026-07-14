@@ -130,12 +130,15 @@ impl TradeShipExecution {
         if self.path_idx > 0 {
             let expected = self.path[self.path_idx - 1];
             if from != expected {
-                if let Some(pos) = self.path.iter().position(|&t| t == from) {
-                    self.path_idx = pos + 1;
-                } else {
-                    self.path.clear();
-                    self.path_idx = 0;
-                    return self.next_path_tile(game, from, to);
+                // TS `PathFinderStepper.next` invalidates the cached path on
+                // any expected-position mismatch.  Do not scan forward in the
+                // stale path: if `from` appears later, skipping to `pos + 1`
+                // drops intermediate movement ticks and makes ships arrive or
+                // get captured early.
+                self.path.clear();
+                self.path_idx = 0;
+                if !self.refresh_path(game, from, to) {
+                    return None;
                 }
             }
         }
@@ -371,6 +374,32 @@ mod piracy_tests {
             friends: Vec::new(),
             team: None,
         })
+    }
+
+    #[test]
+    fn stale_cached_path_replans_instead_of_skipping_ahead() {
+        let mut game = water_game(40, 40);
+        let from = game.ref_xy(8, 8);
+        let dst = game.ref_xy(30, 8);
+        let mut exec = TradeShipExecution::new_for_test(1, 0, 123);
+
+        exec.path = vec![
+            game.ref_xy(1, 1),
+            game.ref_xy(2, 1),
+            from,
+            game.ref_xy(9, 8),
+        ];
+        exec.path_idx = 1;
+        exec.path_dst = Some(dst);
+
+        exec.next_path_tile(&mut game, from, dst)
+            .expect("fresh path from current tile");
+
+        assert_eq!(
+            exec.path.first(),
+            Some(&from),
+            "PathFinderStepper invalidates on expected-position mismatch; it must not scan forward in the stale path"
+        );
     }
 
     /// Warship capture mid-voyage: TradeShipExecution must detect the owner
