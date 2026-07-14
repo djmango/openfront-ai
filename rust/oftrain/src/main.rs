@@ -8,6 +8,7 @@ mod metrics;
 #[cfg(feature = "native-engine")]
 mod native;
 mod policy;
+mod recurrent;
 mod train;
 mod vecenv;
 mod watch;
@@ -262,6 +263,19 @@ struct Args {
     #[arg(long, default_value_t = false)]
     persistent_actors: bool,
 
+    /// Enable per-environment recurrent policy state. Requires persistent
+    /// CUDA actors. The hidden width is set by --recurrent-hidden-size.
+    #[arg(long, default_value_t = false, requires = "persistent_actors")]
+    recurrent_policy: bool,
+
+    /// Number of f32 values in each environment's recurrent hidden state.
+    #[arg(long, default_value_t = 256)]
+    recurrent_hidden_size: usize,
+
+    /// Timesteps per truncated-BPTT chunk for recurrent PPO.
+    #[arg(long, default_value_t = 16)]
+    bptt_chunk_len: usize,
+
     /// Let persistent actors batch whichever envs are ready instead of
     /// waiting for fixed worker halves. Requires --persistent-actors.
     #[arg(long, default_value_t = false)]
@@ -388,6 +402,16 @@ struct Args {
     /// `VarStore` — there is no Python `.pt` converter.
     #[arg(long)]
     init: Option<String>,
+
+    /// Explicit strict V8.1 schema-v1 safetensors migration into the
+    /// recurrent V8.2 policy. Existing tensors are copied exactly and only
+    /// `recurrent.*` tensors retain their V8.2 initialization.
+    #[arg(
+        long,
+        requires = "recurrent_policy",
+        conflicts_with_all = ["init", "resume"]
+    )]
+    init_v81_recurrent: Option<String>,
 
     /// Resume from a previously-saved checkpoint (e.g.
     /// `checkpoints/latest.safetensors`; legacy `.ot` still accepted).
@@ -695,6 +719,46 @@ mod curriculum_flag_tests {
     }
 }
 
+#[cfg(test)]
+mod recurrent_flag_tests {
+    use super::Args;
+    use clap::Parser;
+
+    #[test]
+    fn recurrent_policy_is_opt_in_and_requires_persistent_actors() {
+        let defaults = Args::try_parse_from(["oftrain"]).unwrap();
+        assert!(!defaults.recurrent_policy);
+        assert_eq!(defaults.recurrent_hidden_size, 256);
+        assert_eq!(defaults.bptt_chunk_len, 16);
+        assert!(Args::try_parse_from(["oftrain", "--recurrent-policy"]).is_err());
+
+        let enabled = Args::try_parse_from([
+            "oftrain",
+            "--persistent-actors",
+            "--recurrent-policy",
+            "--recurrent-hidden-size",
+            "128",
+            "--bptt-chunk-len",
+            "32",
+        ])
+        .unwrap();
+        assert!(enabled.recurrent_policy);
+        assert_eq!(enabled.recurrent_hidden_size, 128);
+        assert_eq!(enabled.bptt_chunk_len, 32);
+
+        let warm = Args::try_parse_from([
+            "oftrain", "--persistent-actors", "--recurrent-policy",
+            "--init-v81-recurrent", "v81.safetensors",
+        ]).unwrap();
+        assert_eq!(warm.init_v81_recurrent.as_deref(), Some("v81.safetensors"));
+        assert!(Args::try_parse_from([
+            "oftrain", "--persistent-actors", "--recurrent-policy",
+            "--init-v81-recurrent", "v81.safetensors",
+            "--resume", "v81.safetensors",
+        ]).is_err());
+    }
+}
+
 /// Mirrors PyTorch's own `torch/__init__.py::_preload_cuda_deps()`: when
 /// libtorch is a "split" pip wheel install (each CUDA component - cublas,
 /// cudnn, cusparse, nccl, etc. - its own separate `nvidia-*-cu12` package,
@@ -831,6 +895,18 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or(args.num_envs);
     tch::manual_seed(0);
     let device = parse_device(&args.device);
+    anyhow::ensure!(
+        !args.recurrent_policy || matches!(device, Device::Cuda(_)),
+        "--recurrent-policy requires a CUDA --device"
+    );
+    if args.recurrent_policy {
+        anyhow::ensure!(
+            args.recurrent_hidden_size == policy::RECURRENT_HIDDEN as usize,
+            "--recurrent-hidden-size must match the policy core ({})",
+            policy::RECURRENT_HIDDEN
+        );
+        anyhow::ensure!(args.bptt_chunk_len > 0, "--bptt-chunk-len must be positive");
+    }
     let eval_device = resolve_eval_device(
         args.eval_device.as_deref(),
         args.async_eval,
@@ -923,6 +999,7 @@ fn main() -> anyhow::Result<()> {
             foveate: args.foveate,
             gc: args.gc,
             blocks: args.blocks,
+            recurrent_policy: args.recurrent_policy,
             pinned_h2d: args.pinned_h2d,
             fp16_rollout: args.fp16_rollout,
             compact_rollout: args.compact_rollout,
@@ -969,6 +1046,9 @@ fn main() -> anyhow::Result<()> {
         compact_rollout: args.compact_rollout,
         pipeline_groups: args.pipeline_groups,
         persistent_actors: args.persistent_actors,
+        recurrent_policy: args.recurrent_policy,
+        recurrent_hidden_size: args.recurrent_hidden_size,
+        bptt_chunk_len: args.bptt_chunk_len,
         work_conserving_actors: args.work_conserving_actors,
         actor_max_batch: args.actor_max_batch,
         actor_max_wait: std::time::Duration::from_millis(args.actor_max_wait_ms),
@@ -983,6 +1063,7 @@ fn main() -> anyhow::Result<()> {
         ckpt_every: args.ckpt_every,
         ckpt_dir: args.ckpt_dir,
         init: args.init,
+        init_v81_recurrent: args.init_v81_recurrent,
         resume: args.resume,
         resume_warmup_updates: args.resume_warmup_updates,
         value_loss: match args.value_loss.as_str() {

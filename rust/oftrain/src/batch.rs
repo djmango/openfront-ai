@@ -1295,6 +1295,7 @@ mod tests {
     fn tiny_prepared_obs(gh: usize, gw: usize) -> PreparedObs {
         let plane = gh * gw;
         PreparedObs {
+            prev_action: crate::vecenv::ActionOutcome::default(),
             compact: None,
             grid: Some(vec![0.5f32; policy::C_GRID as usize * plane]),
             grid_coarse: None,

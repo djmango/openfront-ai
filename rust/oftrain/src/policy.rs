@@ -47,6 +47,26 @@ pub const LC: i64 = 64;
 pub const N_HEAD: i64 = 4;
 pub const TF_FF: i64 = 2 * PC;
 pub const TF_LAYERS: i64 = 2;
+/// V8.2 recurrent state width, independent of the existing 512-wide trunk.
+pub const RECURRENT_HIDDEN: i64 = 256;
+/// `ActionOutcome::as_floats` context width from actor commit 6468e46.
+pub const RECURRENT_CONTEXT_FLOATS: i64 = 14;
+pub const RECURRENT_CONTEXT_SCHEMA: &str = "action-outcome-v1";
+pub const RECURRENT_CONTEXT_EMBEDDED: i64 = 128;
+
+const CONTEXT_ACTION: i64 = 0;
+const CONTEXT_PLAYER: i64 = 1;
+const CONTEXT_BUILD: i64 = 3;
+const CONTEXT_NUKE: i64 = 4;
+const CONTEXT_SUCCESS: i64 = 5;
+const CONTEXT_WASTED: i64 = 6;
+const CONTEXT_TARGET_ID: i64 = 7;
+const CONTEXT_TARGET_Y: i64 = 8;
+const CONTEXT_TARGET_X: i64 = 9;
+const CONTEXT_QUANTITY: i64 = 10;
+const CONTEXT_COMMITMENT_AGE: i64 = 11;
+const CONTEXT_HAD_ACTION: i64 = 12;
+const CONTEXT_TARGET_KIND: i64 = 13;
 
 const MASKED_NEG: f64 = -1e9;
 
@@ -463,6 +483,108 @@ struct ForwardOutput {
     fov: Foveation,
 }
 
+/// Previous-action/result encoder and 256-wide GRUCell. Its contribution to
+/// the unchanged trunk passes through a zero-initialized residual projection,
+/// making a warm-started V8.1 policy initially output-bit-identical.
+struct RecurrentCore {
+    action: nn::Embedding,
+    player: nn::Embedding,
+    target_kind: nn::Embedding,
+    build: nn::Embedding,
+    nuke: nn::Embedding,
+    context: nn::Linear,
+    gru_input: nn::Linear,
+    gru_hidden: nn::Linear,
+    residual: nn::Linear,
+}
+
+impl RecurrentCore {
+    fn new(p: &nn::Path) -> Self {
+        let action = nn::embedding(p / "context_action", N_ACTIONS + 1, 32, Default::default());
+        let player = nn::embedding(p / "context_player", MAX_SLOTS + 1, 16, Default::default());
+        let target_kind = nn::embedding(p / "context_target_kind", 4, 8, Default::default());
+        let build = nn::embedding(p / "context_build", N_BUILD + 1, 8, Default::default());
+        let nuke = nn::embedding(p / "context_nuke", N_NUKE + 1, 8, Default::default());
+        let context = nn::linear(
+            p / "context_projection",
+            80,
+            RECURRENT_CONTEXT_EMBEDDED,
+            Default::default(),
+        );
+        let gru_input = nn::linear(
+            p / "gru_input",
+            HIDDEN + RECURRENT_CONTEXT_EMBEDDED,
+            3 * RECURRENT_HIDDEN,
+            Default::default(),
+        );
+        let gru_hidden = nn::linear(
+            p / "gru_hidden", RECURRENT_HIDDEN, 3 * RECURRENT_HIDDEN, Default::default(),
+        );
+        let mut residual =
+            nn::linear(p / "residual", RECURRENT_HIDDEN, HIDDEN, Default::default());
+        tch::no_grad(|| {
+            let _ = residual.ws.zero_();
+            if let Some(bias) = residual.bs.as_mut() {
+                let _ = bias.zero_();
+            }
+        });
+        Self {
+            action, player, target_kind, build, nuke, context,
+            gru_input, gru_hidden, residual,
+        }
+    }
+
+    fn category(context: &Tensor, column: i64, classes: i64) -> Tensor {
+        // -1 is the explicit "not present / no previous action" sentinel.
+        (context.select(1, column).to_kind(Kind::Int64) + 1).clamp(0, classes)
+    }
+
+    fn encode_context(&self, context: &Tensor) -> Tensor {
+        debug_assert_eq!(context.size()[1], RECURRENT_CONTEXT_FLOATS);
+        let action = self.action.forward(&Self::category(context, CONTEXT_ACTION, N_ACTIONS));
+        let player = self.player.forward(&Self::category(context, CONTEXT_PLAYER, MAX_SLOTS));
+        let target_kind =
+            self.target_kind.forward(&Self::category(context, CONTEXT_TARGET_KIND, 3));
+        let build = self.build.forward(&Self::category(context, CONTEXT_BUILD, N_BUILD));
+        let nuke = self.nuke.forward(&Self::category(context, CONTEXT_NUKE, N_NUKE));
+        let target_id = context.select(1, CONTEXT_TARGET_ID);
+        let target_id = target_id.sign() * target_id.abs().log1p() / 16.0;
+        let commitment =
+            context.select(1, CONTEXT_COMMITMENT_AGE).clamp_min(0.0).log1p() / 8.0;
+        let continuous = Tensor::stack(&[
+            context.select(1, CONTEXT_TARGET_Y),
+            context.select(1, CONTEXT_TARGET_X),
+            context.select(1, CONTEXT_QUANTITY),
+            context.select(1, CONTEXT_SUCCESS),
+            context.select(1, CONTEXT_WASTED),
+            target_id,
+            commitment,
+            context.select(1, CONTEXT_HAD_ACTION),
+        ], 1);
+        self.context.forward(&Tensor::cat(
+            &[&action, &player, &target_kind, &build, &nuke, &continuous], 1,
+        )).silu()
+    }
+
+    fn forward(
+        &self, trunk: &Tensor, context: &Tensor, hidden_in: &Tensor, reset_mask: &Tensor,
+    ) -> (Tensor, Tensor) {
+        let keep: Tensor = 1.0 - reset_mask.to_kind(Kind::Float).view([-1, 1]);
+        let hidden = hidden_in * keep;
+        let encoded = self.encode_context(context);
+        let input = self.gru_input.forward(&Tensor::cat(&[trunk, &encoded], 1));
+        let recurrent = self.gru_hidden.forward(&hidden);
+        let input = input.chunk(3, 1);
+        let recurrent = recurrent.chunk(3, 1);
+        let reset = (&input[0] + &recurrent[0]).sigmoid();
+        let update = (&input[1] + &recurrent[1]).sigmoid();
+        let candidate = (&input[2] + reset * &recurrent[2]).tanh();
+        let hidden_out: Tensor = (1.0 - &update) * candidate + update * hidden;
+        let trunk_out = trunk + self.residual.forward(&hidden_out);
+        (trunk_out, hidden_out)
+    }
+}
+
 pub struct PolicyNet {
     grid_coarse_net: GridTower,
     grid_fine_net: GridTower,
@@ -471,6 +593,7 @@ pub struct PolicyNet {
     tf_layers: Vec<EncoderLayer>,
     trunk1: nn::Linear,
     trunk2: nn::Linear,
+    recurrent: Option<RecurrentCore>,
     head_action: nn::Linear,
     head_player_q: nn::Linear,
     head_tile_coarse: (nn::Conv2D, nn::Conv2D),
@@ -501,6 +624,12 @@ impl PolicyNet {
     /// towers (coarse + fine) and the tile heads scale with `gc`; `trunk1`'s
     /// input width scales with `gc` too since it pools both towers' outputs.
     pub fn new(vs: &nn::Path, amp: bool, foveate: bool, gc: i64, blocks: i64) -> Self {
+        Self::new_with_recurrence(vs, amp, foveate, gc, blocks, false)
+    }
+
+    pub fn new_with_recurrence(
+        vs: &nn::Path, amp: bool, foveate: bool, gc: i64, blocks: i64, recurrent: bool,
+    ) -> Self {
         let conv1 = |p: &nn::Path, ci, co| nn::conv2d(p, ci, co, 1, Default::default());
         PolicyNet {
             grid_coarse_net: GridTower::new(&(vs / "grid_coarse"), C_GRID, gc, blocks),
@@ -510,6 +639,7 @@ impl PolicyNet {
             tf_layers: (0..TF_LAYERS).map(|i| EncoderLayer::new(&(vs / "tf" / i), PC, TF_FF)).collect(),
             trunk1: nn::linear(vs / "trunk1", 2 * gc + PC + LC + N_SCALARS, HIDDEN, Default::default()),
             trunk2: nn::linear(vs / "trunk2", HIDDEN, HIDDEN, Default::default()),
+            recurrent: recurrent.then(|| RecurrentCore::new(&(vs / "recurrent"))),
             head_action: nn::linear(vs / "head_action", HIDDEN, N_ACTIONS, Default::default()),
             head_player_q: nn::linear(vs / "head_player_q", HIDDEN, PC, Default::default()),
             head_tile_coarse: (
@@ -776,7 +906,11 @@ impl PolicyNet {
     /// Full forward pass. Returns raw head tensors; callers combine with
     /// masks (see `act`/`evaluate`).
     fn forward(&self, o: &Obs) -> ForwardOutput {
-        let TrunkOutput { h, gc_map, gf_map, p, fov } = self.trunk_forward(o);
+        self.forward_from_trunk(o, self.trunk_forward(o))
+    }
+
+    fn forward_from_trunk(&self, o: &Obs, trunk: TrunkOutput) -> ForwardOutput {
+        let TrunkOutput { h, gc_map, gf_map, p, fov } = trunk;
         let act_logits = self.head_action.forward(&h) + (&o.legal_actions - 1.0) * (-MASKED_NEG);
         let q = self.head_player_q.forward(&h); // (B, PC)
         let player_logits = q.unsqueeze(1).matmul(&p.transpose(-2, -1)).squeeze_dim(1); // (B, S)
@@ -803,6 +937,17 @@ impl PolicyNet {
             value,
             fov,
         }
+    }
+
+    fn forward_recurrent(
+        &self, o: &Obs, hidden_in: &Tensor, context: &Tensor, reset_mask: &Tensor,
+    ) -> (ForwardOutput, Tensor) {
+        let mut trunk = self.trunk_forward(o);
+        let recurrent = self.recurrent.as_ref()
+            .expect("recurrent API requires PolicyNet::new_with_recurrence(..., true)");
+        let (h, hidden_out) = recurrent.forward(&trunk.h, context, hidden_in, reset_mask);
+        trunk.h = h;
+        (self.forward_from_trunk(o, trunk), hidden_out)
     }
 
     /// `train.rs`'s `ret_clip` only bounds the value *target* before the
@@ -964,6 +1109,28 @@ impl PolicyNet {
         self.act_from_forward(o, greedy, output)
     }
 
+    /// Actor-facing API matching commit 6468e46. Actor-owned state may reset
+    /// rows externally; batched reset users call `act_with_state_masked`.
+    pub fn act_with_state(
+        &self, o: &Obs, hidden_in: &Tensor, context: &Tensor, greedy: bool,
+    ) -> (
+        (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor), Tensor,
+    ) {
+        let reset = Tensor::zeros([hidden_in.size()[0]], (Kind::Float, hidden_in.device()));
+        self.act_with_state_masked(o, hidden_in, context, &reset, greedy)
+    }
+
+    /// `reset_mask` is batched, with 1 resetting a row before the GRUCell.
+    pub fn act_with_state_masked(
+        &self, o: &Obs, hidden_in: &Tensor, context: &Tensor,
+        reset_mask: &Tensor, greedy: bool,
+    ) -> (
+        (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor), Tensor,
+    ) {
+        let (output, hidden_out) = self.forward_recurrent(o, hidden_in, context, reset_mask);
+        (self.act_from_forward(o, greedy, output), hidden_out)
+    }
+
     fn act_from_forward(
         &self,
         o: &Obs,
@@ -1075,6 +1242,17 @@ impl PolicyNet {
         self.evaluate_from_forward(o, c, output)
     }
 
+    /// One-timestep learner primitive; trainer sequence construction/BPTT is
+    /// deliberately outside PolicyNet. Returns hidden_out as the fifth value.
+    pub fn evaluate_with_state(
+        &self, o: &Obs, c: &ChoiceBatch, hidden_in: &Tensor,
+        context: &Tensor, reset_mask: &Tensor,
+    ) -> (Tensor, Tensor, Tensor, Tensor, Tensor) {
+        let (output, hidden_out) = self.forward_recurrent(o, hidden_in, context, reset_mask);
+        let (logp, ent, ent_q, value) = self.evaluate_from_forward(o, c, output);
+        (logp, ent, ent_q, value, hidden_out)
+    }
+
     fn evaluate_from_forward(
         &self,
         o: &Obs,
@@ -1157,6 +1335,24 @@ impl PolicyNet {
     pub fn value_only(&self, o: &Obs) -> Tensor {
         let output = self.trunk_forward(o);
         Self::sanitize_value(&self.head_value.forward(&output.h).squeeze_dim(-1))
+    }
+
+    pub fn initial_hidden(&self, batch: i64) -> Tensor {
+        Tensor::zeros([batch, RECURRENT_HIDDEN], (Kind::Float, self.device))
+    }
+
+    pub fn value_with_state(
+        &self, o: &Obs, hidden_in: &Tensor, context: &Tensor,
+    ) -> (Tensor, Tensor) {
+        let reset = Tensor::zeros([hidden_in.size()[0]], (Kind::Float, hidden_in.device()));
+        self.value_with_state_masked(o, hidden_in, context, &reset)
+    }
+
+    pub fn value_with_state_masked(
+        &self, o: &Obs, hidden_in: &Tensor, context: &Tensor, reset_mask: &Tensor,
+    ) -> (Tensor, Tensor) {
+        let (output, hidden_out) = self.forward_recurrent(o, hidden_in, context, reset_mask);
+        (output.value, hidden_out)
     }
 }
 
@@ -1485,6 +1681,18 @@ mod tests {
         assert!(all_finite != 0.0, "{what} has non-finite values: {t:?}");
     }
 
+    fn no_previous_context(batch: i64) -> Tensor {
+        Tensor::from_slice(&[
+            -1.0f32, -1.0, -1.0, -1.0, -1.0, 0.0, 0.0, -1.0, -1.0, -1.0, -1.0, 0.0,
+            0.0, 0.0,
+        ]).view([1, RECURRENT_CONTEXT_FLOATS]).repeat([batch, 1])
+    }
+
+    fn assert_exact(actual: &Tensor, expected: &Tensor, name: &str) {
+        let difference = (actual - expected).abs().max().double_value(&[]);
+        assert_eq!(difference, 0.0, "{name} is not bit-identical");
+    }
+
     #[test]
     fn safetensors_variable_names_match_interchange_schema() {
         let vs = nn::VarStore::new(Device::Cpu);
@@ -1505,6 +1713,318 @@ mod tests {
                 "missing interchange tensor {key}"
             );
         }
+    }
+
+    #[test]
+    fn recurrent_safetensors_schema_is_opt_in_and_round_trips() {
+        let base_vs = nn::VarStore::new(Device::Cpu);
+        let _base = PolicyNet::new(&base_vs.root(), false, false, 8, 1);
+        let recurrent_vs = nn::VarStore::new(Device::Cpu);
+        let _recurrent =
+            PolicyNet::new_with_recurrence(&recurrent_vs.root(), false, false, 8, 1, true);
+        let base = base_vs.variables();
+        let recurrent = recurrent_vs.variables();
+        assert!(base.keys().all(|name| !name.starts_with("recurrent.")));
+        for name in base.keys() {
+            assert!(recurrent.contains_key(name), "recurrent schema lost {name}");
+        }
+        for name in [
+            "recurrent.context_action.weight", "recurrent.context_player.weight",
+            "recurrent.context_target_kind.weight", "recurrent.context_build.weight",
+            "recurrent.context_nuke.weight", "recurrent.context_projection.weight",
+            "recurrent.gru_input.weight", "recurrent.gru_hidden.weight",
+            "recurrent.residual.weight",
+        ] {
+            assert!(recurrent.contains_key(name), "missing recurrent variable {name}");
+        }
+
+        let legacy_path = std::env::temp_dir().join(format!(
+            "oftrain-v81-schema-{}.safetensors", std::process::id()));
+        base_vs.save(&legacy_path).unwrap();
+        let mut warm_vs = nn::VarStore::new(Device::Cpu);
+        let _warm =
+            PolicyNet::new_with_recurrence(&warm_vs.root(), false, false, 8, 1, true);
+        let missing = warm_vs.load_partial(&legacy_path).unwrap();
+        assert!(!missing.is_empty());
+        assert!(missing.iter().all(|name| name.starts_with("recurrent.")),
+            "V8.1 warm start may only leave recurrent variables fresh: {missing:?}");
+        assert_eq!(warm_vs.variables()["recurrent.residual.weight"]
+            .abs().max().double_value(&[]), 0.0);
+        std::fs::remove_file(legacy_path).unwrap();
+
+        let path = std::env::temp_dir().join(format!(
+            "oftrain-v82-recurrent-schema-{}.safetensors", std::process::id()));
+        recurrent_vs.save(&path).unwrap();
+        let mut loaded_vs = nn::VarStore::new(Device::Cpu);
+        let _loaded =
+            PolicyNet::new_with_recurrence(&loaded_vs.root(), false, false, 8, 1, true);
+        loaded_vs.load(&path).unwrap();
+        assert_eq!(loaded_vs.variables().len(), recurrent.len());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn zero_recurrent_residual_preserves_every_head_bit_exactly() {
+        tch::manual_seed(101);
+        let base_vs = nn::VarStore::new(Device::Cpu);
+        let base = PolicyNet::new(&base_vs.root(), false, false, 8, 1);
+        let recurrent_vs = nn::VarStore::new(Device::Cpu);
+        let recurrent =
+            PolicyNet::new_with_recurrence(&recurrent_vs.root(), false, false, 8, 1, true);
+        let recurrent_before: std::collections::HashMap<_, _> = recurrent_vs
+            .variables()
+            .into_iter()
+            .filter(|(name, _)| name.starts_with("recurrent."))
+            .map(|(name, tensor)| (name, tensor.copy()))
+            .collect();
+        let dir = std::env::temp_dir().join(format!(
+            "oftrain-v82-output-warm-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let checkpoint = dir.join("latest.safetensors");
+        base_vs.save(&checkpoint).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            r#"{"format":"oftrain-safetensors","manifest_schema_version":1,
+                 "architecture":{"schema_version":1}}"#,
+        ).unwrap();
+        crate::train::warm_start_v81_recurrent(
+            &recurrent_vs,
+            checkpoint.to_str().unwrap(),
+        ).unwrap();
+        for (name, expected) in recurrent_before {
+            assert!(
+                recurrent_vs.variables()[&name].equal(&expected),
+                "V8.1 migration changed new tensor {name}"
+            );
+        }
+        let obs = synthetic_obs(Device::Cpu, 2, 6, 6);
+        let expected = base.forward(&obs);
+        let hidden = Tensor::randn([2, RECURRENT_HIDDEN], (Kind::Float, Device::Cpu));
+        let context = no_previous_context(2);
+        let _ = context.get(1).select(0, CONTEXT_ACTION).fill_(3.0);
+        let reset = Tensor::zeros([2], (Kind::Float, Device::Cpu));
+        let (actual, hidden_out) =
+            recurrent.forward_recurrent(&obs, &hidden, &context, &reset);
+        assert!((&hidden_out - &hidden).abs().max().double_value(&[]) > 0.0);
+        for (name, actual, expected) in [
+            ("action", &actual.act_logits, &expected.act_logits),
+            ("player", &actual.player_logits, &expected.player_logits),
+            ("tile_coarse", &actual.tile_coarse, &expected.tile_coarse),
+            ("tile_fine", &actual.tile_fine, &expected.tile_fine),
+            ("build", &actual.build, &expected.build),
+            ("nuke", &actual.nuke, &expected.nuke),
+            ("quantity", &actual.quantity, &expected.quantity),
+            ("value", &actual.value, &expected.value),
+        ] {
+            assert_exact(actual, expected, name);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn strict_v81_migration_rejects_missing_legacy_tensor() {
+        let base_vs = nn::VarStore::new(Device::Cpu);
+        let _base = PolicyNet::new(&base_vs.root(), false, false, 8, 1);
+        let recurrent_vs = nn::VarStore::new(Device::Cpu);
+        let _recurrent =
+            PolicyNet::new_with_recurrence(&recurrent_vs.root(), false, false, 8, 1, true);
+        let dir = std::env::temp_dir().join(format!(
+            "oftrain-v82-mismatch-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let checkpoint = dir.join("latest.safetensors");
+        let incomplete: Vec<_> = base_vs
+            .variables()
+            .into_iter()
+            .filter(|(name, _)| name != "head_action.weight")
+            .collect();
+        Tensor::write_safetensors(&incomplete, &checkpoint).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            r#"{"format":"oftrain-safetensors","manifest_schema_version":1,
+                 "architecture":{"schema_version":1}}"#,
+        ).unwrap();
+        let error = crate::train::warm_start_v81_recurrent(
+            &recurrent_vs,
+            checkpoint.to_str().unwrap(),
+        ).unwrap_err();
+        assert!(error.to_string().contains("only recurrent tensors"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn recurrent_context_is_distinct_and_done_masks_reset_rows() {
+        tch::manual_seed(202);
+        let vs = nn::VarStore::new(Device::Cpu);
+        let policy = PolicyNet::new_with_recurrence(&vs.root(), false, false, 8, 1, true);
+        let obs = synthetic_obs(Device::Cpu, 2, 5, 5);
+        let hidden = Tensor::randn([2, RECURRENT_HIDDEN], (Kind::Float, Device::Cpu));
+        let context_a = no_previous_context(2);
+        let context_b = context_a.copy();
+        for (column, value) in [
+            (CONTEXT_ACTION, 2.0), (CONTEXT_PLAYER, 4.0),
+            (CONTEXT_TARGET_KIND, 1.0), (CONTEXT_SUCCESS, 1.0),
+            (CONTEXT_COMMITMENT_AGE, 7.0),
+        ] {
+            let _ = context_b.get(0).select(0, column).fill_(value);
+        }
+        let reset_none = Tensor::zeros([2], (Kind::Float, Device::Cpu));
+        let (_, out_a) =
+            policy.value_with_state_masked(&obs, &hidden, &context_a, &reset_none);
+        let (_, out_b) =
+            policy.value_with_state_masked(&obs, &hidden, &context_b, &reset_none);
+        assert!((out_a.get(0) - out_b.get(0)).abs().max().double_value(&[]) > 0.0);
+
+        let zero_hidden = Tensor::zeros([2, RECURRENT_HIDDEN], (Kind::Float, Device::Cpu));
+        let (_, baseline) = policy.value_with_state(&obs, &zero_hidden, &no_previous_context(2));
+        for (name, column, value) in [
+            ("action", CONTEXT_ACTION, 2.0), ("player", CONTEXT_PLAYER, 4.0),
+            ("tile_y", CONTEXT_TARGET_Y, 0.25), ("tile_x", CONTEXT_TARGET_X, 0.75),
+            ("target_kind", CONTEXT_TARGET_KIND, 1.0), ("build", CONTEXT_BUILD, 2.0),
+            ("nuke", CONTEXT_NUKE, 1.0), ("quantity", CONTEXT_QUANTITY, 0.6),
+            ("success", CONTEXT_SUCCESS, 1.0), ("wasted", CONTEXT_WASTED, 1.0),
+            ("commitment_age", CONTEXT_COMMITMENT_AGE, 7.0),
+        ] {
+            let changed = no_previous_context(2);
+            let _ = changed.get(0).select(0, column).fill_(value);
+            let (_, changed_hidden) = policy.value_with_state(&obs, &zero_hidden, &changed);
+            assert!((baseline.get(0) - changed_hidden.get(0))
+                .abs().max().double_value(&[]) > 0.0, "{name} context was ignored");
+        }
+
+        let reset_first = Tensor::from_slice(&[1.0f32, 0.0]);
+        let (_, masked) =
+            policy.value_with_state_masked(&obs, &hidden, &context_b, &reset_first);
+        let zeroed_hidden = hidden.copy();
+        let _ = zeroed_hidden.get(0).zero_();
+        let (_, reference) = policy.value_with_state(&obs, &zeroed_hidden, &context_b);
+        assert_exact(&masked.get(0), &reference.get(0), "done-reset hidden row");
+        let (_, unmasked) = policy.value_with_state(&obs, &hidden, &context_b);
+        assert_exact(&masked.get(1), &unmasked.get(1), "nonterminal hidden row");
+    }
+
+    #[test]
+    fn recurrent_act_and_evaluate_share_hidden_transition() {
+        tch::manual_seed(252);
+        let vs = nn::VarStore::new(Device::Cpu);
+        let policy = PolicyNet::new_with_recurrence(&vs.root(), false, false, 8, 1, true);
+        let obs = synthetic_obs(Device::Cpu, 2, 5, 5);
+        let hidden = policy.initial_hidden(2);
+        assert_eq!(hidden.size(), [2, RECURRENT_HIDDEN]);
+        let context = no_previous_context(2);
+        let ((action, player, tile, build, nuke, quantity, _, act_value), act_hidden) =
+            policy.act_with_state(&obs, &hidden, &context, true);
+        let choice = ChoiceBatch {
+            action, player_slot: player, tile_region: tile, build_type: build,
+            nuke_type: nuke, quantity_frac: quantity,
+        };
+        let reset = Tensor::zeros([2], (Kind::Float, Device::Cpu));
+        let (logp, _, _, eval_value, eval_hidden) =
+            policy.evaluate_with_state(&obs, &choice, &hidden, &context, &reset);
+        assert_exact(&act_hidden, &eval_hidden, "act/evaluate hidden_out");
+        assert_exact(&act_value, &eval_value, "act/evaluate value");
+        assert_finite(&logp, "recurrent evaluate logprob");
+        let reset_second = Tensor::from_slice(&[0.0f32, 1.0]);
+        let (_, masked_hidden) =
+            policy.act_with_state_masked(&obs, &act_hidden, &context, &reset_second, true);
+        assert_eq!(masked_hidden.size(), [2, RECURRENT_HIDDEN]);
+    }
+
+    #[test]
+    fn actor_hidden_trajectory_replays_exactly_across_bptt_and_done_reset() {
+        tch::manual_seed(272);
+        let vs = nn::VarStore::new(Device::Cpu);
+        let policy = PolicyNet::new_with_recurrence(&vs.root(), false, false, 8, 1, true);
+        let obs = synthetic_obs(Device::Cpu, 2, 5, 5);
+        let done = [[false, false], [true, false], [false, false], [false, true], [false, false]];
+        let mut actor_hidden = policy.initial_hidden(2);
+        let mut hidden_in = Vec::new();
+        let mut hidden_out = Vec::new();
+        let mut contexts = Vec::new();
+        let mut resets = Vec::new();
+        let mut choices = Vec::new();
+        for t in 0..done.len() {
+            let context = no_previous_context(2);
+            let _ = context.get(0).select(0, CONTEXT_ACTION).fill_(t as f64);
+            let _ = context.get(1).select(0, CONTEXT_ACTION).fill_((t + 3) as f64);
+            let reset = if t == 0 {
+                Tensor::zeros([2], (Kind::Float, Device::Cpu))
+            } else {
+                Tensor::from_slice(&[
+                    done[t - 1][0] as u8 as f32,
+                    done[t - 1][1] as u8 as f32,
+                ])
+            };
+            hidden_in.push(actor_hidden.shallow_clone());
+            let ((action, player, tile, build, nuke, quantity, _, _), next) =
+                policy.act_with_state_masked(&obs, &actor_hidden, &context, &reset, true);
+            choices.push(ChoiceBatch {
+                action,
+                player_slot: player,
+                tile_region: tile,
+                build_type: build,
+                nuke_type: nuke,
+                quantity_frac: quantity,
+            });
+            hidden_out.push(next.shallow_clone());
+            contexts.push(context);
+            resets.push(reset);
+            actor_hidden = next;
+        }
+
+        for range in [0..2, 2..4, 4..5] {
+            let mut replay = hidden_in[range.start].shallow_clone();
+            for t in range {
+                let (_, _, _, _, next) = policy.evaluate_with_state(
+                    &obs,
+                    &choices[t],
+                    &replay,
+                    &contexts[t],
+                    &resets[t],
+                );
+                assert_exact(&next, &hidden_out[t], &format!("replay hidden t={t}"));
+                replay = next;
+            }
+        }
+        let reset_hidden = hidden_in[2].copy();
+        let _ = reset_hidden.get(0).zero_();
+        let (_, reset_reference) =
+            policy.value_with_state(&obs, &reset_hidden, &contexts[2]);
+        assert_exact(&hidden_out[2].get(0), &reset_reference.get(0), "done reset replay");
+    }
+
+    #[test]
+    fn gradients_reach_gru_after_zero_residual_starts_learning() {
+        tch::manual_seed(303);
+        let vs = nn::VarStore::new(Device::Cpu);
+        let mut policy =
+            PolicyNet::new_with_recurrence(&vs.root(), false, false, 8, 1, true);
+        let obs = synthetic_obs(Device::Cpu, 2, 5, 5);
+        let hidden = Tensor::zeros([2, RECURRENT_HIDDEN], (Kind::Float, Device::Cpu));
+        let context = no_previous_context(2);
+        let (value, _) = policy.value_with_state(&obs, &hidden, &context);
+        value.sum(Kind::Float).backward();
+        let recurrent = policy.recurrent.as_mut().unwrap();
+        assert!(recurrent.residual.ws.grad().abs().max().double_value(&[]) > 0.0);
+        assert_eq!(recurrent.gru_input.ws.grad().abs().max().double_value(&[]), 0.0);
+        tch::no_grad(|| {
+            recurrent.residual.ws += recurrent.residual.ws.grad() * 1e-3;
+            for (_, tensor) in vs.variables() {
+                let mut grad = tensor.grad();
+                if grad.defined() {
+                    let _ = grad.zero_();
+                }
+            }
+        });
+        let (value, _) = policy.value_with_state(&obs, &hidden, &context);
+        value.sum(Kind::Float).backward();
+        assert!(policy.recurrent.as_ref().unwrap().gru_input.ws.grad()
+            .abs().max().double_value(&[]) > 0.0);
     }
 
     /// Exercises `act()` (no_grad) + `evaluate()` + `backward()` for a
