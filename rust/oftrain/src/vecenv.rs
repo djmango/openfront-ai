@@ -15,14 +15,14 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ofcore::curriculum::{
-    self, ActionChurnTracker, ActionPairCounts, ActionTarget, BoatOutcomeCounts,
-    ChosenAction, CurriculumSchedule, DominanceShaper, RewardComponents, RewardConfig, Stage,
-    TRANSPORT_UNIT_CLASS, V83_CLOSEOUT_SHARE_START, W_DEATH, W_STR, W_WASTE, action_churn_penalty,
-    boat_outcome_reward, classify_boat_resolution, closeout_potential, combat_outcome_reward,
-    dominance_potential, embargo_stop_outcome_reward, fast_win_bonus, land_share,
-    normalized_strength_share, placement, placement_score, sample_episode, stages_for_schedule,
-    strength_delta_weight, tempo_pressure, terminal_reward, timeweight, v83_action_churn_penalty,
-    CombatOutcome,
+    self, ActionChurnTracker, ActionPairCounts, ActionTarget, BoatOutcomeCounts, ChosenAction,
+    CombatOutcome, CurriculumSchedule, DominanceShaper, InverseActionPair, RewardComponents,
+    RewardConfig, Stage, TRANSPORT_UNIT_CLASS, V83_CLOSEOUT_SHARE_START, W_STR, W_WASTE,
+    action_churn_penalty, boat_outcome_reward, classify_boat_resolution, closeout_potential,
+    combat_outcome_reward, dominance_potential, embargo_stop_outcome_reward, fast_win_bonus,
+    land_share, normalized_strength_share, placement, placement_score, sample_episode,
+    stages_for_schedule, strength_delta_weight, tempo_pressure, terminal_reward, timeweight,
+    v83_action_churn_penalty,
 };
 use ofcore::feat::{
     self, A_ATTACK, A_BOAT, A_CANCEL_BOAT, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, ACTIONS,
@@ -290,6 +290,7 @@ impl PendingBoatTracker {
         troops_before: f64,
         troops_after: f64,
         new_sourced_attack: bool,
+        has_sourced_attack: bool,
         config: RewardConfig,
         stage: usize,
     ) -> f64 {
@@ -315,6 +316,7 @@ impl PendingBoatTracker {
                 troops_before,
                 troops_after,
                 new_sourced_attack,
+                has_sourced_attack,
             );
             self.counts.record(outcome);
             reward += boat_outcome_reward(outcome, config);
@@ -560,6 +562,9 @@ impl CombatStickyTracker {
                 }
             }
             self.last_retreat_decision.insert(player, self.decision_i);
+            // Clear sticky open so a later re-engage starts a fresh window;
+            // reinforce must not keep refreshing the clock (see observe ATTACK).
+            self.last_attack_decision.remove(&player);
         } else if action == A_ATTACK {
             if let Some(ret_at) = self.last_retreat_decision.get(&player).copied() {
                 if self.decision_i - ret_at <= window as i64 {
@@ -567,7 +572,11 @@ impl CombatStickyTracker {
                     reward += combat_outcome_reward(CombatOutcome::ThrashReengage, config);
                 }
             }
-            self.last_attack_decision.insert(player, self.decision_i);
+            // First open only — reinforcing the same target must not refresh
+            // the premature-retreat clock (otherwise every retreat is "premature").
+            self.last_attack_decision
+                .entry(player)
+                .or_insert(self.decision_i);
         }
         reward
     }
@@ -796,12 +805,15 @@ impl EnvWorker {
         self.land_total = (self.land.iter().map(|&l| l as i64).sum::<i64>()).max(1);
         self.translator = Some(IntentTranslator::new(self.bridge.terrain(), width, hr, wr));
         self.lut.clear();
-        self.prev_strength = 0.0;
         let initial_strengths =
             curriculum::strengths(&feat::parse_ents(obs.entities()), self.land_total);
+        let me0 = obs.me().max(0) as usize;
+        // Seed prev_strength so the first post-spawn delta isn't a free
+        // +W_DELTA_GAIN * share windfall from 0.0.
+        self.prev_strength = initial_strengths.get(&me0).copied().unwrap_or(0.0);
         self.dominance_shaper.reset(dominance_potential(
             &initial_strengths,
-            obs.me().max(0) as usize,
+            me0,
             self.reward_config.v81_potential_clamp,
         ));
         let initial_share = land_share(
@@ -916,12 +928,13 @@ impl EnvWorker {
         self.land_total = (self.land.iter().map(|&l| l as i64).sum::<i64>()).max(1);
         self.translator = Some(IntentTranslator::new(self.bridge.terrain(), width, hr, wr));
         self.lut.clear();
-        self.prev_strength = 0.0;
         let initial_strengths =
             curriculum::strengths(&feat::parse_ents(obs.entities()), self.land_total);
+        let me0 = obs.me().max(0) as usize;
+        self.prev_strength = initial_strengths.get(&me0).copied().unwrap_or(0.0);
         self.dominance_shaper.reset(dominance_potential(
             &initial_strengths,
-            obs.me().max(0) as usize,
+            me0,
             self.reward_config.v81_potential_clamp,
         ));
         let initial_share = land_share(
@@ -1205,9 +1218,11 @@ impl EnvWorker {
             } else {
                 let next_ents = feat::parse_ents(obs.entities());
                 let composite = curriculum::strengths(&next_ents, self.land_total);
+                let me0 = obs.me().max(0) as usize;
+                self.prev_strength = composite.get(&me0).copied().unwrap_or(0.0);
                 self.dominance_shaper.reset(dominance_potential(
                     &composite,
-                    obs.me().max(0) as usize,
+                    me0,
                     self.reward_config.v81_potential_clamp,
                 ));
                 let share = land_share(
@@ -1255,11 +1270,13 @@ impl EnvWorker {
         } else {
             0.0
         };
+        let has_active_attack = ents.attacks.iter().any(|a| a.from == me);
         let delta_weight = strength_delta_weight(
             delta,
             normalized_share,
             self.episode_stage,
             self.reward_config,
+            has_active_attack,
         );
         let mut components = RewardComponents {
             strength: W_STR * mine * tw,
@@ -1272,6 +1289,16 @@ impl EnvWorker {
         } else {
             action_churn_penalty(inverse_pair, self.episode_stage, self.reward_config)
         };
+        // V8.6: combat sticky outcomes already price attack↔retreat thrash;
+        // stacking flat churn makes attacking a trap.
+        if self.reward_config.v86_skip_combat_churn
+            && matches!(
+                inverse_pair,
+                Some(InverseActionPair::AttackRetreat | InverseActionPair::RetreatAttack)
+            )
+        {
+            components.action_churn = 0.0;
+        }
         if components.action_churn != 0.0 {
             reward += components.action_churn;
         }
@@ -1322,11 +1349,16 @@ impl EnvWorker {
                 && a.src_y.is_some()
                 && !pre_attack_ids.contains(&a.aid)
         });
+        let has_sourced_attack = ents
+            .attacks
+            .iter()
+            .any(|a| a.from == me && a.src_x.is_some() && a.src_y.is_some());
         components.boat_outcome = self.boat_tracker.resolve_missing(
             &alive_transports,
             troops_before,
             troops_after,
             new_sourced_attack,
+            has_sourced_attack,
             self.reward_config,
             self.episode_stage,
         );
@@ -1359,8 +1391,9 @@ impl EnvWorker {
         self.prev_strength = mine;
 
         if !obs.alive() {
-            reward -= W_DEATH;
-            components.death = -W_DEATH;
+            let death = self.reward_config.death_penalty();
+            reward -= death;
+            components.death = -death;
         }
 
         let mut info = None;

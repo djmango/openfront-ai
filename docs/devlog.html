@@ -28,6 +28,7 @@
 
 <nav class="toc">
   <a href="#now">Now</a> ·
+  <a href="#v86-attack-fair">Jul 14 V8.6</a> ·
   <a href="#v85-win-urgency">Jul 14 V8.5</a> ·
   <a href="#v84-boat-tempo">Jul 14 V8.4</a> ·
   <a href="#parity-v4-closeout">Jul 14 parity</a> ·
@@ -64,18 +65,52 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 14th, 2026</h2>
-  <p><b>V8.5 win-urgency kicking off as <code>ppo_v85</code></b>
-  (<a href="#v85-win-urgency">writeup</a>), resumed from live <code>ppo_v84</code>.
-  Win terminal gets +30 extra; tempo starts at share 0.30 (was 0.55);
-  embargo-stop and attack/retreat get outcome pricing. Overnight V8.4 reached
-  stage 8 with ~57% useful boat landings — but ~80% of eps never hit dominance,
-  so urgency never fired, and winners still embargo-thrashed.</p>
-  <p>Also today: curriculum outcome parity closed at 48/48 on v4
-  (<a href="#parity-v4-closeout">writeup</a>).</p>
+  <p><b>V8.6 attack-fair as <code>ppo_v86</code></b>
+  (<a href="#v86-attack-fair">writeup</a>), resumed from live <code>ppo_v85</code>.
+  Reward audit: sticky combat refresh + churn stack made attacking a trap;
+  tempo@0.30 vs dominant-loss@0.55 left a punishment valley; strength asymmetry
+  taxed attack variance; death was cheaper than mid-place; boats merging into
+  open attacks misclassified Destroyed; first-step strength delta was free.
+  All fixed reward-only.</p>
+  <p>Also today: V8.5 win-urgency
+  (<a href="#v85-win-urgency">writeup</a>) and curriculum outcome parity closed
+  at 48/48 on v4 (<a href="#parity-v4-closeout">writeup</a>).</p>
   <p class="d" style="margin:.75rem 0 0">Previous: Jul 13 Rust trainer CUDA
   diagnosis / persistent ownership
   (<a href="#rust-v8-stability">writeup</a>).</p>
 </div>
+
+<h2 class="date" id="v86-attack-fair">Jul 14, 2026 - V8.6: attack-fair reward fixes</h2>
+<p class="session">V8.5 mid-run “unlearning” audit → reward-only <code>ppo_v86</code>
+that resumes the same weights.</p>
+
+<h3>What the audit found</h3>
+<ul>
+  <li><b>Sticky combat refresh:</b> every reinforce rewrote <code>last_attack_decision</code>,
+    so nearly every retreat paid premature −0.10 <i>and</i> AttackRetreat churn −0.05.</li>
+  <li><b>Tempo / dominant-loss mismatch:</b> tempo drains from share 0.30, but loss-weight
+    relief only at 0.55 — and ~80% of stage-8 eps never reach 0.55.</li>
+  <li><b>Strength asymmetry:</b> <code>W_DELTA_GAIN=5</code> vs <code>W_DELTA_LOSS=6.5</code>
+    taxes the troop-burn-before-land shape of every attack.</li>
+  <li><b>Death too cheap:</b> <code>W_DEATH=1</code> vs positive place terminal.</li>
+  <li><b>Boat merge → Destroyed:</b> landing into an existing sourced attack has no new
+    attack id and ~0 refund.</li>
+  <li><b>First-step windfall:</b> <code>prev_strength=0</code> at reset → free +gain×share.</li>
+</ul>
+
+<h3>V8.6 design (still checkpoint-compatible)</h3>
+<table>
+  <tr><th>Knob</th><th>V8.5</th><th>V8.6</th></tr>
+  <tr><td>Reward profile</td><td><code>v8.5-win-urgency-v1</code></td><td><code>v8.6-attack-fair-v1</code></td></tr>
+  <tr><td>Dominance threshold</td><td>0.55</td><td><b>0.30</b> (matches tempo)</td></tr>
+  <tr><td>Delta loss / dominant</td><td>6.5 / 5.25</td><td><b>5.5</b> / 5.0; symmetric while attack open</td></tr>
+  <tr><td>Premature / thrash</td><td>−0.10 / −0.10 + churn stack</td><td>−0.03 / −0.03; first-open sticky; skip combat churn</td></tr>
+  <tr><td>Death</td><td>1.0</td><td><b>10.0</b></td></tr>
+  <tr><td>Boat landing</td><td>new sourced attack only</td><td>also any open sourced attack (no big refund)</td></tr>
+  <tr><td>prev_strength</td><td>0 at reset</td><td>seeded from initial / spawn composite</td></tr>
+  <tr><td>Migrate</td><td><code>--migrate-v84-to-v85</code></td><td><code>--migrate-v85-to-v86</code></td></tr>
+</table>
+<p>Launch: <code>SKIP_SYNC=1 V86_MODE=1</code> → <code>ppo_v86</code>, seed from <code>ppo_v85</code>.</p>
 
 <h2 class="date" id="v85-win-urgency">Jul 14, 2026 - V8.5: win-first urgency, embargo + combat outcomes</h2>
 <p class="session">Overnight <code>ppo_v84</code> audit → reward-only <code>ppo_v85</code>
