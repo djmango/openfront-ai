@@ -348,6 +348,11 @@ struct Args {
     #[arg(long)]
     init: Option<String>,
 
+    /// Explicitly migrate V8.1 schema-v1 weights into the recurrent V8.2
+    /// architecture. Existing tensors are copied exactly.
+    #[arg(long, conflicts_with_all = ["init", "resume"])]
+    init_v81_recurrent: Option<String>,
+
     /// Resume from a previously-saved checkpoint (e.g.
     /// `checkpoints/latest.safetensors`; legacy `.ot` still accepted).
     /// Restores weights and training state (curriculum stage,
@@ -652,6 +657,18 @@ mod curriculum_flag_tests {
         .unwrap();
         assert!(args.migrate_v81_stage5_to_v811);
     }
+
+    #[test]
+    fn recurrent_warm_start_is_explicit_and_cannot_be_a_resume() {
+        let args = Args::try_parse_from([
+            "oftrain", "--init-v81-recurrent", "v81.safetensors",
+        ]).unwrap();
+        assert_eq!(args.init_v81_recurrent.as_deref(), Some("v81.safetensors"));
+        assert!(Args::try_parse_from([
+            "oftrain", "--init-v81-recurrent", "v81.safetensors",
+            "--resume", "v81.safetensors",
+        ]).is_err());
+    }
 }
 
 /// Mirrors PyTorch's own `torch/__init__.py::_preload_cuda_deps()`: when
@@ -904,6 +921,7 @@ fn main() -> anyhow::Result<()> {
         ckpt_every: args.ckpt_every,
         ckpt_dir: args.ckpt_dir,
         init: args.init,
+        init_v81_recurrent: args.init_v81_recurrent,
         resume: args.resume,
         resume_warmup_updates: args.resume_warmup_updates,
         value_loss: match args.value_loss.as_str() {

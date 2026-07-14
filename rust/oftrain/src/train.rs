@@ -342,6 +342,8 @@ pub struct Config {
     /// legacy `.ot` VarStore dump without restoring `TrainState`
     /// (BC→RL / exported weights). Ignored when `resume` is also set.
     pub init: Option<String>,
+    /// Explicit strict V8.1 -> recurrent V8.2 migration.
+    pub init_v81_recurrent: Option<String>,
     /// `--resume`: path to a previously-saved `.safetensors` (preferred) or
     /// legacy `.ot` weights file (its training-state sidecar is found by
     /// swapping the extension for `.state.json` - see `TrainState`).
@@ -388,6 +390,10 @@ pub struct Config {
 /// to write every checkpoint without it being the bottleneck.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TrainState {
+    #[serde(default)]
+    pub checkpoint_schema_version: u32,
+    #[serde(default)]
+    pub hidden_reset_policy: String,
     pub update: u64,
     pub stage: usize,
     pub ent_scale: f64,
@@ -506,9 +512,73 @@ fn state_sidecar_path(ckpt_path: &str) -> String {
     format!("{stem}.state.json")
 }
 
+fn manifest_path(ckpt_path: &str) -> std::path::PathBuf {
+    std::path::Path::new(ckpt_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("manifest.json")
+}
+
+fn read_architecture_manifest(ckpt_path: &str, expected_schema: u64) -> Result<serde_json::Value> {
+    let path = manifest_path(ckpt_path);
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| anyhow!("checkpoint manifest {} is required: {error}", path.display()))?;
+    let manifest: serde_json::Value = serde_json::from_str(&text)?;
+    anyhow::ensure!(manifest["format"] == "oftrain-safetensors", "unsupported checkpoint format");
+    anyhow::ensure!(manifest["manifest_schema_version"] == 1, "unsupported checkpoint manifest schema");
+    anyhow::ensure!(
+        manifest["architecture"]["schema_version"] == expected_schema,
+        "checkpoint architecture schema mismatch: expected v{expected_schema}, found {}",
+        manifest["architecture"]["schema_version"]
+    );
+    Ok(manifest)
+}
+
+fn is_v82_tensor(name: &str) -> bool {
+    name.starts_with("context.") || name.starts_with("recurrent.")
+}
+
+fn warm_start_v81_recurrent(vs: &nn::VarStore, checkpoint: &str) -> Result<()> {
+    let _ = read_architecture_manifest(checkpoint, 1)?;
+    let source: std::collections::HashMap<_, _> =
+        Tensor::load_multi_with_device(checkpoint, Device::Cpu)?.into_iter().collect();
+    let destination = vs.variables();
+    let source_names: std::collections::HashSet<_> = source.keys().cloned().collect();
+    let destination_names: std::collections::HashSet<_> = destination.keys().cloned().collect();
+    let extra: Vec<_> = source_names.difference(&destination_names).cloned().collect();
+    let missing: Vec<_> = destination_names.difference(&source_names).cloned().collect();
+    anyhow::ensure!(extra.is_empty(), "V8.1 checkpoint has unexpected tensors: {extra:?}");
+    anyhow::ensure!(
+        !missing.is_empty() && missing.iter().all(|name| is_v82_tensor(name)),
+        "V8.1 warm start may initialize only context/recurrent tensors; missing={missing:?}"
+    );
+    anyhow::ensure!(
+        source.keys().all(|name| !is_v82_tensor(name)),
+        "--init-v81-recurrent requires a V8.1 checkpoint without recurrent tensors"
+    );
+    for (name, source_tensor) in &source {
+        let mut target = destination[name].shallow_clone();
+        anyhow::ensure!(
+            source_tensor.size() == target.size(),
+            "V8.1 tensor shape mismatch for {name}: source {:?}, V8.2 {:?}",
+            source_tensor.size(), target.size()
+        );
+        tch::no_grad(|| target.f_copy_(source_tensor))?;
+    }
+    for name in ["recurrent.residual.weight", "recurrent.residual.bias"] {
+        let mut tensor = destination.get(name)
+            .ok_or_else(|| anyhow!("V8.2 zero-residual tensor is missing: {name}"))?
+            .shallow_clone();
+        let _ = tch::no_grad(|| tensor.f_zero_())?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod sidecar_path_tests {
-    use super::{atomic_tmp_path, state_sidecar_path};
+    use super::{atomic_tmp_path, is_v82_tensor, state_sidecar_path, warm_start_v81_recurrent};
+    use crate::policy::PolicyNet;
+    use tch::{Device, Tensor, nn};
 
     #[test]
     fn strips_safetensors_and_ot() {
@@ -541,6 +611,70 @@ mod sidecar_path_tests {
             "checkpoints/latest.state.tmp.json"
         );
     }
+
+    fn write_v81_fixture(drop: Option<&str>) -> (std::path::PathBuf, Vec<(String, Tensor)>) {
+        let fixture = drop.unwrap_or("complete").replace('.', "-");
+        let dir = std::env::temp_dir().join(format!(
+            "oftrain-v81-warm-{}-{fixture}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let vs = nn::VarStore::new(Device::Cpu);
+        let _ = PolicyNet::new(&vs.root(), false, false, 8, 1);
+        let tensors: Vec<_> = vs.variables().into_iter()
+            .filter(|(name, _)| !is_v82_tensor(name) && Some(name.as_str()) != drop)
+            .enumerate()
+            .map(|(index, (name, tensor))| (
+                name,
+                Tensor::full(tensor.size().as_slice(), index as f64 / 100.0, (tensor.kind(), Device::Cpu)),
+            ))
+            .collect();
+        let checkpoint = dir.join("v81.safetensors");
+        Tensor::save_multi(&tensors, &checkpoint).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            r#"{"format":"oftrain-safetensors","manifest_schema_version":1,
+                 "architecture":{"schema_version":1}}"#,
+        ).unwrap();
+        (checkpoint, tensors)
+    }
+
+    #[test]
+    fn v81_warm_start_copies_every_old_tensor_and_only_new_keys_are_initialized() {
+        let (checkpoint, source) = write_v81_fixture(None);
+        let destination = nn::VarStore::new(Device::Cpu);
+        let _ = PolicyNet::new(&destination.root(), false, false, 8, 1);
+        let new_before: std::collections::HashMap<_, _> = destination.variables().into_iter()
+            .filter(|(name, _)| is_v82_tensor(name))
+            .collect();
+        warm_start_v81_recurrent(&destination, checkpoint.to_str().unwrap()).unwrap();
+        let after = destination.variables();
+        for (name, tensor) in source {
+            assert!(after[&name].equal(&tensor), "{name} was not copied exactly");
+        }
+        for (name, tensor) in new_before {
+            assert!(after[&name].equal(&tensor), "{name} changed during migration");
+        }
+        assert_eq!(after["recurrent.residual.weight"].abs().max().double_value(&[]), 0.0);
+    }
+
+    #[test]
+    fn v81_warm_start_rejects_non_recurrent_missing_tensor_and_schema_mismatch() {
+        let (checkpoint, _) = write_v81_fixture(Some("head_action.weight"));
+        let destination = nn::VarStore::new(Device::Cpu);
+        let _ = PolicyNet::new(&destination.root(), false, false, 8, 1);
+        let error = warm_start_v81_recurrent(&destination, checkpoint.to_str().unwrap()).unwrap_err();
+        assert!(error.to_string().contains("may initialize only"));
+        std::fs::write(
+            checkpoint.parent().unwrap().join("manifest.json"),
+            r#"{"format":"oftrain-safetensors","manifest_schema_version":1,
+                 "architecture":{"schema_version":2}}"#,
+        ).unwrap();
+        let error = warm_start_v81_recurrent(&destination, checkpoint.to_str().unwrap()).unwrap_err();
+        assert!(error.to_string().contains("expected v1"));
+        std::fs::remove_dir_all(checkpoint.parent().unwrap()).unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -566,6 +700,8 @@ mod v81_state_and_gate_tests {
     #[test]
     fn train_state_round_trips_v81_sizing_and_reads_legacy_sidecars() {
         let state = TrainState {
+            checkpoint_schema_version: 2,
+            hidden_reset_policy: "episode_done".to_string(),
             update: 41,
             stage: 6,
             ent_scale: 1.2,
@@ -601,6 +737,8 @@ mod v81_state_and_gate_tests {
     #[test]
     fn policy_manifest_is_machine_readable_and_versioned() {
         let state = TrainState {
+            checkpoint_schema_version: 2,
+            hidden_reset_policy: "episode_done".to_string(),
             update: 81,
             stage: 4,
             ent_scale: 1.0,
@@ -618,13 +756,16 @@ mod v81_state_and_gate_tests {
         let manifest = policy_manifest_value(
             128,
             2,
+            32,
             "weights/ae/fine.encoder.safetensors",
             Some("weights/ae/coarse.encoder.safetensors"),
             &state,
         );
         assert_eq!(manifest["format"], "oftrain-safetensors");
         assert_eq!(manifest["manifest_schema_version"], 1);
-        assert_eq!(manifest["architecture"]["schema_version"], 1);
+        assert_eq!(manifest["architecture"]["schema_version"], 2);
+        assert_eq!(manifest["architecture"]["recurrent"]["hidden_size"], policy::RECURRENT_HIDDEN);
+        assert_eq!(manifest["architecture"]["recurrent"]["bptt_length"], 32);
         assert_eq!(
             manifest["architecture"]["dimensions"]["grid_channels"],
             policy::C_GRID
@@ -672,6 +813,8 @@ mod v81_state_and_gate_tests {
 
     fn state_for_schedule(id: Option<&str>, v81: bool, stage: usize) -> TrainState {
         TrainState {
+            checkpoint_schema_version: 2,
+            hidden_reset_policy: "episode_done".to_string(),
             update: 1,
             stage,
             ent_scale: 1.0,
@@ -763,6 +906,7 @@ fn save_checkpoint_state(path: &str, state: &TrainState) -> Result<()> {
 fn policy_manifest_value(
     gc: i64,
     blocks: i64,
+    bptt_length: usize,
     ae_ckpt: &str,
     coarse_ckpt: Option<&str>,
     state: &TrainState,
@@ -772,7 +916,7 @@ fn policy_manifest_value(
         "manifest_schema_version": 1,
         "architecture": {
             "name": "oftrain-policy",
-            "schema_version": 1,
+            "schema_version": 2,
             "dimensions": {
                 "grid_channels": policy::C_GRID,
                 "fine_grid_channels": policy::C_GRID_FINE,
@@ -790,6 +934,15 @@ fn policy_manifest_value(
                 "local_hidden": policy::LC,
                 "transformer_layers": policy::TF_LAYERS,
                 "attention_heads": policy::N_HEAD,
+            },
+            "recurrent": {
+                "cell": "gru",
+                "hidden_size": policy::RECURRENT_HIDDEN,
+                "context_schema": policy::CONTEXT_SCHEMA,
+                "context_hidden": policy::CONTEXT_HIDDEN,
+                "bptt_length": bptt_length,
+                "residual_initialization": "zero-output-projection",
+                "hidden_reset_policy": "episode_done",
             },
         },
         "autoencoders": {
@@ -813,6 +966,7 @@ fn save_policy_manifest(cfg: &Config, state: &TrainState) -> Result<()> {
     let manifest = policy_manifest_value(
         cfg.gc,
         cfg.blocks,
+        cfg.rollout_len,
         &cfg.ae_ckpt,
         cfg.coarse_ckpt.as_deref(),
         state,
@@ -3195,6 +3349,8 @@ mod async_eval_tests {
         })
         .unwrap();
         let state = TrainState {
+            checkpoint_schema_version: 2,
+            hidden_reset_policy: "episode_done".to_string(),
             update: 8,
             stage: 2,
             ent_scale: 1.0,
@@ -4967,21 +5123,32 @@ pub fn run(mut cfg: Config) -> Result<()> {
     // TrainState; `--init` is warm-start only (fresh counters/stage).
     let mut resumed_state: Option<TrainState> = None;
     let mut hub_vs: Option<nn::VarStore> = if let Some(resume_path) = &cfg.resume {
+        let manifest = read_architecture_manifest(resume_path, 2)?;
+        anyhow::ensure!(
+            manifest["architecture"]["recurrent"]["bptt_length"] == cfg.rollout_len,
+            "V8.2 resume BPTT mismatch: checkpoint={}, requested={}",
+            manifest["architecture"]["recurrent"]["bptt_length"], cfg.rollout_len
+        );
+        anyhow::ensure!(
+            manifest["architecture"]["recurrent"]["hidden_reset_policy"] == "episode_done",
+            "unsupported V8.2 hidden reset policy"
+        );
         let mut snapshot = nn::VarStore::new(Device::Cpu);
         let _ = PolicyNet::new(&snapshot.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
         snapshot.load(resume_path)?;
         let state_path = state_sidecar_path(resume_path);
-        resumed_state = match std::fs::read_to_string(&state_path) {
-            Ok(s) => Some(serde_json::from_str(&s)?),
-            Err(e) => {
-                println!(
-                    "[train] WARNING: resuming weights from {resume_path} but no readable state \
-                     sidecar at {state_path} ({e}); starting update/stage/entropy-scale counters \
-                     from scratch with the resumed weights"
-                );
-                None
-            }
-        };
+        let state_text = std::fs::read_to_string(&state_path)
+            .map_err(|error| anyhow!("V8.2 resume requires TrainState sidecar {state_path}: {error}"))?;
+        let state: TrainState = serde_json::from_str(&state_text)?;
+        anyhow::ensure!(
+            state.checkpoint_schema_version == 2,
+            "V8.2 resume requires TrainState checkpoint_schema_version=2"
+        );
+        anyhow::ensure!(
+            state.hidden_reset_policy == "episode_done",
+            "V8.2 resume requires hidden_reset_policy=episode_done"
+        );
+        resumed_state = Some(state);
         println!(
             "[train] resumed weights from {resume_path}{}",
             resumed_state
@@ -4993,7 +5160,17 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 .unwrap_or_default()
         );
         Some(snapshot)
+    } else if let Some(init_path) = &cfg.init_v81_recurrent {
+        let snapshot = nn::VarStore::new(Device::Cpu);
+        let _ = PolicyNet::new(&snapshot.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
+        warm_start_v81_recurrent(&snapshot, init_path)?;
+        println!(
+            "[train] migrated V8.1 weights from {init_path} \
+             (--init-v81-recurrent; fresh TrainState / optimizer)"
+        );
+        Some(snapshot)
     } else if let Some(init_path) = &cfg.init {
+        let _ = read_architecture_manifest(init_path, 2)?;
         let mut snapshot = nn::VarStore::new(Device::Cpu);
         let _ = PolicyNet::new(&snapshot.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
         snapshot.load(init_path)?;
@@ -5756,6 +5933,8 @@ pub fn run(mut cfg: Config) -> Result<()> {
             }
             let current_envs_per_shard = live_total_envs / devices.len();
             let state = TrainState {
+                checkpoint_schema_version: 2,
+                hidden_reset_policy: "episode_done".to_string(),
                 update: update + 1,
                 stage: curr_stage,
                 ent_scale,
@@ -5920,6 +6099,8 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 total_env_steps,
             };
             let state = TrainState {
+                checkpoint_schema_version: 2,
+                hidden_reset_policy: "episode_done".to_string(),
                 update: update + 1,
                 stage: curr_stage,
                 ent_scale,
@@ -6099,6 +6280,8 @@ pub fn run(mut cfg: Config) -> Result<()> {
 
         if cfg.ckpt_every > 0 && (update % cfg.ckpt_every == 0) && update > 0 {
             let state = TrainState {
+                checkpoint_schema_version: 2,
+                hidden_reset_policy: "episode_done".to_string(),
                 update: update + 1, // resume must start at the *next* update, not repeat this one
                 stage: curr_stage,
                 ent_scale,
@@ -6153,6 +6336,8 @@ pub fn run(mut cfg: Config) -> Result<()> {
         }
     }
     let final_state = TrainState {
+        checkpoint_schema_version: 2,
+        hidden_reset_policy: "episode_done".to_string(),
         update: cfg.updates,
         stage: curr_stage,
         ent_scale,
@@ -6444,6 +6629,7 @@ mod persistent_actor_tests {
             ckpt_every: 0,
             ckpt_dir: String::new(),
             init: None,
+            init_v81_recurrent: None,
             resume: None,
             resume_warmup_updates: 0,
             value_loss: ValueLoss::Mse,

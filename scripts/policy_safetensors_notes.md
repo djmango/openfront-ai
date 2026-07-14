@@ -19,6 +19,22 @@ that is not automated. Prefer:
   architecture schema versions, model dimensions, AE references, update,
   and curriculum stage.
 
+V8.2 uses architecture schema 2. Its manifest records the GRU hidden size,
+context feature schema/width, BPTT length, zero-output residual initialization,
+and `episode_done` per-environment hidden reset policy. A full `--resume`
+requires this v2 manifest and a v2 `TrainState`; schema-v1 weights cannot be
+mistaken for a resume. Migrate V8.1 explicitly with:
+
+```sh
+oftrain --init-v81-recurrent checkpoints/v81/latest.safetensors ...
+```
+
+That path requires a schema-v1 manifest, copies every old tensor exactly, and
+permits only `context.*` and `recurrent.*` destination keys to be new. The
+recurrent residual projection starts at zero, preserving all V8.1 outputs.
+Python showcase/ONNX consumers intentionally reject schema 2 until they gain
+stateful recurrent inference support.
+
 AE encoders remain independent (`scripts/export_safetensors.py` +
 `--ckpt` / `--coarse-ckpt`).
 

@@ -47,6 +47,9 @@ pub const LC: i64 = 64;
 pub const N_HEAD: i64 = 4;
 pub const TF_FF: i64 = 2 * PC;
 pub const TF_LAYERS: i64 = 2;
+pub const RECURRENT_HIDDEN: i64 = 256;
+pub const CONTEXT_HIDDEN: i64 = 64;
+pub const CONTEXT_SCHEMA: &str = "scalars-v1";
 
 const MASKED_NEG: f64 = -1e9;
 
@@ -463,6 +466,48 @@ struct ForwardOutput {
     fov: Foveation,
 }
 
+/// V8.2 temporal adapter. Its output projection is zero-initialized so a
+/// migrated V8.1 policy has byte-identical outputs before training resumes.
+struct RecurrentAdapter {
+    context: nn::Linear,
+    input: nn::Linear,
+    hidden: nn::Linear,
+    residual: nn::Linear,
+}
+
+impl RecurrentAdapter {
+    fn new(vs: &nn::Path) -> Self {
+        let context = nn::linear(vs / "context" / "proj", N_SCALARS, CONTEXT_HIDDEN, Default::default());
+        let input = nn::linear(vs / "recurrent" / "input", CONTEXT_HIDDEN, 3 * RECURRENT_HIDDEN, Default::default());
+        let hidden = nn::linear(vs / "recurrent" / "hidden", RECURRENT_HIDDEN, 3 * RECURRENT_HIDDEN, Default::default());
+        let residual = nn::linear(vs / "recurrent" / "residual", RECURRENT_HIDDEN, HIDDEN, Default::default());
+        let mut residual_ws = residual.ws.shallow_clone();
+        let mut residual_bs = residual.bs.as_ref().map(Tensor::shallow_clone);
+        tch::no_grad(|| {
+            let _ = residual_ws.zero_();
+            if let Some(bias) = residual_bs.as_mut() {
+                let _ = bias.zero_();
+            }
+        });
+        Self { context, input, hidden, residual }
+    }
+
+    fn forward(&self, trunk: &Tensor, scalars: &Tensor) -> (Tensor, Tensor) {
+        let context = self.context.forward(scalars).silu();
+        let previous = Tensor::zeros(
+            [context.size()[0], RECURRENT_HIDDEN],
+            (context.kind(), context.device()),
+        );
+        let input_gates = self.input.forward(&context).chunk(3, -1);
+        let hidden_gates = self.hidden.forward(&previous).chunk(3, -1);
+        let reset = (&input_gates[0] + &hidden_gates[0]).sigmoid();
+        let update = (&input_gates[1] + &hidden_gates[1]).sigmoid();
+        let candidate = (&input_gates[2] + reset * &hidden_gates[2]).tanh();
+        let next = (update.neg() + 1.0) * candidate + update * previous;
+        (trunk + self.residual.forward(&next), next)
+    }
+}
+
 pub struct PolicyNet {
     grid_coarse_net: GridTower,
     grid_fine_net: GridTower,
@@ -479,6 +524,7 @@ pub struct PolicyNet {
     head_nuke: nn::Linear,
     head_quantity: nn::Linear,
     head_value: nn::Linear,
+    recurrent: RecurrentAdapter,
     device: Device,
     /// `--amp`: run the conv-heavy submodules (grid towers, local net,
     /// tile heads) in manually-managed bf16 instead of f32 (see
@@ -524,6 +570,7 @@ impl PolicyNet {
             head_nuke: nn::linear(vs / "head_nuke", HIDDEN, N_NUKE, Default::default()),
             head_quantity: nn::linear(vs / "head_quantity", HIDDEN, 2, Default::default()),
             head_value: nn::linear(vs / "head_value", HIDDEN, 1, Default::default()),
+            recurrent: RecurrentAdapter::new(vs),
             device: vs.device(),
             amp,
             foveate,
@@ -736,6 +783,7 @@ impl PolicyNet {
         let cat = Tensor::cat(&[&gc_pool, &gf_pool, &p_pool, &l_pool, &o.scalars], -1);
         let h = self.trunk1.forward(&cat).silu();
         let h = self.trunk2.forward(&h).silu();
+        let (h, _next_hidden) = self.recurrent.forward(&h, &o.scalars);
         // Single chokepoint for the whole forward pass: every head (value,
         // action logits, quantity, tile, player) is derived from `h`/`p`/
         // `gc_map`/`gf_map`, so sanitizing NaN/Inf here - rather than
@@ -1476,12 +1524,27 @@ mod tests {
             "trunk1.weight",
             "htf2.bias",
             "head_quantity.weight",
+            "context.proj.weight",
+            "recurrent.input.weight",
+            "recurrent.hidden.weight",
+            "recurrent.residual.weight",
         ] {
             assert!(
                 variables.contains_key(key),
                 "missing interchange tensor {key}"
             );
         }
+    }
+
+    #[test]
+    fn recurrent_zero_residual_preserves_v81_trunk_output_exactly() {
+        let vs = nn::VarStore::new(Device::Cpu);
+        let adapter = RecurrentAdapter::new(&vs.root());
+        let trunk = Tensor::randn([4, HIDDEN], (Kind::Float, Device::Cpu));
+        let scalars = Tensor::randn([4, N_SCALARS], (Kind::Float, Device::Cpu));
+        let (adapted, hidden) = adapter.forward(&trunk, &scalars);
+        assert!(adapted.equal(&trunk), "zero residual changed the V8.1 output");
+        assert_eq!(hidden.size(), [4, RECURRENT_HIDDEN]);
     }
 
     /// Exercises `act()` (no_grad) + `evaluate()` + `backward()` for a
