@@ -1101,18 +1101,18 @@ impl PolicyNet {
     }
 
     /// Actor-facing API matching commit 6468e46. Actor-owned state may reset
-    /// rows externally; batched reset users call `act_recurrent_masked`.
-    pub fn act_recurrent(
+    /// rows externally; batched reset users call `act_with_state_masked`.
+    pub fn act_with_state(
         &self, o: &Obs, hidden_in: &Tensor, context: &Tensor, greedy: bool,
     ) -> (
         (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor), Tensor,
     ) {
         let reset = Tensor::zeros([hidden_in.size()[0]], (Kind::Float, hidden_in.device()));
-        self.act_recurrent_masked(o, hidden_in, context, &reset, greedy)
+        self.act_with_state_masked(o, hidden_in, context, &reset, greedy)
     }
 
     /// `reset_mask` is batched, with 1 resetting a row before the GRUCell.
-    pub fn act_recurrent_masked(
+    pub fn act_with_state_masked(
         &self, o: &Obs, hidden_in: &Tensor, context: &Tensor,
         reset_mask: &Tensor, greedy: bool,
     ) -> (
@@ -1212,7 +1212,7 @@ impl PolicyNet {
 
     /// One-timestep learner primitive; trainer sequence construction/BPTT is
     /// deliberately outside PolicyNet. Returns hidden_out as the fifth value.
-    pub fn evaluate_recurrent(
+    pub fn evaluate_with_state(
         &self, o: &Obs, c: &ChoiceBatch, hidden_in: &Tensor,
         context: &Tensor, reset_mask: &Tensor,
     ) -> (Tensor, Tensor, Tensor, Tensor, Tensor) {
@@ -1309,14 +1309,14 @@ impl PolicyNet {
         Tensor::zeros([batch, RECURRENT_HIDDEN], (Kind::Float, self.device))
     }
 
-    pub fn value_recurrent(
+    pub fn value_with_state(
         &self, o: &Obs, hidden_in: &Tensor, context: &Tensor,
     ) -> (Tensor, Tensor) {
         let reset = Tensor::zeros([hidden_in.size()[0]], (Kind::Float, hidden_in.device()));
-        self.value_recurrent_masked(o, hidden_in, context, &reset)
+        self.value_with_state_masked(o, hidden_in, context, &reset)
     }
 
-    pub fn value_recurrent_masked(
+    pub fn value_with_state_masked(
         &self, o: &Obs, hidden_in: &Tensor, context: &Tensor, reset_mask: &Tensor,
     ) -> (Tensor, Tensor) {
         let (output, hidden_out) = self.forward_recurrent(o, hidden_in, context, reset_mask);
@@ -1788,13 +1788,13 @@ mod tests {
         }
         let reset_none = Tensor::zeros([2], (Kind::Float, Device::Cpu));
         let (_, out_a) =
-            policy.value_recurrent_masked(&obs, &hidden, &context_a, &reset_none);
+            policy.value_with_state_masked(&obs, &hidden, &context_a, &reset_none);
         let (_, out_b) =
-            policy.value_recurrent_masked(&obs, &hidden, &context_b, &reset_none);
+            policy.value_with_state_masked(&obs, &hidden, &context_b, &reset_none);
         assert!((out_a.get(0) - out_b.get(0)).abs().max().double_value(&[]) > 0.0);
 
         let zero_hidden = Tensor::zeros([2, RECURRENT_HIDDEN], (Kind::Float, Device::Cpu));
-        let (_, baseline) = policy.value_recurrent(&obs, &zero_hidden, &no_previous_context(2));
+        let (_, baseline) = policy.value_with_state(&obs, &zero_hidden, &no_previous_context(2));
         for (name, column, value) in [
             ("action", CONTEXT_ACTION, 2.0), ("player", CONTEXT_PLAYER, 4.0),
             ("tile_y", CONTEXT_TARGET_Y, 0.25), ("tile_x", CONTEXT_TARGET_X, 0.75),
@@ -1805,19 +1805,19 @@ mod tests {
         ] {
             let changed = no_previous_context(2);
             let _ = changed.get(0).select(0, column).fill_(value);
-            let (_, changed_hidden) = policy.value_recurrent(&obs, &zero_hidden, &changed);
+            let (_, changed_hidden) = policy.value_with_state(&obs, &zero_hidden, &changed);
             assert!((baseline.get(0) - changed_hidden.get(0))
                 .abs().max().double_value(&[]) > 0.0, "{name} context was ignored");
         }
 
         let reset_first = Tensor::from_slice(&[1.0f32, 0.0]);
         let (_, masked) =
-            policy.value_recurrent_masked(&obs, &hidden, &context_b, &reset_first);
+            policy.value_with_state_masked(&obs, &hidden, &context_b, &reset_first);
         let zeroed_hidden = hidden.copy();
         let _ = zeroed_hidden.get(0).zero_();
-        let (_, reference) = policy.value_recurrent(&obs, &zeroed_hidden, &context_b);
+        let (_, reference) = policy.value_with_state(&obs, &zeroed_hidden, &context_b);
         assert_exact(&masked.get(0), &reference.get(0), "done-reset hidden row");
-        let (_, unmasked) = policy.value_recurrent(&obs, &hidden, &context_b);
+        let (_, unmasked) = policy.value_with_state(&obs, &hidden, &context_b);
         assert_exact(&masked.get(1), &unmasked.get(1), "nonterminal hidden row");
     }
 
@@ -1831,20 +1831,20 @@ mod tests {
         assert_eq!(hidden.size(), [2, RECURRENT_HIDDEN]);
         let context = no_previous_context(2);
         let ((action, player, tile, build, nuke, quantity, _, act_value), act_hidden) =
-            policy.act_recurrent(&obs, &hidden, &context, true);
+            policy.act_with_state(&obs, &hidden, &context, true);
         let choice = ChoiceBatch {
             action, player_slot: player, tile_region: tile, build_type: build,
             nuke_type: nuke, quantity_frac: quantity,
         };
         let reset = Tensor::zeros([2], (Kind::Float, Device::Cpu));
         let (logp, _, _, eval_value, eval_hidden) =
-            policy.evaluate_recurrent(&obs, &choice, &hidden, &context, &reset);
+            policy.evaluate_with_state(&obs, &choice, &hidden, &context, &reset);
         assert_exact(&act_hidden, &eval_hidden, "act/evaluate hidden_out");
         assert_exact(&act_value, &eval_value, "act/evaluate value");
         assert_finite(&logp, "recurrent evaluate logprob");
         let reset_second = Tensor::from_slice(&[0.0f32, 1.0]);
         let (_, masked_hidden) =
-            policy.act_recurrent_masked(&obs, &act_hidden, &context, &reset_second, true);
+            policy.act_with_state_masked(&obs, &act_hidden, &context, &reset_second, true);
         assert_eq!(masked_hidden.size(), [2, RECURRENT_HIDDEN]);
     }
 
@@ -1857,7 +1857,7 @@ mod tests {
         let obs = synthetic_obs(Device::Cpu, 2, 5, 5);
         let hidden = Tensor::zeros([2, RECURRENT_HIDDEN], (Kind::Float, Device::Cpu));
         let context = no_previous_context(2);
-        let (value, _) = policy.value_recurrent(&obs, &hidden, &context);
+        let (value, _) = policy.value_with_state(&obs, &hidden, &context);
         value.sum(Kind::Float).backward();
         let recurrent = policy.recurrent.as_mut().unwrap();
         assert!(recurrent.residual.ws.grad().abs().max().double_value(&[]) > 0.0);
@@ -1871,7 +1871,7 @@ mod tests {
                 }
             }
         });
-        let (value, _) = policy.value_recurrent(&obs, &hidden, &context);
+        let (value, _) = policy.value_with_state(&obs, &hidden, &context);
         value.sum(Kind::Float).backward();
         assert!(policy.recurrent.as_ref().unwrap().gru_input.ws.grad()
             .abs().max().double_value(&[]) > 0.0);
