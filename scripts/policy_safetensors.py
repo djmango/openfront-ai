@@ -65,7 +65,16 @@ def _python_key(rust_key: str) -> str | None:
 def map_oftrain_state(
     source: dict[str, torch.Tensor], expected: dict[str, torch.Tensor]
 ) -> dict[str, torch.Tensor]:
-    """Map every tensor and reject missing, extra, or shape-mismatched values."""
+    """Map every tensor and reject missing, extra, or shape-mismatched values.
+
+    Rust/Python names which need structural translation (grid towers and
+    transformer Q/K/V) are handled by ``_python_key``. Architecture-specific
+    tensors may use a common name in both implementations; accept those only
+    when that exact name is present in the target policy schema. This keeps the
+    loader strict while allowing opt-in architectures (for example V8.2's
+    recurrent context/GRU/residual modules) to add variables without extending
+    a central allow-list for every shared-name tensor.
+    """
     mapped: dict[str, torch.Tensor] = {}
     consumed: set[str] = set()
     tf_layers = sorted(
@@ -82,6 +91,8 @@ def map_oftrain_state(
         if key in consumed:
             continue
         target = _python_key(key)
+        if target is None and key in expected:
+            target = key
         if target is None:
             raise ValueError(f"unmapped oftrain tensor: {key}")
         if target in mapped:

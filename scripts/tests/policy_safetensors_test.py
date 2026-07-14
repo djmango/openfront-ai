@@ -40,6 +40,30 @@ class PolicySafetensorsMappingTest(unittest.TestCase):
                 {"head_action.weight": torch.empty(3, 2)},
             )
 
+    def test_variable_architecture_schema_is_strict_in_both_directions(self) -> None:
+        base_source = {"head_action.weight": torch.zeros(3, 4)}
+        base_expected = {"head_action.weight": torch.empty(3, 4)}
+        recurrent_source = {
+            **base_source,
+            "recurrent.context_action.weight": torch.ones(5, 6),
+            "recurrent.gru.weight_ih": torch.ones(9, 5),
+            "recurrent.residual.weight": torch.zeros(4, 3),
+        }
+        recurrent_expected = {
+            **base_expected,
+            "recurrent.context_action.weight": torch.empty(5, 6),
+            "recurrent.gru.weight_ih": torch.empty(9, 5),
+            "recurrent.residual.weight": torch.empty(4, 3),
+        }
+
+        mapped = map_oftrain_state(recurrent_source, recurrent_expected)
+        self.assertEqual(mapped.keys(), recurrent_expected.keys())
+
+        with self.assertRaisesRegex(ValueError, r"missing=.*recurrent\."):
+            map_oftrain_state(base_source, recurrent_expected)
+        with self.assertRaisesRegex(ValueError, r"unmapped.*recurrent\."):
+            map_oftrain_state(recurrent_source, base_expected)
+
 
 if __name__ == "__main__":
     unittest.main()
