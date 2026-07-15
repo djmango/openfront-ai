@@ -94,4 +94,14 @@ impl GameEngine for NativeEngine {
     fn close(&mut self) {
         self.session = None;
     }
+
+    fn save_record(&mut self, path: &str) -> Result<serde_json::Value> {
+        let session = self
+            .session
+            .as_ref()
+            .ok_or_else(|| anyhow!("save_record before reset"))?;
+        session
+            .save_record(std::path::Path::new(path))
+            .map_err(|e| anyhow!("native save_record: {e}"))
+    }
 }

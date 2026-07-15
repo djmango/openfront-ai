@@ -100,19 +100,50 @@ def record_engine_commit(record: Path) -> str:
     ).strip()
 
 
-def chromium_args() -> list[str]:
-    base = ["--no-sandbox", "--disable-dev-shm-usage"]
+def linux_has_gpu() -> bool:
+    """True when Chromium can likely use a real GPU (NVIDIA / DRM) instead of SoftGL."""
+    if os.environ.get("OF_FORCE_SWIFTSHADER", "").strip() in ("1", "true", "yes"):
+        return False
+    if os.environ.get("OF_FORCE_GPU", "").strip() in ("1", "true", "yes"):
+        return True
+    # NVIDIA CDI / classic device nodes commonly present in GPU containers.
+    for path in ("/dev/nvidia0", "/dev/dri/renderD128", "/dev/dri/card0"):
+        if Path(path).exists():
+            return True
+    return False
+
+
+def chromium_args(*, soft_gl: bool | None = None) -> list[str]:
+    """Chromium flags for headless OpenFront WebGL.
+
+    Prefer a real GPU on Linux (homelab/showcase with NVIDIA). SoftGL/SwiftShader
+    is known to crawl at ~1fps and produces near-static hero clips.
+    """
+    base = ["--no-sandbox", "--disable-dev-shm-usage", "--ignore-gpu-blocklist", "--enable-gpu"]
     if platform.system() == "Darwin":
-        return base + ["--use-angle=metal", "--enable-gpu", "--ignore-gpu-blocklist"]
-    # Docker/Linux showcase has no GPU display stack for Chromium; SwiftShader
-    # WebGL2 works once the client allows it via rlAllowSoftwareGL=1.
+        return base + ["--use-angle=metal"]
+    use_soft = soft_gl if soft_gl is not None else not linux_has_gpu()
+    if use_soft:
+        return base + [
+            "--use-gl=angle",
+            "--use-angle=swiftshader-webgl",
+            "--enable-unsafe-swiftshader",
+        ]
+    # ANGLE + EGL/GL on GPU hosts (Docker NVIDIA CDI exposes /dev/nvidia*).
     return base + [
         "--use-gl=angle",
-        "--use-angle=swiftshader-webgl",
-        "--enable-unsafe-swiftshader",
-        "--enable-gpu",
-        "--ignore-gpu-blocklist",
+        "--use-angle=gl",
+        "--enable-features=Vulkan",
     ]
+
+
+def soft_gl_defaults(*, width: int, height: int, device_scale_factor: float) -> tuple[int, int, float]:
+    """Cheaper SoftGL capture so wall-clock clips still show gameplay motion."""
+    return (
+        min(width, 1280),
+        min(height, 720),
+        min(device_scale_factor, 1.0),
+    )
 
 
 def trim_video(
@@ -122,6 +153,7 @@ def trim_video(
     max_duration: float | None,
     *,
     crf: int = 18,
+    speedup: float = 1.0,
 ) -> None:
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
@@ -133,6 +165,12 @@ def trim_video(
     if start_sec > 0.05:
         cmd.extend(["-ss", f"{start_sec:.3f}"])
     cmd.extend(["-i", str(src)])
+    vf_parts: list[str] = []
+    if speedup > 1.01:
+        # SoftGL records wall-clock at ~1fps; pack more sim progress into the clip.
+        vf_parts.append(f"setpts=PTS/{speedup:.4f}")
+    if vf_parts:
+        cmd.extend(["-vf", ",".join(vf_parts)])
     if max_duration and max_duration > 0:
         cmd.extend(["-t", f"{max_duration:.3f}"])
     cmd.extend([
@@ -224,6 +262,20 @@ def render_record(
         else client_worktree(record_engine_commit(record))
     )
 
+    use_soft_gl = platform.system() != "Darwin" and not linux_has_gpu()
+    chrome_args = chromium_args(soft_gl=use_soft_gl)
+    render_width, render_height, render_dpr = width, height, device_scale_factor
+    if use_soft_gl:
+        render_width, render_height, render_dpr = soft_gl_defaults(
+            width=width, height=height, device_scale_factor=device_scale_factor
+        )
+        print(
+            f"SoftGL fallback: {render_width}x{render_height} dpr={render_dpr} "
+            "(mount /dev/nvidia* or set OF_FORCE_GPU=1 for real WebGL)"
+        )
+    else:
+        print(f"Chromium WebGL: GPU ({' '.join(chrome_args[-3:])})")
+
     with client_ctx as client_dir:
         try:
             if not reuse_services or not port_open(api_port):
@@ -256,23 +308,24 @@ def render_record(
             with sync_playwright() as pw, tempfile.TemporaryDirectory() as td:
                 browser = pw.chromium.launch(
                     headless=not headed,
-                    args=chromium_args(),
+                    args=chrome_args,
                 )
                 ctx = browser.new_context(
-                    viewport={"width": width, "height": height},
-                    device_scale_factor=device_scale_factor,
+                    viewport={"width": render_width, "height": render_height},
+                    device_scale_factor=render_dpr,
                     record_video_dir=td,
-                    record_video_size={"width": width, "height": height},
+                    record_video_size={"width": render_width, "height": render_height},
                 )
                 overlay_flag = "1" if overlay else "0"
+                allow_soft = "1" if use_soft_gl else "0"
                 ctx.add_init_script(
                     f'localStorage.setItem("apiHost", "http://127.0.0.1:{api_port}");'
                     'localStorage.setItem("replayViewAs", "1");'
                     'localStorage.setItem("replayFitMap", "1");'
                     f'localStorage.setItem("rlDebugOverlay", "{overlay_flag}");'
-                    # OpenFront rejects SwiftShader unless this flag is set
+                    # SoftGL only: OpenFront rejects SwiftShader unless allowed
                     # (see patches/showcase-allow-software-gl.patch).
-                    'localStorage.setItem("rlAllowSoftwareGL", "1");'
+                    f'localStorage.setItem("rlAllowSoftwareGL", "{allow_soft}");'
                     'localStorage.setItem("settings.goToPlayer", "false");'
                     'localStorage.setItem("username", "AGENT");'
                 )
@@ -313,15 +366,22 @@ def render_record(
                 t0 = time.time()
                 gameplay_duration: float | None = None
                 win_hold_t0: float | None = None
+                # SoftGL advances ~1 tick/sec; give more wall-clock so Max-speed
+                # still covers meaningful gameplay before --max-duration.
+                soft_budget = (
+                    float(max_duration) * 8.0
+                    if use_soft_gl and max_duration is not None
+                    else None
+                )
                 while time.time() - t0 < timeout:
-                    # Wall-clock cap for headless SwiftShader (tick hooks can lag).
-                    if (
-                        max_duration is not None
-                        and time.time() - gameplay_t0 >= float(max_duration)
-                    ):
-                        gameplay_duration = float(max_duration)
+                    # Wall-clock cap (SoftGL gets a longer budget; tick hooks lag).
+                    wall_cap = soft_budget if soft_budget is not None else (
+                        float(max_duration) if max_duration is not None else None
+                    )
+                    if wall_cap is not None and time.time() - gameplay_t0 >= wall_cap:
+                        gameplay_duration = time.time() - gameplay_t0
                         print(
-                            f"max-duration {max_duration}s reached "
+                            f"max-duration budget {wall_cap:.0f}s reached "
                             f"(tick={page.evaluate('() => window.__replayTick ?? null')})"
                         )
                         break
@@ -392,8 +452,29 @@ def render_record(
                 trim_start = (gameplay_t0 - page_open_t0) if trim_gameplay else 0.0
                 if trim_gameplay:
                     print(f"trimming {trim_start:.1f}s of load-in")
-                trim_end = gameplay_duration if gameplay_duration is not None else max_duration
-                trim_video(raw, out, trim_start, trim_end, crf=crf)
+                recorded = gameplay_duration if gameplay_duration is not None else (
+                    time.time() - gameplay_t0
+                )
+                speedup = 1.0
+                if use_soft_gl and max_duration is not None and recorded > float(max_duration):
+                    speedup = recorded / float(max_duration)
+                    trim_end: float | None = float(max_duration)
+                    print(
+                        f"SoftGL speedup {speedup:.1f}x "
+                        f"({recorded:.0f}s wall -> {max_duration}s clip)"
+                    )
+                elif max_duration is not None:
+                    trim_end = min(recorded, float(max_duration))
+                else:
+                    trim_end = gameplay_duration
+                trim_video(
+                    raw,
+                    out,
+                    trim_start,
+                    trim_end,
+                    crf=crf,
+                    speedup=speedup,
+                )
 
             print(f"wrote {out}")
         finally:

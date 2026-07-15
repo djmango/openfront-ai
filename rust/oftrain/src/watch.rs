@@ -304,6 +304,21 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
         info.get("gameID"),
         info.get("turns")
     );
+    let spool_meta = json!({
+        "map": cfg.map.clone().unwrap_or_default(),
+        "stage": cfg.stage,
+        "engine": "watch",
+        "won": episode_outcome == "win",
+        "timed_out": false,
+        "run_name": std::env::var("HF_RUN_PREFIX")
+            .or_else(|_| std::env::var("RUN_NAME"))
+            .unwrap_or_default(),
+        "policy_repo": std::env::var("HF_REPO_ID").unwrap_or_else(|_| "djmango/openfront-rl".into()),
+        "source": "oftrain-watch",
+    });
+    if let Err(e) = crate::replay_spool::spool_existing_record(&record_path, &spool_meta) {
+        eprintln!("[replay-spool] watch spool: {e}");
+    }
     if cfg.debug {
         let sidecar = {
             let s = cfg.record.to_string_lossy();

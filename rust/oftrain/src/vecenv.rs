@@ -689,6 +689,7 @@ pub struct EnvWorker {
     land: Vec<u8>,
     mag: Vec<u8>,
     ae_static: StaticTerrain,
+    engine_kind: EngineKind,
 }
 
 static NEXT_TERRAIN_ID: AtomicU64 = AtomicU64::new(1);
@@ -750,6 +751,7 @@ impl EnvWorker {
                 map: Arc::from(""),
                 land_mag: Vec::<f32>::new().into(),
             },
+            engine_kind: engine,
         };
         w.reset_episode()?;
         Ok(w)
@@ -838,6 +840,31 @@ impl EnvWorker {
 
     pub fn save_record(&mut self, path: &str) -> Result<serde_json::Value> {
         self.bridge.save_record(path)
+    }
+
+    /// Best-effort GameRecord spool for HF parquet upload (never fails the episode).
+    fn spool_finished_episode(&mut self, won: bool, timed_out: bool) {
+        let engine = match self.engine_kind {
+            EngineKind::Native => "native",
+            EngineKind::Node => "node",
+        };
+        let meta = serde_json::json!({
+            "map": self.map_name,
+            "stage": self.stage,
+            "episode_stage": self.episode_stage,
+            "engine": engine,
+            "won": won,
+            "timed_out": timed_out,
+            "run_name": std::env::var("HF_RUN_PREFIX")
+                .or_else(|_| std::env::var("RUN_NAME"))
+                .unwrap_or_default(),
+            "policy_update": std::env::var("POLICY_UPDATE").ok(),
+            "policy_repo": std::env::var("HF_REPO_ID").unwrap_or_else(|_| "djmango/openfront-rl".into()),
+            "policy_revision": std::env::var("POLICY_REVISION").ok(),
+        });
+        if let Err(e) = crate::replay_spool::spool_episode(self.bridge.as_mut(), &meta) {
+            eprintln!("[replay-spool] {e}");
+        }
     }
 
     pub fn current_obs(&self) -> Option<&RawObs> {
@@ -1307,6 +1334,7 @@ impl EnvWorker {
                     premature_retreats: self.combat_tracker.premature_retreats,
                     thrash_reengages: self.combat_tracker.thrash_reengages,
                 });
+                self.spool_finished_episode(won, timed_out);
                 self.reset_episode()?;
             } else {
                 self.ep_len += 1;
@@ -1493,6 +1521,7 @@ impl EnvWorker {
                 premature_retreats: self.combat_tracker.premature_retreats,
                 thrash_reengages: self.combat_tracker.thrash_reengages,
             });
+            self.spool_finished_episode(won, timed_out);
             self.reset_episode()?;
         } else {
             self.ep_reward_components.add_assign(components);

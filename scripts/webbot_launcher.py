@@ -38,17 +38,27 @@ MAX_GAME_SECONDS = 30 * 60  # safety net if the page never signals game-over
 
 
 def chromium_args() -> list[str]:
-    # Match showcase clip render: SwiftShader WebGL2 (OpenFront rejects a
-    # missing/disabled GPU context even for the headless webbot path).
-    return [
+    import os
+    from pathlib import Path
+
+    base = [
         "--no-sandbox",
         "--disable-dev-shm-usage",
-        "--use-gl=angle",
-        "--use-angle=swiftshader-webgl",
-        "--enable-unsafe-swiftshader",
         "--enable-gpu",
         "--ignore-gpu-blocklist",
     ]
+    force_soft = os.environ.get("OF_FORCE_SWIFTSHADER", "").strip() in ("1", "true", "yes")
+    force_gpu = os.environ.get("OF_FORCE_GPU", "").strip() in ("1", "true", "yes")
+    has_gpu = force_gpu or any(
+        Path(p).exists() for p in ("/dev/nvidia0", "/dev/dri/renderD128", "/dev/dri/card0")
+    )
+    if force_soft or not has_gpu:
+        return base + [
+            "--use-gl=angle",
+            "--use-angle=swiftshader-webgl",
+            "--enable-unsafe-swiftshader",
+        ]
+    return base + ["--use-gl=angle", "--use-angle=gl"]
 
 
 # Local-dev Chromium console is flooded with ad/CORS/cosmetics noise that

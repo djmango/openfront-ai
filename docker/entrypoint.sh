@@ -10,7 +10,7 @@ export PATH="/app/.venv/bin:/app/openfront/node_modules/.bin:/app/rust/target/re
 export OFTRAIN_BIN="${OFTRAIN_BIN:-/app/rust/target/release/oftrain}"
 PY="/app/.venv/bin/python"
 
-mkdir -p "${DATA_DIR}/records" "${DATA_DIR}/policy" "${DATA_DIR}/clips"
+mkdir -p "${DATA_DIR}/records" "${DATA_DIR}/policy" "${DATA_DIR}/clips" "${DATA_DIR}/replay-spool"
 
 export SKIP_BROWSER_OPEN=true
 export ADMIN_BOT_API_KEY="${ADMIN_BOT_API_KEY:-WARNING_DEV_ADMIN_BOT_KEY_DO_NOT_USE_IN_PRODUCTION}"
@@ -48,7 +48,7 @@ echo "[entrypoint] replay archive API on :8987"
 echo "[entrypoint] replay showcase daemon (RUN_NAME=${RUN_NAME:-ppo_v81})"
 "$OFSHOWCASE" daemon &
 
-echo "[entrypoint] showcase hub on :8988 (watch + on-demand play; featured map=random)"
+echo "[entrypoint] showcase hub on :8988 (watch + on-demand play; featured map=latest)"
 "$OFSHOWCASE" hub --port 8988 &
 
 echo "[entrypoint] Caddy on :8086"

@@ -10,6 +10,7 @@ mod native;
 mod nccl;
 mod policy;
 mod recurrent;
+mod replay_spool;
 mod train;
 mod vecenv;
 mod watch;

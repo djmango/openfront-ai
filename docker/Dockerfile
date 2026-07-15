@@ -99,13 +99,14 @@ ENV STAGE=4
 ENV SHOWCASE_WATCH_STAGE=4
 ENV SEED=showcase0
 ENV CLIP_MAX_SEC=90
+ENV CLIP_DEVICE_SCALE_FACTOR=1
 ENV REFRESH_HOURS=1
 ENV LIVE_SHOWCASE=0
 ENV AE_CKPT=weights/ae/ae_v31_d8c32.encoder.safetensors
 ENV OFTRAIN_BIN=/app/rust/target/release/oftrain
 ENV OFSHOWCASE=/app/rust/target/release/ofshowcase
 
-RUN mkdir -p /data/records /data/policy /data/clips /app/rust/target/release \
+RUN mkdir -p /data/records /data/policy /data/clips /data/replay-spool /app/rust/target/release \
     && /app/.venv/bin/python -m playwright install-deps chromium \
     && /app/.venv/bin/python -m playwright install chromium \
     && chmod +x /app/docker/entrypoint.sh \
