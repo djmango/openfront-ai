@@ -200,6 +200,8 @@ pub struct Config {
     pub migrate_v83_to_v84: bool,
     pub migrate_v84_to_v85: bool,
     pub migrate_v85_to_v86: bool,
+    /// Allows V8.3/V8.6 checkpoint -> V10 schedule + anti-spiral reward profile.
+    pub migrate_v86_to_v10: bool,
     /// Optional env workers-per-shard target for every curriculum stage.
     /// A target change is applied by checkpointing and restarting so
     /// persistent actor/learner CUDA ownership never changes threads.
@@ -431,6 +433,9 @@ pub struct TrainState {
     /// Qualifying closeout episodes only (max fixed-land share >= 0.45).
     #[serde(default)]
     pub recent_conversions: Vec<f64>,
+    /// On-stage non-rehearsal death outcomes (1.0 died / 0.0 survived episode).
+    #[serde(default)]
+    pub recent_deaths: Vec<f64>,
     /// Best fixed-seed evaluation associated with this checkpoint. Optional
     /// for backward compatibility with sidecars written before async eval.
     #[serde(default)]
@@ -482,15 +487,20 @@ fn reconcile_resume_schedule(
     migrate_v83_to_v84: bool,
     migrate_v84_to_v85: bool,
     migrate_v85_to_v86: bool,
+    migrate_v86_to_v10: bool,
     want_v84_reward: bool,
     want_v85_reward: bool,
     want_v86_reward: bool,
+    want_v10_reward: bool,
 ) -> Result<()> {
     use ofcore::curriculum::CurriculumSchedule;
     let saved = state.schedule()?;
     if saved == requested {
         anyhow::ensure!(
-            !migrate_v81_stage5_to_v811 && !migrate_v811_stage5_to_v82 && !migrate_v82_to_v83,
+            !migrate_v81_stage5_to_v811
+                && !migrate_v811_stage5_to_v82
+                && !migrate_v82_to_v83
+                && !migrate_v86_to_v10,
             "a curriculum migration flag was supplied but checkpoint already uses {}",
             requested.id()
         );
@@ -504,6 +514,24 @@ fn reconcile_resume_schedule(
                     == Some(ofcore::curriculum::V9_REWARD_PROFILE),
                 "V9 checkpoint reward profile mismatch: expected {:?}, found {:?}",
                 ofcore::curriculum::V9_REWARD_PROFILE,
+                state.reward_profile
+            );
+            return Ok(());
+        }
+        if requested == CurriculumSchedule::V10 {
+            anyhow::ensure!(
+                !migrate_v83_to_v84 && !migrate_v84_to_v85 && !migrate_v85_to_v86,
+                "V8.x reward-profile migration flags are incompatible with V10"
+            );
+            anyhow::ensure!(
+                want_v10_reward,
+                "V10 curriculum requires V10 reward knobs (survival / diplo-panic / combat-action)"
+            );
+            anyhow::ensure!(
+                state.reward_profile.as_deref()
+                    == Some(ofcore::curriculum::V10_REWARD_PROFILE),
+                "V10 checkpoint reward profile mismatch: expected {:?}, found {:?}",
+                ofcore::curriculum::V10_REWARD_PROFILE,
                 state.reward_profile
             );
             return Ok(());
@@ -652,14 +680,26 @@ fn reconcile_resume_schedule(
         || (migrate_v82_to_v83
             && saved == CurriculumSchedule::V82
             && requested == CurriculumSchedule::V83
-            && state.stage == 5);
+            && state.stage == 5)
+        || (migrate_v86_to_v10
+            && saved == CurriculumSchedule::V83
+            && requested == CurriculumSchedule::V10
+            && want_v10_reward
+            && state.reward_profile.as_deref()
+                == Some(ofcore::curriculum::V86_REWARD_PROFILE));
     if supported {
         state.curriculum_schedule = Some(requested.id().to_string());
         state.v81_curriculum = true;
         state.stage_env_targets.clear();
         state.recent_wins.clear();
         state.recent_conversions.clear();
-        if requested == CurriculumSchedule::V83 {
+        state.recent_deaths.clear();
+        if requested == CurriculumSchedule::V10 {
+            state.reward_profile = Some(ofcore::curriculum::V10_REWARD_PROFILE.to_string());
+            // Restart at the closeout stage so demote/death gates can climb
+            // cleanly rather than inheriting a late-stage death spiral.
+            state.stage = 5;
+        } else if requested == CurriculumSchedule::V83 {
             state.reward_profile = Some(if want_v86_reward {
                 ofcore::curriculum::V86_REWARD_PROFILE.to_string()
             } else if want_v85_reward {
@@ -678,9 +718,9 @@ fn reconcile_resume_schedule(
     anyhow::bail!(
         "checkpoint curriculum schedule {} is incompatible with requested {}; \
          supported migrations are V8.1 stage 5 -> V8.1.1 and \
-         V8.1.1 stage 5 -> V8.2, and V8.2 stage 5 -> V8.3 with their \
-         explicit migration flags (V8.3 -> V8.4 / V8.4 -> V8.5 / V8.5 -> V8.6 are reward-profile migrates; \
-         V9 is a parallel fresh schedule with no migrate-from-V8 path)",
+         V8.1.1 stage 5 -> V8.2, V8.2 stage 5 -> V8.3, and V8.6 (v8.3 schedule) -> V10 \
+         with their explicit migration flags (V8.3 -> V8.4 / V8.4 -> V8.5 / V8.5 -> V8.6 \
+         are reward-profile migrates; V9 is a parallel fresh schedule with no migrate-from-V8 path)",
         saved.id(),
         requested.id()
     )
@@ -729,6 +769,41 @@ fn should_advance_v83(
         })
 }
 
+fn window_mean(window: &VecDeque<f64>) -> Option<f64> {
+    if window.is_empty() {
+        None
+    } else {
+        Some(window.iter().sum::<f64>() / window.len() as f64)
+    }
+}
+
+fn should_advance_v10(
+    stage: usize,
+    recent_wins: &VecDeque<f64>,
+    recent_conversions: &VecDeque<f64>,
+    recent_deaths: &VecDeque<f64>,
+    win_gate: f64,
+) -> bool {
+    should_advance_v83(stage, recent_wins, recent_conversions, win_gate)
+        && recent_deaths.len() == ofcore::curriculum::WINDOW
+        && window_mean(recent_deaths).is_some_and(|death_rate| {
+            death_rate < ofcore::curriculum::V10_ADVANCE_MAX_DEATH_RATE
+        })
+}
+
+fn should_demote_v10(
+    stage: usize,
+    recent_wins: &VecDeque<f64>,
+    recent_deaths: &VecDeque<f64>,
+) -> bool {
+    stage > 0
+        && recent_wins.len() == ofcore::curriculum::WINDOW
+        && recent_deaths.len() == ofcore::curriculum::WINDOW
+        && window_mean(recent_wins).is_some_and(|wr| wr < ofcore::curriculum::V10_DEMOTE_MAX_WIN_RATE)
+        && window_mean(recent_deaths)
+            .is_some_and(|dr| dr > ofcore::curriculum::V10_DEMOTE_MIN_DEATH_RATE)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn record_advancement_result(
     schedule: ofcore::curriculum::CurriculumSchedule,
@@ -736,10 +811,12 @@ fn record_advancement_result(
     episode_stage: usize,
     rehearsal: bool,
     won: bool,
+    died: bool,
     closeout_reached: bool,
     converted: bool,
     recent_wins: &mut VecDeque<f64>,
     recent_conversions: &mut VecDeque<f64>,
+    recent_deaths: &mut VecDeque<f64>,
 ) -> bool {
     if rehearsal || episode_stage != current_stage {
         return false;
@@ -748,7 +825,13 @@ fn record_advancement_result(
         recent_wins.pop_front();
     }
     recent_wins.push_back(if won { 1.0 } else { 0.0 });
-    if schedule == ofcore::curriculum::CurriculumSchedule::V83 && closeout_reached {
+    if schedule == ofcore::curriculum::CurriculumSchedule::V10 {
+        if recent_deaths.len() == ofcore::curriculum::WINDOW {
+            recent_deaths.pop_front();
+        }
+        recent_deaths.push_back(if died { 1.0 } else { 0.0 });
+    }
+    if schedule.uses_v83_closeout() && closeout_reached {
         if recent_conversions.len() == ofcore::curriculum::WINDOW {
             recent_conversions.pop_front();
         }
@@ -1001,16 +1084,19 @@ mod v81_state_and_gate_tests {
         use ofcore::curriculum::CurriculumSchedule;
         let mut wins = VecDeque::new();
         let mut conversions = VecDeque::new();
+        let mut deaths = VecDeque::new();
         assert!(!record_advancement_result(
             CurriculumSchedule::V83,
             5,
             5,
             true,
             true,
+            false,
             true,
             true,
             &mut wins,
             &mut conversions,
+            &mut deaths,
         ));
         assert!(!record_advancement_result(
             CurriculumSchedule::V83,
@@ -1018,12 +1104,14 @@ mod v81_state_and_gate_tests {
             4,
             false,
             true,
+            false,
             true,
             true,
             &mut wins,
             &mut conversions,
+            &mut deaths,
         ));
-        assert!(wins.is_empty() && conversions.is_empty());
+        assert!(wins.is_empty() && conversions.is_empty() && deaths.is_empty());
 
         assert!(record_advancement_result(
             CurriculumSchedule::V83,
@@ -1033,11 +1121,14 @@ mod v81_state_and_gate_tests {
             false,
             false,
             false,
+            false,
             &mut wins,
             &mut conversions,
+            &mut deaths,
         ));
         assert_eq!(wins, VecDeque::from([0.0]));
         assert!(conversions.is_empty());
+        assert!(deaths.is_empty());
 
         assert!(record_advancement_result(
             CurriculumSchedule::V83,
@@ -1045,12 +1136,55 @@ mod v81_state_and_gate_tests {
             5,
             false,
             true,
+            false,
             true,
             true,
             &mut wins,
             &mut conversions,
+            &mut deaths,
         ));
         assert_eq!(conversions, VecDeque::from([1.0]));
+    }
+
+    #[test]
+    fn v10_advance_requires_death_ceiling_and_demotes_on_spiral() {
+        let wins = VecDeque::from(vec![1.0; ofcore::curriculum::WINDOW]);
+        let conversions = VecDeque::from(vec![1.0; 20]);
+        let mut deaths = VecDeque::from(vec![0.6; ofcore::curriculum::WINDOW]);
+        assert!(!should_advance_v10(5, &wins, &conversions, &deaths, 0.45));
+        deaths = VecDeque::from(vec![0.4; ofcore::curriculum::WINDOW]);
+        assert!(should_advance_v10(5, &wins, &conversions, &deaths, 0.45));
+
+        let lose = VecDeque::from(vec![0.0; ofcore::curriculum::WINDOW]);
+        let slaughter = VecDeque::from(vec![1.0; ofcore::curriculum::WINDOW]);
+        assert!(!should_demote_v10(0, &lose, &slaughter));
+        assert!(should_demote_v10(8, &lose, &slaughter));
+        let ok_wins = VecDeque::from(vec![0.2; ofcore::curriculum::WINDOW]);
+        assert!(!should_demote_v10(8, &ok_wins, &slaughter));
+    }
+
+    #[test]
+    fn v10_records_deaths_and_conversions() {
+        use ofcore::curriculum::CurriculumSchedule;
+        let mut wins = VecDeque::new();
+        let mut conversions = VecDeque::new();
+        let mut deaths = VecDeque::new();
+        assert!(record_advancement_result(
+            CurriculumSchedule::V10,
+            7,
+            7,
+            false,
+            false,
+            true,
+            true,
+            false,
+            &mut wins,
+            &mut conversions,
+            &mut deaths,
+        ));
+        assert_eq!(wins, VecDeque::from([0.0]));
+        assert_eq!(deaths, VecDeque::from([1.0]));
+        assert_eq!(conversions, VecDeque::from([0.0]));
     }
 
     #[test]
@@ -1065,6 +1199,7 @@ mod v81_state_and_gate_tests {
             total_env_steps: 9_999,
             recent_wins: vec![1.0, 0.0],
             recent_conversions: vec![],
+            recent_deaths: vec![],
             best_eval_win: None,
             best_eval_score: None,
             v81_curriculum: true,
@@ -1116,6 +1251,7 @@ mod v81_state_and_gate_tests {
             total_env_steps: 123,
             recent_wins: vec![],
             recent_conversions: vec![],
+            recent_deaths: vec![],
             best_eval_win: None,
             best_eval_score: None,
             v81_curriculum: true,
@@ -1215,6 +1351,7 @@ mod v81_state_and_gate_tests {
             total_env_steps: 0,
             recent_wins: vec![],
             recent_conversions: vec![],
+            recent_deaths: vec![],
             best_eval_win: None,
             best_eval_score: None,
             v81_curriculum: true,
@@ -1256,6 +1393,7 @@ mod v81_state_and_gate_tests {
             total_env_steps: 32,
             recent_wins: vec![0.0; ofcore::curriculum::WINDOW],
             recent_conversions: vec![],
+            recent_deaths: vec![],
             best_eval_win: None,
             best_eval_score: None,
             v81_curriculum: v81,
@@ -1273,17 +1411,17 @@ mod v81_state_and_gate_tests {
         use ofcore::curriculum::CurriculumSchedule;
         let mut v81 = state_for_schedule(Some("v8.1"), true, 5);
         assert!(
-            reconcile_resume_schedule(&mut v81, CurriculumSchedule::V81, false, false, false, false, false, false, false, false, false)
+            reconcile_resume_schedule(&mut v81, CurriculumSchedule::V81, false, false, false, false, false, false, false, false, false, false, false)
                 .is_ok()
         );
         let error =
-            reconcile_resume_schedule(&mut v81, CurriculumSchedule::V811, false, false, false, false, false, false, false, false, false)
+            reconcile_resume_schedule(&mut v81, CurriculumSchedule::V811, false, false, false, false, false, false, false, false, false, false, false)
                 .unwrap_err();
         assert!(error.to_string().contains("incompatible"));
 
         let mut legacy = state_for_schedule(None, false, 5);
         assert!(
-            reconcile_resume_schedule(&mut legacy, CurriculumSchedule::V811, true, false, false, false, false, false, false, false, false)
+            reconcile_resume_schedule(&mut legacy, CurriculumSchedule::V811, true, false, false, false, false, false, false, false, false, false, false)
                 .is_err()
         );
     }
@@ -1292,7 +1430,7 @@ mod v81_state_and_gate_tests {
     fn explicit_v81_stage5_migration_maps_to_v811_stage5() {
         use ofcore::curriculum::CurriculumSchedule;
         let mut state = state_for_schedule(None, true, 5);
-        reconcile_resume_schedule(&mut state, CurriculumSchedule::V811, true, false, false, false, false, false, false, false, false)
+        reconcile_resume_schedule(&mut state, CurriculumSchedule::V811, true, false, false, false, false, false, false, false, false, false, false)
             .unwrap();
         assert_eq!(state.stage, 5);
         assert_eq!(state.schedule().unwrap(), CurriculumSchedule::V811);
@@ -1306,10 +1444,16 @@ mod v81_state_and_gate_tests {
                 &mut wrong_stage,
                 CurriculumSchedule::V811,
                 true,
-                false,
-                false,
-                false,
-                false, false, false, false, false)
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false)
             .is_err()
         );
     }
@@ -1318,7 +1462,7 @@ mod v81_state_and_gate_tests {
     fn explicit_v811_stage5_migration_maps_to_v82_stage5() {
         use ofcore::curriculum::CurriculumSchedule;
         let mut state = state_for_schedule(Some("v8.1.1"), true, 5);
-        reconcile_resume_schedule(&mut state, CurriculumSchedule::V82, false, true, false, false, false, false, false, false, false).unwrap();
+        reconcile_resume_schedule(&mut state, CurriculumSchedule::V82, false, true, false, false, false, false, false, false, false, false, false).unwrap();
         assert_eq!(state.stage, 5);
         assert_eq!(state.schedule().unwrap(), CurriculumSchedule::V82);
         assert!(state.recent_wins.is_empty());
@@ -1331,10 +1475,16 @@ mod v81_state_and_gate_tests {
                 &mut wrong_stage,
                 CurriculumSchedule::V82,
                 false,
-                true,
-                false,
-                false,
-                false, false, false, false, false)
+                    true,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false)
             .is_err()
         );
         let mut wrong_source = state_for_schedule(Some("v8.1"), true, 5);
@@ -1343,10 +1493,16 @@ mod v81_state_and_gate_tests {
                 &mut wrong_source,
                 CurriculumSchedule::V82,
                 false,
-                true,
-                false,
-                false,
-                false, false, false, false, false)
+                    true,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false)
             .is_err()
         );
     }
@@ -1364,7 +1520,7 @@ mod v81_state_and_gate_tests {
         state.best_eval_score = Some(0.9);
         state.return_stats = Some(serde_json::json!({"mean": 12.0, "count": 44}));
 
-        reconcile_resume_schedule(&mut state, CurriculumSchedule::V83, false, false, true, false, false, false, false, false, false).unwrap();
+        reconcile_resume_schedule(&mut state, CurriculumSchedule::V83, false, false, true, false, false, false, false, false, false, false, false).unwrap();
         assert_eq!(state.stage, 5);
         assert_eq!(state.update, 321);
         assert_eq!(state.total_env_steps, 99_000);
@@ -1392,7 +1548,13 @@ mod v81_state_and_gate_tests {
                     false,
                     true,
                     false,
-                    false, false, false, false, false)
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false)
                 .is_err()
             );
         }
@@ -1404,7 +1566,7 @@ mod v81_state_and_gate_tests {
         let mut state = state_for_schedule(Some("v8.3"), true, 5);
         state.reward_profile = Some("wrong".to_string());
         assert!(
-            reconcile_resume_schedule(&mut state, CurriculumSchedule::V83, false, false, false, false, false, false, false, false, false)
+            reconcile_resume_schedule(&mut state, CurriculumSchedule::V83, false, false, false, false, false, false, false, false, false, false, false)
                 .unwrap_err()
                 .to_string()
                 .contains("reward profile mismatch")
@@ -4244,6 +4406,7 @@ mod async_eval_tests {
             total_env_steps: 99,
             recent_wins: vec![1.0],
             recent_conversions: vec![],
+            recent_deaths: vec![],
             best_eval_win: Some(0.75),
             best_eval_score: Some(3.5),
             v81_curriculum: true,
@@ -6654,9 +6817,11 @@ pub fn run(mut cfg: Config) -> Result<()> {
             cfg.migrate_v83_to_v84,
             cfg.migrate_v84_to_v85,
             cfg.migrate_v85_to_v86,
+            cfg.migrate_v86_to_v10,
             cfg.reward_config.v84_reward_active(),
             cfg.reward_config.v85_reward_active(),
             cfg.reward_config.v86_reward_active(),
+            cfg.reward_config.v10_reward_active(),
         )?;
         if saved_schedule != cfg.curriculum_schedule {
             println!(
@@ -7041,6 +7206,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
         .as_ref()
         .map(|s| s.recent_conversions.iter().copied().collect())
         .unwrap_or_else(|| std::collections::VecDeque::with_capacity(ofcore::curriculum::WINDOW));
+    let mut recent_deaths: std::collections::VecDeque<f64> = resumed_state
+        .as_ref()
+        .map(|s| s.recent_deaths.iter().copied().collect())
+        .unwrap_or_else(|| std::collections::VecDeque::with_capacity(ofcore::curriculum::WINDOW));
     let return_stats = resumed_state
         .as_ref()
         .and_then(|state| state.return_stats.clone());
@@ -7312,6 +7481,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
         }
 
         let mut advanced = false;
+        let mut demoted = false;
         let debug_eps = std::env::var("OFTRAIN_DEBUG_EPISODES").is_ok();
         for result in &next_pending {
             for info in &result.ep_infos {
@@ -7394,10 +7564,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     info.stage,
                     info.rehearsal,
                     info.won,
+                    info.died,
                     info.closeout_reached,
                     info.converted,
                     &mut recent_wins,
                     &mut recent_conversions,
+                    &mut recent_deaths,
                 ) {
                     let win_rate = recent_wins.iter().sum::<f64>() / recent_wins.len() as f64;
                     if debug_eps {
@@ -7408,37 +7580,62 @@ pub fn run(mut cfg: Config) -> Result<()> {
                             ofcore::curriculum::WINDOW
                         );
                     }
-                    let gate_passed =
-                        if cfg.curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V83 {
-                            should_advance_v83(
-                                curr_stage,
-                                &recent_wins,
-                                &recent_conversions,
-                                stages[curr_stage].win_at,
-                            )
-                        } else {
-                            should_advance(&recent_wins, stages[curr_stage].win_at)
-                        };
-                    if curr_stage < stages.len() - 1 && gate_passed {
+                    let gate_passed = match cfg.curriculum_schedule {
+                        ofcore::curriculum::CurriculumSchedule::V10 => should_advance_v10(
+                            curr_stage,
+                            &recent_wins,
+                            &recent_conversions,
+                            &recent_deaths,
+                            stages[curr_stage].win_at,
+                        ),
+                        ofcore::curriculum::CurriculumSchedule::V83 => should_advance_v83(
+                            curr_stage,
+                            &recent_wins,
+                            &recent_conversions,
+                            stages[curr_stage].win_at,
+                        ),
+                        _ => should_advance(&recent_wins, stages[curr_stage].win_at),
+                    };
+                    let demote = cfg.curriculum_schedule
+                        == ofcore::curriculum::CurriculumSchedule::V10
+                        && should_demote_v10(curr_stage, &recent_wins, &recent_deaths);
+                    if demote {
+                        curr_stage -= 1;
+                        recent_wins.clear();
+                        recent_conversions.clear();
+                        recent_deaths.clear();
+                        demoted = true;
+                    } else if curr_stage < stages.len() - 1 && gate_passed {
                         curr_stage += 1;
                         recent_wins.clear();
                         recent_conversions.clear();
+                        recent_deaths.clear();
                         advanced = true;
                     }
                 }
             }
         }
-        if advanced {
+        if advanced || demoted {
             lr_now = cfg.lr * cfg.stage_lr_decay.powi(curr_stage as i32);
             lr_warmup_start_update = update + 1;
-            lr_warmup_updates = LR_WARMUP_UPDATES;
+            lr_warmup_updates = if cfg.curriculum_schedule
+                == ofcore::curriculum::CurriculumSchedule::V10
+            {
+                ofcore::curriculum::V10_LR_WARMUP_UPDATES
+            } else {
+                LR_WARMUP_UPDATES
+            };
             requested_env_target = requested_stage_env_target(
                 &cfg.stage_env_targets,
                 curr_stage,
                 live_total_envs / devices.len(),
             );
             if requested_env_target.is_some() {
-                resize_reason = "curriculum_stage_env_target".to_string();
+                resize_reason = if demoted {
+                    "curriculum_demote_env_target".to_string()
+                } else {
+                    "curriculum_stage_env_target".to_string()
+                };
             }
             if requested_env_target.is_none() && cfg.persistent_actors {
                 for actor in &mut persistent_actors {
@@ -7465,14 +7662,20 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 }
             }
             let st = &stages[curr_stage];
-            println!(
-                "=== curriculum advance -> stage {curr_stage}: maps={:?} bots={} {} lr->{lr_now:.2e}",
-                st.maps, st.bots, st.difficulty
-            );
+            if demoted {
+                println!(
+                    "=== curriculum demote -> stage {curr_stage}: maps={:?} bots={} {} lr->{lr_now:.2e}",
+                    st.maps, st.bots, st.difficulty
+                );
+            } else {
+                println!(
+                    "=== curriculum advance -> stage {curr_stage}: maps={:?} bots={} {} lr->{lr_now:.2e}",
+                    st.maps, st.bots, st.difficulty
+                );
+            }
             if let Some(target) = requested_env_target {
                 println!(
-                    "[train] stage {curr_stage} requests {target} envs/shard; \
-                     checkpointing at update boundary for a persistent-owner-safe restart"
+                    "[train] stage {curr_stage} requests {target} envs/shard;                      checkpointing at update boundary for a persistent-owner-safe restart"
                 );
             }
         }
@@ -7702,6 +7905,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 total_env_steps,
                 recent_wins: recent_wins.iter().copied().collect(),
                 recent_conversions: recent_conversions.iter().copied().collect(),
+        recent_deaths: recent_deaths.iter().copied().collect(),
                 best_eval_win: current_best.map(|best| best.0),
                 best_eval_score: current_best.map(|best| best.1),
                 v81_curriculum: cfg.curriculum_schedule
@@ -7711,6 +7915,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     cfg.curriculum_schedule,
                     ofcore::curriculum::CurriculumSchedule::V83
                         | ofcore::curriculum::CurriculumSchedule::V9
+                        | ofcore::curriculum::CurriculumSchedule::V10
                 )
                 .then(|| cfg.reward_config.reward_profile_id().to_string()),
                 return_stats: return_stats.clone(),
@@ -7795,6 +8000,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 total_env_steps,
                 recent_wins: recent_wins.iter().copied().collect(),
                 recent_conversions: recent_conversions.iter().copied().collect(),
+        recent_deaths: recent_deaths.iter().copied().collect(),
                 best_eval_win: current_best.map(|best| best.0),
                 best_eval_score: current_best.map(|best| best.1),
                 v81_curriculum: cfg.curriculum_schedule
@@ -7804,6 +8010,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     cfg.curriculum_schedule,
                     ofcore::curriculum::CurriculumSchedule::V83
                         | ofcore::curriculum::CurriculumSchedule::V9
+                        | ofcore::curriculum::CurriculumSchedule::V10
                 )
                 .then(|| cfg.reward_config.reward_profile_id().to_string()),
                 return_stats: return_stats.clone(),
@@ -8000,6 +8207,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 total_env_steps,
                 recent_wins: recent_wins.iter().copied().collect(),
                 recent_conversions: recent_conversions.iter().copied().collect(),
+        recent_deaths: recent_deaths.iter().copied().collect(),
                 best_eval_win: current_best.map(|best| best.0),
                 best_eval_score: current_best.map(|best| best.1),
                 v81_curriculum: cfg.curriculum_schedule
@@ -8009,6 +8217,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     cfg.curriculum_schedule,
                     ofcore::curriculum::CurriculumSchedule::V83
                         | ofcore::curriculum::CurriculumSchedule::V9
+                        | ofcore::curriculum::CurriculumSchedule::V10
                 )
                 .then(|| cfg.reward_config.reward_profile_id().to_string()),
                 return_stats: return_stats.clone(),
@@ -8068,6 +8277,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
         total_env_steps,
         recent_wins: recent_wins.iter().copied().collect(),
         recent_conversions: recent_conversions.iter().copied().collect(),
+        recent_deaths: recent_deaths.iter().copied().collect(),
         best_eval_win: current_best.map(|best| best.0),
         best_eval_score: current_best.map(|best| best.1),
         v81_curriculum: cfg.curriculum_schedule != ofcore::curriculum::CurriculumSchedule::Legacy,
@@ -8076,6 +8286,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             cfg.curriculum_schedule,
             ofcore::curriculum::CurriculumSchedule::V83
                 | ofcore::curriculum::CurriculumSchedule::V9
+                | ofcore::curriculum::CurriculumSchedule::V10
         )
         .then(|| cfg.reward_config.reward_profile_id().to_string()),
         return_stats,
@@ -8310,6 +8521,7 @@ mod persistent_actor_tests {
             migrate_v83_to_v84: false,
             migrate_v84_to_v85: false,
             migrate_v85_to_v86: false,
+            migrate_v86_to_v10: false,
             stage_env_targets: Vec::new(),
             max_episode_ticks: 10,
             rollout_len: 2,
@@ -8350,6 +8562,11 @@ mod persistent_actor_tests {
                 v86_skip_combat_churn: false,
                 v86_death_penalty: 0.0,
                 v9_sparse_win: false,
+                v10_survival_coef: 0.0,
+                v10_diplo_panic: 0.0,
+                v10_diplo_panic_share: 0.35,
+                v10_diplo_panic_tick_frac: 0.55,
+                v10_combat_action: 0.0,
             },
             lambda: 0.95,
             clip: 0.2,
