@@ -79,7 +79,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=py-deps /build/.venv /app/.venv
 COPY --from=rust-builder /out/ofhf /out/ofexport /out/ofshowcase /out/oftrain /app/rust/target/release/
 
-COPY rl ./rl
 COPY bridge ./bridge
 COPY scripts ./scripts
 COPY docker ./docker
