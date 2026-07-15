@@ -3138,14 +3138,24 @@ impl Game {
     }
 
     fn accept_alliance_pair(&mut self, requestor: u16, recipient: u16, tick: u32) {
-        self.alliance_requests.retain(|r| {
-            !((r.requestor_small_id == requestor
-                && r.recipient_small_id == recipient
-                && r.status == AllianceRequestStatus::Pending)
-                || (r.requestor_small_id == recipient
-                    && r.recipient_small_id == requestor
-                    && r.status == AllianceRequestStatus::Pending))
-        });
+        // TS `GameImpl.acceptAllianceRequest` removes the request from the live
+        // `allianceRequests` list but pushes it onto the requestor's
+        // `pastOutgoingAllianceRequests`, which `canSendAllianceRequest` uses for
+        // the alliance-request cooldown. Native previously `retain`-deleted the
+        // pending rows, so after accept (and a later break) the sender had no
+        // cooldown memory and could re-request immediately - burning extra
+        // `getAllianceDecision` PRNG draws TS never makes (NA080 Louisiana→Alabama
+        // @1492 accept → @1618 native re-request vs TS cooldown).
+        for r in &mut self.alliance_requests {
+            if r.status != AllianceRequestStatus::Pending {
+                continue;
+            }
+            if (r.requestor_small_id == requestor && r.recipient_small_id == recipient)
+                || (r.requestor_small_id == recipient && r.recipient_small_id == requestor)
+            {
+                r.status = AllianceRequestStatus::Accepted;
+            }
+        }
         let id = self.next_alliance_id;
         self.next_alliance_id += 1;
         let duration = self.wire.alliance_duration();
