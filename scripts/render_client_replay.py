@@ -370,8 +370,11 @@ def render_record(
                     "? window.__replayTick : 0)"
                 )
                 last_tick = start_tick
+                target_tick_rate = float(
+                    os.environ.get("CLIP_GAME_TICKS_PER_SEC", "20")
+                )
                 target_ticks = (
-                    int(float(os.environ.get("CLIP_GAME_TICKS_PER_SEC", "20")) * max_duration)
+                    int(target_tick_rate * max_duration)
                     if max_duration is not None
                     else None
                 )
@@ -496,12 +499,20 @@ def render_record(
                     f"({tick_rate:.1f} ticks/sec before video speedup)"
                 )
                 speedup = 1.0
-                if use_soft_gl and max_duration is not None and recorded > float(max_duration):
-                    speedup = recorded / float(max_duration)
-                    trim_end: float | None = float(max_duration)
+                if use_soft_gl and max_duration is not None and ticks_rendered > 0:
+                    # Wall-clock compression alone preserved the host's slow
+                    # simulation rate. Derive output duration from actual game
+                    # ticks so every published clip is at least the requested
+                    # gameplay speed, even when SoftGL never reaches its target.
+                    trim_end = min(
+                        float(max_duration),
+                        ticks_rendered / target_tick_rate,
+                    )
+                    speedup = recorded / trim_end
                     print(
                         f"SoftGL speedup {speedup:.1f}x "
-                        f"({recorded:.0f}s wall -> {max_duration}s clip)"
+                        f"({recorded:.0f}s wall, {ticks_rendered} ticks "
+                        f"-> {trim_end:.1f}s clip at {target_tick_rate:g} ticks/sec)"
                     )
                 elif max_duration is not None:
                     trim_end = min(recorded, float(max_duration))
