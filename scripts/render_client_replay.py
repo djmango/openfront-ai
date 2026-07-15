@@ -173,6 +173,9 @@ def trim_video(
     if speedup > 1.01:
         # SoftGL records wall-clock at ~1fps; pack more sim progress into the clip.
         vf_parts.append(f"setpts=PTS/{speedup:.4f}")
+    # Playwright records at 25fps. Normalize published clips to 30fps so
+    # browser playback is smooth and consistent after timestamp compression.
+    vf_parts.append("fps=30")
     if vf_parts:
         cmd.extend(["-vf", ",".join(vf_parts)])
     if max_duration and max_duration > 0:
@@ -330,6 +333,10 @@ def render_record(
                     'localStorage.setItem("replayFitMap", "1");'
                     f'localStorage.setItem("rlDebugOverlay", "{overlay_flag}");'
                     'localStorage.setItem("rlAllowSoftwareGL", "1");'
+                    # Rendering every deterministic update is the SoftGL
+                    # bottleneck. The patched client consumes every update but
+                    # draws one in ten while recording.
+                    'localStorage.setItem("replayRenderEvery", "10");'
                     'localStorage.setItem("settings.goToPlayer", "false");'
                     'localStorage.setItem("username", "AGENT");'
                 )
@@ -358,6 +365,11 @@ def render_record(
                     )
                 page.wait_for_timeout(800)
                 gameplay_t0 = time.time()
+                start_tick = page.evaluate(
+                    "() => (typeof window.__replayTick === 'number' "
+                    "? window.__replayTick : 0)"
+                )
+                last_tick = start_tick
                 print("replay running...")
 
                 end_tick = episode.get("end_tick")
@@ -393,6 +405,8 @@ def render_record(
                         "() => (typeof window.__replayTick === 'number' "
                         "? window.__replayTick : null)"
                     )
+                    if tick is not None:
+                        last_tick = tick
                     if (
                         stop_tick is not None
                         and tick is not None
@@ -458,6 +472,12 @@ def render_record(
                     print(f"trimming {trim_start:.1f}s of load-in")
                 recorded = gameplay_duration if gameplay_duration is not None else (
                     time.time() - gameplay_t0
+                )
+                ticks_rendered = max(0, int(last_tick or 0) - int(start_tick or 0))
+                tick_rate = ticks_rendered / recorded if recorded > 0 else 0.0
+                print(
+                    f"captured {ticks_rendered} ticks in {recorded:.1f}s "
+                    f"({tick_rate:.1f} ticks/sec before video speedup)"
                 )
                 speedup = 1.0
                 if use_soft_gl and max_duration is not None and recorded > float(max_duration):

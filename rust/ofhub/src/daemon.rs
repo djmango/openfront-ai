@@ -53,29 +53,54 @@ fn needs_showcase(state: &Value, run_name: &str, watch_stage: i64, policy_change
     if policy_changed {
         return true;
     }
-    let expected: std::collections::HashSet<_> =
-        showcase_maps().into_iter().map(|m| map_seed(&m)).collect();
+    let expected: std::collections::HashSet<_> = showcase_maps().into_iter().collect();
     let have: std::collections::HashSet<_> = state
         .get("maps")
         .and_then(|v| v.as_array())
         .into_iter()
         .flatten()
-        .filter_map(|e| e.get("seed").and_then(|s| s.as_str()).map(str::to_string))
+        .filter_map(|e| e.get("map").and_then(|s| s.as_str()).map(str::to_string))
         .collect();
     if !expected.is_subset(&have) {
         return true;
     }
-    for map_name in showcase_maps() {
-        let seed = map_seed(&map_name);
-        if !clips_dir().join(format!("{seed}.webm")).is_file() {
-            return true;
-        }
-        let record = records_dir().join(format!("{run_name}_s{watch_stage}_{seed}.json"));
-        if !record.is_file() {
-            return true;
-        }
+    let artifacts_ok = state
+        .get("maps")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| {
+            entries.iter().all(|entry| {
+                entry
+                    .get("artifact_tag")
+                    .and_then(Value::as_str)
+                    .is_some()
+                    && entry
+                    .get("clip")
+                    .and_then(Value::as_str)
+                    .is_some_and(|p| Path::new(p).is_file())
+                    && entry
+                        .get("record")
+                        .and_then(Value::as_str)
+                        .is_some_and(|p| Path::new(p).is_file())
+            })
+        });
+    if !artifacts_ok
+        || state.get("run_name").and_then(Value::as_str) != Some(run_name)
+        || state.get("watch_stage").and_then(Value::as_i64) != Some(watch_stage)
+    {
+        return true;
     }
     false
+}
+
+fn policy_artifact_tag(policy: &Path) -> String {
+    let meta = policy_meta(policy).unwrap_or_else(|_| json!({}));
+    if let Some(update) = meta.get("policy_update").and_then(Value::as_i64) {
+        return format!("u{update}");
+    }
+    meta.get("policy_sha256")
+        .and_then(Value::as_str)
+        .map(|sha| format!("sha{}", &sha[..sha.len().min(12)]))
+        .unwrap_or_else(|| "unknown".into())
 }
 
 fn run_watch(
@@ -195,21 +220,25 @@ fn generate_clip(
     nations: &str,
     bots: i64,
     difficulty: &str,
+    artifact_tag: &str,
 ) -> Result<Value> {
-    let seed = map_seed(map_name);
-    let base = format!("{run_name}_s{watch_stage}_{seed}");
+    let map_key = map_seed(map_name);
+    // Policy version is part of both the filename and game seed. Without it,
+    // every update reused stale records and collided on the same gameID.
+    let seed = format!("{run_name}-s{watch_stage}-{artifact_tag}-{map_key}");
+    let base = format!("{run_name}_s{watch_stage}_{artifact_tag}_{map_key}");
     let record = records_dir().join(format!("{base}.json"));
-    let clip = clips_dir().join(format!("{seed}.webm"));
+    let clip = clips_dir().join(format!("{base}.webm"));
 
     // Legacy Pangaea migration from showcase0 naming.
-    if !record.exists() && map_name == "Pangaea" {
+    if artifact_tag == "unknown" && !record.exists() && map_name == "Pangaea" {
         let legacy = records_dir().join(format!("{run_name}_s{stage}_showcase0.json"));
         if legacy.is_file() {
             fs::copy(&legacy, &record)?;
             log(&format!("clip {map_name}: migrated legacy {}", legacy.display()));
         }
     }
-    if !clip.exists() && map_name == "Pangaea" {
+    if artifact_tag == "unknown" && !clip.exists() && map_name == "Pangaea" {
         let legacy_clip = clips_dir().join("showcase0.webm");
         if legacy_clip.is_file() {
             fs::copy(&legacy_clip, &clip)?;
@@ -258,6 +287,8 @@ fn generate_clip(
         .to_string();
     let mut info = json!({
         "seed": seed,
+        "map_key": map_key,
+        "artifact_tag": artifact_tag,
         "game_id": game_id,
         "map": map,
         "record": record.display().to_string(),
@@ -265,7 +296,7 @@ fn generate_clip(
         "generated_at": utc_now(),
     });
     if clip.is_file() {
-        info["url"] = json!(format!("/archive/clips/{}.webm", seed));
+        info["url"] = json!(format!("/archive/clips/{base}.webm"));
     }
     Ok(info)
 }
@@ -327,6 +358,7 @@ async fn generate_showcase(
     fs::create_dir_all(clips_dir())?;
 
     let maps = showcase_maps();
+    let artifact_tag = policy_artifact_tag(policy);
     let first_map = maps.first().map(String::as_str).unwrap_or("showcase");
     let mut clip_infos = Vec::new();
     let mut state = json!({
@@ -356,6 +388,7 @@ async fn generate_showcase(
             nations,
             bots,
             difficulty,
+            &artifact_tag,
         ) {
             Ok(info) => {
                 clip_infos.push(info);

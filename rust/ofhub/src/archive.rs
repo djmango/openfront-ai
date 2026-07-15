@@ -28,7 +28,7 @@ struct ArchiveState {
 }
 
 fn build_index(records_dir: &Path) -> HashMap<String, PathBuf> {
-    let mut idx = HashMap::new();
+    let mut idx: HashMap<String, PathBuf> = HashMap::new();
     let walker = walkdir::WalkDir::new(records_dir).into_iter();
     for entry in walker.flatten() {
         let path = entry.path();
@@ -48,7 +48,17 @@ fn build_index(records_dir: &Path) -> HashMap<String, PathBuf> {
                     .pointer("/info/gameID")
                     .and_then(|x| x.as_str())
                 {
-                    idx.insert(gid.to_string(), path.to_path_buf());
+                    let replace = idx.get(gid).is_none_or(|current| {
+                        let modified = |p: &Path| {
+                            fs::metadata(p)
+                                .and_then(|m| m.modified())
+                                .unwrap_or(std::time::UNIX_EPOCH)
+                        };
+                        modified(path) > modified(current)
+                    });
+                    if replace {
+                        idx.insert(gid.to_string(), path.to_path_buf());
+                    }
                 }
             }
         }
@@ -223,16 +233,34 @@ async fn games(State(st): State<ArchiveState>) -> impl IntoResponse {
     let mut rows: Vec<Value> = idx
         .iter()
         .map(|(gid, path)| {
+            let record = fs::read_to_string(path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .unwrap_or_else(|| json!({}));
             let mtime = fs::metadata(path)
                 .and_then(|m| m.modified())
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
+            let filename = path
+                .file_stem()
+                .and_then(|v| v.to_str())
+                .unwrap_or("");
+            let run_name = filename
+                .split("_s")
+                .next()
+                .unwrap_or(filename);
             json!({
                 "game_id": gid,
                 "path": path.display().to_string(),
                 "mtime": mtime,
+                "map": record.pointer("/info/config/gameMap").cloned().unwrap_or(Value::Null),
+                "num_turns": record.pointer("/info/num_turns").cloned().unwrap_or(Value::Null),
+                "ended_at": record.pointer("/info/end").cloned().unwrap_or(Value::Null),
+                "winner": record.pointer("/info/winner").cloned().unwrap_or(Value::Null),
+                "git_commit": record.get("gitCommit").cloned().unwrap_or(Value::Null),
+                "run_name": run_name,
             })
         })
         .collect();

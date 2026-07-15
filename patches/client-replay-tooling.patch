@@ -8,13 +8,13 @@ index 474ddc811..41d3087d9 100644
  import { translateText } from "../client/Utils";
  import { EventBus } from "../core/EventBus";
  import {
-@@ -829,6 +830,17 @@ export class ClientGameRunner {
+@@ -829,6 +830,35 @@ export class ClientGameRunner {
          this.eventBus.emit(new SendHashEvent(hu.tick, hu.hash));
        });
        this.gameView.update(gu);
 +      // RL replay tooling: expose the sim tick for the debug overlay.
-+      (window as { __replayTick?: number }).__replayTick =
-+        this.gameView.ticks();
++      const replayTick = this.gameView.ticks();
++      (window as { __replayTick?: number }).__replayTick = replayTick;
 +      // World tile -> screen CSS px for the action target marker.
 +      (window as {
 +        __worldToScreen?: (x: number, y: number) => { x: number; y: number };
@@ -23,10 +23,30 @@ index 474ddc811..41d3087d9 100644
 +          { x, y } as import("../core/game/Game").Cell,
 +        );
 +      initRlDebugOverlay(this.lobby.gameID);
-       this.webglBuilder?.update(this.gameView);
-       this.renderer.tick();
+-      this.webglBuilder?.update(this.gameView);
+-      this.renderer.tick();
++      // Software WebGL cannot render every update while MAX replay is also
++      // advancing the simulation. Drop intermediate visual frames only for
++      // showcase capture; gameView still consumes every deterministic update.
++      let renderEvery = 1;
++      try {
++        const raw = Number(localStorage.getItem("replayRenderEvery") ?? "1");
++        if (Number.isFinite(raw) && raw > 1) {
++          renderEvery = Math.floor(raw);
++        }
++      } catch {
++        // Keep normal rendering when storage is unavailable.
++      }
++      const shouldRender =
++        renderEvery === 1 ||
++        replayTick % renderEvery === 0 ||
++        gu.updates[GameUpdateType.Win].length > 0;
++      if (shouldRender) {
++        this.webglBuilder?.update(this.gameView);
++        this.renderer.tick();
++      }
  
-@@ -882,7 +894,9 @@ export class ClientGameRunner {
+@@ -882,7 +912,9 @@ export class ClientGameRunner {
                return;
              }
 
