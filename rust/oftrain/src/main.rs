@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 mod ae;
 mod autoscale;
 mod batch;
@@ -41,7 +43,7 @@ struct Args {
 
     /// Opt into the V8.1 curriculum gates. Stage identities/maps are
     /// unchanged; only stages 4+ use recalibrated crowded-map win gates.
-    #[arg(long, default_value_t = false, conflicts_with = "v9_curriculum")]
+    #[arg(long, default_value_t = false, conflicts_with_all = ["v9_curriculum", "v10_curriculum"])]
     v81_curriculum: bool,
 
     /// Opt into the V8.1.1 high-player bridge schedule. Stage 5 is the
@@ -51,7 +53,7 @@ struct Args {
     #[arg(
         long,
         default_value_t = false,
-        conflicts_with_all = ["v81_curriculum", "v9_curriculum"]
+        conflicts_with_all = ["v81_curriculum", "v9_curriculum", "v10_curriculum"]
     )]
     v811_curriculum: bool,
 
@@ -60,7 +62,7 @@ struct Args {
     #[arg(
         long,
         default_value_t = false,
-        conflicts_with_all = ["v81_curriculum", "v811_curriculum", "v9_curriculum"]
+        conflicts_with_all = ["v81_curriculum", "v811_curriculum", "v9_curriculum", "v10_curriculum"]
     )]
     v82_curriculum: bool,
 
@@ -68,7 +70,7 @@ struct Args {
     #[arg(
         long,
         default_value_t = false,
-        conflicts_with_all = ["v81_curriculum", "v811_curriculum", "v82_curriculum", "v9_curriculum"]
+        conflicts_with_all = ["v81_curriculum", "v811_curriculum", "v82_curriculum", "v9_curriculum", "v10_curriculum"]
     )]
     v83_curriculum: bool,
 
@@ -77,9 +79,17 @@ struct Args {
     #[arg(
         long,
         default_value_t = false,
-        conflicts_with_all = ["v81_curriculum", "v811_curriculum", "v82_curriculum", "v83_curriculum"]
+        conflicts_with_all = ["v81_curriculum", "v811_curriculum", "v82_curriculum", "v83_curriculum", "v10_curriculum"]
     )]
     v9_curriculum: bool,
+
+    /// Opt into the V10 anti-death-spiral curriculum (V8.3 ladder + demote/death gates).
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with_all = ["v81_curriculum", "v811_curriculum", "v82_curriculum", "v83_curriculum", "v9_curriculum"]
+    )]
+    v10_curriculum: bool,
 
     /// Per-stage env worker targets, per GPU/shard. Accepts either one
     /// comma-separated value per stage (`24,24,...`) or ranges such as
@@ -234,6 +244,26 @@ struct Args {
     #[arg(long, default_value_t = false)]
     v9_sparse_win: bool,
 
+    /// V10: alive+land survival shaping coefficient (`coef * land_share`).
+    #[arg(long, default_value_t = 0.0)]
+    v10_survival_coef: f64,
+
+    /// V10: penalty magnitude for late/dominant diplo/donate panic.
+    #[arg(long, default_value_t = 0.0)]
+    v10_diplo_panic: f64,
+
+    /// V10: land-share threshold that arms diplo-panic shaping.
+    #[arg(long, default_value_t = 0.35)]
+    v10_diplo_panic_share: f64,
+
+    /// V10: tick/max_ticks fraction that arms diplo-panic shaping.
+    #[arg(long, default_value_t = 0.55)]
+    v10_diplo_panic_tick_frac: f64,
+
+    /// V10: bonus for productive attack/boat/build actions.
+    #[arg(long, default_value_t = 0.0)]
+    v10_combat_action: f64,
+
     /// Resume a V8.4 reward-profile checkpoint under V8.5 coeffs (weights unchanged).
     #[arg(long, default_value_t = false, requires_all = ["v83_curriculum", "resume"])]
     migrate_v84_to_v85: bool,
@@ -241,6 +271,10 @@ struct Args {
     /// Resume a V8.5 reward-profile checkpoint under V8.6 coeffs (weights unchanged).
     #[arg(long, default_value_t = false, requires_all = ["v83_curriculum", "resume"])]
     migrate_v85_to_v86: bool,
+
+    /// Resume a V8.6 (v8.3 schedule) checkpoint under V10 schedule + anti-spiral reward.
+    #[arg(long, default_value_t = false, requires_all = ["v10_curriculum", "resume"])]
+    migrate_v86_to_v10: bool,
 
     #[arg(long, default_value_t = 0.95)]
     lambda_: f32,
@@ -863,6 +897,7 @@ mod curriculum_flag_tests {
         assert!(!defaults.v82_curriculum);
         assert!(!defaults.v83_curriculum);
         assert!(!defaults.v9_curriculum);
+        assert!(!defaults.v10_curriculum);
         assert!(!defaults.v9_sparse_win);
 
         let v811 = Args::try_parse_from(["oftrain", "--v811-curriculum"]).unwrap();
@@ -1226,12 +1261,23 @@ fn main() -> anyhow::Result<()> {
         v86_skip_combat_churn: args.v86_skip_combat_churn,
         v86_death_penalty: args.v86_death_penalty,
         v9_sparse_win: args.v9_sparse_win,
+        v10_survival_coef: args.v10_survival_coef,
+        v10_diplo_panic: args.v10_diplo_panic,
+        v10_diplo_panic_share: args.v10_diplo_panic_share,
+        v10_diplo_panic_tick_frac: args.v10_diplo_panic_tick_frac,
+        v10_combat_action: args.v10_combat_action,
     };
     anyhow::ensure!(
         args.v9_curriculum == args.v9_sparse_win,
         "--v9-curriculum and --v9-sparse-win must be used together"
     );
-    let curriculum_schedule = if args.v9_curriculum {
+    anyhow::ensure!(
+        !args.v10_curriculum || reward_config.v10_reward_active(),
+        "--v10-curriculum requires at least one V10 reward knob          (--v10-survival-coef / --v10-diplo-panic / --v10-combat-action)"
+    );
+    let curriculum_schedule = if args.v10_curriculum {
+        ofcore::curriculum::CurriculumSchedule::V10
+    } else if args.v9_curriculum {
         ofcore::curriculum::CurriculumSchedule::V9
     } else if args.v83_curriculum {
         ofcore::curriculum::CurriculumSchedule::V83
@@ -1258,6 +1304,9 @@ fn main() -> anyhow::Result<()> {
         }
         None if curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V83 => {
             ofcore::curriculum::V83_ENV_TARGETS.to_vec()
+        }
+        None if curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V10 => {
+            ofcore::curriculum::V10_ENV_TARGETS.to_vec()
         }
         None if curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V9 => {
             ofcore::curriculum::V9_ENV_TARGETS.to_vec()
@@ -1299,6 +1348,7 @@ fn main() -> anyhow::Result<()> {
     println!("[oftrain] curriculum schedule={}", curriculum_schedule.id());
     if curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V9
         || curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V83
+        || curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V10
     {
         println!(
             "[oftrain] reward profile={}",
@@ -1409,6 +1459,7 @@ fn main() -> anyhow::Result<()> {
         migrate_v83_to_v84: args.migrate_v83_to_v84,
         migrate_v84_to_v85: args.migrate_v84_to_v85,
         migrate_v85_to_v86: args.migrate_v85_to_v86,
+        migrate_v86_to_v10: args.migrate_v86_to_v10,
         stage_env_targets,
         max_episode_ticks: args.max_episode_ticks,
         rollout_len: args.rollout_len,

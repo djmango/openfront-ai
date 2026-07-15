@@ -2,7 +2,8 @@
 //! `rl/curriculum.py`; see that file for the design rationale in comments.
 
 use crate::feat::{
-    A_ATTACK, A_BOAT, A_CANCEL_BOAT, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, EntsData,
+    A_ALLIANCE_REQUEST, A_ATTACK, A_BOAT, A_BREAK_ALLIANCE, A_BUILD, A_CANCEL_BOAT,
+    A_DONATE_GOLD, A_DONATE_TROOPS, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, EntsData,
 };
 use std::collections::{HashMap, VecDeque};
 
@@ -31,6 +32,18 @@ pub const V86_REWARD_PROFILE: &str = "v8.6-attack-fair-v1";
 pub const V9_REWARD_PROFILE: &str = "v9-sparse-win-v1";
 pub const V9_SPARSE_WIN: f64 = 1.0;
 pub const V9_SPARSE_LOSS: f64 = -1.0;
+/// V10 anti-death-spiral: dense V8.6-like reward + survival / anti-diplo / combat priors.
+pub const V10_REWARD_PROFILE: &str = "v10-anti-spiral-v1";
+/// Soft death default for V10 launches (override via `--v86-death-penalty`).
+pub const V10_DEFAULT_DEATH_PENALTY: f64 = 3.0;
+/// Rolling death-rate ceiling required before a V10 stage advance.
+pub const V10_ADVANCE_MAX_DEATH_RATE: f64 = 0.55;
+/// Demote when window win-rate is below this and death-rate is above
+/// [`V10_DEMOTE_MIN_DEATH_RATE`].
+pub const V10_DEMOTE_MAX_WIN_RATE: f64 = 0.10;
+pub const V10_DEMOTE_MIN_DEATH_RATE: f64 = 0.85;
+/// Longer LR warmup after V10 stage changes (advance or demote).
+pub const V10_LR_WARMUP_UPDATES: u64 = 200;
 /// Relation score bands mirror engine `Relation` / TS `PlayerImpl.relation()`.
 pub const RELATION_HOSTILE_LT: f64 = -50.0;
 pub const RELATION_DISTRUSTFUL_LT: f64 = 0.0;
@@ -90,6 +103,16 @@ pub struct RewardConfig {
     pub v86_death_penalty: f64,
     /// V9: terminal win/loss only (`+1` / `-1`); disables all dense shaping.
     pub v9_sparse_win: bool,
+    /// V10: per-decision survival shaping while alive (`coef * land_share`).
+    pub v10_survival_coef: f64,
+    /// V10: penalty magnitude for late/dominant diplo/donate panic actions.
+    pub v10_diplo_panic: f64,
+    /// V10: land-share threshold that arms diplo-panic shaping.
+    pub v10_diplo_panic_share: f64,
+    /// V10: tick/max_ticks fraction that arms diplo-panic shaping.
+    pub v10_diplo_panic_tick_frac: f64,
+    /// V10: bonus for productive combat/build/boat actions.
+    pub v10_combat_action: f64,
 }
 
 impl RewardConfig {
@@ -166,6 +189,12 @@ impl RewardConfig {
             || self.v86_death_penalty > 0.0
     }
 
+    pub fn v10_reward_active(self) -> bool {
+        self.v10_survival_coef != 0.0
+            || self.v10_diplo_panic != 0.0
+            || self.v10_combat_action != 0.0
+    }
+
     /// V8.4 boat/tempo knobs and/or V8.5 win-urgency knobs.
     pub fn v84_or_v85_reward_active(self) -> bool {
         self.v84_reward_active() || self.v85_reward_active()
@@ -187,10 +216,12 @@ impl RewardConfig {
         }
     }
 
-    /// Active V8.3+ / V9 reward profile id for TrainState sidecars.
+    /// Active V8.3+ / V9 / V10 reward profile id for TrainState sidecars.
     pub fn reward_profile_id(self) -> &'static str {
         if self.v9_sparse_win {
             V9_REWARD_PROFILE
+        } else if self.v10_reward_active() {
+            V10_REWARD_PROFILE
         } else if self.v86_reward_active() {
             V86_REWARD_PROFILE
         } else if self.v85_reward_active() {
@@ -214,6 +245,9 @@ pub struct RewardComponents {
     pub tempo: f64,
     pub embargo_outcome: f64,
     pub combat_outcome: f64,
+    pub survival: f64,
+    pub diplo_panic: f64,
+    pub combat_action: f64,
     pub waste: f64,
     pub death: f64,
     pub terminal: f64,
@@ -230,6 +264,9 @@ impl RewardComponents {
         self.tempo += other.tempo;
         self.embargo_outcome += other.embargo_outcome;
         self.combat_outcome += other.combat_outcome;
+        self.survival += other.survival;
+        self.diplo_panic += other.diplo_panic;
+        self.combat_action += other.combat_action;
         self.waste += other.waste;
         self.death += other.death;
         self.terminal += other.terminal;
@@ -647,6 +684,8 @@ pub enum CurriculumSchedule {
     V83,
     /// Parallel sparse-win ladder: many tiny steps, high graduation gates.
     V9,
+    /// Anti-death-spiral: V8.3 closeout ladder + demote / death gates / softer density.
+    V10,
 }
 
 impl CurriculumSchedule {
@@ -658,6 +697,7 @@ impl CurriculumSchedule {
             Self::V82 => "v8.2",
             Self::V83 => "v8.3",
             Self::V9 => "v9",
+            Self::V10 => "v10",
         }
     }
 
@@ -669,8 +709,14 @@ impl CurriculumSchedule {
             "v8.2" => Some(Self::V82),
             "v8.3" => Some(Self::V83),
             "v9" => Some(Self::V9),
+            "v10" => Some(Self::V10),
             _ => None,
         }
+    }
+
+    /// V8.3 closeout insert + potential/churn behavior (shared by V10).
+    pub const fn uses_v83_closeout(self) -> bool {
+        matches!(self, Self::V83 | Self::V10)
     }
 }
 
@@ -717,6 +763,37 @@ fn apply_v83_bot_heavy_density(stages: &mut [Stage]) {
         stage.nations = Nations::Exact(nations);
     }
 }
+
+/// V10 softens the mid-ladder density cliffs that triggered stage-8 slaughter
+/// under V8.3 (especially 100/12 → 120/15), while keeping bots ≫ nations.
+pub const V10_BOT_NATION_DENSITY: [(u32, u32); 15] = [
+    (30, 5),   // 0 Onion Easy
+    (30, 5),   // 1 Onion Easy
+    (40, 5),   // 2 Onion/Pangaea Easy
+    (50, 6),   // 3 Pangaea/Caucasus Easy
+    (70, 9),   // 4 three-map Easy (was 80/10)
+    (50, 6),   // 5 closeout Easy
+    (70, 9),   // 6 eight-map Easy bridge (was 80/10)
+    (90, 11),  // 7 broad Easy (was 100/12)
+    (100, 12), // 8 broad Easy (was 120/15 — main cliff)
+    (110, 14), // 9 Medium — do not drop bots when difficulty rises
+    (120, 15), // 10 Medium
+    (140, 18), // 11 Medium
+    (150, 20), // 12 Hard
+    (170, 24), // 13 Hard
+    (200, 30), // 14 Impossible
+];
+
+fn apply_v10_bot_heavy_density(stages: &mut [Stage]) {
+    debug_assert_eq!(stages.len(), V10_BOT_NATION_DENSITY.len());
+    for (stage, &(bots, nations)) in stages.iter_mut().zip(V10_BOT_NATION_DENSITY.iter()) {
+        stage.bots = bots;
+        stage.nations = Nations::Exact(nations);
+    }
+}
+
+/// V10 reuses V8.3 env floors (same 15-stage closeout ladder geometry).
+pub const V10_ENV_TARGETS: [usize; 15] = V83_ENV_TARGETS;
 
 /// V9 envs/GPU. Early Onion bot-food maps stay saturated; later 200–350-bot
 /// broad-pool stages drop toward 8 like V8.3 as sim cost grows.
@@ -867,7 +944,7 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
                 stage.win_at = gate;
             }
         }
-        CurriculumSchedule::V82 | CurriculumSchedule::V83 => {
+        CurriculumSchedule::V82 | CurriculumSchedule::V83 | CurriculumSchedule::V10 => {
             // Stages 0-4 retain the V8.1/V8.1.1 identities and gate. The
             // 30-player/eight-map Easy bridge precedes broad-pool Easy at
             // 50 and 80 players. Medium only begins after all three Easy
@@ -948,7 +1025,7 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
                     win_at: 0.12,
                 },
             ]);
-            if schedule == CurriculumSchedule::V83 {
+            if schedule == CurriculumSchedule::V83 || schedule == CurriculumSchedule::V10 {
                 stages.insert(
                     5,
                     Stage {
@@ -964,7 +1041,11 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
                 // small maps, ~200 bots / ~30 nations at world scale. Never
                 // start nation-only (bots=0), and never let Nations::Default
                 // outnumber bots on World/Europe (50–72 nations).
-                apply_v83_bot_heavy_density(&mut stages);
+                if schedule == CurriculumSchedule::V10 {
+                    apply_v10_bot_heavy_density(&mut stages);
+                } else {
+                    apply_v83_bot_heavy_density(&mut stages);
+                }
             }
         }
         CurriculumSchedule::V9 => {
@@ -1197,7 +1278,16 @@ pub fn sample_episode(
         let past_i = rng.gen_range(0..stage);
         let past = &stg[past_i];
         let m = past.maps[rng.gen_range(0..past.maps.len())];
-        return (m.to_string(), cur.bots, cur.difficulty, cur.nations, true);
+        // Rehearse the past lobby setup (bots/difficulty/nations), not just
+        // the past map with current-stage pressure. Current-stage bots on an
+        // old map was a fake rehearsal that never relieved density cliffs.
+        return (
+            m.to_string(),
+            past.bots,
+            past.difficulty,
+            past.nations,
+            true,
+        );
     }
     let m = cur.maps[rng.gen_range(0..cur.maps.len())];
     (m.to_string(), cur.bots, cur.difficulty, cur.nations, false)
@@ -1365,6 +1455,63 @@ pub fn sparse_terminal_reward(won: bool) -> f64 {
     }
 }
 
+/// Alive+land survival shaping: small positive signal so death is not the only
+/// non-win terminal contrast under a softer death penalty.
+pub fn v10_survival_reward(alive: bool, land_share: f64, config: RewardConfig) -> f64 {
+    if !alive || config.v10_survival_coef == 0.0 {
+        0.0
+    } else {
+        config.v10_survival_coef * finite_or_zero(land_share).clamp(0.0, 1.0)
+    }
+}
+
+fn v10_diplo_panic_armed(land_share: f64, tick: i64, max_ticks: i64, config: RewardConfig) -> bool {
+    let share_armed = finite_or_zero(land_share) >= config.v10_diplo_panic_share;
+    let tick_frac = tick as f64 / max_ticks.max(1) as f64;
+    let late_armed = tick_frac >= config.v10_diplo_panic_tick_frac;
+    share_armed || late_armed
+}
+
+/// Penalize late/dominant diplomacy spam (donate / alliance / embargo thrash)
+/// that GameRecord analysis showed as the death-spiral failure mode.
+pub fn v10_diplo_panic_penalty(
+    action: i64,
+    land_share: f64,
+    tick: i64,
+    max_ticks: i64,
+    config: RewardConfig,
+) -> f64 {
+    if config.v10_diplo_panic == 0.0 {
+        return 0.0;
+    }
+    if !v10_diplo_panic_armed(land_share, tick, max_ticks, config) {
+        return 0.0;
+    }
+    match action {
+        A_DONATE_GOLD
+        | A_DONATE_TROOPS
+        | A_ALLIANCE_REQUEST
+        | A_BREAK_ALLIANCE
+        | A_EMBARGO
+        | A_EMBARGO_STOP => -config.v10_diplo_panic.abs(),
+        _ => 0.0,
+    }
+}
+
+/// Small prior for productive combat/build actions (targeted attack/boat, build).
+pub fn v10_combat_action_bonus(action: i64, has_target: bool, config: RewardConfig) -> f64 {
+    if config.v10_combat_action == 0.0 {
+        return 0.0;
+    }
+    let coef = config.v10_combat_action.abs();
+    match action {
+        A_ATTACK if has_target => coef,
+        A_BOAT if has_target => coef * 0.75,
+        A_BUILD => coef * 0.5,
+        _ => 0.0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1406,6 +1553,11 @@ mod tests {
             v86_skip_combat_churn: false,
             v86_death_penalty: 0.0,
             v9_sparse_win: false,
+            v10_survival_coef: 0.0,
+            v10_diplo_panic: 0.0,
+            v10_diplo_panic_share: 0.35,
+            v10_diplo_panic_tick_frac: 0.55,
+            v10_combat_action: 0.0,
         }
     }
 
@@ -1535,6 +1687,44 @@ mod tests {
         assert_eq!(cfg.reward_profile_id(), V9_REWARD_PROFILE);
         // Sparse wins over V8.6 knobs if both were somehow set.
         cfg.v86_death_penalty = 10.0;
+        assert_eq!(cfg.reward_profile_id(), V9_REWARD_PROFILE);
+    }
+
+    #[test]
+    fn v10_reward_profile_and_shaping_helpers() {
+        let mut cfg = config();
+        cfg.v10_survival_coef = 0.01;
+        cfg.v10_diplo_panic = 0.08;
+        cfg.v10_diplo_panic_share = 0.35;
+        cfg.v10_diplo_panic_tick_frac = 0.55;
+        cfg.v10_combat_action = 0.02;
+        cfg.v86_death_penalty = 3.0;
+        assert_eq!(cfg.reward_profile_id(), V10_REWARD_PROFILE);
+        assert_eq!(cfg.death_penalty(), 3.0);
+        assert_eq!(v10_survival_reward(true, 0.5, cfg), 0.005);
+        assert_eq!(v10_survival_reward(false, 0.5, cfg), 0.0);
+        assert_eq!(
+            v10_diplo_panic_penalty(A_DONATE_GOLD, 0.40, 100, 1000, cfg),
+            -0.08
+        );
+        assert_eq!(
+            v10_diplo_panic_penalty(A_ATTACK, 0.40, 100, 1000, cfg),
+            0.0
+        );
+        assert_eq!(
+            v10_diplo_panic_penalty(A_DONATE_GOLD, 0.10, 100, 1000, cfg),
+            0.0
+        );
+        assert_eq!(
+            v10_diplo_panic_penalty(A_EMBARGO, 0.10, 600, 1000, cfg),
+            -0.08
+        );
+        assert_eq!(v10_combat_action_bonus(A_ATTACK, true, cfg), 0.02);
+        assert_eq!(v10_combat_action_bonus(A_ATTACK, false, cfg), 0.0);
+        assert_eq!(v10_combat_action_bonus(A_BOAT, true, cfg), 0.015);
+        assert_eq!(v10_combat_action_bonus(A_BUILD, false, cfg), 0.01);
+        // Sparse still wins if somehow both are set.
+        cfg.v9_sparse_win = true;
         assert_eq!(cfg.reward_profile_id(), V9_REWARD_PROFILE);
     }
 
@@ -2077,6 +2267,73 @@ mod curriculum_v81_tests {
             CurriculumSchedule::from_id("v8.3"),
             Some(CurriculumSchedule::V83)
         );
+    }
+
+    #[test]
+    fn v10_softens_mid_ladder_density_and_keeps_closeout() {
+        let v83 = stages_for_schedule(CurriculumSchedule::V83);
+        let v10 = stages_for_schedule(CurriculumSchedule::V10);
+        assert_eq!(v10.len(), 15);
+        assert_eq!(v10[5].maps, &["Onion", "Pangaea", "Caucasus"]);
+        assert_eq!(v10[5].win_at, 0.45);
+        assert!(CurriculumSchedule::V10.uses_v83_closeout());
+        assert_eq!(CurriculumSchedule::V10.id(), "v10");
+        assert_eq!(
+            CurriculumSchedule::from_id("v10"),
+            Some(CurriculumSchedule::V10)
+        );
+        assert_eq!(V10_ENV_TARGETS.len(), v10.len());
+        for (index, (stage, &(bots, nations))) in
+            v10.iter().zip(V10_BOT_NATION_DENSITY.iter()).enumerate()
+        {
+            assert_eq!(stage.bots, bots, "stage {index} bots");
+            assert_eq!(
+                stage.nations,
+                Nations::Exact(nations),
+                "stage {index} nations"
+            );
+            assert!(
+                stage.bots > nations * 5,
+                "stage {index}: bots {} should stay >> nations {}",
+                stage.bots,
+                nations
+            );
+        }
+        // Softened cliff vs V8.3 stage 8.
+        assert!(v10[8].bots < v83[8].bots);
+        assert_eq!(v10[8].bots, 100);
+        // Medium does not drop bots below the prior Easy stage.
+        assert!(v10[9].bots >= v10[8].bots);
+        for index in 0..5 {
+            assert_eq!(v10[index].maps, v83[index].maps);
+            assert_eq!(v10[index].win_at, v83[index].win_at);
+        }
+    }
+
+    #[test]
+    fn sample_episode_rehearsal_uses_past_lobby_setup() {
+        use rand::SeedableRng;
+        use rand::rngs::SmallRng;
+        let stages = stages_for_schedule(CurriculumSchedule::V10);
+        let mut rng = SmallRng::seed_from_u64(42);
+        let mut found = false;
+        for _ in 0..200 {
+            let (_map, bots, difficulty, nations, rehearsal) =
+                sample_episode(&stages, 8, &mut rng);
+            if !rehearsal {
+                continue;
+            }
+            found = true;
+            let matches_past = stages[..8].iter().any(|s| {
+                s.bots == bots && s.difficulty == difficulty && s.nations == nations
+            });
+            assert!(
+                matches_past,
+                "rehearsal lobby must come from a past stage, got bots={bots} difficulty={difficulty:?} nations={nations:?}"
+            );
+            break;
+        }
+        assert!(found, "expected a rehearsal sample within 200 draws");
     }
 
     #[test]

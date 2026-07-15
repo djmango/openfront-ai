@@ -46,7 +46,11 @@ V85_MODE="${V85_MODE:-0}"
 V86_MODE="${V86_MODE:-0}"
 # Parallel sparse-win experiment (not a V8.x migrate). Fresh stage-0 ladder.
 V9_MODE="${V9_MODE:-0}"
-if [ "$V9_MODE" = "1" ]; then
+V10_MODE="${V10_MODE:-0}"
+if [ "$V10_MODE" = "1" ]; then
+  RUN_NAME="${RUN_NAME:-ppo_v10}"
+  NUM_GPUS="${NUM_GPUS:-4}"
+elif [ "$V9_MODE" = "1" ]; then
   RUN_NAME="${RUN_NAME:-ppo_v9}"
   NUM_GPUS="${NUM_GPUS:-4}"
 elif [ "$V86_MODE" = "1" ]; then
@@ -70,8 +74,8 @@ V81_CURRICULUM="${V81_CURRICULUM:-0}"
 # persistent compact path was enabled (64 increased stage-2 tail latency).
 # V8.4 doubles rollout length, so default fewer envs to keep VRAM in band.
 # V9 starts at the small-map 24-env floor (schedule env targets take over).
-if [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ]; then
-  NUM_ENVS="${NUM_ENVS:-16}"
+if [ "$V10_MODE" = "1" ] || [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ]; then
+  NUM_ENVS="${NUM_ENVS:-12}"
 elif [ "$V9_MODE" = "1" ] || [ "$V81_CURRICULUM" = "1" ] || [ "$V83_MODE" = "1" ]; then
   NUM_ENVS="${NUM_ENVS:-24}"
 else
@@ -81,7 +85,7 @@ STAGE_ENV_TARGETS="${STAGE_ENV_TARGETS:-}"
 # Persistent owners cannot live-spawn env workers; autoscale grows via the same
 # restart_request.json path as stage env targets. Default on for V8.3+ so late
 # stages (floors of 8–12) can climb toward GPU util without shortening episodes.
-if [ "$V9_MODE" = "1" ] || [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ] || [ "$V83_MODE" = "1" ]; then
+if [ "$V10_MODE" = "1" ] || [ "$V9_MODE" = "1" ] || [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ] || [ "$V83_MODE" = "1" ]; then
   AUTO_SCALE_ENVS="${AUTO_SCALE_ENVS:-1}"
 else
   AUTO_SCALE_ENVS="${AUTO_SCALE_ENVS:-0}"
@@ -95,7 +99,7 @@ MIN_ENVS="${MIN_ENVS:-8}"
 TARGET_GPU_UTIL="${TARGET_GPU_UTIL:-0.85}"
 AUTOSCALE_CHECK_EVERY="${AUTOSCALE_CHECK_EVERY:-5}"
 AUTOSCALE_STEP="${AUTOSCALE_STEP:-2}"
-if [ "$V9_MODE" = "1" ] || [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ]; then
+if [ "$V10_MODE" = "1" ] || [ "$V9_MODE" = "1" ] || [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ]; then
   ROLLOUT_LEN="${ROLLOUT_LEN:-64}"
   BPTT_CHUNK_LEN="${BPTT_CHUNK_LEN:-32}"
 else
@@ -108,7 +112,7 @@ fi
 MINIBATCH_SIZE="${MINIBATCH_SIZE:-128}"
 MINIBATCHES=$((NUM_ENVS * ROLLOUT_LEN / MINIBATCH_SIZE))
 [ "$MINIBATCHES" -ge 1 ] || MINIBATCHES=1
-if [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ] || [ "$V83_MODE" = "1" ]; then
+if [ "$V10_MODE" = "1" ] || [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ] || [ "$V83_MODE" = "1" ]; then
   STAGE="${STAGE:-5}"
 else
   # V9 and legacy/V8.0 start at stage 0 (fresh ladder).
@@ -124,7 +128,7 @@ NODE_FRACTION="${NODE_FRACTION:-0}"
 # persistent owner threads, rollout payloads cross threads as compact host
 # data, and two env groups overlap stepping with actor inference. Keep
 # fp16-rollout opt-in until it receives the same extended CUDA soak.
-if [ "$V9_MODE" = "1" ] || [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ]; then
+if [ "$V10_MODE" = "1" ] || [ "$V9_MODE" = "1" ] || [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ]; then
   EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --fp16-rollout --persistent-actors --work-conserving-actors --pipeline-groups=true --recurrent-policy --bptt-chunk-len $BPTT_CHUNK_LEN --ckpt-every 5 --eval-every 0 --log-every 1 --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
 elif [ "$V83_MODE" = "1" ]; then
   EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --fp16-rollout --persistent-actors --work-conserving-actors --pipeline-groups=true --recurrent-policy --bptt-chunk-len 16 --ckpt-every 5 --eval-every 0 --log-every 1 --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
@@ -132,7 +136,13 @@ else
   EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --persistent-actors --pipeline-groups=true --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
 fi
 V81_ARGS=""
-if [ "$V9_MODE" = "1" ]; then
+if [ "$V10_MODE" = "1" ]; then
+  # V10: anti-death-spiral on V8.3 closeout ladder. Dense V8.6-like reward with
+  # softer death (3), survival/land shaping, late diplo-panic penalty, combat
+  # priors; schedule adds demote + death-rate advance gate + softer density +
+  # past-lobby rehearsal. Seed from ppo_v86 when available.
+  V81_ARGS="--v10-curriculum --v83-close-coef 4.0 --v83-churn-coef 0.06 --v81-dom-coef 0.25 --v81-dominant-loss=true --v81-dominance-threshold 0.30 --v81-delta-loss-dominant 5.0 --v81-churn-coef 0.05 --v81-churn-window 16 --v84-boat-useful 0.15 --v84-boat-destroyed=-0.20 --v84-boat-cancelled=-0.03 --v84-boat-own-shore=-0.05 --v84-boat-min-stage 4 --v84-tempo-coef 0.015 --v84-tempo-min-stage 4 --v84-fast-win-coef 12.0 --v85-tempo-share-threshold 0.30 --v85-extra-win-bonus 30.0 --v85-embargo-bad-stop=-0.15 --v85-embargo-good-stop 0.02 --v85-embargo-min-stage 4 --v85-premature-retreat=-0.03 --v85-thrash-reengage=-0.03 --v85-combat-min-stage 4 --v86-delta-loss 5.5 --v86-attack-symmetric-loss --v86-skip-combat-churn --v86-death-penalty 3.0 --v10-survival-coef 0.01 --v10-diplo-panic 0.08 --v10-diplo-panic-share 0.35 --v10-diplo-panic-tick-frac 0.55 --v10-combat-action 0.02"
+elif [ "$V9_MODE" = "1" ]; then
   # V9: parallel sparse-win experiment. Extremely gradual 25-stage ladder with
   # 0.90–0.975 graduation gates; reward is terminal +1/-1 only (no strength /
   # boat / tempo / closeout shaping). Longer horizon (gamma=0.9997) for credit
@@ -177,6 +187,7 @@ V83_SOURCE_PREFIX="${V83_SOURCE_PREFIX:-ppo_v82}"
 V84_SOURCE_PREFIX="${V84_SOURCE_PREFIX:-ppo_v83}"
 V85_SOURCE_PREFIX="${V85_SOURCE_PREFIX:-ppo_v84}"
 V86_SOURCE_PREFIX="${V86_SOURCE_PREFIX:-ppo_v85}"
+V10_SOURCE_PREFIX="${V10_SOURCE_PREFIX:-ppo_v86}"
 # The current RunPod A40 host advertises direct CUDA P2P, but its first NCCL
 # collective wedges on that transport. Shared-memory transport reduced the
 # same 48 MiB gradient in ~113 ms. Override only after a host-specific P2P
@@ -373,6 +384,11 @@ if [ "$V86_MODE" = "1" ] && [ -f "$CKPT_DIR/latest.safetensors" ] \
   echo "FATAL: V8.6 resume requires manifest.json beside the checkpoint pair" >&2
   exit 1
 fi
+if [ "$V10_MODE" = "1" ] && [ -f "$CKPT_DIR/latest.safetensors" ] \
+  && [ ! -f "$CKPT_DIR/manifest.json" ]; then
+  echo "FATAL: V10 resume requires manifest.json beside the checkpoint pair" >&2
+  exit 1
+fi
 
 # V8.3 starts from the immutable V8.2 latest pair exactly once. The source
 # remains in ppo_v82 (or a separate read-only restore directory); all output
@@ -446,6 +462,29 @@ if [ "$V86_MODE" = "1" ] && [ ! -f "$CKPT_DIR/latest.safetensors" ]; then
   fi
 fi
 
+# V10 seeds once from ppo_v86 (anti-death-spiral schedule + reward).
+V10_SEED_DIR=""
+if [ "$V10_MODE" = "1" ] && [ ! -f "$CKPT_DIR/latest.safetensors" ]; then
+  LOCAL_V86_DIR="$REPO_DIR/rust/checkpoints/$V10_SOURCE_PREFIX"
+  if [ -f "$LOCAL_V86_DIR/latest.safetensors" ] \
+    && [ -f "$LOCAL_V86_DIR/latest.state.json" ] \
+    && [ -f "$LOCAL_V86_DIR/manifest.json" ]; then
+    V10_SEED_DIR="$LOCAL_V86_DIR"
+  else
+    V10_SEED_DIR="$REPO_DIR/rust/checkpoints/.v10-seed-v86"
+    rm -rf "$V10_SEED_DIR"
+    mkdir -p "$V10_SEED_DIR"
+    "$OFHF" pull --checkpoint-dir "$V10_SEED_DIR" --repo-id "$HF_REPO_ID" \
+      --run-prefix "$V10_SOURCE_PREFIX"
+  fi
+  if [ ! -f "$V10_SEED_DIR/latest.safetensors" ] \
+    || [ ! -f "$V10_SEED_DIR/latest.state.json" ] \
+    || [ ! -f "$V10_SEED_DIR/manifest.json" ]; then
+    echo "FATAL: V10 migration requires a complete V8.6 safetensors/state/manifest seed" >&2
+    exit 1
+  fi
+fi
+
 # V8.5 seeds once from ppo_v84 (reward-only win-urgency + thrash outcomes).
 V85_SEED_DIR=""
 if [ "$V85_MODE" = "1" ] && [ ! -f "$CKPT_DIR/latest.safetensors" ]; then
@@ -490,7 +529,12 @@ while true; do
   RESUME=""
   if [ -f "$CKPT_DIR/latest.safetensors" ]; then
     RESUME="--resume $CKPT_DIR/latest.safetensors"
-    if [ "$V86_MODE" = "1" ]; then
+    if [ "$V10_MODE" = "1" ]; then
+      if ! grep -q '"curriculum_schedule":"v10"' "$CKPT_DIR/latest.state.json" 2>/dev/null \
+        && ! grep -q '"curriculum_schedule": "v10"' "$CKPT_DIR/latest.state.json" 2>/dev/null; then
+        RESUME="$RESUME --migrate-v86-to-v10"
+      fi
+    elif [ "$V86_MODE" = "1" ]; then
       if ! grep -q "v8.6-attack-fair-v1" "$CKPT_DIR/latest.state.json" 2>/dev/null; then
         RESUME="$RESUME --migrate-v85-to-v86"
       fi
@@ -505,6 +549,8 @@ while true; do
         RESUME="$RESUME --migrate-v83-to-v84"
       fi
     fi
+  elif [ "$V10_MODE" = "1" ] && [ -n "$V10_SEED_DIR" ]; then
+    RESUME="--resume $V10_SEED_DIR/latest.safetensors --migrate-v86-to-v10"
   elif [ "$V86_MODE" = "1" ] && [ -n "$V86_SEED_DIR" ]; then
     RESUME="--resume $V86_SEED_DIR/latest.safetensors --migrate-v85-to-v86"
   elif [ "$V85_MODE" = "1" ] && [ -n "$V85_SEED_DIR" ]; then

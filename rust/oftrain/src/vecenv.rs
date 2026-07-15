@@ -22,7 +22,8 @@ use ofcore::curriculum::{
     combat_outcome_reward, dominance_potential, embargo_stop_outcome_reward, fast_win_bonus,
     land_share, normalized_strength_share, placement, placement_score, sample_episode,
     sparse_terminal_reward, stages_for_schedule, strength_delta_weight, tempo_pressure,
-    terminal_reward, timeweight, v83_action_churn_penalty,
+    terminal_reward, timeweight, v10_combat_action_bonus, v10_diplo_panic_penalty,
+    v10_survival_reward, v83_action_churn_penalty,
 };
 use ofcore::feat::{
     self, A_ATTACK, A_BOAT, A_CANCEL_BOAT, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, ACTIONS,
@@ -233,6 +234,8 @@ pub struct EpisodeInfo {
     pub n_players: i64,
     pub score: f64,
     pub won: bool,
+    /// True when the episode ended because the agent died (`!alive`).
+    pub died: bool,
     pub wasted: i64,
     pub stage: usize,
     pub map: String,
@@ -1273,8 +1276,10 @@ impl EnvWorker {
         let mut done = false;
         let mut won = false;
         let mut timed_out = false;
+        let mut died = false;
         if !obs.alive() {
             done = true;
+            died = true;
         } else if !obs.winner().is_null() {
             let w = obs.winner();
             won = w
@@ -1322,6 +1327,7 @@ impl EnvWorker {
                     n_players: n,
                     score: placement_score(place, n),
                     won,
+                    died,
                     wasted: self.ep_wasted,
                     stage: self.stage,
                     map: self.map_name.clone(),
@@ -1363,7 +1369,7 @@ impl EnvWorker {
             ..RewardComponents::default()
         };
         let mut reward = components.strength + components.strength_delta;
-        components.action_churn = if self.curriculum_schedule == CurriculumSchedule::V83 {
+        components.action_churn = if self.curriculum_schedule.uses_v83_closeout() {
             v83_action_churn_penalty(inverse_pair, self.episode_stage, share, self.reward_config)
         } else {
             action_churn_penalty(inverse_pair, self.episode_stage, self.reward_config)
@@ -1389,7 +1395,7 @@ impl EnvWorker {
         if components.combat_outcome != 0.0 {
             reward += components.combat_outcome;
         }
-        let next_potential = if self.curriculum_schedule == CurriculumSchedule::V83 && done {
+        let next_potential = if self.curriculum_schedule.uses_v83_closeout() && done {
             0.0
         } else {
             dominance_potential(&composite, me, self.reward_config.v81_potential_clamp)
@@ -1409,7 +1415,7 @@ impl EnvWorker {
             self.dominance_shaper.reset(next_potential);
         }
         let next_closeout_potential = if done { 0.0 } else { closeout_potential(share) };
-        if self.curriculum_schedule == CurriculumSchedule::V83 && self.episode_stage >= 5 {
+        if self.curriculum_schedule.uses_v83_closeout() && self.episode_stage >= 5 {
             components.closeout = self.closeout_shaper.transition(
                 next_closeout_potential,
                 self.reward_config.gamma,
@@ -1464,6 +1470,29 @@ impl EnvWorker {
             }
         }
 
+        components.survival = v10_survival_reward(obs.alive(), share, self.reward_config);
+        if components.survival != 0.0 {
+            reward += components.survival;
+        }
+        components.diplo_panic = v10_diplo_panic_penalty(
+            choice.action,
+            share,
+            obs.tick(),
+            self.max_episode_ticks,
+            self.reward_config,
+        );
+        if components.diplo_panic != 0.0 {
+            reward += components.diplo_panic;
+        }
+        let has_action_target = choice.player_slot.is_some()
+            || choice.tile_region.is_some()
+            || matches!(chosen_action.target, Some(_));
+        components.combat_action =
+            v10_combat_action_bonus(choice.action, has_action_target, self.reward_config);
+        if components.combat_action != 0.0 {
+            reward += components.combat_action;
+        }
+
         reward -= W_WASTE * wasted as f64;
         components.waste = -W_WASTE * wasted as f64;
         self.ep_wasted += wasted;
@@ -1509,6 +1538,7 @@ impl EnvWorker {
                 n_players: n,
                 score: placement_score(place, n),
                 won,
+                died,
                 wasted: self.ep_wasted,
                 stage: self.stage,
                 map: self.map_name.clone(),
