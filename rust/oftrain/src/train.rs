@@ -7576,28 +7576,49 @@ pub fn run(mut cfg: Config) -> Result<()> {
             && cfg.auto_scale_envs
             && update % cfg.autoscale_check_every.max(1) == 0
         {
-            let gpu_util_frac = gpu_sampler
-                .as_ref()
-                .map(|g| g.snapshot().min_mean_util() / 100.0);
+            let gpu_snap = gpu_sampler.as_ref().map(|g| g.snapshot());
+            let gpu_util_frac = gpu_snap.as_ref().map(|s| s.min_mean_util() / 100.0);
+            let gpu_mem_frac = gpu_snap.as_ref().map(|s| s.mem_pct / 100.0);
             let current = live_total_envs / devices.len().max(1);
             let target_n = autoscale::next_env_count(
                 current,
                 gpu_util_frac,
+                gpu_mem_frac,
                 cfg.target_gpu_util,
                 autoscale_min_envs,
                 autoscale_max_envs,
                 cfg.autoscale_step,
             );
-            if target_n > current {
-                let gpu_str = gpu_util_frac
+            let gpu_str = format!(
+                "util={} mem={}",
+                gpu_util_frac
                     .map(|f| format!("{:.1}%", f * 100.0))
-                    .unwrap_or_else(|| "n/a (no GPU)".to_string());
+                    .unwrap_or_else(|| "n/a".to_string()),
+                gpu_mem_frac
+                    .map(|f| format!("{:.1}%", f * 100.0))
+                    .unwrap_or_else(|| "n/a".to_string()),
+            );
+            if target_n < current {
+                if cfg.persistent_actors {
+                    requested_env_target = Some(target_n);
+                    resize_reason = "gpu_mem_autoscale".to_string();
+                    println!(
+                        "[autoscale] persistent: {current} -> {target_n} envs/shard \
+                         ({gpu_str}; VRAM shrink); checkpointing for restart"
+                    );
+                } else {
+                    println!(
+                        "[autoscale] mem pressure wants {current} -> {target_n} envs/shard \
+                         ({gpu_str}) but legacy live-shrink is unsupported; holding"
+                    );
+                }
+            } else if target_n > current {
                 if cfg.persistent_actors {
                     requested_env_target = Some(target_n);
                     resize_reason = "gpu_util_autoscale".to_string();
                     println!(
                         "[autoscale] persistent: {current} -> {target_n} envs/shard \
-                         (gpu_util={gpu_str} target={:.0}%); checkpointing for restart",
+                         ({gpu_str} target={:.0}%); checkpointing for restart",
                         cfg.target_gpu_util * 100.0
                     );
                 } else {
@@ -7645,7 +7666,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                                 actors[gi].cur_obs.push(obs);
                             }
                             println!(
-                                "[autoscale] all shards: {current} -> {target_n} envs (gpu_util={gpu_str} \
+                                "[autoscale] all shards: {current} -> {target_n} envs ({gpu_str} \
                                  target={:.0}% cpu_cap={autoscale_max_envs})",
                                 cfg.target_gpu_util * 100.0
                             );
