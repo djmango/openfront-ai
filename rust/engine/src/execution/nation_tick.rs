@@ -59,10 +59,17 @@ pub fn initialize_nation_behaviors(
 /// nor double-reverted.
 fn update_relations_from_embargos(game: &mut Game, state: &mut NationBehaviorState, small_id: u16) {
     const EMBARGO_MALUS: i32 = -20;
+    // TS `NationExecution.updateRelationsFromEmbargos` iterates `this.mg.players()`,
+    // which is alive-only (`isAlive()` == tiles > 0). Using `all_players()` here
+    // applied malus for wiped nations that still hold temporary attack-embargoes
+    // (GL080 Green Bay←Wausau @5046: Wausau had 0 tiles but an active embargo,
+    // native applied -20 → Distrustful while TS stayed Neutral, desyncing
+    // `getAllianceDecision` PRNG by 2 draws and later forming a spurious
+    // Green Bay↔Madison alliance).
     let others: Vec<(u16, String)> = game
         .all_players()
         .iter()
-        .filter(|p| p.small_id != small_id)
+        .filter(|p| p.small_id != small_id && p.tiles_owned > 0)
         .map(|p| (p.small_id, p.id.clone()))
         .collect();
     for (other_small_id, other_id) in others {
@@ -184,10 +191,11 @@ fn handle_embargoes_to_hostile_nations(game: &mut Game, small_id: u16) {
     let is_higher_difficulty = difficulty == "Hard" || difficulty == "Impossible";
     let team_game = game.wire.game_config().game_mode == "Team";
 
+    // TS `handleEmbargoesToHostileNations` iterates `this.mg.players()` (alive-only).
     let others: Vec<(u16, bool)> = game
         .all_players()
         .iter()
-        .filter(|p| p.small_id != small_id)
+        .filter(|p| p.small_id != small_id && p.tiles_owned > 0)
         .map(|p| (p.small_id, p.player_type == PlayerType::Bot))
         .collect();
 

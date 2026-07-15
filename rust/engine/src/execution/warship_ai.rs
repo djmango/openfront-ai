@@ -15,7 +15,7 @@ use crate::core::schemas::unit_type::{PORT, TRADE_SHIP, TRANSPORT, WARSHIP};
 use crate::game::{Game, PlayerType};
 use crate::map::TileRef;
 use crate::prng::PseudoRandom;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// TS `EMOJI_WARSHIP_RETALIATION` is a single-emoji list (`["⛵"]`), so every
 /// `randElement` draw over it is a no-op single choice - named purely for readability at
@@ -232,37 +232,60 @@ fn track_incoming_transports_and_retaliate(
     state: &mut NationWarshipState,
     emoji: &mut NationEmojiState,
 ) {
-    let incoming_ids: Vec<i32> = game
-        .live_transports()
-        .filter(|t| t.is_active())
-        .filter_map(|t| {
-            let target = t.target_tile()?;
-            let unit_id = t.unit_id()?;
-            if !t.is_retreating()
-                && game.map.owner_id(target) == small_id
-                && t.owner_small_id() != small_id
-            {
-                Some(unit_id)
-            } else {
-                None
+    // TS `for (const p of this.game.units(UnitType.TransportShip))` walks
+    // `_players.values()` × each player's `_units` array — *not* execution-list
+    // order. `live_transports()` follows `execs`, which can insert the same two
+    // inbound ships in the opposite order; because this loop `break`s after the
+    // first retaliation, that alone desyncs the nation PRNG (eastasia080 Sado @1558).
+    let mut transport_by_unit: HashMap<i32, (u16, Option<TileRef>, bool, bool)> = HashMap::new();
+    for t in game.live_transports() {
+        let Some(unit_id) = t.unit_id() else {
+            continue;
+        };
+        transport_by_unit.insert(
+            unit_id,
+            (
+                t.owner_small_id(),
+                t.target_tile(),
+                t.is_retreating(),
+                t.is_active(),
+            ),
+        );
+    }
+    for player in game.all_players() {
+        for unit in &player.units {
+            if unit.unit_type != TRANSPORT {
+                continue;
             }
-        })
-        .collect();
-    for unit_id in incoming_ids {
-        state.tracked_incoming_transport_ships.insert(unit_id);
+            let Some(&(owner, target, is_retreating, is_active)) = transport_by_unit.get(&unit.id)
+            else {
+                continue;
+            };
+            let Some(target) = target else {
+                continue;
+            };
+            if is_active
+                && !is_retreating
+                && game.map.owner_id(target) == small_id
+                && owner != small_id
+            {
+                state.tracked_incoming_transport_ships.insert(unit.id);
+            }
+        }
     }
 
     for transport_id in state.tracked_incoming_transport_ships.to_vec() {
-        let snapshot = game
-            .live_transports()
-            .filter(|t| t.is_active())
-            .find(|t| t.unit_id() == Some(transport_id))
-            .map(|t| (t.owner_small_id(), t.target_tile(), t.is_retreating()));
-        let Some((owner, target, is_retreating)) = snapshot else {
+        let snapshot = transport_by_unit.get(&transport_id).copied();
+        let Some((owner, target, is_retreating, is_active)) = snapshot else {
             state.tracked_incoming_transport_ships.remove(transport_id);
             state.dealt_with_transport_ship.remove(&transport_id);
             continue;
         };
+        if !is_active {
+            state.tracked_incoming_transport_ships.remove(transport_id);
+            state.dealt_with_transport_ship.remove(&transport_id);
+            continue;
+        }
         let Some(target) = target else {
             state.tracked_incoming_transport_ships.remove(transport_id);
             state.dealt_with_transport_ship.remove(&transport_id);
