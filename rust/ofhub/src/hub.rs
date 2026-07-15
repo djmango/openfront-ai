@@ -642,7 +642,7 @@ pub async fn run_hub(port: u16) -> Result<()> {
         })
         .with_state(inner);
 
-    eprintln!("[showcase_hub] hub on :{port} (watch=/watch, play=/play, selection=random)");
+    eprintln!("[showcase_hub] hub on :{port} (watch=/watch, play=/play, selection=latest)");
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;

@@ -117,7 +117,10 @@ def chromium_args(*, soft_gl: bool | None = None) -> list[str]:
     """Chromium flags for headless OpenFront WebGL.
 
     Prefer a real GPU on Linux (homelab/showcase with NVIDIA). SoftGL/SwiftShader
-    is known to crawl at ~1fps and produces near-static hero clips.
+    is known to crawl at ~1fps and produces near-static hero clips - keep it as
+    fallback only. Always allow SoftGL in the OpenFront client (rlAllowSoftwareGL)
+    because Chromium often silently falls back to SwiftShader even when we ask
+    for GL/ANGLE.
     """
     base = ["--no-sandbox", "--disable-dev-shm-usage", "--ignore-gpu-blocklist", "--enable-gpu"]
     if platform.system() == "Darwin":
@@ -129,11 +132,12 @@ def chromium_args(*, soft_gl: bool | None = None) -> list[str]:
             "--use-angle=swiftshader-webgl",
             "--enable-unsafe-swiftshader",
         ]
-    # ANGLE + EGL/GL on GPU hosts (Docker NVIDIA CDI exposes /dev/nvidia*).
+    # NVIDIA headless: ANGLE+EGL tends to stick to the discrete GPU better than
+    # --use-angle=gl (which often silently falls back to SwiftShader).
     return base + [
         "--use-gl=angle",
-        "--use-angle=gl",
-        "--enable-features=Vulkan",
+        "--use-angle=gl-egl",
+        "--enable-unsafe-swiftshader",  # last-resort if EGL fails at runtime
     ]
 
 
@@ -317,15 +321,15 @@ def render_record(
                     record_video_size={"width": render_width, "height": render_height},
                 )
                 overlay_flag = "1" if overlay else "0"
-                allow_soft = "1" if use_soft_gl else "0"
+                # Always allow SoftGL: Chromium often falls back to SwiftShader
+                # even when we request GL/EGL, and OpenFront otherwise refuses
+                # to boot (no replay button → 120s timeout).
                 ctx.add_init_script(
                     f'localStorage.setItem("apiHost", "http://127.0.0.1:{api_port}");'
                     'localStorage.setItem("replayViewAs", "1");'
                     'localStorage.setItem("replayFitMap", "1");'
                     f'localStorage.setItem("rlDebugOverlay", "{overlay_flag}");'
-                    # SoftGL only: OpenFront rejects SwiftShader unless allowed
-                    # (see patches/showcase-allow-software-gl.patch).
-                    f'localStorage.setItem("rlAllowSoftwareGL", "{allow_soft}");'
+                    'localStorage.setItem("rlAllowSoftwareGL", "1");'
                     'localStorage.setItem("settings.goToPlayer", "false");'
                     'localStorage.setItem("username", "AGENT");'
                 )
