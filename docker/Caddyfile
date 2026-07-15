@@ -26,6 +26,9 @@
 	handle /replay {
 		reverse_proxy 127.0.0.1:8988
 	}
+	handle /replays {
+		reverse_proxy 127.0.0.1:8988
+	}
 	handle /status {
 		reverse_proxy 127.0.0.1:8988
 	}
