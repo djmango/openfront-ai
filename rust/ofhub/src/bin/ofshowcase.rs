@@ -20,7 +20,7 @@ struct Cli {
 enum Cmd {
     /// Background worker: pull policy, oftrain --watch, render clips, write state.json.
     Daemon,
-    /// HTTP hub: /, /watch, /play, /status (featured map chosen at random).
+    /// HTTP hub: /, /watch, /play, /status (featured map = latest).
     Hub {
         #[arg(long, env = "HUB_PORT", default_value_t = 8988)]
         port: u16,

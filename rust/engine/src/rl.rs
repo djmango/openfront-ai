@@ -18,16 +18,24 @@ use crate::game::{Game, GameConfig, PlayerInfo, PlayerType};
 use crate::map::TileRef;
 use crate::obs::{borders_neutral_land, build_obs_head, can_extend_alliance};
 use crate::prng::PseudoRandom;
-use crate::record::StampedIntent;
+use crate::record::{StampedIntent, Turn};
 use crate::session::{seed_to_game_id, terrain_bytes, AGENT_CLIENT_ID};
 use crate::spatial::can_build_transport_ship;
 use crate::util::simple_hash;
 use serde_json::{json, Value};
+use std::fs;
 use std::path::Path;
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct RlSession {
     pub game: Game,
     game_id: String,
+    game_config: Value,
+    start_time_ms: u64,
+    turns: Vec<Turn>,
+    last_winner: Value,
+    git_commit: String,
 }
 
 impl RlSession {
@@ -151,7 +159,17 @@ impl RlSession {
         // spawns via step().
         game.execute_next_tick();
 
-        let session = Self { game, game_id };
+        let start_time_ms = now_ms();
+        let git_commit = openfront_git_commit(repo_root);
+        let session = Self {
+            game,
+            game_id,
+            game_config: wire_json,
+            start_time_ms,
+            turns: Vec::new(),
+            last_winner: Value::Null,
+            git_commit,
+        };
         let head = build_obs_head(&session.game, AGENT_CLIENT_ID, Value::Null);
         let terrain_raw = terrain_bytes(&session.game);
         Ok((session, head, terrain_raw))
@@ -185,6 +203,12 @@ impl RlSession {
                     serde_json::from_value(obj).ok()
                 })
                 .collect();
+            // Mirror bridge/session.ts: record turnNumber = ticks() before execs.
+            self.turns.push(Turn {
+                turn_number: self.game.ticks(),
+                intents: stamped.clone(),
+                hash: None,
+            });
             for exec in turn_to_executions(&self.game, &self.game_id, &stamped) {
                 self.game.add_execution(exec);
             }
@@ -197,6 +221,7 @@ impl RlSession {
             let updates = self.game.execute_next_tick();
             if updates.win.is_some() {
                 winner = crate::obs::winner_value(&self.game);
+                self.last_winner = winner.clone();
                 break;
             }
         }
@@ -206,6 +231,57 @@ impl RlSession {
             obj.insert("wasted".into(), Value::from(wasted));
         }
         head
+    }
+
+    /// Persist a Node-compatible GameRecord v0.0.2 JSON (sparse turns).
+    pub fn save_record(&self, path: &Path) -> Result<Value, String> {
+        let end = now_ms();
+        let start = self.start_time_ms;
+        let duration = ((end.saturating_sub(start)) / 1000) as u64;
+        let winner = if self.last_winner.is_null() {
+            Value::Null
+        } else {
+            self.last_winner.clone()
+        };
+        let record = json!({
+            "info": {
+                "gameID": self.game_id,
+                "lobbyCreatedAt": start,
+                "config": self.game_config,
+                "players": [{
+                    "clientID": AGENT_CLIENT_ID,
+                    "username": "Agent",
+                    "clanTag": null,
+                    "persistentID": null,
+                    "stats": {},
+                }],
+                "start": start,
+                "end": end,
+                "duration": duration,
+                "num_turns": self.game.ticks(),
+                "winner": winner,
+                "lobbyFillTime": 0,
+            },
+            "version": "v0.0.2",
+            "gitCommit": self.git_commit,
+            "subdomain": "rl",
+            "domain": "localhost",
+            "turns": self.turns,
+        });
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        }
+        let text = serde_json::to_string(&record).map_err(|e| format!("serialize record: {e}"))?;
+        fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))?;
+        Ok(json!({
+            "saved": path.display().to_string(),
+            "gameID": self.game_id,
+            "turns": self.turns.len(),
+        }))
+    }
+
+    pub fn game_id(&self) -> &str {
+        &self.game_id
     }
 
     /// Port of `bridge/env.ts::EnvSession.countWasted()` - intents the engine
@@ -399,4 +475,29 @@ impl RlSession {
                 && self.game.has_water_component(u.tile as TileRef, comp)
         })
     }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Prefer the openfront submodule SHA so archives replay on the matching engine.
+fn openfront_git_commit(repo_root: &Path) -> String {
+    let openfront = repo_root.join("openfront");
+    let out = Command::new("git")
+        .args(["-C", openfront.to_str().unwrap_or("."), "rev-parse", "HEAD"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+                return s;
+            }
+        }
+        _ => {}
+    }
+    "DEV".into()
 }

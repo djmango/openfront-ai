@@ -60,13 +60,29 @@ pub fn game_map_api_name(map_key: &str) -> String {
     out
 }
 
-/// Pick a random replay entry from `state["maps"]`.
+/// Pick the newest replay entry from `state["maps"]` (by `generated_at`).
 ///
-/// Falls back to a legacy top-level `game_id` entry when `maps` is empty.
+/// Falls back to the last maps entry, then a legacy top-level `game_id`.
 pub fn featured_showcase_entry(state: &Value) -> Option<Value> {
     if let Some(entries) = state.get("maps").and_then(|v| v.as_array()) {
         if !entries.is_empty() {
-            return entries.choose(&mut rand::thread_rng()).cloned();
+            let mut best: Option<&Value> = None;
+            let mut best_ts: &str = "";
+            for entry in entries {
+                let ts = entry
+                    .get("generated_at")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if best.is_none() || ts > best_ts {
+                    best = Some(entry);
+                    best_ts = ts;
+                }
+            }
+            // No timestamps: prefer the last entry (daemon appends in order).
+            if best_ts.is_empty() {
+                return entries.last().cloned();
+            }
+            return best.cloned();
         }
     }
     if state.get("game_id").is_some() {
@@ -199,23 +215,30 @@ pub fn hero_clip_urls(state: &Value) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::collections::HashSet;
 
     #[test]
-    fn featured_picks_random_map_entry() {
+    fn featured_picks_latest_map_entry() {
+        let state = json!({
+            "maps": [
+                {"game_id": "aaaaaaaa", "seed": "onion", "generated_at": "2026-01-01T00:00:00Z"},
+                {"game_id": "bbbbbbbb", "seed": "pangaea", "generated_at": "2026-07-01T12:00:00Z"},
+                {"game_id": "cccccccc", "seed": "asia", "generated_at": "2026-03-01T00:00:00Z"},
+            ]
+        });
+        let entry = featured_showcase_entry(&state).unwrap();
+        assert_eq!(entry["game_id"], "bbbbbbbb");
+    }
+
+    #[test]
+    fn featured_without_timestamps_uses_last_entry() {
         let state = json!({
             "maps": [
                 {"game_id": "aaaaaaaa", "seed": "onion"},
                 {"game_id": "bbbbbbbb", "seed": "pangaea"},
-                {"game_id": "cccccccc", "seed": "asia"},
             ]
         });
-        let mut seen = HashSet::new();
-        for _ in 0..80 {
-            let entry = featured_showcase_entry(&state).unwrap();
-            seen.insert(entry["game_id"].as_str().unwrap().to_string());
-        }
-        assert_eq!(seen.len(), 3);
+        let entry = featured_showcase_entry(&state).unwrap();
+        assert_eq!(entry["game_id"], "bbbbbbbb");
     }
 
     #[test]

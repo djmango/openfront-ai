@@ -5,8 +5,9 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use ofhub::hf;
-use ofhub::paths::POLICY_REPO;
+use ofhub::paths::{POLICY_REPO, REPLAYS_REPO, data_dir, replay_spool_dir, repo_root};
 use ofhub::sync::{self, SyncConfig};
+use std::process::Command;
 
 #[derive(Parser, Debug)]
 #[command(name = "ofhf", about = "Hugging Face sync for openfront-rl checkpoints")]
@@ -63,6 +64,28 @@ enum Cmd {
     PullAe {
         #[arg(long, default_value = "weights/ae")]
         ae_dir: PathBuf,
+    },
+    /// Pack local GameRecord spool into parquet shards on openfront-replays.
+    Replays {
+        #[arg(long, default_value_os_t = replay_spool_dir())]
+        spool: PathBuf,
+        #[arg(long, default_value_t = 1000)]
+        shard_size: usize,
+        #[arg(long, env = "HF_REPLAYS_REPO", default_value = REPLAYS_REPO)]
+        repo: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long, default_value_t = 1)]
+        min_files: usize,
+    },
+    /// Download latest openfront-replays parquet rows into records/ for archive Watch.
+    ReplaysPull {
+        #[arg(long, env = "HF_REPLAYS_REPO", default_value = REPLAYS_REPO)]
+        repo: String,
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
     },
 }
 
@@ -133,6 +156,60 @@ async fn main() -> Result<()> {
         }
         Cmd::PullAe { ae_dir } => {
             sync::pull_ae_encoders(&ae_dir).await?;
+        }
+        Cmd::Replays {
+            spool,
+            shard_size,
+            repo,
+            dry_run,
+            min_files,
+        } => {
+            let script = repo_root().join("scripts/hf_replay_upload.py");
+            let mut cmd = Command::new("uv");
+            cmd.args([
+                "run",
+                "--with",
+                "pyarrow",
+                "python",
+                script.to_str().unwrap_or("scripts/hf_replay_upload.py"),
+                "--spool",
+                spool.to_str().unwrap_or("/data/replay-spool"),
+                "--shard-size",
+                &shard_size.to_string(),
+                "--repo",
+                &repo,
+                "--min-files",
+                &min_files.to_string(),
+            ]);
+            if dry_run {
+                cmd.arg("--dry-run");
+            }
+            let status = cmd.status()?;
+            if !status.success() {
+                anyhow::bail!("hf_replay_upload.py failed with {status}");
+            }
+        }
+        Cmd::ReplaysPull { repo, out, limit } => {
+            let script = repo_root().join("scripts/hf_replay_pull.py");
+            let out_dir = out.unwrap_or_else(|| data_dir().join("records").join("hf-replays"));
+            let mut cmd = Command::new("uv");
+            cmd.args([
+                "run",
+                "--with",
+                "pyarrow",
+                "python",
+                script.to_str().unwrap_or("scripts/hf_replay_pull.py"),
+                "--repo",
+                &repo,
+                "--out",
+                out_dir.to_str().unwrap_or("/data/records/hf-replays"),
+                "--limit",
+                &limit.to_string(),
+            ]);
+            let status = cmd.status()?;
+            if !status.success() {
+                anyhow::bail!("hf_replay_pull.py failed with {status}");
+            }
         }
     }
     Ok(())

@@ -440,7 +440,7 @@ async fn status(State(inner): State<Arc<HubInner>>) -> impl IntoResponse {
                 .or_else(|| replay.get("map").cloned()),
             "game_id": featured.as_ref().and_then(|e| e.get("game_id")).cloned()
                 .or_else(|| replay.get("game_id").cloned()),
-            "selection": "random",
+            "selection": "latest",
         },
         "replay": replay,
         "hub": load_hub(),

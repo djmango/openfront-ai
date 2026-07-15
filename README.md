@@ -195,6 +195,8 @@ all-zeros on 99.9%-empty grids).
   (~375k frames, 250 games, 10 maps)
 - Human games: [djmango/openfront-human-games](https://huggingface.co/datasets/djmango/openfront-human-games)
   (285 hash-verified replays + raw intent records)
+- RL GameRecords: [djmango/openfront-replays](https://huggingface.co/datasets/djmango/openfront-replays)
+  (sparse-turn parquet shards from training/watch; `ofhf replays` / `ofhf replays-pull`)
 - Encoders: [djmango/openfront-tile-autoencoder](https://huggingface.co/djmango/openfront-tile-autoencoder)
   (`ae_v31_d8c32.pt`, `ae_v31_d8.pt`, `ae_v3.pt`)
 - Current Rust RL runs on HF use `latest.safetensors`,

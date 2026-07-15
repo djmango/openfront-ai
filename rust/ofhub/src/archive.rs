@@ -217,6 +217,45 @@ async fn exists() -> impl IntoResponse {
     cors_json(StatusCode::OK, json!({"exists": false}))
 }
 
+async fn games(State(st): State<ArchiveState>) -> impl IntoResponse {
+    let mut idx = st.index.lock().unwrap();
+    *idx = build_index(&st.records_dir);
+    let mut rows: Vec<Value> = idx
+        .iter()
+        .map(|(gid, path)| {
+            let mtime = fs::metadata(path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            json!({
+                "game_id": gid,
+                "path": path.display().to_string(),
+                "mtime": mtime,
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        b.get("mtime")
+            .and_then(|v| v.as_u64())
+            .cmp(&a.get("mtime").and_then(|v| v.as_u64()))
+    });
+    let featured = st
+        .state_file
+        .as_ref()
+        .and_then(|p| load_json(p).ok())
+        .and_then(|s| featured_game_id(&s));
+    cors_json(
+        StatusCode::OK,
+        json!({
+            "count": rows.len(),
+            "featured": featured,
+            "games": rows,
+        }),
+    )
+}
+
 pub async fn run_archive(
     records: PathBuf,
     port: u16,
@@ -241,6 +280,7 @@ pub async fn run_archive(
     let app = Router::new()
         .route("/status", get(status))
         .route("/replay", get(replay_redirect))
+        .route("/games", get(games))
         .route("/game/{id}", get(game))
         .route("/debug/{id}", get(debug))
         .route("/clips/{name}", get(clip))

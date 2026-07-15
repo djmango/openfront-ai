@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 pub const POLICY_REPO: &str = "djmango/openfront-rl";
 pub const AE_REPO: &str = "djmango/openfront-tile-autoencoder";
+pub const REPLAYS_REPO: &str = "djmango/openfront-replays";
 
 pub fn repo_root() -> PathBuf {
     if let Ok(root) = env::var("OFHUB_REPO_ROOT") {
@@ -32,6 +33,10 @@ pub fn clips_dir() -> PathBuf {
 
 pub fn records_dir() -> PathBuf {
     data_dir().join("records")
+}
+
+pub fn replay_spool_dir() -> PathBuf {
+    data_dir().join("replay-spool")
 }
 
 pub fn revision_path() -> PathBuf {

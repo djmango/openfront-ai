@@ -54,7 +54,7 @@ pub struct Turn {
     // the native side's `hash as i64`: parsing the JSON literal straight into
     // i64 instead reads the printed digits as an exact integer and can be off
     // by a few ULPs at large magnitudes, producing spurious tiny hash diffs.
-    #[serde(default, deserialize_with = "deserialize_hash_via_f64")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_hash_via_f64")]
     pub hash: Option<i64>,
 }
 

@@ -10,7 +10,8 @@ pub mod sync;
 pub mod util;
 
 pub use paths::{
-    clips_dir, data_dir, policy_dir, records_dir, repo_root, revision_path, AE_REPO, POLICY_REPO,
+    clips_dir, data_dir, policy_dir, records_dir, replay_spool_dir, repo_root, revision_path,
+    AE_REPO, POLICY_REPO, REPLAYS_REPO,
 };
 pub use util::{
     featured_game_id, featured_showcase_entry, game_map_api_name, load_json, map_seed, policy_meta,

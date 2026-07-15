@@ -142,9 +142,11 @@ fn run_watch(
 fn render_client_clip(record: &Path, out: &Path) -> Result<()> {
     let py = std::env::var("PYTHON").unwrap_or_else(|_| "python3".into());
     let max_sec = env_or("CLIP_MAX_SEC", "90");
+    // Prefer 1080p on GPU hosts; SoftGL path in the renderer downscales itself.
     let width = env_or("CLIP_WIDTH", "1920");
     let height = env_or("CLIP_HEIGHT", "1080");
     let crf = env_or("CLIP_CRF", "18");
+    let dpr = env_or("CLIP_DEVICE_SCALE_FACTOR", "1");
     if let Some(parent) = out.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -163,6 +165,8 @@ fn render_client_clip(record: &Path, out: &Path) -> Result<()> {
             &width,
             "--height",
             &height,
+            "--device-scale-factor",
+            &dpr,
             "--crf",
             &crf,
         ])
@@ -251,6 +255,7 @@ fn generate_clip(
         "map": map,
         "record": record.display().to_string(),
         "clip": clip.display().to_string(),
+        "generated_at": utc_now(),
     });
     if clip.is_file() {
         info["url"] = json!(format!("/archive/clips/{}.webm", seed));
@@ -270,7 +275,7 @@ fn write_showcase_state(
         "run_name": run_name,
         "stage": stage,
         "watch_stage": watch_stage,
-        // Legacy field: featured map is now chosen at random, not hourly.
+        // Legacy field: featured map is the newest entry, not hourly rotation.
         "rotate_hours": 1,
         "generated_at": utc_now(),
     });
@@ -386,6 +391,16 @@ async fn generate_showcase(
         state.get("game_id").and_then(|v| v.as_str()).unwrap_or("?"),
         state.get("policy_update")
     ));
+    // Best-effort: flush any spooled GameRecords to HF parquet.
+    let upload = Command::new(repo_root().join("rust/target/release/ofhf"))
+        .args(["replays", "--min-files", "1"])
+        .current_dir(repo_root())
+        .status();
+    match upload {
+        Ok(s) if s.success() => log("replay spool flushed to Hugging Face"),
+        Ok(s) => log(&format!("replay spool flush skipped ({s})")),
+        Err(e) => log(&format!("replay spool flush skipped ({e})")),
+    }
     Ok(state)
 }
 

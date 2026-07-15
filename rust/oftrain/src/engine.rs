@@ -327,9 +327,9 @@ pub trait GameEngine: Send {
 
     fn close(&mut self);
 
-    /// Persist a client GameRecord JSON (Node bridge only).
+    /// Persist a client GameRecord JSON (Node bridge + native engine).
     fn save_record(&mut self, _path: &str) -> Result<serde_json::Value> {
-        anyhow::bail!("save_record is only supported on the Node engine bridge")
+        anyhow::bail!("save_record is not supported on this engine backend")
     }
 }
 
