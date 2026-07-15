@@ -8,6 +8,8 @@ export DATA_DIR
 export PYTHONPATH=/app
 export PATH="/app/.venv/bin:/app/openfront/node_modules/.bin:/app/rust/target/release:${PATH}"
 export OFTRAIN_BIN="${OFTRAIN_BIN:-/app/rust/target/release/oftrain}"
+# Showcase clip Chromium: SoftGL is reliable in this image; GPU WebGL still falls back.
+export OF_FORCE_SWIFTSHADER="${OF_FORCE_SWIFTSHADER:-1}"
 PY="/app/.venv/bin/python"
 
 mkdir -p "${DATA_DIR}/records" "${DATA_DIR}/policy" "${DATA_DIR}/clips" "${DATA_DIR}/replay-spool"
