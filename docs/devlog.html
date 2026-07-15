@@ -28,6 +28,7 @@
 
 <nav class="toc">
   <a href="#now">Now</a> ·
+  <a href="#v9-killed">Jul 15 V9 killed</a> ·
   <a href="#v9-sparse-win">Jul 14 V9 sparse-win</a> ·
   <a href="#v9-alphastar-oa5">AlphaStar / OA5</a> ·
   <a href="#v9-design">V9 design</a> ·
@@ -70,24 +71,20 @@
 </nav>
 
 <div class="now" id="now">
-  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 14th, 2026</h2>
-  <p><b>V9 sparse-win parallel experiment launched</b>
-  (<a href="#v9-sparse-win">writeup</a>,
-  <a href="https://github.com/djmango/openfront-ai/pull/35">#35</a>).
-  Fresh <code>ppo_v9</code> on RunPod <code>wq7acsw606cc9q</code>
-  (3×A40 secure, $1.32/hr — 4×A40 was out of stock). Branch
-  <code>sully/v9-sparse-win</code> @ <code>2532544</code> via
-  <code>SKIP_SYNC=1</code> (not yet on master). Terminal <code>+1/−1</code> only,
-  25 micro-stages, gates 0.90–0.975. Runs beside live
-  <code>ppo-v8-4xA40-fresh</code> / <code>ppo_v86</code>.</p>
+  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 15th, 2026</h2>
+  <p><b>V9 sparse-win killed</b>
+  (<a href="#v9-killed">postmortem</a>).
+  Cleared bots-only stages 0–1, then died on stage 2 (first nations).
+  Pod <code>wq7acsw606cc9q</code> terminated. Stick with dense V8.x /
+  <code>ppo_v86</code>.</p>
   <p><b>Persistent + autoscale still live on <code>ppo_v86</code></b>
-  (<a href="#persistent-autoscale-restart">writeup</a>). Merged
-  <a href="https://github.com/djmango/openfront-ai/pull/30">#30</a>–<a href="https://github.com/djmango/openfront-ai/pull/33">#33</a>.
+  (<a href="#persistent-autoscale-restart">writeup</a>).
   Do <b>not</b> shorten episodes for GPU util; grow env count via restart instead.</p>
-  <p class="d" style="margin:.75rem 0 0">Earlier today: V8.6 attack-fair
-  (<a href="#v86-attack-fair">writeup</a>), V8.5 win-urgency
-  (<a href="#v85-win-urgency">writeup</a>), curriculum parity 48/48
-  (<a href="#parity-v4-closeout">writeup</a>).</p>
+  <p class="d" style="margin:.75rem 0 0">Jul 14: V9 launch
+  (<a href="#v9-sparse-win">writeup</a>), V8.6 attack-fair
+  (<a href="#v86-attack-fair">writeup</a>), bot-heavy curricula
+  (<a href="https://github.com/djmango/openfront-ai/pull/38">#38</a> /
+  <a href="https://github.com/djmango/openfront-ai/pull/40">#40</a>.</p>
 </div>
 
 <h2 class="date" id="v9-sparse-win">Jul 14, 2026 - V9: sparse win/loss as a parallel to V8.x</h2>
@@ -233,6 +230,63 @@ on a second pod.</p>
     200/30); never <code>Nations::Default</code>. Stages 0–1 bots-only, then
     nations layered on. Fresh restart from stage 0 on the same pod after rebuild.</li>
 </ul>
+
+<h2 class="date" id="v9-killed">Jul 15, 2026 - V9 sparse-win killed (postmortem)</h2>
+<p class="session">Overnight run on 3×A40. Bots-only stages worked; the first
+nation step killed the policy and it never recovered. Experiment stopped;
+pod terminated.</p>
+
+<h3 id="v9-results">What happened</h3>
+<table>
+  <tr><th></th><th>Value</th></tr>
+  <tr><td>Final update / steps</td><td>~1531 / ~5.9M env steps</td></tr>
+  <tr><td>Final stage</td><td><b>2</b> (Onion, 30 Easy bots + Exact(2) nations)</td></tr>
+  <tr><td>Lifetime</td><td>~1570 wins / ~9600 eps (~16% overall)</td></tr>
+  <tr><td>Peak window win rate</td><td><b>0.975</b> at update ~498 (stage 0/1 bots-only)</td></tr>
+  <tr><td>Window at kill</td><td><b>0.0</b> (0/40), death rate ~80%+</td></tr>
+  <tr><td>Pod</td><td><code>wq7acsw606cc9q</code> removed Jul 15</td></tr>
+</table>
+<p>Timeline:</p>
+<ul>
+  <li><b>~u0–25:</b> all losses; random policy dying to 15 Easy bots.</li>
+  <li><b>~u26:</b> first <code>+1</code> win under sparse terminals.</li>
+  <li><b>~u300–700:</b> real learning on bots-only — land share up to ~0.75,
+    window WR often 0.4–0.8, cleared stage 0 (<code>win_at=0.975</code>) and
+    stage 1 (<code>win_at=0.95</code>).</li>
+  <li><b>~u750+:</b> stage 2 introduces 2 nations beside 30 bots. Win rate
+    collapses to ~0; deaths 67–89%; max land share falls back to ~0.1–0.2.
+    ~750 further updates with no recovery.</li>
+</ul>
+
+<h3 id="v9-lessons">What we learned</h3>
+<ul>
+  <li><b>Sparse + bots-only can work.</b> The policy invented enough expand/fight
+    behavior to lock near-perfect win rates with only terminal <code>+1/−1</code>
+    and no dense shaping — matching the OA5 “win-only is possible but slow”
+    note, on a trivial enough stage.</li>
+  <li><b>Nations are a cliff under sparse credit.</b> The jump from
+    <code>Exact(0)</code> → <code>Exact(2)</code> (still 30 bots) was enough to
+    erase competence. High gates got us <i>onto</i> stage 2; they did not keep
+    us alive there. Splitting further (1 nation, then 2) might soften it, but
+    the overnight evidence is that sparse alone does not bridge “bots food” →
+    “competent nation opponents” at our sample budget.</li>
+  <li><b>Always bots ≫ nations</b> (and never <code>Nations::Default</code>) is
+    the right lobby shape either way — kept for V8.3 via
+    <a href="https://github.com/djmango/openfront-ai/pull/38">#38</a> and V9 via
+    <a href="https://github.com/djmango/openfront-ai/pull/40">#40</a>. The first
+    V9 sketch (nation-only early stages) was simply wrong.</li>
+  <li><b>Do not start sparse self-play cold.</b> Self-play as 1v1 + bots is a
+    good <i>later</i> mix on dense V8 once a checkpoint can farm bots; it is a
+    bad bootstrap for sparse V9 (two weak peers, non-stationary, no easy
+    <code>+1</code>s). Prefer scripted bots/nations until the policy is competent.</li>
+  <li><b>Prefer V8 dense path for now.</b> V9’s hypothesis (“curriculum instead
+    of reward engineering”) failed at the first real opponent step. Resume
+    effort on <code>ppo_v86</code> / dense shaping; if sparse is revisited,
+    want BC or strategy-target bootstrap before nation stages — not another
+    boat/tempo knob stack on V9.</li>
+</ul>
+<p>Code stays on master (schedule, <code>--v9-sparse-win</code>,
+<code>pod_train_v9.sh</code>). Run is dead; do not relaunch without a new plan.</p>
 
 <h2 class="date" id="persistent-autoscale-restart">Jul 14, 2026 - persistent actors + GPU-util autoscale via restart</h2>
 <p class="session">Clarified game-time vs wall-clock, then fixed the inverse
@@ -743,17 +797,15 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <code>ae_v3.pt</code> until the v3.1 winner is wired into <code>rl/obs.py</code>.</p>
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
-  <tr><td><code>ppo_v9</code></td><td><b>live</b> Jul 14 (parallel sparse-win)</td>
-    <td>Fresh ladder on schedule <code>v9</code> / profile <code>v9-sparse-win-v1</code>:
-    terminal <code>+1/−1</code> only, 25 micro-stages, gates 0.90–0.975. No V8 migrate.
-    Pod <code>wq7acsw606cc9q</code> 3×A40 secure (<code>NUM_GPUS=3</code>; 4× stock
-    unavailable). Code from <code>sully/v9-sparse-win</code> with
-    <code>SKIP_SYNC=1</code>. SSH
-    <code>root@69.30.85.4 -p 22193</code>; logs
-    <code>/root/bootstrap.log</code>, <code>/tmp/train_ppo_v9.log</code>. See
-    <a href="#v9-sparse-win">V9 writeup</a> and
-    <a href="https://github.com/djmango/openfront-ai/pull/35">#35</a>. Runs beside
-    <code>ppo_v86</code>, not instead of it.</td></tr>
+  <tr><td><code>ppo_v9</code></td><td><b>killed</b> Jul 15 (sparse-win parallel)</td>
+    <td>Terminal <code>+1/−1</code> only. Cleared bots-only stages 0–1 (peak window
+    WR 0.975 @ u~498), then collapsed on stage 2 (30 bots + 2 nations) and never
+    recovered (~750 updates at ~0% WR). Killed at update ~1531 / ~5.9M steps;
+    pod <code>wq7acsw606cc9q</code> terminated. See
+    <a href="#v9-killed">postmortem</a>,
+    <a href="#v9-sparse-win">design</a>,
+    <a href="https://github.com/djmango/openfront-ai/pull/35">#35</a> /
+    <a href="https://github.com/djmango/openfront-ai/pull/40">#40</a>.</td></tr>
   <tr><td><code>ppo_v7</code></td><td><b>killed</b> Jul 9 (openfront-v7, 4x H200)</td>
     <td>From scratch on the merged <a href="#v7-obs">v7 obs</a>: full-state expansion +
     <a href="#v7-fovea">foveated two-stream</a> (fine /8 over own territory + border band,
