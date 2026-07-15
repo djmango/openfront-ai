@@ -86,7 +86,12 @@ if [ "$V9_MODE" = "1" ] || [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "
 else
   AUTO_SCALE_ENVS="${AUTO_SCALE_ENVS:-0}"
 fi
-MAX_ENVS="${MAX_ENVS:-20}"
+# Cap below the A40 OOM cliff seen at 20 envs/shard on bot-heavy late stages.
+# Autoscale may grow up to this; VRAM shrink (oftrain) steps back toward MIN_ENVS.
+MAX_ENVS="${MAX_ENVS:-14}"
+# Keep a floor below the launch NUM_ENVS so a util-driven grow→restart cannot
+# ratchet min==max==NUM_ENVS and freeze autoscale (and prevent VRAM shrink).
+MIN_ENVS="${MIN_ENVS:-8}"
 TARGET_GPU_UTIL="${TARGET_GPU_UTIL:-0.85}"
 AUTOSCALE_CHECK_EVERY="${AUTOSCALE_CHECK_EVERY:-5}"
 AUTOSCALE_STEP="${AUTOSCALE_STEP:-2}"
@@ -161,7 +166,7 @@ if [ -n "$STAGE_ENV_TARGETS" ]; then
   V81_ARGS="$V81_ARGS --stage-env-targets $STAGE_ENV_TARGETS"
 fi
 if [ "$AUTO_SCALE_ENVS" = "1" ]; then
-  EXTRA_ARGS="$EXTRA_ARGS --auto-scale-envs --max-envs $MAX_ENVS --target-gpu-util $TARGET_GPU_UTIL --autoscale-check-every $AUTOSCALE_CHECK_EVERY --autoscale-step $AUTOSCALE_STEP"
+  EXTRA_ARGS="$EXTRA_ARGS --auto-scale-envs --min-envs $MIN_ENVS --max-envs $MAX_ENVS --target-gpu-util $TARGET_GPU_UTIL --autoscale-check-every $AUTOSCALE_CHECK_EVERY --autoscale-step $AUTOSCALE_STEP"
 fi
 REPO_DIR="${REPO_DIR:-/root/openfront-ai}"
 CKPT_DIR="$REPO_DIR/rust/checkpoints/$RUN_NAME"
