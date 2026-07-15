@@ -1256,20 +1256,19 @@ fn minimap_inner_path(
         mini_path_out.push(goal_water);
         true
     } else if use_hpa {
+        // Match TS `buildWaterChain` with graph.nodeCount >= 100: the chain is
+        // HPA → ComponentCheck → Smoothing → ShoreCoercing → MiniMap.
+        // HPA already tries `tryShortPathMultiSource` internally; if it returns
+        // null there is no unbounded mini-map A* fallback. Native previously
+        // fell through to `astar_water_path_into`, inventing paths TS rejects
+        // (e.g. greatlakes080 Parry Sound boat @2600 → dst 831635).
         let hpa = hpa.as_mut().unwrap();
         match hpa.find_path(mini_map, &water_starts, goal_water) {
             Some(p) => {
                 *mini_path_out = p;
                 true
             }
-            None => try_short_water_path_multi(mini_map, &water_starts, goal_water, mini_path_out)
-                || astar_water_path_into(
-                    mini_map,
-                    mini_astar,
-                    &water_starts,
-                    goal_water,
-                    mini_path_out,
-                ),
+            None => false,
         }
     } else if !astar_water_path_into(mini_map, mini_astar, &water_starts, goal_water, mini_path_out) {
         false
