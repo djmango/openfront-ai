@@ -370,6 +370,11 @@ def render_record(
                     "? window.__replayTick : 0)"
                 )
                 last_tick = start_tick
+                target_ticks = (
+                    int(float(os.environ.get("CLIP_GAME_TICKS_PER_SEC", "20")) * max_duration)
+                    if max_duration is not None
+                    else None
+                )
                 print("replay running...")
 
                 end_tick = episode.get("end_tick")
@@ -407,6 +412,17 @@ def render_record(
                     )
                     if tick is not None:
                         last_tick = tick
+                    if (
+                        target_ticks is not None
+                        and tick is not None
+                        and tick - start_tick >= target_ticks
+                    ):
+                        gameplay_duration = time.time() - gameplay_t0
+                        print(
+                            f"clip target reached at tick {tick} "
+                            f"({target_ticks} gameplay ticks)"
+                        )
+                        break
                     if (
                         stop_tick is not None
                         and tick is not None
