@@ -80,6 +80,40 @@ const LANDING_HTML: &str = r#"<!doctype html>
       font-size: 1rem;
       background: #111;
     }
+    .replays {
+      margin: 0 auto 2rem;
+      text-align: left;
+    }
+    .replays h2 {
+      font-size: 1.35rem;
+      margin-bottom: .75rem;
+      text-align: center;
+    }
+    .replay-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: .75rem;
+    }
+    .replay-card {
+      display: block;
+      padding: .8rem;
+      color: #111;
+      border: 2px solid #111;
+      text-decoration: none;
+      background: #fff;
+    }
+    .replay-card:hover, .replay-card:focus-visible {
+      color: #fff;
+      background: #111;
+    }
+    .replay-card strong, .replay-card span { display: block; }
+    .replay-card span { color: #666; font-size: .82rem; }
+    .replay-card:hover span, .replay-card:focus-visible span { color: #ccc; }
+    .recent {
+      margin-top: 1rem;
+      font-size: .9rem;
+      text-align: center;
+    }
     .actions {
       display: flex;
       flex-wrap: wrap;
@@ -110,6 +144,11 @@ const LANDING_HTML: &str = r#"<!doctype html>
       <a href="/watch">%%WATCH_LABEL%%</a>
       <a href="/play">Play vs Agent</a>
     </div>
+    <section class="replays">
+      <h2>All showcase replays</h2>
+      <div class="replay-grid">%%REPLAY_CARDS%%</div>
+      <p class="recent"><a href="/replays">Browse every saved replay</a></p>
+    </section>
     <p class="meta">policy: %%RUN_NAME%%</p>
     <p class="links">
       <a href="https://skg.gg" target="_blank" rel="noopener">skg.gg</a>
@@ -119,6 +158,54 @@ const LANDING_HTML: &str = r#"<!doctype html>
       <a href="https://github.com/djmango/openfront-ai" target="_blank" rel="noopener">GitHub</a>
     </p>
   </main>
+</body>
+</html>
+"#;
+
+const REPLAYS_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenFront Saved Replays</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { max-width: 980px; margin: 0 auto; padding: 2rem 1rem 4rem; font: 17px/1.45 system-ui,sans-serif; color: #111; }
+    h1 { margin-bottom: .25rem; }
+    .lead { margin-top: 0; color: #555; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(260px,1fr)); gap: .75rem; margin-top: 1.5rem; }
+    .card { display: block; padding: 1rem; border: 2px solid #111; color: #111; text-decoration: none; }
+    .card:hover,.card:focus-visible { color: #fff; background:#111; }
+    .meta { display:block; color:#666; font-size:.85rem; overflow-wrap:anywhere; }
+    .card:hover .meta,.card:focus-visible .meta { color:#ccc; }
+  </style>
+</head>
+<body>
+  <p><a href="/">← Showcase</a></p>
+  <h1>Saved replays</h1>
+  <p class="lead">Every locally archived policy run. Newest first.</p>
+  <div id="games" class="grid"><p>Loading…</p></div>
+  <script>
+    fetch("/archive/games").then(r => r.json()).then(data => {
+      const games = document.getElementById("games");
+      games.textContent = "";
+      for (const game of data.games || []) {
+        const a = document.createElement("a");
+        a.className = "card";
+        a.href = "/game/" + encodeURIComponent(game.game_id) + "?embed=1";
+        const title = document.createElement("strong");
+        title.textContent = game.map || game.run_name || game.game_id;
+        const meta = document.createElement("span");
+        meta.className = "meta";
+        meta.textContent = [game.run_name, game.num_turns ? game.num_turns + " ticks" : "", game.game_id].filter(Boolean).join(" · ");
+        a.append(title, meta);
+        games.append(a);
+      }
+      if (!games.children.length) games.textContent = "No saved replays yet.";
+    }).catch(() => {
+      document.getElementById("games").textContent = "Could not load saved replays.";
+    });
+  </script>
 </body>
 </html>
 "#;
@@ -219,9 +306,45 @@ fn watch_target_with_featured(replay: &Value, featured: Option<&Value>) -> (Stri
         .and_then(|v| v.as_str())
         .or_else(|| replay.get("game_id").and_then(|v| v.as_str()));
     if let Some(gid) = gid {
-        return (format!("/game/{gid}"), "replay".into());
+        return (format!("/game/{gid}?embed=1"), "replay".into());
     }
     (String::new(), "none".into())
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn replay_cards(replay: &Value) -> String {
+    let Some(entries) = replay.get("maps").and_then(Value::as_array) else {
+        return r#"<span class="placeholder">Generating replays…</span>"#.into();
+    };
+    if entries.is_empty() {
+        return r#"<span class="placeholder">Generating replays…</span>"#.into();
+    }
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let gid = entry.get("game_id")?.as_str()?;
+            let map = entry.get("map").and_then(Value::as_str).unwrap_or("Replay");
+            let update = replay
+                .get("policy_update")
+                .and_then(Value::as_i64)
+                .map(|u| format!("policy update {u}"))
+                .unwrap_or_else(|| "interactive replay".into());
+            Some(format!(
+                r#"<a class="replay-card" href="/game/{}?embed=1"><strong>{}</strong><span>{}</span></a>"#,
+                html_escape(gid),
+                html_escape(map),
+                html_escape(&update),
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 fn preview_markup(featured: Option<&Value>, replay: &Value) -> String {
@@ -258,7 +381,7 @@ fn preview_markup(featured: Option<&Value>, replay: &Value) -> String {
             format!("Replay preview ({map_label})")
         };
         format!(
-            r#"<video autoplay muted loop playsinline preload="auto" src="{url}" title="{title}"></video>"#
+            r#"<video id="hero-video" autoplay muted loop playsinline controls preload="metadata" src="{url}" title="{title}"></video>"#
         )
     } else {
         let msg = replay
@@ -302,6 +425,7 @@ fn render_landing(replay: &Value, run_name: &str) -> String {
         )
         .replace("%%PREVIEW%%", &preview_markup(featured.as_ref(), replay))
         .replace("%%WATCH_LABEL%%", &watch_label)
+        .replace("%%REPLAY_CARDS%%", &replay_cards(replay))
 }
 
 fn launch_webbot(inner: &HubInner, game_id: &str, worker_path: &str) -> Result<Child> {
@@ -400,6 +524,10 @@ async fn create_play_lobby(inner: &HubInner, config: &Value) -> Result<Value> {
 async fn landing(State(inner): State<Arc<HubInner>>) -> impl IntoResponse {
     let replay = load_replay();
     Html(render_landing(&replay, &inner.run_name))
+}
+
+async fn replays() -> impl IntoResponse {
+    Html(REPLAYS_HTML)
 }
 
 async fn watch() -> Response {
@@ -630,6 +758,7 @@ pub async fn run_hub(port: u16) -> Result<()> {
 
     let app = Router::new()
         .route("/", get(landing))
+        .route("/replays", get(replays))
         .route("/watch", get(watch))
         .route("/replay", get(watch))
         .route("/status", get(status))
