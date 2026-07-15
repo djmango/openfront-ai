@@ -99,6 +99,9 @@ ENV SHOWCASE_WATCH_STAGE=4
 ENV SEED=showcase0
 ENV CLIP_MAX_SEC=90
 ENV CLIP_DEVICE_SCALE_FACTOR=1
+# Chromium in the NVIDIA CDI container still falls back to SoftGL for WebGL2;
+# force it explicitly and rely on SoftGL speedup in render_client_replay.py.
+ENV OF_FORCE_SWIFTSHADER=1
 ENV REFRESH_HOURS=1
 ENV LIVE_SHOWCASE=0
 ENV AE_CKPT=weights/ae/ae_v31_d8c32.encoder.safetensors

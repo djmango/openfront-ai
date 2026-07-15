@@ -140,7 +140,14 @@ fn run_watch(
 }
 
 fn render_client_clip(record: &Path, out: &Path) -> Result<()> {
-    let py = std::env::var("PYTHON").unwrap_or_else(|_| "python3".into());
+    let py = std::env::var("PYTHON").unwrap_or_else(|_| {
+        // Prefer the image venv so Playwright is always importable.
+        if Path::new("/app/.venv/bin/python").is_file() {
+            "/app/.venv/bin/python".into()
+        } else {
+            "python3".into()
+        }
+    });
     let max_sec = env_or("CLIP_MAX_SEC", "90");
     // Prefer 1080p on GPU hosts; SoftGL path in the renderer downscales itself.
     let width = env_or("CLIP_WIDTH", "1920");
