@@ -288,10 +288,15 @@ fn has_too_many_alliances(game: &Game, other_small_id: u16) -> bool {
         return false;
     }
 
+    // TS `hasTooManyAlliances`: `this.game.players().filter(p => p.type() !== Bot)`
+    // where `game.players()` is already alive-only via `isAlive()` (== tiles > 0).
+    // The `Player.alive` flag can remain true after a wipe (0 tiles), which inflated
+    // `total_players`, lowered the alliance-density threshold, and let nations accept
+    // alliances TS rejects (asia150 Kazakhstan→Tajikistan @4401).
     let total_players = game
         .players_in_order()
         .iter()
-        .filter(|p| p.alive && p.player_type != PlayerType::Bot)
+        .filter(|p| p.tiles_owned > 0 && p.player_type != PlayerType::Bot)
         .count();
     let other_alliances = game.alliance_count(other_small_id);
 
