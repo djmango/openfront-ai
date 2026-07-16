@@ -153,28 +153,59 @@ pub async fn ensure_policy(client: &HFClient, run_name: &str) -> Result<PathBuf>
         fs::create_dir_all(parent)?;
     }
 
-    let revision = match policy_revision(client, run_name).await {
-        Ok(r) => r,
-        Err(e) if !is_legacy_policy_run(run_name) => {
+    let cache_complete = dest.exists()
+        && state_dest
+            .as_ref()
+            .map(|p| p.exists())
+            .unwrap_or(true);
+
+    // Prefer a short Hub probe; if Hub hangs/unreachable, keep serving local weights.
+    let revision = match tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        policy_revision(client, run_name),
+    )
+    .await
+    {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) if cache_complete => {
+            eprintln!(
+                "[ofhub] warning: policy revision check failed ({e}); using local {}",
+                dest.display()
+            );
+            return Ok(dest);
+        }
+        Err(_) if cache_complete => {
+            eprintln!(
+                "[ofhub] warning: policy revision check timed out; using local {}",
+                dest.display()
+            );
+            return Ok(dest);
+        }
+        Ok(Err(e)) if !is_legacy_policy_run(run_name) => {
             eprintln!(
                 "[ofhub] warning: {run_name}/latest.safetensors unavailable ({e}); \
                  trying policy.pt fallback"
             );
             let fallback = format!("{run_name}/policy.pt");
             let dest_pt = policy_dir().join(&fallback);
+            if dest_pt.exists() {
+                return Ok(dest_pt);
+            }
             download_to(client, POLICY_REPO, &fallback, &dest_pt).await?;
-            let rev = file_revision(client, POLICY_REPO, &fallback).await?;
-            fs::write(revision_path(), &rev)?;
+            if let Ok(Ok(rev)) = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                file_revision(client, POLICY_REPO, &fallback),
+            )
+            .await
+            {
+                fs::write(revision_path(), &rev)?;
+            }
             return Ok(dest_pt);
         }
-        Err(e) => return Err(e),
+        Ok(Err(e)) => return Err(e),
+        Err(_) => bail!("policy revision check timed out and no local cache for {run_name}"),
     };
 
-    let cache_complete = dest.exists()
-        && state_dest
-            .as_ref()
-            .map(|p| p.exists())
-            .unwrap_or(true);
     if cache_complete && revision_path().exists() {
         let local = fs::read_to_string(revision_path()).unwrap_or_default();
         if local.trim() == revision {
