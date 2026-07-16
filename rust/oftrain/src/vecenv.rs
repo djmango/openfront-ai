@@ -23,7 +23,7 @@ use ofcore::curriculum::{
     land_share, normalized_strength_share, placement, placement_score, sample_episode,
     sparse_terminal_reward, stages_for_schedule, strength_delta_weight, tempo_pressure,
     terminal_reward, timeweight, v10_combat_action_bonus, v10_diplo_panic_penalty,
-    v10_survival_reward, v83_action_churn_penalty,
+    v10_survival_reward, v10_timeout_after_closeout_penalty, v83_action_churn_penalty,
 };
 use ofcore::feat::{
     self, A_ATTACK, A_BOAT, A_CANCEL_BOAT, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, ACTIONS,
@@ -1415,7 +1415,10 @@ impl EnvWorker {
             self.dominance_shaper.reset(next_potential);
         }
         let next_closeout_potential = if done { 0.0 } else { closeout_potential(share) };
-        if self.curriculum_schedule.uses_v83_closeout() && self.episode_stage >= 5 {
+        // Closeout potential is schedule-gated only (no curriculum stage gate).
+        if self.curriculum_schedule.uses_v83_closeout()
+            && self.reward_config.v83_close_coef != 0.0
+        {
             components.closeout = self.closeout_shaper.transition(
                 next_closeout_potential,
                 self.reward_config.gamma,
@@ -1517,6 +1520,11 @@ impl EnvWorker {
             if won {
                 components.terminal += self.reward_config.v85_extra_win_bonus;
             }
+            components.terminal += v10_timeout_after_closeout_penalty(
+                timed_out,
+                self.closeout_tracker.reached(),
+                self.reward_config,
+            );
             reward += components.terminal;
             self.ep_reward_components.add_assign(components);
             self.ep_reward += reward;

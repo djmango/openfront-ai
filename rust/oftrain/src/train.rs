@@ -8580,6 +8580,7 @@ mod persistent_actor_tests {
                 v10_diplo_panic_share: 0.35,
                 v10_diplo_panic_tick_frac: 0.55,
                 v10_combat_action: 0.0,
+                v10_timeout_closeout: 0.0,
             },
             lambda: 0.95,
             clip: 0.2,
