@@ -769,9 +769,9 @@ fn apply_v83_bot_heavy_density(stages: &mut [Stage]) {
 /// V10 softens the mid-ladder density cliffs that triggered stage-8 slaughter
 /// under V8.3 (especially 100/12 → 120/15), while keeping bots ≫ nations.
 pub const V10_BOT_NATION_DENSITY: [(u32, u32); 15] = [
-    (30, 5),   // 0 Onion Easy
-    (30, 5),   // 1 Onion Easy
-    (40, 5),   // 2 Onion/Pangaea Easy
+    (30, 5),   // 0 Onion Easy — light lobby
+    (40, 5),   // 1 Onion Easy — denser bots (not a win_at-only duplicate of 0)
+    (40, 5),   // 2 Onion/Pangaea Easy — same lobby, map variety
     (50, 6),   // 3 Pangaea/Caucasus Easy
     (70, 9),   // 4 three-map Easy (was 80/10)
     (50, 6),   // 5 closeout Easy
@@ -2313,6 +2313,13 @@ mod curriculum_v81_tests {
         for index in 0..5 {
             assert_eq!(v10[index].maps, v83[index].maps);
         }
+        // Stages 0 and 1 share Onion/Easy but must differ in lobby density.
+        assert_eq!(v10[0].maps, v10[1].maps);
+        assert_eq!(v10[0].difficulty, v10[1].difficulty);
+        assert!(
+            v10[1].bots > v10[0].bots,
+            "stage 1 must be a real step up from stage 0, not a duplicate"
+        );
         // V10 does not inherit V8.3's declining win_at ladder.
         assert_ne!(v10[0].win_at, v83[0].win_at);
         assert!(v83[14].win_at < V10_WIN_AT);
