@@ -80,7 +80,10 @@ fn needs_showcase(state: &Value, run_name: &str, watch_stage: i64, policy_change
                     && entry
                         .get("record")
                         .and_then(Value::as_str)
-                        .is_some_and(|p| Path::new(p).is_file())
+                        .is_some_and(|p| {
+                            let record = Path::new(p);
+                            record.is_file() && debug_sidecar_path(record).is_file()
+                        })
             })
         });
     if !artifacts_ok
@@ -90,6 +93,15 @@ fn needs_showcase(state: &Value, run_name: &str, watch_stage: i64, policy_change
         return true;
     }
     false
+}
+
+fn debug_sidecar_path(record: &Path) -> PathBuf {
+    let raw = record.to_string_lossy();
+    if let Some(stem) = raw.strip_suffix(".json") {
+        PathBuf::from(format!("{stem}.debug.json"))
+    } else {
+        record.with_extension("debug.json")
+    }
 }
 
 fn policy_artifact_tag(policy: &Path) -> String {
@@ -151,9 +163,9 @@ fn run_watch(
             &device,
             "--max-steps",
             &max_steps,
-            // Sidecar debug JSON makes CPU/GPU watch much slower.
+            // MODEL overlay reads <record>.debug.json via /archive/debug/<id>.
             "--debug",
-            "false",
+            "true",
         ])
         .current_dir(repo_root())
         .status()
@@ -249,11 +261,15 @@ fn generate_clip(
         }
     }
 
-    if !record.exists() {
+    let debug_sidecar = debug_sidecar_path(&record);
+    if !record.exists() || !debug_sidecar.exists() {
         log(&format!(
-            "clip {map_name}: oftrain --watch stage {watch_stage} -> {}",
-            record.display()
+            "clip {map_name}: oftrain --watch stage {watch_stage} -> {} (debug={})",
+            record.display(),
+            debug_sidecar.display()
         ));
+        // Same seed => same gameID, so existing clips stay valid when we only
+        // backfill a missing MODEL overlay sidecar.
         run_watch(
             policy, ae, &seed, &record, watch_stage, map_name, nations, bots, difficulty,
         )?;

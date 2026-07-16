@@ -1,5 +1,150 @@
+diff --git a/index.html b/index.html
+index f042ec74b..8d44975e5 100644
+--- a/index.html
++++ b/index.html
+@@ -7,6 +7,57 @@
+       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+     />
+     <title data-i18n="main.title">OpenFront (ALPHA)</title>
++    <script>
++      (function () {
++        try {
++          var embed = new URLSearchParams(location.search).get("embed") === "1";
++          if (embed) document.documentElement.classList.add("showcase-embed");
++          var o = location.origin;
++          if (!localStorage.getItem("apiHost"))
++            localStorage.setItem("apiHost", o + "/archive");
++          if (!localStorage.getItem("rlDebugHost"))
++            localStorage.setItem("rlDebugHost", o + "/play");
++          if (!localStorage.getItem("replayViewAs"))
++            localStorage.setItem("replayViewAs", "1");
++          if (!localStorage.getItem("replayFitMap"))
++            localStorage.setItem("replayFitMap", "1");
++          if (!localStorage.getItem("rlDebugOverlay"))
++            localStorage.setItem("rlDebugOverlay", "1");
++          window.addEventListener("DOMContentLoaded", function () {
++            if (!embed && !document.getElementById("agent-play-btn")) {
++              var a = document.createElement("a");
++              a.id = "agent-play-btn";
++              a.href = "/play";
++              a.textContent = "Play vs Agent";
++              a.style.cssText =
++                "position:fixed;right:14px;bottom:14px;z-index:10010;" +
++                "padding:10px 14px;border-radius:8px;" +
++                "background:rgba(42,90,42,.92);color:#5adc5a;" +
++                "font:600 13px system-ui,sans-serif;text-decoration:none;" +
++                "border:1px solid #5adc5a;pointer-events:auto";
++              document.body.appendChild(a);
++            }
++            if (embed) {
++              (function tryAutoplay() {
++                var toggle = document.querySelector('img[alt="replay"]');
++                if (!toggle) {
++                  setTimeout(tryAutoplay, 500);
++                  return;
++                }
++                toggle.click();
++                setTimeout(function () {
++                  var buttons = document.querySelectorAll("replay-panel button");
++                  if (buttons.length) buttons[buttons.length - 1].click();
++                }, 600);
++              })();
++            }
++          });
++        } catch (e) {}
++      })();
++    </script>
++    <style>
++      html.showcase-embed #agent-play-btn { display: none !important; }
++    </style>
+     <link rel="manifest" href="<%- manifestHref %>" />
+     <link rel="icon" type="image/svg+xml" href="<%- faviconHref %>" />
+ 
+@@ -98,49 +149,6 @@
+       async
+       defer
+     ></script>
+-
+-    <script data-cfasync="false">
+-      window.ramp = window.ramp || {};
+-      window.ramp.que = window.ramp.que || [];
+-      window.ramp.passiveMode = true;
+-    </script>
+-
+-    <script>
+-      window.googletag = window.googletag || { cmd: [] };
+-      googletag.cmd.push(function () {
+-        googletag.pubads().set("page_url", "http://openfront.io ");
+-      });
+-    </script>
+-
+-    <!-- Analytics -->
+-    <script
+-      async
+-      src="https://www.googletagmanager.com/gtag/js?id=AW-16702609763"
+-    ></script>
+-    <script>
+-      window.dataLayer = window.dataLayer || [];
+-
+-      function gtag() {
+-        dataLayer.push(arguments);
+-      }
+-
+-      gtag("js", new Date());
+-      gtag("config", "AW-16702609763");
+-    </script>
+-    <!-- Google tag (gtag.js) -->
+-    <script
+-      async
+-      src="https://www.googletagmanager.com/gtag/js?id=G-WQGQQ8RDN4"
+-    ></script>
+-    <script>
+-      window.dataLayer = window.dataLayer || [];
+-      function gtag() {
+-        dataLayer.push(arguments);
+-      }
+-      gtag("js", new Date());
+-
+-      gtag("config", "G-WQGQQ8RDN4");
+-    </script>
+   </head>
+ 
+   <body
+@@ -448,12 +456,5 @@
+       data-cf-beacon='{"token": "03d93e6fefb349c28ee69b408fa25a13"}'
+     ></script>
+     <script type="module" src="/src/client/Main.ts"></script>
+-    <footer>
+-      <script
+-        data-cfasync="false"
+-        async
+-        src="//cdn.intergient.com/1025558/75940/ramp.js"
+-      ></script>
+-    </footer>
+   </body>
+ </html>
+diff --git a/src/client/Api.ts b/src/client/Api.ts
+index 82e55f6e0..9b8927a9b 100644
+--- a/src/client/Api.ts
++++ b/src/client/Api.ts
+@@ -315,6 +315,15 @@ export async function openSubscriptionPortal(): Promise<string | false> {
+ }
+ 
+ export function getApiBase() {
++  try {
++    const override = localStorage.getItem("apiHost");
++    if (override) {
++      return override.replace(/\/$/, "");
++    }
++  } catch {
++    // localStorage unavailable
++  }
++
+   const domainname = getAudience();
+ 
+   if (domainname === "localhost") {
 diff --git a/src/client/ClientGameRunner.ts b/src/client/ClientGameRunner.ts
-index 474ddc811..41d3087d9 100644
+index 474ddc811..1ec2ab8db 100644
 --- a/src/client/ClientGameRunner.ts
 +++ b/src/client/ClientGameRunner.ts
 @@ -1,4 +1,5 @@
@@ -8,10 +153,12 @@ index 474ddc811..41d3087d9 100644
  import { translateText } from "../client/Utils";
  import { EventBus } from "../core/EventBus";
  import {
-@@ -829,6 +830,35 @@ export class ClientGameRunner {
+@@ -829,8 +830,37 @@ export class ClientGameRunner {
          this.eventBus.emit(new SendHashEvent(hu.tick, hu.hash));
        });
        this.gameView.update(gu);
+-      this.webglBuilder?.update(this.gameView);
+-      this.renderer.tick();
 +      // RL replay tooling: expose the sim tick for the debug overlay.
 +      const replayTick = this.gameView.ticks();
 +      (window as { __replayTick?: number }).__replayTick = replayTick;
@@ -23,8 +170,6 @@ index 474ddc811..41d3087d9 100644
 +          { x, y } as import("../core/game/Game").Cell,
 +        );
 +      initRlDebugOverlay(this.lobby.gameID);
--      this.webglBuilder?.update(this.gameView);
--      this.renderer.tick();
 +      // Software WebGL cannot render every update while MAX replay is also
 +      // advancing the simulation. Drop intermediate visual frames only for
 +      // showcase capture; gameView still consumes every deterministic update.
@@ -46,16 +191,18 @@ index 474ddc811..41d3087d9 100644
 +        this.renderer.tick();
 +      }
  
+       // Emit tick metrics event for performance overlay
+       this.eventBus.emit(
 @@ -882,7 +912,9 @@ export class ClientGameRunner {
                return;
              }
-
+ 
 -            this.eventBus.emit(new GoToPlayerEvent(myPlayer, 10));
 +            if (this.userSettings.goToPlayer()) {
 +              this.eventBus.emit(new GoToPlayerEvent(myPlayer, 10));
 +            }
            };
-
+ 
            goToPlayer();
 diff --git a/src/client/LocalServer.ts b/src/client/LocalServer.ts
 index 0304224bf..4bc0c5b0e 100644
@@ -101,12 +248,87 @@ index 0304224bf..4bc0c5b0e 100644
        } satisfies ServerStartGameMessage);
      }
      if (clientMsg.type === "intent") {
+diff --git a/src/client/Main.ts b/src/client/Main.ts
+index 5d77dbf54..504675725 100644
+--- a/src/client/Main.ts
++++ b/src/client/Main.ts
+@@ -31,7 +31,6 @@ import { GameInfoModal } from "./GameInfoModal";
+ import "./GameModeSelector";
+ import { GameModeSelector } from "./GameModeSelector";
+ import { GameStartingModal } from "./GameStartingModal";
+-import "./GoogleAdElement";
+ import { HelpModal } from "./HelpModal";
+ import "./HomepagePromos";
+ import { HostLobbyModal as HostPrivateLobbyModal } from "./HostLobbyModal";
+@@ -504,9 +503,7 @@ class Client {
+ 
+     const onUserMe = async (userMeResponse: UserMeResponse | false) => {
+       updateAccountNavButton(userMeResponse);
+-      const isAdFree =
+-        userMeResponse !== false && userMeResponse.player?.adfree === true;
+-      window.adsEnabled = !isAdFree && !crazyGamesSDK.isOnCrazyGames();
++      window.adsEnabled = false;
+       document.dispatchEvent(
+         new CustomEvent("userMeResponse", {
+           detail: userMeResponse,
+@@ -814,6 +811,35 @@ class Client {
+     return true;
+   }
+ 
++  /** Replay perspective uses the archived player's name, not the visitor's Anon### default. */
++  private replayIdentity(lobby: JoinLobbyEvent): {
++    playerName: string;
++    playerClanTag: string | null;
++  } {
++    const defaultName = this.usernameInput?.getUsername() ?? genAnonUsername();
++    const defaultTag = this.usernameInput?.getClanTag() ?? null;
++    if (!lobby.gameRecord) {
++      return { playerName: defaultName, playerClanTag: defaultTag };
++    }
++    try {
++      const v = localStorage.getItem("replayViewAs");
++      if (v === null || v === "") {
++        return { playerName: defaultName, playerClanTag: defaultTag };
++      }
++      const players = lobby.gameRecord.info.players;
++      const picked =
++        v === "1" || v === "first"
++          ? players[0]
++          : players.find((p) => p.clientID === v);
++      return {
++        playerName: picked?.username ?? defaultName,
++        playerClanTag: picked?.clanTag ?? null,
++      };
++    } catch {
++      return { playerName: defaultName, playerClanTag: defaultTag };
++    }
++  }
++
+   private async handleJoinLobby(event: CustomEvent<JoinLobbyEvent>) {
+     const lobby = event.detail;
+     this.mostRecentJoinEvent = event.timeStamp;
+@@ -839,12 +865,13 @@ class Client {
+     }
+     const auth = await userAuth();
+     const playerRole = auth !== false ? (auth.claims.role ?? null) : null;
++    const { playerName, playerClanTag } = this.replayIdentity(lobby);
+     const newLobbyHandle = joinLobby(this.eventBus, {
+       gameID: lobby.gameID,
+       cosmetics: await getPlayerCosmeticsRefs(),
+       turnstileToken: await this.getTurnstileToken(lobby),
+-      playerName: this.usernameInput?.getUsername() ?? genAnonUsername(),
+-      playerClanTag: this.usernameInput?.getClanTag() ?? null,
++      playerName,
++      playerClanTag,
+       clanTagCheck: this.usernameInput?.getClanCheck(),
+       playerRole,
+       gameStartInfo: lobby.gameStartInfo ?? lobby.gameRecord?.info,
 diff --git a/src/client/RlDebugOverlay.ts b/src/client/RlDebugOverlay.ts
 new file mode 100644
-index 000000000..111111111
+index 000000000..bc3d31a0f
 --- /dev/null
 +++ b/src/client/RlDebugOverlay.ts
-@@ -0,0 +1,263 @@
+@@ -0,0 +1,292 @@
 +/**
 + * RL replay tooling: live model-debug panel.
 + *
@@ -269,34 +491,17 @@ index 000000000..111111111
 +    const local = ["localhost", "127.0.0.1"].includes(window.location.hostname);
 +    hosts = [
 +      localStorage.getItem("rlDebugHost"),
++      `${location.origin}/play`,
 +      localStorage.getItem("apiHost"),
++      `${location.origin}/archive`,
 +      local ? "http://localhost:8988" : null,
 +    ].filter((h): h is string => !!h);
++    hosts = [...new Set(hosts.map((h) => h.replace(/\/$/, "")))];
 +  } catch {
 +    return;
 +  }
 +  if (hosts.length === 0) return;
 +
-+  void (async () => {
-+    for (let attempt = 0; attempt < 3; attempt++) {
-+      for (const host of hosts) {
-+        let data: RlDebugPayload;
-+        try {
-+          const resp = await fetch(`${host}/debug/${gameID}`);
-+          if (!resp.ok) continue;
-+          data = (await resp.json()) as RlDebugPayload;
-+        } catch {
-+          continue;
-+        }
-+        run(data, `${host}/debug/${gameID}`);
-+        return;
-+      }
-+      await new Promise((r) => setTimeout(r, 5000));
-+    }
-+  })();
-+}
-+
-+function run(data: RlDebugPayload, url: string): void {
 +  const el = document.createElement("div");
 +  el.style.cssText =
 +    "position:fixed;left:20px;top:120px;width:420px;z-index:10005;" +
@@ -305,24 +510,66 @@ index 000000000..111111111
 +    "padding:12px 14px;border-radius:10px;pointer-events:auto;" +
 +    "border:1px solid rgba(255,255,255,.12);cursor:move;user-select:none;" +
 +    "box-shadow:0 8px 28px rgba(0,0,0,.45)";
++  el.innerHTML =
++    '<b style="color:#fff;font-size:15px">MODEL</b><br>connecting to decision feed…';
 +  document.body.appendChild(el);
 +  makeDraggable(el);
 +  const marker = makeTargetMarker();
 +
-+  let log = data.log;
++  let actions: string[] = [];
++  let log: RlDebugEntry[] = [];
 +  let idx = 0;
++  let feedUrl: string | null = null;
 +  const recent: string[] = [];
++  const urls = hosts.map((h) => `${h}/debug/${gameID}`);
 +
-+  if (data.live) {
-+    setInterval(() => {
-+      void fetch(url)
-+        .then((r) => (r.ok ? r.json() : null))
-+        .then((d: RlDebugPayload | null) => {
-+          if (d) log = d.log;
-+        })
-+        .catch(() => {});
-+    }, 2000);
++  async function tryConnect(): Promise<boolean> {
++    for (const url of urls) {
++      try {
++        const resp = await fetch(url);
++        if (!resp.ok) continue;
++        const data = (await resp.json()) as RlDebugPayload;
++        if (!Array.isArray(data.log)) continue;
++        actions = data.actions ?? [];
++        log = data.log;
++        feedUrl = url;
++        idx = 0;
++        return true;
++      } catch {
++        // try next host
++      }
++    }
++    return false;
 +  }
++
++  void (async () => {
++    // Live webbot feeds and archive sidecars can appear after the spectator
++    // tab joins - keep retrying instead of giving up after three attempts.
++    while (!(await tryConnect())) {
++      el.innerHTML =
++        '<b style="color:#fff;font-size:15px">MODEL</b><br>waiting for decision feed…';
++      await new Promise((r) => setTimeout(r, 2000));
++    }
++  })();
++
++  setInterval(() => {
++    if (!feedUrl) return;
++    void fetch(feedUrl)
++      .then((r) => (r.ok ? r.json() : null))
++      .then((d: RlDebugPayload | null) => {
++        if (!d || !Array.isArray(d.log)) return;
++        if (
++          log.length &&
++          d.log.length &&
++          (d.log[0]?.tick !== log[0]?.tick || d.log.length < idx)
++        ) {
++          idx = 0;
++        }
++        log = d.log;
++        if (d.actions?.length) actions = d.actions;
++      })
++      .catch(() => {});
++  }, 2000);
 +
 +  setInterval(() => {
 +    const t = (window as { __replayTick?: number }).__replayTick;
@@ -339,6 +586,10 @@ index 000000000..111111111
 +    let html =
 +      '<b style="color:#fff;font-size:15px">MODEL</b> ' +
 +      `<span style="color:#787e8c;font-size:13px">tick ${t}</span><br>`;
++    if (!feedUrl) {
++      el.innerHTML = html + "waiting for decision feed…";
++      return;
++    }
 +    if (!e) {
 +      el.innerHTML = html + "waiting for decisions...";
 +      return;
@@ -346,16 +597,16 @@ index 000000000..111111111
 +    html += `tiles ${e.tiles.toLocaleString()}  troops ${e.troops.toLocaleString()}`;
 +    if (e.value !== undefined) html += `  v ${e.value >= 0 ? "+" : ""}${e.value.toFixed(2)}`;
 +    html += `<br><span style="color:#5adc5a">${esc(e.desc)}</span>`;
-+    if (e.probs) {
++    if (e.probs && actions.length) {
 +      html += '<div style="margin-top:8px;color:#787e8c;font-size:12px">action probs</div>';
-+      for (let i = 0; i < data.actions.length; i++) {
-+        const hi = data.actions[i] === e.action;
++      for (let i = 0; i < actions.length; i++) {
++        const hi = actions[i] === e.action;
 +        const p = e.probs[i] ?? 0;
 +        const pct = Math.round(p * 100);
 +        const col = hi ? "#5adc5a" : p > 0.01 ? "#d2d6e0" : "#787e8c";
 +        html +=
 +          '<div style="display:flex;align-items:center;gap:6px;margin:3px 0">' +
-+          `<span style="width:120px;color:${col};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px">${esc(data.actions[i].slice(0, 16))}</span>` +
++          `<span style="width:120px;color:${col};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px">${esc(actions[i].slice(0, 16))}</span>` +
 +          '<span style="flex:1;height:10px;background:#282c3a;border-radius:3px;overflow:hidden">' +
 +          `<span style="display:block;height:10px;border-radius:3px;width:${pct}%;background:${hi ? "#5adc5a" : "#466ebe"}"></span></span>` +
 +          `<span style="width:36px;text-align:right;color:${col};font-size:12px">${pct}%</span></div>`;
@@ -396,228 +647,3 @@ index 77a0bac69..543b94385 100644
      this.eventBus.on(ZoomEvent, (e) => this.onZoom(e));
      this.eventBus.on(DragEvent, (e) => this.onMove(e));
      this.eventBus.on(GoToPlayerEvent, (e) => this.onGoToPlayer(e));
-diff --git a/index.html b/index.html
-index f042ec74b..a14b6bfd3 100644
---- a/index.html
-+++ b/index.html
-@@ -9,4 +9,55 @@
-     />
-     <title data-i18n="main.title">OpenFront (ALPHA)</title>
-+    <script>
-+      (function () {
-+        try {
-+          var embed = new URLSearchParams(location.search).get("embed") === "1";
-+          if (embed) document.documentElement.classList.add("showcase-embed");
-+          var o = location.origin;
-+          if (!localStorage.getItem("apiHost"))
-+            localStorage.setItem("apiHost", o + "/archive");
-+          if (!localStorage.getItem("rlDebugHost"))
-+            localStorage.setItem("rlDebugHost", o + "/play");
-+          if (!localStorage.getItem("replayViewAs"))
-+            localStorage.setItem("replayViewAs", "1");
-+          if (!localStorage.getItem("replayFitMap"))
-+            localStorage.setItem("replayFitMap", "1");
-+          if (!localStorage.getItem("rlDebugOverlay"))
-+            localStorage.setItem("rlDebugOverlay", "1");
-+          window.addEventListener("DOMContentLoaded", function () {
-+            if (!embed && !document.getElementById("agent-play-btn")) {
-+              var a = document.createElement("a");
-+              a.id = "agent-play-btn";
-+              a.href = "/play";
-+              a.textContent = "Play vs Agent";
-+              a.style.cssText =
-+                "position:fixed;right:14px;bottom:14px;z-index:10010;" +
-+                "padding:10px 14px;border-radius:8px;" +
-+                "background:rgba(42,90,42,.92);color:#5adc5a;" +
-+                "font:600 13px system-ui,sans-serif;text-decoration:none;" +
-+                "border:1px solid #5adc5a;pointer-events:auto";
-+              document.body.appendChild(a);
-+            }
-+            if (embed) {
-+              (function tryAutoplay() {
-+                var toggle = document.querySelector('img[alt="replay"]');
-+                if (!toggle) {
-+                  setTimeout(tryAutoplay, 500);
-+                  return;
-+                }
-+                toggle.click();
-+                setTimeout(function () {
-+                  var buttons = document.querySelectorAll("replay-panel button");
-+                  if (buttons.length) buttons[buttons.length - 1].click();
-+                }, 600);
-+              })();
-+            }
-+          });
-+        } catch (e) {}
-+      })();
-+    </script>
-+    <style>
-+      html.showcase-embed #agent-play-btn { display: none !important; }
-+    </style>
-     <link rel="manifest" href="<%- manifestHref %>" />
-     <link rel="icon" type="image/svg+xml" href="<%- faviconHref %>" />
- 
-diff --git a/src/client/Api.ts b/src/client/Api.ts
-index 82e55f6e0..9b8927a9b 100644
---- a/src/client/Api.ts
-+++ b/src/client/Api.ts
-@@ -315,6 +315,15 @@ export async function openSubscriptionPortal(): Promise<string | false> {
- }
- 
- export function getApiBase() {
-+  try {
-+    const override = localStorage.getItem("apiHost");
-+    if (override) {
-+      return override.replace(/\/$/, "");
-+    }
-+  } catch {
-+    // localStorage unavailable
-+  }
-+
-   const domainname = getAudience();
- 
-   if (domainname === "localhost") {
-
-diff --git a/index.html b/index.html
-index 4af07ad2d..912e0e888 100644
---- a/index.html
-+++ b/index.html
-@@ -96,49 +96,6 @@
-       async
-       defer
-     ></script>
--
--    <script data-cfasync="false">
--      window.ramp = window.ramp || {};
--      window.ramp.que = window.ramp.que || [];
--      window.ramp.passiveMode = true;
--    </script>
--
--    <script>
--      window.googletag = window.googletag || { cmd: [] };
--      googletag.cmd.push(function () {
--        googletag.pubads().set("page_url", "http://openfront.io ");
--      });
--    </script>
--
--    <!-- Analytics -->
--    <script
--      async
--      src="https://www.googletagmanager.com/gtag/js?id=AW-16702609763"
--    ></script>
--    <script>
--      window.dataLayer = window.dataLayer || [];
--
--      function gtag() {
--        dataLayer.push(arguments);
--      }
--
--      gtag("js", new Date());
--      gtag("config", "AW-16702609763");
--    </script>
--    <!-- Google tag (gtag.js) -->
--    <script
--      async
--      src="https://www.googletagmanager.com/gtag/js?id=G-WQGQQ8RDN4"
--    ></script>
--    <script>
--      window.dataLayer = window.dataLayer || [];
--      function gtag() {
--        dataLayer.push(arguments);
--      }
--      gtag("js", new Date());
--
--      gtag("config", "G-WQGQQ8RDN4");
--    </script>
-   </head>
- 
-   <body
-@@ -441,12 +398,5 @@
-       data-cf-beacon='{"token": "03d93e6fefb349c28ee69b408fa25a13"}'
-     ></script>
-     <script type="module" src="/src/client/Main.ts"></script>
--    <footer>
--      <script
--        data-cfasync="false"
--        async
--        src="//cdn.intergient.com/1025558/75940/ramp.js"
--      ></script>
--    </footer>
-   </body>
- </html>
-diff --git a/src/client/Main.ts b/src/client/Main.ts
-index ebfef8a41..4fdf9d598 100644
---- a/src/client/Main.ts
-+++ b/src/client/Main.ts
-@@ -28,7 +28,6 @@ import { GameInfoModal } from "./GameInfoModal";
- import "./GameModeSelector";
- import { GameModeSelector } from "./GameModeSelector";
- import { GameStartingModal } from "./GameStartingModal";
--import "./GoogleAdElement";
- import { HelpModal } from "./HelpModal";
- import "./HomepagePromos";
- import { HostLobbyModal as HostPrivateLobbyModal } from "./HostLobbyModal";
-@@ -477,9 +476,7 @@ class Client {
- 
-     const onUserMe = async (userMeResponse: UserMeResponse | false) => {
-       updateAccountNavButton(userMeResponse);
--      const isAdFree =
--        userMeResponse !== false && userMeResponse.player?.adfree === true;
--      window.adsEnabled = !isAdFree && !crazyGamesSDK.isOnCrazyGames();
-+      window.adsEnabled = false;
-       document.dispatchEvent(
-         new CustomEvent("userMeResponse", {
-           detail: userMeResponse,
-@@ -787,6 +784,35 @@ class Client {
-     return true;
-   }
- 
-+  /** Replay perspective uses the archived player's name, not the visitor's Anon### default. */
-+  private replayIdentity(lobby: JoinLobbyEvent): {
-+    playerName: string;
-+    playerClanTag: string | null;
-+  } {
-+    const defaultName = this.usernameInput?.getUsername() ?? genAnonUsername();
-+    const defaultTag = this.usernameInput?.getClanTag() ?? null;
-+    if (!lobby.gameRecord) {
-+      return { playerName: defaultName, playerClanTag: defaultTag };
-+    }
-+    try {
-+      const v = localStorage.getItem("replayViewAs");
-+      if (v === null || v === "") {
-+        return { playerName: defaultName, playerClanTag: defaultTag };
-+      }
-+      const players = lobby.gameRecord.info.players;
-+      const picked =
-+        v === "1" || v === "first"
-+          ? players[0]
-+          : players.find((p) => p.clientID === v);
-+      return {
-+        playerName: picked?.username ?? defaultName,
-+        playerClanTag: picked?.clanTag ?? null,
-+      };
-+    } catch {
-+      return { playerName: defaultName, playerClanTag: defaultTag };
-+    }
-+  }
-+
-   private async handleJoinLobby(event: CustomEvent<JoinLobbyEvent>) {
-     const lobby = event.detail;
-     this.mostRecentJoinEvent = event.timeStamp;
-@@ -812,12 +838,13 @@ class Client {
-     }
-     const auth = await userAuth();
-     const playerRole = auth !== false ? (auth.claims.role ?? null) : null;
-+    const { playerName, playerClanTag } = this.replayIdentity(lobby);
-     const newLobbyHandle = joinLobby(this.eventBus, {
-       gameID: lobby.gameID,
-       cosmetics: await getPlayerCosmeticsRefs(),
-       turnstileToken: await this.getTurnstileToken(lobby),
--      playerName: this.usernameInput?.getUsername() ?? genAnonUsername(),
--      playerClanTag: this.usernameInput?.getClanTag() ?? null,
-+      playerName,
-+      playerClanTag,
-       clanTagCheck: this.usernameInput?.getClanCheck(),
-       playerRole,
-       gameStartInfo: lobby.gameStartInfo ?? lobby.gameRecord?.info,
-
