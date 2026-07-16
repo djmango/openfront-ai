@@ -36,8 +36,8 @@ pub const V9_SPARSE_LOSS: f64 = -1.0;
 pub const V10_REWARD_PROFILE: &str = "v10-anti-spiral-v1";
 /// Soft death default for V10 launches (override via `--v86-death-penalty`).
 pub const V10_DEFAULT_DEATH_PENALTY: f64 = 3.0;
-/// Floor for V10 stage `win_at` gates (stages already above keep their value).
-pub const V10_MIN_WIN_AT: f64 = 0.70;
+/// V10 graduation gate for every stage (`should_advance` uses strict `>`).
+pub const V10_WIN_AT: f64 = 0.70;
 /// Rolling death-rate ceiling required before a V10 stage advance.
 pub const V10_ADVANCE_MAX_DEATH_RATE: f64 = 0.55;
 /// Demote when window win-rate is below this and death-rate is above
@@ -786,17 +786,12 @@ pub const V10_BOT_NATION_DENSITY: [(u32, u32); 15] = [
     (200, 30), // 14 Impossible
 ];
 
-fn apply_v10_bot_heavy_density(stages: &mut [Stage]) {
+fn apply_v10_stage_params(stages: &mut [Stage]) {
     debug_assert_eq!(stages.len(), V10_BOT_NATION_DENSITY.len());
     for (stage, &(bots, nations)) in stages.iter_mut().zip(V10_BOT_NATION_DENSITY.iter()) {
         stage.bots = bots;
         stage.nations = Nations::Exact(nations);
-    }
-}
-
-fn apply_v10_win_gates(stages: &mut [Stage]) {
-    for stage in stages {
-        stage.win_at = stage.win_at.max(V10_MIN_WIN_AT);
+        stage.win_at = V10_WIN_AT;
     }
 }
 
@@ -1050,8 +1045,7 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
                 // start nation-only (bots=0), and never let Nations::Default
                 // outnumber bots on World/Europe (50–72 nations).
                 if schedule == CurriculumSchedule::V10 {
-                    apply_v10_bot_heavy_density(&mut stages);
-                    apply_v10_win_gates(&mut stages);
+                    apply_v10_stage_params(&mut stages);
                 } else {
                     apply_v83_bot_heavy_density(&mut stages);
                 }
@@ -2284,7 +2278,6 @@ mod curriculum_v81_tests {
         let v10 = stages_for_schedule(CurriculumSchedule::V10);
         assert_eq!(v10.len(), 15);
         assert_eq!(v10[5].maps, &["Onion", "Pangaea", "Caucasus"]);
-        assert_eq!(v10[5].win_at, V10_MIN_WIN_AT);
         assert!(CurriculumSchedule::V10.uses_v83_closeout());
         assert_eq!(CurriculumSchedule::V10.id(), "v10");
         assert_eq!(
@@ -2307,10 +2300,9 @@ mod curriculum_v81_tests {
                 stage.bots,
                 nations
             );
-            assert!(
-                stage.win_at >= V10_MIN_WIN_AT,
-                "stage {index} win_at {} below V10 floor",
-                stage.win_at
+            assert_eq!(
+                stage.win_at, V10_WIN_AT,
+                "stage {index} win_at must be the V10 gate"
             );
         }
         // Softened cliff vs V8.3 stage 8.
@@ -2321,15 +2313,9 @@ mod curriculum_v81_tests {
         for index in 0..5 {
             assert_eq!(v10[index].maps, v83[index].maps);
         }
-        // Early stages already above the floor keep their higher gates.
-        assert_eq!(v10[0].win_at, 0.90);
-        assert_eq!(v10[1].win_at, 0.80);
-        assert_eq!(v10[2].win_at, 0.75);
-        // Mid/late V8.3 gates (0.12–0.65) are floored to 70%.
-        assert_eq!(v10[3].win_at, V10_MIN_WIN_AT);
-        assert_eq!(v10[8].win_at, V10_MIN_WIN_AT);
-        assert_eq!(v10[14].win_at, V10_MIN_WIN_AT);
-        assert!(v83[8].win_at < V10_MIN_WIN_AT);
+        // V10 does not inherit V8.3's declining win_at ladder.
+        assert_ne!(v10[0].win_at, v83[0].win_at);
+        assert!(v83[14].win_at < V10_WIN_AT);
     }
 
     #[test]

@@ -756,12 +756,11 @@ fn conversion_gate(stage: usize) -> Option<(usize, f64)> {
     }
 }
 
-/// V10 keeps the closeout conversion windows but floors both at 70% to match
-/// the raised `win_at` ladder.
 fn conversion_gate_v10(stage: usize) -> Option<(usize, f64)> {
+    let gate = ofcore::curriculum::V10_WIN_AT;
     match stage {
-        5 => Some((20, 0.70)),
-        6 => Some((16, 0.70)),
+        5 => Some((20, gate)),
+        6 => Some((16, gate)),
         _ => None,
     }
 }
