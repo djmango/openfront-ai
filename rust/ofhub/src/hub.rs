@@ -16,7 +16,6 @@ use axum::{Json, Router};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
-use crate::hf;
 use crate::paths::{hub_state_path, repo_root, state_path};
 use crate::util::{
     featured_showcase_entry, game_map_api_name, load_json, showcase_maps, utc_now, write_json,
@@ -732,12 +731,9 @@ pub async fn run_hub(port: u16) -> Result<()> {
     std::fs::create_dir_all(&data)?;
 
     let run_name = env_or("RUN_NAME", "ppo_v81");
-    eprintln!("[showcase_hub] loading policy + encoder via HF (best-effort)");
-    let client = hf::client_with_optional_token()?;
-    let _policy = hf::ensure_policy(&client, &run_name).await;
-    if let Err(e) = &_policy {
-        eprintln!("[showcase_hub] policy ensure failed (hub still serves): {e}");
-    }
+    // Do not block hub bind on HF: play/debug/status must stay up even when Hub
+    // is unreachable. Policy download is the daemon's job; webbot loads its own.
+    eprintln!("[showcase_hub] starting (HF policy preload skipped; daemon owns weights)");
 
     let inner = Arc::new(HubInner {
         run_name,

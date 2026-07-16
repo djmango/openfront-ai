@@ -37,14 +37,22 @@ async fn policy_changed(client: &hf_hub::HFClient, run_name: &str) -> bool {
     if !revision_path().exists() {
         return true;
     }
-    match hf::policy_revision(client, run_name).await {
-        Ok(remote) => {
+    // HF can hang; don't block the daemon loop forever when local weights exist.
+    let check = tokio::time::timeout(Duration::from_secs(20), hf::policy_revision(client, run_name));
+    match check.await {
+        Ok(Ok(remote)) => {
             let local = fs::read_to_string(revision_path()).unwrap_or_default();
             local.trim() != remote
         }
-        Err(e) => {
-            log(&format!("revision check failed ({e}); regenerating"));
-            true
+        Ok(Err(e)) => {
+            log(&format!(
+                "revision check failed ({e}); keeping local policy (no force regen)"
+            ));
+            false
+        }
+        Err(_) => {
+            log("revision check timed out; keeping local policy (no force regen)");
+            false
         }
     }
 }
