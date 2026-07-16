@@ -264,6 +264,10 @@ struct Args {
     #[arg(long, default_value_t = 0.0)]
     v10_combat_action: f64,
 
+    /// V10: terminal penalty when timing out after closeout entry (≥45% land).
+    #[arg(long, default_value_t = 0.0)]
+    v10_timeout_closeout: f64,
+
     /// Resume a V8.4 reward-profile checkpoint under V8.5 coeffs (weights unchanged).
     #[arg(long, default_value_t = false, requires_all = ["v83_curriculum", "resume"])]
     migrate_v84_to_v85: bool,
@@ -1266,14 +1270,20 @@ fn main() -> anyhow::Result<()> {
         v10_diplo_panic_share: args.v10_diplo_panic_share,
         v10_diplo_panic_tick_frac: args.v10_diplo_panic_tick_frac,
         v10_combat_action: args.v10_combat_action,
+        v10_timeout_closeout: args.v10_timeout_closeout,
     };
+    anyhow::ensure!(
+        args.v10_timeout_closeout.is_finite() && args.v10_timeout_closeout >= 0.0,
+        "--v10-timeout-closeout must be finite and non-negative"
+    );
     anyhow::ensure!(
         args.v9_curriculum == args.v9_sparse_win,
         "--v9-curriculum and --v9-sparse-win must be used together"
     );
     anyhow::ensure!(
         !args.v10_curriculum || reward_config.v10_reward_active(),
-        "--v10-curriculum requires at least one V10 reward knob          (--v10-survival-coef / --v10-diplo-panic / --v10-combat-action)"
+        "--v10-curriculum requires at least one V10 reward knob \
+         (--v10-survival-coef / --v10-diplo-panic / --v10-combat-action / --v10-timeout-closeout)"
     );
     let curriculum_schedule = if args.v10_curriculum {
         ofcore::curriculum::CurriculumSchedule::V10

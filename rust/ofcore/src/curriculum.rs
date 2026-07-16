@@ -105,7 +105,8 @@ pub struct RewardConfig {
     pub v86_death_penalty: f64,
     /// V9: terminal win/loss only (`+1` / `-1`); disables all dense shaping.
     pub v9_sparse_win: bool,
-    /// V10: per-decision survival shaping while alive (`coef * land_share`).
+    /// V10: per-decision survival shaping while alive (`coef * land_share`),
+    /// tapered to zero across the closeout band so camping is not paid.
     pub v10_survival_coef: f64,
     /// V10: penalty magnitude for late/dominant diplo/donate panic actions.
     pub v10_diplo_panic: f64,
@@ -115,6 +116,8 @@ pub struct RewardConfig {
     pub v10_diplo_panic_tick_frac: f64,
     /// V10: bonus for productive combat/build/boat actions.
     pub v10_combat_action: f64,
+    /// V10: terminal penalty magnitude when timing out after closeout entry.
+    pub v10_timeout_closeout: f64,
 }
 
 impl RewardConfig {
@@ -195,6 +198,7 @@ impl RewardConfig {
         self.v10_survival_coef != 0.0
             || self.v10_diplo_panic != 0.0
             || self.v10_combat_action != 0.0
+            || self.v10_timeout_closeout != 0.0
     }
 
     /// V8.4 boat/tempo knobs and/or V8.5 win-urgency knobs.
@@ -550,8 +554,8 @@ pub fn v83_action_churn_penalty(
     land_share: f64,
     config: RewardConfig,
 ) -> f64 {
+    // Closeout-band churn is land-share gated only (no curriculum stage gate).
     if reversal.is_some()
-        && stage >= 5
         && land_share >= V83_CLOSEOUT_SHARE_START
         && config.v83_churn_coef != 0.0
         && config.v81_churn_window != 0
@@ -1460,11 +1464,36 @@ pub fn sparse_terminal_reward(won: bool) -> f64 {
 
 /// Alive+land survival shaping: small positive signal so death is not the only
 /// non-win terminal contrast under a softer death penalty.
+///
+/// Tapers to zero across the closeout band `[0.45, 0.80]` so once the agent is
+/// dominant, camping no longer accrues survival pay — finish the win instead.
 pub fn v10_survival_reward(alive: bool, land_share: f64, config: RewardConfig) -> f64 {
     if !alive || config.v10_survival_coef == 0.0 {
+        return 0.0;
+    }
+    let share = finite_or_zero(land_share).clamp(0.0, 1.0);
+    let taper = if share <= V83_CLOSEOUT_SHARE_START {
+        1.0
+    } else if share >= V83_CLOSEOUT_SHARE_FULL {
         0.0
     } else {
-        config.v10_survival_coef * finite_or_zero(land_share).clamp(0.0, 1.0)
+        (V83_CLOSEOUT_SHARE_FULL - share)
+            / (V83_CLOSEOUT_SHARE_FULL - V83_CLOSEOUT_SHARE_START)
+    };
+    config.v10_survival_coef * share * taper
+}
+
+/// Terminal stick for timing out after entering closeout (≥45% land) without
+/// converting the win. Flat magnitude; disabled when coef is 0.
+pub fn v10_timeout_after_closeout_penalty(
+    timed_out: bool,
+    closeout_reached: bool,
+    config: RewardConfig,
+) -> f64 {
+    if timed_out && closeout_reached && config.v10_timeout_closeout != 0.0 {
+        -config.v10_timeout_closeout.abs()
+    } else {
+        0.0
     }
 }
 
@@ -1561,6 +1590,7 @@ mod tests {
             v10_diplo_panic_share: 0.35,
             v10_diplo_panic_tick_frac: 0.55,
             v10_combat_action: 0.0,
+            v10_timeout_closeout: 0.0,
         }
     }
 
@@ -1620,7 +1650,9 @@ mod tests {
         let cfg = config();
         let pair = Some(InverseActionPair::AttackRetreat);
         assert_eq!(action_churn_penalty(pair, 5, cfg), -0.05);
-        assert_eq!(v83_action_churn_penalty(pair, 4, 0.9, cfg), -0.05);
+        // Closeout-band churn is land-share gated only (any curriculum stage).
+        assert_eq!(v83_action_churn_penalty(pair, 0, 0.9, cfg), -0.06);
+        assert_eq!(v83_action_churn_penalty(pair, 4, 0.9, cfg), -0.06);
         assert_eq!(v83_action_churn_penalty(pair, 5, 0.449, cfg), -0.05);
         assert_eq!(v83_action_churn_penalty(pair, 5, 0.45, cfg), -0.06);
     }
@@ -1701,11 +1733,23 @@ mod tests {
         cfg.v10_diplo_panic_share = 0.35;
         cfg.v10_diplo_panic_tick_frac = 0.55;
         cfg.v10_combat_action = 0.02;
+        cfg.v10_timeout_closeout = 20.0;
         cfg.v86_death_penalty = 3.0;
         assert_eq!(cfg.reward_profile_id(), V10_REWARD_PROFILE);
         assert_eq!(cfg.death_penalty(), 3.0);
-        assert_eq!(v10_survival_reward(true, 0.5, cfg), 0.005);
+        // Below closeout: full survival. Inside band: tapered. At/above full: 0.
+        assert!((v10_survival_reward(true, 0.20, cfg) - 0.002).abs() < 1e-12);
+        let mid = v10_survival_reward(true, 0.5, cfg);
+        assert!(mid > 0.0 && mid < 0.005);
+        assert!((mid - 0.01 * 0.5 * ((0.80 - 0.5) / 0.35)).abs() < 1e-12);
+        assert_eq!(v10_survival_reward(true, 0.80, cfg), 0.0);
         assert_eq!(v10_survival_reward(false, 0.5, cfg), 0.0);
+        assert_eq!(
+            v10_timeout_after_closeout_penalty(true, true, cfg),
+            -20.0
+        );
+        assert_eq!(v10_timeout_after_closeout_penalty(true, false, cfg), 0.0);
+        assert_eq!(v10_timeout_after_closeout_penalty(false, true, cfg), 0.0);
         assert_eq!(
             v10_diplo_panic_penalty(A_DONATE_GOLD, 0.40, 100, 1000, cfg),
             -0.08
