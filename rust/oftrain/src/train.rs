@@ -756,6 +756,16 @@ fn conversion_gate(stage: usize) -> Option<(usize, f64)> {
     }
 }
 
+/// V10 keeps the closeout conversion windows but floors both at 70% to match
+/// the raised `win_at` ladder.
+fn conversion_gate_v10(stage: usize) -> Option<(usize, f64)> {
+    match stage {
+        5 => Some((20, 0.70)),
+        6 => Some((16, 0.70)),
+        _ => None,
+    }
+}
+
 fn should_advance_v83(
     stage: usize,
     recent_wins: &VecDeque<f64>,
@@ -784,7 +794,11 @@ fn should_advance_v10(
     recent_deaths: &VecDeque<f64>,
     win_gate: f64,
 ) -> bool {
-    should_advance_v83(stage, recent_wins, recent_conversions, win_gate)
+    should_advance(recent_wins, win_gate)
+        && conversion_gate_v10(stage).is_none_or(|(minimum, gate)| {
+            recent_conversions.len() >= minimum
+                && recent_conversions.iter().sum::<f64>() / recent_conversions.len() as f64 > gate
+        })
         && recent_deaths.len() == ofcore::curriculum::WINDOW
         && window_mean(recent_deaths).is_some_and(|death_rate| {
             death_rate < ofcore::curriculum::V10_ADVANCE_MAX_DEATH_RATE
@@ -1151,9 +1165,9 @@ mod v81_state_and_gate_tests {
         let wins = VecDeque::from(vec![1.0; ofcore::curriculum::WINDOW]);
         let conversions = VecDeque::from(vec![1.0; 20]);
         let mut deaths = VecDeque::from(vec![0.6; ofcore::curriculum::WINDOW]);
-        assert!(!should_advance_v10(5, &wins, &conversions, &deaths, 0.45));
+        assert!(!should_advance_v10(5, &wins, &conversions, &deaths, 0.70));
         deaths = VecDeque::from(vec![0.4; ofcore::curriculum::WINDOW]);
-        assert!(should_advance_v10(5, &wins, &conversions, &deaths, 0.45));
+        assert!(should_advance_v10(5, &wins, &conversions, &deaths, 0.70));
 
         let lose = VecDeque::from(vec![0.0; ofcore::curriculum::WINDOW]);
         let slaughter = VecDeque::from(vec![1.0; ofcore::curriculum::WINDOW]);
