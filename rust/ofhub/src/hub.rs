@@ -601,6 +601,10 @@ async fn play_debug(
                         header::CONTENT_TYPE,
                         HeaderValue::from_static("application/json"),
                     );
+                    res.headers_mut().insert(
+                        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                        HeaderValue::from_static("*"),
+                    );
                     return res;
                 }
             }
@@ -608,6 +612,10 @@ async fn play_debug(
     }
     let mut res = Json(json!({"error":"no live debug feed"})).into_response();
     *res.status_mut() = StatusCode::NOT_FOUND;
+    res.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
     res
 }
 
