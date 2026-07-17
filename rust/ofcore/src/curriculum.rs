@@ -118,6 +118,8 @@ pub struct RewardConfig {
     pub v10_combat_action: f64,
     /// V10: terminal penalty magnitude when timing out after closeout entry.
     pub v10_timeout_closeout: f64,
+    /// V10: one-shot bonus the first time land share crosses closeout entry (45%).
+    pub v10_closeout_entry: f64,
 }
 
 impl RewardConfig {
@@ -199,6 +201,7 @@ impl RewardConfig {
             || self.v10_diplo_panic != 0.0
             || self.v10_combat_action != 0.0
             || self.v10_timeout_closeout != 0.0
+            || self.v10_closeout_entry != 0.0
     }
 
     /// V8.4 boat/tempo knobs and/or V8.5 win-urgency knobs.
@@ -1497,6 +1500,16 @@ pub fn v10_timeout_after_closeout_penalty(
     }
 }
 
+/// One-shot mid-game milestone: pay when land share first crosses closeout
+/// entry (45%). Disabled when coef is 0.
+pub fn v10_closeout_entry_bonus(just_entered: bool, config: RewardConfig) -> f64 {
+    if just_entered && config.v10_closeout_entry != 0.0 {
+        config.v10_closeout_entry.abs()
+    } else {
+        0.0
+    }
+}
+
 fn v10_diplo_panic_armed(land_share: f64, tick: i64, max_ticks: i64, config: RewardConfig) -> bool {
     let share_armed = finite_or_zero(land_share) >= config.v10_diplo_panic_share;
     let tick_frac = tick as f64 / max_ticks.max(1) as f64;
@@ -1591,6 +1604,7 @@ mod tests {
             v10_diplo_panic_tick_frac: 0.55,
             v10_combat_action: 0.0,
             v10_timeout_closeout: 0.0,
+            v10_closeout_entry: 0.0,
         }
     }
 
@@ -1734,6 +1748,7 @@ mod tests {
         cfg.v10_diplo_panic_tick_frac = 0.55;
         cfg.v10_combat_action = 0.02;
         cfg.v10_timeout_closeout = 20.0;
+        cfg.v10_closeout_entry = 25.0;
         cfg.v86_death_penalty = 3.0;
         assert_eq!(cfg.reward_profile_id(), V10_REWARD_PROFILE);
         assert_eq!(cfg.death_penalty(), 3.0);
@@ -1750,6 +1765,8 @@ mod tests {
         );
         assert_eq!(v10_timeout_after_closeout_penalty(true, false, cfg), 0.0);
         assert_eq!(v10_timeout_after_closeout_penalty(false, true, cfg), 0.0);
+        assert_eq!(v10_closeout_entry_bonus(true, cfg), 25.0);
+        assert_eq!(v10_closeout_entry_bonus(false, cfg), 0.0);
         assert_eq!(
             v10_diplo_panic_penalty(A_DONATE_GOLD, 0.40, 100, 1000, cfg),
             -0.08

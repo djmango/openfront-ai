@@ -23,7 +23,8 @@ use ofcore::curriculum::{
     land_share, normalized_strength_share, placement, placement_score, sample_episode,
     sparse_terminal_reward, stages_for_schedule, strength_delta_weight, tempo_pressure,
     terminal_reward, timeweight, v10_combat_action_bonus, v10_diplo_panic_penalty,
-    v10_survival_reward, v10_timeout_after_closeout_penalty, v83_action_churn_penalty,
+    v10_closeout_entry_bonus, v10_survival_reward, v10_timeout_after_closeout_penalty,
+    v83_action_churn_penalty,
 };
 use ofcore::feat::{
     self, A_ATTACK, A_BOAT, A_CANCEL_BOAT, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, ACTIONS,
@@ -344,16 +345,20 @@ impl CloseoutTracker {
         self.post_entry_churn_pairs = 0;
     }
 
-    fn observe(&mut self, share: f64, tick: i64, inverse_pair: bool) {
+    /// Returns true the first time land share crosses closeout entry this episode.
+    fn observe(&mut self, share: f64, tick: i64, inverse_pair: bool) -> bool {
         self.max_land_share = self.max_land_share.max(share);
+        let mut just_entered = false;
         if self.entry_tick.is_some() {
             self.decisions_after_entry += 1;
         } else if share >= V83_CLOSEOUT_SHARE_START {
             self.entry_tick = Some(tick);
+            just_entered = true;
         }
         if self.entry_tick.is_some() && inverse_pair {
             self.post_entry_churn_pairs += 1;
         }
+        just_entered
     }
 
     fn reached(self) -> bool {
@@ -1269,8 +1274,9 @@ impl EnvWorker {
         let ents = feat::parse_ents(obs.entities());
         let tiles = ofcore::translate::my_tiles(&ents, obs.me());
         let share = land_share(tiles, self.land_total);
-        self.closeout_tracker
-            .observe(share, obs.tick(), inverse_pair.is_some());
+        let closeout_just_entered =
+            self.closeout_tracker
+                .observe(share, obs.tick(), inverse_pair.is_some());
         let composite = curriculum::strengths(&ents, self.land_total);
         let me = obs.me().max(0) as usize;
         let mut done = false;
@@ -1427,6 +1433,13 @@ impl EnvWorker {
             reward += components.closeout;
         } else {
             self.closeout_shaper.reset(next_closeout_potential);
+        }
+        // One-shot milestone for first crossing of 45% land (logged under closeout).
+        let entry_bonus =
+            v10_closeout_entry_bonus(closeout_just_entered, self.reward_config);
+        if entry_bonus != 0.0 {
+            components.closeout += entry_bonus;
+            reward += entry_bonus;
         }
 
         let troops_after = player_troops(&ents, me);
@@ -1734,13 +1747,13 @@ mod churn_action_tests {
     fn closeout_tracker_records_entry_max_decisions_conversion_inputs_and_reset() {
         let mut tracker = CloseoutTracker::default();
         tracker.reset(0.10, 100);
-        tracker.observe(0.44, 200, true);
+        assert!(!tracker.observe(0.44, 200, true));
         assert!(!tracker.reached());
         assert_eq!(tracker.post_entry_churn_pairs, 0);
 
-        tracker.observe(0.45, 300, false);
-        tracker.observe(0.62, 400, true);
-        tracker.observe(0.50, 500, false);
+        assert!(tracker.observe(0.45, 300, false));
+        assert!(!tracker.observe(0.62, 400, true));
+        assert!(!tracker.observe(0.50, 500, false));
         assert!(tracker.reached());
         assert_eq!(tracker.entry_tick, Some(300));
         assert_eq!(tracker.max_land_share, 0.62);
