@@ -8581,6 +8581,7 @@ mod persistent_actor_tests {
                 v10_diplo_panic_tick_frac: 0.55,
                 v10_combat_action: 0.0,
                 v10_timeout_closeout: 0.0,
+                v10_closeout_entry: 0.0,
             },
             lambda: 0.95,
             clip: 0.2,

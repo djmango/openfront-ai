@@ -15,6 +15,7 @@ grep -q -- '--v10-combat-action 0.02' "$SCRIPT"
 grep -q -- '--v10-timeout-closeout 20.0' "$SCRIPT"
 grep -q -- '--v85-extra-win-bonus 200.0' "$SCRIPT"
 grep -q -- '--v84-fast-win-coef 40.0' "$SCRIPT"
+grep -q -- '--v10-closeout-entry 25.0' "$SCRIPT"
 grep -q -- '--max-episode-ticks 21000' "$SCRIPT"
 grep -q -- '--v84-tempo-min-stage 0' "$SCRIPT"
 grep -q -- '--v81-min-stage 0' "$SCRIPT"
@@ -30,7 +31,7 @@ rg -n 'v10_curriculum|migrate_v86_to_v10|v10_survival_coef|v10_diplo_panic|v10_c
   "$ROOT/rust/oftrain/src/main.rs" "$ROOT/rust/oftrain/src/train.rs" >/dev/null
 rg -n 'V10_REWARD_PROFILE|v10_reward_active|should_demote_v10|should_advance_v10|V10_BOT_NATION_DENSITY' \
   "$ROOT/rust/ofcore/src/curriculum.rs" "$ROOT/rust/oftrain/src/train.rs" >/dev/null
-rg -n 'v10_survival_reward|v10_timeout_after_closeout_penalty|v10_diplo_panic_penalty|v10_combat_action_bonus|uses_v83_closeout' \
+rg -n 'v10_survival_reward|v10_timeout_after_closeout_penalty|v10_closeout_entry_bonus|v10_diplo_panic_penalty|v10_combat_action_bonus|uses_v83_closeout' \
   "$ROOT/rust/oftrain/src/vecenv.rs" "$ROOT/rust/ofcore/src/curriculum.rs" >/dev/null
 # Closeout shaping must not be hard-gated on curriculum stage >= 5.
 ! rg -n 'episode_stage >= 5' "$ROOT/rust/oftrain/src/vecenv.rs" >/dev/null
