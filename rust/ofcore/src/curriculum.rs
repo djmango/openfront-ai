@@ -36,8 +36,11 @@ pub const V9_SPARSE_LOSS: f64 = -1.0;
 pub const V10_REWARD_PROFILE: &str = "v10-anti-spiral-v1";
 /// Soft death default for V10 launches (override via `--v86-death-penalty`).
 pub const V10_DEFAULT_DEATH_PENALTY: f64 = 3.0;
-/// V10 graduation gate for every stage (`should_advance` uses strict `>`).
+/// V10 graduation gate for the dense (post-ramp) ladder (`should_advance` uses strict `>`).
 pub const V10_WIN_AT: f64 = 0.70;
+/// Higher bar for Easy-ramp stages before legacy stage 0 — master Easy/2..light
+/// lobbies before entering the dense ladder.
+pub const V10_RAMP_WIN_AT: f64 = 0.95;
 /// Rolling death-rate ceiling required before a V10 stage advance.
 pub const V10_ADVANCE_MAX_DEATH_RATE: f64 = 0.55;
 /// Demote when window win-rate is below this and death-rate is above
@@ -828,10 +831,16 @@ pub const V10_BOT_NATION_DENSITY: [(u32, u32); V10_STAGE_COUNT] = [
 
 fn apply_v10_stage_params(stages: &mut [Stage]) {
     debug_assert_eq!(stages.len(), V10_BOT_NATION_DENSITY.len());
-    for (stage, &(bots, nations)) in stages.iter_mut().zip(V10_BOT_NATION_DENSITY.iter()) {
+    for (index, (stage, &(bots, nations))) in
+        stages.iter_mut().zip(V10_BOT_NATION_DENSITY.iter()).enumerate()
+    {
         stage.bots = bots;
         stage.nations = Nations::Exact(nations);
-        stage.win_at = V10_WIN_AT;
+        stage.win_at = if index < V10_EASY_RAMP_LEN {
+            V10_RAMP_WIN_AT
+        } else {
+            V10_WIN_AT
+        };
     }
 }
 
@@ -1098,7 +1107,7 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
                         difficulty: "Easy",
                         nations: NE(0),
                         decision_ticks: 15,
-                        win_at: V10_WIN_AT,
+                        win_at: V10_RAMP_WIN_AT,
                     });
                     stages.splice(0..0, ramp);
                     apply_v10_stage_params(&mut stages);
@@ -2414,16 +2423,23 @@ mod curriculum_v81_tests {
                 stage.bots,
                 nations
             );
+            let expect_gate = if index < V10_EASY_RAMP_LEN {
+                V10_RAMP_WIN_AT
+            } else {
+                V10_WIN_AT
+            };
             assert_eq!(
-                stage.win_at, V10_WIN_AT,
-                "stage {index} win_at must be the V10 gate"
+                stage.win_at, expect_gate,
+                "stage {index} win_at must be the V10 gate for its band"
             );
         }
         // Easy ramp starts at 2 bots / 0 nations and reaches the legacy handoff.
         assert_eq!(v10[V10_EASY_RAMP_LEN - 1].bots, 28);
         assert_eq!(v10[V10_EASY_RAMP_LEN - 1].nations, Nations::Exact(4));
+        assert_eq!(v10[V10_EASY_RAMP_LEN - 1].win_at, V10_RAMP_WIN_AT);
         assert_eq!(v10[V10_EASY_RAMP_LEN].bots, 30);
         assert_eq!(v10[V10_EASY_RAMP_LEN].nations, Nations::Exact(5));
+        assert_eq!(v10[V10_EASY_RAMP_LEN].win_at, V10_WIN_AT);
         // Bots-only prefix before nations appear.
         for index in 0..15 {
             assert_eq!(
