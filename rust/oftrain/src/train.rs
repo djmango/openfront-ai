@@ -534,18 +534,30 @@ fn reconcile_resume_schedule(
                 ofcore::curriculum::V10_REWARD_PROFILE,
                 state.reward_profile
             );
-            // Expand old 15-stage V10 sidecars onto the Easy-ramp ladder so
-            // legacy stage indices keep their dense-lobby meaning.
-            if state.stage_env_targets.len() == ofcore::curriculum::V10_LEGACY_LEN {
+            // Expand older V10 sidecars onto the 100-stage ladder.
+            let targets_len = state.stage_env_targets.len();
+            let remapped = if targets_len == ofcore::curriculum::V10_LEGACY_LEN {
+                // Pre-ramp 15-stage V10 → 35-era index → 100-stage index.
+                let as35 = state
+                    .stage
+                    .saturating_add(20)
+                    .min(ofcore::curriculum::V10_PREV35_LEN - 1);
+                Some(ofcore::curriculum::remap_v10_stage_35_to_100(as35))
+            } else if targets_len == ofcore::curriculum::V10_PREV35_LEN {
+                Some(ofcore::curriculum::remap_v10_stage_35_to_100(state.stage))
+            } else {
+                None
+            };
+            if let Some(new_stage) = remapped {
                 let old = state.stage;
-                state.stage = old.saturating_add(ofcore::curriculum::V10_EASY_RAMP_LEN);
+                state.stage = new_stage;
                 state.stage_env_targets.clear();
                 state.recent_wins.clear();
                 state.recent_conversions.clear();
                 state.recent_deaths.clear();
                 println!(
-                    "[train] V10 Easy-ramp expand: stage {old} -> {} (cleared windows; env targets reset)",
-                    state.stage
+                    "[train] V10 100-stage expand: stage {old} -> {new_stage} \
+                     (from {targets_len}-slot sidecar; cleared windows; env targets reset)"
                 );
             }
             return Ok(());
@@ -771,7 +783,7 @@ fn conversion_gate(stage: usize) -> Option<(usize, f64)> {
 }
 
 fn conversion_gate_v10(stage: usize) -> Option<(usize, f64)> {
-    let gate = ofcore::curriculum::V10_WIN_AT;
+    let gate = ofcore::curriculum::v10_win_at_for_stage(stage);
     if stage == ofcore::curriculum::V10_CLOSEOUT_STAGE {
         Some((20, gate))
     } else if stage == ofcore::curriculum::V10_BRIDGE_STAGE {
