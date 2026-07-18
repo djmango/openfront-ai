@@ -534,6 +534,20 @@ fn reconcile_resume_schedule(
                 ofcore::curriculum::V10_REWARD_PROFILE,
                 state.reward_profile
             );
+            // Expand old 15-stage V10 sidecars onto the Easy-ramp ladder so
+            // legacy stage indices keep their dense-lobby meaning.
+            if state.stage_env_targets.len() == ofcore::curriculum::V10_LEGACY_LEN {
+                let old = state.stage;
+                state.stage = old.saturating_add(ofcore::curriculum::V10_EASY_RAMP_LEN);
+                state.stage_env_targets.clear();
+                state.recent_wins.clear();
+                state.recent_conversions.clear();
+                state.recent_deaths.clear();
+                println!(
+                    "[train] V10 Easy-ramp expand: stage {old} -> {} (cleared windows; env targets reset)",
+                    state.stage
+                );
+            }
             return Ok(());
         }
         if requested == CurriculumSchedule::V83 {
@@ -698,7 +712,7 @@ fn reconcile_resume_schedule(
             state.reward_profile = Some(ofcore::curriculum::V10_REWARD_PROFILE.to_string());
             // Restart at the closeout stage so demote/death gates can climb
             // cleanly rather than inheriting a late-stage death spiral.
-            state.stage = 5;
+            state.stage = ofcore::curriculum::V10_CLOSEOUT_STAGE;
         } else if requested == CurriculumSchedule::V83 {
             state.reward_profile = Some(if want_v86_reward {
                 ofcore::curriculum::V86_REWARD_PROFILE.to_string()
@@ -758,10 +772,12 @@ fn conversion_gate(stage: usize) -> Option<(usize, f64)> {
 
 fn conversion_gate_v10(stage: usize) -> Option<(usize, f64)> {
     let gate = ofcore::curriculum::V10_WIN_AT;
-    match stage {
-        5 => Some((20, gate)),
-        6 => Some((16, gate)),
-        _ => None,
+    if stage == ofcore::curriculum::V10_CLOSEOUT_STAGE {
+        Some((20, gate))
+    } else if stage == ofcore::curriculum::V10_BRIDGE_STAGE {
+        Some((16, gate))
+    } else {
+        None
     }
 }
 
@@ -1161,12 +1177,17 @@ mod v81_state_and_gate_tests {
 
     #[test]
     fn v10_advance_requires_death_ceiling_and_demotes_on_spiral() {
+        let closeout = ofcore::curriculum::V10_CLOSEOUT_STAGE;
         let wins = VecDeque::from(vec![1.0; ofcore::curriculum::WINDOW]);
         let conversions = VecDeque::from(vec![1.0; 20]);
         let mut deaths = VecDeque::from(vec![0.6; ofcore::curriculum::WINDOW]);
-        assert!(!should_advance_v10(5, &wins, &conversions, &deaths, 0.70));
+        assert!(!should_advance_v10(
+            closeout, &wins, &conversions, &deaths, 0.70
+        ));
         deaths = VecDeque::from(vec![0.4; ofcore::curriculum::WINDOW]);
-        assert!(should_advance_v10(5, &wins, &conversions, &deaths, 0.70));
+        assert!(should_advance_v10(
+            closeout, &wins, &conversions, &deaths, 0.70
+        ));
 
         let lose = VecDeque::from(vec![0.0; ofcore::curriculum::WINDOW]);
         let slaughter = VecDeque::from(vec![1.0; ofcore::curriculum::WINDOW]);

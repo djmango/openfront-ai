@@ -773,24 +773,57 @@ fn apply_v83_bot_heavy_density(stages: &mut [Stage]) {
     }
 }
 
-/// V10 softens the mid-ladder density cliffs that triggered stage-8 slaughter
-/// under V8.3 (especially 100/12 → 120/15), while keeping bots ≫ nations.
-pub const V10_BOT_NATION_DENSITY: [(u32, u32); 15] = [
-    (30, 5),   // 0 Onion Easy — light lobby
-    (40, 5),   // 1 Onion Easy — denser bots (not a win_at-only duplicate of 0)
-    (40, 5),   // 2 Onion/Pangaea Easy — same lobby, map variety
-    (50, 6),   // 3 Pangaea/Caucasus Easy
-    (70, 9),   // 4 three-map Easy (was 80/10)
-    (50, 6),   // 5 closeout Easy
-    (70, 9),   // 6 eight-map Easy bridge (was 80/10)
-    (90, 11),  // 7 broad Easy (was 100/12)
-    (100, 12), // 8 broad Easy (was 120/15 — main cliff)
-    (110, 14), // 9 Medium — do not drop bots when difficulty rises
-    (120, 15), // 10 Medium
-    (140, 18), // 11 Medium
-    (150, 20), // 12 Hard
-    (170, 24), // 13 Hard
-    (200, 30), // 14 Impossible
+/// Length of the Easy bots-only → light-nations ramp prepended before the
+/// legacy 15-stage dense ladder (josh-freeman-style Easy/2 start).
+pub const V10_EASY_RAMP_LEN: usize = 20;
+/// Legacy dense ladder length (V8.3 closeout geometry).
+pub const V10_LEGACY_LEN: usize = 15;
+pub const V10_STAGE_COUNT: usize = V10_EASY_RAMP_LEN + V10_LEGACY_LEN;
+/// Closeout insert index after the Easy ramp (`legacy stage 5`).
+pub const V10_CLOSEOUT_STAGE: usize = V10_EASY_RAMP_LEN + 5;
+/// Eight-map bridge index after the Easy ramp (`legacy stage 6`).
+pub const V10_BRIDGE_STAGE: usize = V10_EASY_RAMP_LEN + 6;
+
+/// V10 density table: 20-stage Easy Onion ramp (2 bots → 28/4) then the legacy
+/// 15-stage softened dense ladder. Keeps bots ≫ nations once nations appear.
+pub const V10_BOT_NATION_DENSITY: [(u32, u32); V10_STAGE_COUNT] = [
+    // --- Easy ramp (Onion): bots-only, then light nations ---
+    (2, 0),    // 0  Easy/2 — josh-freeman starting point
+    (3, 0),    // 1
+    (4, 0),    // 2
+    (5, 0),    // 3
+    (6, 0),    // 4
+    (8, 0),    // 5
+    (10, 0),   // 6
+    (12, 0),   // 7
+    (14, 0),   // 8
+    (16, 0),   // 9
+    (18, 0),   // 10
+    (20, 0),   // 11
+    (22, 0),   // 12
+    (24, 0),   // 13
+    (26, 0),   // 14
+    (20, 2),   // 15 introduce nations (bots step back slightly)
+    (22, 3),   // 16
+    (24, 3),   // 17
+    (26, 4),   // 18
+    (28, 4),   // 19 handoff below legacy (30, 5)
+    // --- Legacy dense ladder (old stages 0..14) ---
+    (30, 5),   // 20 Onion Easy
+    (40, 5),   // 21 Onion Easy denser
+    (40, 5),   // 22 Onion/Pangaea Easy
+    (50, 6),   // 23 Pangaea/Caucasus Easy
+    (70, 9),   // 24 three-map Easy
+    (50, 6),   // 25 closeout Easy
+    (70, 9),   // 26 eight-map Easy bridge
+    (90, 11),  // 27 broad Easy
+    (100, 12), // 28 broad Easy
+    (110, 14), // 29 Medium
+    (120, 15), // 30 Medium
+    (140, 18), // 31 Medium
+    (150, 20), // 32 Hard
+    (170, 24), // 33 Hard
+    (200, 30), // 34 Impossible
 ];
 
 fn apply_v10_stage_params(stages: &mut [Stage]) {
@@ -802,8 +835,13 @@ fn apply_v10_stage_params(stages: &mut [Stage]) {
     }
 }
 
-/// V10 reuses V8.3 env floors (same 15-stage closeout ladder geometry).
-pub const V10_ENV_TARGETS: [usize; 15] = V83_ENV_TARGETS;
+/// V10 env floors: saturated 24-env Onion ramp, then legacy V8.3 schedule.
+pub const V10_ENV_TARGETS: [usize; V10_STAGE_COUNT] = [
+    24, 24, 24, 24, 24, 24, 24, 24, 24, 24, // 0-9 ramp
+    24, 24, 24, 24, 24, 24, 24, 24, 24, 24, // 10-19 ramp
+    24, 24, 24, 24, 24, 24, 16, 12, 10, 12, // 20-29 legacy
+    10, 8, 8, 8, 8, // 30-34 legacy
+];
 
 /// V9 envs/GPU. Early Onion bot-food maps stay saturated; later 200–350-bot
 /// broad-pool stages drop toward 8 like V8.3 as sim cost grows.
@@ -1052,6 +1090,17 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
                 // start nation-only (bots=0), and never let Nations::Default
                 // outnumber bots on World/Europe (50–72 nations).
                 if schedule == CurriculumSchedule::V10 {
+                    // Prepend Easy/2 → light-nations Onion ramp before the
+                    // dense 15-stage ladder (AlphaFront-style long ramp).
+                    let ramp = (0..V10_EASY_RAMP_LEN).map(|_| Stage {
+                        maps: &["Onion"],
+                        bots: 2,
+                        difficulty: "Easy",
+                        nations: NE(0),
+                        decision_ticks: 15,
+                        win_at: V10_WIN_AT,
+                    });
+                    stages.splice(0..0, ramp);
                     apply_v10_stage_params(&mut stages);
                 } else {
                     apply_v83_bot_heavy_density(&mut stages);
@@ -2337,8 +2386,12 @@ mod curriculum_v81_tests {
     fn v10_softens_mid_ladder_density_and_keeps_closeout() {
         let v83 = stages_for_schedule(CurriculumSchedule::V83);
         let v10 = stages_for_schedule(CurriculumSchedule::V10);
-        assert_eq!(v10.len(), 15);
-        assert_eq!(v10[5].maps, &["Onion", "Pangaea", "Caucasus"]);
+        assert_eq!(v10.len(), V10_STAGE_COUNT);
+        assert_eq!(V10_EASY_RAMP_LEN, 20);
+        assert_eq!(v10[0].bots, 2);
+        assert_eq!(v10[0].nations, Nations::Exact(0));
+        assert_eq!(v10[0].maps, &["Onion"]);
+        assert_eq!(v10[V10_CLOSEOUT_STAGE].maps, &["Onion", "Pangaea", "Caucasus"]);
         assert!(CurriculumSchedule::V10.uses_v83_closeout());
         assert_eq!(CurriculumSchedule::V10.id(), "v10");
         assert_eq!(
@@ -2356,7 +2409,7 @@ mod curriculum_v81_tests {
                 "stage {index} nations"
             );
             assert!(
-                stage.bots > nations * 5,
+                nations == 0 || stage.bots > nations * 5,
                 "stage {index}: bots {} should stay >> nations {}",
                 stage.bots,
                 nations
@@ -2366,15 +2419,29 @@ mod curriculum_v81_tests {
                 "stage {index} win_at must be the V10 gate"
             );
         }
-        // Softened cliff vs V8.3 stage 8.
-        assert!(v10[8].bots < v83[8].bots);
-        assert_eq!(v10[8].bots, 100);
-        // Medium does not drop bots below the prior Easy stage.
-        assert!(v10[9].bots >= v10[8].bots);
-        for index in 0..5 {
-            assert_eq!(v10[index].maps, v83[index].maps);
+        // Easy ramp starts at 2 bots / 0 nations and reaches the legacy handoff.
+        assert_eq!(v10[V10_EASY_RAMP_LEN - 1].bots, 28);
+        assert_eq!(v10[V10_EASY_RAMP_LEN - 1].nations, Nations::Exact(4));
+        assert_eq!(v10[V10_EASY_RAMP_LEN].bots, 30);
+        assert_eq!(v10[V10_EASY_RAMP_LEN].nations, Nations::Exact(5));
+        // Bots-only prefix before nations appear.
+        for index in 0..15 {
+            assert_eq!(
+                v10[index].nations,
+                Nations::Exact(0),
+                "stage {index} should be bots-only"
+            );
         }
-        // Stages 0 and 1 share Onion/Easy but must differ in lobby density.
+        // Softened cliff vs V8.3 stage 8 (legacy index, after ramp).
+        let legacy8 = V10_EASY_RAMP_LEN + 8;
+        assert!(v10[legacy8].bots < v83[8].bots);
+        assert_eq!(v10[legacy8].bots, 100);
+        // Medium does not drop bots below the prior Easy stage.
+        assert!(v10[legacy8 + 1].bots >= v10[legacy8].bots);
+        for index in 0..5 {
+            assert_eq!(v10[V10_EASY_RAMP_LEN + index].maps, v83[index].maps);
+        }
+        // Ramp starts Easy/2 and differs from the next step.
         assert_eq!(v10[0].maps, v10[1].maps);
         assert_eq!(v10[0].difficulty, v10[1].difficulty);
         assert!(
@@ -2382,7 +2449,7 @@ mod curriculum_v81_tests {
             "stage 1 must be a real step up from stage 0, not a duplicate"
         );
         // V10 does not inherit V8.3's declining win_at ladder.
-        assert_ne!(v10[0].win_at, v83[0].win_at);
+        assert_ne!(v10[V10_EASY_RAMP_LEN].win_at, v83[0].win_at);
         assert!(v83[14].win_at < V10_WIN_AT);
     }
 

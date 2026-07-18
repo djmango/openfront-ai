@@ -29,8 +29,10 @@ grep -q 'V10_MODE=1' "$WRAP"
 
 rg -n 'v10_curriculum|migrate_v86_to_v10|v10_survival_coef|v10_diplo_panic|v10_combat_action|v10_timeout_closeout' \
   "$ROOT/rust/oftrain/src/main.rs" "$ROOT/rust/oftrain/src/train.rs" >/dev/null
-rg -n 'V10_REWARD_PROFILE|v10_reward_active|should_demote_v10|should_advance_v10|V10_BOT_NATION_DENSITY' \
+rg -n 'V10_REWARD_PROFILE|v10_reward_active|should_demote_v10|should_advance_v10|V10_BOT_NATION_DENSITY|V10_EASY_RAMP_LEN|V10_CLOSEOUT_STAGE' \
   "$ROOT/rust/ofcore/src/curriculum.rs" "$ROOT/rust/oftrain/src/train.rs" >/dev/null
+grep -q 'V10_EASY_RAMP_LEN: usize = 20' "$ROOT/rust/ofcore/src/curriculum.rs"
+grep -q '(2, 0)' "$ROOT/rust/ofcore/src/curriculum.rs"
 rg -n 'v10_survival_reward|v10_timeout_after_closeout_penalty|v10_closeout_entry_bonus|v10_diplo_panic_penalty|v10_combat_action_bonus|uses_v83_closeout' \
   "$ROOT/rust/oftrain/src/vecenv.rs" "$ROOT/rust/ofcore/src/curriculum.rs" >/dev/null
 # Closeout shaping must not be hard-gated on curriculum stage >= 5.
