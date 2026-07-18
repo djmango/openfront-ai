@@ -36,11 +36,12 @@ pub const V9_SPARSE_LOSS: f64 = -1.0;
 pub const V10_REWARD_PROFILE: &str = "v10-anti-spiral-v1";
 /// Soft death default for V10 launches (override via `--v86-death-penalty`).
 pub const V10_DEFAULT_DEATH_PENALTY: f64 = 3.0;
-/// V10 graduation gate for the dense (post-ramp) ladder (`should_advance` uses strict `>`).
+/// Reference mid-ladder gate (Medium/Hard band). Prefer [`v10_win_at_for_stage`].
 pub const V10_WIN_AT: f64 = 0.70;
-/// Higher bar for Easy-ramp stages before legacy stage 0 — master Easy/2..light
-/// lobbies before entering the dense ladder.
+/// Easy Onion micro-ramp gate — hold mastery before maps/difficulty expand.
 pub const V10_RAMP_WIN_AT: f64 = 0.95;
+/// Terminal Impossible-stage gate after the smooth decay from [`V10_RAMP_WIN_AT`].
+pub const V10_WIN_AT_END: f64 = 0.65;
 /// Rolling death-rate ceiling required before a V10 stage advance.
 pub const V10_ADVANCE_MAX_DEATH_RATE: f64 = 0.55;
 /// Demote when window win-rate is below this and death-rate is above
@@ -776,58 +777,165 @@ fn apply_v83_bot_heavy_density(stages: &mut [Stage]) {
     }
 }
 
-/// Length of the Easy bots-only → light-nations ramp prepended before the
-/// legacy 15-stage dense ladder (josh-freeman-style Easy/2 start).
-pub const V10_EASY_RAMP_LEN: usize = 20;
-/// Legacy dense ladder length (V8.3 closeout geometry).
+/// Onion Easy micro-ramp length (stages `0 .. V10_EASY_RAMP_LEN`): bots-only,
+/// then 1→4 nations on Onion before multi-map Easy begins.
+pub const V10_EASY_RAMP_LEN: usize = 30;
+/// Historical pre-ramp V10 length (15-stage dense ladder) for sidecar expand.
 pub const V10_LEGACY_LEN: usize = 15;
-pub const V10_STAGE_COUNT: usize = V10_EASY_RAMP_LEN + V10_LEGACY_LEN;
-/// Closeout insert index after the Easy ramp (`legacy stage 5`).
-pub const V10_CLOSEOUT_STAGE: usize = V10_EASY_RAMP_LEN + 5;
-/// Eight-map bridge index after the Easy ramp (`legacy stage 6`).
-pub const V10_BRIDGE_STAGE: usize = V10_EASY_RAMP_LEN + 6;
+/// Prior 35-stage V10 length (20 Easy ramp + 15 dense) for sidecar expand.
+pub const V10_PREV35_LEN: usize = 35;
+/// Full V10 ladder: long Easy mastery → Medium → Hard → Impossible.
+pub const V10_STAGE_COUNT: usize = 100;
+/// First closeout-map stage (Onion/Pangaea/Caucasus Easy conversion gate).
+pub const V10_CLOSEOUT_STAGE: usize = 48;
+/// First eight-map Easy bridge stage (conversion gate).
+pub const V10_BRIDGE_STAGE: usize = 54;
+/// First Medium stage.
+pub const V10_MEDIUM_START: usize = 68;
+/// First Hard stage.
+pub const V10_HARD_START: usize = 82;
+/// First Impossible stage.
+pub const V10_IMPOSSIBLE_START: usize = 92;
 
-/// V10 density table: 20-stage Easy Onion ramp (2 bots → 28/4) then the legacy
-/// 15-stage softened dense ladder. Keeps bots ≫ nations once nations appear.
+/// V10 density: 30-stage Onion micro-ramp (incl. 1-nation band) then a long
+/// Easy→Impossible curve. Keeps bots ≫ nations once nations appear.
 pub const V10_BOT_NATION_DENSITY: [(u32, u32); V10_STAGE_COUNT] = [
-    // --- Easy ramp (Onion): bots-only, then light nations ---
-    (2, 0),    // 0  Easy/2 — josh-freeman starting point
-    (3, 0),    // 1
-    (4, 0),    // 2
-    (5, 0),    // 3
-    (6, 0),    // 4
-    (8, 0),    // 5
-    (10, 0),   // 6
-    (12, 0),   // 7
-    (14, 0),   // 8
-    (16, 0),   // 9
-    (18, 0),   // 10
-    (20, 0),   // 11
-    (22, 0),   // 12
-    (24, 0),   // 13
-    (26, 0),   // 14
-    (20, 2),   // 15 introduce nations (bots step back slightly)
-    (22, 3),   // 16
-    (24, 3),   // 17
-    (26, 4),   // 18
-    (28, 4),   // 19 handoff below legacy (30, 5)
-    // --- Legacy dense ladder (old stages 0..14) ---
-    (30, 5),   // 20 Onion Easy
-    (40, 5),   // 21 Onion Easy denser
-    (40, 5),   // 22 Onion/Pangaea Easy
-    (50, 6),   // 23 Pangaea/Caucasus Easy
-    (70, 9),   // 24 three-map Easy
-    (50, 6),   // 25 closeout Easy
-    (70, 9),   // 26 eight-map Easy bridge
-    (90, 11),  // 27 broad Easy
-    (100, 12), // 28 broad Easy
-    (110, 14), // 29 Medium
-    (120, 15), // 30 Medium
-    (140, 18), // 31 Medium
-    (150, 20), // 32 Hard
-    (170, 24), // 33 Hard
-    (200, 30), // 34 Impossible
+    // --- Onion Easy micro-ramp (0-29): bots-only → 1n → 2n → 3n → 4n ---
+    (2, 0),   // 0 Easy/2
+    (3, 0),   // 1
+    (4, 0),   // 2
+    (5, 0),   // 3
+    (6, 0),   // 4
+    (7, 0),   // 5
+    (8, 0),   // 6
+    (9, 0),   // 7
+    (10, 0),  // 8
+    (12, 0),  // 9
+    (14, 0),  // 10
+    (16, 0),  // 11
+    (18, 0),  // 12
+    (20, 0),  // 13
+    (22, 0),  // 14
+    (16, 1),  // 15 introduce 1 nation
+    (18, 1),  // 16
+    (20, 1),  // 17
+    (22, 1),  // 18
+    (24, 1),  // 19
+    (20, 2),  // 20
+    (22, 2),  // 21
+    (24, 2),  // 22
+    (26, 2),  // 23
+    (22, 3),  // 24
+    (24, 3),  // 25
+    (26, 3),  // 26
+    (24, 4),  // 27
+    (26, 4),  // 28
+    (28, 4),  // 29
+    // --- Easy Onion densify (30-37) ---
+    (30, 5),  // 30
+    (32, 5),  // 31
+    (34, 5),  // 32
+    (36, 5),  // 33
+    (38, 5),  // 34
+    (40, 5),  // 35
+    (42, 5),  // 36
+    (44, 5),  // 37
+    // --- Onion/Pangaea Easy (38-41) ---
+    (40, 5),  // 38
+    (44, 5),  // 39
+    (48, 6),  // 40
+    (52, 6),  // 41
+    // --- Pangaea/Caucasus Easy (42-45) ---
+    (50, 6),  // 42
+    (54, 6),  // 43
+    (58, 7),  // 44
+    (62, 7),  // 45
+    // --- three-map Easy (46-47) ---
+    (66, 8),  // 46
+    (70, 9),  // 47
+    // --- closeout Easy (48-53) ---
+    (50, 6),  // 48 CLOSEOUT
+    (54, 6),  // 49
+    (58, 7),  // 50
+    (60, 7),  // 51
+    (64, 8),  // 52
+    (68, 8),  // 53
+    // --- eight-map Easy bridge (54-57) ---
+    (70, 9),  // 54 BRIDGE
+    (76, 9),  // 55
+    (82, 10), // 56
+    (88, 10), // 57
+    // --- broad Easy (58-67) ---
+    (90, 11),  // 58
+    (94, 11),  // 59
+    (98, 12),  // 60
+    (102, 12), // 61
+    (106, 13), // 62
+    (110, 13), // 63
+    (112, 14), // 64
+    (114, 14), // 65
+    (116, 14), // 66
+    (118, 14), // 67
+    // --- Medium (68-81) ---
+    (100, 12), // 68 MEDIUM_START
+    (104, 12), // 69
+    (108, 13), // 70
+    (112, 13), // 71
+    (116, 14), // 72
+    (120, 14), // 73
+    (124, 15), // 74
+    (128, 15), // 75
+    (132, 16), // 76
+    (136, 16), // 77
+    (140, 17), // 78
+    (144, 18), // 79
+    (148, 18), // 80
+    (152, 19), // 81
+    // --- Hard (82-91) ---
+    (150, 20), // 82 HARD_START
+    (154, 20), // 83
+    (158, 21), // 84
+    (162, 21), // 85
+    (166, 22), // 86
+    (170, 22), // 87
+    (174, 23), // 88
+    (178, 24), // 89
+    (182, 24), // 90
+    (186, 25), // 91
+    // --- Impossible (92-99) ---
+    (190, 26), // 92 IMPOSSIBLE_START
+    (195, 27), // 93
+    (200, 28), // 94
+    (205, 28), // 95
+    (210, 29), // 96
+    (215, 30), // 97
+    (220, 30), // 98
+    (225, 32), // 99
 ];
+
+/// Smooth win-rate gate: hold [`V10_RAMP_WIN_AT`] on the Onion micro-ramp, then
+/// ease down to [`V10_WIN_AT_END`] by the final Impossible stage.
+pub fn v10_win_at_for_stage(index: usize) -> f64 {
+    debug_assert!(index < V10_STAGE_COUNT);
+    if index < V10_EASY_RAMP_LEN {
+        return V10_RAMP_WIN_AT;
+    }
+    let span = (V10_STAGE_COUNT - 1 - V10_EASY_RAMP_LEN) as f64;
+    let t = (index - V10_EASY_RAMP_LEN) as f64 / span;
+    let s = t * t * (3.0 - 2.0 * t);
+    V10_RAMP_WIN_AT - s * (V10_RAMP_WIN_AT - V10_WIN_AT_END)
+}
+
+/// Remap a 35-stage V10 sidecar index onto the 100-stage ladder.
+pub fn remap_v10_stage_35_to_100(old: usize) -> usize {
+    let old = old.min(V10_PREV35_LEN - 1);
+    if old < 20 {
+        (old * V10_EASY_RAMP_LEN) / 20
+    } else {
+        let legacy = old - 20;
+        V10_EASY_RAMP_LEN + (legacy * (V10_STAGE_COUNT - V10_EASY_RAMP_LEN - 1)) / 14
+    }
+}
 
 fn apply_v10_stage_params(stages: &mut [Stage]) {
     debug_assert_eq!(stages.len(), V10_BOT_NATION_DENSITY.len());
@@ -836,20 +944,62 @@ fn apply_v10_stage_params(stages: &mut [Stage]) {
     {
         stage.bots = bots;
         stage.nations = Nations::Exact(nations);
-        stage.win_at = if index < V10_EASY_RAMP_LEN {
-            V10_RAMP_WIN_AT
-        } else {
-            V10_WIN_AT
-        };
+        stage.win_at = v10_win_at_for_stage(index);
     }
 }
 
-/// V10 env floors: saturated 24-env Onion ramp, then legacy V8.3 schedule.
+/// Build the full 100-stage V10 ladder (maps/difficulty/cadence + density/gates).
+fn build_v10_stages() -> Vec<Stage> {
+    use Nations::Exact as NE;
+    const ONION: &[&str] = &["Onion"];
+    const ONION_PANGAEA: &[&str] = &["Onion", "Pangaea"];
+    const PANGAEA_CAUCASUS: &[&str] = &["Pangaea", "Caucasus"];
+    const THREE_MAP: &[&str] = &["Pangaea", "Caucasus", "BlackSea"];
+    const CLOSEOUT: &[&str] = &["Onion", "Pangaea", "Caucasus"];
+    let mut stages = Vec::with_capacity(V10_STAGE_COUNT);
+    let mut push = |maps: &'static [&'static str],
+                    difficulty: &'static str,
+                    decision_ticks: u32,
+                    count: usize| {
+        for _ in 0..count {
+            stages.push(Stage {
+                maps,
+                bots: 0,
+                difficulty,
+                nations: NE(0),
+                decision_ticks,
+                win_at: V10_RAMP_WIN_AT,
+            });
+        }
+    };
+    push(ONION, "Easy", 15, 30); // 0-29 micro-ramp
+    push(ONION, "Easy", 15, 8); // 30-37
+    push(ONION_PANGAEA, "Easy", 15, 4); // 38-41
+    push(PANGAEA_CAUCASUS, "Easy", 15, 4); // 42-45
+    push(THREE_MAP, "Easy", 10, 2); // 46-47
+    push(CLOSEOUT, "Easy", 10, 6); // 48-53
+    push(&V82_STAGE5_MAPS, "Easy", 10, 4); // 54-57 bridge
+    push(&V82_MAPS, "Easy", 10, 10); // 58-67
+    push(&V82_MAPS, "Medium", 10, 14); // 68-81
+    push(&V82_MAPS, "Hard", 10, 10); // 82-91
+    push(&V82_MAPS, "Impossible", 10, 8); // 92-99
+    debug_assert_eq!(stages.len(), V10_STAGE_COUNT);
+    apply_v10_stage_params(&mut stages);
+    stages
+}
+
+/// V10 env floors: saturated early Onion, taper as maps/bots grow.
 pub const V10_ENV_TARGETS: [usize; V10_STAGE_COUNT] = [
-    24, 24, 24, 24, 24, 24, 24, 24, 24, 24, // 0-9 ramp
-    24, 24, 24, 24, 24, 24, 24, 24, 24, 24, // 10-19 ramp
-    24, 24, 24, 24, 24, 24, 16, 12, 10, 12, // 20-29 legacy
-    10, 8, 8, 8, 8, // 30-34 legacy
+    24, 24, 24, 24, 24, 24, 24, 24, 24, 24, // 0-9
+    24, 24, 24, 24, 24, 24, 24, 24, 24, 24, // 10-19
+    24, 24, 24, 24, 24, 24, 24, 24, 24, 24, // 20-29
+    24, 24, 24, 24, 24, 24, 24, 24, 24, 24, // 30-39
+    24, 24, 24, 24, 24, 24, 20, 20, 20, 20, // 40-49
+    20, 20, 20, 20, 16, 16, 16, 16, 12, 12, // 50-59
+    12, 12, 12, 12, 12, 12, 12, 12, 10, 10, // 60-69
+    10, 10, 10, 10, 10, 10, 10, 10, 10, 10, // 70-79
+    10, 10, 8, 8, 8, 8, 8, 8, 8, 8, // 80-89
+    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, // 90-99
 ];
 
 /// V9 envs/GPU. Early Onion bot-food maps stay saturated; later 200–350-bot
@@ -1001,7 +1151,10 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
                 stage.win_at = gate;
             }
         }
-        CurriculumSchedule::V82 | CurriculumSchedule::V83 | CurriculumSchedule::V10 => {
+        CurriculumSchedule::V10 => {
+            return build_v10_stages();
+        }
+        CurriculumSchedule::V82 | CurriculumSchedule::V83 => {
             // Stages 0-4 retain the V8.1/V8.1.1 identities and gate. The
             // 30-player/eight-map Easy bridge precedes broad-pool Easy at
             // 50 and 80 players. Medium only begins after all three Easy
@@ -1082,7 +1235,7 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
                     win_at: 0.12,
                 },
             ]);
-            if schedule == CurriculumSchedule::V83 || schedule == CurriculumSchedule::V10 {
+            if schedule == CurriculumSchedule::V83 {
                 stages.insert(
                     5,
                     Stage {
@@ -1098,22 +1251,7 @@ pub fn stages_for_schedule(schedule: CurriculumSchedule) -> Vec<Stage> {
                 // small maps, ~200 bots / ~30 nations at world scale. Never
                 // start nation-only (bots=0), and never let Nations::Default
                 // outnumber bots on World/Europe (50–72 nations).
-                if schedule == CurriculumSchedule::V10 {
-                    // Prepend Easy/2 → light-nations Onion ramp before the
-                    // dense 15-stage ladder (AlphaFront-style long ramp).
-                    let ramp = (0..V10_EASY_RAMP_LEN).map(|_| Stage {
-                        maps: &["Onion"],
-                        bots: 2,
-                        difficulty: "Easy",
-                        nations: NE(0),
-                        decision_ticks: 15,
-                        win_at: V10_RAMP_WIN_AT,
-                    });
-                    stages.splice(0..0, ramp);
-                    apply_v10_stage_params(&mut stages);
-                } else {
-                    apply_v83_bot_heavy_density(&mut stages);
-                }
+                apply_v83_bot_heavy_density(&mut stages);
             }
         }
         CurriculumSchedule::V9 => {
@@ -2392,21 +2530,24 @@ mod curriculum_v81_tests {
     }
 
     #[test]
-    fn v10_softens_mid_ladder_density_and_keeps_closeout() {
-        let v83 = stages_for_schedule(CurriculumSchedule::V83);
+    fn v10_hundred_stage_curve_has_one_nation_band_and_smooth_gates() {
         let v10 = stages_for_schedule(CurriculumSchedule::V10);
         assert_eq!(v10.len(), V10_STAGE_COUNT);
-        assert_eq!(V10_EASY_RAMP_LEN, 20);
+        assert_eq!(V10_EASY_RAMP_LEN, 30);
+        assert_eq!(V10_CLOSEOUT_STAGE, 48);
+        assert_eq!(V10_BRIDGE_STAGE, 54);
+        assert_eq!(V10_MEDIUM_START, 68);
+        assert_eq!(V10_HARD_START, 82);
+        assert_eq!(V10_IMPOSSIBLE_START, 92);
         assert_eq!(v10[0].bots, 2);
         assert_eq!(v10[0].nations, Nations::Exact(0));
         assert_eq!(v10[0].maps, &["Onion"]);
         assert_eq!(v10[V10_CLOSEOUT_STAGE].maps, &["Onion", "Pangaea", "Caucasus"]);
+        assert_eq!(v10[V10_BRIDGE_STAGE].maps, &V82_STAGE5_MAPS);
+        assert_eq!(v10[V10_MEDIUM_START].difficulty, "Medium");
+        assert_eq!(v10[V10_HARD_START].difficulty, "Hard");
+        assert_eq!(v10[V10_IMPOSSIBLE_START].difficulty, "Impossible");
         assert!(CurriculumSchedule::V10.uses_v83_closeout());
-        assert_eq!(CurriculumSchedule::V10.id(), "v10");
-        assert_eq!(
-            CurriculumSchedule::from_id("v10"),
-            Some(CurriculumSchedule::V10)
-        );
         assert_eq!(V10_ENV_TARGETS.len(), v10.len());
         for (index, (stage, &(bots, nations))) in
             v10.iter().zip(V10_BOT_NATION_DENSITY.iter()).enumerate()
@@ -2423,50 +2564,41 @@ mod curriculum_v81_tests {
                 stage.bots,
                 nations
             );
-            let expect_gate = if index < V10_EASY_RAMP_LEN {
-                V10_RAMP_WIN_AT
-            } else {
-                V10_WIN_AT
-            };
-            assert_eq!(
-                stage.win_at, expect_gate,
-                "stage {index} win_at must be the V10 gate for its band"
+            let expect = v10_win_at_for_stage(index);
+            assert!(
+                (stage.win_at - expect).abs() < 1e-9,
+                "stage {index} win_at {} != {}",
+                stage.win_at,
+                expect
             );
         }
-        // Easy ramp starts at 2 bots / 0 nations and reaches the legacy handoff.
-        assert_eq!(v10[V10_EASY_RAMP_LEN - 1].bots, 28);
-        assert_eq!(v10[V10_EASY_RAMP_LEN - 1].nations, Nations::Exact(4));
-        assert_eq!(v10[V10_EASY_RAMP_LEN - 1].win_at, V10_RAMP_WIN_AT);
-        assert_eq!(v10[V10_EASY_RAMP_LEN].bots, 30);
-        assert_eq!(v10[V10_EASY_RAMP_LEN].nations, Nations::Exact(5));
-        assert_eq!(v10[V10_EASY_RAMP_LEN].win_at, V10_WIN_AT);
-        // Bots-only prefix before nations appear.
+        // Bots-only prefix, then an explicit 1-nation band (no 0→2 jump).
         for index in 0..15 {
-            assert_eq!(
-                v10[index].nations,
-                Nations::Exact(0),
-                "stage {index} should be bots-only"
+            assert_eq!(v10[index].nations, Nations::Exact(0), "stage {index}");
+        }
+        for index in 15..20 {
+            assert_eq!(v10[index].nations, Nations::Exact(1), "stage {index}");
+        }
+        assert_eq!(v10[20].nations, Nations::Exact(2));
+        // Hold 95% through the Onion micro-ramp; decay afterward.
+        assert_eq!(v10[0].win_at, V10_RAMP_WIN_AT);
+        assert_eq!(v10[V10_EASY_RAMP_LEN - 1].win_at, V10_RAMP_WIN_AT);
+        assert!(v10[V10_CLOSEOUT_STAGE].win_at < V10_RAMP_WIN_AT);
+        assert!(v10[V10_CLOSEOUT_STAGE].win_at > V10_WIN_AT);
+        assert!((v10[V10_STAGE_COUNT - 1].win_at - V10_WIN_AT_END).abs() < 1e-9);
+        // Monotone non-increasing gates after the ramp.
+        for index in V10_EASY_RAMP_LEN..(V10_STAGE_COUNT - 1) {
+            assert!(
+                v10[index + 1].win_at <= v10[index].win_at + 1e-12,
+                "win_at rose at stage {}",
+                index + 1
             );
         }
-        // Softened cliff vs V8.3 stage 8 (legacy index, after ramp).
-        let legacy8 = V10_EASY_RAMP_LEN + 8;
-        assert!(v10[legacy8].bots < v83[8].bots);
-        assert_eq!(v10[legacy8].bots, 100);
-        // Medium does not drop bots below the prior Easy stage.
-        assert!(v10[legacy8 + 1].bots >= v10[legacy8].bots);
-        for index in 0..5 {
-            assert_eq!(v10[V10_EASY_RAMP_LEN + index].maps, v83[index].maps);
-        }
-        // Ramp starts Easy/2 and differs from the next step.
-        assert_eq!(v10[0].maps, v10[1].maps);
-        assert_eq!(v10[0].difficulty, v10[1].difficulty);
-        assert!(
-            v10[1].bots > v10[0].bots,
-            "stage 1 must be a real step up from stage 0, not a duplicate"
-        );
-        // V10 does not inherit V8.3's declining win_at ladder.
-        assert_ne!(v10[V10_EASY_RAMP_LEN].win_at, v83[0].win_at);
-        assert!(v83[14].win_at < V10_WIN_AT);
+        assert!(v10[1].bots > v10[0].bots);
+        assert_eq!(remap_v10_stage_35_to_100(0), 0);
+        assert_eq!(remap_v10_stage_35_to_100(19), 28);
+        assert_eq!(remap_v10_stage_35_to_100(20), 30);
+        assert_eq!(remap_v10_stage_35_to_100(34), 99);
     }
 
     #[test]
