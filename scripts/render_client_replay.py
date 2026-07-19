@@ -233,10 +233,11 @@ def client_worktree(commit: str):
 def load_episode_meta(record: Path) -> dict:
     """Outcome + end tick from oftrain --watch debug sidecar (fallback: record info)."""
     sidecar = record.with_suffix(".debug.json")
-    meta = {"outcome": "death", "end_tick": None}
+    meta = {"outcome": "timeout", "end_tick": None}
     if sidecar.exists():
         data = json.loads(sidecar.read_text())
-        meta["outcome"] = data.get("outcome", "death")
+        # Prefer explicit sidecar outcome; never invent "death" for truncations.
+        meta["outcome"] = data.get("outcome", "timeout")
         meta["end_tick"] = data.get("end_tick")
     if meta["end_tick"] is None:
         info = json.loads(record.read_text()).get("info", {})
