@@ -74,6 +74,15 @@ def port_open(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+def free_port(preferred: int | None = None) -> int:
+    """Return `preferred` when free, otherwise an ephemeral localhost port."""
+    if preferred is not None and not port_open(preferred):
+        return preferred
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
 def wait_http(url: str, timeout: float) -> None:
     t0 = time.time()
     while time.time() - t0 < timeout:
@@ -269,7 +278,30 @@ def render_record(
     elif overlay:
         print(f"no {sidecar.name} - rendering without the model overlay")
 
+    if reuse_services and port_open(api_port):
+        try:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{api_port}/game/{game_id}", timeout=2
+            )
+        except Exception:
+            print(
+                f"reuse-services archive :{api_port} missing game {game_id}; "
+                "falling back to self-contained SoftGL"
+            )
+            reuse_services = False
+
     procs: list[subprocess.Popen] = []
+    # Self-contained SoftGL must not collide with a leftover showcase archive
+    # or vite on the default ports — that looks like a replay-button timeout
+    # because Chromium talks to the wrong (empty) archive.
+    if not reuse_services:
+        if port_open(api_port):
+            api_port = free_port()
+            print(f"archive port busy; self-contained SoftGL using :{api_port}")
+        if port_open(client_port):
+            client_port = free_port()
+            print(f"client port busy; self-contained SoftGL using :{client_port}")
+
     client_ctx = (
         contextlib.nullcontext(OPENFRONT)
         if reuse_services
@@ -309,9 +341,22 @@ def render_record(
                     stderr=subprocess.DEVNULL,
                 ))
             if not reuse_services or not port_open(client_port):
-                print("starting vite client (first boot takes ~15s)...")
+                print(
+                    f"starting vite client on :{client_port} "
+                    "(first boot takes ~15s)..."
+                )
                 procs.append(subprocess.Popen(
-                    ["npm", "run", "start:client", "--", "--host", "127.0.0.1"],
+                    [
+                        "npm",
+                        "run",
+                        "start:client",
+                        "--",
+                        "--host",
+                        "127.0.0.1",
+                        "--port",
+                        str(client_port),
+                        "--strictPort",
+                    ],
                     cwd=client_dir,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 ))

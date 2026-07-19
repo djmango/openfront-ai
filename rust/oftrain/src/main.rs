@@ -1350,9 +1350,11 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or(args.num_envs);
     tch::manual_seed(0);
     let device = parse_device(&args.device);
+    // Training/benchmark actors stay CUDA-only. `--watch` may run recurrent
+    // inference on CPU so showcase clips work on busy training pods.
     anyhow::ensure!(
-        !args.recurrent_policy || matches!(device, Device::Cuda(_)),
-        "--recurrent-policy requires a CUDA --device"
+        !args.recurrent_policy || matches!(device, Device::Cuda(_)) || args.watch,
+        "--recurrent-policy requires a CUDA --device (except --watch)"
     );
     if args.recurrent_policy {
         anyhow::ensure!(
@@ -1441,6 +1443,7 @@ fn main() -> anyhow::Result<()> {
             blocks: args.blocks,
             curriculum_schedule,
             reward_config,
+            recurrent_policy: args.recurrent_policy,
         });
     }
 
