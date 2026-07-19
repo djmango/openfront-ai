@@ -17,7 +17,7 @@ graphs simple and shape-flexible.
 Usage:
   uv run python scripts/export_onnx.py \\
       --ae weights/ae/ae_v31_d8c32.encoder.safetensors \\
-      --policy rust/checkpoints/ppo_v81/latest.safetensors \\
+      --policy rust/checkpoints/ppo_v10/latest.safetensors \\
       --out openfront/resources/webbot/models
 """
 
@@ -284,7 +284,7 @@ def main() -> None:
         help="ofae/oftrain encoder .safetensors",
     )
     ap.add_argument(
-        "--policy", default="rust/checkpoints/ppo_v81/latest.safetensors"
+        "--policy", default="rust/checkpoints/ppo_v10/latest.safetensors"
     )
     ap.add_argument("--out", default="openfront/resources/webbot/models")
     ap.add_argument("--skip-verify", action="store_true")

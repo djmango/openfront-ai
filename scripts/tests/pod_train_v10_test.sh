@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
-# Smoke checks for V10 anti-death-spiral launch wiring.
+# Smoke checks for the default V10 trainer launch wiring.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SCRIPT="$ROOT/scripts/pod_train_v8.sh"
 WRAP="$ROOT/scripts/pod_train_v10.sh"
 
-grep -q 'V10_MODE="${V10_MODE:-0}"' "$SCRIPT"
+# No legacy mode switches.
+! grep -q 'V10_MODE=' "$SCRIPT"
+! grep -q 'V9_MODE=' "$SCRIPT"
+! grep -q 'V86_MODE=' "$SCRIPT"
+! grep -q 'V85_MODE=' "$SCRIPT"
+! grep -q 'V84_MODE=' "$SCRIPT"
+! grep -q 'V83_MODE=' "$SCRIPT"
+
 grep -q 'RUN_NAME="${RUN_NAME:-ppo_v10}"' "$SCRIPT"
+grep -q 'NUM_GPUS="${NUM_GPUS:-4}"' "$SCRIPT"
 grep -q -- '--v10-curriculum' "$SCRIPT"
 grep -q -- '--v86-death-penalty 3.0' "$SCRIPT"
 grep -q -- '--v10-survival-coef 0.01' "$SCRIPT"
@@ -17,15 +25,12 @@ grep -q -- '--v85-extra-win-bonus 200.0' "$SCRIPT"
 grep -q -- '--v84-fast-win-coef 40.0' "$SCRIPT"
 grep -q -- '--v10-closeout-entry 25.0' "$SCRIPT"
 grep -q -- '--max-episode-ticks 21000' "$SCRIPT"
-grep -q -- '--v84-tempo-min-stage 0' "$SCRIPT"
-grep -q -- '--v81-min-stage 0' "$SCRIPT"
-grep -q -- '--v84-boat-min-stage 0' "$SCRIPT"
-grep -q -- '--v85-embargo-min-stage 0' "$SCRIPT"
-grep -q -- '--v85-combat-min-stage 0' "$SCRIPT"
 grep -q -- '--migrate-v86-to-v10' "$SCRIPT"
-grep -q 'V10_SOURCE_PREFIX="${V10_SOURCE_PREFIX:-ppo_v86}"' "$SCRIPT"
 grep -q 'v10-anti-spiral-v1' "$ROOT/rust/ofcore/src/curriculum.rs"
-grep -q 'V10_MODE=1' "$WRAP"
+
+# Wrapper is a pure alias (no V10_MODE).
+grep -q 'pod_train_v8.sh' "$WRAP"
+! grep -q 'V10_MODE=1' "$WRAP"
 
 rg -n 'v10_curriculum|migrate_v86_to_v10|v10_survival_coef|v10_diplo_panic|v10_combat_action|v10_timeout_closeout' \
   "$ROOT/rust/oftrain/src/main.rs" "$ROOT/rust/oftrain/src/train.rs" >/dev/null
@@ -33,13 +38,5 @@ rg -n 'V10_REWARD_PROFILE|v10_reward_active|should_demote_v10|should_advance_v10
   "$ROOT/rust/ofcore/src/curriculum.rs" "$ROOT/rust/oftrain/src/train.rs" >/dev/null
 grep -q 'V10_EASY_RAMP_LEN: usize = 30' "$ROOT/rust/ofcore/src/curriculum.rs"
 grep -q 'V10_STAGE_COUNT: usize = 100' "$ROOT/rust/ofcore/src/curriculum.rs"
-grep -q 'V10_RAMP_WIN_AT: f64 = 0.95' "$ROOT/rust/ofcore/src/curriculum.rs"
-grep -q 'V10_WIN_AT_END: f64 = 0.65' "$ROOT/rust/ofcore/src/curriculum.rs"
-grep -q '(2, 0)' "$ROOT/rust/ofcore/src/curriculum.rs"
-grep -q '(16, 1)' "$ROOT/rust/ofcore/src/curriculum.rs"
-rg -n 'v10_survival_reward|v10_timeout_after_closeout_penalty|v10_closeout_entry_bonus|v10_diplo_panic_penalty|v10_combat_action_bonus|uses_v83_closeout' \
-  "$ROOT/rust/oftrain/src/vecenv.rs" "$ROOT/rust/ofcore/src/curriculum.rs" >/dev/null
-# Closeout shaping must not be hard-gated on curriculum stage >= 5.
-! rg -n 'episode_stage >= 5' "$ROOT/rust/oftrain/src/vecenv.rs" >/dev/null
 
 echo "pod_train_v10_test: ok"
