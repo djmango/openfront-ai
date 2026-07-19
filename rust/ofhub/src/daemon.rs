@@ -1,6 +1,13 @@
-//! `ofshowcase daemon` - pull policy, run watch, render clips (port of eval_daemon.py).
+//! `ofshowcase daemon` / `ofshowcase clip` - pull policy, run watch, render clips
+//! (port of eval_daemon.py).
+//!
+//! Clip pixels still come from Playwright + the real OpenFront client
+//! (`scripts/render_client_replay.py`); Rust owns the reliable lifecycle:
+//! SoftGL force, reuse-services with self-contained fallback, and hard-fail
+//! when a MODEL-overlay WebM cannot be produced.
 
 use std::fs;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -146,6 +153,19 @@ fn run_watch(
     }
     let device = env_or("SHOWCASE_DEVICE", "cuda");
     let max_steps = env_or("SHOWCASE_MAX_STEPS", "600");
+    let coarse = env_or(
+        "SHOWCASE_COARSE_CKPT",
+        "weights/ae/ae_v31_d16c32.encoder.safetensors",
+    );
+    let coarse_path = {
+        let p = PathBuf::from(&coarse);
+        if p.is_absolute() {
+            p
+        } else {
+            repo_root().join(p)
+        }
+    };
+    let use_cuda = device.starts_with("cuda");
     let mut args: Vec<String> = vec![
         "--watch".into(),
         "--policy".into(),
@@ -173,14 +193,42 @@ fn run_watch(
         // MODEL overlay reads <record>.debug.json via /archive/debug/<id>.
         "--debug".into(),
         "true".into(),
+        // Match the live training recipe so VarStore load is strict.
+        "--foveate".into(),
     ];
+    // AMP is CUDA-oriented; skip it for CPU watch (busy-pod clip default).
+    if use_cuda {
+        args.push("--amp".into());
+    }
+    if coarse_path.is_file() {
+        args.push("--coarse-ckpt".into());
+        args.push(coarse_path.to_string_lossy().into_owned());
+    }
     // ppo_v10 (and any future v10* run) needs the V10 schedule + a reward knob
     // so `--stage` indices past the legacy 11-stage ladder stay in bounds.
     let run_hint = std::env::var("RUN_NAME").unwrap_or_default();
-    if run_hint.contains("v10")
-        || env_or("SHOWCASE_V10", "0") == "1"
-        || stage >= 15
-    {
+    let v10 = run_hint.contains("v10")
+        || env_or("SHOWCASE_V10", "1") == "1"
+        || stage >= 15;
+    // Recurrent is required for V8.2+/V10 checkpoints; older runs stay feed-forward.
+    let recurrent = match env_or("SHOWCASE_RECURRENT", "auto").as_str() {
+        "1" | "true" | "yes" => true,
+        "0" | "false" | "no" => false,
+        _ => {
+            v10
+                || run_hint.contains("v9")
+                || run_hint.contains("v82")
+                || run_hint.contains("v83")
+                || run_hint.contains("v84")
+                || run_hint.contains("v85")
+                || run_hint.contains("v86")
+        }
+    };
+    if recurrent {
+        args.push("--persistent-actors".into());
+        args.push("--recurrent-policy".into());
+    }
+    if v10 {
         args.extend([
             "--v10-curriculum".into(),
             "--v10-survival-coef".into(),
@@ -204,11 +252,29 @@ fn run_watch(
     Ok(())
 }
 
-fn render_client_clip(record: &Path, out: &Path) -> Result<()> {
+fn port_open(host: &str, port: u16) -> bool {
+    let Ok(mut addrs) = (host, port).to_socket_addrs() else {
+        return false;
+    };
+    let Some(addr) = addrs.next() else {
+        return false;
+    };
+    TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
+}
+
+fn showcase_services_ready() -> bool {
+    // archive API + vite client (docker entrypoint / local stack).
+    port_open("127.0.0.1", 8987) && port_open("127.0.0.1", 9000)
+}
+
+fn render_client_clip_once(record: &Path, out: &Path, reuse_services: bool) -> Result<()> {
     let py = std::env::var("PYTHON").unwrap_or_else(|_| {
-        // Prefer the image venv so Playwright is always importable.
+        // Prefer a venv with Playwright (Docker image, then repo `.venv`).
+        let repo_venv = repo_root().join(".venv/bin/python");
         if Path::new("/app/.venv/bin/python").is_file() {
             "/app/.venv/bin/python".into()
+        } else if repo_venv.is_file() {
+            repo_venv.to_string_lossy().into_owned()
         } else {
             "python3".into()
         }
@@ -222,32 +288,66 @@ fn render_client_clip(record: &Path, out: &Path) -> Result<()> {
     if let Some(parent) = out.parent() {
         fs::create_dir_all(parent)?;
     }
+    let mut args = vec![
+        "scripts/render_client_replay.py".to_string(),
+        "--record".into(),
+        record.to_string_lossy().into_owned(),
+        "--out".into(),
+        out.to_string_lossy().into_owned(),
+        "--trim-gameplay".into(),
+        "--max-duration".into(),
+        max_sec,
+        "--width".into(),
+        width,
+        "--height".into(),
+        height,
+        "--device-scale-factor".into(),
+        dpr,
+        "--crf".into(),
+        crf,
+    ];
+    if reuse_services {
+        args.push("--reuse-services".into());
+    }
     let status = Command::new(py)
-        .arg("scripts/render_client_replay.py")
-        .args([
-            "--record",
-            &record.to_string_lossy(),
-            "--out",
-            &out.to_string_lossy(),
-            "--reuse-services",
-            "--trim-gameplay",
-            "--max-duration",
-            &max_sec,
-            "--width",
-            &width,
-            "--height",
-            &height,
-            "--device-scale-factor",
-            &dpr,
-            "--crf",
-            &crf,
-        ])
+        .args(&args)
+        // SoftGL is the supported headless path; GPU WebGL still falls back
+        // in Chromium and then hits the unpatched WebGL gate without this.
+        .env("OF_FORCE_SWIFTSHADER", "1")
         .current_dir(repo_root())
         .status()?;
     if !status.success() {
-        bail!("render_client_replay.py failed with {status}");
+        bail!(
+            "render_client_replay.py failed with {status} (reuse_services={reuse_services})"
+        );
+    }
+    if !out.is_file() {
+        bail!(
+            "render_client_replay.py exited 0 but {} missing",
+            out.display()
+        );
     }
     Ok(())
+}
+
+/// Render a MODEL-overlay WebM. Prefer live archive+vite when healthy, then
+/// fall back to a self-contained patched SoftGL worktree (reliable on pods).
+fn render_client_clip(record: &Path, out: &Path) -> Result<()> {
+    let prefer_reuse = env_or("CLIP_REUSE_SERVICES", "auto");
+    let try_reuse = match prefer_reuse.as_str() {
+        "1" | "true" | "yes" => true,
+        "0" | "false" | "no" => false,
+        _ => showcase_services_ready(),
+    };
+    if try_reuse {
+        match render_client_clip_once(record, out, true) {
+            Ok(()) => return Ok(()),
+            Err(e) => log(&format!(
+                "reuse-services render failed ({e}); retrying self-contained SoftGL worktree"
+            )),
+        }
+    }
+    render_client_clip_once(record, out, false)
 }
 
 fn generate_clip(
@@ -309,13 +409,19 @@ fn generate_clip(
             "clip {map_name}: render client video -> {}",
             clip.display()
         ));
-        // Watch works from the GameRecord alone; don't fail the map if
-        // Playwright times out (common while Vite is still warming).
-        if let Err(e) = render_client_clip(&record, &clip) {
-            log(&format!("clip {map_name}: render failed ({e}); keeping record for Watch"));
-        }
+        // Record stays on disk for Watch even if this fails; hard-fail the
+        // map so showcase never marks "ready" without a MODEL-overlay WebM.
+        render_client_clip(&record, &clip).with_context(|| {
+            format!(
+                "clip {map_name}: MODEL-overlay render failed (record kept at {})",
+                record.display()
+            )
+        })?;
     } else {
         log(&format!("clip {map_name}: reusing {}", clip.display()));
+    }
+    if !clip.is_file() {
+        bail!("clip {map_name}: expected WebM at {}", clip.display());
     }
 
     let meta: Value = serde_json::from_str(&fs::read_to_string(&record)?)?;
@@ -329,7 +435,7 @@ fn generate_clip(
         .and_then(|v| v.as_str())
         .unwrap_or(map_name)
         .to_string();
-    let mut info = json!({
+    Ok(json!({
         "seed": seed,
         "map_key": map_key,
         "artifact_tag": artifact_tag,
@@ -337,12 +443,9 @@ fn generate_clip(
         "map": map,
         "record": record.display().to_string(),
         "clip": clip.display().to_string(),
+        "url": format!("/archive/clips/{base}.webm"),
         "generated_at": utc_now(),
-    });
-    if clip.is_file() {
-        info["url"] = json!(format!("/archive/clips/{base}.webm"));
-    }
-    Ok(info)
+    }))
 }
 
 fn write_showcase_state(
@@ -496,6 +599,157 @@ fn resolve_ae_path() -> PathBuf {
     } else {
         repo_root().join(p)
     }
+}
+
+/// One-shot MODEL-overlay clip generation (no forever loop).
+#[derive(Debug, Clone)]
+pub struct ClipConfig {
+    pub run_name: String,
+    pub stage: i64,
+    pub watch_stage: i64,
+    pub nations: String,
+    pub bots: i64,
+    pub difficulty: String,
+    /// Map keys (`Onion`, `Pangaea`, …). Empty ⇒ full shuffled curriculum pool.
+    pub maps: Vec<String>,
+    /// Optional local policy `.safetensors` (skips HF pull).
+    pub policy: Option<PathBuf>,
+    /// Force re-watch + re-render even when artifacts exist.
+    pub force: bool,
+}
+
+impl Default for ClipConfig {
+    fn default() -> Self {
+        let stage: i64 = env_or("STAGE", "27").parse().unwrap_or(27);
+        Self {
+            run_name: env_or("RUN_NAME", "ppo_v10"),
+            stage,
+            watch_stage: env_or("SHOWCASE_WATCH_STAGE", &stage.to_string())
+                .parse()
+                .unwrap_or(stage),
+            nations: env_or("SHOWCASE_NATIONS", "4"),
+            bots: env_or("SHOWCASE_BOTS", "24").parse().unwrap_or(24),
+            difficulty: env_or("SHOWCASE_DIFFICULTY", "Easy"),
+            maps: Vec::new(),
+            policy: None,
+            force: false,
+        }
+    }
+}
+
+/// Pull (or use) a policy, run `oftrain --watch` + SoftGL client render for
+/// each map, write `state.json`, and exit. Hard-fails if any map cannot produce
+/// a MODEL-overlay WebM.
+pub async fn run_clip(cfg: ClipConfig) -> Result<Value> {
+    fs::create_dir_all(data_dir())?;
+    fs::create_dir_all(records_dir())?;
+    fs::create_dir_all(clips_dir())?;
+
+    // One-shot clips often run on busy training hosts. Prefer CPU unless the
+    // caller explicitly pins a GPU via SHOWCASE_DEVICE (daemon keeps cuda).
+    if std::env::var_os("SHOWCASE_DEVICE").is_none() {
+        std::env::set_var("SHOWCASE_DEVICE", "cpu");
+        log("clip: SHOWCASE_DEVICE defaulting to cpu (set explicitly to use GPU)");
+    }
+    if std::env::var_os("OF_FORCE_SWIFTSHADER").is_none() {
+        std::env::set_var("OF_FORCE_SWIFTSHADER", "1");
+    }
+
+    let ae = resolve_ae_path();
+    let client = hf::client_with_optional_token()?;
+    if !ae.exists() {
+        let name = ae
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("ae_v31_d8c32.encoder.safetensors");
+        log(&format!("fetching AE encoder {name}"));
+        let _ = hf::ensure_ae_encoder(&client, name, &ae).await;
+    }
+
+    let policy = if let Some(p) = cfg.policy {
+        if !p.is_file() {
+            bail!("policy not found: {}", p.display());
+        }
+        p
+    } else {
+        hf::ensure_policy(&client, &cfg.run_name).await?
+    };
+
+    let maps = if cfg.maps.is_empty() {
+        showcase_maps()
+    } else {
+        cfg.maps
+    };
+    if maps.is_empty() {
+        bail!("no maps requested");
+    }
+
+    let artifact_tag = policy_artifact_tag(&policy);
+    log(&format!(
+        "clip once: run={} stage={} watch_stage={} bots={} nations={} maps={:?} force={} softgl=1",
+        cfg.run_name,
+        cfg.stage,
+        cfg.watch_stage,
+        cfg.bots,
+        cfg.nations,
+        maps,
+        cfg.force
+    ));
+
+    let mut clip_infos = Vec::new();
+    for map_name in &maps {
+        if cfg.force {
+            let map_key = map_seed(map_name);
+            let base = format!(
+                "{}_s{}_{}_{}",
+                cfg.run_name, cfg.watch_stage, artifact_tag, map_key
+            );
+            let _ = fs::remove_file(records_dir().join(format!("{base}.json")));
+            let _ = fs::remove_file(records_dir().join(format!("{base}.debug.json")));
+            let _ = fs::remove_file(clips_dir().join(format!("{base}.webm")));
+        }
+        let info = generate_clip(
+            &policy,
+            &ae,
+            map_name,
+            &cfg.run_name,
+            cfg.watch_stage,
+            cfg.stage,
+            &cfg.nations,
+            cfg.bots,
+            &cfg.difficulty,
+            &artifact_tag,
+        )?;
+        clip_infos.push(info);
+        let state =
+            write_showcase_state(&clip_infos, &policy, &cfg.run_name, cfg.stage, cfg.watch_stage)?;
+        let _ = write_json(&state_path(), &state);
+        log(&format!(
+            "clip ready: {} -> {}",
+            map_name,
+            clip_infos
+                .last()
+                .and_then(|c| c.get("url"))
+                .and_then(|u| u.as_str())
+                .unwrap_or("?")
+        ));
+    }
+
+    let mut state =
+        write_showcase_state(&clip_infos, &policy, &cfg.run_name, cfg.stage, cfg.watch_stage)?;
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert("status".into(), json!("ready"));
+        obj.insert("status_message".into(), Value::Null);
+    }
+    write_json(&state_path(), &state)?;
+    if let Ok(rev) = hf::policy_revision(&client, &cfg.run_name).await {
+        let _ = fs::write(revision_path(), rev);
+    }
+    log(&format!(
+        "clip once complete: {} WebM(s) with MODEL overlay",
+        clip_infos.len()
+    ));
+    Ok(state)
 }
 
 pub async fn run_daemon() -> Result<()> {
