@@ -572,6 +572,11 @@ struct Args {
     #[arg(long, default_value_t = 200)]
     ckpt_every: u64,
 
+    /// Local retention for numbered `policy_update*` files. HF sync keeps the
+    /// full history; this only caps on-disk growth. `0` disables pruning.
+    #[arg(long, default_value_t = 48)]
+    ckpt_keep_last: usize,
+
     #[arg(long, default_value = "checkpoints")]
     ckpt_dir: String,
 
@@ -1530,6 +1535,7 @@ fn main() -> anyhow::Result<()> {
         eval_device,
         ckpt_every: args.ckpt_every,
         ckpt_dir: args.ckpt_dir,
+        ckpt_keep_last: args.ckpt_keep_last,
         init: args.init,
         init_v81_recurrent: args.init_v81_recurrent,
         resume: args.resume,

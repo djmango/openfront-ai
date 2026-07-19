@@ -124,16 +124,25 @@ fi
 # native's ~10x tick speed for the majority. 0 (default) = pure native,
 # same as before this option existed - no extra bootstrap cost in that case.
 NODE_FRACTION="${NODE_FRACTION:-0}"
+# Local numbered-checkpoint retention. HF sync keeps the full historical
+# backlog; this only caps on-pod disk growth for policy_update*.
+CKPT_KEEP_LAST="${CKPT_KEEP_LAST:-48}"
+# Abort/reclaim before the overlay fills enough to crash training.
+DISK_WARN_PCT="${DISK_WARN_PCT:-85}"
+DISK_CRIT_PCT="${DISK_CRIT_PCT:-92}"
+# Comma-separated inactive run dirs under rust/checkpoints/ that may be
+# deleted wholesale when disk is critical (never deletes $RUN_NAME).
+STALE_CKPT_RUNS="${STALE_CKPT_RUNS:-ppo_v8,ppo_v8_fast_native,ppo_v81,ppo_v82,ppo_v83,ppo_v84,ppo_v85,ppo_v86,ppo_v9}"
 # Validated Jul-13 one-GPU recipe: actor/learner CUDA state remains on
 # persistent owner threads, rollout payloads cross threads as compact host
 # data, and two env groups overlap stepping with actor inference. Keep
 # fp16-rollout opt-in until it receives the same extended CUDA soak.
 if [ "$V10_MODE" = "1" ] || [ "$V9_MODE" = "1" ] || [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ]; then
-  EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --fp16-rollout --persistent-actors --work-conserving-actors --pipeline-groups=true --recurrent-policy --bptt-chunk-len $BPTT_CHUNK_LEN --ckpt-every 5 --eval-every 0 --log-every 1 --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
+  EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --fp16-rollout --persistent-actors --work-conserving-actors --pipeline-groups=true --recurrent-policy --bptt-chunk-len $BPTT_CHUNK_LEN --ckpt-every 5 --ckpt-keep-last $CKPT_KEEP_LAST --eval-every 0 --log-every 1 --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
 elif [ "$V83_MODE" = "1" ]; then
-  EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --fp16-rollout --persistent-actors --work-conserving-actors --pipeline-groups=true --recurrent-policy --bptt-chunk-len 16 --ckpt-every 5 --eval-every 0 --log-every 1 --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
+  EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --fp16-rollout --persistent-actors --work-conserving-actors --pipeline-groups=true --recurrent-policy --bptt-chunk-len 16 --ckpt-every 5 --ckpt-keep-last $CKPT_KEEP_LAST --eval-every 0 --log-every 1 --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
 else
-  EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --persistent-actors --pipeline-groups=true --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
+  EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --persistent-actors --pipeline-groups=true --ckpt-keep-last $CKPT_KEEP_LAST --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
 fi
 V81_ARGS=""
 if [ "$V10_MODE" = "1" ]; then
@@ -350,6 +359,74 @@ OFHF="$REPO_DIR/rust/target/release/ofhf"
 
 mkdir -p "$CKPT_DIR"
 
+# Cap local numbered checkpoints + reclaim stale inactive runs when the
+# overlay is near full. HF already retains the full policy_update* backlog.
+disk_used_pct() {
+  df -P "$1" 2>/dev/null | awk 'NR==2 { gsub(/%/, "", $5); print $5; exit }'
+}
+
+prune_local_numbered_ckpts() {
+  local dir="$1" keep="$2"
+  [ -d "$dir" ] || return 0
+  [ "$keep" -gt 0 ] 2>/dev/null || return 0
+  local -a files=()
+  while IFS= read -r f; do
+    [ -n "$f" ] && files+=("$f")
+  done < <(ls -1 "$dir"/policy_update*.safetensors 2>/dev/null | sort -V)
+  local n=${#files[@]}
+  if [ "$n" -le "$keep" ]; then
+    return 0
+  fi
+  local drop=$((n - keep))
+  local i
+  for ((i = 0; i < drop; i++)); do
+    local stem="${files[$i]%.safetensors}"
+    rm -f "${files[$i]}" "${stem}.state.json"
+    echo "[disk] pruned local $(basename "${files[$i]}")"
+  done
+}
+
+reclaim_stale_ckpt_runs() {
+  local root="$REPO_DIR/rust/checkpoints"
+  [ -d "$root" ] || return 0
+  local IFS=','
+  local run
+  for run in $STALE_CKPT_RUNS; do
+    run="$(echo "$run" | tr -d '[:space:]')"
+    [ -n "$run" ] || continue
+    [ "$run" = "$RUN_NAME" ] && continue
+    if [ -d "$root/$run" ]; then
+      local sz
+      sz=$(du -sh "$root/$run" 2>/dev/null | awk '{print $1}')
+      echo "[disk] removing stale checkpoint dir $root/$run ($sz)"
+      rm -rf "$root/$run"
+    fi
+  done
+}
+
+ensure_disk_headroom() {
+  local pct
+  pct="$(disk_used_pct "$CKPT_DIR")"
+  [ -n "$pct" ] || return 0
+  prune_local_numbered_ckpts "$CKPT_DIR" "$CKPT_KEEP_LAST"
+  if [ "$pct" -ge "$DISK_WARN_PCT" ]; then
+    echo "[disk] WARNING: ${pct}% used on $(df -Ph "$CKPT_DIR" | awk 'NR==2{print $1,$5,$4" free"}')"
+  fi
+  if [ "$pct" -ge "$DISK_CRIT_PCT" ]; then
+    echo "[disk] CRITICAL: ${pct}% used — reclaiming stale inactive checkpoint runs"
+    reclaim_stale_ckpt_runs
+    prune_local_numbered_ckpts "$CKPT_DIR" "$CKPT_KEEP_LAST"
+    pct="$(disk_used_pct "$CKPT_DIR")"
+    echo "[disk] after reclaim: ${pct}% used"
+  fi
+  if [ -n "$pct" ] && [ "$pct" -ge 97 ]; then
+    echo "FATAL: disk ${pct}% full after reclaim; refusing to launch trainer" >&2
+    exit 1
+  fi
+}
+
+ensure_disk_headroom
+
 # --- resume seed: current/future runs restore a complete safetensors pair
 # only. Explicit `oftrain --resume old.ot` remains available for manual
 # legacy migrations, but automated launches never select it. ---
@@ -563,6 +640,7 @@ while true; do
   elif [ "$V83_MODE" = "1" ] && [ -n "$V83_SEED_DIR" ]; then
     RESUME="--resume $V83_SEED_DIR/latest.safetensors --migrate-v82-to-v83"
   fi
+  ensure_disk_headroom
   echo "=== $(date -u +%FT%TZ) launching $RUN_NAME num_gpus=$NUM_GPUS envs/shard=$NUM_ENVS $RESUME ==="
   START_TS=$(date +%s)
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
