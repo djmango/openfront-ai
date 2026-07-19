@@ -346,16 +346,24 @@ fi
 "$VENV/bin/pip" install --quiet huggingface_hub safetensors numpy 2>/dev/null || true
 PYTHON="$VENV/bin/python"
 
+# Build ofhub before AE fetch: fetch_ae_encoders.sh uses `ofhf pull-ae`.
+cargo build --release -p ofhub
+OFHF="$REPO_DIR/rust/target/release/ofhf"
+
 # Fine + coarse AE encoder safetensors for oftrain --ckpt / --coarse-ckpt.
 mkdir -p "$AE_DIR"
 if [ ! -f "$AE_DIR/ae_v31_d8c32.encoder.safetensors" ] || [ ! -f "$AE_DIR/ae_v31_d16c32.encoder.safetensors" ]; then
   echo "=== fetching/exporting AE encoders into $AE_DIR ==="
-  AE_DIR="$AE_DIR" PYTHON="$PYTHON" bash "$REPO_DIR/scripts/fetch_ae_encoders.sh"
+  if [ -z "${HF_TOKEN:-}" ]; then
+    echo "FATAL: HF_TOKEN is required to fetch AE encoders from Hugging Face" >&2
+    exit 1
+  fi
+  AE_DIR="$AE_DIR" PYTHON="$PYTHON" OFHF="$OFHF" bash "$REPO_DIR/scripts/fetch_ae_encoders.sh"
 fi
-
-# Build ofhub (HF sync) alongside oftrain.
-cargo build --release -p ofhub
-OFHF="$REPO_DIR/rust/target/release/ofhf"
+if [ ! -f "$AE_DIR/ae_v31_d8c32.encoder.safetensors" ] || [ ! -f "$AE_DIR/ae_v31_d16c32.encoder.safetensors" ]; then
+  echo "FATAL: AE encoder safetensors missing under $AE_DIR after fetch" >&2
+  exit 1
+fi
 
 mkdir -p "$CKPT_DIR"
 
