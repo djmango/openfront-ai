@@ -41,68 +41,17 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     stage: usize,
 
-    /// Opt into the V8.1 curriculum gates. Stage identities/maps are
-    /// unchanged; only stages 4+ use recalibrated crowded-map win gates.
-    #[arg(long, default_value_t = false, conflicts_with_all = ["v9_curriculum", "v10_curriculum"])]
-    v81_curriculum: bool,
-
-    /// Opt into the V8.1.1 high-player bridge schedule. Stage 5 is the
-    /// V8.1 30-bot map pool at Easy, stage 6 repeats it at Medium, and the
-    /// World/Asia challenge moves to stage 7. Incompatible with V8.1 state
-    /// unless the explicit stage-5 migration flag is also supplied.
-    #[arg(
-        long,
-        default_value_t = false,
-        conflicts_with_all = ["v81_curriculum", "v9_curriculum", "v10_curriculum"]
-    )]
-    v811_curriculum: bool,
-
-    /// Opt into the recurrent V8.2 broad-map schedule. Stages 0-4 are
-    /// unchanged; Easy progresses through 30/50/80 players before Medium.
-    #[arg(
-        long,
-        default_value_t = false,
-        conflicts_with_all = ["v81_curriculum", "v811_curriculum", "v9_curriculum", "v10_curriculum"]
-    )]
-    v82_curriculum: bool,
-
-    /// Opt into the V8.3 closeout schedule and reward profile.
-    #[arg(
-        long,
-        default_value_t = false,
-        conflicts_with_all = ["v81_curriculum", "v811_curriculum", "v82_curriculum", "v9_curriculum", "v10_curriculum"]
-    )]
-    v83_curriculum: bool,
-
-    /// Opt into the parallel V9 sparse-win curriculum (high-gate micro-ladder).
-    /// Pair with `--v9-sparse-win` for the ±1 terminal reward profile.
-    #[arg(
-        long,
-        default_value_t = false,
-        conflicts_with_all = ["v81_curriculum", "v811_curriculum", "v82_curriculum", "v83_curriculum", "v10_curriculum"]
-    )]
-    v9_curriculum: bool,
-
-    /// Opt into the V10 anti-death-spiral curriculum (V8.3 ladder + demote/death gates).
-    #[arg(
-        long,
-        default_value_t = false,
-        conflicts_with_all = ["v81_curriculum", "v811_curriculum", "v82_curriculum", "v83_curriculum", "v9_curriculum"]
-    )]
-    v10_curriculum: bool,
-
     /// Per-stage env worker targets, per GPU/shard. Accepts either one
     /// comma-separated value per stage (`24,24,...`) or ranges such as
-    /// `0-5=24,6=12,7=10,8+=8`. Schedule flags select versioned defaults;
-    /// V8.2 uses 16 envs at its eight-map bridge, then 12/10/8 by load.
+    /// `0-5=24,6=12,7=10,8+=8`. V10 defaults are used when omitted.
     /// A target change checkpoints and exits for supervisor restart.
     #[arg(long)]
     stage_env_targets: Option<String>,
 
-    /// Matches `rl/ppo.py --max-episode-ticks` (default 15000). The port
+    /// Matches the live V10 recipe (default 21000). The port
     /// originally shipped 3000, which truncated every stage-0 episode
     /// before the 80%-ownership win condition was reachable - see devlog.
-    #[arg(long, default_value_t = 15000)]
+    #[arg(long, default_value_t = 21000)]
     max_episode_ticks: i64,
 
     /// Steps collected per env before each PPO update.
@@ -119,11 +68,11 @@ struct Args {
     gamma: f32,
 
     /// V8.1 potential-based closeout shaping coefficient K_DOM (0 disables).
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = 0.25)]
     v81_dom_coef: f64,
 
     /// First curriculum stage where V8.1 shaping may apply.
-    #[arg(long, default_value_t = 4)]
+    #[arg(long, default_value_t = 0)]
     v81_min_stage: usize,
 
     /// Symmetric clamp magnitude for the V8.1 log strength-ratio potential.
@@ -131,19 +80,19 @@ struct Args {
     v81_potential_clamp: f64,
 
     /// Relax loss aversion after reaching the dominance threshold.
-    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     v81_dominant_loss: bool,
 
     /// Normalized composite-strength share that counts as dominant.
-    #[arg(long, default_value_t = 0.55)]
+    #[arg(long, default_value_t = 0.30)]
     v81_dominance_threshold: f64,
 
     /// Strength-loss weight while dominant (global legacy weight is 6.5).
-    #[arg(long, default_value_t = 5.25)]
+    #[arg(long, default_value_t = 5.0)]
     v81_delta_loss_dominant: f64,
 
     /// Penalty for reversing a matching recent action (0 disables).
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = 0.05)]
     v81_churn_coef: f64,
 
     /// Number of prior decisions searched for a matching inverse action.
@@ -153,7 +102,7 @@ struct Args {
     v81_churn_window: usize,
 
     /// First curriculum stage where the action-churn penalty may apply.
-    #[arg(long, default_value_t = 4)]
+    #[arg(long, default_value_t = 0)]
     v81_churn_min_stage: usize,
 
     /// V8.3 land-share closeout potential coefficient.
@@ -165,91 +114,87 @@ struct Args {
     v83_churn_coef: f64,
 
     /// V8.4 boat-outcome: reward for a sourced landing attack.
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = 0.15)]
     v84_boat_useful: f64,
 
     /// V8.4 boat-outcome: penalty when a boat is destroyed without landing.
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = -0.20)]
     v84_boat_destroyed: f64,
 
     /// V8.4 boat-outcome: mild cancel penalty (churn already covers the pair).
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = -0.03)]
     v84_boat_cancelled: f64,
 
     /// V8.4 boat-outcome: penalty for returning to own shore without invading.
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = -0.05)]
     v84_boat_own_shore: f64,
 
-    #[arg(long, default_value_t = 4)]
+    #[arg(long, default_value_t = 0)]
     v84_boat_min_stage: usize,
 
     /// V8.4 late-game tempo pressure while dominant.
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = 0.015)]
     v84_tempo_coef: f64,
 
-    #[arg(long, default_value_t = 4)]
+    #[arg(long, default_value_t = 0)]
     v84_tempo_min_stage: usize,
 
     /// V8.4 terminal bonus for faster wins: coef * (1 - tick/max_ticks).
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = 40.0)]
     v84_fast_win_coef: f64,
 
     /// V8.5: tempo share threshold (0 = use --v81-dominance-threshold).
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = 0.30)]
     v85_tempo_share_threshold: f64,
 
     /// V8.5: extra terminal bonus on win (on top of W_WIN).
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = 200.0)]
     v85_extra_win_bonus: f64,
 
     /// V8.5: penalty for embargo_stop while Hostile/Distrustful.
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = -0.15)]
     v85_embargo_bad_stop: f64,
 
     /// V8.5: small reward for embargo_stop after relation recovered.
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = 0.02)]
     v85_embargo_good_stop: f64,
 
-    #[arg(long, default_value_t = 4)]
+    #[arg(long, default_value_t = 0)]
     v85_embargo_min_stage: usize,
 
     /// V8.5: penalty for retreating a just-opened attack.
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = -0.03)]
     v85_premature_retreat: f64,
 
     /// V8.5: penalty for re-attacking right after retreat.
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = -0.03)]
     v85_thrash_reengage: f64,
 
-    #[arg(long, default_value_t = 4)]
+    #[arg(long, default_value_t = 0)]
     v85_combat_min_stage: usize,
 
     /// V8.6: override W_DELTA_LOSS when > 0 (soften attack variance tax).
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = 5.5)]
     v86_delta_loss: f64,
 
     /// V8.6: price strength losses like gains while an attack is open.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true)]
     v86_attack_symmetric_loss: bool,
 
     /// V8.6: skip flat attack↔retreat churn (combat sticky already prices it).
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true)]
     v86_skip_combat_churn: bool,
 
     /// V8.6: override W_DEATH when > 0.
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = 3.0)]
     v86_death_penalty: f64,
 
-    /// V9: terminal win/loss only (+1 / -1). Disables dense strength shaping.
-    #[arg(long, default_value_t = false)]
-    v9_sparse_win: bool,
-
     /// V10: alive+land survival shaping coefficient (`coef * land_share`).
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = 0.01)]
     v10_survival_coef: f64,
 
     /// V10: penalty magnitude for late/dominant diplo/donate panic.
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = 0.08)]
     v10_diplo_panic: f64,
 
     /// V10: land-share threshold that arms diplo-panic shaping.
@@ -261,27 +206,19 @@ struct Args {
     v10_diplo_panic_tick_frac: f64,
 
     /// V10: bonus for productive attack/boat/build actions.
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = 0.02)]
     v10_combat_action: f64,
 
     /// V10: terminal penalty when timing out after closeout entry (≥45% land).
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = 20.0)]
     v10_timeout_closeout: f64,
 
     /// V10: one-shot bonus when land share first crosses closeout entry (45%).
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = 25.0)]
     v10_closeout_entry: f64,
 
-    /// Resume a V8.4 reward-profile checkpoint under V8.5 coeffs (weights unchanged).
-    #[arg(long, default_value_t = false, requires_all = ["v83_curriculum", "resume"])]
-    migrate_v84_to_v85: bool,
-
-    /// Resume a V8.5 reward-profile checkpoint under V8.6 coeffs (weights unchanged).
-    #[arg(long, default_value_t = false, requires_all = ["v83_curriculum", "resume"])]
-    migrate_v85_to_v86: bool,
-
     /// Resume a V8.6 (v8.3 schedule) checkpoint under V10 schedule + anti-spiral reward.
-    #[arg(long, default_value_t = false, requires_all = ["v10_curriculum", "resume"])]
+    #[arg(long, default_value_t = false, requires = "resume")]
     migrate_v86_to_v10: bool,
 
     #[arg(long, default_value_t = 0.95)]
@@ -590,16 +527,6 @@ struct Args {
     #[arg(long)]
     init: Option<String>,
 
-    /// Explicit strict V8.1 schema-v1 safetensors migration into the
-    /// recurrent V8.2 policy. Existing tensors are copied exactly and only
-    /// `recurrent.*` tensors retain their V8.2 initialization.
-    #[arg(
-        long,
-        requires = "recurrent_policy",
-        conflicts_with_all = ["init", "resume"]
-    )]
-    init_v81_recurrent: Option<String>,
-
     /// Resume from a previously-saved checkpoint (e.g.
     /// `checkpoints/latest.safetensors`; legacy `.ot` still accepted).
     /// Restores weights and training state (curriculum stage,
@@ -611,43 +538,6 @@ struct Args {
     /// warms back in while moments rebuild.
     #[arg(long)]
     resume: Option<String>,
-
-    /// Permit the one supported cross-schedule resume: a V8.1 stage-5
-    /// checkpoint becomes V8.1.1 stage 5 (the new Easy bridge), with its
-    /// old Medium-stage win window cleared.
-    #[arg(
-        long,
-        alias = "migrate-v81-stage5",
-        default_value_t = false,
-        requires_all = ["v811_curriculum", "resume"]
-    )]
-    migrate_v81_stage5_to_v811: bool,
-
-    /// Permit a V8.1.1 stage-5 checkpoint to adopt the V8.2 stage 5.
-    /// The old win window and env sizing are cleared.
-    #[arg(
-        long,
-        default_value_t = false,
-        requires_all = ["v82_curriculum", "resume"]
-    )]
-    migrate_v811_stage5_to_v82: bool,
-
-    /// Permit only a V8.2 stage-5 checkpoint to adopt V8.3 stage 5.
-    #[arg(
-        long,
-        default_value_t = false,
-        requires_all = ["v83_curriculum", "resume"]
-    )]
-    migrate_v82_to_v83: bool,
-
-    /// Permit a V8.3 checkpoint to adopt the V8.4 reward profile (same
-    /// curriculum schedule / weights; BPTT/rollout may change).
-    #[arg(
-        long,
-        default_value_t = false,
-        requires_all = ["v83_curriculum", "resume"]
-    )]
-    migrate_v83_to_v84: bool,
 
     /// Extra LR warmup updates applied after `--resume` while AdamW
     /// moments rebuild from scratch (tch cannot dump/restore optimizer
@@ -905,83 +795,67 @@ mod curriculum_flag_tests {
     use clap::Parser;
 
     #[test]
-    fn versioned_curricula_are_opt_in_and_mutually_exclusive() {
+    fn v10_reward_recipe_is_the_cli_default() {
         let defaults = Args::try_parse_from(["oftrain"]).unwrap();
-        assert!(!defaults.v81_curriculum);
-        assert!(!defaults.v811_curriculum);
-        assert!(!defaults.v82_curriculum);
-        assert!(!defaults.v83_curriculum);
-        assert!(!defaults.v9_curriculum);
-        assert!(!defaults.v10_curriculum);
-        assert!(!defaults.v9_sparse_win);
-
-        let v811 = Args::try_parse_from(["oftrain", "--v811-curriculum"]).unwrap();
-        assert!(v811.v811_curriculum);
-        let v82 = Args::try_parse_from(["oftrain", "--v82-curriculum"]).unwrap();
-        assert!(v82.v82_curriculum);
-        let v83 = Args::try_parse_from(["oftrain", "--v83-curriculum"]).unwrap();
-        assert!(v83.v83_curriculum);
-        let v9 = Args::try_parse_from(["oftrain", "--v9-curriculum", "--v9-sparse-win"]).unwrap();
-        assert!(v9.v9_curriculum);
-        assert!(v9.v9_sparse_win);
-        assert!(
-            Args::try_parse_from(["oftrain", "--v81-curriculum", "--v811-curriculum"]).is_err()
-        );
-        assert!(Args::try_parse_from(["oftrain", "--v81-curriculum", "--v82-curriculum"]).is_err());
-        assert!(Args::try_parse_from(["oftrain", "--v82-curriculum", "--v83-curriculum"]).is_err());
-        assert!(
-            Args::try_parse_from(["oftrain", "--v811-curriculum", "--v82-curriculum"]).is_err()
-        );
-        assert!(Args::try_parse_from(["oftrain", "--v83-curriculum", "--v9-curriculum"]).is_err());
+        assert_eq!(defaults.max_episode_ticks, 21000);
+        assert_eq!(defaults.v81_dom_coef, 0.25);
+        assert_eq!(defaults.v81_min_stage, 0);
+        assert!(defaults.v81_dominant_loss);
+        assert_eq!(defaults.v81_dominance_threshold, 0.30);
+        assert_eq!(defaults.v81_delta_loss_dominant, 5.0);
+        assert_eq!(defaults.v81_churn_coef, 0.05);
+        assert_eq!(defaults.v81_churn_min_stage, 0);
+        assert_eq!(defaults.v84_boat_useful, 0.15);
+        assert_eq!(defaults.v84_boat_destroyed, -0.20);
+        assert_eq!(defaults.v84_boat_cancelled, -0.03);
+        assert_eq!(defaults.v84_boat_own_shore, -0.05);
+        assert_eq!(defaults.v84_boat_min_stage, 0);
+        assert_eq!(defaults.v84_tempo_coef, 0.015);
+        assert_eq!(defaults.v84_tempo_min_stage, 0);
+        assert_eq!(defaults.v84_fast_win_coef, 40.0);
+        assert_eq!(defaults.v85_tempo_share_threshold, 0.30);
+        assert_eq!(defaults.v85_extra_win_bonus, 200.0);
+        assert_eq!(defaults.v85_embargo_bad_stop, -0.15);
+        assert_eq!(defaults.v85_embargo_good_stop, 0.02);
+        assert_eq!(defaults.v85_embargo_min_stage, 0);
+        assert_eq!(defaults.v85_premature_retreat, -0.03);
+        assert_eq!(defaults.v85_thrash_reengage, -0.03);
+        assert_eq!(defaults.v85_combat_min_stage, 0);
+        assert_eq!(defaults.v86_delta_loss, 5.5);
+        assert!(defaults.v86_attack_symmetric_loss);
+        assert!(defaults.v86_skip_combat_churn);
+        assert_eq!(defaults.v86_death_penalty, 3.0);
+        assert_eq!(defaults.v10_survival_coef, 0.01);
+        assert_eq!(defaults.v10_diplo_panic, 0.08);
+        assert_eq!(defaults.v10_combat_action, 0.02);
+        assert_eq!(defaults.v10_timeout_closeout, 20.0);
+        assert_eq!(defaults.v10_closeout_entry, 25.0);
     }
 
     #[test]
-    fn migration_requires_v811_and_resume() {
-        assert!(Args::try_parse_from(["oftrain", "--migrate-v81-stage5-to-v811"]).is_err());
+    fn migrate_v86_to_v10_requires_resume() {
+        assert!(Args::try_parse_from(["oftrain", "--migrate-v86-to-v10"]).is_err());
         let args = Args::try_parse_from([
             "oftrain",
-            "--v811-curriculum",
             "--resume",
             "latest.safetensors",
-            "--migrate-v81-stage5",
+            "--migrate-v86-to-v10",
         ])
         .unwrap();
-        assert!(args.migrate_v81_stage5_to_v811);
-
-        assert!(Args::try_parse_from(["oftrain", "--migrate-v811-stage5-to-v82"]).is_err());
-        let args = Args::try_parse_from([
-            "oftrain",
-            "--v82-curriculum",
-            "--resume",
-            "latest.safetensors",
-            "--migrate-v811-stage5-to-v82",
-        ])
-        .unwrap();
-        assert!(args.migrate_v811_stage5_to_v82);
-
-        assert!(Args::try_parse_from(["oftrain", "--migrate-v82-to-v83"]).is_err());
-        let args = Args::try_parse_from([
-            "oftrain",
-            "--v83-curriculum",
-            "--resume",
-            "latest.safetensors",
-            "--migrate-v82-to-v83",
-        ])
-        .unwrap();
-        assert!(args.migrate_v82_to_v83);
+        assert!(args.migrate_v86_to_v10);
     }
 
     #[cfg(feature = "native-engine")]
     #[test]
-    fn v82_maps_all_load_through_the_rust_engine() {
+    fn v10_broad_maps_all_load_through_the_rust_engine() {
         use openfront_engine::core::terrain::{GameMapSize, load_fresh_terrain};
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
             .expect("repository root");
-        for map in ofcore::curriculum::V82_MAPS {
+        for map in ofcore::curriculum::V10_BROAD_MAPS {
             let terrain = load_fresh_terrain(&root, map, GameMapSize::Normal)
-                .unwrap_or_else(|error| panic!("V8.2 map key {map:?} failed to load: {error}"));
+                .unwrap_or_else(|error| panic!("V10 map key {map:?} failed to load: {error}"));
             assert!(terrain.game_map.width > 0, "{map} has zero width");
             assert!(terrain.game_map.height > 0, "{map} has zero height");
             assert!(!terrain.nations.is_empty(), "{map} has no nations");
@@ -1015,28 +889,6 @@ mod recurrent_flag_tests {
         assert!(enabled.recurrent_policy);
         assert_eq!(enabled.recurrent_hidden_size, 128);
         assert_eq!(enabled.bptt_chunk_len, 32);
-
-        let warm = Args::try_parse_from([
-            "oftrain",
-            "--persistent-actors",
-            "--recurrent-policy",
-            "--init-v81-recurrent",
-            "v81.safetensors",
-        ])
-        .unwrap();
-        assert_eq!(warm.init_v81_recurrent.as_deref(), Some("v81.safetensors"));
-        assert!(
-            Args::try_parse_from([
-                "oftrain",
-                "--persistent-actors",
-                "--recurrent-policy",
-                "--init-v81-recurrent",
-                "v81.safetensors",
-                "--resume",
-                "v81.safetensors",
-            ])
-            .is_err()
-        );
     }
 }
 
@@ -1275,7 +1127,6 @@ fn main() -> anyhow::Result<()> {
         v86_attack_symmetric_loss: args.v86_attack_symmetric_loss,
         v86_skip_combat_churn: args.v86_skip_combat_churn,
         v86_death_penalty: args.v86_death_penalty,
-        v9_sparse_win: args.v9_sparse_win,
         v10_survival_coef: args.v10_survival_coef,
         v10_diplo_panic: args.v10_diplo_panic,
         v10_diplo_panic_share: args.v10_diplo_panic_share,
@@ -1292,31 +1143,7 @@ fn main() -> anyhow::Result<()> {
         args.v10_closeout_entry.is_finite() && args.v10_closeout_entry >= 0.0,
         "--v10-closeout-entry must be finite and non-negative"
     );
-    anyhow::ensure!(
-        args.v9_curriculum == args.v9_sparse_win,
-        "--v9-curriculum and --v9-sparse-win must be used together"
-    );
-    anyhow::ensure!(
-        !args.v10_curriculum || reward_config.v10_reward_active(),
-        "--v10-curriculum requires at least one V10 reward knob \
-         (--v10-survival-coef / --v10-diplo-panic / --v10-combat-action / \
-          --v10-timeout-closeout / --v10-closeout-entry)"
-    );
-    let curriculum_schedule = if args.v10_curriculum {
-        ofcore::curriculum::CurriculumSchedule::V10
-    } else if args.v9_curriculum {
-        ofcore::curriculum::CurriculumSchedule::V9
-    } else if args.v83_curriculum {
-        ofcore::curriculum::CurriculumSchedule::V83
-    } else if args.v82_curriculum {
-        ofcore::curriculum::CurriculumSchedule::V82
-    } else if args.v811_curriculum {
-        ofcore::curriculum::CurriculumSchedule::V811
-    } else if args.v81_curriculum {
-        ofcore::curriculum::CurriculumSchedule::V81
-    } else {
-        ofcore::curriculum::CurriculumSchedule::Legacy
-    };
+    let curriculum_schedule = ofcore::curriculum::CurriculumSchedule::V10;
     let stage_count = ofcore::curriculum::stages_for_schedule(curriculum_schedule).len();
     anyhow::ensure!(
         args.stage < stage_count,
@@ -1326,25 +1153,7 @@ fn main() -> anyhow::Result<()> {
     );
     let stage_env_targets = match args.stage_env_targets.as_deref() {
         Some(spec) => parse_stage_env_targets(spec, stage_count)?,
-        None if curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V82 => {
-            ofcore::curriculum::V82_ENV_TARGETS.to_vec()
-        }
-        None if curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V83 => {
-            ofcore::curriculum::V83_ENV_TARGETS.to_vec()
-        }
-        None if curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V10 => {
-            ofcore::curriculum::V10_ENV_TARGETS.to_vec()
-        }
-        None if curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V9 => {
-            ofcore::curriculum::V9_ENV_TARGETS.to_vec()
-        }
-        None if curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V811 => {
-            ofcore::curriculum::V811_ENV_TARGETS.to_vec()
-        }
-        None if curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V81 => {
-            ofcore::curriculum::V81_ENV_TARGETS.to_vec()
-        }
-        None => Vec::new(),
+        None => ofcore::curriculum::V10_ENV_TARGETS.to_vec(),
     };
     let initial_num_envs = stage_env_targets
         .get(args.stage)
@@ -1375,15 +1184,10 @@ fn main() -> anyhow::Result<()> {
     )?;
     println!("[oftrain] device={device:?}");
     println!("[oftrain] curriculum schedule={}", curriculum_schedule.id());
-    if curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V9
-        || curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V83
-        || curriculum_schedule == ofcore::curriculum::CurriculumSchedule::V10
-    {
-        println!(
-            "[oftrain] reward profile={}",
-            reward_config.reward_profile_id()
-        );
-    }
+    println!(
+        "[oftrain] reward profile={}",
+        reward_config.reward_profile_id()
+    );
     println!(
         "[oftrain] v81 reward: min_stage={} K_DOM={} gamma={} phi_clamp={} \
          dominant_loss={} threshold={} W_DELTA_LOSS_DOMINANT={} \
@@ -1484,12 +1288,6 @@ fn main() -> anyhow::Result<()> {
         num_gpus: args.num_gpus,
         stage: args.stage,
         curriculum_schedule,
-        migrate_v81_stage5_to_v811: args.migrate_v81_stage5_to_v811,
-        migrate_v811_stage5_to_v82: args.migrate_v811_stage5_to_v82,
-        migrate_v82_to_v83: args.migrate_v82_to_v83,
-        migrate_v83_to_v84: args.migrate_v83_to_v84,
-        migrate_v84_to_v85: args.migrate_v84_to_v85,
-        migrate_v85_to_v86: args.migrate_v85_to_v86,
         migrate_v86_to_v10: args.migrate_v86_to_v10,
         stage_env_targets,
         max_episode_ticks: args.max_episode_ticks,
@@ -1543,7 +1341,6 @@ fn main() -> anyhow::Result<()> {
         ckpt_dir: args.ckpt_dir,
         ckpt_keep_last: args.ckpt_keep_last,
         init: args.init,
-        init_v81_recurrent: args.init_v81_recurrent,
         resume: args.resume,
         resume_warmup_updates: args.resume_warmup_updates,
         value_loss: match args.value_loss.as_str() {
