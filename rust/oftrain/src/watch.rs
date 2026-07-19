@@ -27,6 +27,9 @@ pub struct WatchConfig<'a> {
     pub difficulty: Option<String>,
     pub nations: Option<String>,
     pub max_steps: usize,
+    /// Same cap as training (`--max-episode-ticks`). Watch stops on win/death
+    /// or when the sim tick reaches this, matching the trainer episode budget.
+    pub max_episode_ticks: i64,
     pub debug: bool,
     pub device: Device,
     pub amp: bool,
@@ -181,7 +184,7 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
     let mut worker = EnvWorker::new(
         0,
         cfg.stage,
-        15000,
+        cfg.max_episode_ticks,
         EngineKind::Node,
         cfg.reward_config,
         cfg.curriculum_schedule,
@@ -190,9 +193,10 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
 
     let mut terrain_cache = TerrainDeviceCache::new(cfg.device);
     let mut debug_log: Vec<Value> = Vec::new();
-    // Only set to win/death when the episode actually ends. Hitting
-    // `--max-steps` while still alive is a truncation ("timeout"), not a loss —
-    // the old default of "death" made strong mid-game clips look like wipeouts.
+    // Only set to win/death when the episode actually ends. Hitting the
+    // training tick budget or `--max-steps` while still alive is a truncation
+    // ("timeout"), not a loss — the old default of "death" made strong
+    // mid-game clips look like wipeouts.
     let mut episode_outcome = "timeout".to_string();
     let mut end_tick = 0i64;
     let mut finished = false;
@@ -338,6 +342,17 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
             );
             break;
         }
+        // Match training: episodes end at --max-episode-ticks even if still alive.
+        if obs.tick() >= cfg.max_episode_ticks {
+            end_tick = obs.tick();
+            episode_outcome = "timeout".to_string();
+            finished = true;
+            println!(
+                "watch hit training max-episode-ticks {} at tick {end_tick} (outcome=timeout)",
+                cfg.max_episode_ticks
+            );
+            break;
+        }
     }
     if !finished {
         let obs = worker.current_obs().unwrap();
@@ -345,9 +360,10 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
         let ents = feat::parse_ents(obs.entities());
         let tiles = my_tiles(&ents, obs.me());
         println!(
-            "watch truncated at --max-steps {}: tick {end_tick}, tiles {tiles}, alive={} \
-             (outcome=timeout — not a loss; raise SHOWCASE_MAX_STEPS / --max-steps to play out)",
+            "watch truncated at --max-steps {} before tick budget {}: tick {end_tick}, tiles {tiles}, \
+             alive={} (outcome=timeout — raise SHOWCASE_MAX_STEPS)",
             cfg.max_steps,
+            cfg.max_episode_ticks,
             obs.alive()
         );
     }
