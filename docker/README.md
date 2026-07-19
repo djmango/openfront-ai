@@ -57,8 +57,8 @@ docker run --rm -p 8086:8086 -v openfront-eval-data:/data openfront-eval
 | `SHOWCASE_WATCH_STAGE` | (stage) | Stage passed to `oftrain --watch` (V10 schedule) |
 | `SHOWCASE_BOTS` | `24` | Watch/replay bot count (matches live Easy ramp) |
 | `SHOWCASE_NATIONS` | `4` | Watch/replay nations |
-| `SHOWCASE_V10` | `1` | Force `--v10-curriculum` on watch (also auto when `RUN_NAME` contains `v10`) |
-| `SHOWCASE_RECURRENT` | `auto` | Load recurrent policy for watch (`auto` = V8.2+/V9/V10 run names) |
+| `SHOWCASE_V10` | `1` | Deprecated; watch is V10 by default |
+| `SHOWCASE_RECURRENT` | `auto` | Load recurrent policy for watch (`auto` = V10 default) |
 | `SHOWCASE_DEVICE` | daemon: `cuda` / clip: `cpu` | Watch device. One-shot `ofshowcase clip` defaults to `cpu` so busy trainers do not OOM; pass `--device cuda:0` to override |
 | `SHOWCASE_MAX_EPISODE_TICKS` | `21000` | Same episode tick budget as V10 training |
 | `SHOWCASE_MAX_STEPS` | ticks/10+64 | Watch decision cap (must stay above tick budget / 10) |

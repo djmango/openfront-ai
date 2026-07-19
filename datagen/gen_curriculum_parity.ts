@@ -76,7 +76,7 @@ interface Bucket {
   bots: number;
   nations: number | "default";
   difficulty: Difficulty;
-  // Curriculum map keys (rust/ofcore/src/curriculum.rs ALL_MAPS / per-stage
+  // Curriculum map keys (rust/ofcore/src/curriculum.rs V10_*_MAPS / per-stage
   // maps lists use the enum KEY, e.g. "BetweenTwoSeas"; resolved to the
   // actual GameMapType string value below).
   mapKeys: string[];
@@ -86,10 +86,10 @@ interface Bucket {
 // One representative curriculum stage per distinct bot count. bots=30 and
 // bots=80 each appear in two stages (Easy/Medium and Medium/Hard
 // respectively); we use the first (lower-difficulty) occurrence for both -
-// see rust/ofcore/src/curriculum.rs `stages()`.
-// Curriculum / V8.2 map keys (rust/ofcore/src/curriculum.rs ALL_MAPS +
- // V82_MAPS). Early buckets stay on the small maps the schedule actually
- // uses; mid/late buckets deliberately fan out across the broad V8.2 pool
+// see rust/ofcore/src/curriculum.rs `stages_for_schedule()`.
+// Curriculum / V10 map keys (rust/ofcore/src/curriculum.rs V10_BRIDGE_MAPS +
+ // V10_BROAD_MAPS). Early buckets stay on the small maps the schedule actually
+ // uses; mid/late buckets deliberately fan out across the broad V10 pool
  // so the outcome gate stress-tests continents and naval maps, not just
  // the seven legacy names curriculum-parity-v4 covered.
 const EARLY_MAPS = ["Onion", "Pangaea", "Caucasus", "BlackSea", "GreatLakes"];

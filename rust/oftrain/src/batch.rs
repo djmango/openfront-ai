@@ -2,7 +2,7 @@
 //! tensors (`policy::Obs`). Envs in one batch do NOT all share the same
 //! grid resolution (gh, gw) in general - every curriculum stage past
 //! stage 1 samples from multiple maps of different native sizes
-//! (`ofcore::curriculum::stages()`), and even a single-map stage mixes in
+//! (`ofcore::curriculum::stages_for_schedule()`), and even a single-map stage mixes in
 //! differently-sized *past*-stage maps via rehearsal sampling
 //! (`REHEARSAL_P`) - so a mixed-shape batch isn't an edge case, it's the
 //! common case as soon as training reaches stage 2. `build_obs` pads

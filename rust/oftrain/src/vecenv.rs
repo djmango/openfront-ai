@@ -21,10 +21,9 @@ use ofcore::curriculum::{
     action_churn_penalty, boat_outcome_reward, classify_boat_resolution, closeout_potential,
     combat_outcome_reward, dominance_potential, embargo_stop_outcome_reward, fast_win_bonus,
     land_share, normalized_strength_share, placement, placement_score, sample_episode,
-    sparse_terminal_reward, stages_for_schedule, strength_delta_weight, tempo_pressure,
-    terminal_reward, timeweight, v10_combat_action_bonus, v10_diplo_panic_penalty,
-    v10_closeout_entry_bonus, v10_survival_reward, v10_timeout_after_closeout_penalty,
-    v83_action_churn_penalty,
+    stages_for_schedule, strength_delta_weight, tempo_pressure, terminal_reward, timeweight,
+    v10_closeout_entry_bonus, v10_combat_action_bonus, v10_diplo_panic_penalty,
+    v10_survival_reward, v10_timeout_after_closeout_penalty, v83_action_churn_penalty,
 };
 use ofcore::feat::{
     self, A_ATTACK, A_BOAT, A_CANCEL_BOAT, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, ACTIONS,
@@ -608,7 +607,6 @@ impl CombatStickyTracker {
     }
 }
 
-
 fn transport_unit_ids(ents: &feat::EntsData, me: usize) -> HashSet<usize> {
     ents.units
         .iter()
@@ -1165,7 +1163,9 @@ impl EnvWorker {
             }
         }
         let combat_target = match chosen_action.target {
-            Some(ActionTarget::Player(id)) if choice.action == A_ATTACK || choice.action == A_RETREAT => {
+            Some(ActionTarget::Player(id))
+                if choice.action == A_ATTACK || choice.action == A_RETREAT =>
+            {
                 Some(id)
             }
             _ => None,
@@ -1302,58 +1302,6 @@ impl EnvWorker {
             .copied()
             .unwrap_or(0.0);
 
-        // V9 sparse path: only terminal ±1. No strength/delta/waste/death/place
-        // or V8.x shaping: environment curriculum carries the learning signal.
-        if self.reward_config.v9_sparse_win {
-            self.prev_strength = mine;
-            let mut components = RewardComponents::default();
-            let mut reward = 0.0;
-            let mut info = None;
-            if done {
-                reward = sparse_terminal_reward(won);
-                components.terminal = reward;
-                let (place, n) = placement(&ents, obs.me(), obs.alive(), self.land_total);
-                self.ep_reward_components.add_assign(components);
-                self.ep_reward += reward;
-                self.ep_len += 1;
-                info = Some(EpisodeInfo {
-                    reward: self.ep_reward,
-                    length: self.ep_len,
-                    final_tiles: tiles,
-                    final_land_share: share,
-                    max_land_share: self.closeout_tracker.max_land_share,
-                    closeout_reached: self.closeout_tracker.reached(),
-                    closeout_entry_tick: self.closeout_tracker.entry_tick,
-                    decisions_after_closeout: self.closeout_tracker.decisions_after_entry,
-                    converted: self.closeout_tracker.reached() && won,
-                    timeout_after_closeout: timed_out && self.closeout_tracker.reached(),
-                    post_closeout_churn_pairs: self.closeout_tracker.post_entry_churn_pairs,
-                    final_tick: obs.tick(),
-                    place,
-                    n_players: n,
-                    score: placement_score(place, n),
-                    won,
-                    died,
-                    wasted: self.ep_wasted,
-                    stage: self.stage,
-                    map: self.map_name.clone(),
-                    rehearsal: self.rehearsal,
-                    reward_components: self.ep_reward_components,
-                    action_pair_counts: self.action_churn_tracker.counts(),
-                    boat_outcome_counts: self.boat_tracker.counts(),
-                    embargo_bad_stops: self.combat_tracker.embargo_bad_stops,
-                    embargo_good_stops: self.combat_tracker.embargo_good_stops,
-                    premature_retreats: self.combat_tracker.premature_retreats,
-                    thrash_reengages: self.combat_tracker.thrash_reengages,
-                });
-                self.spool_finished_episode(won, timed_out);
-                self.reset_episode()?;
-            } else {
-                self.ep_len += 1;
-            }
-            return Ok((reward, done, info, outcome));
-        }
-
         let tw = timeweight(obs.tick());
         let delta = mine - self.prev_strength;
         let normalized_share = if self.reward_config.dominant_loss_active(self.episode_stage) {
@@ -1422,8 +1370,7 @@ impl EnvWorker {
         }
         let next_closeout_potential = if done { 0.0 } else { closeout_potential(share) };
         // Closeout potential is schedule-gated only (no curriculum stage gate).
-        if self.curriculum_schedule.uses_v83_closeout()
-            && self.reward_config.v83_close_coef != 0.0
+        if self.curriculum_schedule.uses_v83_closeout() && self.reward_config.v83_close_coef != 0.0
         {
             components.closeout = self.closeout_shaper.transition(
                 next_closeout_potential,
@@ -1435,8 +1382,7 @@ impl EnvWorker {
             self.closeout_shaper.reset(next_closeout_potential);
         }
         // One-shot milestone for first crossing of 45% land (logged under closeout).
-        let entry_bonus =
-            v10_closeout_entry_bonus(closeout_just_entered, self.reward_config);
+        let entry_bonus = v10_closeout_entry_bonus(closeout_just_entered, self.reward_config);
         if entry_bonus != 0.0 {
             components.closeout += entry_bonus;
             reward += entry_bonus;
