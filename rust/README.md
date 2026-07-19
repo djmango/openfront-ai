@@ -30,22 +30,18 @@ cargo run --release -p ofae -- train --data ../data --steps 100 --out /tmp/ofae_
 
 ## Versioned curricula
 
-No flag selects the 11-stage legacy schedule. `--v81-curriculum` preserves
-the existing 11-stage V8.1 schedule and sizing. The opt-in
-`--v811-curriculum` selects schedule identity `v8.1.1`:
+`oftrain` is V10-only. There are no legacy/V8/V9 curriculum selector flags;
+stage identity is always persisted as `curriculum_schedule: "v10"` with reward
+profile `v10-anti-spiral-v1`.
 
-| Stage | Maps | Bots | Difficulty | Win gate | Envs/GPU |
-|-------|------|------|------------|----------|----------|
-| 4 | Pangaea, Caucasus, BlackSea | 30 | Easy | 0.35 | 24 |
-| 5 | BlackSea, BetweenTwoSeas, Caucasus | 30 | Easy | 0.30 | 24 |
-| 6 | BlackSea, BetweenTwoSeas, Caucasus | 30 | Medium | 0.25 | 24 |
-| 7 | World, Asia, BlackSea | 50 | Medium | 0.25 | 12 |
-| 8 | World, Asia, BetweenTwoSeas, Caucasus | 80 | Medium | 0.22 | 10 |
-| 9–11 | Existing all-map Hard/Impossible progression | 80/120/150 | Hard/Hard/Impossible | 0.20/0.18/0.15 | 8 |
+V10 is a 100-stage anti-death-spiral ladder: a long Onion Easy micro-ramp,
+closeout and bridge stages, then broad-map Easy/Medium/Hard/Impossible bands.
+The live reward recipe keeps the historical `--v81-*`, `--v84-*`,
+`--v85-*`, and `--v86-*` knob names, but those knobs are the V10 defaults.
 
-Checkpoint state records the schedule identity and cross-schedule resume is
-rejected. The sole migration is V8.1 stage 5 to V8.1.1 stage 5:
-`--v811-curriculum --resume PATH --migrate-v81-stage5-to-v811`.
+Normal resume requires a V10 sidecar. The only supported legacy migration is
+from a V8.3-schedule checkpoint with V8.6 reward profile:
+`--resume PATH --migrate-v86-to-v10`.
 
 ## Native port / training gaps
 
