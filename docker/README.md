@@ -18,6 +18,16 @@ View-only replay of the latest RL checkpoint by default, with an on-demand
 replay on HF policy changes. `/watch` opens it in the real client with the
 MODEL overlay.
 
+**One-shot clips (reliable SoftGL path):** Rust owns lifecycle; Playwright
+still paints pixels. Prefers live archive+vite, else a patched SoftGL
+worktree; hard-fails if a MODEL-overlay WebM cannot be produced:
+
+```bash
+ofshowcase clip --map Onion --map Pangaea
+# or, full curriculum pool:
+ofshowcase clip --force
+```
+
 **Play (on click):** `ofshowcase hub` creates a private lobby (random map from
 the curriculum pool), launches `scripts/webbot_launcher.py` (greedy) for the
 in-browser ONNX agent, redirects you to the lobby. Only one Play lobby runs
@@ -48,6 +58,10 @@ docker run --rm -p 8086:8086 -v openfront-eval-data:/data openfront-eval
 | `SHOWCASE_BOTS` | `24` | Watch/replay bot count (matches live Easy ramp) |
 | `SHOWCASE_NATIONS` | `4` | Watch/replay nations |
 | `SHOWCASE_V10` | `1` | Force `--v10-curriculum` on watch (also auto when `RUN_NAME` contains `v10`) |
+| `SHOWCASE_RECURRENT` | `auto` | Load recurrent policy for watch (`auto` = V8.2+/V9/V10 run names) |
+| `SHOWCASE_DEVICE` | daemon: `cuda` / clip: `cpu` | Watch device. One-shot `ofshowcase clip` defaults to `cpu` so busy trainers do not OOM; pass `--device cuda:0` to override |
+| `CLIP_REUSE_SERVICES` | `auto` | Use live :8987/:9000 when healthy; else self-contained SoftGL worktree |
+| `OF_FORCE_SWIFTSHADER` | `1` (clip) | SoftGL headless path for MODEL-overlay WebM |
 
 Homelab: [homelab README](https://github.com/djmango/homelab), `openfrontai.skg.gg`.
 Redeploy: `bash docker/homelab_deploy.sh` on the host (rebuilds image, clears

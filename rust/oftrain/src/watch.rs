@@ -35,6 +35,8 @@ pub struct WatchConfig<'a> {
     pub blocks: i64,
     pub curriculum_schedule: CurriculumSchedule,
     pub reward_config: RewardConfig,
+    /// Match training: V8.2+ / V10 policies need recurrent hidden state.
+    pub recurrent_policy: bool,
 }
 
 fn choice_from_act(
@@ -133,7 +135,14 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
     }
 
     let mut vs = nn::VarStore::new(cfg.device);
-    let policy = PolicyNet::new(&vs.root(), cfg.amp, cfg.foveate, cfg.gc, cfg.blocks);
+    let policy = PolicyNet::new_with_recurrence(
+        &vs.root(),
+        cfg.amp,
+        cfg.foveate,
+        cfg.gc,
+        cfg.blocks,
+        cfg.recurrent_policy,
+    );
     vs.load(cfg.policy)
         .with_context(|| format!("load policy {}", cfg.policy))?;
     let ae = AePair::load(
@@ -143,7 +152,15 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
         cfg.amp,
         false,
     )?;
-    println!("device: {:?}", cfg.device);
+    println!(
+        "device: {:?} recurrent={}",
+        cfg.device, cfg.recurrent_policy
+    );
+    let mut hidden = if cfg.recurrent_policy {
+        Some(policy.initial_hidden(1))
+    } else {
+        None
+    };
     {
         let stem = Path::new(cfg.policy)
             .file_stem()
@@ -191,7 +208,14 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
             &ae,
             &mut terrain_cache,
         )?;
-        let (a, p, t, b, n, q, _lp, _v) = policy.act(&obs_t, true);
+        let (a, p, t, b, n, q, _lp, _v) = if let Some(h) = hidden.as_ref() {
+            let context = crate::recurrent::context_tensor(&[prepared.prev_action.clone()], cfg.device);
+            let (acts, h_out) = policy.act_with_state(&obs_t, h, &context, true);
+            hidden = Some(h_out);
+            acts
+        } else {
+            policy.act(&obs_t, true)
+        };
         let choice = choice_from_act(
             a.int64_value(&[0]),
             p.int64_value(&[0]),
@@ -216,7 +240,22 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
             &ae,
             &mut terrain_cache,
         )?;
-        let (a, p, t, b, n, q, _lp, v, probs) = if cfg.debug {
+        let (a, p, t, b, n, q, _lp, v, probs) = if let Some(h) = hidden.as_ref() {
+            let context = crate::recurrent::context_tensor(&[prepared.prev_action.clone()], cfg.device);
+            if cfg.debug {
+                let (acts, h_out) = policy.act_with_state_debug(&obs_t, h, &context, true);
+                hidden = Some(h_out);
+                acts
+            } else {
+                let (acts, h_out) = policy.act_with_state(&obs_t, h, &context, true);
+                hidden = Some(h_out);
+                let empty =
+                    tch::Tensor::zeros(&[1, ACTIONS.len() as i64], (Kind::Float, cfg.device));
+                (
+                    acts.0, acts.1, acts.2, acts.3, acts.4, acts.5, acts.6, acts.7, empty,
+                )
+            }
+        } else if cfg.debug {
             policy.act_with_debug(&obs_t, true)
         } else {
             let (a, p, t, b, n, q, lp, v) = policy.act(&obs_t, true);

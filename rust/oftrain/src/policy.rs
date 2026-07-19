@@ -1495,6 +1495,38 @@ impl PolicyNet {
         (a, player, tile, build, nuke, q, logp, value, action_probs)
     }
 
+    /// Recurrent sibling of [`Self::act_with_debug`] for MODEL-overlay watch clips.
+    pub fn act_with_state_debug(
+        &self,
+        o: &Obs,
+        hidden_in: &Tensor,
+        context: &Tensor,
+        greedy: bool,
+    ) -> (
+        (
+            Tensor,
+            Tensor,
+            Tensor,
+            Tensor,
+            Tensor,
+            Tensor,
+            Tensor,
+            Tensor,
+            Tensor,
+        ),
+        Tensor,
+    ) {
+        let reset = Tensor::zeros([hidden_in.size()[0]], (Kind::Float, hidden_in.device()));
+        let (output, hidden_out) = self.forward_recurrent(o, hidden_in, context, &reset);
+        let action_probs = sanitize_logits(&output.act_logits).softmax(-1, Kind::Float);
+        let (a, player, tile, build, nuke, q, logp, value) =
+            self.act_from_forward(o, greedy, output);
+        (
+            (a, player, tile, build, nuke, q, logp, value, action_probs),
+            hidden_out,
+        )
+    }
+
     #[cfg(test)]
     fn act_recomputing_foveation_reference(
         &self,
