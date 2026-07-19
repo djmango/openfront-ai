@@ -13,8 +13,8 @@ use crate::paths::clips_dir;
 pub const LEGACY_POLICY_RUNS: &[&str] = &["ppo_v5", "ppo_v7"];
 
 pub fn showcase_maps() -> Vec<String> {
-    // Always the full curriculum pool (no env override).
-    let mut maps: Vec<String> = ofcore::curriculum::ALL_MAPS
+    // Always the broad V10 pool (no env override).
+    let mut maps: Vec<String> = ofcore::curriculum::V10_BROAD_MAPS
         .iter()
         .map(|m| (*m).to_string())
         .collect();

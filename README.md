@@ -248,7 +248,7 @@ Export ONNX from an oftrain checkpoint:
 ```bash
 PYTHONPATH=. uv run python scripts/export_onnx.py \
     --ae runs/ae_v31_d8c32/ae_v3.pt \
-    --policy rust/checkpoints/ppo_v81/latest.safetensors \
+    --policy rust/checkpoints/ppo_v10/latest.safetensors \
     --out openfront/resources/webbot/models
 ```
 

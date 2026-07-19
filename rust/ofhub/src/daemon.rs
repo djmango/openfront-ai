@@ -211,40 +211,15 @@ fn run_watch(
         args.push("--coarse-ckpt".into());
         args.push(coarse_path.to_string_lossy().into_owned());
     }
-    // ppo_v10 (and any future v10* run) needs the V10 schedule + a reward knob
-    // so `--stage` indices past the legacy 11-stage ladder stay in bounds.
-    let run_hint = std::env::var("RUN_NAME").unwrap_or_default();
-    let v10 = run_hint.contains("v10")
-        || env_or("SHOWCASE_V10", "1") == "1"
-        || stage >= 15;
-    // Recurrent is required for V8.2+/V10 checkpoints; older runs stay feed-forward.
-    let recurrent = match env_or("SHOWCASE_RECURRENT", "auto").as_str() {
+    // V10 checkpoints are recurrent by default; allow opt-out for debugging only.
+    let recurrent = match env_or("SHOWCASE_RECURRENT", "1").as_str() {
         "1" | "true" | "yes" => true,
         "0" | "false" | "no" => false,
-        _ => {
-            v10
-                || run_hint.contains("v9")
-                || run_hint.contains("v82")
-                || run_hint.contains("v83")
-                || run_hint.contains("v84")
-                || run_hint.contains("v85")
-                || run_hint.contains("v86")
-        }
+        _ => true,
     };
     if recurrent {
         args.push("--persistent-actors".into());
         args.push("--recurrent-policy".into());
-    }
-    if v10 {
-        args.extend([
-            "--v10-curriculum".into(),
-            "--v10-survival-coef".into(),
-            "0.01".into(),
-            "--v10-diplo-panic".into(),
-            "0.08".into(),
-            "--v10-combat-action".into(),
-            "0.02".into(),
-        ]);
     }
     let status = Command::new(&bin)
         .args(&args)
