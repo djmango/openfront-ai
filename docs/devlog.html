@@ -28,6 +28,9 @@
 
 <nav class="toc">
   <a href="#now">Now</a> ·
+  <a href="#v10-easy-ramp">Jul 18–19 V10</a> ·
+  <a href="#v10-learnings">V10 learnings</a> ·
+  <a href="#v10-curriculum-100">100-stage curve</a> ·
   <a href="#v9-killed">Jul 15 V9 killed</a> ·
   <a href="#v9-sparse-win">Jul 14 V9 sparse-win</a> ·
   <a href="#v9-alphastar-oa5">AlphaStar / OA5</a> ·
@@ -71,21 +74,142 @@
 </nav>
 
 <div class="now" id="now">
-  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 15th, 2026</h2>
-  <p><b>V9 sparse-win killed</b>
-  (<a href="#v9-killed">postmortem</a>).
-  Cleared bots-only stages 0–1, then died on stage 2 (first nations).
-  Pod <code>wq7acsw606cc9q</code> terminated. Stick with dense V8.x /
-  <code>ppo_v86</code>.</p>
-  <p><b>Persistent + autoscale still live on <code>ppo_v86</code></b>
-  (<a href="#persistent-autoscale-restart">writeup</a>).
-  Do <b>not</b> shorten episodes for GPU util; grow env count via restart instead.</p>
-  <p class="d" style="margin:.75rem 0 0">Jul 14: V9 launch
-  (<a href="#v9-sparse-win">writeup</a>), V8.6 attack-fair
-  (<a href="#v86-attack-fair">writeup</a>), bot-heavy curricula
-  (<a href="https://github.com/djmango/openfront-ai/pull/38">#38</a> /
-  <a href="https://github.com/djmango/openfront-ai/pull/40">#40</a>.</p>
+  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 19th, 2026</h2>
+  <p><b><code>ppo_v10</code> live and climbing</b>
+  (<a href="#v10-easy-ramp">writeup</a>).
+  Overnight after the 100-stage Easy ramp deploy: stages <b>0 → 27</b>
+  (Onion Easy, 24 bots / 4 nations) by update ~8470 / ~29.6M steps.
+  Window WR ~70% vs a still-<b>95%</b> gate; conversion ~98%.
+  Significant step up vs the pre-ramp dense lobby stall (~30–50% WR on
+  Onion/Pangaea).</p>
+  <p><b>HF sync healthy</b> —
+  <code>ofhf sync-loop</code> →
+  <a href="https://huggingface.co/djmango/openfront-rl/tree/main/ppo_v10">djmango/openfront-rl/ppo_v10</a>
+  (~10&nbsp;min cadence; latest.state tracks stage/update within one interval).
+  Showcase:
+  <a href="https://openfrontai.skg.gg/">openfrontai.skg.gg</a>
+  (pointed at <code>ppo_v10</code>; regenerate clips after image rebuild).</p>
+  <p class="d" style="margin:.75rem 0 0">V9 sparse-win remains killed
+  (<a href="#v9-killed">postmortem</a>). V10 keeps dense V8.6-like reward +
+  a josh-freeman-style long Easy mastery ladder.</p>
 </div>
+
+<h2 class="date" id="v10-easy-ramp">Jul 18–19, 2026 - V10: Easy mastery ladder that actually climbs</h2>
+<p class="session">After V9 died on first nations and the dense 15-stage V10
+ladder stalled around stage 2–3 (~30–50% WR), we rebuilt the curriculum around
+a long Easy Onion ramp, high early gates, and denser late Easy→Impossible
+steps. Overnight result: <b>0 → 27</b> on the new 100-stage curve.</p>
+
+<h3 id="v10-why">Why V10, not another sparse bet</h3>
+<p>V9 proved win-only + high gates can clear bots-only, then collapsed the
+moment nations appeared. The dense V8.x reward stack (closeout Φ, boats,
+tempo, embargo/combat thrash, soft death) was already teaching useful
+priors — the failure mode was <i>lobby difficulty</i>, not missing shaping.
+So V10 keeps <code>v10-anti-spiral-v1</code> (V8.6-like dense reward + survival /
+anti-diplo / combat priors) and spends the degrees of freedom on a much
+longer Easy mastery curriculum, inspired by
+<a href="https://github.com/josh-freeman/openfront-rl">josh-freeman / AlphaFront</a>
+starting at Easy/2 and reporting 100% WR there.</p>
+
+<h3 id="v10-reward-fixes">Reward / episode fixes that unblocked finish</h3>
+<p>Before the ramp rewrite, mid-lobby episodes often reached ~45% land and then
+idled. Diagnosis: <b>win rate ≠ conversion</b>. Many washouts never hit
+closeout; among closeout episodes, timeouts-after-closeout were the “does
+nothing” failure. Shipped in sequence:</p>
+<ul>
+  <li>Ungate finish rewards (closeout Φ / tempo / boat / combat not hard-gated on stage ≥5)</li>
+  <li>Max episode ticks <b>21000</b> (35&nbsp;min); survival taper 45→80% land</li>
+  <li><code>--v10-timeout-closeout 20</code> stick after closeout</li>
+  <li>Radically larger win terminal: <code>--v85-extra-win-bonus 200</code>, <code>--v84-fast-win-coef 40</code></li>
+  <li>One-shot <code>--v10-closeout-entry 25</code> on first cross of 45% land</li>
+</ul>
+<p>After those: timeout-after-closeout ~0–1%, converted episodes rewarding
+~310, but the dense lobby gate (then 70%) still was not clearing. The
+curriculum, not the reward, was the remaining bottleneck.</p>
+
+<h3 id="v10-curriculum-100">100-stage curve</h3>
+<p>Shipped in
+<a href="https://github.com/djmango/openfront-ai/pull/50">#50</a> /
+<a href="https://github.com/djmango/openfront-ai/pull/51">#51</a> /
+<a href="https://github.com/djmango/openfront-ai/pull/52">#52</a>
+(<code>db79da8</code>). Geometry:</p>
+<table>
+  <tr><th>Stages</th><th>Band</th><th>Lobby</th><th>win_at</th></tr>
+  <tr><td>0–14</td><td>Onion bots-only</td><td>2→22 bots / 0 nations</td><td><b>95%</b></td></tr>
+  <tr><td>15–19</td><td>+1 nation</td><td>16→24 / 1</td><td><b>95%</b></td></tr>
+  <tr><td>20–23</td><td>+2 nations</td><td>20→26 / 2</td><td><b>95%</b></td></tr>
+  <tr><td>24–26</td><td>+3 nations</td><td>22→26 / 3</td><td><b>95%</b></td></tr>
+  <tr><td>27–29</td><td>+4 nations</td><td>24→28 / 4</td><td><b>95%</b></td></tr>
+  <tr><td>30–47</td><td>Easy map expand</td><td>Onion → 3-map, 30→70 bots</td><td>95%→~90%</td></tr>
+  <tr><td>48–53</td><td>Closeout Easy</td><td>Onion/Pangaea/Caucasus</td><td>~90%→87%</td></tr>
+  <tr><td>54–67</td><td>8- then 16-map Easy</td><td>70→118 / 9–14</td><td>~87%→78%</td></tr>
+  <tr><td>68–81</td><td>Medium</td><td>100→152 / 12–19</td><td>~78%→70%</td></tr>
+  <tr><td>82–91</td><td>Hard</td><td>150→186 / 20–25</td><td>~70%→66%</td></tr>
+  <tr><td>92–99</td><td>Impossible</td><td>190→225 / 26–32</td><td>~66%→<b>65%</b></td></tr>
+</table>
+<p><code>win_at</code> holds 95% through the Onion micro-ramp, then smoothsteps
+to 65% by stage 99 — no 95→70 cliff at the old “legacy stage 0” handoff.
+Closeout conversion gate @48, eight-map bridge @54.</p>
+
+<h3 id="v10-overnight">Overnight result (Jul 18 eve → Jul 19 morning)</h3>
+<table>
+  <tr><th></th><th>Before ramp</th><th>After 100-stage reset</th></tr>
+  <tr><td>Stage</td><td>stuck 2↔3 (dense Onion/Pangaea)</td><td><b>27</b> (Onion 24/4)</td></tr>
+  <tr><td>Window WR</td><td>~30–50% vs 70% gate</td><td>~70% vs <b>95%</b> gate (grinding)</td></tr>
+  <tr><td>Conversion</td><td>~33%</td><td><b>~98%</b></td></tr>
+  <tr><td>Death rate</td><td>~35–40%</td><td>~28%</td></tr>
+  <tr><td>Timeout after closeout</td><td>was the idle failure</td><td>~0%</td></tr>
+  <tr><td>Pace</td><td>oscillating for days</td><td>0→27 in ~12h wall-clock</td></tr>
+</table>
+<p>Stage 26 (26 bots / 3 nations) cleared at ~90% wins. Stage 27 is the first
+real slowdown on the 95% bar — still converting when it reaches 45% land, not
+yet winning often enough to graduate. One demote 27→26 and re-advance; no
+death spiral.</p>
+
+<h3 id="v10-learnings">What we learned</h3>
+<ul>
+  <li><b>Match AlphaFront’s start, not their whole stack.</b> Easy/2 bots-only
+    with a high win gate is the missing first mile. Dense reward on top of that
+    climbs; sparse win-only on a hard lobby does not.</li>
+  <li><b>Do not jump 0→2 nations.</b> An explicit 1-nation band (stages 15–19)
+    is load-bearing. The old ramp skipped it and pretended nations were a small
+    step; they are not.</li>
+  <li><b>High gates on easy lobbies, decay later.</b> 95% through Onion mastery
+    forces competence before maps/difficulty expand. A hard drop to 70% at the
+    first dense lobby invited “advance on luck, demote on death.”</li>
+  <li><b>Win rate and conversion answer different questions.</b> Low WR with
+    mid conversion meant washouts; high conversion with mid WR means finish /
+    endgame. Instrument both before changing reward.</li>
+  <li><b>Finish incentives must fire before the curriculum gets hard.</b>
+    Ungating closeout/tempo + timeout stick + big win bonus removed the
+    post-45%-land idle without waiting for stage ≥5.</li>
+  <li><b>Sidecar expands need an explicit remap.</b> 15→35 used
+    <code>+ramp_len</code>; 35→100 uses proportional remap. Forcing stage 0
+    after a curriculum rewrite beats preserving a stuck dense index.</li>
+  <li><b>Disk full kills trainers silently.</b> Pod filled to 80G/80G;
+    crash-looped with <code>No space left on device</code> on log tee / git
+    fetch. Trim validation dirs + truncate logs before redeploy; watch the
+    overlay (~87% again by morning).</li>
+  <li><b>HF sync-loop is the recovery path.</b>
+    <code>ofhf sync-loop</code> on <code>djmango/openfront-rl</code> /
+    <code>ppo_v10</code> kept latest + numbered policy updates current through
+    the overnight climb (occasional xet/commit retry noise; uploads continue).</li>
+</ul>
+
+<h3 id="v10-ops">Ops pointers</h3>
+<ul>
+  <li>Pod: 4×A40 RunPod, tmux <code>v10-production</code>,
+    <code>scripts/pod_train_v10.sh</code>, HEAD <code>db79da8</code>+</li>
+  <li>Checkpoints:
+    <a href="https://huggingface.co/djmango/openfront-rl/tree/main/ppo_v10">HF ppo_v10</a></li>
+  <li>Showcase:
+    <a href="https://openfrontai.skg.gg/">openfrontai.skg.gg</a>
+    — defaults <code>RUN_NAME=ppo_v10</code>; rebuild via
+    <code>docker/homelab_deploy.sh</code> when clips go stale</li>
+  <li>Devlog proxy:
+    <a href="https://skg.gg/pages/openfront-devlog/">skg.gg/pages/openfront-devlog</a>
+    (Cloudflare Pages pulls <code>docs/devlog.html</code> from master)</li>
+</ul>
 
 <h2 class="date" id="v9-sparse-win">Jul 14, 2026 - V9: sparse win/loss as a parallel to V8.x</h2>
 <p class="session">Hypothesis: we have been doing a lot of reward engineering
@@ -797,6 +921,15 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <code>ae_v3.pt</code> until the v3.1 winner is wired into <code>rl/obs.py</code>.</p>
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
+  <tr><td><code>ppo_v10</code></td><td><b>live</b> Jul 19 (4×A40)</td>
+    <td>Dense anti-spiral reward + <b>100-stage</b> Easy→Impossible curriculum
+    (<a href="#v10-easy-ramp">writeup</a>). Overnight after Easy/2 reset: stages
+    0→27 (Onion 24/4), update ~8470 / ~29.6M steps, conversion ~98%, still under
+    the 95% Onion-ramp gate. HF
+    <a href="https://huggingface.co/djmango/openfront-rl/tree/main/ppo_v10">ppo_v10/</a>.
+    PRs
+    <a href="https://github.com/djmango/openfront-ai/pull/47">#47</a>–
+    <a href="https://github.com/djmango/openfront-ai/pull/52">#52</a>.</td></tr>
   <tr><td><code>ppo_v9</code></td><td><b>killed</b> Jul 15 (sparse-win parallel)</td>
     <td>Terminal <code>+1/−1</code> only. Cleared bots-only stages 0–1 (peak window
     WR 0.975 @ u~498), then collapsed on stage 2 (30 bots + 2 nations) and never

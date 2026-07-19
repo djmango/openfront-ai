@@ -47,7 +47,7 @@ echo "[entrypoint] replay archive API on :8987"
   --bind 0.0.0.0 \
   --port 8987 &
 
-echo "[entrypoint] replay showcase daemon (RUN_NAME=${RUN_NAME:-ppo_v81})"
+echo "[entrypoint] replay showcase daemon (RUN_NAME=${RUN_NAME:-ppo_v10})"
 "$OFSHOWCASE" daemon &
 
 echo "[entrypoint] showcase hub on :8988 (watch + on-demand play; featured map=latest)"

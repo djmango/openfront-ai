@@ -37,13 +37,18 @@ docker run --rm -p 8086:8086 -v openfront-eval-data:/data openfront-eval
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RUN_NAME` | `ppo_v81` | HF policy run under `djmango/openfront-rl` |
-| `PLAY_MAP` | `random` | Live play map key, or `random` to sample the curriculum pool |
+| `RUN_NAME` | `ppo_v10` | HF policy run under `djmango/openfront-rl` |
+| `PLAY_MAP` | `Onion` | Live play map key, or `random` to sample the curriculum pool |
 | `PLAY_BOTS` | `10` | Tribe bots |
 | `PLAY_NATIONS` | `1` | Nation opponents |
-| `PLAY_START_DELAY` | `30` | Lobby countdown (seconds) |
+| `PLAY_START_DELAY` | `15` | Lobby countdown (seconds) |
 | `PLAY_GREEDY` | `1` | Pass `--greedy` to webbot (`0` to sample) |
-| `STAGE` | `4` | Curriculum stage for replay generation |
-| `SHOWCASE_WATCH_STAGE` | (stage) | Stage passed to `oftrain --watch` |
+| `STAGE` | `27` | Curriculum stage label in showcase state |
+| `SHOWCASE_WATCH_STAGE` | (stage) | Stage passed to `oftrain --watch` (V10 schedule) |
+| `SHOWCASE_BOTS` | `24` | Watch/replay bot count (matches live Easy ramp) |
+| `SHOWCASE_NATIONS` | `4` | Watch/replay nations |
+| `SHOWCASE_V10` | `1` | Force `--v10-curriculum` on watch (also auto when `RUN_NAME` contains `v10`) |
 
 Homelab: [homelab README](https://github.com/djmango/homelab), `openfrontai.skg.gg`.
+Redeploy: `bash docker/homelab_deploy.sh` on the host (rebuilds image, clears
+`hero_clips`, restarts `ofshowcase daemon` so clips regenerate from HF).
