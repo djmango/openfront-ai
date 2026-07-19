@@ -51,9 +51,53 @@ def default_spool() -> Path:
     return base / "replay-spool"
 
 
+def recover_tmp_orphans(spool: Path) -> int:
+    """Promote leftover `._tmp_*.json` writes into `{gameID}.json`.
+
+    Parallel env workers used to collide on `._tmp_{ms}.json`; failed renames
+    left valid GameRecords stranded under the temp prefix (upload skipped them).
+    """
+    recovered = 0
+    for path in sorted(spool.glob("._tmp_*.json")):
+        try:
+            record = json.loads(path.read_text())
+            game_id = (record.get("info") or {}).get("gameID")
+            if not game_id:
+                print(f"recover skip {path.name}: missing info.gameID", flush=True)
+                continue
+            dest = spool / f"{game_id}.json"
+            if dest.exists():
+                path.unlink(missing_ok=True)
+                continue
+            path.rename(dest)
+            meta_path = dest.with_suffix(".meta.json")
+            if not meta_path.is_file():
+                meta_path.write_text(
+                    json.dumps(
+                        {
+                            "game_id": game_id,
+                            "recovered_from_tmp": True,
+                            "spooled_at": int(time.time() * 1000),
+                        },
+                        indent=2,
+                    )
+                )
+            recovered += 1
+        except Exception as e:
+            print(f"recover skip {path.name}: {e}", flush=True)
+    if recovered:
+        print(f"recovered {recovered} orphan tmp GameRecords in {spool}", flush=True)
+    return recovered
+
+
 def list_ready(spool: Path) -> list[Path]:
+    recover_tmp_orphans(spool)
     files = sorted(spool.glob("*.json"))
-    return [p for p in files if not p.name.startswith("._") and not p.name.endswith(".meta.json")]
+    return [
+        p
+        for p in files
+        if not p.name.startswith("._") and not p.name.endswith(".meta.json")
+    ]
 
 
 def row_from_record(path: Path) -> dict:

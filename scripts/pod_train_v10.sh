@@ -65,7 +65,12 @@ fi
 
 REPO_DIR="${REPO_DIR:-/root/openfront-ai}"
 CKPT_DIR="$REPO_DIR/rust/checkpoints/$RUN_NAME"
+# oftrain cwd is $REPO_DIR/rust; ofhf defaults to $DATA_DIR/replay-spool.
+# Keep both on the same path so GameRecords actually reach HF parquet.
+export DATA_DIR="${DATA_DIR:-$REPO_DIR/rust}"
 HF_SYNC_INTERVAL_SECONDS="${HF_SYNC_INTERVAL_SECONDS:-600}"
+HF_REPLAY_FLUSH_INTERVAL_SECONDS="${HF_REPLAY_FLUSH_INTERVAL_SECONDS:-$HF_SYNC_INTERVAL_SECONDS}"
+HF_REPLAYS_REPO="${HF_REPLAYS_REPO:-djmango/openfront-replays}"
 HF_REPO_ID="${HF_REPO_ID:-djmango/openfront-rl}"
 HF_RUN_PREFIX="${HF_RUN_PREFIX:-$RUN_NAME}"
 # The current RunPod A40 host advertises direct CUDA P2P, but its first NCCL
@@ -336,7 +341,23 @@ fi
   --run-prefix "$HF_RUN_PREFIX" --interval "$HF_SYNC_INTERVAL_SECONDS" \
   >>"/tmp/hf_sync_$RUN_NAME.log" 2>&1 &
 SYNC_PID=$!
-trap 'kill "$SYNC_PID" 2>/dev/null' EXIT
+# Drain GameRecord spool → zstd parquet shards on openfront-replays.
+# Training only spools locally; without this flush the HF dataset never appears.
+mkdir -p "$DATA_DIR/replay-spool"
+(
+  while true; do
+    "$OFHF" replays \
+      --spool "$DATA_DIR/replay-spool" \
+      --repo "$HF_REPLAYS_REPO" \
+      --min-files 1 \
+      --shard-size "${HF_REPLAY_SHARD_SIZE:-1000}" \
+      >>"/tmp/hf_replays_$RUN_NAME.log" 2>&1 || true
+    sleep "$HF_REPLAY_FLUSH_INTERVAL_SECONDS"
+  done
+) &
+REPLAY_PID=$!
+trap 'kill "$SYNC_PID" "$REPLAY_PID" 2>/dev/null' EXIT
+echo "[replays] flushing $DATA_DIR/replay-spool -> $HF_REPLAYS_REPO every ${HF_REPLAY_FLUSH_INTERVAL_SECONDS}s (pid=$REPLAY_PID)"
 
 # --- crash-proof training loop (backoff, not an instant relaunch into the
 # same wall - see pod_train.sh's FAST_EXITS precedent) ---
