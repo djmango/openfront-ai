@@ -1,205 +1,73 @@
 #!/usr/bin/env bash
-# Restart-proof training for the Rust `oftrain` trainer (v8 port) on a
-# RunPod pod. Rust-flavored equivalent of `pod_train.sh` (the Python-era
-# ppo_v2-v7 wrapper): bootstraps the repo + libtorch/CUDA venv + build,
-# resumes from a local or HF-synced checkpoint, crash-loops with backoff,
-# and periodically pushes the latest checkpoint to `djmango/openfront-rl`
-# so a fresh pod (or one after total disk loss) can pick training back up.
+# Restart-proof V10 training for the Rust `oftrain` trainer on a RunPod pod.
+# Bootstraps the repo + libtorch/CUDA venv + build, resumes from a local or
+# HF-synced checkpoint, crash-loops with backoff, and periodically pushes the
+# latest checkpoint to `djmango/openfront-rl`.
 #
-#   RUN_NAME=ppo_v8 NUM_GPUS=8 bash scripts/pod_train_v8.sh
+#   bash scripts/pod_train_v8.sh
+#   NUM_GPUS=4 NODE_FRACTION=0.2 bash scripts/pod_train_v8.sh
 #
-# As a RunPod `dockerArgs` pod start command - deliberately does NOT run
-# this script as the container's own foreground process (see docs/devlog.html's
-# 2026-07-12 "don't tie the container's lifecycle to the training script"
-# entry for why that caused repeated "container not found" SSH failures
-# that terminating-and-relaunching pods did NOT fix, since it wasn't a
-# host-specific problem): starts sshd explicitly, launches this script
-# fully detached in the background, and keeps the container itself alive
-# with `sleep infinity` regardless of what happens to the training process.
-#   bash -c "service ssh start 2>/dev/null || /usr/sbin/sshd; nohup bash -c 'curl -fsSL https://raw.githubusercontent.com/djmango/openfront-ai/master/scripts/pod_train_v8.sh -o /root/pod_train_v8.sh && RUN_NAME=ppo_v8 NUM_GPUS=8 bash /root/pod_train_v8.sh' > /root/bootstrap.log 2>&1 & disown; sleep infinity"
-#
-# To hedge native's known weaker parity at higher bot counts by running a
-# fraction of envs on the real Node/TS engine (see oftrain's `--engine` doc
-# comment), set NODE_FRACTION (0.0-1.0, default 0 = pure native, no extra
-# bootstrap cost):
-#   RUN_NAME=ppo_v8 NUM_GPUS=4 NODE_FRACTION=0.2 bash scripts/pod_train_v8.sh
+# RunPod dockerArgs (detached; keep the container alive with sleep infinity):
+#   bash -c "service ssh start 2>/dev/null || /usr/sbin/sshd; nohup bash -c 'curl -fsSL https://raw.githubusercontent.com/djmango/openfront-ai/master/scripts/pod_train_v8.sh -o /root/pod_train_v8.sh && bash /root/pod_train_v8.sh' > /root/bootstrap.log 2>&1 & disown; sleep infinity"
 #
 # If a pod fails to actually train (crash-loops immediately, "CUDA unknown
-# error" in the trainer's own log at /tmp/train_$RUN_NAME.log) despite
-# `nvidia-smi` looking healthy: this has already happened on a RunPod
-# community-cloud host once (see docs/devlog.html's "v8 launch" entry,
-# 2026-07-12) and was NOT fixable in code - `cuInit()` itself failed for the
-# compiled binary on that specific host while plain `python3 -c "import
-# torch"` worked fine in the identical environment. Don't sink time
-# bisecting it again - terminate that pod and relaunch (prefer secure cloud
-# over community; a different physical host resolved it instantly last
-# time, zero code changes needed).
-#
-# See docs/devlog.html's "ppo_v8 launch plan" section for the full runbook,
-# config rationale, and sizing math this script implements.
+# error" in /tmp/train_$RUN_NAME.log) despite nvidia-smi looking healthy:
+# terminate and relaunch on another host (known cuInit host footgun).
 
 set -uo pipefail
 
-V83_MODE="${V83_MODE:-0}"
-V84_MODE="${V84_MODE:-0}"
-V85_MODE="${V85_MODE:-0}"
-V86_MODE="${V86_MODE:-0}"
-# Parallel sparse-win experiment (not a V8.x migrate). Fresh stage-0 ladder.
-V9_MODE="${V9_MODE:-0}"
-V10_MODE="${V10_MODE:-0}"
-if [ "$V10_MODE" = "1" ]; then
-  RUN_NAME="${RUN_NAME:-ppo_v10}"
-  NUM_GPUS="${NUM_GPUS:-4}"
-elif [ "$V9_MODE" = "1" ]; then
-  RUN_NAME="${RUN_NAME:-ppo_v9}"
-  NUM_GPUS="${NUM_GPUS:-4}"
-elif [ "$V86_MODE" = "1" ]; then
-  RUN_NAME="${RUN_NAME:-ppo_v86}"
-  NUM_GPUS="${NUM_GPUS:-4}"
-elif [ "$V85_MODE" = "1" ]; then
-  RUN_NAME="${RUN_NAME:-ppo_v85}"
-  NUM_GPUS="${NUM_GPUS:-4}"
-elif [ "$V84_MODE" = "1" ]; then
-  RUN_NAME="${RUN_NAME:-ppo_v84}"
-  NUM_GPUS="${NUM_GPUS:-4}"
-elif [ "$V83_MODE" = "1" ]; then
-  RUN_NAME="${RUN_NAME:-ppo_v83}"
-  NUM_GPUS="${NUM_GPUS:-4}"
-else
-  RUN_NAME="${RUN_NAME:-ppo_v8}"
-  NUM_GPUS="${NUM_GPUS:-1}"
-fi
-V81_CURRICULUM="${V81_CURRICULUM:-0}"
-# Envs per GPU/shard. Live A40 A/Bs found 48 faster than 64 once the
-# persistent compact path was enabled (64 increased stage-2 tail latency).
-# V8.4 doubles rollout length, so default fewer envs to keep VRAM in band.
-# V9 starts at the small-map 24-env floor (schedule env targets take over).
-if [ "$V10_MODE" = "1" ] || [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ]; then
-  NUM_ENVS="${NUM_ENVS:-12}"
-elif [ "$V9_MODE" = "1" ] || [ "$V81_CURRICULUM" = "1" ] || [ "$V83_MODE" = "1" ]; then
-  NUM_ENVS="${NUM_ENVS:-24}"
-else
-  NUM_ENVS="${NUM_ENVS:-48}"
-fi
+RUN_NAME="${RUN_NAME:-ppo_v10}"
+NUM_GPUS="${NUM_GPUS:-4}"
+# Envs per GPU/shard. Live A40 A/Bs found 12 healthier than 48 once V10's
+# longer rollout/BPTT was enabled; stage env targets + autoscale take over.
+NUM_ENVS="${NUM_ENVS:-12}"
 STAGE_ENV_TARGETS="${STAGE_ENV_TARGETS:-}"
 # Persistent owners cannot live-spawn env workers; autoscale grows via the same
-# restart_request.json path as stage env targets. Default on for V8.3+ so late
-# stages (floors of 8–12) can climb toward GPU util without shortening episodes.
-if [ "$V10_MODE" = "1" ] || [ "$V9_MODE" = "1" ] || [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ] || [ "$V83_MODE" = "1" ]; then
-  AUTO_SCALE_ENVS="${AUTO_SCALE_ENVS:-1}"
-else
-  AUTO_SCALE_ENVS="${AUTO_SCALE_ENVS:-0}"
-fi
+# restart_request.json path as stage env targets.
+AUTO_SCALE_ENVS="${AUTO_SCALE_ENVS:-1}"
 # Cap below the A40 OOM cliff seen at 20 envs/shard on bot-heavy late stages.
-# Autoscale may grow up to this; VRAM shrink (oftrain) steps back toward MIN_ENVS.
 MAX_ENVS="${MAX_ENVS:-14}"
-# Keep a floor below the launch NUM_ENVS so a util-driven grow→restart cannot
-# ratchet min==max==NUM_ENVS and freeze autoscale (and prevent VRAM shrink).
 MIN_ENVS="${MIN_ENVS:-8}"
 TARGET_GPU_UTIL="${TARGET_GPU_UTIL:-0.85}"
 AUTOSCALE_CHECK_EVERY="${AUTOSCALE_CHECK_EVERY:-5}"
 AUTOSCALE_STEP="${AUTOSCALE_STEP:-2}"
-if [ "$V10_MODE" = "1" ] || [ "$V9_MODE" = "1" ] || [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ]; then
-  ROLLOUT_LEN="${ROLLOUT_LEN:-64}"
-  BPTT_CHUNK_LEN="${BPTT_CHUNK_LEN:-32}"
-else
-  ROLLOUT_LEN="${ROLLOUT_LEN:-32}"
-  BPTT_CHUNK_LEN="${BPTT_CHUNK_LEN:-16}"
-fi
+ROLLOUT_LEN="${ROLLOUT_LEN:-64}"
+BPTT_CHUNK_LEN="${BPTT_CHUNK_LEN:-32}"
 # Match rl/ppo.py's optimizer cadence: its --minibatch is a target sample
-# count (128), while oftrain's --minibatches is a count. Derive the latter
-# so scaling env workers does not silently make each critic update weaker.
+# count (128), while oftrain's --minibatches is a count.
 MINIBATCH_SIZE="${MINIBATCH_SIZE:-128}"
 MINIBATCHES=$((NUM_ENVS * ROLLOUT_LEN / MINIBATCH_SIZE))
 [ "$MINIBATCHES" -ge 1 ] || MINIBATCHES=1
-if [ "$V10_MODE" = "1" ] || [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ] || [ "$V83_MODE" = "1" ]; then
-  STAGE="${STAGE:-5}"
-else
-  # V9 and legacy/V8.0 start at stage 0 (fresh ladder).
-  STAGE="${STAGE:-0}"
-fi
+STAGE="${STAGE:-0}"
 # Fraction (0.0-1.0) of env workers that run the real Node/TS engine
-# instead of native, to hedge native's known parity gaps at higher bot
-# counts (see oftrain's `--engine` doc comment) while still getting
-# native's ~10x tick speed for the majority. 0 (default) = pure native,
-# same as before this option existed - no extra bootstrap cost in that case.
+# instead of native, to hedge native's known parity gaps at higher bot counts.
 NODE_FRACTION="${NODE_FRACTION:-0}"
-# Local numbered-checkpoint retention. HF sync keeps the full historical
-# backlog; this only caps on-pod disk growth for policy_update*.
 CKPT_KEEP_LAST="${CKPT_KEEP_LAST:-48}"
-# Abort/reclaim before the overlay fills enough to crash training.
 DISK_WARN_PCT="${DISK_WARN_PCT:-85}"
 DISK_CRIT_PCT="${DISK_CRIT_PCT:-92}"
-# Comma-separated inactive run dirs under rust/checkpoints/ that may be
-# deleted wholesale when disk is critical (never deletes $RUN_NAME).
+# Inactive run dirs under rust/checkpoints/ that may be deleted when disk is
+# critical (never deletes $RUN_NAME).
 STALE_CKPT_RUNS="${STALE_CKPT_RUNS:-ppo_v8,ppo_v8_fast_native,ppo_v81,ppo_v82,ppo_v83,ppo_v84,ppo_v85,ppo_v86,ppo_v9}"
-# Validated Jul-13 one-GPU recipe: actor/learner CUDA state remains on
-# persistent owner threads, rollout payloads cross threads as compact host
-# data, and two env groups overlap stepping with actor inference. Keep
-# fp16-rollout opt-in until it receives the same extended CUDA soak.
-if [ "$V10_MODE" = "1" ] || [ "$V9_MODE" = "1" ] || [ "$V86_MODE" = "1" ] || [ "$V85_MODE" = "1" ] || [ "$V84_MODE" = "1" ]; then
-  EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --fp16-rollout --persistent-actors --work-conserving-actors --pipeline-groups=true --recurrent-policy --bptt-chunk-len $BPTT_CHUNK_LEN --ckpt-every 5 --ckpt-keep-last $CKPT_KEEP_LAST --eval-every 0 --log-every 1 --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
-elif [ "$V83_MODE" = "1" ]; then
-  EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --fp16-rollout --persistent-actors --work-conserving-actors --pipeline-groups=true --recurrent-policy --bptt-chunk-len 16 --ckpt-every 5 --ckpt-keep-last $CKPT_KEEP_LAST --eval-every 0 --log-every 1 --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
-else
-  EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --persistent-actors --pipeline-groups=true --ckpt-keep-last $CKPT_KEEP_LAST --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
-fi
-V81_ARGS=""
-if [ "$V10_MODE" = "1" ]; then
-  # V10: anti-death-spiral on V8.3 closeout ladder. Dense V8.6-like reward with
-  # softer death (3), tapered survival, timeout-after-closeout stick, diplo-
-  # panic + combat priors. All reward stage mins = 0 (no curriculum gating).
-  # Max ticks 21000 = 35 min @ 10 ticks/s. Schedule: demote + death-rate
-  # advance gate + softer density + past-lobby rehearsal.
-  # Win bonus is radical on purpose: W_WIN(30)+extra(200)+place(~15)+fast(≤40)
-  # ≈ 245–285 terminal on win vs ~10 on washouts, so finishing dominates shaping.
-  V81_ARGS="--v10-curriculum --max-episode-ticks 21000 --v83-close-coef 4.0 --v83-churn-coef 0.06 --v81-dom-coef 0.25 --v81-dominant-loss=true --v81-dominance-threshold 0.30 --v81-delta-loss-dominant 5.0 --v81-min-stage 0 --v81-churn-coef 0.05 --v81-churn-window 16 --v81-churn-min-stage 0 --v84-boat-useful 0.15 --v84-boat-destroyed=-0.20 --v84-boat-cancelled=-0.03 --v84-boat-own-shore=-0.05 --v84-boat-min-stage 0 --v84-tempo-coef 0.015 --v84-tempo-min-stage 0 --v84-fast-win-coef 40.0 --v85-tempo-share-threshold 0.30 --v85-extra-win-bonus 200.0 --v85-embargo-bad-stop=-0.15 --v85-embargo-good-stop 0.02 --v85-embargo-min-stage 0 --v85-premature-retreat=-0.03 --v85-thrash-reengage=-0.03 --v85-combat-min-stage 0 --v86-delta-loss 5.5 --v86-attack-symmetric-loss --v86-skip-combat-churn --v86-death-penalty 3.0 --v10-survival-coef 0.01 --v10-diplo-panic 0.08 --v10-diplo-panic-share 0.35 --v10-diplo-panic-tick-frac 0.55 --v10-combat-action 0.02 --v10-timeout-closeout 20.0 --v10-closeout-entry 25.0"
-elif [ "$V9_MODE" = "1" ]; then
-  # V9: parallel sparse-win experiment. Extremely gradual 25-stage ladder with
-  # 0.90–0.975 graduation gates; reward is terminal +1/-1 only (no strength /
-  # boat / tempo / closeout shaping). Longer horizon (gamma=0.9997) for credit
-  # assignment under sparse terminals. Fresh run: no V8.x migrate.
-  V81_ARGS="--v9-curriculum --v9-sparse-win --gamma 0.9997 --ret-clip 2"
-elif [ "$V86_MODE" = "1" ]; then
-  # V8.6: attack-fair fixes on top of V8.5. Dominance threshold matches tempo
-  # (0.30), softened delta loss, symmetric loss while attacking, sticky combat
-  # without reinforce-refresh / churn stack, bigger death penalty.
-  # Bool clap flags are presence-only (no =true); see v85 deploy clap gotcha.
-  V81_ARGS="--v83-curriculum --v83-close-coef 4.0 --v83-churn-coef 0.06 --v81-dom-coef 0.25 --v81-dominant-loss=true --v81-dominance-threshold 0.30 --v81-delta-loss-dominant 5.0 --v81-churn-coef 0.05 --v81-churn-window 16 --v84-boat-useful 0.15 --v84-boat-destroyed=-0.20 --v84-boat-cancelled=-0.03 --v84-boat-own-shore=-0.05 --v84-boat-min-stage 4 --v84-tempo-coef 0.015 --v84-tempo-min-stage 4 --v84-fast-win-coef 12.0 --v85-tempo-share-threshold 0.30 --v85-extra-win-bonus 30.0 --v85-embargo-bad-stop=-0.15 --v85-embargo-good-stop 0.02 --v85-embargo-min-stage 4 --v85-premature-retreat=-0.03 --v85-thrash-reengage=-0.03 --v85-combat-min-stage 4 --v86-delta-loss 5.5 --v86-attack-symmetric-loss --v86-skip-combat-churn --v86-death-penalty 10.0"
-elif [ "$V85_MODE" = "1" ]; then
-  # V8.5: win-first urgency + embargo/combat outcomes on top of V8.4 boats.
-  # Tempo kicks at land/strength share 0.30 (was 0.55). Extra win bonus makes
-  # terminal win dominate shaping. Negative coeffs use --flag=val for clap.
-  V81_ARGS="--v83-curriculum --v83-close-coef 4.0 --v83-churn-coef 0.06 --v81-dom-coef 0.25 --v81-dominant-loss=true --v81-churn-coef 0.05 --v81-churn-window 16 --v84-boat-useful 0.15 --v84-boat-destroyed=-0.20 --v84-boat-cancelled=-0.03 --v84-boat-own-shore=-0.05 --v84-boat-min-stage 4 --v84-tempo-coef 0.015 --v84-tempo-min-stage 4 --v84-fast-win-coef 12.0 --v85-tempo-share-threshold 0.30 --v85-extra-win-bonus 30.0 --v85-embargo-bad-stop=-0.15 --v85-embargo-good-stop 0.02 --v85-embargo-min-stage 4 --v85-premature-retreat=-0.10 --v85-thrash-reengage=-0.10 --v85-combat-min-stage 4"
-elif [ "$V84_MODE" = "1" ]; then
-  # V8.4: boat-outcome + tempo + fast-win on top of V8.3 closeout curriculum.
-  # Longer BPTT/rollout (32/64) for delayed boat credit; still reward-only
-  # so ppo_v83 weights resume with --migrate-v83-to-v84.
-  # Negative values must use --flag=val form; clap otherwise treats "-0.20" as a flag.
-  V81_ARGS="--v83-curriculum --v83-close-coef 4.0 --v83-churn-coef 0.06 --v81-dom-coef 0.25 --v81-dominant-loss=true --v81-churn-coef 0.05 --v81-churn-window 16 --v84-boat-useful 0.15 --v84-boat-destroyed=-0.20 --v84-boat-cancelled=-0.03 --v84-boat-own-shore=-0.05 --v84-boat-min-stage 4 --v84-tempo-coef 0.005 --v84-tempo-min-stage 4 --v84-fast-win-coef 8.0"
-elif [ "$V83_MODE" = "1" ]; then
-  # churn_window=16: catch delayed undos (boat→…→cancel), not just adjacent pairs.
-  # This is still a band-aid — fundamental fix is gating free inverse actions.
-  V81_ARGS="--v83-curriculum --v83-close-coef 4.0 --v83-churn-coef 0.06 --v81-dom-coef 0.25 --v81-dominant-loss=true --v81-churn-coef 0.05 --v81-churn-window 16"
-elif [ "$V81_CURRICULUM" = "1" ]; then
-  V81_ARGS="--v81-curriculum"
-fi
+
+# Validated recipe: persistent CUDA owners + compact rollout + recurrent BPTT.
+EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --fp16-rollout --persistent-actors --work-conserving-actors --pipeline-groups=true --recurrent-policy --bptt-chunk-len $BPTT_CHUNK_LEN --ckpt-every 5 --ckpt-keep-last $CKPT_KEEP_LAST --eval-every 0 --log-every 1 --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
+
+# V10 anti-death-spiral on the closeout ladder. Dense reward with softer death,
+# survival / diplo-panic / combat priors, and radical win bonus so finishing
+# dominates shaping. All reward stage mins = 0.
+TRAIN_ARGS="--v10-curriculum --max-episode-ticks 21000 --v83-close-coef 4.0 --v83-churn-coef 0.06 --v81-dom-coef 0.25 --v81-dominant-loss=true --v81-dominance-threshold 0.30 --v81-delta-loss-dominant 5.0 --v81-min-stage 0 --v81-churn-coef 0.05 --v81-churn-window 16 --v81-churn-min-stage 0 --v84-boat-useful 0.15 --v84-boat-destroyed=-0.20 --v84-boat-cancelled=-0.03 --v84-boat-own-shore=-0.05 --v84-boat-min-stage 0 --v84-tempo-coef 0.015 --v84-tempo-min-stage 0 --v84-fast-win-coef 40.0 --v85-tempo-share-threshold 0.30 --v85-extra-win-bonus 200.0 --v85-embargo-bad-stop=-0.15 --v85-embargo-good-stop 0.02 --v85-embargo-min-stage 0 --v85-premature-retreat=-0.03 --v85-thrash-reengage=-0.03 --v85-combat-min-stage 0 --v86-delta-loss 5.5 --v86-attack-symmetric-loss --v86-skip-combat-churn --v86-death-penalty 3.0 --v10-survival-coef 0.01 --v10-diplo-panic 0.08 --v10-diplo-panic-share 0.35 --v10-diplo-panic-tick-frac 0.55 --v10-combat-action 0.02 --v10-timeout-closeout 20.0 --v10-closeout-entry 25.0"
 if [ -n "$STAGE_ENV_TARGETS" ]; then
-  V81_ARGS="$V81_ARGS --stage-env-targets $STAGE_ENV_TARGETS"
+  TRAIN_ARGS="$TRAIN_ARGS --stage-env-targets $STAGE_ENV_TARGETS"
 fi
 if [ "$AUTO_SCALE_ENVS" = "1" ]; then
   EXTRA_ARGS="$EXTRA_ARGS --auto-scale-envs --min-envs $MIN_ENVS --max-envs $MAX_ENVS --target-gpu-util $TARGET_GPU_UTIL --autoscale-check-every $AUTOSCALE_CHECK_EVERY --autoscale-step $AUTOSCALE_STEP"
 fi
+
 REPO_DIR="${REPO_DIR:-/root/openfront-ai}"
 CKPT_DIR="$REPO_DIR/rust/checkpoints/$RUN_NAME"
 HF_SYNC_INTERVAL_SECONDS="${HF_SYNC_INTERVAL_SECONDS:-600}"
 HF_REPO_ID="${HF_REPO_ID:-djmango/openfront-rl}"
 HF_RUN_PREFIX="${HF_RUN_PREFIX:-$RUN_NAME}"
-V83_SOURCE_PREFIX="${V83_SOURCE_PREFIX:-ppo_v82}"
-V84_SOURCE_PREFIX="${V84_SOURCE_PREFIX:-ppo_v83}"
-V85_SOURCE_PREFIX="${V85_SOURCE_PREFIX:-ppo_v84}"
-V86_SOURCE_PREFIX="${V86_SOURCE_PREFIX:-ppo_v85}"
-V10_SOURCE_PREFIX="${V10_SOURCE_PREFIX:-ppo_v86}"
 # The current RunPod A40 host advertises direct CUDA P2P, but its first NCCL
 # collective wedges on that transport. Shared-memory transport reduced the
 # same 48 MiB gradient in ~113 ms. Override only after a host-specific P2P
@@ -452,148 +320,9 @@ then
   echo "FATAL: latest.safetensors and latest.state.json must exist as a pair" >&2
   exit 1
 fi
-if [ "$V83_MODE" = "1" ] && [ -f "$CKPT_DIR/latest.safetensors" ] \
-  && [ ! -f "$CKPT_DIR/manifest.json" ]; then
-  echo "FATAL: V8.3 resume requires manifest.json beside the checkpoint pair" >&2
-  exit 1
-fi
-if [ "$V84_MODE" = "1" ] && [ -f "$CKPT_DIR/latest.safetensors" ] \
-  && [ ! -f "$CKPT_DIR/manifest.json" ]; then
-  echo "FATAL: V8.4 resume requires manifest.json beside the checkpoint pair" >&2
-  exit 1
-fi
-if [ "$V85_MODE" = "1" ] && [ -f "$CKPT_DIR/latest.safetensors" ] \
-  && [ ! -f "$CKPT_DIR/manifest.json" ]; then
-  echo "FATAL: V8.5 resume requires manifest.json beside the checkpoint pair" >&2
-  exit 1
-fi
-if [ "$V86_MODE" = "1" ] && [ -f "$CKPT_DIR/latest.safetensors" ] \
-  && [ ! -f "$CKPT_DIR/manifest.json" ]; then
-  echo "FATAL: V8.6 resume requires manifest.json beside the checkpoint pair" >&2
-  exit 1
-fi
-if [ "$V10_MODE" = "1" ] && [ -f "$CKPT_DIR/latest.safetensors" ] \
-  && [ ! -f "$CKPT_DIR/manifest.json" ]; then
+if [ -f "$CKPT_DIR/latest.safetensors" ] && [ ! -f "$CKPT_DIR/manifest.json" ]; then
   echo "FATAL: V10 resume requires manifest.json beside the checkpoint pair" >&2
   exit 1
-fi
-
-# V8.3 starts from the immutable V8.2 latest pair exactly once. The source
-# remains in ppo_v82 (or a separate read-only restore directory); all output
-# and subsequent resumes use ppo_v83.
-V83_SEED_DIR=""
-if [ "$V83_MODE" = "1" ] && [ ! -f "$CKPT_DIR/latest.safetensors" ]; then
-  LOCAL_V82_DIR="$REPO_DIR/rust/checkpoints/$V83_SOURCE_PREFIX"
-  if [ -f "$LOCAL_V82_DIR/latest.safetensors" ] \
-    && [ -f "$LOCAL_V82_DIR/latest.state.json" ] \
-    && [ -f "$LOCAL_V82_DIR/manifest.json" ]; then
-    V83_SEED_DIR="$LOCAL_V82_DIR"
-  else
-    V83_SEED_DIR="$REPO_DIR/rust/checkpoints/.v83-seed-v82"
-    rm -rf "$V83_SEED_DIR"
-    mkdir -p "$V83_SEED_DIR"
-    "$OFHF" pull --checkpoint-dir "$V83_SEED_DIR" --repo-id "$HF_REPO_ID" \
-      --run-prefix "$V83_SOURCE_PREFIX"
-  fi
-  if [ ! -f "$V83_SEED_DIR/latest.safetensors" ] \
-    || [ ! -f "$V83_SEED_DIR/latest.state.json" ] \
-    || [ ! -f "$V83_SEED_DIR/manifest.json" ]; then
-    echo "FATAL: V8.3 migration requires a complete V8.2 safetensors/state/manifest seed" >&2
-    exit 1
-  fi
-fi
-
-# V8.4 seeds once from ppo_v83 (reward-only + longer BPTT/rollout).
-V84_SEED_DIR=""
-if [ "$V84_MODE" = "1" ] && [ ! -f "$CKPT_DIR/latest.safetensors" ]; then
-  LOCAL_V83_DIR="$REPO_DIR/rust/checkpoints/$V84_SOURCE_PREFIX"
-  if [ -f "$LOCAL_V83_DIR/latest.safetensors" ] \
-    && [ -f "$LOCAL_V83_DIR/latest.state.json" ] \
-    && [ -f "$LOCAL_V83_DIR/manifest.json" ]; then
-    V84_SEED_DIR="$LOCAL_V83_DIR"
-  else
-    V84_SEED_DIR="$REPO_DIR/rust/checkpoints/.v84-seed-v83"
-    rm -rf "$V84_SEED_DIR"
-    mkdir -p "$V84_SEED_DIR"
-    "$OFHF" pull --checkpoint-dir "$V84_SEED_DIR" --repo-id "$HF_REPO_ID" \
-      --run-prefix "$V84_SOURCE_PREFIX"
-  fi
-  if [ ! -f "$V84_SEED_DIR/latest.safetensors" ] \
-    || [ ! -f "$V84_SEED_DIR/latest.state.json" ] \
-    || [ ! -f "$V84_SEED_DIR/manifest.json" ]; then
-    echo "FATAL: V8.4 migration requires a complete V8.3 safetensors/state/manifest seed" >&2
-    exit 1
-  fi
-fi
-
-
-# V8.6 seeds once from ppo_v85 (attack-fair reward fixes).
-V86_SEED_DIR=""
-if [ "$V86_MODE" = "1" ] && [ ! -f "$CKPT_DIR/latest.safetensors" ]; then
-  LOCAL_V85_DIR="$REPO_DIR/rust/checkpoints/$V86_SOURCE_PREFIX"
-  if [ -f "$LOCAL_V85_DIR/latest.safetensors" ] \
-    && [ -f "$LOCAL_V85_DIR/latest.state.json" ] \
-    && [ -f "$LOCAL_V85_DIR/manifest.json" ]; then
-    V86_SEED_DIR="$LOCAL_V85_DIR"
-  else
-    V86_SEED_DIR="$REPO_DIR/rust/checkpoints/.v86-seed-v85"
-    rm -rf "$V86_SEED_DIR"
-    mkdir -p "$V86_SEED_DIR"
-    "$OFHF" pull --checkpoint-dir "$V86_SEED_DIR" --repo-id "$HF_REPO_ID" \
-      --run-prefix "$V86_SOURCE_PREFIX"
-  fi
-  if [ ! -f "$V86_SEED_DIR/latest.safetensors" ] \
-    || [ ! -f "$V86_SEED_DIR/latest.state.json" ] \
-    || [ ! -f "$V86_SEED_DIR/manifest.json" ]; then
-    echo "FATAL: V8.6 migration requires a complete V8.5 safetensors/state/manifest seed" >&2
-    exit 1
-  fi
-fi
-
-# V10 seeds once from ppo_v86 (anti-death-spiral schedule + reward).
-V10_SEED_DIR=""
-if [ "$V10_MODE" = "1" ] && [ ! -f "$CKPT_DIR/latest.safetensors" ]; then
-  LOCAL_V86_DIR="$REPO_DIR/rust/checkpoints/$V10_SOURCE_PREFIX"
-  if [ -f "$LOCAL_V86_DIR/latest.safetensors" ] \
-    && [ -f "$LOCAL_V86_DIR/latest.state.json" ] \
-    && [ -f "$LOCAL_V86_DIR/manifest.json" ]; then
-    V10_SEED_DIR="$LOCAL_V86_DIR"
-  else
-    V10_SEED_DIR="$REPO_DIR/rust/checkpoints/.v10-seed-v86"
-    rm -rf "$V10_SEED_DIR"
-    mkdir -p "$V10_SEED_DIR"
-    "$OFHF" pull --checkpoint-dir "$V10_SEED_DIR" --repo-id "$HF_REPO_ID" \
-      --run-prefix "$V10_SOURCE_PREFIX"
-  fi
-  if [ ! -f "$V10_SEED_DIR/latest.safetensors" ] \
-    || [ ! -f "$V10_SEED_DIR/latest.state.json" ] \
-    || [ ! -f "$V10_SEED_DIR/manifest.json" ]; then
-    echo "FATAL: V10 migration requires a complete V8.6 safetensors/state/manifest seed" >&2
-    exit 1
-  fi
-fi
-
-# V8.5 seeds once from ppo_v84 (reward-only win-urgency + thrash outcomes).
-V85_SEED_DIR=""
-if [ "$V85_MODE" = "1" ] && [ ! -f "$CKPT_DIR/latest.safetensors" ]; then
-  LOCAL_V84_DIR="$REPO_DIR/rust/checkpoints/$V85_SOURCE_PREFIX"
-  if [ -f "$LOCAL_V84_DIR/latest.safetensors" ] \
-    && [ -f "$LOCAL_V84_DIR/latest.state.json" ] \
-    && [ -f "$LOCAL_V84_DIR/manifest.json" ]; then
-    V85_SEED_DIR="$LOCAL_V84_DIR"
-  else
-    V85_SEED_DIR="$REPO_DIR/rust/checkpoints/.v85-seed-v84"
-    rm -rf "$V85_SEED_DIR"
-    mkdir -p "$V85_SEED_DIR"
-    "$OFHF" pull --checkpoint-dir "$V85_SEED_DIR" --repo-id "$HF_REPO_ID" \
-      --run-prefix "$V85_SOURCE_PREFIX"
-  fi
-  if [ ! -f "$V85_SEED_DIR/latest.safetensors" ] \
-    || [ ! -f "$V85_SEED_DIR/latest.state.json" ] \
-    || [ ! -f "$V85_SEED_DIR/manifest.json" ]; then
-    echo "FATAL: V8.5 migration requires a complete V8.4 safetensors/state/manifest seed" >&2
-    exit 1
-  fi
 fi
 
 # --- background HF sync: immutable snapshots of latest, best-eval,
@@ -617,36 +346,11 @@ while true; do
   RESUME=""
   if [ -f "$CKPT_DIR/latest.safetensors" ]; then
     RESUME="--resume $CKPT_DIR/latest.safetensors"
-    if [ "$V10_MODE" = "1" ]; then
-      if ! grep -q '"curriculum_schedule":"v10"' "$CKPT_DIR/latest.state.json" 2>/dev/null \
-        && ! grep -q '"curriculum_schedule": "v10"' "$CKPT_DIR/latest.state.json" 2>/dev/null; then
-        RESUME="$RESUME --migrate-v86-to-v10"
-      fi
-    elif [ "$V86_MODE" = "1" ]; then
-      if ! grep -q "v8.6-attack-fair-v1" "$CKPT_DIR/latest.state.json" 2>/dev/null; then
-        RESUME="$RESUME --migrate-v85-to-v86"
-      fi
-    elif [ "$V85_MODE" = "1" ]; then
-      if ! grep -q "v8.5-win-urgency-v1" "$CKPT_DIR/latest.state.json" 2>/dev/null; then
-        RESUME="$RESUME --migrate-v84-to-v85"
-      fi
-    elif [ "$V84_MODE" = "1" ]; then
-      # First resume from a V8.3 seed writes V8.4 profile into the new run
-      # dir; subsequent resumes already carry the V8.4 profile.
-      if ! grep -q "v8.4-boat-tempo-v1" "$CKPT_DIR/latest.state.json" 2>/dev/null; then
-        RESUME="$RESUME --migrate-v83-to-v84"
-      fi
+    # One-shot: absorb a pre-V10 checkpoint into the V10 schedule/reward.
+    if ! grep -q '"curriculum_schedule":"v10"' "$CKPT_DIR/latest.state.json" 2>/dev/null \
+      && ! grep -q '"curriculum_schedule": "v10"' "$CKPT_DIR/latest.state.json" 2>/dev/null; then
+      RESUME="$RESUME --migrate-v86-to-v10"
     fi
-  elif [ "$V10_MODE" = "1" ] && [ -n "$V10_SEED_DIR" ]; then
-    RESUME="--resume $V10_SEED_DIR/latest.safetensors --migrate-v86-to-v10"
-  elif [ "$V86_MODE" = "1" ] && [ -n "$V86_SEED_DIR" ]; then
-    RESUME="--resume $V86_SEED_DIR/latest.safetensors --migrate-v85-to-v86"
-  elif [ "$V85_MODE" = "1" ] && [ -n "$V85_SEED_DIR" ]; then
-    RESUME="--resume $V85_SEED_DIR/latest.safetensors --migrate-v84-to-v85"
-  elif [ "$V84_MODE" = "1" ] && [ -n "$V84_SEED_DIR" ]; then
-    RESUME="--resume $V84_SEED_DIR/latest.safetensors --migrate-v83-to-v84"
-  elif [ "$V83_MODE" = "1" ] && [ -n "$V83_SEED_DIR" ]; then
-    RESUME="--resume $V83_SEED_DIR/latest.safetensors --migrate-v82-to-v83"
   fi
   ensure_disk_headroom
   echo "=== $(date -u +%FT%TZ) launching $RUN_NAME num_gpus=$NUM_GPUS envs/shard=$NUM_ENVS $RESUME ==="
@@ -658,7 +362,7 @@ while true; do
   LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB:$CUDA_LIB:$NCCL_LIB:$NCCL_LINK_LIB" \
     ./target/release/oftrain --engine native --node-fraction "$NODE_FRACTION" --num-envs "$NUM_ENVS" --num-gpus "$NUM_GPUS" \
     --rollout-len "$ROLLOUT_LEN" --minibatches "$MINIBATCHES" --stage "$STAGE" --device cuda:0 \
-    --ckpt-dir "$CKPT_DIR" $V81_ARGS $EXTRA_ARGS $RESUME \
+    --ckpt-dir "$CKPT_DIR" $TRAIN_ARGS $EXTRA_ARGS $RESUME \
     >> "/tmp/train_$RUN_NAME.log" 2>&1
   RC=$?
   ELAPSED=$(( $(date +%s) - START_TS ))

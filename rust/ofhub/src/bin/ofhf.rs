@@ -20,7 +20,7 @@ struct Cli {
 enum Cmd {
     /// Restore latest.safetensors + latest.state.json into a checkpoint dir.
     Pull {
-        #[arg(long, env = "HF_RUN_PREFIX", default_value = "ppo_v81")]
+        #[arg(long, env = "HF_RUN_PREFIX", default_value = "ppo_v10")]
         run_prefix: String,
         #[arg(long)]
         checkpoint_dir: PathBuf,
@@ -31,7 +31,7 @@ enum Cmd {
     Push {
         #[arg(long)]
         checkpoint_dir: PathBuf,
-        #[arg(long, env = "HF_RUN_PREFIX", default_value = "ppo_v81")]
+        #[arg(long, env = "HF_RUN_PREFIX", default_value = "ppo_v10")]
         run_prefix: String,
         #[arg(long, env = "HF_REPO_ID", default_value = POLICY_REPO)]
         repo_id: String,
@@ -42,7 +42,7 @@ enum Cmd {
     SyncLoop {
         #[arg(long)]
         checkpoint_dir: PathBuf,
-        #[arg(long, env = "HF_RUN_PREFIX", default_value = "ppo_v81")]
+        #[arg(long, env = "HF_RUN_PREFIX", default_value = "ppo_v10")]
         run_prefix: String,
         #[arg(long, env = "HF_REPO_ID", default_value = POLICY_REPO)]
         repo_id: String,
@@ -57,7 +57,7 @@ enum Cmd {
     },
     /// Print the remote revision (blob oid / etag) for a run's weights.
     Revision {
-        #[arg(long, default_value = "ppo_v81")]
+        #[arg(long, default_value = "ppo_v10")]
         run_name: String,
     },
     /// Download AE encoder safetensors into a directory.

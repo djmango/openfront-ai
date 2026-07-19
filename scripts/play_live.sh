@@ -16,7 +16,7 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_DIR"
 
 HOST="${HOST:-localhost:9000}"
-RUN_NAME="${RUN_NAME:-ppo_v81}"
+RUN_NAME="${RUN_NAME:-ppo_v10}"
 DEFAULT_POLICY="rust/checkpoints/$RUN_NAME/latest.safetensors"
 POLICY="${POLICY:-$DEFAULT_POLICY}"
 AE="${AE:-weights/ae/ae_v31_d8c32.encoder.safetensors}"
