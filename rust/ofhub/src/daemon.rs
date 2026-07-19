@@ -146,35 +146,55 @@ fn run_watch(
     }
     let device = env_or("SHOWCASE_DEVICE", "cuda");
     let max_steps = env_or("SHOWCASE_MAX_STEPS", "600");
+    let mut args: Vec<String> = vec![
+        "--watch".into(),
+        "--policy".into(),
+        policy.to_string_lossy().into_owned(),
+        "--ckpt".into(),
+        ae.to_string_lossy().into_owned(),
+        "--stage".into(),
+        stage.to_string(),
+        "--seed".into(),
+        seed.into(),
+        "--record".into(),
+        record.to_string_lossy().into_owned(),
+        "--map".into(),
+        map_name.into(),
+        "--nations".into(),
+        nations.into(),
+        "--bots".into(),
+        bots.to_string(),
+        "--difficulty".into(),
+        difficulty.into(),
+        "--device".into(),
+        device,
+        "--max-steps".into(),
+        max_steps,
+        // MODEL overlay reads <record>.debug.json via /archive/debug/<id>.
+        "--debug".into(),
+        "true".into(),
+    ];
+    // ppo_v10 (and any future v10* run) needs the V10 schedule + a reward knob
+    // so `--stage` indices past the legacy 11-stage ladder stay in bounds.
+    let run_hint = std::env::var("RUN_NAME").unwrap_or_default();
+    if run_hint.contains("v10")
+        || env_or("SHOWCASE_V10", "0") == "1"
+        || stage >= 15
+    {
+        args.extend([
+            "--v10-curriculum".into(),
+            "--v10-survival-coef".into(),
+            "0.01".into(),
+            "--v10-diplo-panic".into(),
+            "0.08".into(),
+            "--v10-combat-action".into(),
+            "0.02".into(),
+            "--max-episode-ticks".into(),
+            "21000".into(),
+        ]);
+    }
     let status = Command::new(&bin)
-        .args([
-            "--watch",
-            "--policy",
-            &policy.to_string_lossy(),
-            "--ckpt",
-            &ae.to_string_lossy(),
-            "--stage",
-            &stage.to_string(),
-            "--seed",
-            seed,
-            "--record",
-            &record.to_string_lossy(),
-            "--map",
-            map_name,
-            "--nations",
-            nations,
-            "--bots",
-            &bots.to_string(),
-            "--difficulty",
-            difficulty,
-            "--device",
-            &device,
-            "--max-steps",
-            &max_steps,
-            // MODEL overlay reads <record>.debug.json via /archive/debug/<id>.
-            "--debug",
-            "true",
-        ])
+        .args(&args)
         .current_dir(repo_root())
         .status()
         .with_context(|| format!("spawn {}", bin.display()))?;
@@ -480,13 +500,14 @@ fn resolve_ae_path() -> PathBuf {
 
 pub async fn run_daemon() -> Result<()> {
     fs::create_dir_all(data_dir())?;
-    let run_name = env_or("RUN_NAME", "ppo_v81");
-    let stage: i64 = env_or("STAGE", "4").parse().unwrap_or(4);
+    // Defaults track the live V10 Easy-ramp run (Onion ~24 bots / 4 nations).
+    let run_name = env_or("RUN_NAME", "ppo_v10");
+    let stage: i64 = env_or("STAGE", "27").parse().unwrap_or(27);
     let watch_stage: i64 = env_or("SHOWCASE_WATCH_STAGE", &stage.to_string())
         .parse()
         .unwrap_or(stage);
-    let nations = env_or("SHOWCASE_NATIONS", "disabled");
-    let bots: i64 = env_or("SHOWCASE_BOTS", "30").parse().unwrap_or(30);
+    let nations = env_or("SHOWCASE_NATIONS", "4");
+    let bots: i64 = env_or("SHOWCASE_BOTS", "24").parse().unwrap_or(24);
     let difficulty = env_or("SHOWCASE_DIFFICULTY", "Easy");
     let refresh_hours: f64 = env_or("REFRESH_HOURS", "1").parse().unwrap_or(1.0);
 
