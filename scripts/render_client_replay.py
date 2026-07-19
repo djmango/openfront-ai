@@ -398,6 +398,8 @@ def render_record(
                     'localStorage.setItem("rlAllowSoftwareGL", "1");'
                     'localStorage.setItem("replayRenderEvery", "10");'
                     'localStorage.setItem("settings.goToPlayer", "false");'
+                    # Solid fills at whole-map zoom (patterns read as "dots").
+                    'localStorage.setItem("settings.territoryPatterns", "false");'
                     'localStorage.setItem("username", "AGENT");'
                     f'localStorage.setItem("replaySkipVisualUntil", "{skip_until}");'
                 )
