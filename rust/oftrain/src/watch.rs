@@ -190,8 +190,12 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
 
     let mut terrain_cache = TerrainDeviceCache::new(cfg.device);
     let mut debug_log: Vec<Value> = Vec::new();
-    let mut episode_outcome = "death".to_string();
+    // Only set to win/death when the episode actually ends. Hitting
+    // `--max-steps` while still alive is a truncation ("timeout"), not a loss —
+    // the old default of "death" made strong mid-game clips look like wipeouts.
+    let mut episode_outcome = "timeout".to_string();
     let mut end_tick = 0i64;
+    let mut finished = false;
 
     // Spawn phase: up to 8 greedy decisions, not logged.
     for _ in 0..8 {
@@ -327,12 +331,25 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
                 .map(|a| a.len() > 1 && a[1] == "AGENTRL1")
                 .unwrap_or(false);
             episode_outcome = if won { "win" } else { "death" }.to_string();
+            finished = true;
             println!(
                 "episode over at tick {end_tick}: alive={}, winner={w}, outcome={episode_outcome}",
                 obs.alive()
             );
             break;
         }
+    }
+    if !finished {
+        let obs = worker.current_obs().unwrap();
+        end_tick = obs.tick();
+        let ents = feat::parse_ents(obs.entities());
+        let tiles = my_tiles(&ents, obs.me());
+        println!(
+            "watch truncated at --max-steps {}: tick {end_tick}, tiles {tiles}, alive={} \
+             (outcome=timeout — not a loss; raise SHOWCASE_MAX_STEPS / --max-steps to play out)",
+            cfg.max_steps,
+            obs.alive()
+        );
     }
 
     let record_path = cfg.record.canonicalize().unwrap_or(cfg.record.clone());

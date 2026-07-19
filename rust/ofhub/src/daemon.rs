@@ -152,7 +152,9 @@ fn run_watch(
         fs::create_dir_all(parent)?;
     }
     let device = env_or("SHOWCASE_DEVICE", "cuda");
-    let max_steps = env_or("SHOWCASE_MAX_STEPS", "600");
+    // Full Easy/Frenzy games often need well past 600 decisions; 600 was
+    // truncating dominant positions and (before the watch fix) labeling them death.
+    let max_steps = env_or("SHOWCASE_MAX_STEPS", "2500");
     let coarse = env_or(
         "SHOWCASE_COARSE_CKPT",
         "weights/ae/ae_v31_d16c32.encoder.safetensors",
