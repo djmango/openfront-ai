@@ -86,6 +86,7 @@ def wait_http(url: str, timeout: float) -> None:
 
 
 PATCH = REPO / "patches/client-replay-tooling.patch"
+SOFTGL_PATCH = REPO / "patches/showcase-allow-software-gl.patch"
 OPENFRONT = REPO / "openfront"
 
 
@@ -201,6 +202,12 @@ def client_worktree(commit: str):
         subprocess.run(
             ["git", "apply", str(PATCH)], cwd=wt, check=True,
         )
+        # SoftGL/SwiftShader must be allowed for headless clip captures on
+        # GPU-less pods; without this the WebGL gate modal blocks replay.
+        if SOFTGL_PATCH.is_file():
+            subprocess.run(
+                ["git", "apply", str(SOFTGL_PATCH)], cwd=wt, check=True,
+            )
         pin_nm = OPENFRONT / "node_modules"
         if pin_nm.is_dir() and not (wt / "node_modules").exists():
             os.symlink(pin_nm, wt / "node_modules")

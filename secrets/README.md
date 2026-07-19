@@ -23,4 +23,5 @@ The age **private** key is deliberately never committed anywhere in this repo - 
 ## Current secrets
 
 - `runpod.enc.yaml`: `runpod_api_key` - a dedicated `cursor-agent`-named RunPod API key (created via `createApiKey`, scoped separately from any personal key so it can be revoked independently).
+- `share_skg.enc.yaml`: `share_skg_url` / `share_skg_username` / `share_skg_password` / `share_skg_token` → env `SHARE_SKG_*` — Zipline account on https://share.skg.gg for agent clip uploads (`cursor` user).
 - `hf.enc.yaml`: `hf_token` → env `HF_TOKEN` - Hugging Face **write** token used by training pods / HF sync workers to upload checkpoints. Prefer a dedicated `cursor-agent` token from https://huggingface.co/settings/tokens so it can be revoked independently of your personal login; re-encrypt after rotating.
