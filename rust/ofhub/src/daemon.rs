@@ -152,9 +152,12 @@ fn run_watch(
         fs::create_dir_all(parent)?;
     }
     let device = env_or("SHOWCASE_DEVICE", "cuda");
-    // Full Easy/Frenzy games often need well past 600 decisions; 600 was
-    // truncating dominant positions and (before the watch fix) labeling them death.
-    let max_steps = env_or("SHOWCASE_MAX_STEPS", "2500");
+    // Match live V10 training (`--max-episode-ticks 21000`). Watch advances
+    // 10 ticks per decision, so the decision cap must not fire first.
+    let max_episode_ticks = env_or("SHOWCASE_MAX_EPISODE_TICKS", "21000");
+    let ticks: i64 = max_episode_ticks.parse().unwrap_or(21000);
+    let default_steps = (ticks / 10 + 64).max(64).to_string();
+    let max_steps = env_or("SHOWCASE_MAX_STEPS", &default_steps);
     let coarse = env_or(
         "SHOWCASE_COARSE_CKPT",
         "weights/ae/ae_v31_d16c32.encoder.safetensors",
@@ -192,6 +195,8 @@ fn run_watch(
         device,
         "--max-steps".into(),
         max_steps,
+        "--max-episode-ticks".into(),
+        max_episode_ticks,
         // MODEL overlay reads <record>.debug.json via /archive/debug/<id>.
         "--debug".into(),
         "true".into(),
@@ -239,8 +244,6 @@ fn run_watch(
             "0.08".into(),
             "--v10-combat-action".into(),
             "0.02".into(),
-            "--max-episode-ticks".into(),
-            "21000".into(),
         ]);
     }
     let status = Command::new(&bin)
