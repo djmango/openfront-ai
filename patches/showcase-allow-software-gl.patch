@@ -1,5 +1,33 @@
+diff --git a/src/client/render/gl/Renderer.ts b/src/client/render/gl/Renderer.ts
+index 0b93ee2f..f7379fd5 100644
+--- a/src/client/render/gl/Renderer.ts
++++ b/src/client/render/gl/Renderer.ts
+@@ -1142,11 +1142,22 @@ export class GPURenderer {
+ 
+   private uploadTextures(): void {
+     if (this.altView) this.affiliationPalette.flush();
+-    if (this.inSpawnPhase) {
++    // Showcase SoftGL: live drip + R16UI POINTS scatter paints "dots" instead
++    // of solid territory. Flush every bucket and full-upload the tile texture.
++    let softGl = false;
++    try {
++      softGl = localStorage.getItem("rlAllowSoftwareGL") === "1";
++    } catch {
++      // localStorage unavailable
++    }
++    if (this.inSpawnPhase || softGl) {
+       this.territoryPass.flushAllDripBuckets();
+     } else {
+       this.territoryPass.drainDripBucket();
+     }
++    if (softGl) {
++      this.territoryPass.forceFullGpuUpload();
++    }
+     // Full uploads need a full border recompute; scatter uploads already
+     // pushed per-tile border patches via the wired `borderPatchConsumer`.
+     if (this.territoryPass.flushTileTexture() === "full") {
 diff --git a/src/client/render/gl/initGL.ts b/src/client/render/gl/initGL.ts
-index 9e7d8b1c6..dbc4bbc72 100644
+index 9e7d8b1c..dbc4bbc7 100644
 --- a/src/client/render/gl/initGL.ts
 +++ b/src/client/render/gl/initGL.ts
 @@ -35,6 +35,15 @@ const REQUIRED_TEXTURE_SIZE = getPaletteSize();
@@ -40,3 +68,25 @@ index 9e7d8b1c6..dbc4bbc72 100644
        return { gl: null, status: "software", renderer };
      }
      // Fingerprinting protection caps texture sizes on an otherwise
+diff --git a/src/client/render/gl/passes/TerritoryPass.ts b/src/client/render/gl/passes/TerritoryPass.ts
+index c40744b9..d4a731ba 100644
+--- a/src/client/render/gl/passes/TerritoryPass.ts
++++ b/src/client/render/gl/passes/TerritoryPass.ts
+@@ -272,6 +272,17 @@ export class TerritoryPass {
+     this.currentBucket = (this.currentBucket + 1) % this.nBuckets;
+   }
+ 
++  /**
++   * Force the next flushTileTexture to re-upload the entire cpuTileState via
++   * texSubImage2D. SoftGL/SwiftShader's R16UI POINTS scatter path only paints
++   * sparse dots; full uploads restore solid territory fills for showcase clips.
++   */
++  forceFullGpuUpload(): void {
++    this.scatter.clear();
++    this.fullUploadPending = true;
++    this.tilesDirty = true;
++  }
++
+   /**
+    * Drain every drip bucket immediately. Used during spawn phase and after
+    * seek so tile state pops to current sim state without the 60Hz stagger.
