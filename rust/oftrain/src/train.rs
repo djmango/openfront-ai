@@ -366,6 +366,11 @@ pub struct Config {
     pub eval_device: Option<Device>,
     pub ckpt_every: u64,
     pub ckpt_dir: String,
+    /// Keep only the newest N numbered `policy_update*.safetensors` locally
+    /// (plus matching `.state.json`). Curriculum advance/demote milestones,
+    /// `latest.*`, and `best_eval.*` are never pruned. HF already retains the
+    /// full historical backlog — local prune is disk hygiene only. `0` disables.
+    pub ckpt_keep_last: usize,
     /// `--init`: warm-start weights from a `.safetensors` (preferred) or
     /// legacy `.ot` VarStore dump without restoring `TrainState`
     /// (BC→RL / exported weights). Ignored when `resume` is also set.
@@ -1188,6 +1193,69 @@ mod v81_state_and_gate_tests {
     }
 
     #[test]
+    fn prune_numbered_checkpoints_keeps_newest_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "oftrain-prune-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for idx in [10u64, 20, 30, 40, 50] {
+            let path = dir.join(format!("policy_update{idx}.safetensors"));
+            std::fs::write(&path, b"weights").unwrap();
+            std::fs::write(state_sidecar_path(path.to_str().unwrap()), b"{}").unwrap();
+        }
+        std::fs::write(dir.join("latest.safetensors"), b"latest").unwrap();
+        std::fs::write(
+            dir.join("curriculum_advance_u50_s1_to_2.safetensors"),
+            b"mile",
+        )
+        .unwrap();
+        prune_numbered_checkpoints(dir.to_str().unwrap(), 2).unwrap();
+        assert!(!dir.join("policy_update10.safetensors").exists());
+        assert!(!dir.join("policy_update30.safetensors").exists());
+        assert!(dir.join("policy_update40.safetensors").exists());
+        assert!(dir.join("policy_update50.safetensors").exists());
+        assert!(dir.join("latest.safetensors").exists());
+        assert!(dir
+            .join("curriculum_advance_u50_s1_to_2.safetensors")
+            .exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn curriculum_note_summarizes_advance() {
+        let stages = ofcore::curriculum::stages_for_schedule(
+            ofcore::curriculum::CurriculumSchedule::V10,
+        );
+        let transition = CurriculumTransition {
+            event: "advance",
+            from_stage: 0,
+            to_stage: 1,
+            win_rate: 0.975,
+            conversion_rate: 1.0,
+            death_rate: 0.05,
+            win_gate: 0.95,
+            window_size: ofcore::curriculum::WINDOW,
+        };
+        let note = curriculum_transition_note(
+            &transition,
+            123,
+            ofcore::curriculum::CurriculumSchedule::V10,
+            &stages,
+        );
+        assert_eq!(note["event"], "advance");
+        assert_eq!(note["from_stage"], 0);
+        assert_eq!(note["to_stage"], 1);
+        let summary = note["summary"].as_str().unwrap();
+        assert!(summary.contains("Advanced stage 0→1"));
+        assert!(summary.contains("update 123"));
+    }
+
+    #[test]
     fn v10_advance_requires_death_ceiling_and_demotes_on_spiral() {
         let closeout = ofcore::curriculum::V10_CLOSEOUT_STAGE;
         let wins = VecDeque::from(vec![1.0; ofcore::curriculum::WINDOW]);
@@ -1680,6 +1748,179 @@ fn save_checkpoint_state(path: &str, state: &TrainState) -> Result<()> {
         Ok(())
     })?;
     Ok(())
+}
+
+fn note_sidecar_path(ckpt_path: &str) -> String {
+    let stem = ckpt_path
+        .strip_suffix(".safetensors")
+        .or_else(|| ckpt_path.strip_suffix(".ot"))
+        .unwrap_or(ckpt_path);
+    format!("{stem}.note.json")
+}
+
+fn parse_policy_update_index(name: &str) -> Option<u64> {
+    let rest = name.strip_prefix("policy_update")?;
+    let digits = rest.strip_suffix(".safetensors")?;
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// Drop oldest numbered `policy_update*` checkpoints once local retention
+/// exceeds `keep_last`. Never touches curriculum milestones, `latest.*`, or
+/// `best_eval.*` — HF sync already keeps the full historical backlog.
+fn prune_numbered_checkpoints(ckpt_dir: &str, keep_last: usize) -> Result<()> {
+    if keep_last == 0 {
+        return Ok(());
+    }
+    let dir = std::path::Path::new(ckpt_dir);
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let mut numbered: Vec<(u64, std::path::PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if let Some(idx) = parse_policy_update_index(name) {
+            numbered.push((idx, path));
+        }
+    }
+    if numbered.len() <= keep_last {
+        return Ok(());
+    }
+    numbered.sort_by_key(|(idx, _)| *idx);
+    let drop_n = numbered.len() - keep_last;
+    for (_, path) in numbered.into_iter().take(drop_n) {
+        let state = state_sidecar_path(path.to_str().unwrap_or(""));
+        if let Err(e) = std::fs::remove_file(&path) {
+            eprintln!(
+                "[train] WARNING: failed to prune {}: {e}",
+                path.display()
+            );
+        } else {
+            println!("[train] pruned local checkpoint {}", path.display());
+        }
+        let _ = std::fs::remove_file(state);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct CurriculumTransition {
+    event: &'static str,
+    from_stage: usize,
+    to_stage: usize,
+    win_rate: f64,
+    conversion_rate: f64,
+    death_rate: f64,
+    win_gate: f64,
+    window_size: usize,
+}
+
+fn nations_label(nations: &ofcore::curriculum::Nations) -> String {
+    match nations {
+        ofcore::curriculum::Nations::Default => "default".to_string(),
+        ofcore::curriculum::Nations::Exact(n) => n.to_string(),
+    }
+}
+
+fn curriculum_transition_note(
+    transition: &CurriculumTransition,
+    update: u64,
+    schedule: ofcore::curriculum::CurriculumSchedule,
+    stages: &[ofcore::curriculum::Stage],
+) -> serde_json::Value {
+    let from = &stages[transition.from_stage];
+    let to = &stages[transition.to_stage];
+    let summary = match transition.event {
+        "demote" => format!(
+            "Demoted stage {}→{} at update {} (WR={:.1}% < demote ceil; DR={:.1}%; CR={:.1}%). \
+             {} bots={} nations={} {} → {} bots={} nations={} {}.",
+            transition.from_stage,
+            transition.to_stage,
+            update,
+            transition.win_rate * 100.0,
+            transition.death_rate * 100.0,
+            transition.conversion_rate * 100.0,
+            from.maps.join("+"),
+            from.bots,
+            nations_label(&from.nations),
+            from.difficulty,
+            to.maps.join("+"),
+            to.bots,
+            nations_label(&to.nations),
+            to.difficulty,
+        ),
+        _ => format!(
+            "Advanced stage {}→{} at update {} (WR={:.1}% vs gate {:.1}%; DR={:.1}%; CR={:.1}%). \
+             {} bots={} nations={} {} → {} bots={} nations={} {}.",
+            transition.from_stage,
+            transition.to_stage,
+            update,
+            transition.win_rate * 100.0,
+            transition.win_gate * 100.0,
+            transition.death_rate * 100.0,
+            transition.conversion_rate * 100.0,
+            from.maps.join("+"),
+            from.bots,
+            nations_label(&from.nations),
+            from.difficulty,
+            to.maps.join("+"),
+            to.bots,
+            nations_label(&to.nations),
+            to.difficulty,
+        ),
+    };
+    serde_json::json!({
+        "schema": 1,
+        "event": transition.event,
+        "update": update,
+        "from_stage": transition.from_stage,
+        "to_stage": transition.to_stage,
+        "curriculum_schedule": schedule.id(),
+        "win_rate": transition.win_rate,
+        "conversion_rate": transition.conversion_rate,
+        "death_rate": transition.death_rate,
+        "window_size": transition.window_size,
+        "win_gate": transition.win_gate,
+        "from": {
+            "maps": from.maps,
+            "bots": from.bots,
+            "nations": nations_label(&from.nations),
+            "difficulty": from.difficulty,
+            "decision_ticks": from.decision_ticks,
+            "win_at": from.win_at,
+        },
+        "to": {
+            "maps": to.maps,
+            "bots": to.bots,
+            "nations": nations_label(&to.nations),
+            "difficulty": to.difficulty,
+            "decision_ticks": to.decision_ticks,
+            "win_at": to.win_at,
+        },
+        "summary": summary,
+    })
+}
+
+fn curriculum_milestone_path(
+    ckpt_dir: &str,
+    transition: &CurriculumTransition,
+    update: u64,
+) -> String {
+    format!(
+        "{}/curriculum_{}_u{}_s{}_to_{}.safetensors",
+        ckpt_dir,
+        transition.event,
+        update,
+        transition.from_stage,
+        transition.to_stage,
+    )
 }
 
 fn policy_manifest_value(
@@ -7528,6 +7769,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
 
         let mut advanced = false;
         let mut demoted = false;
+        let mut curriculum_transitions: Vec<CurriculumTransition> = Vec::new();
         let debug_eps = std::env::var("OFTRAIN_DEBUG_EPISODES").is_ok();
         for result in &next_pending {
             for info in &result.ep_infos {
@@ -7646,13 +7888,45 @@ pub fn run(mut cfg: Config) -> Result<()> {
                         == ofcore::curriculum::CurriculumSchedule::V10
                         && should_demote_v10(curr_stage, &recent_wins, &recent_deaths);
                     if demote {
+                        let from_stage = curr_stage;
+                        let win_rate = window_mean(&recent_wins).unwrap_or(0.0);
+                        let conversion_rate = window_mean(&recent_conversions).unwrap_or(0.0);
+                        let death_rate = window_mean(&recent_deaths).unwrap_or(0.0);
+                        let win_gate = stages[from_stage].win_at;
+                        let window_size = recent_wins.len();
                         curr_stage -= 1;
+                        curriculum_transitions.push(CurriculumTransition {
+                            event: "demote",
+                            from_stage,
+                            to_stage: curr_stage,
+                            win_rate,
+                            conversion_rate,
+                            death_rate,
+                            win_gate,
+                            window_size,
+                        });
                         recent_wins.clear();
                         recent_conversions.clear();
                         recent_deaths.clear();
                         demoted = true;
                     } else if curr_stage < stages.len() - 1 && gate_passed {
+                        let from_stage = curr_stage;
+                        let win_rate = window_mean(&recent_wins).unwrap_or(0.0);
+                        let conversion_rate = window_mean(&recent_conversions).unwrap_or(0.0);
+                        let death_rate = window_mean(&recent_deaths).unwrap_or(0.0);
+                        let win_gate = stages[from_stage].win_at;
+                        let window_size = recent_wins.len();
                         curr_stage += 1;
+                        curriculum_transitions.push(CurriculumTransition {
+                            event: "advance",
+                            from_stage,
+                            to_stage: curr_stage,
+                            win_rate,
+                            conversion_rate,
+                            death_rate,
+                            win_gate,
+                            window_size,
+                        });
                         recent_wins.clear();
                         recent_conversions.clear();
                         recent_deaths.clear();
@@ -7722,6 +7996,70 @@ pub fn run(mut cfg: Config) -> Result<()> {
             if let Some(target) = requested_env_target {
                 println!(
                     "[train] stage {curr_stage} requests {target} envs/shard;                      checkpointing at update boundary for a persistent-owner-safe restart"
+                );
+            }
+            // Persist one immutable milestone per advance/demote so HF sync
+            // can keep a card-backed historical trail (not just latest.*).
+            for transition in &curriculum_transitions {
+                let note = curriculum_transition_note(
+                    transition,
+                    update,
+                    cfg.curriculum_schedule,
+                    &stages,
+                );
+                let path = curriculum_milestone_path(&cfg.ckpt_dir, transition, update);
+                let state = TrainState {
+                    checkpoint_schema_version: if cfg.recurrent_policy { 2 } else { 1 },
+                    hidden_reset_policy: if cfg.recurrent_policy {
+                        "episode_done".to_string()
+                    } else {
+                        "none".to_string()
+                    },
+                    update: update + 1,
+                    stage: transition.to_stage,
+                    ent_scale,
+                    lr_now,
+                    total_env_steps,
+                    recent_wins: recent_wins.iter().copied().collect(),
+                    recent_conversions: recent_conversions.iter().copied().collect(),
+                    recent_deaths: recent_deaths.iter().copied().collect(),
+                    best_eval_win: current_best.map(|best| best.0),
+                    best_eval_score: current_best.map(|best| best.1),
+                    v81_curriculum: cfg.curriculum_schedule
+                        != ofcore::curriculum::CurriculumSchedule::Legacy,
+                    curriculum_schedule: Some(cfg.curriculum_schedule.id().to_string()),
+                    reward_profile: matches!(
+                        cfg.curriculum_schedule,
+                        ofcore::curriculum::CurriculumSchedule::V83
+                            | ofcore::curriculum::CurriculumSchedule::V9
+                            | ofcore::curriculum::CurriculumSchedule::V10
+                    )
+                    .then(|| cfg.reward_config.reward_profile_id().to_string()),
+                    return_stats: return_stats.clone(),
+                    stage_env_targets: cfg.stage_env_targets.clone(),
+                    envs_per_shard: live_total_envs / devices.len(),
+                    requested_env_target: None,
+                };
+                if persistent_learner_enabled {
+                    persistent_learner
+                        .as_mut()
+                        .expect("persistent learner initialized")
+                        .0
+                        .save_weights(&path)?;
+                    save_checkpoint_state(&path, &state)?;
+                } else {
+                    save_checkpoint(&learners[0].vs, &path, &state)?;
+                }
+                let note_path = note_sidecar_path(&path);
+                save_atomic(&note_path, |tmp| {
+                    std::fs::write(tmp, serde_json::to_string_pretty(&note)?)?;
+                    Ok(())
+                })?;
+                println!(
+                    "[train] curriculum {} milestone saved: {} ({})",
+                    transition.event,
+                    path,
+                    note["summary"].as_str().unwrap_or("")
                 );
             }
         }
@@ -8301,6 +8639,9 @@ pub fn run(mut cfg: Config) -> Result<()> {
             }
             save_policy_manifest(&cfg, &state)?;
             println!("[train] checkpoint saved: {path} (update={})", state.update);
+            if let Err(e) = prune_numbered_checkpoints(&cfg.ckpt_dir, cfg.ckpt_keep_last) {
+                eprintln!("[train] WARNING: checkpoint prune failed: {e:#}");
+            }
         }
     }
 
@@ -8659,6 +9000,7 @@ mod persistent_actor_tests {
             eval_device: None,
             ckpt_every: 0,
             ckpt_dir: String::new(),
+            ckpt_keep_last: 0,
             init: None,
             init_v81_recurrent: None,
             resume: None,

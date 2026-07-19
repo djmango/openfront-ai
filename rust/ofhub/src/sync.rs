@@ -94,19 +94,61 @@ fn discover(checkpoint_dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn regex_lite_milestone() -> impl Fn(&str) -> bool {
-    |name: &str| {
-        let Some(rest) = name.strip_prefix("policy_update") else {
-            return false;
-        };
-        let (digits, suffix) = if let Some(s) = rest.strip_suffix(".safetensors") {
-            (s, true)
-        } else if let Some(s) = rest.strip_suffix(".state.json") {
-            (s, true)
-        } else {
-            ("", false)
-        };
-        suffix && !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+    |name: &str| is_policy_update_milestone(name) || is_curriculum_milestone(name)
+}
+
+fn is_policy_update_milestone(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("policy_update") else {
+        return false;
+    };
+    let (digits, suffix) = if let Some(s) = rest.strip_suffix(".safetensors") {
+        (s, true)
+    } else if let Some(s) = rest.strip_suffix(".state.json") {
+        (s, true)
+    } else {
+        ("", false)
+    };
+    suffix && !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Curriculum advance/demote artifacts:
+/// `curriculum_{advance|demote}_u{update}_s{from}_to_{to}.{safetensors|state.json|note.json}`
+fn is_curriculum_milestone(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("curriculum_") else {
+        return false;
+    };
+    let (stem, ok_suffix) = if let Some(s) = rest.strip_suffix(".safetensors") {
+        (s, true)
+    } else if let Some(s) = rest.strip_suffix(".state.json") {
+        (s, true)
+    } else if let Some(s) = rest.strip_suffix(".note.json") {
+        (s, true)
+    } else {
+        ("", false)
+    };
+    if !ok_suffix {
+        return false;
     }
+    let (event, after_event) = if let Some(s) = stem.strip_prefix("advance_u") {
+        ("advance", s)
+    } else if let Some(s) = stem.strip_prefix("demote_u") {
+        ("demote", s)
+    } else {
+        return false;
+    };
+    let _ = event;
+    let Some((update, after_update)) = after_event.split_once("_s") else {
+        return false;
+    };
+    let Some((from, to)) = after_update.split_once("_to_") else {
+        return false;
+    };
+    !update.is_empty()
+        && update.chars().all(|c| c.is_ascii_digit())
+        && !from.is_empty()
+        && from.chars().all(|c| c.is_ascii_digit())
+        && !to.is_empty()
+        && to.chars().all(|c| c.is_ascii_digit())
 }
 
 fn atomic_json(path: &Path, value: &SyncState) -> Result<()> {
@@ -435,4 +477,32 @@ pub async fn pull_ae_encoders(ae_dir: &Path) -> Result<()> {
 #[allow(dead_code)]
 fn _json_example() -> serde_json::Value {
     json!({})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discovers_policy_update_milestones() {
+        assert!(is_policy_update_milestone("policy_update120.safetensors"));
+        assert!(is_policy_update_milestone("policy_update120.state.json"));
+        assert!(!is_policy_update_milestone("policy_update120.note.json"));
+        assert!(!is_policy_update_milestone("latest.safetensors"));
+    }
+
+    #[test]
+    fn discovers_curriculum_milestones_and_notes() {
+        assert!(is_curriculum_milestone(
+            "curriculum_advance_u8400_s26_to_27.safetensors"
+        ));
+        assert!(is_curriculum_milestone(
+            "curriculum_demote_u8410_s27_to_26.state.json"
+        ));
+        assert!(is_curriculum_milestone(
+            "curriculum_advance_u8400_s26_to_27.note.json"
+        ));
+        assert!(!is_curriculum_milestone("curriculum_advance_u8400.safetensors"));
+        assert!(!is_curriculum_milestone("policy_update120.safetensors"));
+    }
 }
