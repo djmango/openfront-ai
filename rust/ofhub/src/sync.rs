@@ -235,7 +235,7 @@ impl Default for SyncConfig {
         Self {
             checkpoint_dir: PathBuf::from("checkpoints"),
             repo_id: default_policy_repo(),
-            run_prefix: env_or("HF_RUN_PREFIX", "ppo_v81"),
+            run_prefix: env_or("HF_RUN_PREFIX", "ppo_v10"),
             interval_secs: env_or("HF_SYNC_INTERVAL_SECONDS", "600")
                 .parse()
                 .unwrap_or(600.0),

@@ -292,7 +292,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint-dir", type=Path, required=True)
     parser.add_argument("--repo-id", default=os.environ.get("HF_REPO_ID", "djmango/openfront-rl"))
-    parser.add_argument("--run-prefix", default=os.environ.get("HF_RUN_PREFIX", "ppo_v81"))
+    parser.add_argument("--run-prefix", default=os.environ.get("HF_RUN_PREFIX", "ppo_v10"))
     parser.add_argument("--interval", type=float, default=float(os.environ.get("HF_SYNC_INTERVAL_SECONDS", "600")))
     parser.add_argument("--max-retries", type=int, default=5)
     parser.add_argument("--once", action="store_true")
