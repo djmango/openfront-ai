@@ -61,7 +61,7 @@ docker run --rm -p 8086:8086 -v openfront-eval-data:/data openfront-eval
 | `SHOWCASE_RECURRENT` | `auto` | Load recurrent policy for watch (`auto` = V8.2+/V9/V10 run names) |
 | `SHOWCASE_DEVICE` | daemon: `cuda` / clip: `cpu` | Watch device. One-shot `ofshowcase clip` defaults to `cpu` so busy trainers do not OOM; pass `--device cuda:0` to override |
 | `CLIP_REUSE_SERVICES` | `auto` | Use live :8987/:9000 when healthy; else self-contained SoftGL worktree |
-| `OF_FORCE_SWIFTSHADER` | `1` (clip) | SoftGL headless path for MODEL-overlay WebM |
+| `OF_FORCE_SWIFTSHADER` | auto / `1` on GPU-less hosts | SoftGL when no `/dev/nvidia*` / DRM; GPU WebGL preferred when present |
 
 Homelab: [homelab README](https://github.com/djmango/homelab), `openfrontai.skg.gg`.
 Redeploy: `bash docker/homelab_deploy.sh` on the host (rebuilds image, clears

@@ -311,13 +311,24 @@ fn render_client_clip_once(record: &Path, out: &Path, reuse_services: bool) -> R
     if reuse_services {
         args.push("--reuse-services".into());
     }
-    let status = Command::new(py)
-        .args(&args)
-        // SoftGL is the supported headless path; GPU WebGL still falls back
-        // in Chromium and then hits the unpatched WebGL gate without this.
-        .env("OF_FORCE_SWIFTSHADER", "1")
-        .current_dir(repo_root())
-        .status()?;
+    let mut cmd = Command::new(&py);
+    cmd.args(&args).current_dir(repo_root());
+    // Prefer real GPU WebGL when present (solid territory). Only force
+    // SoftGL when the caller asks — Chromium on GPU-less hosts still falls
+    // back to SwiftShader, and rlAllowSoftwareGL keeps that path unblocked.
+    match std::env::var("OF_FORCE_SWIFTSHADER") {
+        Ok(v) => {
+            cmd.env("OF_FORCE_SWIFTSHADER", v);
+        }
+        Err(_) => {
+            let has_gpu = Path::new("/dev/nvidia0").exists()
+                || Path::new("/dev/dri/renderD128").exists();
+            if !has_gpu {
+                cmd.env("OF_FORCE_SWIFTSHADER", "1");
+            }
+        }
+    }
+    let status = cmd.status()?;
     if !status.success() {
         bail!(
             "render_client_replay.py failed with {status} (reuse_services={reuse_services})"
@@ -652,9 +663,6 @@ pub async fn run_clip(cfg: ClipConfig) -> Result<Value> {
     if std::env::var_os("SHOWCASE_DEVICE").is_none() {
         std::env::set_var("SHOWCASE_DEVICE", "cpu");
         log("clip: SHOWCASE_DEVICE defaulting to cpu (set explicitly to use GPU)");
-    }
-    if std::env::var_os("OF_FORCE_SWIFTSHADER").is_none() {
-        std::env::set_var("OF_FORCE_SWIFTSHADER", "1");
     }
 
     let ae = resolve_ae_path();

@@ -7,7 +7,8 @@ patches/client-replay-tooling.patch, applied in a detached worktree at the
 record's engine commit so the openfront submodule stays clean):
   - replayViewAs: the viewer adopts the agent's identity - self-player
     styling, gold spawn ring, crown when first, "You Won!" modal
-  - replayFitMap: camera starts centered on the whole map
+  - Camera follows the agent (goToPlayer). Whole-map fit makes every tile a
+    speck ("dots instead of territory") on large maps like Onion/Pangaea.
   - RlDebugOverlay: in-client model panel (chosen action, value,
     action-probability bars, recent-actions log) synced to the sim tick,
     plus a red ✕ on the map when the decision includes a tile target;
@@ -383,14 +384,18 @@ def render_record(
                 ctx.add_init_script(
                     f'localStorage.setItem("apiHost", "http://127.0.0.1:{api_port}");'
                     'localStorage.setItem("replayViewAs", "1");'
-                    'localStorage.setItem("replayFitMap", "1");'
+                    # Do NOT set replayFitMap — any non-empty value enables
+                    # whole-map fit, which makes every tile a sub-pixel speck
+                    # ("dots everywhere") on Onion/Pangaea.
                     f'localStorage.setItem("rlDebugOverlay", "{overlay_flag}");'
                     'localStorage.setItem("rlAllowSoftwareGL", "1");'
-                    # Rendering every deterministic update is the SoftGL
-                    # bottleneck. The patched client consumes every update but
-                    # draws one in ten while recording.
+                    # SoftGL cannot *draw* every MAX-speed tick. The patched
+                    # client still uploads every territory delta; this only
+                    # throttles HUD tick(). SoftGL also full-uploads the tile
+                    # texture (POINTS scatter into R16UI is a no-op there).
                     'localStorage.setItem("replayRenderEvery", "10");'
-                    'localStorage.setItem("settings.goToPlayer", "false");'
+                    # Follow the agent so territory fills the frame.
+                    'localStorage.setItem("settings.goToPlayer", "true");'
                     'localStorage.setItem("username", "AGENT");'
                 )
                 page = ctx.new_page()
