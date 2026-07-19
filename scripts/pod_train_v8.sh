@@ -55,9 +55,9 @@ EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --fp16-rollout --per
 # V10 anti-death-spiral on the closeout ladder. Dense reward with softer death,
 # survival / diplo-panic / combat priors, and radical win bonus so finishing
 # dominates shaping. All reward stage mins = 0.
-V81_ARGS="--v10-curriculum --max-episode-ticks 21000 --v83-close-coef 4.0 --v83-churn-coef 0.06 --v81-dom-coef 0.25 --v81-dominant-loss=true --v81-dominance-threshold 0.30 --v81-delta-loss-dominant 5.0 --v81-min-stage 0 --v81-churn-coef 0.05 --v81-churn-window 16 --v81-churn-min-stage 0 --v84-boat-useful 0.15 --v84-boat-destroyed=-0.20 --v84-boat-cancelled=-0.03 --v84-boat-own-shore=-0.05 --v84-boat-min-stage 0 --v84-tempo-coef 0.015 --v84-tempo-min-stage 0 --v84-fast-win-coef 40.0 --v85-tempo-share-threshold 0.30 --v85-extra-win-bonus 200.0 --v85-embargo-bad-stop=-0.15 --v85-embargo-good-stop 0.02 --v85-embargo-min-stage 0 --v85-premature-retreat=-0.03 --v85-thrash-reengage=-0.03 --v85-combat-min-stage 0 --v86-delta-loss 5.5 --v86-attack-symmetric-loss --v86-skip-combat-churn --v86-death-penalty 3.0 --v10-survival-coef 0.01 --v10-diplo-panic 0.08 --v10-diplo-panic-share 0.35 --v10-diplo-panic-tick-frac 0.55 --v10-combat-action 0.02 --v10-timeout-closeout 20.0 --v10-closeout-entry 25.0"
+TRAIN_ARGS="--v10-curriculum --max-episode-ticks 21000 --v83-close-coef 4.0 --v83-churn-coef 0.06 --v81-dom-coef 0.25 --v81-dominant-loss=true --v81-dominance-threshold 0.30 --v81-delta-loss-dominant 5.0 --v81-min-stage 0 --v81-churn-coef 0.05 --v81-churn-window 16 --v81-churn-min-stage 0 --v84-boat-useful 0.15 --v84-boat-destroyed=-0.20 --v84-boat-cancelled=-0.03 --v84-boat-own-shore=-0.05 --v84-boat-min-stage 0 --v84-tempo-coef 0.015 --v84-tempo-min-stage 0 --v84-fast-win-coef 40.0 --v85-tempo-share-threshold 0.30 --v85-extra-win-bonus 200.0 --v85-embargo-bad-stop=-0.15 --v85-embargo-good-stop 0.02 --v85-embargo-min-stage 0 --v85-premature-retreat=-0.03 --v85-thrash-reengage=-0.03 --v85-combat-min-stage 0 --v86-delta-loss 5.5 --v86-attack-symmetric-loss --v86-skip-combat-churn --v86-death-penalty 3.0 --v10-survival-coef 0.01 --v10-diplo-panic 0.08 --v10-diplo-panic-share 0.35 --v10-diplo-panic-tick-frac 0.55 --v10-combat-action 0.02 --v10-timeout-closeout 20.0 --v10-closeout-entry 25.0"
 if [ -n "$STAGE_ENV_TARGETS" ]; then
-  V81_ARGS="$V81_ARGS --stage-env-targets $STAGE_ENV_TARGETS"
+  TRAIN_ARGS="$TRAIN_ARGS --stage-env-targets $STAGE_ENV_TARGETS"
 fi
 if [ "$AUTO_SCALE_ENVS" = "1" ]; then
   EXTRA_ARGS="$EXTRA_ARGS --auto-scale-envs --min-envs $MIN_ENVS --max-envs $MAX_ENVS --target-gpu-util $TARGET_GPU_UTIL --autoscale-check-every $AUTOSCALE_CHECK_EVERY --autoscale-step $AUTOSCALE_STEP"
@@ -362,7 +362,7 @@ while true; do
   LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB:$CUDA_LIB:$NCCL_LIB:$NCCL_LINK_LIB" \
     ./target/release/oftrain --engine native --node-fraction "$NODE_FRACTION" --num-envs "$NUM_ENVS" --num-gpus "$NUM_GPUS" \
     --rollout-len "$ROLLOUT_LEN" --minibatches "$MINIBATCHES" --stage "$STAGE" --device cuda:0 \
-    --ckpt-dir "$CKPT_DIR" $V81_ARGS $EXTRA_ARGS $RESUME \
+    --ckpt-dir "$CKPT_DIR" $TRAIN_ARGS $EXTRA_ARGS $RESUME \
     >> "/tmp/train_$RUN_NAME.log" 2>&1
   RC=$?
   ELAPSED=$(( $(date +%s) - START_TS ))
