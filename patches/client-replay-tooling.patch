@@ -1,8 +1,8 @@
 diff --git a/index.html b/index.html
-index f042ec74..9b5f8fb4 100644
+index f042ec74..94b7b1f3 100644
 --- a/index.html
 +++ b/index.html
-@@ -7,6 +7,58 @@
+@@ -7,6 +7,59 @@
        content="width=device-width, initial-scale=1.0, viewport-fit=cover"
      />
      <title data-i18n="main.title">OpenFront (ALPHA)</title>
@@ -18,9 +18,10 @@ index f042ec74..9b5f8fb4 100644
 +            localStorage.setItem("rlDebugHost", o + "/play");
 +          if (!localStorage.getItem("replayViewAs"))
 +            localStorage.setItem("replayViewAs", "1");
-+          // Follow the agent — whole-map fit makes tiles look like dust.
++          if (!localStorage.getItem("replayFitMap"))
++            localStorage.setItem("replayFitMap", "1");
 +          if (!localStorage.getItem("settings.goToPlayer"))
-+            localStorage.setItem("settings.goToPlayer", "true");
++            localStorage.setItem("settings.goToPlayer", "false");
 +          if (!localStorage.getItem("rlDebugOverlay"))
 +            localStorage.setItem("rlDebugOverlay", "1");
 +          window.addEventListener("DOMContentLoaded", function () {
@@ -61,7 +62,7 @@ index f042ec74..9b5f8fb4 100644
      <link rel="manifest" href="<%- manifestHref %>" />
      <link rel="icon" type="image/svg+xml" href="<%- faviconHref %>" />
  
-@@ -98,49 +150,6 @@
+@@ -98,49 +151,6 @@
        async
        defer
      ></script>
@@ -111,7 +112,7 @@ index f042ec74..9b5f8fb4 100644
    </head>
  
    <body
-@@ -448,12 +457,5 @@
+@@ -448,12 +458,5 @@
        data-cf-beacon='{"token": "03d93e6fefb349c28ee69b408fa25a13"}'
      ></script>
      <script type="module" src="/src/client/Main.ts"></script>
@@ -145,7 +146,7 @@ index 82e55f6e..9b8927a9 100644
  
    if (domainname === "localhost") {
 diff --git a/src/client/ClientGameRunner.ts b/src/client/ClientGameRunner.ts
-index 474ddc81..91e02cc1 100644
+index 474ddc81..ec3487f3 100644
 --- a/src/client/ClientGameRunner.ts
 +++ b/src/client/ClientGameRunner.ts
 @@ -1,4 +1,5 @@
@@ -154,10 +155,12 @@ index 474ddc81..91e02cc1 100644
  import { translateText } from "../client/Utils";
  import { EventBus } from "../core/EventBus";
  import {
-@@ -829,8 +830,37 @@ export class ClientGameRunner {
+@@ -829,8 +830,64 @@ export class ClientGameRunner {
          this.eventBus.emit(new SendHashEvent(hu.tick, hu.hash));
        });
        this.gameView.update(gu);
+-      this.webglBuilder?.update(this.gameView);
+-      this.renderer.tick();
 +      // RL replay tooling: expose the sim tick for the debug overlay.
 +      const replayTick = this.gameView.ticks();
 +      (window as { __replayTick?: number }).__replayTick = replayTick;
@@ -169,31 +172,57 @@ index 474ddc81..91e02cc1 100644
 +          { x, y } as import("../core/game/Game").Cell,
 +        );
 +      initRlDebugOverlay(this.lobby.gameID);
-+      // SoftGL cannot *draw* every MAX-speed tick; throttle HUD tick only.
-+      // webglBuilder.update must still run every tick — skipping it drops
-+      // territory deltas and leaves only TileScatterPass POINTS ("dots").
-       this.webglBuilder?.update(this.gameView);
--      this.renderer.tick();
-+      let renderEvery = 1;
++      // SoftGL catch-up: skip ALL GL until replaySkipVisualUntil so Max
++      // replay can race to late-game (otherwise ~0.7 tick/s never reaches
++      // a win at tick 5k+). First visual tick force-full-uploads tiles.
++      let skipUntil = 0;
 +      try {
-+        const raw = Number(localStorage.getItem("replayRenderEvery") ?? "1");
-+        if (Number.isFinite(raw) && raw > 1) {
-+          renderEvery = Math.floor(raw);
-+        }
++        const raw = Number(
++          localStorage.getItem("replaySkipVisualUntil") ?? "0",
++        );
++        if (Number.isFinite(raw) && raw > 0) skipUntil = Math.floor(raw);
 +      } catch {
-+        // Keep normal rendering when storage is unavailable.
++        // localStorage unavailable
 +      }
-+      const shouldRender =
-+        renderEvery === 1 ||
-+        replayTick % renderEvery === 0 ||
-+        gu.updates[GameUpdateType.Win].length > 0;
-+      if (shouldRender) {
-+        this.renderer.tick();
++      const catchingUp = skipUntil > 0 && replayTick < skipUntil;
++      const w = window as unknown as {
++        __rlCaughtUp?: boolean;
++        __rlCatchingUp?: boolean;
++      };
++      w.__rlCatchingUp = catchingUp;
++      if (!catchingUp) {
++        if (skipUntil > 0 && !w.__rlCaughtUp) {
++          w.__rlCaughtUp = true;
++          this.webglBuilder?.clearCaches();
++          // Force Upload.ts full-upload path (changedTiles === null).
++          (
++            this.gameView as unknown as { _frame: { changedTiles: unknown } }
++          )._frame.changedTiles = null;
++        }
++        // SoftGL cannot *draw* every MAX-speed tick; throttle HUD tick only.
++        // Outside catch-up, webglBuilder.update must run every tick.
++        this.webglBuilder?.update(this.gameView);
++        let renderEvery = 1;
++        try {
++          const raw = Number(localStorage.getItem("replayRenderEvery") ?? "1");
++          if (Number.isFinite(raw) && raw > 1) {
++            renderEvery = Math.floor(raw);
++          }
++        } catch {
++          // Keep normal rendering when storage is unavailable.
++        }
++        const shouldRender =
++          renderEvery === 1 ||
++          replayTick % renderEvery === 0 ||
++          gu.updates[GameUpdateType.Win].length > 0;
++        if (shouldRender) {
++          this.renderer.tick();
++        }
 +      }
  
        // Emit tick metrics event for performance overlay
        this.eventBus.emit(
-@@ -882,7 +912,9 @@ export class ClientGameRunner {
+@@ -882,7 +939,9 @@ export class ClientGameRunner {
                return;
              }
  

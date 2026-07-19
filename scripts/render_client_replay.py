@@ -7,8 +7,9 @@ patches/client-replay-tooling.patch, applied in a detached worktree at the
 record's engine commit so the openfront submodule stays clean):
   - replayViewAs: the viewer adopts the agent's identity - self-player
     styling, gold spawn ring, crown when first, "You Won!" modal
-  - Camera follows the agent (goToPlayer). Whole-map fit makes every tile a
-    speck ("dots instead of territory") on large maps like Onion/Pangaea.
+  - replayFitMap: whole-map camera for showcase clips
+  - SoftGL catch-up (replaySkipVisualUntil): sim-only until near end_tick so
+    long wins are actually reached (SoftGL is ~0.7 tick/s when drawing)
   - RlDebugOverlay: in-client model panel (chosen action, value,
     action-probability bars, recent-actions log) synced to the sim tick,
     plus a red ✕ on the map when the decision includes a tile target;
@@ -378,25 +379,27 @@ def render_record(
                     record_video_size={"width": render_width, "height": render_height},
                 )
                 overlay_flag = "1" if overlay else "0"
+                end_tick = episode.get("end_tick")
+                outcome = episode.get("outcome", "timeout")
+                # SoftGL draws ~0.7 tick/s — without catch-up a 5k-tick win never
+                # appears in the clip. Skip GL until near the end, then record.
+                capture_ticks = int(os.environ.get("CLIP_CAPTURE_TICKS", "900"))
+                skip_until = 0
+                if use_soft_gl and end_tick:
+                    skip_until = max(0, int(end_tick) - capture_ticks)
                 # Always allow SoftGL: Chromium often falls back to SwiftShader
                 # even when we request GL/EGL, and OpenFront otherwise refuses
                 # to boot (no replay button → 120s timeout).
                 ctx.add_init_script(
                     f'localStorage.setItem("apiHost", "http://127.0.0.1:{api_port}");'
                     'localStorage.setItem("replayViewAs", "1");'
-                    # Do NOT set replayFitMap — any non-empty value enables
-                    # whole-map fit, which makes every tile a sub-pixel speck
-                    # ("dots everywhere") on Onion/Pangaea.
+                    'localStorage.setItem("replayFitMap", "1");'
                     f'localStorage.setItem("rlDebugOverlay", "{overlay_flag}");'
                     'localStorage.setItem("rlAllowSoftwareGL", "1");'
-                    # SoftGL cannot *draw* every MAX-speed tick. The patched
-                    # client still uploads every territory delta; this only
-                    # throttles HUD tick(). SoftGL also full-uploads the tile
-                    # texture (POINTS scatter into R16UI is a no-op there).
                     'localStorage.setItem("replayRenderEvery", "10");'
-                    # Follow the agent so territory fills the frame.
-                    'localStorage.setItem("settings.goToPlayer", "true");'
+                    'localStorage.setItem("settings.goToPlayer", "false");'
                     'localStorage.setItem("username", "AGENT");'
+                    f'localStorage.setItem("replaySkipVisualUntil", "{skip_until}");'
                 )
                 page = ctx.new_page()
                 page_open_t0 = time.time()
@@ -422,24 +425,50 @@ def render_record(
                         "el => el.click()"
                     )
                 page.wait_for_timeout(800)
+                target_tick_rate = float(
+                    os.environ.get("CLIP_GAME_TICKS_PER_SEC", "20")
+                )
+                if skip_until > 0:
+                    print(
+                        f"SoftGL catch-up until tick {skip_until} "
+                        f"(sim-only; climax={capture_ticks} ticks before "
+                        f"end_tick={end_tick}, outcome={outcome})"
+                    )
+                    catch_t0 = time.time()
+                    while time.time() - catch_t0 < timeout:
+                        tick = page.evaluate(
+                            "() => (typeof window.__replayTick === 'number' "
+                            "? window.__replayTick : null)"
+                        )
+                        catching = page.evaluate(
+                            "() => window.__rlCatchingUp === true"
+                        )
+                        if tick is not None and tick >= skip_until and not catching:
+                            print(
+                                f"catch-up done at tick {tick} "
+                                f"in {time.time() - catch_t0:.1f}s"
+                            )
+                            break
+                        page.wait_for_timeout(50)
+                    else:
+                        raise SystemExit(
+                            f"timed out during SoftGL catch-up "
+                            f"(last tick={page.evaluate('() => window.__replayTick ?? null')})"
+                        )
+
                 gameplay_t0 = time.time()
                 start_tick = page.evaluate(
                     "() => (typeof window.__replayTick === 'number' "
                     "? window.__replayTick : 0)"
                 )
                 last_tick = start_tick
-                target_tick_rate = float(
-                    os.environ.get("CLIP_GAME_TICKS_PER_SEC", "20")
-                )
                 target_ticks = (
                     int(target_tick_rate * max_duration)
-                    if max_duration is not None
+                    if max_duration is not None and not end_tick
                     else None
                 )
                 print("replay running...")
 
-                end_tick = episode.get("end_tick")
-                outcome = episode.get("outcome", "death")
                 stop_tick = (
                     int(end_tick) - death_trim_ticks
                     if end_tick and outcome == "death"
@@ -448,10 +477,10 @@ def render_record(
                 t0 = time.time()
                 gameplay_duration: float | None = None
                 win_hold_t0: float | None = None
-                # SoftGL advances ~1 tick/sec; give more wall-clock so Max-speed
-                # still covers meaningful gameplay before --max-duration.
+                # SoftGL climax budget (catch-up already finished). Keep enough
+                # wall-clock to reach win/death modal after skip.
                 soft_budget = (
-                    float(max_duration) * 8.0
+                    float(max_duration) * 10.0
                     if use_soft_gl and max_duration is not None
                     else None
                 )
