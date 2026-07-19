@@ -561,8 +561,10 @@ struct Args {
     #[arg(long)]
     nations: Option<String>,
 
-    /// Max post-spawn decisions for `--watch`.
-    #[arg(long, default_value_t = 1200)]
+    /// Max post-spawn decisions for `--watch`. Watch steps 10 ticks per
+    /// decision, so this should be ≥ `--max-episode-ticks` / 10 or the
+    /// decision cap truncates before the training tick budget.
+    #[arg(long, default_value_t = 2200)]
     max_steps: usize,
 
     /// Write `.debug.json` sidecar with `--watch` (default true).
@@ -1435,6 +1437,7 @@ fn main() -> anyhow::Result<()> {
             difficulty: args.difficulty.clone(),
             nations: args.nations.clone(),
             max_steps: args.max_steps,
+            max_episode_ticks: args.max_episode_ticks,
             debug: args.debug,
             device,
             amp: args.amp,
