@@ -32,7 +32,8 @@ pub const V10_REWARD_PROFILE: &str = "v10-anti-spiral-v1";
 pub const V10_DEFAULT_DEATH_PENALTY: f64 = 3.0;
 /// Reference mid-ladder gate (Medium/Hard band). Prefer [`v10_win_at_for_stage`].
 pub const V10_WIN_AT: f64 = 0.70;
-/// Easy Onion micro-ramp gate — hold mastery before maps/difficulty expand.
+/// Early density-ramp gate — hold mastery while maps are already varied;
+/// opponent density (bots/nations), not map identity, is the hard axis.
 pub const V10_RAMP_WIN_AT: f64 = 0.95;
 /// Terminal Impossible-stage gate after the smooth decay from [`V10_RAMP_WIN_AT`].
 pub const V10_WIN_AT_END: f64 = 0.65;
@@ -684,18 +685,23 @@ impl CurriculumSchedule {
     }
 }
 
-/// Onion Easy micro-ramp length (stages `0 .. V10_EASY_RAMP_LEN`): bots-only,
-/// then 1→4 nations on Onion before multi-map Easy begins.
+/// Early Easy density-ramp length (stages `0 .. V10_EASY_RAMP_LEN`): bots-only
+/// then 1→4 nations. Maps are already mixed (bridge → broad); density is the
+/// hard axis, not map identity.
 pub const V10_EASY_RAMP_LEN: usize = 30;
+/// Stages `0 .. V10_MAP_WARMUP_LEN` use the 8-map bridge pool before broad-16.
+pub const V10_MAP_WARMUP_LEN: usize = 8;
+/// First stage that samples the full 16-map broad pool.
+pub const V10_BROAD_STAGE: usize = V10_MAP_WARMUP_LEN;
 /// Historical pre-ramp V10 length (15-stage dense ladder) for sidecar expand.
 pub const V10_LEGACY_LEN: usize = 15;
 /// Prior 35-stage V10 length (20 Easy ramp + 15 dense) for sidecar expand.
 pub const V10_PREV35_LEN: usize = 35;
 /// Full V10 ladder: long Easy mastery → Medium → Hard → Impossible.
 pub const V10_STAGE_COUNT: usize = 100;
-/// First closeout-map stage (Onion/Pangaea/Caucasus Easy conversion gate).
+/// Easy density conversion-gate milestone (maps already broad by here).
 pub const V10_CLOSEOUT_STAGE: usize = 48;
-/// First eight-map Easy bridge stage (conversion gate).
+/// Later Easy conversion-gate milestone (maps already broad by here).
 pub const V10_BRIDGE_STAGE: usize = 54;
 /// First Medium stage.
 pub const V10_MEDIUM_START: usize = 68;
@@ -704,10 +710,11 @@ pub const V10_HARD_START: usize = 82;
 /// First Impossible stage.
 pub const V10_IMPOSSIBLE_START: usize = 92;
 
-/// V10 density: 30-stage Onion micro-ramp (incl. 1-nation band) then a long
+/// V10 density: early Easy density ramp (incl. 1-nation band) then a long
 /// Easy→Impossible curve. Keeps bots ≫ nations once nations appear.
+/// Map pools are applied separately in [`build_v10_stages`] (bridge→broad).
 pub const V10_BOT_NATION_DENSITY: [(u32, u32); V10_STAGE_COUNT] = [
-    // --- Onion Easy micro-ramp (0-29): bots-only → 1n → 2n → 3n → 4n ---
+    // --- Easy density ramp (0-29): bots-only → 1n → 2n → 3n → 4n ---
     (2, 0),  // 0 Easy/2
     (3, 0),  // 1
     (4, 0),  // 2
@@ -738,7 +745,7 @@ pub const V10_BOT_NATION_DENSITY: [(u32, u32); V10_STAGE_COUNT] = [
     (24, 4), // 27
     (26, 4), // 28
     (28, 4), // 29
-    // --- Easy Onion densify (30-37) ---
+    // --- Easy densify (30-37) ---
     (30, 5), // 30
     (32, 5), // 31
     (34, 5), // 32
@@ -747,17 +754,16 @@ pub const V10_BOT_NATION_DENSITY: [(u32, u32); V10_STAGE_COUNT] = [
     (40, 5), // 35
     (42, 5), // 36
     (44, 5), // 37
-    // --- Onion/Pangaea Easy (38-41) ---
+    // --- Easy densify continued (38-45) ---
     (40, 5), // 38
     (44, 5), // 39
     (48, 6), // 40
     (52, 6), // 41
-    // --- Pangaea/Caucasus Easy (42-45) ---
     (50, 6), // 42
     (54, 6), // 43
     (58, 7), // 44
     (62, 7), // 45
-    // --- three-map Easy (46-47) ---
+    // --- Easy densify continued (46-47) ---
     (66, 8), // 46
     (70, 9), // 47
     // --- closeout Easy (48-53) ---
@@ -767,12 +773,12 @@ pub const V10_BOT_NATION_DENSITY: [(u32, u32); V10_STAGE_COUNT] = [
     (60, 7), // 51
     (64, 8), // 52
     (68, 8), // 53
-    // --- eight-map Easy bridge (54-57) ---
+    // --- bridge-gate Easy (54-57) ---
     (70, 9),  // 54 BRIDGE
     (76, 9),  // 55
     (82, 10), // 56
     (88, 10), // 57
-    // --- broad Easy (58-67) ---
+    // --- broad Easy densify (58-67) ---
     (90, 11),  // 58
     (94, 11),  // 59
     (98, 12),  // 60
@@ -820,7 +826,7 @@ pub const V10_BOT_NATION_DENSITY: [(u32, u32); V10_STAGE_COUNT] = [
     (225, 32), // 99
 ];
 
-/// Smooth win-rate gate: hold [`V10_RAMP_WIN_AT`] on the Onion micro-ramp, then
+/// Smooth win-rate gate: hold [`V10_RAMP_WIN_AT`] on the early density ramp, then
 /// ease down to [`V10_WIN_AT_END`] by the final Impossible stage.
 pub fn v10_win_at_for_stage(index: usize) -> f64 {
     debug_assert!(index < V10_STAGE_COUNT);
@@ -858,13 +864,12 @@ fn apply_v10_stage_params(stages: &mut [Stage]) {
 }
 
 /// Build the full 100-stage V10 ladder (maps/difficulty/cadence + density/gates).
+///
+/// Map variety is introduced early so the policy cannot overfit Onion:
+/// stages 0-7 sample the 8-map bridge pool, then stages 8+ use the full
+/// 16-map broad pool. Opponent density (bots/nations) remains the hard axis.
 fn build_v10_stages() -> Vec<Stage> {
     use Nations::Exact as NE;
-    const ONION: &[&str] = &["Onion"];
-    const ONION_PANGAEA: &[&str] = &["Onion", "Pangaea"];
-    const PANGAEA_CAUCASUS: &[&str] = &["Pangaea", "Caucasus"];
-    const THREE_MAP: &[&str] = &["Pangaea", "Caucasus", "BlackSea"];
-    const CLOSEOUT: &[&str] = &["Onion", "Pangaea", "Caucasus"];
     let mut stages = Vec::with_capacity(V10_STAGE_COUNT);
     let mut push = |maps: &'static [&'static str],
                     difficulty: &'static str,
@@ -881,14 +886,12 @@ fn build_v10_stages() -> Vec<Stage> {
             });
         }
     };
-    push(ONION, "Easy", 15, 30); // 0-29 micro-ramp
-    push(ONION, "Easy", 15, 8); // 30-37
-    push(ONION_PANGAEA, "Easy", 15, 4); // 38-41
-    push(PANGAEA_CAUCASUS, "Easy", 15, 4); // 42-45
-    push(THREE_MAP, "Easy", 10, 2); // 46-47
-    push(CLOSEOUT, "Easy", 10, 6); // 48-53
-    push(&V10_BRIDGE_MAPS, "Easy", 10, 4); // 54-57 bridge
-    push(&V10_BROAD_MAPS, "Easy", 10, 10); // 58-67
+    // 0-7: 8-map warm-up (terrain/naval variety without World/Asia yet)
+    push(&V10_BRIDGE_MAPS, "Easy", 15, V10_MAP_WARMUP_LEN);
+    // 8-45: full broad-16 through the early/mid Easy density ramp
+    push(&V10_BROAD_MAPS, "Easy", 15, 38);
+    // 46-67: broad Easy with faster decision cadence
+    push(&V10_BROAD_MAPS, "Easy", 10, 22);
     push(&V10_BROAD_MAPS, "Medium", 10, 14); // 68-81
     push(&V10_BROAD_MAPS, "Hard", 10, 10); // 82-91
     push(&V10_BROAD_MAPS, "Impossible", 10, 8); // 92-99
@@ -897,7 +900,7 @@ fn build_v10_stages() -> Vec<Stage> {
     stages
 }
 
-/// V10 env floors: saturated early Onion, taper as maps/bots grow.
+/// V10 env floors: saturated early Easy density ramp, taper as bots grow.
 pub const V10_ENV_TARGETS: [usize; V10_STAGE_COUNT] = [
     24, 24, 24, 24, 24, 24, 24, 24, 24, 24, // 0-9
     24, 24, 24, 24, 24, 24, 24, 24, 24, 24, // 10-19
@@ -1720,6 +1723,8 @@ mod tests {
         let v10 = stages_for_schedule(CurriculumSchedule::V10);
         assert_eq!(v10.len(), V10_STAGE_COUNT);
         assert_eq!(V10_EASY_RAMP_LEN, 30);
+        assert_eq!(V10_MAP_WARMUP_LEN, 8);
+        assert_eq!(V10_BROAD_STAGE, 8);
         assert_eq!(V10_CLOSEOUT_STAGE, 48);
         assert_eq!(V10_BRIDGE_STAGE, 54);
         assert_eq!(V10_MEDIUM_START, 68);
@@ -1727,12 +1732,13 @@ mod tests {
         assert_eq!(V10_IMPOSSIBLE_START, 92);
         assert_eq!(v10[0].bots, 2);
         assert_eq!(v10[0].nations, Nations::Exact(0));
-        assert_eq!(v10[0].maps, &["Onion"]);
-        assert_eq!(
-            v10[V10_CLOSEOUT_STAGE].maps,
-            &["Onion", "Pangaea", "Caucasus"]
-        );
-        assert_eq!(v10[V10_BRIDGE_STAGE].maps, &V10_BRIDGE_MAPS);
+        // Early map variety: bridge-8 warm-up, then broad-16 for the rest.
+        assert_eq!(v10[0].maps, &V10_BRIDGE_MAPS);
+        assert_eq!(v10[V10_MAP_WARMUP_LEN - 1].maps, &V10_BRIDGE_MAPS);
+        assert_eq!(v10[V10_BROAD_STAGE].maps, &V10_BROAD_MAPS);
+        assert_eq!(v10[V10_CLOSEOUT_STAGE].maps, &V10_BROAD_MAPS);
+        assert_eq!(v10[V10_BRIDGE_STAGE].maps, &V10_BROAD_MAPS);
+        assert_eq!(v10[V10_MEDIUM_START].maps, &V10_BROAD_MAPS);
         assert_eq!(v10[V10_MEDIUM_START].difficulty, "Medium");
         assert_eq!(v10[V10_HARD_START].difficulty, "Hard");
         assert_eq!(v10[V10_IMPOSSIBLE_START].difficulty, "Impossible");
@@ -1760,6 +1766,11 @@ mod tests {
                 stage.win_at,
                 expect
             );
+            if index < V10_BROAD_STAGE {
+                assert_eq!(stage.maps, &V10_BRIDGE_MAPS, "stage {index} maps");
+            } else {
+                assert_eq!(stage.maps, &V10_BROAD_MAPS, "stage {index} maps");
+            }
         }
         for index in 0..15 {
             assert_eq!(v10[index].nations, Nations::Exact(0), "stage {index}");

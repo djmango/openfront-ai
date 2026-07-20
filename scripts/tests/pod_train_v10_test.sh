@@ -34,9 +34,16 @@ grep -q 'pod_train_v10.sh' "$WRAP"
 
 rg -n 'migrate_v86_to_v10|v10_survival_coef|v10_diplo_panic|v10_combat_action|v10_timeout_closeout' \
   "$ROOT/rust/oftrain/src/main.rs" "$ROOT/rust/oftrain/src/train.rs" >/dev/null
-rg -n 'V10_REWARD_PROFILE|v10_reward_active|should_demote_v10|should_advance_v10|V10_BOT_NATION_DENSITY|V10_EASY_RAMP_LEN|V10_CLOSEOUT_STAGE' \
+rg -n 'V10_REWARD_PROFILE|v10_reward_active|should_demote_v10|should_advance_v10|V10_BOT_NATION_DENSITY|V10_EASY_RAMP_LEN|V10_CLOSEOUT_STAGE|V10_MAP_WARMUP_LEN|V10_BROAD_STAGE' \
   "$ROOT/rust/ofcore/src/curriculum.rs" "$ROOT/rust/oftrain/src/train.rs" >/dev/null
 grep -q 'V10_EASY_RAMP_LEN: usize = 30' "$ROOT/rust/ofcore/src/curriculum.rs"
+grep -q 'V10_MAP_WARMUP_LEN: usize = 8' "$ROOT/rust/ofcore/src/curriculum.rs"
 grep -q 'V10_STAGE_COUNT: usize = 100' "$ROOT/rust/ofcore/src/curriculum.rs"
+# Early stages must mix maps (bridge → broad), not Onion-only.
+grep -q 'push(&V10_BRIDGE_MAPS, "Easy", 15, V10_MAP_WARMUP_LEN)' \
+  "$ROOT/rust/ofcore/src/curriculum.rs"
+grep -q 'push(&V10_BROAD_MAPS, "Easy", 15, 38)' \
+  "$ROOT/rust/ofcore/src/curriculum.rs"
+! grep -q 'push(ONION,' "$ROOT/rust/ofcore/src/curriculum.rs"
 
 echo "pod_train_v10_test: ok"
