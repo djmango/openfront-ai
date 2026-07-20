@@ -632,12 +632,13 @@ pub const V10_BRIDGE_MAPS: [&str; 8] = [
     "BlackSea",
     "BetweenTwoSeas",
     "Europe",
-    "Scandinavia",
+    "Britannia",
     "GreatLakes",
 ];
 
 /// Broad V10 pool. These are `GameMapType` enum keys (the values accepted
 /// by the Node bridge and normalized to asset-directory names by Rust).
+/// Every entry must exist under `openfront/resources/maps/<lowercase>/`.
 pub const V10_BROAD_MAPS: [&str; 16] = [
     "Onion",
     "Pangaea",
@@ -653,7 +654,7 @@ pub const V10_BROAD_MAPS: [&str; 16] = [
     "Australia",
     "EastAsia",
     "MiddleEast",
-    "Scandinavia",
+    "Britannia",
     "GreatLakes",
 ];
 
@@ -1733,6 +1734,9 @@ mod tests {
         assert_eq!(v10[0].bots, 2);
         assert_eq!(v10[0].nations, Nations::Exact(0));
         // Early map variety: bridge-8 warm-up, then broad-16 for the rest.
+        // Scandinavia is not a GameMapType / asset dir — pools must stay valid.
+        assert!(!V10_BRIDGE_MAPS.contains(&"Scandinavia"));
+        assert!(!V10_BROAD_MAPS.contains(&"Scandinavia"));
         assert_eq!(v10[0].maps, &V10_BRIDGE_MAPS);
         assert_eq!(v10[V10_MAP_WARMUP_LEN - 1].maps, &V10_BRIDGE_MAPS);
         assert_eq!(v10[V10_BROAD_STAGE].maps, &V10_BROAD_MAPS);
