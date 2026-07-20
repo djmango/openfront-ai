@@ -711,9 +711,13 @@ pub const V10_HARD_START: usize = 82;
 /// First Impossible stage.
 pub const V10_IMPOSSIBLE_START: usize = 92;
 
-/// V10 density: early Easy density ramp (incl. 1-nation band) then a long
-/// Easy→Impossible curve. Keeps bots ≫ nations once nations appear.
-/// Map pools are applied separately in [`build_v10_stages`] (bridge→broad).
+/// V10 density: early Easy density ramp (incl. 1-nation band), then densify.
+///
+/// At each difficulty jump (Easy→Medium, Medium→Hard, Hard→Impossible) nation
+/// count **resets low** so the policy learns the new bot strength with a sparse
+/// lobby, then nations ramp back up inside that band. Keeps bots ≫ nations
+/// once nations appear. Map pools are applied separately in [`build_v10_stages`]
+/// (bridge→broad).
 pub const V10_BOT_NATION_DENSITY: [(u32, u32); V10_STAGE_COUNT] = [
     // --- Easy density ramp (0-29): bots-only → 1n → 2n → 3n → 4n ---
     (2, 0),  // 0 Easy/2
@@ -789,42 +793,42 @@ pub const V10_BOT_NATION_DENSITY: [(u32, u32); V10_STAGE_COUNT] = [
     (112, 14), // 64
     (114, 14), // 65
     (116, 14), // 66
-    (118, 14), // 67
-    // --- Medium (68-81) ---
-    (100, 12), // 68 MEDIUM_START
-    (104, 12), // 69
-    (108, 13), // 70
-    (112, 13), // 71
-    (116, 14), // 72
-    (120, 14), // 73
-    (124, 15), // 74
-    (128, 15), // 75
-    (132, 16), // 76
-    (136, 16), // 77
-    (140, 17), // 78
-    (144, 18), // 79
-    (148, 18), // 80
-    (152, 19), // 81
-    // --- Hard (82-91) ---
-    (150, 20), // 82 HARD_START
-    (154, 20), // 83
-    (158, 21), // 84
-    (162, 21), // 85
-    (166, 22), // 86
-    (170, 22), // 87
-    (174, 23), // 88
-    (178, 24), // 89
-    (182, 24), // 90
-    (186, 25), // 91
-    // --- Impossible (92-99) ---
-    (190, 26), // 92 IMPOSSIBLE_START
-    (195, 27), // 93
-    (200, 28), // 94
-    (205, 28), // 95
-    (210, 29), // 96
-    (215, 30), // 97
-    (220, 30), // 98
-    (225, 32), // 99
+    (118, 14), // 67 peak Easy nations before Medium reset
+    // --- Medium (68-81): drop nations (14→4), learn Medium bots, ramp back ---
+    (90, 4),   // 68 MEDIUM_START nation reset
+    (94, 5),   // 69
+    (98, 6),   // 70
+    (102, 7),  // 71
+    (106, 8),  // 72
+    (110, 9),  // 73
+    (114, 10), // 74
+    (118, 11), // 75
+    (122, 12), // 76
+    (126, 13), // 77
+    (130, 14), // 78
+    (134, 15), // 79
+    (138, 16), // 80
+    (142, 16), // 81 peak Medium nations before Hard reset
+    // --- Hard (82-91): drop nations (16→6), learn Hard bots, ramp back ---
+    (130, 6),  // 82 HARD_START nation reset
+    (134, 7),  // 83
+    (138, 8),  // 84
+    (142, 9),  // 85
+    (146, 10), // 86
+    (150, 12), // 87
+    (154, 14), // 88
+    (158, 16), // 89
+    (162, 18), // 90
+    (166, 18), // 91 peak Hard nations before Impossible reset
+    // --- Impossible (92-99): drop nations (18→8), then densify ---
+    (155, 8),  // 92 IMPOSSIBLE_START nation reset
+    (160, 10), // 93
+    (165, 12), // 94
+    (170, 14), // 95
+    (175, 16), // 96
+    (180, 18), // 97
+    (185, 20), // 98
+    (190, 22), // 99
 ];
 
 /// Smooth win-rate gate: hold [`V10_RAMP_WIN_AT`] on the early density ramp, then
@@ -1753,6 +1757,43 @@ mod tests {
         assert_eq!(v10[V10_MEDIUM_START].difficulty, "Medium");
         assert_eq!(v10[V10_HARD_START].difficulty, "Hard");
         assert_eq!(v10[V10_IMPOSSIBLE_START].difficulty, "Impossible");
+        // Difficulty jumps reset nations low, then each band ramps back up.
+        let Nations::Exact(easy_peak_n) = v10[V10_MEDIUM_START - 1].nations else {
+            panic!("expected Exact nations");
+        };
+        let Nations::Exact(med_start_n) = v10[V10_MEDIUM_START].nations else {
+            panic!("expected Exact nations");
+        };
+        let Nations::Exact(med_peak_n) = v10[V10_HARD_START - 1].nations else {
+            panic!("expected Exact nations");
+        };
+        let Nations::Exact(hard_start_n) = v10[V10_HARD_START].nations else {
+            panic!("expected Exact nations");
+        };
+        let Nations::Exact(hard_peak_n) = v10[V10_IMPOSSIBLE_START - 1].nations else {
+            panic!("expected Exact nations");
+        };
+        let Nations::Exact(imp_start_n) = v10[V10_IMPOSSIBLE_START].nations else {
+            panic!("expected Exact nations");
+        };
+        assert!(
+            med_start_n * 2 <= easy_peak_n,
+            "Medium start nations {med_start_n} should drop hard from Easy peak {easy_peak_n}"
+        );
+        assert!(
+            hard_start_n * 2 <= med_peak_n,
+            "Hard start nations {hard_start_n} should drop hard from Medium peak {med_peak_n}"
+        );
+        assert!(
+            imp_start_n * 2 <= hard_peak_n,
+            "Impossible start nations {imp_start_n} should drop hard from Hard peak {hard_peak_n}"
+        );
+        assert!(med_peak_n > med_start_n, "Medium band should ramp nations");
+        assert!(hard_peak_n > hard_start_n, "Hard band should ramp nations");
+        let Nations::Exact(imp_end_n) = v10[V10_STAGE_COUNT - 1].nations else {
+            panic!("expected Exact nations");
+        };
+        assert!(imp_end_n > imp_start_n, "Impossible band should ramp nations");
         assert!(CurriculumSchedule::V10.uses_v83_closeout());
         assert_eq!(V10_ENV_TARGETS.len(), v10.len());
         for (index, (stage, &(bots, nations))) in
