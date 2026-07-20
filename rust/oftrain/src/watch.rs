@@ -1,4 +1,5 @@
-//! One greedy Node-engine episode → GameRecord + `.debug.json` sidecar.
+//! One greedy Node-engine episode → GameRecord + `.debug.json` + compact
+//! `.thinking.json` (few-KB top-3 trace for HF parquet).
 
 use std::path::{Path, PathBuf};
 
@@ -376,12 +377,45 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
         info.get("gameID"),
         info.get("turns")
     );
+    if cfg.debug {
+        let stem = {
+            let s = record_path.to_string_lossy();
+            s.strip_suffix(".json")
+                .map(|x| x.to_string())
+                .unwrap_or_else(|| record_path.to_string_lossy().to_string())
+        };
+        let debug_path = PathBuf::from(format!("{stem}.debug.json"));
+        let thinking_path = PathBuf::from(format!("{stem}.thinking.json"));
+        let payload = json!({
+            "actions": ACTIONS,
+            "log": debug_log,
+            "outcome": episode_outcome,
+            "end_tick": end_tick,
+        });
+        std::fs::write(&debug_path, serde_json::to_string(&payload)?)?;
+        let thinking = compact_thinking(&debug_log, &episode_outcome, end_tick, 15);
+        std::fs::write(&thinking_path, serde_json::to_string(&thinking)?)?;
+        let thinking_bytes = std::fs::metadata(&thinking_path).map(|m| m.len()).unwrap_or(0);
+        println!(
+            "debug sidecar: {} ({} decisions); thinking: {} ({} bytes, {} kept)",
+            debug_path.display(),
+            debug_log.len(),
+            thinking_path.display(),
+            thinking_bytes,
+            thinking
+                .get("s")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0)
+        );
+    }
+    // Spool after sidecars exist so parquet upload packs thinking_json too.
     let spool_meta = json!({
         "map": cfg.map.clone().unwrap_or_default(),
         "stage": cfg.stage,
         "engine": "watch",
         "won": episode_outcome == "win",
-        "timed_out": false,
+        "timed_out": episode_outcome == "timeout",
         "run_name": std::env::var("HF_RUN_PREFIX")
             .or_else(|_| std::env::var("RUN_NAME"))
             .unwrap_or_default(),
@@ -391,27 +425,68 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
     if let Err(e) = crate::replay_spool::spool_existing_record(&record_path, &spool_meta) {
         eprintln!("[replay-spool] watch spool: {e}");
     }
-    if cfg.debug {
-        let sidecar = {
-            let s = cfg.record.to_string_lossy();
-            if let Some(stem) = s.strip_suffix(".json") {
-                PathBuf::from(format!("{stem}.debug.json"))
-            } else {
-                cfg.record.with_extension("debug.json")
-            }
-        };
-        let payload = json!({
-            "actions": ACTIONS,
-            "log": debug_log,
-            "outcome": episode_outcome,
-            "end_tick": end_tick,
-        });
-        std::fs::write(&sidecar, serde_json::to_string(&payload)?)?;
-        println!(
-            "debug sidecar: {} ({} decisions)",
-            sidecar.display(),
-            debug_log.len()
-        );
-    }
     Ok(())
+}
+
+/// Stride-sampled top-3 action trace for HF parquet (`thinking_json`).
+fn compact_thinking(debug_log: &[Value], outcome: &str, end_tick: i64, stride: usize) -> Value {
+    let n = debug_log.len();
+    let mut steps = Vec::new();
+    let mut prev_a: Option<&str> = None;
+    for (i, entry) in debug_log.iter().enumerate() {
+        let action = entry.get("action").and_then(|v| v.as_str()).unwrap_or("noop");
+        let keep = i < 3
+            || i + 5 >= n
+            || (stride > 0 && i % stride == 0)
+            || (action != "noop" && prev_a != Some(action));
+        prev_a = Some(action);
+        if !keep {
+            continue;
+        }
+        let tick = entry.get("tick").and_then(|v| v.as_i64()).unwrap_or(0);
+        let value = entry.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let a_idx = ACTIONS
+            .iter()
+            .position(|&a| a == action)
+            .unwrap_or(255) as i64;
+        let probs = entry
+            .get("probs")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut order: Vec<usize> = (0..probs.len()).collect();
+        order.sort_by(|&a, &b| {
+            let pa = probs[a].as_f64().unwrap_or(0.0);
+            let pb = probs[b].as_f64().unwrap_or(0.0);
+            pb.partial_cmp(&pa).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut row = vec![
+            json!(tick),
+            json!(a_idx),
+            json!((value * 100.0).round() as i64),
+        ];
+        for &k in order.iter().take(3) {
+            let p = probs[k].as_f64().unwrap_or(0.0);
+            row.push(json!(k as i64));
+            row.push(json!((p * 1000.0).round() as i64));
+        }
+        if action != "noop" {
+            let desc = entry
+                .get("desc")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let short: String = desc.chars().take(48).collect();
+            row.push(json!(short));
+        }
+        steps.push(json!(row));
+    }
+    json!({
+        "v": 1,
+        "o": outcome,
+        "T": end_tick,
+        "n": n,
+        "stride": stride,
+        "a": ACTIONS,
+        "s": steps,
+    })
 }
