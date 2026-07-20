@@ -403,6 +403,10 @@ impl GridTower {
     /// bf16, casting in once at the input and back to f32 once at the
     /// output (see `conv2d_bf16`); `amp=false` is the byte-for-byte
     /// original f32 path.
+    ///
+    /// Input `x` may be Float or Half (compact learner Obs keeps grids as
+    /// Half on CUDA under `--fp16-rollout`). Amp casts Half/Float→BF16;
+    /// the non-amp path promotes Half→Float before the f32 stem.
     fn forward_masked(&self, x: &Tensor, valid: Option<&Tensor>, amp: bool) -> Tensor {
         let mask = valid.map(|v| {
             v.unsqueeze(1)
@@ -426,7 +430,12 @@ impl GridTower {
             }
             h.to_kind(Kind::Float)
         } else {
-            let mut h = self.stem.forward(x).silu();
+            let x = if x.kind() == Kind::Float {
+                x.shallow_clone()
+            } else {
+                x.to_kind(Kind::Float)
+            };
+            let mut h = self.stem.forward(&x).silu();
             if let Some(mask) = &mask {
                 h *= mask;
             }
@@ -845,8 +854,11 @@ impl PolicyNet {
                 cgh,
                 cgw,
             );
+            // Compact learner Obs may keep `grid` as Half while masks stay
+            // Float — cat requires a matching dtype.
+            let valid_ch = o.grid_valid.unsqueeze(1).to_kind(o.grid.kind());
             return Foveation {
-                grid_fine: Tensor::cat(&[&o.grid, &o.grid_valid.unsqueeze(1)], 1),
+                grid_fine: Tensor::cat(&[&o.grid, &valid_ch], 1),
                 legal_tile_fine: o.legal_tile.shallow_clone(),
                 grid_valid_fine: o.grid_valid.shallow_clone(),
                 grid_coarse,
@@ -877,7 +889,8 @@ impl PolicyNet {
             .squeeze_dim(1);
 
         if !use_crop {
-            let grid_fine = Tensor::cat(&[&o.grid, &o.grid_valid.unsqueeze(1)], 1);
+            let valid_ch = o.grid_valid.unsqueeze(1).to_kind(o.grid.kind());
+            let grid_fine = Tensor::cat(&[&o.grid, &valid_ch], 1);
             let fine_coarse = Self::fine_to_coarse_mask(o);
             let device = o.grid.device();
             let origin_y = Tensor::zeros([b], (Kind::Int64, device));
@@ -937,7 +950,13 @@ impl PolicyNet {
             FOVEATE_SIZE,
         )
         .squeeze_dim(1);
-        let grid_fine = Tensor::cat(&[&grid_cropped, &grid_valid_fine.unsqueeze(1)], 1);
+        let grid_fine = Tensor::cat(
+            &[
+                &grid_cropped,
+                &grid_valid_fine.unsqueeze(1).to_kind(grid_cropped.kind()),
+            ],
+            1,
+        );
         let (cgh, cgw) = (gc_valid.size()[1], gc_valid.size()[2]);
         // `legal_tile_fine`/`grid_valid_fine` are already crop+pad'd to
         // FOVEATE_SIZE with zeros outside the true (fine_h, fine_w) crop

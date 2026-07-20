@@ -45,6 +45,10 @@ fn to_device_maybe_pinned(t: &Tensor, device: Device, pinned: bool) -> Tensor {
 /// destination is CUDA, stage as Half on the host, H2D as Half (half the
 /// PCIe bytes), then `.to_kind(Float)` on device. CPU / flag-off keep the
 /// plain Float path (byte-identical to pre-flag behavior).
+///
+/// Learner-resident compact grids do **not** use this helper — see
+/// `build_compact_host_obs`, which keeps Half on CUDA to cut ShardBatch
+/// Obs VRAM roughly in half.
 fn upload_float_grid(
     v: &[f32],
     shape: &[i64],
@@ -1435,9 +1439,18 @@ fn build_compact_host_obs(
         origin_y,
         origin_x,
     } = packed;
+    // Keep compact grids as Half on CUDA for the whole learner-resident
+    // ShardBatch (T×N). `--fp16-rollout` used to Half-stage on the host then
+    // immediately cast back to Float on device — PCIe win only, ~2× Obs VRAM
+    // still paid. Amp towers cast Half→BF16 at the input boundary; non-CUDA
+    // keeps Float for CPU test parity.
     let half_up = |v: Vec<half::f16>, shape: &[i64]| {
-        to_device_maybe_pinned(&Tensor::from_slice(&v).view(shape), device, pinned_h2d)
-            .to_kind(Kind::Float)
+        let t = to_device_maybe_pinned(&Tensor::from_slice(&v).view(shape), device, pinned_h2d);
+        if device.is_cuda() {
+            t
+        } else {
+            t.to_kind(Kind::Float)
+        }
     };
     let up = |v: Vec<f32>, shape: &[i64]| {
         to_device_maybe_pinned(&Tensor::from_slice(&v).view(shape), device, pinned_h2d)

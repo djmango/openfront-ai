@@ -6,10 +6,13 @@
 #
 #   bash scripts/pod_train_v10.sh
 #   NUM_GPUS=4 bash scripts/pod_train_v10.sh
-#   # Throughput: keep NODE_FRACTION=0 (default). Non-zero mixes slower Node envs.
 #
-# RunPod dockerArgs (detached; keep the container alive with sleep infinity):
-#   bash -c "service ssh start 2>/dev/null || /usr/sbin/sshd; nohup bash -c 'curl -fsSL https://raw.githubusercontent.com/djmango/openfront-ai/master/scripts/pod_train_v10.sh -o /root/pod_train_v10.sh && bash /root/pod_train_v10.sh' > /root/bootstrap.log 2>&1 & disown; sleep infinity"
+# Production is pure-native (NODE_FRACTION=0). A non-zero mix is a slow parity
+# hedge and requires an explicit opt-in: ALLOW_NODE_MIX=1 NODE_FRACTION=<frac> ...
+#
+# RunPod dockerArgs (detached; keep the container alive with sleep infinity).
+# Pin NODE_FRACTION=0 so leftover shell/template env cannot reintroduce a mix:
+#   bash -c "service ssh start 2>/dev/null || /usr/sbin/sshd; nohup bash -c 'set -a; [ -f /root/ppo_v10.env ] && . /root/ppo_v10.env; set +a; curl -fsSL https://raw.githubusercontent.com/djmango/openfront-ai/master/scripts/pod_train_v10.sh -o /root/pod_train_v10.sh && NUM_GPUS=4 NODE_FRACTION=0 NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 bash /root/pod_train_v10.sh' > /root/bootstrap.log 2>&1 & disown; sleep infinity"
 #
 # If a pod fails to actually train (crash-loops immediately, "CUDA unknown
 # error" in /tmp/train_$RUN_NAME.log) despite nvidia-smi looking healthy:
@@ -41,8 +44,10 @@ MINIBATCHES=$((NUM_ENVS * ROLLOUT_LEN / MINIBATCH_SIZE))
 [ "$MINIBATCHES" -ge 1 ] || MINIBATCHES=1
 STAGE="${STAGE:-0}"
 # Fraction (0.0-1.0) of env workers that run the real Node/TS engine
-# instead of native, to hedge native's known parity gaps at higher bot counts.
+# instead of native. Default 0 (pure native). Non-zero requires ALLOW_NODE_MIX=1
+# — otherwise every "quick hedge" relaunch silently tanks collect throughput.
 NODE_FRACTION="${NODE_FRACTION:-0}"
+ALLOW_NODE_MIX="${ALLOW_NODE_MIX:-0}"
 CKPT_KEEP_LAST="${CKPT_KEEP_LAST:-48}"
 DISK_WARN_PCT="${DISK_WARN_PCT:-85}"
 DISK_CRIT_PCT="${DISK_CRIT_PCT:-92}"
@@ -77,6 +82,21 @@ NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
 NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
 TORCH_VERSION="2.11.0" # tch 0.24's C++ shim needs this exact version - see devlog
 AE_DIR="${AE_DIR:-$REPO_DIR/weights/ae}"
+
+# --- refuse recurring footguns early (before long bootstrap) ---
+if [ -n "${V10_MODE:-}" ] || [ -n "${V9_MODE:-}" ] || [ -n "${V86_MODE:-}" ]; then
+  echo "FATAL: legacy mode env (V10_MODE/V9_MODE/V86_MODE) is no longer supported."
+  echo "       Use scripts/pod_train_v10.sh directly (or the pod_train_v8.sh shim)."
+  exit 1
+fi
+if [ "$(python3 -c "print(1 if float('$NODE_FRACTION') > 0 else 0)")" = "1" ] \
+  && [ "$ALLOW_NODE_MIX" != "1" ]; then
+  echo "FATAL: NODE_FRACTION=$NODE_FRACTION without ALLOW_NODE_MIX=1."
+  echo "       Production training is pure-native (NODE_FRACTION=0)."
+  echo "       Node mix is a slow parity hedge — re-run with ALLOW_NODE_MIX=1 if you"
+  echo "       truly need it, or unset NODE_FRACTION."
+  exit 1
+fi
 
 # --- bootstrap: repo ---
 mkdir -p "$(dirname "$REPO_DIR")"
@@ -115,7 +135,7 @@ if [ "$(python3 -c "print(1 if float('$NODE_FRACTION') > 0 else 0)")" = "1" ]; t
     apt-get install -y nodejs >/dev/null
   fi
   [ -d openfront/node_modules ] || (cd openfront && npm install --silent)
-  echo "node engine mix enabled (--node-fraction $NODE_FRACTION): node $(node --version), tsx ready"
+  echo "node engine mix enabled (--node-fraction $NODE_FRACTION ALLOW_NODE_MIX=1): node $(node --version), tsx ready"
 fi
 
 # --- CUDA-linked libtorch venv (see devlog: must be exactly $TORCH_VERSION,
@@ -354,14 +374,19 @@ while true; do
     fi
   fi
   ensure_disk_headroom
-  echo "=== $(date -u +%FT%TZ) launching $RUN_NAME num_gpus=$NUM_GPUS envs/shard=$NUM_ENVS $RESUME ==="
+  NODE_MIX_ARGS=()
+  if [ "$(python3 -c "print(1 if float('$NODE_FRACTION') > 0 else 0)")" = "1" ]; then
+    NODE_MIX_ARGS=(--allow-node-mix)
+  fi
+  echo "=== $(date -u +%FT%TZ) launching $RUN_NAME num_gpus=$NUM_GPUS envs/shard=$NUM_ENVS node_fraction=$NODE_FRACTION $RESUME ==="
   START_TS=$(date +%s)
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   NCCL_P2P_DISABLE="$NCCL_P2P_DISABLE" \
   NCCL_IB_DISABLE="$NCCL_IB_DISABLE" \
   OFTRAIN_NCCL_TIMEOUT_SECONDS="${OFTRAIN_NCCL_TIMEOUT_SECONDS:-60}" \
   LD_LIBRARY_PATH="$TORCH_LIB/lib:$NVRTC_LIB:$CUDA_LIB:$NCCL_LIB:$NCCL_LINK_LIB" \
-    ./target/release/oftrain --engine native --node-fraction "$NODE_FRACTION" --num-envs "$NUM_ENVS" --num-gpus "$NUM_GPUS" \
+    ./target/release/oftrain --engine native --node-fraction "$NODE_FRACTION" "${NODE_MIX_ARGS[@]}" \
+    --num-envs "$NUM_ENVS" --num-gpus "$NUM_GPUS" \
     --rollout-len "$ROLLOUT_LEN" --minibatches "$MINIBATCHES" --stage "$STAGE" --device cuda:0 \
     --ckpt-dir "$CKPT_DIR" $TRAIN_ARGS $EXTRA_ARGS $RESUME \
     >> "/tmp/train_$RUN_NAME.log" 2>&1

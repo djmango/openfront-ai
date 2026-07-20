@@ -424,17 +424,21 @@ struct Args {
 
     /// Fraction (0.0-1.0) of env workers, evenly spread across every
     /// shard's index range, that run the real Node/TS engine instead of
-    /// `--engine`'s choice for the rest. Exists to hedge the native
-    /// engine's known parity gaps (see `--engine`'s doc comment - weaker at
-    /// 30+ bot counts) by keeping some ground-truth-accurate episodes
-    /// flowing even while training mostly on native's ~10x-faster ticking.
-    /// 0.0 (default) is a pure single-engine run, identical to omitting
-    /// this flag entirely. 0.2 = 1 Node env per 5 (evenly spread, not
-    /// clumped - see `train::engine_for_idx`). Requires `openfront/`'s
-    /// node_modules installed (`bridge::Bridge::spawn` shells out to its
-    /// `tsx`) whenever this is > 0, even if `--engine native`.
+    /// `--engine`'s choice for the rest.
+    ///
+    /// Default **0.0** (pure native) is the production training path.
+    /// Non-zero mixes are a *slow* parity hedge for native's residual gaps
+    /// at high bot counts — they require `--allow-node-mix` so accidental
+    /// `NODE_FRACTION=0.2` relaunches cannot silently tank collect
+    /// throughput again. Requires `openfront/` node_modules (`tsx`) when
+    /// > 0. See `train::engine_for_idx`.
     #[arg(long, default_value_t = 0.0)]
     node_fraction: f64,
+
+    /// Opt-in for `--node-fraction > 0`. Production launches must stay at
+    /// the default (absent); only parity-debug / hedge runs should set this.
+    #[arg(long, default_value_t = false)]
+    allow_node_mix: bool,
 
     #[arg(long, default_value_t = 1)]
     log_every: u64,
@@ -1283,6 +1287,15 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
+    let node_fraction = args.node_fraction.clamp(0.0, 1.0);
+    if node_fraction > 0.0 && !args.allow_node_mix {
+        anyhow::bail!(
+            "--node-fraction {node_fraction} requires --allow-node-mix. \
+             Production training is pure-native (omit --node-fraction / leave it 0). \
+             Node mix is a slow parity hedge and must be opted into explicitly."
+        );
+    }
+
     let cfg = train::Config {
         num_envs: initial_num_envs,
         num_gpus: args.num_gpus,
@@ -1331,7 +1344,7 @@ fn main() -> anyhow::Result<()> {
         actor_max_wait: std::time::Duration::from_millis(args.actor_max_wait_ms),
         device,
         engine: args.engine,
-        node_fraction: args.node_fraction.clamp(0.0, 1.0),
+        node_fraction,
         log_every: args.log_every,
         eval_every: args.eval_every,
         eval_episodes: args.eval_episodes,

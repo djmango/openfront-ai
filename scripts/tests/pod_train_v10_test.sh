@@ -15,6 +15,20 @@ WRAP="$ROOT/scripts/pod_train_v8.sh"
 
 grep -q 'RUN_NAME="${RUN_NAME:-ppo_v10}"' "$SCRIPT"
 grep -q 'NUM_GPUS="${NUM_GPUS:-4}"' "$SCRIPT"
+# Pure-native is the production default; non-zero mix needs an explicit opt-in.
+grep -q 'NODE_FRACTION="${NODE_FRACTION:-0}"' "$SCRIPT"
+grep -q 'ALLOW_NODE_MIX="${ALLOW_NODE_MIX:-0}"' "$SCRIPT"
+grep -q 'ALLOW_NODE_MIX=1' "$SCRIPT"
+grep -q -- '--allow-node-mix' "$SCRIPT"
+# Do not advertise a concrete non-zero NODE_FRACTION in examples (operators
+# copy-paste it). `set -e` ignores `! cmd` failures — assert explicitly.
+if grep -nE 'NODE_FRACTION=0\.[1-9]' "$SCRIPT"; then
+  echo "FAIL: non-zero NODE_FRACTION example still present in pod_train_v10.sh" >&2
+  exit 1
+fi
+# Recommended dockerArgs must pin NODE_FRACTION=0 and curl v10 (not v8+V10_MODE).
+grep -q 'NODE_FRACTION=0 NCCL_P2P_DISABLE=1' "$SCRIPT"
+grep -q 'curl -fsSL https://raw.githubusercontent.com/djmango/openfront-ai/master/scripts/pod_train_v10.sh' "$SCRIPT"
 ! grep -q -- '--v10-curriculum' "$SCRIPT"
 grep -q -- '--v86-death-penalty 3.0' "$SCRIPT"
 grep -q -- '--v10-survival-coef 0.01' "$SCRIPT"
