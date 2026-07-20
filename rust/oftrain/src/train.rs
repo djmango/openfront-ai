@@ -3734,10 +3734,13 @@ fn apply_weight_snapshot(vs: &nn::VarStore, snapshot: &CpuWeightSnapshot) -> Res
             item.shape,
             destination.size()
         );
+        // Snapshots are always f32 (learner). Actor inference weights may
+        // already be BF16 (see `cast_actor_inference_weights_bf16`).
         let source = cpu
             .narrow(0, offset, item.len)
             .view(item.shape.as_slice())
-            .to_device(destination.device());
+            .to_device(destination.device())
+            .to_kind(destination.kind());
         tch::no_grad(|| destination.f_copy_(&source))?;
         offset += item.len;
     }
@@ -3746,6 +3749,31 @@ fn apply_weight_snapshot(vs: &nn::VarStore, snapshot: &CpuWeightSnapshot) -> Res
         "weight snapshot payload length mismatch"
     );
     Ok(())
+}
+
+/// Conv towers / tile heads the actor runs under `--amp` via
+/// `conv2d_bf16`. Storing them as BF16 in the actor VarStore halves that
+/// shard of policy VRAM; the learner keeps f32 for Adam. One-step-lag
+/// dual VarStores stay intentional — this only shrinks the actor copy.
+fn actor_inference_weight_bf16(name: &str) -> bool {
+    name.starts_with("grid_coarse.")
+        || name.starts_with("grid_fine.")
+        || name.starts_with("local.")
+        || name.starts_with("htc1.")
+        || name.starts_with("htc2.")
+        || name.starts_with("htf1.")
+        || name.starts_with("htf2.")
+}
+
+fn cast_actor_inference_weights_bf16(vs: &nn::VarStore) {
+    tch::no_grad(|| {
+        for (name, mut tensor) in vs.variables() {
+            if actor_inference_weight_bf16(&name) && tensor.kind() != Kind::BFloat16 {
+                let bf16 = tensor.to_kind(Kind::BFloat16);
+                tensor.set_data(&bf16);
+            }
+        }
+    });
 }
 
 #[derive(Clone)]
@@ -4341,6 +4369,9 @@ fn build_actor_shard(
         cfg.recurrent_policy,
     );
     apply_weight_snapshot(&vs, &initial_weights)?;
+    if cfg.amp {
+        cast_actor_inference_weights_bf16(&vs);
+    }
     if let Device::Cuda(index) = device {
         Cuda::synchronize(index as i64);
     }
@@ -4449,6 +4480,9 @@ fn actor_loop(
             }
             ActorCommand::Refresh { id, weights, .. } => apply_weight_snapshot(&actor.vs, &weights)
                 .map(|_| {
+                    if cfg.amp {
+                        cast_actor_inference_weights_bf16(&actor.vs);
+                    }
                     if let Device::Cuda(index) = actor.device {
                         Cuda::synchronize(index as i64);
                     }
@@ -4901,7 +4935,7 @@ fn learner_loop(
         let reply: Result<LearnerReply> = match command {
             LearnerCommand::Train {
                 id,
-                rollout,
+                mut rollout,
                 lr,
                 ent_coef,
                 ret_stat: initial_ret_stat,
@@ -4965,7 +4999,7 @@ fn learner_loop(
                 let losses = if gradient_rx.is_some() {
                     train_update(
                         std::slice::from_mut(&mut learner),
-                        std::slice::from_ref(&rollout),
+                        std::slice::from_mut(&mut rollout),
                         &cfg,
                         &mut rng,
                         ent_coef,
@@ -4981,7 +5015,7 @@ fn learner_loop(
                     // it to the same device.
                     train_update(
                         std::slice::from_mut(&mut learner),
-                        std::slice::from_ref(&rollout),
+                        std::slice::from_mut(&mut rollout),
                         &cfg,
                         &mut rng,
                         ent_coef,
@@ -5735,7 +5769,7 @@ fn shuffled_sequence_envs(n: usize, rng: &mut rand::rngs::SmallRng) -> Vec<i64> 
 /// update's `collect_rollout` calls (see module doc).
 fn train_update(
     learners: &mut [LearnerShard],
-    pending: &[RolloutResult],
+    pending: &mut [RolloutResult],
     cfg: &Config,
     rng: &mut rand::rngs::SmallRng,
     ent_coef: f32,
@@ -6078,6 +6112,17 @@ fn train_update(
             "[phase] learner ShardBatch construction finished in {:.3}s",
             batch_started.elapsed().as_secs_f64()
         );
+    }
+    // Pipelined collect keeps rollout N+1's host obs alive while we train
+    // on N. Once ShardBatch is on-device, drop N's host PreparedObs / compact
+    // arena refs so peak RSS is one host rollout + one GPU batch, not two
+    // host rollouts stacked through the whole PPO loop.
+    for result in pending.iter_mut() {
+        for row in result.buffer.iter_mut() {
+            for step in row.iter_mut() {
+                step.obs.release_rollout_payload();
+            }
+        }
     }
 
     for _epoch in 0..cfg.epochs {
@@ -6770,6 +6815,9 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 cfg.recurrent_policy,
             );
             actor_vs.copy(&learners[gi].vs)?;
+            if cfg.amp {
+                cast_actor_inference_weights_bf16(&actor_vs);
+            }
             let path = std::path::Path::new(&cfg.ae_ckpt);
             if !path.exists() {
                 anyhow::bail!(
@@ -7117,7 +7165,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             let mut timings = TrainTimings::default();
             let train_result = train_update(
                 &mut learners,
-                &pending,
+                &mut pending,
                 cfg_ref,
                 rng.as_mut().expect("legacy learner RNG available"),
                 ent_coef_now,
@@ -7151,7 +7199,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 let mut timings = TrainTimings::default();
                 let train_result = train_update(
                     &mut learners,
-                    &pending,
+                    &mut pending,
                     cfg_ref,
                     rng.as_mut().expect("legacy learner RNG available"),
                     ent_coef_now,
@@ -8218,6 +8266,34 @@ mod persistent_actor_tests {
     }
 
     #[test]
+    fn actor_inference_weights_cast_to_bf16_and_refresh_preserves_kind() {
+        tch::manual_seed(92);
+        let source = nn::VarStore::new(Device::Cpu);
+        let _ = PolicyNet::new(&source.root(), true, false, 8, 1);
+        let snapshot = snapshot_weights(&source).unwrap();
+
+        let actor = nn::VarStore::new(Device::Cpu);
+        let _ = PolicyNet::new(&actor.root(), true, false, 8, 1);
+        apply_weight_snapshot(&actor, &snapshot).unwrap();
+        cast_actor_inference_weights_bf16(&actor);
+        for (name, tensor) in actor.variables() {
+            if actor_inference_weight_bf16(&name) {
+                assert_eq!(tensor.kind(), Kind::BFloat16, "{name}");
+            } else {
+                assert_eq!(tensor.kind(), Kind::Float, "{name}");
+            }
+        }
+
+        // Learner snapshot is f32; refresh must cast into the BF16 slots.
+        apply_weight_snapshot(&actor, &snapshot).unwrap();
+        for (name, tensor) in actor.variables() {
+            if actor_inference_weight_bf16(&name) {
+                assert_eq!(tensor.kind(), Kind::BFloat16, "{name}");
+            }
+        }
+    }
+
+    #[test]
     fn packed_weight_message_is_independent_cpu_data() {
         tch::manual_seed(91);
         let source = nn::VarStore::new(Device::Cpu);
@@ -8528,12 +8604,12 @@ mod persistent_actor_tests {
         let mut owned_ret = RetStat::default();
         let mut legacy_timings = TrainTimings::default();
         let mut owned_timings = TrainTimings::default();
-        let legacy_rollout = parity_rollout();
-        let owned_rollout = parity_rollout();
+        let mut legacy_rollout = parity_rollout();
+        let mut owned_rollout = parity_rollout();
 
         let legacy_losses = train_update(
             std::slice::from_mut(&mut legacy),
-            std::slice::from_ref(&legacy_rollout),
+            std::slice::from_mut(&mut legacy_rollout),
             &cfg,
             &mut legacy_rng,
             0.01,
@@ -8546,7 +8622,7 @@ mod persistent_actor_tests {
         .unwrap();
         let owned_losses = train_update(
             std::slice::from_mut(&mut owned),
-            std::slice::from_ref(&owned_rollout),
+            std::slice::from_mut(&mut owned_rollout),
             &cfg,
             &mut owned_rng,
             0.01,
