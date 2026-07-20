@@ -902,6 +902,13 @@ fn build_v10_stages() -> Vec<Stage> {
 }
 
 /// V10 env floors: saturated early Easy density ramp, taper as bots grow.
+///
+/// These are *aspirational* per-shard floors for larger GPUs. On current
+/// 46 GB A40 pods, `pod_train_v10.sh`'s `MAX_ENVS` (default 14) is the
+/// hard VRAM ceiling — oftrain clamps resize requests to `--max-envs` so
+/// a floor of 24 does not trigger noop cold restarts. Raising throughput
+/// means freeing Obs VRAM (see compact Half-resident grids), not editing
+/// this table down to the A40 cap.
 pub const V10_ENV_TARGETS: [usize; V10_STAGE_COUNT] = [
     24, 24, 24, 24, 24, 24, 24, 24, 24, 24, // 0-9
     24, 24, 24, 24, 24, 24, 24, 24, 24, 24, // 10-19

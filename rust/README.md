@@ -59,9 +59,10 @@ Trade-ship warship piracy is **ported** (`WarshipExecution::hunt_trade_ship` →
 `was_captured`, redirects to the capturer's nearest port, and pays gold to
 the pirate on voyage complete).
 
-**Hedge for training:** `oftrain --node-fraction 0.2` keeps a fraction of env
-workers on the Node/TS engine so ground-truth episodes still flow while most
-ticking stays on native (~10× faster).
+**Parity hedge (opt-in only):** production training is pure-native
+(`--node-fraction 0`). To mix slower Node/TS envs for ground-truth episodes,
+pass `--allow-node-mix --node-fraction 0.2` (or `ALLOW_NODE_MIX=1 NODE_FRACTION=0.2`
+via `pod_train_v10.sh`). Accidental non-zero mixes are rejected.
 
 ## oftrain notes
 
@@ -84,7 +85,7 @@ restorable in tch).
 | Core executions (attack, nuke, warship, nation AI, …) | **Mostly done** |
 | Trade-ship warship piracy | **Done** |
 | Curriculum outcome gate bots≤10 | **Pass / strong** |
-| Curriculum outcome gate bots=30+ | **Residual gap** — use `--node-fraction` |
+| Curriculum outcome gate bots=30+ | **Residual gap** — opt-in `--allow-node-mix --node-fraction` |
 | Full 285-game hash suite | Prefer TS oracle; native improving |
 
 Run `./scripts/port_status.sh` for LOC ratio.
