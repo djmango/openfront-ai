@@ -46,9 +46,11 @@ grep -q 'v10-anti-spiral-v1' "$ROOT/rust/ofcore/src/curriculum.rs"
 grep -q 'pod_train_v10.sh' "$WRAP"
 ! grep -q 'V10_MODE=1' "$WRAP"
 
-rg -n 'migrate_v86_to_v10|v10_survival_coef|v10_diplo_panic|v10_combat_action|v10_timeout_closeout' \
+# Prefer rg when present; fall back to grep -E so pods without ripgrep still pass.
+search() { if command -v rg >/dev/null 2>&1; then rg -n "$1" "${@:2}"; else grep -REn "$1" "${@:2}"; fi; }
+search 'migrate_v86_to_v10|v10_survival_coef|v10_diplo_panic|v10_combat_action|v10_timeout_closeout' \
   "$ROOT/rust/oftrain/src/main.rs" "$ROOT/rust/oftrain/src/train.rs" >/dev/null
-rg -n 'V10_REWARD_PROFILE|v10_reward_active|should_demote_v10|should_advance_v10|V10_BOT_NATION_DENSITY|V10_EASY_RAMP_LEN|V10_CLOSEOUT_STAGE|V10_MAP_WARMUP_LEN|V10_BROAD_STAGE' \
+search 'V10_REWARD_PROFILE|v10_reward_active|should_demote_v10|should_advance_v10|V10_BOT_NATION_DENSITY|V10_EASY_RAMP_LEN|V10_CLOSEOUT_STAGE|V10_MAP_WARMUP_LEN|V10_BROAD_STAGE' \
   "$ROOT/rust/ofcore/src/curriculum.rs" "$ROOT/rust/oftrain/src/train.rs" >/dev/null
 grep -q 'V10_EASY_RAMP_LEN: usize = 30' "$ROOT/rust/ofcore/src/curriculum.rs"
 grep -q 'V10_MAP_WARMUP_LEN: usize = 8' "$ROOT/rust/ofcore/src/curriculum.rs"
