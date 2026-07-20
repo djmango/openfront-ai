@@ -638,6 +638,24 @@ fn requested_stage_env_target(
         .filter(|&target| target != current_envs_per_shard)
 }
 
+/// Like [`requested_stage_env_target`], but apply `--max-envs` before deciding
+/// whether a restart is warranted.
+///
+/// Without this, a stage floor of 24 with `MAX_ENVS=14` requests a restart on
+/// every advance/demote, then clamps back to 14 on boot — a full cold restart
+/// with no net env-count change (and it also skips in-process `set_stage`).
+fn requested_stage_env_target_for_resize(
+    targets: &[usize],
+    stage: usize,
+    current_envs_per_shard: usize,
+    auto_scale_envs: bool,
+    max_envs: usize,
+) -> Option<usize> {
+    let target = requested_stage_env_target(targets, stage, current_envs_per_shard)?;
+    let capped = clamp_resolved_envs_to_autoscale_max(target, auto_scale_envs, max_envs);
+    (capped != current_envs_per_shard).then_some(capped)
+}
+
 /// Resolve per-shard env count at process start.
 ///
 /// Stage schedule values are a *floor* within a stage: an autoscale restart
@@ -1062,6 +1080,30 @@ mod v10_state_and_gate_tests {
         assert_eq!(requested_stage_env_target(&v10, 54, 20), Some(16));
         assert_eq!(requested_stage_env_target(&v10, 58, 16), Some(12));
         assert_eq!(requested_stage_env_target(&v10, 82, 10), Some(8));
+    }
+
+    #[test]
+    fn stage_resize_skips_noop_when_floor_exceeds_max_envs() {
+        let v10 = ofcore::curriculum::V10_ENV_TARGETS;
+        // Stages 0-45 want 24, but A40 pods cap at MAX_ENVS=14.
+        assert_eq!(
+            requested_stage_env_target_for_resize(&v10, 10, 14, true, 14),
+            None
+        );
+        assert_eq!(
+            requested_stage_env_target_for_resize(&v10, 10, 12, true, 14),
+            Some(14)
+        );
+        // Without a max-envs cap, the raw floor still requests a restart.
+        assert_eq!(
+            requested_stage_env_target_for_resize(&v10, 10, 14, false, 14),
+            Some(24)
+        );
+        // Late-stage shrink below the cap still restarts.
+        assert_eq!(
+            requested_stage_env_target_for_resize(&v10, 58, 14, true, 14),
+            Some(12)
+        );
     }
 
     #[test]
@@ -7333,11 +7375,30 @@ pub fn run(mut cfg: Config) -> Result<()> {
             lr_now = cfg.lr * cfg.stage_lr_decay.powi(curr_stage as i32);
             lr_warmup_start_update = update + 1;
             lr_warmup_updates = ofcore::curriculum::V10_LR_WARMUP_UPDATES;
-            requested_env_target = requested_stage_env_target(
+            let live_envs_per_shard = live_total_envs / devices.len();
+            requested_env_target = requested_stage_env_target_for_resize(
                 &cfg.stage_env_targets,
                 curr_stage,
-                live_total_envs / devices.len(),
+                live_envs_per_shard,
+                cfg.auto_scale_envs,
+                cfg.max_envs,
             );
+            if requested_env_target.is_none() {
+                if let Some(floor) = cfg.stage_env_targets.get(curr_stage).copied() {
+                    let capped = clamp_resolved_envs_to_autoscale_max(
+                        floor,
+                        cfg.auto_scale_envs,
+                        cfg.max_envs,
+                    );
+                    if floor != live_envs_per_shard && capped == live_envs_per_shard {
+                        println!(
+                            "[train] stage {curr_stage} env floor {floor} capped to \
+                             max_envs={} (live={live_envs_per_shard}); skipping noop resize",
+                            if cfg.auto_scale_envs { cfg.max_envs } else { floor }
+                        );
+                    }
+                }
+            }
             if requested_env_target.is_some() {
                 resize_reason = if demoted {
                     "curriculum_demote_env_target".to_string()
