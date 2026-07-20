@@ -34,14 +34,43 @@ use ofcore::translate::{Choice, IntentTranslator, translate};
 use crate::ae::{self, AeRaw, StaticTerrain, TerrainCacheKey};
 use crate::engine::{self, EngineKind, GameEngine, RawObs};
 
+/// Per-env layout of [`CompactHostBuffers::extras`] (all f32):
+/// `players | local | legal_ptarget | pmask | scalars | legal_actions |
+/// legal_build | legal_nuke`.
+pub(crate) fn compact_extras_per_env() -> usize {
+    use crate::policy::LOCAL;
+    feat::MAX_SLOTS * feat::P_FEAT
+        + 5 * LOCAL as usize * LOCAL as usize
+        + feat::N_ACTIONS * feat::MAX_SLOTS
+        + feat::MAX_SLOTS
+        + feat::N_SCALARS
+        + feat::N_ACTIONS
+        + feat::N_BUILD
+        + feat::N_NUKE
+}
+
+pub(crate) fn compact_extras_players_n() -> usize {
+    feat::MAX_SLOTS * feat::P_FEAT
+}
+pub(crate) fn compact_extras_local_n() -> usize {
+    use crate::policy::LOCAL;
+    5 * LOCAL as usize * LOCAL as usize
+}
+pub(crate) fn compact_extras_legal_ptarget_n() -> usize {
+    feat::N_ACTIONS * feat::MAX_SLOTS
+}
+
 /// CPU-owned foveated rollout payload. Grid samples cross the actor/learner
 /// boundary as fp16 values; masks and crop metadata stay explicit so the
 /// learner never has to reconstruct a full fine grid or infer coordinates.
+/// Non-grid tensors (`players` / `local` / …) live in `extras` so
+/// `PreparedObs` can drop its per-step Vec copies after compact.
 #[derive(Default)]
 pub(crate) struct CompactHostBuffers {
     pub grids: Vec<half::f16>,
     pub masks: Vec<f32>,
     pub origins: Vec<i64>,
+    pub extras: Vec<f32>,
 }
 
 /// Actor-created pool for compact D2H payloads. A payload is returned only
@@ -141,6 +170,8 @@ pub struct CompactGrid {
     coarse_legal: Range<usize>, // (coarse_h, coarse_w)
     pub coarse_h: usize,
     pub coarse_w: usize,
+    /// Range into [`CompactHostBuffers::extras`] for this env.
+    extras: Range<usize>,
 }
 
 impl CompactGrid {
@@ -159,6 +190,7 @@ impl CompactGrid {
         coarse_legal: Range<usize>,
         coarse_h: usize,
         coarse_w: usize,
+        extras: Range<usize>,
     ) -> Self {
         Self {
             payload,
@@ -174,6 +206,7 @@ impl CompactGrid {
             coarse_legal,
             coarse_h,
             coarse_w,
+            extras,
         }
     }
 
@@ -196,6 +229,64 @@ impl CompactGrid {
         &self.payload.buffers.masks[self.coarse_legal.clone()]
     }
 
+    fn extras_slice(&self) -> &[f32] {
+        &self.payload.buffers.extras[self.extras.clone()]
+    }
+
+    pub fn players(&self) -> &[f32] {
+        let n = compact_extras_players_n();
+        &self.extras_slice()[..n]
+    }
+    pub fn local(&self) -> &[f32] {
+        let start = compact_extras_players_n();
+        let n = compact_extras_local_n();
+        &self.extras_slice()[start..start + n]
+    }
+    pub fn legal_ptarget(&self) -> &[f32] {
+        let start = compact_extras_players_n() + compact_extras_local_n();
+        let n = compact_extras_legal_ptarget_n();
+        &self.extras_slice()[start..start + n]
+    }
+    pub fn pmask(&self) -> &[f32] {
+        let start =
+            compact_extras_players_n() + compact_extras_local_n() + compact_extras_legal_ptarget_n();
+        &self.extras_slice()[start..start + feat::MAX_SLOTS]
+    }
+    pub fn scalars(&self) -> &[f32] {
+        let start = compact_extras_players_n()
+            + compact_extras_local_n()
+            + compact_extras_legal_ptarget_n()
+            + feat::MAX_SLOTS;
+        &self.extras_slice()[start..start + feat::N_SCALARS]
+    }
+    pub fn legal_actions(&self) -> &[f32] {
+        let start = compact_extras_players_n()
+            + compact_extras_local_n()
+            + compact_extras_legal_ptarget_n()
+            + feat::MAX_SLOTS
+            + feat::N_SCALARS;
+        &self.extras_slice()[start..start + feat::N_ACTIONS]
+    }
+    pub fn legal_build(&self) -> &[f32] {
+        let start = compact_extras_players_n()
+            + compact_extras_local_n()
+            + compact_extras_legal_ptarget_n()
+            + feat::MAX_SLOTS
+            + feat::N_SCALARS
+            + feat::N_ACTIONS;
+        &self.extras_slice()[start..start + feat::N_BUILD]
+    }
+    pub fn legal_nuke(&self) -> &[f32] {
+        let start = compact_extras_players_n()
+            + compact_extras_local_n()
+            + compact_extras_legal_ptarget_n()
+            + feat::MAX_SLOTS
+            + feat::N_SCALARS
+            + feat::N_ACTIONS
+            + feat::N_BUILD;
+        &self.extras_slice()[start..start + feat::N_NUKE]
+    }
+
     #[cfg(test)]
     pub(crate) fn grid_storage_ptr(&self) -> *const half::f16 {
         self.payload.buffers.grids.as_ptr()
@@ -207,11 +298,12 @@ impl CompactGrid {
     }
 
     #[cfg(test)]
-    pub(crate) fn storage_capacities(&self) -> (usize, usize, usize) {
+    pub(crate) fn storage_capacities(&self) -> (usize, usize, usize, usize) {
         (
             self.payload.buffers.grids.capacity(),
             self.payload.buffers.masks.capacity(),
             self.payload.buffers.origins.capacity(),
+            self.payload.buffers.extras.capacity(),
         )
     }
 }
@@ -496,6 +588,33 @@ pub struct PreparedObs {
     pub legal_build: [f32; feat::N_BUILD],
     pub legal_nuke: [f32; feat::N_NUKE],
     pub local: Vec<f32>, // (5, LOCAL, LOCAL)
+}
+
+impl PreparedObs {
+    /// Drop host-owned rollout tensors after the learner has uploaded a
+    /// `ShardBatch` (or after compact has moved them into the arena).
+    /// Keeps only tiny metadata the Step struct still needs.
+    pub fn release_rollout_payload(&mut self) {
+        self.compact = None;
+        self.grid = None;
+        self.grid_coarse = None;
+        self.ae_raw.owners = Vec::new();
+        self.ae_raw.static_terrain.land_mag = Vec::<f32>::new().into();
+        self.ae_raw.fallout = Vec::new();
+        self.ae_raw.stat = Vec::new();
+        self.ego = Vec::new();
+        self.db = Vec::new();
+        self.transient = Vec::new();
+        self.legal_tile = Vec::new();
+        self.players = Vec::new();
+        self.local = Vec::new();
+        self.legal_ptarget = Vec::new();
+        self.pmask = [0.0; feat::MAX_SLOTS];
+        self.scalars = [0.0; feat::N_SCALARS];
+        self.legal_actions = [0.0; feat::N_ACTIONS];
+        self.legal_build = [0.0; feat::N_BUILD];
+        self.legal_nuke = [0.0; feat::N_NUKE];
+    }
 }
 
 fn selected_player_id(choice: &Choice, lut: &[u8], ents: &feat::EntsData) -> Option<usize> {

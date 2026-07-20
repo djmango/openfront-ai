@@ -222,7 +222,41 @@ impl SpatialAE {
             if self.enc_out_bf16.is_none() {
                 self.enc_out_bf16 = Some(CachedBf16Conv::new(&self.enc_out));
             }
+            // Amp encode uses only the bf16 conv caches (+ f32 GroupNorm /
+            // embedding). Move the unused f32 conv storages to CPU so the
+            // actor does not pay a second full copy of encoder weights in
+            // VRAM alongside the learner's policy.
+            self.reclaim_cached_f32_convs_to_cpu();
         });
+    }
+
+    /// After [`Self::cache_bf16`], f32 `Conv2D` weights are dead on the
+    /// amp path. `set_data` rewrites the shared VarStore storage in place
+    /// so all handles (module fields + `VarStore`) observe the CPU move.
+    fn reclaim_cached_f32_convs_to_cpu(&mut self) {
+        let reclaim = |t: &mut Tensor| {
+            if t.device().is_cuda() {
+                let cpu = t.to_device(Device::Cpu);
+                t.set_data(&cpu);
+            }
+        };
+        let reclaim_conv = |conv: &mut nn::Conv2D| {
+            reclaim(&mut conv.ws);
+            if let Some(bs) = conv.bs.as_mut() {
+                reclaim(bs);
+            }
+        };
+        for block in &mut self.enc_stem {
+            if block.bf16.is_some() {
+                reclaim_conv(&mut block.conv);
+            }
+        }
+        if self.enc_fuse.bf16.is_some() {
+            reclaim_conv(&mut self.enc_fuse.conv);
+        }
+        if self.enc_out_bf16.is_some() {
+            reclaim_conv(&mut self.enc_out);
+        }
     }
 
     /// `owners` (B,H,W) int64, `terrain` (B,3,H,W) f32, `static_planes`
@@ -1617,7 +1651,8 @@ mod tests {
 
             assert!(
                 bf_vs.variables().values().all(|v| v.kind() == Kind::Float),
-                "mixed precision must not mutate stored AE parameter dtypes"
+                "mixed precision must not mutate stored AE parameter dtypes \
+                 (CUDA reclaim only moves unused f32 conv storage to CPU)"
             );
             assert_eq!(bf.kind(), Kind::Float);
             assert!(bf.isfinite().all().int64_value(&[]) != 0);

@@ -1218,12 +1218,38 @@ fn store_compact_host(
     let coarse_mask_len = batch * coarse_mask_n;
     let origins = Tensor::stack(&[&meta.origin_y, &meta.origin_x], 1).contiguous();
 
+    let extras_n = crate::vecenv::compact_extras_per_env();
+    let players_n = crate::vecenv::compact_extras_players_n();
+    let local_n = crate::vecenv::compact_extras_local_n();
+    let legal_ptarget_n = crate::vecenv::compact_extras_legal_ptarget_n();
+
     let mut lease = host_arena.lease();
     {
         let buffers = lease.buffers_mut();
         copy_tensor_f16(&grids, &mut buffers.grids)?;
         copy_tensor_f32(&masks, &mut buffers.masks)?;
         copy_tensor_i64(&origins, &mut buffers.origins)?;
+        buffers.extras.clear();
+        buffers.extras.reserve(batch * extras_n);
+        for it in items.iter() {
+            anyhow::ensure!(
+                it.players.len() == players_n,
+                "compact players length mismatch"
+            );
+            anyhow::ensure!(it.local.len() == local_n, "compact local length mismatch");
+            anyhow::ensure!(
+                it.legal_ptarget.len() == legal_ptarget_n,
+                "compact legal_ptarget length mismatch"
+            );
+            buffers.extras.extend_from_slice(&it.players);
+            buffers.extras.extend_from_slice(&it.local);
+            buffers.extras.extend_from_slice(&it.legal_ptarget);
+            buffers.extras.extend_from_slice(&it.pmask);
+            buffers.extras.extend_from_slice(&it.scalars);
+            buffers.extras.extend_from_slice(&it.legal_actions);
+            buffers.extras.extend_from_slice(&it.legal_build);
+            buffers.extras.extend_from_slice(&it.legal_nuke);
+        }
         anyhow::ensure!(
             buffers.grids.len() == fine_len + batch * coarse_n,
             "compact grid payload length mismatch"
@@ -1235,6 +1261,10 @@ fn store_compact_host(
         anyhow::ensure!(
             buffers.origins.len() == 2 * batch,
             "compact origin payload length mismatch"
+        );
+        anyhow::ensure!(
+            buffers.extras.len() == batch * extras_n,
+            "compact extras payload length mismatch"
         );
     }
     let payload = lease.publish();
@@ -1258,6 +1288,7 @@ fn store_compact_host(
             coarse_legal_base + i * coarse_mask_n..coarse_legal_base + (i + 1) * coarse_mask_n,
             ch as usize,
             cw as usize,
+            i * extras_n..(i + 1) * extras_n,
         ));
         clear_full_resolution_payload(it);
     }
@@ -1265,17 +1296,27 @@ fn store_compact_host(
 }
 
 fn clear_full_resolution_payload(it: &mut PreparedObs) {
-    // These full-resolution buffers are actor inputs, not rollout data.
+    // Drop full-resolution + non-grid host tensors: they now live in the
+    // compact arena (grids/masks/extras). Use Vec::new() so capacity is
+    // not retained across every Step in the rollout.
     it.grid = None;
     it.grid_coarse = None;
-    it.ae_raw.owners.clear();
+    it.ae_raw.owners = Vec::new();
     it.ae_raw.static_terrain.land_mag = Vec::<f32>::new().into();
-    it.ae_raw.fallout.clear();
-    it.ae_raw.stat.clear();
-    it.ego.clear();
-    it.db.clear();
-    it.transient.clear();
-    it.legal_tile.clear();
+    it.ae_raw.fallout = Vec::new();
+    it.ae_raw.stat = Vec::new();
+    it.ego = Vec::new();
+    it.db = Vec::new();
+    it.transient = Vec::new();
+    it.legal_tile = Vec::new();
+    it.players = Vec::new();
+    it.local = Vec::new();
+    it.legal_ptarget = Vec::new();
+    it.pmask = [0.0; ofcore::feat::MAX_SLOTS];
+    it.scalars = [0.0; ofcore::feat::N_SCALARS];
+    it.legal_actions = [0.0; ofcore::feat::N_ACTIONS];
+    it.legal_build = [0.0; ofcore::feat::N_BUILD];
+    it.legal_nuke = [0.0; ofcore::feat::N_NUKE];
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -1321,15 +1362,12 @@ impl PackedCompactHost {
 
 /// Pure host packing for one deterministic contiguous item range. Tensor
 /// construction and H2D intentionally happen only after all ranges rejoin.
-fn pack_compact_host_range(
-    items: &[&PreparedObs],
-    compact: &[&CompactGrid],
-    ch: usize,
-    cw: usize,
-) -> PackedCompactHost {
+/// Non-grid tensors are read from [`CompactGrid`] (arena `extras`), not
+/// `PreparedObs`, which is cleared after [`store_compact_host`].
+fn pack_compact_host_range(compact: &[&CompactGrid], ch: usize, cw: usize) -> PackedCompactHost {
     let cg = policy::C_GRID as usize;
     let mut out = PackedCompactHost::default();
-    for (it, c) in items.iter().zip(compact) {
+    for c in compact {
         out.fine.extend_from_slice(c.fine());
         out.fine_valid.extend_from_slice(c.fine_valid());
         out.fine_legal.extend_from_slice(c.fine_legal());
@@ -1354,14 +1392,15 @@ fn pack_compact_host_range(
             }
             dst.extend(padded);
         }
-        out.players.extend_from_slice(&it.players);
-        out.pmask.extend_from_slice(&it.pmask);
-        out.local.extend_from_slice(&it.local);
-        out.scalars.extend_from_slice(&it.scalars);
-        out.legal_actions.extend_from_slice(&it.legal_actions);
-        out.legal_ptarget.extend_from_slice(&it.legal_ptarget);
-        out.legal_build.extend_from_slice(&it.legal_build);
-        out.legal_nuke.extend_from_slice(&it.legal_nuke);
+        // Non-grid tensors live in the compact arena after store_compact_host.
+        out.players.extend_from_slice(c.players());
+        out.local.extend_from_slice(c.local());
+        out.legal_ptarget.extend_from_slice(c.legal_ptarget());
+        out.pmask.extend_from_slice(c.pmask());
+        out.scalars.extend_from_slice(c.scalars());
+        out.legal_actions.extend_from_slice(c.legal_actions());
+        out.legal_build.extend_from_slice(c.legal_build());
+        out.legal_nuke.extend_from_slice(c.legal_nuke());
         out.origin_y.push(c.origin_y);
         out.origin_x.push(c.origin_x);
     }
@@ -1369,21 +1408,17 @@ fn pack_compact_host_range(
 }
 
 fn pack_compact_host(
-    items: &[&PreparedObs],
     compact: &[&CompactGrid],
     ch: usize,
     cw: usize,
     workers: usize,
 ) -> PackedCompactHost {
-    let workers = workers.max(1).min(items.len());
-    let chunk = items.len().div_ceil(workers);
+    let workers = workers.max(1).min(compact.len());
+    let chunk = compact.len().div_ceil(workers);
     std::thread::scope(|scope| {
-        let handles: Vec<_> = items
+        let handles: Vec<_> = compact
             .chunks(chunk)
-            .zip(compact.chunks(chunk))
-            .map(|(item_range, compact_range)| {
-                scope.spawn(move || pack_compact_host_range(item_range, compact_range, ch, cw))
-            })
+            .map(|compact_range| scope.spawn(move || pack_compact_host_range(compact_range, ch, cw)))
             .collect();
         // Joining in range order preserves exact T-major/N-minor layout.
         let mut packed = PackedCompactHost::default();
@@ -1420,7 +1455,7 @@ fn build_compact_host_obs(
     let workers = std::thread::available_parallelism()
         .map_or(1, usize::from)
         .min(8);
-    let packed = pack_compact_host(items, &compact, ch, cw, workers);
+    let packed = pack_compact_host(&compact, ch, cw, workers);
     let PackedCompactHost {
         fine,
         fine_valid,
@@ -1818,6 +1853,9 @@ mod tests {
                 && it.ego.is_empty()
                 && it.transient.is_empty()
                 && it.legal_tile.is_empty()
+                && it.players.is_empty()
+                && it.local.is_empty()
+                && it.legal_ptarget.is_empty()
         }));
         let refs: Vec<&PreparedObs> = items.iter().collect();
         let compact: Vec<&CompactGrid> =
@@ -1825,8 +1863,8 @@ mod tests {
         let ch = compact.iter().map(|c| c.coarse_h).max().unwrap();
         let cw = compact.iter().map(|c| c.coarse_w).max().unwrap();
         assert_eq!(
-            pack_compact_host(&refs, &compact, ch, cw, 1),
-            pack_compact_host(&refs, &compact, ch, cw, 3),
+            pack_compact_host(&compact, ch, cw, 1),
+            pack_compact_host(&compact, ch, cw, 3),
             "parallel disjoint-range packing must preserve every host bit and item order"
         );
         let rebuilt = build_obs(&refs, Device::Cpu, false, false);
