@@ -5,7 +5,8 @@
 # latest checkpoint to `djmango/openfront-rl`.
 #
 #   bash scripts/pod_train_v10.sh
-#   NUM_GPUS=4 NODE_FRACTION=0.2 bash scripts/pod_train_v10.sh
+#   NUM_GPUS=4 bash scripts/pod_train_v10.sh
+#   # Throughput: keep NODE_FRACTION=0 (default). Non-zero mixes slower Node envs.
 #
 # RunPod dockerArgs (detached; keep the container alive with sleep infinity):
 #   bash -c "service ssh start 2>/dev/null || /usr/sbin/sshd; nohup bash -c 'curl -fsSL https://raw.githubusercontent.com/djmango/openfront-ai/master/scripts/pod_train_v10.sh -o /root/pod_train_v10.sh && bash /root/pod_train_v10.sh' > /root/bootstrap.log 2>&1 & disown; sleep infinity"
