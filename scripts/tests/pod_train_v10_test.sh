@@ -15,6 +15,12 @@ WRAP="$ROOT/scripts/pod_train_v8.sh"
 
 grep -q 'RUN_NAME="${RUN_NAME:-ppo_v10}"' "$SCRIPT"
 grep -q 'NUM_GPUS="${NUM_GPUS:-4}"' "$SCRIPT"
+# Stability: single-instance flock + never relaunch above MAX_ENVS.
+grep -q 'flock -n 9' "$SCRIPT"
+grep -q 'MAX_ENVS="${MAX_ENVS:-14}"' "$SCRIPT"
+grep -q 'CLAMPED_ENVS' "$SCRIPT"
+grep -q 'capped to $CLAMPED_ENVS' "$SCRIPT"
+grep -q 'FAST_EXITS >= 4 ? 60' "$SCRIPT"
 # Pure-native is the production default; non-zero mix needs an explicit opt-in.
 grep -q 'NODE_FRACTION="${NODE_FRACTION:-0}"' "$SCRIPT"
 grep -q 'ALLOW_NODE_MIX="${ALLOW_NODE_MIX:-0}"' "$SCRIPT"
@@ -27,7 +33,7 @@ if grep -nE 'NODE_FRACTION=0\.[1-9]' "$SCRIPT"; then
   exit 1
 fi
 # Recommended dockerArgs must pin NODE_FRACTION=0 and curl v10 (not v8+V10_MODE).
-grep -q 'NODE_FRACTION=0 NCCL_P2P_DISABLE=1' "$SCRIPT"
+grep -q 'NODE_FRACTION=0 MAX_ENVS=14 NCCL_P2P_DISABLE=1' "$SCRIPT"
 grep -q 'curl -fsSL https://raw.githubusercontent.com/djmango/openfront-ai/master/scripts/pod_train_v10.sh' "$SCRIPT"
 ! grep -q -- '--v10-curriculum' "$SCRIPT"
 grep -q -- '--v86-death-penalty 3.0' "$SCRIPT"

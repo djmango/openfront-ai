@@ -11,8 +11,9 @@
 # hedge and requires an explicit opt-in: ALLOW_NODE_MIX=1 NODE_FRACTION=<frac> ...
 #
 # RunPod dockerArgs (detached; keep the container alive with sleep infinity).
-# Pin NODE_FRACTION=0 so leftover shell/template env cannot reintroduce a mix:
-#   bash -c "service ssh start 2>/dev/null || /usr/sbin/sshd; nohup bash -c 'set -a; [ -f /root/ppo_v10.env ] && . /root/ppo_v10.env; set +a; curl -fsSL https://raw.githubusercontent.com/djmango/openfront-ai/master/scripts/pod_train_v10.sh -o /root/pod_train_v10.sh && NUM_GPUS=4 NODE_FRACTION=0 NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 bash /root/pod_train_v10.sh' > /root/bootstrap.log 2>&1 & disown; sleep infinity"
+# Pin NODE_FRACTION=0 so leftover shell/template env cannot reintroduce a mix.
+# The script self-flocks; never start a second copy alongside a live trainer:
+#   bash -c "service ssh start 2>/dev/null || /usr/sbin/sshd; nohup bash -c 'set -a; [ -f /root/ppo_v10.env ] && . /root/ppo_v10.env; set +a; curl -fsSL https://raw.githubusercontent.com/djmango/openfront-ai/master/scripts/pod_train_v10.sh -o /root/pod_train_v10.sh && NUM_GPUS=4 NODE_FRACTION=0 MAX_ENVS=14 NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 bash /root/pod_train_v10.sh' > /root/bootstrap.log 2>&1 & disown; sleep infinity"
 #
 # If a pod fails to actually train (crash-loops immediately, "CUDA unknown
 # error" in /tmp/train_$RUN_NAME.log) despite nvidia-smi looking healthy:
@@ -21,6 +22,15 @@
 set -uo pipefail
 
 RUN_NAME="${RUN_NAME:-ppo_v10}"
+# Single-instance supervisor: docker CMD + manual starts must not dual-launch
+# oftrain (that OOMs every GPU and takes the run down).
+BOOTSTRAP_LOCK="${BOOTSTRAP_LOCK:-/tmp/${RUN_NAME}.bootstrap.lock}"
+exec 9>"$BOOTSTRAP_LOCK"
+if ! flock -n 9; then
+  echo "FATAL: another $RUN_NAME bootstrap already holds $BOOTSTRAP_LOCK" >&2
+  exit 1
+fi
+
 NUM_GPUS="${NUM_GPUS:-4}"
 # Envs per GPU/shard. Live A40 A/Bs found 12 healthier than 48 once V10's
 # longer rollout/BPTT was enabled; stage env targets + autoscale take over.
@@ -40,6 +50,10 @@ BPTT_CHUNK_LEN="${BPTT_CHUNK_LEN:-32}"
 # Match rl/ppo.py's optimizer cadence: its --minibatch is a target sample
 # count (128), while oftrain's --minibatches is a count.
 MINIBATCH_SIZE="${MINIBATCH_SIZE:-128}"
+# Always launch inside the autoscale band. Curriculum floors (e.g. 24) are
+# aspirational; MAX_ENVS is the VRAM ceiling on this pod class.
+if [ "$NUM_ENVS" -gt "$MAX_ENVS" ]; then NUM_ENVS=$MAX_ENVS; fi
+if [ "$NUM_ENVS" -lt "$MIN_ENVS" ]; then NUM_ENVS=$MIN_ENVS; fi
 MINIBATCHES=$((NUM_ENVS * ROLLOUT_LEN / MINIBATCH_SIZE))
 [ "$MINIBATCHES" -ge 1 ] || MINIBATCHES=1
 STAGE="${STAGE:-0}"
@@ -395,15 +409,25 @@ while true; do
   if [ -f "$CKPT_DIR/restart_request.json" ]; then
     REQUESTED_ENVS=$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["requested_envs_per_shard"])' "$CKPT_DIR/restart_request.json")
     RESIZE_REASON=$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("reason","resize"))' "$CKPT_DIR/restart_request.json")
-    echo "=== intentional resize ($RESIZE_REASON): $NUM_ENVS -> $REQUESTED_ENVS envs/shard; restarting now ===" \
-      | tee -a "/tmp/train_$RUN_NAME.log"
     # Consume the request here. oftrain also deletes it after a successful
     # spawn, but if startup fails the file would otherwise pin the supervisor
     # in a tight 26→26 relaunch loop.
     mv -f "$CKPT_DIR/restart_request.json" "$CKPT_DIR/restart_request.json.last"
-    NUM_ENVS="$REQUESTED_ENVS"
-    MINIBATCHES=$((NUM_ENVS * ROLLOUT_LEN / MINIBATCH_SIZE))
-    [ "$MINIBATCHES" -ge 1 ] || MINIBATCHES=1
+    # Defense in depth: oftrain should already clamp to --max-envs, but never
+    # relaunch above MAX_ENVS (curriculum floors of 24 used to OOM A40s).
+    CLAMPED_ENVS=$REQUESTED_ENVS
+    if [ "$CLAMPED_ENVS" -gt "$MAX_ENVS" ]; then CLAMPED_ENVS=$MAX_ENVS; fi
+    if [ "$CLAMPED_ENVS" -lt "$MIN_ENVS" ]; then CLAMPED_ENVS=$MIN_ENVS; fi
+    if [ "$CLAMPED_ENVS" -eq "$NUM_ENVS" ]; then
+      echo "=== resize request ($RESIZE_REASON) $REQUESTED_ENVS capped to $CLAMPED_ENVS (= current); relaunching same size ===" \
+        | tee -a "/tmp/train_$RUN_NAME.log"
+    else
+      echo "=== intentional resize ($RESIZE_REASON): $NUM_ENVS -> $CLAMPED_ENVS envs/shard (requested $REQUESTED_ENVS); restarting now ===" \
+        | tee -a "/tmp/train_$RUN_NAME.log"
+      NUM_ENVS="$CLAMPED_ENVS"
+      MINIBATCHES=$((NUM_ENVS * ROLLOUT_LEN / MINIBATCH_SIZE))
+      [ "$MINIBATCHES" -ge 1 ] || MINIBATCHES=1
+    fi
     FAST_EXITS=0
     continue
   fi
@@ -412,7 +436,8 @@ while true; do
   else
     FAST_EXITS=0
   fi
-  BACKOFF=$(( FAST_EXITS >= 2 ? (FAST_EXITS >= 4 ? 600 : 60) : 10 ))
+  # Keep downtime short: 10s → 30s → 60s max (never sit for 10 minutes).
+  BACKOFF=$(( FAST_EXITS >= 2 ? (FAST_EXITS >= 4 ? 60 : 30) : 10 ))
   echo "=== trainer exited ($RC) after ${ELAPSED}s; fast-exits=$FAST_EXITS, restarting in ${BACKOFF}s ===" \
     | tee -a "/tmp/train_$RUN_NAME.log"
   sleep "$BACKOFF"
