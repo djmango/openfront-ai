@@ -66,7 +66,20 @@ pub fn spool_episode(
     Ok(Some(dest))
 }
 
+fn sibling_sidecar(record_path: &Path, suffix: &str) -> PathBuf {
+    let stem = record_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown");
+    record_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{stem}.{suffix}"))
+}
+
 /// Copy an already-written GameRecord into the spool (e.g. oftrain --watch output).
+/// Also copies colocated `.thinking.json` / `.debug.json` when present so parquet
+/// upload can pack compact MODEL thinking alongside `record_json`.
 pub fn spool_existing_record(record_path: &Path, meta: &Value) -> Result<Option<PathBuf>> {
     if !record_path.is_file() {
         return Ok(None);
@@ -88,6 +101,12 @@ pub fn spool_existing_record(record_path: &Path, meta: &Value) -> Result<Option<
         });
     let dest = dir.join(format!("{game_id}.json"));
     fs::write(&dest, text)?;
+    for suffix in ["thinking.json", "debug.json"] {
+        let src = sibling_sidecar(record_path, suffix);
+        if src.is_file() {
+            let _ = fs::copy(&src, dir.join(format!("{game_id}.{suffix}")));
+        }
+    }
     let mut sidecar = meta.clone();
     if let Some(obj) = sidecar.as_object_mut() {
         obj.insert("game_id".into(), json!(game_id));
@@ -97,6 +116,9 @@ pub fn spool_existing_record(record_path: &Path, meta: &Value) -> Result<Option<
             json!(dest.file_name().and_then(|n| n.to_str()).unwrap_or("")),
         );
     }
-    fs::write(dest.with_extension("meta.json"), serde_json::to_string_pretty(&sidecar)?)?;
+    fs::write(
+        dir.join(format!("{game_id}.meta.json")),
+        serde_json::to_string_pretty(&sidecar)?,
+    )?;
     Ok(Some(dest))
 }

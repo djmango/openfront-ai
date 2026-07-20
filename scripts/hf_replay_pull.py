@@ -90,6 +90,11 @@ def main() -> None:
                         dest.write_text(json.dumps(json.loads(raw), separators=(",", ":")))
                     except json.JSONDecodeError:
                         dest.write_text(str(raw))
+                thinking = row.get("thinking_json") or ""
+                if thinking:
+                    if isinstance(thinking, bytes):
+                        thinking = thinking.decode("utf-8", errors="replace")
+                    (out / f"{gid}.thinking.json").write_text(str(thinking))
                 created = int(row.get("created_at") or 0)
                 if created >= latest_created:
                     latest_created = created
