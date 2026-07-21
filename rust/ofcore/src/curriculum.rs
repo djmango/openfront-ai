@@ -32,13 +32,23 @@ pub const V10_REWARD_PROFILE: &str = "v10-anti-spiral-v1";
 pub const V10_DEFAULT_DEATH_PENALTY: f64 = 3.0;
 /// Reference mid-ladder gate (Medium/Hard band). Prefer [`v10_win_at_for_stage`].
 pub const V10_WIN_AT: f64 = 0.70;
-/// Early density-ramp gate — hold mastery while maps are already varied;
-/// opponent density (bots/nations), not map identity, is the hard axis.
-/// 0.90 (need >36/40 under the strict `>` compare) so the 1→2 nation jump
-/// at stage 20 does not pin the ladder for thousands of episodes.
+/// Bots-only early-ramp gate (stages `0 .. V10_NATION_INTRO_STAGE`).
+/// 0.90 (need >36/40 under the strict `>` compare).
 pub const V10_RAMP_WIN_AT: f64 = 0.90;
-/// Terminal Impossible-stage gate after the smooth decay from [`V10_RAMP_WIN_AT`].
+/// First stage that introduces a nation (see [`V10_BOT_NATION_DENSITY`]).
+pub const V10_NATION_INTRO_STAGE: usize = 15;
+/// Softened gate for the 1-nation band (stages 15-19). Holding 0.90 here
+/// pinned mid-ladder runs for thousands of updates.
+pub const V10_ONE_NATION_WIN_AT: f64 = 0.80;
+/// Softened gate for 2+ nation Easy density ramp (stages 20-29) and the
+/// starting point of the post-ramp smooth decay.
+pub const V10_NATION_RAMP_WIN_AT: f64 = 0.75;
+/// Terminal Impossible-stage gate after the smooth decay from
+/// [`V10_NATION_RAMP_WIN_AT`].
 pub const V10_WIN_AT_END: f64 = 0.65;
+/// Floor for `lr * stage_lr_decay ^ stage`. Without this, mid-ladder stages
+/// decay to ~1e-6 and learning stalls even when the win gate is reachable.
+pub const V10_STAGE_LR_FLOOR: f64 = 1e-5;
 /// Rolling death-rate ceiling required before a V10 stage advance.
 pub const V10_ADVANCE_MAX_DEATH_RATE: f64 = 0.55;
 /// Demote when window win-rate is below this and death-rate is above
@@ -833,17 +843,47 @@ pub const V10_BOT_NATION_DENSITY: [(u32, u32); V10_STAGE_COUNT] = [
     (190, 22), // 99
 ];
 
-/// Smooth win-rate gate: hold [`V10_RAMP_WIN_AT`] on the early density ramp, then
-/// ease down to [`V10_WIN_AT_END`] by the final Impossible stage.
+/// Smooth win-rate gate: hold [`V10_RAMP_WIN_AT`] while bots-only, soften once
+/// nations appear, then ease from [`V10_NATION_RAMP_WIN_AT`] down to
+/// [`V10_WIN_AT_END`] by the final Impossible stage.
 pub fn v10_win_at_for_stage(index: usize) -> f64 {
     debug_assert!(index < V10_STAGE_COUNT);
-    if index < V10_EASY_RAMP_LEN {
+    if index < V10_NATION_INTRO_STAGE {
         return V10_RAMP_WIN_AT;
+    }
+    if index < 20 {
+        return V10_ONE_NATION_WIN_AT;
+    }
+    if index < V10_EASY_RAMP_LEN {
+        return V10_NATION_RAMP_WIN_AT;
     }
     let span = (V10_STAGE_COUNT - 1 - V10_EASY_RAMP_LEN) as f64;
     let t = (index - V10_EASY_RAMP_LEN) as f64 / span;
     let s = t * t * (3.0 - 2.0 * t);
-    V10_RAMP_WIN_AT - s * (V10_RAMP_WIN_AT - V10_WIN_AT_END)
+    V10_NATION_RAMP_WIN_AT - s * (V10_NATION_RAMP_WIN_AT - V10_WIN_AT_END)
+}
+
+/// `max(floor, base_lr * decay ^ stage)` — shared by advance/demote/resume.
+pub fn stage_learning_rate(base_lr: f64, decay: f64, stage: usize, floor: f64) -> f64 {
+    (base_lr * decay.powi(stage as i32)).max(floor)
+}
+
+/// Invert uncapped `base * decay ^ stage` to recover an implied stage.
+/// Used to detect sidecars whose `stage` was rewritten downward while
+/// `lr_now` still reflected a much higher stage (the u11571 28→8 cliff).
+pub fn imply_stage_from_learning_rate(lr_now: f64, base_lr: f64, decay: f64) -> Option<usize> {
+    if !(base_lr > 0.0 && lr_now > 0.0 && (0.0 < decay && decay < 1.0)) {
+        return None;
+    }
+    let ratio = lr_now / base_lr;
+    if ratio > 1.0 + 1e-9 {
+        return Some(0);
+    }
+    let stage = (ratio.ln() / decay.ln()).round();
+    if !stage.is_finite() || stage < 0.0 {
+        return None;
+    }
+    Some((stage as usize).min(V10_STAGE_COUNT - 1))
 }
 
 /// Remap a 35-stage V10 sidecar index onto the 100-stage ladder.
@@ -1854,10 +1894,21 @@ mod tests {
         }
         assert_eq!(v10[20].nations, Nations::Exact(2));
         assert_eq!(v10[0].win_at, V10_RAMP_WIN_AT);
-        assert_eq!(v10[V10_EASY_RAMP_LEN - 1].win_at, V10_RAMP_WIN_AT);
-        assert!(v10[V10_CLOSEOUT_STAGE].win_at < V10_RAMP_WIN_AT);
-        assert!(v10[V10_CLOSEOUT_STAGE].win_at > V10_WIN_AT);
+        assert_eq!(v10[V10_NATION_INTRO_STAGE - 1].win_at, V10_RAMP_WIN_AT);
+        assert_eq!(v10[V10_NATION_INTRO_STAGE].win_at, V10_ONE_NATION_WIN_AT);
+        assert_eq!(v10[20].win_at, V10_NATION_RAMP_WIN_AT);
+        assert_eq!(v10[V10_EASY_RAMP_LEN - 1].win_at, V10_NATION_RAMP_WIN_AT);
+        assert!(v10[V10_CLOSEOUT_STAGE].win_at < V10_NATION_RAMP_WIN_AT);
+        assert!(v10[V10_CLOSEOUT_STAGE].win_at > V10_WIN_AT_END - 1e-9);
         assert!((v10[V10_STAGE_COUNT - 1].win_at - V10_WIN_AT_END).abs() < 1e-9);
+        assert!((stage_learning_rate(2.5e-4, 0.85, 28, V10_STAGE_LR_FLOOR)
+            - V10_STAGE_LR_FLOOR)
+            .abs()
+            < 1e-15);
+        assert_eq!(
+            imply_stage_from_learning_rate(2.5e-4 * 0.85_f64.powi(28), 2.5e-4, 0.85),
+            Some(28)
+        );
         for index in V10_EASY_RAMP_LEN..(V10_STAGE_COUNT - 1) {
             assert!(
                 v10[index + 1].win_at <= v10[index].win_at + 1e-12,

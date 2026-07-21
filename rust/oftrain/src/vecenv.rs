@@ -1565,13 +1565,14 @@ impl EnvWorker {
         if components.diplo_panic != 0.0 {
             reward += components.diplo_panic;
         }
-        // Boat/build must have actually emitted a non-wasted intent. The policy
-        // always samples tile_region for these actions; treating that sample as
-        // a "target" paid +0.015 on empty boats (net +0.005 after waste) and
-        // locked recurrent policies into boat spam with ~98% empty translates.
+        // Boat/build/attack must have actually emitted a non-wasted intent.
+        // The policy always samples tile_region (boat/build) or player_slot
+        // (attack); treating that sample as a "target" paid combat-action
+        // bonuses on empty/failed translates (empty boats were net +0.005
+        // after waste; attacks paid +0.02 whenever a slot was sampled).
         let emitted_ok = !intents.is_empty() && (intents.len() as i64) > engine_wasted;
         let has_action_target = match choice.action {
-            A_BOAT | A_BUILD => emitted_ok,
+            A_ATTACK | A_BOAT | A_BUILD => emitted_ok,
             _ => {
                 choice.player_slot.is_some()
                     || choice.tile_region.is_some()

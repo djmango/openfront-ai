@@ -514,8 +514,9 @@ pub fn parse_legal(actions: &Value) -> Legal {
         stop_embargoable: id_list(&get("stopEmbargoable")),
         targetable: id_list(&get("targetable")),
         extendable: id_list(&get("extendable")),
-        can_expand: get("canExpand").as_bool().unwrap_or(true),
-        can_boat: get("canBoat").as_bool().unwrap_or(true),
+        // Default closed: a missing key must not open expand/boat masks.
+        can_expand: get("canExpand").as_bool().unwrap_or(false),
+        can_boat: get("canBoat").as_bool().unwrap_or(false),
         troops: num(&get("troops")),
         gold: num(&get("gold")),
         build_mask,

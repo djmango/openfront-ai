@@ -287,10 +287,19 @@ pub fn legality(game: &Game, client_id: &str) -> Value {
         .collect();
 
     let mut buildable: Vec<&str> = Vec::new();
-    for t in STRUCTURES.iter().chain(LAUNCHABLE.iter()).chain([ut::WARSHIP].iter()) {
+    for t in STRUCTURES.iter().chain(LAUNCHABLE.iter()) {
         if gold >= game.structure_cost(sid, t) {
             buildable.push(t);
         }
+    }
+    // Warship requires a completed own port (see `warship_spawn`). Opening it
+    // on gold alone made the build head sample Warship with nowhere to place.
+    let has_completed_port = agent
+        .units
+        .iter()
+        .any(|u| u.unit_type == ut::PORT && !u.under_construction);
+    if has_completed_port && gold >= game.structure_cost(sid, ut::WARSHIP) {
+        buildable.push(ut::WARSHIP);
     }
 
     let attackable: Vec<u16> = others
