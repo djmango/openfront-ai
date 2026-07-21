@@ -547,6 +547,10 @@ mod impassable_terrain_tests {
             0,
             "a blocked launch must not build a nuke unit"
         );
+        assert!(
+            can_build_nuke(&game, 1, unit_type::ATOM_BOMB, target).is_none(),
+            "can_build_nuke must reject trajectory-blocked targets so RL waste counts them"
+        );
     }
 
     #[test]
