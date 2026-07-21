@@ -59,7 +59,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp target/release/ofhf target/release/ofexport target/release/ofshowcase /out/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/rust/target \
-    cargo build --release -p oftrain \
+    cargo build --release -p oftrain --features native-engine \
     && cp target/release/oftrain /out/
 
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm AS runtime

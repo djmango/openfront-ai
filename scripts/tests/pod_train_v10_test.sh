@@ -47,6 +47,12 @@ grep -q -- '--v10-closeout-entry 25.0' "$SCRIPT"
 grep -q -- '--max-episode-ticks 21000' "$SCRIPT"
 grep -q -- '--migrate-v86-to-v10' "$SCRIPT"
 grep -q 'v10-anti-spiral-v1' "$ROOT/rust/ofcore/src/curriculum.rs"
+# native-engine must be the Cargo default (CLI --engine native is production).
+grep -q 'default = \["native-engine"\]' "$ROOT/rust/oftrain/Cargo.toml"
+grep -q 'cargo build --release -p oftrain --features native-engine' \
+  "$ROOT/docker/Dockerfile"
+grep -q 'SKIP_SYNC=1' "$ROOT/scripts/ppo_v10.env.example"
+grep -q 'MAX_ENVS=14' "$ROOT/scripts/ppo_v10.env.example"
 
 # Wrapper is a pure compatibility alias.
 grep -q 'pod_train_v10.sh' "$WRAP"

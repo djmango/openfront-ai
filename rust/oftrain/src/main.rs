@@ -410,15 +410,10 @@ struct Args {
     #[arg(long, default_value = "cpu")]
     device: String,
 
-    /// Simulation backend: "native" (in-process Rust engine; requires the
-    /// `native-engine` feature) or "node" (JSONL subprocess per env, kept
-    /// as the parity-testing fallback). Native is ~10x faster ticking and
-    /// validated end-to-end (curriculum advances, wins fire correctly) at
-    /// the curriculum's early-stage bot counts (0/5/10, where outcome
-    /// parity vs the TS engine is 67-100%); parity is weaker at high bot
-    /// counts (30+, "wrong narrow leader in a crowded field" - see
-    /// docs/devlog.html's curriculum-parity-check section) so re-check
-    /// that gate before relying on native at later curriculum stages.
+    /// Simulation backend: "native" (in-process Rust engine; Cargo feature
+    /// `native-engine`, on by default) or "node" (JSONL subprocess per env,
+    /// parity-testing fallback). Production pods always launch via
+    /// `scripts/pod_train_v10.sh` — clap defaults here are local smoke only.
     #[arg(long, default_value = "native")]
     engine: engine::EngineKind,
 
