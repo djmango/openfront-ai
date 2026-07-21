@@ -26,7 +26,7 @@ use ofcore::curriculum::{
     v10_survival_reward, v10_timeout_after_closeout_penalty, v83_action_churn_penalty,
 };
 use ofcore::feat::{
-    self, A_ATTACK, A_BOAT, A_CANCEL_BOAT, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, ACTIONS,
+    self, A_ATTACK, A_BOAT, A_BUILD, A_CANCEL_BOAT, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, ACTIONS,
     IS_LAND_BIT, MAG_MASK, REGION,
 };
 use ofcore::translate::{Choice, IntentTranslator, translate};
@@ -1565,9 +1565,19 @@ impl EnvWorker {
         if components.diplo_panic != 0.0 {
             reward += components.diplo_panic;
         }
-        let has_action_target = choice.player_slot.is_some()
-            || choice.tile_region.is_some()
-            || matches!(chosen_action.target, Some(_));
+        // Boat/build must have actually emitted a non-wasted intent. The policy
+        // always samples tile_region for these actions; treating that sample as
+        // a "target" paid +0.015 on empty boats (net +0.005 after waste) and
+        // locked recurrent policies into boat spam with ~98% empty translates.
+        let emitted_ok = !intents.is_empty() && (intents.len() as i64) > engine_wasted;
+        let has_action_target = match choice.action {
+            A_BOAT | A_BUILD => emitted_ok,
+            _ => {
+                choice.player_slot.is_some()
+                    || choice.tile_region.is_some()
+                    || matches!(chosen_action.target, Some(_))
+            }
+        };
         components.combat_action =
             v10_combat_action_bonus(choice.action, has_action_target, self.reward_config);
         if components.combat_action != 0.0 {
