@@ -236,8 +236,11 @@ pub struct Config {
     /// recovers (observed on every A100 run before this was ported).
     pub ent_floor: f32,
     pub entq_coef: f32,
-    /// `lr * stage_lr_decay ^ stage`, applied on curriculum advance.
+    /// `lr * stage_lr_decay ^ stage`, applied on curriculum advance/demote
+    /// and recomputed on resume (floored by `stage_lr_floor`).
     pub stage_lr_decay: f64,
+    /// Lower bound for stage-decayed LR (default [`ofcore::curriculum::V10_STAGE_LR_FLOOR`]).
+    pub stage_lr_floor: f64,
     pub epochs: usize,
     pub minibatches: usize,
     /// `--amp`: manual bf16 mixed precision for the policy net's conv
@@ -519,6 +522,99 @@ fn reconcile_resume_schedule(
         None => anyhow::bail!(
             "checkpoint is missing curriculum_schedule; only explicit v8.3/V86 -> V10 migration or native v10 sidecars are supported"
         ),
+    }
+}
+
+/// Detect sidecars whose `stage` was rewritten downward while `lr_now` still
+/// matches a much higher stage (observed: stage 28→8 at update 11571 with
+/// `lr_now` left at `2.6e-6`). Restore the implied stage, then always
+/// recompute `lr_now` from the (possibly corrected) stage + floor.
+fn reconcile_resume_stage_and_lr(
+    state: &mut TrainState,
+    base_lr: f64,
+    decay: f64,
+    floor: f64,
+) {
+    const MIN_IMPLIED_STAGE_GAP: usize = 3;
+    if let Some(implied) =
+        ofcore::curriculum::imply_stage_from_learning_rate(state.lr_now, base_lr, decay)
+    {
+        let uncapped_for_sidecar =
+            base_lr * decay.powi(state.stage as i32);
+        if implied >= state.stage + MIN_IMPLIED_STAGE_GAP
+            && state.lr_now < uncapped_for_sidecar * 0.5
+        {
+            println!(
+                "[train] refusing unexplained resume stage drop: sidecar stage={} \
+                 but lr_now={:.2e} implies stage~{implied}; restoring stage",
+                state.stage, state.lr_now
+            );
+            state.stage = implied;
+            state.recent_wins.clear();
+            state.recent_conversions.clear();
+            state.recent_deaths.clear();
+        }
+    }
+    let corrected =
+        ofcore::curriculum::stage_learning_rate(base_lr, decay, state.stage, floor);
+    if (corrected - state.lr_now).abs() > 1e-15 {
+        println!(
+            "[train] recomputed resume lr_now: {:.2e} -> {corrected:.2e} \
+             (stage={}, decay={decay}, floor={floor:.2e})",
+            state.lr_now, state.stage
+        );
+        state.lr_now = corrected;
+    }
+}
+
+#[cfg(test)]
+mod resume_stage_lr_tests {
+    use super::{reconcile_resume_stage_and_lr, TrainState};
+    use ofcore::curriculum::{V10_REWARD_PROFILE, V10_STAGE_LR_FLOOR};
+
+    fn state(stage: usize, lr_now: f64) -> TrainState {
+        TrainState {
+            checkpoint_schema_version: 2,
+            hidden_reset_policy: "episode_done".into(),
+            update: 1,
+            stage,
+            ent_scale: 1.0,
+            lr_now,
+            total_env_steps: 0,
+            recent_wins: vec![1.0; 4],
+            recent_conversions: vec![],
+            recent_deaths: vec![],
+            best_eval_win: None,
+            best_eval_score: None,
+            curriculum_schedule: Some("v10".into()),
+            reward_profile: Some(V10_REWARD_PROFILE.into()),
+            return_stats: None,
+            stage_env_targets: vec![],
+            envs_per_shard: 0,
+            requested_env_target: None,
+        }
+    }
+
+    #[test]
+    fn restores_stage_when_lr_implies_much_higher_stage() {
+        let base: f64 = 2.5e-4;
+        let decay: f64 = 0.85;
+        let lr28 = base * decay.powi(28);
+        let mut st = state(8, lr28);
+        reconcile_resume_stage_and_lr(&mut st, base, decay, V10_STAGE_LR_FLOOR);
+        assert_eq!(st.stage, 28);
+        assert!((st.lr_now - V10_STAGE_LR_FLOOR).abs() < 1e-15);
+        assert!(st.recent_wins.is_empty());
+    }
+
+    #[test]
+    fn recomputes_lr_to_floor_without_stage_rewrite() {
+        let base: f64 = 2.5e-4;
+        let decay: f64 = 0.85;
+        let mut st = state(24, base * decay.powi(24));
+        reconcile_resume_stage_and_lr(&mut st, base, decay, V10_STAGE_LR_FLOOR);
+        assert_eq!(st.stage, 24);
+        assert!((st.lr_now - V10_STAGE_LR_FLOOR).abs() < 1e-15);
     }
 }
 
@@ -3626,6 +3722,9 @@ pub fn run_benchmark(cfg: BenchmarkConfig<'_>) -> Result<()> {
                     "tempo": info.reward_components.tempo,
                     "embargo_outcome": info.reward_components.embargo_outcome,
                     "combat_outcome": info.reward_components.combat_outcome,
+                    "survival": info.reward_components.survival,
+                    "diplo_panic": info.reward_components.diplo_panic,
+                    "combat_action": info.reward_components.combat_action,
                     "waste": info.reward_components.waste,
                     "death": info.reward_components.death,
                     "terminal": info.reward_components.terminal,
@@ -6602,6 +6701,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             .clone()
             .unwrap_or_else(|| "<missing>".to_string());
         reconcile_resume_schedule(state, cfg.curriculum_schedule, cfg.migrate_v86_to_v10)?;
+        reconcile_resume_stage_and_lr(state, cfg.lr, cfg.stage_lr_decay, cfg.stage_lr_floor);
         if saved_schedule_id != cfg.curriculum_schedule.id() {
             println!(
                 "[train] migrated curriculum schedule {} -> {}",
@@ -7312,6 +7412,9 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     "reward/tempo": info.reward_components.tempo,
                     "reward/embargo_outcome": info.reward_components.embargo_outcome,
                     "reward/combat_outcome": info.reward_components.combat_outcome,
+                    "reward/survival": info.reward_components.survival,
+                    "reward/diplo_panic": info.reward_components.diplo_panic,
+                    "reward/combat_action": info.reward_components.combat_action,
                     "reward/waste": info.reward_components.waste,
                     "reward/death": info.reward_components.death,
                     "reward/terminal": info.reward_components.terminal,
@@ -7420,7 +7523,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
             }
         }
         if advanced || demoted {
-            lr_now = cfg.lr * cfg.stage_lr_decay.powi(curr_stage as i32);
+            lr_now = ofcore::curriculum::stage_learning_rate(
+                cfg.lr,
+                cfg.stage_lr_decay,
+                curr_stage,
+                cfg.stage_lr_floor,
+            );
             lr_warmup_start_update = update + 1;
             lr_warmup_updates = ofcore::curriculum::V10_LR_WARMUP_UPDATES;
             let live_envs_per_shard = live_total_envs / devices.len();
@@ -8448,6 +8556,7 @@ mod persistent_actor_tests {
             ent_floor: 0.0,
             entq_coef: 0.002,
             stage_lr_decay: 0.85,
+            stage_lr_floor: ofcore::curriculum::V10_STAGE_LR_FLOOR,
             epochs: 2,
             minibatches: 1,
             amp: false,

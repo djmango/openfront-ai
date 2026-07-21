@@ -16,7 +16,9 @@ use crate::execution::{
 };
 use crate::game::{Game, GameConfig, PlayerInfo, PlayerType};
 use crate::map::TileRef;
-use crate::obs::{borders_neutral_land, build_obs_head, can_extend_alliance};
+use crate::obs::{
+    borders_neutral_land, build_obs_head, can_extend_alliance, shares_border_with,
+};
 use crate::prng::PseudoRandom;
 use crate::record::{StampedIntent, Turn};
 use crate::session::{seed_to_game_id, terrain_bytes, AGENT_CLIENT_ID};
@@ -310,15 +312,34 @@ impl RlSession {
                     !self.can_build(sid, gold, unit, tile)
                 }
                 "attack" => {
-                    let terra = intent
-                        .get("targetID")
-                        .map(|v| v.is_null())
-                        .unwrap_or(false);
-                    if terra {
-                        let agent = self.game.player_by_client_id(AGENT_CLIENT_ID).unwrap();
-                        !borders_neutral_land(&self.game, agent)
+                    let troops = intent.get("troops").and_then(Value::as_i64).unwrap_or(0);
+                    if troops <= 0 {
+                        true
                     } else {
-                        false
+                        let terra = intent
+                            .get("targetID")
+                            .map(|v| v.is_null())
+                            .unwrap_or(false);
+                        let agent = self.game.player_by_client_id(AGENT_CLIENT_ID).unwrap();
+                        if terra {
+                            !borders_neutral_land(&self.game, agent)
+                        } else {
+                            // Previously non-terra attacks were never wasted, so
+                            // empty/illegal player attacks still looked successful
+                            // and collected the V10 combat-action bonus.
+                            let target_id = intent
+                                .get("targetID")
+                                .and_then(Value::as_str)
+                                .unwrap_or("");
+                            match self.game.player_by_id(target_id) {
+                                None => true,
+                                Some(t) => {
+                                    !shares_border_with(&self.game, agent, t.small_id)
+                                        || self.game.is_friendly(sid, t.small_id)
+                                        || !self.game.can_attack_player(sid, t.small_id)
+                                }
+                            }
+                        }
                     }
                 }
                 "upgrade_structure" => {
