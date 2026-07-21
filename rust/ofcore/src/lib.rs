@@ -7,3 +7,7 @@
 pub mod curriculum;
 pub mod feat;
 pub mod translate;
+
+#[cfg(test)]
+#[path = "translate_boat_build_tests.rs"]
+mod translate_boat_build_tests;
