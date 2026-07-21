@@ -359,14 +359,47 @@ pub fn can_build_nuke(
             if game.map.owner_id(dst) == 0 {
                 return None;
             }
-            nuke_spawn(game, owner_small_id, nuke_type, dst)
+            let spawn = nuke_spawn(game, owner_small_id, nuke_type, dst)?;
+            // Match NukeExecution::spawn: trajectory over impassable aborts
+            // before gold/unit spend. Without this, can_build / waste checks
+            // treated those launches as successful no-ops.
+            if nuke_trajectory_blocked(game, spawn, dst, nuke_type) {
+                return None;
+            }
+            Some(spawn)
         }
         unit_type::ATOM_BOMB | unit_type::HYDROGEN_BOMB => {
-            nuke_spawn(game, owner_small_id, nuke_type, dst)
+            let spawn = nuke_spawn(game, owner_small_id, nuke_type, dst)?;
+            if nuke_trajectory_blocked(game, spawn, dst, nuke_type) {
+                return None;
+            }
+            Some(spawn)
         }
         unit_type::MIRV_WARHEAD => Some(dst),
         _ => None,
     }
+}
+
+fn nuke_trajectory_blocked(
+    game: &Game,
+    spawn_tile: TileRef,
+    dst: TileRef,
+    nuke_type: &str,
+) -> bool {
+    if nuke_type == unit_type::MIRV_WARHEAD {
+        return false;
+    }
+    let speed = game.wire.default_nuke_speed();
+    let distance_based_height = nuke_type != unit_type::MIRV_WARHEAD;
+    let trajectory = parabola::find_path_tiles(
+        game,
+        spawn_tile,
+        dst,
+        speed,
+        distance_based_height,
+        true,
+    );
+    trajectory.is_empty() || trajectory.iter().any(|&t| game.is_impassable(t))
 }
 
 // TS `ImpassableTerrain.test.ts` - "Nukes: targeting" / "Nukes: blast

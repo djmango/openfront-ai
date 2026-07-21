@@ -289,6 +289,10 @@ struct Args {
     #[arg(long, default_value_t = 0.85)]
     stage_lr_decay: f64,
 
+    /// Floor for stage-decayed LR (`max(floor, lr * decay^stage)`).
+    #[arg(long, default_value_t = ofcore::curriculum::V10_STAGE_LR_FLOOR)]
+    stage_lr_floor: f64,
+
     #[arg(long, default_value_t = 2)]
     epochs: usize,
 
@@ -1319,6 +1323,7 @@ fn main() -> anyhow::Result<()> {
         ent_floor: args.ent_floor,
         entq_coef: args.entq_coef,
         stage_lr_decay: args.stage_lr_decay,
+        stage_lr_floor: args.stage_lr_floor,
         epochs: args.epochs,
         minibatches: args.minibatches,
         amp: args.amp,
