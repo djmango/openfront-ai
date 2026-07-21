@@ -7,6 +7,15 @@
 #   bash scripts/pod_train_v10.sh
 #   NUM_GPUS=4 bash scripts/pod_train_v10.sh
 #
+# Knob sources of truth (do not duplicate elsewhere):
+#   1. THIS SCRIPT — launch recipe (NUM_ENVS/MAX_ENVS, EXTRA_ARGS, TRAIN_ARGS,
+#      NCCL, HF sync). Optional overrides: /root/ppo_v10.env (see
+#      scripts/ppo_v10.env.example).
+#   2. rust/ofcore/src/curriculum.rs — stages, bots/nations, win gates,
+#      V10_ENV_TARGETS floors.
+#   3. rust/oftrain Cargo default features — native-engine ON. Clap defaults
+#      in main.rs are local smoke only; pods never rely on them.
+#
 # Production is pure-native (NODE_FRACTION=0). A non-zero mix is a slow parity
 # hedge and requires an explicit opt-in: ALLOW_NODE_MIX=1 NODE_FRACTION=<frac> ...
 #

@@ -18,8 +18,13 @@ export LIBTORCH_USE_PYTORCH=1
 export LIBTORCH="$(python -c 'import torch, os; print(os.path.dirname(torch.__file__))')"
 export LD_LIBRARY_PATH="$LIBTORCH/lib:${LD_LIBRARY_PATH:-}"
 
+# oftrain defaults to `--features native-engine` (required for `--engine native`).
 cargo build --release -p openfront-engine -p oftrain -p ofhub -p ofae   # from rust/
 cargo test -p oftrain --bin oftrain
+
+# Production launch knobs (envs, rollout, reward recipe, MAX_ENVS) live in
+# `scripts/pod_train_v10.sh` + optional `/root/ppo_v10.env` — not clap defaults.
+# Curriculum stages / density / win gates: `ofcore/src/curriculum.rs`.
 
 # AE train (needs cached games under data/)
 cargo run --release -p ofae -- train --data ../data --steps 100 --out /tmp/ofae_smoke

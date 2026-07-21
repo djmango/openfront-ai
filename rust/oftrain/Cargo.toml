@@ -28,7 +28,10 @@ openfront-engine = { path = "../engine", optional = true }
 half = "2.7.1"
 
 [features]
-default = []
+# native-engine is on by default: CLI `--engine native` is the production
+# path, and building without this feature recently took a live pod down.
+# Opt out with `--no-default-features` (Node-only / parity tooling).
+default = ["native-engine"]
 download-libtorch = ["tch/download-libtorch"]
 native-engine = ["dep:openfront-engine"]
 # Compiles the device-resident persistent-learner gradient reducer. Builds
