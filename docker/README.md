@@ -53,8 +53,8 @@ docker run --rm -p 8086:8086 -v openfront-eval-data:/data openfront-eval
 | `PLAY_NATIONS` | `1` | Nation opponents |
 | `PLAY_START_DELAY` | `15` | Lobby countdown (seconds) |
 | `PLAY_GREEDY` | `1` | Pass `--greedy` to webbot (`0` to sample) |
-| `STAGE` | `27` | Curriculum stage label in showcase state |
-| `SHOWCASE_WATCH_STAGE` | (stage) | Stage passed to `oftrain --watch` (V10 schedule) |
+| `STAGE` | `27` | Showcase UI label only — **not** the live trainer's `--stage` (pods train from checkpoint stage, usually starting at 0) |
+| `SHOWCASE_WATCH_STAGE` | (stage) | Stage passed to `oftrain --watch` for clip/replay opponents (independent of training progress) |
 | `SHOWCASE_BOTS` | `24` | Watch/replay bot count (matches live Easy ramp) |
 | `SHOWCASE_NATIONS` | `4` | Watch/replay nations |
 | `SHOWCASE_V10` | `1` | Deprecated; watch is V10 by default |

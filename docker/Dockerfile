@@ -94,6 +94,7 @@ ENV PATH="/app/.venv/bin:/app/openfront/node_modules/.bin:/app/rust/target/relea
 ENV PYTHONPATH=/app
 ENV DATA_DIR=/data
 ENV RUN_NAME=ppo_v10
+# Showcase UI / watch opponent stage only — independent of trainer --stage.
 ENV STAGE=27
 ENV SHOWCASE_WATCH_STAGE=27
 ENV SHOWCASE_BOTS=24

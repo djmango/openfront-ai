@@ -55,7 +55,8 @@ struct Args {
     max_episode_ticks: i64,
 
     /// Steps collected per env before each PPO update.
-    #[arg(long, default_value_t = 32)]
+    /// Matches `scripts/pod_train_v10.sh` (`ROLLOUT_LEN=64`).
+    #[arg(long, default_value_t = 64)]
     rollout_len: usize,
 
     #[arg(long, default_value_t = 1_000_000)]
@@ -348,7 +349,7 @@ struct Args {
 
     /// H2D fine/coarse grids as fp16 then cast to f32 on device (halves
     /// PCIe bytes for the big AE planes). Host `PreparedObs` stays f32.
-    /// Opt-in (default off); `pod_train_v8.sh` enables via EXTRA_ARGS.
+    /// Opt-in (default off); `pod_train_v10.sh` enables via EXTRA_ARGS.
     /// No-op on CPU (Half round-trip skipped).
     #[arg(long, default_value_t = false)]
     fp16_rollout: bool,
@@ -382,7 +383,8 @@ struct Args {
     recurrent_hidden_size: usize,
 
     /// Timesteps per truncated-BPTT chunk for recurrent PPO.
-    #[arg(long, default_value_t = 16)]
+    /// Matches `scripts/pod_train_v10.sh` (`BPTT_CHUNK_LEN=32`).
+    #[arg(long, default_value_t = 32)]
     bptt_chunk_len: usize,
 
     /// Let persistent actors batch whichever envs are ready instead of
@@ -555,15 +557,16 @@ struct Args {
     /// With `--persistent-actors`, growth checkpoints and exits via
     /// `restart_request.json` (same path as stage env targets); legacy
     /// collectors still spawn workers in-process. See `autoscale.rs` and
-    /// `train::run`. Off by default; `pod_train_v8.sh` enables it for V8.3+.
+    /// `train::run`. Off by default; `pod_train_v10.sh` enables it.
     #[arg(long, default_value_t = false)]
     auto_scale_envs: bool,
 
     /// Target GPU utilization set point for `--auto-scale-envs`, as a 0-1
-    /// fraction (0.95 = 95%), compared against `GpuSnapshot::min_mean_util`
+    /// fraction (0.85 = 85%), compared against `GpuSnapshot::min_mean_util`
     /// (the worst GPU's running mean - see `gpu_util.rs`) converted to the
-    /// same 0-1 scale. No effect without `--auto-scale-envs`.
-    #[arg(long, default_value_t = 0.95)]
+    /// same 0-1 scale. Matches `pod_train_v10.sh` (`TARGET_GPU_UTIL=0.85`).
+    /// No effect without `--auto-scale-envs`.
+    #[arg(long, default_value_t = 0.85)]
     target_gpu_util: f64,
 
     /// Floor for `--auto-scale-envs`: never scale below this many envs per
@@ -573,15 +576,11 @@ struct Args {
     min_envs: Option<usize>,
 
     /// Ceiling for `--auto-scale-envs`, per shard (same "per shard" unit
-    /// as `--num-envs`/`--min-envs`). 0 (the default) means "derive
-    /// automatically" from CPU headroom (see `autoscale::cpu_env_cap_per_shard`:
-    /// logical CPUs minus a small reserved margin, divided across
-    /// `--num-gpus` shards) - each env worker is one OS thread plus, for
-    /// `--engine node`, its own Node bridge subprocess, so this exists to
-    /// keep autoscale from oversubscribing the CPU chasing GPU headroom
-    /// that IPC/engine-tick latency won't actually let it use. No effect
-    /// without `--auto-scale-envs`.
-    #[arg(long, default_value_t = 0)]
+    /// as `--num-envs`/`--min-envs`). Default 14 matches the A40 VRAM
+    /// ceiling in `pod_train_v10.sh` (`MAX_ENVS=14`). Pass `--max-envs 0`
+    /// to derive from CPU headroom instead (`autoscale::cpu_env_cap_per_shard`).
+    /// No effect without `--auto-scale-envs`.
+    #[arg(long, default_value_t = 14)]
     max_envs: usize,
 
     /// How often (in PPO updates) `--auto-scale-envs` re-evaluates GPU
@@ -594,8 +593,8 @@ struct Args {
     /// Envs added per `--auto-scale-envs` growth step (per shard). Small
     /// steps converge more slowly but overshoot the target less; see
     /// `autoscale::next_env_count`'s hysteresis band for the other half of
-    /// the anti-thrashing story.
-    #[arg(long, default_value_t = 4)]
+    /// the anti-thrashing story. Matches `pod_train_v10.sh` (`AUTOSCALE_STEP=2`).
+    #[arg(long, default_value_t = 2)]
     autoscale_step: usize,
 }
 
@@ -872,7 +871,11 @@ mod recurrent_flag_tests {
         let defaults = Args::try_parse_from(["oftrain"]).unwrap();
         assert!(!defaults.recurrent_policy);
         assert_eq!(defaults.recurrent_hidden_size, 256);
-        assert_eq!(defaults.bptt_chunk_len, 16);
+        assert_eq!(defaults.bptt_chunk_len, 32);
+        assert_eq!(defaults.rollout_len, 64);
+        assert!((defaults.target_gpu_util - 0.85).abs() < 1e-9);
+        assert_eq!(defaults.max_envs, 14);
+        assert_eq!(defaults.autoscale_step, 2);
         assert!(Args::try_parse_from(["oftrain", "--recurrent-policy"]).is_err());
 
         let enabled = Args::try_parse_from([
@@ -882,12 +885,12 @@ mod recurrent_flag_tests {
             "--recurrent-hidden-size",
             "128",
             "--bptt-chunk-len",
-            "32",
+            "16",
         ])
         .unwrap();
         assert!(enabled.recurrent_policy);
         assert_eq!(enabled.recurrent_hidden_size, 128);
-        assert_eq!(enabled.bptt_chunk_len, 32);
+        assert_eq!(enabled.bptt_chunk_len, 16);
     }
 }
 

@@ -5,13 +5,19 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SCRIPT="$ROOT/scripts/pod_train_v10.sh"
 WRAP="$ROOT/scripts/pod_train_v8.sh"
 
-# No legacy mode switches.
-! grep -q 'V10_MODE=' "$SCRIPT"
-! grep -q 'V9_MODE=' "$SCRIPT"
-! grep -q 'V86_MODE=' "$SCRIPT"
-! grep -q 'V85_MODE=' "$SCRIPT"
-! grep -q 'V84_MODE=' "$SCRIPT"
-! grep -q 'V83_MODE=' "$SCRIPT"
+# No legacy mode *launch* switches (no V*_MODE=1 recipes). Soft-ignore of
+# V10_MODE is required for frozen RunPod dockerArgs that still set it.
+grep -q 'ignoring legacy V10_MODE' "$SCRIPT"
+! grep -qE 'V10_MODE=\$\{|V10_MODE=1[[:space:]]' "$SCRIPT"
+! grep -qE 'V9_MODE=\$\{|V9_MODE=1' "$SCRIPT"
+! grep -qE 'V86_MODE=\$\{|V86_MODE=1' "$SCRIPT"
+! grep -qE 'V85_MODE=\$\{|V85_MODE=1' "$SCRIPT"
+! grep -qE 'V84_MODE=\$\{|V84_MODE=1' "$SCRIPT"
+! grep -qE 'V83_MODE=\$\{|V83_MODE=1' "$SCRIPT"
+# v8 shim must drop V10_MODE and locate/fetch pod_train_v10.sh.
+grep -q 'unset V10_MODE' "$WRAP"
+grep -q 'pod_train_v10.sh' "$WRAP"
+grep -q 'curl -fsSL https://raw.githubusercontent.com/djmango/openfront-ai/master/scripts/pod_train_v10.sh' "$WRAP"
 
 grep -q 'RUN_NAME="${RUN_NAME:-ppo_v10}"' "$SCRIPT"
 grep -q 'NUM_GPUS="${NUM_GPUS:-4}"' "$SCRIPT"

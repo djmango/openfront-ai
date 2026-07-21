@@ -14,7 +14,8 @@
 #   2. rust/ofcore/src/curriculum.rs — stages, bots/nations, win gates,
 #      V10_ENV_TARGETS floors.
 #   3. rust/oftrain Cargo default features — native-engine ON. Clap defaults
-#      in main.rs are local smoke only; pods never rely on them.
+#      in main.rs mirror this recipe for rollout/BPTT/autoscale knobs so a
+#      bare `oftrain` smoke matches production; pods still pass them explicitly.
 #
 # Production is pure-native (NODE_FRACTION=0). A non-zero mix is a slow parity
 # hedge and requires an explicit opt-in: ALLOW_NODE_MIX=1 NODE_FRACTION=<frac> ...
@@ -107,8 +108,15 @@ TORCH_VERSION="2.11.0" # tch 0.24's C++ shim needs this exact version - see devl
 AE_DIR="${AE_DIR:-$REPO_DIR/weights/ae}"
 
 # --- refuse recurring footguns early (before long bootstrap) ---
-if [ -n "${V10_MODE:-}" ] || [ -n "${V9_MODE:-}" ] || [ -n "${V86_MODE:-}" ]; then
-  echo "FATAL: legacy mode env (V10_MODE/V9_MODE/V86_MODE) is no longer supported."
+# Legacy RunPod dockerArgs still set V10_MODE=1 while curling pod_train_v8.sh.
+# Ignore that flag so a reboot with a frozen CMD does not refuse to train;
+# the v8 shim also unsets it. Other mode envs remain hard errors.
+if [ -n "${V10_MODE:-}" ]; then
+  echo "WARNING: ignoring legacy V10_MODE=$V10_MODE (pod_train_v10.sh is already V10)."
+  unset V10_MODE
+fi
+if [ -n "${V9_MODE:-}" ] || [ -n "${V86_MODE:-}" ]; then
+  echo "FATAL: legacy mode env (V9_MODE/V86_MODE) is no longer supported."
   echo "       Use scripts/pod_train_v10.sh directly (or the pod_train_v8.sh shim)."
   exit 1
 fi

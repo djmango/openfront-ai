@@ -264,7 +264,7 @@ pub struct Config {
     pub pinned_h2d: bool,
     /// `--fp16-rollout`: after AE encode, H2D fine/coarse grids as Half
     /// then cast to Float on device (halves PCIe transfer). Host
-    /// `PreparedObs.grid` stays f32. Default off (opt-in); pod_train_v8
+    /// `PreparedObs.grid` stays f32. Default off (opt-in); pod_train_v10
     /// enables it via EXTRA_ARGS.
     pub fp16_rollout: bool,
     /// Host-owned fp16 foveated rollout payload. Effective only together
