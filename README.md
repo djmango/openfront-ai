@@ -128,8 +128,8 @@ Condensed from the [devlog](https://djmango.github.io/openfront-ai/devlog.html#l
   browser play (thin Python island; Torch also provides libtorch for `tch`).
 - `bridge/` - persistent Node process wrapping the engine (JSONL reset/step
   over stdio, binary tile IPC).
-- `scripts/` - ONNX export, client replay render, HF upload, `pod_train_v8.sh`
-  cloud supervisors, `fetch_ae_encoders.sh`.
+- `scripts/` - ONNX export, client replay render, HF upload, `pod_train_v10.sh`
+  (RunPod launcher; `pod_train_v8.sh` is a compatibility shim), `fetch_ae_encoders.sh`.
 - `docs/` - devlog and training graphs.
 - `openfront/` - git submodule of
   [openfrontio/OpenFrontIO](https://github.com/openfrontio/OpenFrontIO),
@@ -179,9 +179,9 @@ cargo run --release -p ofae -- export-encoder \
 # or pull frozen encoders from HF
 bash ../scripts/fetch_ae_encoders.sh
 
-# PPO (oftrain) - see scripts/pod_train_v8.sh for the RunPod launcher
+# PPO (oftrain) - see scripts/pod_train_v10.sh for the RunPod launcher
 cargo build --release -p oftrain --features native-engine
-# then: ./target/release/oftrain --help  /  bash ../scripts/pod_train_v8.sh
+# then: ./target/release/oftrain --help  /  bash ../scripts/pod_train_v10.sh
 ```
 
 AE details: owner IDs relabeled to static per-game spawn slots (any player
