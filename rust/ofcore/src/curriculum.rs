@@ -1187,6 +1187,11 @@ pub fn v10_diplo_panic_penalty(
 }
 
 /// Small prior for productive combat/build actions (targeted attack/boat, build).
+///
+/// `has_target` must mean the action actually emitted a usable intent
+/// (translated tile / player), not merely that the policy sampled a head
+/// value. Paying boat/build bonuses on empty translates made empty boats
+/// net-positive vs waste and suppressed real builds.
 pub fn v10_combat_action_bonus(action: i64, has_target: bool, config: RewardConfig) -> f64 {
     if config.v10_combat_action == 0.0 {
         return 0.0;
@@ -1195,9 +1200,18 @@ pub fn v10_combat_action_bonus(action: i64, has_target: bool, config: RewardConf
     match action {
         A_ATTACK if has_target => coef,
         A_BOAT if has_target => coef * 0.75,
-        A_BUILD => coef * 0.5,
+        A_BUILD if has_target => coef * 0.5,
         _ => 0.0,
     }
+}
+
+/// Net shaping an empty boat/build translate used to receive under V10:
+/// combat-action bonus counted `tile_region.is_some()` as a target, so a
+/// wasted empty boat was `+0.015 - W_WASTE = +0.005` (free EV). Builds
+/// were `+0.01 - W_WASTE = 0`. Callers must require a real emitted intent.
+pub fn v10_empty_action_net_reward(action: i64, config: RewardConfig) -> f64 {
+    let bogus_bonus = v10_combat_action_bonus(action, true, config);
+    bogus_bonus - W_WASTE
 }
 
 #[cfg(test)]
@@ -1418,7 +1432,13 @@ mod tests {
         assert_eq!(v10_combat_action_bonus(A_ATTACK, true, cfg), 0.02);
         assert_eq!(v10_combat_action_bonus(A_ATTACK, false, cfg), 0.0);
         assert_eq!(v10_combat_action_bonus(A_BOAT, true, cfg), 0.015);
-        assert_eq!(v10_combat_action_bonus(A_BUILD, false, cfg), 0.01);
+        assert_eq!(v10_combat_action_bonus(A_BOAT, false, cfg), 0.0);
+        assert_eq!(v10_combat_action_bonus(A_BUILD, true, cfg), 0.01);
+        assert_eq!(v10_combat_action_bonus(A_BUILD, false, cfg), 0.0);
+        // Historical bug: counting sampled tile heads as targets made empty
+        // boats net-positive and empty builds reward-neutral.
+        assert!(v10_empty_action_net_reward(A_BOAT, cfg) > 0.0);
+        assert_eq!(v10_empty_action_net_reward(A_BUILD, cfg), 0.0);
     }
 
     #[test]
