@@ -34,7 +34,9 @@ pub const V10_DEFAULT_DEATH_PENALTY: f64 = 3.0;
 pub const V10_WIN_AT: f64 = 0.70;
 /// Early density-ramp gate — hold mastery while maps are already varied;
 /// opponent density (bots/nations), not map identity, is the hard axis.
-pub const V10_RAMP_WIN_AT: f64 = 0.95;
+/// 0.90 (need >36/40 under the strict `>` compare) so the 1→2 nation jump
+/// at stage 20 does not pin the ladder for thousands of episodes.
+pub const V10_RAMP_WIN_AT: f64 = 0.90;
 /// Terminal Impossible-stage gate after the smooth decay from [`V10_RAMP_WIN_AT`].
 pub const V10_WIN_AT_END: f64 = 0.65;
 /// Rolling death-rate ceiling required before a V10 stage advance.
