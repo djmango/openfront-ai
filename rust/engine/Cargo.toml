@@ -20,6 +20,9 @@ thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 base64 = "0.22"
 flate2 = "1"
+# Typed RL obs builders (`entities_typed` / `legality_typed`) emit ofcore
+# featurizer structs so the native trainer can skip JSON parse on collect.
+ofcore = { path = "../ofcore" }
 # Optional: powers `rl_batch`'s in-process multi-`RlSession` parallel step
 # helper. Off by default so nothing about the default build/behavior
 # changes; opt in with `--features parallel`.

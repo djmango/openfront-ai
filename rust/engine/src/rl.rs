@@ -17,9 +17,11 @@ use crate::execution::{
 use crate::game::{Game, GameConfig, PlayerInfo, PlayerType};
 use crate::map::TileRef;
 use crate::obs::{
-    borders_neutral_land, build_obs_head, can_extend_alliance, shares_border_with,
+    borders_neutral_land, build_obs_head_meta, can_extend_alliance, shares_border_with,
 };
+use crate::obs_typed::{entities_typed, legality_typed};
 use crate::prng::PseudoRandom;
+use ofcore::feat::{EntsData, Legal};
 use crate::record::{StampedIntent, Turn};
 use crate::session::{seed_to_game_id, terrain_bytes, AGENT_CLIENT_ID};
 use crate::spatial::can_build_transport_ship;
@@ -42,8 +44,8 @@ pub struct RlSession {
 
 impl RlSession {
     /// Mirrors `bridge/env.ts::EnvSession.reset()`. Returns the session plus
-    /// the obs head and raw terrain bytes; the binary tile-state frame is
-    /// not built here - in-process callers should read `tile_state()`
+    /// the obs head (meta only — no JSON entities/legal), typed ents/legal,
+    /// and raw terrain bytes. In-process callers should read `tile_state()`
     /// directly (see its doc comment) instead of paying for a byte
     /// encoding that only exists for out-of-process backends.
     pub fn reset(
@@ -53,7 +55,7 @@ impl RlSession {
         bots: u32,
         difficulty: &str,
         nations: Value,
-    ) -> Result<(Self, Value, Vec<u8>), String> {
+    ) -> Result<(Self, Value, EntsData, Legal, Vec<u8>), String> {
         let map_dir = repo_root
             .join("openfront/resources/maps")
             .join(map_key.to_lowercase());
@@ -172,9 +174,11 @@ impl RlSession {
             last_winner: Value::Null,
             git_commit,
         };
-        let head = build_obs_head(&session.game, AGENT_CLIENT_ID, Value::Null);
+        let head = build_obs_head_meta(&session.game, AGENT_CLIENT_ID, Value::Null);
+        let ents = entities_typed(&session.game);
+        let legal = legality_typed(&session.game, AGENT_CLIENT_ID);
         let terrain_raw = terrain_bytes(&session.game);
-        Ok((session, head, terrain_raw))
+        Ok((session, head, ents, legal, terrain_raw))
     }
 
     /// Zero-copy view of the packed per-tile state buffer (owner id in the
@@ -190,10 +194,10 @@ impl RlSession {
 
     /// Mirrors `bridge/env.ts::EnvSession.step()`: count wasted intents
     /// against pre-step state, submit one turn, run `ticks` engine ticks
-    /// (breaking on a win update), return the obs head. Read the
-    /// post-step tile state via `tile_state()` (no bytes are built here -
-    /// see its doc comment).
-    pub fn step(&mut self, intents: &[Value], ticks: u32) -> Value {
+    /// (breaking on a win update), return meta head + typed ents/legal.
+    /// Read the post-step tile state via `tile_state()` (no bytes are built
+    /// here - see its doc comment).
+    pub fn step(&mut self, intents: &[Value], ticks: u32) -> (Value, EntsData, Legal) {
         let wasted = self.count_wasted(intents);
         if !intents.is_empty() {
             let stamped: Vec<StampedIntent> = intents
@@ -228,11 +232,13 @@ impl RlSession {
             }
         }
 
-        let mut head = build_obs_head(&self.game, AGENT_CLIENT_ID, winner);
+        let mut head = build_obs_head_meta(&self.game, AGENT_CLIENT_ID, winner);
         if let Some(obj) = head.as_object_mut() {
             obj.insert("wasted".into(), Value::from(wasted));
         }
-        head
+        let ents = entities_typed(&self.game);
+        let legal = legality_typed(&self.game, AGENT_CLIENT_ID);
+        (head, ents, legal)
     }
 
     /// Persist a Node-compatible GameRecord v0.0.2 JSON (sparse turns).

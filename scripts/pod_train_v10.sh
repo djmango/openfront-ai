@@ -23,7 +23,7 @@
 # RunPod dockerArgs (detached; keep the container alive with sleep infinity).
 # Pin NODE_FRACTION=0 so leftover shell/template env cannot reintroduce a mix.
 # The script self-flocks; never start a second copy alongside a live trainer:
-#   bash -c "service ssh start 2>/dev/null || /usr/sbin/sshd; nohup bash -c 'set -a; [ -f /root/ppo_v10.env ] && . /root/ppo_v10.env; set +a; curl -fsSL https://raw.githubusercontent.com/djmango/openfront-ai/master/scripts/pod_train_v10.sh -o /root/pod_train_v10.sh && NUM_GPUS=4 NODE_FRACTION=0 MAX_ENVS=14 NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 bash /root/pod_train_v10.sh' > /root/bootstrap.log 2>&1 & disown; sleep infinity"
+#   bash -c "service ssh start 2>/dev/null || /usr/sbin/sshd; nohup bash -c 'set -a; [ -f /root/ppo_v10.env ] && . /root/ppo_v10.env; set +a; curl -fsSL https://raw.githubusercontent.com/djmango/openfront-ai/master/scripts/pod_train_v10.sh -o /root/pod_train_v10.sh && NUM_GPUS=4 NODE_FRACTION=0 MAX_ENVS=16 NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 bash /root/pod_train_v10.sh' > /root/bootstrap.log 2>&1 & disown; sleep infinity"
 #
 # If a pod fails to actually train (crash-loops immediately, "CUDA unknown
 # error" in /tmp/train_$RUN_NAME.log) despite nvidia-smi looking healthy:
@@ -50,7 +50,7 @@ STAGE_ENV_TARGETS="${STAGE_ENV_TARGETS:-}"
 # restart_request.json path as stage env targets.
 AUTO_SCALE_ENVS="${AUTO_SCALE_ENVS:-1}"
 # Cap below the A40 OOM cliff seen at 20 envs/shard on bot-heavy late stages.
-MAX_ENVS="${MAX_ENVS:-14}"
+MAX_ENVS="${MAX_ENVS:-16}"
 MIN_ENVS="${MIN_ENVS:-8}"
 TARGET_GPU_UTIL="${TARGET_GPU_UTIL:-0.85}"
 AUTOSCALE_CHECK_EVERY="${AUTOSCALE_CHECK_EVERY:-5}"
@@ -80,7 +80,12 @@ DISK_CRIT_PCT="${DISK_CRIT_PCT:-92}"
 STALE_CKPT_RUNS="${STALE_CKPT_RUNS:-ppo_v8,ppo_v8_fast_native,ppo_v81,ppo_v82,ppo_v83,ppo_v84,ppo_v85,ppo_v86,ppo_v9}"
 
 # Validated recipe: persistent CUDA owners + compact rollout + recurrent BPTT.
-EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --fp16-rollout --persistent-actors --work-conserving-actors --pipeline-groups=true --recurrent-policy --bptt-chunk-len $BPTT_CHUNK_LEN --ckpt-every 5 --ckpt-keep-last $CKPT_KEEP_LAST --eval-every 0 --log-every 1 --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
+# Work-conserving batching knobs (inference scheduling only):
+# - wait-ms=50 / same-shape-prefer: was 2ms → ~70% singleton AE batches
+# - target-batch=2: stage-25 has ~16 unique map shapes vs 14 envs/shard, so
+#   target=8 never fills and always burns the full wait before dispatch
+# - padding-waste=0.50: after wait, allow slightly more mixed-shape compact pad
+EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --fp16-rollout --pinned-h2d --persistent-actors --work-conserving-actors --pipeline-groups=true --actor-target-batch 2 --actor-max-wait-ms 15 --actor-max-padding-waste 0.50 --recurrent-policy --bptt-chunk-len $BPTT_CHUNK_LEN --ckpt-every 5 --ckpt-keep-last $CKPT_KEEP_LAST --eval-every 0 --log-every 1 --coarse-ckpt ../weights/ae/ae_v31_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v31_d8c32.encoder.safetensors}"
 
 # V10 anti-death-spiral on the closeout ladder. Dense reward with softer death,
 # survival / diplo-panic / combat priors, and radical win bonus so finishing

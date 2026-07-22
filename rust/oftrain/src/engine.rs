@@ -28,12 +28,21 @@ pub enum TileState {
 pub struct RawObs {
     pub head: Value,
     pub tiles: TileState,
+    /// Native engine fills this to skip JSON `parse_ents` / `parse_legal`.
+    /// Node / daemon backends leave it `None`.
+    pub structured: Option<(ofcore::feat::EntsData, ofcore::feat::Legal)>,
 }
 
 pub struct PreparedTileState {
     pub owners_slotted: Vec<u8>,
     pub fallout_packed: Vec<u8>,
     pub db: Vec<f32>,
+    /// Pooled ego fractions at /`region` when built via
+    /// [`RawObs::prepare_tiles_with_ego`]; empty otherwise.
+    pub ego: Vec<f32>,
+    /// Own-territory centroid used by local crop. Meaningful when `ego`
+    /// is non-empty; otherwise `(hr/2, wr/2)`.
+    pub center: (f64, f64),
 }
 
 impl RawObs {
@@ -89,12 +98,33 @@ impl RawObs {
         wr: usize,
         region: usize,
     ) -> PreparedTileState {
+        self.prepare_tiles_with_ego(lut, width, hr, wr, region, None)
+    }
+
+    /// Same as [`Self::prepare_tiles`], but also pools ego classes and the
+    /// own-territory centroid in the same `hr*wr` walk when `clut` is set.
+    /// Removes the separate [`ofcore::feat::pool_ego_and_center`] scan.
+    pub fn prepare_tiles_with_ego(
+        &self,
+        lut: &[u8],
+        width: usize,
+        hr: usize,
+        wr: usize,
+        region: usize,
+        clut: Option<&[u8; ofcore::feat::MAX_SLOTS]>,
+    ) -> PreparedTileState {
         assert!(region != 0 && hr % region == 0 && wr % region == 0);
         let packed_wr = wr.div_ceil(8);
         let gw = wr / region;
+        let gh = hr / region;
+        let plane = gh * gw;
         let mut owners_slotted = vec![0u8; hr * wr];
         let mut fallout_packed = vec![0u8; hr * packed_wr];
-        let mut db_counts = vec![0u32; (hr / region) * gw];
+        let mut db_counts = vec![0u32; plane];
+        let mut ego_counts = clut.map(|_| vec![0u32; 3 * plane]);
+        let mut sum_y = 0.0f64;
+        let mut sum_x = 0.0f64;
+        let mut own_count = 0.0f64;
 
         for y in 0..hr {
             let src_row = y * width;
@@ -117,11 +147,24 @@ impl RawObs {
                         )
                     }
                 };
-                owners_slotted[dst] = lut.get(owner as usize).copied().unwrap_or(0);
+                let slotted = lut.get(owner as usize).copied().unwrap_or(0);
+                owners_slotted[dst] = slotted;
                 if fallout != 0 {
                     fallout_packed[y * packed_wr + x / 8] |= 1 << (7 - x % 8);
                 }
-                db_counts[(y / region) * gw + x / region] += defense as u32;
+                let region_at = (y / region) * gw + x / region;
+                db_counts[region_at] += defense as u32;
+                if let (Some(clut), Some(counts)) = (clut, ego_counts.as_mut()) {
+                    let cls = clut[slotted as usize];
+                    if cls > 0 {
+                        counts[(cls - 1) as usize * plane + region_at] += 1;
+                    }
+                    if cls == 1 {
+                        sum_y += y as f64;
+                        sum_x += x as f64;
+                        own_count += 1.0;
+                    }
+                }
             }
         }
 
@@ -130,10 +173,26 @@ impl RawObs {
             .into_iter()
             .map(|count| count as f32 / norm)
             .collect();
+        let (ego, center) = if let Some(counts) = ego_counts {
+            let ego = counts
+                .into_iter()
+                .map(|count| count as f32 / norm)
+                .collect();
+            let center = if own_count > 0.0 {
+                (sum_y / own_count, sum_x / own_count)
+            } else {
+                (hr as f64 / 2.0, wr as f64 / 2.0)
+            };
+            (ego, center)
+        } else {
+            (Vec::new(), (hr as f64 / 2.0, wr as f64 / 2.0))
+        };
         PreparedTileState {
             owners_slotted,
             fallout_packed,
             db,
+            ego,
+            center,
         }
     }
 }
@@ -193,6 +252,7 @@ mod tests {
                 fallout,
                 defense_bonus,
             },
+            structured: None,
         }
     }
 
@@ -200,6 +260,7 @@ mod tests {
         RawObs {
             head: Value::Null,
             tiles: TileState::Packed(state.to_vec()),
+            structured: None,
         }
     }
 
@@ -280,6 +341,12 @@ mod tests {
                 ofcore::feat::pool_ego_and_center(&new.owners_slotted, &clut, hr, wr);
             assert_eq!(new_ego, old_ego);
             assert_eq!(new.db, old_db);
+            let fused = packed.prepare_tiles_with_ego(&lut, width, hr, wr, region, Some(&clut));
+            assert_eq!(fused.owners_slotted, new.owners_slotted);
+            assert_eq!(fused.fallout_packed, new.fallout_packed);
+            assert_eq!(fused.db, new.db);
+            assert_eq!(fused.ego, new_ego);
+            assert_eq!(fused.center, center);
             let local = 16.min(hr).min(wr);
             let old_local =
                 ofcore::feat::local_crop(&old_owners, &clut, &land, &old_defense, hr, wr, local);

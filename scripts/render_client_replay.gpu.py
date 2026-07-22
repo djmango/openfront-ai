@@ -120,15 +120,9 @@ def linux_has_gpu() -> bool:
         return False
     if os.environ.get("OF_FORCE_GPU", "").strip() in ("1", "true", "yes"):
         return True
-    # NVIDIA CDI / classic device nodes. RunPod often exposes nvidia1+ /
-    # renderD129+ without the *0 / *128 nodes.
-    for path in (
-        "/dev/nvidia0",
-        "/dev/nvidia1",
-        "/dev/dri/renderD128",
-        "/dev/dri/renderD129",
-        "/dev/dri/card0",
-    ):
+    # NVIDIA CDI / classic device nodes commonly present in GPU containers.
+    # RunPod often exposes nvidia1+ (no nvidia0) and renderD129+ (no renderD128).
+    for path in ("/dev/nvidia0", "/dev/nvidia1", "/dev/dri/renderD128", "/dev/dri/renderD129", "/dev/dri/card0"):
         if Path(path).exists():
             return True
     try:
@@ -160,13 +154,63 @@ def chromium_args(*, soft_gl: bool | None = None) -> list[str]:
             "--use-angle=swiftshader-webgl",
             "--enable-unsafe-swiftshader",
         ]
-    # NVIDIA headless: ANGLE+EGL tends to stick to the discrete GPU better than
-    # --use-angle=gl (which often silently falls back to SwiftShader).
+    # RunPod/NVIDIA: Playwright's chrome-headless-shell always lands on
+    # SwiftShader. Full Chromium + ANGLE/Vulkan (+ Xvfb) hits the A40.
     return base + [
-        "--use-gl=angle",
-        "--use-angle=gl-egl",
-        "--enable-unsafe-swiftshader",  # last-resort if EGL fails at runtime
+        "--use-angle=vulkan",
+        "--enable-features=Vulkan",
+        "--disable-vulkan-surface",
+        "--enable-gpu-rasterization",
+        "--in-process-gpu",
     ]
+
+
+def ensure_xvfb_display() -> str | None:
+    """Start Xvfb if needed so headed Chromium can use NVIDIA GL/Vulkan."""
+    if platform.system() != "Linux":
+        return None
+    display = os.environ.get("DISPLAY", "").strip()
+    if display:
+        return display
+    # Prefer :99 — matches our smoke-tested pod path.
+    display = os.environ.get("OF_XVFB_DISPLAY", ":99")
+    if shutil.which("Xvfb") is None:
+        print("Xvfb missing; NVIDIA WebGL may fall back to SoftGL")
+        return None
+    log = Path(tempfile.gettempdir()) / "of-xvfb.log"
+    subprocess.Popen(
+        ["Xvfb", display, "-screen", "0", "1920x1080x24"],
+        stdout=open(log, "ab"),
+        stderr=subprocess.STDOUT,
+    )
+    time.sleep(0.5)
+    os.environ["DISPLAY"] = display
+    print(f"started Xvfb on DISPLAY={display}")
+    return display
+
+
+def full_chromium_executable(pw) -> str | None:
+    """Path to full Chromium (not headless-shell) for real GPU WebGL."""
+    override = os.environ.get("OF_CHROMIUM_EXECUTABLE", "").strip()
+    if override and Path(override).is_file():
+        return override
+    try:
+        exe = Path(pw.chromium.executable_path)
+        # .../chromium-XXXX/chrome-linux64/chrome  vs  chromium_headless_shell-...
+        for cand in (
+            exe.parent.parent.parent / "chromium-1228" / "chrome-linux64" / "chrome",
+            exe.parent / "chrome",
+        ):
+            if cand.is_file():
+                return str(cand)
+        # Walk playwright cache for chrome-linux64/chrome
+        cache = Path.home() / ".cache" / "ms-playwright"
+        matches = sorted(cache.glob("chromium-*/chrome-linux64/chrome"))
+        if matches:
+            return str(matches[-1])
+    except Exception:
+        pass
+    return None
 
 
 def soft_gl_defaults(*, width: int, height: int, device_scale_factor: float) -> tuple[int, int, float]:
@@ -220,21 +264,64 @@ def trim_video(
 @contextlib.contextmanager
 def client_worktree(commit: str):
     """Detached openfront worktree at `commit` with replay-tooling patch applied."""
+    # Older archived human GameRecords pin ancient gitCommits that predate our
+    # SoftGL / MODEL-overlay patches. Prefer an explicit override, else fall
+    # back to the submodule HEAD when the pinned commit can't take patches.
+    override = os.environ.get("OF_CLIENT_COMMIT", "").strip()
+    if override:
+        commit = override
     wt = Path(tempfile.mkdtemp(prefix="openfront-client-"))
     try:
-        subprocess.run(
-            ["git", "-C", str(OPENFRONT), "worktree", "add", "--detach", str(wt), commit],
-            check=True, capture_output=True, text=True,
-        )
-        subprocess.run(
-            ["git", "apply", str(PATCH)], cwd=wt, check=True,
-        )
-        # SoftGL/SwiftShader must be allowed for headless clip captures on
-        # GPU-less pods; without this the WebGL gate modal blocks replay.
-        if SOFTGL_PATCH.is_file():
+        def _add(c: str) -> None:
             subprocess.run(
-                ["git", "apply", str(SOFTGL_PATCH)], cwd=wt, check=True,
+                ["git", "-C", str(OPENFRONT), "worktree", "add", "--detach", str(wt), c],
+                check=True, capture_output=True, text=True,
             )
+
+        try:
+            _add(commit)
+        except subprocess.CalledProcessError:
+            # Shallow submodule may lack the archived commit — fetch then retry.
+            subprocess.run(
+                ["git", "-C", str(OPENFRONT), "fetch", "--depth=1", "origin", commit],
+                check=False, capture_output=True, text=True,
+            )
+            _add(commit)
+
+        patch = subprocess.run(
+            ["git", "apply", str(PATCH)], cwd=wt, capture_output=True, text=True,
+        )
+        if patch.returncode != 0:
+            head = subprocess.check_output(
+                ["git", "-C", str(OPENFRONT), "rev-parse", "HEAD"], text=True,
+            ).strip()
+            print(
+                f"replay patch failed on {commit[:12]} "
+                f"({patch.stderr.strip()[:160]}); falling back to HEAD {head[:12]}"
+            )
+            subprocess.run(
+                ["git", "-C", str(OPENFRONT), "worktree", "remove", "--force", str(wt)],
+                capture_output=True,
+            )
+            shutil.rmtree(wt, ignore_errors=True)
+            wt = Path(tempfile.mkdtemp(prefix="openfront-client-"))
+            commit = head
+            _add(commit)
+            subprocess.run(
+                ["git", "apply", str(PATCH)], cwd=wt, check=True,
+            )
+        # SoftGL/SwiftShader must be allowed for headless clip captures on
+        # GPU-less hosts; without this the WebGL gate modal blocks replay.
+        if SOFTGL_PATCH.is_file():
+            soft = subprocess.run(
+                ["git", "apply", str(SOFTGL_PATCH)], cwd=wt,
+                capture_output=True, text=True,
+            )
+            if soft.returncode != 0:
+                print(
+                    f"SoftGL patch skipped on {commit[:12]}: "
+                    f"{soft.stderr.strip()[:160]}"
+                )
         pin_nm = OPENFRONT / "node_modules"
         if pin_nm.is_dir() and not (wt / "node_modules").exists():
             os.symlink(pin_nm, wt / "node_modules")
@@ -280,11 +367,10 @@ def render_record(
     reuse_services: bool = False,
     trim_gameplay: bool = False,
     max_duration: int | None = None,
+    full_game: bool = True,
     death_trim_ticks: int = 55,
     win_hold_sec: float = 2.5,
-    full_game: bool = True,
 ) -> None:
-    _ = full_game  # always-on; kept for call-site compat
     from playwright.sync_api import sync_playwright
 
     game_id = json.loads(record.read_text())["info"]["gameID"]
@@ -329,7 +415,9 @@ def render_record(
         else client_worktree(record_engine_commit(record))
     )
 
-    use_soft_gl = platform.system() != "Darwin" and not linux_has_gpu()
+    want_gpu = platform.system() == "Darwin" or linux_has_gpu()
+    # SoftGL only when we cannot get a real GPU WebGL context.
+    use_soft_gl = platform.system() != "Darwin" and not want_gpu
     chrome_args = chromium_args(soft_gl=use_soft_gl)
     render_width, render_height, render_dpr = width, height, device_scale_factor
     if use_soft_gl:
@@ -341,7 +429,7 @@ def render_record(
             "(mount /dev/nvidia* or set OF_FORCE_GPU=1 for real WebGL)"
         )
     else:
-        print(f"Chromium WebGL: GPU ({' '.join(chrome_args[-3:])})")
+        print(f"Chromium WebGL: GPU path ({' '.join(chrome_args[-4:])})")
 
     with client_ctx as client_dir:
         try:
@@ -386,10 +474,31 @@ def render_record(
             speed_label = {"0.5": "×0.5", "1": "×1", "2": "×2"}.get(speed)
 
             with sync_playwright() as pw, tempfile.TemporaryDirectory() as td:
-                browser = pw.chromium.launch(
-                    headless=not headed,
-                    args=chrome_args,
-                )
+                launch_kwargs: dict = {"args": chrome_args}
+                if want_gpu and platform.system() == "Linux":
+                    # chrome-headless-shell → SwiftShader even with A40s present.
+                    # Headed full Chromium under Xvfb + ANGLE/Vulkan → NVIDIA.
+                    ensure_xvfb_display()
+                    full = full_chromium_executable(pw)
+                    if full:
+                        launch_kwargs["executable_path"] = full
+                        launch_kwargs["headless"] = False
+                        print(f"using full Chromium for NVIDIA WebGL: {full}")
+                    else:
+                        launch_kwargs["headless"] = not headed
+                        print(
+                            "full Chromium not found; "
+                            "headless-shell may SoftGL-fallback"
+                        )
+                    os.environ.setdefault(
+                        "VK_ICD_FILENAMES", "/etc/vulkan/icd.d/nvidia_icd.json"
+                    )
+                    os.environ.setdefault("__NV_PRIME_RENDER_OFFLOAD", "1")
+                    os.environ.setdefault("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
+                    launch_kwargs["env"] = dict(os.environ)
+                else:
+                    launch_kwargs["headless"] = not headed
+                browser = pw.chromium.launch(**launch_kwargs)
                 ctx = browser.new_context(
                     viewport={"width": render_width, "height": render_height},
                     device_scale_factor=render_dpr,
@@ -400,7 +509,6 @@ def render_record(
                 end_tick = episode.get("end_tick")
                 outcome = episode.get("outcome", "timeout")
                 # Always record the full episode. SoftGL is slow; prefer a GPU.
-                # CLIP_RENDER_EVERY can thin draws on SoftGL without skipping ticks.
                 render_every = os.environ.get("CLIP_RENDER_EVERY") or (
                     "40" if use_soft_gl else "1"
                 )
@@ -422,6 +530,31 @@ def render_record(
                 )
                 page = ctx.new_page()
                 page_open_t0 = time.time()
+                # Confirm we actually got NVIDIA/Metal — headless-shell often
+                # lies and still SoftGLs, which is why full-game clips took hours.
+                gl_info = page.evaluate(
+                    """() => {
+                      const c = document.createElement("canvas");
+                      const gl = c.getContext("webgl2") || c.getContext("webgl");
+                      if (!gl) return {ok: false};
+                      const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+                      return {
+                        ok: true,
+                        renderer: gl.getParameter(
+                          dbg ? dbg.UNMASKED_RENDERER_WEBGL : gl.RENDERER
+                        ),
+                      };
+                    }"""
+                )
+                renderer = str((gl_info or {}).get("renderer") or "")
+                print(f"WebGL renderer: {renderer or 'none'}")
+                if "swiftshader" in renderer.lower() or "llvmpipe" in renderer.lower():
+                    use_soft_gl = True
+                    print(
+                        "WARNING: Chromium fell back to SoftGL — full-game "
+                        "capture will crawl (~0.7 tick/s). Use full Chromium "
+                        "+ Xvfb + NVIDIA Vulkan on the GPU pod."
+                    )
                 page.goto(
                     f"http://localhost:{client_port}/game/{game_id}",
                     wait_until="domcontentloaded",
@@ -447,24 +580,22 @@ def render_record(
                 target_tick_rate = float(
                     os.environ.get("CLIP_GAME_TICKS_PER_SEC", "20")
                 )
-                mode = "SoftGL" if use_soft_gl else "GPU"
-                print(
-                    f"full-game {mode} capture "
-                    f"(end_tick={end_tick}, outcome={outcome})"
-                    + ("; wall-clock may be long on SoftGL" if use_soft_gl else "")
-                )
-
                 gameplay_t0 = time.time()
                 start_tick = page.evaluate(
                     "() => (typeof window.__replayTick === 'number' "
                     "? window.__replayTick : 0)"
                 )
                 last_tick = start_tick
-                print("replay running...")
+                mode = "SoftGL" if use_soft_gl else "GPU"
+                print(
+                    f"full-game {mode} capture from tick {start_tick} "
+                    f"(end_tick={end_tick}, outcome={outcome})"
+                    + ("; wall-clock may be long on SoftGL" if use_soft_gl else "")
+                )
 
                 # Death: cut before the wipeout modal. Timeout: cut at the
                 # episode budget — without this the loop runs to --timeout
-                # wall-clock because no win/death modal ever appears.
+                # wall-clock (hours) because no win/death modal ever appears.
                 if end_tick and outcome == "death":
                     stop_tick = int(end_tick) - death_trim_ticks
                 elif end_tick and outcome == "timeout":
@@ -564,20 +695,24 @@ def render_record(
                     f"captured {ticks_rendered} ticks in {recorded:.1f}s "
                     f"({tick_rate:.1f} ticks/sec before video speedup)"
                 )
-                # Compress wall-clock capture to target gameplay tick rate.
                 speedup = 1.0
-                if ticks_rendered > 0 and recorded > 0 and target_tick_rate > 0:
-                    desired = ticks_rendered / target_tick_rate
-                    if max_duration is not None:
-                        desired = min(desired, float(max_duration))
-                    if desired > 0:
-                        speedup = recorded / desired
-                        print(
-                            f"speedup {speedup:.1f}x "
-                            f"({recorded:.0f}s wall, {ticks_rendered} ticks "
-                            f"-> {desired:.1f}s at {target_tick_rate:g} ticks/sec)"
-                        )
-                    trim_end = desired
+                if use_soft_gl and ticks_rendered > 0:
+                    # Wall-clock compression alone preserved the host's slow
+                    # simulation rate. Derive output duration from actual game
+                    # ticks so every published clip is at least the requested
+                    # gameplay speed, even when SoftGL never reaches its target.
+                    natural = ticks_rendered / target_tick_rate
+                    if max_duration is not None and not full_game:
+                        trim_end = min(float(max_duration), natural)
+                    else:
+                        # Full-game: keep natural gameplay speed (or env override).
+                        trim_end = natural
+                    speedup = recorded / trim_end if trim_end > 0 else 1.0
+                    print(
+                        f"SoftGL speedup {speedup:.1f}x "
+                        f"({recorded:.0f}s wall, {ticks_rendered} ticks "
+                        f"-> {trim_end:.1f}s clip at {target_tick_rate:g} ticks/sec)"
+                    )
                 elif max_duration is not None:
                     trim_end = min(recorded, float(max_duration))
                 else:
@@ -624,7 +759,7 @@ def main() -> None:
         "--full-game",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="record the whole episode (default; --no-full-game is ignored legacy)",
+        help="record the whole episode (default)",
     )
     args = ap.parse_args()
 

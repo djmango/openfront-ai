@@ -124,7 +124,18 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
         bail!("--stage {} out of range for schedule", cfg.stage);
     }
     let st = &stages[cfg.stage];
-    let map_name = cfg.map.as_deref().unwrap_or(st.maps[0]);
+    // No map override ⇒ sample the stage pool (do not default to maps[0]/Onion).
+    let map_name = match cfg.map.as_deref() {
+        Some(m) => m,
+        None if st.maps.is_empty() => bail!("stage {} has empty map pool", cfg.stage),
+        None => {
+            use rand::seq::SliceRandom;
+            let mut rng = rand::thread_rng();
+            *st.maps
+                .choose(&mut rng)
+                .ok_or_else(|| anyhow::anyhow!("stage {} has empty map pool", cfg.stage))?
+        }
+    };
     let bots = cfg.bots.unwrap_or(st.bots);
     let difficulty = cfg.difficulty.as_deref().unwrap_or(st.difficulty);
     let nations = resolve_nations(st, cfg.nations.as_deref());
@@ -149,6 +160,8 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
     );
     vs.load(cfg.policy)
         .with_context(|| format!("load policy {}", cfg.policy))?;
+    // Keep AE on the non-persistent load path: enabling bf16/shared-pair
+    // encode here *increased* peak VRAM for batch-1 watch on large maps.
     let ae = AePair::load(
         Path::new(cfg.ae_ckpt),
         cfg.coarse_ckpt.map(Path::new),
@@ -209,30 +222,35 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
             break;
         }
         let prepared = worker.prepare();
-        let obs_t = batch::build_obs_with_ae_cached(
-            &[&prepared],
-            cfg.device,
-            false,
-            false,
-            &ae,
-            &mut terrain_cache,
-        )?;
-        let (a, p, t, b, n, q, _lp, _v) = if let Some(h) = hidden.as_ref() {
-            let context = crate::recurrent::context_tensor(&[prepared.prev_action.clone()], cfg.device);
-            let (acts, h_out) = policy.act_with_state(&obs_t, h, &context, true);
-            hidden = Some(h_out);
-            acts
-        } else {
-            policy.act(&obs_t, true)
-        };
-        let choice = choice_from_act(
-            a.int64_value(&[0]),
-            p.int64_value(&[0]),
-            t.int64_value(&[0]),
-            b.int64_value(&[0]),
-            n.int64_value(&[0]),
-            q.double_value(&[0]) as f32,
-        );
+        // Watch must run under no_grad — otherwise each step retains the
+        // autograd graph and VRAM climbs to the full GPU over ~hundreds of steps.
+        let choice = tch::no_grad(|| -> Result<Choice> {
+            let obs_t = batch::build_obs_with_ae_cached(
+                &[&prepared],
+                cfg.device,
+                false,
+                false,
+                &ae,
+                &mut terrain_cache,
+            )?;
+            let (a, p, t, b, n, q, _lp, _v) = if let Some(h) = hidden.as_ref() {
+                let context =
+                    crate::recurrent::context_tensor(&[prepared.prev_action.clone()], cfg.device);
+                let (acts, h_out) = policy.act_with_state(&obs_t, h, &context, true);
+                hidden = Some(h_out);
+                acts
+            } else {
+                policy.act(&obs_t, true)
+            };
+            Ok(choice_from_act(
+                a.int64_value(&[0]),
+                p.int64_value(&[0]),
+                t.int64_value(&[0]),
+                b.int64_value(&[0]),
+                n.int64_value(&[0]),
+                q.double_value(&[0]) as f32,
+            ))
+        })?;
         worker.apply_watch(&choice)?;
     }
     if worker.current_obs().unwrap().spawn_phase() {
@@ -241,111 +259,119 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
 
     for step in 0..cfg.max_steps {
         let prepared = worker.prepare();
-        let obs_t = batch::build_obs_with_ae_cached(
-            &[&prepared],
-            cfg.device,
-            false,
-            false,
-            &ae,
-            &mut terrain_cache,
-        )?;
-        let (a, p, t, b, n, q, _lp, v, probs) = if let Some(h) = hidden.as_ref() {
-            let context = crate::recurrent::context_tensor(&[prepared.prev_action.clone()], cfg.device);
-            if cfg.debug {
-                let (acts, h_out) = policy.act_with_state_debug(&obs_t, h, &context, true);
-                hidden = Some(h_out);
-                acts
+        let (choice, debug_entry) = tch::no_grad(|| -> Result<(Choice, Option<Value>)> {
+            let obs_t = batch::build_obs_with_ae_cached(
+                &[&prepared],
+                cfg.device,
+                false,
+                false,
+                &ae,
+                &mut terrain_cache,
+            )?;
+            let (a, p, t, b, n, q, _lp, v, probs) = if let Some(h) = hidden.as_ref() {
+                let context =
+                    crate::recurrent::context_tensor(&[prepared.prev_action.clone()], cfg.device);
+                if cfg.debug {
+                    let (acts, h_out) = policy.act_with_state_debug(&obs_t, h, &context, true);
+                    hidden = Some(h_out);
+                    acts
+                } else {
+                    let (acts, h_out) = policy.act_with_state(&obs_t, h, &context, true);
+                    hidden = Some(h_out);
+                    let empty =
+                        tch::Tensor::zeros(&[1, ACTIONS.len() as i64], (Kind::Float, cfg.device));
+                    (
+                        acts.0, acts.1, acts.2, acts.3, acts.4, acts.5, acts.6, acts.7, empty,
+                    )
+                }
+            } else if cfg.debug {
+                policy.act_with_debug(&obs_t, true)
             } else {
-                let (acts, h_out) = policy.act_with_state(&obs_t, h, &context, true);
-                hidden = Some(h_out);
+                let (a, p, t, b, n, q, lp, v) = policy.act(&obs_t, true);
                 let empty =
                     tch::Tensor::zeros(&[1, ACTIONS.len() as i64], (Kind::Float, cfg.device));
-                (
-                    acts.0, acts.1, acts.2, acts.3, acts.4, acts.5, acts.6, acts.7, empty,
-                )
-            }
-        } else if cfg.debug {
-            policy.act_with_debug(&obs_t, true)
-        } else {
-            let (a, p, t, b, n, q, lp, v) = policy.act(&obs_t, true);
-            let empty = tch::Tensor::zeros(&[1, ACTIONS.len() as i64], (Kind::Float, cfg.device));
-            (a, p, t, b, n, q, lp, v, empty)
-        };
-        let choice = choice_from_act(
-            a.int64_value(&[0]),
-            p.int64_value(&[0]),
-            t.int64_value(&[0]),
-            b.int64_value(&[0]),
-            n.int64_value(&[0]),
-            q.double_value(&[0]) as f32,
-        );
+                (a, p, t, b, n, q, lp, v, empty)
+            };
+            let choice = choice_from_act(
+                a.int64_value(&[0]),
+                p.int64_value(&[0]),
+                t.int64_value(&[0]),
+                b.int64_value(&[0]),
+                n.int64_value(&[0]),
+                q.double_value(&[0]) as f32,
+            );
 
-        let obs = worker.current_obs().unwrap();
-        let tick = obs.tick();
-        let ents = feat::parse_ents(obs.entities());
-        let legal = feat::parse_legal(obs.legal_actions());
-        let me = ents.players.iter().find(|p| p.id == obs.me() as usize);
-        let tiles = me.map(|p| p.tiles as i64).unwrap_or(0);
-        let troops = me.map(|p| p.troops as i64).unwrap_or(0);
-        let desc = describe_choice(&choice, legal.troops as i64);
+            let tick = worker.current_obs().unwrap().tick();
+            let me_id = worker.current_obs().unwrap().me() as usize;
+            let ents = worker.ents();
+            let legal_troops = worker.legal().troops as i64;
+            let me = ents.players.iter().find(|p| p.id == me_id);
+            let tiles = me.map(|p| p.tiles as i64).unwrap_or(0);
+            let troops = me.map(|p| p.troops as i64).unwrap_or(0);
+            let desc = describe_choice(&choice, legal_troops);
 
-        if cfg.debug {
-            let value = (v.double_value(&[0]) * 1000.0).round() / 1000.0;
-            let probs_v: Vec<f64> = (0..ACTIONS.len())
-                .map(|i| {
-                    let p = probs.double_value(&[0, i as i64]);
-                    (p * 10000.0).round() / 10000.0
-                })
-                .collect();
-            let mut entry = json!({
-                "tick": tick,
-                "desc": desc,
-                "action": ACTIONS[choice.action as usize],
-                "tiles": tiles,
-                "troops": troops,
-                "value": value,
-                "probs": probs_v,
-            });
-            // World tile for MODEL overlay red X (matches rl/watch.action_tile_xy).
-            if let Some(region) = choice.tile_region {
-                let gy = region / GW_MAX;
-                let gx = region % GW_MAX;
-                let r = feat::REGION as i64;
-                entry["tile_x"] = json!(gx * r + r / 2);
-                entry["tile_y"] = json!(gy * r + r / 2);
-            }
+            let debug_entry = if cfg.debug {
+                let value = (v.double_value(&[0]) * 1000.0).round() / 1000.0;
+                let probs_v: Vec<f64> = (0..ACTIONS.len())
+                    .map(|i| {
+                        let p = probs.double_value(&[0, i as i64]);
+                        (p * 10000.0).round() / 10000.0
+                    })
+                    .collect();
+                let mut entry = json!({
+                    "tick": tick,
+                    "desc": desc,
+                    "action": ACTIONS[choice.action as usize],
+                    "tiles": tiles,
+                    "troops": troops,
+                    "value": value,
+                    "probs": probs_v,
+                });
+                // World tile for MODEL overlay red X (matches rl/watch.action_tile_xy).
+                if let Some(region) = choice.tile_region {
+                    let gy = region / GW_MAX;
+                    let gx = region % GW_MAX;
+                    let r = feat::REGION as i64;
+                    entry["tile_x"] = json!(gx * r + r / 2);
+                    entry["tile_y"] = json!(gy * r + r / 2);
+                }
+                Some(entry)
+            } else {
+                None
+            };
+            Ok((choice, debug_entry))
+        })?;
+        if let Some(entry) = debug_entry {
             debug_log.push(entry);
         }
 
         worker.apply_watch(&choice)?;
-        let obs = worker.current_obs().unwrap();
+        let tick = worker.current_obs().unwrap().tick();
+        let alive = worker.current_obs().unwrap().alive();
+        let winner = worker.current_obs().unwrap().winner().clone();
+        let me = worker.current_obs().unwrap().me();
         if step % 100 == 0 {
-            let ents = feat::parse_ents(obs.entities());
             println!(
-                "step {step}, tick {}, my tiles {}, alive {}",
-                obs.tick(),
-                my_tiles(&ents, obs.me()),
-                obs.alive()
+                "step {step}, tick {tick}, my tiles {}, alive {alive}",
+                my_tiles(worker.ents(), me),
             );
         }
-        if !obs.alive() || !obs.winner().is_null() {
-            end_tick = obs.tick();
-            let w = obs.winner();
-            let won = w
+        if !alive || !winner.is_null() {
+            end_tick = tick;
+            let won = winner
                 .as_array()
                 .map(|a| a.len() > 1 && a[1] == "AGENTRL1")
                 .unwrap_or(false);
             episode_outcome = if won { "win" } else { "death" }.to_string();
             finished = true;
             println!(
-                "episode over at tick {end_tick}: alive={}, winner={w}, outcome={episode_outcome}",
-                obs.alive()
+                "episode over at tick {end_tick}: alive={alive}, winner={winner}, outcome={episode_outcome}",
             );
             break;
         }
         // Match training: episodes end at --max-episode-ticks even if still alive.
-        if obs.tick() >= cfg.max_episode_ticks {
-            end_tick = obs.tick();
+        if tick >= cfg.max_episode_ticks {
+            end_tick = tick;
             episode_outcome = "timeout".to_string();
             finished = true;
             println!(
@@ -356,16 +382,16 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
         }
     }
     if !finished {
-        let obs = worker.current_obs().unwrap();
-        end_tick = obs.tick();
-        let ents = feat::parse_ents(obs.entities());
-        let tiles = my_tiles(&ents, obs.me());
+        let tick = worker.current_obs().unwrap().tick();
+        let alive = worker.current_obs().unwrap().alive();
+        let me = worker.current_obs().unwrap().me();
+        end_tick = tick;
+        let tiles = my_tiles(worker.ents(), me);
         println!(
             "watch truncated at --max-steps {} before tick budget {}: tick {end_tick}, tiles {tiles}, \
-             alive={} (outcome=timeout — raise SHOWCASE_MAX_STEPS)",
+             alive={alive} (outcome=timeout — raise SHOWCASE_MAX_STEPS)",
             cfg.max_steps,
             cfg.max_episode_ticks,
-            obs.alive()
         );
     }
 

@@ -348,7 +348,9 @@ struct Args {
     /// `batch::to_device_maybe_pinned`). No-op unless `--device`/shards
     /// are CUDA - not exercisable end-to-end on this Mac's CPU-only
     /// libtorch build, see DEVLOG/final report for how this was verified.
-    #[arg(long, default_value_t = false)]
+    /// Pin host staging for observation/choice H2D. Default on for CUDA
+    /// training recipes (`pod_train_v10.sh`); local CPU smokes can leave it.
+    #[arg(long, default_value_t = true)]
     pinned_h2d: bool,
 
     /// H2D fine/coarse grids as fp16 then cast to f32 on device (halves
@@ -400,16 +402,24 @@ struct Args {
     #[arg(long, default_value_t = 32)]
     actor_max_batch: usize,
 
-    /// Preferred ready envs before dispatch (bounded by --actor-max-batch).
-    #[arg(long, default_value_t = 8)]
+    /// Preferred same-shape ready envs before dispatch (bounded by
+    /// --actor-max-batch). Default 2: with diverse stage-25 maps (~16 unique
+    /// shapes across 14 envs/shard), target=8 never fills and always burns
+    /// --actor-max-wait-ms before every dispatch. Inference scheduling only.
+    #[arg(long, default_value_t = 2)]
     actor_target_batch: usize,
 
     /// Maximum compact-coarse padding waste allowed while coalescing shapes.
-    #[arg(long, default_value_t = 0.25)]
+    /// 0.35 lets mixed curriculum maps share a dispatch more often; 0.25 was
+    /// forcing near-singleton batches once stage pools diversify.
+    #[arg(long, default_value_t = 0.35)]
     actor_max_padding_waste: f64,
 
     /// Maximum time the oldest ready observation waits for a batch.
-    #[arg(long, default_value_t = 2)]
+    /// Default 15ms: with `--actor-target-batch 2`, peers usually land quickly;
+    /// 50ms was leftover from the target=8 era and still burned on rare
+    /// singleton same-shape waits. Inference scheduling only — no model change.
+    #[arg(long, default_value_t = 15)]
     actor_max_wait_ms: u64,
 
     /// "cpu", "cuda", or "cuda:N".
@@ -487,7 +497,7 @@ struct Args {
     #[arg(long, default_value = "watch0")]
     seed: String,
 
-    /// Map override for `--watch` (default: first map in stage pool).
+    /// Map override for `--watch` (default: sample from stage pool).
     #[arg(long)]
     map: Option<String>,
 
@@ -580,11 +590,11 @@ struct Args {
     min_envs: Option<usize>,
 
     /// Ceiling for `--auto-scale-envs`, per shard (same "per shard" unit
-    /// as `--num-envs`/`--min-envs`). Default 14 matches the A40 VRAM
-    /// ceiling in `pod_train_v10.sh` (`MAX_ENVS=14`). Pass `--max-envs 0`
+    /// as `--num-envs`/`--min-envs`). Default 16 matches the A40 VRAM
+    /// ceiling in `pod_train_v10.sh` (`MAX_ENVS=16`). Pass `--max-envs 0`
     /// to derive from CPU headroom instead (`autoscale::cpu_env_cap_per_shard`).
     /// No effect without `--auto-scale-envs`.
-    #[arg(long, default_value_t = 14)]
+    #[arg(long, default_value_t = 16)]
     max_envs: usize,
 
     /// How often (in PPO updates) `--auto-scale-envs` re-evaluates GPU
@@ -878,7 +888,7 @@ mod recurrent_flag_tests {
         assert_eq!(defaults.bptt_chunk_len, 32);
         assert_eq!(defaults.rollout_len, 64);
         assert!((defaults.target_gpu_util - 0.85).abs() < 1e-9);
-        assert_eq!(defaults.max_envs, 14);
+        assert_eq!(defaults.max_envs, 16);
         assert_eq!(defaults.autoscale_step, 2);
         assert!(Args::try_parse_from(["oftrain", "--recurrent-policy"]).is_err());
 
