@@ -638,25 +638,22 @@ pub struct Stage {
 /// V10 bridge pool: production maps with varied terrain and naval
 /// pressure, without introducing the largest world-scale maps all at once.
 pub const V10_BRIDGE_MAPS: [&str; 8] = [
-    "Onion",
     "Pangaea",
+    "Europe",
     "Caucasus",
     "BlackSea",
     "BetweenTwoSeas",
-    "Europe",
     "Britannia",
     "GreatLakes",
+    "Onion",
 ];
 
 /// Broad V10 pool. These are `GameMapType` enum keys (the values accepted
 /// by the Node bridge and normalized to asset-directory names by Rust).
 /// Every entry must exist under `openfront/resources/maps/<lowercase>/`.
+/// Order is not a preference — watch/showcase sample the pool; Onion is not first.
 pub const V10_BROAD_MAPS: [&str; 16] = [
-    "Onion",
     "Pangaea",
-    "Caucasus",
-    "BlackSea",
-    "BetweenTwoSeas",
     "Europe",
     "Asia",
     "World",
@@ -664,10 +661,14 @@ pub const V10_BROAD_MAPS: [&str; 16] = [
     "SouthAmerica",
     "Africa",
     "Australia",
+    "Caucasus",
+    "BlackSea",
+    "BetweenTwoSeas",
     "EastAsia",
     "MiddleEast",
     "Britannia",
     "GreatLakes",
+    "Onion",
 ];
 
 /// Stable curriculum identities persisted in trainer checkpoints.

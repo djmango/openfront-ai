@@ -168,6 +168,7 @@ impl Bridge {
                 fallout,
                 defense_bonus,
             },
+            structured: None,
         }
     }
 

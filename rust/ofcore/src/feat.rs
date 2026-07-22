@@ -179,7 +179,7 @@ pub fn nuke_index(unit: &str, up: bool) -> Option<i64> {
 /// UNIT_CLASSES order from ofae / former ae/units.py (v7: +SAMMissile, MIRV Warhead,
 /// Train). The first N_STATIC classes are the static structures, and
 /// their class index IS their position in the static-plane array.
-fn unit_class(ty: &str) -> Option<usize> {
+pub fn unit_class(ty: &str) -> Option<usize> {
     Some(match ty {
         "City" => 0,
         "Port" => 1,
@@ -235,6 +235,7 @@ fn id_list(v: &Value) -> Vec<usize> {
         .unwrap_or_default()
 }
 
+#[derive(Clone, Debug)]
 pub struct UnitE {
     pub class: usize,
     pub owner: usize,
@@ -256,6 +257,7 @@ pub struct UnitE {
     pub station: bool,
 }
 
+#[derive(Clone, Debug)]
 pub struct PlayerE {
     pub id: usize,
     pub pid: String,
@@ -301,6 +303,7 @@ impl PlayerE {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct AttackE {
     pub aid: String,
     pub from: usize,
@@ -312,8 +315,10 @@ pub struct AttackE {
 }
 
 /// (a, b, expires_at_tick).
+#[derive(Clone, Debug)]
 pub struct AllianceE(pub usize, pub usize, pub i64);
 
+#[derive(Clone, Debug, Default)]
 pub struct EntsData {
     pub players: Vec<PlayerE>,
     pub units: Vec<UnitE>,
@@ -432,7 +437,7 @@ pub fn parse_ents(v: &Value) -> EntsData {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct Legal {
     pub present: bool,
     pub attackable: Vec<usize>,
@@ -559,6 +564,28 @@ pub fn make_lut(player_ids: &[usize]) -> Vec<u8> {
     lut
 }
 
+/// Slot → ego class LUT (0 neutral, 1 own, 2 ally, 3 enemy). Shared by
+/// [`featurize`] and the fused tile+ego prepare path so both see identical
+/// classing without a second full-map scan.
+pub fn make_clut(lut: &[u8], me: i64, ents: &EntsData) -> [u8; MAX_SLOTS] {
+    let slot_of = |id: usize| -> usize { *lut.get(id).unwrap_or(&0) as usize };
+    let me_slot: usize = if me >= 0 { slot_of(me as usize) } else { 0 };
+    let mut clut = [3u8; MAX_SLOTS];
+    clut[0] = 0;
+    for a in &ents.alliances {
+        let (sa, sb) = (slot_of(a.0), slot_of(a.1));
+        if sa == me_slot && sb < MAX_SLOTS {
+            clut[sb] = 2;
+        } else if sb == me_slot && sa < MAX_SLOTS {
+            clut[sa] = 2;
+        }
+    }
+    if me_slot > 0 && me_slot < MAX_SLOTS {
+        clut[me_slot] = 1;
+    }
+    clut
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn featurize(
     gh: usize,
@@ -593,16 +620,7 @@ pub fn featurize(
             ally_expiry.insert(sa, a.2);
         }
     }
-    let mut clut = [3u8; MAX_SLOTS];
-    clut[0] = 0;
-    for &s in &allies {
-        if s < MAX_SLOTS {
-            clut[s] = 2;
-        }
-    }
-    if me_slot > 0 {
-        clut[me_slot] = 1;
-    }
+    let clut = make_clut(lut, me, ents);
     let is_ally = |slot: usize| allies.contains(&slot);
 
     let mut stat = vec![0.0f32; N_STATIC * plane];

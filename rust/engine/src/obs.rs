@@ -44,6 +44,17 @@ fn player_type_str(t: PlayerType) -> &'static str {
 /// `winner` mirrors env.ts's step(): the TS wire tuple only on the step the
 /// win update fired, `Null` otherwise (pass `Null` on reset).
 pub fn build_obs_head(game: &Game, client_id: &str, winner: Value) -> Value {
+    let mut head = build_obs_head_meta(game, client_id, winner);
+    if let Some(obj) = head.as_object_mut() {
+        obj.insert("entities".into(), entities(game));
+        obj.insert("legal".into(), legality(game, client_id));
+    }
+    head
+}
+
+/// Scalar/meta head only — no `entities` / `legal` JSON. Native collect pairs
+/// this with [`crate::obs_typed`] structs so prepare never re-parses JSON.
+pub fn build_obs_head_meta(game: &Game, client_id: &str, winner: Value) -> Value {
     let agent = game.player_by_client_id(client_id);
     json!({
         "tick": game.ticks(),
@@ -53,8 +64,6 @@ pub fn build_obs_head(game: &Game, client_id: &str, winner: Value) -> Value {
         "winner": winner,
         "me": agent.map(|p| p.small_id as i32).unwrap_or(-1),
         "alive": agent.map(|p| p.alive).unwrap_or(false),
-        "entities": entities(game),
-        "legal": legality(game, client_id),
     })
 }
 

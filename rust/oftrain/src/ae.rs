@@ -611,7 +611,9 @@ pub fn encode_latent_batch_device(
         let per = (MAX_ENC_PIX / pix.max(1)).max(1);
         for chunk in idxs.chunks(per) {
             let b = chunk.len() as i64;
-            let use_terrain_cache = terrain_cache.is_some() && device.is_cuda();
+            // Cache static terrain on CPU too — without it, watch/CPU encode
+            // rebuilds the full land/fallout tensor every step and crawls.
+            let use_terrain_cache = terrain_cache.is_some();
             let mut owners = Vec::with_capacity(chunk.len() * pix);
             let mut terrain = Vec::with_capacity(if use_terrain_cache {
                 0
@@ -768,7 +770,7 @@ pub fn encode_uniform_latent_batch_device(
 
     for chunk in items.chunks(per) {
         let b = chunk.len() as i64;
-        let use_terrain_cache = device.is_cuda();
+        let use_terrain_cache = true;
         let mut owners = Vec::with_capacity(chunk.len() * pix);
         let mut terrain = Vec::with_capacity(if use_terrain_cache {
             0
@@ -914,7 +916,7 @@ pub fn encode_dual_latent_batch_device(
         let per = (MAX_ENC_PIX / pix).max(1);
         for chunk in idxs.chunks(per) {
             let b = chunk.len() as i64;
-            let use_terrain_cache = device.is_cuda();
+            let use_terrain_cache = true;
             let mut owners = Vec::with_capacity(chunk.len() * pix);
             let mut terrain = Vec::with_capacity(if use_terrain_cache {
                 0

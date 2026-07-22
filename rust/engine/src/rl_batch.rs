@@ -86,10 +86,13 @@ mod tests {
             .collect();
 
         let intents: Vec<Vec<Value>> = vec![Vec::new(); 4];
-        let par_heads = step_many_parallel(&mut par_sessions, &intents, 5);
+        let par_heads: Vec<_> = step_many_parallel(&mut par_sessions, &intents, 5)
+            .into_iter()
+            .map(|(head, _, _)| head)
+            .collect();
         let seq_heads: Vec<Value> = seq_sessions
             .iter_mut()
-            .map(|s| s.step(&[], 5))
+            .map(|s| s.step(&[], 5).0)
             .collect();
 
         assert_eq!(par_heads, seq_heads);

@@ -793,6 +793,11 @@ pub struct EnvWorker {
     ep_len: i64,
     ep_wasted: i64,
     obs: Option<RawObs>,
+    /// Cached featurizer view of `obs`. Filled from native `structured`
+    /// side-channels or JSON parse; reused across apply→prepare so collect
+    /// never re-walks the same entities/legal twice.
+    cached_ents: Option<feat::EntsData>,
+    cached_legal: Option<feat::Legal>,
     lut: Vec<u8>,
     translator: Option<IntentTranslator>,
     land_total: i64,
@@ -845,6 +850,8 @@ impl EnvWorker {
             ep_len: 0,
             ep_wasted: 0,
             obs: None,
+            cached_ents: None,
+            cached_legal: None,
             lut: Vec::new(),
             translator: None,
             land_total: 1,
@@ -932,9 +939,9 @@ impl EnvWorker {
         self.land_total = (self.land.iter().map(|&l| l as i64).sum::<i64>()).max(1);
         self.translator = Some(IntentTranslator::new(self.bridge.terrain(), width, hr, wr));
         self.lut.clear();
-        let initial_strengths =
-            curriculum::strengths(&feat::parse_ents(obs.entities()), self.land_total);
-        let me0 = obs.me().max(0) as usize;
+        self.set_obs(obs);
+        let initial_strengths = curriculum::strengths(self.ents(), self.land_total);
+        let me0 = self.obs.as_ref().unwrap().me().max(0) as usize;
         // Seed prev_strength so the first post-spawn delta isn't a free
         // +W_DELTA_GAIN * share windfall from 0.0.
         self.prev_strength = initial_strengths.get(&me0).copied().unwrap_or(0.0);
@@ -944,12 +951,13 @@ impl EnvWorker {
             self.reward_config.v81_potential_clamp,
         ));
         let initial_share = land_share(
-            ofcore::translate::my_tiles(&feat::parse_ents(obs.entities()), obs.me()),
+            ofcore::translate::my_tiles(self.ents(), self.obs.as_ref().unwrap().me()),
             self.land_total,
         );
         self.closeout_shaper
             .reset(closeout_potential(initial_share));
-        self.closeout_tracker.reset(initial_share, obs.tick());
+        self.closeout_tracker
+            .reset(initial_share, self.obs.as_ref().unwrap().tick());
         self.spawn_steps = 0;
         self.ep_reward = 0.0;
         self.action_churn_tracker.reset();
@@ -959,7 +967,6 @@ impl EnvWorker {
         self.ep_len = 0;
         self.ep_wasted = 0;
         self.episode += 1;
-        self.obs = Some(obs);
         Ok(())
     }
 
@@ -1003,17 +1010,19 @@ impl EnvWorker {
     /// Translate + step without auto-reset (for watch/record episodes).
     pub fn apply_watch(&mut self, choice: &Choice) -> Result<()> {
         let lut = self.current_lut();
-        let obs = self.obs.as_ref().unwrap();
-        let ents = feat::parse_ents(obs.entities());
-        let legal = feat::parse_legal(obs.legal_actions());
-        let width = obs.head["width"].as_u64().unwrap() as usize;
+        let width = self.obs.as_ref().unwrap().head["width"].as_u64().unwrap() as usize;
         let mut owners_trim = vec![0i64; self.hr * self.wr];
-        for y in 0..self.hr {
-            for x in 0..self.wr {
-                owners_trim[y * self.wr + x] = obs.owner_at(y * width + x) as i64;
+        {
+            let obs = self.obs.as_ref().unwrap();
+            for y in 0..self.hr {
+                for x in 0..self.wr {
+                    owners_trim[y * self.wr + x] = obs.owner_at(y * width + x) as i64;
+                }
             }
         }
-        let me = obs.me();
+        let me = self.obs.as_ref().unwrap().me();
+        let ents = self.ents().clone();
+        let legal = self.legal().clone();
         let intents = translate(
             choice,
             self.translator.as_mut().unwrap(),
@@ -1027,7 +1036,7 @@ impl EnvWorker {
         if new_obs.spawn_phase() {
             self.spawn_steps += 1;
         }
-        self.obs = Some(new_obs);
+        self.set_obs(new_obs);
         Ok(())
     }
 
@@ -1080,9 +1089,9 @@ impl EnvWorker {
         self.land_total = (self.land.iter().map(|&l| l as i64).sum::<i64>()).max(1);
         self.translator = Some(IntentTranslator::new(self.bridge.terrain(), width, hr, wr));
         self.lut.clear();
-        let initial_strengths =
-            curriculum::strengths(&feat::parse_ents(obs.entities()), self.land_total);
-        let me0 = obs.me().max(0) as usize;
+        self.set_obs(obs);
+        let initial_strengths = curriculum::strengths(self.ents(), self.land_total);
+        let me0 = self.obs.as_ref().unwrap().me().max(0) as usize;
         self.prev_strength = initial_strengths.get(&me0).copied().unwrap_or(0.0);
         self.dominance_shaper.reset(dominance_potential(
             &initial_strengths,
@@ -1090,12 +1099,13 @@ impl EnvWorker {
             self.reward_config.v81_potential_clamp,
         ));
         let initial_share = land_share(
-            ofcore::translate::my_tiles(&feat::parse_ents(obs.entities()), obs.me()),
+            ofcore::translate::my_tiles(self.ents(), self.obs.as_ref().unwrap().me()),
             self.land_total,
         );
         self.closeout_shaper
             .reset(closeout_potential(initial_share));
-        self.closeout_tracker.reset(initial_share, obs.tick());
+        self.closeout_tracker
+            .reset(initial_share, self.obs.as_ref().unwrap().tick());
         self.spawn_steps = 0;
         self.ep_reward = 0.0;
         self.action_churn_tracker.reset();
@@ -1107,17 +1117,40 @@ impl EnvWorker {
         self.ep_len = 0;
         self.ep_wasted = 0;
         self.episode += 1;
-        self.obs = Some(obs);
         Ok(())
     }
 
+    /// Install a new observation and refresh the ents/legal cache from the
+    /// native structured side-channel when present, otherwise JSON parse.
+    fn set_obs(&mut self, mut obs: RawObs) {
+        if let Some((ents, legal)) = obs.structured.take() {
+            self.cached_ents = Some(ents);
+            self.cached_legal = Some(legal);
+        } else {
+            self.cached_ents = Some(feat::parse_ents(obs.entities()));
+            self.cached_legal = Some(feat::parse_legal(obs.legal_actions()));
+        }
+        self.obs = Some(obs);
+    }
+
+    pub fn ents(&self) -> &feat::EntsData {
+        self.cached_ents
+            .as_ref()
+            .expect("obs cache missing; call set_obs first")
+    }
+
+    pub fn legal(&self) -> &feat::Legal {
+        self.cached_legal
+            .as_ref()
+            .expect("obs cache missing; call set_obs first")
+    }
+
     fn current_lut(&mut self) -> Vec<u8> {
-        let ents = feat::parse_ents(self.obs.as_ref().unwrap().entities());
         let spawn_phase = self.obs.as_ref().unwrap().spawn_phase();
         // Mirrors ObsBuilder._slot_lut: rebuild every tick during spawn
         // (roster still filling in), freeze on first post-spawn obs.
         if spawn_phase || self.lut.is_empty() {
-            let ids: Vec<usize> = ents.players.iter().map(|p| p.id).collect();
+            let ids: Vec<usize> = self.ents().players.iter().map(|p| p.id).collect();
             let lut = feat::make_lut(&ids);
             if !spawn_phase {
                 self.lut = lut.clone();
@@ -1129,17 +1162,35 @@ impl EnvWorker {
     }
 
     pub fn prepare(&mut self) -> PreparedObs {
+        let profile = std::env::var_os("OF_COLLECT_PROFILE").is_some();
+        let t0 = std::time::Instant::now();
         let lut = self.current_lut();
-        let obs = self.obs.as_ref().unwrap();
-        let ents = feat::parse_ents(obs.entities());
-        let legal = feat::parse_legal(obs.legal_actions());
+        let me = self.obs.as_ref().unwrap().me();
+        let clut = feat::make_clut(&lut, me, self.ents());
         let (hr, wr) = (self.hr, self.wr);
         let (gh, gw) = (hr / REGION, wr / REGION);
-
-        let width = obs.head["width"].as_u64().unwrap_or(wr as u64) as usize;
-        let tiles = obs.prepare_tiles(&lut, width, hr, wr, REGION);
+        let width = self
+            .obs
+            .as_ref()
+            .unwrap()
+            .head["width"]
+            .as_u64()
+            .unwrap_or(wr as u64) as usize;
+        let tiles = self.obs.as_ref().unwrap().prepare_tiles_with_ego(
+            &lut,
+            width,
+            hr,
+            wr,
+            REGION,
+            Some(&clut),
+        );
         let owners_slotted = tiles.owners_slotted;
+        let ego = tiles.ego;
+        let center = tiles.center;
 
+        let tick = self.obs.as_ref().unwrap().tick();
+        let spawn_phase = self.obs.as_ref().unwrap().spawn_phase();
+        let alive = self.obs.as_ref().unwrap().alive();
         let f = feat::featurize(
             gh,
             gw,
@@ -1147,29 +1198,32 @@ impl EnvWorker {
             &self.land,
             &self.mag,
             &owners_slotted,
-            obs.tick(),
-            obs.spawn_phase(),
-            obs.alive(),
-            obs.me(),
-            &ents,
-            &legal,
+            tick,
+            spawn_phase,
+            alive,
+            me,
+            self.ents(),
+            self.legal(),
         );
+        debug_assert_eq!(f.clut, clut);
 
-        let (ego, center) = feat::pool_ego_and_center(&owners_slotted, &f.clut, hr, wr);
-        let local = feat::local_crop_at_with_defense(
-            &owners_slotted,
-            &f.clut,
-            &self.land,
-            hr,
-            wr,
-            crate::policy::LOCAL as usize,
-            center,
-            |i| {
-                let y = i / wr;
-                let x = i % wr;
-                obs.defense_bonus_at(y * width + x)
-            },
-        );
+        let local = {
+            let obs = self.obs.as_ref().unwrap();
+            feat::local_crop_at_with_defense(
+                &owners_slotted,
+                &f.clut,
+                &self.land,
+                hr,
+                wr,
+                crate::policy::LOCAL as usize,
+                center,
+                |i| {
+                    let y = i / wr;
+                    let x = i % wr;
+                    obs.defense_bonus_at(y * width + x)
+                },
+            )
+        };
         let ae_raw = AeRaw {
             owners: owners_slotted,
             static_terrain: self.ae_static.clone(),
@@ -1179,7 +1233,7 @@ impl EnvWorker {
             wr,
         };
 
-        PreparedObs {
+        let out = PreparedObs {
             prev_action: self.prev_action.clone(),
             compact: None,
             grid: None,
@@ -1202,7 +1256,22 @@ impl EnvWorker {
             legal_build: f.legal_build,
             legal_nuke: f.legal_nuke,
             local,
+        };
+        if profile {
+            static PREPARE_N: AtomicU64 = AtomicU64::new(0);
+            let n = PREPARE_N.fetch_add(1, Ordering::Relaxed);
+            if n < 8 || n % 64 == 0 {
+                eprintln!(
+                    "[collect-profile] prepare env={} n={} prepare_us={} hr={} wr={}",
+                    self.idx,
+                    n,
+                    t0.elapsed().as_micros(),
+                    hr,
+                    wr
+                );
+            }
         }
+        out
     }
 
     /// Combined apply-then-prepare, matching a Gym-style `env.step()`:
@@ -1210,8 +1279,24 @@ impl EnvWorker {
     /// applying `choice` to the current one. Drives the threaded rollout
     /// loop in `train.rs`.
     pub fn step(&mut self, choice: &Choice) -> Result<EnvTransition> {
+        let profile = std::env::var_os("OF_COLLECT_PROFILE").is_some();
+        let t0 = std::time::Instant::now();
         let (reward, done, info, outcome) = self.apply(choice)?;
+        let apply_us = t0.elapsed().as_micros();
+        let t1 = std::time::Instant::now();
         let prepared = self.prepare();
+        let prepare_us = t1.elapsed().as_micros();
+        if profile {
+            // Sampled stderr: cheap enough for a short A/B; not for prod logs.
+            static STEP_N: AtomicU64 = AtomicU64::new(0);
+            let n = STEP_N.fetch_add(1, Ordering::Relaxed);
+            if n < 8 || n % 64 == 0 {
+                eprintln!(
+                    "[collect-profile] env={} step_n={} apply_us={} prepare_us={} hr={} wr={}",
+                    self.idx, n, apply_us, prepare_us, self.hr, self.wr
+                );
+            }
+        }
         Ok(EnvTransition {
             next_obs: prepared,
             reward,
@@ -1228,23 +1313,26 @@ impl EnvWorker {
     ) -> Result<(f64, bool, Option<EpisodeInfo>, ActionOutcome)> {
         let name = ACTIONS[choice.action as usize];
         let lut = self.current_lut();
-        let obs = self.obs.as_ref().unwrap();
-        let ents = feat::parse_ents(obs.entities());
-        let legal = feat::parse_legal(obs.legal_actions());
-        let boats_before = legal.boats.clone();
-        let pre_attack_ids: HashSet<String> = ents.attacks.iter().map(|a| a.aid.clone()).collect();
-        let me_pre = obs.me().max(0) as usize;
-        let troops_before = player_troops(&ents, me_pre);
+        let boats_before = self.legal().boats.clone();
+        let pre_attack_ids: HashSet<String> =
+            self.ents().attacks.iter().map(|a| a.aid.clone()).collect();
+        let me_pre = self.obs.as_ref().unwrap().me().max(0) as usize;
+        let troops_before = player_troops(self.ents(), me_pre);
         // Raw tiles are full (untrimmed width) resolution; translate wants
         // owner ids trimmed to (hr, wr) matching the translator's grids.
-        let width = obs.head["width"].as_u64().unwrap() as usize;
+        let width = self.obs.as_ref().unwrap().head["width"].as_u64().unwrap() as usize;
         let mut owners_trim = vec![0i64; self.hr * self.wr];
-        for y in 0..self.hr {
-            for x in 0..self.wr {
-                owners_trim[y * self.wr + x] = obs.owner_at(y * width + x) as i64;
+        {
+            let obs = self.obs.as_ref().unwrap();
+            for y in 0..self.hr {
+                for x in 0..self.wr {
+                    owners_trim[y * self.wr + x] = obs.owner_at(y * width + x) as i64;
+                }
             }
         }
-        let me = obs.me();
+        let me = self.obs.as_ref().unwrap().me();
+        let ents = self.ents().clone();
+        let legal = self.legal().clone();
         let intents = translate(
             choice,
             self.translator.as_mut().unwrap(),
@@ -1256,8 +1344,14 @@ impl EnvWorker {
         );
 
         let new_obs = self.bridge.step(&intents, self.decision_ticks)?;
+        // Peek boats from the post-step structured/JSON before installing
+        // the new obs (churn attribution needs pre+post boat id sets).
         let boats_after = if choice.action == A_BOAT {
-            feat::parse_legal(new_obs.legal_actions()).boats
+            if let Some((_, legal)) = new_obs.structured.as_ref() {
+                legal.boats.clone()
+            } else {
+                feat::parse_legal(new_obs.legal_actions()).boats
+            }
         } else {
             Vec::new()
         };
@@ -1268,7 +1362,8 @@ impl EnvWorker {
         let mut embargo_outcome_r = 0.0;
         if choice.action == A_EMBARGO_STOP {
             if let Some(ActionTarget::Player(target)) = chosen_action.target {
-                let rel = ents
+                let rel = self
+                    .ents()
                     .players
                     .iter()
                     .find(|p| p.id == me_pre)
@@ -1299,7 +1394,9 @@ impl EnvWorker {
 
         if let Some(ActionTarget::Unit(unit_id)) = chosen_action.target {
             if choice.action == A_BOAT && !intents.is_empty() {
-                let after_ents = feat::parse_ents(new_obs.entities());
+                let after_ents = new_obs.structured.as_ref().map(|(e, _)| e.clone()).unwrap_or_else(|| {
+                    feat::parse_ents(new_obs.entities())
+                });
                 let troops = after_ents
                     .units
                     .iter()
@@ -1361,18 +1458,16 @@ impl EnvWorker {
             target_kind,
         };
         self.prev_action = outcome.clone();
-        self.obs = Some(new_obs);
-        let obs = self.obs.as_ref().unwrap();
+        self.set_obs(new_obs);
 
-        if obs.spawn_phase() {
+        if self.obs.as_ref().unwrap().spawn_phase() {
             self.spawn_steps += 1;
             if self.spawn_steps >= 8 {
                 // Fallback: pick a uniformly random legal spawn tile.
                 self.spawn_randomly()?;
             } else {
-                let next_ents = feat::parse_ents(obs.entities());
-                let composite = curriculum::strengths(&next_ents, self.land_total);
-                let me0 = obs.me().max(0) as usize;
+                let composite = curriculum::strengths(self.ents(), self.land_total);
+                let me0 = self.obs.as_ref().unwrap().me().max(0) as usize;
                 self.prev_strength = composite.get(&me0).copied().unwrap_or(0.0);
                 self.dominance_shaper.reset(dominance_potential(
                     &composite,
@@ -1380,7 +1475,7 @@ impl EnvWorker {
                     self.reward_config.v81_potential_clamp,
                 ));
                 let share = land_share(
-                    ofcore::translate::my_tiles(&next_ents, obs.me()),
+                    ofcore::translate::my_tiles(self.ents(), self.obs.as_ref().unwrap().me()),
                     self.land_total,
                 );
                 self.closeout_shaper.reset(closeout_potential(share));
@@ -1389,46 +1484,44 @@ impl EnvWorker {
             }
         }
 
-        let obs = self.obs.as_ref().unwrap();
-        let ents = feat::parse_ents(obs.entities());
-        let tiles = ofcore::translate::my_tiles(&ents, obs.me());
+        let obs_me = self.obs.as_ref().unwrap().me();
+        let obs_tick = self.obs.as_ref().unwrap().tick();
+        let obs_alive = self.obs.as_ref().unwrap().alive();
+        let winner_val = self.obs.as_ref().unwrap().winner().clone();
+        let tiles = ofcore::translate::my_tiles(self.ents(), obs_me);
         let share = land_share(tiles, self.land_total);
         let closeout_just_entered =
             self.closeout_tracker
-                .observe(share, obs.tick(), inverse_pair.is_some());
-        let composite = curriculum::strengths(&ents, self.land_total);
-        let me = obs.me().max(0) as usize;
+                .observe(share, obs_tick, inverse_pair.is_some());
+        let composite = curriculum::strengths(self.ents(), self.land_total);
+        let me = obs_me.max(0) as usize;
         let mut done = false;
         let mut won = false;
         let mut timed_out = false;
         let mut died = false;
-        if !obs.alive() {
+        if !obs_alive {
             done = true;
             died = true;
-        } else if !obs.winner().is_null() {
-            let w = obs.winner();
-            won = w
+        } else if !winner_val.is_null() {
+            won = winner_val
                 .as_array()
                 .map(|a| a.len() > 1 && a[1] == "AGENTRL1")
                 .unwrap_or(false);
             done = true;
-        } else if obs.tick() >= self.max_episode_ticks {
+        } else if obs_tick >= self.max_episode_ticks {
             done = true;
             timed_out = true;
         }
-        let mine = composite
-            .get(&(obs.me().max(0) as usize))
-            .copied()
-            .unwrap_or(0.0);
+        let mine = composite.get(&me).copied().unwrap_or(0.0);
 
-        let tw = timeweight(obs.tick());
+        let tw = timeweight(obs_tick);
         let delta = mine - self.prev_strength;
         let normalized_share = if self.reward_config.dominant_loss_active(self.episode_stage) {
             normalized_strength_share(&composite, me)
         } else {
             0.0
         };
-        let has_active_attack = ents.attacks.iter().any(|a| a.from == me);
+        let has_active_attack = self.ents().attacks.iter().any(|a| a.from == me);
         let delta_weight = strength_delta_weight(
             delta,
             normalized_share,
@@ -1507,15 +1600,16 @@ impl EnvWorker {
             reward += entry_bonus;
         }
 
-        let troops_after = player_troops(&ents, me);
-        let alive_transports = transport_unit_ids(&ents, me);
-        let new_sourced_attack = ents.attacks.iter().any(|a| {
+        let troops_after = player_troops(self.ents(), me);
+        let alive_transports = transport_unit_ids(self.ents(), me);
+        let new_sourced_attack = self.ents().attacks.iter().any(|a| {
             a.from == me
                 && a.src_x.is_some()
                 && a.src_y.is_some()
                 && !pre_attack_ids.contains(&a.aid)
         });
-        let has_sourced_attack = ents
+        let has_sourced_attack = self
+            .ents()
             .attacks
             .iter()
             .any(|a| a.from == me && a.src_x.is_some() && a.src_y.is_some());
@@ -1540,7 +1634,7 @@ impl EnvWorker {
         if self.reward_config.tempo_active(self.episode_stage) {
             components.tempo = -self.reward_config.v84_tempo_coef
                 * tempo_pressure(
-                    obs.tick(),
+                    obs_tick,
                     self.max_episode_ticks,
                     tempo_share,
                     self.reward_config.tempo_share_threshold(),
@@ -1551,14 +1645,14 @@ impl EnvWorker {
             }
         }
 
-        components.survival = v10_survival_reward(obs.alive(), share, self.reward_config);
+        components.survival = v10_survival_reward(obs_alive, share, self.reward_config);
         if components.survival != 0.0 {
             reward += components.survival;
         }
         components.diplo_panic = v10_diplo_panic_penalty(
             choice.action,
             share,
-            obs.tick(),
+            obs_tick,
             self.max_episode_ticks,
             self.reward_config,
         );
@@ -1590,7 +1684,7 @@ impl EnvWorker {
         self.ep_wasted += wasted;
         self.prev_strength = mine;
 
-        if !obs.alive() {
+        if !obs_alive {
             let death = self.reward_config.death_penalty();
             reward -= death;
             components.death = -death;
@@ -1598,11 +1692,11 @@ impl EnvWorker {
 
         let mut info = None;
         if done {
-            let (place, n) = placement(&ents, obs.me(), obs.alive(), self.land_total);
+            let (place, n) = placement(self.ents(), obs_me, obs_alive, self.land_total);
             components.terminal = terminal_reward(place, won)
                 + fast_win_bonus(
                     won,
-                    obs.tick(),
+                    obs_tick,
                     self.max_episode_ticks,
                     self.reward_config.v84_fast_win_coef,
                 );
@@ -1630,7 +1724,7 @@ impl EnvWorker {
                 converted: self.closeout_tracker.reached() && won,
                 timeout_after_closeout: timed_out && self.closeout_tracker.reached(),
                 post_closeout_churn_pairs: self.closeout_tracker.post_entry_churn_pairs,
-                final_tick: obs.tick(),
+                final_tick: obs_tick,
                 place,
                 n_players: n,
                 score: placement_score(place, n),
@@ -1685,7 +1779,7 @@ impl EnvWorker {
             &[serde_json::json!({"type": "spawn", "tile": tile})],
             self.decision_ticks,
         )?;
-        self.obs = Some(new_obs);
+        self.set_obs(new_obs);
         Ok(())
     }
 

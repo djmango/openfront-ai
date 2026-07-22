@@ -55,11 +55,13 @@
 //! on.
 //! Gated persistent runs may instead use `--work-conserving-actors`: each
 //! worker publishes its CPU `PreparedObs` as soon as stepping finishes, and
-//! the actor drains a stable FIFO ready queue into microbatches bounded by
-//! target/max size, compact-coarse padding waste, and `--actor-max-wait-ms`.
-//! AE encoding and foveated cropping stay exact-shape; only compact observations
-//! are coalesced. Rollout slots remain T-major/N-minor regardless of completion
-//! order. The fixed-half collector remains the default/non-persistent fallback.
+//! the actor drains a ready queue into microbatches bounded by target/max
+//! size and `--actor-max-wait-ms`. Dispatch prefers the oldest env's exact
+//! shape (zero padding); mixed-shape compact coalescing is only a fallback
+//! after `max_wait`, still bounded by `--actor-max-padding-waste`. AE encode
+//! and foveated crop stay exact-shape. Rollout slots remain T-major/N-minor
+//! regardless of completion order. The fixed-half collector remains the
+//! default/non-persistent fallback.
 //!
 //! Multi-GPU (see `LearnerShard`/`ActorShard`): one `PolicyNet`/`VarStore`
 //! replica per device, each owning a disjoint slice of envs, in a single
@@ -737,7 +739,7 @@ fn requested_stage_env_target(
 /// Like [`requested_stage_env_target`], but apply `--max-envs` before deciding
 /// whether a restart is warranted.
 ///
-/// Without this, a stage floor of 24 with `MAX_ENVS=14` requests a restart on
+/// Without this, a stage floor of 24 with `MAX_ENVS=16` requests a restart on
 /// every advance/demote, then clamps back to 14 on boot — a full cold restart
 /// with no net env-count change (and it also skips in-process `set_stage`).
 fn requested_stage_env_target_for_resize(
@@ -1181,7 +1183,7 @@ mod v10_state_and_gate_tests {
     #[test]
     fn stage_resize_skips_noop_when_floor_exceeds_max_envs() {
         let v10 = ofcore::curriculum::V10_ENV_TARGETS;
-        // Stages 0-45 want 24, but A40 pods cap at MAX_ENVS=14.
+        // Stages 0-45 want 24, but A40 pods cap at MAX_ENVS=16.
         assert_eq!(
             requested_stage_env_target_for_resize(&v10, 10, 14, true, 14),
             None
@@ -2128,50 +2130,85 @@ impl ReadyScheduler {
     }
 
     fn take_batch(&mut self, now: Duration) -> Option<Vec<usize>> {
-        let total: usize = self.buckets.iter().map(|bucket| bucket.items.len()).sum();
-        let oldest = self
-            .buckets
-            .iter()
-            .filter_map(|bucket| bucket.items.front())
-            .min_by_key(|item| item.sequence)?;
-        if total < self.target_batch && now.saturating_sub(oldest.ready_at) < self.max_wait {
-            return None;
-        }
-
-        // Global publication FIFO, independent of shape-bucket placement.
-        let mut candidates: Vec<(u64, usize, ActorShape)> = self
+        let (oldest_bucket, oldest_ready_at) = self
             .buckets
             .iter()
             .enumerate()
-            .flat_map(|(bucket, values)| {
-                values
+            .filter_map(|(idx, bucket)| {
+                bucket
                     .items
-                    .iter()
-                    .map(move |item| (item.sequence, bucket, values.shape))
+                    .front()
+                    .map(|item| (idx, item.sequence, item.ready_at))
             })
-            .collect();
-        candidates.sort_unstable_by_key(|candidate| candidate.0);
-        let mut selected = Vec::new();
-        let mut sum_area = 0usize;
-        let mut max_h = 0usize;
-        let mut max_w = 0usize;
-        for &(_, bucket, shape) in candidates.iter().take(self.max_batch) {
-            let next_n = selected.len() + 1;
-            let next_h = max_h.max(shape.cgh);
-            let next_w = max_w.max(shape.cgw);
-            let next_sum = sum_area + shape.cgh * shape.cgw;
-            let allocated = next_n * next_h * next_w;
-            let waste = 1.0 - next_sum as f64 / allocated.max(1) as f64;
-            if !selected.is_empty() && waste > self.max_padding_waste {
-                break;
-            }
-            selected.push(bucket);
-            sum_area = next_sum;
-            max_h = next_h;
-            max_w = next_w;
+            .min_by_key(|(_, sequence, _)| *sequence)
+            .map(|(idx, _, ready_at)| (idx, ready_at))?;
+        let same_ready = self.buckets[oldest_bucket].items.len();
+        let waited_out = now.saturating_sub(oldest_ready_at) >= self.max_wait;
+        // Wait for more peers of the oldest env's shape — not merely any
+        // ready env — so mixed curriculum maps don't force singleton AE
+        // dispatches the moment total_ready hits target_batch.
+        if same_ready < self.target_batch && !waited_out {
+            return None;
         }
+
+        // Same-shape prefer: fill from the globally oldest env's shape bucket
+        // first (zero padding, exact AE shapes). Mixed-shape coalescing is a
+        // fallback only after max_wait when that bucket is still short of
+        // target_batch — still subject to max_padding_waste. Inference
+        // batching only; does not change obs or sampled action for any env.
+        let mut selected_buckets = Vec::new();
+        let same_shape_n = same_ready.min(self.max_batch);
+        for _ in 0..same_shape_n {
+            selected_buckets.push(oldest_bucket);
+        }
+
+        if waited_out && selected_buckets.len() < self.target_batch {
+            let primary = self.buckets[oldest_bucket].shape;
+            let mut sum_area = selected_buckets.len() * primary.cgh * primary.cgw;
+            let mut max_h = primary.cgh;
+            let mut max_w = primary.cgw;
+            let mut taken_from: Vec<usize> = self.buckets.iter().map(|b| b.items.len()).collect();
+            taken_from[oldest_bucket] -= same_shape_n;
+
+            let mut others: Vec<(u64, usize, ActorShape)> = self
+                .buckets
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| *idx != oldest_bucket)
+                .flat_map(|(bucket, values)| {
+                    values
+                        .items
+                        .iter()
+                        .map(move |item| (item.sequence, bucket, values.shape))
+                })
+                .collect();
+            others.sort_unstable_by_key(|candidate| candidate.0);
+            for &(_, bucket, shape) in &others {
+                if selected_buckets.len() >= self.max_batch {
+                    break;
+                }
+                if taken_from[bucket] == 0 {
+                    continue;
+                }
+                let next_n = selected_buckets.len() + 1;
+                let next_h = max_h.max(shape.cgh);
+                let next_w = max_w.max(shape.cgw);
+                let next_sum = sum_area + shape.cgh * shape.cgw;
+                let allocated = next_n * next_h * next_w;
+                let waste = 1.0 - next_sum as f64 / allocated.max(1) as f64;
+                if waste > self.max_padding_waste {
+                    continue;
+                }
+                selected_buckets.push(bucket);
+                taken_from[bucket] -= 1;
+                sum_area = next_sum;
+                max_h = next_h;
+                max_w = next_w;
+            }
+        }
+
         Some(
-            selected
+            selected_buckets
                 .into_iter()
                 .map(|bucket| self.buckets[bucket].items.pop_front().unwrap().env)
                 .collect(),
@@ -2651,7 +2688,7 @@ mod packed_act_tests {
     }
 
     #[test]
-    fn ready_scheduler_coalesces_shapes_in_global_fifo_order() {
+    fn ready_scheduler_prefers_same_shape_over_mixed_fifo() {
         let shape_a = ActorShape::of(&shaped_obs(0, 6, 8));
         let shape_b = ActorShape::of(&shaped_obs(1, 8, 6));
         let mut ready = ReadyScheduler::new(2, 2, 1.0, Duration::from_millis(5));
@@ -2659,8 +2696,9 @@ mod packed_act_tests {
         ready.push(1, shape_b, Duration::ZERO);
         ready.push(2, shape_a, Duration::from_millis(1));
         ready.push(3, shape_b, Duration::from_millis(1));
-        assert_eq!(ready.take_batch(Duration::from_millis(1)), Some(vec![0, 1]));
-        assert_eq!(ready.take_batch(Duration::from_millis(1)), Some(vec![2, 3]));
+        // Oldest is shape_a: pack both a's before touching b's.
+        assert_eq!(ready.take_batch(Duration::from_millis(1)), Some(vec![0, 2]));
+        assert_eq!(ready.take_batch(Duration::from_millis(1)), Some(vec![1, 3]));
 
         ready.push(4, shape_b, Duration::from_millis(2));
         assert_eq!(ready.take_batch(Duration::from_millis(6)), None);
@@ -2678,10 +2716,30 @@ mod packed_act_tests {
         ready.push(8, large, Duration::from_millis(1));
         ready.push(9, large, Duration::from_millis(2));
 
-        // Coalescing small+large would waste far more than 20%, so the
-        // globally oldest item dispatches alone; no later env bypasses it.
-        assert_eq!(ready.take_batch(Duration::from_millis(2)), Some(vec![7]));
-        assert_eq!(ready.take_batch(Duration::from_millis(2)), Some(vec![8, 9]));
+        // Before wait expires, same-shape count < target → hold (don't fire a
+        // singleton just because other shapes are ready).
+        assert_eq!(ready.take_batch(Duration::from_millis(2)), None);
+        // After wait: oldest small dispatches alone; larges pack next.
+        assert_eq!(ready.take_batch(Duration::from_millis(5)), Some(vec![7]));
+        assert_eq!(ready.take_batch(Duration::from_millis(5)), Some(vec![8, 9]));
+        assert!(ready.is_empty());
+    }
+
+    #[test]
+    fn ready_scheduler_mixed_shape_fallback_only_after_wait() {
+        // compact areas 2x2=4 and 2x3=6 → waste = 1-10/12 ≈ 0.167 < 0.25.
+        let small = ActorShape::of(&shaped_obs(0, 4, 4));
+        let large = ActorShape::of(&shaped_obs(1, 4, 5));
+        let mut ready = ReadyScheduler::new(2, 8, 0.25, Duration::from_millis(10));
+        ready.push(0, small, Duration::ZERO);
+        ready.push(1, large, Duration::from_millis(1));
+        // Before wait: hold for same-shape peers even though another shape is ready.
+        assert_eq!(ready.take_batch(Duration::from_millis(5)), None);
+        // After wait: same-shape first (small), then mix in large to hit target.
+        assert_eq!(
+            ready.take_batch(Duration::from_millis(10)),
+            Some(vec![0, 1])
+        );
         assert!(ready.is_empty());
     }
 
@@ -8576,8 +8634,8 @@ mod persistent_actor_tests {
             work_conserving_actors: false,
             actor_max_batch: 32,
             actor_target_batch: 8,
-            actor_max_padding_waste: 0.25,
-            actor_max_wait: Duration::from_millis(2),
+            actor_max_padding_waste: 0.35,
+            actor_max_wait: Duration::from_millis(15),
             device: Device::Cpu,
             engine: EngineKind::Native,
             node_fraction: 0.0,

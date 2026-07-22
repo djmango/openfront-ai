@@ -42,9 +42,9 @@ docker run -d \
   -e SHOWCASE_V10="${SHOWCASE_V10:-1}" \
   -e REFRESH_HOURS="${REFRESH_HOURS:-1}" \
   -e LIVE_SHOWCASE="${LIVE_SHOWCASE:-0}" \
-  -e CLIP_MAX_SEC="${CLIP_MAX_SEC:-90}" \
+  -e CLIP_MAX_SEC="${CLIP_MAX_SEC:-0}" \
   -e AE_CKPT="${AE_CKPT:-weights/ae/ae_v31_d8c32.encoder.safetensors}" \
-  -e PLAY_MAP="${PLAY_MAP:-Onion}" \
+  -e PLAY_MAP="${PLAY_MAP:-random}" \
   -e PLAY_BOTS="${PLAY_BOTS:-10}" \
   -e PLAY_NATIONS="${PLAY_NATIONS:-1}" \
   -e PLAY_START_DELAY="${PLAY_START_DELAY:-15}" \

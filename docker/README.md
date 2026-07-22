@@ -48,7 +48,7 @@ docker run --rm -p 8086:8086 -v openfront-eval-data:/data openfront-eval
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RUN_NAME` | `ppo_v10` | HF policy run under `djmango/openfront-rl` |
-| `PLAY_MAP` | `Onion` | Live play map key, or `random` to sample the curriculum pool |
+| `PLAY_MAP` | `random` | Live play map key, or `random` to sample the curriculum pool |
 | `PLAY_BOTS` | `10` | Tribe bots |
 | `PLAY_NATIONS` | `1` | Nation opponents |
 | `PLAY_START_DELAY` | `15` | Lobby countdown (seconds) |

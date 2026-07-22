@@ -108,7 +108,7 @@ fn repo_root() -> PathBuf {
 
 fn reset_session(root: &PathBuf, args: &Args, idx: usize) -> RlSession {
     let seed = format!("bench{idx}-{}", args.envs);
-    let (session, _head, _terrain) = RlSession::reset(
+    let (session, _head, _ents, _legal, _terrain) = RlSession::reset(
         root,
         &args.map,
         &seed,
@@ -163,7 +163,7 @@ fn run_shard(sessions: &mut [RlSession], args: &Args) -> (u64, u64) {
     let mut total_steps = 0u64;
     for _ in 0..args.steps {
         for session in sessions.iter_mut() {
-            let _head = session.step(&intents, args.ticks);
+            let _ = session.step(&intents, args.ticks);
             // Touch the tile state the way the native trainer backend
             // does post-step, so this loop still pays for exactly the
             // work `NativeEngine::step` does (no more, no less).
@@ -306,7 +306,7 @@ fn run_profile(args: &Args) {
         // build_obs_head, i.e. entities()+legality() - tile bytes are
         // NOT part of step() any more, see tile_state()'s doc comment).
         let t0 = Instant::now();
-        let _head = session.step(&intents, args.ticks);
+        let _ = session.step(&intents, args.ticks);
         std::hint::black_box(session.tile_state());
         t_full_step += t0.elapsed();
 

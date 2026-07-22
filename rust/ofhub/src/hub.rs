@@ -137,8 +137,8 @@ const LANDING_HTML: &str = r#"<!doctype html>
     <h1>OpenFront Agent</h1>
     <p class="lead">A reinforcement learning agent that plays
       <a href="https://openfront.io">OpenFront.io</a> on the real engine.
-      Current run <code>ppo_v10</code>: 100-stage Easy→Impossible curriculum,
-      overnight through Easy Onion mastery. Play it 1v1.</p>
+      Current run <code>ppo_v10</code>: 100-stage Easy→Impossible curriculum
+      across the broad map pool. Play it 1v1.</p>
     <figure class="preview">%%PREVIEW%%</figure>
     <div class="actions">
       <a href="/watch">%%WATCH_LABEL%%</a>
@@ -743,7 +743,7 @@ pub async fn run_hub(port: u16) -> Result<()> {
             "ADMIN_BOT_API_KEY",
             "WARNING_DEV_ADMIN_BOT_KEY_DO_NOT_USE_IN_PRODUCTION",
         ),
-        play_map: env_or("PLAY_MAP", "Onion"),
+        play_map: env_or("PLAY_MAP", "random"),
         play_bots: env_or("PLAY_BOTS", "10").parse().unwrap_or(10),
         play_nations: env_or("PLAY_NATIONS", "1").parse().unwrap_or(1),
         play_start_delay: env_or("PLAY_START_DELAY", "15").parse().unwrap_or(15),

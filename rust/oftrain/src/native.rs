@@ -6,6 +6,7 @@
 //! see rust/DEVLOG.md.
 
 use anyhow::{Result, anyhow};
+use ofcore::feat::{EntsData, Legal};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -36,12 +37,20 @@ impl NativeEngine {
     /// owners, packing fallout, and pooling defense in one pass.
     /// Takes `width`/`height` explicitly (rather than `&self`) so callers
     /// can hold a live borrow of `self.session` while decoding.
-    fn decode(width: usize, height: usize, head: Value, tiles: &[u16]) -> RawObs {
+    fn decode(
+        width: usize,
+        height: usize,
+        head: Value,
+        tiles: &[u16],
+        ents: EntsData,
+        legal: Legal,
+    ) -> RawObs {
         let n = width * height;
         debug_assert_eq!(tiles.len(), n);
         RawObs {
             head,
             tiles: TileState::Packed(tiles.to_vec()),
+            structured: Some((ents, legal)),
         }
     }
 }
@@ -55,7 +64,7 @@ impl GameEngine for NativeEngine {
         difficulty: &str,
         nations: Value,
     ) -> Result<RawObs> {
-        let (session, head, terrain) =
+        let (session, head, ents, legal, terrain) =
             RlSession::reset(&self.repo_root, map_name, seed, bots, difficulty, nations)
                 .map_err(|e| anyhow!("native reset: {e}"))?;
         self.width = head["width"].as_u64().ok_or_else(|| anyhow!("no width"))? as usize;
@@ -66,7 +75,14 @@ impl GameEngine for NativeEngine {
         self.session = Some(session);
         let (width, height) = (self.width, self.height);
         let session = self.session.as_ref().unwrap();
-        Ok(Self::decode(width, height, head, session.tile_state()))
+        Ok(Self::decode(
+            width,
+            height,
+            head,
+            session.tile_state(),
+            ents,
+            legal,
+        ))
     }
 
     fn step(&mut self, intents: &[Value], ticks: u32) -> Result<RawObs> {
@@ -75,8 +91,15 @@ impl GameEngine for NativeEngine {
             .session
             .as_mut()
             .ok_or_else(|| anyhow!("step before reset"))?;
-        let head = session.step(intents, ticks);
-        Ok(Self::decode(width, height, head, session.tile_state()))
+        let (head, ents, legal) = session.step(intents, ticks);
+        Ok(Self::decode(
+            width,
+            height,
+            head,
+            session.tile_state(),
+            ents,
+            legal,
+        ))
     }
 
     fn width(&self) -> usize {
