@@ -1,4 +1,4 @@
-//! AE training loop (parity with `ae.train_v3`).
+//! AE training loop (parity with former `ae.train_v3`, v3.2 no-static).
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -7,15 +7,12 @@ use anyhow::{Context, Result};
 use clap::Args;
 use rand::SeedableRng;
 use serde_json::json;
-use tch::nn::{self, OptimizerConfig};
-use tch::{IndexOp, Kind, Tensor};
+use tch::nn;
+use tch::{Kind, Tensor};
 
 use crate::checkpoint::save_checkpoint;
 use crate::data::GameBank;
-use crate::model::{
-    border_mask, build_optimizer, device_from_str, pick_device, SpatialAE, STATIC_CLASS_WEIGHTS,
-    NUM_STATIC,
-};
+use crate::model::{border_mask, build_optimizer, device_from_str, pick_device, SpatialAE};
 
 #[derive(Debug, Args)]
 pub struct TrainArgs {
@@ -37,11 +34,7 @@ pub struct TrainArgs {
     pub border_weight: f64,
     #[arg(long, default_value_t = 1.5)]
     pub focal_gamma: f64,
-    #[arg(long, default_value_t = 1.0)]
-    pub w_units: f64,
-    #[arg(long, default_value_t = 20.0)]
-    pub unit_pos_weight: f64,
-    #[arg(long, default_value = "runs/ae_v3")]
+    #[arg(long, default_value = "runs/ae_v32_nostatic_d8c32")]
     pub out: PathBuf,
     #[arg(long)]
     pub init: Option<PathBuf>,
@@ -76,33 +69,26 @@ pub fn run(args: TrainArgs) -> Result<()> {
         .iter()
         .map(|t| t.numel() as i64)
         .sum();
-    eprintln!("ofae: model {:.2}M params", n_params as f64 / 1e6);
+    eprintln!("ofae: model {:.2}M params (v3.2 no-static)", n_params as f64 / 1e6);
 
     let mut opt = build_optimizer(&vs, args.lr)?;
     let warmup = (args.steps / 10).clamp(1, 500);
-
-    let unit_pos_w = Tensor::from_slice(&STATIC_CLASS_WEIGHTS)
-        .to_device(device)
-        .to_kind(Kind::Float)
-        .view([1, NUM_STATIC, 1, 1])
-        * args.unit_pos_weight;
 
     let meta = json!({
         "latent_c": args.latent_c,
         "latent_down": args.latent_down,
         "terrain_cond": true,
         "upsample_decoder": true,
+        "static_in_latent": false,
+        "schema": "ae_v32_nostatic",
         "crop": args.crop,
         "batch_size": args.batch_size,
         "lr": args.lr,
         "border_weight": args.border_weight,
         "focal_gamma": args.focal_gamma,
-        "w_units": args.w_units,
-        "unit_pos_weight": args.unit_pos_weight,
         "data": args.data,
     });
 
-    let crop = args.crop as usize;
     let t0 = Instant::now();
     for step in 1..=args.steps {
         // LR schedule: linear warmup then cosine to 5% of peak.
@@ -114,20 +100,16 @@ pub fn run(args: TrainArgs) -> Result<()> {
         };
         opt.set_lr(args.lr * lr_scale);
 
-        let (owners_v, terrain_v, planes_v) =
-            bank.sample_batch(&mut rng, args.batch_size as usize, crop, args.latent_down)?;
+        let (owners_v, terrain_v) =
+            bank.sample_batch(&mut rng, args.batch_size as usize, args.crop as usize)?;
         let owners = Tensor::from_slice(&owners_v)
             .to_device(device)
             .view([args.batch_size, args.crop, args.crop]);
         let terrain = Tensor::from_slice(&terrain_v)
             .to_device(device)
             .view([args.batch_size, 3, args.crop, args.crop]);
-        let gh = args.crop / args.latent_down;
-        let planes = Tensor::from_slice(&planes_v)
-            .to_device(device)
-            .view([args.batch_size, NUM_STATIC, gh, gh]);
 
-        let (tile_logits, unit_logits, _) = ae.forward(&owners, &terrain, &planes);
+        let (tile_logits, _) = ae.forward(&owners, &terrain);
 
         let mut per_tile = tile_logits.cross_entropy_loss(
             &owners,
@@ -143,14 +125,7 @@ pub fn run(args: TrainArgs) -> Result<()> {
         let border = border_mask(&owners);
         let weights = Tensor::ones_like(&per_tile)
             + border.to_kind(Kind::Float) * args.border_weight;
-        let loss_tiles = (&per_tile * &weights).sum(Kind::Float) / weights.sum(Kind::Float);
-        let loss_units = unit_logits.binary_cross_entropy_with_logits(
-            &planes,
-            None::<Tensor>,
-            Some(unit_pos_w.shallow_clone()),
-            tch::Reduction::Mean,
-        );
-        let loss = &loss_tiles + args.w_units * &loss_units;
+        let loss = (&per_tile * &weights).sum(Kind::Float) / weights.sum(Kind::Float);
 
         opt.zero_grad();
         loss.backward();
@@ -169,23 +144,11 @@ pub fn run(args: TrainArgs) -> Result<()> {
                 } else {
                     1.0
                 };
-                let occ = planes.gt(0.5);
-                let n_occ = occ.sum(Kind::Float).double_value(&[]);
-                let unit_rec = if n_occ > 0.0 {
-                    (unit_logits.gt(0.0).logical_and(&occ))
-                        .sum(Kind::Float)
-                        .double_value(&[])
-                        / n_occ
-                } else {
-                    f64::NAN
-                };
                 let rate =
                     step as f64 * args.batch_size as f64 / t0.elapsed().as_secs_f64().max(1e-6);
                 eprintln!(
-                    "step {step:5}  loss {:.4}  tiles {:.4}  units {:.4}  acc {acc:.4}  bacc {bacc:.4}  unit-rec {unit_rec:.2}  lr {:.2e}  {rate:.1} ex/s",
+                    "step {step:5}  loss {:.4}  acc {acc:.4}  bacc {bacc:.4}  lr {:.2e}  {rate:.1} ex/s",
                     loss.double_value(&[]),
-                    loss_tiles.double_value(&[]),
-                    loss_units.double_value(&[]),
                     args.lr * lr_scale,
                 );
             });
@@ -199,6 +162,9 @@ pub fn run(args: TrainArgs) -> Result<()> {
             }
         }
     }
-    eprintln!("ofae: done -> {}", args.out.join("ae_v3.safetensors").display());
+    eprintln!(
+        "ofae: done -> {}",
+        args.out.join("ae_v3.safetensors").display()
+    );
     Ok(())
 }

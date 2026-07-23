@@ -5,9 +5,13 @@
 //! `ofae` / HF encoder safetensors (keys match tch's
 //! '.' path separator exactly). Decoder weights are intentionally absent.
 //!
+//! v3.2 (no-static): encoder inputs are owners + terrain(+fallout) only.
+//! Structure planes stay on `AeRaw.stat` and are concatenated into the policy
+//! grid as an exact bypass (`C_GRID` = latent + 6 static + ego + db + transient).
+//!
 //! Production checkpoints:
-//! - fine:  `ae_v31_d8c32`  — 32ch @ 1/8
-//! - coarse: `ae_v31_d16c32` — 32ch @ 1/16 (optional v7 coarse stream)
+//! - fine:  `ae_v32_nostatic_d8c32`  — 32ch @ 1/8
+//! - coarse: `ae_v32_nostatic_d16c32` — 32ch @ 1/16 (optional coarse stream)
 
 use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
@@ -143,7 +147,7 @@ impl SpatialAE {
             .map(|(i, &(ci, co, st))| ConvGn::new(&(vs / "enc_stem" / i), ci, co, st))
             .collect();
 
-        let enc_fuse = ConvGn::new(&(vs / "enc_fuse" / 0), 128 + NUM_STATIC, 128, 1);
+        let enc_fuse = ConvGn::new(&(vs / "enc_fuse" / 0), 128, 128, 1);
         let mut out_cfg = nn::ConvConfig::default();
         out_cfg.stride = 1;
         out_cfg.padding = 0;
@@ -259,9 +263,9 @@ impl SpatialAE {
         }
     }
 
-    /// `owners` (B,H,W) int64, `terrain` (B,3,H,W) f32, `static_planes`
-    /// (B,6,H/down,W/down) f32 → `z` (B,latent_c,H/down,W/down) f32.
-    pub fn encode(&self, owners: &Tensor, terrain: &Tensor, static_planes: &Tensor) -> Tensor {
+    /// `owners` (B,H,W) int64, `terrain` (B,3,H,W) f32 → `z`
+    /// (B,latent_c,H/down,W/down) f32. Static structures are not an AE input.
+    pub fn encode(&self, owners: &Tensor, terrain: &Tensor) -> Tensor {
         // Embedding and concatenated activations remain f32. Owners stay
         // int64 as required by embedding lookup.
         let emb = self.owner_emb.forward(owners).permute([0, 3, 1, 2]);
@@ -269,7 +273,7 @@ impl SpatialAE {
         for block in &self.enc_stem {
             g = block.forward(&g);
         }
-        g = self.enc_fuse.forward(&Tensor::cat(&[&g, static_planes], 1));
+        g = self.enc_fuse.forward(&g);
         if let Some(conv) = &self.enc_out_bf16 {
             conv.forward(&g.to_kind(Kind::BFloat16), [1, 1], [0, 0])
                 .to_kind(Kind::Float)
@@ -356,7 +360,9 @@ pub struct AeRaw {
     /// NumPy/ofrs-compatible row-major packbits: each row occupies
     /// `ceil(wr/8)` bytes and its leftmost pixel is bit 7.
     pub fallout: Vec<u8>, // (hr, ceil(wr/8)), fresh every decision
-    pub stat: Vec<f32>, // (6, gh, gw)
+    /// Exact structure planes at /8 (6, gh, gw). Not fed to the AE; assembled
+    /// into the policy grid after the latent (see `batch` / `C_GRID`).
+    pub stat: Vec<f32>,
     pub hr: usize,
     pub wr: usize,
 }
@@ -632,10 +638,6 @@ pub fn encode_latent_batch_device(
             } else {
                 (fine_gh.div_ceil(2), fine_gw.div_ceil(2))
             };
-            // static must be at latent resolution. Fine AE uses /8 = REGION
-            // which matches `stat` from featurize. Coarse AE needs /16:
-            // max-pool the /8 static 2x (ceil), matching encode_grids.
-            let mut static_p = Vec::with_capacity(chunk.len() * NUM_STATIC as usize * gh * gw);
             for &i in chunk {
                 let it = items[i];
                 owners.extend_from_slice(&it.owners);
@@ -644,11 +646,6 @@ pub fn encode_latent_batch_device(
                     terrain.extend(unpack_fallout_host(&it.fallout, hr, wr));
                 } else {
                     fallout.extend_from_slice(&it.fallout);
-                }
-                if ae.latent_down == REGION {
-                    static_p.extend_from_slice(&it.stat);
-                } else {
-                    static_p.extend(max_pool2_stat(&it.stat, fine_gh, fine_gw));
                 }
             }
             // One synchronous H2D of packed u8, followed by a device-local
@@ -677,11 +674,7 @@ pub fn encode_latent_batch_device(
                     .to_device(device)
                     .to_kind(Kind::Float)
             };
-            let static_t = Tensor::from_slice(&static_p)
-                .view([b, NUM_STATIC, gh as i64, gw as i64])
-                .to_device(device)
-                .to_kind(Kind::Float);
-            let z = tch::no_grad(|| ae.encode(&owners_t, &terrain_t, &static_t));
+            let z = tch::no_grad(|| ae.encode(&owners_t, &terrain_t));
             anyhow::ensure!(
                 z.size() == [b, ae.latent_c, gh as i64, gw as i64],
                 "AE output shape {:?}, expected [{b}, {}, {gh}, {gw}]",
@@ -782,8 +775,6 @@ pub fn encode_uniform_latent_batch_device(
         } else {
             0
         });
-        let mut fine_static =
-            Vec::with_capacity(chunk.len() * NUM_STATIC as usize * fine_gh * fine_gw);
         for item in chunk {
             owners.extend_from_slice(&item.owners);
             if use_terrain_cache {
@@ -792,7 +783,6 @@ pub fn encode_uniform_latent_batch_device(
                 terrain.extend_from_slice(item.static_terrain.land_mag.as_ref());
                 terrain.extend(unpack_fallout_host(&item.fallout, hr, wr));
             }
-            fine_static.extend_from_slice(&item.stat);
         }
 
         // All host-backed uploads are synchronous: no temporary vector can
@@ -817,17 +807,10 @@ pub fn encode_uniform_latent_batch_device(
                 .to_device(device)
                 .to_kind(Kind::Float)
         };
-        let fine_static_t = Tensor::from_slice(&fine_static)
-            .view([b, NUM_STATIC, fine_gh as i64, fine_gw as i64])
-            .to_device(device)
-            .to_kind(Kind::Float);
 
         let (fine_z, coarse_z) = tch::no_grad(|| {
-            let fine_z = pair.fine.encode(&owners_t, &terrain_t, &fine_static_t);
-            let coarse_z = coarse_encoder.map(|encoder| {
-                let coarse_static = fine_static_t.max_pool2d([2, 2], [2, 2], [0, 0], [1, 1], true);
-                encoder.encode(&owners_t, &terrain_t, &coarse_static)
-            });
+            let fine_z = pair.fine.encode(&owners_t, &terrain_t);
+            let coarse_z = coarse_encoder.map(|encoder| encoder.encode(&owners_t, &terrain_t));
             (fine_z, coarse_z)
         });
         fine_chunks.push(fine_z);
@@ -930,8 +913,6 @@ pub fn encode_dual_latent_batch_device(
             });
             let fine_gh = hr / REGION as usize;
             let fine_gw = wr / REGION as usize;
-            let mut fine_static =
-                Vec::with_capacity(chunk.len() * NUM_STATIC as usize * fine_gh * fine_gw);
             for &i in chunk {
                 let item = items[i];
                 owners.extend_from_slice(&item.owners);
@@ -941,7 +922,6 @@ pub fn encode_dual_latent_batch_device(
                     terrain.extend_from_slice(item.static_terrain.land_mag.as_ref());
                     terrain.extend(unpack_fallout_host(&item.fallout, hr, wr));
                 }
-                fine_static.extend_from_slice(&item.stat);
             }
 
             // Every host-backed H2D above/below is synchronous. In particular,
@@ -967,18 +947,10 @@ pub fn encode_dual_latent_batch_device(
                     .to_device(device)
                     .to_kind(Kind::Float)
             };
-            let fine_static_t = Tensor::from_slice(&fine_static)
-                .view([b, NUM_STATIC, fine_gh as i64, fine_gw as i64])
-                .to_device(device)
-                .to_kind(Kind::Float);
 
             let (fine_z, coarse_z) = tch::no_grad(|| {
-                let fine_z = pair.fine.encode(&owners_t, &terrain_t, &fine_static_t);
-                // This exactly matches F.max_pool2d(kernel=2, stride=2,
-                // ceil_mode=True): odd fine edges are retained, not dropped.
-                let coarse_static_t =
-                    fine_static_t.max_pool2d([2, 2], [2, 2], [0, 0], [1, 1], true);
-                let coarse_z = coarse.encode(&owners_t, &terrain_t, &coarse_static_t);
+                let fine_z = pair.fine.encode(&owners_t, &terrain_t);
+                let coarse_z = coarse.encode(&owners_t, &terrain_t);
                 (fine_z, coarse_z)
             });
             let coarse_gh = fine_gh.div_ceil(2);
@@ -1015,37 +987,6 @@ pub fn encode_dual_latent_batch_device(
         fine: collect("fine", fine_out)?,
         coarse: collect("coarse", coarse_out)?,
     })
-}
-
-/// 2x max-pool over (C,H,W) host planes with ceil mode (odd dims keep a
-/// 1-wide edge), matching `F.max_pool2d(..., ceil_mode=True)`.
-fn max_pool2_stat(stat: &[f32], gh: usize, gw: usize) -> Vec<f32> {
-    let cgh = gh.div_ceil(2);
-    let cgw = gw.div_ceil(2);
-    let mut out = vec![0.0f32; NUM_STATIC as usize * cgh * cgw];
-    for c in 0..NUM_STATIC as usize {
-        for y in 0..cgh {
-            for x in 0..cgw {
-                let y0 = y * 2;
-                let x0 = x * 2;
-                let mut m = f32::NEG_INFINITY;
-                for dy in 0..2 {
-                    for dx in 0..2 {
-                        let yy = y0 + dy;
-                        let xx = x0 + dx;
-                        if yy < gh && xx < gw {
-                            m = m.max(stat[c * gh * gw + yy * gw + xx]);
-                        }
-                    }
-                }
-                if m == f32::NEG_INFINITY {
-                    m = 0.0;
-                }
-                out[c * cgh * cgw + y * cgw + x] = m;
-            }
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -1095,19 +1036,7 @@ mod tests {
         terrain.extend(unpack_fallout_host(&raw.fallout, raw.hr, raw.wr));
         let terrain =
             Tensor::from_slice(&terrain).view([1, TERRAIN_CHANNELS, raw.hr as i64, raw.wr as i64]);
-        let fine_gh = raw.hr / REGION as usize;
-        let fine_gw = raw.wr / REGION as usize;
-        let (stat, gh, gw) = if ae.latent_down == REGION {
-            (raw.stat.clone(), fine_gh, fine_gw)
-        } else {
-            (
-                max_pool2_stat(&raw.stat, fine_gh, fine_gw),
-                fine_gh.div_ceil(2),
-                fine_gw.div_ceil(2),
-            )
-        };
-        let stat = Tensor::from_slice(&stat).view([1, NUM_STATIC, gh as i64, gw as i64]);
-        tch::no_grad(|| ae.encode(&owners, &terrain, &stat).select(0, 0))
+        tch::no_grad(|| ae.encode(&owners, &terrain).select(0, 0))
     }
 
     fn flat_f32(tensor: &Tensor) -> Vec<f32> {
@@ -1438,10 +1367,10 @@ mod tests {
     #[test]
     fn load_exported_d8_weights_and_encode() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../weights/ae/ae_v31_d8c32.encoder.safetensors");
+            .join("../../weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors");
         if !path.exists() {
             eprintln!(
-                "skip: {} missing (run scripts/fetch_ae_encoders.sh)",
+                "skip: {} missing (train ofae v3.2 / export encoder)",
                 path.display()
             );
             return;
@@ -1450,8 +1379,7 @@ mod tests {
         assert_eq!(ae.latent_down, 8);
         let owners = Tensor::zeros([1, 32, 40], (Kind::Int64, Device::Cpu));
         let terrain = Tensor::zeros([1, 3, 32, 40], (Kind::Float, Device::Cpu));
-        let static_p = Tensor::zeros([1, 6, 4, 5], (Kind::Float, Device::Cpu));
-        let z = tch::no_grad(|| ae.encode(&owners, &terrain, &static_p));
+        let z = tch::no_grad(|| ae.encode(&owners, &terrain));
         assert_eq!(z.size(), &[1, 32, 4, 5]);
         assert!(z.isfinite().all().double_value(&[]) != 0.0);
     }
@@ -1571,9 +1499,8 @@ mod tests {
             "packed device expansion changed the exact f32 encoder input"
         );
         let owners = Tensor::zeros([1, 8, 8], (Kind::Int64, Device::Cpu));
-        let stat = Tensor::from_slice(&[0.0f32, 1.0, 2.0, 3.0, 4.0, 5.0]).view([1, 6, 1, 1]);
-        let expected = tch::no_grad(|| ae.encode(&owners, &uncached, &stat));
-        let actual = tch::no_grad(|| ae.encode(&owners, &cached, &stat));
+        let expected = tch::no_grad(|| ae.encode(&owners, &uncached));
+        let actual = tch::no_grad(|| ae.encode(&owners, &cached));
         assert_eq!(
             Vec::<f32>::try_from(expected.reshape([-1])).unwrap(),
             Vec::<f32>::try_from(actual.reshape([-1])).unwrap()
@@ -1644,12 +1571,8 @@ mod tests {
                 [2, TERRAIN_CHANNELS, side, side],
                 (Kind::Float, Device::Cpu),
             );
-            let static_p = Tensor::rand(
-                [2, NUM_STATIC, side / latent_down, side / latent_down],
-                (Kind::Float, Device::Cpu),
-            );
-            let fp = tch::no_grad(|| fp_ae.encode(&owners, &terrain, &static_p));
-            let bf = tch::no_grad(|| bf_ae.encode(&owners, &terrain, &static_p));
+            let fp = tch::no_grad(|| fp_ae.encode(&owners, &terrain));
+            let bf = tch::no_grad(|| bf_ae.encode(&owners, &terrain));
 
             assert!(
                 bf_vs.variables().values().all(|v| v.kind() == Kind::Float),
@@ -1702,12 +1625,8 @@ mod tests {
                 [1, TERRAIN_CHANNELS, side, side],
                 (Kind::Float, Device::Cpu),
             );
-            let static_planes = Tensor::zeros(
-                [1, NUM_STATIC, side / latent_down, side / latent_down],
-                (Kind::Float, Device::Cpu),
-            );
-            let _ = tch::no_grad(|| ae.encode(&owners, &terrain, &static_planes));
-            let _ = tch::no_grad(|| ae.encode(&owners, &terrain, &static_planes));
+            let _ = tch::no_grad(|| ae.encode(&owners, &terrain));
+            let _ = tch::no_grad(|| ae.encode(&owners, &terrain));
             assert_eq!(
                 bf16_cache_ptrs(&ae),
                 allocated,

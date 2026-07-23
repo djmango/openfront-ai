@@ -70,9 +70,17 @@ fn export_encoder_named(
         .with_context(|| format!("write {}", out.display()))?;
 
     let mut sidecar = HashMap::new();
-    sidecar.insert("format", json!("spatial_ae_encoder_v3"));
+    sidecar.insert("format", json!("spatial_ae_encoder_v32_nostatic"));
+    sidecar.insert("static_in_latent", json!(false));
     if let Some(obj) = meta.as_object() {
-        for key in ["latent_c", "latent_down", "terrain_cond", "upsample_decoder"] {
+        for key in [
+            "latent_c",
+            "latent_down",
+            "terrain_cond",
+            "upsample_decoder",
+            "schema",
+            "static_in_latent",
+        ] {
             if let Some(v) = obj.get(key) {
                 sidecar.insert(key, v.clone());
             }
