@@ -1,4 +1,7 @@
-"""Encoder-only SpatialAE for webbot ONNX export (loads ofae/oftrain safetensors)."""
+"""Encoder-only SpatialAE for webbot ONNX export (loads ofae/oftrain safetensors).
+
+v3.2 no-static: buildings are not an AE input; they bypass into the policy grid.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +14,7 @@ from safetensors.torch import load_file
 MAX_SLOTS = 128
 OWNER_EMB_DIM = 8
 TERRAIN_CHANNELS = 3
+# Kept for policy-side constants / docs; not an encoder input.
 NUM_STATIC = 6
 
 
@@ -23,7 +27,7 @@ def conv_block(c_in: int, c_out: int, stride: int) -> nn.Sequential:
 
 
 class SpatialAEEncoder(nn.Module):
-    """Matches oftrain/ofae encoder VarStore keys."""
+    """Matches oftrain/ofae encoder VarStore keys (v3.2 no-static)."""
 
     def __init__(self, latent_c: int = 32, latent_down: int = 8):
         super().__init__()
@@ -42,22 +46,17 @@ class SpatialAEEncoder(nn.Module):
             stem.append(conv_block(128, 128, stride=2))
         self.enc_stem = nn.Sequential(*stem)
         self.enc_fuse = nn.Sequential(
-            conv_block(128 + NUM_STATIC, 128, stride=1),
+            conv_block(128, 128, stride=1),
             nn.Conv2d(128, latent_c, kernel_size=1),
         )
 
-    def encode(
-        self,
-        owners: torch.Tensor,
-        terrain: torch.Tensor,
-        static_planes: torch.Tensor,
-    ) -> torch.Tensor:
+    def encode(self, owners: torch.Tensor, terrain: torch.Tensor) -> torch.Tensor:
         emb = self.owner_emb(owners).permute(0, 3, 1, 2)
         g = self.enc_stem(torch.cat([emb, terrain], dim=1))
-        return self.enc_fuse(torch.cat([g, static_planes], dim=1))
+        return self.enc_fuse(g)
 
-    def forward(self, owners, terrain, static):
-        return self.encode(owners, terrain, static)
+    def forward(self, owners, terrain):
+        return self.encode(owners, terrain)
 
 
 def load_ae_encoder(
@@ -75,6 +74,12 @@ def load_ae_encoder(
         meta = json.loads(meta_path.read_text())
         latent_c = int(meta.get("latent_c", latent_c))
         latent_down = int(meta.get("latent_down", latent_down))
+        if meta.get("static_in_latent", True) is not False and "v32" not in path.name:
+            # Old v3.1 encoders fuse 6 static planes; refuse silent mismatch.
+            raise ValueError(
+                f"encoder {path} looks like a static-in-latent (v3.1) checkpoint; "
+                "train/export ae_v32_nostatic instead"
+            )
     if latent_down != expected_down or latent_c != expected_c:
         raise ValueError(
             f"encoder {path} is {latent_c}ch @ 1/{latent_down}; "

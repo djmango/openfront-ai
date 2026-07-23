@@ -7,10 +7,11 @@ MAX_SLOTS = 128
 REGION = 8
 LATENT_C = 32
 
-# Transient planes + defense-bonus bypass (must match oftrain C_GRID).
+# Exact static + ego + defense-bonus + transient (must match oftrain C_GRID).
+N_STATIC = 6
 N_TRANSIENT = 53
 N_DEFENSE_BONUS = 1
-C_GRID = LATENT_C + 3 + N_DEFENSE_BONUS + N_TRANSIENT
+C_GRID = LATENT_C + N_STATIC + 3 + N_DEFENSE_BONUS + N_TRANSIENT  # 95
 C_GRID_FINE = C_GRID + 1
 
 LOCAL = 64

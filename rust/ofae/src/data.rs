@@ -10,8 +10,6 @@ use rand::{Rng, SeedableRng};
 use serde::Deserialize;
 use walkdir::WalkDir;
 
-use crate::model::NUM_STATIC;
-
 pub const IS_LAND_BIT: u8 = 7;
 pub const MAGNITUDE_MASK: u8 = 0x1f;
 pub const MAGNITUDE_NORM: f32 = 31.0;
@@ -37,9 +35,6 @@ pub struct CachedGame {
     frames: Mmap,
     frame_offsets: Vec<i64>,
     terr: Vec<u8>,
-    static_xy: Vec<[i32; 2]>,
-    static_cls: Vec<i8>,
-    static_offsets: Vec<i64>,
 }
 
 impl CachedGame {
@@ -64,9 +59,6 @@ impl CachedGame {
             );
         }
 
-        let (static_xy, static_cls, static_offsets) =
-            load_or_build_static(&cache, &idx.unit_offsets)?;
-
         Ok(Self {
             path: game_dir.to_path_buf(),
             n: idx.n,
@@ -75,9 +67,6 @@ impl CachedGame {
             frames,
             frame_offsets: idx.frame_offsets,
             terr,
-            static_xy,
-            static_cls,
-            static_offsets,
         })
     }
 
@@ -100,14 +89,15 @@ impl CachedGame {
         Ok((slots, packed))
     }
 
-    /// Sample one training crop: (owners HxW i64-as-u8, terrain 3xHxW f32, planes Cxghxgw f32).
+    /// Sample one training crop: (owners HxW i64, terrain 3xHxW f32, y0, x0).
+    /// Static structure planes are no longer AE targets (v3.2); sidecars remain
+    /// on disk for tooling but are not sampled into the training batch.
     pub fn sample(
         &self,
         rng: &mut SmallRng,
         crop: usize,
-        latent_down: i64,
         border_sample: bool,
-    ) -> Result<(Vec<i64>, Vec<f32>, Vec<f32>, usize, usize)> {
+    ) -> Result<(Vec<i64>, Vec<f32>, usize, usize)> {
         let mut si = rng.gen_range(0..self.n);
         let (mut slots_full, mut fall_full) = self.frame(si)?;
         let mut y0 = 0usize;
@@ -179,158 +169,8 @@ impl CachedGame {
             }
         }
 
-        let g16 = crop / 16;
-        let mut planes16 = vec![0f32; (NUM_STATIC as usize) * g16 * g16];
-        let lo = self.static_offsets[si] as usize;
-        let hi = self.static_offsets[si + 1] as usize;
-        for i in lo..hi {
-            let [ux, uy] = self.static_xy[i];
-            let gx = (ux as isize - x0 as isize) / 16;
-            let gy = (uy as isize - y0 as isize) / 16;
-            if gx >= 0 && gy >= 0 && (gx as usize) < g16 && (gy as usize) < g16 {
-                let c = self.static_cls[i] as usize;
-                if c < NUM_STATIC as usize {
-                    let idx = c * g16 * g16 + (gy as usize) * g16 + gx as usize;
-                    planes16[idx] = (planes16[idx] + 1.0).min(1.0);
-                }
-            }
-        }
-
-        let planes = if latent_down == 8 {
-            // nearest 2x upsample
-            let g8 = crop / 8;
-            let mut out = vec![0f32; (NUM_STATIC as usize) * g8 * g8];
-            for c in 0..NUM_STATIC as usize {
-                for gy in 0..g16 {
-                    for gx in 0..g16 {
-                        let v = planes16[c * g16 * g16 + gy * g16 + gx];
-                        for dy in 0..2 {
-                            for dx in 0..2 {
-                                out[c * g8 * g8 + (gy * 2 + dy) * g8 + (gx * 2 + dx)] = v;
-                            }
-                        }
-                    }
-                }
-            }
-            out
-        } else {
-            planes16
-        };
-
-        let gh = crop / latent_down as usize;
-        Ok((owners, terrain, planes, crop, gh))
+        Ok((owners, terrain, y0, x0))
     }
-}
-
-fn load_or_build_static(
-    cache: &Path,
-    unit_offsets: &[i64],
-) -> Result<(Vec<[i32; 2]>, Vec<i8>, Vec<i64>)> {
-    let bin_path = cache.join("static.bin");
-    if bin_path.exists() {
-        return read_static_bin(&bin_path);
-    }
-    let static_path = cache.join("static.npz");
-    if static_path.exists() {
-        return read_static_npz(&static_path);
-    }
-    // Build from units.npy (same as Python CachedGame constructor).
-    let units_path = cache.join("units.npy");
-    if !units_path.exists() {
-        let n = unit_offsets.len().saturating_sub(1);
-        return Ok((vec![], vec![], vec![0i64; n + 1]));
-    }
-    let units = read_units_npy(&units_path)?;
-    const STATIC_INDICES: [i32; 6] = [0, 1, 2, 3, 4, 5];
-    let mut xy = Vec::new();
-    let mut cls = Vec::new();
-    let mut offsets = vec![0i64];
-    let n_snaps = unit_offsets.len().saturating_sub(1);
-    for si in 0..n_snaps {
-        let lo = unit_offsets[si] as usize;
-        let hi = unit_offsets[si + 1] as usize;
-        for row in &units[lo..hi.min(units.len())] {
-            let c = row[1];
-            if let Some(pos) = STATIC_INDICES.iter().position(|&s| s == c) {
-                xy.push([row[2], row[3]]);
-                cls.push(pos as i8);
-            }
-        }
-        offsets.push(xy.len() as i64);
-    }
-    Ok((xy, cls, offsets))
-}
-
-fn read_static_bin(path: &Path) -> Result<(Vec<[i32; 2]>, Vec<i8>, Vec<i64>)> {
-    let bytes = std::fs::read(path)?;
-    if bytes.len() < 24 || &bytes[..8] != b"OFAESTAT" {
-        bail!("bad static.bin magic in {}", path.display());
-    }
-    let n_xy = u64::from_le_bytes(bytes[8..16].try_into()?) as usize;
-    let n_off = u64::from_le_bytes(bytes[16..24].try_into()?) as usize;
-    let mut o = 24usize;
-    let mut xy = Vec::with_capacity(n_xy);
-    for _ in 0..n_xy {
-        let x = i32::from_le_bytes(bytes[o..o + 4].try_into()?);
-        let y = i32::from_le_bytes(bytes[o + 4..o + 8].try_into()?);
-        xy.push([x, y]);
-        o += 8;
-    }
-    let cls = bytes[o..o + n_xy].iter().map(|&b| b as i8).collect();
-    o += n_xy;
-    let mut offsets = Vec::with_capacity(n_off);
-    for _ in 0..n_off {
-        offsets.push(i64::from_le_bytes(bytes[o..o + 8].try_into()?));
-        o += 8;
-    }
-    Ok((xy, cls, offsets))
-}
-
-fn read_static_npz(path: &Path) -> Result<(Vec<[i32; 2]>, Vec<i8>, Vec<i64>)> {
-    // Existing Python caches ship units.npy beside static.npz; rebuild from that.
-    let cache = path.parent().context("static.npz parent")?;
-    let units_path = cache.join("units.npy");
-    let idx_path = cache.join("index.json");
-    if !units_path.exists() || !idx_path.exists() {
-        bail!(
-            "cannot read {} without sibling units.npy + index.json",
-            path.display()
-        );
-    }
-    let idx: IndexJson = serde_json::from_str(&std::fs::read_to_string(idx_path)?)?;
-    let units = read_units_npy(&units_path)?;
-    const STATIC_INDICES: [i32; 6] = [0, 1, 2, 3, 4, 5];
-    let mut xy = Vec::new();
-    let mut cls = Vec::new();
-    let mut offsets = vec![0i64];
-    let n_snaps = idx.unit_offsets.len().saturating_sub(1);
-    for si in 0..n_snaps {
-        let lo = idx.unit_offsets[si] as usize;
-        let hi = idx.unit_offsets[si + 1] as usize;
-        for row in &units[lo..hi.min(units.len())] {
-            let c = row[1];
-            if let Some(pos) = STATIC_INDICES.iter().position(|&s| s == c) {
-                xy.push([row[2], row[3]]);
-                cls.push(pos as i8);
-            }
-        }
-        offsets.push(xy.len() as i64);
-    }
-    Ok((xy, cls, offsets))
-}
-
-fn read_units_npy(path: &Path) -> Result<Vec<[i32; 7]>> {
-    let bytes = std::fs::read(path)?;
-    let npy = npyz::NpyFile::new(&bytes[..])?;
-    let shape = npy.shape().to_vec();
-    if shape.len() != 2 || shape[1] != 7 {
-        bail!("{}: expected (m,7), got {:?}", path.display(), shape);
-    }
-    let data: Vec<i32> = npy.into_vec()?;
-    Ok(data
-        .chunks_exact(7)
-        .map(|c| [c[0], c[1], c[2], c[3], c[4], c[5], c[6]])
-        .collect())
 }
 
 pub fn discover_games(data_roots: &str) -> Result<Vec<PathBuf>> {
@@ -380,21 +220,16 @@ impl GameBank {
         rng: &mut SmallRng,
         batch: usize,
         crop: usize,
-        latent_down: i64,
-    ) -> Result<(Vec<i64>, Vec<f32>, Vec<f32>)> {
-        let gh = crop / latent_down as usize;
+    ) -> Result<(Vec<i64>, Vec<f32>)> {
         let mut owners = Vec::with_capacity(batch * crop * crop);
         let mut terrain = Vec::with_capacity(batch * 3 * crop * crop);
-        let mut planes = Vec::with_capacity(batch * (NUM_STATIC as usize) * gh * gh);
         for _ in 0..batch {
             let gi = rng.gen_range(0..self.games.len());
-            let (o, t, p, _, _) =
-                self.games[gi].sample(rng, crop, latent_down, true)?;
+            let (o, t, _, _) = self.games[gi].sample(rng, crop, true)?;
             owners.extend(o);
             terrain.extend(t);
-            planes.extend(p);
         }
-        Ok((owners, terrain, planes))
+        Ok((owners, terrain))
     }
 
     pub fn worker_rng(seed: u64, worker: u64) -> SmallRng {

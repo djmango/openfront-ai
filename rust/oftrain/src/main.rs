@@ -320,13 +320,13 @@ struct Args {
     foveate: bool,
 
     /// Frozen fine AE encoder safetensors (from `ofae` / HF
-    /// `ae_v31_d8c32.encoder.safetensors`). Required for
-    /// production obs parity (`C_GRID=89`).
-    #[arg(long, default_value = "weights/ae/ae_v31_d8c32.encoder.safetensors")]
+    /// `ae_v32_nostatic_d8c32.encoder.safetensors`). Required for
+    /// production obs parity (`C_GRID=95`, static structures bypass AE).
+    #[arg(long, default_value = "weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors")]
     ckpt: String,
 
     /// Optional frozen coarse /16 AE encoder safetensors (from
-    /// `ae_v31_d16c32.encoder.safetensors`). When set, the coarse stream uses a native /16
+    /// `ae_v32_nostatic_d16c32.encoder.safetensors`). When set, the coarse stream uses a native /16
     /// latent instead of 2x-pooling the fine grid.
     #[arg(long)]
     coarse_ckpt: Option<String>,
