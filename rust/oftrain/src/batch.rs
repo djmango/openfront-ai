@@ -65,10 +65,9 @@ fn upload_float_grid(
     }
 }
 
-/// Assemble per-item `C_GRID` host planes: AE latent (or prebuilt grid)
-/// + ego + db + transient. When `ae` is set, runs batched GPU encode
-/// (mirrors `rl/obs.py::encode_grids`); otherwise requires each item's
-/// `PreparedObs::grid` to already be filled (unit-test path).
+/// Assemble per-item `C_GRID` host planes: AE latent + exact static + ego +
+/// db + transient. When `ae` is set, runs batched GPU encode; otherwise
+/// requires each item's `PreparedObs::grid` to already be filled.
 fn assemble_grids(
     items: &[&PreparedObs],
     device: Device,
@@ -94,8 +93,10 @@ fn assemble_grids(
             let z_vec: Vec<f32> = Vec::<f32>::try_from(z_flat)
                 .map_err(|e| anyhow::anyhow!("AE latent host copy failed: {e}"))?;
             debug_assert_eq!(z_vec.len(), policy::LATENT_C as usize * plane);
+            debug_assert_eq!(it.ae_raw.stat.len(), policy::N_STATIC as usize * plane);
             let mut grid = Vec::with_capacity(c_grid * plane);
             grid.extend_from_slice(&z_vec);
+            grid.extend_from_slice(&it.ae_raw.stat);
             grid.extend_from_slice(&it.ego);
             grid.extend_from_slice(&it.db);
             grid.extend_from_slice(&it.transient);
@@ -143,12 +144,14 @@ fn assemble_coarse_grids(
         let z_vec: Vec<f32> = Vec::<f32>::try_from(z_flat)
             .map_err(|e| anyhow::anyhow!("coarse AE latent host copy failed: {e}"))?;
         debug_assert_eq!(z_vec.len(), policy::LATENT_C as usize * cgh * cgw);
-        // Pool ego/db (avg) and transient (max) to /16, matching encode_grids.
+        // Pool static/transient (max) and ego/db (avg) to /16.
+        let stat_c = max_pool2_planes(&it.ae_raw.stat, policy::N_STATIC as usize, it.gh, it.gw);
         let ego_c = avg_pool2_planes(&it.ego, 3, it.gh, it.gw);
         let db_c = avg_pool2_planes(&it.db, 1, it.gh, it.gw);
         let tr_c = max_pool2_planes(&it.transient, ofcore::feat::N_TRANSIENT, it.gh, it.gw);
         let mut grid = Vec::with_capacity(c_grid * cgh * cgw);
         grid.extend_from_slice(&z_vec);
+        grid.extend_from_slice(&stat_c);
         grid.extend_from_slice(&ego_c);
         grid.extend_from_slice(&db_c);
         grid.extend_from_slice(&tr_c);
@@ -344,6 +347,12 @@ fn assemble_uniform_device_grid(
     let mut extras = Vec::with_capacity(items.len() * extra_c * gh * gw);
     for it in items {
         if coarse {
+            extras.extend(max_pool2_planes(
+                &it.ae_raw.stat,
+                policy::N_STATIC as usize,
+                it.gh,
+                it.gw,
+            ));
             extras.extend(avg_pool2_planes(&it.ego, 3, it.gh, it.gw));
             extras.extend(avg_pool2_planes(&it.db, 1, it.gh, it.gw));
             extras.extend(max_pool2_planes(
@@ -353,6 +362,7 @@ fn assemble_uniform_device_grid(
                 it.gw,
             ));
         } else {
+            extras.extend_from_slice(&it.ae_raw.stat);
             extras.extend_from_slice(&it.ego);
             extras.extend_from_slice(&it.db);
             extras.extend_from_slice(&it.transient);
@@ -401,7 +411,13 @@ fn assemble_mixed_device_grid(
         padded_latents.push(latent.constant_pad_nd([0, (gw - iw) as i64, 0, (gh - ih) as i64]));
 
         let src = if coarse {
-            let mut v = avg_pool2_planes(&it.ego, 3, it.gh, it.gw);
+            let mut v = max_pool2_planes(
+                &it.ae_raw.stat,
+                policy::N_STATIC as usize,
+                it.gh,
+                it.gw,
+            );
+            v.extend(avg_pool2_planes(&it.ego, 3, it.gh, it.gw));
             v.extend(avg_pool2_planes(&it.db, 1, it.gh, it.gw));
             v.extend(max_pool2_planes(
                 &it.transient,
@@ -412,6 +428,7 @@ fn assemble_mixed_device_grid(
             v
         } else {
             let mut v = Vec::with_capacity(extra_c * ih * iw);
+            v.extend_from_slice(&it.ae_raw.stat);
             v.extend_from_slice(&it.ego);
             v.extend_from_slice(&it.db);
             v.extend_from_slice(&it.transient);
@@ -544,6 +561,12 @@ fn host_grids_from_latent(
         grid.extend_from_slice(&latent[offset..offset + latent_len]);
         offset += latent_len;
         if coarse {
+            grid.extend(max_pool2_planes(
+                &it.ae_raw.stat,
+                policy::N_STATIC as usize,
+                it.gh,
+                it.gw,
+            ));
             grid.extend(avg_pool2_planes(&it.ego, 3, it.gh, it.gw));
             grid.extend(avg_pool2_planes(&it.db, 1, it.gh, it.gw));
             grid.extend(max_pool2_planes(
@@ -553,6 +576,7 @@ fn host_grids_from_latent(
                 it.gw,
             ));
         } else {
+            grid.extend_from_slice(&it.ae_raw.stat);
             grid.extend_from_slice(&it.ego);
             grid.extend_from_slice(&it.db);
             grid.extend_from_slice(&it.transient);

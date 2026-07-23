@@ -1,5 +1,10 @@
 //! Full SpatialAE (encoder + v3.1 upsample decoder) for AE training.
 //!
+//! v3.2 (no-static): buildings are **not** encoded into the latent. The
+//! encoder sees owners + terrain(+fallout) only; structures go to the
+//! policy as an exact grid bypass (`oftrain` `C_GRID` includes 6 static
+//! planes after the latent).
+//!
 //! Encoder VarStore paths match `oftrain::ae` / `ofexport` so
 //! `.encoder.safetensors` loads into PPO without remapping.
 
@@ -10,9 +15,10 @@ use tch::{Device, IndexOp, Kind, Tensor};
 pub const MAX_SLOTS: i64 = 128;
 pub const OWNER_EMB_DIM: i64 = 8;
 pub const TERRAIN_CHANNELS: i64 = 3;
+/// Structure-class count (policy bypass / docs). Not an AE input in v3.2.
+#[allow(dead_code)]
 pub const NUM_STATIC: i64 = 6;
 pub const STATIC_TERRAIN_C: i64 = 2;
-pub const STATIC_CLASS_WEIGHTS: [f64; 6] = [1.0, 1.0, 1.0, 4.0, 4.0, 2.0];
 
 pub const ENCODER_PREFIXES: &[&str] = &["owner_emb.", "enc_stem.", "enc_fuse."];
 
@@ -66,14 +72,13 @@ pub struct SpatialAE {
     dec_up: Vec<UpsampleBlock>,
     dec_refine: ConvGn,
     dec_out: nn::Conv2D,
-    dec_units: nn::Conv2D,
     pub latent_c: i64,
     pub latent_down: i64,
     pub terrain_cond: bool,
 }
 
 impl SpatialAE {
-    /// v3.1: terrain-conditioned upsample decoder (training default).
+    /// v3.2: terrain-conditioned upsample decoder; no static fuse / units head.
     pub fn new(vs: &nn::Path, latent_c: i64, latent_down: i64) -> Result<Self> {
         if latent_down != 8 && latent_down != 16 {
             bail!("latent_down must be 8 or 16, got {latent_down}");
@@ -107,7 +112,8 @@ impl SpatialAE {
             .map(|(i, &(ci, co, st))| ConvGn::new(&(vs / "enc_stem" / i), ci, co, st))
             .collect();
 
-        let enc_fuse = ConvGn::new(&(vs / "enc_fuse" / 0), 128 + NUM_STATIC, 128, 1);
+        // Refine stem features before the 1x1 latent projection (no static concat).
+        let enc_fuse = ConvGn::new(&(vs / "enc_fuse" / 0), 128, 128, 1);
         let mut out_cfg = nn::ConvConfig::default();
         out_cfg.stride = 1;
         out_cfg.padding = 0;
@@ -130,10 +136,6 @@ impl SpatialAE {
         dcfg.stride = 1;
         dcfg.padding = 0;
         let dec_out = nn::conv2d(vs / "dec_out", 32, MAX_SLOTS, 1, dcfg);
-        let mut ucfg = nn::ConvConfig::default();
-        ucfg.stride = 1;
-        ucfg.padding = 0;
-        let dec_units = nn::conv2d(vs / "dec_units", 128, NUM_STATIC, 1, ucfg);
 
         Ok(Self {
             owner_emb,
@@ -144,24 +146,23 @@ impl SpatialAE {
             dec_up,
             dec_refine,
             dec_out,
-            dec_units,
             latent_c,
             latent_down,
             terrain_cond: true,
         })
     }
 
-    pub fn encode(&self, owners: &Tensor, terrain: &Tensor, static_planes: &Tensor) -> Tensor {
+    pub fn encode(&self, owners: &Tensor, terrain: &Tensor) -> Tensor {
         let emb = self.owner_emb.forward(owners).permute([0, 3, 1, 2]);
         let mut g = Tensor::cat(&[&emb, terrain], 1);
         for block in &self.enc_stem {
             g = block.forward(&g);
         }
-        g = self.enc_fuse.forward(&Tensor::cat(&[&g, static_planes], 1));
+        g = self.enc_fuse.forward(&g);
         self.enc_out.forward(&g)
     }
 
-    pub fn decode(&self, z_grid: &Tensor, terrain: &Tensor) -> (Tensor, Tensor) {
+    pub fn decode(&self, z_grid: &Tensor, terrain: &Tensor) -> Tensor {
         let static_t = terrain.i((.., ..STATIC_TERRAIN_C, .., ..));
         let mut pyramid: Vec<(i64, Tensor)> = vec![(1, static_t.shallow_clone())];
         let mut down = 2i64;
@@ -178,7 +179,7 @@ impl SpatialAE {
             .map(|(_, t)| t)
             .expect("latent pyramid");
         let h = self.dec_in.forward(&Tensor::cat(&[z_grid, lat], 1));
-        let mut x = h.shallow_clone();
+        let mut x = h;
         let mut scale = self.latent_down;
         for up in &self.dec_up {
             scale /= 2;
@@ -195,18 +196,13 @@ impl SpatialAE {
             .map(|(_, t)| t)
             .expect("full pyramid");
         x = self.dec_refine.forward(&Tensor::cat(&[&x, full], 1));
-        (self.dec_out.forward(&x), self.dec_units.forward(&h))
+        self.dec_out.forward(&x)
     }
 
-    pub fn forward(
-        &self,
-        owners: &Tensor,
-        terrain: &Tensor,
-        static_planes: &Tensor,
-    ) -> (Tensor, Tensor, Tensor) {
-        let z = self.encode(owners, terrain, static_planes);
-        let (tile, units) = self.decode(&z, terrain);
-        (tile, units, z)
+    pub fn forward(&self, owners: &Tensor, terrain: &Tensor) -> (Tensor, Tensor) {
+        let z = self.encode(owners, terrain);
+        let tile = self.decode(&z, terrain);
+        (tile, z)
     }
 }
 
@@ -214,10 +210,7 @@ pub fn border_mask(owners: &Tensor) -> Tensor {
     // owners: (B, H, W) - tile is border if any 4-neighbour ownership differs.
     let h = owners.size()[1];
     let w = owners.size()[2];
-    let mut diff = Tensor::zeros(
-        owners.size(),
-        (Kind::Bool, owners.device()),
-    );
+    let diff = Tensor::zeros(owners.size(), (Kind::Bool, owners.device()));
     if h > 1 {
         let d = owners
             .i((.., 1.., ..))

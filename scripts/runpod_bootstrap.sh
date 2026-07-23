@@ -89,4 +89,4 @@ rm -rf /workspace/hf-cache  # reclaim the transient download cache
 "$OFAE" prefeaturize --data data-human --workers "$WORKERS"
 
 echo "bootstrap complete - train with:"
-echo "  $OFAE train --data data,data-human --steps 40000 --batch-size 64 --latent-down 8 --out runs/ae_v31_d8c32"
+echo "  $OFAE train --data data,data-human --steps 40000 --batch-size 64 --latent-down 8 --out runs/ae_v32_nostatic_d8c32"

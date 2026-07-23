@@ -547,7 +547,7 @@ pub struct EnvTransition {
 ///
 /// Production path (`batch::build_obs` with an `AePair`): GPU AE encode
 /// replaces the old 6ch `stat` placeholder with a 32ch latent, yielding
-/// `C_GRID = 89 = latent(32) + ego(3) + db(1) + transient(53)`.
+/// `C_GRID = 95 = latent(32) + static(6) + ego(3) + db(1) + transient(53)`.
 ///
 /// `grid` is only filled for the no-AE test/legacy path (63ch
 /// stat+ego+db+transient); training always passes an AE and rebuilds

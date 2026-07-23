@@ -6,8 +6,9 @@ neural net for ownership/terrain/fallout; ego-pooling and the local crop are
 cheap array ops done in TypeScript (webbot/features.ts) to keep the ONNX
 graphs simple and shape-flexible.
 
-  ae_encoder.onnx: (owners int64 [1,H,W], terrain float [1,3,H,W],
-                     static float [1,NUM_STATIC,H/8,W/8]) -> z [1,32,H/8,W/8]
+  ae_encoder.onnx: (owners int64 [1,H,W], terrain float [1,3,H,W])
+                     -> z [1,32,H/8,W/8]
+  (static structures bypass the AE into the policy grid)
   policy.onnx: (grid, grid_valid, local, players, pmask, scalars,
                 legal_actions, legal_ptarget, legal_build, legal_nuke,
                 legal_tile) -> (action_logits, player_logits, tile_logits,
@@ -16,7 +17,7 @@ graphs simple and shape-flexible.
 
 Usage:
   uv run python scripts/export_onnx.py \\
-      --ae weights/ae/ae_v31_d8c32.encoder.safetensors \\
+      --ae weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors \\
       --policy rust/checkpoints/ppo_v10/latest.safetensors \\
       --out openfront/resources/webbot/models
 """
@@ -30,7 +31,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from webbot_export.ae_encoder import NUM_STATIC, load_ae_encoder
+from webbot_export.ae_encoder import load_ae_encoder
 from webbot_export.consts import (
     ACTIONS,
     BUILD_TYPES,
@@ -51,10 +52,8 @@ class AEEncoderWrapper(nn.Module):
         super().__init__()
         self.ae = ae
 
-    def forward(
-        self, owners: torch.Tensor, terrain: torch.Tensor, static: torch.Tensor
-    ) -> torch.Tensor:
-        return self.ae.encode(owners, terrain, static)
+    def forward(self, owners: torch.Tensor, terrain: torch.Tensor) -> torch.Tensor:
+        return self.ae.encode(owners, terrain)
 
 
 class PolicyWrapper(nn.Module):
@@ -103,10 +102,8 @@ class PolicyWrapper(nn.Module):
 
 
 def make_dummy_inputs(gh: int = 19, gw: int = 31, h: int = 152, w: int = 248):
-    n_static = NUM_STATIC
     owners = torch.randint(0, MAX_SLOTS, (1, h, w), dtype=torch.int64)
     terrain = torch.rand(1, 3, h, w, dtype=torch.float32)
-    static = torch.rand(1, n_static, gh, gw, dtype=torch.float32)
 
     grid = torch.randn(1, C_GRID, gh, gw, dtype=torch.float32)
     grid_valid = torch.ones(1, gh, gw, dtype=torch.float32)
@@ -121,7 +118,7 @@ def make_dummy_inputs(gh: int = 19, gw: int = 31, h: int = 152, w: int = 248):
     legal_nuke = torch.ones(1, len(NUKE_TYPES), dtype=torch.float32)
     legal_tile = torch.ones(1, gh, gw, dtype=torch.float32)
     return {
-        "ae": (owners, terrain, static),
+        "ae": (owners, terrain),
         "policy": (
             grid,
             grid_valid,
@@ -139,18 +136,17 @@ def make_dummy_inputs(gh: int = 19, gw: int = 31, h: int = 152, w: int = 248):
 
 def export_ae(ae, out_dir: Path, dummy) -> None:
     wrapper = AEEncoderWrapper(ae).eval()
-    owners, terrain, static = dummy["ae"]
+    owners, terrain = dummy["ae"]
     path = out_dir / "ae_encoder.onnx"
     torch.onnx.export(
         wrapper,
-        (owners, terrain, static),
+        (owners, terrain),
         str(path),
-        input_names=["owners", "terrain", "static"],
+        input_names=["owners", "terrain"],
         output_names=["z"],
         dynamic_axes={
             "owners": {1: "h", 2: "w"},
             "terrain": {2: "h", 3: "w"},
-            "static": {2: "gh", 3: "gw"},
             "z": {2: "gh", 3: "gw"},
         },
         opset_version=18,
@@ -206,9 +202,9 @@ def export_policy(policy, out_dir: Path, dummy) -> None:
 def verify(out_dir: Path, ae, policy, dummy) -> None:
     import onnxruntime as ort
 
-    owners, terrain, static = dummy["ae"]
+    owners, terrain = dummy["ae"]
     with torch.no_grad():
-        z_torch = ae.encode(owners, terrain, static).numpy()
+        z_torch = ae.encode(owners, terrain).numpy()
     sess = ort.InferenceSession(
         str(out_dir / "ae_encoder.onnx"), providers=["CPUExecutionProvider"]
     )
@@ -217,7 +213,6 @@ def verify(out_dir: Path, ae, policy, dummy) -> None:
         {
             "owners": owners.numpy(),
             "terrain": terrain.numpy(),
-            "static": static.numpy(),
         },
     )[0]
     diff = np.abs(z_torch - z_onnx).max()
@@ -280,7 +275,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--ae",
-        default="weights/ae/ae_v31_d8c32.encoder.safetensors",
+        default="weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors",
         help="ofae/oftrain encoder .safetensors",
     )
     ap.add_argument(
