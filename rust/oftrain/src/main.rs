@@ -210,6 +210,14 @@ struct Args {
     #[arg(long, default_value_t = 0.02)]
     v10_combat_action: f64,
 
+    /// V10: bonus for repeating the previous attack's player target.
+    #[arg(long, default_value_t = 0.04)]
+    v10_attack_commit: f64,
+
+    /// V10: penalty for switching attack player target vs previous attack.
+    #[arg(long, default_value_t = 0.02)]
+    v10_attack_switch: f64,
+
     /// V10: terminal penalty when timing out after closeout entry (≥45% land).
     #[arg(long, default_value_t = 20.0)]
     v10_timeout_closeout: f64,
@@ -292,6 +300,11 @@ struct Args {
     /// Floor for stage-decayed LR (`max(floor, lr * decay^stage)`).
     #[arg(long, default_value_t = ofcore::curriculum::V10_STAGE_LR_FLOOR)]
     stage_lr_floor: f64,
+
+    /// Max LR boost when win-rate lags the stage gate (`1.0` = off).
+    /// Effective LR = stage_baseline * scale(wr, gate, max_boost).
+    #[arg(long, default_value_t = 4.0)]
+    lr_perf_max_boost: f64,
 
     #[arg(long, default_value_t = 2)]
     epochs: usize,
@@ -840,8 +853,11 @@ mod curriculum_flag_tests {
         assert_eq!(defaults.v10_survival_coef, 0.01);
         assert_eq!(defaults.v10_diplo_panic, 0.08);
         assert_eq!(defaults.v10_combat_action, 0.02);
+        assert_eq!(defaults.v10_attack_commit, 0.04);
+        assert_eq!(defaults.v10_attack_switch, 0.02);
         assert_eq!(defaults.v10_timeout_closeout, 20.0);
         assert_eq!(defaults.v10_closeout_entry, 25.0);
+        assert_eq!(defaults.lr_perf_max_boost, 4.0);
     }
 
     #[test]
@@ -1148,6 +1164,8 @@ fn main() -> anyhow::Result<()> {
         v10_diplo_panic_share: args.v10_diplo_panic_share,
         v10_diplo_panic_tick_frac: args.v10_diplo_panic_tick_frac,
         v10_combat_action: args.v10_combat_action,
+        v10_attack_commit: args.v10_attack_commit,
+        v10_attack_switch: args.v10_attack_switch,
         v10_timeout_closeout: args.v10_timeout_closeout,
         v10_closeout_entry: args.v10_closeout_entry,
     };
@@ -1334,6 +1352,7 @@ fn main() -> anyhow::Result<()> {
         entq_coef: args.entq_coef,
         stage_lr_decay: args.stage_lr_decay,
         stage_lr_floor: args.stage_lr_floor,
+        lr_perf_max_boost: args.lr_perf_max_boost,
         epochs: args.epochs,
         minibatches: args.minibatches,
         amp: args.amp,

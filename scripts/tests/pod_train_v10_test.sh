@@ -23,7 +23,7 @@ grep -q 'RUN_NAME="${RUN_NAME:-ppo_v10}"' "$SCRIPT"
 grep -q 'NUM_GPUS="${NUM_GPUS:-4}"' "$SCRIPT"
 # Stability: single-instance flock + never relaunch above MAX_ENVS.
 grep -q 'flock -n 9' "$SCRIPT"
-grep -q 'MAX_ENVS="${MAX_ENVS:-14}"' "$SCRIPT"
+grep -qE 'MAX_ENVS="\$\{MAX_ENVS:-(14|16)\}"' "$SCRIPT"
 grep -q 'CLAMPED_ENVS' "$SCRIPT"
 grep -q 'capped to $CLAMPED_ENVS' "$SCRIPT"
 grep -q 'FAST_EXITS >= 4 ? 60' "$SCRIPT"
@@ -39,13 +39,16 @@ if grep -nE 'NODE_FRACTION=0\.[1-9]' "$SCRIPT"; then
   exit 1
 fi
 # Recommended dockerArgs must pin NODE_FRACTION=0 and curl v10 (not v8+V10_MODE).
-grep -q 'NODE_FRACTION=0 MAX_ENVS=14 NCCL_P2P_DISABLE=1' "$SCRIPT"
+grep -qE 'NODE_FRACTION=0 MAX_ENVS=(14|16) NCCL_P2P_DISABLE=1' "$SCRIPT"
 grep -q 'curl -fsSL https://raw.githubusercontent.com/djmango/openfront-ai/master/scripts/pod_train_v10.sh' "$SCRIPT"
 ! grep -q -- '--v10-curriculum' "$SCRIPT"
 grep -q -- '--v86-death-penalty 3.0' "$SCRIPT"
 grep -q -- '--v10-survival-coef 0.01' "$SCRIPT"
 grep -q -- '--v10-diplo-panic 0.08' "$SCRIPT"
 grep -q -- '--v10-combat-action 0.02' "$SCRIPT"
+grep -q -- '--v10-attack-commit 0.04' "$SCRIPT"
+grep -q -- '--v10-attack-switch 0.02' "$SCRIPT"
+grep -q -- '--lr-perf-max-boost 4.0' "$SCRIPT"
 grep -q -- '--v10-timeout-closeout 20.0' "$SCRIPT"
 grep -q -- '--v85-extra-win-bonus 200.0' "$SCRIPT"
 grep -q -- '--v84-fast-win-coef 40.0' "$SCRIPT"
@@ -66,9 +69,9 @@ grep -q 'pod_train_v10.sh' "$WRAP"
 
 # Prefer rg when present; fall back to grep -E so pods without ripgrep still pass.
 search() { if command -v rg >/dev/null 2>&1; then rg -n "$1" "${@:2}"; else grep -REn "$1" "${@:2}"; fi; }
-search 'migrate_v86_to_v10|v10_survival_coef|v10_diplo_panic|v10_combat_action|v10_timeout_closeout' \
+search 'migrate_v86_to_v10|v10_survival_coef|v10_diplo_panic|v10_combat_action|v10_attack_commit|lr_perf_max_boost|v10_timeout_closeout' \
   "$ROOT/rust/oftrain/src/main.rs" "$ROOT/rust/oftrain/src/train.rs" >/dev/null
-search 'V10_REWARD_PROFILE|v10_reward_active|should_demote_v10|should_advance_v10|V10_BOT_NATION_DENSITY|V10_EASY_RAMP_LEN|V10_CLOSEOUT_STAGE|V10_MAP_WARMUP_LEN|V10_BROAD_STAGE' \
+search 'V10_REWARD_PROFILE|v10_reward_active|v10_attack_commit_bonus|performance_lr_scale|v10_map_train_weight|should_demote_v10|should_advance_v10|V10_BOT_NATION_DENSITY|V10_EASY_RAMP_LEN|V10_CLOSEOUT_STAGE|V10_MAP_WARMUP_LEN|V10_BROAD_STAGE' \
   "$ROOT/rust/ofcore/src/curriculum.rs" "$ROOT/rust/oftrain/src/train.rs" >/dev/null
 grep -q 'V10_EASY_RAMP_LEN: usize = 30' "$ROOT/rust/ofcore/src/curriculum.rs"
 grep -q 'V10_MAP_WARMUP_LEN: usize = 8' "$ROOT/rust/ofcore/src/curriculum.rs"

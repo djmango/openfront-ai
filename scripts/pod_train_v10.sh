@@ -90,7 +90,7 @@ EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --fp16-rollout --pin
 # V10 anti-death-spiral on the closeout ladder. Dense reward with softer death,
 # survival / diplo-panic / combat priors, and radical win bonus so finishing
 # dominates shaping. All reward stage mins = 0.
-TRAIN_ARGS="--max-episode-ticks 21000 --v83-close-coef 4.0 --v83-churn-coef 0.06 --v81-dom-coef 0.25 --v81-dominant-loss=true --v81-dominance-threshold 0.30 --v81-delta-loss-dominant 5.0 --v81-min-stage 0 --v81-churn-coef 0.05 --v81-churn-window 16 --v81-churn-min-stage 0 --v84-boat-useful 0.15 --v84-boat-destroyed=-0.20 --v84-boat-cancelled=-0.03 --v84-boat-own-shore=-0.05 --v84-boat-min-stage 0 --v84-tempo-coef 0.015 --v84-tempo-min-stage 0 --v84-fast-win-coef 40.0 --v85-tempo-share-threshold 0.30 --v85-extra-win-bonus 200.0 --v85-embargo-bad-stop=-0.15 --v85-embargo-good-stop 0.02 --v85-embargo-min-stage 0 --v85-premature-retreat=-0.03 --v85-thrash-reengage=-0.03 --v85-combat-min-stage 0 --v86-delta-loss 5.5 --v86-attack-symmetric-loss --v86-skip-combat-churn --v86-death-penalty 3.0 --v10-survival-coef 0.01 --v10-diplo-panic 0.08 --v10-diplo-panic-share 0.35 --v10-diplo-panic-tick-frac 0.55 --v10-combat-action 0.02 --v10-timeout-closeout 20.0 --v10-closeout-entry 25.0"
+TRAIN_ARGS="--max-episode-ticks 21000 --v83-close-coef 4.0 --v83-churn-coef 0.06 --v81-dom-coef 0.25 --v81-dominant-loss=true --v81-dominance-threshold 0.30 --v81-delta-loss-dominant 5.0 --v81-min-stage 0 --v81-churn-coef 0.05 --v81-churn-window 16 --v81-churn-min-stage 0 --v84-boat-useful 0.15 --v84-boat-destroyed=-0.20 --v84-boat-cancelled=-0.03 --v84-boat-own-shore=-0.05 --v84-boat-min-stage 0 --v84-tempo-coef 0.015 --v84-tempo-min-stage 0 --v84-fast-win-coef 40.0 --v85-tempo-share-threshold 0.30 --v85-extra-win-bonus 200.0 --v85-embargo-bad-stop=-0.15 --v85-embargo-good-stop 0.02 --v85-embargo-min-stage 0 --v85-premature-retreat=-0.03 --v85-thrash-reengage=-0.03 --v85-combat-min-stage 0 --v86-delta-loss 5.5 --v86-attack-symmetric-loss --v86-skip-combat-churn --v86-death-penalty 3.0 --v10-survival-coef 0.01 --v10-diplo-panic 0.08 --v10-diplo-panic-share 0.35 --v10-diplo-panic-tick-frac 0.55 --v10-combat-action 0.02 --v10-attack-commit 0.04 --v10-attack-switch 0.02 --v10-timeout-closeout 20.0 --v10-closeout-entry 25.0 --lr-perf-max-boost 4.0"
 if [ -n "$STAGE_ENV_TARGETS" ]; then
   TRAIN_ARGS="$TRAIN_ARGS --stage-env-targets $STAGE_ENV_TARGETS"
 fi
@@ -113,7 +113,7 @@ TORCH_VERSION="2.11.0" # tch 0.24's C++ shim needs this exact version - see devl
 AE_DIR="${AE_DIR:-$REPO_DIR/weights/ae}"
 
 # --- refuse recurring footguns early (before long bootstrap) ---
-# Legacy RunPod dockerArgs still set V10_MODE=1 while curling pod_train_v8.sh.
+# Legacy RunPod dockerArgs still set V10_MODE=1_(legacy)_curling pod_train_v8.sh.
 # Ignore that flag so a reboot with a frozen CMD does not refuse to train;
 # the v8 shim also unsets it. Other mode envs remain hard errors.
 if [ -n "${V10_MODE:-}" ]; then

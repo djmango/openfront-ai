@@ -243,6 +243,9 @@ pub struct Config {
     pub stage_lr_decay: f64,
     /// Lower bound for stage-decayed LR (default [`ofcore::curriculum::V10_STAGE_LR_FLOOR`]).
     pub stage_lr_floor: f64,
+    /// Max multiplier on stage LR when win-rate is far below the stage gate
+    /// (`1.0` disables). See [`ofcore::curriculum::performance_lr_scale`].
+    pub lr_perf_max_boost: f64,
     pub epochs: usize,
     pub minibatches: usize,
     /// `--amp`: manual bf16 mixed precision for the policy net's conv
@@ -7473,6 +7476,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     "reward/survival": info.reward_components.survival,
                     "reward/diplo_panic": info.reward_components.diplo_panic,
                     "reward/combat_action": info.reward_components.combat_action,
+                    "reward/attack_commit": info.reward_components.attack_commit,
                     "reward/waste": info.reward_components.waste,
                     "reward/death": info.reward_components.death,
                     "reward/terminal": info.reward_components.terminal,
@@ -7580,13 +7584,23 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 }
             }
         }
-        if advanced || demoted {
-            lr_now = ofcore::curriculum::stage_learning_rate(
+        // Performance-scaled LR: inverse to how close we are to the gate.
+        // Stage advance/demote still resets warmup; every update recomputes
+        // lr_now from stage baseline × (gate - wr) boost.
+        {
+            let wr = window_mean(&recent_wins);
+            let gate = stages[curr_stage].win_at;
+            lr_now = ofcore::curriculum::effective_learning_rate(
                 cfg.lr,
                 cfg.stage_lr_decay,
                 curr_stage,
                 cfg.stage_lr_floor,
+                wr,
+                gate,
+                cfg.lr_perf_max_boost,
             );
+        }
+        if advanced || demoted {
             lr_warmup_start_update = update + 1;
             lr_warmup_updates = ofcore::curriculum::V10_LR_WARMUP_UPDATES;
             let live_envs_per_shard = live_total_envs / devices.len();
@@ -8599,6 +8613,8 @@ mod persistent_actor_tests {
                 v10_diplo_panic_share: 0.35,
                 v10_diplo_panic_tick_frac: 0.55,
                 v10_combat_action: 0.0,
+                v10_attack_commit: 0.0,
+                v10_attack_switch: 0.0,
                 v10_timeout_closeout: 0.0,
                 v10_closeout_entry: 0.0,
             },
@@ -8615,6 +8631,7 @@ mod persistent_actor_tests {
             entq_coef: 0.002,
             stage_lr_decay: 0.85,
             stage_lr_floor: ofcore::curriculum::V10_STAGE_LR_FLOOR,
+            lr_perf_max_boost: 4.0,
             epochs: 2,
             minibatches: 1,
             amp: false,
