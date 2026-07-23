@@ -138,22 +138,26 @@ if [ "$(python3 -c "print(1 if float('$NODE_FRACTION') > 0 else 0)")" = "1" ] \
 fi
 
 # --- bootstrap: repo ---
+# GIT_REF selects the training code. Default master; V11 pre-merge pods should
+# set GIT_REF=sully/v11-plan-lstm-bc-210b (or the merged commit once on master).
+GIT_REF="${GIT_REF:-master}"
 mkdir -p "$(dirname "$REPO_DIR")"
 if [ ! -d "$REPO_DIR" ]; then
   git clone --recurse-submodules https://github.com/djmango/openfront-ai "$REPO_DIR"
 fi
 cd "$REPO_DIR"
 if [ -d .git ] && [ -z "${SKIP_SYNC:-}" ]; then
-  # Same "deployed code MUST match origin/master" assertion as pod_train.sh
-  # - a silently-failed pull once ran a whole day's training on stale code.
-  git fetch origin master || true
-  git reset --hard origin/master || true
+  # Deployed code MUST match origin/$GIT_REF — a silently-failed pull once ran
+  # a whole day's training on stale code.
+  git fetch origin "$GIT_REF" || true
+  git checkout -B "$GIT_REF" "origin/$GIT_REF" 2>/dev/null \
+    || git reset --hard "origin/$GIT_REF" || true
   git submodule update --init || true
-  if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/master 2>/dev/null)" ]; then
-    echo "FATAL: HEAD $(git rev-parse --short HEAD) != origin/master; refusing to train stale code"
+  if [ "$(git rev-parse HEAD)" != "$(git rev-parse "origin/$GIT_REF" 2>/dev/null)" ]; then
+    echo "FATAL: HEAD $(git rev-parse --short HEAD) != origin/$GIT_REF; refusing to train stale code"
     exit 1
   fi
-  echo "deployed commit: $(git rev-parse --short HEAD)"
+  echo "deployed commit: $(git rev-parse --short HEAD) (GIT_REF=$GIT_REF)"
 fi
 
 # --- rust toolchain ---
