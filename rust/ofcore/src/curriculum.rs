@@ -125,6 +125,12 @@ pub struct RewardConfig {
     pub v10_diplo_panic_tick_frac: f64,
     /// V10: bonus for productive combat/build/boat actions.
     pub v10_combat_action: f64,
+    /// V10: bonus when an emitted attack repeats the previous player target
+    /// (commit / finish fights instead of multi-front thrash).
+    pub v10_attack_commit: f64,
+    /// V10: penalty when an emitted attack switches to a different player
+    /// target vs the previous attack (0 disables the switch tax).
+    pub v10_attack_switch: f64,
     /// V10: terminal penalty magnitude when timing out after closeout entry.
     pub v10_timeout_closeout: f64,
     /// V10: one-shot bonus the first time land share crosses closeout entry (45%).
@@ -209,6 +215,8 @@ impl RewardConfig {
         self.v10_survival_coef != 0.0
             || self.v10_diplo_panic != 0.0
             || self.v10_combat_action != 0.0
+            || self.v10_attack_commit != 0.0
+            || self.v10_attack_switch != 0.0
             || self.v10_timeout_closeout != 0.0
             || self.v10_closeout_entry != 0.0
     }
@@ -260,6 +268,7 @@ pub struct RewardComponents {
     pub survival: f64,
     pub diplo_panic: f64,
     pub combat_action: f64,
+    pub attack_commit: f64,
     pub waste: f64,
     pub death: f64,
     pub terminal: f64,
@@ -279,6 +288,7 @@ impl RewardComponents {
         self.survival += other.survival;
         self.diplo_panic += other.diplo_panic;
         self.combat_action += other.combat_action;
+        self.attack_commit += other.attack_commit;
         self.waste += other.waste;
         self.death += other.death;
         self.terminal += other.terminal;
@@ -869,6 +879,72 @@ pub fn stage_learning_rate(base_lr: f64, decay: f64, stage: usize, floor: f64) -
     (base_lr * decay.powi(stage as i32)).max(floor)
 }
 
+/// Scale LR up when win-rate lags the stage gate (and leave it alone at/above).
+///
+/// Stage decay alone pins mid-ladder runs at the floor even while WR sits at
+/// ~0.5 vs a 0.75 gate. Performance scaling restores inverse proportionality:
+/// farther below the gate → higher LR, up to `max_boost`× the stage baseline.
+/// `max_boost <= 1.0` disables the boost (always returns 1.0).
+pub fn performance_lr_scale(win_rate: f64, gate: f64, max_boost: f64) -> f64 {
+    if !(max_boost > 1.0 && gate > 0.0) {
+        return 1.0;
+    }
+    let wr = finite_or_zero(win_rate).clamp(0.0, 1.0);
+    if wr >= gate {
+        return 1.0;
+    }
+    1.0 + (max_boost - 1.0) * ((gate - wr) / gate)
+}
+
+/// Effective LR: stage baseline × performance scale.
+pub fn effective_learning_rate(
+    base_lr: f64,
+    decay: f64,
+    stage: usize,
+    floor: f64,
+    win_rate: Option<f64>,
+    gate: f64,
+    max_boost: f64,
+) -> f64 {
+    let baseline = stage_learning_rate(base_lr, decay, stage, floor);
+    let scale = match win_rate {
+        Some(wr) => performance_lr_scale(wr, gate, max_boost),
+        None => 1.0,
+    };
+    baseline * scale
+}
+
+/// Training oversample weight for maps that currently break the
+/// terra-snowball prior (early multi-front / naval contact), not because
+/// the assets are intrinsically harder. Uniform sampling starved gradient
+/// on these while Africa/SouthAmerica farmed wins.
+pub fn v10_map_train_weight(map: &str) -> f64 {
+    match map {
+        "Caucasus" | "Onion" | "Europe" | "Pangaea" => 3.0,
+        "Britannia" | "Australia" | "BlackSea" => 2.0,
+        _ => 1.0,
+    }
+}
+
+fn sample_weighted_map<'a>(maps: &'a [&'a str], rng: &mut impl rand::Rng) -> &'a str {
+    debug_assert!(!maps.is_empty());
+    let mut total = 0.0;
+    for m in maps {
+        total += v10_map_train_weight(m);
+    }
+    if !(total > 0.0) {
+        return maps[rng.gen_range(0..maps.len())];
+    }
+    let mut pick = rng.r#gen::<f64>() * total;
+    for m in maps {
+        pick -= v10_map_train_weight(m);
+        if pick <= 0.0 {
+            return m;
+        }
+    }
+    maps[maps.len() - 1]
+}
+
 /// Invert uncapped `base * decay ^ stage` to recover an implied stage.
 /// Used to detect sidecars whose `stage` was rewritten downward while
 /// `lr_now` still reflected a much higher stage (the u11571 28→8 cliff).
@@ -985,7 +1061,7 @@ pub fn sample_episode(
     if stage > 0 && rng.r#gen::<f64>() < REHEARSAL_P {
         let past_i = rng.gen_range(0..stage);
         let past = &stg[past_i];
-        let m = past.maps[rng.gen_range(0..past.maps.len())];
+        let m = sample_weighted_map(past.maps, rng);
         // Rehearse the past lobby setup (bots/difficulty/nations), not just
         // the past map with current-stage pressure. Current-stage bots on an
         // old map was a fake rehearsal that never relieved density cliffs.
@@ -997,7 +1073,7 @@ pub fn sample_episode(
             true,
         );
     }
-    let m = cur.maps[rng.gen_range(0..cur.maps.len())];
+    let m = sample_weighted_map(cur.maps, rng);
     (m.to_string(), cur.bots, cur.difficulty, cur.nations, false)
 }
 
@@ -1246,6 +1322,31 @@ pub fn v10_combat_action_bonus(action: i64, has_target: bool, config: RewardConf
     }
 }
 
+/// Reward committing to the same player target across successive attacks.
+///
+/// `current_player` is the resolved attack target player id when the attack
+/// intent actually emitted; `prev_player` is the previous emitted attack's
+/// target (None on the first attack of an episode). Terra attacks
+/// (`targetID=None`) do not update commitment and score 0 here.
+pub fn v10_attack_commit_bonus(
+    action: i64,
+    current_player: Option<usize>,
+    prev_player: Option<usize>,
+    config: RewardConfig,
+) -> f64 {
+    if action != A_ATTACK {
+        return 0.0;
+    }
+    let Some(cur) = current_player else {
+        return 0.0;
+    };
+    match prev_player {
+        Some(prev) if prev == cur => config.v10_attack_commit.abs(),
+        Some(_) => -config.v10_attack_switch.abs(),
+        None => 0.0,
+    }
+}
+
 /// Net shaping an empty boat/build translate used to receive under V10:
 /// combat-action bonus counted `tile_region.is_some()` as a target, so a
 /// wasted empty boat was `+0.015 - W_WASTE = +0.005` (free EV). Builds
@@ -1300,6 +1401,8 @@ mod tests {
             v10_diplo_panic_share: 0.35,
             v10_diplo_panic_tick_frac: 0.55,
             v10_combat_action: 0.0,
+            v10_attack_commit: 0.0,
+            v10_attack_switch: 0.0,
             v10_timeout_closeout: 0.0,
             v10_closeout_entry: 0.0,
         }
@@ -1476,6 +1579,19 @@ mod tests {
         assert_eq!(v10_combat_action_bonus(A_BOAT, false, cfg), 0.0);
         assert_eq!(v10_combat_action_bonus(A_BUILD, true, cfg), 0.01);
         assert_eq!(v10_combat_action_bonus(A_BUILD, false, cfg), 0.0);
+        cfg.v10_attack_commit = 0.04;
+        cfg.v10_attack_switch = 0.02;
+        assert_eq!(v10_attack_commit_bonus(A_ATTACK, Some(3), None, cfg), 0.0);
+        assert_eq!(
+            v10_attack_commit_bonus(A_ATTACK, Some(3), Some(3), cfg),
+            0.04
+        );
+        assert_eq!(
+            v10_attack_commit_bonus(A_ATTACK, Some(4), Some(3), cfg),
+            -0.02
+        );
+        assert_eq!(v10_attack_commit_bonus(A_ATTACK, None, Some(3), cfg), 0.0);
+        assert_eq!(v10_attack_commit_bonus(A_BOAT, Some(3), Some(3), cfg), 0.0);
         // Historical bug: counting sampled tile heads as targets made empty
         // boats net-positive and empty builds reward-neutral.
         assert!(v10_empty_action_net_reward(A_BOAT, cfg) > 0.0);
@@ -1910,6 +2026,25 @@ mod tests {
             imply_stage_from_learning_rate(2.5e-4 * 0.85_f64.powi(28), 2.5e-4, 0.85),
             Some(28)
         );
+        // Performance LR: at/above gate → 1x; halfway to zero gap → mid boost.
+        assert_eq!(performance_lr_scale(0.75, 0.75, 4.0), 1.0);
+        assert_eq!(performance_lr_scale(0.9, 0.75, 4.0), 1.0);
+        assert!((performance_lr_scale(0.5, 0.75, 4.0) - 2.0).abs() < 1e-12);
+        assert_eq!(performance_lr_scale(0.0, 0.75, 4.0), 4.0);
+        assert_eq!(performance_lr_scale(0.5, 0.75, 1.0), 1.0);
+        let boosted = effective_learning_rate(
+            2.5e-4,
+            0.85,
+            25,
+            V10_STAGE_LR_FLOOR,
+            Some(0.5),
+            0.75,
+            4.0,
+        );
+        assert!((boosted - V10_STAGE_LR_FLOOR * 2.0).abs() < 1e-12);
+        assert!(v10_map_train_weight("Caucasus") > v10_map_train_weight("Africa"));
+        assert!(v10_map_train_weight("Onion") > v10_map_train_weight("SouthAmerica"));
+        assert_eq!(v10_map_train_weight("Africa"), 1.0);
         for index in V10_EASY_RAMP_LEN..(V10_STAGE_COUNT - 1) {
             assert!(
                 v10[index + 1].win_at <= v10[index].win_at + 1e-12,

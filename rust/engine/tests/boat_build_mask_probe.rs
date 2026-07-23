@@ -342,6 +342,8 @@ fn empty_boat_was_net_positive_vs_waste_while_build_was_neutral() {
         v10_diplo_panic_share: 0.35,
         v10_diplo_panic_tick_frac: 0.55,
         v10_combat_action: 0.02,
+        v10_attack_commit: 0.04,
+        v10_attack_switch: 0.02,
         v10_timeout_closeout: 20.0,
         v10_closeout_entry: 25.0,
     };

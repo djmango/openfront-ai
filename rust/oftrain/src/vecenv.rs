@@ -22,7 +22,8 @@ use ofcore::curriculum::{
     combat_outcome_reward, dominance_potential, embargo_stop_outcome_reward, fast_win_bonus,
     land_share, normalized_strength_share, placement, placement_score, sample_episode,
     stages_for_schedule, strength_delta_weight, tempo_pressure, terminal_reward, timeweight,
-    v10_closeout_entry_bonus, v10_combat_action_bonus, v10_diplo_panic_penalty,
+    v10_attack_commit_bonus, v10_closeout_entry_bonus, v10_combat_action_bonus,
+    v10_diplo_panic_penalty,
     v10_survival_reward, v10_timeout_after_closeout_penalty, v83_action_churn_penalty,
 };
 use ofcore::feat::{
@@ -810,6 +811,8 @@ pub struct EnvWorker {
     combat_tracker: CombatStickyTracker,
     prev_action: ActionOutcome,
     last_commitment: Option<(i64, i64, i64, i64, i64, u64)>,
+    /// Previous emitted attack's player target (for V10 commit bonus).
+    prev_attack_player: Option<usize>,
     ep_reward_components: RewardComponents,
     spawn_steps: i64,
     map_name: String,
@@ -864,6 +867,7 @@ impl EnvWorker {
             combat_tracker: CombatStickyTracker::default(),
             prev_action: ActionOutcome::default(),
             last_commitment: None,
+            prev_attack_player: None,
             ep_reward_components: RewardComponents::default(),
             spawn_steps: 0,
             map_name: String::new(),
@@ -963,6 +967,7 @@ impl EnvWorker {
         self.action_churn_tracker.reset();
         self.boat_tracker.reset();
         self.combat_tracker.reset();
+        self.prev_attack_player = None;
         self.ep_reward_components = RewardComponents::default();
         self.ep_len = 0;
         self.ep_wasted = 0;
@@ -1113,6 +1118,7 @@ impl EnvWorker {
         self.combat_tracker.reset();
         self.prev_action = ActionOutcome::default();
         self.last_commitment = None;
+        self.prev_attack_player = None;
         self.ep_reward_components = RewardComponents::default();
         self.ep_len = 0;
         self.ep_wasted = 0;
@@ -1677,6 +1683,27 @@ impl EnvWorker {
             v10_combat_action_bonus(choice.action, has_action_target, self.reward_config);
         if components.combat_action != 0.0 {
             reward += components.combat_action;
+        }
+        // Commit bonus: same player target across successive emitted attacks.
+        let attack_player = if choice.action == A_ATTACK && emitted_ok {
+            match chosen_action.target {
+                Some(ActionTarget::Player(id)) => Some(id),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        components.attack_commit = v10_attack_commit_bonus(
+            choice.action,
+            attack_player,
+            self.prev_attack_player,
+            self.reward_config,
+        );
+        if components.attack_commit != 0.0 {
+            reward += components.attack_commit;
+        }
+        if let Some(pid) = attack_player {
+            self.prev_attack_player = Some(pid);
         }
 
         reward -= W_WASTE * wasted as f64;
