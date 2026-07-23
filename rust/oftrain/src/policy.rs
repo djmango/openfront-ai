@@ -1,11 +1,11 @@
 //! Policy network: tch port of `rl/policy.py`.
 //!
-//! Grid channels (v3.2 no-static AE): frozen AE latent (32) + exact static
-//! structures (6) + ego (3) + defense_bonus (1) + transient (53) = `C_GRID`
-//! 95. Buildings bypass the AE. Encode lives in `ae.rs` /
-//! `batch::build_obs_with_ae`. Optional native /16 coarse stream arrives
-//! via `Obs::grid_coarse` when `--coarse-ckpt` is set; otherwise `foveate`
-//! falls back to 2x avg-pool of the fine grid.
+//! Grid channels (V11 / AE v3.2): frozen AE latent (32) + exact static
+//! structures (6) + ego (3) + defense_bonus (1) + transient (57) = `C_GRID`
+//! 99. Buildings bypass the AE. Transient includes ego-split attack fronts.
+//! Encode lives in `ae.rs` / `batch::build_obs_with_ae`. Optional native
+//! /16 coarse stream arrives via `Obs::grid_coarse` when `--coarse-ckpt`
+//! is set; otherwise `foveate` falls back to 2x avg-pool of the fine grid.
 //!
 //! `--foveate` (on by default in training configs that pass it): fixed
 //! `FOVEATE_SIZE` crop centered on own-tile mass. Off uses the legacy
@@ -20,14 +20,16 @@ pub const MAX_SLOTS: i64 = ofcore::feat::MAX_SLOTS as i64;
 
 pub const LATENT_C: i64 = 32;
 pub const N_STATIC: i64 = 6;
-pub const N_TRANSIENT: i64 = 53;
+pub const N_TRANSIENT: i64 = ofcore::feat::N_TRANSIENT as i64; // 57
 /// Own-ego channel index inside `grid` (first ego plane after latent+static).
 pub const EGO_OWN_CH: i64 = LATENT_C + N_STATIC;
-pub const C_GRID: i64 = LATENT_C + N_STATIC + 3 + 1 + N_TRANSIENT; // 95
-pub const C_GRID_FINE: i64 = C_GRID + 1; // 96
+pub const C_GRID: i64 = LATENT_C + N_STATIC + 3 + 1 + N_TRANSIENT; // 99
+pub const C_GRID_FINE: i64 = C_GRID + 1; // 100
 pub const N_LOCAL: i64 = 5;
 pub const LOCAL: i64 = 64;
-pub const P_FEAT: i64 = 21;
+pub const P_FEAT: i64 = ofcore::feat::P_FEAT as i64; // 28
+pub const U_FEAT: i64 = ofcore::feat::U_FEAT as i64;
+pub const MAX_UNITS: i64 = ofcore::feat::MAX_UNITS as i64;
 pub const N_SCALARS: i64 = 11;
 pub const N_BUILD: i64 = 7;
 pub const N_NUKE: i64 = 5;
@@ -40,20 +42,25 @@ pub const N_NUKE: i64 = 5;
 /// detail view) rather than most of the map.
 pub const FOVEATE_SIZE: i64 = 48;
 
-pub const HIDDEN: i64 = 512;
-pub const GC: i64 = 256;
-pub const PC: i64 = 128;
-pub const BLOCKS: i64 = 4;
+/// V11 capacity bump (~25–40M class with GC=384 / BLOCKS=6 / HIDDEN=768).
+pub const HIDDEN: i64 = 768;
+pub const GC: i64 = 384;
+pub const PC: i64 = 160;
+pub const UC: i64 = 128; // unit token dim
+pub const BLOCKS: i64 = 6;
 pub const LC: i64 = 64;
 pub const N_HEAD: i64 = 4;
 pub const TF_FF: i64 = 2 * PC;
 pub const TF_LAYERS: i64 = 2;
-/// V8.2 recurrent state width, independent of the existing 512-wide trunk.
-pub const RECURRENT_HIDDEN: i64 = 256;
+/// LSTM hidden/cell width (each). Packed actor state is `RECURRENT_STATE`.
+pub const RECURRENT_HIDDEN: i64 = 512;
+/// Packed LSTM state `[h | c]` carried through rollouts / BPTT.
+pub const RECURRENT_STATE: i64 = 2 * RECURRENT_HIDDEN;
 /// `ActionOutcome::as_floats` context width from actor commit 6468e46.
 pub const RECURRENT_CONTEXT_FLOATS: i64 = 14;
 pub const RECURRENT_CONTEXT_SCHEMA: &str = "action-outcome-v1";
 pub const RECURRENT_CONTEXT_EMBEDDED: i64 = 128;
+pub const RECURRENT_CELL: &str = "lstm";
 
 const CONTEXT_ACTION: i64 = 0;
 const CONTEXT_PLAYER: i64 = 1;
@@ -89,17 +96,14 @@ const NEEDS_TILE: &[&str] = &[
     "build",
     "launch_nuke",
     "spawn",
-    "upgrade_structure",
-    "move_warship",
-    "cancel_boat",
-    "delete_unit",
+    "move_warship", // destination tile; unit selected via pointer
 ];
-const REFINE_TILE: &[&str] = &[
-    "spawn",
-    "build",
+const REFINE_TILE: &[&str] = &["spawn", "build"];
+const NEEDS_UNIT: &[&str] = &[
     "upgrade_structure",
-    "cancel_boat",
     "delete_unit",
+    "cancel_boat",
+    "move_warship",
 ];
 const NEEDS_QUANTITY: &[&str] = &["attack", "expand", "boat", "donate_gold", "donate_troops"];
 
@@ -108,6 +112,9 @@ pub fn needs_player(action_name: &str) -> bool {
 }
 pub fn needs_tile(action_name: &str) -> bool {
     NEEDS_TILE.contains(&action_name)
+}
+pub fn needs_unit(action_name: &str) -> bool {
+    NEEDS_UNIT.contains(&action_name)
 }
 pub fn needs_quantity(action_name: &str) -> bool {
     NEEDS_QUANTITY.contains(&action_name)
@@ -142,6 +149,9 @@ pub struct Obs {
     pub grid_coarse: Option<Tensor>,
     pub players: Tensor,       // (B, MAX_SLOTS, P_FEAT) f32
     pub pmask: Tensor,         // (B, MAX_SLOTS) f32
+    pub units: Tensor,         // (B, MAX_UNITS, U_FEAT) f32
+    pub umask: Tensor,         // (B, MAX_UNITS) f32
+    pub legal_utarget: Tensor, // (B, N_ACTIONS, MAX_UNITS) f32
     pub local: Tensor,         // (B, N_LOCAL, LOCAL, LOCAL) f32
     pub scalars: Tensor,       // (B, N_SCALARS) f32
     pub legal_actions: Tensor, // (B, N_ACTIONS) f32
@@ -168,6 +178,9 @@ impl Obs {
             grid_coarse: self.grid_coarse.as_ref().map(|g| g.index_select(0, idx)),
             players: self.players.index_select(0, idx),
             pmask: self.pmask.index_select(0, idx),
+            units: self.units.index_select(0, idx),
+            umask: self.umask.index_select(0, idx),
+            legal_utarget: self.legal_utarget.index_select(0, idx),
             local: self.local.index_select(0, idx),
             scalars: self.scalars.index_select(0, idx),
             legal_actions: self.legal_actions.index_select(0, idx),
@@ -190,6 +203,7 @@ pub struct ChoiceBatch {
     pub action: Tensor,        // (B,) i64
     pub player_slot: Tensor,   // (B,) i64, -1 unused
     pub tile_region: Tensor,   // (B,) i64, -1 unused
+    pub unit_index: Tensor,    // (B,) i64, -1 unused
     pub build_type: Tensor,    // (B,) i64, -1 unused
     pub nuke_type: Tensor,     // (B,) i64, -1 unused
     pub quantity_frac: Tensor, // (B,) f32, -1.0 unused
@@ -201,6 +215,7 @@ impl ChoiceBatch {
             action: self.action.index_select(0, idx),
             player_slot: self.player_slot.index_select(0, idx),
             tile_region: self.tile_region.index_select(0, idx),
+            unit_index: self.unit_index.index_select(0, idx),
             build_type: self.build_type.index_select(0, idx),
             nuke_type: self.nuke_type.index_select(0, idx),
             quantity_frac: self.quantity_frac.index_select(0, idx),
@@ -568,12 +583,14 @@ struct TrunkOutput {
     gc_map: Tensor,
     gf_map: Tensor,
     p: Tensor,
+    u: Tensor, // unit tokens after projection (B, MAX_UNITS, UC)
     fov: Foveation,
 }
 
 struct ForwardOutput {
     act_logits: Tensor,
     player_logits: Tensor,
+    unit_logits: Tensor,
     tile_coarse: Tensor,
     tile_fine: Tensor,
     build: Tensor,
@@ -583,9 +600,9 @@ struct ForwardOutput {
     fov: Foveation,
 }
 
-/// Previous-action/result encoder and 256-wide GRUCell. Its contribution to
-/// the unchanged trunk passes through a zero-initialized residual projection,
-/// making a warm-started V8.1 policy initially output-bit-identical.
+/// Previous-action/result encoder + full LSTM (V11). State is packed as
+/// `[h | c]` with width `RECURRENT_STATE` so rollout/BPTT buffers stay a
+/// single tensor. Residual into the trunk starts at zero.
 struct RecurrentCore {
     action: nn::Embedding,
     player: nn::Embedding,
@@ -593,8 +610,8 @@ struct RecurrentCore {
     build: nn::Embedding,
     nuke: nn::Embedding,
     context: nn::Linear,
-    gru_input: nn::Linear,
-    gru_hidden: nn::Linear,
+    lstm_input: nn::Linear,
+    lstm_hidden: nn::Linear,
     residual: nn::Linear,
 }
 
@@ -611,16 +628,17 @@ impl RecurrentCore {
             RECURRENT_CONTEXT_EMBEDDED,
             Default::default(),
         );
-        let gru_input = nn::linear(
-            p / "gru_input",
+        // LSTM gates: input / forget / cell / output → 4 * H
+        let lstm_input = nn::linear(
+            p / "lstm_input",
             HIDDEN + RECURRENT_CONTEXT_EMBEDDED,
-            3 * RECURRENT_HIDDEN,
+            4 * RECURRENT_HIDDEN,
             Default::default(),
         );
-        let gru_hidden = nn::linear(
-            p / "gru_hidden",
+        let lstm_hidden = nn::linear(
+            p / "lstm_hidden",
             RECURRENT_HIDDEN,
-            3 * RECURRENT_HIDDEN,
+            4 * RECURRENT_HIDDEN,
             Default::default(),
         );
         let mut residual = nn::linear(p / "residual", RECURRENT_HIDDEN, HIDDEN, Default::default());
@@ -637,8 +655,8 @@ impl RecurrentCore {
             build,
             nuke,
             context,
-            gru_input,
-            gru_hidden,
+            lstm_input,
+            lstm_hidden,
             residual,
         }
     }
@@ -697,22 +715,27 @@ impl RecurrentCore {
         &self,
         trunk: &Tensor,
         context: &Tensor,
-        hidden_in: &Tensor,
+        state_in: &Tensor,
         reset_mask: &Tensor,
     ) -> (Tensor, Tensor) {
+        debug_assert_eq!(state_in.size()[1], RECURRENT_STATE);
         let keep: Tensor = 1.0 - reset_mask.to_kind(Kind::Float).view([-1, 1]);
-        let hidden = hidden_in * keep;
+        let state = state_in * &keep;
+        let h = state.narrow(1, 0, RECURRENT_HIDDEN);
+        let c = state.narrow(1, RECURRENT_HIDDEN, RECURRENT_HIDDEN);
         let encoded = self.encode_context(context);
-        let input = self.gru_input.forward(&Tensor::cat(&[trunk, &encoded], 1));
-        let recurrent = self.gru_hidden.forward(&hidden);
-        let input = input.chunk(3, 1);
-        let recurrent = recurrent.chunk(3, 1);
-        let reset = (&input[0] + &recurrent[0]).sigmoid();
-        let update = (&input[1] + &recurrent[1]).sigmoid();
-        let candidate = (&input[2] + reset * &recurrent[2]).tanh();
-        let hidden_out: Tensor = (1.0 - &update) * candidate + update * hidden;
-        let trunk_out = trunk + self.residual.forward(&hidden_out);
-        (trunk_out, hidden_out)
+        let gates = self.lstm_input.forward(&Tensor::cat(&[trunk, &encoded], 1))
+            + self.lstm_hidden.forward(&h);
+        let chunks = gates.chunk(4, 1);
+        let i = chunks[0].sigmoid();
+        let f = chunks[1].sigmoid();
+        let g = chunks[2].tanh();
+        let o = chunks[3].sigmoid();
+        let c_out = &f * &c + &i * &g;
+        let h_out = &o * c_out.tanh();
+        let state_out = Tensor::cat(&[&h_out, &c_out], 1);
+        let trunk_out = trunk + self.residual.forward(&h_out);
+        (trunk_out, state_out)
     }
 }
 
@@ -721,12 +744,14 @@ pub struct PolicyNet {
     grid_fine_net: GridTower,
     local_net: LocalNet,
     player_in: nn::Linear,
+    unit_in: nn::Linear,
     tf_layers: Vec<EncoderLayer>,
     trunk1: nn::Linear,
     trunk2: nn::Linear,
     recurrent: Option<RecurrentCore>,
     head_action: nn::Linear,
     head_player_q: nn::Linear,
+    head_unit_q: nn::Linear,
     head_tile_coarse: (nn::Conv2D, nn::Conv2D),
     head_tile_fine: (nn::Conv2D, nn::Conv2D),
     head_build: nn::Linear,
@@ -738,6 +763,7 @@ pub struct PolicyNet {
     // in every actor forward and every PPO sequence chunk.
     needs_player: Tensor,
     needs_tile: Tensor,
+    needs_unit: Tensor,
     needs_quantity: Tensor,
     refine_tile: Tensor,
     /// `--amp`: run the conv-heavy submodules (grid towers, local net,
@@ -778,12 +804,13 @@ impl PolicyNet {
             grid_fine_net: GridTower::new(&(vs / "grid_fine"), C_GRID_FINE, gc, blocks),
             local_net: LocalNet::new(&(vs / "local")),
             player_in: nn::linear(vs / "player_in", P_FEAT, PC, Default::default()),
+            unit_in: nn::linear(vs / "unit_in", U_FEAT, UC, Default::default()),
             tf_layers: (0..TF_LAYERS)
                 .map(|i| EncoderLayer::new(&(vs / "tf" / i), PC, TF_FF))
                 .collect(),
             trunk1: nn::linear(
                 vs / "trunk1",
-                2 * gc + PC + LC + N_SCALARS,
+                2 * gc + PC + UC + LC + N_SCALARS,
                 HIDDEN,
                 Default::default(),
             ),
@@ -791,6 +818,7 @@ impl PolicyNet {
             recurrent: recurrent.then(|| RecurrentCore::new(&(vs / "recurrent"))),
             head_action: nn::linear(vs / "head_action", HIDDEN, N_ACTIONS, Default::default()),
             head_player_q: nn::linear(vs / "head_player_q", HIDDEN, PC, Default::default()),
+            head_unit_q: nn::linear(vs / "head_unit_q", HIDDEN, UC, Default::default()),
             head_tile_coarse: (
                 conv1(&(vs / "htc1"), gc + HIDDEN, 256),
                 conv1(&(vs / "htc2"), 256, 1),
@@ -805,6 +833,7 @@ impl PolicyNet {
             head_value: nn::linear(vs / "head_value", HIDDEN, 1, Default::default()),
             needs_player: action_table(NEEDS_PLAYER, vs.device()),
             needs_tile: action_table(NEEDS_TILE, vs.device()),
+            needs_unit: action_table(NEEDS_UNIT, vs.device()),
             needs_quantity: action_table(NEEDS_QUANTITY, vs.device()),
             refine_tile: action_table(REFINE_TILE, vs.device()),
             amp,
@@ -1004,6 +1033,9 @@ impl PolicyNet {
             grid_coarse: Some(fov.grid_coarse),
             players: o.players.shallow_clone(),
             pmask: o.pmask.shallow_clone(),
+            units: o.units.shallow_clone(),
+            umask: o.umask.shallow_clone(),
+            legal_utarget: o.legal_utarget.shallow_clone(),
             local: o.local.shallow_clone(),
             scalars: o.scalars.shallow_clone(),
             legal_actions: o.legal_actions.shallow_clone(),
@@ -1049,8 +1081,16 @@ impl PolicyNet {
         let p_pool = (&p * &m).sum_dim_intlist(1i64, false, Kind::Float)
             / m.sum_dim_intlist(1i64, false, Kind::Float).clamp_min(1.0);
 
+        let u = self.unit_in.forward(&o.units); // (B, U, UC)
+        let um = o.umask.unsqueeze(-1);
+        let u_pool = (&u * &um).sum_dim_intlist(1i64, false, Kind::Float)
+            / um.sum_dim_intlist(1i64, false, Kind::Float).clamp_min(1.0);
+
         let l_pool = self.local_net.forward(&o.local, self.amp);
-        let cat = Tensor::cat(&[&gc_pool, &gf_pool, &p_pool, &l_pool, &o.scalars], -1);
+        let cat = Tensor::cat(
+            &[&gc_pool, &gf_pool, &p_pool, &u_pool, &l_pool, &o.scalars],
+            -1,
+        );
         let h = self.trunk1.forward(&cat).silu();
         let h = self.trunk2.forward(&h).silu();
         // Single chokepoint for the whole forward pass: every head (value,
@@ -1069,11 +1109,13 @@ impl PolicyNet {
         let gc_map = sanitize(&gc_map);
         let gf_map = sanitize(&gf_map);
         let p = sanitize(&p);
+        let u = sanitize(&u);
         TrunkOutput {
             h,
             gc_map,
             gf_map,
             p,
+            u,
             fov,
         }
     }
@@ -1113,11 +1155,14 @@ impl PolicyNet {
             gc_map,
             gf_map,
             p,
+            u,
             fov,
         } = trunk;
         let act_logits = self.head_action.forward(&h) + (&o.legal_actions - 1.0) * (-MASKED_NEG);
         let q = self.head_player_q.forward(&h); // (B, PC)
         let player_logits = q.unsqueeze(1).matmul(&p.transpose(-2, -1)).squeeze_dim(1); // (B, S)
+        let uq = self.head_unit_q.forward(&h); // (B, UC)
+        let unit_logits = uq.unsqueeze(1).matmul(&u.transpose(-2, -1)).squeeze_dim(1); // (B, U)
         let tile_coarse = Self::tile_head(&self.head_tile_coarse, &gc_map, &h, self.amp);
         let tile_fine = Self::tile_head(&self.head_tile_fine, &gf_map, &h, self.amp);
         let build = self.head_build.forward(&h) + (&o.legal_build - 1.0) * (-MASKED_NEG);
@@ -1133,6 +1178,7 @@ impl PolicyNet {
         ForwardOutput {
             act_logits,
             player_logits,
+            unit_logits,
             tile_coarse,
             tile_fine,
             build,
@@ -1329,15 +1375,16 @@ impl PolicyNet {
 
     /// Batched sampling (mirrors `Policy.act`). `greedy=true` takes the
     /// argmax of every head. Returns (action, player_slot, tile_region,
-    /// build_type, nuke_type, quantity_frac, logp, value); unused fields
-    /// per-sample are left at their sampled/garbage value - callers must
-    /// gate on the corresponding `needs_*`/`is_*` mask (see `vecenv`'s
-    /// choice extraction) exactly like Python's `act()` dict-building loop.
+    /// unit_index, build_type, nuke_type, quantity_frac, logp, value);
+    /// unused fields per-sample are left at their sampled/garbage value -
+    /// callers must gate on the corresponding `needs_*`/`is_*` mask.
+    #[allow(clippy::type_complexity)]
     pub fn act(
         &self,
         o: &Obs,
         greedy: bool,
     ) -> (
+        Tensor,
         Tensor,
         Tensor,
         Tensor,
@@ -1353,6 +1400,7 @@ impl PolicyNet {
 
     /// Actor-facing API matching commit 6468e46. Actor-owned state may reset
     /// rows externally; batched reset users call `act_with_state_masked`.
+    #[allow(clippy::type_complexity)]
     pub fn act_with_state(
         &self,
         o: &Obs,
@@ -1369,6 +1417,7 @@ impl PolicyNet {
             Tensor,
             Tensor,
             Tensor,
+            Tensor,
         ),
         Tensor,
     ) {
@@ -1376,7 +1425,8 @@ impl PolicyNet {
         self.act_with_state_masked(o, hidden_in, context, &reset, greedy)
     }
 
-    /// `reset_mask` is batched, with 1 resetting a row before the GRUCell.
+    /// `reset_mask` is batched, with 1 resetting a row before the LSTM step.
+    #[allow(clippy::type_complexity)]
     pub fn act_with_state_masked(
         &self,
         o: &Obs,
@@ -1394,6 +1444,7 @@ impl PolicyNet {
             Tensor,
             Tensor,
             Tensor,
+            Tensor,
         ),
         Tensor,
     ) {
@@ -1401,6 +1452,7 @@ impl PolicyNet {
         (self.act_from_forward(o, greedy, output), hidden_out)
     }
 
+    #[allow(clippy::type_complexity)]
     fn act_from_forward(
         &self,
         o: &Obs,
@@ -1415,10 +1467,12 @@ impl PolicyNet {
         Tensor,
         Tensor,
         Tensor,
+        Tensor,
     ) {
         let ForwardOutput {
             act_logits,
             player_logits: player_logits_raw,
+            unit_logits: unit_logits_raw,
             tile_coarse,
             tile_fine,
             build,
@@ -1439,6 +1493,21 @@ impl PolicyNet {
             .squeeze_dim(1);
         let player_logits = &player_logits_raw + (&pmask - 1.0) * (-MASKED_NEG);
         let (player, player_lp) = categorical_sample(&player_logits, greedy);
+
+        let umask = o
+            .legal_utarget
+            .gather(
+                1,
+                &a.view([-1, 1, 1]).expand([-1, 1, MAX_UNITS as i64], false),
+                false,
+            )
+            .squeeze_dim(1);
+        // Fall back to umask when no action-specific unit legality (keeps
+        // sampling defined even if legal_utarget row is all-zero).
+        let unit_mask = umask.where_self(&umask.gt(0.0).any_dim(1, true), &o.umask);
+        let unit_logits = &unit_logits_raw + (&unit_mask - 1.0) * (-MASKED_NEG);
+        let (unit, unit_lp) = categorical_sample(&unit_logits, greedy);
+
         let (build_s, build_lp) = categorical_sample(&build, greedy);
         let (nuke_s, nuke_lp) = categorical_sample(&nuke, greedy);
 
@@ -1453,6 +1522,7 @@ impl PolicyNet {
 
         let needs_p = self.needs_player.index_select(0, &a);
         let needs_t = self.needs_tile.index_select(0, &a);
+        let needs_u = self.needs_unit.index_select(0, &a);
         let needs_q = self.needs_quantity.index_select(0, &a);
         let is_build = a
             .eq(ACTIONS.iter().position(|&x| x == "build").unwrap() as i64)
@@ -1462,6 +1532,7 @@ impl PolicyNet {
             .to_kind(Kind::Float);
 
         logp = logp + &needs_p * &player_lp;
+        logp = logp + &needs_u * &unit_lp;
 
         let (_cgh, cgw) = Self::coarse_dims(&fov.grid_coarse);
         let coarse_logits = self.coarse_logits_for_action(
@@ -1489,10 +1560,11 @@ impl PolicyNet {
         logp = logp + &is_nuke * &nuke_lp;
         logp = logp + &needs_q * &q_lp;
 
-        (a, player, tile_region, build_s, nuke_s, q, logp, value)
+        (a, player, tile_region, unit, build_s, nuke_s, q, logp, value)
     }
 
     /// Greedy/stochastic act plus masked action probabilities for debug overlays.
+    #[allow(clippy::type_complexity)]
     pub fn act_with_debug(
         &self,
         o: &Obs,
@@ -1507,15 +1579,28 @@ impl PolicyNet {
         Tensor,
         Tensor,
         Tensor,
+        Tensor,
     ) {
         let output = self.forward(o);
         let action_probs = sanitize_logits(&output.act_logits).softmax(-1, Kind::Float);
-        let (a, player, tile, build, nuke, q, logp, value) =
+        let (a, player, tile, unit, build, nuke, q, logp, value) =
             self.act_from_forward(o, greedy, output);
-        (a, player, tile, build, nuke, q, logp, value, action_probs)
+        (
+            a,
+            player,
+            tile,
+            unit,
+            build,
+            nuke,
+            q,
+            logp,
+            value,
+            action_probs,
+        )
     }
 
     /// Recurrent sibling of [`Self::act_with_debug`] for MODEL-overlay watch clips.
+    #[allow(clippy::type_complexity)]
     pub fn act_with_state_debug(
         &self,
         o: &Obs,
@@ -1533,26 +1618,40 @@ impl PolicyNet {
             Tensor,
             Tensor,
             Tensor,
+            Tensor,
         ),
         Tensor,
     ) {
         let reset = Tensor::zeros([hidden_in.size()[0]], (Kind::Float, hidden_in.device()));
         let (output, hidden_out) = self.forward_recurrent(o, hidden_in, context, &reset);
         let action_probs = sanitize_logits(&output.act_logits).softmax(-1, Kind::Float);
-        let (a, player, tile, build, nuke, q, logp, value) =
+        let (a, player, tile, unit, build, nuke, q, logp, value) =
             self.act_from_forward(o, greedy, output);
         (
-            (a, player, tile, build, nuke, q, logp, value, action_probs),
+            (
+                a,
+                player,
+                tile,
+                unit,
+                build,
+                nuke,
+                q,
+                logp,
+                value,
+                action_probs,
+            ),
             hidden_out,
         )
     }
 
     #[cfg(test)]
+    #[allow(clippy::type_complexity)]
     fn act_recomputing_foveation_reference(
         &self,
         o: &Obs,
         greedy: bool,
     ) -> (
+        Tensor,
         Tensor,
         Tensor,
         Tensor,
@@ -1596,10 +1695,11 @@ impl PolicyNet {
     ///
     /// `o`, `c`, `context`, and `reset_mask` are flattened time-major as
     /// `[steps * envs, ...]`; `hidden_in` is the detached actor state at the
-    /// chunk boundary `[envs, RECURRENT_HIDDEN]`. The observation trunk runs
-    /// once over the full flattened chunk. Only the GRU transition remains
-    /// sequential, after which every policy/value head runs once in a fused
-    /// batch. Returned policy tensors preserve the same time-major order.
+    /// chunk boundary `[envs, RECURRENT_STATE]` (packed LSTM `[h|c]`). The
+    /// observation trunk runs once over the full flattened chunk. Only the
+    /// LSTM transition remains sequential, after which every policy/value
+    /// head runs once in a fused batch. Returned policy tensors preserve the
+    /// same time-major order.
     pub fn evaluate_sequence_fused(
         &self,
         o: &Obs,
@@ -1620,7 +1720,7 @@ impl PolicyNet {
             "recurrent sequence batch is not time-major rectangular"
         );
         let envs = total / steps;
-        assert_eq!(hidden_in.size(), [envs, RECURRENT_HIDDEN]);
+        assert_eq!(hidden_in.size(), [envs, RECURRENT_STATE]);
         assert_eq!(context.size(), [total, RECURRENT_CONTEXT_FLOATS]);
         assert_eq!(reset_mask.size(), [total]);
 
@@ -1657,6 +1757,7 @@ impl PolicyNet {
         let ForwardOutput {
             act_logits,
             player_logits: player_logits_raw,
+            unit_logits: unit_logits_raw,
             tile_coarse,
             tile_fine,
             build,
@@ -1684,6 +1785,23 @@ impl PolicyNet {
         let ps_c = c.player_slot.clamp(0, MAX_SLOTS as i64 - 1);
         logp = logp + &p_used * categorical_logp(&player_logits, &ps_c);
         ent = ent + &p_used * categorical_entropy(&player_logits);
+
+        let umask = o
+            .legal_utarget
+            .gather(
+                1,
+                &action_c
+                    .view([-1, 1, 1])
+                    .expand([-1, 1, MAX_UNITS as i64], false),
+                false,
+            )
+            .squeeze_dim(1);
+        let unit_mask = umask.where_self(&umask.gt(0.0).any_dim(1, true), &o.umask);
+        let unit_logits = &unit_logits_raw + (&unit_mask - 1.0) * (-MASKED_NEG);
+        let u_used = c.unit_index.ge(0).to_kind(Kind::Float);
+        let ui_c = c.unit_index.clamp(0, MAX_UNITS as i64 - 1);
+        logp = logp + &u_used * categorical_logp(&unit_logits, &ui_c);
+        ent = ent + &u_used * categorical_entropy(&unit_logits);
 
         let (cgh, cgw) = Self::coarse_dims(&fov.grid_coarse);
         let t_used = c.tile_region.ge(0).to_kind(Kind::Float);
@@ -1746,7 +1864,7 @@ impl PolicyNet {
 
     pub fn initial_hidden(&self, batch: i64) -> Tensor {
         Tensor::zeros(
-            [batch, RECURRENT_HIDDEN],
+            [batch, RECURRENT_STATE],
             (Kind::Float, self.refine_tile.device()),
         )
     }
@@ -2114,6 +2232,9 @@ mod tests {
             grid_coarse: None,
             players: Tensor::rand([b, ms, P_FEAT], opts),
             pmask: Tensor::ones([b, ms], opts),
+            units: Tensor::rand([b, MAX_UNITS, U_FEAT], opts),
+            umask: Tensor::ones([b, MAX_UNITS], opts),
+            legal_utarget: Tensor::ones([b, na, MAX_UNITS], opts),
             local: Tensor::rand([b, N_LOCAL, LOCAL, LOCAL], opts),
             scalars: Tensor::rand([b, N_SCALARS], opts),
             legal_actions: Tensor::ones([b, na], opts),
@@ -2184,8 +2305,8 @@ mod tests {
             "recurrent.context_build.weight",
             "recurrent.context_nuke.weight",
             "recurrent.context_projection.weight",
-            "recurrent.gru_input.weight",
-            "recurrent.gru_hidden.weight",
+            "recurrent.lstm_input.weight",
+            "recurrent.lstm_hidden.weight",
             "recurrent.residual.weight",
         ] {
             assert!(
@@ -2234,7 +2355,7 @@ mod tests {
         let vs = nn::VarStore::new(Device::Cpu);
         let policy = PolicyNet::new_with_recurrence(&vs.root(), false, false, 8, 1, true);
         let obs = synthetic_obs(Device::Cpu, 2, 5, 5);
-        let hidden = Tensor::randn([2, RECURRENT_HIDDEN], (Kind::Float, Device::Cpu));
+        let hidden = Tensor::randn([2, RECURRENT_STATE], (Kind::Float, Device::Cpu));
         let context_a = no_previous_context(2);
         let context_b = context_a.copy();
         for (column, value) in [
@@ -2251,7 +2372,7 @@ mod tests {
         let (_, out_b) = policy.value_with_state_masked(&obs, &hidden, &context_b, &reset_none);
         assert!((out_a.get(0) - out_b.get(0)).abs().max().double_value(&[]) > 0.0);
 
-        let zero_hidden = Tensor::zeros([2, RECURRENT_HIDDEN], (Kind::Float, Device::Cpu));
+        let zero_hidden = Tensor::zeros([2, RECURRENT_STATE], (Kind::Float, Device::Cpu));
         let (_, baseline) = policy.value_with_state(&obs, &zero_hidden, &no_previous_context(2));
         for (name, column, value) in [
             ("action", CONTEXT_ACTION, 2.0),
@@ -2296,14 +2417,15 @@ mod tests {
         let policy = PolicyNet::new_with_recurrence(&vs.root(), false, false, 8, 1, true);
         let obs = synthetic_obs(Device::Cpu, 2, 5, 5);
         let hidden = policy.initial_hidden(2);
-        assert_eq!(hidden.size(), [2, RECURRENT_HIDDEN]);
+        assert_eq!(hidden.size(), [2, RECURRENT_STATE]);
         let context = no_previous_context(2);
-        let ((action, player, tile, build, nuke, quantity, _, act_value), act_hidden) =
+        let ((action, player, tile, unit, build, nuke, quantity, _, act_value), act_hidden) =
             policy.act_with_state(&obs, &hidden, &context, true);
         let choice = ChoiceBatch {
             action,
             player_slot: player,
             tile_region: tile,
+            unit_index: unit,
             build_type: build,
             nuke_type: nuke,
             quantity_frac: quantity,
@@ -2317,7 +2439,7 @@ mod tests {
         let reset_second = Tensor::from_slice(&[0.0f32, 1.0]);
         let (_, masked_hidden) =
             policy.act_with_state_masked(&obs, &act_hidden, &context, &reset_second, true);
-        assert_eq!(masked_hidden.size(), [2, RECURRENT_HIDDEN]);
+        assert_eq!(masked_hidden.size(), [2, RECURRENT_STATE]);
     }
 
     #[test]
@@ -2352,12 +2474,13 @@ mod tests {
                 Tensor::from_slice(&[done[t - 1][0] as u8 as f32, done[t - 1][1] as u8 as f32])
             };
             hidden_in.push(actor_hidden.shallow_clone());
-            let ((action, player, tile, build, nuke, quantity, _, _), next) =
+            let ((action, player, tile, unit, build, nuke, quantity, _, _), next) =
                 policy.act_with_state_masked(&obs, &actor_hidden, &context, &reset, true);
             choices.push(ChoiceBatch {
                 action,
                 player_slot: player,
                 tile_region: tile,
+                unit_index: unit,
                 build_type: build,
                 nuke_type: nuke,
                 quantity_frac: quantity,
@@ -2414,6 +2537,7 @@ mod tests {
             action: Tensor::from_slice(&[0i64, 1, 2, 3, 4, 5]),
             player_slot: Tensor::zeros([steps * envs], (Kind::Int64, Device::Cpu)),
             tile_region: Tensor::zeros([steps * envs], (Kind::Int64, Device::Cpu)),
+            unit_index: Tensor::full([steps * envs], -1, (Kind::Int64, Device::Cpu)),
             build_type: Tensor::zeros([steps * envs], (Kind::Int64, Device::Cpu)),
             nuke_type: Tensor::zeros([steps * envs], (Kind::Int64, Device::Cpu)),
             quantity_frac: Tensor::full([steps * envs], 0.4, (Kind::Float, Device::Cpu)),
@@ -2432,7 +2556,7 @@ mod tests {
         // Reset env 0 before t=1 and env 1 before t=2: both are inside this
         // BPTT chunk, rather than only at its detached initial boundary.
         let reset = Tensor::from_slice(&[0.0f32, 0.0, 1.0, 0.0, 0.0, 1.0]);
-        let initial_hidden = Tensor::randn([envs, RECURRENT_HIDDEN], (Kind::Float, Device::Cpu));
+        let initial_hidden = Tensor::randn([envs, RECURRENT_STATE], (Kind::Float, Device::Cpu));
 
         let mut hidden = initial_hidden.shallow_clone();
         let mut reference_parts: [Vec<Tensor>; 4] = Default::default();
@@ -2503,19 +2627,19 @@ mod tests {
     }
 
     #[test]
-    fn gradients_reach_gru_after_zero_residual_starts_learning() {
+    fn gradients_reach_lstm_after_zero_residual_starts_learning() {
         tch::manual_seed(303);
         let vs = nn::VarStore::new(Device::Cpu);
         let mut policy = PolicyNet::new_with_recurrence(&vs.root(), false, false, 8, 1, true);
         let obs = synthetic_obs(Device::Cpu, 2, 5, 5);
-        let hidden = Tensor::zeros([2, RECURRENT_HIDDEN], (Kind::Float, Device::Cpu));
+        let hidden = Tensor::zeros([2, RECURRENT_STATE], (Kind::Float, Device::Cpu));
         let context = no_previous_context(2);
         let (value, _) = policy.value_with_state(&obs, &hidden, &context);
         value.sum(Kind::Float).backward();
         let recurrent = policy.recurrent.as_mut().unwrap();
         assert!(recurrent.residual.ws.grad().abs().max().double_value(&[]) > 0.0);
         assert_eq!(
-            recurrent.gru_input.ws.grad().abs().max().double_value(&[]),
+            recurrent.lstm_input.ws.grad().abs().max().double_value(&[]),
             0.0
         );
         tch::no_grad(|| {
@@ -2534,7 +2658,7 @@ mod tests {
                 .recurrent
                 .as_ref()
                 .unwrap()
-                .gru_input
+                .lstm_input
                 .ws
                 .grad()
                 .abs()
@@ -2549,7 +2673,7 @@ mod tests {
     /// summed loss stay finite. Shared by the amp/foveate/model-size
     /// tests below so each only has to say what's different about it.
     fn check_policy_finite(policy: &PolicyNet, o: &Obs) {
-        let (a, player, tile, build, nuke, qty, logp, value) =
+        let (a, player, tile, unit, build, nuke, qty, logp, value) =
             tch::no_grad(|| policy.act(o, false));
         for (name, t) in [
             ("act.logp", &logp),
@@ -2563,6 +2687,7 @@ mod tests {
             action: a,
             player_slot: player,
             tile_region: tile,
+            unit_index: unit,
             build_type: build,
             nuke_type: nuke,
             quantity_frac: qty,
@@ -2591,12 +2716,13 @@ mod tests {
         let vs = nn::VarStore::new(Device::Cpu);
         let policy = PolicyNet::new(&vs.root(), false, false, GC, BLOCKS);
         let o = synthetic_obs(Device::Cpu, 2, 6, 6);
-        let (a, player, tile, build, nuke, qty, _logp, _value) =
+        let (a, player, tile, unit, build, nuke, qty, _logp, _value) =
             tch::no_grad(|| policy.act(&o, false));
         let choice = ChoiceBatch {
             action: a,
             player_slot: player,
             tile_region: tile,
+            unit_index: unit,
             build_type: build,
             nuke_type: nuke,
             quantity_frac: qty,
@@ -2841,6 +2967,7 @@ mod tests {
                 3 * GW_MAX + 5,
                 (FOVEATE_SIZE + 3) * GW_MAX + FOVEATE_SIZE + 7,
             ]),
+            unit_index: Tensor::from_slice(&[-1i64, -1]),
             build_type: Tensor::from_slice(&[-1i64, -1]),
             nuke_type: Tensor::from_slice(&[-1i64, -1]),
             quantity_frac: Tensor::from_slice(&[-1.0f32, -1.0]),
@@ -2868,6 +2995,7 @@ mod tests {
                 (FOVEATE_SIZE + 2) * GW_MAX + FOVEATE_SIZE + 4,
             ])
             .to_device(device),
+            unit_index: Tensor::from_slice(&[-1i64, -1]).to_device(device),
             build_type: Tensor::from_slice(&[-1i64, -1]).to_device(device),
             nuke_type: Tensor::from_slice(&[-1i64, -1]).to_device(device),
             quantity_frac: Tensor::from_slice(&[-1.0f32, -1.0]).to_device(device),
@@ -2961,11 +3089,12 @@ mod tests {
                 ("action", &optimized_act.0, &reference_act.0),
                 ("player", &optimized_act.1, &reference_act.1),
                 ("tile", &optimized_act.2, &reference_act.2),
-                ("build", &optimized_act.3, &reference_act.3),
-                ("nuke", &optimized_act.4, &reference_act.4),
-                ("quantity", &optimized_act.5, &reference_act.5),
-                ("logp", &optimized_act.6, &reference_act.6),
-                ("value", &optimized_act.7, &reference_act.7),
+                ("unit", &optimized_act.3, &reference_act.3),
+                ("build", &optimized_act.4, &reference_act.4),
+                ("nuke", &optimized_act.5, &reference_act.5),
+                ("quantity", &optimized_act.6, &reference_act.6),
+                ("logp", &optimized_act.7, &reference_act.7),
+                ("value", &optimized_act.8, &reference_act.8),
             ] {
                 assert_same_tensor(optimized, reference, &format!("{obs_name}.act.{field}"));
             }
