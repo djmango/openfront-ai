@@ -4,19 +4,21 @@ Kept in sync with rust/ofcore feat layout.
 """
 
 MAX_SLOTS = 128
+MAX_UNITS = 32
 REGION = 8
 LATENT_C = 32
 
 # Exact static + ego + defense-bonus + transient (must match oftrain C_GRID).
 N_STATIC = 6
-N_TRANSIENT = 53
+N_TRANSIENT = 57
 N_DEFENSE_BONUS = 1
-C_GRID = LATENT_C + N_STATIC + 3 + N_DEFENSE_BONUS + N_TRANSIENT  # 95
+C_GRID = LATENT_C + N_STATIC + 3 + N_DEFENSE_BONUS + N_TRANSIENT  # 99
 C_GRID_FINE = C_GRID + 1
 
 LOCAL = 64
 N_LOCAL = 5
-P_FEAT = 21
+P_FEAT = 28
+U_FEAT = 12
 N_SCALARS = 11
 
 ACTIONS = [
@@ -69,10 +71,12 @@ __all__ = [
     "LATENT_C",
     "LOCAL",
     "MAX_SLOTS",
+    "MAX_UNITS",
     "N_ACTIONS",
     "N_LOCAL",
     "N_SCALARS",
     "NUKE_TYPES",
     "P_FEAT",
     "REGION",
+    "U_FEAT",
 ]

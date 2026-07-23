@@ -321,7 +321,7 @@ struct Args {
 
     /// Frozen fine AE encoder safetensors (from `ofae` / HF
     /// `ae_v32_nostatic_d8c32.encoder.safetensors`). Required for
-    /// production obs parity (`C_GRID=95`, static structures bypass AE).
+    /// production obs parity (`C_GRID=99`, static structures bypass AE).
     #[arg(long, default_value = "weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors")]
     ckpt: String,
 
@@ -384,8 +384,8 @@ struct Args {
     #[arg(long, default_value_t = false, requires = "persistent_actors")]
     recurrent_policy: bool,
 
-    /// Number of f32 values in each environment's recurrent hidden state.
-    #[arg(long, default_value_t = 256)]
+    /// LSTM hidden width (packed actor state is 2× this: h|c).
+    #[arg(long, default_value_t = 512)]
     recurrent_hidden_size: usize,
 
     /// Timesteps per truncated-BPTT chunk for recurrent PPO.
@@ -884,7 +884,7 @@ mod recurrent_flag_tests {
     fn recurrent_policy_is_opt_in_and_requires_persistent_actors() {
         let defaults = Args::try_parse_from(["oftrain"]).unwrap();
         assert!(!defaults.recurrent_policy);
-        assert_eq!(defaults.recurrent_hidden_size, 256);
+        assert_eq!(defaults.recurrent_hidden_size, 512);
         assert_eq!(defaults.bptt_chunk_len, 32);
         assert_eq!(defaults.rollout_len, 64);
         assert!((defaults.target_gpu_util - 0.85).abs() < 1e-9);

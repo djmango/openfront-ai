@@ -28,6 +28,12 @@
 
 <nav class="toc">
   <a href="#now">Now</a> ·
+  <a href="#v11-plan">Jul 23 V11 plan</a> ·
+  <a href="#v11-learnings">audit learnings</a> ·
+  <a href="#v11-scope">V11 scope</a> ·
+  <a href="#v11-bc">BC unfreeze</a> ·
+  <a href="#v11-build">build order</a> ·
+  <a href="#v10-killed">Jul 23 V10 killed</a> ·
   <a href="#v10-easy-ramp">Jul 18–19 V10</a> ·
   <a href="#v10-learnings">V10 learnings</a> ·
   <a href="#v10-curriculum-100">100-stage curve</a> ·
@@ -74,25 +80,261 @@
 </nav>
 
 <div class="now" id="now">
-  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 19th, 2026</h2>
-  <p><b><code>ppo_v10</code> live and climbing</b>
-  (<a href="#v10-easy-ramp">writeup</a>).
-  Overnight after the 100-stage Easy ramp deploy: stages <b>0 → 27</b>
-  (Onion Easy, 24 bots / 4 nations) by update ~8470 / ~29.6M steps.
-  Window WR ~70% vs a still-<b>95%</b> gate; conversion ~98%.
-  Significant step up vs the pre-ramp dense lobby stall (~30–50% WR on
-  Onion/Pangaea).</p>
-  <p><b>HF sync healthy</b> —
-  <code>ofhf sync-loop</code> →
-  <a href="https://huggingface.co/djmango/openfront-rl/tree/main/ppo_v10">djmango/openfront-rl/ppo_v10</a>
-  (~10&nbsp;min cadence; latest.state tracks stage/update within one interval).
-  Showcase:
-  <a href="https://openfrontai.skg.gg/">openfrontai.skg.gg</a>
-  (pointed at <code>ppo_v10</code>; regenerate clips after image rebuild).</p>
-  <p class="d" style="margin:.75rem 0 0">V9 sparse-win remains killed
-  (<a href="#v9-killed">postmortem</a>). V10 keeps dense V8.6-like reward +
-  a josh-freeman-style long Easy mastery ladder.</p>
+  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 23rd, 2026</h2>
+  <p><b>V11 is the next training generation.</b>
+  <code>ppo_v10</code> is <a href="#v10-killed">killed</a> (final: update 12581 /
+  stage 25 / ~44.5M steps, window WR ~30%). The next run is
+  <code>ppo_v11</code> — not another reward tweak on the V10 shape.
+  Plan: <a href="#v11-plan">below</a>.</p>
+  <p><b>AE v3.2 no-static</b> is merging into the stack
+  (<code>ae_v32_nostatic_d8c32</code> / <code>d16c32</code>,
+  <code>C_GRID=95</code>): structures leave the latent and ride exact
+  static bypass planes. Training locally; V11 points at these encoders,
+  not <code>ae_v31_*</code>.</p>
+  <p class="d" style="margin:.75rem 0 0">V10 stays on HF as an archive
+  (<a href="https://huggingface.co/djmango/openfront-rl/tree/main/ppo_v10">ppo_v10/</a>).
+  Showcase / clips stay pointed there until a V11 policy exists.</p>
 </div>
+
+<h2 class="date" id="v11-plan">Jul 23, 2026 - V11: obs + capacity + LSTM + BC restart</h2>
+<p class="session">V10 proved the Easy mastery ladder and dense anti-spiral
+reward can climb. It also exposed that we have been squeezing a ~12M GRU
+policy that is still structurally blind on diplomacy geometry, attack
+ownership, and unit identity. V11 ships the missing DESIGN.md entity stack,
+replaces the GRU with a full LSTM, grows capacity, and unfreezes behavior
+cloning on the new schema — one from-scratch generation, not a mid-run
+migrate.</p>
+
+<h3 id="v10-killed">V10 killed (Jul 23)</h3>
+<ul>
+  <li>Pod <code>qvrke1ylmfse4y</code> (<code>ppo-v8-4xA40-fresh</code>, 4×A40):
+    oftrain stopped, final <code>ofhf push</code>, pod terminated. Fleet empty.</li>
+  <li>Final checkpoint: update <b>12581</b>, stage <b>25</b>
+    (Onion Easy ~22–26 bots / 3 nations band), ~<b>44.5M</b> env steps,
+    window WR ~<b>0.30</b> vs 95% gate, conversion ~0.63, lr 2.8e-5.</li>
+  <li>Peak earlier in the ramp was stage ~27 overnight Jul 18–19; later
+    grind oscillated in the mid-20s under the 95% Onion-nation gates.
+    Curriculum worked; the bottleneck moved to representation / memory /
+    capacity, not “needs another Φ term.”</li>
+  <li>Weights remain on
+    <a href="https://huggingface.co/djmango/openfront-rl/tree/main/ppo_v10">HF ppo_v10/</a>
+    (<code>latest</code> + <code>policy_update12580</code>). No V10→V11
+    warm start — shapes and recurrence both change.</li>
+</ul>
+
+<h3 id="v11-learnings">What we learned (audit → V11)</h3>
+<p>Pulled from V8–V10 training, the
+<a href="#bc-verdict">BC verdict</a> / <a href="#bc-moratorium">moratorium</a>,
+the AlphaStar / OA5 contrast, and a pass over live obs vs
+<a href="../DESIGN.md">DESIGN.md</a>.</p>
+
+<h4>Observation is strong spatially, blind where humans look</h4>
+<ul>
+  <li><b>Neighbor pack was promised and never shipped.</b>
+    DESIGN player tokens include shared-border length with self, terrain
+    mix along that border, and a rich relation continuum. Live
+    <code>P_FEAT=21</code> has troops/gold/tiles/ally/embargo/attack
+    aggregates/income/doomsday — but <i>no</i> border-length or
+    border-terrain features. Relation scores that matter for diplo sit
+    mostly in the reward (<code>v10-diplo-panic</code> etc.), not in the
+    policy’s player stream. The agent cannot see “who am I touching and
+    on what terrain?”</li>
+  <li><b>Attack fronts are anonymous.</b> <code>TR_ATTACK_SRC</code> /
+    <code>TR_ATTACK_RETREAT</code> rasterize every active attack with
+    intensity, but they are shared planes — not ego-split
+    (own / ally / enemy) the way every other unit-bearing transient is.
+    Land invasions between two other bots look like fog blobs.</li>
+  <li><b>No unit instances.</b> DESIGN head 4 is a pointer over own-unit
+    tokens (upgrade / delete / cancel_boat / move_warship). Live code
+    still does nearest-in-region snap
+    (<code>translate::nearest_own_unit</code>). The policy cannot name a
+    specific city or warship; it points at a tile region and hopes.</li>
+  <li><b>Diplomacy continuum is reward-only.</b> Soft relation / panic /
+    targeting pressure shaped the return; the obs mostly exposes binary
+    ally/embargo/traitor bits. AlphaStar kept strategy targets in the
+    <i>observation and SL prior</i>; we kept stacking mid-run Φ.</li>
+</ul>
+
+<h4>Capacity and memory are below the systems we cite</h4>
+<ul>
+  <li>Policy is ~<b>11–12M</b> params (GC=256, BLOCKS=4, HIDDEN=512) plus a
+    <b>256-wide GRU</b> (<code>RECURRENT_HIDDEN</code>). AlphaStar / OA5
+    sat in the tens–hundreds of millions with deep LSTMs. The Jul 10
+    small-vs-full A/B already hinted full policy learns more smoothly;
+    V10 did not re-test size under the new curriculum.</li>
+  <li><b>The GRU is not carrying the load.</b> We added recurrence in V8.x
+    hoping for commitment memory (attack/retreat flip-flops, massing
+    neighbors). In practice the GRU has not unlocked those behaviors;
+    boat/tempo/closeout still had to be reward-engineered. V11 replaces
+    it with a <b>full LSTM</b> (cell + hidden), wider, with BPTT already
+    wired (<code>--bptt-chunk-len</code>). Hypothesis: gated cell state
+    over multi-minute games matters more than another Φ coefficient.</li>
+</ul>
+
+<h4>Reward / curriculum are ahead of representation</h4>
+<ul>
+  <li>V9 sparse-win cleared bots-only then died at first nations — scaffolding
+    kind mattered more than “sparse vs dense” slogans
+    (<a href="#v9-alphastar-oa5">AlphaStar / OA5</a>).</li>
+  <li>V10’s 100-stage Easy ramp + ungate finish rewards + timeout stick
+    were the right curriculum/reward moves: conversion → ~98%, climb to
+    mid-20s. Further Φ stacking is low priority.</li>
+  <li><b>Next wins are obs + architecture + imitation bootstrap</b>, then
+    reuse V10’s ladder (possibly remapped) under the new schema.</li>
+</ul>
+
+<h4>Past BC failed for reasons V11 can avoid</h4>
+<p>Honest read from <a href="#bc-verdict">bc_v1…bc_v6</a> (not “BC never
+works”):</p>
+<ul>
+  <li><b>Ceiling was low on a blind obs.</b> Holdout action acc saturated
+    ~0.60–0.70; temporal BC was worse. Human archive ~300 games, noop/UI
+    default heavy (quantity bucket 25%). Imitating clicks without neighbor
+    geometry / unit identity / ego attack fronts teaches “looks human,”
+    not “wins.”</li>
+  <li><b>Warm start helped early PPO once</b> (<code>ppo_v5</code> off
+    <code>bc_v4</code>), then stopped being the bottleneck — later
+    plateaus were reward/curriculum/obs. The Jul 8 moratorium was correct:
+    we never isolated BC from simultaneous recipe changes, and v7 broke
+    the weights anyway.</li>
+  <li><b>Infra ate the signal</b> (z-cache ~2× not 10×, OOM, EDQUOT). V11
+    BC must ride the Rust AE path / compact caches, not resurrect the
+    Python mmap pile.</li>
+  <li><b>Unfreeze condition for V11:</b> BC only on the <i>new</i> V11
+    schema (neighbor pack + ego fronts + unit tokens + LSTM policy),
+    feedforward first, outcome-conditioned winner bucket, then a short
+    A/B: PPO <code>--init bc_v11</code> vs scratch on identical Easy/2
+    seeds. If warm start does not clear stages 0–3 faster, keep BC as an
+    eval prior and do not block the PPO track.</li>
+</ul>
+
+<h3 id="v11-scope">V11 scope (all of it)</h3>
+<table>
+  <tr><th>#</th><th>Change</th><th>Intent</th><th>Shape impact</th></tr>
+  <tr>
+    <td>1</td>
+    <td><b>Neighbor pack → <code>P_FEAT</code></b></td>
+    <td>Per alive player vs ego: shared-border length (log), terrain mix
+      along that border (land/water/defense fractions), richer relation
+      vector (allied / neutral / targeting-me / traitor / embargo bits
+      already partly present — fill the DESIGN gaps). Optionally top-K
+      neighbors by border length if full <code>MAX_SLOTS</code> is too
+      wide for attention.</td>
+    <td><code>P_FEAT</code> 21 → ~28–32</td>
+  </tr>
+  <tr>
+    <td>2</td>
+    <td><b>Ego-split attack fronts</b></td>
+    <td>Replace anonymous <code>TR_ATTACK_SRC/RETREAT</code> with
+      own/ally/enemy triplets (same <code>clut</code> classing as other
+      transients). Intensity stays log-troops; retreat overlays stay.</td>
+    <td><code>N_TRANSIENT</code> 53 → 57; <code>C_GRID</code> +4</td>
+  </tr>
+  <tr>
+    <td>3</td>
+    <td><b>Small unit-token stream + pointer head</b></td>
+    <td>Top-K own (+ visible enemy optional) unit tokens: type, level,
+      health, cooldown, under-construction, region xy. New pointer head
+      over tokens for upgrade / delete / cancel_boat / move_warship.
+      Retire nearest-in-region snap for those actions (keep region snap
+      for tile-target actions).</td>
+    <td>new token set + head; action translate changes</td>
+  </tr>
+  <tr>
+    <td>4</td>
+    <td><b>Bigger model</b></td>
+    <td>Raise defaults toward ~25–40M: e.g. GC 256→384 or 512, BLOCKS
+      4→6, HIDDEN 512→768, player/unit token width up. Keep
+      <code>--gc/--blocks</code> overrides for A/B. Prefer capacity over
+      another throughput chase on 4×A40.</td>
+    <td>checkpoint break; throughput ↓</td>
+  </tr>
+  <tr>
+    <td>5</td>
+    <td><b>Full LSTM (replace GRU)</b></td>
+    <td><code>RecurrentCore</code>: LSTM cell with (h, c), width
+      ≥512 (start 512, A/B 768). Context still encodes prev action/result.
+      Rollout buffer carries both states through episode resets.
+      BPTT chunking stays. Kill GRU path — no dual-mode.</td>
+    <td>recurrent state 256 → 2×H_lstm; ckpt break</td>
+  </tr>
+  <tr>
+    <td>6</td>
+    <td><b>Behavior cloning restart</b></td>
+    <td><code>bc_v11</code> on V11 obs/policy (Rust trainer preferred;
+      recover Python <code>rl/bc.py</code> only if needed). Outcome-
+      conditioned feedforward first; no temporal transformer until
+      LSTM PPO shows memory value. Human archive re-featurized under
+      AE v3.2 + V11 feat. Then the isolation A/B the moratorium asked
+      for.</td>
+    <td>new run prefix; lifts Jul 8 moratorium for V11 schema only</td>
+  </tr>
+</table>
+<p><b>Keep from V10:</b> dense <code>v10-anti-spiral</code>-style reward
+(profile bump to <code>v11-…</code> only if knobs change), 100-stage Easy
+mastery ladder (remap stage indices; do not restart the curriculum
+philosophy), foveation, compact/fp16 rollout, persistent actors,
+autoscale, HF sync-loop. <b>Drop:</b> mid-run Φ stacking as the default
+response to plateaus; GRU; nearest-unit snap for unit actions; AE v3.1
+encoders.</p>
+
+<h3 id="v11-ae">Encoder / schema baseline</h3>
+<ul>
+  <li>AE: <code>ae_v32_nostatic_d8c32</code> (fine) +
+    <code>ae_v32_nostatic_d16c32</code> (coarse). Static buildings are
+    exact 6-plane bypass; latent is owners+terrain(+fallout) only.
+    <code>C_GRID</code> starts at 95 before ego-split attack expansion.</li>
+  <li>Schema id suggestion: <code>v11_lstm_entities</code> in sidecar /
+    checkpoint meta so resume refuses V10 weights loudly.</li>
+  <li>Webbot / ONNX export must track unit pointer + LSTM state; do not
+    ship V11 to showcase until both are wired.</li>
+</ul>
+
+<h3 id="v11-bc">BC unfreeze rules (so we do not repeat Jul 8)</h3>
+<ol>
+  <li>No BC until V11 featurization + policy forward are green on bot +
+    human holdout batches (shape tests, legal masks, pointer masks).</li>
+  <li>Train <code>bc_v11</code> feedforward on the new schema only;
+    downsample noops; mask unused heads; winner-bucket at deploy.</li>
+  <li>Success metric is <b>not</b> chasing 0.70→0.75 action acc. Success
+    is: short PPO A/B where warm start beats scratch to clear Easy
+    bots-only stages under identical seeds/config.</li>
+  <li>If A/B is flat, freeze <code>bc_v11</code> as a playable prior and
+    continue PPO from scratch — do not grind the archive for weeks.</li>
+  <li>Temporal / seq BC stays shelved until LSTM PPO demonstrably uses
+    memory (commitment metrics: attack flip rate, alliance hold time).</li>
+</ol>
+
+<h3 id="v11-build">Build order</h3>
+<ol>
+  <li><b>Feat:</b> neighbor pack + ego-split attack fronts in
+    <code>ofcore::feat</code> / batch encode; update webbot parity tests.</li>
+  <li><b>Units:</b> top-K unit token builder + legality masks; pointer
+    head in <code>policy.rs</code>; translate path for upgrade/delete/
+    warship/boat-cancel.</li>
+  <li><b>LSTM + size:</b> replace <code>RecurrentCore</code> GRU with
+    LSTM; bump GC/BLOCKS/HIDDEN/RECURRENT defaults; fix checkpoint
+    serialize for (h, c).</li>
+  <li><b>AE wire-up:</b> finish/export v3.2 weights; point
+    <code>pod_train_v11.sh</code> at them (do not leave v3.1 hardcodes).</li>
+  <li><b>BC:</b> Rust BC loop (or recovered Python) → <code>bc_v11</code>
+    → isolation A/B.</li>
+  <li><b>PPO launch:</b> <code>ppo_v11</code> on 4×A40, V10 curriculum +
+    reward, from BC init if A/B wins else scratch. Kill criteria pre-
+    registered: stage-0–3 wall-clock vs V10 baseline; attack flip rate;
+    unit-pointer usage share.</li>
+</ol>
+
+<h3 id="v11-non-goals">Non-goals for V11</h3>
+<ul>
+  <li>Another sparse-win parallel (V9 answered).</li>
+  <li>New boat/tempo/embargo Φ terms before the obs/LSTM stack lands.</li>
+  <li>Self-play league (still post-bot-curriculum).</li>
+  <li>Migrating <code>ppo_v10</code> weights into V11.</li>
+</ul>
+<p class="d">Implementation tracks this plan on branch work toward
+<code>scripts/pod_train_v11.sh</code> + schema bump; this entry is the
+contract.</p>
 
 <h2 class="date" id="v10-easy-ramp">Jul 18–19, 2026 - V10: Easy mastery ladder that actually climbs</h2>
 <p class="session">After V9 died on first nations and the dense 15-stage V10
@@ -921,15 +1163,18 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <code>ae_v3.pt</code> until the v3.1 winner is wired into <code>rl/obs.py</code>.</p>
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
-  <tr><td><code>ppo_v10</code></td><td><b>live</b> Jul 19 (4×A40)</td>
-    <td>Dense anti-spiral reward + <b>100-stage</b> Easy→Impossible curriculum
-    (<a href="#v10-easy-ramp">writeup</a>). Overnight after Easy/2 reset: stages
-    0→27 (Onion 24/4), update ~8470 / ~29.6M steps, conversion ~98%, still under
-    the 95% Onion-ramp gate. HF
+  <tr><td><code>ppo_v11</code></td><td><b>planned</b> Jul 23</td>
+    <td>Next generation: neighbor pack, ego-split attack fronts, unit tokens +
+    pointer, bigger model, full LSTM (replace GRU), BC restart on new schema.
+    AE v3.2 no-static. See <a href="#v11-plan">V11 plan</a>.</td></tr>
+  <tr><td><code>ppo_v10</code></td><td><b>killed</b> Jul 23 (4×A40)</td>
+    <td>Dense anti-spiral + <b>100-stage</b> Easy ramp
+    (<a href="#v10-easy-ramp">writeup</a>). Peak overnight Jul 18–19: stages
+    0→27. Final: update 12581 / stage 25 / ~44.5M steps, window WR ~0.30 vs
+    95% gate. Pod terminated; weights kept on HF
     <a href="https://huggingface.co/djmango/openfront-rl/tree/main/ppo_v10">ppo_v10/</a>.
-    PRs
-    <a href="https://github.com/djmango/openfront-ai/pull/47">#47</a>–
-    <a href="https://github.com/djmango/openfront-ai/pull/52">#52</a>.</td></tr>
+    Superseded by <a href="#v11-plan">V11</a>.
+    <a href="#v10-killed">kill note</a>.</td></tr>
   <tr><td><code>ppo_v9</code></td><td><b>killed</b> Jul 15 (sparse-win parallel)</td>
     <td>Terminal <code>+1/−1</code> only. Cleared bots-only stages 0–1 (peak window
     WR 0.975 @ u~498), then collapsed on stage 2 (30 bots + 2 nations) and never
@@ -3142,16 +3387,17 @@ from the raw cache IS that idea, done right).</p>
 
 <h3 id="next">Open threads</h3>
 <ul>
+  <li><b>V11 (active plan, Jul 23):</b> see <a href="#v11-plan">V11 plan</a> —
+    neighbor pack, ego-split fronts, unit tokens + pointer, bigger model,
+    full LSTM replacing GRU, BC unfreeze on the new schema. V10 killed.</li>
   <li><b>v5 wishlist (drafted Jul 6 night, from watching v4 launch day):</b>
     <ul>
-      <li><b>Memory.</b> The policy is purely reactive - one snapshot per decision, no
-        recurrence. It can't see trends (massing neighbors, receding attacks) or its own
-        commitments (attack/retreat flip-flopping in the overlays). Add an LSTM between trunk
-        and heads for PPO; hidden states ride the rollout buffer through resets.</li>
-      <li><b>BC temporal transformer, judged properly.</b> The <code>--seq</code> BCPolicy
-        exists but has only ever run at starvation throughput. With cache-bc feeding it, run
-        seq=8 vs feedforward at equal samples on full holdout; if seq wins, that's the
-        evidence that buys the PPO LSTM.</li>
+      <li><b>Memory.</b> <i>Superseded by V11:</i> V8.x shipped a 256 GRU; it did
+        not unlock commitment memory. V11 replaces it with a full LSTM (cell +
+        hidden), wider, BPTT already wired.</li>
+      <li><b>BC temporal transformer, judged properly.</b> <i>Still shelved under
+        V11 rules:</i> feedforward <code>bc_v11</code> first; seq BC only after
+        LSTM PPO shows memory value. See <a href="#v11-bc">BC unfreeze</a>.</li>
       <li><b>Reward MDP audit + asymmetric strength shaping.</b> v4 games show the shape:
         hyper-aggressive expansion, big holdings, then collapse (s2 seed 7: 103k tiles at
         t8001, dead by t10711). W_DELTA treats gains and losses symmetrically; weight losses
@@ -3171,11 +3417,10 @@ from the raw cache IS that idea, done right).</p>
   <li><b>Spawn supervision coverage:</b> only sidecars regenerated with
     <code>--bc --rebc</code> (formatVersion 2) carry spawn labels; old v1 sidecars still train
     everything else. Re-replay the archive on a pod to unlock BC spawn supervision everywhere.</li>
-  <li><b>BC warm start:</b> does initializing PPO from human imitation beat the 1v1 curriculum
-    bootstrap, or compound with it? <i>Formalized Jul 8 as the
-    <a href="#bc-moratorium">BC moratorium</a>'s unfreeze experiment: v6-shape A/B,
-    <code>--init v6_bc</code> vs from scratch, identical seeds/config. Until it runs and wins,
-    no new BC runs.</i></li>
+  <li><b>BC warm start:</b> Jul 8 moratorium unfreeze experiment was never run on
+    v6-shape. <i>Superseded Jul 23:</i> run the isolation A/B on
+    <b>V11 schema</b> (<code>bc_v11</code> vs scratch) per
+    <a href="#v11-bc">V11 BC rules</a> — not on obsolete v6 weights.</li>
   <li><b>Warm-start refreshes:</b> future same-architecture encoder updates on new data should
     resume from the current checkpoint (and checkpoint optimizer state, see billing-restart scar)
     instead of 40k fresh steps.</li>

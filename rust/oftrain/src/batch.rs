@@ -749,6 +749,9 @@ fn build_native_compact_mixed(
     let mut origin_x = Vec::with_capacity(items.len());
     let mut players = Vec::with_capacity(items.len());
     let mut pmask = Vec::with_capacity(items.len());
+    let mut units = Vec::with_capacity(items.len());
+    let mut umask = Vec::with_capacity(items.len());
+    let mut legal_utarget = Vec::with_capacity(items.len());
     let mut local = Vec::with_capacity(items.len());
     let mut scalars = Vec::with_capacity(items.len());
     let mut legal_actions = Vec::with_capacity(items.len());
@@ -786,6 +789,9 @@ fn build_native_compact_mixed(
         origin_x.push(meta.origin_x.narrow(0, row, 1));
         players.push(obs.players.narrow(0, row, 1));
         pmask.push(obs.pmask.narrow(0, row, 1));
+        units.push(obs.units.narrow(0, row, 1));
+        umask.push(obs.umask.narrow(0, row, 1));
+        legal_utarget.push(obs.legal_utarget.narrow(0, row, 1));
         local.push(obs.local.narrow(0, row, 1));
         scalars.push(obs.scalars.narrow(0, row, 1));
         legal_actions.push(obs.legal_actions.narrow(0, row, 1));
@@ -800,6 +806,9 @@ fn build_native_compact_mixed(
         grid_coarse: Some(cat_rows(&coarse)),
         players: cat_rows(&players),
         pmask: cat_rows(&pmask),
+        units: cat_rows(&units),
+        umask: cat_rows(&umask),
+        legal_utarget: cat_rows(&legal_utarget),
         local: cat_rows(&local),
         scalars: cat_rows(&scalars),
         legal_actions: cat_rows(&legal_actions),
@@ -1047,6 +1056,9 @@ fn build_obs_from_parts(
     let mut grid_valid = Vec::with_capacity(b * gh * gw);
     let mut players = Vec::with_capacity(b * feat::MAX_SLOTS * feat::P_FEAT);
     let mut pmask = Vec::with_capacity(b * feat::MAX_SLOTS);
+    let mut units = Vec::with_capacity(b * feat::MAX_UNITS * feat::U_FEAT);
+    let mut umask = Vec::with_capacity(b * feat::MAX_UNITS);
+    let mut legal_utarget = Vec::with_capacity(b * feat::N_ACTIONS * feat::MAX_UNITS);
     let mut local = Vec::with_capacity(b * 5 * policy::LOCAL as usize * policy::LOCAL as usize);
     let mut scalars = Vec::with_capacity(b * feat::N_SCALARS);
     let mut legal_actions = Vec::with_capacity(b * feat::N_ACTIONS);
@@ -1090,6 +1102,9 @@ fn build_obs_from_parts(
         }
         players.extend_from_slice(&it.players);
         pmask.extend_from_slice(&it.pmask);
+        units.extend_from_slice(&it.units);
+        umask.extend_from_slice(&it.umask);
+        legal_utarget.extend_from_slice(&it.legal_utarget);
         local.extend_from_slice(&it.local);
         scalars.extend_from_slice(&it.scalars);
         legal_actions.extend_from_slice(&it.legal_actions);
@@ -1109,6 +1124,8 @@ fn build_obs_from_parts(
     let bi = b as i64;
     let (ghi, gwi) = (gh as i64, gw as i64);
     let ms = feat::MAX_SLOTS as i64;
+    let mu = feat::MAX_UNITS as i64;
+    let uf = feat::U_FEAT as i64;
     let na = feat::N_ACTIONS as i64;
     let local_sz = policy::LOCAL;
 
@@ -1158,6 +1175,9 @@ fn build_obs_from_parts(
         grid_coarse,
         players: t(players, &[bi, ms, feat::P_FEAT as i64]),
         pmask: t(pmask, &[bi, ms]),
+        units: t(units, &[bi, mu, uf]),
+        umask: t(umask, &[bi, mu]),
+        legal_utarget: t(legal_utarget, &[bi, na, mu]),
         local: t(local, &[bi, 5, local_sz, local_sz]),
         scalars: t(scalars, &[bi, feat::N_SCALARS as i64]),
         legal_actions: t(legal_actions, &[bi, na]),
@@ -1244,6 +1264,8 @@ fn store_compact_host(
 
     let extras_n = crate::vecenv::compact_extras_per_env();
     let players_n = crate::vecenv::compact_extras_players_n();
+    let units_n = crate::vecenv::compact_extras_units_n();
+    let legal_utarget_n = crate::vecenv::compact_extras_legal_utarget_n();
     let local_n = crate::vecenv::compact_extras_local_n();
     let legal_ptarget_n = crate::vecenv::compact_extras_legal_ptarget_n();
 
@@ -1260,12 +1282,20 @@ fn store_compact_host(
                 it.players.len() == players_n,
                 "compact players length mismatch"
             );
+            anyhow::ensure!(it.units.len() == units_n, "compact units length mismatch");
+            anyhow::ensure!(
+                it.legal_utarget.len() == legal_utarget_n,
+                "compact legal_utarget length mismatch"
+            );
             anyhow::ensure!(it.local.len() == local_n, "compact local length mismatch");
             anyhow::ensure!(
                 it.legal_ptarget.len() == legal_ptarget_n,
                 "compact legal_ptarget length mismatch"
             );
             buffers.extras.extend_from_slice(&it.players);
+            buffers.extras.extend_from_slice(&it.units);
+            buffers.extras.extend_from_slice(&it.umask);
+            buffers.extras.extend_from_slice(&it.legal_utarget);
             buffers.extras.extend_from_slice(&it.local);
             buffers.extras.extend_from_slice(&it.legal_ptarget);
             buffers.extras.extend_from_slice(&it.pmask);
@@ -1334,6 +1364,9 @@ fn clear_full_resolution_payload(it: &mut PreparedObs) {
     it.transient = Vec::new();
     it.legal_tile = Vec::new();
     it.players = Vec::new();
+    it.units = Vec::new();
+    it.umask = [0.0; feat::MAX_UNITS];
+    it.legal_utarget = Vec::new();
     it.local = Vec::new();
     it.legal_ptarget = Vec::new();
     it.pmask = [0.0; ofcore::feat::MAX_SLOTS];
@@ -1352,6 +1385,9 @@ struct PackedCompactHost {
     coarse_valid: Vec<f32>,
     coarse_legal: Vec<f32>,
     players: Vec<f32>,
+    units: Vec<f32>,
+    umask: Vec<f32>,
+    legal_utarget: Vec<f32>,
     pmask: Vec<f32>,
     local: Vec<f32>,
     scalars: Vec<f32>,
@@ -1372,6 +1408,9 @@ impl PackedCompactHost {
         self.coarse_valid.append(&mut other.coarse_valid);
         self.coarse_legal.append(&mut other.coarse_legal);
         self.players.append(&mut other.players);
+        self.units.append(&mut other.units);
+        self.umask.append(&mut other.umask);
+        self.legal_utarget.append(&mut other.legal_utarget);
         self.pmask.append(&mut other.pmask);
         self.local.append(&mut other.local);
         self.scalars.append(&mut other.scalars);
@@ -1418,6 +1457,9 @@ fn pack_compact_host_range(compact: &[&CompactGrid], ch: usize, cw: usize) -> Pa
         }
         // Non-grid tensors live in the compact arena after store_compact_host.
         out.players.extend_from_slice(c.players());
+        out.units.extend_from_slice(c.units());
+        out.umask.extend_from_slice(c.umask());
+        out.legal_utarget.extend_from_slice(c.legal_utarget());
         out.local.extend_from_slice(c.local());
         out.legal_ptarget.extend_from_slice(c.legal_ptarget());
         out.pmask.extend_from_slice(c.pmask());
@@ -1488,6 +1530,9 @@ fn build_compact_host_obs(
         coarse_valid,
         coarse_legal,
         players,
+        units,
+        umask,
+        legal_utarget,
         pmask,
         local,
         scalars,
@@ -1522,6 +1567,23 @@ fn build_compact_host_obs(
         grid_coarse: Some(half_up(coarse, &[bi, policy::C_GRID, ch as i64, cw as i64])),
         players: up(players, &[bi, feat::MAX_SLOTS as i64, feat::P_FEAT as i64]),
         pmask: up(pmask, &[bi, feat::MAX_SLOTS as i64]),
+        units: up(
+            units,
+            &[
+                bi,
+                feat::MAX_UNITS as i64,
+                feat::U_FEAT as i64,
+            ],
+        ),
+        umask: up(umask, &[bi, feat::MAX_UNITS as i64]),
+        legal_utarget: up(
+            legal_utarget,
+            &[
+                bi,
+                feat::N_ACTIONS as i64,
+                feat::MAX_UNITS as i64,
+            ],
+        ),
         local: up(local, &[bi, 5, policy::LOCAL, policy::LOCAL]),
         scalars: up(scalars, &[bi, feat::N_SCALARS as i64]),
         legal_actions: up(legal_actions, &[bi, feat::N_ACTIONS as i64]),
@@ -1547,6 +1609,7 @@ pub struct ChoiceScalars {
     pub action: i64,
     pub player_slot: i64,   // -1 unused
     pub tile_region: i64,   // -1 unused
+    pub unit_index: i64,    // -1 unused
     pub build_type: i64,    // -1 unused
     pub nuke_type: i64,     // -1 unused
     pub quantity_frac: f32, // -1.0 unused
@@ -1560,6 +1623,7 @@ pub fn build_choice_batch(
     let action: Vec<i64> = items.iter().map(|c| c.action).collect();
     let player_slot: Vec<i64> = items.iter().map(|c| c.player_slot).collect();
     let tile_region: Vec<i64> = items.iter().map(|c| c.tile_region).collect();
+    let unit_index: Vec<i64> = items.iter().map(|c| c.unit_index).collect();
     let build_type: Vec<i64> = items.iter().map(|c| c.build_type).collect();
     let nuke_type: Vec<i64> = items.iter().map(|c| c.nuke_type).collect();
     let quantity_frac: Vec<f32> = items.iter().map(|c| c.quantity_frac).collect();
@@ -1568,6 +1632,7 @@ pub fn build_choice_batch(
         action: up(Tensor::from_slice(&action)),
         player_slot: up(Tensor::from_slice(&player_slot)),
         tile_region: up(Tensor::from_slice(&tile_region)),
+        unit_index: up(Tensor::from_slice(&unit_index)),
         build_type: up(Tensor::from_slice(&build_type)),
         nuke_type: up(Tensor::from_slice(&nuke_type)),
         quantity_frac: up(Tensor::from_slice(&quantity_frac)),
@@ -1619,6 +1684,9 @@ mod tests {
             gw,
             players: vec![0.1f32; feat::MAX_SLOTS * feat::P_FEAT],
             pmask: [1.0f32; feat::MAX_SLOTS],
+            units: vec![0.0f32; feat::MAX_UNITS * feat::U_FEAT],
+            umask: [1.0f32; feat::MAX_UNITS],
+            legal_utarget: vec![1.0f32; feat::N_ACTIONS * feat::MAX_UNITS],
             scalars: [0.2f32; feat::N_SCALARS],
             me_slot: 0,
             legal_actions: [1.0f32; feat::N_ACTIONS],
@@ -1650,6 +1718,7 @@ mod tests {
                 action: 1,
                 player_slot: -1,
                 tile_region: 3,
+                unit_index: -1,
                 build_type: -1,
                 nuke_type: -1,
                 quantity_frac: -1.0,
@@ -1658,6 +1727,7 @@ mod tests {
                 action: 2,
                 player_slot: 0,
                 tile_region: -1,
+                unit_index: -1,
                 build_type: 1,
                 nuke_type: -1,
                 quantity_frac: 0.5,
@@ -2478,11 +2548,11 @@ mod tests {
             });
         }
         let hidden = Tensor::from_slice(
-            &(0..2 * policy::RECURRENT_HIDDEN as usize)
+            &(0..2 * policy::RECURRENT_STATE as usize)
                 .map(|i| (i as f32 - 100.0) / 1000.0)
                 .collect::<Vec<_>>(),
         )
-        .view([2, policy::RECURRENT_HIDDEN]);
+        .view([2, policy::RECURRENT_STATE]);
         let contexts: Vec<_> = mixed_items
             .iter()
             .map(|item| item.prev_action.clone())
@@ -2504,9 +2574,9 @@ mod tests {
             assert_eq!(mixed_action.0.int64_value(&[row as i64]), 0);
             assert_eq!(single_action.0.int64_value(&[0]), 0);
             for (name, actual, expected) in [
-                ("quantity", &mixed_action.5, &single_action.5),
-                ("logp", &mixed_action.6, &single_action.6),
-                ("value", &mixed_action.7, &single_action.7),
+                ("quantity", &mixed_action.6, &single_action.6),
+                ("logp", &mixed_action.7, &single_action.7),
+                ("value", &mixed_action.8, &single_action.8),
             ] {
                 let diff = (actual.narrow(0, row as i64, 1) - expected)
                     .abs()
