@@ -25,10 +25,10 @@ if [ -n "$OFHF" ]; then
   "$OFHF" pull-ae --ae-dir "$AE_DIR"
 fi
 
-if [ ! -f "$AE_DIR/ae_v31_d8c32.encoder.safetensors" ] \
-  || [ ! -f "$AE_DIR/ae_v31_d16c32.encoder.safetensors" ]; then
+if [ ! -f "$AE_DIR/ae_v32_nostatic_d8c32.encoder.safetensors" ] \
+  || [ ! -f "$AE_DIR/ae_v32_nostatic_d16c32.encoder.safetensors" ]; then
   echo "WARN: encoder safetensors missing under $AE_DIR after ofhf pull." >&2
-  echo "Train with: cargo run -p ofae -- train --latent-down 8 --out runs/ae_v31_d8c32" >&2
+  echo "Train with: cargo run -p ofae -- train --latent-down 8 --out runs/ae_v32_nostatic_d8c32" >&2
   echo "Or download *.encoder.safetensors from djmango/openfront-tile-autoencoder" >&2
   exit 1
 fi

@@ -1,11 +1,11 @@
 //! Policy network: tch port of `rl/policy.py`.
 //!
-//! Grid channels match production Python PPO: frozen AE latent (32) +
-//! ego (3) + defense_bonus (1) + transient (53) = `C_GRID` 89. AE encode
-//! lives in `ae.rs` / `batch::build_obs_with_ae`. Optional native /16
-//! coarse stream arrives via `Obs::grid_coarse` when `--coarse-ckpt` is
-//! set; otherwise `foveate` falls back to 2x avg-pool of the fine grid
-//! (same as Python without `coarse_ae`).
+//! Grid channels (v3.2 no-static AE): frozen AE latent (32) + exact static
+//! structures (6) + ego (3) + defense_bonus (1) + transient (53) = `C_GRID`
+//! 95. Buildings bypass the AE. Encode lives in `ae.rs` /
+//! `batch::build_obs_with_ae`. Optional native /16 coarse stream arrives
+//! via `Obs::grid_coarse` when `--coarse-ckpt` is set; otherwise `foveate`
+//! falls back to 2x avg-pool of the fine grid.
 //!
 //! `--foveate` (on by default in training configs that pass it): fixed
 //! `FOVEATE_SIZE` crop centered on own-tile mass. Off uses the legacy
@@ -19,11 +19,12 @@ pub const N_ACTIONS: i64 = ofcore::feat::N_ACTIONS as i64;
 pub const MAX_SLOTS: i64 = ofcore::feat::MAX_SLOTS as i64;
 
 pub const LATENT_C: i64 = 32;
+pub const N_STATIC: i64 = 6;
 pub const N_TRANSIENT: i64 = 53;
-/// Own-ego channel index inside `grid` (first bypass plane after latent).
-pub const EGO_OWN_CH: i64 = LATENT_C;
-pub const C_GRID: i64 = LATENT_C + 3 + 1 + N_TRANSIENT; // 89
-pub const C_GRID_FINE: i64 = C_GRID + 1; // 90
+/// Own-ego channel index inside `grid` (first ego plane after latent+static).
+pub const EGO_OWN_CH: i64 = LATENT_C + N_STATIC;
+pub const C_GRID: i64 = LATENT_C + N_STATIC + 3 + 1 + N_TRANSIENT; // 95
+pub const C_GRID_FINE: i64 = C_GRID + 1; // 96
 pub const N_LOCAL: i64 = 5;
 pub const LOCAL: i64 = 64;
 pub const P_FEAT: i64 = 21;

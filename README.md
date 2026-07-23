@@ -165,16 +165,16 @@ Snapshots are written every 10 ticks (1s of game time). Format details in the
 # one-time: convert gzip+JSON snapshots to fast zstd caches
 cd rust && cargo run --release -p ofae -- prefeaturize --data ../data --workers 8
 
-# spatial AE (v3.1) - writes ae_v3.safetensors + ae_v3.encoder.safetensors
+# spatial AE (v3.2 no-static) - buildings bypass AE into the policy grid
 cargo run --release -p ofae -- train \
     --data ../data,../data-human \
     --steps 40000 --batch-size 64 --latent-down 8 --latent-c 32 \
-    --out ../runs/ae_v31_d8c32
+    --out ../runs/ae_v32_nostatic_d8c32
 
 # optional: filter a full ckpt → encoder-only (train already writes encoder)
 cargo run --release -p ofae -- export-encoder \
-    --ckpt ../runs/ae_v31_d8c32/ae_v3.safetensors \
-    --out ../weights/ae/ae_v31_d8c32.encoder.safetensors
+    --ckpt ../runs/ae_v32_nostatic_d8c32/ae_v3.safetensors \
+    --out ../weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors
 
 # or pull frozen encoders from HF
 bash ../scripts/fetch_ae_encoders.sh
@@ -186,8 +186,9 @@ cargo build --release -p oftrain --features native-engine
 
 AE details: owner IDs relabeled to static per-game spawn slots (any player
 count, fixed channels); fully convolutional training on border-dense random
-crops; rarity-weighted BCE *detection* for structures (count MSE collapses to
-all-zeros on 99.9%-empty grids).
+crops; v3.2 drops structures from the latent (exact 6-plane bypass on the
+policy grid, `C_GRID=95`). Breaking vs `ae_v31_*` — retrain PPO after swapping
+encoders.
 
 ## Artifacts
 
