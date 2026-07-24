@@ -31,8 +31,9 @@ pub struct WatchConfig<'a> {
     pub difficulty: Option<String>,
     pub nations: Option<String>,
     pub max_steps: usize,
-    /// Same cap as training (`--max-episode-ticks`). Watch stops on win/death
-    /// or when the sim tick reaches this, matching the trainer episode budget.
+    /// Same cap as training (`--max-episode-ticks` /
+    /// `ofcore::DEFAULT_MAX_EPISODE_TICKS`). Watch stops on win/death or when
+    /// the sim tick reaches this — trainer and watch share one tick budget.
     pub max_episode_ticks: i64,
     pub debug: bool,
     pub device: Device,
@@ -390,13 +391,13 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
             );
             break;
         }
-        // Match training: episodes end at --max-episode-ticks even if still alive.
+        // Same tick budget as training (`--max-episode-ticks`).
         if tick >= cfg.max_episode_ticks {
             end_tick = tick;
             episode_outcome = "timeout".to_string();
             finished = true;
             println!(
-                "watch hit training max-episode-ticks {} at tick {end_tick} (outcome=timeout)",
+                "watch hit max-episode-ticks {} at tick {end_tick} (outcome=timeout; same budget as training)",
                 cfg.max_episode_ticks
             );
             break;
@@ -410,7 +411,7 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
         let tiles = my_tiles(worker.ents(), me);
         println!(
             "watch truncated at --max-steps {} before tick budget {}: tick {end_tick}, tiles {tiles}, \
-             alive={alive} (outcome=timeout — raise SHOWCASE_MAX_STEPS)",
+             alive={alive} (outcome=timeout — raise --max-steps; tick budget is --max-episode-ticks)",
             cfg.max_steps,
             cfg.max_episode_ticks,
         );
