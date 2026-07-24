@@ -56,8 +56,8 @@ struct Args {
     max_episode_ticks: i64,
 
     /// Steps collected per env before each PPO update.
-    /// Matches `scripts/pod_train_v10.sh` (`ROLLOUT_LEN=64`).
-    #[arg(long, default_value_t = 64)]
+    /// Matches `scripts/pod_train_v11.sh` (`ROLLOUT_LEN=48`).
+    #[arg(long, default_value_t = 48)]
     rollout_len: usize,
 
     #[arg(long, default_value_t = 1_000_000)]
@@ -294,14 +294,16 @@ struct Args {
     #[arg(long, default_value_t = ofcore::curriculum::V10_STAGE_LR_FLOOR)]
     stage_lr_floor: f64,
 
-    #[arg(long, default_value_t = 2)]
+    /// Floor PPO epochs per update. Production util stack starts at 8;
+    /// `--balance-train-collect` may grow toward `--max-epochs`.
+    #[arg(long, default_value_t = 8)]
     epochs: usize,
 
-    /// Opt-in: adapt `--epochs` each update so `train_s / collect_s` tracks
+    /// Adapt `--epochs` each update so `train_s / collect_s` tracks
     /// `--balance-target-ratio`. The lasting fix for collect-bound util when
     /// `--max-envs` is VRAM-capped (see `balance.rs`). Floor is `--epochs`;
-    /// ceiling is `--max-epochs`.
-    #[arg(long, default_value_t = false)]
+    /// ceiling is `--max-epochs`. Default on (matches `pod_train_v11.sh`).
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     balance_train_collect: bool,
 
     /// Target `train_s / collect_s` for `--balance-train-collect` (default 0.95).
@@ -313,7 +315,8 @@ struct Args {
     max_epochs: usize,
 
     /// Number of minibatches per shard. The default gives Python's
-    /// 128-sample minibatches for the default 4 envs x 32 rollout.
+    /// 128-sample minibatches for the default 4 envs x 48 rollout when
+    /// overridden; production pods set this from `NUM_ENVS * ROLLOUT_LEN / 128`.
     #[arg(long, default_value_t = 1)]
     minibatches: usize,
 
@@ -324,7 +327,8 @@ struct Args {
     /// instead - see `policy.rs`/DEVLOG. Works (slower) on CPU too, so
     /// it's smoke-testable without a GPU. Frozen AE bf16 additionally
     /// requires CUDA and --persistent-actors; all other AE paths stay f32.
-    #[arg(long, default_value_t = false)]
+    /// Default on (matches `pod_train_v11.sh`); pass `--amp=false` for CPU smokes.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     amp: bool,
 
     /// Real foveated crop: the fine-grid branch becomes a fixed
@@ -365,21 +369,21 @@ struct Args {
     /// are CUDA - not exercisable end-to-end on this Mac's CPU-only
     /// libtorch build, see DEVLOG/final report for how this was verified.
     /// Pin host staging for observation/choice H2D. Default on for CUDA
-    /// training recipes (`pod_train_v10.sh`); local CPU smokes can leave it.
+    /// training recipes (`pod_train_v11.sh`); local CPU smokes can leave it.
     #[arg(long, default_value_t = true)]
     pinned_h2d: bool,
 
     /// H2D fine/coarse grids as fp16 then cast to f32 on device (halves
     /// PCIe bytes for the big AE planes). Host `PreparedObs` stays f32.
-    /// Opt-in (default off); `pod_train_v10.sh` enables via EXTRA_ARGS.
-    /// No-op on CPU (Half round-trip skipped).
-    #[arg(long, default_value_t = false)]
+    /// Default on (matches `pod_train_v11.sh`); no-op on CPU.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     fp16_rollout: bool,
 
     /// Store foveated rollout grids as compact host fp16 windows with
     /// explicit origins/masks. Requires --foveate; legacy behavior is kept
-    /// when disabled or when foveation is off.
-    #[arg(long, default_value_t = false)]
+    /// when disabled or when foveation is off. Default on (matches
+    /// `pod_train_v11.sh`).
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     compact_rollout: bool,
 
     /// Split env workers into two halves and overlap act(g1) with step(g0)
@@ -390,14 +394,16 @@ struct Args {
 
     /// Keep one actor OS thread alive per GPU for the full run and, for the
     /// one-GPU Phase 2 path, keep the learner on its own stable owner thread.
-    /// CUDA state never crosses channels. Incompatible utilization autoscale
-    /// is disabled without changing ownership mode.
-    #[arg(long, default_value_t = false)]
+    /// CUDA state never crosses channels. Default on (matches `pod_train_v11.sh`);
+    /// pass `--persistent-actors=false` for legacy/CPU collector smokes.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     persistent_actors: bool,
 
     /// Enable per-environment recurrent policy state. Requires persistent
-    /// CUDA actors. The hidden width is set by --recurrent-hidden-size.
-    #[arg(long, default_value_t = false, requires = "persistent_actors")]
+    /// actors. The hidden width is set by --recurrent-hidden-size.
+    /// Default on (V11 / `pod_train_v11.sh`); disable with
+    /// `--recurrent-policy=false` (and usually `--persistent-actors=false`).
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, requires = "persistent_actors")]
     recurrent_policy: bool,
 
     /// LSTM hidden width (packed actor state is 2× this: h|c).
@@ -405,13 +411,14 @@ struct Args {
     recurrent_hidden_size: usize,
 
     /// Timesteps per truncated-BPTT chunk for recurrent PPO.
-    /// Matches `scripts/pod_train_v10.sh` (`BPTT_CHUNK_LEN=32`).
-    #[arg(long, default_value_t = 32)]
+    /// Matches `scripts/pod_train_v11.sh` (`BPTT_CHUNK_LEN=24`).
+    #[arg(long, default_value_t = 24)]
     bptt_chunk_len: usize,
 
     /// Let persistent actors batch whichever envs are ready instead of
     /// waiting for fixed worker halves. Requires --persistent-actors.
-    #[arg(long, default_value_t = false)]
+    /// Default on (matches `pod_train_v11.sh`).
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     work_conserving_actors: bool,
 
     /// Maximum ready envs in one work-conserving actor inference batch.
@@ -426,9 +433,9 @@ struct Args {
     actor_target_batch: usize,
 
     /// Maximum compact-coarse padding waste allowed while coalescing shapes.
-    /// 0.35 lets mixed curriculum maps share a dispatch more often; 0.25 was
-    /// forcing near-singleton batches once stage pools diversify.
-    #[arg(long, default_value_t = 0.35)]
+    /// 0.50 matches the validated util stack (`pod_train_v11.sh`); lower
+    /// values force more singleton batches on diverse stage pools.
+    #[arg(long, default_value_t = 0.50)]
     actor_max_padding_waste: f64,
 
     /// Maximum time the oldest ready observation waits for a batch.
@@ -445,7 +452,9 @@ struct Args {
     /// Simulation backend: "native" (in-process Rust engine; Cargo feature
     /// `native-engine`, on by default) or "node" (JSONL subprocess per env,
     /// parity-testing fallback). Production pods always launch via
-    /// `scripts/pod_train_v10.sh` — clap defaults here are local smoke only.
+    /// `scripts/pod_train_v11.sh`. Util/throughput clap defaults mirror that
+    /// recipe; pass `--persistent-actors=false --recurrent-policy=false` (etc.)
+    /// for legacy/CPU smokes.
     #[arg(long, default_value = "native")]
     engine: engine::EngineKind,
 
@@ -470,9 +479,10 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     log_every: u64,
 
-    /// Updates between fixed-seed greedy eval passes (0 = off). Default 50
-    /// (tighter than Python's 300 so short smoke runs still see a number).
-    #[arg(long, default_value_t = 50)]
+    /// Updates between fixed-seed greedy eval passes (0 = off). Default 0
+    /// matches `pod_train_v11.sh` (async/off during util-focused runs);
+    /// pass a positive value for local smoke eval cadence.
+    #[arg(long, default_value_t = 0)]
     eval_every: u64,
 
     /// Episodes per greedy eval pass (fresh workers, seeds `w{i}-ep0`).
@@ -539,7 +549,9 @@ struct Args {
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     debug: bool,
 
-    #[arg(long, default_value_t = 200)]
+    /// Updates between numbered policy checkpoints. Default 5 matches
+    /// `pod_train_v11.sh`.
+    #[arg(long, default_value_t = 5)]
     ckpt_every: u64,
 
     /// Local retention for numbered `policy_update*` files. HF sync keeps the
@@ -583,20 +595,21 @@ struct Args {
     #[arg(long, default_value = "mse", value_parser = ["huber", "mse"])]
     value_loss: String,
 
-    /// Opt-in: automatically grow `--num-envs` toward `--target-gpu-util`.
+    /// Automatically grow `--num-envs` toward `--target-gpu-util`.
     /// With `--persistent-actors`, growth checkpoints and exits via
     /// `restart_request.json` (same path as stage env targets); legacy
     /// collectors still spawn workers in-process. See `autoscale.rs` and
-    /// `train::run`. Off by default; `pod_train_v10.sh` enables it.
-    #[arg(long, default_value_t = false)]
+    /// `train::run`. Default on (matches `pod_train_v11.sh`); pass
+    /// `--auto-scale-envs=false` for fixed-env smokes.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     auto_scale_envs: bool,
 
     /// Target GPU utilization set point for `--auto-scale-envs`, as a 0-1
-    /// fraction (0.85 = 85%), compared against `GpuSnapshot::min_mean_util`
+    /// fraction (0.92 = 92%), compared against `GpuSnapshot::min_mean_util`
     /// (the worst GPU's running mean - see `gpu_util.rs`) converted to the
-    /// same 0-1 scale. Matches `pod_train_v10.sh` (`TARGET_GPU_UTIL=0.85`).
+    /// same 0-1 scale. Matches `pod_train_v11.sh` (`TARGET_GPU_UTIL=0.92`).
     /// No effect without `--auto-scale-envs`.
-    #[arg(long, default_value_t = 0.85)]
+    #[arg(long, default_value_t = 0.92)]
     target_gpu_util: f64,
 
     /// Floor for `--auto-scale-envs`: never scale below this many envs per
@@ -606,11 +619,11 @@ struct Args {
     min_envs: Option<usize>,
 
     /// Ceiling for `--auto-scale-envs`, per shard (same "per shard" unit
-    /// as `--num-envs`/`--min-envs`). Default 16 matches the A40 VRAM
-    /// ceiling in `pod_train_v10.sh` (`MAX_ENVS=16`). Pass `--max-envs 0`
+    /// as `--num-envs`/`--min-envs`). Default 32 matches the A100 80GB
+    /// ceiling in `pod_train_v11.sh` (`MAX_ENVS=32`). Pass `--max-envs 0`
     /// to derive from CPU headroom instead (`autoscale::cpu_env_cap_per_shard`).
     /// No effect without `--auto-scale-envs`.
-    #[arg(long, default_value_t = 16)]
+    #[arg(long, default_value_t = 32)]
     max_envs: usize,
 
     /// How often (in PPO updates) `--auto-scale-envs` re-evaluates GPU
@@ -623,7 +636,7 @@ struct Args {
     /// Envs added per `--auto-scale-envs` growth step (per shard). Small
     /// steps converge more slowly but overshoot the target less; see
     /// `autoscale::next_env_count`'s hysteresis band for the other half of
-    /// the anti-thrashing story. Matches `pod_train_v10.sh` (`AUTOSCALE_STEP=2`).
+    /// the anti-thrashing story. Matches `pod_train_v11.sh` (`AUTOSCALE_STEP=2`).
     #[arg(long, default_value_t = 2)]
     autoscale_step: usize,
 }
@@ -897,30 +910,60 @@ mod recurrent_flag_tests {
     use clap::Parser;
 
     #[test]
-    fn recurrent_policy_is_opt_in_and_requires_persistent_actors() {
+    fn util_stack_defaults_match_pod_train_v11() {
         let defaults = Args::try_parse_from(["oftrain"]).unwrap();
-        assert!(!defaults.recurrent_policy);
+        assert!(defaults.recurrent_policy);
+        assert!(defaults.persistent_actors);
+        assert!(defaults.work_conserving_actors);
+        assert!(defaults.balance_train_collect);
+        assert!(defaults.amp);
+        assert!(defaults.fp16_rollout);
+        assert!(defaults.compact_rollout);
+        assert!(defaults.auto_scale_envs);
         assert_eq!(defaults.recurrent_hidden_size, 512);
-        assert_eq!(defaults.bptt_chunk_len, 32);
-        assert_eq!(defaults.rollout_len, 64);
-        assert!((defaults.target_gpu_util - 0.85).abs() < 1e-9);
-        assert_eq!(defaults.max_envs, 16);
+        assert_eq!(defaults.bptt_chunk_len, 24);
+        assert_eq!(defaults.rollout_len, 48);
+        assert_eq!(defaults.epochs, 8);
+        assert_eq!(defaults.max_epochs, 12);
+        assert!((defaults.balance_target_ratio - 0.95).abs() < 1e-9);
+        assert!((defaults.target_gpu_util - 0.92).abs() < 1e-9);
+        assert!((defaults.actor_max_padding_waste - 0.50).abs() < 1e-9);
+        assert_eq!(defaults.max_envs, 32);
         assert_eq!(defaults.autoscale_step, 2);
-        assert!(Args::try_parse_from(["oftrain", "--recurrent-policy"]).is_err());
+        assert_eq!(defaults.ckpt_every, 5);
+        assert_eq!(defaults.eval_every, 0);
 
-        let enabled = Args::try_parse_from([
+        let tuned = Args::try_parse_from([
             "oftrain",
-            "--persistent-actors",
-            "--recurrent-policy",
+            "--persistent-actors=true",
+            "--recurrent-policy=true",
             "--recurrent-hidden-size",
             "128",
             "--bptt-chunk-len",
             "16",
         ])
         .unwrap();
-        assert!(enabled.recurrent_policy);
-        assert_eq!(enabled.recurrent_hidden_size, 128);
-        assert_eq!(enabled.bptt_chunk_len, 16);
+        assert!(tuned.recurrent_policy);
+        assert_eq!(tuned.recurrent_hidden_size, 128);
+        assert_eq!(tuned.bptt_chunk_len, 16);
+
+        // Clap `requires` only checks presence, so `--persistent-actors=false`
+        // still parses with default recurrent=true; `train::run` rejects that
+        // combo at runtime. CPU/legacy smokes must disable both explicitly.
+        let cpu_smoke = Args::try_parse_from([
+            "oftrain",
+            "--persistent-actors=false",
+            "--recurrent-policy=false",
+            "--work-conserving-actors=false",
+            "--auto-scale-envs=false",
+            "--amp=false",
+        ])
+        .unwrap();
+        assert!(!cpu_smoke.persistent_actors);
+        assert!(!cpu_smoke.recurrent_policy);
+        assert!(!cpu_smoke.work_conserving_actors);
+        assert!(!cpu_smoke.auto_scale_envs);
+        assert!(!cpu_smoke.amp);
     }
 }
 
