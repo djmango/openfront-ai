@@ -1099,8 +1099,25 @@ impl EnvWorker {
         self.episode_stage = self.stage;
         let stg = &self.stages[self.stage];
         self.decision_ticks = stg.decision_ticks;
-        let (map_name, bots, difficulty, nations, rehearsal) =
-            sample_episode(&self.stages, self.stage, &mut self.rng);
+        // util E6: sticky same-map resets (~70%) keep (hr,wr) stable across
+        // episodes so work-conserving actor batches stay same-shape and the
+        // AE path avoids churning unique map geometries every episode.
+        // Does not change reward / legal actions — only map resampling bias.
+        const STICKY_MAP_P: f64 = 0.70;
+        let sticky = !self.map_name.is_empty()
+            && stg.maps.iter().any(|m| *m == self.map_name.as_str())
+            && self.rng.gen::<f64>() < STICKY_MAP_P;
+        let (map_name, bots, difficulty, nations, rehearsal) = if sticky {
+            (
+                self.map_name.clone(),
+                stg.bots,
+                stg.difficulty,
+                stg.nations,
+                false,
+            )
+        } else {
+            sample_episode(&self.stages, self.stage, &mut self.rng)
+        };
         self.map_name = map_name.clone();
         self.rehearsal = rehearsal;
         let nations_val = match nations {
