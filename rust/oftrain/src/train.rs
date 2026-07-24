@@ -7253,10 +7253,11 @@ pub fn run(mut cfg: Config) -> Result<()> {
     cfg.epochs = live_epochs;
     cfg.max_epochs = cfg.max_epochs.max(live_epochs);
     let mut train_collect_ratio_ema: Option<f64> = None;
+    let mut collect_hwm_s: Option<f64> = None;
     if cfg.balance_train_collect {
         println!(
             "[balance] train/collect rebalance enabled: epochs={live_epochs}..{} \
-             target_ratio={:.2}",
+             target_ratio={:.2} (collect high-water mark + fast +2 grow)",
             cfg.max_epochs, cfg.balance_target_ratio
         );
     }
@@ -7888,8 +7889,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
         );
 
         if cfg.balance_train_collect {
+            collect_hwm_s = balance::update_collect_hwm(collect_hwm_s, collect_dt);
+            let collect_ref = collect_hwm_s.unwrap_or(collect_dt);
             train_collect_ratio_ema =
-                balance::update_ratio_ema(train_collect_ratio_ema, train_dt, collect_dt);
+                balance::update_ratio_ema(train_collect_ratio_ema, train_dt, collect_ref);
             if let Some(ratio) = train_collect_ratio_ema {
                 let next = balance::next_epochs(
                     live_epochs,
@@ -7901,8 +7904,9 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 if next != live_epochs {
                     println!(
                         "[balance] epochs {live_epochs} -> {next} \
-                         (ema train/collect={ratio:.3} target={:.2}; \
-                         train_s={train_dt:.1} collect_s={collect_dt:.1})",
+                         (ema train/collect_hwm={ratio:.3} target={:.2}; \
+                         train_s={train_dt:.1} collect_s={collect_dt:.1} \
+                         collect_hwm={collect_ref:.1})",
                         cfg.balance_target_ratio
                     );
                     live_epochs = next;
@@ -8274,7 +8278,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             println!(
                 "[update {:>5}] steps/s={:>7.1} decisions_total={:>9} eps_done={:>5} recent_reward={:>8.3} \
                  pg={:>+.4} v={:>.4} ent={:>.3} entq={:>+.3} ecoef={:.4} stage={} lr={:.2e} elapsed={:.0}s \
-                 update_s={:.1} collect_s={:.1} train_s={:.1} actor_work_s={:.1} \
+                 update_s={:.1} collect_s={:.1} train_s={:.1} epochs={} actor_work_s={:.1} \
                  batch_build_s={:.3} gradient_sync_s={:.3} learner_snapshot_s={:.3} \
                  refresh_s={:.3}{gpu_str}",
                 update,
@@ -8293,6 +8297,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 dt,
                 collect_dt,
                 train_dt,
+                live_epochs,
                 actor_work_dt,
                 batch_build_dt,
                 gradient_sync_dt,
@@ -8727,8 +8732,8 @@ mod persistent_actor_tests {
             stage_lr_floor: ofcore::curriculum::V10_STAGE_LR_FLOOR,
             epochs: 2,
             balance_train_collect: false,
-            balance_target_ratio: 0.92,
-            max_epochs: 8,
+            balance_target_ratio: 0.95,
+            max_epochs: 12,
             minibatches: 1,
             amp: false,
             foveate: false,

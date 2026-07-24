@@ -304,12 +304,12 @@ struct Args {
     #[arg(long, default_value_t = false)]
     balance_train_collect: bool,
 
-    /// Target `train_s / collect_s` for `--balance-train-collect` (default 0.92).
-    #[arg(long, default_value_t = 0.92)]
+    /// Target `train_s / collect_s` for `--balance-train-collect` (default 0.95).
+    #[arg(long, default_value_t = 0.95)]
     balance_target_ratio: f64,
 
-    /// Ceiling for `--balance-train-collect` epoch growth (default 8).
-    #[arg(long, default_value_t = 8)]
+    /// Ceiling for `--balance-train-collect` epoch growth (default 12).
+    #[arg(long, default_value_t = 12)]
     max_epochs: usize,
 
     /// Number of minibatches per shard. The default gives Python's
