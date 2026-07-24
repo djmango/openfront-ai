@@ -2,6 +2,7 @@
 
 mod ae;
 mod autoscale;
+mod balance;
 mod batch;
 mod bridge;
 mod engine;
@@ -295,6 +296,21 @@ struct Args {
 
     #[arg(long, default_value_t = 2)]
     epochs: usize,
+
+    /// Opt-in: adapt `--epochs` each update so `train_s / collect_s` tracks
+    /// `--balance-target-ratio`. The lasting fix for collect-bound util when
+    /// `--max-envs` is VRAM-capped (see `balance.rs`). Floor is `--epochs`;
+    /// ceiling is `--max-epochs`.
+    #[arg(long, default_value_t = false)]
+    balance_train_collect: bool,
+
+    /// Target `train_s / collect_s` for `--balance-train-collect` (default 0.95).
+    #[arg(long, default_value_t = 0.95)]
+    balance_target_ratio: f64,
+
+    /// Ceiling for `--balance-train-collect` epoch growth (default 12).
+    #[arg(long, default_value_t = 12)]
+    max_epochs: usize,
 
     /// Number of minibatches per shard. The default gives Python's
     /// 128-sample minibatches for the default 4 envs x 32 rollout.
@@ -1335,6 +1351,9 @@ fn main() -> anyhow::Result<()> {
         stage_lr_decay: args.stage_lr_decay,
         stage_lr_floor: args.stage_lr_floor,
         epochs: args.epochs,
+        balance_train_collect: args.balance_train_collect,
+        balance_target_ratio: args.balance_target_ratio,
+        max_epochs: args.max_epochs.max(args.epochs.max(1)),
         minibatches: args.minibatches,
         amp: args.amp,
         foveate: args.foveate,
