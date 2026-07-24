@@ -1105,7 +1105,7 @@ impl EnvWorker {
         // Does not change reward / legal actions — only map resampling bias.
         const STICKY_MAP_P: f64 = 0.70;
         let sticky = !self.map_name.is_empty()
-            && stg.maps.iter().any(|m| *m == self.map_name)
+            && stg.maps.iter().any(|m| *m == self.map_name.as_str())
             && self.rng.gen::<f64>() < STICKY_MAP_P;
         let (map_name, bots, difficulty, nations, rehearsal) = if sticky {
             (
