@@ -60,6 +60,11 @@ AUTOSCALE_CHECK_EVERY="${AUTOSCALE_CHECK_EVERY:-5}"
 AUTOSCALE_STEP="${AUTOSCALE_STEP:-2}"
 ROLLOUT_LEN="${ROLLOUT_LEN:-64}"
 BPTT_CHUNK_LEN="${BPTT_CHUNK_LEN:-32}"
+# PPO epochs per update. At the A100 VRAM ceiling (~24 envs/shard) collect_s
+# stays ~2x train_s with the historical default of 2, pinning mean util near
+# ~60%. epochs=4 roughly doubles train wall so the one-step pipeline saturates
+# (~train_s ≈ collect_s → ~90% mean util). Override with EPOCHS= for A/Bs.
+EPOCHS="${EPOCHS:-4}"
 # Match rl/ppo.py's optimizer cadence: its --minibatch is a target sample
 # count (128), while oftrain's --minibatches is a count.
 MINIBATCH_SIZE="${MINIBATCH_SIZE:-128}"
@@ -88,7 +93,7 @@ STALE_CKPT_RUNS="${STALE_CKPT_RUNS:-ppo_v8,ppo_v8_fast_native,ppo_v81,ppo_v82,pp
 # - target-batch=2: stage-25 has ~16 unique map shapes vs 14 envs/shard, so
 #   target=8 never fills and always burns the full wait before dispatch
 # - padding-waste=0.50: after wait, allow slightly more mixed-shape compact pad
-EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --fp16-rollout --pinned-h2d --persistent-actors --work-conserving-actors --pipeline-groups=true --actor-target-batch 2 --actor-max-wait-ms 15 --actor-max-padding-waste 0.50 --recurrent-policy --bptt-chunk-len $BPTT_CHUNK_LEN --ckpt-every 5 --ckpt-keep-last $CKPT_KEEP_LAST --eval-every 0 --log-every 1 --coarse-ckpt ../weights/ae/ae_v32_nostatic_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors}"
+EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --fp16-rollout --pinned-h2d --persistent-actors --work-conserving-actors --pipeline-groups=true --actor-target-batch 2 --actor-max-wait-ms 15 --actor-max-padding-waste 0.50 --recurrent-policy --bptt-chunk-len $BPTT_CHUNK_LEN --epochs $EPOCHS --ckpt-every 5 --ckpt-keep-last $CKPT_KEEP_LAST --eval-every 0 --log-every 1 --coarse-ckpt ../weights/ae/ae_v32_nostatic_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors}"
 
 # V11 anti-death-spiral on the closeout ladder. Dense reward with softer death,
 # survival / diplo-panic / combat priors, and radical win bonus so finishing
