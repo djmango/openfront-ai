@@ -52,8 +52,9 @@ STAGE_ENV_TARGETS="${STAGE_ENV_TARGETS:-}"
 # Persistent owners cannot live-spawn env workers; autoscale grows via the same
 # restart_request.json path as stage env targets.
 AUTO_SCALE_ENVS="${AUTO_SCALE_ENVS:-1}"
-# Cap for 80GB A100; raise cautiously if VRAM headroom remains late-stage.
-MAX_ENVS="${MAX_ENVS:-24}"
+# Cap for 80GB A100. Was 24 (~74% VRAM); 32 uses the MEM_BLOCK=0.90 headroom
+# so util-driven growth can continue when collect-bound at mid mem.
+MAX_ENVS="${MAX_ENVS:-32}"
 MIN_ENVS="${MIN_ENVS:-10}"
 TARGET_GPU_UTIL="${TARGET_GPU_UTIL:-0.85}"
 AUTOSCALE_CHECK_EVERY="${AUTOSCALE_CHECK_EVERY:-5}"
