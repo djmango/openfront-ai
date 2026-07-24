@@ -8018,6 +8018,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
                         }
                     }
                 }
+            } else if current >= autoscale_max_envs {
+                println!(
+                    "[autoscale] hold at max_envs={autoscale_max_envs} ({gpu_str}); \
+                     util growth capped - raise MAX_ENVS / MEM_BLOCK or use \
+                     --balance-train-collect"
+                );
             }
         }
 
