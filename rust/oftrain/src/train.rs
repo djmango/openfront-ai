@@ -7188,6 +7188,24 @@ pub fn run(mut cfg: Config) -> Result<()> {
         .as_ref()
         .map(|s| s.total_env_steps)
         .unwrap_or(0);
+    // Adaptive epoch rebalance (`--balance-train-collect`). Floor is the
+    // CLI `--epochs`; ceiling is `--max-epochs`. Must initialize before
+    // `cfg_ref` so we can mutate `cfg.epochs` / `cfg.max_epochs` once up
+    // front; the live loop only mutates `live_epochs` (persistent learners
+    // take it per Train command).
+    let balance_min_epochs = cfg.epochs.max(1);
+    let mut live_epochs = balance_min_epochs;
+    cfg.epochs = live_epochs;
+    cfg.max_epochs = cfg.max_epochs.max(live_epochs);
+    let mut train_collect_ratio_ema: Option<f64> = None;
+    let mut collect_hwm_s: Option<f64> = None;
+    if cfg.balance_train_collect {
+        println!(
+            "[balance] train/collect rebalance enabled: epochs={live_epochs}..{} \
+             target_ratio={:.2} (collect high-water mark + fast +2 grow)",
+            cfg.max_epochs, cfg.balance_target_ratio
+        );
+    }
     let cfg_ref = &cfg;
 
     // Curriculum advancement (port of `rl/ppo.py`'s win-rate gate, see
@@ -7244,23 +7262,6 @@ pub fn run(mut cfg: Config) -> Result<()> {
     };
     let mut requested_env_target: Option<usize> = None;
     let mut resize_reason = String::new();
-    // Adaptive epoch rebalance (`--balance-train-collect`). Floor is the
-    // CLI `--epochs`; ceiling is `--max-epochs`. Mutating `cfg.epochs`
-    // keeps the non-persistent `train_update` path in sync; persistent
-    // owners take `live_epochs` per Train command.
-    let balance_min_epochs = cfg.epochs.max(1);
-    let mut live_epochs = balance_min_epochs;
-    cfg.epochs = live_epochs;
-    cfg.max_epochs = cfg.max_epochs.max(live_epochs);
-    let mut train_collect_ratio_ema: Option<f64> = None;
-    let mut collect_hwm_s: Option<f64> = None;
-    if cfg.balance_train_collect {
-        println!(
-            "[balance] train/collect rebalance enabled: epochs={live_epochs}..{} \
-             target_ratio={:.2} (collect high-water mark + fast +2 grow)",
-            cfg.max_epochs, cfg.balance_target_ratio
-        );
-    }
 
     // Prime the pipeline: collect the very first rollout (using the
     // actors' initial, freshly-copied-from-learner weights) before the
@@ -7909,8 +7910,9 @@ pub fn run(mut cfg: Config) -> Result<()> {
                          collect_hwm={collect_ref:.1})",
                         cfg.balance_target_ratio
                     );
+                    // Persistent learners take `live_epochs` per Train
+                    // command; do not mutate `cfg` here (`cfg_ref` borrows it).
                     live_epochs = next;
-                    cfg.epochs = live_epochs;
                 }
             }
         }
