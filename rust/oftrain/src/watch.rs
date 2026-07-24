@@ -1,5 +1,8 @@
-//! One greedy Node-engine episode → GameRecord + `.debug.json` + compact
-//! `.thinking.json` (few-KB top-3 trace for HF parquet).
+//! One watch episode → GameRecord + `.debug.json` + compact `.thinking.json`
+//! (few-KB top-3 trace for HF parquet).
+//!
+//! Defaults match the historical showcase path (Node + greedy). Pass
+//! `--engine native` and/or `--watch-stochastic` to A/B against training.
 
 use std::path::{Path, PathBuf};
 
@@ -41,6 +44,10 @@ pub struct WatchConfig<'a> {
     pub reward_config: RewardConfig,
     /// Match training: V8.2+ / V10 policies need recurrent hidden state.
     pub recurrent_policy: bool,
+    /// Simulation backend for the watch episode (`native` or `node`).
+    pub engine: EngineKind,
+    /// When true, sample actions from the policy; when false (default), argmax.
+    pub stochastic: bool,
 }
 
 fn choice_from_act(
@@ -143,8 +150,15 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
     let difficulty = cfg.difficulty.as_deref().unwrap_or(st.difficulty);
     let nations = resolve_nations(st, cfg.nations.as_deref());
 
+    let greedy = !cfg.stochastic;
+    let engine_label = match cfg.engine {
+        EngineKind::Native => "native",
+        EngineKind::Node => "node",
+    };
+    let sample_label = if greedy { "greedy" } else { "stochastic" };
     println!(
-        "stage {}: {map_name}, nations={nations}, {bots} bots, {difficulty}",
+        "stage {}: {map_name}, nations={nations}, {bots} bots, {difficulty} \
+         engine={engine_label} sample={sample_label}",
         cfg.stage
     );
 
@@ -202,7 +216,7 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
         0,
         cfg.stage,
         cfg.max_episode_ticks,
-        EngineKind::Node,
+        cfg.engine,
         cfg.reward_config,
         cfg.curriculum_schedule,
     )?;
@@ -218,7 +232,7 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
     let mut end_tick = 0i64;
     let mut finished = false;
 
-    // Spawn phase: up to 8 greedy decisions, not logged.
+    // Spawn phase: up to 8 decisions, not logged (same sampling mode as play).
     for _ in 0..8 {
         let obs = worker.current_obs().unwrap();
         if !obs.spawn_phase() {
@@ -239,11 +253,11 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
             let (a, p, t, u, b, n, q, _lp, _v) = if let Some(h) = hidden.as_ref() {
                 let context =
                     crate::recurrent::context_tensor(&[prepared.prev_action.clone()], cfg.device);
-                let (acts, h_out) = policy.act_with_state(&obs_t, h, &context, true);
+                let (acts, h_out) = policy.act_with_state(&obs_t, h, &context, greedy);
                 hidden = Some(h_out);
                 acts
             } else {
-                policy.act(&obs_t, true)
+                policy.act(&obs_t, greedy)
             };
             Ok(choice_from_act(
                 a.int64_value(&[0]),
@@ -276,11 +290,12 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
                 let context =
                     crate::recurrent::context_tensor(&[prepared.prev_action.clone()], cfg.device);
                 if cfg.debug {
-                    let (acts, h_out) = policy.act_with_state_debug(&obs_t, h, &context, true);
+                    let (acts, h_out) =
+                        policy.act_with_state_debug(&obs_t, h, &context, greedy);
                     hidden = Some(h_out);
                     acts
                 } else {
-                    let (acts, h_out) = policy.act_with_state(&obs_t, h, &context, true);
+                    let (acts, h_out) = policy.act_with_state(&obs_t, h, &context, greedy);
                     hidden = Some(h_out);
                     let empty =
                         tch::Tensor::zeros(&[1, ACTIONS.len() as i64], (Kind::Float, cfg.device));
@@ -290,9 +305,9 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
                     )
                 }
             } else if cfg.debug {
-                policy.act_with_debug(&obs_t, true)
+                policy.act_with_debug(&obs_t, greedy)
             } else {
-                let (a, p, t, u, b, n, q, lp, v) = policy.act(&obs_t, true);
+                let (a, p, t, u, b, n, q, lp, v) = policy.act(&obs_t, greedy);
                 let empty =
                     tch::Tensor::zeros(&[1, ACTIONS.len() as i64], (Kind::Float, cfg.device));
                 (a, p, t, u, b, n, q, lp, v, empty)
@@ -445,7 +460,8 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
     let spool_meta = json!({
         "map": cfg.map.clone().unwrap_or_default(),
         "stage": cfg.stage,
-        "engine": "watch",
+        "engine": engine_label,
+        "sample": sample_label,
         "won": episode_outcome == "win",
         "timed_out": episode_outcome == "timeout",
         "run_name": std::env::var("HF_RUN_PREFIX")
