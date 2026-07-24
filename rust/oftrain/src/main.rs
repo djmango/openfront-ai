@@ -49,10 +49,10 @@ struct Args {
     #[arg(long)]
     stage_env_targets: Option<String>,
 
-    /// Matches the live V10 recipe (default 21000). The port
-    /// originally shipped 3000, which truncated every stage-0 episode
-    /// before the 80%-ownership win condition was reachable - see devlog.
-    #[arg(long, default_value_t = 21000)]
+    /// Episode tick budget for train and `--watch` (one source of truth:
+    /// `ofcore::DEFAULT_MAX_EPISODE_TICKS`). Watch stops on win/death or
+    /// this tick, matching trainer truncation.
+    #[arg(long, default_value_t = ofcore::DEFAULT_MAX_EPISODE_TICKS)]
     max_episode_ticks: i64,
 
     /// Steps collected per env before each PPO update.
@@ -546,10 +546,11 @@ struct Args {
     #[arg(long)]
     nations: Option<String>,
 
-    /// Max post-spawn decisions for `--watch`. Watch steps 10 ticks per
-    /// decision, so this should be ≥ `--max-episode-ticks` / 10 or the
-    /// decision cap truncates before the training tick budget.
-    #[arg(long, default_value_t = 2200)]
+    /// Max post-spawn decisions for `--watch`. Derived from
+    /// `--max-episode-ticks` so the decision cap cannot undercut the
+    /// shared train/watch tick budget. Watch still raises this at runtime
+    /// if a lower explicit value would truncate early.
+    #[arg(long, default_value_t = ofcore::DEFAULT_WATCH_MAX_STEPS)]
     max_steps: usize,
 
     /// Write `.debug.json` sidecar with `--watch` (default true).
@@ -845,7 +846,8 @@ mod curriculum_flag_tests {
     #[test]
     fn v10_reward_recipe_is_the_cli_default() {
         let defaults = Args::try_parse_from(["oftrain"]).unwrap();
-        assert_eq!(defaults.max_episode_ticks, 21000);
+        assert_eq!(defaults.max_episode_ticks, ofcore::DEFAULT_MAX_EPISODE_TICKS);
+        assert_eq!(defaults.max_steps, ofcore::DEFAULT_WATCH_MAX_STEPS);
         assert_eq!(defaults.v81_dom_coef, 0.25);
         assert_eq!(defaults.v81_min_stage, 0);
         assert!(defaults.v81_dominant_loss);
@@ -1331,7 +1333,9 @@ fn main() -> anyhow::Result<()> {
             bots: args.bots,
             difficulty: args.difficulty.clone(),
             nations: args.nations.clone(),
-            max_steps: args.max_steps,
+            max_steps: args
+                .max_steps
+                .max(ofcore::watch_max_steps_for_ticks(args.max_episode_ticks)),
             max_episode_ticks: args.max_episode_ticks,
             debug: args.debug,
             device,
