@@ -6738,11 +6738,21 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     && recurrent["context_features"] == policy::RECURRENT_CONTEXT_FLOATS,
                 "V8.2 recurrent context schema mismatch"
             );
-            anyhow::ensure!(
-                recurrent["bptt_length"] == cfg.bptt_chunk_len
-                    && recurrent["rollout_length"] == cfg.rollout_len,
-                "recurrent BPTT/rollout configuration mismatch"
-            );
+            // Rollout / BPTT lengths are training-dynamics knobs, not weight
+            // shapes. Allow resume across util A/Bs (e.g. 64→48) with a warn
+            // so pods can retune collect without wiping the run.
+            if recurrent["bptt_length"] != cfg.bptt_chunk_len
+                || recurrent["rollout_length"] != cfg.rollout_len
+            {
+                println!(
+                    "[train] WARNING: resume manifest bptt/rollout \
+                     ({}/{}) != CLI ({}/{}); continuing with CLI values",
+                    recurrent["bptt_length"],
+                    recurrent["rollout_length"],
+                    cfg.bptt_chunk_len,
+                    cfg.rollout_len
+                );
+            }
             anyhow::ensure!(
                 recurrent["hidden_reset_policy"] == "episode_done",
                 "unsupported V8.2 hidden reset policy"
