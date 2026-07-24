@@ -425,6 +425,8 @@ while true; do
   fi
   echo "=== $(date -u +%FT%TZ) launching $RUN_NAME num_gpus=$NUM_GPUS envs/shard=$NUM_ENVS node_fraction=$NODE_FRACTION $RESUME ==="
   START_TS=$(date +%s)
+  # Sampled apply/prepare timings on stderr (util E6 diagnostics).
+  OF_COLLECT_PROFILE="${OF_COLLECT_PROFILE:-1}" \
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   NCCL_P2P_DISABLE="$NCCL_P2P_DISABLE" \
   NCCL_IB_DISABLE="$NCCL_IB_DISABLE" \
