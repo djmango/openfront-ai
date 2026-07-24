@@ -58,8 +58,10 @@ MIN_ENVS="${MIN_ENVS:-10}"
 TARGET_GPU_UTIL="${TARGET_GPU_UTIL:-0.85}"
 AUTOSCALE_CHECK_EVERY="${AUTOSCALE_CHECK_EVERY:-5}"
 AUTOSCALE_STEP="${AUTOSCALE_STEP:-2}"
-ROLLOUT_LEN="${ROLLOUT_LEN:-64}"
-BPTT_CHUNK_LEN="${BPTT_CHUNK_LEN:-32}"
+# util E5: shorter rollout lowers the collect barrier; pair with epochs=4 so
+# samples/update stay healthy (48*N vs 64*N) while train wall stays long.
+ROLLOUT_LEN="${ROLLOUT_LEN:-48}"
+BPTT_CHUNK_LEN="${BPTT_CHUNK_LEN:-24}"
 # PPO epochs per update. At the A100 VRAM ceiling (~24 envs/shard) collect_s
 # stays ~2x train_s with the historical default of 2, pinning mean util near
 # ~60%. epochs=4 roughly doubles train wall so the one-step pipeline saturates
