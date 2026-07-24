@@ -90,10 +90,10 @@ STALE_CKPT_RUNS="${STALE_CKPT_RUNS:-ppo_v8,ppo_v8_fast_native,ppo_v81,ppo_v82,pp
 # Validated recipe: persistent CUDA owners + compact rollout + recurrent BPTT.
 # Work-conserving batching knobs (inference scheduling only):
 # - wait-ms=50 / same-shape-prefer: was 2ms → ~70% singleton AE batches
-# - target-batch=2: stage-25 has ~16 unique map shapes vs 14 envs/shard, so
-#   target=8 never fills and always burns the full wait before dispatch
+# - target-batch=1 / wait-ms=0 (util E4): dispatch as soon as any env is ready
+#   to maximize GPU feed during collect (accepts more singletons).
 # - padding-waste=0.50: after wait, allow slightly more mixed-shape compact pad
-EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --fp16-rollout --pinned-h2d --persistent-actors --work-conserving-actors --pipeline-groups=true --actor-target-batch 2 --actor-max-wait-ms 15 --actor-max-padding-waste 0.50 --recurrent-policy --bptt-chunk-len $BPTT_CHUNK_LEN --epochs $EPOCHS --ckpt-every 5 --ckpt-keep-last $CKPT_KEEP_LAST --eval-every 0 --log-every 1 --coarse-ckpt ../weights/ae/ae_v32_nostatic_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors}"
+EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --fp16-rollout --pinned-h2d --persistent-actors --work-conserving-actors --pipeline-groups=true --actor-target-batch 1 --actor-max-wait-ms 0 --actor-max-padding-waste 0.50 --recurrent-policy --bptt-chunk-len $BPTT_CHUNK_LEN --epochs $EPOCHS --ckpt-every 5 --ckpt-keep-last $CKPT_KEEP_LAST --eval-every 0 --log-every 1 --coarse-ckpt ../weights/ae/ae_v32_nostatic_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors}"
 
 # V11 anti-death-spiral on the closeout ladder. Dense reward with softer death,
 # survival / diplo-panic / combat priors, and radical win bonus so finishing
