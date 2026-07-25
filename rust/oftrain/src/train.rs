@@ -6679,6 +6679,11 @@ pub fn run(mut cfg: Config) -> Result<()> {
     );
     if cfg.recurrent_policy {
         anyhow::ensure!(
+            cfg.persistent_actors,
+            "--recurrent-policy requires --persistent-actors \
+             (pass --recurrent-policy=false with --persistent-actors=false for legacy/CPU smokes)"
+        );
+        anyhow::ensure!(
             cfg.recurrent_hidden_size == policy::RECURRENT_HIDDEN as usize,
             "recurrent hidden size must be {}",
             policy::RECURRENT_HIDDEN

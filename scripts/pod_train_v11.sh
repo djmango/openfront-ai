@@ -16,9 +16,10 @@
 #      scripts/ppo_v11.env.example).
 #   2. rust/ofcore/src/curriculum.rs — stages, bots/nations, win gates,
 #      V10_ENV_TARGETS floors (V11 keeps the same curriculum).
-#   3. rust/oftrain Cargo default features — native-engine ON. Clap defaults
-#      in main.rs mirror this recipe for rollout/BPTT/autoscale knobs so a
-#      bare `oftrain` smoke matches production; pods still pass them explicitly.
+#   3. rust/oftrain clap defaults in main.rs — mirror this recipe (rollout 48,
+#      BPTT 24, epochs 8, balance-train-collect, amp/fp16/compact, persistent
+#      + work-conserving + recurrent, autoscale target 0.92 / max-envs 32) so a
+#      bare `oftrain` matches production; pods still pass them explicitly.
 #
 # Production is pure-native (NODE_FRACTION=0). A non-zero mix is a slow parity
 # hedge and requires an explicit opt-in: ALLOW_NODE_MIX=1 NODE_FRACTION=<frac> ...
@@ -45,9 +46,8 @@ if ! flock -n 9; then
 fi
 
 NUM_GPUS="${NUM_GPUS:-2}"
-# Envs per GPU/shard. A100 80GB can take more than A40; start at 16 and let
-# stage env targets + autoscale take over within MAX_ENVS.
-# Start near the util-healthy band; autoscale can still grow to MAX_ENVS.
+# Envs per GPU/shard. Start near the util-healthy band; autoscale can still
+# grow to MAX_ENVS. (Clap default for bare oftrain remains 4 for local smokes.)
 NUM_ENVS="${NUM_ENVS:-24}"
 STAGE_ENV_TARGETS="${STAGE_ENV_TARGETS:-}"
 # Persistent owners cannot live-spawn env workers; autoscale grows via the same

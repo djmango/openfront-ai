@@ -474,6 +474,7 @@ def render_record(
                 t0 = time.time()
                 gameplay_duration: float | None = None
                 win_hold_t0: float | None = None
+                early_modal_warned = False
                 while time.time() - t0 < timeout:
                     if (
                         max_duration is not None
@@ -507,12 +508,26 @@ def render_record(
                     modal = page.locator("win-modal div.fixed")
                     if modal.count() > 0:
                         if outcome == "win":
-                            if win_hold_t0 is None:
-                                win_hold_t0 = time.time()
-                                print("win modal - holding for celebration")
-                            elif time.time() - win_hold_t0 >= win_hold_sec:
-                                gameplay_duration = time.time() - gameplay_t0
-                                break
+                            # Ignore premature win modals from client lobby
+                            # divergence (e.g. rewriting nations:0 → 1).
+                            reached_end = end_tick is None or (
+                                tick is not None and tick >= int(end_tick)
+                            )
+                            if reached_end:
+                                if win_hold_t0 is None:
+                                    win_hold_t0 = time.time()
+                                    print(
+                                        f"win modal at tick {tick} - holding for celebration"
+                                    )
+                                elif time.time() - win_hold_t0 >= win_hold_sec:
+                                    gameplay_duration = time.time() - gameplay_t0
+                                    break
+                            elif not early_modal_warned:
+                                early_modal_warned = True
+                                print(
+                                    f"ignoring early win modal at tick {tick} "
+                                    f"(recorded end_tick={end_tick})"
+                                )
                         else:
                             gameplay_duration = max(
                                 0.0, time.time() - gameplay_t0 - 1.5
@@ -534,10 +549,16 @@ def render_record(
                         for _ in range(30):
                             if modal.count() > 0:
                                 win_hold_t0 = time.time()
+                                print(
+                                    f"win modal at tick {tick} - holding for celebration"
+                                )
                                 break
                             page.wait_for_timeout(100)
                         if win_hold_t0 is None:
                             gameplay_duration = time.time() - gameplay_t0
+                            print(
+                                f"end_tick {end_tick} reached without win modal; stopping"
+                            )
                             break
 
                     page.wait_for_timeout(100)

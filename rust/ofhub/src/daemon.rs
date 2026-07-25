@@ -152,11 +152,16 @@ fn run_watch(
         fs::create_dir_all(parent)?;
     }
     let device = env_or("SHOWCASE_DEVICE", "cuda");
-    // Match live V10 training (`--max-episode-ticks 21000`). Watch advances
-    // 10 ticks per decision, so the decision cap must not fire first.
-    let max_episode_ticks = env_or("SHOWCASE_MAX_EPISODE_TICKS", "21000");
-    let ticks: i64 = max_episode_ticks.parse().unwrap_or(21000);
-    let default_steps = (ticks / 10 + 64).max(64).to_string();
+    // One source of truth: ofcore::DEFAULT_MAX_EPISODE_TICKS (same clap
+    // default as oftrain train + watch). Override only via env.
+    let max_episode_ticks = env_or(
+        "SHOWCASE_MAX_EPISODE_TICKS",
+        &ofcore::DEFAULT_MAX_EPISODE_TICKS.to_string(),
+    );
+    let ticks: i64 = max_episode_ticks
+        .parse()
+        .unwrap_or(ofcore::DEFAULT_MAX_EPISODE_TICKS);
+    let default_steps = ofcore::watch_max_steps_for_ticks(ticks).to_string();
     let max_steps = env_or("SHOWCASE_MAX_STEPS", &default_steps);
     let coarse = env_or(
         "SHOWCASE_COARSE_CKPT",
