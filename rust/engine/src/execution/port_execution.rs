@@ -265,6 +265,7 @@ mod tests {
             gold_multiplier: None,
             max_timer_value: None,
             ranked_type: None,
+            water_nukes: None,
         };
         let mut game = Game::new(
             String::new(),

@@ -143,6 +143,16 @@ impl NukeExecution {
 
         let to_destroy = if let Some(c) = self.tiles_to_destroy_cache.take() {
             c
+        } else if game.wire.water_nukes() {
+            // TS `NukeExecution.tilesToDestroy`'s `waterNukes()` branch: instead
+            // of the BFS coin-flip, sample 16 angular radii, smooth them into a
+            // gently-undulating boundary, then scan the `outer`-radius bounding
+            // box and keep every tile inside that irregular boundary (land AND
+            // water - unlike the BFS branch there is no per-tile filter). This
+            // game (Hawaii team mode) sets `waterNukes: true`, so native must
+            // use this algorithm or every nuke destroys a different tile set
+            // (see jdxWdFCt tick-2980 water-nuke bisection).
+            water_nuke_tiles(game, dst, inner, outer, tick)
         } else {
             let rand_cell = std::cell::RefCell::new(PseudoRandom::new(tick as i32));
             game.map.bfs(dst, |gm, n| {
@@ -570,6 +580,74 @@ mod impassable_terrain_tests {
 
         assert!(!nuke.is_active(), "should have detonated and deactivated normally");
     }
+}
+
+/// TS `NukeExecution.tilesToDestroy`'s `waterNukes()` branch (pin f0da4182).
+///
+/// Samples `NUM_SAMPLES` angular radii uniformly in `[inner2, outer2)`, applies
+/// one light smoothing pass, then scans the `outer`-radius bounding box and
+/// keeps every tile whose squared distance is within the angularly-interpolated
+/// boundary. Tiles are emitted in row-major (`py` then `px`) order, matching the
+/// insertion order of TS's result `Set`. `inner`/`outer` are the nuke's
+/// magnitudes (not yet squared).
+fn water_nuke_tiles(game: &Game, dst: TileRef, inner: f64, outer: f64, tick: u32) -> Vec<TileRef> {
+    const NUM_SAMPLES: usize = 16;
+    let inner2 = inner * inner;
+    let outer2 = outer * outer;
+
+    let mut rand = PseudoRandom::new(tick as i32);
+    let mut radii_sq = [0.0f64; NUM_SAMPLES];
+    for r in radii_sq.iter_mut() {
+        *r = rand.next_float(inner2, outer2);
+    }
+    let prev = radii_sq;
+    for i in 0..NUM_SAMPLES {
+        let l = (i + NUM_SAMPLES - 1) % NUM_SAMPLES;
+        let r = (i + 1) % NUM_SAMPLES;
+        radii_sq[i] = prev[i] * 0.6 + prev[l] * 0.2 + prev[r] * 0.2;
+    }
+
+    let cx = game.x(dst) as i32;
+    let cy = game.y(dst) as i32;
+    let outer_i = outer as i32;
+    let width = game.width() as i32;
+    let height = game.height() as i32;
+    let x0 = (cx - outer_i).max(0);
+    let y0 = (cy - outer_i).max(0);
+    let x1 = (cx + outer_i).min(width - 1);
+    let y1 = (cy + outer_i).min(height - 1);
+
+    let two_pi = std::f64::consts::PI * 2.0;
+    let mut result = Vec::new();
+    let mut py = y0;
+    while py <= y1 {
+        let mut px = x0;
+        while px <= x1 {
+            let dx = px - cx;
+            let dy = py - cy;
+            let d2 = (dx * dx + dy * dy) as f64;
+            if d2 > outer2 {
+                px += 1;
+                continue;
+            }
+            if d2 > inner2 {
+                let angle = (dy as f64).atan2(dx as f64) + std::f64::consts::PI;
+                let t = (angle / two_pi) * NUM_SAMPLES as f64;
+                let i0 = (t.floor() as usize) % NUM_SAMPLES;
+                let i1 = (i0 + 1) % NUM_SAMPLES;
+                let frac = t - t.floor();
+                let threshold = radii_sq[i0] * (1.0 - frac) + radii_sq[i1] * frac;
+                if d2 > threshold {
+                    px += 1;
+                    continue;
+                }
+            }
+            result.push(game.ref_xy(px as u32, py as u32));
+            px += 1;
+        }
+        py += 1;
+    }
+    result
 }
 
 fn nuke_spawn(game: &Game, owner_small_id: u16, nuke_type: &str, dst: TileRef) -> Option<TileRef> {
