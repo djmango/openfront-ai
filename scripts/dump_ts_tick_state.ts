@@ -107,9 +107,11 @@ function snapshot(
         tile: u.tile(),
         hash: u.hash(),
         health: u.health(),
-        veterancy: u.veterancy(),
+        veterancy: typeof (u as any).veterancy === "function" ? (u as any).veterancy() : 0,
         veterancyProgress:
-          u.type() === UnitType.Warship ? u.warshipState().veterancyProgress : 0,
+          u.type() === UnitType.Warship
+            ? ((u.warshipState() as any).veterancyProgress ?? 0)
+            : 0,
         targetTile: u.targetTile() ?? null,
         patrolTile:
           u.type() === UnitType.Warship
