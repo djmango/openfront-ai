@@ -1273,9 +1273,16 @@ impl AttackExecution {
                 .map(|p| p.owned_tiles.clone())
                 .unwrap_or_default();
             for tile in tiles {
+                // TS `AttackExecution.handleDeadDefender` iterates
+                // `this.mg.forEachNeighbor(...)`, which on this pin (f0da4182)
+                // visits west, east, north, south. The `captured` branch below
+                // hands each orphan tile to the FIRST qualifying neighbor
+                // owner, so visit order decides which player captures which
+                // tile (and in which order, which feeds the insertion-ordered
+                // border sets). It must match TS's order.
                 let mut neighbors = [TileRef::MAX; 4];
                 let mut n = 0usize;
-                game.map.for_each_neighbor4(tile, |nb| {
+                game.map.for_each_neighbor4_wens(tile, |nb| {
                     if n < 4 {
                         neighbors[n] = nb;
                         n += 1;
@@ -1312,7 +1319,15 @@ impl AttackExecution {
     }
 
     fn add_neighbors(&mut self, game: &Game, tile: TileRef, tick: u32) {
-        game.map.for_each_neighbor4(tile, |neighbor| {
+        // TS `AttackExecution.addNeighbors` iterates `this.map.neighbors4(...)`,
+        // which on this pin (f0da4182) visits west, east, north, south. Because
+        // this loop draws one `random.next_int(0, 7)` per qualifying neighbor,
+        // the visit order determines which tile receives which priority draw -
+        // so it MUST match TS's order or the attack frontier heap dequeues a
+        // different tile first, desyncing conquest from the very first attack
+        // tick. (The general `for_each_neighbor4` is north, south, west, east,
+        // matching TS's `neighbors()` array helper used elsewhere.)
+        game.map.for_each_neighbor4_wens(tile, |neighbor| {
             if game.map.is_water(neighbor) {
                 return;
             }

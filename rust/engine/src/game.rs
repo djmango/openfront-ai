@@ -1082,9 +1082,19 @@ impl Game {
     }
 
     fn refresh_borders_around(&mut self, tile: TileRef) {
+        // TS `GameImpl.updateBorders` iterates `this._map.neighbors4(...)`,
+        // which on this pin (f0da4182) visits west, east, north, south.
+        // `updateBorderStatus` adds/removes tiles from the owner's
+        // insertion-ordered `_borderTiles` set, so this order determines that
+        // set's iteration order - which `AttackExecution.refreshToConquer`
+        // consumes (one PRNG draw per border tile's neighbor) when seeding an
+        // attack's conquest heap. It must match TS or the border set drifts
+        // out of insertion-order sync and attacks eventually dequeue a
+        // different frontier tile. (The general `for_each_neighbor4` is
+        // north, south, west, east, matching TS's `neighbors()` array helper.)
         let mut neighbors = [TileRef::MAX; 4];
         let mut n = 0usize;
-        self.map.for_each_neighbor4(tile, |t| {
+        self.map.for_each_neighbor4_wens(tile, |t| {
             if n < 4 {
                 neighbors[n] = t;
                 n += 1;
