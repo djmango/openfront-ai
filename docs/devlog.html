@@ -85,21 +85,20 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 25th, 2026</h2>
-  <p><b><code>ppo_v11</code> moved to a single-pod <b>4×A100 80GB</b> soak.</b>
-  Recipe: 38 envs/shard (max 40), util stack (persistent + recurrent + rollout 48 /
-  BPTT 24 + balance-train-collect). Resumed ~update <b>466</b> / stage <b>16</b>
-  from the 2× run. Live GPUs hold ~<b>95-100%</b> util and ~<b>47-52 / 80 GB</b>
-  VRAM. Details: <a href="#v11-4x">4× scale-up</a>,
-  <a href="#v11-soak">prior soak</a>.</p>
+  <p><b><code>ppo_v11</code> is live on one clean <b>4×A100 80GB</b> pod.</b>
+  Old 2× pod is gone. Single oftrain at 38 envs/shard (max 40), util stack
+  intact. Stage <b>16</b> / update ~<b>467+</b>, window WR ~0.6 (soft 80% nation
+  gate). GPUs hold ~<b>95-100%</b> util, ~<b>47-52 / 80 GB</b> VRAM. Details:
+  <a href="#v11-4x">4× scale-up</a>, <a href="#v11-soak">prior soak</a>.</p>
   <p><b>AE v3.2 no-static</b> is the live encoder pair
   (<code>ae_v32_nostatic_d8c32</code> / <code>d16c32</code>).
   Watch / MODEL-overlay clips are pointed at V11 checkpoints on HF
   (<code>djmango/openfront-rl/ppo_v11/</code>), not the V10 archive.</p>
   <p class="d" style="margin:.75rem 0 0">
   Surpass old model ≈ clear stage <b>28+</b> (V10 peaked ~27, died at 25 /
-  WR ~30%). Medium = stage <b>68</b>. After the 4× move (see
-  <a href="#v11-4x">scale-up</a>): surpass ~<b>Jul 26-27</b> UTC; Medium
-  ~<b>Jul 29-31</b> UTC (band Aug 1-3 if another stage-12-shaped hole shows).</p>
+  WR ~30%). Medium = stage <b>68</b>. Measured 4× cadence (see
+  <a href="#v11-4x">scale-up</a>): surpass ~<b>Jul 27</b> UTC (band Jul 26-28);
+  Medium ~<b>Jul 31</b> UTC (band Aug 1-3 if another stage-12-shaped hole shows).</p>
 </div>
 
 
@@ -113,34 +112,35 @@ revised ETAs from measured update cadence.</p>
   <li>Pod: <code>ppo-v11-4xA100</code> (secure cloud), <code>NUM_GPUS=4</code>,
     <code>NUM_ENVS=38</code>, <code>MAX_ENVS=40</code>, same util clap defaults
     (rollout 48 / BPTT 24 / epochs 8-12 balance / persistent+recurrent).</li>
-  <li>Terminated the old 2× pod after HF sync so only one trainer writes
-    <code>ppo_v11/</code>.</li>
+  <li>Old 2× pod (<code>ppo-v11-2xA100</code>) terminated after HF sync;
+    RunPod now shows only <code>ppo-v11-4xA100</code>. One oftrain + one
+    HF sync-loop; no duplicate trainers.</li>
   <li>Launch fixes that unblocked master resumes: clap
     <code>ArgAction::Set</code> needs <code>--flag=true</code> (not bare
     <code>--amp</code>); <code>--foveate</code>/<code>--pinned-h2d</code> stay
     flag-only so do not pass a trailing <code>true</code>.</li>
 </ul>
 
-<h3 id="v11-4x-util">Util / VRAM</h3>
+<h3 id="v11-4x-util">Util / VRAM (stable)</h3>
 <ul>
   <li>2× baseline: ~100% util, ~55/80 GB at 24 envs/shard (48 envs total).</li>
-  <li>4× @ 32 envs/shard (96 total): ~95-100% util, ~47-52/80 GB; warm updates
-    ~10-12/hr vs ~6.5/hr on 2× (~1.6×).</li>
-  <li>4× @ 38 envs/shard (152 total): still ~95-100% util, ~47-52/80 GB while
-    the first post-restart collect fills. Headroom to 40 remains if collect
-    stays balanced; GPU util is already at the 0.92 target so autoscale will
-    not push further on util alone.</li>
+  <li>4× @ 32 envs/shard (96 total): ~95-100% util, ~47-52/80 GB; brief warm
+    stretch looked ~10-12 updates/hr.</li>
+  <li>4× @ 38 envs/shard (152 total), settled: ~95-100% util, ~47-52/80 GB,
+    single trainer. Update wall ~7.5-9 min (~7-8/hr), similar to late 2×, but
+    ~3× env-steps per update (152 vs 48). Autoscale will not grow further on
+    util alone (already at the 0.92 target); VRAM headroom to 40 remains.</li>
 </ul>
 
 <h3 id="v11-4x-eta">Revised ETAs</h3>
-<p>At stage 16 with WR still climbing back through the soft 80% nation gate.
-Using ~1.5-1.8× wall-clock vs the late-2× ~3 h/stage band (WR-gated, not pure
-throughput):</p>
+<p>Stage 16, window WR ~0.6 under the soft 80% nation gate. Update clock is
+not much faster than 2×; the win is sample volume per update. Vs the late-2×
+~3 h/stage band, assume ~2.2-2.8 h/stage once WR is clearing (WR-gated):</p>
 <table>
   <tr><th>milestone</th><th>stage</th><th>ETA (UTC)</th><th>notes</th></tr>
-  <tr><td>Surpass V10</td><td>28+</td><td>~Jul 26-27</td>
-    <td>was Jul 27-28 on 2× after the s12 stick</td></tr>
-  <tr><td>Medium</td><td>68</td><td>~Jul 29-31</td>
+  <tr><td>Surpass V10</td><td>28+</td><td>~Jul 27</td>
+    <td>band Jul 26-28; was Jul 27-28 on 2× after s12</td></tr>
+  <tr><td>Medium</td><td>68</td><td>~Jul 31</td>
     <td>band Aug 1-3 if another long stick appears</td></tr>
 </table>
 <p>Caveats: first-nation WR is noisy (window can sit ~0.6 before clearing);
