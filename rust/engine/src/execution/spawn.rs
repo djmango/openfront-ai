@@ -36,6 +36,27 @@ impl Execution for SpawnExecution {
             return;
         }
         self.active = false;
+        // TS `SpawnExecution.tick` anti-teleport gate (OpenFront pin
+        // f0da4182, "reject spawn intents after the spawn phase"): once the
+        // game is no longer in the spawn phase, an already-spawned player's
+        // spawn intent must be a deterministic no-op rather than
+        // relinquishing its entire territory and re-conquering it at the new
+        // tile (an instant teleport). Without this, native applies a late
+        // spawn intent that TS ignores, moving the player's whole starting
+        // blob to a different map location and desyncing every subsequent
+        // tick. Gated here (not in the shared `execute_player_spawn`) because
+        // TS only guards the human `SpawnExecution` path, not bot
+        // `TribeExecution` mass spawns.
+        if !game.in_spawn_phase() {
+            let small_id = game
+                .player_by_id(&self.player_info.id)
+                .map(|p| p.small_id);
+            if let Some(small_id) = small_id {
+                if game.has_spawned(small_id) {
+                    return;
+                }
+            }
+        }
         let spawned = execute_player_spawn(game, &self.player_info, self.tile, &mut self.random);
         // TS `SpawnExecution.tick`: in singleplayer the spawn phase ends
         // the moment the human player picks a spawn (GameRunner never adds
