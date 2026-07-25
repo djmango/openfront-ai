@@ -100,7 +100,7 @@ STALE_CKPT_RUNS="${STALE_CKPT_RUNS:-ppo_v8,ppo_v8_fast_native,ppo_v81,ppo_v82,pp
 # util stays ≥90% when collect wall drifts (see balance.rs).
 MAX_EPOCHS="${MAX_EPOCHS:-12}"
 BALANCE_TARGET_RATIO="${BALANCE_TARGET_RATIO:-0.95}"
-EXTRA_ARGS="${EXTRA_ARGS:---amp true --foveate true --compact-rollout true --fp16-rollout true --pinned-h2d true --persistent-actors true --work-conserving-actors true --pipeline-groups=true --actor-target-batch 2 --actor-max-wait-ms 15 --actor-max-padding-waste 0.50 --recurrent-policy true --bptt-chunk-len $BPTT_CHUNK_LEN --epochs $EPOCHS --balance-train-collect true --max-epochs $MAX_EPOCHS --balance-target-ratio $BALANCE_TARGET_RATIO --ckpt-every 5 --ckpt-keep-last $CKPT_KEEP_LAST --eval-every 0 --log-every 1 --coarse-ckpt ../weights/ae/ae_v32_nostatic_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors}"
+EXTRA_ARGS="${EXTRA_ARGS:---amp=true --compact-rollout=true --fp16-rollout=true --persistent-actors=true --work-conserving-actors=true --pipeline-groups=true --actor-target-batch 2 --actor-max-wait-ms 15 --actor-max-padding-waste 0.50 --recurrent-policy=true --bptt-chunk-len $BPTT_CHUNK_LEN --epochs $EPOCHS --balance-train-collect=true --max-epochs $MAX_EPOCHS --balance-target-ratio $BALANCE_TARGET_RATIO --ckpt-every 5 --ckpt-keep-last $CKPT_KEEP_LAST --eval-every 0 --log-every 1 --coarse-ckpt ../weights/ae/ae_v32_nostatic_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors}"
 
 # V11 anti-death-spiral on the closeout ladder. Dense reward with softer death,
 # survival / diplo-panic / combat priors, and radical win bonus so finishing
@@ -110,7 +110,7 @@ if [ -n "$STAGE_ENV_TARGETS" ]; then
   TRAIN_ARGS="$TRAIN_ARGS --stage-env-targets $STAGE_ENV_TARGETS"
 fi
 if [ "$AUTO_SCALE_ENVS" = "1" ]; then
-  EXTRA_ARGS="$EXTRA_ARGS --auto-scale-envs --min-envs $MIN_ENVS --max-envs $MAX_ENVS --target-gpu-util $TARGET_GPU_UTIL --autoscale-check-every $AUTOSCALE_CHECK_EVERY --autoscale-step $AUTOSCALE_STEP"
+  EXTRA_ARGS="$EXTRA_ARGS --auto-scale-envs=true --min-envs $MIN_ENVS --max-envs $MAX_ENVS --target-gpu-util $TARGET_GPU_UTIL --autoscale-check-every $AUTOSCALE_CHECK_EVERY --autoscale-step $AUTOSCALE_STEP"
 fi
 
 REPO_DIR="${REPO_DIR:-/root/openfront-ai}"
