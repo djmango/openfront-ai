@@ -8,12 +8,19 @@ use serde_json::Value;
 pub const REGION: usize = 8;
 pub const MAX_SLOTS: usize = 128;
 pub const N_STATIC: usize = 6;
-pub const N_TRANSIENT: usize = 53;
-pub const P_FEAT: usize = 21;
+/// V11: ego-split attack fronts add 4 planes (own/ally/enemy × src/retreat).
+pub const N_TRANSIENT: usize = 57;
+/// V11 neighbor pack: +7 columns (border geometry + relation continuum).
+pub const P_FEAT: usize = 28;
 pub const N_SCALARS: usize = 11;
 pub const N_ACTIONS: usize = 21;
 pub const N_BUILD: usize = 7;
 pub const N_NUKE: usize = 5;
+/// Top-K own (+ visible) unit tokens for the unit pointer head.
+pub const MAX_UNITS: usize = 32;
+/// Per-unit token: type / ego-class / level / health / cooldown / constructing /
+/// gy / gx / troops / can_upgrade / can_delete / can_boat_or_warship.
+pub const U_FEAT: usize = 12;
 pub const GW_MAX: i64 = 250;
 pub const GH_MAX: i64 = 150;
 pub const IS_LAND_BIT: u8 = 7;
@@ -105,8 +112,10 @@ pub const TR_TRAIN: usize = 39;
 pub const TR_SILO_COOLDOWN: usize = 42;
 pub const TR_SAM_COOLDOWN: usize = 45;
 pub const TR_STATION: usize = 48;
-pub const TR_ATTACK_SRC: usize = 51; // shared across owners
-pub const TR_ATTACK_RETREAT: usize = 52; // shared, overlays TR_ATTACK_SRC
+/// V11: ego-split (own/ally/enemy) attack source intensity.
+pub const TR_ATTACK_SRC: usize = 51;
+/// V11: ego-split retreat overlay (own/ally/enemy).
+pub const TR_ATTACK_RETREAT: usize = 54;
 
 pub fn action_index(name: &str) -> Option<i64> {
     ACTIONS.iter().position(|&a| a == name).map(|i| i as i64)
@@ -126,6 +135,14 @@ pub fn needs_player(a: i64) -> bool {
             | A_EMBARGO_STOP
             | A_TARGET_PLAYER
             | A_ALLIANCE_EXTENSION
+    )
+}
+
+/// V11 unit-pointer actions (upgrade / delete / cancel_boat / move_warship).
+pub fn needs_unit(a: i64) -> bool {
+    matches!(
+        a,
+        A_UPGRADE_STRUCTURE | A_DELETE_UNIT | A_CANCEL_BOAT | A_MOVE_WARSHIP
     )
 }
 
@@ -541,6 +558,13 @@ pub struct Feat {
     pub clut: [u8; MAX_SLOTS],
     pub players: Vec<f32>, // (MAX_SLOTS, P_FEAT)
     pub pmask: [f32; MAX_SLOTS],
+    /// Packed unit tokens `(MAX_UNITS, U_FEAT)`.
+    pub units: Vec<f32>,
+    pub umask: [f32; MAX_UNITS],
+    /// Engine uids aligned with `units` rows (`-1` = pad).
+    pub unit_uids: [i64; MAX_UNITS],
+    /// Per-action legality over unit tokens `(N_ACTIONS, MAX_UNITS)`.
+    pub legal_utarget: Vec<f32>,
     pub scalars: [f32; N_SCALARS],
     pub me_slot: i64,
     pub legal_actions: [f32; N_ACTIONS],
@@ -714,7 +738,7 @@ pub fn featurize(
         }
     }
 
-    // Attack fronts (v7): source-tile intensity across ALL active attacks.
+    // Attack fronts (V11): ego-split own/ally/enemy source + retreat planes.
     for a in &ents.attacks {
         let (src_x, src_y) = match (a.src_x, a.src_y) {
             (Some(x), Some(y)) => (x, y),
@@ -725,11 +749,13 @@ pub fn featurize(
             continue;
         }
         let at = gy as usize * gw + gx as usize;
+        let cls = clut[slot_of(a.from).min(MAX_SLOTS - 1)] as i64;
+        let oc = if cls != 0 { (cls - 1) as usize } else { 2 };
         let val = log_norm(a.troops);
-        let idx = TR_ATTACK_SRC * plane + at;
+        let idx = (TR_ATTACK_SRC + oc) * plane + at;
         transient[idx] = transient[idx].max(val);
         if a.retreating {
-            let idx = TR_ATTACK_RETREAT * plane + at;
+            let idx = (TR_ATTACK_RETREAT + oc) * plane + at;
             transient[idx] = transient[idx].max(val);
         }
     }
@@ -769,6 +795,13 @@ pub fn featurize(
         }
     }
 
+    // V11 neighbor pack: region-adjacency border stats ego↔other from the
+    // slotted owner/land/mag grids already in scope (approx. of true tile
+    // border length; enough for diplomacy geometry the old P_FEAT lacked).
+    let (border_len, border_land, border_mag) =
+        neighbor_border_stats(owners, land, mag, me_slot, gh, gw);
+
+    let me_player = ents.players.iter().find(|p| p.id as i64 == me);
     let mut players = vec![0.0f32; MAX_SLOTS * P_FEAT];
     let mut pmask = [0.0f32; MAX_SLOTS];
     let mut n_alive = 0usize;
@@ -786,6 +819,12 @@ pub fn featurize(
             .get(&slot)
             .map(|&exp| (((exp - tick) as f64 / 3000.0).clamp(0.0, 1.0)) as f32)
             .unwrap_or(0.0);
+        let blen = border_len[slot];
+        let relation = me_player
+            .map(|mp| mp.relation_to(p.id))
+            .unwrap_or(0.0)
+            .clamp(-1.0, 1.0) as f32;
+        let targeting_me = p.targets.iter().any(|&t| slot_of(t) == me_slot);
         let f = &mut players[slot * P_FEAT..(slot + 1) * P_FEAT];
         f[0] = p.alive as u8 as f32;
         f[1] = log_norm(p.troops);
@@ -812,7 +851,30 @@ pub fn featurize(
         f[18] = log_norm(p.gold_income);
         f[19] = p.doomsday as u8 as f32;
         f[20] = (p.doomsday_ticks / 3000.0).clamp(0.0, 1.0) as f32;
+        // V11 neighbor pack
+        f[21] = log_norm(blen as f64);
+        f[22] = if blen > 0 {
+            border_land[slot] / blen as f32
+        } else {
+            0.0
+        };
+        f[23] = if blen > 0 {
+            1.0 - border_land[slot] / blen as f32
+        } else {
+            0.0
+        };
+        f[24] = if blen > 0 {
+            border_mag[slot] / blen as f32
+        } else {
+            0.0
+        };
+        f[25] = relation;
+        f[26] = targeting_me as u8 as f32;
+        f[27] = (blen > 0) as u8 as f32;
     }
+
+    let (units, umask, unit_uids, legal_utarget) =
+        build_unit_tokens(ents, legal, &clut, me, slot_of, gh, gw);
 
     let me_troop_income = ents
         .players
@@ -903,6 +965,10 @@ pub fn featurize(
         clut,
         players,
         pmask,
+        units,
+        umask,
+        unit_uids,
+        legal_utarget,
         scalars,
         me_slot: me_slot as i64,
         legal_actions: act,
@@ -911,6 +977,146 @@ pub fn featurize(
         legal_nuke,
         legal_tile,
     }
+}
+
+/// Count 4-neighbour region adjacencies between `me_slot` and every other
+/// slot. Also accumulates land / high-magnitude (defense-ish) fractions.
+fn neighbor_border_stats(
+    owners: &[u8],
+    land: &[u8],
+    mag: &[u8],
+    me_slot: usize,
+    gh: usize,
+    gw: usize,
+) -> ([u32; MAX_SLOTS], [f32; MAX_SLOTS], [f32; MAX_SLOTS]) {
+    let mut border_len = [0u32; MAX_SLOTS];
+    let mut border_land = [0.0f32; MAX_SLOTS];
+    let mut border_mag = [0.0f32; MAX_SLOTS];
+    if me_slot == 0 || gh == 0 || gw == 0 {
+        return (border_len, border_land, border_mag);
+    }
+    let plane = gh * gw;
+    let mag_hi = (IMPASSABLE_MAGNITUDE as f32) * 0.5;
+    for y in 0..gh {
+        for x in 0..gw {
+            let i = y * gw + x;
+            let a = owners[i] as usize;
+            if a != me_slot && a != 0 {
+                // Count edges where neighbour is me.
+                let mut touch = false;
+                if y > 0 && owners[i - gw] as usize == me_slot {
+                    touch = true;
+                }
+                if y + 1 < gh && owners[i + gw] as usize == me_slot {
+                    touch = true;
+                }
+                if x > 0 && owners[i - 1] as usize == me_slot {
+                    touch = true;
+                }
+                if x + 1 < gw && owners[i + 1] as usize == me_slot {
+                    touch = true;
+                }
+                if touch && a < MAX_SLOTS {
+                    border_len[a] += 1;
+                    border_land[a] += land.get(i).copied().unwrap_or(0) as f32;
+                    let m = mag.get(i).copied().unwrap_or(0) as f32;
+                    border_mag[a] += if m >= mag_hi { 1.0 } else { 0.0 };
+                }
+            }
+            let _ = plane;
+        }
+    }
+    (border_len, border_land, border_mag)
+}
+
+fn build_unit_tokens<F>(
+    ents: &EntsData,
+    legal: &Legal,
+    clut: &[u8; MAX_SLOTS],
+    me: i64,
+    slot_of: F,
+    gh: usize,
+    gw: usize,
+) -> (Vec<f32>, [f32; MAX_UNITS], [i64; MAX_UNITS], Vec<f32>)
+where
+    F: Fn(usize) -> usize,
+{
+    let mut units = vec![0.0f32; MAX_UNITS * U_FEAT];
+    let mut umask = [0.0f32; MAX_UNITS];
+    let mut unit_uids = [-1i64; MAX_UNITS];
+    let mut legal_utarget = vec![0.0f32; N_ACTIONS * MAX_UNITS];
+
+    // Prefer own units first (pointer actions are own-unit), then fill with
+    // visible enemy/ally structures/ships up to MAX_UNITS.
+    let mut candidates: Vec<&UnitE> = ents
+        .units
+        .iter()
+        .filter(|u| u.owner as i64 == me)
+        .collect();
+    let mut others: Vec<&UnitE> = ents
+        .units
+        .iter()
+        .filter(|u| u.owner as i64 != me)
+        .collect();
+    // Stable-ish: nearer to map center later; keep insertion order for now.
+    candidates.append(&mut others);
+    candidates.truncate(MAX_UNITS);
+
+    let up_set: std::collections::HashSet<usize> = legal.upgradable.iter().copied().collect();
+    let del_set: std::collections::HashSet<usize> = legal.deletable.iter().copied().collect();
+    let boat_set: std::collections::HashSet<usize> = legal.boats.iter().copied().collect();
+    let war_set: std::collections::HashSet<usize> = legal.warships.iter().copied().collect();
+
+    for (i, u) in candidates.iter().enumerate() {
+        let uid = u.uid.max(0) as usize;
+        umask[i] = 1.0;
+        unit_uids[i] = u.uid;
+        let slot = slot_of(u.owner).min(MAX_SLOTS - 1);
+        let cls = clut[slot] as f32;
+        let oc = if clut[slot] != 0 {
+            (clut[slot] - 1) as f32
+        } else {
+            2.0
+        };
+        let hf = match (u.health, u.max_health) {
+            (Some(h), Some(m)) if m > 0.0 => (h / m) as f32,
+            _ => 1.0,
+        };
+        let gy = (u.y as f32 / (gh.max(1) * REGION) as f32).clamp(0.0, 1.0);
+        let gx = (u.x as f32 / (gw.max(1) * REGION) as f32).clamp(0.0, 1.0);
+        let can_up = up_set.contains(&uid) as u8 as f32;
+        let can_del = del_set.contains(&uid) as u8 as f32;
+        let can_boat = boat_set.contains(&uid) as u8 as f32;
+        let can_war = war_set.contains(&uid) as u8 as f32;
+        let f = &mut units[i * U_FEAT..(i + 1) * U_FEAT];
+        f[0] = (u.class as f32) / 16.0;
+        f[1] = oc / 2.0;
+        f[2] = (u.level / 10.0).min(1.0) as f32;
+        f[3] = hf;
+        f[4] = u.cooldown as u8 as f32;
+        f[5] = u.constructing as u8 as f32;
+        f[6] = gy;
+        f[7] = gx;
+        f[8] = log_norm(u.troops);
+        f[9] = can_up;
+        f[10] = can_del;
+        f[11] = (can_boat + can_war).min(1.0);
+        let _ = cls;
+
+        if can_up > 0.5 {
+            legal_utarget[A_UPGRADE_STRUCTURE as usize * MAX_UNITS + i] = 1.0;
+        }
+        if can_del > 0.5 {
+            legal_utarget[A_DELETE_UNIT as usize * MAX_UNITS + i] = 1.0;
+        }
+        if can_boat > 0.5 {
+            legal_utarget[A_CANCEL_BOAT as usize * MAX_UNITS + i] = 1.0;
+        }
+        if can_war > 0.5 {
+            legal_utarget[A_MOVE_WARSHIP as usize * MAX_UNITS + i] = 1.0;
+        }
+    }
+    (units, umask, unit_uids, legal_utarget)
 }
 
 /// Ego-class occupancy fractions (own/ally/enemy) + defense-bonus fraction,

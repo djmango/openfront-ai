@@ -47,6 +47,7 @@ fn choice_from_act(
     act: i64,
     player: i64,
     tile: i64,
+    unit: i64,
     build: i64,
     nuke: i64,
     qty: f32,
@@ -54,6 +55,7 @@ fn choice_from_act(
     let name = ACTIONS[act as usize];
     let np = policy::needs_player(name);
     let nt = policy::needs_tile(name);
+    let nu = policy::needs_unit(name);
     let nq = policy::needs_quantity(name);
     let is_build = name == "build";
     let is_nuke = name == "launch_nuke";
@@ -61,6 +63,7 @@ fn choice_from_act(
         action: act,
         player_slot: np.then_some(player),
         tile_region: nt.then_some(tile),
+        unit_index: nu.then_some(unit),
         build_type: is_build.then_some(build),
         nuke_type: is_nuke.then_some(nuke),
         quantity_frac: nq.then_some(qty as f64),
@@ -233,7 +236,7 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
                 &ae,
                 &mut terrain_cache,
             )?;
-            let (a, p, t, b, n, q, _lp, _v) = if let Some(h) = hidden.as_ref() {
+            let (a, p, t, u, b, n, q, _lp, _v) = if let Some(h) = hidden.as_ref() {
                 let context =
                     crate::recurrent::context_tensor(&[prepared.prev_action.clone()], cfg.device);
                 let (acts, h_out) = policy.act_with_state(&obs_t, h, &context, true);
@@ -246,6 +249,7 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
                 a.int64_value(&[0]),
                 p.int64_value(&[0]),
                 t.int64_value(&[0]),
+                u.int64_value(&[0]),
                 b.int64_value(&[0]),
                 n.int64_value(&[0]),
                 q.double_value(&[0]) as f32,
@@ -268,7 +272,7 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
                 &ae,
                 &mut terrain_cache,
             )?;
-            let (a, p, t, b, n, q, _lp, v, probs) = if let Some(h) = hidden.as_ref() {
+            let (a, p, t, u, b, n, q, _lp, v, probs) = if let Some(h) = hidden.as_ref() {
                 let context =
                     crate::recurrent::context_tensor(&[prepared.prev_action.clone()], cfg.device);
                 if cfg.debug {
@@ -281,21 +285,23 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
                     let empty =
                         tch::Tensor::zeros(&[1, ACTIONS.len() as i64], (Kind::Float, cfg.device));
                     (
-                        acts.0, acts.1, acts.2, acts.3, acts.4, acts.5, acts.6, acts.7, empty,
+                        acts.0, acts.1, acts.2, acts.3, acts.4, acts.5, acts.6, acts.7, acts.8,
+                        empty,
                     )
                 }
             } else if cfg.debug {
                 policy.act_with_debug(&obs_t, true)
             } else {
-                let (a, p, t, b, n, q, lp, v) = policy.act(&obs_t, true);
+                let (a, p, t, u, b, n, q, lp, v) = policy.act(&obs_t, true);
                 let empty =
                     tch::Tensor::zeros(&[1, ACTIONS.len() as i64], (Kind::Float, cfg.device));
-                (a, p, t, b, n, q, lp, v, empty)
+                (a, p, t, u, b, n, q, lp, v, empty)
             };
             let choice = choice_from_act(
                 a.int64_value(&[0]),
                 p.int64_value(&[0]),
                 t.int64_value(&[0]),
+                u.int64_value(&[0]),
                 b.int64_value(&[0]),
                 n.int64_value(&[0]),
                 q.double_value(&[0]) as f32,

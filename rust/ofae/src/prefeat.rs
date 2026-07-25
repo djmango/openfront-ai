@@ -41,6 +41,10 @@ pub struct PrefeaturizeArgs {
     pub data: String,
     #[arg(long, default_value_t = 8)]
     pub workers: usize,
+    /// Rebuild caches even when `cache/index.json` already exists.
+    /// Needed after slot-LUT fixes; stale caches can be all-zero owners.
+    #[arg(long, default_value_t = false)]
+    pub force: bool,
 }
 
 pub fn run(args: PrefeaturizeArgs) -> Result<()> {
@@ -67,18 +71,24 @@ pub fn run(args: PrefeaturizeArgs) -> Result<()> {
         .build_global()
         .ok();
 
-    game_dirs.par_iter().for_each(|d| match build_cache(d) {
-        Ok(msg) => println!("{msg}"),
-        Err(e) => eprintln!("FAIL {}: {e:#}", d.display()),
-    });
+    game_dirs
+        .par_iter()
+        .for_each(|d| match build_cache(d, args.force) {
+            Ok(msg) => println!("{msg}"),
+            Err(e) => eprintln!("FAIL {}: {e:#}", d.display()),
+        });
     Ok(())
 }
 
-fn build_cache(game_dir: &Path) -> Result<String> {
+fn build_cache(game_dir: &Path, force: bool) -> Result<String> {
     let cache = game_dir.join("cache");
-    if cache.join("index.json").exists() {
+    if cache.join("index.json").exists() && !force {
         ensure_static_sidecar(&cache)?;
         return Ok(format!("skip {}", game_dir.file_name().unwrap().to_string_lossy()));
+    }
+    if force && cache.exists() {
+        std::fs::remove_dir_all(&cache)
+            .with_context(|| format!("remove stale cache {}", cache.display()))?;
     }
     let meta: Value = serde_json::from_str(
         &std::fs::read_to_string(game_dir.join("meta.json"))
@@ -94,7 +104,11 @@ fn build_cache(game_dir: &Path) -> Result<String> {
         bail!("terrain size mismatch");
     }
 
-    let lut = slot_lut(&meta, 0)?;
+    let states_dir = game_dir.join("states");
+    // meta.snapshots[*] in current archives only carries `{tick}` — player
+    // ids live in per-tick entity JSON. Building the LUT from meta alone
+    // produced all-zero owner caches and a trivially-perfect AE train.
+    let lut = slot_lut_from_entities(game_dir, &states_dir, snaps, n, h, w)?;
     let lut8: Vec<u8> = lut.iter().map(|&x| x as u8).collect();
 
     std::fs::create_dir_all(&cache)?;
@@ -102,7 +116,6 @@ fn build_cache(game_dir: &Path) -> Result<String> {
     let mut unit_rows: Vec<[i32; 7]> = Vec::new();
     let mut unit_offsets = vec![0i64; n + 1];
 
-    let states_dir = game_dir.join("states");
     let mut frames_out = File::create(cache.join("frames.zst"))?;
 
     for i in 0..n {
@@ -229,20 +242,67 @@ fn bytemuck_cast_i8(v: &[i8]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len()) }
 }
 
-fn slot_lut(meta: &Value, snap_i: usize) -> Result<Vec<i64>> {
-    let snaps = meta["snapshots"].as_array().context("snapshots")?;
-    let players = snaps
-        .get(snap_i)
-        .and_then(|s| s.get("players"))
-        .and_then(|p| p.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let mut small_ids: Vec<u64> = players
-        .iter()
-        .filter_map(|p| p.get("id").or_else(|| p.get("smallID")).and_then(|v| v.as_u64()))
-        .collect();
+fn slot_lut_from_entities(
+    game_dir: &Path,
+    states_dir: &Path,
+    snaps: &[Value],
+    n: usize,
+    h: usize,
+    w: usize,
+) -> Result<Vec<i64>> {
+    let mut small_ids: Vec<u64> = Vec::new();
+
+    // Prefer entity JSON player lists (authoritative smallIDs).
+    let sample_is: Vec<usize> = if n == 0 {
+        vec![]
+    } else if n == 1 {
+        vec![0]
+    } else {
+        // First, middle, last — enough for a stable roster on bot/human games.
+        let mut v = vec![0, n / 2, n - 1];
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    for &i in &sample_is {
+        let ents = load_entities(game_dir, states_dir, i, snaps)?;
+        if let Some(players) = ents.get("players").and_then(|p| p.as_array()) {
+            for p in players {
+                if let Some(id) = p
+                    .get("smallID")
+                    .or_else(|| p.get("id"))
+                    .and_then(|v| v.as_u64())
+                {
+                    if id > 0 {
+                        small_ids.push(id);
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: unique non-zero owner bits from a few state frames.
+    if small_ids.is_empty() {
+        for &i in &sample_is {
+            let state = load_state(game_dir, states_dir, i, h, w, n)?;
+            for &s in &state {
+                let id = (s & OWNER_MASK) as u64;
+                if id > 0 {
+                    small_ids.push(id);
+                }
+            }
+        }
+    }
+
     small_ids.sort_unstable();
     small_ids.dedup();
+    if small_ids.is_empty() {
+        bail!(
+            "{}: no player ids in entity JSON or state owners",
+            game_dir.display()
+        );
+    }
+
     let mut lut = vec![0i64; 4096];
     for (slot, sid) in small_ids.into_iter().enumerate() {
         let slot = (slot + 1).min(MAX_SLOTS - 1) as i64;

@@ -180,10 +180,50 @@ pub fn slot_to_pid(slot: i64, lut: &[u8], players: &[feat::PlayerE]) -> Option<S
     players.iter().find(|p| p.id == small).map(|p| p.pid.clone())
 }
 
+/// Resolve a unit for V11 pointer actions. Prefers `choice.unit_index` when
+/// it lands on a legal uid; falls back to nearest-in-region for older
+/// checkpoints / missing pointer samples.
+fn resolve_unit<'a>(
+    choice: &Choice,
+    tr: &IntentTranslator,
+    ents: &'a EntsData,
+    me: i64,
+    ids: &[usize],
+) -> Option<&'a feat::UnitE> {
+    if let Some(idx) = choice.unit_index {
+        if idx >= 0 {
+            // Observation packs tokens in the same order as build_unit_tokens:
+            // own units first, then others. Find by scanning that order.
+            let mut own: Vec<&feat::UnitE> = ents
+                .units
+                .iter()
+                .filter(|u| u.owner as i64 == me)
+                .collect();
+            let mut others: Vec<&feat::UnitE> = ents
+                .units
+                .iter()
+                .filter(|u| u.owner as i64 != me)
+                .collect();
+            own.append(&mut others);
+            if let Some(u) = own.get(idx as usize) {
+                let uid = u.uid.max(0) as usize;
+                if ids.contains(&uid) {
+                    return Some(*u);
+                }
+            }
+        }
+    }
+    choice
+        .tile_region
+        .and_then(|r| tr.nearest_own_unit(r, ents, me, ids))
+}
+
 pub struct Choice {
     pub action: i64,
     pub player_slot: Option<i64>,
     pub tile_region: Option<i64>,
+    /// V11 unit-pointer index into the observation's unit-token list.
+    pub unit_index: Option<i64>,
     pub build_type: Option<i64>,
     pub nuke_type: Option<i64>,
     pub quantity_frac: Option<f64>,
@@ -267,30 +307,36 @@ pub fn translate(
             }
             vec![json!({"type": "cancel_attack", "attackID": aid})]
         }
-        "upgrade_structure" => match choice
-            .tile_region
-            .and_then(|r| tr.nearest_own_unit(r, ents, me, &legal.upgradable))
-        {
-            Some(u) => {
-                let ty = static_type_name(u.class);
-                vec![json!({"type": "upgrade_structure", "unit": ty, "unitId": u.uid})]
+        "upgrade_structure" => {
+            let u = resolve_unit(choice, tr, ents, me, &legal.upgradable);
+            match u {
+                Some(u) => {
+                    let ty = static_type_name(u.class);
+                    vec![json!({"type": "upgrade_structure", "unit": ty, "unitId": u.uid})]
+                }
+                None => vec![],
             }
-            None => vec![],
-        },
+        }
         "move_warship" => {
             if legal.warships.is_empty() {
                 return vec![];
             }
+            let unit_ids: Vec<i64> = match resolve_unit(choice, tr, ents, me, &legal.warships) {
+                Some(u) => vec![u.uid],
+                None => legal.warships.iter().map(|&id| id as i64).collect(),
+            };
             match choice.tile_region.and_then(|r| tr.move_warship_tile(r)) {
-                Some(tile) => vec![json!({"type": "move_warship", "unitIds": legal.warships, "tile": tile})],
+                Some(tile) => {
+                    vec![json!({"type": "move_warship", "unitIds": unit_ids, "tile": tile})]
+                }
                 None => vec![],
             }
         }
-        "cancel_boat" => match choice.tile_region.and_then(|r| tr.nearest_own_unit(r, ents, me, &legal.boats)) {
+        "cancel_boat" => match resolve_unit(choice, tr, ents, me, &legal.boats) {
             Some(u) => vec![json!({"type": "cancel_boat", "unitID": u.uid})],
             None => vec![],
         },
-        "delete_unit" => match choice.tile_region.and_then(|r| tr.nearest_own_unit(r, ents, me, &legal.deletable)) {
+        "delete_unit" => match resolve_unit(choice, tr, ents, me, &legal.deletable) {
             Some(u) => vec![json!({"type": "delete_unit", "unitId": u.uid})],
             None => vec![],
         },

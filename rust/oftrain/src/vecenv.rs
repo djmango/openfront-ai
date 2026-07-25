@@ -35,13 +35,15 @@ use crate::ae::{self, AeRaw, StaticTerrain, TerrainCacheKey};
 use crate::engine::{self, EngineKind, GameEngine, RawObs};
 
 /// Per-env layout of [`CompactHostBuffers::extras`] (all f32):
-/// `players | local | legal_ptarget | pmask | scalars | legal_actions |
-/// legal_build | legal_nuke`.
+/// `players | units | umask | legal_utarget | local | legal_ptarget |
+/// pmask | scalars | legal_actions | legal_build | legal_nuke`.
 pub(crate) fn compact_extras_per_env() -> usize {
-    use crate::policy::LOCAL;
-    feat::MAX_SLOTS * feat::P_FEAT
-        + 5 * LOCAL as usize * LOCAL as usize
-        + feat::N_ACTIONS * feat::MAX_SLOTS
+    compact_extras_players_n()
+        + compact_extras_units_n()
+        + compact_extras_umask_n()
+        + compact_extras_legal_utarget_n()
+        + compact_extras_local_n()
+        + compact_extras_legal_ptarget_n()
         + feat::MAX_SLOTS
         + feat::N_SCALARS
         + feat::N_ACTIONS
@@ -51,6 +53,15 @@ pub(crate) fn compact_extras_per_env() -> usize {
 
 pub(crate) fn compact_extras_players_n() -> usize {
     feat::MAX_SLOTS * feat::P_FEAT
+}
+pub(crate) fn compact_extras_units_n() -> usize {
+    feat::MAX_UNITS * feat::U_FEAT
+}
+pub(crate) fn compact_extras_umask_n() -> usize {
+    feat::MAX_UNITS
+}
+pub(crate) fn compact_extras_legal_utarget_n() -> usize {
+    feat::N_ACTIONS * feat::MAX_UNITS
 }
 pub(crate) fn compact_extras_local_n() -> usize {
     use crate::policy::LOCAL;
@@ -237,23 +248,52 @@ impl CompactGrid {
         let n = compact_extras_players_n();
         &self.extras_slice()[..n]
     }
-    pub fn local(&self) -> &[f32] {
+    pub fn units(&self) -> &[f32] {
         let start = compact_extras_players_n();
+        let n = compact_extras_units_n();
+        &self.extras_slice()[start..start + n]
+    }
+    pub fn umask(&self) -> &[f32] {
+        let start = compact_extras_players_n() + compact_extras_units_n();
+        &self.extras_slice()[start..start + compact_extras_umask_n()]
+    }
+    pub fn legal_utarget(&self) -> &[f32] {
+        let start =
+            compact_extras_players_n() + compact_extras_units_n() + compact_extras_umask_n();
+        let n = compact_extras_legal_utarget_n();
+        &self.extras_slice()[start..start + n]
+    }
+    pub fn local(&self) -> &[f32] {
+        let start = compact_extras_players_n()
+            + compact_extras_units_n()
+            + compact_extras_umask_n()
+            + compact_extras_legal_utarget_n();
         let n = compact_extras_local_n();
         &self.extras_slice()[start..start + n]
     }
     pub fn legal_ptarget(&self) -> &[f32] {
-        let start = compact_extras_players_n() + compact_extras_local_n();
+        let start = compact_extras_players_n()
+            + compact_extras_units_n()
+            + compact_extras_umask_n()
+            + compact_extras_legal_utarget_n()
+            + compact_extras_local_n();
         let n = compact_extras_legal_ptarget_n();
         &self.extras_slice()[start..start + n]
     }
     pub fn pmask(&self) -> &[f32] {
-        let start =
-            compact_extras_players_n() + compact_extras_local_n() + compact_extras_legal_ptarget_n();
+        let start = compact_extras_players_n()
+            + compact_extras_units_n()
+            + compact_extras_umask_n()
+            + compact_extras_legal_utarget_n()
+            + compact_extras_local_n()
+            + compact_extras_legal_ptarget_n();
         &self.extras_slice()[start..start + feat::MAX_SLOTS]
     }
     pub fn scalars(&self) -> &[f32] {
         let start = compact_extras_players_n()
+            + compact_extras_units_n()
+            + compact_extras_umask_n()
+            + compact_extras_legal_utarget_n()
             + compact_extras_local_n()
             + compact_extras_legal_ptarget_n()
             + feat::MAX_SLOTS;
@@ -261,6 +301,9 @@ impl CompactGrid {
     }
     pub fn legal_actions(&self) -> &[f32] {
         let start = compact_extras_players_n()
+            + compact_extras_units_n()
+            + compact_extras_umask_n()
+            + compact_extras_legal_utarget_n()
             + compact_extras_local_n()
             + compact_extras_legal_ptarget_n()
             + feat::MAX_SLOTS
@@ -269,6 +312,9 @@ impl CompactGrid {
     }
     pub fn legal_build(&self) -> &[f32] {
         let start = compact_extras_players_n()
+            + compact_extras_units_n()
+            + compact_extras_umask_n()
+            + compact_extras_legal_utarget_n()
             + compact_extras_local_n()
             + compact_extras_legal_ptarget_n()
             + feat::MAX_SLOTS
@@ -278,6 +324,9 @@ impl CompactGrid {
     }
     pub fn legal_nuke(&self) -> &[f32] {
         let start = compact_extras_players_n()
+            + compact_extras_units_n()
+            + compact_extras_umask_n()
+            + compact_extras_legal_utarget_n()
             + compact_extras_local_n()
             + compact_extras_legal_ptarget_n()
             + feat::MAX_SLOTS
@@ -547,7 +596,7 @@ pub struct EnvTransition {
 ///
 /// Production path (`batch::build_obs` with an `AePair`): GPU AE encode
 /// replaces the old 6ch `stat` placeholder with a 32ch latent, yielding
-/// `C_GRID = 95 = latent(32) + static(6) + ego(3) + db(1) + transient(53)`.
+/// `C_GRID = 99 = latent(32) + static(6) + ego(3) + db(1) + transient(57)`.
 ///
 /// `grid` is only filled for the no-AE test/legacy path (63ch
 /// stat+ego+db+transient); training always passes an AE and rebuilds
@@ -574,13 +623,16 @@ pub struct PreparedObs {
     pub ego: Vec<f32>,
     /// Pooled defense bonus at /8: (1, gh, gw).
     pub db: Vec<f32>,
-    /// Transient planes at /8: (53, gh, gw).
+    /// Transient planes at /8: (57, gh, gw).
     pub transient: Vec<f32>,
     pub legal_tile: Vec<f32>, // (gh, gw)
     pub gh: usize,
     pub gw: usize,
     pub players: Vec<f32>, // (MAX_SLOTS, P_FEAT)
     pub pmask: [f32; feat::MAX_SLOTS],
+    pub units: Vec<f32>, // (MAX_UNITS, U_FEAT)
+    pub umask: [f32; feat::MAX_UNITS],
+    pub legal_utarget: Vec<f32>, // (N_ACTIONS, MAX_UNITS)
     pub scalars: [f32; feat::N_SCALARS],
     pub me_slot: i64,
     pub legal_actions: [f32; feat::N_ACTIONS],
@@ -607,6 +659,9 @@ impl PreparedObs {
         self.transient = Vec::new();
         self.legal_tile = Vec::new();
         self.players = Vec::new();
+        self.units = Vec::new();
+        self.umask = [0.0; feat::MAX_UNITS];
+        self.legal_utarget = Vec::new();
         self.local = Vec::new();
         self.legal_ptarget = Vec::new();
         self.pmask = [0.0; feat::MAX_SLOTS];
@@ -1249,6 +1304,9 @@ impl EnvWorker {
             gw,
             players: f.players,
             pmask: f.pmask,
+            units: f.units,
+            umask: f.umask,
+            legal_utarget: f.legal_utarget,
             scalars: f.scalars,
             me_slot: f.me_slot,
             legal_actions: f.legal_actions,
@@ -1802,6 +1860,7 @@ mod churn_action_tests {
             action,
             player_slot,
             tile_region,
+            unit_index: None,
             build_type: None,
             nuke_type: None,
             quantity_frac: None,
