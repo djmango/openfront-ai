@@ -100,6 +100,7 @@ use tch::nn::OptimizerConfig;
 use tch::{Cuda, Device, Kind, Tensor, nn};
 
 use crate::autoscale;
+use crate::balance;
 use crate::batch::{self, ChoiceScalars};
 use crate::engine::EngineKind;
 use crate::gpu_util::GpuUtilSampler;
@@ -244,6 +245,13 @@ pub struct Config {
     /// Lower bound for stage-decayed LR (default [`ofcore::curriculum::V10_STAGE_LR_FLOOR`]).
     pub stage_lr_floor: f64,
     pub epochs: usize,
+    /// `--balance-train-collect`: adapt epochs each update toward
+    /// `train_s / collect_s ≈ balance_target_ratio` (see `balance.rs`).
+    pub balance_train_collect: bool,
+    /// Target train/collect ratio for adaptive epochs.
+    pub balance_target_ratio: f64,
+    /// Ceiling for adaptive epoch growth (floor is `epochs`).
+    pub max_epochs: usize,
     pub minibatches: usize,
     /// `--amp`: manual bf16 mixed precision for the policy net's conv
     /// towers (see `policy::PolicyNet::amp` doc). CPU-safe (bf16 works on
@@ -4946,6 +4954,9 @@ enum LearnerCommand {
         rollout: RolloutResult,
         lr: f64,
         ent_coef: f32,
+        /// PPO epochs for this update (may differ from `Config::epochs` when
+        /// `--balance-train-collect` is adapting live).
+        epochs: usize,
         /// Global running statistic at the start of the update.  Every
         /// owner therefore computes the same adaptive return bound.
         ret_stat: RetStat,
@@ -5048,7 +5059,7 @@ impl LearnerProtocol {
 fn learner_loop(
     shard_index: usize,
     device: Device,
-    cfg: Config,
+    mut cfg: Config,
     initial_weights: CpuWeightSnapshot,
     initial_lr: f64,
     mut rng: rand::rngs::SmallRng,
@@ -5133,6 +5144,7 @@ fn learner_loop(
                 mut rollout,
                 lr,
                 ent_coef,
+                epochs,
                 ret_stat: initial_ret_stat,
             } => {
                 learner.opt.set_lr(lr);
@@ -5191,6 +5203,8 @@ fn learner_loop(
                     }
                 };
                 let mut timings = TrainTimings::default();
+                // Per-update epoch override for `--balance-train-collect`.
+                cfg.epochs = epochs.max(1);
                 let losses = if gradient_rx.is_some() {
                     train_update(
                         std::slice::from_mut(&mut learner),
@@ -5503,6 +5517,7 @@ impl PersistentLearner {
         rollouts: Vec<RolloutResult>,
         lr: f64,
         ent_coef: f32,
+        epochs: usize,
     ) -> Result<TrainReply> {
         anyhow::ensure!(
             rollouts.len() == self.command_txs.len(),
@@ -5510,6 +5525,10 @@ impl PersistentLearner {
             rollouts.len(),
             self.command_txs.len()
         );
+        let epochs = epochs.max(1);
+        // Keep hub barrier + owner train_update on the same epoch count for
+        // this update (adaptive balance may change epochs between updates).
+        self.epochs = epochs;
         let id = self.next_id();
         for (tx, rollout) in self.command_txs.iter().zip(rollouts) {
             tx.send(LearnerCommand::Train {
@@ -5517,14 +5536,15 @@ impl PersistentLearner {
                 rollout,
                 lr,
                 ent_coef,
+                epochs,
                 ret_stat: self.ret_stat,
             })?;
         }
         let world = self.command_txs.len();
         #[cfg(test)]
-        let mut averaged_gradients = Vec::with_capacity(self.epochs * self.minibatches);
+        let mut averaged_gradients = Vec::with_capacity(epochs * self.minibatches);
         if world > 1 {
-            for epoch in 0..self.epochs {
+            for epoch in 0..epochs {
                 for minibatch in 0..self.minibatches {
                     let mut packets: Vec<Option<(bool, Vec<f32>)>> =
                         (0..world).map(|_| None).collect();
@@ -6718,11 +6738,21 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     && recurrent["context_features"] == policy::RECURRENT_CONTEXT_FLOATS,
                 "V8.2 recurrent context schema mismatch"
             );
-            anyhow::ensure!(
-                recurrent["bptt_length"] == cfg.bptt_chunk_len
-                    && recurrent["rollout_length"] == cfg.rollout_len,
-                "recurrent BPTT/rollout configuration mismatch"
-            );
+            // Rollout / BPTT lengths are training-dynamics knobs, not weight
+            // shapes. Allow resume across util A/Bs (e.g. 64→48) with a warn
+            // so pods can retune collect without wiping the run.
+            if recurrent["bptt_length"] != cfg.bptt_chunk_len
+                || recurrent["rollout_length"] != cfg.rollout_len
+            {
+                println!(
+                    "[train] WARNING: resume manifest bptt/rollout \
+                     ({}/{}) != CLI ({}/{}); continuing with CLI values",
+                    recurrent["bptt_length"],
+                    recurrent["rollout_length"],
+                    cfg.bptt_chunk_len,
+                    cfg.rollout_len
+                );
+            }
             anyhow::ensure!(
                 recurrent["hidden_reset_policy"] == "episode_done",
                 "unsupported V8.2 hidden reset policy"
@@ -7168,6 +7198,24 @@ pub fn run(mut cfg: Config) -> Result<()> {
         .as_ref()
         .map(|s| s.total_env_steps)
         .unwrap_or(0);
+    // Adaptive epoch rebalance (`--balance-train-collect`). Floor is the
+    // CLI `--epochs`; ceiling is `--max-epochs`. Must initialize before
+    // `cfg_ref` so we can mutate `cfg.epochs` / `cfg.max_epochs` once up
+    // front; the live loop only mutates `live_epochs` (persistent learners
+    // take it per Train command).
+    let balance_min_epochs = cfg.epochs.max(1);
+    let mut live_epochs = balance_min_epochs;
+    cfg.epochs = live_epochs;
+    cfg.max_epochs = cfg.max_epochs.max(live_epochs);
+    let mut train_collect_ratio_ema: Option<f64> = None;
+    let mut collect_hwm_s: Option<f64> = None;
+    if cfg.balance_train_collect {
+        println!(
+            "[balance] train/collect rebalance enabled: epochs={live_epochs}..{} \
+             target_ratio={:.2} (collect high-water mark + fast +2 grow)",
+            cfg.max_epochs, cfg.balance_target_ratio
+        );
+    }
     let cfg_ref = &cfg;
 
     // Curriculum advancement (port of `rl/ppo.py`'s win-rate gate, see
@@ -7332,6 +7380,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     std::mem::take(&mut pending),
                     lr_now * warmup_frac,
                     ent_coef_now,
+                    live_epochs,
                 );
             let next_pending = persistent_actors
                 .iter_mut()
@@ -7850,6 +7899,34 @@ pub fn run(mut cfg: Config) -> Result<()> {
             update_start.elapsed().as_secs_f64()
         );
 
+        if cfg.balance_train_collect {
+            collect_hwm_s = balance::update_collect_hwm(collect_hwm_s, collect_dt);
+            let collect_ref = collect_hwm_s.unwrap_or(collect_dt);
+            train_collect_ratio_ema =
+                balance::update_ratio_ema(train_collect_ratio_ema, train_dt, collect_ref);
+            if let Some(ratio) = train_collect_ratio_ema {
+                let next = balance::next_epochs(
+                    live_epochs,
+                    ratio,
+                    cfg.balance_target_ratio,
+                    balance_min_epochs,
+                    cfg.max_epochs,
+                );
+                if next != live_epochs {
+                    println!(
+                        "[balance] epochs {live_epochs} -> {next} \
+                         (ema train/collect_hwm={ratio:.3} target={:.2}; \
+                         train_s={train_dt:.1} collect_s={collect_dt:.1} \
+                         collect_hwm={collect_ref:.1})",
+                        cfg.balance_target_ratio
+                    );
+                    // Persistent learners take `live_epochs` per Train
+                    // command; do not mutate `cfg` here (`cfg_ref` borrows it).
+                    live_epochs = next;
+                }
+            }
+        }
+
         // Auto-scale check: after this update's pending swap and *before*
         // the next collect. Persistent owners cannot live-spawn workers
         // (CUDA ownership stays on the actor thread), so growth sets
@@ -7957,6 +8034,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
                         }
                     }
                 }
+            } else if current >= autoscale_max_envs {
+                println!(
+                    "[autoscale] hold at max_envs={autoscale_max_envs} ({gpu_str}); \
+                     util growth capped - raise MAX_ENVS / MEM_BLOCK or use \
+                     --balance-train-collect"
+                );
             }
         }
 
@@ -8207,7 +8290,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             println!(
                 "[update {:>5}] steps/s={:>7.1} decisions_total={:>9} eps_done={:>5} recent_reward={:>8.3} \
                  pg={:>+.4} v={:>.4} ent={:>.3} entq={:>+.3} ecoef={:.4} stage={} lr={:.2e} elapsed={:.0}s \
-                 update_s={:.1} collect_s={:.1} train_s={:.1} actor_work_s={:.1} \
+                 update_s={:.1} collect_s={:.1} train_s={:.1} epochs={} actor_work_s={:.1} \
                  batch_build_s={:.3} gradient_sync_s={:.3} learner_snapshot_s={:.3} \
                  refresh_s={:.3}{gpu_str}",
                 update,
@@ -8226,6 +8309,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 dt,
                 collect_dt,
                 train_dt,
+                live_epochs,
                 actor_work_dt,
                 batch_build_dt,
                 gradient_sync_dt,
@@ -8548,6 +8632,7 @@ mod persistent_actor_tests {
                 rollout: empty_rollout(),
                 lr: 1e-4,
                 ent_coef: 0.01,
+                epochs: 2,
                 ret_stat: RetStat::default(),
             })
             .unwrap();
@@ -8658,6 +8743,9 @@ mod persistent_actor_tests {
             stage_lr_decay: 0.85,
             stage_lr_floor: ofcore::curriculum::V10_STAGE_LR_FLOOR,
             epochs: 2,
+            balance_train_collect: false,
+            balance_target_ratio: 0.95,
+            max_epochs: 12,
             minibatches: 1,
             amp: false,
             foveate: false,
@@ -8940,9 +9028,9 @@ mod persistent_actor_tests {
                 rand::rngs::SmallRng::seed_from_u64(77),
             )
             .unwrap();
-            let one_reply = one.train(vec![parity_rollout()], cfg.lr, 0.01).unwrap();
+            let one_reply = one.train(vec![parity_rollout()], cfg.lr, 0.01, cfg.epochs).unwrap();
             let two_reply = two
-                .train(vec![parity_rollout(), parity_rollout()], cfg.lr, 0.01)
+                .train(vec![parity_rollout(), parity_rollout()], cfg.lr, 0.01, cfg.epochs)
                 .unwrap();
 
             assert!(one_reply.averaged_gradients.is_empty());
@@ -9043,8 +9131,8 @@ mod persistent_actor_tests {
             rand::rngs::SmallRng::seed_from_u64(55),
         )
         .unwrap();
-        let one_reply = one.train(vec![rollout()], cfg.lr, 0.01).unwrap();
-        let two_reply = two.train(vec![rollout(), rollout()], cfg.lr, 0.01).unwrap();
+        let one_reply = one.train(vec![rollout()], cfg.lr, 0.01, cfg.epochs).unwrap();
+        let two_reply = two.train(vec![rollout(), rollout()], cfg.lr, 0.01, cfg.epochs).unwrap();
         assert!(one_reply.averaged_gradients.is_empty());
         assert_eq!(
             two_reply.averaged_gradients.len(),
@@ -9084,7 +9172,7 @@ mod persistent_actor_tests {
         let mut poisoned = parity_rollout();
         poisoned.buffer[0][0].reward = f32::NAN;
         let reply = group
-            .train(vec![poisoned, parity_rollout()], cfg.lr, 0.01)
+            .train(vec![poisoned, parity_rollout()], cfg.lr, 0.01, cfg.epochs)
             .unwrap();
         assert_eq!(reply.weights[0].values, weights.values);
         assert_eq!(reply.weights[1].values, weights.values);
@@ -9107,7 +9195,7 @@ mod persistent_actor_tests {
         )
         .unwrap();
         assert!(params > 0);
-        let reply = learner.train(vec![parity_rollout()], cfg.lr, 0.01).unwrap();
+        let reply = learner.train(vec![parity_rollout()], cfg.lr, 0.01, cfg.epochs).unwrap();
         assert!(reply.train_seconds >= 0.0);
         assert!(reply.snapshot_seconds >= 0.0);
         assert!(!reply.weights[0].values.is_empty());

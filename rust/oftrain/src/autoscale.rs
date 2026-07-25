@@ -63,12 +63,12 @@ const GROW_BAND: f64 = 0.03;
 /// Block util-driven growth once aggregate VRAM used/total reaches this
 /// fraction. Leaves headroom below the shrink tripwire so we don't grow
 /// into an immediate shrink restart.
-pub const MEM_BLOCK_GROW_FRAC: f64 = 0.80;
+pub const MEM_BLOCK_GROW_FRAC: f64 = 0.90;
 
 /// Shrink one `--autoscale-step` when aggregate VRAM used/total reaches
 /// this fraction. Tuned from A40 runs that OOM-killed near ~90–95% mem
 /// with 20 envs on bot-heavy stage-6 maps.
-pub const MEM_SHRINK_FRAC: f64 = 0.88;
+pub const MEM_SHRINK_FRAC: f64 = 0.94;
 
 /// Logical CPUs available to this process, minus the reserved margin
 /// (floor of 1 so a tiny/CPU-starved box still gets *some* cap rather than
@@ -166,7 +166,8 @@ mod tests {
 
     #[test]
     fn shrinks_when_vram_is_critical() {
-        let next = next_env_count(20, Some(0.40), Some(0.92), 0.85, 8, 20, 2);
+        // 0.95 >= MEM_SHRINK_FRAC (0.94) → shrink
+        let next = next_env_count(20, Some(0.40), Some(0.95), 0.85, 8, 20, 2);
         assert_eq!(next, 18);
     }
 
@@ -177,14 +178,22 @@ mod tests {
     }
 
     #[test]
+    fn grows_under_previous_mem_block_threshold() {
+        // 0.85 was blocked at 0.80; with MEM_BLOCK=0.90 this should grow.
+        let next = next_env_count(16, Some(0.40), Some(0.85), 0.85, 8, 32, 2);
+        assert_eq!(next, 18);
+    }
+
+    #[test]
     fn blocks_growth_when_vram_is_elevated() {
-        let next = next_env_count(16, Some(0.40), Some(0.85), 0.85, 8, 20, 2);
+        // 0.91 >= MEM_BLOCK_GROW_FRAC (0.90) → hold
+        let next = next_env_count(16, Some(0.40), Some(0.91), 0.85, 8, 20, 2);
         assert_eq!(next, 16);
     }
 
     #[test]
     fn shrinks_on_vram_even_without_util_signal() {
-        let next = next_env_count(20, None, Some(0.90), 0.85, 8, 20, 2);
+        let next = next_env_count(20, None, Some(0.95), 0.85, 8, 20, 2);
         assert_eq!(next, 18);
     }
 
