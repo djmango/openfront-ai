@@ -375,7 +375,7 @@ pub fn send_emoji(
 /// TS `respondToMIRV()` - the MIRV *target*'s reaction, not the launching
 /// nation's. Skips `shouldSendEmoji` (AllPlayers is always OK there) but still
 /// gates on the target's `canSendEmoji(AllPlayers)` cooldown before drawing
-/// `randElement` — otherwise native burns an extra PRNG draw whenever the
+/// `randElement` - otherwise native burns an extra PRNG draw whenever the
 /// target is on AllPlayers emoji cooldown (`curr-b010-s13-blacksea` @ 15710).
 pub(crate) fn respond_to_mirv(game: &mut Game, random: &mut PseudoRandom, mirv_target_small_id: u16) {
     if !random.chance(8) {
@@ -478,7 +478,7 @@ mod tests {
 
         respond_to_mirv(&mut game, &mut random, target);
 
-        // Only `chance(8)` should have been consumed — no `randElement`.
+        // Only `chance(8)` should have been consumed - no `randElement`.
         assert_eq!(
             format!("{:?}", random),
             format!("{:?}", expected),

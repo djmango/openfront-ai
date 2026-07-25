@@ -178,7 +178,7 @@ pub fn entities_typed(game: &Game) -> EntsData {
 }
 
 /// Typed port of [`crate::obs::legality`]'s `actions` object (empty when
-/// the agent is dead / missing — same as JSON `actions: {}`).
+/// the agent is dead / missing - same as JSON `actions: {}`).
 pub fn legality_typed(game: &Game, client_id: &str) -> Legal {
     let agent = match game.player_by_client_id(client_id) {
         Some(p) if p.alive => p,

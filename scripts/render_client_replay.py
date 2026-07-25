@@ -313,7 +313,7 @@ def render_record(
 
     procs: list[subprocess.Popen] = []
     # Self-contained SoftGL must not collide with a leftover showcase archive
-    # or vite on the default ports — that looks like a replay-button timeout
+    # or vite on the default ports - that looks like a replay-button timeout
     # because Chromium talks to the wrong (empty) archive.
     if not reuse_services:
         if port_open(api_port):
@@ -463,7 +463,7 @@ def render_record(
                 print("replay running...")
 
                 # Death: cut before the wipeout modal. Timeout: cut at the
-                # episode budget — without this the loop runs to --timeout
+                # episode budget - without this the loop runs to --timeout
                 # wall-clock because no win/death modal ever appears.
                 if end_tick and outcome == "death":
                     stop_tick = int(end_tick) - death_trim_ticks

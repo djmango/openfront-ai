@@ -8,12 +8,12 @@
 #   NUM_GPUS=4 bash scripts/pod_train_v10.sh
 #
 # Knob sources of truth (do not duplicate elsewhere):
-#   1. THIS SCRIPT — launch recipe (NUM_ENVS/MAX_ENVS, EXTRA_ARGS, TRAIN_ARGS,
+#   1. THIS SCRIPT - launch recipe (NUM_ENVS/MAX_ENVS, EXTRA_ARGS, TRAIN_ARGS,
 #      NCCL, HF sync). Optional overrides: /root/ppo_v10.env (see
 #      scripts/ppo_v10.env.example).
-#   2. rust/ofcore/src/curriculum.rs — stages, bots/nations, win gates,
+#   2. rust/ofcore/src/curriculum.rs - stages, bots/nations, win gates,
 #      V10_ENV_TARGETS floors.
-#   3. rust/oftrain Cargo default features — native-engine ON. Clap defaults
+#   3. rust/oftrain Cargo default features - native-engine ON. Clap defaults
 #      in main.rs mirror this recipe for rollout/BPTT/autoscale knobs so a
 #      bare `oftrain` smoke matches production; pods still pass them explicitly.
 #
@@ -69,7 +69,7 @@ MINIBATCHES=$((NUM_ENVS * ROLLOUT_LEN / MINIBATCH_SIZE))
 STAGE="${STAGE:-0}"
 # Fraction (0.0-1.0) of env workers that run the real Node/TS engine
 # instead of native. Default 0 (pure native). Non-zero requires ALLOW_NODE_MIX=1
-# — otherwise every "quick hedge" relaunch silently tanks collect throughput.
+# - otherwise every "quick hedge" relaunch silently tanks collect throughput.
 NODE_FRACTION="${NODE_FRACTION:-0}"
 ALLOW_NODE_MIX="${ALLOW_NODE_MIX:-0}"
 CKPT_KEEP_LAST="${CKPT_KEEP_LAST:-48}"
@@ -129,7 +129,7 @@ if [ "$(python3 -c "print(1 if float('$NODE_FRACTION') > 0 else 0)")" = "1" ] \
   && [ "$ALLOW_NODE_MIX" != "1" ]; then
   echo "FATAL: NODE_FRACTION=$NODE_FRACTION without ALLOW_NODE_MIX=1."
   echo "       Production training is pure-native (NODE_FRACTION=0)."
-  echo "       Node mix is a slow parity hedge — re-run with ALLOW_NODE_MIX=1 if you"
+  echo "       Node mix is a slow parity hedge - re-run with ALLOW_NODE_MIX=1 if you"
   echo "       truly need it, or unset NODE_FRACTION."
   exit 1
 fi
@@ -346,7 +346,7 @@ ensure_disk_headroom() {
     echo "[disk] WARNING: ${pct}% used on $(df -Ph "$CKPT_DIR" | awk 'NR==2{print $1,$5,$4" free"}')"
   fi
   if [ "$pct" -ge "$DISK_CRIT_PCT" ]; then
-    echo "[disk] CRITICAL: ${pct}% used — reclaiming stale inactive checkpoint runs"
+    echo "[disk] CRITICAL: ${pct}% used - reclaiming stale inactive checkpoint runs"
     reclaim_stale_ckpt_runs
     prune_local_numbered_ckpts "$CKPT_DIR" "$CKPT_KEEP_LAST"
     pct="$(disk_used_pct "$CKPT_DIR")"

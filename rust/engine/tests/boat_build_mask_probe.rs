@@ -154,7 +154,7 @@ fn boat_canboat_true_but_random_regions_mostly_fail_translate_or_engine() {
     let mut empty_intent = 0u32;
     let mut engine_reject = 0u32;
     let mut engine_accept = 0u32;
-    // Uniform over all coarse regions — what an untrained coarse head samples
+    // Uniform over all coarse regions - what an untrained coarse head samples
     // when legal_tile is all-ones and there is no coarse_has_land prune.
     for gy in 0..gh {
         for gx in 0..gw {
@@ -198,7 +198,7 @@ fn boat_canboat_true_but_random_regions_mostly_fail_translate_or_engine() {
     );
     // Live watch evidence: death episode had 523 boat decisions / 10 boat
     // intents (97.7% empty). That stickiness is policy+reward, not map
-    // geometry alone — geometry still fails >30% of uniform region picks.
+    // geometry alone - geometry still fails >30% of uniform region picks.
     let _ = empty_rate;
 }
 

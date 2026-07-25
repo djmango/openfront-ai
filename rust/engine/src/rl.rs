@@ -44,7 +44,7 @@ pub struct RlSession {
 
 impl RlSession {
     /// Mirrors `bridge/env.ts::EnvSession.reset()`. Returns the session plus
-    /// the obs head (meta only — no JSON entities/legal), typed ents/legal,
+    /// the obs head (meta only - no JSON entities/legal), typed ents/legal,
     /// and raw terrain bytes. In-process callers should read `tile_state()`
     /// directly (see its doc comment) instead of paying for a byte
     /// encoding that only exists for out-of-process backends.

@@ -10,8 +10,8 @@
 //! grid as an exact bypass (`C_GRID` = latent + 6 static + ego + db + transient).
 //!
 //! Production checkpoints:
-//! - fine:  `ae_v32_nostatic_d8c32`  — 32ch @ 1/8
-//! - coarse: `ae_v32_nostatic_d16c32` — 32ch @ 1/16 (optional coarse stream)
+//! - fine:  `ae_v32_nostatic_d8c32`  - 32ch @ 1/8
+//! - coarse: `ae_v32_nostatic_d16c32` - 32ch @ 1/16 (optional coarse stream)
 
 use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
@@ -617,7 +617,7 @@ pub fn encode_latent_batch_device(
         let per = (MAX_ENC_PIX / pix.max(1)).max(1);
         for chunk in idxs.chunks(per) {
             let b = chunk.len() as i64;
-            // Cache static terrain on CPU too — without it, watch/CPU encode
+            // Cache static terrain on CPU too - without it, watch/CPU encode
             // rebuilds the full land/fallout tensor every step and crawls.
             let use_terrain_cache = terrain_cache.is_some();
             let mut owners = Vec::with_capacity(chunk.len() * pix);
