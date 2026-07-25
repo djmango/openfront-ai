@@ -3,7 +3,7 @@ use super::{
     BoatRetreatExecution, BreakAllianceExecution, ConstructionExecution, DeleteUnitExecution,
     DonateGoldExecution,
     DonateTroopsExecution, EmbargoAllExecution, EmbargoExecution, ExecEnum,
-    MarkDisconnectedExecution, NoOpExecution, RetreatExecution, SpawnExecution,
+    MarkDisconnectedExecution, MoveWarshipExecution, NoOpExecution, RetreatExecution, SpawnExecution,
     TargetPlayerExecution, TransportShipExecution, UpgradeStructureExecution,
 };
 use crate::execution::AttackExecution;
@@ -282,6 +282,25 @@ pub fn intent_to_execution(game: &Game, game_id: &str, intent: &StampedIntent) -
                 ExecEnum::TargetPlayer(TargetPlayerExecution::new(p.small_id, target))
             } else {
                 ExecEnum::NoOp(NoOpExecution)
+            }
+        }
+        "move_warship" => {
+            let unit_ids: Vec<i32> = intent
+                .fields
+                .get("unitIds")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_i64().map(|n| n as i32))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let tile = intent.fields.get("tile").and_then(Value::as_u64);
+            match (game.player_by_client_id(client_id), tile) {
+                (Some(p), Some(tile)) if !unit_ids.is_empty() => ExecEnum::MoveWarship(
+                    MoveWarshipExecution::new(p.small_id, unit_ids, tile as u32),
+                ),
+                _ => ExecEnum::NoOp(NoOpExecution),
             }
         }
         "cancel_attack" => {
