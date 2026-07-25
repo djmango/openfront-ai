@@ -2238,6 +2238,7 @@ mod ai_attack_behavior_tests {
                 gold_multiplier: None,
                 max_timer_value: None,
                 ranked_type: None,
+                water_nukes: None,
             },
             false,
         )
@@ -2792,6 +2793,7 @@ mod ai_attack_nuked_territory_tests {
                 gold_multiplier: None,
                 max_timer_value: None,
                 ranked_type: None,
+                water_nukes: None,
             },
             false,
         )

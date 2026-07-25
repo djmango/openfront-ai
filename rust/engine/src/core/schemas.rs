@@ -109,6 +109,8 @@ pub struct GameConfig {
     pub max_timer_value: Option<u32>,
     #[serde(default)]
     pub ranked_type: Option<String>,
+    #[serde(default)]
+    pub water_nukes: Option<bool>,
 }
 
 impl GameConfig {

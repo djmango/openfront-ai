@@ -592,9 +592,9 @@ impl Config {
         90
     }
 
-    /// TS `waterNukes()`  -  not present in any pinned record's `gameConfig`; default false.
+    /// TS `Config.waterNukes()` = `this._gameConfig.waterNukes ?? false`.
     pub fn water_nukes(&self) -> bool {
-        false
+        self.game_config.water_nukes.unwrap_or(false)
     }
 
     /// TS `nukeMagnitudes(unitType)` -> `(inner, outer)`.
