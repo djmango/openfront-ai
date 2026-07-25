@@ -336,7 +336,7 @@ struct Args {
     /// own-tile centroid instead of the whole map (coarse branch is
     /// unaffected - always the full map). Default on to match Python v7;
     /// pass `--foveate=false` for the legacy whole-map-as-fine path.
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     foveate: bool,
 
     /// Frozen fine AE encoder safetensors (from `ofae` / HF
@@ -370,7 +370,7 @@ struct Args {
     /// libtorch build, see DEVLOG/final report for how this was verified.
     /// Pin host staging for observation/choice H2D. Default on for CUDA
     /// training recipes (`pod_train_v11.sh`); local CPU smokes can leave it.
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pinned_h2d: bool,
 
     /// H2D fine/coarse grids as fp16 then cast to f32 on device (halves
