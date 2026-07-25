@@ -27,7 +27,7 @@
 # RunPod dockerArgs (detached; keep the container alive with sleep infinity).
 # Pin NODE_FRACTION=0 so leftover shell/template env cannot reintroduce a mix.
 # The script self-flocks; never start a second copy alongside a live trainer:
-#   bash -c "service ssh start 2>/dev/null || /usr/sbin/sshd; nohup bash -c 'set -a; [ -f /root/ppo_v11.env ] && . /root/ppo_v11.env; set +a; curl -fsSL https://raw.githubusercontent.com/djmango/openfront-ai/master/scripts/pod_train_v11.sh -o /root/pod_train_v11.sh && NUM_GPUS=4 NODE_FRACTION=0 NUM_ENVS=32 MAX_ENVS=40 NCCL_P2P_DISABLE=0 NCCL_IB_DISABLE=1 bash /root/pod_train_v11.sh' > /root/bootstrap.log 2>&1 & disown; sleep infinity"
+#   bash -c "service ssh start 2>/dev/null || /usr/sbin/sshd; nohup bash -c 'set -a; [ -f /root/ppo_v11.env ] && . /root/ppo_v11.env; set +a; curl -fsSL https://raw.githubusercontent.com/djmango/openfront-ai/master/scripts/pod_train_v11.sh -o /root/pod_train_v11.sh && NUM_GPUS=4 NODE_FRACTION=0 NUM_ENVS=38 MAX_ENVS=40 NCCL_P2P_DISABLE=0 NCCL_IB_DISABLE=1 bash /root/pod_train_v11.sh' > /root/bootstrap.log 2>&1 & disown; sleep infinity"
 #
 # If a pod fails to actually train (crash-loops immediately, "CUDA unknown
 # error" in /tmp/train_$RUN_NAME.log) despite nvidia-smi looking healthy:
@@ -48,7 +48,7 @@ fi
 NUM_GPUS="${NUM_GPUS:-4}"
 # Envs per GPU/shard. Start near the util-healthy band; autoscale can still
 # grow to MAX_ENVS. (Clap default for bare oftrain remains 4 for local smokes.)
-NUM_ENVS="${NUM_ENVS:-32}"
+NUM_ENVS="${NUM_ENVS:-38}"
 STAGE_ENV_TARGETS="${STAGE_ENV_TARGETS:-}"
 # Persistent owners cannot live-spawn env workers; autoscale grows via the same
 # restart_request.json path as stage env targets.
