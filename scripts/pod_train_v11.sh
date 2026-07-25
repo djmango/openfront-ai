@@ -2,7 +2,7 @@
 # Restart-proof V11 training for the Rust `oftrain` trainer on a RunPod pod.
 # Schema: neighbor pack + ego-split attacks + unit pointer + LSTM + bigger trunk.
 # Requires AE v3.2 no-static encoders (ae_v32_nostatic_d{8,16}c32).
-# Target recipe: 2×A100 80GB SXM (override NUM_GPUS/MAX_ENVS as needed).
+# Target recipe: 4×A100 80GB SXM (override NUM_GPUS/MAX_ENVS as needed).
 # Bootstraps the repo + libtorch/CUDA venv + build, resumes from a local or
 # HF-synced checkpoint, crash-loops with backoff, and periodically pushes the
 # latest checkpoint to `djmango/openfront-rl`.
@@ -27,7 +27,7 @@
 # RunPod dockerArgs (detached; keep the container alive with sleep infinity).
 # Pin NODE_FRACTION=0 so leftover shell/template env cannot reintroduce a mix.
 # The script self-flocks; never start a second copy alongside a live trainer:
-#   bash -c "service ssh start 2>/dev/null || /usr/sbin/sshd; nohup bash -c 'set -a; [ -f /root/ppo_v11.env ] && . /root/ppo_v11.env; set +a; curl -fsSL https://raw.githubusercontent.com/djmango/openfront-ai/master/scripts/pod_train_v11.sh -o /root/pod_train_v11.sh && NUM_GPUS=2 NODE_FRACTION=0 MAX_ENVS=24 NCCL_P2P_DISABLE=0 NCCL_IB_DISABLE=1 bash /root/pod_train_v11.sh' > /root/bootstrap.log 2>&1 & disown; sleep infinity"
+#   bash -c "service ssh start 2>/dev/null || /usr/sbin/sshd; nohup bash -c 'set -a; [ -f /root/ppo_v11.env ] && . /root/ppo_v11.env; set +a; curl -fsSL https://raw.githubusercontent.com/djmango/openfront-ai/master/scripts/pod_train_v11.sh -o /root/pod_train_v11.sh && NUM_GPUS=4 NODE_FRACTION=0 NUM_ENVS=32 MAX_ENVS=40 NCCL_P2P_DISABLE=0 NCCL_IB_DISABLE=1 bash /root/pod_train_v11.sh' > /root/bootstrap.log 2>&1 & disown; sleep infinity"
 #
 # If a pod fails to actually train (crash-loops immediately, "CUDA unknown
 # error" in /tmp/train_$RUN_NAME.log) despite nvidia-smi looking healthy:
@@ -45,17 +45,17 @@ if ! flock -n 9; then
   exit 1
 fi
 
-NUM_GPUS="${NUM_GPUS:-2}"
+NUM_GPUS="${NUM_GPUS:-4}"
 # Envs per GPU/shard. Start near the util-healthy band; autoscale can still
 # grow to MAX_ENVS. (Clap default for bare oftrain remains 4 for local smokes.)
-NUM_ENVS="${NUM_ENVS:-24}"
+NUM_ENVS="${NUM_ENVS:-32}"
 STAGE_ENV_TARGETS="${STAGE_ENV_TARGETS:-}"
 # Persistent owners cannot live-spawn env workers; autoscale grows via the same
 # restart_request.json path as stage env targets.
 AUTO_SCALE_ENVS="${AUTO_SCALE_ENVS:-1}"
-# Cap for 80GB A100. Was 24 (~74% VRAM); 32 uses the MEM_BLOCK=0.90 headroom
-# so util-driven growth can continue when collect-bound at mid mem.
-MAX_ENVS="${MAX_ENVS:-32}"
+# Cap for 80GB A100. 32 envs/shard left ~55/80GB; 40 uses more of the
+# MEM_BLOCK=0.90 headroom once collect is no longer the only limiter.
+MAX_ENVS="${MAX_ENVS:-40}"
 MIN_ENVS="${MIN_ENVS:-10}"
 # Aim autoscale / ops target at the util SLO (balance handles train fill).
 TARGET_GPU_UTIL="${TARGET_GPU_UTIL:-0.92}"
@@ -100,7 +100,7 @@ STALE_CKPT_RUNS="${STALE_CKPT_RUNS:-ppo_v8,ppo_v8_fast_native,ppo_v81,ppo_v82,pp
 # util stays ≥90% when collect wall drifts (see balance.rs).
 MAX_EPOCHS="${MAX_EPOCHS:-12}"
 BALANCE_TARGET_RATIO="${BALANCE_TARGET_RATIO:-0.95}"
-EXTRA_ARGS="${EXTRA_ARGS:---amp --foveate --compact-rollout --fp16-rollout --pinned-h2d --persistent-actors --work-conserving-actors --pipeline-groups=true --actor-target-batch 2 --actor-max-wait-ms 15 --actor-max-padding-waste 0.50 --recurrent-policy --bptt-chunk-len $BPTT_CHUNK_LEN --epochs $EPOCHS --balance-train-collect --max-epochs $MAX_EPOCHS --balance-target-ratio $BALANCE_TARGET_RATIO --ckpt-every 5 --ckpt-keep-last $CKPT_KEEP_LAST --eval-every 0 --log-every 1 --coarse-ckpt ../weights/ae/ae_v32_nostatic_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors}"
+EXTRA_ARGS="${EXTRA_ARGS:---amp true --foveate true --compact-rollout true --fp16-rollout true --pinned-h2d true --persistent-actors true --work-conserving-actors true --pipeline-groups=true --actor-target-batch 2 --actor-max-wait-ms 15 --actor-max-padding-waste 0.50 --recurrent-policy true --bptt-chunk-len $BPTT_CHUNK_LEN --epochs $EPOCHS --balance-train-collect true --max-epochs $MAX_EPOCHS --balance-target-ratio $BALANCE_TARGET_RATIO --ckpt-every 5 --ckpt-keep-last $CKPT_KEEP_LAST --eval-every 0 --log-every 1 --coarse-ckpt ../weights/ae/ae_v32_nostatic_d16c32.encoder.safetensors --ckpt ../weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors}"
 
 # V11 anti-death-spiral on the closeout ladder. Dense reward with softer death,
 # survival / diplo-panic / combat priors, and radical win bonus so finishing
