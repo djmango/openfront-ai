@@ -69,6 +69,9 @@ impl Execution for DonateTroopsExecution {
         let removed = game.remove_troops(self.sender_small_id, troops);
         if removed > 0 {
             game.add_troops(recipient_small_id, removed as f64);
+            // TS `PlayerImpl.donateTroops` records every successful donation on
+            // the shared `sentDonations` list (used by the donate cooldown).
+            game.record_donation(self.sender_small_id, recipient_small_id);
             if troops >= removed as f64 {
                 game.update_relation(recipient_small_id, self.sender_small_id, 50);
             }
@@ -151,6 +154,7 @@ mod tests {
                 gold_multiplier: None,
                 max_timer_value: None,
                 ranked_type: None,
+                water_nukes: None,
             },
             false,
         );
@@ -201,6 +205,59 @@ mod tests {
             game.player_by_small_id(player2).unwrap().troops,
             troops_before + 100
         );
+    }
+
+    // TS `PlayerImpl.canDonateTroops`'s `sentDonations`/`donateCooldown()` scan:
+    // a second donation to the same recipient within `donate_cooldown()` (100)
+    // ticks must be rejected, and allowed again once the window elapses.
+    #[test]
+    fn troop_donations_to_same_recipient_respect_cooldown() {
+        let mut game = game_with_donations_enabled();
+        game.end_spawn_phase();
+        let p1 = add_human(&mut game, "p1", 1);
+        let p2 = add_human(&mut game, "p2", 1);
+        game.player_by_small_id_mut(p1).unwrap().troops = 1_000_000;
+        game.player_by_small_id_mut(p2).unwrap().troops = 0;
+
+        assert!(game.create_alliance_request(p1, p2, game.ticks()));
+        assert!(game.create_alliance_request(p2, p1, game.ticks()));
+        assert!(game.is_allied_with(p1, p2));
+
+        // First donation goes through.
+        game.add_execution(ExecEnum::DonateTroops(DonateTroopsExecution::new(
+            p1,
+            "p2".into(),
+            Some(100.0),
+        )));
+        game.execute_next_tick();
+        game.execute_next_tick();
+        let after_first = game.player_by_small_id(p2).unwrap().troops;
+        assert_eq!(after_first, 100);
+
+        // Second donation immediately after is blocked by the cooldown.
+        assert!(!game.can_donate_troops(p1, p2));
+        game.add_execution(ExecEnum::DonateTroops(DonateTroopsExecution::new(
+            p1,
+            "p2".into(),
+            Some(100.0),
+        )));
+        game.execute_next_tick();
+        game.execute_next_tick();
+        assert_eq!(game.player_by_small_id(p2).unwrap().troops, after_first);
+
+        // Once the cooldown window elapses the donation is allowed again.
+        for _ in 0..game.wire.donate_cooldown() {
+            game.execute_next_tick();
+        }
+        assert!(game.can_donate_troops(p1, p2));
+        game.add_execution(ExecEnum::DonateTroops(DonateTroopsExecution::new(
+            p1,
+            "p2".into(),
+            Some(100.0),
+        )));
+        game.execute_next_tick();
+        game.execute_next_tick();
+        assert!(game.player_by_small_id(p2).unwrap().troops > after_first);
     }
 
     #[test]
