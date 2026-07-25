@@ -342,7 +342,15 @@ impl WarshipExecution {
     fn best_neighbor_toward(&self, game: &Game, from: TileRef, target: TileRef) -> Option<TileRef> {
         let mut best = None;
         let mut best_distance = game.manhattan_dist(from, target);
-        game.map.for_each_neighbor4(from, |neighbor| {
+        // TS `WarshipExecution.bestNeighborToward` iterates
+        // `this.mg.forEachNeighbor(...)`, which on this pin (f0da4182) visits
+        // west, east, north, south. The `distance < best_distance` (strict)
+        // comparison keeps the FIRST neighbor achieving the minimum, so visit
+        // order decides which tile the warship steps onto when two neighbors
+        // are equidistant to the target - it must match TS's order or the
+        // warship (a hashed unit) drifts onto a different tile, desyncing the
+        // player hash mid-game (see jdxWdFCt tick-2292 warship bisection).
+        game.map.for_each_neighbor4_wens(from, |neighbor| {
             if !game.is_water(neighbor) {
                 return;
             }
