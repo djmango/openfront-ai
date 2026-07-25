@@ -356,6 +356,7 @@ impl Default for Game {
             gold_multiplier: None,
             max_timer_value: None,
             ranked_type: None,
+            water_nukes: None,
         };
         Self {
             game_id: String::new(),
@@ -4176,6 +4177,7 @@ mod alliance_accept_nukes_tests {
             gold_multiplier: None,
             max_timer_value: None,
             ranked_type: None,
+            water_nukes: None,
         };
         let mut game = Game::new(
             String::new(),
@@ -5037,6 +5039,7 @@ mod team_join_tests {
             gold_multiplier: None,
             max_timer_value: None,
             ranked_type: None,
+            water_nukes: None,
         };
         let mut game = Game::new(
             String::new(),

@@ -902,6 +902,7 @@ mod immunity_tests {
             gold_multiplier: None,
             max_timer_value: None,
             ranked_type: None,
+            water_nukes: None,
         };
         game.wire = crate::core::config::Config::new(wire_cfg, false);
         game.end_spawn_phase();
