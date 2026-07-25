@@ -135,6 +135,11 @@ pub struct Player {
     /// TS `PlayerImpl.outgoingEmojis_` - `(recipient small_id | AllPlayers, createdAt)`.
     /// `None` recipient matches TS `AllPlayers`. Used by `canSendEmoji` cooldown.
     pub outgoing_emoji_sends: Vec<(Option<u16>, u32)>,
+    /// TS `PlayerImpl.sentDonations` (`Donation[]`) - `(recipient small_id, tick)`
+    /// per successful troop/gold donation. Shared across both donation kinds and
+    /// never pruned, matching TS; read by `can_donate_troops`/`can_donate_gold`
+    /// to enforce `donate_cooldown()`.
+    pub sent_donations: Vec<(u16, u32)>,
 }
 
 impl Default for Player {
@@ -172,6 +177,7 @@ impl Default for Player {
             target_marks: Vec::new(),
             last_delete_unit_tick: -1,
             outgoing_emoji_sends: Vec::new(),
+            sent_donations: Vec::new(),
         }
     }
 }
@@ -3563,6 +3569,9 @@ impl Game {
         {
             return false;
         }
+        if self.donation_on_cooldown(sender, recipient_small_id) {
+            return false;
+        }
         true
     }
 
@@ -3587,7 +3596,31 @@ impl Game {
         {
             return false;
         }
+        if self.donation_on_cooldown(sender, recipient_small_id) {
+            return false;
+        }
         true
+    }
+
+    /// TS `PlayerImpl.canDonate{Troops,Gold}` shared `sentDonations` cooldown
+    /// scan: true if `sender` donated (troops or gold) to `recipient_small_id`
+    /// within the last `donate_cooldown()` ticks.
+    fn donation_on_cooldown(&self, sender: &Player, recipient_small_id: u16) -> bool {
+        let cooldown = self.wire.donate_cooldown();
+        sender
+            .sent_donations
+            .iter()
+            .any(|&(rid, tick)| rid == recipient_small_id && self.ticks.saturating_sub(tick) < cooldown)
+    }
+
+    /// TS `PlayerImpl.donate{Troops,Gold}` push onto the shared `sentDonations`
+    /// list, recording a successful donation from `sender_small_id` to
+    /// `recipient_small_id` at the current tick.
+    pub fn record_donation(&mut self, sender_small_id: u16, recipient_small_id: u16) {
+        let tick = self.ticks;
+        if let Some(sender) = self.player_by_small_id_mut(sender_small_id) {
+            sender.sent_donations.push((recipient_small_id, tick));
+        }
     }
 
     pub fn can_send_alliance_request(&self, sender_small_id: u16, recipient_small_id: u16) -> bool {

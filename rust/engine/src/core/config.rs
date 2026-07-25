@@ -181,6 +181,12 @@ impl Config {
         10 * 10
     }
 
+    /// TS `Config.donateCooldown()` (`10 * 10`). Minimum ticks between two
+    /// donations (troops or gold) from the same sender to the same recipient.
+    pub fn donate_cooldown(&self) -> u32 {
+        10 * 10
+    }
+
     pub fn temporary_embargo_duration(&self) -> u32 {
         300 * 10
     }
