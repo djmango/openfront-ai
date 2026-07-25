@@ -628,10 +628,10 @@ struct Args {
 
     /// Ceiling for `--auto-scale-envs`, per shard (same "per shard" unit
     /// as `--num-envs`/`--min-envs`). Default 32 matches the A100 80GB
-    /// ceiling in `pod_train_v11.sh` (`MAX_ENVS=32`). Pass `--max-envs 0`
+    /// ceiling in `pod_train_v11.sh` (`MAX_ENVS=40`). Pass `--max-envs 0`
     /// to derive from CPU headroom instead (`autoscale::cpu_env_cap_per_shard`).
     /// No effect without `--auto-scale-envs`.
-    #[arg(long, default_value_t = 32)]
+    #[arg(long, default_value_t = 40)]
     max_envs: usize,
 
     /// How often (in PPO updates) `--auto-scale-envs` re-evaluates GPU
@@ -937,7 +937,7 @@ mod recurrent_flag_tests {
         assert!((defaults.balance_target_ratio - 0.95).abs() < 1e-9);
         assert!((defaults.target_gpu_util - 0.92).abs() < 1e-9);
         assert!((defaults.actor_max_padding_waste - 0.50).abs() < 1e-9);
-        assert_eq!(defaults.max_envs, 32);
+        assert_eq!(defaults.max_envs, 40);
         assert_eq!(defaults.autoscale_step, 2);
         assert_eq!(defaults.ckpt_every, 5);
         assert_eq!(defaults.eval_every, 0);
