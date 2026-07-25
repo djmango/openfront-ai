@@ -11,12 +11,12 @@
 #   NUM_GPUS=4 bash scripts/pod_train_v11.sh
 #
 # Knob sources of truth (do not duplicate elsewhere):
-#   1. THIS SCRIPT — launch recipe (NUM_ENVS/MAX_ENVS, EXTRA_ARGS, TRAIN_ARGS,
+#   1. THIS SCRIPT - launch recipe (NUM_ENVS/MAX_ENVS, EXTRA_ARGS, TRAIN_ARGS,
 #      NCCL, HF sync). Optional overrides: /root/ppo_v11.env (see
 #      scripts/ppo_v11.env.example).
-#   2. rust/ofcore/src/curriculum.rs — stages, bots/nations, win gates,
+#   2. rust/ofcore/src/curriculum.rs - stages, bots/nations, win gates,
 #      V10_ENV_TARGETS floors (V11 keeps the same curriculum).
-#   3. rust/oftrain clap defaults in main.rs — mirror this recipe (rollout 48,
+#   3. rust/oftrain clap defaults in main.rs - mirror this recipe (rollout 48,
 #      BPTT 24, epochs 8, balance-train-collect, amp/fp16/compact, persistent
 #      + work-conserving + recurrent, autoscale target 0.92 / max-envs 32) so a
 #      bare `oftrain` matches production; pods still pass them explicitly.
@@ -80,7 +80,7 @@ MINIBATCHES=$((NUM_ENVS * ROLLOUT_LEN / MINIBATCH_SIZE))
 STAGE="${STAGE:-0}"
 # Fraction (0.0-1.0) of env workers that run the real Node/TS engine
 # instead of native. Default 0 (pure native). Non-zero requires ALLOW_NODE_MIX=1
-# — otherwise every "quick hedge" relaunch silently tanks collect throughput.
+# - otherwise every "quick hedge" relaunch silently tanks collect throughput.
 NODE_FRACTION="${NODE_FRACTION:-0}"
 ALLOW_NODE_MIX="${ALLOW_NODE_MIX:-0}"
 CKPT_KEEP_LAST="${CKPT_KEEP_LAST:-48}"
@@ -144,7 +144,7 @@ if [ "$(python3 -c "print(1 if float('$NODE_FRACTION') > 0 else 0)")" = "1" ] \
   && [ "$ALLOW_NODE_MIX" != "1" ]; then
   echo "FATAL: NODE_FRACTION=$NODE_FRACTION without ALLOW_NODE_MIX=1."
   echo "       Production training is pure-native (NODE_FRACTION=0)."
-  echo "       Node mix is a slow parity hedge — re-run with ALLOW_NODE_MIX=1 if you"
+  echo "       Node mix is a slow parity hedge - re-run with ALLOW_NODE_MIX=1 if you"
   echo "       truly need it, or unset NODE_FRACTION."
   exit 1
 fi
@@ -159,7 +159,7 @@ if [ ! -d "$REPO_DIR" ]; then
 fi
 cd "$REPO_DIR"
 if [ -d .git ] && [ -z "${SKIP_SYNC:-}" ]; then
-  # Deployed code MUST match origin/$GIT_REF — a silently-failed pull once ran
+  # Deployed code MUST match origin/$GIT_REF - a silently-failed pull once ran
   # a whole day's training on stale code.
   git fetch origin "$GIT_REF" || true
   git checkout -B "$GIT_REF" "origin/$GIT_REF" 2>/dev/null \
@@ -365,7 +365,7 @@ ensure_disk_headroom() {
     echo "[disk] WARNING: ${pct}% used on $(df -Ph "$CKPT_DIR" | awk 'NR==2{print $1,$5,$4" free"}')"
   fi
   if [ "$pct" -ge "$DISK_CRIT_PCT" ]; then
-    echo "[disk] CRITICAL: ${pct}% used — reclaiming stale inactive checkpoint runs"
+    echo "[disk] CRITICAL: ${pct}% used - reclaiming stale inactive checkpoint runs"
     reclaim_stale_ckpt_runs
     prune_local_numbered_ckpts "$CKPT_DIR" "$CKPT_KEEP_LAST"
     pct="$(disk_used_pct "$CKPT_DIR")"
@@ -422,7 +422,7 @@ while true; do
   RESUME=""
   if [ -f "$CKPT_DIR/latest.safetensors" ]; then
     # V11 is a fresh schema (units + LSTM + C_GRID=99). Do not auto-migrate
-    # V10/V8.x weights — resume only same-run V11 checkpoints.
+    # V10/V8.x weights - resume only same-run V11 checkpoints.
     RESUME="--resume $CKPT_DIR/latest.safetensors"
   fi
   ensure_disk_headroom

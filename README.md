@@ -187,7 +187,7 @@ cargo build --release -p oftrain --features native-engine
 AE details: owner IDs relabeled to static per-game spawn slots (any player
 count, fixed channels); fully convolutional training on border-dense random
 crops; v3.2 drops structures from the latent (exact 6-plane bypass on the
-policy grid, `C_GRID=95`). Breaking vs `ae_v31_*` — retrain PPO after swapping
+policy grid, `C_GRID=95`). Breaking vs `ae_v31_*` - retrain PPO after swapping
 encoders.
 
 ## Artifacts

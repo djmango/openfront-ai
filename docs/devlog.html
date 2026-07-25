@@ -28,13 +28,16 @@
 
 <nav class="toc">
   <a href="#now">Now</a> ·
+  <a href="#v11-soak">Jul 24-25 V11 soak</a> ·
+  <a href="#v11-watch">watch / clips</a> ·
+  <a href="#v11-scale">scale notes</a> ·
   <a href="#v11-plan">Jul 23 V11 plan</a> ·
   <a href="#v11-learnings">audit learnings</a> ·
   <a href="#v11-scope">V11 scope</a> ·
   <a href="#v11-bc">BC unfreeze</a> ·
   <a href="#v11-build">build order</a> ·
   <a href="#v10-killed">Jul 23 V10 killed</a> ·
-  <a href="#v10-easy-ramp">Jul 18–19 V10</a> ·
+  <a href="#v10-easy-ramp">Jul 18-19 V10</a> ·
   <a href="#v10-learnings">V10 learnings</a> ·
   <a href="#v10-curriculum-100">100-stage curve</a> ·
   <a href="#v9-killed">Jul 15 V9 killed</a> ·
@@ -80,21 +83,110 @@
 </nav>
 
 <div class="now" id="now">
-  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 23rd, 2026</h2>
-  <p><b>V11 is the next training generation.</b>
-  <code>ppo_v10</code> is <a href="#v10-killed">killed</a> (final: update 12581 /
-  stage 25 / ~44.5M steps, window WR ~30%). The next run is
-  <code>ppo_v11</code> — not another reward tweak on the V10 shape.
-  Plan: <a href="#v11-plan">below</a>.</p>
-  <p><b>AE v3.2 no-static</b> is merging into the stack
-  (<code>ae_v32_nostatic_d8c32</code> / <code>d16c32</code>,
-  <code>C_GRID=95</code>): structures leave the latent and ride exact
-  static bypass planes. Training locally; V11 points at these encoders,
-  not <code>ae_v31_*</code>.</p>
-  <p class="d" style="margin:.75rem 0 0">V10 stays on HF as an archive
-  (<a href="https://huggingface.co/djmango/openfront-rl/tree/main/ppo_v10">ppo_v10/</a>).
-  Showcase / clips stay pointed there until a V11 policy exists.</p>
+  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 25th, 2026</h2>
+  <p><b><code>ppo_v11</code> is live and climbing the Easy ramp.</b>
+  2×A100 80GB SXM, util stack (persistent actors, recurrent LSTM, rollout 48 /
+  BPTT 24, balance-train-collect, autoscale). As of ~update <b>456</b> /
+  stage <b>15</b> (~1.1M env steps): window WR ~<b>85%</b>, DR <b>0</b>
+  (16 Easy bots + first nation). Past V10's early bots-only band; still far
+  from Medium (stage 68). Details:
+  <a href="#v11-soak">soak learnings</a>.</p>
+  <p><b>AE v3.2 no-static</b> is the live encoder pair
+  (<code>ae_v32_nostatic_d8c32</code> / <code>d16c32</code>).
+  Watch / MODEL-overlay clips are pointed at V11 checkpoints on HF
+  (<code>djmango/openfront-rl/ppo_v11/</code>), not the V10 archive.</p>
+  <p class="d" style="margin:.75rem 0 0">
+  Surpass old model ≈ clear stage <b>28+</b> (V10 peaked ~27, died at 25 /
+  WR ~30%). Medium = stage <b>68</b>. Current best-guess ETAs after the
+  stage-12 stick: surpass ~Jul 27-28 UTC; Medium ~Aug 1-3 UTC
+  (band Jul 30-Aug 5 if another hole shows up).</p>
 </div>
+
+<h2 class="date" id="v11-soak">Jul 24-25, 2026 - V11 soak: util stack, watch truth, clip bugs</h2>
+<p class="session">First multi-day <code>ppo_v11</code> run on 2×A100. Validated the
+util clap defaults, found greedy watch is not the train policy, fixed a
+client-render nations rewrite that truncated win clips at ~60% land, and
+measured real stage pace (fast bots-only, then a 10h stage-12 hole, then
+into the 1-nation band).</p>
+
+<h3 id="v11-util">Util stack as clap defaults</h3>
+<ul>
+  <li>Live recipe mirrors <code>scripts/pod_train_v11.sh</code>: rollout 48,
+    BPTT 24, epochs 8 (balance up to 12), amp/fp16/compact rollout,
+    persistent + work-conserving actors, recurrent policy, autoscale
+    target util 0.92 / max-envs 32.</li>
+  <li>Resume across rollout/BPTT retunes is allowed; recurrent still
+    requires persistent actors.</li>
+  <li>Bool clap defaults use <code>ArgAction::Set</code> where needed
+    (<code>--amp true</code>, not bare <code>--amp</code>).</li>
+  <li><code>--max-episode-ticks</code> is one source of truth:
+    <code>ofcore::DEFAULT_MAX_EPISODE_TICKS = 21000</code> for train, watch,
+    and ofhub showcase. Watch <code>--max-steps</code> is derived so the
+    decision cap cannot undercut the tick budget. OpenFront
+    <code>msPerTick=100</code> ⇒ 21000 ticks ≈ 35 in-game minutes.</li>
+</ul>
+
+<h3 id="v11-curriculum-pace">Curriculum pace (what actually happened)</h3>
+<table>
+  <tr><th>band</th><th>pace</th><th>notes</th></tr>
+  <tr><td>s0→3</td><td>slow</td>
+    <td>s3 alone ~6.5h / 69 updates (recovery after post-advance WR crash)</td></tr>
+  <tr><td>s4→11</td><td>~0.9-1.7 h/stage</td>
+    <td>bots-only Easy density; ~9-17 updates/stage; ~10 updates/hr</td></tr>
+  <tr><td><b>s12</b></td><td><b>10.6 h / 102 updates</b></td>
+    <td>WR sank to ~0.50 then climbed; first real V11 stick</td></tr>
+  <tr><td>s13→15</td><td>~2.7-3.0 h/stage</td>
+    <td>recovered; entered first-nation stage 15 (gate softens 90%→80%)</td></tr>
+</table>
+<p>Advances (update → stage): 87→1, 113→2, 139→3, 208→4, 219→5, 231→6,
+241→7, 251→8, 260→9, 269→10, 279→11, 296→12, 398→13, 425→14, 449→15.</p>
+<p><b>Estimate update after s12:</b> do not assume the 1 h/stage honeymoon
+holds. With recent ~3-5.5 h/stage, surpass-V10 (s28) slips to ~Jul 27-28;
+Medium (s68) to ~Aug 1-3. Another s12-shaped hole pushes Medium later.</p>
+
+<h3 id="v11-watch">Watch / eval truths</h3>
+<ul>
+  <li><b>Greedy ≠ train.</b> Argmax watch freezes near spawn (~52 tiles) and
+    dies on both native and Node. Stochastic sampling is what training /
+    WR windows measure. Added <code>--watch-stochastic</code>;
+    <code>--engine native|node</code> is honored in <code>--watch</code>
+    (bare <code>--watch</code> still defaults Node for historical showcase).</li>
+  <li><b>FFA win is real 80% land.</b> Replayed watch records with
+    <code>nations=0</code> restored: agent land share ~80.05-80.34%,
+    fallout 0, reason <code>land_share</code>. Knife-edge clears look
+    "on top but not painted" on large maps.</li>
+  <li><b>Clip bug (nations rewrite).</b> Client schema rejects
+    <code>nations: 0</code> (<code>min(1)</code> or
+    <code>"disabled"|"default"</code>). Rewriting 0→1 for render spawned a
+    nation that hit 80% mid-replay; the renderer stopped on that win modal
+    while the agent was still ~60%. Fix: patch bots-only lobbies to
+    <code>nations: "disabled"</code>, and ignore win modals until
+    <code>tick &gt;= recorded end_tick</code>
+    (see <code>scripts/render_client_replay*.py</code>).</li>
+  <li>Stage-15 stochastic sample (u456, 6 maps): 2 wins (Asia, World) /
+    4 nation-losses. Train window still ~85% WR / 0 DR; nations are the
+    new failure mode on some seeds/maps.</li>
+</ul>
+
+<h3 id="v11-scale">Scale: what helps before multipod</h3>
+<ul>
+  <li>Live pod: 2×A100 80GB @ ~97-100% util, ~55/80 GB VRAM, 24 envs/shard,
+    <code>MAX_ENVS=32</code>, collect≈train (epochs already at max 12).
+    Progression is mostly <b>WR-gated</b>, not idle-GPU-gated.</li>
+  <li>Raising envs on the same 2 GPUs: small (~10-20%) at best.</li>
+  <li><b>Best single-pod lever:</b> more GPUs on one host
+    (<code>NUM_GPUS=4</code> etc.). oftrain is single-node multi-GPU
+    (<code>cuda:0..N-1</code> + NCCL, not a multi-machine launcher.</li>
+  <li>Multipod only after one host's GPU ceiling; needs multi-node DDP we
+    do not run in the current pod recipe.</li>
+</ul>
+
+<h3 id="v11-emdash">Prose lint</h3>
+<p><code>scripts/lint_emdash.sh</code> bans U+2014 and HTML
+<code>&amp;mdash;</code> / <code>&amp;#8212;</code> forms across the repo
+(excluding <code>openfront/</code> and <code>patches/</code>). Prefer ASCII
+<code>-</code> / commas / colons. Test:
+<code>scripts/tests/lint_emdash_test.sh</code>.</p>
 
 <h2 class="date" id="v11-plan">Jul 23, 2026 - V11: obs + capacity + LSTM + BC restart</h2>
 <p class="session">V10 proved the Easy mastery ladder and dense anti-spiral
@@ -102,7 +194,7 @@ reward can climb. It also exposed that we have been squeezing a ~12M GRU
 policy that is still structurally blind on diplomacy geometry, attack
 ownership, and unit identity. V11 ships the missing DESIGN.md entity stack,
 replaces the GRU with a full LSTM, grows capacity, and unfreezes behavior
-cloning on the new schema — one from-scratch generation, not a mid-run
+cloning on the new schema - one from-scratch generation, not a mid-run
 migrate.</p>
 
 <h3 id="v10-killed">V10 killed (Jul 23)</h3>
@@ -119,7 +211,7 @@ migrate.</p>
   <li>Weights remain on
     <a href="https://huggingface.co/djmango/openfront-rl/tree/main/ppo_v10">HF ppo_v10/</a>
     (<code>latest</code> + <code>policy_update12580</code>). No V10→V11
-    warm start — shapes and recurrence both change.</li>
+    warm start - shapes and recurrence both change.</li>
 </ul>
 
 <h3 id="v11-learnings">What we learned (audit → V11)</h3>
@@ -134,14 +226,14 @@ the AlphaStar / OA5 contrast, and a pass over live obs vs
     DESIGN player tokens include shared-border length with self, terrain
     mix along that border, and a rich relation continuum. Live
     <code>P_FEAT=21</code> has troops/gold/tiles/ally/embargo/attack
-    aggregates/income/doomsday — but <i>no</i> border-length or
+    aggregates/income/doomsday - but <i>no</i> border-length or
     border-terrain features. Relation scores that matter for diplo sit
     mostly in the reward (<code>v10-diplo-panic</code> etc.), not in the
     policy’s player stream. The agent cannot see “who am I touching and
     on what terrain?”</li>
   <li><b>Attack fronts are anonymous.</b> <code>TR_ATTACK_SRC</code> /
     <code>TR_ATTACK_RETREAT</code> rasterize every active attack with
-    intensity, but they are shared planes — not ego-split
+    intensity, but they are shared planes - not ego-split
     (own / ally / enemy) the way every other unit-bearing transient is.
     Land invasions between two other bots look like fog blobs.</li>
   <li><b>No unit instances.</b> DESIGN head 4 is a pointer over own-unit
@@ -173,7 +265,7 @@ the AlphaStar / OA5 contrast, and a pass over live obs vs
 
 <h4>Reward / curriculum are ahead of representation</h4>
 <ul>
-  <li>V9 sparse-win cleared bots-only then died at first nations — scaffolding
+  <li>V9 sparse-win cleared bots-only then died at first nations - scaffolding
     kind mattered more than “sparse vs dense” slogans
     (<a href="#v9-alphastar-oa5">AlphaStar / OA5</a>).</li>
   <li>V10’s 100-stage Easy ramp + ungate finish rewards + timeout stick
@@ -193,7 +285,7 @@ works”):</p>
     geometry / unit identity / ego attack fronts teaches “looks human,”
     not “wins.”</li>
   <li><b>Warm start helped early PPO once</b> (<code>ppo_v5</code> off
-    <code>bc_v4</code>), then stopped being the bottleneck — later
+    <code>bc_v4</code>), then stopped being the bottleneck - later
     plateaus were reward/curriculum/obs. The Jul 8 moratorium was correct:
     we never isolated BC from simultaneous recipe changes, and v7 broke
     the weights anyway.</li>
@@ -217,7 +309,7 @@ works”):</p>
     <td>Per alive player vs ego: shared-border length (log), terrain mix
       along that border (land/water/defense fractions), richer relation
       vector (allied / neutral / targeting-me / traitor / embargo bits
-      already partly present — fill the DESIGN gaps). Optionally top-K
+      already partly present - fill the DESIGN gaps). Optionally top-K
       neighbors by border length if full <code>MAX_SLOTS</code> is too
       wide for attention.</td>
     <td><code>P_FEAT</code> 21 → ~28–32</td>
@@ -255,7 +347,7 @@ works”):</p>
     <td><code>RecurrentCore</code>: LSTM cell with (h, c), width
       ≥512 (start 512, A/B 768). Context still encodes prev action/result.
       Rollout buffer carries both states through episode resets.
-      BPTT chunking stays. Kill GRU path — no dual-mode.</td>
+      BPTT chunking stays. Kill GRU path - no dual-mode.</td>
     <td>recurrent state 256 → 2×H_lstm; ckpt break</td>
   </tr>
   <tr>
@@ -300,7 +392,7 @@ encoders.</p>
     is: short PPO A/B where warm start beats scratch to clear Easy
     bots-only stages under identical seeds/config.</li>
   <li>If A/B is flat, freeze <code>bc_v11</code> as a playable prior and
-    continue PPO from scratch — do not grind the archive for weeks.</li>
+    continue PPO from scratch - do not grind the archive for weeks.</li>
   <li>Temporal / seq BC stays shelved until LSTM PPO demonstrably uses
     memory (commitment metrics: attack flip rate, alliance hold time).</li>
 </ol>
@@ -346,7 +438,7 @@ steps. Overnight result: <b>0 → 27</b> on the new 100-stage curve.</p>
 <p>V9 proved win-only + high gates can clear bots-only, then collapsed the
 moment nations appeared. The dense V8.x reward stack (closeout Φ, boats,
 tempo, embargo/combat thrash, soft death) was already teaching useful
-priors — the failure mode was <i>lobby difficulty</i>, not missing shaping.
+priors - the failure mode was <i>lobby difficulty</i>, not missing shaping.
 So V10 keeps <code>v10-anti-spiral-v1</code> (V8.6-like dense reward + survival /
 anti-diplo / combat priors) and spends the degrees of freedom on a much
 longer Easy mastery curriculum, inspired by
@@ -390,7 +482,7 @@ curriculum, not the reward, was the remaining bottleneck.</p>
   <tr><td>92–99</td><td>Impossible</td><td>190→225 / 26–32</td><td>~66%→<b>65%</b></td></tr>
 </table>
 <p><code>win_at</code> holds 95% through the Onion micro-ramp, then smoothsteps
-to 65% by stage 99 — no 95→70 cliff at the old “legacy stage 0” handoff.
+to 65% by stage 99 - no 95→70 cliff at the old “legacy stage 0” handoff.
 Closeout conversion gate @48, eight-map bridge @54.</p>
 
 <h3 id="v10-overnight">Overnight result (Jul 18 eve → Jul 19 morning)</h3>
@@ -404,7 +496,7 @@ Closeout conversion gate @48, eight-map bridge @54.</p>
   <tr><td>Pace</td><td>oscillating for days</td><td>0→27 in ~12h wall-clock</td></tr>
 </table>
 <p>Stage 26 (26 bots / 3 nations) cleared at ~90% wins. Stage 27 is the first
-real slowdown on the 95% bar — still converting when it reaches 45% land, not
+real slowdown on the 95% bar - still converting when it reaches 45% land, not
 yet winning often enough to graduate. One demote 27→26 and re-advance; no
 death spiral.</p>
 
@@ -446,7 +538,7 @@ death spiral.</p>
     <a href="https://huggingface.co/djmango/openfront-rl/tree/main/ppo_v10">HF ppo_v10</a></li>
   <li>Showcase:
     <a href="https://openfrontai.skg.gg/">openfrontai.skg.gg</a>
-    — defaults <code>RUN_NAME=ppo_v10</code>; rebuild via
+    - defaults <code>RUN_NAME=ppo_v10</code>; rebuild via
     <code>docker/homelab_deploy.sh</code> when clips go stale</li>
   <li>Devlog proxy:
     <a href="https://skg.gg/pages/openfront-devlog/">skg.gg/pages/openfront-devlog</a>
@@ -525,7 +617,7 @@ is a new schedule + a hard sparse branch in reward assembly, not
 <h3 id="v9-stages">Stage sketch (high gates)</h3>
 <p>Bots are always present and always far outnumber nations (food). Typical
 ratios: 30 bots / 5 nations, 200 bots / 30 nations. Early stages are bots-only;
-nations are layered on with <code>Exact(n)</code> only — never
+nations are layered on with <code>Exact(n)</code> only - never
 <code>Nations::Default</code> (that dumps the full map manifest, e.g. World ~72).</p>
 <table>
   <tr><th>#</th><th>maps</th><th>bots</th><th>diff</th><th>nations</th><th>win_at</th></tr>
@@ -580,7 +672,7 @@ on a second pod.</p>
     entrypoint, then started training over SSH via
     <code>/root/start_v9.sh</code> (clone branch +
     <code>SKIP_SYNC=1 NUM_GPUS=3 bash scripts/pod_train_v9.sh</code>).</li>
-  <li><code>HF_TOKEN</code> must be exported in the SSH launcher — RunPod
+  <li><code>HF_TOKEN</code> must be exported in the SSH launcher - RunPod
     <code>--env</code> did not land in the login shell for this create path.</li>
   <li>Account balance was ~$29 with V8 already at $1.76/hr; V9 adds $1.32/hr.
     Top up before a long overnight if both stay up.</li>
@@ -590,7 +682,7 @@ on a second pod.</p>
     early losses expected). Checkpoints at update 5/10 under
     <code>rust/checkpoints/ppo_v9/</code>.</li>
   <li><b>Curriculum fix (same evening):</b> stage 0–2 were nation-only
-    (<code>bots: 0</code>, <code>Exact(1→3)</code>) — nations are harder than bots,
+    (<code>bots: 0</code>, <code>Exact(1→3)</code>) - nations are harder than bots,
     so the sparse ladder never saw a win (~650 eps, win_rate 0, land share decaying).
     Reladdered so bots are always on and always ≫ nations (~6:1+, e.g. 30/5,
     200/30); never <code>Nations::Default</code>. Stages 0–1 bots-only, then
@@ -616,7 +708,7 @@ pod terminated.</p>
 <ul>
   <li><b>~u0–25:</b> all losses; random policy dying to 15 Easy bots.</li>
   <li><b>~u26:</b> first <code>+1</code> win under sparse terminals.</li>
-  <li><b>~u300–700:</b> real learning on bots-only — land share up to ~0.75,
+  <li><b>~u300–700:</b> real learning on bots-only - land share up to ~0.75,
     window WR often 0.4–0.8, cleared stage 0 (<code>win_at=0.975</code>) and
     stage 1 (<code>win_at=0.95</code>).</li>
   <li><b>~u750+:</b> stage 2 introduces 2 nations beside 30 bots. Win rate
@@ -628,7 +720,7 @@ pod terminated.</p>
 <ul>
   <li><b>Sparse + bots-only can work.</b> The policy invented enough expand/fight
     behavior to lock near-perfect win rates with only terminal <code>+1/−1</code>
-    and no dense shaping — matching the OA5 “win-only is possible but slow”
+    and no dense shaping - matching the OA5 “win-only is possible but slow”
     note, on a trivial enough stage.</li>
   <li><b>Nations are a cliff under sparse credit.</b> The jump from
     <code>Exact(0)</code> → <code>Exact(2)</code> (still 30 bots) was enough to
@@ -637,7 +729,7 @@ pod terminated.</p>
     the overnight evidence is that sparse alone does not bridge “bots food” →
     “competent nation opponents” at our sample budget.</li>
   <li><b>Always bots ≫ nations</b> (and never <code>Nations::Default</code>) is
-    the right lobby shape either way — kept for V8.3 via
+    the right lobby shape either way - kept for V8.3 via
     <a href="https://github.com/djmango/openfront-ai/pull/38">#38</a> and V9 via
     <a href="https://github.com/djmango/openfront-ai/pull/40">#40</a>. The first
     V9 sketch (nation-only early stages) was simply wrong.</li>
@@ -648,7 +740,7 @@ pod terminated.</p>
   <li><b>Prefer V8 dense path for now.</b> V9’s hypothesis (“curriculum instead
     of reward engineering”) failed at the first real opponent step. Resume
     effort on <code>ppo_v86</code> / dense shaping; if sparse is revisited,
-    want BC or strategy-target bootstrap before nation stages — not another
+    want BC or strategy-target bootstrap before nation stages - not another
     boat/tempo knob stack on V9.</li>
 </ul>
 <p>Code stays on master (schedule, <code>--v9-sparse-win</code>,
@@ -668,7 +760,7 @@ game time. So:</p>
   <tr><td>15000</td><td><b>~25 min</b></td><td>oftrain / Python PPO default <code>max_episode_ticks</code></td></tr>
   <tr><td>lobby <code>maxTimerValue</code> 15–40</td><td>15–40 min</td><td>same order as our episode cap</td></tr>
 </table>
-<p>Half-hour games are fine and desired — we want episodes long enough to actually
+<p>Half-hour games are fine and desired - we want episodes long enough to actually
 win. The earlier “collectors install in 3–4 minute games” figure was
 <b>pod wall-clock collect stall</b> (one PPO update’s collect phase), not match
 length. Shortening <code>max_episode_ticks</code> for util would train the wrong
@@ -738,7 +830,7 @@ the new count. Util autoscale just wasn’t wired into that path.</p>
     profile <code>v8.6-attack-fair-v1</code>.</li>
   <li>Sizing: <b>16 envs/shard</b> (64 total), <code>--auto-scale-envs --max-envs 20</code>,
     <code>max_ticks=15000</code>.</li>
-  <li>First post-fix update completed (~142s collect-bound; util still uneven —
+  <li>First post-fix update completed (~142s collect-bound; util still uneven  - 
     expected until/unless autoscale climbs 16→18→20).</li>
 </ul>
 <p>Next: let util-driven restarts step toward 20; watch OOM; leave reward settling
@@ -753,7 +845,7 @@ that resumes the same weights.</p>
   <li><b>Sticky combat refresh:</b> every reinforce rewrote <code>last_attack_decision</code>,
     so nearly every retreat paid premature −0.10 <i>and</i> AttackRetreat churn −0.05.</li>
   <li><b>Tempo / dominant-loss mismatch:</b> tempo drains from share 0.30, but loss-weight
-    relief only at 0.55 — and ~80% of stage-8 eps never reach 0.55.</li>
+    relief only at 0.55 - and ~80% of stage-8 eps never reach 0.55.</li>
   <li><b>Strength asymmetry:</b> <code>W_DELTA_GAIN=5</code> vs <code>W_DELTA_LOSS=6.5</code>
     taxes the troop-burn-before-land shape of every attack.</li>
   <li><b>Death too cheap:</b> <code>W_DEATH=1</code> vs positive place terminal.</li>
@@ -785,7 +877,7 @@ that resumes the same weights.</p>
   <li>Boats improved: useful landing fraction ~53–59% on stages 7–8; boat reward positive.</li>
   <li><b>~80% of stage-8 episodes never reach dominance (0.55)</b>; median max land ~0.09.
     Tempo (gated on 0.55) only fired on ~14% of episodes.</li>
-  <li>Embargo thrash remains the main dumb pattern — even on <i>closeout winners</i>
+  <li>Embargo thrash remains the main dumb pattern - even on <i>closeout winners</i>
     (~7.5 embargo pairs/ep). Attack↔retreat secondary.</li>
   <li>On winners, terminal (~42) already dwarfs shaping; on the other 80%, PPO mostly
     trains strength/death/boat crumbs because win never arrives.</li>
@@ -795,7 +887,7 @@ that resumes the same weights.</p>
 <table>
   <tr><th>Knob</th><th>V8.4</th><th>V8.5</th></tr>
   <tr><td>Reward profile</td><td><code>v8.4-boat-tempo-v1</code></td><td><code>v8.5-win-urgency-v1</code></td></tr>
-  <tr><td>Extra win bonus</td><td>—</td><td>+30 on win (W_WIN 30 → effective 60)</td></tr>
+  <tr><td>Extra win bonus</td><td> - </td><td>+30 on win (W_WIN 30 → effective 60)</td></tr>
   <tr><td>Fast-win coef</td><td>8</td><td>12</td></tr>
   <tr><td>Tempo coef / threshold</td><td>0.005 @ 0.55</td><td>0.015 @ <b>0.30</b></td></tr>
   <tr><td>Embargo</td><td>flat churn only</td><td>stop while Hostile/Distrustful −0.15; recovered +0.02</td></tr>
@@ -810,7 +902,7 @@ decision window (same length as churn window).</p>
 <p class="session">Live <code>ppo_v83</code> on 4×A40 (optimized trainer), then design of
 reward-only <code>ppo_v84</code> that resumes the same weights.</p>
 
-<h3>V8.3 closeout worked — then the real failure mode showed up</h3>
+<h3>V8.3 closeout worked - then the real failure mode showed up</h3>
 <p>Migrated from V8.2 stage 5 into V8.3’s inserted Easy closeout stage
 (Onion/Pangaea/Caucasus, 10 Easy bots, Exact(6) nations, win_at 0.45) with
 land-share potential Φ from 0.45→0.80 and a dual advancement gate (wins +
@@ -827,7 +919,7 @@ play looks brain-dead.</p>
 
 <h3>Greedy vs sampling is not the training bug</h3>
 <p>Play/eval should be greedy; PPO rollouts must stay stochastic. Mixing greedy
-trajectories into training does not invent a better mode — if greedy boat-spam
+trajectories into training does not invent a better mode - if greedy boat-spam
 is already bad, you either reinforce a free launch or add noisy on-policy junk.
 Temperature does not exist in this stack; exploration is softmax + entropy
 floor. The webbot path has <code>--greedy</code>; <code>rl/play</code> /
@@ -857,7 +949,7 @@ BPTT/rollout to <b>32/64</b>, and adds an explicit outcome term.</p>
 <p>Across 161 V8.3 episodes the inverse-pair counts were roughly:
 embargo↔stop <b>333</b>, attack↔retreat <b>211</b>, boat↔cancel <b>70</b>.
 Window=2 only caught adjacent undos; we bumped to 16. That still does not
-explain boat addiction — and explicit churn is not the fundamental fix for
+explain boat addiction - and explicit churn is not the fundamental fix for
 free reversible actions (mask/gate inverses or price outcomes).</p>
 
 <h3>V8.4 design (reward-only, resume from <code>ppo_v83</code>)</h3>
@@ -868,9 +960,9 @@ free reversible actions (mask/gate inverses or price outcomes).</p>
   <tr><td>Reward profile</td><td><code>v8.3-closeout-v1</code></td><td><code>v8.4-boat-tempo-v1</code></td></tr>
   <tr><td>BPTT / rollout</td><td>16 / 32</td><td><b>32 / 64</b></td></tr>
   <tr><td>Envs/shard default</td><td>24</td><td>16 (VRAM headroom)</td></tr>
-  <tr><td>Boat outcome</td><td>—</td><td>useful +0.15 / destroyed −0.20 / cancel −0.03 / own-shore −0.05</td></tr>
-  <tr><td>Tempo</td><td>—</td><td>−0.005 × late² while dominant</td></tr>
-  <tr><td>Fast win</td><td>—</td><td>+8 × (1 − tick/max) on win</td></tr>
+  <tr><td>Boat outcome</td><td> - </td><td>useful +0.15 / destroyed −0.20 / cancel −0.03 / own-shore −0.05</td></tr>
+  <tr><td>Tempo</td><td> - </td><td>−0.005 × late² while dominant</td></tr>
+  <tr><td>Fast win</td><td> - </td><td>+8 × (1 − tick/max) on win</td></tr>
   <tr><td>Migrate</td><td><code>--migrate-v82-to-v83</code></td><td><code>--migrate-v83-to-v84</code></td></tr>
 </table>
 <p>Boat outcome is categorical at <i>resolution</i> (not launch/cancel Δtroops),
@@ -887,7 +979,7 @@ heuristics. Metrics: <code>reward/boat_outcome</code>, <code>reward/tempo</code>
   seeds once from local/HF <code>ppo_v83</code>.</li>
   <li>Negative boat rewards must use <code>--flag=-0.20</code> form; bare
   <code>-0.20</code> is parsed by clap as an unexpected flag.</li>
-  <li>Shallow clones lack <code>openfront/resources/maps</code> — symlink the
+  <li>Shallow clones lack <code>openfront/resources/maps</code> - symlink the
   maps tree from a populated checkout before spawn.</li>
   <li>Play the bot with <code>--greedy</code> or you will re-learn the sampling lesson.</li>
   <li>NCCL on this A40 host still needs <code>NCCL_P2P_DISABLE=1</code> /
@@ -1163,10 +1255,12 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <code>ae_v3.pt</code> until the v3.1 winner is wired into <code>rl/obs.py</code>.</p>
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
-  <tr><td><code>ppo_v11</code></td><td><b>planned</b> Jul 23</td>
-    <td>Next generation: neighbor pack, ego-split attack fronts, unit tokens +
-    pointer, bigger model, full LSTM (replace GRU), BC restart on new schema.
-    AE v3.2 no-static. See <a href="#v11-plan">V11 plan</a>.</td></tr>
+  <tr><td><code>ppo_v11</code></td><td><b>live</b> Jul 24-25 (2×A100 80GB)</td>
+    <td>Util stack + AE v3.2 no-static + recurrent LSTM. Climbing V10 Easy
+    ramp: ~u456 / stage 15 / ~1.1M steps, window WR ~0.85 / DR 0 (16 bots +
+    1 nation). Surpass-V10 target stage 28+; Medium at 68.
+    See <a href="#v11-soak">soak</a>, <a href="#v11-plan">plan</a>.
+    HF <a href="https://huggingface.co/djmango/openfront-rl/tree/main/ppo_v11">ppo_v11/</a>.</td></tr>
   <tr><td><code>ppo_v10</code></td><td><b>killed</b> Jul 23 (4×A40)</td>
     <td>Dense anti-spiral + <b>100-stage</b> Easy ramp
     (<a href="#v10-easy-ramp">writeup</a>). Peak overnight Jul 18–19: stages
@@ -3387,7 +3481,7 @@ from the raw cache IS that idea, done right).</p>
 
 <h3 id="next">Open threads</h3>
 <ul>
-  <li><b>V11 (active plan, Jul 23):</b> see <a href="#v11-plan">V11 plan</a> —
+  <li><b>V11 (active plan, Jul 23):</b> see <a href="#v11-plan">V11 plan</a>  - 
     neighbor pack, ego-split fronts, unit tokens + pointer, bigger model,
     full LSTM replacing GRU, BC unfreeze on the new schema. V10 killed.</li>
   <li><b>v5 wishlist (drafted Jul 6 night, from watching v4 launch day):</b>
@@ -3420,7 +3514,7 @@ from the raw cache IS that idea, done right).</p>
   <li><b>BC warm start:</b> Jul 8 moratorium unfreeze experiment was never run on
     v6-shape. <i>Superseded Jul 23:</i> run the isolation A/B on
     <b>V11 schema</b> (<code>bc_v11</code> vs scratch) per
-    <a href="#v11-bc">V11 BC rules</a> — not on obsolete v6 weights.</li>
+    <a href="#v11-bc">V11 BC rules</a> - not on obsolete v6 weights.</li>
   <li><b>Warm-start refreshes:</b> future same-architecture encoder updates on new data should
     resume from the current checkpoint (and checkpoint optimizer state, see billing-restart scar)
     instead of 40k fresh steps.</li>

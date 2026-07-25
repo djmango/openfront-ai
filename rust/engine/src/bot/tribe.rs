@@ -256,7 +256,7 @@ mod tests {
 
         let mut exec = TribeExecution::new(tribe, "tribe-a".into());
         let tick = game.ticks();
-        // Call the alliance step directly — a full `tick()` also runs
+        // Call the alliance step directly - a full `tick()` also runs
         // `tribe_maybe_attack`, which can break the alliance under test.
         exec.accept_all_alliance_requests(&mut game, tick);
         game.execute_next_tick();

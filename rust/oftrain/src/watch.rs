@@ -33,7 +33,7 @@ pub struct WatchConfig<'a> {
     pub max_steps: usize,
     /// Same cap as training (`--max-episode-ticks` /
     /// `ofcore::DEFAULT_MAX_EPISODE_TICKS`). Watch stops on win/death or when
-    /// the sim tick reaches this — trainer and watch share one tick budget.
+    /// the sim tick reaches this - trainer and watch share one tick budget.
     pub max_episode_ticks: i64,
     pub debug: bool,
     pub device: Device,
@@ -227,7 +227,7 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
     let mut debug_log: Vec<Value> = Vec::new();
     // Only set to win/death when the episode actually ends. Hitting the
     // training tick budget or `--max-steps` while still alive is a truncation
-    // ("timeout"), not a loss — the old default of "death" made strong
+    // ("timeout"), not a loss - the old default of "death" made strong
     // mid-game clips look like wipeouts.
     let mut episode_outcome = "timeout".to_string();
     let mut end_tick = 0i64;
@@ -240,7 +240,7 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
             break;
         }
         let prepared = worker.prepare();
-        // Watch must run under no_grad — otherwise each step retains the
+        // Watch must run under no_grad - otherwise each step retains the
         // autograd graph and VRAM climbs to the full GPU over ~hundreds of steps.
         let choice = tch::no_grad(|| -> Result<Choice> {
             let obs_t = batch::build_obs_with_ae_cached(
@@ -411,7 +411,7 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
         let tiles = my_tiles(worker.ents(), me);
         println!(
             "watch truncated at --max-steps {} before tick budget {}: tick {end_tick}, tiles {tiles}, \
-             alive={alive} (outcome=timeout — raise --max-steps; tick budget is --max-episode-ticks)",
+             alive={alive} (outcome=timeout - raise --max-steps; tick budget is --max-episode-ticks)",
             cfg.max_steps,
             cfg.max_episode_ticks,
         );

@@ -301,7 +301,7 @@ fn render_client_clip_once(record: &Path, out: &Path, reuse_services: bool) -> R
     let mut cmd = Command::new(&py);
     cmd.args(&args).current_dir(repo_root());
     // Prefer real GPU WebGL when present (solid territory). Only force
-    // SoftGL when the caller asks — Chromium on GPU-less hosts still falls
+    // SoftGL when the caller asks - Chromium on GPU-less hosts still falls
     // back to SwiftShader, and rlAllowSoftwareGL keeps that path unblocked.
     match std::env::var("OF_FORCE_SWIFTSHADER") {
         Ok(v) => {

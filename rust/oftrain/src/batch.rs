@@ -46,7 +46,7 @@ fn to_device_maybe_pinned(t: &Tensor, device: Device, pinned: bool) -> Tensor {
 /// PCIe bytes), then `.to_kind(Float)` on device. CPU / flag-off keep the
 /// plain Float path (byte-identical to pre-flag behavior).
 ///
-/// Learner-resident compact grids do **not** use this helper — see
+/// Learner-resident compact grids do **not** use this helper - see
 /// `build_compact_host_obs`, which keeps Half on CUDA to cut ShardBatch
 /// Obs VRAM roughly in half.
 fn upload_float_grid(
@@ -1007,7 +1007,7 @@ fn build_obs_with_ae_cache(
             .iter()
             .map(|it| {
                 it.grid.clone().ok_or_else(|| {
-                    anyhow::anyhow!("PreparedObs.grid missing — call encode_prepared_obs first")
+                    anyhow::anyhow!("PreparedObs.grid missing - call encode_prepared_obs first")
                 })
             })
             .collect::<anyhow::Result<Vec<_>>>()?
@@ -1545,7 +1545,7 @@ fn build_compact_host_obs(
     } = packed;
     // Keep compact grids as Half on CUDA for the whole learner-resident
     // ShardBatch (T×N). `--fp16-rollout` used to Half-stage on the host then
-    // immediately cast back to Float on device — PCIe win only, ~2× Obs VRAM
+    // immediately cast back to Float on device - PCIe win only, ~2× Obs VRAM
     // still paid. Amp towers cast Half→BF16 at the input boundary; non-CUDA
     // keeps Float for CPU test parity.
     let half_up = |v: Vec<half::f16>, shape: &[i64]| {

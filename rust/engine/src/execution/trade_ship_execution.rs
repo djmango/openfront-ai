@@ -480,7 +480,7 @@ mod piracy_tests {
     }
 
     /// Captured voyage gold goes to the pirate (current ship owner), not
-    /// the original trade partners — mirrors TS `TradeShipExecution.complete`.
+    /// the original trade partners - mirrors TS `TradeShipExecution.complete`.
     #[test]
     fn captured_trade_ship_pays_gold_to_pirate_on_complete() {
         let mut game = water_game(20, 20);
@@ -553,7 +553,7 @@ mod piracy_tests {
 
     /// TS `srcPort.owner()` still returns the last owner after the port unit is
     /// deleted. When that stale owner equals the (possibly newly captured) dst
-    /// owner, the voyage must be deleted — not redirected via `wasCaptured`.
+    /// owner, the voyage must be deleted - not redirected via `wasCaptured`.
     /// Regression: `curr-b150-s14-britannia` TradeShip 3386 @ ~11323.
     #[test]
     fn deleted_src_port_uses_cached_owner_for_same_owner_delete() {
@@ -574,7 +574,7 @@ mod piracy_tests {
             dst_port,
             hampshire,
             ship_id,
-            true, // was_captured — without the cache fallback this redirects instead of deleting
+            true, // was_captured - without the cache fallback this redirects instead of deleting
         );
 
         game.remove_unit(mayo, src_port);

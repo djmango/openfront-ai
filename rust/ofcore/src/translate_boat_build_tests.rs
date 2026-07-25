@@ -60,7 +60,7 @@ fn boat_tile_returns_none_for_pure_ocean_region() {
 #[test]
 fn boat_tile_can_pick_inland_non_shore_fallback() {
     // Region with only inland enemy land (no shore bit) still returns a tile
-    // via the plain_valid fallback — engine may still reject it later.
+    // via the plain_valid fallback - engine may still reject it later.
     let hr = REGION * 2;
     let wr = REGION * 2;
     let width = wr;

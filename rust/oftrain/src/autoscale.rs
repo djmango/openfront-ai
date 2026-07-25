@@ -109,7 +109,7 @@ pub fn next_env_count(
     let step = step.max(1);
 
     // VRAM pressure wins over util growth. Shrink even when util is
-    // unknown — OOM kills do not wait for a clean util sample.
+    // unknown - OOM kills do not wait for a clean util sample.
     if let Some(mem) = gpu_mem_frac {
         if mem >= MEM_SHRINK_FRAC && current > min {
             return current.saturating_sub(step).max(min);

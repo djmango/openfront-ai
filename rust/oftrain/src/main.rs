@@ -441,7 +441,7 @@ struct Args {
     /// Maximum time the oldest ready observation waits for a batch.
     /// Default 15ms: with `--actor-target-batch 2`, peers usually land quickly;
     /// 50ms was leftover from the target=8 era and still burned on rare
-    /// singleton same-shape waits. Inference scheduling only — no model change.
+    /// singleton same-shape waits. Inference scheduling only - no model change.
     #[arg(long, default_value_t = 15)]
     actor_max_wait_ms: u64,
 
@@ -464,7 +464,7 @@ struct Args {
     ///
     /// Default **0.0** (pure native) is the production training path.
     /// Non-zero mixes are a *slow* parity hedge for native's residual gaps
-    /// at high bot counts — they require `--allow-node-mix` so accidental
+    /// at high bot counts - they require `--allow-node-mix` so accidental
     /// `NODE_FRACTION=0.2` relaunches cannot silently tank collect
     /// throughput again. Requires `openfront/` node_modules (`tsx`) when
     /// > 0. See `train::engine_for_idx`.
@@ -574,7 +574,7 @@ struct Args {
     /// legacy `.ot` VarStore dump (BC→RL or a previously exported
     /// checkpoint) without restoring TrainState. Ignored when `--resume`
     /// is also set. Policy interchange is safetensors-only via Rust
-    /// `VarStore` — there is no Python `.pt` converter.
+    /// `VarStore` - there is no Python `.pt` converter.
     #[arg(long)]
     init: Option<String>,
 

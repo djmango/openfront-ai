@@ -987,7 +987,7 @@ impl Game {
             p.tiles_owned = 0;
             p.border_tiles.clear();
             p.owned_tiles.clear();
-            // TS `isAlive()` is `_tiles.size > 0` — keep the sticky flag in sync
+            // TS `isAlive()` is `_tiles.size > 0` - keep the sticky flag in sync
             // so mid-tick readers match (see conquer_one / relinquish_tile).
             p.alive = false;
         }
@@ -1007,7 +1007,7 @@ impl Game {
             p.owned_tiles.retain(|&t| t != tile);
             p.last_tile_change = tick;
             if p.tiles_owned == 0 {
-                // Match TS `Player.isAlive()` (`_tiles.size > 0`) immediately —
+                // Match TS `Player.isAlive()` (`_tiles.size > 0`) immediately  - 
                 // do not wait for the next `PlayerExecution` tick.
                 p.alive = false;
             }
@@ -1218,7 +1218,7 @@ impl Game {
                 p.owned_tiles.retain(|&t| t != tile);
                 p.last_tile_change = tick;
                 if p.tiles_owned == 0 {
-                    // Match TS `Player.isAlive()` (`_tiles.size > 0`) immediately —
+                    // Match TS `Player.isAlive()` (`_tiles.size > 0`) immediately  - 
                     // do not wait for the next `PlayerExecution` tick. Mid-tick
                     // AI / attack filters that read `.alive` must see the player
                     // as dead the moment their last tile is gone.
@@ -2067,7 +2067,7 @@ impl Game {
             // TS `setOwner` keeps the same Unit object in the grid; only owner changes.
             self.unit_grid.set_owner(unit_id, to_small_id);
             // TS TrainStation keeps a live Unit ref so owner/isActive track
-            // capture automatically — update the cached station owner here.
+            // capture automatically - update the cached station owner here.
             crate::rail::update_station_owner_for_unit(
                 &mut self.rail_network,
                 unit_id,
@@ -3521,7 +3521,7 @@ impl Game {
     /// Record a sent emoji for `can_send_emoji` cooldown (TS `outgoingEmojis_`).
     ///
     /// Native emoji is hash-neutral (no `EmojiExecution`), but TS records
-    /// `createdAt` when that execution *ticks* — always the tick after
+    /// `createdAt` when that execution *ticks* - always the tick after
     /// `addExecution` (init same tick, tick next). Store `ticks + 1` so the
     /// 50-tick cooldown window matches TS.
     pub fn record_emoji_send(&mut self, sender_small_id: u16, recipient: Option<u16>) {
