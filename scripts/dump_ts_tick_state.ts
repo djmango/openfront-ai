@@ -61,6 +61,9 @@ interface PlayerSnapshot {
   hash: number;
   numUnits: number;
   units?: UnitSnapshot[];
+  ownedTiles?: number[];
+  borderOrder?: number[];
+  ownedOrder?: number[];
 }
 
 interface TickSnapshot {
@@ -76,7 +79,13 @@ function playerIdentity(p: Player): string {
   return clientID === null ? `nation:${p.name()}` : `player:${clientID}`;
 }
 
-function snapshot(game: Game, dumpUnits: boolean): TickSnapshot {
+function snapshot(
+  game: Game,
+  dumpUnits: boolean,
+  dumpOwnedTiles: boolean,
+  dumpBorderOrder: boolean,
+  dumpOwnedOrder: boolean,
+): TickSnapshot {
   const players: PlayerSnapshot[] = game.allPlayers().map((p) => {
     const base: PlayerSnapshot = {
       identity: playerIdentity(p),
@@ -119,6 +128,17 @@ function snapshot(game: Game, dumpUnits: boolean): TickSnapshot {
             ? u.warshipState().state === "docked"
             : false,
       }));
+    }
+    if (dumpOwnedTiles) {
+      base.ownedTiles = Array.from(p.tiles() as Iterable<number>).sort(
+        (a, b) => a - b,
+      );
+    }
+    if (dumpBorderOrder) {
+      base.borderOrder = Array.from(p.borderTiles() as Iterable<number>);
+    }
+    if (dumpOwnedOrder) {
+      base.ownedOrder = Array.from(p.tiles() as Iterable<number>);
     }
     return base;
   });
@@ -177,6 +197,9 @@ async function main() {
   }
 
   const dumpUnits = process.env.OF_DUMP_UNITS !== undefined;
+  const dumpOwnedTiles = process.env.OF_DUMP_OWNED_TILES !== undefined;
+  const dumpBorderOrder = process.env.OF_DUMP_BORDER_ORDER !== undefined;
+  const dumpOwnedOrder = process.env.OF_DUMP_OWNED_ORDER !== undefined;
   const dumpUnitsFrom = process.env.OF_DUMP_UNITS_FROM
     ? parseInt(process.env.OF_DUMP_UNITS_FROM, 10)
     : 0;
@@ -194,14 +217,18 @@ async function main() {
     game.executeNextTick();
     if (game.ticks() < dumpTicksFrom) continue;
     if (game.ticks() % every === 0) {
-      out.push(snapshot(game, dumpUnits && game.ticks() >= dumpUnitsFrom));
+      out.push(
+        snapshot(game, dumpUnits && game.ticks() >= dumpUnitsFrom, dumpOwnedTiles, dumpBorderOrder, dumpOwnedOrder),
+      );
     }
   }
   if (
     game.ticks() >= dumpTicksFrom &&
     (out.length === 0 || out[out.length - 1].tick !== game.ticks())
   ) {
-    out.push(snapshot(game, dumpUnits && game.ticks() >= dumpUnitsFrom));
+    out.push(
+      snapshot(game, dumpUnits && game.ticks() >= dumpUnitsFrom, dumpOwnedTiles, dumpBorderOrder, dumpOwnedOrder),
+    );
   }
 
   fs.writeFileSync(

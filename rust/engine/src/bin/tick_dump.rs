@@ -64,6 +64,12 @@ struct PlayerSnapshot {
     num_units: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     units: Option<Vec<UnitSnapshot>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owned_tiles: Option<Vec<i32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    border_order: Option<Vec<i32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owned_order: Option<Vec<i32>>,
 }
 
 #[derive(Serialize)]
@@ -106,7 +112,13 @@ fn load_record_bytes(path: &std::path::Path) -> Result<Vec<u8>, String> {
     }
 }
 
-fn snapshot(game: &openfront_engine::game::Game, dump_units: bool) -> TickSnapshot {
+fn snapshot(
+    game: &openfront_engine::game::Game,
+    dump_units: bool,
+    dump_owned_tiles: bool,
+    dump_border_order: bool,
+    dump_owned_order: bool,
+) -> TickSnapshot {
     let warships: HashMap<(u16, i32), &openfront_engine::execution::WarshipExecution> = game
         .live_warships()
         .filter_map(|warship| Some(((warship.owner_small_id(), warship.unit_id()?), warship)))
@@ -143,6 +155,23 @@ fn snapshot(game: &openfront_engine::game::Game, dump_units: bool) -> TickSnapsh
             } else {
                 None
             };
+            let owned_tiles = if dump_owned_tiles {
+                let mut v: Vec<i32> = p.owned_tiles.iter().map(|&t| t as i32).collect();
+                v.sort_unstable();
+                Some(v)
+            } else {
+                None
+            };
+            let border_order = if dump_border_order {
+                Some(p.border_tiles.iter().map(|t| t as i32).collect())
+            } else {
+                None
+            };
+            let owned_order = if dump_owned_order {
+                Some(p.owned_tiles.iter().map(|&t| t as i32).collect())
+            } else {
+                None
+            };
             PlayerSnapshot {
                 identity: player_identity(p),
                 id: p.id.clone(),
@@ -159,6 +188,9 @@ fn snapshot(game: &openfront_engine::game::Game, dump_units: bool) -> TickSnapsh
                 hash: openfront_engine::hash::player_hash(p),
                 num_units: p.units.len(),
                 units,
+                owned_tiles,
+                border_order,
+                owned_order,
             }
         })
         .collect();
@@ -175,6 +207,9 @@ fn snapshot(game: &openfront_engine::game::Game, dump_units: bool) -> TickSnapsh
 fn main() {
     let args = Args::parse();
     let dump_units = std::env::var_os("OF_DUMP_UNITS").is_some();
+    let dump_owned_tiles = std::env::var_os("OF_DUMP_OWNED_TILES").is_some();
+    let dump_border_order = std::env::var_os("OF_DUMP_BORDER_ORDER").is_some();
+    let dump_owned_order = std::env::var_os("OF_DUMP_OWNED_ORDER").is_some();
     let dump_units_from: u32 = std::env::var("OF_DUMP_UNITS_FROM")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -207,14 +242,14 @@ fn main() {
         }
         if game.ticks() % args.every == 0 {
             let include_units = dump_units && game.ticks() >= dump_units_from;
-            out.push(snapshot(&game, include_units));
+            out.push(snapshot(&game, include_units, dump_owned_tiles, dump_border_order, dump_owned_order));
         }
     }
     // Always capture the true final state even if it doesn't land on an
     // `every`-tick boundary.
     if game.ticks() >= dump_ticks_from && out.last().map(|s| s.tick) != Some(game.ticks()) {
         let include_units = dump_units && game.ticks() >= dump_units_from;
-        out.push(snapshot(&game, include_units));
+        out.push(snapshot(&game, include_units, dump_owned_tiles, dump_border_order, dump_owned_order));
     }
 
     let dump = Dump {
