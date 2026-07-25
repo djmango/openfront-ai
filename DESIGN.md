@@ -198,6 +198,26 @@ layers (kept at grid resolution for pointer head 3, plus a pooled vector).
 Concatenate pooled spatial + pooled tokens + scalars -> trunk MLP (LSTM
 later if needed) -> action heads.
 
+### V11 (Jul 23, 2026): ship the missing entity stack + LSTM
+
+V10 (dense reward + 100-stage Easy ladder) climbed then stalled under
+representation limits. **V11** is the next from-scratch generation; full
+writeup in `docs/devlog.html#v11-plan`. Contract:
+
+1. **Neighbor pack** into `P_FEAT` (shared-border length, border terrain
+   mix, richer relation) — currently promised above but absent from live
+   `P_FEAT=21`.
+2. **Ego-split attack fronts** (`TR_ATTACK_*` own/ally/enemy).
+3. **Unit-token stream + pointer head** for upgrade/delete/warship/boat-
+   cancel (retire nearest-in-region snap for those actions).
+4. **Bigger model** (~25–40M class; raise GC/BLOCKS/HIDDEN).
+5. **Full LSTM** replacing the 256-wide GRU recurrent core.
+6. **BC restart** (`bc_v11`) on this schema only, with an isolation PPO
+   warm-start A/B before treating imitation as load-bearing.
+
+Baseline encoder: AE v3.2 no-static (`ae_v32_nostatic_*`, structures on
+exact bypass). No V10 weight migrate.
+
 ### v7: full-state observation expansion + foveated two-stream resolution
 
 v7 is two observation changes shipping as one version (both break every
@@ -313,9 +333,16 @@ game logic. Decision cadence: one policy step per ~10 game ticks.
 
 ## Behavior cloning from archived human games
 
-BC is under moratorium and the Python trainer (`rl/bc.py`) was removed with
-the rest of the Python RL stack (recover from git if needed). Historical
-design: two BC variants trained on the replayed human archive (see
+**Jul 23, 2026 — V11 unfreeze.** The Jul 8 moratorium still applies to the
+old v6/v7 shapes and the removed Python trainer path as a *research track
+on blind obs*. V11 restarts BC only on the new schema (neighbor pack,
+ego-split attack fronts, unit tokens + pointer, LSTM policy, AE v3.2
+no-static). See `docs/devlog.html#v11-plan` / `#v11-bc`. Success is a short
+PPO warm-start A/B on Easy bots-only, not holdout action accuracy.
+
+Historical note: the Python trainer (`rl/bc.py`) was removed with the rest
+of the Python RL stack (recover from git if needed). Pre-V11 design: two BC
+variants trained on the replayed human archive (see
 `datagen/replay.ts --bc`), both on the PPO policy architecture so BC
 weights doubled as PPO initialization (`load_state_dict(strict=False)`):
 

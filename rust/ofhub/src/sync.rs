@@ -450,6 +450,9 @@ pub async fn pull_ae_encoders(ae_dir: &Path) -> Result<()> {
     let client = hf::client_with_optional_token()?;
     fs::create_dir_all(ae_dir)?;
     for name in [
+        "ae_v32_nostatic_d8c32.encoder.safetensors",
+        "ae_v32_nostatic_d16c32.encoder.safetensors",
+        // Legacy V10 fine/coarse encoders (kept for older recipes).
         "ae_v31_d8c32.encoder.safetensors",
         "ae_v31_d16c32.encoder.safetensors",
     ] {

@@ -576,7 +576,7 @@ mod resume_stage_lr_tests {
 
     fn state(stage: usize, lr_now: f64) -> TrainState {
         TrainState {
-            checkpoint_schema_version: 2,
+            checkpoint_schema_version: 3,
             hidden_reset_policy: "episode_done".into(),
             update: 1,
             stage,
@@ -1123,7 +1123,8 @@ mod v10_state_and_gate_tests {
         );
         assert_eq!(manifest["format"], "oftrain-safetensors");
         assert_eq!(manifest["manifest_schema_version"], 1);
-        assert_eq!(manifest["architecture"]["schema_version"], 2);
+        assert_eq!(manifest["architecture"]["schema_version"], 3);
+        assert_eq!(manifest["architecture"]["recurrent"]["cell"], "lstm");
         assert_eq!(manifest["architecture"]["recurrent"]["hidden_size"], 256);
         assert_eq!(
             manifest["architecture"]["recurrent"]["context_schema"],
@@ -1528,6 +1529,9 @@ fn policy_manifest_value(
             "grid_channels": policy::C_GRID,
             "fine_grid_channels": policy::C_GRID_FINE,
             "player_features": policy::P_FEAT,
+            "unit_features": policy::U_FEAT,
+            "max_units": policy::MAX_UNITS,
+            "transient_planes": policy::N_TRANSIENT,
             "scalars": policy::N_SCALARS,
             "local_planes": policy::N_LOCAL,
             "actions": policy::N_ACTIONS,
@@ -1544,10 +1548,11 @@ fn policy_manifest_value(
         },
     });
     if recurrent_policy {
-        architecture["schema_version"] = 2.into();
+        architecture["schema_version"] = 3.into();
         architecture["recurrent"] = serde_json::json!({
-            "cell": "gru",
+            "cell": policy::RECURRENT_CELL,
             "hidden_size": recurrent_hidden_size,
+            "state_size": policy::RECURRENT_STATE,
             "context_schema": policy::RECURRENT_CONTEXT_SCHEMA,
             "context_features": policy::RECURRENT_CONTEXT_FLOATS,
             "context_embedding": policy::RECURRENT_CONTEXT_EMBEDDED,
@@ -1755,13 +1760,13 @@ fn action_needs_quantity(a: i64) -> bool {
     policy::needs_quantity(ACTIONS[a as usize])
 }
 
-const ACT_DISCRETE_FIELDS: usize = 5;
+const ACT_DISCRETE_FIELDS: usize = 6;
 const ACT_FLOAT_FIELDS: usize = 3;
 
 /// Host representation of one policy act batch. Discrete and floating-point
 /// outputs stay in their native types, so packing does not change any bits.
 struct PackedActHost {
-    /// Row-major `(action, player, tile, build, nuke)` values.
+    /// Row-major `(action, player, tile, unit, build, nuke)` values.
     discrete: Vec<i64>,
     /// Row-major `(quantity, logp, value)` values.
     floats: Vec<f32>,
@@ -1814,6 +1819,7 @@ fn transfer_act_results(
     a: &Tensor,
     player: &Tensor,
     tile: &Tensor,
+    unit: &Tensor,
     build: &Tensor,
     nuke: &Tensor,
     qty: &Tensor,
@@ -1821,7 +1827,7 @@ fn transfer_act_results(
     value: &Tensor,
     len: usize,
 ) -> Result<PackedActHost> {
-    let discrete_cpu = Tensor::stack(&[a, player, tile, build, nuke], 1).to_device(Device::Cpu);
+    let discrete_cpu = Tensor::stack(&[a, player, tile, unit, build, nuke], 1).to_device(Device::Cpu);
     let floats_cpu = Tensor::stack(&[qty, logp, value], 1).to_device(Device::Cpu);
     let discrete: Vec<i64> = discrete_cpu.reshape([-1]).try_into()?;
     let floats: Vec<f32> = floats_cpu.reshape([-1]).try_into()?;
@@ -1982,6 +1988,7 @@ fn choice_from_act_vecs(
     a_v: &[i64],
     player_v: &[i64],
     tile_v: &[i64],
+    unit_v: &[i64],
     build_v: &[i64],
     nuke_v: &[i64],
     qty_v: &[f32],
@@ -1990,22 +1997,29 @@ fn choice_from_act_vecs(
         a_v[i],
         player_v[i],
         tile_v[i],
+        unit_v[i],
         build_v[i],
         nuke_v[i],
         qty_v[i],
     )
 }
 
+fn action_needs_unit(a: i64) -> bool {
+    policy::needs_unit(ACTIONS[a as usize])
+}
+
 fn choice_from_act_values(
     act: i64,
     player: i64,
     tile: i64,
+    unit: i64,
     build: i64,
     nuke: i64,
     qty: f32,
 ) -> (Choice, ChoiceScalars) {
     let np = action_needs_player(act);
     let nt = action_needs_tile(act);
+    let nu = action_needs_unit(act);
     let nq = action_needs_quantity(act);
     let is_build = ACTIONS[act as usize] == "build";
     let is_nuke = ACTIONS[act as usize] == "launch_nuke";
@@ -2013,6 +2027,7 @@ fn choice_from_act_values(
         action: act,
         player_slot: np.then_some(player),
         tile_region: nt.then_some(tile),
+        unit_index: nu.then_some(unit),
         build_type: is_build.then_some(build),
         nuke_type: is_nuke.then_some(nuke),
         quantity_frac: nq.then_some(qty as f64),
@@ -2021,6 +2036,7 @@ fn choice_from_act_values(
         action: act,
         player_slot: if np { player } else { -1 },
         tile_region: if nt { tile } else { -1 },
+        unit_index: if nu { unit } else { -1 },
         build_type: if is_build { build } else { -1 },
         nuke_type: if is_nuke { nuke } else { -1 },
         quantity_frac: if nq { qty } else { -1.0 },
@@ -2399,9 +2415,9 @@ fn act_contiguous_obs(
             vec![Vec::new(); n],
         )
     };
-    let (a, player, tile, build, nuke, qty, logp, value) = action;
+    let (a, player, tile, unit, build, nuke, qty, logp, value) = action;
     Ok(ActorBatchHost {
-        packed: transfer_act_results(&a, &player, &tile, &build, &nuke, &qty, &logp, &value, n)?,
+        packed: transfer_act_results(&a, &player, &tile, &unit, &build, &nuke, &qty, &logp, &value, n)?,
         hidden_in,
     })
 }
@@ -2436,6 +2452,7 @@ fn act_ready_batch(actor: &mut ActorShard, cfg: &Config, envs: &[usize]) -> Resu
             discrete[2],
             discrete[3],
             discrete[4],
+            discrete[5],
             floats[0],
         );
         rows.push(ActorRow {
@@ -2512,6 +2529,7 @@ fn act_group(
                         discrete[2],
                         discrete[3],
                         discrete[4],
+                        discrete[5],
                         floats[0],
                     );
                     rows[original] = Some(ActorRow {
@@ -2541,6 +2559,7 @@ fn act_group(
                 discrete[2],
                 discrete[3],
                 discrete[4],
+                discrete[5],
                 floats[0],
             );
             *row = Some(ActorRow {
@@ -2579,23 +2598,26 @@ mod packed_act_tests {
         Option<i64>,
         Option<i64>,
         Option<i64>,
+        Option<i64>,
         Option<u64>,
     ) {
         (
             c.action,
             c.player_slot,
             c.tile_region,
+            c.unit_index,
             c.build_type,
             c.nuke_type,
             c.quantity_frac.map(f64::to_bits),
         )
     }
 
-    fn scalar_bits(c: &ChoiceScalars) -> (i64, i64, i64, i64, i64, u32) {
+    fn scalar_bits(c: &ChoiceScalars) -> (i64, i64, i64, i64, i64, i64, u32) {
         (
             c.action,
             c.player_slot,
             c.tile_region,
+            c.unit_index,
             c.build_type,
             c.nuke_type,
             c.quantity_frac.to_bits(),
@@ -2644,6 +2666,9 @@ mod packed_act_tests {
                 .map(|i| ((i * 7 + id * 11) % 53) as f32 / 53.0)
                 .collect(),
             pmask: [1.0; ofcore::feat::MAX_SLOTS],
+            units: vec![0.0; ofcore::feat::MAX_UNITS * ofcore::feat::U_FEAT],
+            umask: [1.0; ofcore::feat::MAX_UNITS],
+            legal_utarget: vec![1.0; ofcore::feat::N_ACTIONS * ofcore::feat::MAX_UNITS],
             scalars: {
                 let mut values = [0.1; ofcore::feat::N_SCALARS];
                 values[0] = id as f32;
@@ -2785,6 +2810,7 @@ mod packed_act_tests {
                     action: 0,
                     player_slot: -1,
                     tile_region: -1,
+                    unit_index: -1,
                     build_type: -1,
                     nuke_type: -1,
                     quantity_frac: -1.0,
@@ -2914,9 +2940,9 @@ mod packed_act_tests {
                 .collect();
             let full = batch::build_obs(&refs, Device::Cpu, false, false);
             let compact = PolicyNet::compact_observation(&full);
-            let (a, p, t, b, n, q, lp, v) = tch::no_grad(|| policy.act(&compact, greedy));
+            let (a, p, t, u, b, n, q, lp, v) = tch::no_grad(|| policy.act(&compact, greedy));
             let packed =
-                transfer_act_results(&a, &p, &t, &b, &n, &q, &lp, &v, range.len()).unwrap();
+                transfer_act_results(&a, &p, &t, &u, &b, &n, &q, &lp, &v, range.len()).unwrap();
             for bucket_row in 0..range.len() {
                 let original = buckets.order[range.start + bucket_row];
                 let (discrete, floats) = packed.row(bucket_row).unwrap();
@@ -2955,7 +2981,7 @@ mod packed_act_tests {
                 .pop()
                 .unwrap();
             let normalized = |row: &(Vec<i64>, Vec<f32>)| {
-                choice_from_act_values(row.0[0], row.0[1], row.0[2], row.0[3], row.0[4], row.1[0]).1
+                choice_from_act_values(row.0[0], row.0[1], row.0[2], row.0[3], row.0[4], row.0[5], row.1[0]).1
             };
             let actual_choice = normalized(&bucketed[i]);
             let expected_choice = normalized(&singleton);
@@ -2964,6 +2990,7 @@ mod packed_act_tests {
                     actual_choice.action,
                     actual_choice.player_slot,
                     actual_choice.tile_region,
+                    actual_choice.unit_index,
                     actual_choice.build_type,
                     actual_choice.nuke_type,
                 ),
@@ -2971,6 +2998,7 @@ mod packed_act_tests {
                     expected_choice.action,
                     expected_choice.player_slot,
                     expected_choice.tile_region,
+                    expected_choice.unit_index,
                     expected_choice.build_type,
                     expected_choice.nuke_type,
                 ),
@@ -3008,8 +3036,9 @@ mod packed_act_tests {
         for (i, (discrete, floats)) in sampled.iter().enumerate() {
             assert!((0..ofcore::feat::N_ACTIONS as i64).contains(&discrete[0]));
             assert!((0..ofcore::feat::MAX_SLOTS as i64).contains(&discrete[1]));
-            assert!((0..ofcore::feat::N_BUILD as i64).contains(&discrete[3]));
-            assert!((0..ofcore::feat::N_NUKE as i64).contains(&discrete[4]));
+            assert!((0..ofcore::feat::MAX_UNITS as i64).contains(&discrete[3]));
+            assert!((0..ofcore::feat::N_BUILD as i64).contains(&discrete[4]));
+            assert!((0..ofcore::feat::N_NUKE as i64).contains(&discrete[5]));
             assert!(discrete[2] >= 0, "negative tile row {i}");
             assert!((1e-4..=1.0 - 1e-4).contains(&floats[0]));
             assert!(floats[1].is_finite() && floats[2].is_finite());
@@ -3024,6 +3053,7 @@ mod packed_act_tests {
         let actions = [0i64, 1, 4, 5, 9];
         let players = [10i64, 11, 12, 13, 14];
         let tiles = [20i64, 21, 22, 23, 24];
+        let units = [0i64, 1, 2, 3, 4];
         let builds = [1i64, 2, 3, 4, 5];
         let nukes = [4i64, 3, 2, 1, 0];
         let quantities = [0.125f32, 0.25, 0.5, 0.75, 0.875];
@@ -3033,6 +3063,7 @@ mod packed_act_tests {
         let a = Tensor::from_slice(&actions);
         let player = Tensor::from_slice(&players);
         let tile = Tensor::from_slice(&tiles);
+        let unit = Tensor::from_slice(&units);
         let build = Tensor::from_slice(&builds);
         let nuke = Tensor::from_slice(&nukes);
         let qty = Tensor::from_slice(&quantities);
@@ -3042,6 +3073,7 @@ mod packed_act_tests {
             &a,
             &player,
             &tile,
+            &unit,
             &build,
             &nuke,
             &qty,
@@ -3054,6 +3086,7 @@ mod packed_act_tests {
         let a_v: Vec<i64> = (&a).try_into().unwrap();
         let player_v: Vec<i64> = (&player).try_into().unwrap();
         let tile_v: Vec<i64> = (&tile).try_into().unwrap();
+        let unit_v: Vec<i64> = (&unit).try_into().unwrap();
         let build_v: Vec<i64> = (&build).try_into().unwrap();
         let nuke_v: Vec<i64> = (&nuke).try_into().unwrap();
         let qty_v: Vec<f32> = (&qty).try_into().unwrap();
@@ -3064,7 +3097,7 @@ mod packed_act_tests {
             let (discrete, floats) = packed.row(i).unwrap();
             assert_eq!(
                 discrete,
-                &[a_v[i], player_v[i], tile_v[i], build_v[i], nuke_v[i]]
+                &[a_v[i], player_v[i], tile_v[i], unit_v[i], build_v[i], nuke_v[i]]
             );
             assert_eq!(
                 floats.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
@@ -3080,10 +3113,11 @@ mod packed_act_tests {
                 discrete[2],
                 discrete[3],
                 discrete[4],
+                discrete[5],
                 floats[0],
             );
             let reference_choice =
-                choice_from_act_vecs(i, &a_v, &player_v, &tile_v, &build_v, &nuke_v, &qty_v);
+                choice_from_act_vecs(i, &a_v, &player_v, &tile_v, &unit_v, &build_v, &nuke_v, &qty_v);
             assert_eq!(
                 choice_bits(&packed_choice.0),
                 choice_bits(&reference_choice.0)
@@ -3102,6 +3136,7 @@ mod packed_act_tests {
             [-(1i64 << 54), 1i64 << 54],
             [-(1i64 << 24) - 1, (1i64 << 24) + 1],
             [-1, 0],
+            [7, 8],
             [123_456_789_012_345, -123_456_789_012_345],
         ];
         let float_inputs = [
@@ -3118,7 +3153,7 @@ mod packed_act_tests {
             .map(|values| Tensor::from_slice(values))
             .collect();
         let packed =
-            transfer_act_results(&d[0], &d[1], &d[2], &d[3], &d[4], &f[0], &f[1], &f[2], 2)
+            transfer_act_results(&d[0], &d[1], &d[2], &d[3], &d[4], &d[5], &f[0], &f[1], &f[2], 2)
                 .unwrap();
 
         for row in 0..2 {
@@ -3134,8 +3169,8 @@ mod packed_act_tests {
     #[test]
     fn packed_host_rejects_size_overflow_mismatches_and_out_of_bounds_rows() {
         assert!(PackedActHost::from_parts(Vec::new(), Vec::new(), usize::MAX).is_err());
-        assert!(PackedActHost::from_parts(vec![0; 4], vec![0.0; 3], 1).is_err());
-        assert!(PackedActHost::from_parts(vec![0; 5], vec![0.0; 2], 1).is_err());
+        assert!(PackedActHost::from_parts(vec![0; 5], vec![0.0; 3], 1).is_err());
+        assert!(PackedActHost::from_parts(vec![0; 6], vec![0.0; 2], 1).is_err());
 
         let one = PackedActHost::from_parts(vec![0; 5], vec![0.0; 3], 1).unwrap();
         assert!(one.row(1).is_err());
@@ -3557,7 +3592,7 @@ fn run_eval(
     let mut results: Vec<Option<EpisodeInfo>> = vec![None; episodes];
     let mut terrain_cache = crate::ae::TerrainDeviceCache::new(device);
     let mut recurrent = recurrent_policy
-        .then(|| ActorRecurrentState::new(episodes, policy::RECURRENT_HIDDEN as usize, device));
+        .then(|| ActorRecurrentState::new(episodes, policy::RECURRENT_STATE as usize, device));
 
     for _ in 0..step_cap {
         let pending: Vec<usize> = (0..episodes).filter(|&i| results[i].is_none()).collect();
@@ -3584,7 +3619,7 @@ fn run_eval(
                 &mut terrain_cache,
             )?
         };
-        let (a, player, tile, build, nuke, qty, _logp, _value) =
+        let (a, player, tile, unit, build, nuke, qty, _logp, _value) =
             if let Some(state) = recurrent.as_mut() {
                 let hidden = state.gather(&pending);
                 let contexts: Vec<ActionOutcome> = pending
@@ -3602,6 +3637,7 @@ fn run_eval(
         let a_v: Vec<i64> = (&a).try_into()?;
         let player_v: Vec<i64> = (&player).try_into()?;
         let tile_v: Vec<i64> = (&tile).try_into()?;
+        let unit_v: Vec<i64> = (&unit).try_into()?;
         let build_v: Vec<i64> = (&build).try_into()?;
         let nuke_v: Vec<i64> = (&nuke).try_into()?;
         let qty_v: Vec<f32> = (&qty).try_into()?;
@@ -3610,6 +3646,7 @@ fn run_eval(
             let act = a_v[bi];
             let np = action_needs_player(act);
             let nt = action_needs_tile(act);
+            let nu = action_needs_unit(act);
             let nq = action_needs_quantity(act);
             let is_build = ACTIONS[act as usize] == "build";
             let is_nuke = ACTIONS[act as usize] == "launch_nuke";
@@ -3617,6 +3654,7 @@ fn run_eval(
                 action: act,
                 player_slot: np.then_some(player_v[bi]),
                 tile_region: nt.then_some(tile_v[bi]),
+                unit_index: nu.then_some(unit_v[bi]),
                 build_type: is_build.then_some(build_v[bi]),
                 nuke_type: is_nuke.then_some(nuke_v[bi]),
                 quantity_frac: nq.then_some(qty_v[bi] as f64),
@@ -4569,7 +4607,7 @@ fn build_actor_shard(
     }
     let recurrent = cfg
         .recurrent_policy
-        .then(|| ActorRecurrentState::new(workers.len(), cfg.recurrent_hidden_size, device));
+        .then(|| ActorRecurrentState::new(workers.len(), policy::RECURRENT_STATE as usize, device));
     Ok(ActorShard {
         device,
         workers,
@@ -6030,7 +6068,7 @@ fn train_update(
                     let mut ret_flat = vec![0.0f32; total];
                     let mut old_logp_flat = vec![0.0f32; total];
                     let mut hidden_flat = cfg.recurrent_policy.then(|| {
-                        vec![0.0f32; total * policy::RECURRENT_HIDDEN as usize]
+                        vec![0.0f32; total * policy::RECURRENT_STATE as usize]
                     });
                     let mut context_flat = cfg.recurrent_policy.then(|| {
                         vec![0.0f32; total * crate::recurrent::CONTEXT_FLOATS]
@@ -6062,9 +6100,9 @@ fn train_update(
                             old_logp_flat[flat_idx] = buffer[t][e].logp;
                             if let Some(hidden) = hidden_flat.as_mut() {
                                 let state = &buffer[t][e].hidden_in;
-                                debug_assert_eq!(state.len(), policy::RECURRENT_HIDDEN as usize);
-                                let begin = flat_idx * policy::RECURRENT_HIDDEN as usize;
-                                hidden[begin..begin + policy::RECURRENT_HIDDEN as usize]
+                                debug_assert_eq!(state.len(), policy::RECURRENT_STATE as usize);
+                                let begin = flat_idx * policy::RECURRENT_STATE as usize;
+                                hidden[begin..begin + policy::RECURRENT_STATE as usize]
                                     .copy_from_slice(state);
                             }
                             if let Some(context) = context_flat.as_mut() {
@@ -6171,7 +6209,7 @@ fn train_update(
                     let old_logp = Tensor::from_slice(&old_logp_flat).to_device(device);
                     let hidden_in = hidden_flat.map(|values| {
                         Tensor::from_slice(&values)
-                            .view([total as i64, policy::RECURRENT_HIDDEN])
+                            .view([total as i64, policy::RECURRENT_STATE])
                             .to_device(device)
                     });
                     let context = context_flat.map(|values| {
@@ -6661,11 +6699,15 @@ pub fn run(mut cfg: Config) -> Result<()> {
     let mut resumed_state: Option<TrainState> = None;
     let mut hub_vs: Option<nn::VarStore> = if let Some(resume_path) = &cfg.resume {
         if cfg.recurrent_policy {
-            let manifest = read_architecture_manifest(resume_path, 2)?;
+            let manifest = read_architecture_manifest(resume_path, 3)?;
             let recurrent = &manifest["architecture"]["recurrent"];
             anyhow::ensure!(
-                recurrent["cell"] == "gru",
-                "V8.2 resume requires a GRU manifest"
+                recurrent["cell"] == "lstm",
+                "V11 resume requires an LSTM manifest"
+            );
+            anyhow::ensure!(
+                recurrent["cell"] != "gru",
+                "V11 resume refuses GRU checkpoints"
             );
             anyhow::ensure!(
                 recurrent["hidden_size"] == cfg.recurrent_hidden_size,
@@ -6713,8 +6755,8 @@ pub fn run(mut cfg: Config) -> Result<()> {
         };
         if let Some(state) = resumed_state.as_ref().filter(|_| cfg.recurrent_policy) {
             anyhow::ensure!(
-                state.checkpoint_schema_version == 2,
-                "V8.2 resume requires TrainState checkpoint_schema_version=2"
+                state.checkpoint_schema_version == 3,
+                "V11 resume requires TrainState checkpoint_schema_version=3"
             );
             anyhow::ensure!(
                 state.hidden_reset_policy == "episode_done",
@@ -6734,7 +6776,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
         Some(snapshot)
     } else if let Some(init_path) = &cfg.init {
         if cfg.recurrent_policy {
-            let _ = read_architecture_manifest(init_path, 2)?;
+            let _ = read_architecture_manifest(init_path, 3)?;
         }
         let mut snapshot = nn::VarStore::new(Device::Cpu);
         let _ = PolicyNet::new_with_recurrence(
@@ -7672,7 +7714,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 );
                 let path = curriculum_milestone_path(&cfg.ckpt_dir, transition, update);
                 let state = TrainState {
-                    checkpoint_schema_version: if cfg.recurrent_policy { 2 } else { 1 },
+                    checkpoint_schema_version: if cfg.recurrent_policy { 3 } else { 1 },
                     hidden_reset_policy: if cfg.recurrent_policy {
                         "episode_done".to_string()
                     } else {
@@ -7931,7 +7973,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 resize_reason.clone()
             };
             let state = TrainState {
-                checkpoint_schema_version: if cfg.recurrent_policy { 2 } else { 1 },
+                checkpoint_schema_version: if cfg.recurrent_policy { 3 } else { 1 },
                 hidden_reset_policy: if cfg.recurrent_policy {
                     "episode_done".to_string()
                 } else {
@@ -8018,7 +8060,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 total_env_steps,
             };
             let state = TrainState {
-                checkpoint_schema_version: if cfg.recurrent_policy { 2 } else { 1 },
+                checkpoint_schema_version: if cfg.recurrent_policy { 3 } else { 1 },
                 hidden_reset_policy: if cfg.recurrent_policy {
                     "episode_done".to_string()
                 } else {
@@ -8217,7 +8259,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
 
         if cfg.ckpt_every > 0 && (update % cfg.ckpt_every == 0) && update > 0 {
             let state = TrainState {
-                checkpoint_schema_version: if cfg.recurrent_policy { 2 } else { 1 },
+                checkpoint_schema_version: if cfg.recurrent_policy { 3 } else { 1 },
                 hidden_reset_policy: if cfg.recurrent_policy {
                     "episode_done".to_string()
                 } else {
@@ -8282,7 +8324,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
         }
     }
     let final_state = TrainState {
-        checkpoint_schema_version: if cfg.recurrent_policy { 2 } else { 1 },
+        checkpoint_schema_version: if cfg.recurrent_policy { 3 } else { 1 },
         hidden_reset_policy: if cfg.recurrent_policy {
             "episode_done".to_string()
         } else {
@@ -8629,7 +8671,7 @@ mod persistent_actor_tests {
             pipeline_groups: false,
             persistent_actors: true,
             recurrent_policy: false,
-            recurrent_hidden_size: 256,
+            recurrent_hidden_size: 512,
             bptt_chunk_len: 16,
             work_conserving_actors: false,
             actor_max_batch: 32,
@@ -8696,6 +8738,9 @@ mod persistent_actor_tests {
             gw,
             players: vec![0.1; ofcore::feat::MAX_SLOTS * ofcore::feat::P_FEAT],
             pmask: [1.0; ofcore::feat::MAX_SLOTS],
+            units: vec![0.0; ofcore::feat::MAX_UNITS * ofcore::feat::U_FEAT],
+            umask: [1.0; ofcore::feat::MAX_UNITS],
+            legal_utarget: vec![1.0; ofcore::feat::N_ACTIONS * ofcore::feat::MAX_UNITS],
             scalars: [0.1; ofcore::feat::N_SCALARS],
             me_slot: 0,
             legal_actions: [1.0; ofcore::feat::N_ACTIONS],
@@ -8717,6 +8762,7 @@ mod persistent_actor_tests {
                 action: wait,
                 player_slot: -1,
                 tile_region: -1,
+                unit_index: -1,
                 build_type: -1,
                 nuke_type: -1,
                 quantity_frac: -1.0,
@@ -8974,7 +9020,7 @@ mod persistent_actor_tests {
             let mut rollout = parity_rollout();
             for (t, row) in rollout.buffer.iter_mut().enumerate() {
                 for step in row {
-                    step.hidden_in = vec![0.0; policy::RECURRENT_HIDDEN as usize];
+                    step.hidden_in = vec![0.0; policy::RECURRENT_STATE as usize];
                     step.context.action = t as i64;
                 }
             }
