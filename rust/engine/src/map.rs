@@ -299,7 +299,38 @@ impl GameMap {
         }
     }
 
-    /// TS `GameMap.neighbors4` / `forEachNeighbor` order: north, south, west, east.
+    /// West, east, north, south iteration order.
+    ///
+    /// This matches the OpenFront pin `f0da4182`'s `GameMapImpl.neighbors4`
+    /// and `GameMapImpl.forEachNeighbor` (both `west, east, north, south`).
+    /// Note this is the *opposite grouping* from `for_each_neighbor4`
+    /// (north, south, west, east), which mirrors upstream's `neighbors()`
+    /// array helper. The distinction only matters for callers that draw a
+    /// PRNG value (or otherwise depend on visit order) per neighbor - the
+    /// canonical one being `AttackExecution::add_neighbors`, which mirrors
+    /// TS `AttackExecution.addNeighbors`'s `this.map.neighbors4(...)` loop.
+    /// Upstream TS reordered `neighbors4`/`forEachNeighbor` from
+    /// `north, south, west, east` to `west, east, north, south` at some point
+    /// before this pin, which silently re-desynced native's attack frontier
+    /// (see docs/bot-ai-parity-neighbor-order/).
+    pub fn for_each_neighbor4_wens(&self, t: TileRef, mut f: impl FnMut(TileRef)) {
+        let w = self.width;
+        let x = self.x(t);
+        if x > 0 {
+            f(t - 1);
+        }
+        if x + 1 < w {
+            f(t + 1);
+        }
+        if t >= w {
+            f(t - w);
+        }
+        if t < (self.height - 1) * w {
+            f(t + w);
+        }
+    }
+
+    /// TS `GameMap.neighbors()` (array helper) order: north, south, west, east.
     pub fn neighbors4_ts(&self, t: TileRef, buf: &mut [TileRef; 4]) -> usize {
         let w = self.width;
         let x = self.x(t);
@@ -462,6 +493,12 @@ mod neighbor_order_tests {
         out
     }
 
+    fn collect_neighbors4_wens(map: &GameMap, t: TileRef) -> Vec<TileRef> {
+        let mut out = Vec::new();
+        map.for_each_neighbor4_wens(t, |n| out.push(n));
+        out
+    }
+
     #[test]
     fn for_each_neighbor4_visits_n_s_w_e_for_interior_tiles() {
         let map = map16();
@@ -506,6 +543,61 @@ mod neighbor_order_tests {
                 map.ref_xy(6, h - 1),
             ]
         );
+    }
+
+    #[test]
+    fn for_each_neighbor4_wens_visits_w_e_n_s_for_interior_tiles() {
+        // Mirrors the OpenFront pin f0da4182 `GameMapImpl.neighbors4` /
+        // `forEachNeighbor`, both of which visit west, east, north, south.
+        // Attack/cluster/border code that draws a PRNG value per neighbor or
+        // builds insertion-ordered sets depends on this exact order.
+        let map = map16();
+        let tile = map.ref_xy(5, 7);
+        assert_eq!(
+            collect_neighbors4_wens(&map, tile),
+            vec![
+                map.ref_xy(4, 7),
+                map.ref_xy(6, 7),
+                map.ref_xy(5, 6),
+                map.ref_xy(5, 8),
+            ]
+        );
+    }
+
+    #[test]
+    fn for_each_neighbor4_wens_clips_at_corners_and_edges() {
+        let map = map16();
+        let w = map.width;
+        let h = map.height;
+        // top-left corner: E, S only.
+        assert_eq!(
+            collect_neighbors4_wens(&map, map.ref_xy(0, 0)),
+            vec![map.ref_xy(1, 0), map.ref_xy(0, 1)]
+        );
+        // bottom-right corner: W, N only.
+        assert_eq!(
+            collect_neighbors4_wens(&map, map.ref_xy(w - 1, h - 1)),
+            vec![map.ref_xy(w - 2, h - 1), map.ref_xy(w - 1, h - 2)]
+        );
+        // left edge: E, N, S.
+        assert_eq!(
+            collect_neighbors4_wens(&map, map.ref_xy(0, 5)),
+            vec![map.ref_xy(1, 5), map.ref_xy(0, 4), map.ref_xy(0, 6)]
+        );
+    }
+
+    #[test]
+    fn for_each_neighbor4_wens_is_a_permutation_of_neighbors4_for_every_tile() {
+        // Same neighbor set as `for_each_neighbor4`, only the visit order
+        // differs (west,east,north,south vs north,south,west,east).
+        let map = map16();
+        for t in 0..(map.width * map.height) {
+            let mut wens = collect_neighbors4_wens(&map, t);
+            let mut nswe = collect_neighbors4(&map, t);
+            wens.sort_unstable();
+            nswe.sort_unstable();
+            assert_eq!(wens, nswe, "tile {t}");
+        }
     }
 
     #[test]
