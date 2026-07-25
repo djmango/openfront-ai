@@ -184,7 +184,7 @@ impl Execution for ConstructionExecution {
         let unit_id = self.unit_id.expect("unit_id set above");
         // TS `ConstructionExecution.tick`: when the structure is captured mid-
         // build, retarget to the new owner so completion clears
-        // `under_construction` and spawns City/Port/… execs for them — not the
+        // `under_construction` and spawns City/Port/… execs for them - not the
         // original builder (who no longer holds the unit).
         let Some(owner) = unit_owner_small_id(game, unit_id) else {
             self.active = false;

@@ -23,7 +23,7 @@ cargo build --release -p openfront-engine -p oftrain -p ofhub -p ofae   # from r
 cargo test -p oftrain --bin oftrain
 
 # Production launch knobs (envs, rollout, reward recipe, MAX_ENVS) live in
-# `scripts/pod_train_v10.sh` + optional `/root/ppo_v10.env` — not clap defaults.
+# `scripts/pod_train_v10.sh` + optional `/root/ppo_v10.env` - not clap defaults.
 # Curriculum stages / density / win gates: `ofcore/src/curriculum.rs`.
 
 # AE train (needs cached games under data/)
@@ -55,7 +55,7 @@ outcome parity ~67–100% vs TS). **Remaining gaps that matter for training:**
 
 | Gap | Notes |
 |-----|--------|
-| **bots=30+ outcome parity** | Crowded FFA / `nations: default` — wrong narrow leader; see `docs/curriculum-parity-report.md` |
+| **bots=30+ outcome parity** | Crowded FFA / `nations: default` - wrong narrow leader; see `docs/curriculum-parity-report.md` |
 | **UI-only Game APIs** | `buildable_units` / `can_attack_tile` etc. deliberately unported |
 | **Archive provenance** | A few `#[ignore]`d replay tests disagree with archived hashes despite matching live TS |
 
@@ -90,7 +90,7 @@ restorable in tch).
 | Core executions (attack, nuke, warship, nation AI, …) | **Mostly done** |
 | Trade-ship warship piracy | **Done** |
 | Curriculum outcome gate bots≤10 | **Pass / strong** |
-| Curriculum outcome gate bots=30+ | **Residual gap** — opt-in `--allow-node-mix --node-fraction` |
+| Curriculum outcome gate bots=30+ | **Residual gap** - opt-in `--allow-node-mix --node-fraction` |
 | Full 285-game hash suite | Prefer TS oracle; native improving |
 
 Run `./scripts/port_status.sh` for LOC ratio.

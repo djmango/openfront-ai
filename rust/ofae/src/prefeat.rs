@@ -105,7 +105,7 @@ fn build_cache(game_dir: &Path, force: bool) -> Result<String> {
     }
 
     let states_dir = game_dir.join("states");
-    // meta.snapshots[*] in current archives only carries `{tick}` — player
+    // meta.snapshots[*] in current archives only carries `{tick}` - player
     // ids live in per-tick entity JSON. Building the LUT from meta alone
     // produced all-zero owner caches and a trivially-perfect AE train.
     let lut = slot_lut_from_entities(game_dir, &states_dir, snaps, n, h, w)?;
@@ -258,7 +258,7 @@ fn slot_lut_from_entities(
     } else if n == 1 {
         vec![0]
     } else {
-        // First, middle, last — enough for a stable roster on bot/human games.
+        // First, middle, last - enough for a stable roster on bot/human games.
         let mut v = vec![0, n / 2, n - 1];
         v.sort_unstable();
         v.dedup();

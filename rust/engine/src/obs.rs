@@ -52,7 +52,7 @@ pub fn build_obs_head(game: &Game, client_id: &str, winner: Value) -> Value {
     head
 }
 
-/// Scalar/meta head only — no `entities` / `legal` JSON. Native collect pairs
+/// Scalar/meta head only - no `entities` / `legal` JSON. Native collect pairs
 /// this with [`crate::obs_typed`] structs so prepare never re-parses JSON.
 pub fn build_obs_head_meta(game: &Game, client_id: &str, winner: Value) -> Value {
     let agent = game.player_by_client_id(client_id);
@@ -98,7 +98,7 @@ pub fn entities(game: &Game) -> Value {
                 "traitor": game.is_traitor(sid),
                 "embargoes": value_array(p.embargoes.keys()),
                 // Sparse relation scores for RL reward (V8.5 embargo outcome).
-                // Not consumed by the policy featurizer — reward-only.
+                // Not consumed by the policy featurizer - reward-only.
                 "relations": p
                     .relations
                     .iter()

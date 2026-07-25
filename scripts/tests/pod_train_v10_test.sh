@@ -33,7 +33,7 @@ grep -q 'ALLOW_NODE_MIX="${ALLOW_NODE_MIX:-0}"' "$SCRIPT"
 grep -q 'ALLOW_NODE_MIX=1' "$SCRIPT"
 grep -q -- '--allow-node-mix' "$SCRIPT"
 # Do not advertise a concrete non-zero NODE_FRACTION in examples (operators
-# copy-paste it). `set -e` ignores `! cmd` failures — assert explicitly.
+# copy-paste it). `set -e` ignores `! cmd` failures - assert explicitly.
 if grep -nE 'NODE_FRACTION=0\.[1-9]' "$SCRIPT"; then
   echo "FAIL: non-zero NODE_FRACTION example still present in pod_train_v10.sh" >&2
   exit 1

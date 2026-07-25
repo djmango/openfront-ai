@@ -3,7 +3,7 @@
 //! Keep this in lockstep with [`crate::bot::tribe::TribeExecution::tick`]
 //! (alliance accept + `delete_next_structure` + `tribe_maybe_attack`). The
 //! live spawn path currently uses per-tribe `ExecEnum::Tribe`; this batch
-//! driver is the unused perf shell — still must not silently drop tribe
+//! driver is the unused perf shell - still must not silently drop tribe
 //! steps if it is ever wired in.
 
 use crate::bot::tribe::TribeExecution;

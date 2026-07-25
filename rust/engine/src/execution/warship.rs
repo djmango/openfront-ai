@@ -33,7 +33,7 @@ pub fn warship_build_port_tile(game: &Game, small_id: u16, tile: TileRef) -> Opt
 /// `canSpawnUnitType` → `warshipSpawn(tile)` (nearest port sharing `tile`'s water component).
 ///
 /// `ConstructionExecution` never gates Warship on cost (it isn't a structure), so this is the
-/// *only* gold/buildability gate a warship goes through — both when AI decides to queue one
+/// *only* gold/buildability gate a warship goes through - both when AI decides to queue one
 /// (`warship_ai`) and again in `WarshipExecution::init` (matching TS `WarshipExecution.init`,
 /// which re-checks `canBuild` at spawn time after same-tick spends like SAM construction).
 pub fn can_build_warship(game: &Game, small_id: u16, tile: TileRef) -> bool {
@@ -687,7 +687,7 @@ impl Execution for WarshipExecution {
         }
         // TS `WarshipExecution.init`: re-check `canBuild` at spawn time (gold may have been
         // spent earlier this tick by Structure construction / nukes). On failure, warn and
-        // leave inactive — do not call `buildUnit` / drive gold negative.
+        // leave inactive - do not call `buildUnit` / drive gold negative.
         if !can_build_warship(game, self.owner_small_id, self.patrol_tile) {
             self.active = false;
             return;
@@ -922,7 +922,7 @@ mod tests {
 
     /// TS `WarshipExecution.init` re-checks `canBuild` at spawn time. Same-tick structure
     /// spends (e.g. SAM construction) can drop gold below warship cost after Construction
-    /// already queued the WarshipExecution — native must skip the build (not drive gold
+    /// already queued the WarshipExecution - native must skip the build (not drive gold
     /// negative / invent an extra unit), matching TS's "Failed to spawn warship" path.
     #[test]
     fn warship_init_skips_build_when_gold_insufficient_after_prior_spend() {
@@ -936,7 +936,7 @@ mod tests {
         assert!(warship_cost > 0);
         if let Some(p) = game.player_by_small_id_mut(sid) {
             // Enough at queue time for warship, but after a same-tick SAM-sized spend only
-            // half remains — below warship cost.
+            // half remains - below warship cost.
             p.gold = warship_cost / 2;
             p.alive = true;
         }

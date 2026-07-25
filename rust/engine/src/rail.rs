@@ -165,7 +165,7 @@ impl RailNetwork {
 
     fn delete_cluster(&mut self, cluster_id: u32) {
         // TS `deleteCluster` clears the Cluster object's station set and nulls
-        // `setCluster(null)` on members still in that set — but leaves the Cluster
+        // `setCluster(null)` on members still in that set - but leaves the Cluster
         // *object* alive. Orphans that still hold a reference to it can later
         // `addStation` and resurrect membership (curr-b030 city 141 snapped onto a
         // rail whose `from` pointed at deleted cluster 28: TS revived size-1 cluster,
@@ -236,7 +236,7 @@ impl RailNetwork {
 
 pub fn station_tile(game: &Game, rn: &RailNetwork, station_id: u32) -> Option<TileRef> {
     let st = rn.stations.get(&station_id)?;
-    // TS reads `station.unit.tile()` via the live unit reference — owner may
+    // TS reads `station.unit.tile()` via the live unit reference - owner may
     // have changed after capture without reconnecting the station.
     let owner = game
         .find_unit_owner(st.unit_id)
@@ -249,7 +249,7 @@ pub fn station_unit_type(rn: &RailNetwork, station_id: u32) -> Option<String> {
 }
 
 pub fn station_active(game: &Game, rn: &RailNetwork, station_id: u32) -> bool {
-    // TS `TrainStation.isActive()` is `this.unit.isActive()` — resolve the
+    // TS `TrainStation.isActive()` is `this.unit.isActive()` - resolve the
     // unit by id globally so a captured station isn't treated as dead just
     // because `Station.owner_small_id` is stale.
     rn.stations
@@ -1091,7 +1091,7 @@ mod tests {
     }
 
     /// Capturing a city that is a train station must not make `station_active`
-    /// flip false — TS `TrainStation.isActive()` follows the Unit, not a
+    /// flip false - TS `TrainStation.isActive()` follows the Unit, not a
     /// frozen owner id. Without this, in-flight trains delete on the next tick
     /// (Canada +7/−7 unit blip on curr-b030-s0-pangaea ~4242).
     #[test]
@@ -1126,7 +1126,7 @@ mod tests {
     }
 
     /// TS `deleteCluster` leaves the Cluster object alive (cleared). Orphans that
-    /// still point at it must be able to `addStation` again — removing the HashMap
+    /// still point at it must be able to `addStation` again - removing the HashMap
     /// entry made `cluster_add_station` a no-op and stale-pointer'd new snaps
     /// (curr-b030 stations 141/171).
     #[test]

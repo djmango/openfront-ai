@@ -222,7 +222,7 @@ fn select_steamroll_stop_target(game: &Game, small_id: u16, difficulty: &str) ->
     // TS ranks with `p.unitCount(UnitType.City)` which sums city *levels*, not
     // unit cardinality. Using `unit_count` here made native over-trigger steamroll
     // MIRVs whenever the leader had more city buildings but a smaller level gap
-    // (e.g. many L1 cities vs fewer upgraded ones) — seen as Egypt MIRV @ 15888
+    // (e.g. many L1 cities vs fewer upgraded ones) - seen as Egypt MIRV @ 15888
     // on curr-b030-s0-pangaea while TS correctly stayed put.
     let mut all_players: Vec<(u16, i64)> = game
         .all_players()
@@ -505,7 +505,7 @@ mod tests {
 
     /// Regression: TS ranks by `unitCount(City)` (sum of levels). A leader with
     /// many L1 cities can clear a 2x *unit* gap while losing a 2x *level* gap to
-    /// a second place with fewer, upgraded cities — native must not MIRV then.
+    /// a second place with fewer, upgraded cities - native must not MIRV then.
     #[test]
     fn select_steamroll_stop_target_uses_city_level_sum_not_unit_cardinality() {
         let mut game = crate::test_util::plains_game(20, 20);

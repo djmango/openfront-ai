@@ -342,7 +342,7 @@ pub struct Config {
     /// Keep only the newest N numbered `policy_update*.safetensors` locally
     /// (plus matching `.state.json`). Curriculum advance/demote milestones,
     /// `latest.*`, and `best_eval.*` are never pruned. HF already retains the
-    /// full historical backlog — local prune is disk hygiene only. `0` disables.
+    /// full historical backlog - local prune is disk hygiene only. `0` disables.
     pub ckpt_keep_last: usize,
     /// `--init`: warm-start weights from a `.safetensors` (preferred) or
     /// legacy `.ot` VarStore dump without restoring `TrainState`
@@ -748,7 +748,7 @@ fn requested_stage_env_target(
 /// whether a restart is warranted.
 ///
 /// Without this, a stage floor of 24 with `MAX_ENVS=16` requests a restart on
-/// every advance/demote, then clamps back to 14 on boot — a full cold restart
+/// every advance/demote, then clamps back to 14 on boot - a full cold restart
 /// with no net env-count change (and it also skips in-process `set_stage`).
 fn requested_stage_env_target_for_resize(
     targets: &[usize],
@@ -1372,7 +1372,7 @@ fn parse_policy_update_index(name: &str) -> Option<u64> {
 
 /// Drop oldest numbered `policy_update*` checkpoints once local retention
 /// exceeds `keep_last`. Never touches curriculum milestones, `latest.*`, or
-/// `best_eval.*` — HF sync already keeps the full historical backlog.
+/// `best_eval.*` - HF sync already keeps the full historical backlog.
 fn prune_numbered_checkpoints(ckpt_dir: &str, keep_last: usize) -> Result<()> {
     if keep_last == 0 {
         return Ok(());
@@ -2168,8 +2168,8 @@ impl ReadyScheduler {
             .map(|(idx, _, ready_at)| (idx, ready_at))?;
         let same_ready = self.buckets[oldest_bucket].items.len();
         let waited_out = now.saturating_sub(oldest_ready_at) >= self.max_wait;
-        // Wait for more peers of the oldest env's shape — not merely any
-        // ready env — so mixed curriculum maps don't force singleton AE
+        // Wait for more peers of the oldest env's shape - not merely any
+        // ready env - so mixed curriculum maps don't force singleton AE
         // dispatches the moment total_ready hits target_batch.
         if same_ready < self.target_batch && !waited_out {
             return None;
@@ -2178,7 +2178,7 @@ impl ReadyScheduler {
         // Same-shape prefer: fill from the globally oldest env's shape bucket
         // first (zero padding, exact AE shapes). Mixed-shape coalescing is a
         // fallback only after max_wait when that bucket is still short of
-        // target_batch — still subject to max_padding_waste. Inference
+        // target_batch - still subject to max_padding_waste. Inference
         // batching only; does not change obs or sampled action for any env.
         let mut selected_buckets = Vec::new();
         let same_shape_n = same_ready.min(self.max_batch);
@@ -3957,7 +3957,7 @@ fn apply_weight_snapshot(vs: &nn::VarStore, snapshot: &CpuWeightSnapshot) -> Res
 /// Conv towers / tile heads the actor runs under `--amp` via
 /// `conv2d_bf16`. Storing them as BF16 in the actor VarStore halves that
 /// shard of policy VRAM; the learner keeps f32 for Adam. One-step-lag
-/// dual VarStores stay intentional — this only shrinks the actor copy.
+/// dual VarStores stay intentional - this only shrinks the actor copy.
 fn actor_inference_weight_bf16(name: &str) -> bool {
     name.starts_with("grid_coarse.")
         || name.starts_with("grid_fine.")
@@ -6406,7 +6406,7 @@ fn train_update(
             let mb_t0 = Instant::now();
             // Further split when `mb_size * pix_per > MAX_UPD_PIX` (mirror
             // `rl/ppo.py`). All samples share padded grid dims, so no
-            // shape-grouping is needed — just chop and accumulate grads
+            // shape-grouping is needed - just chop and accumulate grads
             // with `w_sub = sub_len / mb_len` before one optimizer step.
             let n_subs = ((len + sub_size - 1) / sub_size) as usize;
             for shard in learners.iter_mut() {

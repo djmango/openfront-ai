@@ -753,7 +753,7 @@ impl CombatStickyTracker {
                     reward += combat_outcome_reward(CombatOutcome::ThrashReengage, config);
                 }
             }
-            // First open only — reinforcing the same target must not refresh
+            // First open only - reinforcing the same target must not refresh
             // the premature-retreat clock (otherwise every retreat is "premature").
             self.last_attack_decision
                 .entry(player)
@@ -1102,7 +1102,7 @@ impl EnvWorker {
         // Sticky same-map resets (~70%) keep (hr,wr) stable across episodes so
         // work-conserving actor batches stay same-shape and the AE path
         // avoids churning unique map geometries every episode. Does not
-        // change reward / legal actions — only map resampling bias.
+        // change reward / legal actions - only map resampling bias.
         const STICKY_MAP_P: f64 = 0.70;
         let sticky = !self.map_name.is_empty()
             && stg.maps.iter().any(|m| *m == self.map_name.as_str())

@@ -885,7 +885,7 @@ impl PolicyNet {
                 cgw,
             );
             // Compact learner Obs may keep `grid` as Half while masks stay
-            // Float — cat requires a matching dtype.
+            // Float - cat requires a matching dtype.
             let valid_ch = o.grid_valid.unsqueeze(1).to_kind(o.grid.kind());
             return Foveation {
                 grid_fine: Tensor::cat(&[&o.grid, &valid_ch], 1),

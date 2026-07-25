@@ -205,7 +205,7 @@ representation limits. **V11** is the next from-scratch generation; full
 writeup in `docs/devlog.html#v11-plan`. Contract:
 
 1. **Neighbor pack** into `P_FEAT` (shared-border length, border terrain
-   mix, richer relation) — currently promised above but absent from live
+   mix, richer relation) - currently promised above but absent from live
    `P_FEAT=21`.
 2. **Ego-split attack fronts** (`TR_ATTACK_*` own/ally/enemy).
 3. **Unit-token stream + pointer head** for upgrade/delete/warship/boat-
@@ -333,7 +333,7 @@ game logic. Decision cadence: one policy step per ~10 game ticks.
 
 ## Behavior cloning from archived human games
 
-**Jul 23, 2026 — V11 unfreeze.** The Jul 8 moratorium still applies to the
+**Jul 23, 2026 - V11 unfreeze.** The Jul 8 moratorium still applies to the
 old v6/v7 shapes and the removed Python trainer path as a *research track
 on blind obs*. V11 restarts BC only on the new schema (neighbor pack,
 ego-split attack fronts, unit tokens + pointer, LSTM policy, AE v3.2

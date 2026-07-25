@@ -774,7 +774,7 @@ fn rand_coastal_tile_array(
             }
             // TS `randCoastalTileArray`: ocean neighbors are always valid port
             // sites (skip component lookup). Do not require `shared` to contain
-            // the ocean sentinel — lake-only `shared` sets still accept ocean
+            // the ocean sentinel - lake-only `shared` sets still accept ocean
             // shores in TS.
             if game.map.is_ocean(neighbor) {
                 ok = true;
@@ -1030,7 +1030,7 @@ pub fn save_up_target(game: &Game) -> i64 {
     }
     if !game.wire.is_unit_disabled(unit_type::MIRV) {
         // TS `this.cost(MIRV)` escalates with `stats().numMirvsLaunched()`.
-        // `wire.mirv_cost()` is the zero-launch base only — use `structure_cost`.
+        // `wire.mirv_cost()` is the zero-launch base only - use `structure_cost`.
         return game.structure_cost(0, unit_type::MIRV) + game.wire.hydrogen_bomb_cost();
     }
     if !game.wire.is_unit_disabled(unit_type::HYDROGEN_BOMB) {
@@ -1166,7 +1166,7 @@ fn perceived_structure_cost(game: &Game, small_id: u16, structure_type: &str) ->
     // other types use `getStructureRatios(difficulty)[type].perceivedCostIncreasePerOwned`
     // (Port/Factory/MissileSilo: 1.0, SAMLauncher: 0.3, fallback: 0.1). Native previously
     // used 1.0 for every non-city type, so SAM perceived cost was `real*(1+owned)` instead
-    // of `real*(1+0.3*owned)` — Mongolia @ tick 6129 couldn't "afford" a 3M SAM with
+    // of `real*(1+0.3*owned)` - Mongolia @ tick 6129 couldn't "afford" a 3M SAM with
     // ~3.93M gold (native wanted 6M; TS wanted 3.9M).
     let increase = if structure_type == unit_type::CITY {
         CITY_PERCEIVED_COST_INCREASE_PER_OWNED
@@ -1880,7 +1880,7 @@ mod tests {
         );
     }
 
-    // ── tryBuildDefensePost — early-exit guards ──────────────────────────────
+    // ── tryBuildDefensePost - early-exit guards ──────────────────────────────
     //
     // Both players are `Nation` type so `AttackExecution::init`'s
     // `can_attack_player` immunity gate (which only applies when the
@@ -1950,7 +1950,7 @@ mod tests {
         assert!(!try_build_defense_post(&mut game, &mut random, defender));
     }
 
-    // ── tryBuildDefensePost — real integration scenario ─────────────────────
+    // ── tryBuildDefensePost - real integration scenario ─────────────────────
     //
     // A large defender territory bordering a large attacker territory gives
     // `get_attack_front_tiles` a genuine multi-tile front and

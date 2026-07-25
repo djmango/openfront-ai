@@ -233,7 +233,7 @@ fn track_incoming_transports_and_retaliate(
     emoji: &mut NationEmojiState,
 ) {
     // TS `for (const p of this.game.units(UnitType.TransportShip))` walks
-    // `_players.values()` × each player's `_units` array — *not* execution-list
+    // `_players.values()` × each player's `_units` array - *not* execution-list
     // order. `live_transports()` follows `execs`, which can insert the same two
     // inbound ships in the opposite order; because this loop `break`s after the
     // first retaliation, that alone desyncs the nation PRNG (eastasia080 Sado @1558).

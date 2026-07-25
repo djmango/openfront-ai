@@ -317,7 +317,7 @@ impl BoatOutcomeCounts {
 }
 
 /// Classify a resolved transport. Strength already counts fielded troops, so
-/// this is a small categorical signal for the tile/action heads — not a
+/// this is a small categorical signal for the tile/action heads - not a
 /// re-pricing of troop deltas.
 ///
 /// `has_sourced_attack` covers landings that merge into an already-open
@@ -651,7 +651,7 @@ pub const V10_BRIDGE_MAPS: [&str; 8] = [
 /// Broad V10 pool. These are `GameMapType` enum keys (the values accepted
 /// by the Node bridge and normalized to asset-directory names by Rust).
 /// Every entry must exist under `openfront/resources/maps/<lowercase>/`.
-/// Order is not a preference — watch/showcase sample the pool; Onion is not first.
+/// Order is not a preference - watch/showcase sample the pool; Onion is not first.
 pub const V10_BROAD_MAPS: [&str; 16] = [
     "Pangaea",
     "Europe",
@@ -864,7 +864,7 @@ pub fn v10_win_at_for_stage(index: usize) -> f64 {
     V10_NATION_RAMP_WIN_AT - s * (V10_NATION_RAMP_WIN_AT - V10_WIN_AT_END)
 }
 
-/// `max(floor, base_lr * decay ^ stage)` — shared by advance/demote/resume.
+/// `max(floor, base_lr * decay ^ stage)` - shared by advance/demote/resume.
 pub fn stage_learning_rate(base_lr: f64, decay: f64, stage: usize, floor: f64) -> f64 {
     (base_lr * decay.powi(stage as i32)).max(floor)
 }
@@ -952,7 +952,7 @@ fn build_v10_stages() -> Vec<Stage> {
 ///
 /// These are *aspirational* per-shard floors for larger GPUs. On current
 /// 46 GB A40 pods, `pod_train_v10.sh`'s `MAX_ENVS` (default 14) is the
-/// hard VRAM ceiling — oftrain clamps resize requests to `--max-envs` so
+/// hard VRAM ceiling - oftrain clamps resize requests to `--max-envs` so
 /// a floor of 24 does not trigger noop cold restarts. Raising throughput
 /// means freeing Obs VRAM (see compact Half-resident grids), not editing
 /// this table down to the A40 cap.
@@ -1158,7 +1158,7 @@ pub fn terminal_reward(place: i64, won: bool) -> f64 {
 /// non-win terminal contrast under a softer death penalty.
 ///
 /// Tapers to zero across the closeout band `[0.45, 0.80]` so once the agent is
-/// dominant, camping no longer accrues survival pay — finish the win instead.
+/// dominant, camping no longer accrues survival pay - finish the win instead.
 pub fn v10_survival_reward(alive: bool, land_share: f64, config: RewardConfig) -> f64 {
     if !alive || config.v10_survival_coef == 0.0 {
         return 0.0;
@@ -1808,7 +1808,7 @@ mod tests {
         assert_eq!(v10[0].bots, 2);
         assert_eq!(v10[0].nations, Nations::Exact(0));
         // Early map variety: bridge-8 warm-up, then broad-16 for the rest.
-        // Scandinavia is not a GameMapType / asset dir — pools must stay valid.
+        // Scandinavia is not a GameMapType / asset dir - pools must stay valid.
         assert!(!V10_BRIDGE_MAPS.contains(&"Scandinavia"));
         assert!(!V10_BROAD_MAPS.contains(&"Scandinavia"));
         assert_eq!(v10[0].maps, &V10_BRIDGE_MAPS);

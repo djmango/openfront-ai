@@ -172,7 +172,7 @@ def ensure_xvfb_display() -> str | None:
     display = os.environ.get("DISPLAY", "").strip()
     if display:
         return display
-    # Prefer :99 — matches our smoke-tested pod path.
+    # Prefer :99 - matches our smoke-tested pod path.
     display = os.environ.get("OF_XVFB_DISPLAY", ":99")
     if shutil.which("Xvfb") is None:
         print("Xvfb missing; NVIDIA WebGL may fall back to SoftGL")
@@ -281,7 +281,7 @@ def client_worktree(commit: str):
         try:
             _add(commit)
         except subprocess.CalledProcessError:
-            # Shallow submodule may lack the archived commit — fetch then retry.
+            # Shallow submodule may lack the archived commit - fetch then retry.
             subprocess.run(
                 ["git", "-C", str(OPENFRONT), "fetch", "--depth=1", "origin", commit],
                 check=False, capture_output=True, text=True,
@@ -399,7 +399,7 @@ def render_record(
 
     procs: list[subprocess.Popen] = []
     # Self-contained SoftGL must not collide with a leftover showcase archive
-    # or vite on the default ports — that looks like a replay-button timeout
+    # or vite on the default ports - that looks like a replay-button timeout
     # because Chromium talks to the wrong (empty) archive.
     if not reuse_services:
         if port_open(api_port):
@@ -530,7 +530,7 @@ def render_record(
                 )
                 page = ctx.new_page()
                 page_open_t0 = time.time()
-                # Confirm we actually got NVIDIA/Metal — headless-shell often
+                # Confirm we actually got NVIDIA/Metal - headless-shell often
                 # lies and still SoftGLs, which is why full-game clips took hours.
                 gl_info = page.evaluate(
                     """() => {
@@ -551,7 +551,7 @@ def render_record(
                 if "swiftshader" in renderer.lower() or "llvmpipe" in renderer.lower():
                     use_soft_gl = True
                     print(
-                        "WARNING: Chromium fell back to SoftGL — full-game "
+                        "WARNING: Chromium fell back to SoftGL - full-game "
                         "capture will crawl (~0.7 tick/s). Use full Chromium "
                         "+ Xvfb + NVIDIA Vulkan on the GPU pod."
                     )
@@ -594,7 +594,7 @@ def render_record(
                 )
 
                 # Death: cut before the wipeout modal. Timeout: cut at the
-                # episode budget — without this the loop runs to --timeout
+                # episode budget - without this the loop runs to --timeout
                 # wall-clock (hours) because no win/death modal ever appears.
                 if end_tick and outcome == "death":
                     stop_tick = int(end_tick) - death_trim_ticks
@@ -642,7 +642,7 @@ def render_record(
                             # Ignore premature win modals. Client lobby tweaks
                             # (e.g. schema `nations: "disabled"` vs a bad
                             # `nations: 1` rewrite) can crown a nation mid-replay
-                            # while the recorded agent win is still later —
+                            # while the recorded agent win is still later  - 
                             # stopping there cuts clips at ~60% land.
                             reached_end = end_tick is None or (
                                 tick is not None and tick >= int(end_tick)
