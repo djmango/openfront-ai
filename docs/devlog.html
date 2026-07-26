@@ -966,12 +966,12 @@ explores attack/build, so train metrics look “kind of OK” while deployment-s
 play looks brain-dead.</p>
 
 <h3>Greedy vs sampling is not the training bug</h3>
-<p>Play/eval should be greedy; PPO rollouts must stay stochastic. Mixing greedy
-trajectories into training does not invent a better mode - if greedy boat-spam
-is already bad, you either reinforce a free launch or add noisy on-policy junk.
-Temperature does not exist in this stack; exploration is softmax + entropy
-floor. The webbot path has <code>--greedy</code>; <code>rl/play</code> /
-<code>play_live.sh</code> default to sampling and will lie to you.</p>
+<p><b>Superseded (V11):</b> play / watch / showcase are <b>stochastic</b>, matching
+PPO rollouts and WR windows. Greedy argmax freezes near spawn and dies — do not
+use it for demos. Mixing greedy trajectories into training still does not invent
+a better mode. Temperature does not exist in this stack; exploration is softmax +
+entropy floor. Argmax remains debug-only
+(<code>--watch-stochastic=false</code> / <code>PLAY_GREEDY=1</code>).</p>
 
 <h3>Why it does not “just learn boats are bad”</h3>
 <ol>
@@ -1029,7 +1029,8 @@ heuristics. Metrics: <code>reward/boat_outcome</code>, <code>reward/tempo</code>
   <code>-0.20</code> is parsed by clap as an unexpected flag.</li>
   <li>Shallow clones lack <code>openfront/resources/maps</code> - symlink the
   maps tree from a populated checkout before spawn.</li>
-  <li>Play the bot with <code>--greedy</code> or you will re-learn the sampling lesson.</li>
+  <li><b>Do not</b> play/watch greedy for demos — use stochastic (train-matched).
+    Argmax is debug-only.</li>
   <li>NCCL on this A40 host still needs <code>NCCL_P2P_DISABLE=1</code> /
   <code>NCCL_IB_DISABLE=1</code> (SHM collectives).</li>
 </ul>
@@ -3380,8 +3381,9 @@ exactly (same PseudoRandom ID stream, no spawn timer), so agent games saved as G
 <b>bit-identically</b> in the real client, and <code>verify_record.ts</code> proves it by re-simulating
 from intents alone.</p>
 <ul>
-  <li><code>rl/watch.py</code>: one greedy episode → flat debug WebM + GameRecord + a
-    <code>.debug.json</code> sidecar (every decision: action, probs, value).</li>
+  <li><code>oftrain --watch</code>: one <b>stochastic</b> episode (train-matched;
+    default) → GameRecord + <code>.debug.json</code> sidecar (every decision:
+    action, probs, value). Full tick budget <code>21000</code>.</li>
   <li><code>scripts/render_client_replay.py</code>: headless Chromium replays the record in the
     <b>actual game client</b> → WebM with real graphics. Agent renders as AGENT with the gold spawn
     ring, crown when first, "You Won!" modal; camera starts fit to the whole map.</li>
