@@ -66,12 +66,30 @@ interface PlayerSnapshot {
   ownedOrder?: number[];
 }
 
+interface RailroadSnapshot {
+  id: number;
+  from: number;
+  to: number;
+  tiles: number[];
+}
+
+interface StationSnapshot {
+  id: number;
+  unitId: number;
+  unitType: string;
+  tile: number | null;
+  railroads: number[];
+  cluster: number | null;
+}
+
 interface TickSnapshot {
   tick: number;
   inSpawnPhase: boolean;
   totalLandTiles: number;
   totalOwnedTiles: number;
   players: PlayerSnapshot[];
+  railroads?: RailroadSnapshot[];
+  stations?: StationSnapshot[];
 }
 
 function playerIdentity(p: Player): string {
@@ -85,6 +103,7 @@ function snapshot(
   dumpOwnedTiles: boolean,
   dumpBorderOrder: boolean,
   dumpOwnedOrder: boolean,
+  dumpRails: boolean,
 ): TickSnapshot {
   const players: PlayerSnapshot[] = game.allPlayers().map((p) => {
     const base: PlayerSnapshot = {
@@ -145,13 +164,43 @@ function snapshot(
     return base;
   });
   const totalOwnedTiles = players.reduce((sum, p) => sum + p.tiles, 0);
-  return {
+  const out: TickSnapshot = {
     tick: game.ticks(),
     inSpawnPhase: game.inSpawnPhase(),
     totalLandTiles: game.numLandTiles(),
     totalOwnedTiles,
     players,
   };
+  if (dumpRails) {
+    const rn = game.railNetwork() as any;
+    const stations = [...rn.stationManager().getAll()] as any[];
+    const railSet = new Map<number, RailroadSnapshot>();
+    const stationSnaps: StationSnapshot[] = [];
+    for (const st of stations) {
+      const rails = [...st.railroads] as any[];
+      stationSnaps.push({
+        id: st.id,
+        unitId: st.unit.id(),
+        unitType: st.unit.type(),
+        tile: st.tile(),
+        railroads: rails.map((r) => r.id),
+        cluster: st.getCluster() ? 1 : null,
+      });
+      for (const r of rails) {
+        if (!railSet.has(r.id)) {
+          railSet.set(r.id, {
+            id: r.id,
+            from: r.from.id,
+            to: r.to.id,
+            tiles: [...r.tiles],
+          });
+        }
+      }
+    }
+    out.railroads = [...railSet.values()].sort((a, b) => a.id - b.id);
+    out.stations = stationSnaps.sort((a, b) => a.id - b.id);
+  }
+  return out;
 }
 
 async function main() {
@@ -202,6 +251,7 @@ async function main() {
   const dumpOwnedTiles = process.env.OF_DUMP_OWNED_TILES !== undefined;
   const dumpBorderOrder = process.env.OF_DUMP_BORDER_ORDER !== undefined;
   const dumpOwnedOrder = process.env.OF_DUMP_OWNED_ORDER !== undefined;
+  const dumpRails = process.env.OF_DUMP_RAILS !== undefined;
   const dumpUnitsFrom = process.env.OF_DUMP_UNITS_FROM
     ? parseInt(process.env.OF_DUMP_UNITS_FROM, 10)
     : 0;
@@ -220,7 +270,14 @@ async function main() {
     if (game.ticks() < dumpTicksFrom) continue;
     if (game.ticks() % every === 0) {
       out.push(
-        snapshot(game, dumpUnits && game.ticks() >= dumpUnitsFrom, dumpOwnedTiles, dumpBorderOrder, dumpOwnedOrder),
+        snapshot(
+          game,
+          dumpUnits && game.ticks() >= dumpUnitsFrom,
+          dumpOwnedTiles,
+          dumpBorderOrder,
+          dumpOwnedOrder,
+          dumpRails,
+        ),
       );
     }
   }
@@ -229,7 +286,14 @@ async function main() {
     (out.length === 0 || out[out.length - 1].tick !== game.ticks())
   ) {
     out.push(
-      snapshot(game, dumpUnits && game.ticks() >= dumpUnitsFrom, dumpOwnedTiles, dumpBorderOrder, dumpOwnedOrder),
+      snapshot(
+        game,
+        dumpUnits && game.ticks() >= dumpUnitsFrom,
+        dumpOwnedTiles,
+        dumpBorderOrder,
+        dumpOwnedOrder,
+        dumpRails,
+      ),
     );
   }
 
