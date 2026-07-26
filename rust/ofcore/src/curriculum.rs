@@ -36,12 +36,15 @@ pub const V10_WIN_AT: f64 = 0.70;
 /// 0.90 (need >36/40 under the strict `>` compare).
 pub const V10_RAMP_WIN_AT: f64 = 0.90;
 /// First stage that introduces a nation (see [`V10_BOT_NATION_DENSITY`]).
-pub const V10_NATION_INTRO_STAGE: usize = 15;
-/// Softened gate for the 1-nation band (stages 15-19). Holding 0.90 here
+pub const V10_NATION_INTRO_STAGE: usize = 8;
+/// Softened gate for the 1-nation band
+/// (`V10_NATION_INTRO_STAGE .. V10_MULTI_NATION_STAGE`). Holding 0.90 here
 /// pinned mid-ladder runs for thousands of updates.
 pub const V10_ONE_NATION_WIN_AT: f64 = 0.80;
-/// Softened gate for 2+ nation Easy density ramp (stages 20-29) and the
-/// starting point of the post-ramp smooth decay.
+/// First stage with 2+ nations (end of the 1-nation win-gate band).
+pub const V10_MULTI_NATION_STAGE: usize = 12;
+/// Softened gate for 2+ nation Easy density ramp and the starting point of
+/// the post-ramp smooth decay.
 pub const V10_NATION_RAMP_WIN_AT: f64 = 0.75;
 /// Terminal Impossible-stage gate after the smooth decay from
 /// [`V10_NATION_RAMP_WIN_AT`].
@@ -702,7 +705,7 @@ impl CurriculumSchedule {
 /// Early Easy density-ramp length (stages `0 .. V10_EASY_RAMP_LEN`): bots-only
 /// then 1→4 nations. Maps are already mixed (bridge → broad); density is the
 /// hard axis, not map identity.
-pub const V10_EASY_RAMP_LEN: usize = 30;
+pub const V10_EASY_RAMP_LEN: usize = 22;
 /// Stages `0 .. V10_MAP_WARMUP_LEN` use the 8-map bridge pool before broad-16.
 pub const V10_MAP_WARMUP_LEN: usize = 8;
 /// First stage that samples the full 16-map broad pool.
@@ -711,20 +714,24 @@ pub const V10_BROAD_STAGE: usize = V10_MAP_WARMUP_LEN;
 pub const V10_LEGACY_LEN: usize = 15;
 /// Prior 35-stage V10 length (20 Easy ramp + 15 dense) for sidecar expand.
 pub const V10_PREV35_LEN: usize = 35;
-/// Full V10 ladder: long Easy mastery → Medium → Hard → Impossible.
-pub const V10_STAGE_COUNT: usize = 100;
+/// Prior 100-stage V10 length (long Easy micro-ramp) for sidecar expand.
+pub const V10_PREV100_LEN: usize = 100;
+/// Full V10 ladder: faster Easy → Medium → Hard → Impossible.
+/// Medium/Hard/Impossible lobby rows match the prior 100-stage table; only
+/// Easy is compressed (fewer +2-bot micro-stages).
+pub const V10_STAGE_COUNT: usize = 68;
 /// Easy density conversion-gate milestone (maps already broad by here).
-pub const V10_CLOSEOUT_STAGE: usize = 48;
+pub const V10_CLOSEOUT_STAGE: usize = 28;
 /// Later Easy conversion-gate milestone (maps already broad by here).
-pub const V10_BRIDGE_STAGE: usize = 54;
+pub const V10_BRIDGE_STAGE: usize = 31;
 /// First Medium stage.
-pub const V10_MEDIUM_START: usize = 68;
+pub const V10_MEDIUM_START: usize = 36;
 /// First Hard stage.
-pub const V10_HARD_START: usize = 82;
+pub const V10_HARD_START: usize = 50;
 /// First Impossible stage.
-pub const V10_IMPOSSIBLE_START: usize = 92;
+pub const V10_IMPOSSIBLE_START: usize = 60;
 
-/// V10 density: early Easy density ramp (incl. 1-nation band), then densify.
+/// V10 density: compressed Easy ramp, then densify into Medium+.
 ///
 /// At each difficulty jump (Easy→Medium, Medium→Hard, Hard→Impossible) nation
 /// count **resets low** so the policy learns the new bot strength with a sparse
@@ -732,116 +739,186 @@ pub const V10_IMPOSSIBLE_START: usize = 92;
 /// once nations appear. Map pools are applied separately in [`build_v10_stages`]
 /// (bridge→broad).
 pub const V10_BOT_NATION_DENSITY: [(u32, u32); V10_STAGE_COUNT] = [
-    // --- Easy density ramp (0-29): bots-only → 1n → 2n → 3n → 4n ---
-    (2, 0),  // 0 Easy/2
-    (3, 0),  // 1
-    (4, 0),  // 2
-    (5, 0),  // 3
-    (6, 0),  // 4
-    (7, 0),  // 5
-    (8, 0),  // 6
-    (9, 0),  // 7
-    (10, 0), // 8
-    (12, 0), // 9
-    (14, 0), // 10
-    (16, 0), // 11
-    (18, 0), // 12
-    (20, 0), // 13
-    (22, 0), // 14
-    (16, 1), // 15 introduce 1 nation
-    (18, 1), // 16
-    (20, 1), // 17
-    (22, 1), // 18
-    (24, 1), // 19
-    (20, 2), // 20
-    (22, 2), // 21
-    (24, 2), // 22
-    (26, 2), // 23
-    (22, 3), // 24
-    (24, 3), // 25
-    (26, 3), // 26
-    (24, 4), // 27
-    (26, 4), // 28
-    (28, 4), // 29
-    // --- Easy densify (30-37) ---
-    (30, 5), // 30
-    (32, 5), // 31
-    (34, 5), // 32
-    (36, 5), // 33
-    (38, 5), // 34
-    (40, 5), // 35
-    (42, 5), // 36
-    (44, 5), // 37
-    // --- Easy densify continued (38-45) ---
-    (40, 5), // 38
-    (44, 5), // 39
-    (48, 6), // 40
-    (52, 6), // 41
-    (50, 6), // 42
-    (54, 6), // 43
-    (58, 7), // 44
-    (62, 7), // 45
-    // --- Easy densify continued (46-47) ---
-    (66, 8), // 46
-    (70, 9), // 47
-    // --- closeout Easy (48-53) ---
-    (50, 6), // 48 CLOSEOUT
-    (54, 6), // 49
-    (58, 7), // 50
-    (60, 7), // 51
-    (64, 8), // 52
-    (68, 8), // 53
-    // --- bridge-gate Easy (54-57) ---
-    (70, 9),  // 54 BRIDGE
-    (76, 9),  // 55
-    (82, 10), // 56
-    (88, 10), // 57
-    // --- broad Easy densify (58-67) ---
-    (90, 11),  // 58
-    (94, 11),  // 59
-    (98, 12),  // 60
-    (102, 12), // 61
-    (106, 13), // 62
-    (110, 13), // 63
-    (112, 14), // 64
-    (114, 14), // 65
-    (116, 14), // 66
-    (118, 14), // 67 peak Easy nations before Medium reset
-    // --- Medium (68-81): drop nations (14→4), learn Medium bots, ramp back ---
-    (90, 4),   // 68 MEDIUM_START nation reset
-    (94, 5),   // 69
-    (98, 6),   // 70
-    (102, 7),  // 71
-    (106, 8),  // 72
-    (110, 9),  // 73
-    (114, 10), // 74
-    (118, 11), // 75
-    (122, 12), // 76
-    (126, 13), // 77
-    (130, 14), // 78
-    (134, 15), // 79
-    (138, 16), // 80
-    (142, 16), // 81 peak Medium nations before Hard reset
-    // --- Hard (82-91): drop nations (16→6), learn Hard bots, ramp back ---
-    (130, 6),  // 82 HARD_START nation reset
-    (134, 7),  // 83
-    (138, 8),  // 84
-    (142, 9),  // 85
-    (146, 10), // 86
-    (150, 12), // 87
-    (154, 14), // 88
-    (158, 16), // 89
-    (162, 18), // 90
-    (166, 18), // 91 peak Hard nations before Impossible reset
-    // --- Impossible (92-99): drop nations (18→8), then densify ---
-    (155, 8),  // 92 IMPOSSIBLE_START nation reset
-    (160, 10), // 93
-    (165, 12), // 94
-    (170, 14), // 95
-    (175, 16), // 96
-    (180, 18), // 97
-    (185, 20), // 98
-    (190, 22), // 99
+    // --- Easy density ramp (0-21): bots-only → 1n → 2n → 3n → 4n ---
+    (2, 0),  // 0
+    (4, 0),  // 1
+    (7, 0),  // 2
+    (10, 0), // 3
+    (14, 0), // 4
+    (18, 0), // 5
+    (22, 0), // 6
+    (26, 0), // 7
+    (18, 1), // 8 introduce 1 nation
+    (22, 1), // 9
+    (26, 1), // 10
+    (30, 1), // 11
+    (22, 2), // 12
+    (26, 2), // 13
+    (30, 2), // 14
+    (34, 2), // 15
+    (26, 3), // 16
+    (30, 3), // 17
+    (34, 3), // 18
+    (30, 4), // 19
+    (34, 4), // 20
+    (38, 4), // 21
+    // --- Easy densify (22-27) ---
+    (42, 5), // 22
+    (48, 5), // 23
+    (52, 6), // 24
+    (58, 7), // 25
+    (66, 8), // 26
+    (70, 9), // 27
+    // --- closeout Easy (28-30) ---
+    (54, 6), // 28 CLOSEOUT
+    (60, 7), // 29
+    (68, 8), // 30
+    // --- bridge-gate Easy (31-33) ---
+    (76, 9),  // 31 BRIDGE
+    (82, 10), // 32
+    (88, 10), // 33
+    // --- peak Easy (34-35) ---
+    (102, 12), // 34
+    (118, 14), // 35 peak Easy nations before Medium reset
+    // --- Medium (36-49): same lobbies as prior stages 68-81 ---
+    (90, 4),   // 36 MEDIUM_START nation reset
+    (94, 5),   // 37
+    (98, 6),   // 38
+    (102, 7),  // 39
+    (106, 8),  // 40
+    (110, 9),  // 41
+    (114, 10), // 42
+    (118, 11), // 43
+    (122, 12), // 44
+    (126, 13), // 45
+    (130, 14), // 46
+    (134, 15), // 47
+    (138, 16), // 48
+    (142, 16), // 49 peak Medium nations before Hard reset
+    // --- Hard (50-59): same lobbies as prior stages 82-91 ---
+    (130, 6),  // 50 HARD_START nation reset
+    (134, 7),  // 51
+    (138, 8),  // 52
+    (142, 9),  // 53
+    (146, 10), // 54
+    (150, 12), // 55
+    (154, 14), // 56
+    (158, 16), // 57
+    (162, 18), // 58
+    (166, 18), // 59 peak Hard nations before Impossible reset
+    // --- Impossible (60-67): same lobbies as prior stages 92-99 ---
+    (155, 8),  // 60 IMPOSSIBLE_START nation reset
+    (160, 10), // 61
+    (165, 12), // 62
+    (170, 14), // 63
+    (175, 16), // 64
+    (180, 18), // 65
+    (185, 20), // 66
+    (190, 22), // 67
+];
+
+/// Prior 100-stage Easy micro-ramp densities (for sidecar remap only).
+pub const V10_PREV100_DENSITY: [(u32, u32); V10_PREV100_LEN] = [
+    (2, 0),
+    (3, 0),
+    (4, 0),
+    (5, 0),
+    (6, 0),
+    (7, 0),
+    (8, 0),
+    (9, 0),
+    (10, 0),
+    (12, 0),
+    (14, 0),
+    (16, 0),
+    (18, 0),
+    (20, 0),
+    (22, 0),
+    (16, 1),
+    (18, 1),
+    (20, 1),
+    (22, 1),
+    (24, 1),
+    (20, 2),
+    (22, 2),
+    (24, 2),
+    (26, 2),
+    (22, 3),
+    (24, 3),
+    (26, 3),
+    (24, 4),
+    (26, 4),
+    (28, 4),
+    (30, 5),
+    (32, 5),
+    (34, 5),
+    (36, 5),
+    (38, 5),
+    (40, 5),
+    (42, 5),
+    (44, 5),
+    (40, 5),
+    (44, 5),
+    (48, 6),
+    (52, 6),
+    (50, 6),
+    (54, 6),
+    (58, 7),
+    (62, 7),
+    (66, 8),
+    (70, 9),
+    (50, 6),
+    (54, 6),
+    (58, 7),
+    (60, 7),
+    (64, 8),
+    (68, 8),
+    (70, 9),
+    (76, 9),
+    (82, 10),
+    (88, 10),
+    (90, 11),
+    (94, 11),
+    (98, 12),
+    (102, 12),
+    (106, 13),
+    (110, 13),
+    (112, 14),
+    (114, 14),
+    (116, 14),
+    (118, 14),
+    (90, 4),
+    (94, 5),
+    (98, 6),
+    (102, 7),
+    (106, 8),
+    (110, 9),
+    (114, 10),
+    (118, 11),
+    (122, 12),
+    (126, 13),
+    (130, 14),
+    (134, 15),
+    (138, 16),
+    (142, 16),
+    (130, 6),
+    (134, 7),
+    (138, 8),
+    (142, 9),
+    (146, 10),
+    (150, 12),
+    (154, 14),
+    (158, 16),
+    (162, 18),
+    (166, 18),
+    (155, 8),
+    (160, 10),
+    (165, 12),
+    (170, 14),
+    (175, 16),
+    (180, 18),
+    (185, 20),
+    (190, 22),
 ];
 
 /// Smooth win-rate gate: hold [`V10_RAMP_WIN_AT`] while bots-only, soften once
@@ -852,7 +929,7 @@ pub fn v10_win_at_for_stage(index: usize) -> f64 {
     if index < V10_NATION_INTRO_STAGE {
         return V10_RAMP_WIN_AT;
     }
-    if index < 20 {
+    if index < V10_MULTI_NATION_STAGE {
         return V10_ONE_NATION_WIN_AT;
     }
     if index < V10_EASY_RAMP_LEN {
@@ -887,7 +964,7 @@ pub fn imply_stage_from_learning_rate(lr_now: f64, base_lr: f64, decay: f64) -> 
     Some((stage as usize).min(V10_STAGE_COUNT - 1))
 }
 
-/// Remap a 35-stage V10 sidecar index onto the 100-stage ladder.
+/// Remap a 35-stage V10 sidecar index onto the current stage table.
 pub fn remap_v10_stage_35_to_100(old: usize) -> usize {
     let old = old.min(V10_PREV35_LEN - 1);
     if old < 20 {
@@ -896,6 +973,40 @@ pub fn remap_v10_stage_35_to_100(old: usize) -> usize {
         let legacy = old - 20;
         V10_EASY_RAMP_LEN + (legacy * (V10_STAGE_COUNT - V10_EASY_RAMP_LEN - 1)) / 14
     }
+}
+
+/// Remap a prior 100-stage V10 sidecar index onto the current stage table by
+/// matching lobby density (bots, nations). Prefers the same nation count and
+/// the smallest bots ≥ the old lobby so progress never moves backwards.
+pub fn remap_v10_stage_100_to_current(old: usize) -> usize {
+    let old = old.min(V10_PREV100_LEN - 1);
+    let (bots, nations) = V10_PREV100_DENSITY[old];
+    remap_density_to_stage(bots, nations)
+}
+
+fn remap_density_to_stage(bots: u32, nations: u32) -> usize {
+    if let Some((index, _)) = V10_BOT_NATION_DENSITY
+        .iter()
+        .enumerate()
+        .find(|&(_, &(b, n))| b == bots && n == nations)
+    {
+        return index;
+    }
+    if let Some((index, _)) = V10_BOT_NATION_DENSITY
+        .iter()
+        .enumerate()
+        .filter(|&(_, &(_, n))| n == nations)
+        .filter(|&(_, &(b, _))| b >= bots)
+        .min_by_key(|&(_, &(b, _))| b)
+    {
+        return index;
+    }
+    V10_BOT_NATION_DENSITY
+        .iter()
+        .enumerate()
+        .min_by_key(|&(_, &(b, n))| (n.abs_diff(nations), b.abs_diff(bots)))
+        .map(|(index, _)| index)
+        .unwrap_or(0)
 }
 
 fn apply_v10_stage_params(stages: &mut [Stage]) {
@@ -911,7 +1022,7 @@ fn apply_v10_stage_params(stages: &mut [Stage]) {
     }
 }
 
-/// Build the full 100-stage V10 ladder (maps/difficulty/cadence + density/gates).
+/// Build the full V10 ladder (maps/difficulty/cadence + density/gates).
 ///
 /// Map variety is introduced early so the policy cannot overfit Onion:
 /// stages 0-7 sample the 8-map bridge pool, then stages 8+ use the full
@@ -936,13 +1047,13 @@ fn build_v10_stages() -> Vec<Stage> {
     };
     // 0-7: 8-map warm-up (terrain/naval variety without World/Asia yet)
     push(&V10_BRIDGE_MAPS, "Easy", 15, V10_MAP_WARMUP_LEN);
-    // 8-45: full broad-16 through the early/mid Easy density ramp
-    push(&V10_BROAD_MAPS, "Easy", 15, 38);
-    // 46-67: broad Easy with faster decision cadence
-    push(&V10_BROAD_MAPS, "Easy", 10, 22);
-    push(&V10_BROAD_MAPS, "Medium", 10, 14); // 68-81
-    push(&V10_BROAD_MAPS, "Hard", 10, 10); // 82-91
-    push(&V10_BROAD_MAPS, "Impossible", 10, 8); // 92-99
+    // 8-27: full broad-16 through early/mid Easy density
+    push(&V10_BROAD_MAPS, "Easy", 15, 20);
+    // 28-35: broad Easy with faster decision cadence (closeout → peak)
+    push(&V10_BROAD_MAPS, "Easy", 10, 8);
+    push(&V10_BROAD_MAPS, "Medium", 10, 14); // 36-49
+    push(&V10_BROAD_MAPS, "Hard", 10, 10); // 50-59
+    push(&V10_BROAD_MAPS, "Impossible", 10, 8); // 60-67
     debug_assert_eq!(stages.len(), V10_STAGE_COUNT);
     apply_v10_stage_params(&mut stages);
     stages
@@ -959,14 +1070,11 @@ fn build_v10_stages() -> Vec<Stage> {
 pub const V10_ENV_TARGETS: [usize; V10_STAGE_COUNT] = [
     24, 24, 24, 24, 24, 24, 24, 24, 24, 24, // 0-9
     24, 24, 24, 24, 24, 24, 24, 24, 24, 24, // 10-19
-    24, 24, 24, 24, 24, 24, 24, 24, 24, 24, // 20-29
-    24, 24, 24, 24, 24, 24, 24, 24, 24, 24, // 30-39
-    24, 24, 24, 24, 24, 24, 20, 20, 20, 20, // 40-49
-    20, 20, 20, 20, 16, 16, 16, 16, 12, 12, // 50-59
-    12, 12, 12, 12, 12, 12, 12, 12, 10, 10, // 60-69
-    10, 10, 10, 10, 10, 10, 10, 10, 10, 10, // 70-79
-    10, 10, 8, 8, 8, 8, 8, 8, 8, 8, // 80-89
-    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, // 90-99
+    24, 24, 24, 24, 24, 24, 24, 24, 20, 20, // 20-29
+    20, 16, 16, 16, 12, 12, 10, 10, 10, 10, // 30-39
+    10, 10, 10, 10, 10, 10, 10, 10, 10, 10, // 40-49
+    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, // 50-59
+    8, 8, 8, 8, 8, 8, 8, 8, // 60-67
 ];
 
 pub fn stages_for_schedule(_schedule: CurriculumSchedule) -> Vec<Stage> {
@@ -1794,17 +1902,19 @@ mod tests {
     }
 
     #[test]
-    fn v10_hundred_stage_curve_has_one_nation_band_and_smooth_gates() {
+    fn v10_stage_curve_has_one_nation_band_and_smooth_gates() {
         let v10 = stages_for_schedule(CurriculumSchedule::V10);
         assert_eq!(v10.len(), V10_STAGE_COUNT);
-        assert_eq!(V10_EASY_RAMP_LEN, 30);
+        assert_eq!(V10_EASY_RAMP_LEN, 22);
         assert_eq!(V10_MAP_WARMUP_LEN, 8);
         assert_eq!(V10_BROAD_STAGE, 8);
-        assert_eq!(V10_CLOSEOUT_STAGE, 48);
-        assert_eq!(V10_BRIDGE_STAGE, 54);
-        assert_eq!(V10_MEDIUM_START, 68);
-        assert_eq!(V10_HARD_START, 82);
-        assert_eq!(V10_IMPOSSIBLE_START, 92);
+        assert_eq!(V10_NATION_INTRO_STAGE, 8);
+        assert_eq!(V10_MULTI_NATION_STAGE, 12);
+        assert_eq!(V10_CLOSEOUT_STAGE, 28);
+        assert_eq!(V10_BRIDGE_STAGE, 31);
+        assert_eq!(V10_MEDIUM_START, 36);
+        assert_eq!(V10_HARD_START, 50);
+        assert_eq!(V10_IMPOSSIBLE_START, 60);
         assert_eq!(v10[0].bots, 2);
         assert_eq!(v10[0].nations, Nations::Exact(0));
         // Early map variety: bridge-8 warm-up, then broad-16 for the rest.
@@ -1820,6 +1930,11 @@ mod tests {
         assert_eq!(v10[V10_MEDIUM_START].difficulty, "Medium");
         assert_eq!(v10[V10_HARD_START].difficulty, "Hard");
         assert_eq!(v10[V10_IMPOSSIBLE_START].difficulty, "Impossible");
+        // Medium/Hard/Impossible lobbies unchanged vs the prior 100-stage table.
+        assert_eq!(
+            &V10_BOT_NATION_DENSITY[V10_MEDIUM_START..],
+            &V10_PREV100_DENSITY[68..]
+        );
         // Difficulty jumps reset nations low, then each band ramps back up.
         let Nations::Exact(easy_peak_n) = v10[V10_MEDIUM_START - 1].nations else {
             panic!("expected Exact nations");
@@ -1887,17 +2002,20 @@ mod tests {
                 assert_eq!(stage.maps, &V10_BROAD_MAPS, "stage {index} maps");
             }
         }
-        for index in 0..15 {
+        for index in 0..V10_NATION_INTRO_STAGE {
             assert_eq!(v10[index].nations, Nations::Exact(0), "stage {index}");
         }
-        for index in 15..20 {
+        for index in V10_NATION_INTRO_STAGE..V10_MULTI_NATION_STAGE {
             assert_eq!(v10[index].nations, Nations::Exact(1), "stage {index}");
         }
-        assert_eq!(v10[20].nations, Nations::Exact(2));
+        assert_eq!(v10[V10_MULTI_NATION_STAGE].nations, Nations::Exact(2));
         assert_eq!(v10[0].win_at, V10_RAMP_WIN_AT);
         assert_eq!(v10[V10_NATION_INTRO_STAGE - 1].win_at, V10_RAMP_WIN_AT);
         assert_eq!(v10[V10_NATION_INTRO_STAGE].win_at, V10_ONE_NATION_WIN_AT);
-        assert_eq!(v10[20].win_at, V10_NATION_RAMP_WIN_AT);
+        assert_eq!(
+            v10[V10_MULTI_NATION_STAGE].win_at,
+            V10_NATION_RAMP_WIN_AT
+        );
         assert_eq!(v10[V10_EASY_RAMP_LEN - 1].win_at, V10_NATION_RAMP_WIN_AT);
         assert!(v10[V10_CLOSEOUT_STAGE].win_at < V10_NATION_RAMP_WIN_AT);
         assert!(v10[V10_CLOSEOUT_STAGE].win_at > V10_WIN_AT_END - 1e-9);
@@ -1919,9 +2037,13 @@ mod tests {
         }
         assert!(v10[1].bots > v10[0].bots);
         assert_eq!(remap_v10_stage_35_to_100(0), 0);
-        assert_eq!(remap_v10_stage_35_to_100(19), 28);
-        assert_eq!(remap_v10_stage_35_to_100(20), 30);
-        assert_eq!(remap_v10_stage_35_to_100(34), 99);
+        assert_eq!(remap_v10_stage_35_to_100(19), 20);
+        assert_eq!(remap_v10_stage_35_to_100(20), 22);
+        assert_eq!(remap_v10_stage_35_to_100(34), 67);
+        // Live ppo_v11 was on prior stage 22 (24 bots / 2 nations).
+        assert_eq!(remap_v10_stage_100_to_current(22), 13);
+        assert_eq!(remap_v10_stage_100_to_current(68), V10_MEDIUM_START);
+        assert_eq!(remap_v10_stage_100_to_current(99), V10_STAGE_COUNT - 1);
     }
 
     #[test]

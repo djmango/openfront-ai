@@ -462,6 +462,11 @@ fn expand_v10_sidecar_if_needed(state: &mut TrainState) {
         Some(ofcore::curriculum::remap_v10_stage_35_to_100(as35))
     } else if targets_len == ofcore::curriculum::V10_PREV35_LEN {
         Some(ofcore::curriculum::remap_v10_stage_35_to_100(state.stage))
+    } else if targets_len == ofcore::curriculum::V10_PREV100_LEN {
+        Some(ofcore::curriculum::remap_v10_stage_100_to_current(state.stage))
+    } else if state.stage >= ofcore::curriculum::V10_STAGE_COUNT {
+        // Targets already cleared/reset but stage index is still from a longer table.
+        Some(ofcore::curriculum::remap_v10_stage_100_to_current(state.stage))
     } else {
         None
     };
@@ -473,7 +478,7 @@ fn expand_v10_sidecar_if_needed(state: &mut TrainState) {
         state.recent_conversions.clear();
         state.recent_deaths.clear();
         println!(
-            "[train] V10 100-stage expand: stage {old} -> {new_stage} \
+            "[train] V10 stage-table expand: stage {old} -> {new_stage} \
              (from {targets_len}-slot sidecar; cleared windows; env targets reset)"
         );
     }
@@ -1207,15 +1212,21 @@ mod v10_state_and_gate_tests {
         assert_eq!(requested_stage_env_target(&targets, 0, 24), None);
 
         let v10 = ofcore::curriculum::V10_ENV_TARGETS;
-        assert_eq!(requested_stage_env_target(&v10, 54, 20), Some(16));
-        assert_eq!(requested_stage_env_target(&v10, 58, 16), Some(12));
-        assert_eq!(requested_stage_env_target(&v10, 82, 10), Some(8));
+        assert_eq!(
+            requested_stage_env_target(&v10, ofcore::curriculum::V10_BRIDGE_STAGE, 20),
+            Some(16)
+        );
+        assert_eq!(requested_stage_env_target(&v10, 34, 16), Some(12));
+        assert_eq!(
+            requested_stage_env_target(&v10, ofcore::curriculum::V10_HARD_START, 10),
+            Some(8)
+        );
     }
 
     #[test]
     fn stage_resize_skips_noop_when_floor_exceeds_max_envs() {
         let v10 = ofcore::curriculum::V10_ENV_TARGETS;
-        // Stages 0-45 want 24, but A40 pods cap at MAX_ENVS=16.
+        // Early Easy wants 24, but A40 pods cap at MAX_ENVS=16.
         assert_eq!(
             requested_stage_env_target_for_resize(&v10, 10, 14, true, 14),
             None
@@ -1229,9 +1240,9 @@ mod v10_state_and_gate_tests {
             requested_stage_env_target_for_resize(&v10, 10, 14, false, 14),
             Some(24)
         );
-        // Late-stage shrink below the cap still restarts (floor 16→12).
+        // Late-Easy shrink below the cap still restarts (floor 16→12).
         assert_eq!(
-            requested_stage_env_target_for_resize(&v10, 58, 14, true, 14),
+            requested_stage_env_target_for_resize(&v10, 34, 14, true, 14),
             Some(12)
         );
     }
@@ -1239,7 +1250,7 @@ mod v10_state_and_gate_tests {
     #[test]
     fn autoscale_keeps_gains_above_flat_stage_floor() {
         let v10 = ofcore::curriculum::V10_ENV_TARGETS;
-        // Live autoscale climbed to 32; advance 20→21 stays at floor 24.
+        // Live autoscale climbed to 32; advance stays at floor 24.
         // Must NOT request a shrink-to-floor restart (that caused the
         // 24→26→…→40 climb storm that starved the win window).
         assert_eq!(
@@ -1255,9 +1266,15 @@ mod v10_state_and_gate_tests {
             requested_stage_env_target_for_resize(&v10, 21, 16, true, 40),
             Some(24)
         );
-        // Intentional VRAM taper (20→16 at stage 54) still shrinks.
+        // Intentional VRAM taper (20→16 at bridge) still shrinks.
         assert_eq!(
-            requested_stage_env_target_for_resize(&v10, 54, 20, true, 40),
+            requested_stage_env_target_for_resize(
+                &v10,
+                ofcore::curriculum::V10_BRIDGE_STAGE,
+                20,
+                true,
+                40
+            ),
             Some(16)
         );
         // Without autoscale, exact-target shrink still applies on flat bands.
@@ -1269,7 +1286,7 @@ mod v10_state_and_gate_tests {
 
     #[test]
     fn startup_envs_keep_autoscale_gains_above_stage_floor() {
-        let mut resumed = state_for_schedule(Some("v10"), 68);
+        let mut resumed = state_for_schedule(Some("v10"), ofcore::curriculum::V10_MEDIUM_START);
         resumed.envs_per_shard = 16;
         resumed.requested_env_target = None;
         assert_eq!(
@@ -1306,6 +1323,21 @@ mod v10_state_and_gate_tests {
             ofcore::curriculum::CurriculumSchedule::V10
         );
         assert!(state.stage >= ofcore::curriculum::V10_EASY_RAMP_LEN);
+        assert!(state.stage_env_targets.is_empty());
+        assert!(state.recent_wins.is_empty());
+    }
+
+    #[test]
+    fn resume_expands_prior_100_stage_v10_sidecar() {
+        let mut state = state_for_schedule(Some("v10"), 22);
+        state.stage_env_targets = vec![24; ofcore::curriculum::V10_PREV100_LEN];
+        reconcile_resume_schedule(
+            &mut state,
+            ofcore::curriculum::CurriculumSchedule::V10,
+            false,
+        )
+        .unwrap();
+        assert_eq!(state.stage, 13);
         assert!(state.stage_env_targets.is_empty());
         assert!(state.recent_wins.is_empty());
     }

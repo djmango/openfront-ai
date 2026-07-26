@@ -137,7 +137,7 @@ const LANDING_HTML: &str = r#"<!doctype html>
     <h1>OpenFront Agent</h1>
     <p class="lead">A reinforcement learning agent that plays
       <a href="https://openfront.io">OpenFront.io</a> on the real engine.
-      Current run <code>ppo_v10</code>: 100-stage Easy→Impossible curriculum
+      Current run <code>ppo_v10</code>: Easy→Impossible stage-table curriculum
       across the broad map pool. Play it 1v1.</p>
     <figure class="preview">%%PREVIEW%%</figure>
     <div class="actions">
