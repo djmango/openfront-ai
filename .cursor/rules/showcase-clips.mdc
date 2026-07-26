@@ -16,11 +16,14 @@ agent (ppo_v11 / oftrain `--watch` / `render_client_replay.py` / `ofshowcase`):
 
 ## Watch / sampling (critical)
 
-- **Stochastic, not greedy.** Demos and showcase must match train rollouts /
-  WR windows (`--watch-stochastic=true`, the oftrain default). Greedy argmax
-  freezes near spawn (~52 tiles) and dies — never use it for human-facing clips.
+- **Stochastic only — never greedy.** Demos and showcase must match train
+  rollouts / WR windows (`--watch-stochastic=true`, the oftrain default).
+  Greedy argmax freezes near spawn (~52 tiles) and dies. Do not pass
+  `--watch-stochastic=false`, `--greedy`, or `PLAY_GREEDY=1` for human-facing
+  clips. We do not do greedy anymore.
 - **Tick budget:** use the shared train default (`DEFAULT_MAX_EPISODE_TICKS` =
-  21000). Do not silently lower it (e.g. 12000) or episodes look "cut short".
+  21000) so episodes run to the same horizon as training. Do not silently
+  lower it (e.g. 12000) or episodes look "cut short".
 - **Engine:** `--engine native` (same as train).
 - **Lobby density:** for "current stage" clips, use that stage's bots/nations
   from `V10_BOT_NATION_DENSITY`. Asking for 4n/8n while the policy is still on
