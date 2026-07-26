@@ -39,7 +39,7 @@ cargo run --release -p ofae -- train --data ../data --steps 100 --out /tmp/ofae_
 stage identity is always persisted as `curriculum_schedule: "v10"` with reward
 profile `v10-anti-spiral-v1`.
 
-V10 is a 100-stage anti-death-spiral ladder: a long Onion Easy micro-ramp,
+V10 is a stage-table anti-death-spiral ladder: a compressed Easy density ramp,
 closeout and bridge stages, then broad-map Easy/Medium/Hard/Impossible bands.
 The live reward recipe keeps the historical `--v81-*`, `--v84-*`,
 `--v85-*`, and `--v86-*` knob names, but those knobs are the V10 defaults.
