@@ -1512,17 +1512,12 @@ impl PolicyNet {
         let (nuke_s, nuke_lp) = categorical_sample(&nuke, greedy);
 
         let (qa, qb) = quantity_ab(&quantity);
-<<<<<<< HEAD
         let q = if greedy {
             &qa / (&qa + &qb)
         } else {
-            sample_beta_host(&qa, &qb)
+            sample_beta(&qa, &qb)
         }
         .clamp(1e-4, 1.0 - 1e-4);
-=======
-        let q = if greedy { &qa / (&qa + &qb) } else { sample_beta(&qa, &qb) }
-            .clamp(1e-4, 1.0 - 1e-4);
->>>>>>> 4d016f5 (oftrain: sample Beta quantities on CUDA)
         let q_lp = beta_log_prob(&q, &qa, &qb);
 
         let needs_p = self.needs_player.index_select(0, &a);
