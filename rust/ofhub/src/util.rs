@@ -13,9 +13,12 @@ use crate::paths::clips_dir;
 pub const LEGACY_POLICY_RUNS: &[&str] = &["ppo_v5", "ppo_v7"];
 
 pub fn showcase_maps() -> Vec<String> {
-    // Always the broad V10 pool (no env override).
+    // Broad V10 pool minus Onion. Training may still sample Onion; human-facing
+    // showcase / hub clips must vary maps and must not default to Onion-only
+    // (owner preference — see `.cursor/rules/showcase-clips.mdc`).
     let mut maps: Vec<String> = ofcore::curriculum::V10_BROAD_MAPS
         .iter()
+        .filter(|m| **m != "Onion")
         .map(|m| (*m).to_string())
         .collect();
     // Shuffle so generation / featured bias isn't fixed to list order.

@@ -508,14 +508,15 @@ struct Args {
     benchmark_out: Option<String>,
 
     /// Run one watch episode, save GameRecord + `.debug.json`, exit.
-    /// Engine comes from `--engine` (default historically overridden to node
-    /// inside watch; now respects `--engine`). Sampling is greedy unless
-    /// `--watch-stochastic`.
+    /// Engine follows `--engine` (default native, same as train). Sampling is
+    /// stochastic by default (matches PPO rollouts / WR windows); pass
+    /// `--watch-stochastic=false` only for argmax debug (greedy freezes near spawn).
     #[arg(long, default_value_t = false)]
     watch: bool,
 
-    /// Sample actions from the policy during `--watch` instead of argmax.
-    #[arg(long, default_value_t = false)]
+    /// Sample actions during `--watch` (default true — matches train rollouts).
+    /// Set `--watch-stochastic=false` for argmax; do not use greedy for demos.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     watch_stochastic: bool,
 
     /// Policy safetensors for `--watch` (also accepted via `--resume`/`--init`).
@@ -1313,15 +1314,7 @@ fn main() -> anyhow::Result<()> {
             .record
             .clone()
             .unwrap_or_else(|| format!("records-rl/{run}_s{}_{}.json", args.stage, args.seed));
-        // Historical default for bare `--watch` was Node even when clap
-        // `--engine` defaulted to native. Keep Node unless the operator
-        // explicitly passes `--engine …`.
-        let watch_engine = if std::env::args().any(|a| a == "--engine" || a.starts_with("--engine="))
-        {
-            args.engine
-        } else {
-            engine::EngineKind::Node
-        };
+        // Watch uses the same engine default as train (`--engine`, native).
         return watch::run_watch(watch::WatchConfig {
             policy,
             record: std::path::PathBuf::from(record),
@@ -1346,7 +1339,7 @@ fn main() -> anyhow::Result<()> {
             curriculum_schedule,
             reward_config,
             recurrent_policy: args.recurrent_policy,
-            engine: watch_engine,
+            engine: args.engine,
             stochastic: args.watch_stochastic,
         });
     }

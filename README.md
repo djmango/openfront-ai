@@ -218,9 +218,11 @@ encoders.
 
 ### Watching the agent play
 
-`oftrain --watch` runs a greedy episode and saves an engine `GameRecord` -
+`oftrain --watch` runs a **stochastic** episode (same sampling as PPO
+rollouts / WR windows — not greedy argmax) and saves an engine `GameRecord` -
 the same format openfront.io archives - which the **real game client**
 replays with the full UI. Showcase automation: `ofshowcase daemon`.
+Use the shared train tick budget (`--max-episode-ticks`, default 21000).
 
 ```bash
 # after building oftrain (see rust/README.md)
@@ -228,7 +230,10 @@ replays with the full UI. Showcase automation: `ofshowcase daemon`.
 ```
 
 **Client video** - `scripts/render_client_replay.py` replays the record in the
-actual OpenFront client (headless Chromium):
+actual OpenFront client (headless Chromium). Prefer a real NVIDIA GPU (full
+Chromium + Xvfb + Vulkan); SoftGL clips are a last resort. For human-facing
+batches use a **variety of maps** — do not ship Onion-only showcases (see
+`.cursor/rules/showcase-clips.mdc` and `showcase-clips/run_watches.sh`).
 
 ```bash
 uv run playwright install chromium   # one-time
