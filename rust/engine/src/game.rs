@@ -290,6 +290,8 @@ pub struct Game {
     pub(crate) mini_water_astar: crate::water::WaterAstarScratch,
     pub(crate) mini_water_hpa: Option<crate::water_hpa::WaterHierarchical>,
     water_graph_version: u32,
+    /// TS `GameImpl._waterManager` - batched water-nuke terrain conversion.
+    water_manager: crate::water_manager::WaterManager,
     path_buf: Vec<TileRef>,
     next_unit_id: i32,
     /// TS `GameImpl.unitGrid` - spatial index for nearbyUnits order.
@@ -403,6 +405,7 @@ impl Default for Game {
             mini_water_astar: crate::water::WaterAstarScratch::new(1),
             mini_water_hpa: None,
             water_graph_version: 0,
+            water_manager: crate::water_manager::WaterManager::default(),
             path_buf: Vec::new(),
             next_unit_id: 1,
             unit_grid: crate::unit_grid::UnitGrid::new(1, 1),
@@ -3804,6 +3807,24 @@ impl Game {
             });
         }
 
+        // TS `GameImpl.executeNextTick`: flush water conversions after hash,
+        // before `_ticks++`.
+        let rebuild_hpa = {
+            let Game {
+                map,
+                mini_map,
+                water_manager,
+                ..
+            } = self;
+            let (_changed, rebuild) = water_manager.tick(map, mini_map, tick);
+            rebuild
+        };
+        if rebuild_hpa {
+            self.mini_water_hpa =
+                Some(crate::water_hpa::WaterHierarchical::new(&self.mini_map, true));
+            self.water_graph_version = self.water_graph_version.wrapping_add(1);
+        }
+
         self.ticks += 1;
         TickUpdates {
             hash,
@@ -3812,6 +3833,22 @@ impl Game {
                 winner: w.clone(),
             }),
         }
+    }
+
+    /// TS `GameImpl.queueWaterConversion`.
+    pub fn queue_water_conversion(&mut self, tile: TileRef) {
+        if !self.is_land(tile) {
+            return;
+        }
+        if self.map.owner_id(tile) != 0 {
+            // TS throws; nuke path always relinquished first.
+            return;
+        }
+        if !self.wire.water_nukes() {
+            self.map.set_fallout(tile, true);
+            return;
+        }
+        self.water_manager.queue_tile(tile);
     }
 }
 
@@ -4823,19 +4860,23 @@ mod impassable_terrain_tests {
         unreachable!("gap marker only - see doc comment above");
     }
 
-    // TS `GameImpl.setWater`/`queueWaterConversion`'s "water nukes" feature
-    // defaults off (`Config.waterNukes() => this._gameConfig.waterNukes ??
-    // false`) and has no native port; when off, TS's own
-    // `queueWaterConversion` falls back to `setFallout` (which native DOES
-    // implement and does guard `!is_impassable` in `NukeExecution::detonate`
-    // - see `nuke_execution.rs`'s tests). The low-level `GameMap.setWater`
-    // this specific test calls is only reachable via that unported feature
-    // (plus a client-only rendering call site), so there is nothing to
-    // port it against.
     #[test]
-    #[ignore = "GameMap.setWater is only reachable via the unported (default-off) waterNukes feature; native's default fallout path is covered in nuke_execution.rs"]
-    fn set_water_does_not_convert_impassable_tiles_is_unported() {
-        unreachable!("gap marker only - see doc comment above");
+    fn set_water_converts_land_and_decrements_land_count() {
+        let mut game = Game::default();
+        // Default 1x1 map is water (terrain 0). Build a tiny land map.
+        let meta = crate::map::MapMeta {
+            width: 2,
+            height: 2,
+            num_land_tiles: 4,
+        };
+        let terrain = vec![0x80u8; 4]; // land bit set, mag 0
+        game.map = crate::map::GameMap::from_terrain_bytes(&meta, &terrain).unwrap();
+        assert_eq!(game.map.num_land_tiles, 4);
+        let t = game.map.ref_xy(0, 0);
+        assert!(game.map.is_land(t));
+        game.map.set_water(t);
+        assert!(game.map.is_water(t));
+        assert_eq!(game.map.num_land_tiles, 3);
     }
 }
 

@@ -74,12 +74,36 @@ struct PlayerSnapshot {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct RailroadSnapshot {
+    id: u32,
+    from: u32,
+    to: u32,
+    tiles: Vec<u32>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StationSnapshot {
+    id: u32,
+    unit_id: i32,
+    unit_type: String,
+    tile: Option<u32>,
+    railroads: Vec<u32>,
+    cluster: Option<u32>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct TickSnapshot {
     tick: u32,
     in_spawn_phase: bool,
     total_land_tiles: u32,
     total_owned_tiles: i32,
     players: Vec<PlayerSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    railroads: Option<Vec<RailroadSnapshot>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stations: Option<Vec<StationSnapshot>>,
 }
 
 #[derive(Serialize)]
@@ -118,6 +142,7 @@ fn snapshot(
     dump_owned_tiles: bool,
     dump_border_order: bool,
     dump_owned_order: bool,
+    dump_rails: bool,
 ) -> TickSnapshot {
     let warships: HashMap<(u16, i32), &openfront_engine::execution::WarshipExecution> = game
         .live_warships()
@@ -195,12 +220,45 @@ fn snapshot(
         })
         .collect();
     let total_owned_tiles: i32 = players.iter().map(|p| p.tiles).sum();
+    let (railroads, stations) = if dump_rails {
+        let mut rails: Vec<RailroadSnapshot> = game
+            .rail_network
+            .railroads
+            .values()
+            .map(|r| RailroadSnapshot {
+                id: r.id,
+                from: r.from,
+                to: r.to,
+                tiles: r.tiles.clone(),
+            })
+            .collect();
+        rails.sort_by_key(|r| r.id);
+        let mut sts: Vec<StationSnapshot> = game
+            .rail_network
+            .stations
+            .values()
+            .map(|s| StationSnapshot {
+                id: s.id,
+                unit_id: s.unit_id,
+                unit_type: s.unit_type.clone(),
+                tile: openfront_engine::rail::station_tile(game, &game.rail_network, s.id),
+                railroads: s.railroads.clone(),
+                cluster: s.cluster,
+            })
+            .collect();
+        sts.sort_by_key(|s| s.id);
+        (Some(rails), Some(sts))
+    } else {
+        (None, None)
+    };
     TickSnapshot {
         tick: game.ticks(),
         in_spawn_phase: game.in_spawn_phase(),
         total_land_tiles: game.num_land_tiles(),
         total_owned_tiles,
         players,
+        railroads,
+        stations,
     }
 }
 
@@ -210,6 +268,7 @@ fn main() {
     let dump_owned_tiles = std::env::var_os("OF_DUMP_OWNED_TILES").is_some();
     let dump_border_order = std::env::var_os("OF_DUMP_BORDER_ORDER").is_some();
     let dump_owned_order = std::env::var_os("OF_DUMP_OWNED_ORDER").is_some();
+    let dump_rails = std::env::var_os("OF_DUMP_RAILS").is_some();
     let dump_units_from: u32 = std::env::var("OF_DUMP_UNITS_FROM")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -242,14 +301,28 @@ fn main() {
         }
         if game.ticks() % args.every == 0 {
             let include_units = dump_units && game.ticks() >= dump_units_from;
-            out.push(snapshot(&game, include_units, dump_owned_tiles, dump_border_order, dump_owned_order));
+            out.push(snapshot(
+                &game,
+                include_units,
+                dump_owned_tiles,
+                dump_border_order,
+                dump_owned_order,
+                dump_rails,
+            ));
         }
     }
     // Always capture the true final state even if it doesn't land on an
     // `every`-tick boundary.
     if game.ticks() >= dump_ticks_from && out.last().map(|s| s.tick) != Some(game.ticks()) {
         let include_units = dump_units && game.ticks() >= dump_units_from;
-        out.push(snapshot(&game, include_units, dump_owned_tiles, dump_border_order, dump_owned_order));
+        out.push(snapshot(
+            &game,
+            include_units,
+            dump_owned_tiles,
+            dump_border_order,
+            dump_owned_order,
+            dump_rails,
+        ));
     }
 
     let dump = Dump {

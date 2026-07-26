@@ -174,8 +174,10 @@ impl NukeExecution {
                 game.relinquish_tile(t);
                 *tiles_per_player.entry(owner).or_insert(0) += 1;
             }
+            // TS `NukeExecution.detonate`: land tiles go through
+            // `queueWaterConversion` (water when `waterNukes`, else fallout).
             if game.is_land(t) {
-                game.map.set_fallout(t, true);
+                game.queue_water_conversion(t);
             }
         }
 
