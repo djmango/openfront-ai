@@ -251,8 +251,8 @@ pub fn nearby_land_player_small_ids(game: &Game, small_id: u16) -> Vec<u16> {
     let mut seen = HashSet::new();
     game.for_each_border_tile(small_id, |tile| {
         game.map.for_each_neighbor4(tile, |neighbor| {
-            // TS `PlayerImpl.nearby()`: `map.isLand(n) && !map.isImpassable(n)`.
-            if !game.is_land(neighbor) || game.is_impassable(neighbor) {
+            // TS `PlayerImpl.nearby()` at f0da4182: land only (no isImpassable).
+            if !game.is_land(neighbor) {
                 return;
             }
             let owner = game.map.owner_id(neighbor);
@@ -270,8 +270,8 @@ pub fn nearby_player_small_ids(game: &Game, small_id: u16) -> Vec<u16> {
     let mut seen = HashSet::new();
     game.for_each_border_tile(small_id, |tile| {
         game.map.for_each_neighbor4(tile, |neighbor| {
-            // TS `PlayerImpl.nearby()`: `map.isLand(n) && !map.isImpassable(n)`.
-            if !game.is_land(neighbor) || game.is_impassable(neighbor) {
+            // TS `PlayerImpl.nearby()` at f0da4182: land only (no isImpassable).
+            if !game.is_land(neighbor) {
                 return;
             }
             let owner = game.map.owner_id(neighbor);
@@ -309,7 +309,12 @@ pub fn nearby_player_small_ids(game: &Game, small_id: u16) -> Vec<u16> {
                 continue;
             }
             let tile = game.ref_xy(nx as u32, ny as u32);
-            if !game.is_land(tile) || game.is_impassable(tile) || game.has_fallout(tile) {
+            // TS `shoreReachableNeighbors`: land only; skip unowned+fallout
+            // (owned fallout still contributes). No isImpassable on this pin.
+            if !game.is_land(tile) {
+                continue;
+            }
+            if !game.has_owner(tile) && game.has_fallout(tile) {
                 continue;
             }
             let owner = game.map.owner_id(tile);
@@ -366,11 +371,8 @@ pub fn send_boat_attack_to_nearby_tn(game: &mut Game, small_id: u16) -> bool {
                 continue;
             }
             let tile = game.ref_xy(nx as u32, ny as u32);
-            if game.is_land(tile)
-                && !game.is_impassable(tile)
-                && !game.has_owner(tile)
-                && !game.has_fallout(tile)
-            {
+            // TS `sendBoatAttackToNearbyTerraNullius`: land, unowned, no fallout.
+            if game.is_land(tile) && !game.has_owner(tile) && !game.has_fallout(tile) {
                 candidates.push(tile);
             }
         }
@@ -575,14 +577,15 @@ fn collect_bordering_players(game: &Game, small_id: u16) -> Vec<u16> {
         }
     };
 
-    // TS `AiAttackBehavior.maybeAttack`: borderTiles flatMap neighbors() order.
+    // TS `AiAttackBehavior.maybeAttack`: borderTiles flatMap neighbors() order;
+    // filter is land && owner !== self (no isImpassable on this pin).
     if let Some(border) = game.border_tiles_of(small_id) {
         let mut nbuf = [TileRef::MAX; 4];
         for border_tile in border.iter() {
             let n = game.map.neighbors4_ts(border_tile, &mut nbuf);
             for i in 0..n {
                 let neighbor = nbuf[i];
-                if !game.is_land(neighbor) || game.is_impassable(neighbor) {
+                if !game.is_land(neighbor) {
                     continue;
                 }
                 let owner = game.map.owner_id(neighbor);
@@ -630,19 +633,13 @@ pub(crate) fn nearby_players_ts_order(game: &Game, small_id: u16) -> Vec<u16> {
             let n = game.map.neighbors4_ts(border_tile, &mut nbuf);
             for i in 0..n {
                 let neighbor = nbuf[i];
-                if !game.is_land(neighbor) || game.is_impassable(neighbor) {
+                // TS `PlayerImpl.nearby()`: land only (no isImpassable on f0da).
+                if !game.is_land(neighbor) {
                     continue;
                 }
                 let owner = game.map.owner_id(neighbor);
-                // TS `PlayerImpl.nearby()`'s direct-neighbor `visit`: an
-                // unowned tile that is nuked (fallout) contributes NO slot at
-                // all (`return` before `ns.add(...)`), unlike a plain unowned
-                // tile, which still adds a TerraNullius slot. Native was
-                // pushing `owner` unconditionally here, so a nuked-TN border
-                // tile occupied a slot in this order-sensitive list (feeding
-                // e.g. `tribe_maybe_attack`'s neighbor shuffle and
-                // `troop_send_cap`'s neighbor scan) that TS's fixed `nearby()`
-                // (see `AiAttackBehaviorNukedTerritory.test.ts`) omits.
+                // Unowned+fallout contributes no slot; plain unowned still
+                // adds TerraNullius (owner 0).
                 if owner == 0 && game.has_fallout(neighbor) {
                     continue;
                 }
@@ -676,7 +673,12 @@ pub(crate) fn nearby_players_ts_order(game: &Game, small_id: u16) -> Vec<u16> {
                 continue;
             }
             let tile = game.ref_xy(nx as u32, ny as u32);
-            if !game.is_land(tile) || game.is_impassable(tile) || game.has_fallout(tile) {
+            // TS `shoreReachableNeighbors`: land only; skip unowned+fallout
+            // (owned fallout still contributes). No isImpassable on this pin.
+            if !game.is_land(tile) {
+                continue;
+            }
+            if !game.has_owner(tile) && game.has_fallout(tile) {
                 continue;
             }
             push(game.map.owner_id(tile));
@@ -1713,10 +1715,8 @@ fn attack_with_random_boat(
                 continue;
             }
             let tile = game.ref_xy(rx as u32, ry as u32);
+            // TS `attackWithRandomBoat`: land only (no isImpassable on f0da).
             if !game.is_land(tile) {
-                continue;
-            }
-            if game.is_impassable(tile) {
                 continue;
             }
             let owner = game.map.owner_id(tile);
