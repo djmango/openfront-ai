@@ -260,11 +260,10 @@ fn get_capturing_player(game: &Game, small_id: u16, cluster: &OrderedTiles) -> O
     // order. TS `getCapturingPlayer` uses `map.neighbors4(...)` (west, east,
     // north, south on this pin, f0da4182) - the first-seen order below feeds
     // `getMode`'s tie-break (first enemy with the strictly-greatest border
-    // count wins), so it must match TS's neighbor order. `for_each_neighbor4`
-    // is north, south, west, east and would pick a different captor on ties.
+    // count wins), so it must match TS `forEachNeighbor` order (N,S,W,E).
     let mut neighbors: Vec<(u16, u32)> = Vec::new();
     for t in cluster.iter() {
-        game.map.for_each_neighbor4_wens(t, |n| {
+        game.map.for_each_neighbor4(t, |n| {
             let owner = game.map.owner_id(n);
             if owner == 0 || owner == small_id {
                 return;
@@ -313,11 +312,11 @@ fn flood_owned(game: &Game, small_id: u16, start: TileRef) -> OrderedTiles {
     // order. That insertion order - and therefore the order `capturing.conquer`
     // hands the cluster's tiles to the captor - is exactly this DFS visit
     // order, which feeds the captor's insertion-ordered owned/border sets. It
-    // must use the same neighbor order as TS or the captor's border set drifts
-    // (see the K6NhdJh7 tick-443 Aztec-absorption bisection). The general
-    // `for_each_neighbor4` is north, south, west, east and would desync it.
+    // must use the same neighbor order as TS `forEachNeighbor` (N,S,W,E) or
+    // the captor's border set drifts (see the K6NhdJh7 tick-443 Aztec-
+    // absorption bisection).
     while let Some(t) = stack.pop() {
-        game.map.for_each_neighbor4_wens(t, |n| {
+        game.map.for_each_neighbor4(t, |n| {
             if result.contains(n) || game.map.owner_id(n) != small_id {
                 return;
             }
