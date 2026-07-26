@@ -166,10 +166,15 @@ async fn main() -> Result<()> {
         } => {
             let script = repo_root().join("scripts/hf_replay_upload.py");
             let mut cmd = Command::new("uv");
+            // pyarrow + huggingface_hub: keep upload self-contained on train pods
+            // that only have the oftrain torch venv (no project sync).
             cmd.args([
                 "run",
+                "--no-project",
                 "--with",
                 "pyarrow",
+                "--with",
+                "huggingface_hub",
                 "python",
                 script.to_str().unwrap_or("scripts/hf_replay_upload.py"),
                 "--spool",
@@ -195,8 +200,11 @@ async fn main() -> Result<()> {
             let mut cmd = Command::new("uv");
             cmd.args([
                 "run",
+                "--no-project",
                 "--with",
                 "pyarrow",
+                "--with",
+                "huggingface_hub",
                 "python",
                 script.to_str().unwrap_or("scripts/hf_replay_pull.py"),
                 "--repo",
