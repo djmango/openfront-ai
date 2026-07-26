@@ -15,6 +15,11 @@ Usage:
         --start 2026-07-03T00:00:00Z --end 2026-07-05T00:00:00Z \
         --min-players 8 --max-games 500
 
+    # Only games hashed on the live production tip (clean latest-engine parity):
+    uv run python scripts/fetch_games.py \
+        --start 2026-07-24T00:00:00Z --end 2026-07-27T00:00:00Z \
+        --git-commit dd1277e245b5 --max-games 80
+
 API docs: openfront/docs/API.md (max 2-day window, 1000 games per page).
 """
 
@@ -84,12 +89,45 @@ def main() -> None:
     ap.add_argument(
         "--mode", default=None, help='optional filter: "Free For All" or "Team"'
     )
+    ap.add_argument(
+        "--git-commit",
+        default=None,
+        help=(
+            "only keep games whose record.gitCommit matches this prefix "
+            "(e.g. the live production tip). Listing has no commit field, so "
+            "mismatches are skipped after the per-game download."
+        ),
+    )
+    ap.add_argument(
+        "--max-fetch-attempts",
+        type=int,
+        default=0,
+        help=(
+            "cap how many full records to download while hunting for "
+            "--git-commit matches (0 = 20x --max-games). Without a commit "
+            "filter this equals --max-games."
+        ),
+    )
     ap.add_argument("--sleep", type=float, default=0.3, help="seconds between fetches")
     args = ap.parse_args()
 
     out_root = Path(args.out)
     out_root.mkdir(parents=True, exist_ok=True)
-    have = {p.stem.removesuffix(".json") for p in out_root.glob("*/*.json.gz")}
+    want_commit = (args.git_commit or "").strip().lower() or None
+    # When filtering by commit, only treat games already under a matching
+    # bucket as present - a same-ID record on an older pin must not block
+    # re-fetching the live-tip copy (IDs are unique per game anyway).
+    if want_commit:
+        have = {
+            p.stem.removesuffix(".json")
+            for p in out_root.glob("*/*.json.gz")
+            if p.parent.name.lower().startswith(want_commit)
+        }
+    else:
+        have = {p.stem.removesuffix(".json") for p in out_root.glob("*/*.json.gz")}
+    max_attempts = args.max_fetch_attempts or (
+        args.max_games * 20 if want_commit else args.max_games
+    )
 
     start = datetime.fromisoformat(args.start.replace("Z", "+00:00"))
     end = datetime.fromisoformat(args.end.replace("Z", "+00:00"))
@@ -114,17 +152,21 @@ def main() -> None:
     candidates.sort(key=lambda g: -(g.get("numPlayers") or 0))
     print(
         f"{len(listed)} public games listed, {len(candidates)} pass filters "
-        f"(min {args.min_players} players), downloading up to {args.max_games}"
+        f"(min {args.min_players} players)"
+        + (f", requiring gitCommit~={want_commit}" if want_commit else "")
+        + f", keeping up to {args.max_games} (max {max_attempts} fetches)"
     )
 
-    done = failed = 0
+    done = failed = skipped_commit = 0
+    attempts = 0
     for g in candidates:
-        if done >= args.max_games:
+        if done >= args.max_games or attempts >= max_attempts:
             break
         gid = g["game"]
         if gid in have:
             done += 1
             continue
+        attempts += 1
         try:
             record = get_json(f"{API}/game/{gid}")
         except Exception as e:
@@ -136,10 +178,20 @@ def main() -> None:
             failed += 1
             continue
         commit = record.get("gitCommit", "unknown")[:12]
+        if want_commit and not commit.lower().startswith(want_commit):
+            skipped_commit += 1
+            if skipped_commit <= 5 or skipped_commit % 25 == 0:
+                print(
+                    f"[{gid}] skip commit {commit} (want {want_commit}) "
+                    f"[{skipped_commit} skipped]"
+                )
+            time.sleep(args.sleep)
+            continue
         dest = out_root / commit / f"{gid}.json.gz"
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(gzip.compress(json.dumps(record).encode(), 6))
         done += 1
+        have.add(gid)
         n_turns = len(record["turns"])
         n_hashes = sum(1 for t in record["turns"] if t.get("hash") is not None)
         print(
@@ -148,7 +200,10 @@ def main() -> None:
         )
         time.sleep(args.sleep)
 
-    print(f"done: {done} saved, {failed} failed")
+    print(
+        f"done: {done} saved, {failed} failed, {skipped_commit} wrong-commit, "
+        f"{attempts} fetches"
+    )
     by_commit: dict[str, int] = {}
     for p in out_root.glob("*/*.json.gz"):
         by_commit[p.parent.name] = by_commit.get(p.parent.name, 0) + 1
