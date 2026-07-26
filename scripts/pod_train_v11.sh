@@ -59,6 +59,9 @@ MAX_ENVS="${MAX_ENVS:-40}"
 MIN_ENVS="${MIN_ENVS:-10}"
 # Aim autoscale / ops target at the util SLO (balance handles train fill).
 TARGET_GPU_UTIL="${TARGET_GPU_UTIL:-0.92}"
+# check_every still gates how often we re-read util; growth itself jumps via
+# n' = n * target/util (see oftrain autoscale.rs), so step is only the
+# minimum increment / alignment quantum - not the climb rate.
 AUTOSCALE_CHECK_EVERY="${AUTOSCALE_CHECK_EVERY:-5}"
 AUTOSCALE_STEP="${AUTOSCALE_STEP:-2}"
 # Shorter rollout lowers the collect barrier; pair with high epochs + balance
