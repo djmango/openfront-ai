@@ -84,21 +84,23 @@
 </nav>
 
 <div class="now" id="now">
-  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 25th, 2026</h2>
-  <p><b><code>ppo_v11</code> is live on one clean <b>4×A100 80GB</b> pod.</b>
-  Old 2× pod is gone. Single oftrain at 38 envs/shard (max 40), util stack
-  intact. Stage <b>16</b> / update ~<b>467+</b>, window WR ~0.6 (soft 80% nation
-  gate). GPUs hold ~<b>95-100%</b> util, ~<b>47-52 / 80 GB</b> VRAM. Details:
-  <a href="#v11-4x">4× scale-up</a>, <a href="#v11-soak">prior soak</a>.</p>
-  <p><b>AE v3.2 no-static</b> is the live encoder pair
+  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 26th, 2026</h2>
+  <p><b><code>ppo_v11</code> still live on the sole <b>4×A100 80GB</b> pod</b>
+  (HF syncing ~every 30 min through u570+). Overnight climb through the
+  1-nation band: stage <b>16 → 19</b> / update <b>571</b> / ~1.71M steps /
+  32 envs/shard. Stage 19 = 24 bots + 1 nation (peak Easy 1-nation density,
+  soft 80% gate); win window just reset after the advance (1/1 so far).
+  Details: <a href="#v11-4x">4× scale-up</a>, <a href="#v11-soak">soak</a>.</p>
+  <p><b>AE v3.2 no-static</b> remains the live encoder pair
   (<code>ae_v32_nostatic_d8c32</code> / <code>d16c32</code>).
-  Watch / MODEL-overlay clips are pointed at V11 checkpoints on HF
-  (<code>djmango/openfront-rl/ppo_v11/</code>), not the V10 archive.</p>
+  Watch / MODEL-overlay clips stay on
+  <code>djmango/openfront-rl/ppo_v11/</code>.</p>
   <p class="d" style="margin:.75rem 0 0">
-  Surpass old model ≈ clear stage <b>28+</b> (V10 peaked ~27, died at 25 /
-  WR ~30%). Medium = stage <b>68</b>. Measured 4× cadence (see
-  <a href="#v11-4x">scale-up</a>): surpass ~<b>Jul 27</b> UTC (band Jul 26-28);
-  Medium ~<b>Jul 31</b> UTC (band Aug 1-3 if another stage-12-shaped hole shows).</p>
+  Next cliff: stage <b>20</b> (2 nations). Surpass V10 ≈ stage <b>28+</b>
+  (V10 peaked ~27, died at 25 / WR ~30%). Medium = stage <b>68</b>.
+  If 1-nation pace holds, surpass still ~<b>Jul 27</b> UTC (band Jul 27-28);
+  2-nation intro can slip that. Medium ~<b>Jul 31</b> UTC
+  (band Aug 1-3 if another s12-shaped hole shows).</p>
 </div>
 
 
@@ -133,18 +135,18 @@ revised ETAs from measured update cadence.</p>
 </ul>
 
 <h3 id="v11-4x-eta">Revised ETAs</h3>
-<p>Stage 16, window WR ~0.6 under the soft 80% nation gate. Update clock is
+<p>As of Jul 26 ~07:00 UTC: stage 19 / u571 (overnight 16→19). Update clock is
 not much faster than 2×; the win is sample volume per update. Vs the late-2×
 ~3 h/stage band, assume ~2.2-2.8 h/stage once WR is clearing (WR-gated):</p>
 <table>
   <tr><th>milestone</th><th>stage</th><th>ETA (UTC)</th><th>notes</th></tr>
   <tr><td>Surpass V10</td><td>28+</td><td>~Jul 27</td>
-    <td>band Jul 26-28; was Jul 27-28 on 2× after s12</td></tr>
+    <td>band Jul 27-28; next density cliff is s20 (2 nations)</td></tr>
   <tr><td>Medium</td><td>68</td><td>~Jul 31</td>
     <td>band Aug 1-3 if another long stick appears</td></tr>
 </table>
-<p>Caveats: first-nation WR is noisy (window can sit ~0.6 before clearing);
-another s12-shaped hole still dominates calendar risk more than GPU count.</p>
+<p>Caveats: 1-nation windows reset thin on each advance; 2-nation intro at s20
+and any s12-shaped hole still dominate calendar risk more than GPU count.</p>
 
 <h2 class="date" id="v11-soak">Jul 24-25, 2026 - V11 soak: util stack, watch truth, clip bugs</h2>
 <p class="session">First multi-day <code>ppo_v11</code> run on 2×A100. Validated the
@@ -1299,11 +1301,12 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <code>ae_v3.pt</code> until the v3.1 winner is wired into <code>rl/obs.py</code>.</p>
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
-  <tr><td><code>ppo_v11</code></td><td><b>live</b> Jul 25 (4×A100 80GB; was 2×)</td>
-    <td>Util stack + AE v3.2 no-static + recurrent LSTM. Climbing V10 Easy
-    ramp: ~u456 / stage 15 / ~1.1M steps, window WR ~0.85 / DR 0 (16 bots +
-    1 nation). Surpass-V10 target stage 28+; Medium at 68.
-    See <a href="#v11-soak">soak</a>, <a href="#v11-plan">plan</a>.
+  <tr><td><code>ppo_v11</code></td><td><b>live</b> Jul 26 (4×A100 80GB)</td>
+    <td>Util stack + AE v3.2 no-static + recurrent LSTM. V10 Easy ramp:
+    u571 / stage 19 / ~1.71M steps / 32 envs/shard (24 bots + 1 nation;
+    overnight 16→19). Surpass-V10 target stage 28+; Medium at 68.
+    See <a href="#v11-soak">soak</a>, <a href="#v11-plan">plan</a>,
+    <a href="#v11-4x">4×</a>.
     HF <a href="https://huggingface.co/djmango/openfront-rl/tree/main/ppo_v11">ppo_v11/</a>.</td></tr>
   <tr><td><code>ppo_v10</code></td><td><b>killed</b> Jul 23 (4×A40)</td>
     <td>Dense anti-spiral + <b>100-stage</b> Easy ramp
