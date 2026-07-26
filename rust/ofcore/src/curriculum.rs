@@ -844,6 +844,59 @@ pub const V10_BOT_NATION_DENSITY: [(u32, u32); V10_STAGE_COUNT] = [
     (190, 22), // 99
 ];
 
+/// Upper exclusive bound of the difficulty band containing `stage`
+/// (Easy→Medium→Hard→Impossible). Hot-WR skips never cross this line so the
+/// policy must still land on each difficulty reset stage.
+fn v10_band_end(stage: usize) -> usize {
+    if stage < V10_MEDIUM_START {
+        V10_MEDIUM_START
+    } else if stage < V10_HARD_START {
+        V10_HARD_START
+    } else if stage < V10_IMPOSSIBLE_START {
+        V10_IMPOSSIBLE_START
+    } else {
+        V10_STAGE_COUNT
+    }
+}
+
+/// Stages to advance when the win gate passes.
+///
+/// Default is 1. When the rolling window is still near-perfect (`win_rate` ≥
+/// 0.95 and `death_rate` ≤ 0.10), skip Easy/Medium micro-steps:
+/// - jump to the next nation-count increase within the current difficulty
+///   band (up to 3 stages), else
+/// - skip one same-nation +bots tick (`stride = 2`).
+///
+/// Never skips across a difficulty-band boundary — Medium/Hard/Impossible
+/// intros stay mandatory landings.
+pub fn v10_advance_stride(stage: usize, win_rate: f64, death_rate: f64) -> usize {
+    const HOT_WR: f64 = 0.95;
+    const HOT_DEATH: f64 = 0.10;
+    const MAX_STRIDE: usize = 3;
+    if stage + 1 >= V10_STAGE_COUNT {
+        return 0;
+    }
+    if win_rate < HOT_WR || death_rate > HOT_DEATH {
+        return 1;
+    }
+    let (_, nations0) = V10_BOT_NATION_DENSITY[stage];
+    let band_end = v10_band_end(stage);
+    for delta in 1..=MAX_STRIDE {
+        let dest = stage + delta;
+        if dest >= band_end || dest >= V10_STAGE_COUNT {
+            break;
+        }
+        let (_, nations1) = V10_BOT_NATION_DENSITY[dest];
+        if nations1 > nations0 {
+            return delta;
+        }
+    }
+    let dest = (stage + 2)
+        .min(band_end.saturating_sub(1))
+        .min(V10_STAGE_COUNT - 1);
+    (dest.saturating_sub(stage)).max(1)
+}
+
 /// Smooth win-rate gate: hold [`V10_RAMP_WIN_AT`] while bots-only, soften once
 /// nations appear, then ease from [`V10_NATION_RAMP_WIN_AT`] down to
 /// [`V10_WIN_AT_END`] by the final Impossible stage.
@@ -1922,6 +1975,24 @@ mod tests {
         assert_eq!(remap_v10_stage_35_to_100(19), 28);
         assert_eq!(remap_v10_stage_35_to_100(20), 30);
         assert_eq!(remap_v10_stage_35_to_100(34), 99);
+    }
+
+    #[test]
+    fn hot_wr_skips_same_nation_micro_steps_but_not_band_edges() {
+        // Cool window: always +1.
+        assert_eq!(v10_advance_stride(22, 0.80, 0.0), 1);
+        assert_eq!(v10_advance_stride(22, 1.0, 0.20), 1);
+        // Stage 22 (2n) @ 100% → jump to 24 (first 3n), skipping 23.
+        assert_eq!(v10_advance_stride(22, 1.0, 0.0), 2);
+        // Stage 19 (1n) @ 100% → land on 20 (2n intro), do not skip the cliff.
+        assert_eq!(v10_advance_stride(19, 1.0, 0.0), 1);
+        // Stage 20 (2n densify) @ 100% → +2 bots micro-skip to 22.
+        assert_eq!(v10_advance_stride(20, 1.0, 0.0), 2);
+        // Peak Easy must still step into Medium (no skip across band).
+        assert_eq!(v10_advance_stride(V10_MEDIUM_START - 1, 1.0, 0.0), 1);
+        assert_eq!(v10_advance_stride(V10_HARD_START - 1, 1.0, 0.0), 1);
+        // Final stage: nowhere to go.
+        assert_eq!(v10_advance_stride(V10_STAGE_COUNT - 1, 1.0, 0.0), 0);
     }
 
     #[test]

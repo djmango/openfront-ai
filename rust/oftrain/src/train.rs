@@ -7722,7 +7722,21 @@ pub fn run(mut cfg: Config) -> Result<()> {
                         let death_rate = window_mean(&recent_deaths).unwrap_or(0.0);
                         let win_gate = stages[from_stage].win_at;
                         let window_size = recent_wins.len();
-                        curr_stage += 1;
+                        let stride = ofcore::curriculum::v10_advance_stride(
+                            from_stage, win_rate, death_rate,
+                        )
+                        .max(1);
+                        let dest = (from_stage + stride).min(stages.len() - 1);
+                        if dest > from_stage + 1 {
+                            println!(
+                                "[train] hot-WR stride {from_stage}->{dest} \
+                                 (WR={:.1}% DR={:.1}%); skipping {} micro-stage(s)",
+                                win_rate * 100.0,
+                                death_rate * 100.0,
+                                dest - from_stage - 1
+                            );
+                        }
+                        curr_stage = dest;
                         curriculum_transitions.push(CurriculumTransition {
                             event: "advance",
                             from_stage,
