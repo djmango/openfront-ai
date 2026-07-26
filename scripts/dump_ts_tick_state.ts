@@ -61,6 +61,25 @@ interface PlayerSnapshot {
   hash: number;
   numUnits: number;
   units?: UnitSnapshot[];
+  ownedTiles?: number[];
+  borderOrder?: number[];
+  ownedOrder?: number[];
+}
+
+interface RailroadSnapshot {
+  id: number;
+  from: number;
+  to: number;
+  tiles: number[];
+}
+
+interface StationSnapshot {
+  id: number;
+  unitId: number;
+  unitType: string;
+  tile: number | null;
+  railroads: number[];
+  cluster: number | null;
 }
 
 interface TickSnapshot {
@@ -69,6 +88,8 @@ interface TickSnapshot {
   totalLandTiles: number;
   totalOwnedTiles: number;
   players: PlayerSnapshot[];
+  railroads?: RailroadSnapshot[];
+  stations?: StationSnapshot[];
 }
 
 function playerIdentity(p: Player): string {
@@ -76,7 +97,14 @@ function playerIdentity(p: Player): string {
   return clientID === null ? `nation:${p.name()}` : `player:${clientID}`;
 }
 
-function snapshot(game: Game, dumpUnits: boolean): TickSnapshot {
+function snapshot(
+  game: Game,
+  dumpUnits: boolean,
+  dumpOwnedTiles: boolean,
+  dumpBorderOrder: boolean,
+  dumpOwnedOrder: boolean,
+  dumpRails: boolean,
+): TickSnapshot {
   const players: PlayerSnapshot[] = game.allPlayers().map((p) => {
     const base: PlayerSnapshot = {
       identity: playerIdentity(p),
@@ -98,9 +126,11 @@ function snapshot(game: Game, dumpUnits: boolean): TickSnapshot {
         tile: u.tile(),
         hash: u.hash(),
         health: u.health(),
-        veterancy: u.veterancy(),
+        veterancy: typeof (u as any).veterancy === "function" ? (u as any).veterancy() : 0,
         veterancyProgress:
-          u.type() === UnitType.Warship ? u.warshipState().veterancyProgress : 0,
+          u.type() === UnitType.Warship
+            ? ((u.warshipState() as any).veterancyProgress ?? 0)
+            : 0,
         targetTile: u.targetTile() ?? null,
         patrolTile:
           u.type() === UnitType.Warship
@@ -120,16 +150,57 @@ function snapshot(game: Game, dumpUnits: boolean): TickSnapshot {
             : false,
       }));
     }
+    if (dumpOwnedTiles) {
+      base.ownedTiles = Array.from(p.tiles() as Iterable<number>).sort(
+        (a, b) => a - b,
+      );
+    }
+    if (dumpBorderOrder) {
+      base.borderOrder = Array.from(p.borderTiles() as Iterable<number>);
+    }
+    if (dumpOwnedOrder) {
+      base.ownedOrder = Array.from(p.tiles() as Iterable<number>);
+    }
     return base;
   });
   const totalOwnedTiles = players.reduce((sum, p) => sum + p.tiles, 0);
-  return {
+  const out: TickSnapshot = {
     tick: game.ticks(),
     inSpawnPhase: game.inSpawnPhase(),
     totalLandTiles: game.numLandTiles(),
     totalOwnedTiles,
     players,
   };
+  if (dumpRails) {
+    const rn = game.railNetwork() as any;
+    const stations = [...rn.stationManager().getAll()] as any[];
+    const railSet = new Map<number, RailroadSnapshot>();
+    const stationSnaps: StationSnapshot[] = [];
+    for (const st of stations) {
+      const rails = [...st.railroads] as any[];
+      stationSnaps.push({
+        id: st.id,
+        unitId: st.unit.id(),
+        unitType: st.unit.type(),
+        tile: st.tile(),
+        railroads: rails.map((r) => r.id),
+        cluster: st.getCluster() ? 1 : null,
+      });
+      for (const r of rails) {
+        if (!railSet.has(r.id)) {
+          railSet.set(r.id, {
+            id: r.id,
+            from: r.from.id,
+            to: r.to.id,
+            tiles: [...r.tiles],
+          });
+        }
+      }
+    }
+    out.railroads = [...railSet.values()].sort((a, b) => a.id - b.id);
+    out.stations = stationSnaps.sort((a, b) => a.id - b.id);
+  }
+  return out;
 }
 
 async function main() {
@@ -177,6 +248,10 @@ async function main() {
   }
 
   const dumpUnits = process.env.OF_DUMP_UNITS !== undefined;
+  const dumpOwnedTiles = process.env.OF_DUMP_OWNED_TILES !== undefined;
+  const dumpBorderOrder = process.env.OF_DUMP_BORDER_ORDER !== undefined;
+  const dumpOwnedOrder = process.env.OF_DUMP_OWNED_ORDER !== undefined;
+  const dumpRails = process.env.OF_DUMP_RAILS !== undefined;
   const dumpUnitsFrom = process.env.OF_DUMP_UNITS_FROM
     ? parseInt(process.env.OF_DUMP_UNITS_FROM, 10)
     : 0;
@@ -194,14 +269,32 @@ async function main() {
     game.executeNextTick();
     if (game.ticks() < dumpTicksFrom) continue;
     if (game.ticks() % every === 0) {
-      out.push(snapshot(game, dumpUnits && game.ticks() >= dumpUnitsFrom));
+      out.push(
+        snapshot(
+          game,
+          dumpUnits && game.ticks() >= dumpUnitsFrom,
+          dumpOwnedTiles,
+          dumpBorderOrder,
+          dumpOwnedOrder,
+          dumpRails,
+        ),
+      );
     }
   }
   if (
     game.ticks() >= dumpTicksFrom &&
     (out.length === 0 || out[out.length - 1].tick !== game.ticks())
   ) {
-    out.push(snapshot(game, dumpUnits && game.ticks() >= dumpUnitsFrom));
+    out.push(
+      snapshot(
+        game,
+        dumpUnits && game.ticks() >= dumpUnitsFrom,
+        dumpOwnedTiles,
+        dumpBorderOrder,
+        dumpOwnedOrder,
+        dumpRails,
+      ),
+    );
   }
 
   fs.writeFileSync(

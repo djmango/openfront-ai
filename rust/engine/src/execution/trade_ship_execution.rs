@@ -26,6 +26,12 @@ pub struct TradeShipExecution {
     tiles_traveled: u32,
     was_captured: bool,
     active: bool,
+    /// TS `WaterPathFinder` stagger / water-graph version tracking.
+    stagger: u32,
+    water_graph_version: u32,
+    pending_version: u32,
+    stagger_countdown: u32,
+    stagger_assigned: bool,
 }
 
 impl TradeShipExecution {
@@ -48,6 +54,11 @@ impl TradeShipExecution {
             tiles_traveled: 0,
             was_captured: false,
             active: true,
+            stagger: 0,
+            water_graph_version: 0,
+            pending_version: u32::MAX,
+            stagger_countdown: 0,
+            stagger_assigned: false,
         }
     }
 
@@ -80,6 +91,11 @@ impl TradeShipExecution {
             tiles_traveled: 0,
             was_captured: false,
             active: true,
+            stagger: 0,
+            water_graph_version: 0,
+            pending_version: u32::MAX,
+            stagger_countdown: 0,
+            stagger_assigned: false,
         }
     }
 
@@ -120,6 +136,11 @@ impl TradeShipExecution {
             tiles_traveled: 0,
             was_captured,
             active: true,
+            stagger: 0,
+            water_graph_version: 0,
+            pending_version: u32::MAX,
+            stagger_countdown: 0,
+            stagger_assigned: false,
         }
     }
 
@@ -129,6 +150,28 @@ impl TradeShipExecution {
 
     pub fn cached_destination_port_owner_small_id(&self) -> Option<u16> {
         self.dst_port_owner_small_id
+    }
+
+    /// TS `WaterPathFinder.ensureFresh` - after a water-graph rebuild, keep the
+    /// old cached path for `stagger` ticks, then drop it so the next step
+    /// re-runs A* against the new graph.
+    fn ensure_water_path_fresh(&mut self, game: &Game) {
+        let v = game.water_graph_version();
+        if v == self.water_graph_version {
+            return;
+        }
+        if self.pending_version != v {
+            self.pending_version = v;
+            self.stagger_countdown = self.stagger;
+        }
+        if self.stagger_countdown > 0 {
+            self.stagger_countdown -= 1;
+            return;
+        }
+        self.water_graph_version = v;
+        self.path.clear();
+        self.path_idx = 0;
+        self.path_dst = None;
     }
 
     fn refresh_path(&mut self, game: &mut Game, from: TileRef, to: TileRef) -> bool {
@@ -150,6 +193,7 @@ impl TradeShipExecution {
     }
 
     fn next_path_tile(&mut self, game: &mut Game, from: TileRef, to: TileRef) -> Option<TileRef> {
+        self.ensure_water_path_fresh(game);
         if self.path_dst != Some(to) || self.path.is_empty() {
             if !self.refresh_path(game, from, to) {
                 return None;
@@ -207,11 +251,23 @@ impl TradeShipExecution {
 }
 
 impl Execution for TradeShipExecution {
-    fn init(&mut self, _game: &mut Game, _tick: u32) {}
+    fn init(&mut self, game: &mut Game, _tick: u32) {
+        // TS `TradeShipExecution.init`: assign WaterPathFinder stagger.
+        if !self.stagger_assigned {
+            self.stagger = game.next_trade_ship_stagger();
+            self.water_graph_version = game.water_graph_version();
+            self.stagger_assigned = true;
+        }
+    }
 
     fn tick(&mut self, game: &mut Game, _tick: u32) {
         if !self.active {
             return;
+        }
+        if !self.stagger_assigned {
+            self.stagger = game.next_trade_ship_stagger();
+            self.water_graph_version = game.water_graph_version();
+            self.stagger_assigned = true;
         }
 
         // TS `TradeShipExecution.tick`: the ship is lazily built on the first tick.

@@ -108,6 +108,9 @@ pub struct WarshipExecution {
     hunt_path: Vec<TileRef>,
     hunt_path_idx: usize,
     active: bool,
+    /// TS `WaterPathFinder(mg)` with default stagger=0 - invalidate immediately
+    /// when `waterGraphVersion` advances.
+    water_graph_version: u32,
 }
 
 impl WarshipExecution {
@@ -209,7 +212,22 @@ impl WarshipExecution {
             hunt_path: Vec::new(),
             hunt_path_idx: 0,
             active: true,
+            water_graph_version: 0,
         }
+    }
+
+    /// TS `WaterPathFinder.ensureFresh` with stagger=0 (immediate rebuild).
+    fn ensure_water_path_fresh(&mut self, game: &Game) {
+        let v = game.water_graph_version();
+        if v == self.water_graph_version {
+            return;
+        }
+        self.water_graph_version = v;
+        self.path.clear();
+        self.path_idx = 0;
+        self.hunt_path.clear();
+        self.hunt_path_idx = 0;
+        self.hunt_target_tile = None;
     }
 
     fn spawn_tile(&self, game: &Game) -> Option<TileRef> {
@@ -257,6 +275,7 @@ impl WarshipExecution {
     }
 
     fn refresh_path(&mut self, game: &mut Game, from: TileRef, to: TileRef) -> bool {
+        self.ensure_water_path_fresh(game);
         if !game.plan_water_path(from, to) {
             return false;
         }
@@ -342,6 +361,15 @@ impl WarshipExecution {
     fn best_neighbor_toward(&self, game: &Game, from: TileRef, target: TileRef) -> Option<TileRef> {
         let mut best = None;
         let mut best_distance = game.manhattan_dist(from, target);
+        // TS `WarshipExecution.bestNeighborToward` iterates
+        // `this.mg.forEachNeighbor(...)`, which on this pin (f0da4182) visits
+        // west, east, north, south. The `distance < best_distance` (strict)
+        // comparison keeps the FIRST neighbor achieving the minimum, so visit
+        // order decides which tile the warship steps onto when two neighbors
+        // are equidistant to the target - it must match TS `forEachNeighbor`
+        // (N,S,W,E) or the warship (a hashed unit) drifts onto a different
+        // tile, desyncing the player hash mid-game (see jdxWdFCt tick-2292
+        // warship bisection).
         game.map.for_each_neighbor4(from, |neighbor| {
             if !game.is_water(neighbor) {
                 return;
@@ -362,6 +390,7 @@ impl WarshipExecution {
         target_owner: u16,
         target_unit_id: i32,
     ) {
+        self.ensure_water_path_fresh(game);
         for _ in 0..2 {
             let Some(from) = game.unit_tile_of(self.owner_small_id, unit_id) else {
                 return;
@@ -699,6 +728,7 @@ impl Execution for WarshipExecution {
         self.random = Some(PseudoRandom::new(tick as i32));
         self.unit_id = Some(game.build_unit(self.owner_small_id, WARSHIP, spawn));
         self.last_observed_patrol_tile = Some(self.patrol_tile);
+        self.water_graph_version = game.water_graph_version();
     }
 
     fn tick(&mut self, game: &mut Game, tick: u32) {
@@ -706,6 +736,7 @@ impl Execution for WarshipExecution {
             self.active = false;
             return;
         };
+        self.ensure_water_path_fresh(game);
         let Some(from) = game.unit_tile_of(self.owner_small_id, unit_id) else {
             self.active = false;
             return;
