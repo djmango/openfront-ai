@@ -462,6 +462,11 @@ fn expand_v10_sidecar_if_needed(state: &mut TrainState) {
         Some(ofcore::curriculum::remap_v10_stage_35_to_100(as35))
     } else if targets_len == ofcore::curriculum::V10_PREV35_LEN {
         Some(ofcore::curriculum::remap_v10_stage_35_to_100(state.stage))
+    } else if targets_len == ofcore::curriculum::V10_PREV100_LEN {
+        Some(ofcore::curriculum::remap_v10_stage_100_to_current(state.stage))
+    } else if state.stage >= ofcore::curriculum::V10_STAGE_COUNT {
+        // Targets already cleared/reset but stage index is still from a longer table.
+        Some(ofcore::curriculum::remap_v10_stage_100_to_current(state.stage))
     } else {
         None
     };
@@ -473,7 +478,7 @@ fn expand_v10_sidecar_if_needed(state: &mut TrainState) {
         state.recent_conversions.clear();
         state.recent_deaths.clear();
         println!(
-            "[train] V10 100-stage expand: stage {old} -> {new_stage} \
+            "[train] V10 stage-table expand: stage {old} -> {new_stage} \
              (from {targets_len}-slot sidecar; cleared windows; env targets reset)"
         );
     }
@@ -750,6 +755,12 @@ fn requested_stage_env_target(
 /// Without this, a stage floor of 24 with `MAX_ENVS=16` requests a restart on
 /// every advance/demote, then clamps back to 14 on boot - a full cold restart
 /// with no net env-count change (and it also skips in-process `set_stage`).
+///
+/// With `--auto-scale-envs`, stage table values are **floors** (see
+/// [`resolve_startup_envs_per_shard`]): stay above the floor after GPU-util
+/// growth, and only shrink when the schedule's capped floor itself dropped
+/// vs the previous stage (VRAM taper). Flat-band advances (24→24) must not
+/// restart 32→24 and force an autoscale climb that aborts in-flight episodes.
 fn requested_stage_env_target_for_resize(
     targets: &[usize],
     stage: usize,
@@ -757,9 +768,26 @@ fn requested_stage_env_target_for_resize(
     auto_scale_envs: bool,
     max_envs: usize,
 ) -> Option<usize> {
-    let target = requested_stage_env_target(targets, stage, current_envs_per_shard)?;
-    let capped = clamp_resolved_envs_to_autoscale_max(target, auto_scale_envs, max_envs);
-    (capped != current_envs_per_shard).then_some(capped)
+    let floor = *targets.get(stage)?;
+    let capped = clamp_resolved_envs_to_autoscale_max(floor, auto_scale_envs, max_envs);
+    if capped == current_envs_per_shard {
+        return None;
+    }
+    if !auto_scale_envs {
+        return (capped != current_envs_per_shard).then_some(capped);
+    }
+    if current_envs_per_shard < capped {
+        return Some(capped);
+    }
+    // current > capped: shrink only when this stage's capped floor dropped
+    // relative to the previous stage (intentional taper).
+    let prev_floor = if stage > 0 {
+        targets.get(stage - 1).copied().unwrap_or(floor)
+    } else {
+        floor
+    };
+    let prev_capped = clamp_resolved_envs_to_autoscale_max(prev_floor, true, max_envs);
+    (capped < prev_capped).then_some(capped)
 }
 
 /// Resolve per-shard env count at process start.
@@ -1184,15 +1212,21 @@ mod v10_state_and_gate_tests {
         assert_eq!(requested_stage_env_target(&targets, 0, 24), None);
 
         let v10 = ofcore::curriculum::V10_ENV_TARGETS;
-        assert_eq!(requested_stage_env_target(&v10, 54, 20), Some(16));
-        assert_eq!(requested_stage_env_target(&v10, 58, 16), Some(12));
-        assert_eq!(requested_stage_env_target(&v10, 82, 10), Some(8));
+        assert_eq!(
+            requested_stage_env_target(&v10, ofcore::curriculum::V10_BRIDGE_STAGE, 20),
+            Some(16)
+        );
+        assert_eq!(requested_stage_env_target(&v10, 34, 16), Some(12));
+        assert_eq!(
+            requested_stage_env_target(&v10, ofcore::curriculum::V10_HARD_START, 10),
+            Some(8)
+        );
     }
 
     #[test]
     fn stage_resize_skips_noop_when_floor_exceeds_max_envs() {
         let v10 = ofcore::curriculum::V10_ENV_TARGETS;
-        // Stages 0-45 want 24, but A40 pods cap at MAX_ENVS=16.
+        // Early Easy wants 24, but A40 pods cap at MAX_ENVS=16.
         assert_eq!(
             requested_stage_env_target_for_resize(&v10, 10, 14, true, 14),
             None
@@ -1206,16 +1240,53 @@ mod v10_state_and_gate_tests {
             requested_stage_env_target_for_resize(&v10, 10, 14, false, 14),
             Some(24)
         );
-        // Late-stage shrink below the cap still restarts.
+        // Late-Easy shrink below the cap still restarts (floor 16→12).
         assert_eq!(
-            requested_stage_env_target_for_resize(&v10, 58, 14, true, 14),
+            requested_stage_env_target_for_resize(&v10, 34, 14, true, 14),
             Some(12)
         );
     }
 
     #[test]
+    fn autoscale_keeps_gains_above_flat_stage_floor() {
+        let v10 = ofcore::curriculum::V10_ENV_TARGETS;
+        // Live autoscale climbed to 32; advance stays at floor 24.
+        // Must NOT request a shrink-to-floor restart (that caused the
+        // 24→26→…→40 climb storm that starved the win window).
+        assert_eq!(
+            requested_stage_env_target_for_resize(&v10, 21, 32, true, 40),
+            None
+        );
+        assert_eq!(
+            requested_stage_env_target_for_resize(&v10, 21, 40, true, 40),
+            None
+        );
+        // Still grow when below the floor.
+        assert_eq!(
+            requested_stage_env_target_for_resize(&v10, 21, 16, true, 40),
+            Some(24)
+        );
+        // Intentional VRAM taper (20→16 at bridge) still shrinks.
+        assert_eq!(
+            requested_stage_env_target_for_resize(
+                &v10,
+                ofcore::curriculum::V10_BRIDGE_STAGE,
+                20,
+                true,
+                40
+            ),
+            Some(16)
+        );
+        // Without autoscale, exact-target shrink still applies on flat bands.
+        assert_eq!(
+            requested_stage_env_target_for_resize(&v10, 21, 32, false, 40),
+            Some(24)
+        );
+    }
+
+    #[test]
     fn startup_envs_keep_autoscale_gains_above_stage_floor() {
-        let mut resumed = state_for_schedule(Some("v10"), 68);
+        let mut resumed = state_for_schedule(Some("v10"), ofcore::curriculum::V10_MEDIUM_START);
         resumed.envs_per_shard = 16;
         resumed.requested_env_target = None;
         assert_eq!(
@@ -1252,6 +1323,21 @@ mod v10_state_and_gate_tests {
             ofcore::curriculum::CurriculumSchedule::V10
         );
         assert!(state.stage >= ofcore::curriculum::V10_EASY_RAMP_LEN);
+        assert!(state.stage_env_targets.is_empty());
+        assert!(state.recent_wins.is_empty());
+    }
+
+    #[test]
+    fn resume_expands_prior_100_stage_v10_sidecar() {
+        let mut state = state_for_schedule(Some("v10"), 22);
+        state.stage_env_targets = vec![24; ofcore::curriculum::V10_PREV100_LEN];
+        reconcile_resume_schedule(
+            &mut state,
+            ofcore::curriculum::CurriculumSchedule::V10,
+            false,
+        )
+        .unwrap();
+        assert_eq!(state.stage, 13);
         assert!(state.stage_env_targets.is_empty());
         assert!(state.recent_wins.is_empty());
     }
@@ -7245,6 +7331,17 @@ pub fn run(mut cfg: Config) -> Result<()> {
         .as_ref()
         .map(|s| s.recent_deaths.iter().copied().collect())
         .unwrap_or_else(|| std::collections::VecDeque::with_capacity(ofcore::curriculum::WINDOW));
+    if !recent_wins.is_empty() || !recent_conversions.is_empty() || !recent_deaths.is_empty() {
+        let wr = recent_wins.iter().sum::<f64>() / recent_wins.len().max(1) as f64;
+        println!(
+            "[train] restored curriculum windows from sidecar: \
+             wins={}/{} (mean={wr:.3}) conversions={} deaths={}",
+            recent_wins.len(),
+            ofcore::curriculum::WINDOW,
+            recent_conversions.len(),
+            recent_deaths.len()
+        );
+    }
     let return_stats = resumed_state
         .as_ref()
         .and_then(|state| state.return_stats.clone());

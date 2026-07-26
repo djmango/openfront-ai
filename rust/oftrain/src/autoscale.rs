@@ -27,7 +27,11 @@
 //! Policy:
 //! - `mem >= MEM_SHRINK_FRAC` → step down toward `--min-envs`
 //! - `mem >= MEM_BLOCK_GROW_FRAC` → hold (never grow into pressure)
-//! - else grow on util as before
+//! - else, if `util < target - GROW_BAND`, jump to
+//!   `n' = n * target / util` (linear util∝envs estimate), step-aligned and
+//!   capped by VRAM headroom (`n * MEM_BLOCK / mem`) and `--max-envs`.
+//!   One restart replaces the old `+step` climb that cost ~8 cold restarts
+//!   to go 24→40 on A100s.
 //!
 //! ## Degrading without a GPU
 //!
@@ -87,6 +91,37 @@ pub fn cpu_env_cap_per_shard(num_shards: usize) -> usize {
     (cpu_total_env_cap() / num_shards.max(1)).max(1)
 }
 
+/// Estimate envs needed to hit `target` util, assuming rough linearity
+/// `util ∝ envs` (valid while collect-bound / under-saturated - the A100
+/// sweep that motivated this module). Cap by VRAM headroom so a single
+/// jump does not overshoot `MEM_BLOCK_GROW_FRAC`. Round the delta up to a
+/// multiple of `step` (minimum one step).
+///
+/// `n' = min(max, max(n+step, n * target/util), n * MEM_BLOCK/mem)`.
+fn util_jump_target(
+    current: usize,
+    util: f64,
+    mem: Option<f64>,
+    target: f64,
+    step: usize,
+    max: usize,
+) -> usize {
+    let util = util.max(0.01);
+    let mut estimated = ((current as f64) * (target / util)).ceil() as usize;
+    if let Some(mem) = mem.filter(|m| *m > 0.0) {
+        // Headroom to the grow-block line: if mem is 60% of VRAM, we can
+        // scale envs by ~0.90/0.60 before hitting MEM_BLOCK (assuming mem
+        // also scales roughly with env count).
+        let mem_cap = ((current as f64) * (MEM_BLOCK_GROW_FRAC / mem)).floor() as usize;
+        estimated = estimated.min(mem_cap.max(current));
+    }
+    let min_next = current.saturating_add(step).min(max);
+    let desired = estimated.max(min_next).min(max);
+    let delta = desired.saturating_sub(current);
+    let stepped_delta = ((delta + step - 1) / step) * step;
+    current.saturating_add(stepped_delta).min(max).max(min_next)
+}
+
 /// Pure decision function: given the current per-shard env count and the
 /// latest GPU utilization / memory readings (0-1 fractions, or `None` if
 /// there's no signal), returns the env count that should be live after
@@ -128,7 +163,7 @@ pub fn next_env_count(
         return current;
     }
     if util < target - GROW_BAND {
-        (current + step).min(max)
+        util_jump_target(current, util, gpu_mem_frac, target, step, max)
     } else {
         current
     }
@@ -140,8 +175,10 @@ mod tests {
 
     #[test]
     fn grows_when_clearly_below_target() {
+        // Util wants ceil(8*0.95/0.40)=19, but mem headroom caps at
+        // floor(8*0.90/0.50)=14 → step-align up to 16.
         let next = next_env_count(8, Some(0.40), Some(0.50), 0.95, 4, 64, 4);
-        assert_eq!(next, 12);
+        assert_eq!(next, 16);
     }
 
     #[test]
@@ -179,7 +216,8 @@ mod tests {
 
     #[test]
     fn grows_under_previous_mem_block_threshold() {
-        // 0.85 was blocked at 0.80; with MEM_BLOCK=0.90 this should grow.
+        // 0.85 < MEM_BLOCK so growth is allowed, but mem headroom only
+        // fits ~one step (floor(16*0.90/0.85)=16) so we take min +step.
         let next = next_env_count(16, Some(0.40), Some(0.85), 0.85, 8, 32, 2);
         assert_eq!(next, 18);
     }
@@ -199,7 +237,7 @@ mod tests {
 
     #[test]
     fn clamps_growth_step_to_the_max_bound() {
-        // Below target, but the step would overshoot max - clamp, don't
+        // Below target, but the jump would overshoot max - clamp, don't
         // exceed it.
         let next = next_env_count(62, Some(0.10), Some(0.50), 0.95, 4, 64, 4);
         assert_eq!(next, 64);
@@ -243,9 +281,33 @@ mod tests {
     #[test]
     fn zero_step_still_makes_progress() {
         // `step.max(1)` inside the function means a misconfigured
-        // `--autoscale-step 0` can't wedge growth forever.
+        // `--autoscale-step 0` can't wedge growth forever. Mem headroom
+        // at 50% caps the jump below the pure util estimate (38).
         let next = next_env_count(4, Some(0.10), Some(0.50), 0.95, 4, 64, 0);
-        assert_eq!(next, 5);
+        assert_eq!(next, 7); // floor(4*0.90/0.50)=7
+    }
+
+    #[test]
+    fn near_target_util_only_takes_minimum_step() {
+        // Grow when util < target - band (0.92 - 0.03 = 0.89). At 0.88:
+        // 24*0.92/0.88 ≈ 25.1 → 26.
+        let next = next_env_count(24, Some(0.88), Some(0.50), 0.92, 10, 40, 2);
+        assert_eq!(next, 26);
+    }
+
+    #[test]
+    fn underutilized_a100_jumps_using_util_and_mem_headroom() {
+        // Live ppo_v11 shape: 24 envs @ 50% util / 60% mem, target 92%.
+        // Util wants ~44, mem headroom allows floor(24*0.90/0.60)=36,
+        // max=40 → one restart to 36 (not eight +2 climbs to 40).
+        let next = next_env_count(24, Some(0.50), Some(0.60), 0.92, 10, 40, 2);
+        assert_eq!(next, 36);
+    }
+
+    #[test]
+    fn low_mem_pressure_allows_full_util_jump_to_max() {
+        let next = next_env_count(24, Some(0.50), Some(0.40), 0.92, 10, 40, 2);
+        assert_eq!(next, 40);
     }
 
     #[test]
