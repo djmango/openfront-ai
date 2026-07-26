@@ -169,6 +169,36 @@ impl GameMap {
         self.set_tile_state(t, s);
     }
 
+    /// TS `GameMapImpl.setWater` - lake water (terrain byte 0), decrement land count.
+    pub fn set_water(&mut self, t: TileRef) {
+        if !self.is_land(t) {
+            return;
+        }
+        self.terrain[t as usize] = 0;
+        self.num_land_tiles = self.num_land_tiles.saturating_sub(1);
+    }
+
+    /// TS `GameMapImpl.setOcean`.
+    pub fn set_ocean(&mut self, t: TileRef) {
+        self.terrain[t as usize] |= 1 << OCEAN_BIT;
+    }
+
+    /// TS `GameMapImpl.setShorelineBit`.
+    pub fn set_shoreline_bit(&mut self, t: TileRef) {
+        self.terrain[t as usize] |= 1 << SHORELINE_BIT;
+    }
+
+    /// TS `GameMapImpl.clearShorelineBit`.
+    pub fn clear_shoreline_bit(&mut self, t: TileRef) {
+        self.terrain[t as usize] &= !(1 << SHORELINE_BIT);
+    }
+
+    /// TS `GameMapImpl.setMagnitude`.
+    pub fn set_magnitude(&mut self, t: TileRef, value: u8) {
+        let tbyte = &mut self.terrain[t as usize];
+        *tbyte = (*tbyte & !MAGNITUDE_MASK) | (value & MAGNITUDE_MASK);
+    }
+
     pub fn magnitude(&self, t: TileRef) -> u8 {
         self.terrain_byte(t) & MAGNITUDE_MASK
     }

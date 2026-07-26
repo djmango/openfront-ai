@@ -87,6 +87,9 @@ impl Execution for DonateGoldExecution {
             return;
         }
         game.add_gold(recipient_small_id, removed);
+        // TS `PlayerImpl.donateGold` records every successful donation on the
+        // shared `sentDonations` list (used by the donate cooldown).
+        game.record_donation(self.sender_small_id, recipient_small_id);
         let relation_update = calculate_relation_update(game, removed, tick);
         if relation_update > 0 {
             game.update_relation(recipient_small_id, self.sender_small_id, relation_update);

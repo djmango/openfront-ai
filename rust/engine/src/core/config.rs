@@ -181,6 +181,12 @@ impl Config {
         10 * 10
     }
 
+    /// TS `Config.donateCooldown()` (`10 * 10`). Minimum ticks between two
+    /// donations (troops or gold) from the same sender to the same recipient.
+    pub fn donate_cooldown(&self) -> u32 {
+        10 * 10
+    }
+
     pub fn temporary_embargo_duration(&self) -> u32 {
         300 * 10
     }
@@ -592,9 +598,9 @@ impl Config {
         90
     }
 
-    /// TS `waterNukes()`  -  not present in any pinned record's `gameConfig`; default false.
+    /// TS `Config.waterNukes()` = `this._gameConfig.waterNukes ?? false`.
     pub fn water_nukes(&self) -> bool {
-        false
+        self.game_config.water_nukes.unwrap_or(false)
     }
 
     /// TS `nukeMagnitudes(unitType)` -> `(inner, outer)`.

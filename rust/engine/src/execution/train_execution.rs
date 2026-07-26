@@ -180,9 +180,15 @@ impl Execution for TrainExecution {
             return;
         }
 
+        // TS `TrainExecution.tick` does `const tile = this.getNextTile(); if
+        // (tile) { ... } else { targetReached(); deleteTrain(); }`. A returned
+        // `TileRef` of `0` is falsy in JS, so TS treats reaching tile ref 0 as
+        // "no next tile" and deletes the train. Mirror that here: a `Some(0)`
+        // must delete the train, not move it, or native keeps running trains TS
+        // has already retired (extra units + phantom trade gold downstream).
         match self.get_next_tile(game) {
-            Some(tile) => self.update_cars_positions(game, tile),
-            None => {
+            Some(tile) if tile != 0 => self.update_cars_positions(game, tile),
+            _ => {
                 self.delete_train(game);
             }
         }

@@ -135,6 +135,11 @@ pub struct Player {
     /// TS `PlayerImpl.outgoingEmojis_` - `(recipient small_id | AllPlayers, createdAt)`.
     /// `None` recipient matches TS `AllPlayers`. Used by `canSendEmoji` cooldown.
     pub outgoing_emoji_sends: Vec<(Option<u16>, u32)>,
+    /// TS `PlayerImpl.sentDonations` (`Donation[]`) - `(recipient small_id, tick)`
+    /// per successful troop/gold donation. Shared across both donation kinds and
+    /// never pruned, matching TS; read by `can_donate_troops`/`can_donate_gold`
+    /// to enforce `donate_cooldown()`.
+    pub sent_donations: Vec<(u16, u32)>,
 }
 
 impl Default for Player {
@@ -172,6 +177,7 @@ impl Default for Player {
             target_marks: Vec::new(),
             last_delete_unit_tick: -1,
             outgoing_emoji_sends: Vec::new(),
+            sent_donations: Vec::new(),
         }
     }
 }
@@ -284,6 +290,12 @@ pub struct Game {
     pub(crate) mini_water_astar: crate::water::WaterAstarScratch,
     pub(crate) mini_water_hpa: Option<crate::water_hpa::WaterHierarchical>,
     water_graph_version: u32,
+    /// TS `GameImpl._waterManager` - batched water-nuke terrain conversion.
+    water_manager: crate::water_manager::WaterManager,
+    /// TS `TradeShipExecution._staggerCounter` - assigns water-path rebuild stagger.
+    trade_ship_stagger_counter: u32,
+    /// TS `TransportShipExecution._staggerCounter` (independent of trade ships).
+    transport_ship_stagger_counter: u32,
     path_buf: Vec<TileRef>,
     next_unit_id: i32,
     /// TS `GameImpl.unitGrid` - spatial index for nearbyUnits order.
@@ -356,6 +368,7 @@ impl Default for Game {
             gold_multiplier: None,
             max_timer_value: None,
             ranked_type: None,
+            water_nukes: None,
         };
         Self {
             game_id: String::new(),
@@ -396,6 +409,9 @@ impl Default for Game {
             mini_water_astar: crate::water::WaterAstarScratch::new(1),
             mini_water_hpa: None,
             water_graph_version: 0,
+            water_manager: crate::water_manager::WaterManager::default(),
+            trade_ship_stagger_counter: 0,
+            transport_ship_stagger_counter: 0,
             path_buf: Vec::new(),
             next_unit_id: 1,
             unit_grid: crate::unit_grid::UnitGrid::new(1, 1),
@@ -3363,6 +3379,14 @@ impl Game {
     }
 
     pub fn players_on_same_team(&self, a: u16, b: u16) -> bool {
+        // TS `PlayerImpl.isOnSameTeam`: `if (other === this) return false`. A
+        // player is never on the same team as themselves. This matters for the
+        // nuke self-target path (`PlayerImpl.nukeSpawn`): a human can launch a
+        // nuke onto a tile they own themselves, which native previously
+        // rejected because `players_on_same_team(self, self)` returned true.
+        if a == b {
+            return false;
+        }
         let Some(pa) = self.player_by_small_id(a) else {
             return false;
         };
@@ -3552,6 +3576,9 @@ impl Game {
         {
             return false;
         }
+        if self.donation_on_cooldown(sender, recipient_small_id) {
+            return false;
+        }
         true
     }
 
@@ -3576,7 +3603,31 @@ impl Game {
         {
             return false;
         }
+        if self.donation_on_cooldown(sender, recipient_small_id) {
+            return false;
+        }
         true
+    }
+
+    /// TS `PlayerImpl.canDonate{Troops,Gold}` shared `sentDonations` cooldown
+    /// scan: true if `sender` donated (troops or gold) to `recipient_small_id`
+    /// within the last `donate_cooldown()` ticks.
+    fn donation_on_cooldown(&self, sender: &Player, recipient_small_id: u16) -> bool {
+        let cooldown = self.wire.donate_cooldown();
+        sender
+            .sent_donations
+            .iter()
+            .any(|&(rid, tick)| rid == recipient_small_id && self.ticks.saturating_sub(tick) < cooldown)
+    }
+
+    /// TS `PlayerImpl.donate{Troops,Gold}` push onto the shared `sentDonations`
+    /// list, recording a successful donation from `sender_small_id` to
+    /// `recipient_small_id` at the current tick.
+    pub fn record_donation(&mut self, sender_small_id: u16, recipient_small_id: u16) {
+        let tick = self.ticks;
+        if let Some(sender) = self.player_by_small_id_mut(sender_small_id) {
+            sender.sent_donations.push((recipient_small_id, tick));
+        }
     }
 
     pub fn can_send_alliance_request(&self, sender_small_id: u16, recipient_small_id: u16) -> bool {
@@ -3762,6 +3813,24 @@ impl Game {
             });
         }
 
+        // TS `GameImpl.executeNextTick`: flush water conversions after hash,
+        // before `_ticks++`.
+        let rebuild_hpa = {
+            let Game {
+                map,
+                mini_map,
+                water_manager,
+                ..
+            } = self;
+            let (_changed, rebuild) = water_manager.tick(map, mini_map, tick);
+            rebuild
+        };
+        if rebuild_hpa {
+            self.mini_water_hpa =
+                Some(crate::water_hpa::WaterHierarchical::new(&self.mini_map, true));
+            self.water_graph_version = self.water_graph_version.wrapping_add(1);
+        }
+
         self.ticks += 1;
         TickUpdates {
             hash,
@@ -3770,6 +3839,42 @@ impl Game {
                 winner: w.clone(),
             }),
         }
+    }
+
+    /// TS `GameImpl.queueWaterConversion`.
+    pub fn queue_water_conversion(&mut self, tile: TileRef) {
+        if !self.is_land(tile) {
+            return;
+        }
+        if self.map.owner_id(tile) != 0 {
+            // TS throws; nuke path always relinquished first.
+            return;
+        }
+        if !self.wire.water_nukes() {
+            self.map.set_fallout(tile, true);
+            return;
+        }
+        self.water_manager.queue_tile(tile);
+    }
+
+    pub fn water_graph_version(&self) -> u32 {
+        self.water_graph_version
+    }
+
+    /// TS `TradeShipExecution._staggerCounter++ % WaterPathFinder.STAGGER_SPREAD`.
+    pub fn next_trade_ship_stagger(&mut self) -> u32 {
+        const STAGGER_SPREAD: u32 = 50;
+        let s = self.trade_ship_stagger_counter % STAGGER_SPREAD;
+        self.trade_ship_stagger_counter = self.trade_ship_stagger_counter.wrapping_add(1);
+        s
+    }
+
+    /// TS `TransportShipExecution._staggerCounter++ % WaterPathFinder.STAGGER_SPREAD`.
+    pub fn next_transport_ship_stagger(&mut self) -> u32 {
+        const STAGGER_SPREAD: u32 = 50;
+        let s = self.transport_ship_stagger_counter % STAGGER_SPREAD;
+        self.transport_ship_stagger_counter = self.transport_ship_stagger_counter.wrapping_add(1);
+        s
     }
 }
 
@@ -4166,6 +4271,7 @@ mod alliance_accept_nukes_tests {
             gold_multiplier: None,
             max_timer_value: None,
             ranked_type: None,
+            water_nukes: None,
         };
         let mut game = Game::new(
             String::new(),
@@ -4780,19 +4886,23 @@ mod impassable_terrain_tests {
         unreachable!("gap marker only - see doc comment above");
     }
 
-    // TS `GameImpl.setWater`/`queueWaterConversion`'s "water nukes" feature
-    // defaults off (`Config.waterNukes() => this._gameConfig.waterNukes ??
-    // false`) and has no native port; when off, TS's own
-    // `queueWaterConversion` falls back to `setFallout` (which native DOES
-    // implement and does guard `!is_impassable` in `NukeExecution::detonate`
-    // - see `nuke_execution.rs`'s tests). The low-level `GameMap.setWater`
-    // this specific test calls is only reachable via that unported feature
-    // (plus a client-only rendering call site), so there is nothing to
-    // port it against.
     #[test]
-    #[ignore = "GameMap.setWater is only reachable via the unported (default-off) waterNukes feature; native's default fallout path is covered in nuke_execution.rs"]
-    fn set_water_does_not_convert_impassable_tiles_is_unported() {
-        unreachable!("gap marker only - see doc comment above");
+    fn set_water_converts_land_and_decrements_land_count() {
+        let mut game = Game::default();
+        // Default 1x1 map is water (terrain 0). Build a tiny land map.
+        let meta = crate::map::MapMeta {
+            width: 2,
+            height: 2,
+            num_land_tiles: 4,
+        };
+        let terrain = vec![0x80u8; 4]; // land bit set, mag 0
+        game.map = crate::map::GameMap::from_terrain_bytes(&meta, &terrain).unwrap();
+        assert_eq!(game.map.num_land_tiles, 4);
+        let t = game.map.ref_xy(0, 0);
+        assert!(game.map.is_land(t));
+        game.map.set_water(t);
+        assert!(game.map.is_water(t));
+        assert_eq!(game.map.num_land_tiles, 3);
     }
 }
 
@@ -5027,6 +5137,7 @@ mod team_join_tests {
             gold_multiplier: None,
             max_timer_value: None,
             ranked_type: None,
+            water_nukes: None,
         };
         let mut game = Game::new(
             String::new(),
@@ -5069,6 +5180,20 @@ mod team_join_tests {
         // Same nominal team, but `Bot` is explicitly excluded from `players_on_same_team`'s
         // friendliness check - tribes still fight each other.
         assert!(!game.players_on_same_team(bot1, bot2));
+    }
+
+    #[test]
+    fn a_player_is_never_on_the_same_team_as_themselves() {
+        // TS `PlayerImpl.isOnSameTeam`: `if (other === this) return false`.
+        // Native previously returned true (a player's team equals their own),
+        // which made `PlayerImpl.nukeSpawn` reject a human launching a nuke
+        // onto a tile they own themselves (found via the KD13niv8 tick-5746
+        // full-game bisection - a human self-target atom bomb TS built but
+        // native silently dropped).
+        let mut game = team_mode_game(2);
+        let p1 = add_player(&mut game, "self", PlayerType::Human);
+        game.player_by_small_id_mut(p1).unwrap().team = Some("Red".into());
+        assert!(!game.players_on_same_team(p1, p1));
     }
 
     #[test]
