@@ -37,6 +37,9 @@ agent (ppo_v11 / oftrain `--watch` / `render_client_replay.py` / `ofshowcase`):
   ship SoftGL/SwiftShader clips when a GPU is available (`OF_REFUSE_SOFTGL=1`).
 - Client `gameID` must be exactly 8 alphanumeric chars (`GAME_ID_REGEX`).
 - Omit `"winner": null` in GameRecords (Zod WinnerSchema is optional, not nullable).
+- `gameMap` must be the OpenFront `GameMapType` *value* (e.g. `"North America"`),
+  not the Rust PascalCase id (`NorthAmerica`). `render_client_replay.py`
+  rewrites this during sanitize.
 
 ## Watch script
 

@@ -101,7 +101,9 @@ PY
 }
 
 run_until_full 13 2 26 n2_europe Europe watch_n2_
-run_until_full 20 4 34 n4_pangaea Pangaea watch_n4_
+# World tends to reach the full 21000-tick horizon more often than Pangaea at
+# this OOD 4n density; retries still cover deaths.
+run_until_full 20 4 34 n4_world World watch_n4_
 run_until_full 26 8 66 n8_northamerica NorthAmerica watch_n8_
 echo ALL_WATCHES_DONE
 ls -lh showcase-clips/ppo_v11_u676_n{2_europe,4_pangaea,8_northamerica}.{json,debug.json} 2>/dev/null || true
