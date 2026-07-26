@@ -456,19 +456,19 @@ impl TrainState {
 /// the stage index was rewritten (callers must not undo that via LR inference).
 fn expand_v10_sidecar_if_needed(state: &mut TrainState) -> bool {
     let targets_len = state.stage_env_targets.len();
-    let remapped = if targets_len == ofcore::curriculum::V10_LEGACY_LEN {
-        let as35 = state
+    let remapped = if targets_len == ofcore::curriculum::V10_PRE_RAMP_SIDECAR_LEN {
+        let as_short = state
             .stage
             .saturating_add(20)
-            .min(ofcore::curriculum::V10_PREV35_LEN - 1);
-        Some(ofcore::curriculum::remap_v10_stage_35_to_100(as35))
-    } else if targets_len == ofcore::curriculum::V10_PREV35_LEN {
-        Some(ofcore::curriculum::remap_v10_stage_35_to_100(state.stage))
-    } else if targets_len == ofcore::curriculum::V10_PREV100_LEN {
-        Some(ofcore::curriculum::remap_v10_stage_100_to_current(state.stage))
+            .min(ofcore::curriculum::V10_SHORT_SIDECAR_LEN - 1);
+        Some(ofcore::curriculum::remap_v10_short_sidecar_stage(as_short))
+    } else if targets_len == ofcore::curriculum::V10_SHORT_SIDECAR_LEN {
+        Some(ofcore::curriculum::remap_v10_short_sidecar_stage(state.stage))
+    } else if targets_len == ofcore::curriculum::V10_PRIOR_SIDECAR_LEN {
+        Some(ofcore::curriculum::remap_v10_prior_sidecar_stage(state.stage))
     } else if state.stage >= ofcore::curriculum::V10_STAGE_COUNT {
         // Targets already cleared/reset but stage index is still from a longer table.
-        Some(ofcore::curriculum::remap_v10_stage_100_to_current(state.stage))
+        Some(ofcore::curriculum::remap_v10_prior_sidecar_stage(state.stage))
     } else {
         None
     };
@@ -1354,7 +1354,7 @@ mod v10_state_and_gate_tests {
     #[test]
     fn resume_accepts_v10_and_expands_old_v10_sidecars() {
         let mut state = state_for_schedule(Some("v10"), 2);
-        state.stage_env_targets = vec![24; ofcore::curriculum::V10_LEGACY_LEN];
+        state.stage_env_targets = vec![24; ofcore::curriculum::V10_PRE_RAMP_SIDECAR_LEN];
         reconcile_resume_schedule(
             &mut state,
             ofcore::curriculum::CurriculumSchedule::V10,
@@ -1371,9 +1371,9 @@ mod v10_state_and_gate_tests {
     }
 
     #[test]
-    fn resume_expands_prior_100_stage_v10_sidecar() {
+    fn resume_expands_prior_long_sidecar() {
         let mut state = state_for_schedule(Some("v10"), 22);
-        state.stage_env_targets = vec![24; ofcore::curriculum::V10_PREV100_LEN];
+        state.stage_env_targets = vec![24; ofcore::curriculum::V10_PRIOR_SIDECAR_LEN];
         state.lr_now = ofcore::curriculum::V10_STAGE_LR_FLOOR;
         let expanded = reconcile_resume_schedule(
             &mut state,

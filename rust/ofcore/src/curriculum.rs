@@ -710,12 +710,12 @@ pub const V10_EASY_RAMP_LEN: usize = 22;
 pub const V10_MAP_WARMUP_LEN: usize = 8;
 /// First stage that samples the full 16-map broad pool.
 pub const V10_BROAD_STAGE: usize = V10_MAP_WARMUP_LEN;
-/// Historical pre-ramp V10 length (15-stage dense ladder) for sidecar expand.
-pub const V10_LEGACY_LEN: usize = 15;
-/// Prior 35-stage V10 length (20 Easy ramp + 15 dense) for sidecar expand.
-pub const V10_PREV35_LEN: usize = 35;
-/// Prior 100-stage V10 length (long Easy micro-ramp) for sidecar expand.
-pub const V10_PREV100_LEN: usize = 100;
+/// Oldest V10 sidecar length (pre-ramp 15-stage dense ladder).
+pub const V10_PRE_RAMP_SIDECAR_LEN: usize = 15;
+/// Short V10 sidecar length (20 Easy ramp + 15 dense = 35).
+pub const V10_SHORT_SIDECAR_LEN: usize = 35;
+/// Prior long V10 sidecar length (100-stage Easy micro-ramp table).
+pub const V10_PRIOR_SIDECAR_LEN: usize = 100;
 /// Full V10 ladder: faster Easy → Medium → Hard → Impossible.
 /// Medium/Hard/Impossible lobby rows match the prior 100-stage table; only
 /// Easy is compressed (fewer +2-bot micro-stages).
@@ -817,8 +817,8 @@ pub const V10_BOT_NATION_DENSITY: [(u32, u32); V10_STAGE_COUNT] = [
     (190, 22), // 67
 ];
 
-/// Prior 100-stage Easy micro-ramp densities (for sidecar remap only).
-pub const V10_PREV100_DENSITY: [(u32, u32); V10_PREV100_LEN] = [
+/// Prior long-table densities (for sidecar remap onto the current stage table).
+pub const V10_PRIOR_BOT_NATION_DENSITY: [(u32, u32); V10_PRIOR_SIDECAR_LEN] = [
     (2, 0),
     (3, 0),
     (4, 0),
@@ -964,9 +964,9 @@ pub fn imply_stage_from_learning_rate(lr_now: f64, base_lr: f64, decay: f64) -> 
     Some((stage as usize).min(V10_STAGE_COUNT - 1))
 }
 
-/// Remap a 35-stage V10 sidecar index onto the current stage table.
-pub fn remap_v10_stage_35_to_100(old: usize) -> usize {
-    let old = old.min(V10_PREV35_LEN - 1);
+/// Remap a short (35-slot) V10 sidecar index onto the current stage table.
+pub fn remap_v10_short_sidecar_stage(old: usize) -> usize {
+    let old = old.min(V10_SHORT_SIDECAR_LEN - 1);
     if old < 20 {
         (old * V10_EASY_RAMP_LEN) / 20
     } else {
@@ -975,12 +975,12 @@ pub fn remap_v10_stage_35_to_100(old: usize) -> usize {
     }
 }
 
-/// Remap a prior 100-stage V10 sidecar index onto the current stage table by
+/// Remap a prior long-table V10 sidecar index onto the current stage table by
 /// matching lobby density (bots, nations). Prefers the same nation count and
 /// the smallest bots ≥ the old lobby so progress never moves backwards.
-pub fn remap_v10_stage_100_to_current(old: usize) -> usize {
-    let old = old.min(V10_PREV100_LEN - 1);
-    let (bots, nations) = V10_PREV100_DENSITY[old];
+pub fn remap_v10_prior_sidecar_stage(old: usize) -> usize {
+    let old = old.min(V10_PRIOR_SIDECAR_LEN - 1);
+    let (bots, nations) = V10_PRIOR_BOT_NATION_DENSITY[old];
     remap_density_to_stage(bots, nations)
 }
 
@@ -1933,7 +1933,7 @@ mod tests {
         // Medium/Hard/Impossible lobbies unchanged vs the prior 100-stage table.
         assert_eq!(
             &V10_BOT_NATION_DENSITY[V10_MEDIUM_START..],
-            &V10_PREV100_DENSITY[68..]
+            &V10_PRIOR_BOT_NATION_DENSITY[68..]
         );
         // Difficulty jumps reset nations low, then each band ramps back up.
         let Nations::Exact(easy_peak_n) = v10[V10_MEDIUM_START - 1].nations else {
@@ -2036,14 +2036,14 @@ mod tests {
             );
         }
         assert!(v10[1].bots > v10[0].bots);
-        assert_eq!(remap_v10_stage_35_to_100(0), 0);
-        assert_eq!(remap_v10_stage_35_to_100(19), 20);
-        assert_eq!(remap_v10_stage_35_to_100(20), 22);
-        assert_eq!(remap_v10_stage_35_to_100(34), 67);
+        assert_eq!(remap_v10_short_sidecar_stage(0), 0);
+        assert_eq!(remap_v10_short_sidecar_stage(19), 20);
+        assert_eq!(remap_v10_short_sidecar_stage(20), 22);
+        assert_eq!(remap_v10_short_sidecar_stage(34), 67);
         // Live ppo_v11 was on prior stage 22 (24 bots / 2 nations).
-        assert_eq!(remap_v10_stage_100_to_current(22), 13);
-        assert_eq!(remap_v10_stage_100_to_current(68), V10_MEDIUM_START);
-        assert_eq!(remap_v10_stage_100_to_current(99), V10_STAGE_COUNT - 1);
+        assert_eq!(remap_v10_prior_sidecar_stage(22), 13);
+        assert_eq!(remap_v10_prior_sidecar_stage(68), V10_MEDIUM_START);
+        assert_eq!(remap_v10_prior_sidecar_stage(99), V10_STAGE_COUNT - 1);
     }
 
     #[test]
