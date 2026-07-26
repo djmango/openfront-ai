@@ -294,6 +294,8 @@ pub struct Game {
     water_manager: crate::water_manager::WaterManager,
     /// TS `TradeShipExecution._staggerCounter` - assigns water-path rebuild stagger.
     trade_ship_stagger_counter: u32,
+    /// TS `TransportShipExecution._staggerCounter` (independent of trade ships).
+    transport_ship_stagger_counter: u32,
     path_buf: Vec<TileRef>,
     next_unit_id: i32,
     /// TS `GameImpl.unitGrid` - spatial index for nearbyUnits order.
@@ -409,6 +411,7 @@ impl Default for Game {
             water_graph_version: 0,
             water_manager: crate::water_manager::WaterManager::default(),
             trade_ship_stagger_counter: 0,
+            transport_ship_stagger_counter: 0,
             path_buf: Vec::new(),
             next_unit_id: 1,
             unit_grid: crate::unit_grid::UnitGrid::new(1, 1),
@@ -3863,6 +3866,14 @@ impl Game {
         const STAGGER_SPREAD: u32 = 50;
         let s = self.trade_ship_stagger_counter % STAGGER_SPREAD;
         self.trade_ship_stagger_counter = self.trade_ship_stagger_counter.wrapping_add(1);
+        s
+    }
+
+    /// TS `TransportShipExecution._staggerCounter++ % WaterPathFinder.STAGGER_SPREAD`.
+    pub fn next_transport_ship_stagger(&mut self) -> u32 {
+        const STAGGER_SPREAD: u32 = 50;
+        let s = self.transport_ship_stagger_counter % STAGGER_SPREAD;
+        self.transport_ship_stagger_counter = self.transport_ship_stagger_counter.wrapping_add(1);
         s
     }
 }

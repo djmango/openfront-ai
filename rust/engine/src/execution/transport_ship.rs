@@ -28,6 +28,12 @@ pub struct TransportShipExecution {
     // multi-tick voyage completes. Mirror that by freezing the owner of
     // `ref_tile` here instead of re-reading `dst`'s owner at landing time.
     target_small_id: Option<u16>,
+    /// TS `WaterPathFinder` stagger / water-graph version tracking.
+    stagger: u32,
+    water_graph_version: u32,
+    pending_version: u32,
+    stagger_countdown: u32,
+    stagger_assigned: bool,
 }
 
 impl TransportShipExecution {
@@ -48,6 +54,11 @@ impl TransportShipExecution {
             retreating: false,
             retreat_destination_resolved: false,
             target_small_id: None,
+            stagger: 0,
+            water_graph_version: 0,
+            pending_version: u32::MAX,
+            stagger_countdown: 0,
+            stagger_assigned: false,
         }
     }
 
@@ -117,6 +128,27 @@ impl TransportShipExecution {
         Some(u.tile as TileRef)
     }
 
+    /// TS `WaterPathFinder.ensureFresh`.
+    fn ensure_water_path_fresh(&mut self, game: &Game) {
+        let v = game.water_graph_version();
+        if v == self.water_graph_version {
+            return;
+        }
+        if self.pending_version != v {
+            self.pending_version = v;
+            self.stagger_countdown = self.stagger;
+        }
+        if self.stagger_countdown > 0 {
+            self.stagger_countdown -= 1;
+            return;
+        }
+        self.water_graph_version = v;
+        self.path.clear();
+        self.path_idx = 0;
+        self.path_dst = None;
+        self.motion_plan_dst = None;
+    }
+
     fn refresh_path(&mut self, game: &mut Game, from: TileRef, to: TileRef) -> bool {
         if !game.plan_water_path(from, to) {
             return false;
@@ -137,6 +169,7 @@ impl TransportShipExecution {
     }
 
     fn next_path_tile(&mut self, game: &mut Game, from: TileRef, to: TileRef) -> Option<TileRef> {
+        self.ensure_water_path_fresh(game);
         if self.path_dst != Some(to) || self.path.is_empty() {
             if !self.refresh_path(game, from, to) {
                 return None;
@@ -173,6 +206,11 @@ impl Execution for TransportShipExecution {
         }
         self.initialized = true;
         self.last_move_tick = tick;
+        if !self.stagger_assigned {
+            self.stagger = game.next_transport_ship_stagger();
+            self.water_graph_version = game.water_graph_version();
+            self.stagger_assigned = true;
+        }
 
         if game.wire.is_unit_disabled(TRANSPORT) {
             self.active = false;
