@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# Pin dedicated openfront submodule, then run native 78-record gate.
+# Hash-level multi-record parity report (archived fixtures).
+#
+# DIAGNOSTIC ONLY. The merge bar for engine/pin/human-game work is
+# scripts/run_outcome_gate.sh (winner / terminal tick / land share) — see
+# docs/PARITY_PLAYBOOK.md. Do not treat this script's pass rate as parity.
+#
+# Pins the dedicated openfront submodule, then runs the native hash report.
 # Never touches the webbot openfront checkout.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
