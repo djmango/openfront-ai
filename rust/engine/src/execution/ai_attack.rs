@@ -153,11 +153,13 @@ pub fn has_land_border_tn(game: &Game, small_id: u16) -> bool {
         let n = game.map.neighbors4_ts(border_tile, &mut nbuf);
         for i in 0..n {
             let neighbor = nbuf[i];
-            if game.is_land(neighbor)
-                && !game.is_impassable(neighbor)
-                && !game.has_owner(neighbor)
-                && !game.has_fallout(neighbor)
-            {
+            // TS `hasNonNukedTerraNullius`'s border scan (`AiAttackBehavior`) and
+            // `PlayerImpl.nearby()` only test `isLand && !hasOwner (&& !hasFallout)`;
+            // they do NOT exclude impassable land. An unowned impassable tile
+            // (mountain) is terra nullius to TS, so it must be here too - filtering
+            // it out under-counts nearby TN and flips the sticky
+            // `neighborsTerraNullius`/`has_non_nuked_tn` gate too early.
+            if game.is_land(neighbor) && !game.has_owner(neighbor) && !game.has_fallout(neighbor) {
                 return true;
             }
         }
@@ -187,7 +189,12 @@ fn has_land_border_with_terra_nullius(game: &Game, small_id: u16) -> bool {
         let n = game.map.neighbors4_ts(border_tile, &mut nbuf);
         for i in 0..n {
             let neighbor = nbuf[i];
-            if game.is_land(neighbor) && !game.is_impassable(neighbor) && !game.has_owner(neighbor) {
+            // TS `AiAttackBehavior.hasLandBorderWithTerraNullius()` only tests
+            // `isLand && !hasOwner` - it does NOT exclude impassable land. An
+            // unowned impassable tile (mountain) counts as a land TN border for
+            // the land-vs-boat branch, so filtering it out here under-counts and
+            // wrongly pushes native onto the boat path.
+            if game.is_land(neighbor) && !game.has_owner(neighbor) {
                 return true;
             }
         }
@@ -224,11 +231,11 @@ fn has_shore_reachable_tn(game: &Game, small_id: u16) -> bool {
                 continue;
             }
             let tile = game.ref_xy(nx as u32, ny as u32);
-            if game.is_land(tile)
-                && !game.is_impassable(tile)
-                && !game.has_owner(tile)
-                && !game.has_fallout(tile)
-            {
+            // TS `PlayerImpl.shoreReachableNeighbors()` /
+            // `sendBoatAttackToNearbyTerraNullius()` only test
+            // `isLand && !hasOwner && !hasFallout` - no impassable filter. An
+            // unowned impassable tile across a river is shore-reachable TN to TS.
+            if game.is_land(tile) && !game.has_owner(tile) && !game.has_fallout(tile) {
                 return true;
             }
         }
