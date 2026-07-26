@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import platform
@@ -263,6 +264,45 @@ def load_episode_meta(record: Path) -> dict:
     return meta
 
 
+def sanitize_record_for_client(record: Path, dest_dir: Path) -> Path:
+    """Copy a GameRecord so the OpenFront client Zod schema accepts it.
+
+    - `info.winner: null` fails WinnerSchema (optional, not nullable) → drop it.
+    - `info.gameID` must match `/^[A-Za-z0-9]{8}$/` or `/game/<id>` never joins.
+    """
+    data = json.loads(record.read_text())
+    info = data.setdefault("info", {})
+    changed = False
+    if "winner" in info and info["winner"] is None:
+        del info["winner"]
+        changed = True
+    gid = info.get("gameID")
+    if not isinstance(gid, str) or not (
+        len(gid) == 8 and gid.isalnum()
+    ):
+        # Stable 8-char id from path so parallel renders don't collide.
+        digest = hashlib.sha1(str(record.resolve()).encode()).hexdigest()[:8]
+        info["gameID"] = digest
+        changed = True
+        print(f"rewrote gameID {gid!r} -> {digest} for client GAME_ID_REGEX")
+    if not changed:
+        return record
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    out = dest_dir / record.name
+    out.write_text(json.dumps(data, separators=(",", ":")))
+    # Keep debug/thinking sidecars discoverable next to the sanitized record.
+    for suffix in (".debug.json", ".thinking.json"):
+        side = record.with_name(record.stem + suffix)
+        if side.is_file():
+            target = out.with_name(out.stem + suffix)
+            if not target.exists():
+                try:
+                    os.symlink(side.resolve(), target)
+                except OSError:
+                    shutil.copy2(side, target)
+    return out
+
+
 def render_record(
     record: Path,
     out: Path,
@@ -287,11 +327,15 @@ def render_record(
     _ = full_game  # always-on; kept for call-site compat
     from playwright.sync_api import sync_playwright
 
-    game_id = json.loads(record.read_text())["info"]["gameID"]
     out.parent.mkdir(parents=True, exist_ok=True)
+    sanitize_dir = out.parent / ".client-render-records"
+    record = sanitize_record_for_client(record, sanitize_dir)
+    game_id = json.loads(record.read_text())["info"]["gameID"]
     print(f"gameID {game_id} -> {out}")
 
-    sidecar = record.with_suffix(".debug.json")
+    sidecar = record.with_name(record.stem + ".debug.json")
+    if not sidecar.exists():
+        sidecar = record.with_suffix(".debug.json")
     episode = load_episode_meta(record)
     print(f"episode outcome: {episode['outcome']} (end tick {episode['end_tick']})")
     if overlay and sidecar.exists():
@@ -366,6 +410,11 @@ def render_record(
                     f"starting vite client on :{client_port} "
                     "(first boot takes ~15s)..."
                 )
+                # Headless pods have no xdg-open; vite's `open: true` otherwise
+                # crashes the process after bind and the replay never loads.
+                client_env = os.environ.copy()
+                client_env["BROWSER"] = "none"
+                client_env["SKIP_BROWSER_OPEN"] = "true"
                 procs.append(subprocess.Popen(
                     [
                         "npm",
@@ -379,6 +428,7 @@ def render_record(
                         "--strictPort",
                     ],
                     cwd=client_dir,
+                    env=client_env,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 ))
             wait_http(f"http://localhost:{client_port}", 90)
