@@ -597,9 +597,9 @@ impl Game {
         if self.mini_map.is_water(mini_tile) {
             return Some(hpa.graph.get_component_id(mini_tile));
         }
-        // TS `WaterManager.getWaterComponent`  -  miniMap.neighbors order (N,S,W,E).
+        // TS `WaterManager.getWaterComponent` — miniMap.neighbors() (N,S,W,E).
         let mut one_hop = [TileRef::MAX; 4];
-        let n1 = self.mini_map.neighbors4_ts(mini_tile, &mut one_hop);
+        let n1 = self.mini_map.neighbors_nswe(mini_tile, &mut one_hop);
         for i in 0..n1 {
             if self.mini_map.is_water(one_hop[i]) {
                 return Some(hpa.graph.get_component_id(one_hop[i]));
@@ -607,7 +607,7 @@ impl Game {
         }
         for i in 0..n1 {
             let mut two_hop = [TileRef::MAX; 4];
-            let n2 = self.mini_map.neighbors4_ts(one_hop[i], &mut two_hop);
+            let n2 = self.mini_map.neighbors_nswe(one_hop[i], &mut two_hop);
             for j in 0..n2 {
                 if self.mini_map.is_water(two_hop[j]) {
                     return Some(hpa.graph.get_component_id(two_hop[j]));
@@ -640,7 +640,7 @@ impl Game {
             return true;
         }
         let mut one_hop = [TileRef::MAX; 4];
-        let n1 = self.mini_map.neighbors4_ts(mini_tile, &mut one_hop);
+        let n1 = self.mini_map.neighbors_nswe(mini_tile, &mut one_hop);
         for i in 0..n1 {
             if self.mini_map.is_water(one_hop[i])
                 && hpa.graph.get_component_id(one_hop[i]) == component
@@ -650,7 +650,7 @@ impl Game {
         }
         for i in 0..n1 {
             let mut two_hop = [TileRef::MAX; 4];
-            let n2 = self.mini_map.neighbors4_ts(one_hop[i], &mut two_hop);
+            let n2 = self.mini_map.neighbors_nswe(one_hop[i], &mut two_hop);
             for j in 0..n2 {
                 if self.mini_map.is_water(two_hop[j])
                     && hpa.graph.get_component_id(two_hop[j]) == component

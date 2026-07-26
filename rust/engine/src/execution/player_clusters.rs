@@ -257,10 +257,9 @@ fn is_surrounded(game: &Game, small_id: u16, cluster: &OrderedTiles) -> bool {
 
 fn get_capturing_player(game: &Game, small_id: u16, cluster: &OrderedTiles) -> Option<u16> {
     // TS iterates cluster Set insertion order; Map keeps first-seen neighbor
-    // order. TS `getCapturingPlayer` uses `map.neighbors4(...)` (west, east,
-    // north, south on this pin, f0da4182) - the first-seen order below feeds
-    // `getMode`'s tie-break (first enemy with the strictly-greatest border
-    // count wins), so it must match TS `forEachNeighbor` order (N,S,W,E).
+    // order. TS `getCapturingPlayer` uses `map.neighbors4(...)` (W,E,N,S on
+    // live tip `dd1277e245b5`) - the first-seen order below feeds `getMode`'s
+    // tie-break (first enemy with the strictly-greatest border count wins).
     let mut neighbors: Vec<(u16, u32)> = Vec::new();
     for t in cluster.iter() {
         game.map.for_each_neighbor4(t, |n| {
@@ -306,15 +305,10 @@ fn flood_owned(game: &Game, small_id: u16, start: TileRef) -> OrderedTiles {
         stack.push(start);
     }
 
-    // TS `PlayerExecution.removeCluster` floods the doomed cluster with
-    // `this.mg.forEachNeighbor(...)` (west, east, north, south on this pin,
-    // f0da4182), then conquers the resulting `Set<TileRef>` in insertion
-    // order. That insertion order - and therefore the order `capturing.conquer`
-    // hands the cluster's tiles to the captor - is exactly this DFS visit
-    // order, which feeds the captor's insertion-ordered owned/border sets. It
-    // must use the same neighbor order as TS `forEachNeighbor` (N,S,W,E) or
-    // the captor's border set drifts (see the K6NhdJh7 tick-443 Aztec-
-    // absorption bisection).
+    // TS `PlayerExecution.removeCluster` floods via `forEachNeighbor`
+    // (W,E,N,S on live tip `dd1277e245b5`), then conquers the resulting
+    // `Set<TileRef>` in insertion order. That DFS visit order feeds the
+    // captor's insertion-ordered owned/border sets and must match TS.
     while let Some(t) = stack.pop() {
         game.map.for_each_neighbor4(t, |n| {
             if result.contains(n) || game.map.owner_id(n) != small_id {
