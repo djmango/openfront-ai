@@ -37,6 +37,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -338,11 +339,38 @@ def load_episode_meta(record: Path) -> dict:
     return meta
 
 
+def _client_game_map_values() -> dict[str, str]:
+    """Map Rust/engine map ids → OpenFront `GameMapType` string values.
+
+    Zod uses the enum *values* (often spaced display names), e.g.
+    `NorthAmerica = "North America"`. Native GameRecords often write the
+    PascalCase id; that fails schema validation and the replay button never
+    appears. Europe/World/Onion work only because id == value.
+    """
+    maps_gen = REPO / "openfront/src/core/game/Maps.gen.ts"
+    if not maps_gen.is_file():
+        # Detached client worktrees still have Maps.gen.ts; fall back empty.
+        return {}
+    text = maps_gen.read_text(encoding="utf-8")
+    # `export enum GameMapType { Name = "Value", ... }`
+    m = re.search(r"export enum GameMapType \{([^}]*)\}", text, re.S)
+    if not m:
+        return {}
+    return {
+        name: value
+        for name, value in re.findall(
+            r'([A-Za-z0-9_]+)\s*=\s*"([^"]*)"', m.group(1)
+        )
+    }
+
+
 def sanitize_record_for_client(record: Path, dest_dir: Path) -> Path:
     """Copy a GameRecord so the OpenFront client Zod schema accepts it.
 
     - `info.winner: null` fails WinnerSchema (optional, not nullable) → drop it.
     - `info.gameID` must match `/^[A-Za-z0-9]{8}$/` or `/game/<id>` never joins.
+    - `info.config.gameMap` must be a `GameMapType` *value* (display string),
+      not necessarily the PascalCase id Rust writes.
     """
     data = json.loads(record.read_text())
     info = data.setdefault("info", {})
@@ -350,6 +378,22 @@ def sanitize_record_for_client(record: Path, dest_dir: Path) -> Path:
     if "winner" in info and info["winner"] is None:
         del info["winner"]
         changed = True
+    cfg = info.get("config")
+    if isinstance(cfg, dict):
+        gm = cfg.get("gameMap")
+        if isinstance(gm, str):
+            mapping = _client_game_map_values()
+            # Prefer id→value; also accept already-correct values.
+            values = set(mapping.values())
+            if gm in mapping and mapping[gm] != gm:
+                cfg["gameMap"] = mapping[gm]
+                changed = True
+                print(f"rewrote gameMap {gm!r} -> {mapping[gm]!r} for client Zod")
+            elif gm not in values and gm not in mapping:
+                print(
+                    f"WARNING: gameMap {gm!r} not in GameMapType; "
+                    "client may reject the record"
+                )
     gid = info.get("gameID")
     if not isinstance(gid, str) or not (
         len(gid) == 8 and gid.isalnum()
@@ -687,12 +731,14 @@ def render_record(
 
                     modal = page.locator("win-modal div.fixed")
                     if modal.count() > 0:
+                        # Client sim can diverge and flash a win/death modal
+                        # mid-replay. Trust recorded end_tick for timeout /
+                        # win; only cut early on death once near the recorded
+                        # death tick (stop_tick already handles the trim).
+                        reached_end = end_tick is None or (
+                            tick is not None and tick >= int(end_tick)
+                        )
                         if outcome == "win":
-                            # Ignore premature win modals from client lobby
-                            # divergence (e.g. rewriting nations:0 → 1).
-                            reached_end = end_tick is None or (
-                                tick is not None and tick >= int(end_tick)
-                            )
                             if reached_end:
                                 if win_hold_t0 is None:
                                     win_hold_t0 = time.time()
@@ -708,15 +754,33 @@ def render_record(
                                     f"ignoring early win modal at tick {tick} "
                                     f"(recorded end_tick={end_tick})"
                                 )
+                        elif outcome == "timeout":
+                            if not early_modal_warned:
+                                early_modal_warned = True
+                                print(
+                                    f"ignoring early modal at tick {tick} "
+                                    f"(timeout episode; stop at end_tick={end_tick})"
+                                )
                         else:
-                            gameplay_duration = max(
-                                0.0, time.time() - gameplay_t0 - 1.5
+                            # death: if stop_tick missed, cut on modal near end
+                            near_death = stop_tick is None or (
+                                tick is not None and tick >= int(stop_tick)
                             )
-                            print(
-                                f"death modal detected late "
-                                f"(trim to {gameplay_duration:.1f}s gameplay)"
-                            )
-                            break
+                            if near_death:
+                                gameplay_duration = max(
+                                    0.0, time.time() - gameplay_t0 - 1.5
+                                )
+                                print(
+                                    f"death modal detected late "
+                                    f"(trim to {gameplay_duration:.1f}s gameplay)"
+                                )
+                                break
+                            elif not early_modal_warned:
+                                early_modal_warned = True
+                                print(
+                                    f"ignoring early death modal at tick {tick} "
+                                    f"(recorded end_tick={end_tick})"
+                                )
 
                     if (
                         outcome == "win"
