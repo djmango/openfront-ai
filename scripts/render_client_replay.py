@@ -436,10 +436,10 @@ def render_record(
     if not reuse_services:
         if port_open(api_port):
             api_port = free_port()
-            print(f"archive port busy; self-contained SoftGL using :{api_port}")
+            print(f"archive port busy; self-contained render using :{api_port}")
         if port_open(client_port):
             client_port = free_port()
-            print(f"client port busy; self-contained SoftGL using :{client_port}")
+            print(f"client port busy; self-contained render using :{client_port}")
 
     client_ctx = (
         contextlib.nullcontext(OPENFRONT)
