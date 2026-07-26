@@ -292,6 +292,8 @@ pub struct Game {
     water_graph_version: u32,
     /// TS `GameImpl._waterManager` - batched water-nuke terrain conversion.
     water_manager: crate::water_manager::WaterManager,
+    /// TS `TradeShipExecution._staggerCounter` - assigns water-path rebuild stagger.
+    trade_ship_stagger_counter: u32,
     path_buf: Vec<TileRef>,
     next_unit_id: i32,
     /// TS `GameImpl.unitGrid` - spatial index for nearbyUnits order.
@@ -406,6 +408,7 @@ impl Default for Game {
             mini_water_hpa: None,
             water_graph_version: 0,
             water_manager: crate::water_manager::WaterManager::default(),
+            trade_ship_stagger_counter: 0,
             path_buf: Vec::new(),
             next_unit_id: 1,
             unit_grid: crate::unit_grid::UnitGrid::new(1, 1),
@@ -3849,6 +3852,18 @@ impl Game {
             return;
         }
         self.water_manager.queue_tile(tile);
+    }
+
+    pub fn water_graph_version(&self) -> u32 {
+        self.water_graph_version
+    }
+
+    /// TS `TradeShipExecution._staggerCounter++ % WaterPathFinder.STAGGER_SPREAD`.
+    pub fn next_trade_ship_stagger(&mut self) -> u32 {
+        const STAGGER_SPREAD: u32 = 50;
+        let s = self.trade_ship_stagger_counter % STAGGER_SPREAD;
+        self.trade_ship_stagger_counter = self.trade_ship_stagger_counter.wrapping_add(1);
+        s
     }
 }
 
