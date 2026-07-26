@@ -30,6 +30,7 @@ pub mod util;
 pub mod unit_grid;
 pub mod water;
 pub mod water_hpa;
+pub mod water_manager;
 
 pub use backend::Backend;
 pub use game::Game;
