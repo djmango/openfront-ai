@@ -584,6 +584,188 @@ mod impassable_terrain_tests {
     }
 }
 
+/// Ported from `openfront/tests/nukes/WaterNukes.test.ts`.
+///
+/// Per `docs/PARITY_PLAYBOOK.md`, prefer porting the TS unit suite for
+/// subsystem completeness over chasing full-game bisect %. Archived
+/// `waterNukes:true` fixtures from older OpenFront pins (e.g. `f0da4182`)
+/// diverge early against current native for neighbor-order / impassable-
+/// filter reasons unrelated to water conversion.
+///
+/// Note: TS `TestConfig.nukeMagnitudes` forces `{inner:1, outer:1}`; native
+/// uses production AtomBomb magnitudes `(12, 30)`. Assertions below match
+/// the TS behavior under production magnitudes (crater + shoreline + graph
+/// rebuild), not the exact TestConfig geometry.
+#[cfg(test)]
+mod water_nukes_tests {
+    use super::*;
+    use crate::execution::exec_enum::ExecEnum;
+    use crate::game::{Game, Player, PlayerType};
+    use crate::map::{GameMap, MapMeta};
+    use crate::test_util::plains_game;
+
+    fn enable_water_nukes(game: &mut Game, on: bool) {
+        let mut cfg = game.wire.game_config().clone();
+        cfg.water_nukes = Some(on);
+        cfg.instant_build = true;
+        cfg.infinite_gold = true;
+        // TS TestConfig defaults spawnImmunityDuration to 0; production is 50.
+        cfg.spawn_immunity_duration = Some(0);
+        game.wire = crate::core::config::Config::new(cfg, false);
+    }
+
+    /// Half-resolution mini-map (TS `TerrainMapLoader`), required for the
+    /// `waterGraphVersion` test's mini-tile majority-water flip path.
+    fn attach_half_mini_map(game: &mut Game) {
+        let mw = game.map.width / 2;
+        let mh = game.map.height / 2;
+        let n = (mw * mh) as usize;
+        let meta = MapMeta {
+            width: mw,
+            height: mh,
+            num_land_tiles: n as u32,
+        };
+        game.mini_map = GameMap::from_terrain_bytes(&meta, &vec![0x80u8; n]).unwrap();
+        game.mini_water_astar = crate::water::WaterAstarScratch::new(n);
+        game.mini_water_hpa = Some(crate::water_hpa::WaterHierarchical::new(&game.mini_map, true));
+    }
+
+    fn add_human(game: &mut Game, small_id: u16) {
+        game.add_player(Player {
+            id: format!("p{small_id}"),
+            small_id,
+            player_type: PlayerType::Human,
+            gold: 1_000_000_000,
+            ..Default::default()
+        });
+    }
+
+    fn silo_game(width: u32, height: u32, water_nukes: bool) -> (Game, u16, TileRef) {
+        let mut game = plains_game(width, height);
+        enable_water_nukes(&mut game, water_nukes);
+        add_human(&mut game, 1);
+        let home = game.map.ref_xy(1, 1);
+        game.conquer(1, home);
+        game.build_unit(1, unit_type::MISSILE_SILO, home);
+        (game, 1, home)
+    }
+
+    /// TS `launchNukeAt` + `tickUntilNukeLands` (and the graph-version test's
+    /// 80-tick window so the 20-tick rebuild throttle can fire).
+    fn launch_and_detonate(game: &mut Game, owner: u16, target: TileRef) {
+        assert!(
+            can_build_nuke(game, owner, unit_type::ATOM_BOMB, target).is_some(),
+            "can_build_nuke must succeed (spawn immunity must be off)"
+        );
+        game.add_execution(ExecEnum::Nuke(NukeExecution::new(
+            unit_type::ATOM_BOMB,
+            owner,
+            target,
+            None,
+            -1.0,
+            0,
+            true,
+        )));
+        for _ in 0..80 {
+            game.execute_next_tick();
+        }
+    }
+
+    #[test]
+    fn water_nukes_convert_land_to_water_instead_of_fallout() {
+        let (mut game, owner, _) = silo_game(64, 64, true);
+        let target = game.map.ref_xy(10, 10);
+        assert!(game.is_land(target));
+        assert!(!game.has_fallout(target));
+
+        launch_and_detonate(&mut game, owner, target);
+
+        assert!(game.is_water(target), "target must become water");
+        assert!(!game.is_land(target));
+        assert!(
+            !game.has_fallout(target),
+            "waterNukes path must not paint fallout"
+        );
+    }
+
+    #[test]
+    fn water_nukes_update_shoreline_bits_around_the_crater() {
+        let (mut game, owner, _) = silo_game(64, 64, true);
+        let target = game.map.ref_xy(10, 10);
+
+        launch_and_detonate(&mut game, owner, target);
+
+        // Production AtomBomb outer=30; land adjacent to converted water
+        // must pick up shoreline bits (TS checks dist-2 under TestConfig
+        // magnitudes {1,1}).
+        let mut shoreline_land = 0u32;
+        for y in 0..64u32 {
+            for x in 0..64u32 {
+                let t = game.map.ref_xy(x, y);
+                if game.is_land(t) && game.map.is_shoreline(t) {
+                    shoreline_land += 1;
+                }
+            }
+        }
+        assert!(
+            shoreline_land > 0,
+            "converted crater must leave shoreline on surrounding land"
+        );
+    }
+
+    #[test]
+    fn queue_water_conversion_skips_tiles_conquered_before_flush() {
+        let mut game = plains_game(32, 32);
+        enable_water_nukes(&mut game, true);
+        add_human(&mut game, 1);
+        let target = game.map.ref_xy(10, 10);
+        assert!(game.is_land(target));
+        assert!(!game.has_owner(target));
+
+        game.queue_water_conversion(target);
+        game.conquer(1, target);
+        assert!(game.has_owner(target));
+
+        game.execute_next_tick();
+
+        assert!(game.is_land(target), "owned tile must stay land");
+        assert!(game.has_owner(target));
+        assert!(!game.is_water(target));
+    }
+
+    #[test]
+    fn water_graph_version_increments_after_water_conversion() {
+        let (mut game, owner, _) = silo_game(64, 64, true);
+        attach_half_mini_map(&mut game);
+        let target = game.map.ref_xy(30, 30);
+        let before = game.water_graph_version();
+
+        launch_and_detonate(&mut game, owner, target);
+
+        assert!(
+            game.water_graph_version() > before,
+            "mini water-graph rebuild must bump water_graph_version after a water nuke"
+        );
+    }
+
+    #[test]
+    fn without_water_nukes_nuke_applies_fallout_not_water() {
+        let (mut game, owner, _) = silo_game(64, 64, false);
+        let target = game.map.ref_xy(10, 10);
+        let before = game.water_graph_version();
+
+        launch_and_detonate(&mut game, owner, target);
+
+        assert!(game.is_land(target), "default path keeps land");
+        assert!(game.has_fallout(target), "default path paints fallout");
+        assert_eq!(
+            game.water_graph_version(),
+            before,
+            "fallout path must not rebuild the water graph"
+        );
+    }
+}
+
 /// TS `NukeExecution.tilesToDestroy`'s `waterNukes()` branch (pin f0da4182).
 ///
 /// Samples `NUM_SAMPLES` angular radii uniformly in `[inner2, outer2)`, applies
