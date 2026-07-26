@@ -452,7 +452,9 @@ impl TrainState {
     }
 }
 
-fn expand_v10_sidecar_if_needed(state: &mut TrainState) {
+/// Remap sidecars written against an older stage-table length. Returns true when
+/// the stage index was rewritten (callers must not undo that via LR inference).
+fn expand_v10_sidecar_if_needed(state: &mut TrainState) -> bool {
     let targets_len = state.stage_env_targets.len();
     let remapped = if targets_len == ofcore::curriculum::V10_LEGACY_LEN {
         let as35 = state
@@ -481,14 +483,18 @@ fn expand_v10_sidecar_if_needed(state: &mut TrainState) {
             "[train] V10 stage-table expand: stage {old} -> {new_stage} \
              (from {targets_len}-slot sidecar; cleared windows; env targets reset)"
         );
+        true
+    } else {
+        false
     }
 }
 
+/// Returns whether the sidecar stage index was remapped onto a newer table.
 fn reconcile_resume_schedule(
     state: &mut TrainState,
     requested: ofcore::curriculum::CurriculumSchedule,
     migrate_v86_to_v10: bool,
-) -> Result<()> {
+) -> Result<bool> {
     anyhow::ensure!(
         requested == ofcore::curriculum::CurriculumSchedule::V10,
         "oftrain only supports the V10 curriculum"
@@ -505,8 +511,7 @@ fn reconcile_resume_schedule(
                 ofcore::curriculum::V10_REWARD_PROFILE,
                 state.reward_profile
             );
-            expand_v10_sidecar_if_needed(state);
-            Ok(())
+            Ok(expand_v10_sidecar_if_needed(state))
         }
         Some(ofcore::curriculum::LEGACY_V83_SCHEDULE_ID) if migrate_v86_to_v10 => {
             anyhow::ensure!(
@@ -526,7 +531,7 @@ fn reconcile_resume_schedule(
             state.best_eval_win = None;
             state.best_eval_score = None;
             state.requested_env_target = None;
-            Ok(())
+            Ok(true)
         }
         Some(ofcore::curriculum::LEGACY_V83_SCHEDULE_ID) => {
             anyhow::bail!("V8.3/V8.6 checkpoint requires --migrate-v86-to-v10 to resume under V10")
@@ -544,31 +549,48 @@ fn reconcile_resume_schedule(
 /// matches a much higher stage (observed: stage 28→8 at update 11571 with
 /// `lr_now` left at `2.6e-6`). Restore the implied stage, then always
 /// recompute `lr_now` from the (possibly corrected) stage + floor.
+///
+/// Skipped after an intentional stage-table expand/migration: those lower the
+/// index on purpose, and a floored `lr_now` is shared by many stages so it must
+/// not invent a higher index.
 fn reconcile_resume_stage_and_lr(
     state: &mut TrainState,
     base_lr: f64,
     decay: f64,
     floor: f64,
+    skip_stage_restore: bool,
 ) {
     const MIN_IMPLIED_STAGE_GAP: usize = 3;
-    if let Some(implied) =
-        ofcore::curriculum::imply_stage_from_learning_rate(state.lr_now, base_lr, decay)
-    {
-        let uncapped_for_sidecar =
-            base_lr * decay.powi(state.stage as i32);
-        if implied >= state.stage + MIN_IMPLIED_STAGE_GAP
-            && state.lr_now < uncapped_for_sidecar * 0.5
+    // Floored LRs are shared by many stages (plateau). Only treat as ambiguous
+    // when lr_now is *at* the floor — values below the floor still diagnose the
+    // historical "stage rewritten down, lr left high-stage" cliff.
+    let lr_at_floor = floor > 0.0
+        && state.lr_now >= floor * 0.99
+        && state.lr_now <= floor * 1.01;
+    if !skip_stage_restore && !lr_at_floor {
+        if let Some(implied) =
+            ofcore::curriculum::imply_stage_from_learning_rate(state.lr_now, base_lr, decay)
         {
-            println!(
-                "[train] refusing unexplained resume stage drop: sidecar stage={} \
-                 but lr_now={:.2e} implies stage~{implied}; restoring stage",
-                state.stage, state.lr_now
-            );
-            state.stage = implied;
-            state.recent_wins.clear();
-            state.recent_conversions.clear();
-            state.recent_deaths.clear();
+            let uncapped_for_sidecar = base_lr * decay.powi(state.stage as i32);
+            if implied >= state.stage + MIN_IMPLIED_STAGE_GAP
+                && state.lr_now < uncapped_for_sidecar * 0.5
+            {
+                println!(
+                    "[train] refusing unexplained resume stage drop: sidecar stage={} \
+                     but lr_now={:.2e} implies stage~{implied}; restoring stage",
+                    state.stage, state.lr_now
+                );
+                state.stage = implied;
+                state.recent_wins.clear();
+                state.recent_conversions.clear();
+                state.recent_deaths.clear();
+            }
         }
+    } else if skip_stage_restore {
+        println!(
+            "[train] keeping remapped resume stage {} (skip LR stage restore after table expand)",
+            state.stage
+        );
     }
     let corrected =
         ofcore::curriculum::stage_learning_rate(base_lr, decay, state.stage, floor);
@@ -616,7 +638,7 @@ mod resume_stage_lr_tests {
         let decay: f64 = 0.85;
         let lr28 = base * decay.powi(28);
         let mut st = state(8, lr28);
-        reconcile_resume_stage_and_lr(&mut st, base, decay, V10_STAGE_LR_FLOOR);
+        reconcile_resume_stage_and_lr(&mut st, base, decay, V10_STAGE_LR_FLOOR, false);
         assert_eq!(st.stage, 28);
         assert!((st.lr_now - V10_STAGE_LR_FLOOR).abs() < 1e-15);
         assert!(st.recent_wins.is_empty());
@@ -627,9 +649,30 @@ mod resume_stage_lr_tests {
         let base: f64 = 2.5e-4;
         let decay: f64 = 0.85;
         let mut st = state(24, base * decay.powi(24));
-        reconcile_resume_stage_and_lr(&mut st, base, decay, V10_STAGE_LR_FLOOR);
+        reconcile_resume_stage_and_lr(&mut st, base, decay, V10_STAGE_LR_FLOOR, false);
         assert_eq!(st.stage, 24);
         assert!((st.lr_now - V10_STAGE_LR_FLOOR).abs() < 1e-15);
+    }
+
+    #[test]
+    fn table_expand_keeps_remapped_stage_despite_floor_lr() {
+        let base: f64 = 2.5e-4;
+        let decay: f64 = 0.85;
+        // Floored LR implies ~stage 20, but density remap intentionally put us at 13.
+        let mut st = state(13, V10_STAGE_LR_FLOOR);
+        reconcile_resume_stage_and_lr(&mut st, base, decay, V10_STAGE_LR_FLOOR, true);
+        assert_eq!(st.stage, 13);
+        let expect = ofcore::curriculum::stage_learning_rate(base, decay, 13, V10_STAGE_LR_FLOOR);
+        assert!((st.lr_now - expect).abs() < 1e-15);
+    }
+
+    #[test]
+    fn floor_lr_alone_does_not_invent_a_higher_stage() {
+        let base: f64 = 2.5e-4;
+        let decay: f64 = 0.85;
+        let mut st = state(13, V10_STAGE_LR_FLOOR);
+        reconcile_resume_stage_and_lr(&mut st, base, decay, V10_STAGE_LR_FLOOR, false);
+        assert_eq!(st.stage, 13);
     }
 }
 
@@ -1331,15 +1374,25 @@ mod v10_state_and_gate_tests {
     fn resume_expands_prior_100_stage_v10_sidecar() {
         let mut state = state_for_schedule(Some("v10"), 22);
         state.stage_env_targets = vec![24; ofcore::curriculum::V10_PREV100_LEN];
-        reconcile_resume_schedule(
+        state.lr_now = ofcore::curriculum::V10_STAGE_LR_FLOOR;
+        let expanded = reconcile_resume_schedule(
             &mut state,
             ofcore::curriculum::CurriculumSchedule::V10,
             false,
         )
         .unwrap();
+        assert!(expanded);
         assert_eq!(state.stage, 13);
         assert!(state.stage_env_targets.is_empty());
         assert!(state.recent_wins.is_empty());
+        super::reconcile_resume_stage_and_lr(
+            &mut state,
+            2.5e-4,
+            0.85,
+            ofcore::curriculum::V10_STAGE_LR_FLOOR,
+            expanded,
+        );
+        assert_eq!(state.stage, 13, "LR floor must not undo density remap");
     }
 
     #[test]
@@ -6921,8 +6974,15 @@ pub fn run(mut cfg: Config) -> Result<()> {
             .curriculum_schedule
             .clone()
             .unwrap_or_else(|| "<missing>".to_string());
-        reconcile_resume_schedule(state, cfg.curriculum_schedule, cfg.migrate_v86_to_v10)?;
-        reconcile_resume_stage_and_lr(state, cfg.lr, cfg.stage_lr_decay, cfg.stage_lr_floor);
+        let table_expanded =
+            reconcile_resume_schedule(state, cfg.curriculum_schedule, cfg.migrate_v86_to_v10)?;
+        reconcile_resume_stage_and_lr(
+            state,
+            cfg.lr,
+            cfg.stage_lr_decay,
+            cfg.stage_lr_floor,
+            table_expanded,
+        );
         if saved_schedule_id != cfg.curriculum_schedule.id() {
             println!(
                 "[train] migrated curriculum schedule {} -> {}",
