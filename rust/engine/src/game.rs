@@ -3370,6 +3370,14 @@ impl Game {
     }
 
     pub fn players_on_same_team(&self, a: u16, b: u16) -> bool {
+        // TS `PlayerImpl.isOnSameTeam`: `if (other === this) return false`. A
+        // player is never on the same team as themselves. This matters for the
+        // nuke self-target path (`PlayerImpl.nukeSpawn`): a human can launch a
+        // nuke onto a tile they own themselves, which native previously
+        // rejected because `players_on_same_team(self, self)` returned true.
+        if a == b {
+            return false;
+        }
         let Some(pa) = self.player_by_small_id(a) else {
             return false;
         };
@@ -5105,6 +5113,20 @@ mod team_join_tests {
         // Same nominal team, but `Bot` is explicitly excluded from `players_on_same_team`'s
         // friendliness check - tribes still fight each other.
         assert!(!game.players_on_same_team(bot1, bot2));
+    }
+
+    #[test]
+    fn a_player_is_never_on_the_same_team_as_themselves() {
+        // TS `PlayerImpl.isOnSameTeam`: `if (other === this) return false`.
+        // Native previously returned true (a player's team equals their own),
+        // which made `PlayerImpl.nukeSpawn` reject a human launching a nuke
+        // onto a tile they own themselves (found via the KD13niv8 tick-5746
+        // full-game bisection - a human self-target atom bomb TS built but
+        // native silently dropped).
+        let mut game = team_mode_game(2);
+        let p1 = add_player(&mut game, "self", PlayerType::Human);
+        game.player_by_small_id_mut(p1).unwrap().team = Some("Red".into());
+        assert!(!game.players_on_same_team(p1, p1));
     }
 
     #[test]
