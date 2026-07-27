@@ -257,7 +257,8 @@ fn magnitude_penalty(mag: u8) -> u32 {
 
 fn count_water_neighbors_ts(map: &GameMap, tile: TileRef) -> u32 {
     let mut buf = [0u32; 4];
-    let n = map.neighbors4_ts(tile, &mut buf);
+    // TS `ShoreCoercingTransformer` iterates `map.neighbors()` (N,S,W,E).
+    let n = map.neighbors_nswe(tile, &mut buf);
     let mut count = 0u32;
     for i in 0..n {
         if map.is_water(buf[i]) {
@@ -273,7 +274,7 @@ pub fn coerce_shore_to_water(map: &GameMap, tile: TileRef) -> Option<TileRef> {
         return Some(tile);
     }
     let mut buf = [0u32; 4];
-    let n = map.neighbors4_ts(tile, &mut buf);
+    let n = map.neighbors_nswe(tile, &mut buf);
     let mut best: Option<TileRef> = None;
     let mut max_score = -1i32;
     for i in 0..n {

@@ -275,10 +275,6 @@ impl Execution for TransportShipExecution {
                 .map(|p| p.troops as f64)
                 .unwrap_or(0.0),
         );
-        if troops < 1.0 {
-            self.active = false;
-            return;
-        }
         game.remove_troops(self.owner_small_id, troops);
         self.troops = Some(troops);
 
@@ -401,16 +397,20 @@ mod tests {
     use super::*;
     use crate::game::{PlayerInfo, PlayerType};
 
-    fn add_human(game: &mut Game, id: &str) -> u16 {
+    fn add_player(game: &mut Game, id: &str, player_type: PlayerType) -> u16 {
         game.add_from_info(&PlayerInfo {
             name: id.into(),
-            player_type: PlayerType::Human,
-            client_id: Some(id.into()),
+            player_type,
+            client_id: (player_type == PlayerType::Human).then(|| id.into()),
             id: id.into(),
             clan_tag: None,
             friends: Vec::new(),
             team: None,
         })
+    }
+
+    fn add_human(game: &mut Game, id: &str) -> u16 {
+        add_player(game, id, PlayerType::Human)
     }
 
     fn two_tile_land_game() -> Game {
@@ -423,6 +423,40 @@ mod tests {
         let terrain = vec![0x80u8; 2];
         game.map = crate::map::GameMap::from_terrain_bytes(&meta, &terrain).unwrap();
         game.mini_map = crate::map::GameMap::from_terrain_bytes(&meta, &terrain).unwrap();
+        game
+    }
+
+    fn transport_test_game() -> Game {
+        const LAND: u8 = 0b1000_0000;
+        const SHORE: u8 = 1 << 6;
+
+        let width = 5;
+        let height = 3;
+        let mut terrain = vec![0u8; (width * height) as usize];
+        for y in 0..height {
+            terrain[(y * width) as usize] = LAND | SHORE;
+            terrain[(y * width + (width - 1)) as usize] = LAND | SHORE;
+        }
+        let meta = crate::map::MapMeta {
+            width,
+            height,
+            num_land_tiles: height * 2,
+        };
+        let map = crate::map::GameMap::from_terrain_bytes(&meta, &terrain).unwrap();
+        let mut game = Game::default();
+        game.map = map.clone();
+        game.mini_map = map;
+        let tile_count = (width * height) as usize;
+        game.bfs = crate::water::BfsScratch::new(tile_count);
+        game.water_astar = crate::water::WaterAstarScratch::new(tile_count);
+        game.mini_water_astar = crate::water::WaterAstarScratch::new(tile_count);
+        game.mini_water_hpa = Some(crate::water_hpa::WaterHierarchical::new(
+            &game.mini_map,
+            true,
+        ));
+        game.water_component = crate::water::build_water_components(&game.map);
+        game.reinit_unit_grid();
+        game.end_spawn_phase();
         game
     }
 
@@ -518,6 +552,31 @@ mod tests {
 
         assert!(!ship.is_active());
         assert!(ship.unit_id().is_none());
+    }
+
+    #[test]
+    fn zero_troop_transport_intent_still_launches_ship() {
+        let mut game = transport_test_game();
+        let sender = add_player(&mut game, "sender", PlayerType::Bot);
+        let target = add_player(&mut game, "target", PlayerType::Bot);
+        if let Some(p) = game.player_by_small_id_mut(sender) {
+            p.troops = 1_000;
+        }
+
+        for y in 0..3 {
+            game.conquer(sender, game.map.ref_xy(0, y));
+            game.conquer(target, game.map.ref_xy(4, y));
+        }
+        let target_shore = game.map.ref_xy(4, 1);
+
+        let mut ship = TransportShipExecution::new(sender, target_shore, 0.0);
+        ship.init(&mut game, 42);
+
+        assert!(ship.is_active());
+        assert_eq!(ship.carried_troops(), 0.0);
+        assert!(ship.unit_id().is_some());
+        assert_eq!(game.unit_count(sender, TRANSPORT), 1);
+        assert_eq!(game.player_by_small_id(sender).unwrap().troops, 1_000);
     }
 
     // Ported from Attack.test.ts's "Boat penalty on retreat Transport Ship

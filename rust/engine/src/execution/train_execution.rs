@@ -100,6 +100,19 @@ impl TrainExecution {
             let car = game.build_unit(self.owner_small_id, unit_type::TRAIN, spawn_tile);
             self.car_unit_ids.push(car);
         }
+
+        // TS builds the units before composing the client motion plan. If any
+        // later station hop has no oriented railroad, init returns inactive and
+        // those just-built train units remain parked at the source station.
+        if !Self::has_motion_plan_segments(&game.rail_network, &self.stations) {
+            self.active = false;
+        }
+    }
+
+    fn has_motion_plan_segments(rn: &rail::RailNetwork, stations: &[u32]) -> bool {
+        stations
+            .windows(2)
+            .all(|pair| rail::oriented_railroad_tiles(rn, pair[0], pair[1]).is_some())
     }
 }
 
@@ -152,6 +165,65 @@ mod tests {
         assert!(
             exec.can_trade_with_destination(&game),
             "live owner can trade with train owner even when cached owner is embargoed"
+        );
+    }
+
+    #[test]
+    fn motion_plan_validation_rejects_missing_later_segment() {
+        let mut rn = rail::RailNetwork::default();
+        rn.stations.insert(
+            1,
+            rail::Station {
+                id: 1,
+                owner_small_id: 1,
+                unit_id: 10,
+                unit_type: unit_type::FACTORY.into(),
+                tile: 100,
+                cluster: Some(1),
+                railroads: vec![7],
+                railroad_by_neighbor: [(2, 7)].into(),
+            },
+        );
+        rn.stations.insert(
+            2,
+            rail::Station {
+                id: 2,
+                owner_small_id: 1,
+                unit_id: 11,
+                unit_type: unit_type::CITY.into(),
+                tile: 101,
+                cluster: Some(1),
+                railroads: vec![7],
+                railroad_by_neighbor: [(1, 7)].into(),
+            },
+        );
+        rn.stations.insert(
+            3,
+            rail::Station {
+                id: 3,
+                owner_small_id: 1,
+                unit_id: 12,
+                unit_type: unit_type::PORT.into(),
+                tile: 102,
+                cluster: Some(1),
+                railroads: Vec::new(),
+                railroad_by_neighbor: std::collections::HashMap::new(),
+            },
+        );
+        rn.railroads.insert(
+            7,
+            rail::Railroad {
+                id: 7,
+                from: 1,
+                to: 2,
+                tiles: vec![100, 101],
+            },
+        );
+
+        assert!(TrainExecution::has_motion_plan_segments(&rn, &[1, 2]));
+        assert!(
+            !TrainExecution::has_motion_plan_segments(&rn, &[1, 2, 3]),
+            "TS deactivates after creating units if any later motion-plan segment is missing"
         );
     }
 }
