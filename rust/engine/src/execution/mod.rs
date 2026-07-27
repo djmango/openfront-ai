@@ -35,6 +35,7 @@ pub mod attack;
 pub mod donate;
 pub mod donate_gold;
 pub mod embargo_exec;
+pub mod emoji_execution;
 pub mod exec_enum;
 pub mod flat_heap;
 pub mod intent;
@@ -91,6 +92,7 @@ pub use alliance_exec::{
 pub use donate::DonateTroopsExecution;
 pub use donate_gold::DonateGoldExecution;
 pub use embargo_exec::{EmbargoAllExecution, EmbargoExecution};
+pub use emoji_execution::EmojiExecution;
 pub use exec_enum::ExecEnum;
 pub use intent::{intent_to_execution, turn_to_executions};
 pub use mark_disconnected::MarkDisconnectedExecution;
