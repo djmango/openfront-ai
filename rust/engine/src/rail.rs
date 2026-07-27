@@ -31,6 +31,7 @@ pub struct Station {
     pub owner_small_id: u16,
     pub unit_id: i32,
     pub unit_type: String,
+    pub tile: TileRef,
     pub cluster: Option<u32>,
     /// Railroad ids incident to this station, insertion order (mirrors TS `Set` order).
     pub railroads: Vec<u32>,
@@ -279,11 +280,13 @@ impl RailNetwork {
 pub fn station_tile(game: &Game, rn: &RailNetwork, station_id: u32) -> Option<TileRef> {
     let st = rn.stations.get(&station_id)?;
     // TS reads `station.unit.tile()` via the live unit reference - owner may
-    // have changed after capture without reconnecting the station.
+    // have changed after capture without reconnecting the station. If the Unit
+    // has since been removed while a duplicate/orphan Station object remains,
+    // TS still has that dead Unit object's last tile; keep the same cached tile.
     let owner = game
         .find_unit_owner(st.unit_id)
         .unwrap_or(st.owner_small_id);
-    game.unit_tile_of(owner, st.unit_id)
+    Some(game.unit_tile_of(owner, st.unit_id).unwrap_or(st.tile))
 }
 
 pub fn station_unit_type(rn: &RailNetwork, station_id: u32) -> Option<String> {
@@ -371,6 +374,7 @@ pub fn connect_station(
 ) -> u32 {
     let mut rn = std::mem::take(&mut game.rail_network);
     let id = rn.new_station_id();
+    let tile = game.unit_tile_of(owner_small_id, unit_id).unwrap_or(0);
     rn.stations.insert(
         id,
         Station {
@@ -378,6 +382,7 @@ pub fn connect_station(
             owner_small_id,
             unit_id,
             unit_type: unit_type_str.to_string(),
+            tile,
             cluster: None,
             railroads: Vec::new(),
             railroad_by_neighbor: HashMap::new(),
@@ -1155,6 +1160,7 @@ mod tests {
             owner_small_id: 1,
             unit_id: 99,
             unit_type: unit_type::FACTORY.to_string(),
+            tile: 100,
             cluster: Some(1),
             railroads: Vec::new(),
             railroad_by_neighbor: HashMap::new(),
@@ -1229,6 +1235,7 @@ mod tests {
                 owner_small_id: 1,
                 unit_id: 1,
                 unit_type: unit_type::CITY.to_string(),
+                tile: 10,
                 cluster: None,
                 railroads: Vec::new(),
                 railroad_by_neighbor: HashMap::new(),
@@ -1243,6 +1250,7 @@ mod tests {
                 owner_small_id: 1,
                 unit_id: 2,
                 unit_type: unit_type::CITY.to_string(),
+                tile: 20,
                 cluster: Some(cluster),
                 railroads: Vec::new(),
                 railroad_by_neighbor: HashMap::new(),
@@ -1314,6 +1322,7 @@ mod tests {
                     owner_small_id: 1,
                     unit_id: 42,
                     unit_type: unit_type::CITY.to_string(),
+                    tile: sid,
                     cluster: None,
                     railroads: Vec::new(),
                     railroad_by_neighbor: HashMap::new(),
@@ -1334,6 +1343,24 @@ mod tests {
     }
 
     #[test]
+    fn orphan_station_tile_uses_cached_unit_tile() {
+        let mut game = plains_game(20, 20);
+        let owner = add_nation(&mut game, "owner");
+        let tile = game.map.ref_xy(6, 6);
+        game.conquer(owner, tile);
+
+        let city = game.build_unit(owner, unit_type::CITY, tile);
+        let station_id = connect_station(&mut game, owner, city, unit_type::CITY);
+        game.remove_unit(owner, city);
+
+        assert_eq!(
+            station_tile(&game, &game.rail_network, station_id),
+            Some(tile),
+            "TS TrainStation keeps a dead Unit object's last tile for station path heuristics"
+        );
+    }
+
+    #[test]
     fn cluster_tracks_trade_stations_separately_from_factories() {
         let mut rn = RailNetwork::default();
         let cluster = rn.new_cluster();
@@ -1350,6 +1377,7 @@ mod tests {
                     owner_small_id: 1,
                     unit_id: sid as i32,
                     unit_type: unit_type.to_string(),
+                    tile: sid,
                     cluster: None,
                     railroads: Vec::new(),
                     railroad_by_neighbor: HashMap::new(),
