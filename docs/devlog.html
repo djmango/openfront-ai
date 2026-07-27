@@ -85,22 +85,26 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 27th, 2026</h2>
-  <p><b><code>ppo_v11</code> live on <b>4×A100 80GB</b></b> at update <b>716</b> /
-  stage <b>16</b> (~2.64M steps, 40 envs/shard). After the compressed-Easy
+  <p><b><code>ppo_v11</code> live on <b>4×A100 80GB</b></b> at update <b>721</b> /
+  stage <b>16</b> (~2.69M steps, 40 envs/shard). After the compressed-Easy
   stage-table remap (sidecar expand jumped live progress
-  <b>s22 → s13</b> at u681), climbed <b>13→16</b> in ~2 h, then stuck on
-  s16 (26 bots / <b>3 nations</b>, Easy) with window WR ~<b>0.10</b> /
-  DR ~0.63 for ~5 h. Train tick budget still
-  <code>--max-episode-ticks 21000</code>.</p>
+  <b>s22 → s13</b> at u681), climbed <b>13→16</b> by u692, then stuck on
+  s16 (26 bots / <b>3 nations</b>, Easy). Window WR trough ~0.075 at u713,
+  recovered to ~<b>0.275</b> / DR ~0.50 by u721 (gate still 0.75). Train
+  tick budget <code>--max-episode-ticks 21000</code>.</p>
   <p><b>AE v3.2 no-static</b> remains the live encoder pair
   (<code>ae_v32_nostatic_d8c32</code> / <code>d16c32</code>).
-  Watch clips: <code>djmango/openfront-rl/ppo_v11/</code> +
-  <code>showcase-clips/run_progress_watches.sh</code>.</p>
+  Progress clips (u716 policy, train-matched 21000 ticks):
+  <a href="https://share.skg.gg/u/8Jc8UC.webm">s16 current</a> (death@17301) ·
+  s17 next (retrying strict client render) ·
+  <a href="https://share.skg.gg/u/GRaquL.webm">s26 +10</a> (death@5571) ·
+  <a href="https://share.skg.gg/u/HKODT2.webm">s36 Medium</a> (death@4261).
+  Script: <code>showcase-clips/run_progress_watches.sh</code>.</p>
   <p class="d" style="margin:.75rem 0 0">
-  Compressed ladder (not the old 100-stage indices): Surpass/closeout ≈
-  stage <b>28</b>; first <b>Medium = stage 36</b> (was 68 on the prior
-  table). With the s16 WR hole, surpass ~<b>Jul 28-30</b> UTC; Medium
-  ~<b>Jul 29 – Aug 1</b> UTC. Another long nation stick pushes both later.</p>
+  Compressed ladder: Surpass/closeout ≈ stage <b>28</b>; first
+  <b>Medium = stage 36</b>. With the ongoing s16 3-nation hole (WR climbing
+  but still far from gate), surpass ~<b>Jul 28-30</b> UTC; Medium
+  ~<b>Jul 29 – Aug 1</b> UTC. Another deep WR trough pushes both later.</p>
 </div>
 
 
@@ -135,18 +139,21 @@ revised ETAs from measured update cadence.</p>
 </ul>
 
 <h3 id="v11-4x-eta">Revised ETAs</h3>
-<p>As of Jul 27 ~04:00 UTC: stage <b>16</b> / u716 after Easy-table remap
-(live jumped s22→s13 at u681, then 13→16). Window WR ~0.10 on 3-nation Easy.
-Update clock still ~5-8/hr when clearing; progression is WR-gated:</p>
+<p>As of Jul 27 ~05:15 UTC: stage <b>16</b> / u721 after Easy-table remap
+(live jumped s22→s13 at u681, then 13→16 by u692). Stuck ~29 updates on
+3-nation Easy; WR recovered 0.075→0.275 (u713→u721) vs gate 0.75.
+Update clock ~5-6/hr; progression is WR-gated:</p>
 <table>
   <tr><th>milestone</th><th>stage</th><th>ETA (UTC)</th><th>notes</th></tr>
   <tr><td>Surpass / closeout</td><td>28</td><td>~Jul 28-30</td>
-    <td>12 advances; s16 hole + later nation densify</td></tr>
+    <td>12 advances after clear; s16 hole + later nation densify</td></tr>
   <tr><td>First Medium</td><td><b>36</b></td><td>~Jul 29 – Aug 1</td>
-    <td>compressed ladder (old docs said 68 — that was the prior 100-stage index)</td></tr>
+    <td>compressed ladder (old docs said 68 — prior 100-stage index)</td></tr>
 </table>
 <p>Caveats: nation-count jumps (3n@s16, 4n@s19, 5n@s22, …) dominate calendar
-risk more than GPU count. Medium lobby resets to 90 bots / 4n at s36.</p>
+risk more than GPU count. Medium lobby resets to 90 bots / 4n at s36.
+Optimistic path if WR keeps climbing ~0.02/update clears s16 within ~1 day;
+a second trough like u697→u713 adds hours.</p>
 
 <h2 class="date" id="v11-soak">Jul 24-25, 2026 - V11 soak: util stack, watch truth, clip bugs</h2>
 <p class="session">First multi-day <code>ppo_v11</code> run on 2×A100. Validated the
