@@ -1405,13 +1405,6 @@ pub fn do_handle_structures(
     }
 
     if !cities_disabled && maybe_spawn_structure(game, random, small_id, unit_type::CITY) {
-        if game
-            .player_by_small_id(small_id)
-            .is_some_and(|p| p.name == "China")
-            && (18000..=18005).contains(&game.ticks())
-        {
-            eprintln!("[struct-native] tick={} spawned CITY", game.ticks());
-        }
         return true;
     }
     false
