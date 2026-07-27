@@ -285,13 +285,8 @@ impl Execution for AttackExecution {
             if game.map.owner_id(tile_to_conquer) != self.target_small_id || !on_border {
                 continue;
             }
-            // Equivalent of TS `if (!isLand(t) || isImpassable(t)) continue;`
-            // in AttackExecution.tick. Without this, an impassable tile that
-            // slipped into `to_conquer` (e.g. via the historical add_neighbors
-            // gap) could actually be conquered below, giving it a real owner
-            // in violation of the "impassable tiles are always owner 0"
-            // invariant the rest of the engine assumes.
-            if !game.is_land(tile_to_conquer) || game.is_impassable(tile_to_conquer) {
+            // Tip `AttackExecution.tick`: land-only guard (impassable removed).
+            if !game.is_land(tile_to_conquer) {
                 continue;
             }
 
@@ -638,6 +633,7 @@ mod tests {
     /// `add_neighbors`'s matching `is_impassable` exclusion - this pins the
     /// end-to-end behavior through a real multi-tick fight across a wall.
     #[test]
+    #[ignore = "tip dd1277 removed impassable terrain"]
     fn attack_does_not_expand_into_impassable_tiles() {
         const WALL_X: u32 = 30;
         let mut game = crate::test_util::walled_game(60, 20, Some((WALL_X, 2)));
@@ -1317,18 +1313,8 @@ impl AttackExecution {
             if game.map.is_water(neighbor) {
                 return;
             }
-            // Equivalent of TS `if (isWater(t) || isImpassable(t) || ownerID(t)
-            // !== targetSmallID) continue;` in AttackExecution.addNeighbors.
-            // Impassable tiles always have owner 0 (TerraNullius), so when
-            // attacking TerraNullius they'd otherwise slip past the owner
-            // check below and get added as a phantom border/candidate tile -
-            // consuming an extra `self.random.next_int(0, 7)` draw that TS
-            // never makes, desyncing the shared per-attack PRNG stream (see
-            // the `self.random` usage a few lines down and in
-            // `AttackExecution::tick`'s `border_size + random.next_int(0, 5)`).
-            if game.map.is_impassable(neighbor) {
-                return;
-            }
+            // Tip `AttackExecution.addNeighbors`: water or wrong owner skip
+            // (impassable filter removed on tip).
             if game.map.owner_id(neighbor) != self.target_small_id {
                 return;
             }

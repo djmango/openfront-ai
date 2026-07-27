@@ -309,11 +309,16 @@ pub fn nearby_player_small_ids(game: &Game, small_id: u16) -> Vec<u16> {
                 continue;
             }
             let tile = game.ref_xy(nx as u32, ny as u32);
-            // Tip: no impassable skip on shore-reachable land.
-            if !game.is_land(tile) || game.has_fallout(tile) {
+            // Tip `shoreReachableNeighbors`:
+            //   if (!isLand) continue;
+            //   if (!hasOwner && hasFallout) continue;
+            if !game.is_land(tile) {
                 continue;
             }
             let owner = game.map.owner_id(tile);
+            if owner == 0 && game.has_fallout(tile) {
+                continue;
+            }
             if owner != small_id && owner != 0 {
                 seen.insert(owner);
             }
@@ -667,11 +672,14 @@ pub(crate) fn nearby_players_ts_order(game: &Game, small_id: u16) -> Vec<u16> {
                 continue;
             }
             let tile = game.ref_xy(nx as u32, ny as u32);
-            // Tip `shoreReachableNeighbors`: no impassable skip.
-            if !game.is_land(tile) || game.has_fallout(tile) {
+            // Tip `shoreReachableNeighbors`: skip only unowned nuked land.
+            if !game.is_land(tile) {
                 continue;
             }
             let owner = game.map.owner_id(tile);
+            if owner == 0 && game.has_fallout(tile) {
+                continue;
+            }
             if owner != small_id {
                 push(owner);
             }

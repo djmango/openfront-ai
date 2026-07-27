@@ -60,6 +60,10 @@ impl PseudoRandom {
         self.next_int(0, odds) == 0
     }
 
+    pub fn debug_state(&self) -> (i32, i32, i32, i32) {
+        (self.s0, self.s1, self.s2, self.s3)
+    }
+
     pub fn next_id(&mut self) -> String {
         let mut v = (self.next() * POW36_8).floor() as u64;
         let mut out = String::with_capacity(8);

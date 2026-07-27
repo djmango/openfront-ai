@@ -203,16 +203,18 @@ impl GameMap {
         self.terrain_byte(t) & MAGNITUDE_MASK
     }
 
-    pub fn is_impassable(&self, t: TileRef) -> bool {
-        self.is_land(t) && self.magnitude(t) == IMPASSABLE_MAGNITUDE
+    /// Live tip (`dd1277e245b5`) removed impassable terrain as a gameplay
+    /// concept: magnitude 31 is just deep-inland Mountain (see tip
+    /// `GameMap.terrainType`). Always return false so attack/spawn/nuke/
+    /// conquer paths match tip TS (which has no `isImpassable` API).
+    pub fn is_impassable(&self, _t: TileRef) -> bool {
+        false
     }
 
     pub fn terrain_type(&self, t: TileRef) -> TerrainType {
         if self.is_land(t) {
             let mag = self.magnitude(t);
-            if mag >= IMPASSABLE_MAGNITUDE {
-                return TerrainType::Impassable;
-            }
+            // Tip: mag >= 20 is Mountain (including former impassable mag 31).
             if mag < 10 {
                 return TerrainType::Plains;
             }

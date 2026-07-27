@@ -712,17 +712,13 @@ fn is_trajectory_interceptable_by_sam(
     false
 }
 
-/// TS `NationNukeBehavior.isTrajectoryBlockedByImpassable()`.
-fn is_trajectory_blocked_by_impassable(game: &Game, spawn_tile: TileRef, target_tile: TileRef) -> bool {
-    let path = parabola::find_path_tiles(
-        game,
-        spawn_tile,
-        target_tile,
-        game.wire.default_nuke_speed(),
-        true,
-        true,
-    );
-    path.iter().any(|&t| game.is_impassable(t))
+/// Tip removed `NationNukeBehavior.isTrajectoryBlockedByImpassable()` entirely.
+fn is_trajectory_blocked_by_impassable(
+    _game: &Game,
+    _spawn_tile: TileRef,
+    _target_tile: TileRef,
+) -> bool {
+    false
 }
 
 /// TS `NationNukeBehavior.findEnemySamsCoveringTile()` - enemy SAMs (unit id +
