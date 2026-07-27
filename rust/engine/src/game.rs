@@ -3403,7 +3403,9 @@ impl Game {
             return false;
         };
         for &(prev_recipient, created_at) in &sender.outgoing_emoji_sends {
-            if prev_recipient == recipient && self.ticks.saturating_sub(created_at) < EMOJI_MESSAGE_COOLDOWN
+            if prev_recipient == recipient
+                && created_at <= self.ticks
+                && self.ticks - created_at < EMOJI_MESSAGE_COOLDOWN
             {
                 return false;
             }
@@ -3416,7 +3418,10 @@ impl Game {
     /// Native emoji is hash-neutral (no `EmojiExecution`), but TS records
     /// `createdAt` when that execution *ticks* - always the tick after
     /// `addExecution` (init same tick, tick next). Store `ticks + 1` so the
-    /// 50-tick cooldown window matches TS.
+    /// 50-tick cooldown window matches TS. `can_send_emoji` ignores these
+    /// future entries until their execution tick, so multiple same-tick queued
+    /// emoji attempts consume RNG like TS before later execution cooldowns
+    /// decide which messages are displayed.
     pub fn record_emoji_send(&mut self, sender_small_id: u16, recipient: Option<u16>) {
         let created_at = self.ticks.saturating_add(1);
         if let Some(sender) = self.player_by_small_id_mut(sender_small_id) {
@@ -4578,6 +4583,35 @@ mod player_tests {
 
         assert_eq!(game.player_by_small_id(2).unwrap().tiles_owned, 0);
         assert!(!game.can_send_alliance_request(2, 1));
+    }
+
+    /// TS queues `EmojiExecution` and records `outgoingEmojis_` only when that
+    /// execution ticks on the next game tick. Native records queued emoji sends
+    /// immediately with a future `createdAt`; those future entries must not
+    /// block another same-tick emoji attempt (or its PRNG draw), but should
+    /// start the normal cooldown once the execution tick arrives.
+    #[test]
+    fn queued_emoji_cooldown_starts_on_execution_tick() {
+        let mut game = Game::default();
+        add_bot(&mut game, "sender", 1);
+        add_bot(&mut game, "recipient", 2);
+
+        assert!(game.can_send_emoji(1, Some(2)));
+        game.record_emoji_send(1, Some(2));
+
+        assert!(
+            game.can_send_emoji(1, Some(2)),
+            "same-tick queued emoji should not block another queued attempt"
+        );
+
+        game.ticks = 1;
+        assert!(!game.can_send_emoji(1, Some(2)));
+
+        game.ticks = 50;
+        assert!(!game.can_send_emoji(1, Some(2)));
+
+        game.ticks = 51;
+        assert!(game.can_send_emoji(1, Some(2)));
     }
 
     /// TS `Game.nearbyUnits()` excludes under-construction units by default.
