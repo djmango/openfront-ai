@@ -207,14 +207,13 @@ impl Execution for AttackExecution {
         if !self.active || !self.initialized {
             return;
         }
-        if !self.attack_live {
-            self.active = false;
-            return;
-        }
-
         if self.retreated {
             let malus = if self.target_is_player { 25.0 } else { 0.0 };
             self.retreat(game, malus);
+            return;
+        }
+        if !self.attack_live {
+            self.active = false;
             return;
         }
         if self.retreating {
@@ -368,6 +367,39 @@ mod tests {
         attack.tick(&mut game, 1);
 
         assert_eq!(game.player_by_small_id(1).unwrap().troops, 1_400);
+        assert!(!attack.is_active());
+    }
+
+    #[test]
+    fn retreated_attack_deleted_by_same_tick_merge_still_returns_survivors() {
+        let mut game = Game::default();
+        game.add_player(Player {
+            id: "attacker".to_string(),
+            small_id: 1,
+            troops: 1_000,
+            ..Default::default()
+        });
+        game.add_player(Player {
+            id: "target".to_string(),
+            small_id: 2,
+            ..Default::default()
+        });
+
+        let mut attack = AttackExecution::new(1, Some("target".to_string()), Some(120.0));
+        attack.initialized = true;
+        attack.target_is_player = true;
+        attack.target_small_id = 2;
+        attack.troops = 120.0;
+        attack.retreating = true;
+        attack.retreated = true;
+        // TS checks `retreated()` before `isActive()`. This matters when a
+        // same-tick outgoing merge deletes a just-executed retreat before the
+        // old AttackExecution gets its next tick.
+        attack.attack_live = false;
+
+        attack.tick(&mut game, 1);
+
+        assert_eq!(game.player_by_small_id(1).unwrap().troops, 1_090);
         assert!(!attack.is_active());
     }
 
