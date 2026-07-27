@@ -30,6 +30,8 @@ agent (ppo_v11 / oftrain `--watch` / `render_client_replay.py` / `ofshowcase`):
   2n is out-of-distribution — expect more deaths; prefer curriculum rows that
   actually have those nation counts (e.g. stage 20 ≈ 34 bots/4n, stage 26 ≈
   66 bots/8n) and say so.
+- **One watch, one record.** Do not seed-hunt for timeout/win. Death / timeout /
+  win are all valid native outcomes — ship what the policy did.
 
 ## Rendering
 
@@ -41,12 +43,12 @@ agent (ppo_v11 / oftrain `--watch` / `render_client_replay.py` / `ofshowcase`):
   not the Rust PascalCase id (`NorthAmerica`). `render_client_replay.py`
   rewrites this during sanitize.
 - **Outcome labels come from native watch** (`win` / `death` / `timeout` at
-  `DEFAULT_MAX_EPISODE_TICKS`). Never call a native-alive-at-budget episode a
-  win/death. If the client flashes You Died mid-replay on a timeout record,
-  that is **client divergence** — do not ship the death-screen video
-  (`OF_STRICT_REPLAY=1` refuses it). Re-watch another seed or fix the desync.
+  `DEFAULT_MAX_EPISODE_TICKS`). If the client flashes an early win/death modal
+  mid-replay, dismiss the overlay and continue to the recorded `end_tick` —
+  do not abort the render or re-watch another seed.
 
-## Watch script
+## Watch scripts
 
-`showcase-clips/run_watches.sh` pins distinct non-Onion maps per lobby size and
-train-matched watch flags. Follow that pattern for ad-hoc requests.
+- `showcase-clips/run_watches.sh` — density demos (2n/4n/8n), distinct maps.
+- `showcase-clips/run_progress_watches.sh` — current / next / +10 / first Medium.
+Both pin train-matched tick flags. Follow that pattern for ad-hoc requests.
