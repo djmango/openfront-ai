@@ -40,6 +40,11 @@ agent (ppo_v11 / oftrain `--watch` / `render_client_replay.py` / `ofshowcase`):
 - `gameMap` must be the OpenFront `GameMapType` *value* (e.g. `"North America"`),
   not the Rust PascalCase id (`NorthAmerica`). `render_client_replay.py`
   rewrites this during sanitize.
+- **Outcome labels come from native watch** (`win` / `death` / `timeout` at
+  `DEFAULT_MAX_EPISODE_TICKS`). Never call a native-alive-at-budget episode a
+  win/death. If the client flashes You Died mid-replay on a timeout record,
+  that is **client divergence** — do not ship the death-screen video
+  (`OF_STRICT_REPLAY=1` refuses it). Re-watch another seed or fix the desync.
 
 ## Watch script
 
