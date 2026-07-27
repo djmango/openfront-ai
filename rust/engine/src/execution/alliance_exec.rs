@@ -170,9 +170,14 @@ impl Execution for BreakAllianceExecution {
             game.break_alliance_between(self.requestor_small_id, recipient_small_id);
             game.update_relation(recipient_small_id, self.requestor_small_id, -100);
 
-            let neighbors =
-                crate::execution::ai_attack::nearby_player_small_ids(game, self.requestor_small_id);
+            let neighbors = crate::execution::ai_attack::nearby_players_ts_order(
+                game,
+                self.requestor_small_id,
+            );
             for neighbor in neighbors {
+                if neighbor == 0 {
+                    continue;
+                }
                 if !game.players_on_same_team(neighbor, recipient_small_id) {
                     game.update_relation(neighbor, self.requestor_small_id, -40);
                 }

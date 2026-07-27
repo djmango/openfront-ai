@@ -230,7 +230,10 @@ fn build_reachable_stations(game: &Game, small_id: u16) -> Vec<ReachableStation>
         }
     }
 
-    for neighbor_id in crate::execution::ai_attack::nearby_player_small_ids(game, small_id) {
+    for neighbor_id in crate::execution::ai_attack::nearby_players_ts_order(game, small_id) {
+        if neighbor_id == 0 {
+            continue;
+        }
         let Some(neighbor) = game.player_by_small_id(neighbor_id) else {
             continue;
         };
@@ -657,7 +660,6 @@ pub fn can_build_land_structure(game: &Game, small_id: u16, tile: TileRef) -> Op
 
 /// TS `SharedWaterCache.TTL_TICKS`  -  rebuilt at most once every 3s (30 ticks).
 const SHARED_WATER_CACHE_TTL_TICKS: i64 = 30;
-const MIN_PORT_WATER_COMPONENT_SIZE: u32 = 3000;
 
 /// Which water bodies (lake component ids, plus a `u32::MAX` sentinel for ocean) a
 /// player's coastline touches, keyed by small id. Bots are excluded (TS `SharedWaterCache`
@@ -669,7 +671,8 @@ fn player_water_touch(game: &Game, small_id: u16) -> (bool, std::collections::Ha
         if !game.is_shore(border) {
             return;
         }
-        game.map.for_each_neighbor4(border, |n| {
+        // TS `SharedWaterCache` / `randCoastalTileArray` walk `neighbors()` (N,S,W,E).
+        game.map.for_each_neighbor_nswe(border, |n| {
             if !game.is_water(n) {
                 return;
             }
@@ -761,41 +764,31 @@ fn rand_coastal_tile_array(
     let Some(shared) = shared_water_components(game, small_id) else {
         return Vec::new();
     };
-    let difficulty = game.wire.game_config().difficulty.as_str();
     let mut tiles: Vec<TileRef> = Vec::new();
     game.for_each_border_tile(small_id, |border| {
         if !game.is_shore(border) {
             return;
         }
         let mut ok = false;
-        game.map.for_each_neighbor4(border, |neighbor| {
+        // Tip TS `randCoastalTileArray` uses `neighbors()` (N,S,W,E). Live tip
+        // also dropped the old `MIN_PORT_WATER_COMPONENT_SIZE` tiny-lake skip
+        // (still present on older pins like f73501ae) - keep this aligned with
+        // the OpenFront pin under test.
+        game.map.for_each_neighbor_nswe(border, |neighbor| {
             if ok || !game.is_water(neighbor) {
                 return;
             }
-            // TS `randCoastalTileArray`: ocean neighbors are always valid port
-            // sites (skip component lookup). Do not require `shared` to contain
-            // the ocean sentinel - lake-only `shared` sets still accept ocean
-            // shores in TS.
+            // Ocean neighbors are always valid port sites (skip component lookup).
+            // Do not require `shared` to contain the ocean sentinel - lake-only
+            // `shared` sets still accept ocean shores in TS.
             if game.map.is_ocean(neighbor) {
                 ok = true;
                 return;
             }
             if let Some(c) = game.get_water_component(neighbor) {
-                if !shared.contains(&c) {
-                    return;
+                if shared.contains(&c) {
+                    ok = true;
                 }
-                // TS skips tiny non-ocean lakes for port placement outside
-                // Easy difficulty; otherwise nations spend ports on water
-                // bodies too small for meaningful trade routes.
-                if difficulty != "Easy" {
-                    if game
-                        .get_water_component_size(c)
-                        .is_some_and(|size| size < MIN_PORT_WATER_COMPONENT_SIZE)
-                    {
-                        return;
-                    }
-                }
-                ok = true;
             }
         });
         if ok {
@@ -1412,13 +1405,6 @@ pub fn do_handle_structures(
     }
 
     if !cities_disabled && maybe_spawn_structure(game, random, small_id, unit_type::CITY) {
-        if game
-            .player_by_small_id(small_id)
-            .is_some_and(|p| p.name == "China")
-            && (18000..=18005).contains(&game.ticks())
-        {
-            eprintln!("[struct-native] tick={} spawned CITY", game.ticks());
-        }
         return true;
     }
     false

@@ -2,7 +2,7 @@ use super::{
     AllianceExtensionExecution, AllianceRejectExecution, AllianceRequestExecution,
     BoatRetreatExecution, BreakAllianceExecution, ConstructionExecution, DeleteUnitExecution,
     DonateGoldExecution,
-    DonateTroopsExecution, EmbargoAllExecution, EmbargoExecution, ExecEnum,
+    DonateTroopsExecution, EmbargoAllExecution, EmbargoExecution, EmojiExecution, ExecEnum,
     MarkDisconnectedExecution, MoveWarshipExecution, NoOpExecution, RetreatExecution, SpawnExecution,
     TargetPlayerExecution, TransportShipExecution, UpgradeStructureExecution,
 };
@@ -312,6 +312,26 @@ pub fn intent_to_execution(game: &Game, game_id: &str, intent: &StampedIntent) -
                 .to_string();
             if let Some(p) = game.player_by_client_id(client_id) {
                 ExecEnum::Retreat(RetreatExecution::new(p.small_id, attack_id))
+            } else {
+                ExecEnum::NoOp(NoOpExecution)
+            }
+        }
+        "emoji" => {
+            // TS `Executor.createExecs` → `EmojiExecution`. Relation side-effects
+            // in `respondToEmoji` are not hash-neutral.
+            let recipient = match intent.fields.get("recipient") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(s)) if s == "AllPlayers" || s.is_empty() => None,
+                Some(Value::String(s)) => Some(s.clone()),
+                Some(v) => v.as_str().map(|s| s.to_string()),
+            };
+            let emoji = intent
+                .fields
+                .get("emoji")
+                .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|n| n as i64)))
+                .unwrap_or(0) as i32;
+            if let Some(p) = game.player_by_client_id(client_id) {
+                ExecEnum::Emoji(EmojiExecution::new(p.small_id, recipient, emoji))
             } else {
                 ExecEnum::NoOp(NoOpExecution)
             }

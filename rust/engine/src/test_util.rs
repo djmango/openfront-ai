@@ -29,13 +29,14 @@ pub fn plains_game(width: u32, height: u32) -> Game {
 pub fn walled_game(width: u32, height: u32, wall: Option<(u32, u32)>) -> Game {
     let n = (width * height) as usize;
     let mut data = vec![LAND_PLAINS; n];
-    let mut num_land_tiles = n as u32;
+    let num_land_tiles = n as u32;
     if let Some((wall_x, wall_width)) = wall {
         for y in 0..height {
             for x in wall_x..wall_x + wall_width {
                 let idx = (y * width + x) as usize;
                 data[idx] = IMPASSABLE;
-                num_land_tiles -= 1;
+                // Tip: mag31 is still land (Mountain). Do not exclude from
+                // num_land_tiles the way the old impassable feature did.
             }
         }
     }

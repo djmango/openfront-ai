@@ -362,14 +362,9 @@ impl WarshipExecution {
         let mut best = None;
         let mut best_distance = game.manhattan_dist(from, target);
         // TS `WarshipExecution.bestNeighborToward` iterates
-        // `this.mg.forEachNeighbor(...)`, which on this pin (f0da4182) visits
-        // west, east, north, south. The `distance < best_distance` (strict)
-        // comparison keeps the FIRST neighbor achieving the minimum, so visit
-        // order decides which tile the warship steps onto when two neighbors
-        // are equidistant to the target - it must match TS `forEachNeighbor`
-        // (N,S,W,E) or the warship (a hashed unit) drifts onto a different
-        // tile, desyncing the player hash mid-game (see jdxWdFCt tick-2292
-        // warship bisection).
+        // `this.mg.forEachNeighbor(...)` (W,E,N,S on live tip `dd1277e245b5`).
+        // The `distance < best_distance` (strict) comparison keeps the FIRST
+        // neighbor achieving the minimum, so visit order decides ties.
         game.map.for_each_neighbor4(from, |neighbor| {
             if !game.is_water(neighbor) {
                 return;
@@ -449,14 +444,12 @@ impl WarshipExecution {
         if target.2 != TRANSPORT {
             self.last_shell_attack = tick;
         }
-        let owner_veterancy = game.unit_veterancy(self.owner_small_id, unit_id);
-        game.add_execution(ExecEnum::Shell(ShellExecution::new_with_owner_veterancy(
+        game.add_execution(ExecEnum::Shell(ShellExecution::new(
             from,
             self.owner_small_id,
             unit_id,
             target.0,
             target.1,
-            owner_veterancy,
         )));
         if target.2 == TRANSPORT {
             self.already_sent_shell.insert((target.0, target.1));
@@ -1725,11 +1718,11 @@ mod tests {
             exec.hunt_trade_ship(&mut game, ship_id, p2, trade_id);
 
             assert_eq!(game.find_unit_owner(trade_id), Some(p1));
-            // TS `recordTradeCapture()` after capture - progress toward veterancy.
+            // Tip TS has no warship veterancy side effect when capturing a trade ship.
             assert_eq!(
                 game.unit(p1, ship_id).unwrap().veterancy_progress,
-                1,
-                "trade capture must call record_trade_capture"
+                0,
+                "trade capture must leave stale native veterancy progress inert"
             );
         }
 

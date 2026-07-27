@@ -33,6 +33,8 @@ interface UnitSnapshot {
   unitType: string;
   tile: number;
   hash: number;
+  level: number;
+  underConstruction: boolean;
   health: number;
   veterancy: number;
   veterancyProgress: number;
@@ -125,6 +127,8 @@ function snapshot(
         unitType: u.type(),
         tile: u.tile(),
         hash: u.hash(),
+        level: u.level(),
+        underConstruction: u.isUnderConstruction(),
         health: u.health(),
         veterancy: typeof (u as any).veterancy === "function" ? (u as any).veterancy() : 0,
         veterancyProgress:
