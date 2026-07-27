@@ -85,28 +85,23 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 27th, 2026</h2>
-  <p><b><code>ppo_v11</code> live on <b>4×A100 80GB</b></b> at update <b>726</b> /
-  stage <b>16</b> (~2.72M steps, 40 envs/shard). After the compressed-Easy
-  stage-table remap (sidecar expand jumped live progress
-  <b>s22 → s13</b> at u681), climbed <b>13→16</b> by u692, then stuck on
-  s16 (26 bots / <b>3 nations</b>, Easy). Window WR trough ~0.075 at u713,
-  peaked ~0.275 at u721, now ~<b>0.20</b> (gate still 0.75). Train
-  tick budget <code>--max-episode-ticks 21000</code>.</p>
+  <p><b><code>ppo_v11</code> live on <b>4×A100 80GB</b></b> at update <b>806</b> /
+  stage <b>16</b> (~3.34M steps, 40 envs/shard). Still on s16 (26 bots /
+  <b>3 nations</b>, Easy) since u692 (~114 updates / ~21 h). Window WR
+  climbed from the ~0.075 trough through a brief <b>0.75 gate touch at
+  u801</b>, then slipped to ~<b>0.625</b> / DR ~0.20 by u806. Cadence
+  ~5.4 updates/hr. Train tick budget
+  <code>--max-episode-ticks 21000</code>.</p>
   <p><b>AE v3.2 no-static</b> remains the live encoder pair
   (<code>ae_v32_nostatic_d8c32</code> / <code>d16c32</code>).
-  Progress clips (u716 policy, train-matched 21000 ticks):
-  <a href="https://share.skg.gg/u/8Jc8UC.webm">s16 current</a> (death@17301) ·
-  <a href="https://share.skg.gg/u/iZzw1Q.webm">s17 next</a> (death@20251) ·
-  <a href="https://share.skg.gg/u/GRaquL.webm">s26 +10</a> (death@5571) ·
-  <a href="https://share.skg.gg/u/HKODT2.webm">s36 Medium</a> (death@4261).
-  Scripts: <code>run_progress_watches.sh</code> /
-  <code>run_watches.sh</code> (one watch per clip; renderer dismisses early
-  client modals and follows native <code>end_tick</code>).</p>
+  Recent s16 games (u806): links below once rendered.
+  Scripts: <code>run_recent_watches.sh</code> /
+  <code>run_progress_watches.sh</code>.</p>
   <p class="d" style="margin:.75rem 0 0">
   Compressed ladder: Surpass/closeout ≈ stage <b>28</b>; first
-  <b>Medium = stage 36</b>. With the ongoing s16 3-nation hole (WR climbing
-  but still far from gate), surpass ~<b>Jul 28-30</b> UTC; Medium
-  ~<b>Jul 29 – Aug 1</b> UTC. Another deep WR trough pushes both later.</p>
+  <b>Medium = stage 36</b>. Near the s16 gate now — surpass
+  ~<b>Jul 28-29</b> UTC (base <b>Jul 29-30</b>); Medium
+  ~<b>Jul 29-31</b> UTC. Another WR slip like u801→u806 adds hours.</p>
 </div>
 
 
@@ -141,21 +136,22 @@ revised ETAs from measured update cadence.</p>
 </ul>
 
 <h3 id="v11-4x-eta">Revised ETAs</h3>
-<p>As of Jul 27 ~06:00 UTC: stage <b>16</b> / u726 after Easy-table remap
-(live jumped s22→s13 at u681, then 13→16 by u692). Stuck ~34 updates on
-3-nation Easy; WR recovered 0.075→0.275 then slipped to ~0.20 vs gate 0.75.
-Update clock ~5-6/hr; progression is WR-gated:</p>
+<p>As of Jul 27 ~21:00 UTC: stage <b>16</b> / u806. Stuck ~114 updates
+(~21 h) on 3-nation Easy since u692. WR briefly hit the <b>0.75 gate at
+u801</b>, then 0.625 by u806. Cadence ~5.4 updates/hr; progression is
+WR-gated:</p>
 <table>
   <tr><th>milestone</th><th>stage</th><th>ETA (UTC)</th><th>notes</th></tr>
-  <tr><td>Surpass / closeout</td><td>28</td><td>~Jul 28-30</td>
-    <td>12 advances after clear; s16 hole + later nation densify</td></tr>
-  <tr><td>First Medium</td><td><b>36</b></td><td>~Jul 29 – Aug 1</td>
-    <td>compressed ladder (old docs said 68 — prior 100-stage index)</td></tr>
+  <tr><td>Clear s16</td><td>16→17</td><td>~Jul 28</td>
+    <td>already touched gate once; need a sustained ≥0.75 window</td></tr>
+  <tr><td>Surpass / closeout</td><td>28</td><td>~Jul 28-29 (base Jul 29-30)</td>
+    <td>12 advances after clear; nation densify still the risk</td></tr>
+  <tr><td>First Medium</td><td><b>36</b></td><td>~Jul 29-31</td>
+    <td>compressed ladder (old docs said 68)</td></tr>
 </table>
-<p>Caveats: nation-count jumps (3n@s16, 4n@s19, 5n@s22, …) dominate calendar
-risk more than GPU count. Medium lobby resets to 90 bots / 4n at s36.
-Optimistic path if WR keeps climbing ~0.02/update clears s16 within ~1 day;
-a second trough like u697→u713 adds hours.</p>
+<p>Caveats: nation-count jumps dominate calendar risk. A second trough
+like u801→u806 pushes clear past Jul 28. Medium lobby resets to 90 bots /
+4n at s36.</p>
 
 <h2 class="date" id="v11-soak">Jul 24-25, 2026 - V11 soak: util stack, watch truth, clip bugs</h2>
 <p class="session">First multi-day <code>ppo_v11</code> run on 2×A100. Validated the
