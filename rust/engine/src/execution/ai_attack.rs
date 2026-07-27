@@ -148,18 +148,24 @@ pub fn has_land_border_tn(game: &Game, small_id: u16) -> bool {
     let Some(border) = game.border_tiles_of(small_id) else {
         return false;
     };
-    let mut nbuf = [TileRef::MAX; 4];
+    // Tip `AiAttackBehavior.maybeAttack` builds `border` via `neighbors()`
+    // (N,S,W,E) and no longer skips impassable land.
     for border_tile in border.iter() {
-        let n = game.map.neighbors4_ts(border_tile, &mut nbuf);
-        for i in 0..n {
-            let neighbor = nbuf[i];
+        let mut found = false;
+        game.map.for_each_neighbor_nswe(border_tile, |neighbor| {
+            if found {
+                return;
+            }
             if game.is_land(neighbor)
-                && !game.is_impassable(neighbor)
+                && game.map.owner_id(neighbor) != small_id
                 && !game.has_owner(neighbor)
                 && !game.has_fallout(neighbor)
             {
-                return true;
+                found = true;
             }
+        });
+        if found {
+            return true;
         }
     }
     false
@@ -182,14 +188,19 @@ fn has_land_border_with_terra_nullius(game: &Game, small_id: u16) -> bool {
     let Some(border) = game.border_tiles_of(small_id) else {
         return false;
     };
-    let mut nbuf = [TileRef::MAX; 4];
+    // Tip TS: `neighbors()` + land && !hasOwner (impassable filter removed).
     for border_tile in border.iter() {
-        let n = game.map.neighbors4_ts(border_tile, &mut nbuf);
-        for i in 0..n {
-            let neighbor = nbuf[i];
-            if game.is_land(neighbor) && !game.is_impassable(neighbor) && !game.has_owner(neighbor) {
-                return true;
+        let mut found = false;
+        game.map.for_each_neighbor_nswe(border_tile, |neighbor| {
+            if found {
+                return;
             }
+            if game.is_land(neighbor) && !game.has_owner(neighbor) {
+                found = true;
+            }
+        });
+        if found {
+            return true;
         }
     }
     false
@@ -224,11 +235,8 @@ fn has_shore_reachable_tn(game: &Game, small_id: u16) -> bool {
                 continue;
             }
             let tile = game.ref_xy(nx as u32, ny as u32);
-            if game.is_land(tile)
-                && !game.is_impassable(tile)
-                && !game.has_owner(tile)
-                && !game.has_fallout(tile)
-            {
+            // Tip `shoreReachableNeighbors` / boat TN probe: no impassable skip.
+            if game.is_land(tile) && !game.has_owner(tile) && !game.has_fallout(tile) {
                 return true;
             }
         }
@@ -243,9 +251,9 @@ pub fn has_non_nuked_tn(game: &Game, small_id: u16) -> bool {
 pub fn nearby_land_player_small_ids(game: &Game, small_id: u16) -> Vec<u16> {
     let mut seen = HashSet::new();
     game.for_each_border_tile(small_id, |tile| {
-        game.map.for_each_neighbor4(tile, |neighbor| {
-            // TS `PlayerImpl.nearby()`: `map.isLand(n) && !map.isImpassable(n)`.
-            if !game.is_land(neighbor) || game.is_impassable(neighbor) {
+        // Tip `PlayerImpl.nearby()`: `neighbors()` + land (no impassable skip).
+        game.map.for_each_neighbor_nswe(tile, |neighbor| {
+            if !game.is_land(neighbor) {
                 return;
             }
             let owner = game.map.owner_id(neighbor);
@@ -262,9 +270,8 @@ pub fn nearby_land_player_small_ids(game: &Game, small_id: u16) -> Vec<u16> {
 pub fn nearby_player_small_ids(game: &Game, small_id: u16) -> Vec<u16> {
     let mut seen = HashSet::new();
     game.for_each_border_tile(small_id, |tile| {
-        game.map.for_each_neighbor4(tile, |neighbor| {
-            // TS `PlayerImpl.nearby()`: `map.isLand(n) && !map.isImpassable(n)`.
-            if !game.is_land(neighbor) || game.is_impassable(neighbor) {
+        game.map.for_each_neighbor_nswe(tile, |neighbor| {
+            if !game.is_land(neighbor) {
                 return;
             }
             let owner = game.map.owner_id(neighbor);
@@ -302,7 +309,8 @@ pub fn nearby_player_small_ids(game: &Game, small_id: u16) -> Vec<u16> {
                 continue;
             }
             let tile = game.ref_xy(nx as u32, ny as u32);
-            if !game.is_land(tile) || game.is_impassable(tile) || game.has_fallout(tile) {
+            // Tip: no impassable skip on shore-reachable land.
+            if !game.is_land(tile) || game.has_fallout(tile) {
                 continue;
             }
             let owner = game.map.owner_id(tile);
@@ -359,11 +367,8 @@ pub fn send_boat_attack_to_nearby_tn(game: &mut Game, small_id: u16) -> bool {
                 continue;
             }
             let tile = game.ref_xy(nx as u32, ny as u32);
-            if game.is_land(tile)
-                && !game.is_impassable(tile)
-                && !game.has_owner(tile)
-                && !game.has_fallout(tile)
-            {
+            // Tip `sendBoatAttackToNearbyTerraNullius`: no impassable skip.
+            if game.is_land(tile) && !game.has_owner(tile) && !game.has_fallout(tile) {
                 candidates.push(tile);
             }
         }
@@ -568,23 +573,23 @@ fn collect_bordering_players(game: &Game, small_id: u16) -> Vec<u16> {
         }
     };
 
-    // TS `AiAttackBehavior.maybeAttack`: borderTiles flatMap neighbors() order.
+    // Tip `AiAttackBehavior.maybeAttack`:
+    // `borderTiles.flatMap(t => neighbors(t)).filter(land && owner != self)`.
     if let Some(border) = game.border_tiles_of(small_id) {
-        let mut nbuf = [TileRef::MAX; 4];
         for border_tile in border.iter() {
-            let n = game.map.neighbors4_ts(border_tile, &mut nbuf);
-            for i in 0..n {
-                let neighbor = nbuf[i];
-                if !game.is_land(neighbor) || game.is_impassable(neighbor) {
-                    continue;
+            game.map.for_each_neighbor_nswe(border_tile, |neighbor| {
+                if !game.is_land(neighbor) {
+                    return;
                 }
                 let owner = game.map.owner_id(neighbor);
-                push(owner);
-            }
+                if owner != small_id {
+                    push(owner);
+                }
+            });
         }
     }
 
-    // TS `PlayerImpl.nearby()` players only (shore-reachable included).
+    // Tip `PlayerImpl.nearby()` players only (shore-reachable included).
     for sid in nearby_players_ts_order(game, small_id) {
         push(sid);
     }
@@ -618,29 +623,22 @@ pub(crate) fn nearby_players_ts_order(game: &Game, small_id: u16) -> Vec<u16> {
     };
 
     if let Some(border) = game.border_tiles_of(small_id) {
-        let mut nbuf = [TileRef::MAX; 4];
         for border_tile in border.iter() {
-            let n = game.map.neighbors4_ts(border_tile, &mut nbuf);
-            for i in 0..n {
-                let neighbor = nbuf[i];
-                if !game.is_land(neighbor) || game.is_impassable(neighbor) {
-                    continue;
+            // Tip `PlayerImpl.nearby()`: `map.neighbors()` (N,S,W,E), land only.
+            game.map.for_each_neighbor_nswe(border_tile, |neighbor| {
+                if !game.is_land(neighbor) {
+                    return;
                 }
                 let owner = game.map.owner_id(neighbor);
-                // TS `PlayerImpl.nearby()`'s direct-neighbor `visit`: an
-                // unowned tile that is nuked (fallout) contributes NO slot at
-                // all (`return` before `ns.add(...)`), unlike a plain unowned
-                // tile, which still adds a TerraNullius slot. Native was
-                // pushing `owner` unconditionally here, so a nuked-TN border
-                // tile occupied a slot in this order-sensitive list (feeding
-                // e.g. `tribe_maybe_attack`'s neighbor shuffle and
-                // `troop_send_cap`'s neighbor scan) that TS's fixed `nearby()`
-                // (see `AiAttackBehaviorNukedTerritory.test.ts`) omits.
+                // Unowned nuked tiles contribute no slot; plain unowned still
+                // adds TerraNullius (owner 0).
                 if owner == 0 && game.has_fallout(neighbor) {
-                    continue;
+                    return;
                 }
-                push(owner);
-            }
+                if owner != small_id {
+                    push(owner);
+                }
+            });
         }
     }
 
@@ -669,10 +667,14 @@ pub(crate) fn nearby_players_ts_order(game: &Game, small_id: u16) -> Vec<u16> {
                 continue;
             }
             let tile = game.ref_xy(nx as u32, ny as u32);
-            if !game.is_land(tile) || game.is_impassable(tile) || game.has_fallout(tile) {
+            // Tip `shoreReachableNeighbors`: no impassable skip.
+            if !game.is_land(tile) || game.has_fallout(tile) {
                 continue;
             }
-            push(game.map.owner_id(tile));
+            let owner = game.map.owner_id(tile);
+            if owner != small_id {
+                push(owner);
+            }
         }
     }
 
@@ -724,7 +726,8 @@ fn is_bordering_nuked_territory(game: &Game, small_id: u16) -> bool {
         if found {
             return;
         }
-        game.map.for_each_neighbor4(tile, |neighbor| {
+        // Tip `isBorderingNukedTerritory`: `neighbors()` (N,S,W,E).
+        game.map.for_each_neighbor_nswe(tile, |neighbor| {
             if game.is_land(neighbor) && !game.has_owner(neighbor) && game.has_fallout(neighbor) {
                 found = true;
             }
@@ -1709,9 +1712,7 @@ fn attack_with_random_boat(
             if !game.is_land(tile) {
                 continue;
             }
-            if game.is_impassable(tile) {
-                continue;
-            }
+            // Tip `attackWithRandomBoat` dropped the impassable skip.
             let owner = game.map.owner_id(tile);
             if owner == small_id {
                 continue;
@@ -3157,18 +3158,14 @@ mod tests {
         (game, wall_x)
     }
 
-    /// TS `ImpassableTerrain.test.ts` "hasNonNukedTerraNullius does not
-    /// falsely detect impassable tiles as TerraNullius": a nation bordering
-    /// an impassable wall must not see the wall's TerraNullius (owner 0) as
-    /// a nearby neighbor, but must still see the real enemy player across
-    /// its other border. Ported directly against `nearby_players_ts_order`
-    /// (TS `PlayerImpl.nearby()`'s native equivalent, already
-    /// `!is_impassable`-guarded per its own doc comment) rather than the TS
-    /// test's `AiAttackBehavior`/`NationAllianceBehavior`/
-    /// `NationEmojiBehavior` orchestration wiring, which has no 1:1 native
-    /// port to construct (client-facing plumbing, not decision logic).
+    /// Live tip (`dd1277e245b5`) removed the `!isImpassable` guard from
+    /// `PlayerImpl.nearby()` / `AiAttackBehavior` border walks. Impassable
+    /// land is still `isLand`, so a nation bordering a wall now sees
+    /// TerraNullius (owner 0) via that adjacency — matching tip runtime,
+    /// not the older `ImpassableTerrain.test.ts` expectation that still
+    /// asserts the pre-tip filter.
     #[test]
-    fn nearby_players_excludes_terra_nullius_from_an_impassable_wall() {
+    fn nearby_players_includes_enemy_when_bordering_an_impassable_wall() {
         let (game, _) = wall_scenario();
         let neighbors = nearby_players_ts_order(&game, 1);
         assert!(
@@ -3176,8 +3173,8 @@ mod tests {
             "enemy should be a nearby neighbor: {neighbors:?}"
         );
         assert!(
-            !neighbors.contains(&0),
-            "impassable-adjacent tiles must not surface TerraNullius: {neighbors:?}"
+            neighbors.contains(&0),
+            "tip nearby() surfaces TerraNullius for impassable-adjacent land: {neighbors:?}"
         );
     }
 
