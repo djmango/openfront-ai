@@ -246,30 +246,31 @@ impl RlSession {
         let end = now_ms();
         let start = self.start_time_ms;
         let duration = ((end.saturating_sub(start)) / 1000) as u64;
-        let winner = if self.last_winner.is_null() {
-            Value::Null
-        } else {
-            self.last_winner.clone()
-        };
+        // OpenFront WinnerSchema is optional (field absent), not nullable.
+        // Emitting `"winner": null` makes client GameRecordSchema.safeParse fail
+        // and the join-lobby UI never starts the replay.
+        let mut info = json!({
+            "gameID": self.game_id,
+            "lobbyCreatedAt": start,
+            "config": self.game_config,
+            "players": [{
+                "clientID": AGENT_CLIENT_ID,
+                "username": "Agent",
+                "clanTag": null,
+                "persistentID": null,
+                "stats": {},
+            }],
+            "start": start,
+            "end": end,
+            "duration": duration,
+            "num_turns": self.game.ticks(),
+            "lobbyFillTime": 0,
+        });
+        if !self.last_winner.is_null() {
+            info["winner"] = self.last_winner.clone();
+        }
         let record = json!({
-            "info": {
-                "gameID": self.game_id,
-                "lobbyCreatedAt": start,
-                "config": self.game_config,
-                "players": [{
-                    "clientID": AGENT_CLIENT_ID,
-                    "username": "Agent",
-                    "clanTag": null,
-                    "persistentID": null,
-                    "stats": {},
-                }],
-                "start": start,
-                "end": end,
-                "duration": duration,
-                "num_turns": self.game.ticks(),
-                "winner": winner,
-                "lobbyFillTime": 0,
-            },
+            "info": info,
             "version": "v0.0.2",
             "gitCommit": self.git_commit,
             "subdomain": "rl",

@@ -1,8 +1,9 @@
 //! One watch episode → GameRecord + `.debug.json` + compact `.thinking.json`
 //! (few-KB top-3 trace for HF parquet).
 //!
-//! Defaults match the historical showcase path (Node + greedy). Pass
-//! `--engine native` and/or `--watch-stochastic` to A/B against training.
+//! Defaults match training: native engine + **stochastic** sampling (same as
+//! PPO rollouts / WR windows). Argmax (`--watch-stochastic=false`) freezes
+//! near spawn and is debug-only — do not use it for demos or showcase clips.
 
 use std::path::{Path, PathBuf};
 
@@ -47,7 +48,7 @@ pub struct WatchConfig<'a> {
     pub recurrent_policy: bool,
     /// Simulation backend for the watch episode (`native` or `node`).
     pub engine: EngineKind,
-    /// When true, sample actions from the policy; when false (default), argmax.
+    /// When true (default), sample actions like training; when false, argmax.
     pub stochastic: bool,
 }
 
