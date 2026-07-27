@@ -13,8 +13,9 @@ AE=weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors
 COARSE=weights/ae/ae_v32_nostatic_d16c32.encoder.safetensors
 OFTRAIN=./rust/target/release/oftrain
 
-# Shared with train (ofcore::DEFAULT_MAX_EPISODE_TICKS).
+# Shared with train (ofcore::DEFAULT_MAX_EPISODE_TICKS / pod --max-episode-ticks).
 MAX_TICKS=21000
+MAX_STEPS=$((MAX_TICKS / 10 + 64))
 
 run_watch() {
   local STAGE=$1 N=$2 BOTS=$3 TAG=$4 MAP=$5 SEED=$6
@@ -40,6 +41,7 @@ run_watch() {
     --persistent-actors=true \
     --recurrent-policy=true \
     --max-episode-ticks "$MAX_TICKS" \
+    --max-steps "$MAX_STEPS" \
     --record "$OUT" \
     --debug true \
     >>"$LOG" 2>&1
