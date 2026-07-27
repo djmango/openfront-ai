@@ -99,7 +99,9 @@
   <a href="https://share.skg.gg/u/iZzw1Q.webm">s17 next</a> (death@20251) ·
   <a href="https://share.skg.gg/u/GRaquL.webm">s26 +10</a> (death@5571) ·
   <a href="https://share.skg.gg/u/HKODT2.webm">s36 Medium</a> (death@4261).
-  Script: <code>showcase-clips/run_progress_watches.sh</code>.</p>
+  Scripts: <code>run_progress_watches.sh</code> /
+  <code>run_watches.sh</code> (one watch per clip; renderer dismisses early
+  client modals and follows native <code>end_tick</code>).</p>
   <p class="d" style="margin:.75rem 0 0">
   Compressed ladder: Surpass/closeout ≈ stage <b>28</b>; first
   <b>Medium = stage 36</b>. With the ongoing s16 3-nation hole (WR climbing
@@ -215,9 +217,10 @@ Medium (s68) to ~Aug 1-3. Another s12-shaped hole pushes Medium later.</p>
     <code>"disabled"|"default"</code>). Rewriting 0→1 for render spawned a
     nation that hit 80% mid-replay; the renderer stopped on that win modal
     while the agent was still ~60%. Fix: patch bots-only lobbies to
-    <code>nations: "disabled"</code>, and ignore win modals until
-    <code>tick &gt;= recorded end_tick</code>
-    (see <code>scripts/render_client_replay*.py</code>).</li>
+    <code>nations: "disabled"</code>, and dismiss early client win/death
+    modals until <code>tick &gt;= recorded end_tick</code>
+    (see <code>scripts/render_client_replay.py</code>). Native outcome is
+    truth — do not seed-hunt when the client desyncs.</li>
   <li>Stage-15 stochastic sample (u456, 6 maps): 2 wins (Asia, World) /
     4 nation-losses. Train window still ~85% WR / 0 DR; nations are the
     new failure mode on some seeds/maps.</li>
