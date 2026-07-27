@@ -230,7 +230,10 @@ fn build_reachable_stations(game: &Game, small_id: u16) -> Vec<ReachableStation>
         }
     }
 
-    for neighbor_id in crate::execution::ai_attack::nearby_player_small_ids(game, small_id) {
+    for neighbor_id in crate::execution::ai_attack::nearby_players_ts_order(game, small_id) {
+        if neighbor_id == 0 {
+            continue;
+        }
         let Some(neighbor) = game.player_by_small_id(neighbor_id) else {
             continue;
         };

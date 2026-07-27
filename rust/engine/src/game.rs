@@ -1216,13 +1216,9 @@ impl Game {
     }
 
     fn conquer_one(&mut self, small_id: u16, tile: TileRef, refresh_borders: bool) {
-        // TS `GameImpl.conquer`: `if (!this.isLand(tile)) throw ...; if
-        // (this.isImpassable(tile)) throw ...;` - impassable tiles (which
-        // are land, so the `is_land` check alone doesn't catch them) must
-        // never receive a real owner. Native no-ops instead of TS's throw,
-        // matching this function's existing silent-reject convention for
-        // the `!is_land` case just above.
-        if !self.is_land(tile) || self.is_impassable(tile) {
+        // Tip TS `GameImpl.conquer`: land-only guard (impassable API removed).
+        // Native no-ops on water instead of TS's throw.
+        if !self.is_land(tile) {
             return;
         }
         let tick = self.ticks;
@@ -4786,19 +4782,20 @@ mod impassable_terrain_tests {
     }
 
     #[test]
-    fn is_impassable_returns_true_for_impassable_tiles_false_for_plains() {
+    fn is_impassable_always_false_on_tip() {
         let game = wall_game();
         assert!(!game.is_impassable(game.map.ref_xy(20, 10)));
-        assert!(game.is_impassable(game.map.ref_xy(WALL_X, 10)));
-        assert!(game.is_impassable(game.map.ref_xy(WALL_X + 1, 10)));
+        // Mag-31 wall tiles are Mountain on tip, never impassable.
+        assert!(!game.is_impassable(game.map.ref_xy(WALL_X, 10)));
+        assert!(!game.is_impassable(game.map.ref_xy(WALL_X + 1, 10)));
     }
 
     #[test]
-    fn terrain_type_returns_impassable_for_impassable_tiles() {
+    fn terrain_type_treats_mag31_as_mountain_on_tip() {
         let game = wall_game();
         assert_eq!(
             game.terrain_type(game.map.ref_xy(WALL_X, 10)),
-            crate::map::TerrainType::Impassable
+            crate::map::TerrainType::Mountain
         );
     }
 
@@ -4809,9 +4806,10 @@ mod impassable_terrain_tests {
     }
 
     #[test]
-    fn num_land_tiles_excludes_impassable_tiles() {
+    fn num_land_tiles_includes_mag31_mountain_tiles_on_tip() {
         let game = wall_game();
-        assert_eq!(game.num_land_tiles(), MAP_W * MAP_H - WALL_WIDTH * MAP_H);
+        // Tip counts former impassable mag31 tiles as ordinary land.
+        assert_eq!(game.num_land_tiles(), MAP_W * MAP_H);
     }
 
     fn add_bot(game: &mut Game, id: &str, small_id: u16) {
@@ -4823,23 +4821,19 @@ mod impassable_terrain_tests {
         });
     }
 
-    /// TS `GameImpl.conquer` throws on impassable tiles; native no-ops
-    /// instead (see `conquer_one`'s doc comment for why) - this pins the
-    /// bug that fix caught: before it, `game.conquer(1, impassable_tile)`
-    /// would silently succeed and give a player real ownership of
-    /// impassable terrain.
+    /// Tip: mag31 tiles are conquerable Mountain (impassable feature removed).
     #[test]
-    fn conquer_does_not_grant_ownership_of_impassable_tiles() {
+    fn conquer_grants_ownership_of_mag31_mountain_tiles_on_tip() {
         let mut game = wall_game();
         add_bot(&mut game, "player", 1);
         let tile = game.map.ref_xy(WALL_X, 10);
         game.conquer(1, tile);
         assert_eq!(
             game.map.owner_id(tile),
-            0,
-            "impassable tile must stay unowned"
+            1,
+            "tip treats mag31 as conquerable Mountain"
         );
-        assert_eq!(game.player_by_small_id(1).unwrap().tiles_owned, 0);
+        assert_eq!(game.player_by_small_id(1).unwrap().tiles_owned, 1);
     }
 
     #[test]

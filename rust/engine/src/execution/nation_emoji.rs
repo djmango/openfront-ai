@@ -1,6 +1,6 @@
 //! Nation casual emoji behavior (TS `NationEmojiBehavior.ts` - RNG parity only).
 
-use super::ai_attack::nearby_player_small_ids;
+use super::ai_attack::nearby_players_ts_order;
 use crate::game::{Game, PlayerType};
 use crate::prng::PseudoRandom;
 use std::collections::HashMap;
@@ -41,6 +41,7 @@ pub fn maybe_send_casual_emoji(
     find_rat(game, random, small_id, state);
     greet_nearby_players(game, random, small_id, state);
 }
+
 
 fn check_overwhelmed_by_attacks(
     game: &mut Game,
@@ -214,12 +215,18 @@ fn annoy_traitors(game: &mut Game, random: &mut PseudoRandom, small_id: u16, sta
         return;
     }
 
+    // Tip `NationEmojiBehavior.annoyTraitors`: `game.players()` is alive-only
+    // (`isAlive()` == tiles > 0). Including wiped humans here let native pick
+    // dead traitors TS never sees, burning extra `randElement`/`sendEmoji`
+    // PRNG draws (XjHWuiUa Bosnia @877 → alliance/boat desync @993).
+    // Friendly check matches TS `!p.isFriendly(this.player)` (traitor→self).
     let traitors: Vec<u16> = game
         .players_in_order()
         .iter()
         .filter(|p| {
-            p.player_type == PlayerType::Human
-                && !game.is_friendly(small_id, p.small_id)
+            p.tiles_owned > 0
+                && p.player_type == PlayerType::Human
+                && !game.is_friendly(p.small_id, small_id)
                 && game.is_traitor(p.small_id)
         })
         .map(|p| p.small_id)
@@ -276,11 +283,13 @@ fn greet_nearby_players(
         return;
     }
 
-    let nearby_humans: Vec<u16> = nearby_player_small_ids(game, small_id)
+    let nearby_humans: Vec<u16> = nearby_players_ts_order(game, small_id)
         .into_iter()
         .filter(|&sid| {
-            game.player_by_small_id(sid)
-                .is_some_and(|p| p.player_type == PlayerType::Human)
+            sid != 0
+                && game
+                    .player_by_small_id(sid)
+                    .is_some_and(|p| p.player_type == PlayerType::Human)
         })
         .collect();
     if nearby_humans.is_empty() {

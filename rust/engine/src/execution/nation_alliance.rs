@@ -318,11 +318,13 @@ fn check_already_enough_alliances(
         "Easy" => false,
         "Medium" => game.alliance_count(small_id) >= random.next_int(4, 6) as usize,
         "Hard" | "Impossible" => {
-            let bordering: Vec<u16> = super::ai_attack::nearby_player_small_ids(game, small_id)
+            let bordering: Vec<u16> = super::ai_attack::nearby_players_ts_order(game, small_id)
                 .into_iter()
                 .filter(|&sid| {
-                    game.player_by_small_id(sid)
-                        .is_some_and(|p| p.player_type != PlayerType::Bot)
+                    sid != 0
+                        && game
+                            .player_by_small_id(sid)
+                            .is_some_and(|p| p.player_type != PlayerType::Bot)
                 })
                 .collect();
             let bordering_friends: Vec<u16> = bordering

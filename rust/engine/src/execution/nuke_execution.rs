@@ -90,12 +90,9 @@ impl NukeExecution {
             self.distance_based_height(),
             self.rocket_direction_up,
         );
-        // TS `NukeExecution.tick`: "Nuke trajectories cannot pass over
-        // impassable terrain, just as they cannot exceed the map border" -
-        // the full parabola path is checked BEFORE launch (no gold spent, no
-        // unit built) and the launch is aborted if any tile is impassable.
-        // Native previously never checked this at all, letting nukes fly
-        // straight through impassable walls.
+        // Tip `NukeExecution.tick`: impassable trajectory guard removed with
+        // the impassable-terrain feature. Keep the call site inert via
+        // `is_impassable() == false` on tip.
         if trajectory.iter().any(|&t| game.is_impassable(t)) {
             self.active = false;
             return;
@@ -157,13 +154,8 @@ impl NukeExecution {
             let rand_cell = std::cell::RefCell::new(PseudoRandom::new(tick as i32));
             game.map.bfs(dst, |gm, n| {
                 let d2 = gm.euclidean_dist_squared(dst, n);
-                // TS `NukeExecution.tilesToDestroy`: `d2 <= outer2 && (d2 <=
-                // inner2 || rand.chance(2)) && !this.mg.isImpassable(n)` -
-                // impassable tiles are excluded from the destroy set itself
-                // (not just "solid" against later floods), so they never
-                // get flagged with fallout. Native was missing the
-                // `!isImpassable` term.
-                d2 <= outer2 && (d2 <= inner2 || rand_cell.borrow_mut().chance(2)) && !gm.is_impassable(n)
+                // Tip blast BFS: no impassable filter (feature removed).
+                d2 <= outer2 && (d2 <= inner2 || rand_cell.borrow_mut().chance(2))
             })
         };
 
@@ -452,6 +444,7 @@ mod impassable_terrain_tests {
     }
 
     #[test]
+    #[ignore = "tip dd1277 removed impassable terrain"]
     fn can_build_atom_bomb_returns_none_for_impassable_target() {
         let mut game = wall_game();
         add_bot(&mut game, "player", 1);
@@ -463,6 +456,7 @@ mod impassable_terrain_tests {
     }
 
     #[test]
+    #[ignore = "tip dd1277 removed impassable terrain"]
     fn can_build_mirv_returns_none_for_impassable_target() {
         let mut game = wall_game();
         add_bot(&mut game, "player", 1);
@@ -474,6 +468,7 @@ mod impassable_terrain_tests {
     }
 
     #[test]
+    #[ignore = "tip dd1277 removed impassable terrain"]
     fn nuke_execution_deactivates_when_targeting_impassable_tile() {
         let mut game = wall_game();
         add_bot(&mut game, "player", 1);
@@ -504,6 +499,7 @@ mod impassable_terrain_tests {
     /// `set_fallout(true)`, which TS's `tilesToDestroy()` (which excludes
     /// impassable tiles from the set entirely) never allows.
     #[test]
+    #[ignore = "tip dd1277 removed impassable terrain"]
     fn nuke_blast_does_not_set_fallout_on_impassable_tiles() {
         let mut game = wall_game();
         add_bot(&mut game, "player", 1);
@@ -534,6 +530,7 @@ mod impassable_terrain_tests {
     /// impassable terrain: before the fix, a nuke would build and fly
     /// straight through the wall to its target.
     #[test]
+    #[ignore = "tip dd1277 removed impassable terrain"]
     fn nuke_trajectory_blocked_by_impassable_terrain_aborts_launch() {
         let mut game = wall_game();
         add_bot(&mut game, "player", 1);
@@ -838,12 +835,7 @@ fn nuke_spawn(game: &Game, owner_small_id: u16, nuke_type: &str, dst: TileRef) -
     if game.is_spawn_immunity_active() {
         return None;
     }
-    // TS `PlayerImpl.nukeSpawn`: "Impassable terrain cannot be nuked."
-    // Native was missing this guard entirely, so `canBuild(AtomBomb/MIRV,
-    // impassableTile)` would incorrectly succeed.
-    if game.is_impassable(dst) {
-        return None;
-    }
+    // Tip `PlayerImpl.nukeSpawn`: impassable target guard removed.
     let owner_of_tile = game.map.owner_id(dst);
     let game_over = game.winner.is_some();
     if owner_of_tile != 0 && game.players_on_same_team(owner_small_id, owner_of_tile) && !game_over {

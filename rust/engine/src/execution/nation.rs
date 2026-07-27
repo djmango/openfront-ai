@@ -207,7 +207,8 @@ impl NationExecution {
                 continue;
             }
             let tile = game.ref_xy(x as u32, y as u32);
-            if !game.is_land(tile) || game.has_owner(tile) || game.is_impassable(tile) {
+            // Tip `NationExecution.randomSpawnLand`: land && !hasOwner only.
+            if !game.is_land(tile) || game.has_owner(tile) {
                 continue;
             }
             if game.terrain_type(tile) == TerrainType::Mountain && self.random.chance(2) {
