@@ -521,6 +521,11 @@ fn try_send_player_attack_forced(
     // the `send_boat_attack_to_nearby_tn`/`random_boat_attack_troops`
     // functions in this same file, which already correctly use the unfloored
     // form.
+    let Some(dst_shore) =
+        boat_attack_destination_to_player(game, attacker_small_id, target_small_id)
+    else {
+        return false;
+    };
     let boat_troops = game
         .player_by_small_id(attacker_small_id)
         .map(|p| p.troops as f64 / 5.0)
@@ -530,7 +535,20 @@ fn try_send_player_attack_forced(
     else {
         return false;
     };
-    send_boat_attack_to_player(game, attacker_small_id, target_small_id, boat_troops)
+    if is_nation && is_human {
+        // TS `calculateAttackTroops` runs this hook for both land and boat attacks.
+        if let Some(state) = emoji {
+            super::nation_emoji::maybe_send_attack_emoji(
+                game,
+                random,
+                attacker_small_id,
+                state,
+                target_small_id,
+            );
+        }
+    }
+    game.add_transport_attack(attacker_small_id, dst_shore, boat_troops);
+    true
 }
 
 pub fn send_boat_attack_to_player(
