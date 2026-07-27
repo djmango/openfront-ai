@@ -444,14 +444,12 @@ impl WarshipExecution {
         if target.2 != TRANSPORT {
             self.last_shell_attack = tick;
         }
-        let owner_veterancy = game.unit_veterancy(self.owner_small_id, unit_id);
-        game.add_execution(ExecEnum::Shell(ShellExecution::new_with_owner_veterancy(
+        game.add_execution(ExecEnum::Shell(ShellExecution::new(
             from,
             self.owner_small_id,
             unit_id,
             target.0,
             target.1,
-            owner_veterancy,
         )));
         if target.2 == TRANSPORT {
             self.already_sent_shell.insert((target.0, target.1));
@@ -1720,11 +1718,11 @@ mod tests {
             exec.hunt_trade_ship(&mut game, ship_id, p2, trade_id);
 
             assert_eq!(game.find_unit_owner(trade_id), Some(p1));
-            // TS `recordTradeCapture()` after capture - progress toward veterancy.
+            // Tip TS has no warship veterancy side effect when capturing a trade ship.
             assert_eq!(
                 game.unit(p1, ship_id).unwrap().veterancy_progress,
-                1,
-                "trade capture must call record_trade_capture"
+                0,
+                "trade capture must leave stale native veterancy progress inert"
             );
         }
 
