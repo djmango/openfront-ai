@@ -491,7 +491,18 @@ fn try_send_player_attack_forced(
             Some(p) => p.id.clone(),
             None => return false,
         };
-        let Some(troops) = land_attack_troops(game, attacker_small_id, reserve_ratio) else {
+        // TS `calculateAttackTroops`: `useReserve = target.isPlayer() &&
+        // !botWithStructures`. Nation→Bot already takes the
+        // `try_send_nation_bot_attack` branch above; Bot→Bot-with-structures
+        // falls through here and must still use `expandRatio` (keep less /
+        // send more) so structure recapture matches tip.
+        let land_ratio = if target_is_bot && player_has_structure_units(game, target_small_id)
+        {
+            expand_ratio
+        } else {
+            reserve_ratio
+        };
+        let Some(troops) = land_attack_troops(game, attacker_small_id, land_ratio) else {
             return false;
         };
         let Some(troops) =
@@ -2330,6 +2341,47 @@ mod ai_attack_behavior_tests {
             .into_iter()
             .find(|a| a.0 == owner && a.1 == target)
             .map(|a| a.2)
+    }
+
+    #[test]
+    fn bot_vs_bot_with_structures_uses_expand_ratio() {
+        // Tip `calculateAttackTroops`: Bot→Bot that owns structures uses
+        // expandRatio (not reserveRatio). Regression for 4XcZGh83 @1242.
+        let Some(mut game) = new_game("Medium", "Free For All") else {
+            return;
+        };
+        let attacker = add_player(&mut game, "bot_attacker", PlayerType::Bot);
+        let target = add_player(&mut game, "bot_target", PlayerType::Bot);
+        conquer_round_robin(&mut game, &[attacker, target], 200);
+        game.add_troops(attacker, 100_000.0);
+        game.add_troops(target, 5_000.0);
+        // Tile 1 is owned by target in the round-robin conquer above.
+        game.build_unit(target, crate::core::schemas::unit_type::CITY, 1);
+        assert!(player_has_structure_units(&game, target));
+
+        let reserve = 0.40;
+        let expand = 0.10;
+        let attacker_troops = game.player_by_small_id(attacker).unwrap().troops as f64;
+        let max_troops = game.max_troops_for(attacker);
+        let expected = attacker_troops - max_troops * expand;
+        let wrong_reserve = attacker_troops - max_troops * reserve;
+        assert!(
+            (expected - wrong_reserve).abs() > 1_000.0,
+            "test ratios must produce distinct send sizes"
+        );
+
+        let mut random = PseudoRandom::new(42);
+        let mut sent = 0.0;
+        let result = try_send_player_attack(
+            &mut game, &mut random, attacker, target, reserve, expand, &mut sent, "Medium", None,
+        );
+        assert!(result);
+        let start_troops =
+            queued_attack_troops(&mut game, attacker, target).expect("attack should be queued");
+        assert!(
+            (start_troops - expected).abs() < 1.0,
+            "expected expand-ratio send {expected}, got {start_troops} (reserve would be {wrong_reserve})"
+        );
     }
 
     #[test]
