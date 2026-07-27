@@ -732,35 +732,87 @@ def render_record(
                     modal = page.locator("win-modal div.fixed")
                     if modal.count() > 0:
                         # Client sim can diverge and flash a win/death modal
-                        # mid-replay. Trust recorded end_tick for timeout /
-                        # win; only cut early on death once near the recorded
-                        # death tick (stop_tick already handles the trim).
+                        # mid-replay while the native record is still going.
+                        # Leaving that overlay up ships a "death" video for a
+                        # timeout episode — never do that.
+                        modal_text = ""
+                        try:
+                            modal_text = " ".join(
+                                (modal.inner_text(timeout=500) or "").split()
+                            )[:160]
+                        except Exception:
+                            modal_text = ""
                         reached_end = end_tick is None or (
                             tick is not None and tick >= int(end_tick)
                         )
+                        # How close we are to the recorded end (0..1).
+                        progress = 0.0
+                        if end_tick and tick is not None and int(end_tick) > 0:
+                            progress = float(tick) / float(end_tick)
+                        strict = os.environ.get(
+                            "OF_STRICT_REPLAY", "1"
+                        ).strip() not in ("0", "false", "no")
+
+                        def _dismiss_early_modal(reason: str) -> None:
+                            nonlocal early_modal_warned
+                            if not early_modal_warned:
+                                early_modal_warned = True
+                                print(
+                                    f"{reason} at tick {tick} "
+                                    f"(recorded end_tick={end_tick}, "
+                                    f"modal={modal_text!r}) - dismissing overlay"
+                                )
+                            # Keep dismissing: WinModal may re-show while
+                            # isAlive() stays false under divergence.
+                            page.evaluate(
+                                """() => {
+                                  for (const el of document.querySelectorAll(
+                                    'win-modal div.fixed'
+                                  )) {
+                                    el.remove();
+                                  }
+                                  const wm = document.querySelector('win-modal');
+                                  if (wm) {
+                                    wm.style.display = 'none';
+                                    try { wm.hasShownDeathModal = true; } catch (_) {}
+                                  }
+                                }"""
+                            )
+
                         if outcome == "win":
                             if reached_end:
                                 if win_hold_t0 is None:
                                     win_hold_t0 = time.time()
                                     print(
                                         f"win modal at tick {tick} - holding for celebration"
+                                        + (f" ({modal_text})" if modal_text else "")
                                     )
                                 elif time.time() - win_hold_t0 >= win_hold_sec:
                                     gameplay_duration = time.time() - gameplay_t0
                                     break
-                            elif not early_modal_warned:
-                                early_modal_warned = True
-                                print(
-                                    f"ignoring early win modal at tick {tick} "
-                                    f"(recorded end_tick={end_tick})"
-                                )
+                            else:
+                                if strict and progress < 0.95:
+                                    raise SystemExit(
+                                        f"client replay diverged: early win/death "
+                                        f"modal at tick {tick}/{end_tick} "
+                                        f"({modal_text!r}) on recorded win; "
+                                        f"set OF_STRICT_REPLAY=0 to dismiss+continue"
+                                    )
+                                _dismiss_early_modal("early win modal")
                         elif outcome == "timeout":
-                            if not early_modal_warned:
-                                early_modal_warned = True
-                                print(
-                                    f"ignoring early modal at tick {tick} "
-                                    f"(timeout episode; stop at end_tick={end_tick})"
+                            # Native still-alive-at-budget. An early "You Died"
+                            # means the client desynced — do not ship that as a
+                            # timeout clip unless explicitly overridden.
+                            if strict and progress < 0.95:
+                                raise SystemExit(
+                                    f"client replay diverged: early modal at tick "
+                                    f"{tick}/{end_tick} ({modal_text!r}) on "
+                                    f"recorded timeout (agent still alive in "
+                                    f"native). Refusing to ship a death-screen "
+                                    f"video. Re-watch a cleaner seed, or set "
+                                    f"OF_STRICT_REPLAY=0 to dismiss+continue."
                                 )
+                            _dismiss_early_modal("early modal on timeout")
                         else:
                             # death: if stop_tick missed, cut on modal near end
                             near_death = stop_tick is None or (
@@ -773,14 +825,11 @@ def render_record(
                                 print(
                                     f"death modal detected late "
                                     f"(trim to {gameplay_duration:.1f}s gameplay)"
+                                    + (f" ({modal_text})" if modal_text else "")
                                 )
                                 break
-                            elif not early_modal_warned:
-                                early_modal_warned = True
-                                print(
-                                    f"ignoring early death modal at tick {tick} "
-                                    f"(recorded end_tick={end_tick})"
-                                )
+                            else:
+                                _dismiss_early_modal("early death modal")
 
                     if (
                         outcome == "win"
