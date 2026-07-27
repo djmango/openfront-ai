@@ -178,6 +178,11 @@ fn run_watch(
     let use_cuda = device.starts_with("cuda");
     let mut args: Vec<String> = vec![
         "--watch".into(),
+        // Stochastic = train rollouts / WR windows. Greedy freezes near spawn.
+        "--watch-stochastic".into(),
+        "true".into(),
+        "--engine".into(),
+        "native".into(),
         "--policy".into(),
         policy.to_string_lossy().into_owned(),
         "--ckpt".into(),

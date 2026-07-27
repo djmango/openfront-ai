@@ -747,8 +747,9 @@ pub async fn run_hub(port: u16) -> Result<()> {
         play_bots: env_or("PLAY_BOTS", "10").parse().unwrap_or(10),
         play_nations: env_or("PLAY_NATIONS", "1").parse().unwrap_or(1),
         play_start_delay: env_or("PLAY_START_DELAY", "15").parse().unwrap_or(15),
-        // Default on: showcase Play should be argmax, not stochastic.
-        play_greedy: env_or("PLAY_GREEDY", "1") != "0",
+        // Default off: play/showcase follow train (stochastic). Greedy freezes
+        // near spawn — only enable via PLAY_GREEDY=1 for argmax debug.
+        play_greedy: env_or("PLAY_GREEDY", "0") != "0",
         debug_port: env_or("PLAY_DEBUG_PORT", "8989").parse().unwrap_or(8989),
         live_debug_port: env_or("LIVE_DEBUG_PORT", "8990").parse().unwrap_or(8990),
         live_showcase: env_or("LIVE_SHOWCASE", "0") != "0",
