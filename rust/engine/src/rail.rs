@@ -34,6 +34,12 @@ pub struct Station {
     pub cluster: Option<u32>,
     /// Railroad ids incident to this station, insertion order (mirrors TS `Set` order).
     pub railroads: Vec<u32>,
+    /// TS `TrainStation.railroadByNeighbor`, used by `getRailroadTo`.
+    ///
+    /// This intentionally has different semantics from `railroads`: removing
+    /// any railroad to a neighbor deletes the map entry even if another railroad
+    /// to that same neighbor remains in the Set.
+    pub railroad_by_neighbor: HashMap<u32, u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +53,35 @@ pub struct Railroad {
 #[derive(Debug, Clone, Default)]
 pub struct Cluster {
     pub stations: Vec<u32>,
+}
+
+impl Station {
+    fn add_railroad(&mut self, railroad: &Railroad) {
+        if !self.railroads.contains(&railroad.id) {
+            self.railroads.push(railroad.id);
+        }
+        let neighbor = if railroad.from == self.id {
+            railroad.to
+        } else {
+            railroad.from
+        };
+        self.railroad_by_neighbor.insert(neighbor, railroad.id);
+    }
+
+    fn remove_railroad(&mut self, railroad: &Railroad) {
+        self.railroads.retain(|&r| r != railroad.id);
+        let neighbor = if railroad.from == self.id {
+            railroad.to
+        } else {
+            railroad.from
+        };
+        self.railroad_by_neighbor.remove(&neighbor);
+    }
+
+    fn clear_railroads(&mut self) {
+        self.railroads.clear();
+        self.railroad_by_neighbor.clear();
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -111,13 +146,9 @@ impl RailNetwork {
         st.railroads
             .iter()
             .filter_map(|rid| {
-                self.railroads.get(rid).map(|r| {
-                    if r.from != station_id {
-                        r.from
-                    } else {
-                        r.to
-                    }
-                })
+                self.railroads
+                    .get(rid)
+                    .map(|r| if r.from != station_id { r.from } else { r.to })
             })
             .collect()
     }
@@ -337,6 +368,7 @@ pub fn connect_station(
             unit_type: unit_type_str.to_string(),
             cluster: None,
             railroads: Vec::new(),
+            railroad_by_neighbor: HashMap::new(),
         },
     );
     // TS `StationManager.findStation(unit)` scans the insertion-ordered Set and returns
@@ -369,10 +401,10 @@ fn connect_to_existing_rails(game: &Game, rn: &mut RailNetwork, station_id: u32)
 
         // Disconnect the old rail - it becomes invalid.
         if let Some(from_st) = rn.stations.get_mut(&rail.from) {
-            from_st.railroads.retain(|&r| r != rail.id);
+            from_st.remove_railroad(&rail);
         }
         if let Some(to_st) = rn.stations.get_mut(&rail.to) {
-            to_st.railroads.retain(|&r| r != rail.id);
+            to_st.remove_railroad(&rail);
         }
         rn.grid.unregister(rail.id);
         rn.railroads.remove(&rail.id);
@@ -393,14 +425,14 @@ fn connect_to_existing_rails(game: &Game, rn: &mut RailNetwork, station_id: u32)
         };
 
         if let Some(st) = rn.stations.get_mut(&station_id) {
-            st.railroads.push(new_from_id);
-            st.railroads.push(new_to_id);
+            st.add_railroad(&new_from);
+            st.add_railroad(&new_to);
         }
         if let Some(st) = rn.stations.get_mut(&rail.from) {
-            st.railroads.push(new_from_id);
+            st.add_railroad(&new_from);
         }
         if let Some(st) = rn.stations.get_mut(&rail.to) {
-            st.railroads.push(new_to_id);
+            st.add_railroad(&new_to);
         }
         rn.grid.register(game, &new_to);
         rn.grid.register(game, &new_from);
@@ -484,10 +516,10 @@ fn connect(game: &Game, rn: &mut RailNetwork, a: u32, b: u32) -> bool {
             tiles: path,
         };
         if let Some(st) = rn.stations.get_mut(&a) {
-            st.railroads.push(id);
+            st.add_railroad(&railroad);
         }
         if let Some(st) = rn.stations.get_mut(&b) {
-            st.railroads.push(id);
+            st.add_railroad(&railroad);
         }
         rn.grid.register(game, &railroad);
         rn.railroads.insert(id, railroad);
@@ -530,16 +562,16 @@ pub fn remove_station(game: &mut Game, unit_id: i32) {
         for rid in railroads {
             if let Some(r) = rn.railroads.remove(&rid) {
                 if let Some(st) = rn.stations.get_mut(&r.from) {
-                    st.railroads.retain(|&x| x != rid);
+                    st.remove_railroad(&r);
                 }
                 if let Some(st) = rn.stations.get_mut(&r.to) {
-                    st.railroads.retain(|&x| x != rid);
+                    st.remove_railroad(&r);
                 }
                 rn.grid.unregister(rid);
             }
         }
         if let Some(st) = rn.stations.get_mut(&station_id) {
-            st.railroads.clear();
+            st.clear_railroads();
         }
 
         let cluster = rn.stations.get(&station_id).and_then(|s| s.cluster);
@@ -622,33 +654,34 @@ pub fn find_stations_path(game: &Game, rn: &RailNetwork, from: u32, to: u32) -> 
             + (game.y(a) as i64 - game.y(b) as i64).unsigned_abs() as f64
     };
 
-    astar_generic(num_nodes, &[from], to, max_priority, 32, neighbors_fn, cost_fn, heuristic_fn)
-        .unwrap_or_default()
+    astar_generic(
+        num_nodes,
+        &[from],
+        to,
+        max_priority,
+        32,
+        neighbors_fn,
+        cost_fn,
+        heuristic_fn,
+    )
+    .unwrap_or_default()
 }
 
 /// TS `Railroad.getOrientedRailroad` - oriented tiles for a `from -> to` hop along the graph.
-/// TS `TrainStation.getRailroadTo` looks up a `Map<TrainStation, Railroad>` keyed by
-/// neighbor, which `addRailroad` overwrites on every call - so when two railroads connect
-/// the same station pair (e.g. two nearby rails both split by one new station), the
-/// *most recently added* edge wins, not the first. Iterate `st.railroads` back-to-front
-/// (append-only, so last-added is scanned first) to match that overwrite semantics.
+/// This must use `TrainStation.getRailroadTo`'s neighbor map, not the station's railroad Set:
+/// TS `removeRailroad` deletes the map entry for a neighbor even if another railroad to that
+/// neighbor remains in the Set.
 pub fn oriented_railroad_tiles(rn: &RailNetwork, from: u32, to: u32) -> Option<Vec<TileRef>> {
     let st = rn.stations.get(&from)?;
-    for &rid in st.railroads.iter().rev() {
-        let Some(r) = rn.railroads.get(&rid) else {
-            continue;
-        };
-        if r.from == to || r.to == to {
-            return Some(if r.to == to {
-                r.tiles.clone()
-            } else {
-                let mut t = r.tiles.clone();
-                t.reverse();
-                t
-            });
-        }
-    }
-    None
+    let rid = st.railroad_by_neighbor.get(&to)?;
+    let r = rn.railroads.get(rid)?;
+    Some(if r.to == to {
+        r.tiles.clone()
+    } else {
+        let mut t = r.tiles.clone();
+        t.reverse();
+        t
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -829,7 +862,11 @@ fn rail_neighbors(mini: &GameMap, node: u32, buf: &mut [u32; 4]) -> usize {
 
 fn rail_cost(mini: &GameMap, from: u32, to: u32, prev: Option<u32>) -> f64 {
     let penalized = mini.is_water(to) || mini.is_shoreline(to);
-    let mut c = if penalized { 1.0 + RAIL_WATER_PENALTY } else { 1.0 };
+    let mut c = if penalized {
+        1.0 + RAIL_WATER_PENALTY
+    } else {
+        1.0
+    };
     if let Some(p) = prev {
         let d1 = from as i64 - p as i64;
         let d2 = to as i64 - from as i64;
@@ -886,11 +923,7 @@ fn upscale_mini_path(full: &GameMap, mini: &GameMap, mini_path: &[TileRef]) -> V
         .collect()
 }
 
-fn fix_path_extremes(
-    mut path: Vec<TileRef>,
-    cell_src: TileRef,
-    cell_dst: TileRef,
-) -> Vec<TileRef> {
+fn fix_path_extremes(mut path: Vec<TileRef>, cell_src: TileRef, cell_dst: TileRef) -> Vec<TileRef> {
     match path.iter().position(|&t| t == cell_src) {
         Some(idx) if idx != 0 => path = path[idx..].to_vec(),
         Some(_) => {}
@@ -1090,6 +1123,41 @@ mod tests {
         })
     }
 
+    #[test]
+    fn removing_one_parallel_rail_clears_neighbor_lookup() {
+        let first = Railroad {
+            id: 1,
+            from: 10,
+            to: 20,
+            tiles: vec![100, 101],
+        };
+        let second = Railroad {
+            id: 2,
+            from: 10,
+            to: 20,
+            tiles: vec![200, 201],
+        };
+        let mut station = Station {
+            id: 10,
+            owner_small_id: 1,
+            unit_id: 99,
+            unit_type: unit_type::FACTORY.to_string(),
+            cluster: Some(1),
+            railroads: Vec::new(),
+            railroad_by_neighbor: HashMap::new(),
+        };
+
+        station.add_railroad(&first);
+        station.add_railroad(&second);
+        station.remove_railroad(&first);
+
+        assert_eq!(station.railroads, vec![2]);
+        assert!(
+            !station.railroad_by_neighbor.contains_key(&20),
+            "TS removeRailroad deletes railroadByNeighbor even when another same-neighbor rail remains"
+        );
+    }
+
     /// Capturing a city that is a train station must not make `station_active`
     /// flip false - TS `TrainStation.isActive()` follows the Unit, not a
     /// frozen owner id. Without this, in-flight trains delete on the next tick
@@ -1119,10 +1187,17 @@ mod tests {
             "captured station must remain active for in-flight trains"
         );
         assert_eq!(
-            game.rail_network.stations.get(&station_id).unwrap().owner_small_id,
+            game.rail_network
+                .stations
+                .get(&station_id)
+                .unwrap()
+                .owner_small_id,
             b
         );
-        assert_eq!(station_tile(&game, &game.rail_network, station_id), Some(city_tile));
+        assert_eq!(
+            station_tile(&game, &game.rail_network, station_id),
+            Some(city_tile)
+        );
     }
 
     /// TS `deleteCluster` leaves the Cluster object alive (cleared). Orphans that
@@ -1143,6 +1218,7 @@ mod tests {
                 unit_type: unit_type::CITY.to_string(),
                 cluster: None,
                 railroads: Vec::new(),
+                railroad_by_neighbor: HashMap::new(),
             },
         );
         // Simulate an orphan still pointing at `cluster` after delete (neighbor `from`).
@@ -1156,6 +1232,7 @@ mod tests {
                 unit_type: unit_type::CITY.to_string(),
                 cluster: Some(cluster),
                 railroads: Vec::new(),
+                railroad_by_neighbor: HashMap::new(),
             },
         );
         assert!(rn.clusters.get(&cluster).unwrap().stations.is_empty());
