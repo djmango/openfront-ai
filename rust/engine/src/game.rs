@@ -3094,14 +3094,19 @@ impl Game {
         });
     }
 
-    /// TS `GameImpl.breakAlliance` - marks `breaker` a traitor (unless `other` already is)
-    /// and detaches the alliance, WITHOUT any relation change. Used by `NukeExecution`,
-    /// which applies its own (differently-directed) relation update afterward.
+    /// TS `GameImpl.breakAlliance` - marks `breaker` a traitor unless `other`
+    /// already is a traitor or disconnected, and detaches the alliance WITHOUT
+    /// any relation change. Used by `NukeExecution`, which applies its own
+    /// (differently-directed) relation update afterward.
     pub fn break_alliance_silently(&mut self, breaker: u16, other: u16) -> bool {
         if !self.is_allied_with(breaker, other) {
             return false;
         }
-        if !self.is_traitor(other) {
+        if !self.is_traitor(other)
+            && !self
+                .player_by_small_id(other)
+                .is_some_and(|player| player.is_disconnected)
+        {
             self.mark_traitor(breaker);
         }
         self.alliances.retain(|al| {
@@ -3980,6 +3985,23 @@ mod player_alliance_list_tests {
         assert_eq!(game.alliance_count(player1), 0);
         assert_eq!(game.alliance_count(player2), 0);
         assert!(!game.is_allied_with(player1, player2));
+    }
+
+    #[test]
+    fn silent_break_against_disconnected_player_does_not_mark_traitor() {
+        let mut game = Game::default();
+        game.end_spawn_phase();
+        let breaker = add_human(&mut game, "breaker");
+        let disconnected = add_human(&mut game, "disconnected");
+        ally(&mut game, breaker, "breaker", disconnected, "disconnected");
+        game.player_by_small_id_mut(disconnected)
+            .unwrap()
+            .is_disconnected = true;
+
+        assert!(game.break_alliance_silently(breaker, disconnected));
+
+        assert!(!game.is_allied_with(breaker, disconnected));
+        assert!(!game.is_traitor(breaker));
     }
 
     #[test]
