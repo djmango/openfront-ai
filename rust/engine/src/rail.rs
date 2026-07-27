@@ -53,6 +53,8 @@ pub struct Railroad {
 #[derive(Debug, Clone, Default)]
 pub struct Cluster {
     pub stations: Vec<u32>,
+    /// TS `Cluster.tradeStations`: separate insertion order used by train destination sampling.
+    pub trade_stations: Vec<u32>,
 }
 
 impl Station {
@@ -163,15 +165,23 @@ impl RailNetwork {
     /// behavior we must reproduce byte-for-byte, so the removal below is unconditional (no
     /// `prev_id != cluster_id` guard) and happens *after* the add, matching TS's exact order.
     fn cluster_add_station(&mut self, cluster_id: u32, station_id: u32) {
+        let is_trade_station = self
+            .stations
+            .get(&station_id)
+            .is_some_and(|station| is_trade_type(&station.unit_type));
         if let Some(c) = self.clusters.get_mut(&cluster_id) {
             if !c.stations.contains(&station_id) {
                 c.stations.push(station_id);
+            }
+            if is_trade_station && !c.trade_stations.contains(&station_id) {
+                c.trade_stations.push(station_id);
             }
         }
         let prev = self.stations.get(&station_id).and_then(|s| s.cluster);
         if let Some(prev_id) = prev {
             if let Some(c) = self.clusters.get_mut(&prev_id) {
                 c.stations.retain(|&s| s != station_id);
+                c.trade_stations.retain(|&s| s != station_id);
             }
         }
         if let Some(st) = self.stations.get_mut(&station_id) {
@@ -204,6 +214,7 @@ impl RailNetwork {
         // left a stale pointer). Keep an empty entry in `clusters` to match.
         if let Some(c) = self.clusters.get_mut(&cluster_id) {
             let members = std::mem::take(&mut c.stations);
+            c.trade_stations.clear();
             for s in members {
                 if let Some(st) = self.stations.get_mut(&s) {
                     if st.cluster == Some(cluster_id) {
@@ -291,10 +302,14 @@ pub fn station_active(game: &Game, rn: &RailNetwork, station_id: u32) -> bool {
 /// Keep `Station.owner_small_id` in sync when a station building is captured
 /// (TS `Unit.setOwner` leaves the TrainStation pointing at the same Unit).
 pub fn update_station_owner_for_unit(rn: &mut RailNetwork, unit_id: i32, new_owner: u16) {
-    if let Some(station_id) = rn.station_by_unit.get(&unit_id).copied() {
-        if let Some(st) = rn.stations.get_mut(&station_id) {
-            st.owner_small_id = new_owner;
-        }
+    // TS TrainStation stores a reference to the Unit object, so every duplicate
+    // TrainStation for that unit observes owner changes after capture.
+    for st in rn
+        .stations
+        .values_mut()
+        .filter(|station| station.unit_id == unit_id)
+    {
+        st.owner_small_id = new_owner;
     }
 }
 
@@ -311,10 +326,10 @@ fn station_trade_available(game: &Game, station: &Station, source_owner: u16) ->
 pub fn cluster_has_any_trade_destination(game: &Game, cluster_id: u32, source_owner: u16) -> bool {
     let rn = &game.rail_network;
     rn.clusters.get(&cluster_id).is_some_and(|c| {
-        c.stations.iter().any(|sid| {
-            rn.stations.get(sid).is_some_and(|s| {
-                is_trade_type(&s.unit_type) && station_trade_available(game, s, source_owner)
-            })
+        c.trade_stations.iter().any(|sid| {
+            rn.stations
+                .get(sid)
+                .is_some_and(|s| station_trade_available(game, s, source_owner))
         })
     })
 }
@@ -331,13 +346,10 @@ pub fn cluster_random_trade_destination(
     let cluster = rn.clusters.get(&cluster_id)?;
     let mut selected = None;
     let mut eligible_seen: i32 = 0;
-    for &sid in &cluster.stations {
+    for &sid in &cluster.trade_stations {
         let Some(st) = rn.stations.get(&sid) else {
             continue;
         };
-        if !is_trade_type(&st.unit_type) {
-            continue;
-        }
         if !station_trade_available(game, st, source_owner) {
             continue;
         }
@@ -588,6 +600,7 @@ pub fn remove_station(game: &mut Game, unit_id: i32) {
         if let Some(cluster_id) = cluster {
             if let Some(c) = rn.clusters.get_mut(&cluster_id) {
                 c.stations.retain(|&s| s != station_id);
+                c.trade_stations.retain(|&s| s != station_id);
             }
             let empty = rn
                 .clusters
@@ -1287,6 +1300,74 @@ mod tests {
             game.rail_network.find_latest_station_by_unit(factory),
             Some(second),
             "with only one active duplicate, both lookup modes agree"
+        );
+    }
+
+    #[test]
+    fn capture_updates_every_duplicate_station_owner_cache() {
+        let mut rn = RailNetwork::default();
+        for sid in [rn.new_station_id(), rn.new_station_id()] {
+            rn.stations.insert(
+                sid,
+                Station {
+                    id: sid,
+                    owner_small_id: 1,
+                    unit_id: 42,
+                    unit_type: unit_type::CITY.to_string(),
+                    cluster: None,
+                    railroads: Vec::new(),
+                    railroad_by_neighbor: HashMap::new(),
+                },
+            );
+        }
+        rn.station_by_unit.insert(42, 1);
+
+        update_station_owner_for_unit(&mut rn, 42, 7);
+
+        assert!(
+            rn.stations
+                .values()
+                .filter(|station| station.unit_id == 42)
+                .all(|station| station.owner_small_id == 7),
+            "TS duplicate TrainStations share one Unit reference, so capture changes every station owner"
+        );
+    }
+
+    #[test]
+    fn cluster_tracks_trade_stations_separately_from_factories() {
+        let mut rn = RailNetwork::default();
+        let cluster = rn.new_cluster();
+        for (sid, unit_type) in [
+            (rn.new_station_id(), unit_type::FACTORY),
+            (rn.new_station_id(), unit_type::CITY),
+            (rn.new_station_id(), unit_type::FACTORY),
+            (rn.new_station_id(), unit_type::PORT),
+        ] {
+            rn.stations.insert(
+                sid,
+                Station {
+                    id: sid,
+                    owner_small_id: 1,
+                    unit_id: sid as i32,
+                    unit_type: unit_type.to_string(),
+                    cluster: None,
+                    railroads: Vec::new(),
+                    railroad_by_neighbor: HashMap::new(),
+                },
+            );
+            rn.cluster_add_station(cluster, sid);
+        }
+
+        let c = rn.clusters.get(&cluster).unwrap();
+        assert_eq!(c.stations.len(), 4);
+        assert_eq!(c.trade_stations.len(), 2);
+        assert_eq!(
+            c.trade_stations
+                .iter()
+                .map(|sid| rn.stations.get(sid).unwrap().unit_type.as_str())
+                .collect::<Vec<_>>(),
+            vec![unit_type::CITY, unit_type::PORT],
+            "TS Cluster.randomTradeDestination iterates the dedicated tradeStations Set"
         );
     }
 }
