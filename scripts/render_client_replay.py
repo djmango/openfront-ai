@@ -731,10 +731,9 @@ def render_record(
 
                     modal = page.locator("win-modal div.fixed")
                     if modal.count() > 0:
-                        # Native watch outcome/end_tick is source of truth.
-                        # Client sim can flash win/death mid-replay; dismiss
-                        # overlays until the recorded stop and keep going —
-                        # never abort the render to hunt another seed.
+                        # Client replay can diverge from the native GameRecord.
+                        # Never dismiss a conflicting terminal signal and keep
+                        # filming — that ships death footage labeled as a win.
                         modal_text = ""
                         try:
                             modal_text = " ".join(
@@ -745,6 +744,11 @@ def render_record(
                         reached_end = end_tick is None or (
                             tick is not None and tick >= int(end_tick)
                         )
+                        text_l = modal_text.lower()
+                        client_death = "you died" in text_l or (
+                            "has won" in text_l and "you won" not in text_l
+                        )
+                        client_win = "you won" in text_l
 
                         def _dismiss_early_modal(reason: str) -> None:
                             nonlocal early_modal_warned
@@ -755,8 +759,6 @@ def render_record(
                                     f"(recorded end_tick={end_tick}, "
                                     f"modal={modal_text!r}) - dismissing overlay"
                                 )
-                            # Keep dismissing: WinModal may re-show while
-                            # isAlive() stays false under divergence.
                             page.evaluate(
                                 """() => {
                                   for (const el of document.querySelectorAll(
@@ -772,8 +774,16 @@ def render_record(
                                 }"""
                             )
 
+                        def _fail_desync(why: str) -> None:
+                            raise SystemExit(
+                                f"client replay desync: {why} at tick "
+                                f"{tick}/{end_tick} (modal={modal_text!r}, "
+                                f"native outcome={outcome}). Refusing to ship "
+                                f"a mismatched clip."
+                            )
+
                         if outcome == "win":
-                            if reached_end:
+                            if reached_end and client_win:
                                 if win_hold_t0 is None:
                                     win_hold_t0 = time.time()
                                     print(
@@ -783,9 +793,21 @@ def render_record(
                                 elif time.time() - win_hold_t0 >= win_hold_sec:
                                     gameplay_duration = time.time() - gameplay_t0
                                     break
+                            elif client_death or (reached_end and not client_win):
+                                _fail_desync(
+                                    "client death/other-win on native-win record"
+                                    if client_death
+                                    else "no client You-Won modal at native win tick"
+                                )
                             else:
-                                _dismiss_early_modal("early win modal")
+                                # Spurious non-terminal overlay; clear and continue.
+                                _dismiss_early_modal("early non-terminal modal on win")
                         elif outcome == "timeout":
+                            if client_death:
+                                _fail_desync(
+                                    "client death/other-win on native-timeout "
+                                    "(agent still alive in native)"
+                                )
                             _dismiss_early_modal("early modal on timeout")
                         else:
                             # death: if stop_tick missed, cut on modal near end
@@ -812,21 +834,35 @@ def render_record(
                         and tick >= int(end_tick)
                         and win_hold_t0 is None
                     ):
-                        # Win tick reached; wait for modal then celebrate.
+                        # Win tick reached; require the client You-Won modal.
+                        saw_win = False
                         for _ in range(30):
                             if modal.count() > 0:
-                                win_hold_t0 = time.time()
-                                print(
-                                    f"win modal at tick {tick} - holding for celebration"
+                                try:
+                                    mt = " ".join(
+                                        (modal.inner_text(timeout=500) or "").split()
+                                    ).lower()
+                                except Exception:
+                                    mt = ""
+                                if "you won" in mt:
+                                    saw_win = True
+                                    win_hold_t0 = time.time()
+                                    print(
+                                        f"win modal at tick {tick} - holding for celebration"
+                                    )
+                                    break
+                                raise SystemExit(
+                                    f"client replay desync: modal at native win "
+                                    f"tick {tick}/{end_tick} is not You-Won "
+                                    f"(modal={mt!r}). Refusing to ship."
                                 )
-                                break
                             page.wait_for_timeout(100)
-                        if win_hold_t0 is None:
-                            gameplay_duration = time.time() - gameplay_t0
-                            print(
-                                f"end_tick {end_tick} reached without win modal; stopping"
+                        if not saw_win and win_hold_t0 is None:
+                            raise SystemExit(
+                                f"client replay desync: end_tick {end_tick} "
+                                f"reached without You-Won modal on native-win "
+                                f"record. Refusing to ship a mismatched clip."
                             )
-                            break
 
                     page.wait_for_timeout(100)
                 else:
