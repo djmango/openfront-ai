@@ -26,7 +26,7 @@ for MAP in "${MAPS[@]}"; do
   TAG="${i}_${MAP}"
   LOG="$OUTDIR/${TAG}.watch.log"
   echo "=== $TAG $(date -u +%H:%M:%S) ===" | tee "$LOG"
-  "$OFTRAIN" --watch --watch-stochastic=true --engine native \
+  "$OFTRAIN" --watch --watch-stochastic=true --engine node \
     --policy "$POLICY" --ckpt "$AE" --coarse-ckpt "$COARSE" \
     --stage "$STAGE" --map "$MAP" --bots "$BOTS" --nations "$N" --difficulty "$DIFF" \
     --seed "$SEED" --device cuda:0 --amp=true --foveate=true \
