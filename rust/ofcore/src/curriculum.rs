@@ -1046,10 +1046,10 @@ fn build_v10_stages() -> Vec<Stage> {
         }
     };
     // 0-7: 8-map warm-up (terrain/naval variety without World/Asia yet)
-    push(&V10_BRIDGE_MAPS, "Easy", 15, V10_MAP_WARMUP_LEN);
+    push(&V10_BRIDGE_MAPS, "Easy", 10, V10_MAP_WARMUP_LEN);
     // 8-27: full broad-16 through early/mid Easy density
-    push(&V10_BROAD_MAPS, "Easy", 15, 20);
-    // 28-35: broad Easy with faster decision cadence (closeout → peak)
+    push(&V10_BROAD_MAPS, "Easy", 10, 20);
+    // 28-35: broad Easy closeout → peak (same decision cadence)
     push(&V10_BROAD_MAPS, "Easy", 10, 8);
     push(&V10_BROAD_MAPS, "Medium", 10, 14); // 36-49
     push(&V10_BROAD_MAPS, "Hard", 10, 10); // 50-59
@@ -1415,6 +1415,19 @@ mod tests {
 
     fn composite(values: &[(usize, f64)]) -> HashMap<usize, f64> {
         values.iter().copied().collect()
+    }
+
+    #[test]
+    fn v10_decision_ticks_are_uniformly_ten() {
+        let stages = stages_for_schedule(CurriculumSchedule::V10);
+        assert_eq!(stages.len(), V10_STAGE_COUNT);
+        for (i, stage) in stages.iter().enumerate() {
+            assert_eq!(
+                stage.decision_ticks, 10,
+                "stage {i} decision_ticks={}",
+                stage.decision_ticks
+            );
+        }
     }
 
     #[test]
