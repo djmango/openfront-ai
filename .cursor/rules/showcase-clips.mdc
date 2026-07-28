@@ -24,12 +24,15 @@ agent (ppo_v11 / oftrain `--watch` / `render_client_replay.py` / `ofshowcase`):
 - **Tick budget:** use the shared train default (`DEFAULT_MAX_EPISODE_TICKS` =
   21000) so episodes run to the same horizon as training. Do not silently
   lower it (e.g. 12000) or episodes look "cut short".
+- **Decision ticks:** watch must use the stage's `decision_ticks` (15 for V10
+  stages 0–27, 10 after). Never hardcode 10 for early Easy — that desyncs
+  demos from the `recent_wins` window.
 - **Engine:** `--engine native` (same as train).
 - **Lobby density:** for "current stage" clips, use that stage's bots/nations
-  from `V10_BOT_NATION_DENSITY`. Asking for 4n/8n while the policy is still on
-  2n is out-of-distribution — expect more deaths; prefer curriculum rows that
-  actually have those nation counts (e.g. stage 20 ≈ 34 bots/4n, stage 26 ≈
-  66 bots/8n) and say so.
+  from `V10_BOT_NATION_DENSITY` (and the stage difficulty). Do not hardcode a
+  stale lobby. Asking for 4n/8n while the policy is still on 2n is
+  out-of-distribution — expect more deaths; prefer curriculum rows that
+  actually have those nation counts and say so.
 - **One watch, one record.** Do not seed-hunt for timeout/win. Death / timeout /
   win are all valid native outcomes — ship what the policy did.
 
