@@ -1,9 +1,10 @@
 //! One watch episode → GameRecord + `.debug.json` + compact `.thinking.json`
 //! (few-KB top-3 trace for HF parquet).
 //!
-//! Defaults match training: native engine + **stochastic** sampling (same as
-//! PPO rollouts / WR windows). Argmax (`--watch-stochastic=false`) freezes
-//! near spawn and is debug-only — do not use it for demos or showcase clips.
+//! Showcase default: **Node/TS engine** + **stochastic** sampling so the
+//! GameRecord replays in the real client without native↔TS desync. Training
+//! stays native. Argmax (`--watch-stochastic=false`) freezes near spawn and
+//! is debug-only — do not use it for demos or showcase clips.
 
 use std::path::{Path, PathBuf};
 

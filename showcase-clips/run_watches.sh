@@ -33,7 +33,7 @@ run_watch() {
   "$OFTRAIN" \
     --watch \
     --watch-stochastic=true \
-    --engine native \
+    --engine node \
     --policy "$POLICY" \
     --ckpt "$AE" \
     --coarse-ckpt "$COARSE" \
