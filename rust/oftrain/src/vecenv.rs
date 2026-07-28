@@ -954,9 +954,7 @@ impl EnvWorker {
         nations: Value,
     ) -> Result<()> {
         self.episode_stage = self.stage;
-        // Match training's stage cadence. Stages 0-27 use decision_ticks=15;
-        // closeout/Medium+ use 10. Hardcoding 10 made watches act ~50% more
-        // often than the episodes that fill `recent_wins` at early Easy.
+        // Always use the stage table's decision_ticks (V10 is uniformly 10).
         self.decision_ticks = self
             .stages
             .get(self.stage)

@@ -19,10 +19,10 @@ pub const DEFAULT_MAX_EPISODE_TICKS: i64 = 21_000;
 
 /// Default sim ticks per watch decision when stage config is unavailable.
 ///
-/// Prefer the curriculum stage's `decision_ticks` (15 for early V10 Easy,
-/// 10 for closeout/Medium+). Watch `reset_watch` now reads the stage value;
-/// this constant is only for deriving a safe `--max-steps` floor that cannot
-/// undercut [`DEFAULT_MAX_EPISODE_TICKS`] even at the fastest cadence (10).
+/// Prefer the curriculum stage's `decision_ticks` (V10 uses 10 everywhere).
+/// Watch `reset_watch` reads the stage value; this constant is only for
+/// deriving a safe `--max-steps` floor that cannot undercut
+/// [`DEFAULT_MAX_EPISODE_TICKS`] at that cadence.
 pub const WATCH_TICKS_PER_DECISION: i64 = 10;
 
 /// Decision cap that cannot undercut [`DEFAULT_MAX_EPISODE_TICKS`].
