@@ -731,7 +731,7 @@ def render_record(
 
                     modal = page.locator("win-modal div.fixed")
                     if modal.count() > 0:
-                        # Client replay can diverge from the native GameRecord.
+                        # Client replay must match the watch GameRecord (Node).
                         # Never dismiss a conflicting terminal signal and keep
                         # filming — that ships death footage labeled as a win.
                         modal_text = ""
@@ -778,7 +778,7 @@ def render_record(
                             raise SystemExit(
                                 f"client replay desync: {why} at tick "
                                 f"{tick}/{end_tick} (modal={modal_text!r}, "
-                                f"native outcome={outcome}). Refusing to ship "
+                                f"record outcome={outcome}). Refusing to ship "
                                 f"a mismatched clip."
                             )
 
@@ -795,9 +795,9 @@ def render_record(
                                     break
                             elif client_death or (reached_end and not client_win):
                                 _fail_desync(
-                                    "client death/other-win on native-win record"
+                                    "client death/other-win on watch-win record"
                                     if client_death
-                                    else "no client You-Won modal at native win tick"
+                                    else "no client You-Won modal at watch win tick"
                                 )
                             else:
                                 # Spurious non-terminal overlay; clear and continue.
@@ -805,8 +805,8 @@ def render_record(
                         elif outcome == "timeout":
                             if client_death:
                                 _fail_desync(
-                                    "client death/other-win on native-timeout "
-                                    "(agent still alive in native)"
+                                    "client death/other-win on watch-timeout "
+                                    "(agent still alive in watch record)"
                                 )
                             _dismiss_early_modal("early modal on timeout")
                         else:
@@ -852,7 +852,7 @@ def render_record(
                                     )
                                     break
                                 raise SystemExit(
-                                    f"client replay desync: modal at native win "
+                                    f"client replay desync: modal at watch win "
                                     f"tick {tick}/{end_tick} is not You-Won "
                                     f"(modal={mt!r}). Refusing to ship."
                                 )
@@ -860,7 +860,7 @@ def render_record(
                         if not saw_win and win_hold_t0 is None:
                             raise SystemExit(
                                 f"client replay desync: end_tick {end_tick} "
-                                f"reached without You-Won modal on native-win "
+                                f"reached without You-Won modal on watch-win "
                                 f"record. Refusing to ship a mismatched clip."
                             )
 
