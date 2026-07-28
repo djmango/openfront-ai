@@ -44,10 +44,11 @@ agent (ppo_v11 / oftrain `--watch` / `render_client_replay.py` / `ofshowcase`):
 - `gameMap` must be the OpenFront `GameMapType` *value* (e.g. `"North America"`),
   not the Rust PascalCase id (`NorthAmerica`). `render_client_replay.py`
   rewrites this during sanitize.
-- **Outcome labels come from native watch** (`win` / `death` / `timeout` at
-  `DEFAULT_MAX_EPISODE_TICKS`). If the client flashes an early win/death modal
-  mid-replay, dismiss the overlay and continue to the recorded `end_tick` —
-  do not abort the render or re-watch another seed.
+- **Outcome labels come from native watch** (`win` / `death` / `timeout`).
+  Client replay must agree: if the browser shows You Died / another winner on
+  a native-win or native-timeout record, **fail the render** — do not dismiss
+  and ship a mismatched video. Win clips must show a You-Won modal at
+  `end_tick`.
 
 ## Watch scripts
 
