@@ -182,7 +182,7 @@ fn run_watch(
         "--watch-stochastic".into(),
         "true".into(),
         "--engine".into(),
-        "native".into(),
+        "node".into(),
         "--policy".into(),
         policy.to_string_lossy().into_owned(),
         "--ckpt".into(),
