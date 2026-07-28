@@ -382,11 +382,20 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
         }
         if !alive || !winner.is_null() {
             end_tick = tick;
-            let won = winner
-                .as_array()
-                .map(|a| a.len() > 1 && a[1] == "AGENTRL1")
-                .unwrap_or(false);
-            episode_outcome = if won { "win" } else { "death" }.to_string();
+            // Match training: death wins over a stale/racey winner field.
+            let won = alive
+                && winner
+                    .as_array()
+                    .map(|a| a.len() > 1 && a[0] == "player" && a[1] == "AGENTRL1")
+                    .unwrap_or(false);
+            episode_outcome = if !alive {
+                "death"
+            } else if won {
+                "win"
+            } else {
+                "death"
+            }
+            .to_string();
             finished = true;
             println!(
                 "episode over at tick {end_tick}: alive={alive}, winner={winner}, outcome={episode_outcome}",
