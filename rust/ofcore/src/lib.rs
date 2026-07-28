@@ -17,7 +17,12 @@ pub mod translate;
 /// OpenFront `msPerTick() = 100`, so 21000 ticks ≈ 35 in-game minutes.
 pub const DEFAULT_MAX_EPISODE_TICKS: i64 = 21_000;
 
-/// Watch / `rl.watch` advances this many sim ticks per policy decision.
+/// Default sim ticks per watch decision when stage config is unavailable.
+///
+/// Prefer the curriculum stage's `decision_ticks` (15 for early V10 Easy,
+/// 10 for closeout/Medium+). Watch `reset_watch` now reads the stage value;
+/// this constant is only for deriving a safe `--max-steps` floor that cannot
+/// undercut [`DEFAULT_MAX_EPISODE_TICKS`] even at the fastest cadence (10).
 pub const WATCH_TICKS_PER_DECISION: i64 = 10;
 
 /// Decision cap that cannot undercut [`DEFAULT_MAX_EPISODE_TICKS`].

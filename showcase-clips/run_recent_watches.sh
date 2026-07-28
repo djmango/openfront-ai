@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Recent games at the live stage (u806 / s16): a few stochastic watches,
-# train-matched tick budget. One watch each — no seed hunting.
+# Recent games at the *live* curriculum lobby (bots/nations/difficulty from
+# stage table — not hardcoded). Train-matched tick budget + decision_ticks.
 set -euo pipefail
 cd /workspace
 export PATH="/workspace/rust/.libtorch-venv/bin:$PATH"
@@ -14,15 +14,32 @@ AE=weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors
 COARSE=weights/ae/ae_v32_nostatic_d16c32.encoder.safetensors
 OFTRAIN=./rust/target/release/oftrain
 MAX_TICKS=21000
+# Over-provision for fastest cadence (10); stage may use 15.
 MAX_STEPS=$((MAX_TICKS / 10 + 64))
 
 UPD=$(python3 -c "import json;print(json.load(open('$STATE'))['update'])")
 STAGE=$(python3 -c "import json;print(json.load(open('$STATE'))['stage'])")
+read -r BOTS N DIFF DT <<<"$(python3 - <<PY
+import re
+from pathlib import Path
+text = Path("rust/ofcore/src/curriculum.rs").read_text()
+pairs = [(int(a), int(b)) for a, b in re.findall(
+    r"\((\d+),\s*(\d+)\)",
+    re.search(r"pub const V10_BOT_NATION_DENSITY:.*?=\s*\[(.*?)\];", text, re.S).group(1),
+)]
+med = int(re.search(r"V10_MEDIUM_START:\s*usize\s*=\s*(\d+)", text).group(1))
+hard = int(re.search(r"V10_HARD_START:\s*usize\s*=\s*(\d+)", text).group(1))
+# decision_ticks: 15 for stages 0-27, 10 after (matches build_v10_stages)
+s = int("$STAGE")
+bots, n = pairs[s]
+diff = "Easy" if s < med else ("Medium" if s < hard else "Hard")
+dt = 15 if s < 28 else 10
+print(bots, n, diff, dt)
+PY
+)"
 TAG_PREFIX="ppo_v11_u${UPD}"
-# s16 lobby from curriculum
-BOTS=26; N=3; DIFF=Easy
 
-echo "CHECKPOINT update=$UPD stage=$STAGE lobby=${BOTS}b/${N}n $DIFF ticks=$MAX_TICKS"
+echo "CHECKPOINT update=$UPD stage=$STAGE lobby=${BOTS}b/${N}n $DIFF decision_ticks=$DT ticks=$MAX_TICKS"
 
 run_watch() {
   local TAG=$1 MAP=$2 SEED=$3
@@ -40,11 +57,14 @@ run_watch() {
 import json
 from pathlib import Path
 d=json.loads(Path("showcase-clips/${TAG_PREFIX}_${TAG}.debug.json").read_text())
-print(f"outcome={d.get('outcome')} end_tick={d.get('end_tick')}")
+print(f"outcome={d.get('outcome')} end_tick={d.get('end_tick')} decision_ticks={d.get('decision_ticks')}")
 PY
 }
 
-run_watch "s${STAGE}_europe" Europe "recent_eu_a"
-run_watch "s${STAGE}_world" World "recent_world_a"
-run_watch "s${STAGE}_asia" Asia "recent_asia_a"
+# Leave map unset for true train sampling? Keep a few maps for variety, but
+# lobby always matches curriculum for STAGE.
+run_watch "s${STAGE}_europe" Europe "diag_eu_a"
+run_watch "s${STAGE}_world" World "diag_world_a"
+run_watch "s${STAGE}_asia" Asia "diag_asia_a"
+run_watch "s${STAGE}_pangaea" Pangaea "diag_pang_a"
 echo ALL_RECENT_WATCHES_DONE
