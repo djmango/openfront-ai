@@ -24,9 +24,8 @@ agent (ppo_v11 / oftrain `--watch` / `render_client_replay.py` / `ofshowcase`):
 - **Tick budget:** use the shared train default (`DEFAULT_MAX_EPISODE_TICKS` =
   21000) so episodes run to the same horizon as training. Do not silently
   lower it (e.g. 12000) or episodes look "cut short".
-- **Decision ticks:** watch must use the stage's `decision_ticks` (15 for V10
-  stages 0–27, 10 after). Never hardcode 10 for early Easy — that desyncs
-  demos from the `recent_wins` window.
+- **Decision ticks:** watch must use the stage's `decision_ticks` (V10 is
+  **10 everywhere**). Do not invent a different cadence than train.
 - **Engine:** `--engine native` (same as train).
 - **Lobby density:** for "current stage" clips, use that stage's bots/nations
   from `V10_BOT_NATION_DENSITY` (and the stage difficulty). Do not hardcode a

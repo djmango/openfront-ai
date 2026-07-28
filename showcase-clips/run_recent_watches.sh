@@ -29,11 +29,11 @@ pairs = [(int(a), int(b)) for a, b in re.findall(
 )]
 med = int(re.search(r"V10_MEDIUM_START:\s*usize\s*=\s*(\d+)", text).group(1))
 hard = int(re.search(r"V10_HARD_START:\s*usize\s*=\s*(\d+)", text).group(1))
-# decision_ticks: 15 for stages 0-27, 10 after (matches build_v10_stages)
+# decision_ticks: V10 is 10 for every stage
 s = int("$STAGE")
 bots, n = pairs[s]
 diff = "Easy" if s < med else ("Medium" if s < hard else "Hard")
-dt = 15 if s < 28 else 10
+dt = 10
 print(bots, n, diff, dt)
 PY
 )"

@@ -220,12 +220,13 @@ Medium (s68) to ~Aug 1-3. Another s12-shaped hole pushes Medium later.</p>
     modals until <code>tick &gt;= recorded end_tick</code>
     (see <code>scripts/render_client_replay.py</code>). Native outcome is
     truth — do not seed-hunt when the client desyncs.</li>
-  <li><b>Watch decision_ticks must match the stage.</b> Training stages 0-27
-    use <code>decision_ticks=15</code>; watch used to hardcode 10, so demos
-    acted ~50% more often than the episodes that fill
-    <code>recent_wins</code>. Fixed in <code>EnvWorker::reset_watch</code>
-    to read the stage table. Showcase scripts must also pass the curriculum
-    lobby (bots/nations/difficulty) for the live stage — not a stale
+  <li><b>Watch decision_ticks must match the stage.</b> Watch used to hardcode
+    10 while early V10 stages trained at 15, so demos acted ~50% more often
+    than the <code>recent_wins</code> window. Fixed in
+    <code>EnvWorker::reset_watch</code> to read the stage table; V10 is now
+    <b>decision_ticks=10 for every stage</b> so train and watch stay aligned
+    without a mid-ladder cadence flip. Showcase scripts must also pass the
+    curriculum lobby (bots/nations/difficulty) for the live stage — not a stale
     hardcoded 26b/3n.</li>
   <li>Stage-15 stochastic sample (u456, 6 maps): 2 wins (Asia, World) /
     4 nation-losses. Train window still ~85% WR / 0 DR; nations are the
