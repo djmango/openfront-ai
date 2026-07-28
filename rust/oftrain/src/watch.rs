@@ -158,9 +158,10 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
         EngineKind::Node => "node",
     };
     let sample_label = if greedy { "greedy" } else { "stochastic" };
+    let decision_ticks = st.decision_ticks.max(1);
     println!(
         "stage {}: {map_name}, nations={nations}, {bots} bots, {difficulty} \
-         engine={engine_label} sample={sample_label}",
+         decision_ticks={decision_ticks} engine={engine_label} sample={sample_label}",
         cfg.stage
     );
 
@@ -222,7 +223,7 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
         cfg.reward_config,
         cfg.curriculum_schedule,
     )?;
-    worker.reset_watch(map_name, &cfg.seed, bots, difficulty, nations)?;
+    worker.reset_watch(map_name, &cfg.seed, bots, difficulty, nations.clone())?;
 
     let mut terrain_cache = TerrainDeviceCache::new(cfg.device);
     let mut debug_log: Vec<Value> = Vec::new();
@@ -440,6 +441,12 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
             "log": debug_log,
             "outcome": episode_outcome,
             "end_tick": end_tick,
+            "decision_ticks": decision_ticks,
+            "stage": cfg.stage,
+            "bots": bots,
+            "nations": nations,
+            "difficulty": difficulty,
+            "map": map_name,
         });
         std::fs::write(&debug_path, serde_json::to_string(&payload)?)?;
         let thinking = compact_thinking(&debug_log, &episode_outcome, end_tick, 15);

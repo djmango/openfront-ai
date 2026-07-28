@@ -954,8 +954,14 @@ impl EnvWorker {
         nations: Value,
     ) -> Result<()> {
         self.episode_stage = self.stage;
-        // rl.watch always steps 10 ticks per decision, not stage.decision_ticks.
-        self.decision_ticks = 10;
+        // Match training's stage cadence. Stages 0-27 use decision_ticks=15;
+        // closeout/Medium+ use 10. Hardcoding 10 made watches act ~50% more
+        // often than the episodes that fill `recent_wins` at early Easy.
+        self.decision_ticks = self
+            .stages
+            .get(self.stage)
+            .map(|s| s.decision_ticks.max(1))
+            .unwrap_or(10);
         self.map_name = map_name.to_string();
         self.rehearsal = false;
         let obs = self
