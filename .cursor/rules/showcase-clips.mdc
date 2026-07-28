@@ -26,7 +26,10 @@ agent (ppo_v11 / oftrain `--watch` / `render_client_replay.py` / `ofshowcase`):
   lower it (e.g. 12000) or episodes look "cut short".
 - **Decision ticks:** watch must use the stage's `decision_ticks` (V10 is
   **10 everywhere**). Do not invent a different cadence than train.
-- **Engine:** `--engine native` (same as train).
+- **Engine:** `--engine node` for watches/clips/replays so the GameRecord is
+  produced by the same TS sim the client replays (avoids native↔TS desync).
+  Training stays `--engine native`. Pass `--engine native` on watch only for
+  parity debug.
 - **Lobby density:** for "current stage" clips, use that stage's bots/nations
   from `V10_BOT_NATION_DENSITY` (and the stage difficulty). Do not hardcode a
   stale lobby. Asking for 4n/8n while the policy is still on 2n is

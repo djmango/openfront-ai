@@ -508,9 +508,11 @@ struct Args {
     benchmark_out: Option<String>,
 
     /// Run one watch episode, save GameRecord + `.debug.json`, exit.
-    /// Engine follows `--engine` (default native, same as train). Sampling is
-    /// stochastic by default (matches PPO rollouts / WR windows); pass
-    /// `--watch-stochastic=false` only for argmax debug (greedy freezes near spawn).
+    /// Bare `--watch` defaults the simulation to **Node/TS** so the saved
+    /// GameRecord replays cleanly in the real client (avoids native↔TS desync
+    /// in showcase clips). Pass `--engine native` explicitly for parity debug.
+    /// Sampling is stochastic by default (matches PPO rollouts / WR windows);
+    /// `--watch-stochastic=false` is argmax debug only (greedy freezes near spawn).
     #[arg(long, default_value_t = false)]
     watch: bool,
 
@@ -1314,7 +1316,15 @@ fn main() -> anyhow::Result<()> {
             .record
             .clone()
             .unwrap_or_else(|| format!("records-rl/{run}_s{}_{}.json", args.stage, args.seed));
-        // Watch uses the same engine default as train (`--engine`, native).
+        // Showcase / client-replay records must come from the Node/TS engine.
+        // Bare `--watch` therefore defaults to Node even though clap `--engine`
+        // defaults to native for training. Explicit `--engine …` still wins.
+        let watch_engine = if std::env::args().any(|a| a == "--engine" || a.starts_with("--engine="))
+        {
+            args.engine
+        } else {
+            engine::EngineKind::Node
+        };
         return watch::run_watch(watch::WatchConfig {
             policy,
             record: std::path::PathBuf::from(record),
@@ -1339,7 +1349,7 @@ fn main() -> anyhow::Result<()> {
             curriculum_schedule,
             reward_config,
             recurrent_policy: args.recurrent_policy,
-            engine: args.engine,
+            engine: watch_engine,
             stochastic: args.watch_stochastic,
         });
     }

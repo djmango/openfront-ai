@@ -46,7 +46,7 @@ run_watch() {
   local OUT="showcase-clips/${TAG_PREFIX}_${TAG}.json"
   local LOG="showcase-clips/${TAG_PREFIX}_${TAG}.watch.log"
   echo "=== WATCH $TAG map=$MAP seed=$SEED $(date -u +%H:%M:%S) ===" | tee "$LOG"
-  "$OFTRAIN" --watch --watch-stochastic=true --engine native \
+  "$OFTRAIN" --watch --watch-stochastic=true --engine node \
     --policy "$POLICY" --ckpt "$AE" --coarse-ckpt "$COARSE" \
     --stage "$STAGE" --map "$MAP" --bots "$BOTS" --nations "$N" --difficulty "$DIFF" \
     --seed "$SEED" --device cuda:0 --amp=true --foveate=true \
