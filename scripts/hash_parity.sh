@@ -78,7 +78,7 @@ COMPARE_OUT="$(
   uv run --no-project python "$ROOT/scripts/stream_compare_ticks.py" \
     "$TMP.native.ndjson" "$TMP.ts.ndjson" \
     --skip-before "$SKIP_BEFORE" \
-    --idle-timeout 180 \
+    --idle-timeout 30 \
     --startup-timeout 900
 )"
 COMPARE_STATUS=$?

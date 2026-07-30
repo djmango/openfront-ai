@@ -29,6 +29,7 @@ DEFAULT_FIELDS = [
     "numUnits",
 ]
 SOFT_FIELDS = {"troops", "gold"}
+# Truncated JSON `hash` ints are noisy past 2^53; ignore when hashBits present.
 # Prefer these labels when classifying the diverge layer.
 LAYER_PRIORITY = [
     ("presence", "presence"),
@@ -192,7 +193,7 @@ def main() -> int:
     ap.add_argument(
         "--idle-timeout",
         type=float,
-        default=120.0,
+        default=30.0,
         help="seconds to wait for the next line before treating a stream as finished",
     )
     ap.add_argument(
@@ -260,9 +261,21 @@ def main() -> int:
             # Still do player diff so we report the real field(s).
             pass
 
-        all_diffs = diff_players(
-            players_by_id(n_snap), players_by_id(t_snap), fields
+        compare_fields = list(fields)
+        # Prefer IEEE bits — drop truncated `hash` when both sides expose hashBits.
+        n_players = players_by_id(n_snap)
+        t_players = players_by_id(t_snap)
+        sample = next(iter(n_players.values()), None) or next(
+            iter(t_players.values()), None
         )
+        if (
+            sample is not None
+            and sample.get("hashBits") is not None
+            and "hashBits" in compare_fields
+            and "hash" in compare_fields
+        ):
+            compare_fields = [f for f in compare_fields if f != "hash"]
+        all_diffs = diff_players(n_players, t_players, compare_fields)
         diffs = hard_diffs(all_diffs)
         n_ghb = n_snap.get("gameHashBits")
         t_ghb = t_snap.get("gameHashBits")
