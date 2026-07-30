@@ -12,12 +12,24 @@
 //! Streaming mode (for `scripts/hash_parity.sh` early-stop compare):
 //!   --ndjson writes one JSON object per line and flushes each tick so a
 //!   parallel TS dump can be compared online without buffering the full game.
+//!
+//! Daemon / resume mode (for `scripts/hash_bisect.sh` true binary search):
+//!   --daemon --repo R --record REC
+//!   stdin commands (one per line):
+//!     STATUS | RESET | ADVANCE <tick> | DUMP <path> [units] | QUIT
+//!   stdout: `OK tick=N` / `ERR ...`
+//!   ADVANCE only moves forward (in-memory resume). RESET reboots from tick 0.
+//!
+//! Live expand control (hash_parity in-place unit expand, no re-replay):
+//!   OF_DUMP_CONTROL=/path/to/file — polled each tick; body `EXPAND until=N`
+//!   enables unit dumps and continues until tick N then exits.
 use clap::Parser;
 use openfront_engine::execution::intent::turn_to_executions;
+use openfront_engine::game::Game;
 use openfront_engine::record::GameRecord;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -26,17 +38,20 @@ struct Args {
     #[arg(long)]
     repo: PathBuf,
     #[arg(long)]
-    record: PathBuf,
+    record: Option<PathBuf>,
     #[arg(long, default_value_t = 50)]
     every: u32,
     #[arg(long)]
-    out: PathBuf,
+    out: Option<PathBuf>,
     #[arg(long)]
     max_ticks: Option<u32>,
     /// Stream one TickSnapshot JSON object per line (plus a header line).
     /// Enables online native-vs-TS compare with early process kill.
     #[arg(long, default_value_t = false)]
     ndjson: bool,
+    /// Interactive stdin command mode for mid-game resume / binary search.
+    #[arg(long, default_value_t = false)]
+    daemon: bool,
 }
 
 #[derive(Serialize)]
@@ -296,9 +311,138 @@ fn snapshot(
     }
 }
 
+fn poll_expand_control(path: &std::path::Path) -> Option<u32> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let body = body.trim();
+    if let Some(rest) = body.strip_prefix("EXPAND") {
+        for part in rest.split_whitespace() {
+            if let Some(v) = part.strip_prefix("until=") {
+                return v.parse().ok();
+            }
+        }
+        // Bare EXPAND — caller should set a default until.
+        return Some(u32::MAX);
+    }
+    None
+}
+
+fn advance_to(game: &mut Game, record: &GameRecord, target: u32) -> Result<(), String> {
+    if target < game.ticks() {
+        return Err(format!(
+            "cannot rewind: at tick {}, requested {}",
+            game.ticks(),
+            target
+        ));
+    }
+    while game.ticks() < target {
+        let turn_idx = game.ticks() as usize;
+        if turn_idx >= record.turns.len() {
+            break;
+        }
+        let turn = &record.turns[turn_idx];
+        let gid = game.game_id.clone();
+        for execution in turn_to_executions(game, &gid, &turn.intents) {
+            game.add_execution(execution);
+        }
+        game.execute_next_tick();
+    }
+    Ok(())
+}
+
+fn write_single_tick_dump(path: &std::path::Path, game: &Game, game_id: &str, units: bool) {
+    let snap = snapshot(game, units, false, false, false, false);
+    let dump = Dump {
+        engine: "native",
+        game_id: game_id.to_string(),
+        every: 1,
+        final_tick: snap.tick,
+        ticks: vec![snap],
+    };
+    std::fs::write(path, serde_json::to_string(&dump).unwrap()).expect("write dump");
+}
+
+fn run_daemon(repo: &std::path::Path, record_path: &std::path::Path) {
+    let bytes = load_record_bytes(record_path).expect("read record");
+    let record = GameRecord::from_json_bytes(&bytes)
+        .expect("parse record")
+        .decompress();
+    let game_id = record.info.game_id.clone();
+    let bootstrap = || {
+        openfront_engine::bootstrap::game_from_record(repo, &record).expect("bootstrap")
+    };
+    let mut game = bootstrap();
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    writeln!(stdout, "OK tick={}", game.ticks()).ok();
+    stdout.flush().ok();
+
+    for line in stdin.lock().lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                writeln!(stdout, "ERR read {e}").ok();
+                break;
+            }
+        };
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let cmd = parts.next().unwrap_or("").to_ascii_uppercase();
+        match cmd.as_str() {
+            "STATUS" => {
+                writeln!(stdout, "OK tick={}", game.ticks()).ok();
+            }
+            "RESET" => {
+                game = bootstrap();
+                writeln!(stdout, "OK tick={}", game.ticks()).ok();
+            }
+            "ADVANCE" => {
+                let Some(t) = parts.next().and_then(|s| s.parse::<u32>().ok()) else {
+                    writeln!(stdout, "ERR usage ADVANCE <tick>").ok();
+                    stdout.flush().ok();
+                    continue;
+                };
+                match advance_to(&mut game, &record, t) {
+                    Ok(()) => writeln!(stdout, "OK tick={}", game.ticks()).ok(),
+                    Err(e) => writeln!(stdout, "ERR {e}").ok(),
+                };
+            }
+            "DUMP" => {
+                let Some(path) = parts.next() else {
+                    writeln!(stdout, "ERR usage DUMP <path> [units]").ok();
+                    stdout.flush().ok();
+                    continue;
+                };
+                let units = parts.any(|p| p == "units" || p == "units=1");
+                write_single_tick_dump(std::path::Path::new(path), &game, &game_id, units);
+                writeln!(stdout, "OK tick={} path={path}", game.ticks()).ok();
+            }
+            "QUIT" | "EXIT" => {
+                writeln!(stdout, "OK bye").ok();
+                stdout.flush().ok();
+                break;
+            }
+            _ => {
+                writeln!(stdout, "ERR unknown command {cmd}").ok();
+            }
+        }
+        stdout.flush().ok();
+    }
+}
+
 fn main() {
     let args = Args::parse();
-    let dump_units = std::env::var_os("OF_DUMP_UNITS").is_some();
+    if args.daemon {
+        let record = args.record.expect("--record required for --daemon");
+        run_daemon(&args.repo, &record);
+        return;
+    }
+    let record_path = args.record.expect("--record required");
+    let out_path = args.out.expect("--out required");
+
+    let mut dump_units = std::env::var_os("OF_DUMP_UNITS").is_some();
     let dump_owned_tiles = std::env::var_os("OF_DUMP_OWNED_TILES").is_some();
     let dump_border_order = std::env::var_os("OF_DUMP_BORDER_ORDER").is_some();
     let dump_owned_order = std::env::var_os("OF_DUMP_OWNED_ORDER").is_some();
@@ -311,10 +455,11 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
+    let control_path = std::env::var_os("OF_DUMP_CONTROL").map(PathBuf::from);
     let ndjson = args.ndjson
-        || args.out.extension().and_then(|s| s.to_str()) == Some("ndjson")
+        || out_path.extension().and_then(|s| s.to_str()) == Some("ndjson")
         || std::env::var_os("OF_DUMP_NDJSON").is_some();
-    let bytes = load_record_bytes(&args.record).expect("read record");
+    let bytes = load_record_bytes(&record_path).expect("read record");
     let record = GameRecord::from_json_bytes(&bytes)
         .expect("parse record")
         .decompress();
@@ -322,7 +467,7 @@ fn main() {
         openfront_engine::bootstrap::game_from_record(&args.repo, &record).expect("bootstrap");
 
     let mut ndjson_file = if ndjson {
-        let mut f = std::fs::File::create(&args.out).expect("create ndjson out");
+        let mut f = std::fs::File::create(&out_path).expect("create ndjson out");
         let header = serde_json::json!({
             "type": "header",
             "engine": "native",
@@ -337,10 +482,16 @@ fn main() {
     };
     let mut buffered: Vec<TickSnapshot> = Vec::new();
     let mut last_emitted_tick: Option<u32> = None;
+    let mut expand_until: Option<u32> = None;
 
     for turn in &record.turns {
         if let Some(max) = args.max_ticks {
             if turn.turn_number > max {
+                break;
+            }
+        }
+        if let Some(until) = expand_until {
+            if game.ticks() >= until {
                 break;
             }
         }
@@ -349,10 +500,30 @@ fn main() {
             game.add_execution(execution);
         }
         game.execute_next_tick();
+
+        if let Some(ref ctrl) = control_path {
+            if expand_until.is_none() {
+                if let Some(until) = poll_expand_control(ctrl) {
+                    let until = if until == u32::MAX {
+                        game.ticks().saturating_add(25)
+                    } else {
+                        until
+                    };
+                    expand_until = Some(until);
+                    dump_units = true;
+                    eprintln!(
+                        "[tick_dump] EXPAND control → units until tick {until} (at {})",
+                        game.ticks()
+                    );
+                }
+            }
+        }
+
         if game.ticks() < dump_ticks_from {
             continue;
         }
-        if game.ticks() % args.every == 0 {
+        let every = if expand_until.is_some() { 1 } else { args.every };
+        if game.ticks() % every == 0 {
             let include_units = dump_units && game.ticks() >= dump_units_from;
             let snap = snapshot(
                 &game,
@@ -369,6 +540,11 @@ fn main() {
                 f.flush().ok();
             } else {
                 buffered.push(snap);
+            }
+        }
+        if let Some(until) = expand_until {
+            if game.ticks() >= until {
+                break;
             }
         }
     }
@@ -394,7 +570,7 @@ fn main() {
     if ndjson {
         eprintln!(
             "[tick_dump] streamed ndjson to {} (final tick {})",
-            args.out.display(),
+            out_path.display(),
             game.ticks()
         );
         return;
@@ -407,11 +583,11 @@ fn main() {
         final_tick: game.ticks(),
         ticks: buffered,
     };
-    std::fs::write(&args.out, serde_json::to_string(&dump).unwrap()).expect("write out");
+    std::fs::write(&out_path, serde_json::to_string(&dump).unwrap()).expect("write out");
     eprintln!(
         "[tick_dump] wrote {} snapshots to {} (final tick {})",
         dump.ticks.len(),
-        args.out.display(),
+        out_path.display(),
         dump.final_tick
     );
 }
