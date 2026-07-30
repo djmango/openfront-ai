@@ -102,17 +102,20 @@ def hard_diffs(diffs: List[Tuple[str, str, Any, Any]]) -> List[Tuple[str, str, A
 
 
 def wait_line(fh, path: str, deadline: float) -> Optional[str]:
-    """Read one line from an open file, waiting for writers to append."""
+    """Read one complete line (must end with \\n), waiting for writers to append.
+
+    Partial lines from a concurrent flush are rewound and retried so we never
+    JSON-decode a truncated NDJSON record.
+    """
     while True:
         pos = fh.tell()
         line = fh.readline()
-        if line:
+        if line.endswith("\n"):
             return line
+        # Empty or partial — wait for more bytes.
+        fh.seek(pos)
         if time.time() > deadline:
             return None
-        # Writer may still be catching up; also detect writer death via mtime stall
-        # is handled by caller timeout. Sleep briefly.
-        fh.seek(pos)
         time.sleep(0.05)
 
 
@@ -125,6 +128,15 @@ def open_stream(path: str, timeout: float):
     return open(path, "r", encoding="utf-8")
 
 
+def loads_snap(line: str) -> Dict[str, Any]:
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError as e:
+        raise json.JSONDecodeError(
+            f"ndjson parse failed ({e.msg})", e.doc, e.pos
+        ) from e
+
+
 def iter_snaps(fh, path: str, idle_timeout: float) -> Iterable[Dict[str, Any]]:
     # Skip/consume header
     while True:
@@ -134,7 +146,7 @@ def iter_snaps(fh, path: str, idle_timeout: float) -> Iterable[Dict[str, Any]]:
         line = line.strip()
         if not line:
             continue
-        obj = json.loads(line)
+        obj = loads_snap(line)
         if obj.get("type") == "header":
             break
         # No header — treat as first snap
@@ -147,7 +159,7 @@ def iter_snaps(fh, path: str, idle_timeout: float) -> Iterable[Dict[str, Any]]:
         line = line.strip()
         if not line:
             continue
-        yield json.loads(line)
+        yield loads_snap(line)
 
 
 def unit_deep_diffs(

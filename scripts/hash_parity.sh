@@ -99,7 +99,8 @@ fi
 
 if [[ $COMPARE_STATUS -ne 1 || -z "$DIVERGENT_TICK" ]]; then
   echo "[hash_parity] compare failed (status=$COMPARE_STATUS); see $TMP.*.err" >&2
-  tail -20 "$TMP.native.err" "$TMP.ts.err" >&2 || true
+  tail -n 20 "$TMP.native.err" >&2 || true
+  tail -n 20 "$TMP.ts.err" >&2 || true
   exit "$COMPARE_STATUS"
 fi
 
