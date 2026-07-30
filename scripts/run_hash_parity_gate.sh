@@ -66,6 +66,7 @@ run_one() {
 
 export -f run_one
 export ROOT SKIP_BEFORE MAX_TICKS EVERY
+export HASH_PARITY_USE_BISECT="${HASH_PARITY_USE_BISECT:-0}"
 
 RESULTS_FILE="$(mktemp)"
 if [[ "$JOBS" -le 1 ]]; then
