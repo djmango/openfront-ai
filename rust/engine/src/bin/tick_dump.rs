@@ -8,12 +8,16 @@
 //!   cargo run --release -p openfront-engine --bin tick_dump -- \
 //!     --repo <repo_root> --record <record.json[.gz]> --every 50 \
 //!     --out /tmp/native_ticks.json [--max-ticks N]
+//!
+//! Streaming mode (for `scripts/hash_parity.sh` early-stop compare):
+//!   --ndjson writes one JSON object per line and flushes each tick so a
+//!   parallel TS dump can be compared online without buffering the full game.
 use clap::Parser;
 use openfront_engine::execution::intent::turn_to_executions;
 use openfront_engine::record::GameRecord;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -29,6 +33,10 @@ struct Args {
     out: PathBuf,
     #[arg(long)]
     max_ticks: Option<u32>,
+    /// Stream one TickSnapshot JSON object per line (plus a header line).
+    /// Enables online native-vs-TS compare with early process kill.
+    #[arg(long, default_value_t = false)]
+    ndjson: bool,
 }
 
 #[derive(Serialize)]
@@ -63,6 +71,10 @@ struct PlayerSnapshot {
     gold: i64,
     alive: bool,
     hash: i64,
+    /// IEEE-754 bits of the pre-truncation player hash float (decimal string).
+    hash_bits: String,
+    /// Sum of per-unit hashes (cheap; isolates unit-list drift when tiles/troops match).
+    units_hash: i64,
     num_units: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     units: Option<Vec<UnitSnapshot>>,
@@ -101,6 +113,10 @@ struct TickSnapshot {
     in_spawn_phase: bool,
     total_land_tiles: u32,
     total_owned_tiles: i32,
+    /// `GameImpl.hash()`-compatible aggregate (players folded like TS).
+    game_hash: i64,
+    /// IEEE-754 bits of the pre-truncation game hash float (decimal string).
+    game_hash_bits: String,
     players: Vec<PlayerSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     railroads: Option<Vec<RailroadSnapshot>>,
@@ -215,6 +231,12 @@ fn snapshot(
                 // polluted by native's internal sticky flag.
                 alive: p.tiles_owned > 0,
                 hash: openfront_engine::hash::player_hash(p),
+                hash_bits: openfront_engine::hash::player_hash_js(p).to_bits().to_string(),
+                units_hash: p
+                    .units
+                    .iter()
+                    .map(openfront_engine::hash::unit_hash)
+                    .sum(),
                 num_units: p.units.len(),
                 units,
                 owned_tiles,
@@ -224,6 +246,12 @@ fn snapshot(
         })
         .collect();
     let total_owned_tiles: i32 = players.iter().map(|p| p.tiles).sum();
+    let mut game_hash_f64 = 1.0_f64;
+    for p in game.players_in_order() {
+        game_hash_f64 += openfront_engine::hash::player_hash_js(p);
+    }
+    let game_hash = game_hash_f64 as i64;
+    let game_hash_bits = game_hash_f64.to_bits().to_string();
     let (railroads, stations) = if dump_rails {
         let mut rails: Vec<RailroadSnapshot> = game
             .rail_network
@@ -260,6 +288,8 @@ fn snapshot(
         in_spawn_phase: game.in_spawn_phase(),
         total_land_tiles: game.num_land_tiles(),
         total_owned_tiles,
+        game_hash,
+        game_hash_bits,
         players,
         railroads,
         stations,
@@ -281,6 +311,9 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
+    let ndjson = args.ndjson
+        || args.out.extension().and_then(|s| s.to_str()) == Some("ndjson")
+        || std::env::var_os("OF_DUMP_NDJSON").is_some();
     let bytes = load_record_bytes(&args.record).expect("read record");
     let record = GameRecord::from_json_bytes(&bytes)
         .expect("parse record")
@@ -288,7 +321,23 @@ fn main() {
     let mut game =
         openfront_engine::bootstrap::game_from_record(&args.repo, &record).expect("bootstrap");
 
-    let mut out = Vec::new();
+    let mut ndjson_file = if ndjson {
+        let mut f = std::fs::File::create(&args.out).expect("create ndjson out");
+        let header = serde_json::json!({
+            "type": "header",
+            "engine": "native",
+            "gameId": record.info.game_id,
+            "every": args.every,
+        });
+        writeln!(f, "{header}").expect("write header");
+        f.flush().ok();
+        Some(f)
+    } else {
+        None
+    };
+    let mut buffered: Vec<TickSnapshot> = Vec::new();
+    let mut last_emitted_tick: Option<u32> = None;
+
     for turn in &record.turns {
         if let Some(max) = args.max_ticks {
             if turn.turn_number > max {
@@ -305,28 +354,50 @@ fn main() {
         }
         if game.ticks() % args.every == 0 {
             let include_units = dump_units && game.ticks() >= dump_units_from;
-            out.push(snapshot(
+            let snap = snapshot(
                 &game,
                 include_units,
                 dump_owned_tiles,
                 dump_border_order,
                 dump_owned_order,
                 dump_rails,
-            ));
+            );
+            last_emitted_tick = Some(snap.tick);
+            if let Some(f) = ndjson_file.as_mut() {
+                let line = serde_json::to_string(&snap).expect("serialize snap");
+                writeln!(f, "{line}").expect("write snap");
+                f.flush().ok();
+            } else {
+                buffered.push(snap);
+            }
         }
     }
-    // Always capture the true final state even if it doesn't land on an
-    // `every`-tick boundary.
-    if game.ticks() >= dump_ticks_from && out.last().map(|s| s.tick) != Some(game.ticks()) {
+    if game.ticks() >= dump_ticks_from && last_emitted_tick != Some(game.ticks()) {
         let include_units = dump_units && game.ticks() >= dump_units_from;
-        out.push(snapshot(
+        let snap = snapshot(
             &game,
             include_units,
             dump_owned_tiles,
             dump_border_order,
             dump_owned_order,
             dump_rails,
-        ));
+        );
+        if let Some(f) = ndjson_file.as_mut() {
+            let line = serde_json::to_string(&snap).expect("serialize snap");
+            writeln!(f, "{line}").expect("write snap");
+            f.flush().ok();
+        } else {
+            buffered.push(snap);
+        }
+    }
+
+    if ndjson {
+        eprintln!(
+            "[tick_dump] streamed ndjson to {} (final tick {})",
+            args.out.display(),
+            game.ticks()
+        );
+        return;
     }
 
     let dump = Dump {
@@ -334,7 +405,7 @@ fn main() {
         game_id: record.info.game_id.clone(),
         every: args.every,
         final_tick: game.ticks(),
-        ticks: out,
+        ticks: buffered,
     };
     std::fs::write(&args.out, serde_json::to_string(&dump).unwrap()).expect("write out");
     eprintln!(
