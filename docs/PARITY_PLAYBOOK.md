@@ -80,10 +80,22 @@ over JSON int hashes past `2^53`.
   exceed `Number.MAX_SAFE_INTEGER`).
 - Comparators join on player **`id`**, not `identity`.
 
+## Tip hash gate snapshot (`dd1277e245b5`)
+
+Coarse: `HASH_PARITY_EVERY=25 HASH_PARITY_MAX_TICKS=4000` → **39/41** after
+retesting NDJSON false crashes. Remaining real misses:
+
+| game | fine tick | layer | note |
+|------|-----------|-------|------|
+| `YdhKd1j6` | 2111 | units | Warship `#14761` tile/target (agree through 2110) |
+| `xpia5Ua4` | 1885 | hash | `nation:Galicica` troops/hashBits |
+
+Use `scripts/hash_parity.sh` / `hash_bisect.sh` to drive these — not outcome bisect.
+
 ## Dispatch checklist
 
 - [ ] For tip full-parity: measure with `hash_parity` / hash gate, not only outcome.
-- [ ] Prefer `hash_parity.sh` over manual bisect loops.
+- [ ] Prefer `hash_parity.sh` / `hash_bisect.sh` over manual from-0 loops.
 - [ ] Keep tip human games in one commit bucket; don’t mix pins.
 - [ ] No `git stash` across concurrent worktrees.
 - [ ] Outcome gate alone is not “bit parity.”
