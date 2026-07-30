@@ -61,6 +61,10 @@ interface PlayerSnapshot {
   gold: string;
   alive: boolean;
   hash: number;
+  /** IEEE-754 bits of player hash float, as decimal string (bit-exact compare). */
+  hashBits: string;
+  /** Sum of unit.hash() — cheap layer to isolate unit drift. */
+  unitsHash: number;
   numUnits: number;
   units?: UnitSnapshot[];
   ownedTiles?: number[];
@@ -89,6 +93,9 @@ interface TickSnapshot {
   inSpawnPhase: boolean;
   totalLandTiles: number;
   totalOwnedTiles: number;
+  gameHash: number;
+  /** IEEE-754 bits of game.hash() float, as decimal string. */
+  gameHashBits: string;
   players: PlayerSnapshot[];
   railroads?: RailroadSnapshot[];
   stations?: StationSnapshot[];
@@ -97,6 +104,12 @@ interface TickSnapshot {
 function playerIdentity(p: Player): string {
   const clientID = p.clientID();
   return clientID === null ? `nation:${p.name()}` : `player:${clientID}`;
+}
+
+/** Decimal string of IEEE-754 bit pattern — stable across JSON number precision loss. */
+function f64Bits(n: number): string {
+  const bits = new BigUint64Array(new Float64Array([n]).buffer)[0];
+  return bits.toString();
 }
 
 function snapshot(
@@ -119,6 +132,8 @@ function snapshot(
       gold: p.gold().toString(),
       alive: p.isAlive(),
       hash: p.hash(),
+      hashBits: f64Bits(p.hash()),
+      unitsHash: p.units().reduce((sum, u) => sum + u.hash(), 0),
       numUnits: p.units().length,
     };
     if (dumpUnits) {
@@ -168,11 +183,14 @@ function snapshot(
     return base;
   });
   const totalOwnedTiles = players.reduce((sum, p) => sum + p.tiles, 0);
+  const gameHash = game.hash();
   const out: TickSnapshot = {
     tick: game.ticks(),
     inSpawnPhase: game.inSpawnPhase(),
     totalLandTiles: game.numLandTiles(),
     totalOwnedTiles,
+    gameHash,
+    gameHashBits: f64Bits(gameHash),
     players,
   };
   if (dumpRails) {
@@ -265,15 +283,41 @@ async function main() {
   const dumpTicksFrom = process.env.OF_DUMP_TICKS_FROM
     ? parseInt(process.env.OF_DUMP_TICKS_FROM, 10)
     : 0;
+  const ndjson =
+    process.env.OF_DUMP_NDJSON !== undefined || outPath.endsWith(".ndjson");
+
+  let ndjsonFd: number | null = null;
+  if (ndjson) {
+    ndjsonFd = fs.openSync(outPath, "w");
+    fs.writeSync(
+      ndjsonFd,
+      JSON.stringify({
+        type: "header",
+        engine: "ts",
+        gameId: info.gameID,
+        every,
+      }) + "\n",
+    );
+  }
 
   const out: TickSnapshot[] = [];
+  let lastEmittedTick: number | undefined;
+  const pushSnap = (snap: TickSnapshot) => {
+    lastEmittedTick = snap.tick;
+    if (ndjsonFd !== null) {
+      fs.writeSync(ndjsonFd, JSON.stringify(snap) + "\n");
+    } else {
+      out.push(snap);
+    }
+  };
+
   for (const turn of record.turns) {
     if (maxTicks !== undefined && turn.turnNumber > maxTicks) break;
     game.addExecution(...executor.createExecs(turn));
     game.executeNextTick();
     if (game.ticks() < dumpTicksFrom) continue;
     if (game.ticks() % every === 0) {
-      out.push(
+      pushSnap(
         snapshot(
           game,
           dumpUnits && game.ticks() >= dumpUnitsFrom,
@@ -287,9 +331,9 @@ async function main() {
   }
   if (
     game.ticks() >= dumpTicksFrom &&
-    (out.length === 0 || out[out.length - 1].tick !== game.ticks())
+    lastEmittedTick !== game.ticks()
   ) {
-    out.push(
+    pushSnap(
       snapshot(
         game,
         dumpUnits && game.ticks() >= dumpUnitsFrom,
@@ -299,6 +343,14 @@ async function main() {
         dumpRails,
       ),
     );
+  }
+
+  if (ndjsonFd !== null) {
+    fs.closeSync(ndjsonFd);
+    console.error(
+      `[dump_ts_tick_state] streamed ndjson to ${outPath} (final tick ${game.ticks()})`,
+    );
+    return;
   }
 
   fs.writeFileSync(
