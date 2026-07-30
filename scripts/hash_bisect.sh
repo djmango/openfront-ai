@@ -30,7 +30,7 @@ TMP="/tmp/hash_bisect.$GAME_ID"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/rust/target}"
 TICK_DUMP="$TARGET_DIR/release/tick_dump"
 TSX="$ROOT/openfront/node_modules/.bin/tsx"
-FIELDS="${HASH_BISECT_FIELDS:-alive,tiles,hashBits,unitsHash,numUnits,hash}"
+FIELDS="${HASH_BISECT_FIELDS:-alive,tiles,hashBits,unitsHash,numUnits}"
 
 if [[ ! -x "$TICK_DUMP" ]]; then
   echo "[hash_bisect] building tick_dump" >&2

@@ -77,13 +77,25 @@ def normalize(field, value):
 def diff_at_tick(native_players, ts_players, fields):
     diffs = []
     all_ids = set(native_players) | set(ts_players)
+    # Prefer hashBits over truncated hash ints when available.
+    use_fields = list(fields)
+    sample = next(iter(native_players.values()), None) or next(
+        iter(ts_players.values()), None
+    )
+    if (
+        sample is not None
+        and sample.get("hashBits") is not None
+        and "hashBits" in use_fields
+        and "hash" in use_fields
+    ):
+        use_fields = [f for f in use_fields if f != "hash"]
     for ident in sorted(all_ids):
         n = native_players.get(ident)
         t = ts_players.get(ident)
         if n is None or t is None:
             diffs.append((ident, "presence", n is not None, t is not None))
             continue
-        for f in fields:
+        for f in use_fields:
             nv = normalize(f, n.get(camel(f)))
             tv = normalize(f, t.get(camel(f)))
             if nv != tv:
