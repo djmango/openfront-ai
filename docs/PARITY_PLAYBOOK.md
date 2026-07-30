@@ -48,19 +48,29 @@ New loop:
    at first diverge
 3. If layer is units/hash: one expand dump near the window with units
 
-Still no mid-game resume (both engines replay from 0) — that is the next
-tooling milestone — but you no longer pay for a full trailing replay or a
-second full fine pass just to learn the tick.
+**Mid-game resume (dump daemons):** `tick_dump --daemon` and
+`dump_ts_tick_state.ts --daemon` accept `ADVANCE` / `RESET` / `DUMP` on stdin.
+`ADVANCE` only moves forward (in-memory resume). Use:
+
+- `scripts/hash_bisect.sh` — true binary search with resume (sticky diverge)
+- `scripts/hash_parity.sh` expand — daemon `ADVANCE` to diverge tick + unit `DUMP`
+
+Streaming every=1 early-stop remains the fastest way to *find* the first
+diverge tick in one pass; bisect helps on long horizons when you want
+logarithmic probes with warm engines.
 
 **Join on player `id`, never `identity` alone.** Bot identities
 (`nation:Name`) collide; identity-join hides real field diffs and can look
-like a mysterious `gameHash`-only miss.
+like a mysterious `gameHash`-only miss. Prefer `gameHashBits` / `hashBits`
+over JSON int hashes past `2^53`.
 
 ## Tooling
 
-- **`scripts/hash_parity.sh`** — primary tip diagnostic (hash/bit).
-- **`scripts/run_hash_parity_gate.sh`** — multi-record hash gate.
+- **`scripts/hash_parity.sh`** — primary tip diagnostic (hash/bit, streaming).
+- **`scripts/hash_bisect.sh`** — daemon binary-search with mid-game resume.
+- **`scripts/run_hash_parity_gate.sh`** — multi-record hash gate (`HASH_PARITY_EVERY`, `HASH_PARITY_USE_BISECT=1`).
 - **`scripts/stream_compare_ticks.py`** — online NDJSON comparator.
+- **`tick_dump --daemon`** / `dump_ts_tick_state.ts --daemon` — ADVANCE/RESET/DUMP.
 - **`scripts/run_outcome_gate.sh`** — winner-level pin merge bar.
 - **`scripts/run_curriculum_parity_gate.sh`** — curriculum self-play outcome.
 - **`scripts/bisect_parity.sh`** — legacy coarse/fine JSON bisect.

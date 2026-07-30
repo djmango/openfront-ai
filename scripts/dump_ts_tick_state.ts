@@ -225,33 +225,59 @@ function snapshot(
   return out;
 }
 
-async function main() {
-  const recordPath = process.argv[2];
-  const every = parseInt(process.argv[3] ?? "50", 10);
-  const outPath = process.argv[4] ?? "/tmp/ts_ticks.json";
-  const maxTicks = process.argv[5] ? parseInt(process.argv[5], 10) : undefined;
-  if (!recordPath) {
-    console.error("usage: tsx dump_ts_tick_state.ts <record.gz> <every> <outPath> [maxTicks]");
-    process.exit(1);
+function pollExpandControl(path: string): number | null {
+  try {
+    const body = fs.readFileSync(path, "utf8").trim();
+    if (!body.startsWith("EXPAND")) return null;
+    const m = body.match(/until=(\d+)/);
+    return m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
+  } catch {
+    return null;
   }
+}
 
+async function bootstrapGame(recordPath: string): Promise<{
+  record: GameRecord;
+  game: Game;
+  executor: Executor;
+}> {
   const raw = recordPath.endsWith(".gz")
     ? zlib.gunzipSync(fs.readFileSync(recordPath)).toString("utf8")
     : fs.readFileSync(recordPath, "utf8");
   const record: GameRecord = decompressGameRecord(JSON.parse(raw) as GameRecord);
   const info = record.info;
   const gameConfig = info.config;
-
   const config = new Config(gameConfig, null, false);
   const terrain = await loadFreshTerrain(gameConfig.gameMap as never, gameConfig.gameMapSize);
   const random = new PseudoRandom(simpleHash(info.gameID));
   const humans = info.players.map(
-    (p) => new PlayerInfo(p.username, PlayerType.Human, p.clientID, random.nextID(), p.isLobbyCreator ?? false, p.clanTag, p.friends ?? []),
+    (p) =>
+      new PlayerInfo(
+        p.username,
+        PlayerType.Human,
+        p.clientID,
+        random.nextID(),
+        p.isLobbyCreator ?? false,
+        p.clanTag,
+        p.friends ?? [],
+      ),
   );
-  const nations = createNationsForGame(info, terrain.nations, terrain.additionalNations, humans.length, random);
-  const game: Game = createGame(humans, nations, terrain.gameMap, terrain.miniGameMap, config, terrain.teamGameSpawnAreas);
+  const nations = createNationsForGame(
+    info,
+    terrain.nations,
+    terrain.additionalNations,
+    humans.length,
+    random,
+  );
+  const game: Game = createGame(
+    humans,
+    nations,
+    terrain.gameMap,
+    terrain.miniGameMap,
+    config,
+    terrain.teamGameSpawnAreas,
+  );
   const executor = new Executor(game, info.gameID, undefined);
-
   if (gameConfig.gameType !== GameType.Singleplayer) {
     game.addExecution(new SpawnTimerExecution());
   }
@@ -268,8 +294,109 @@ async function main() {
   if (!config.isUnitDisabled(UnitType.Factory)) {
     game.addExecution(new RecomputeRailClusterExecution(game.railNetwork()));
   }
+  return { record, game, executor };
+}
 
-  const dumpUnits = process.env.OF_DUMP_UNITS !== undefined;
+function advanceTo(
+  game: Game,
+  executor: Executor,
+  record: GameRecord,
+  target: number,
+): void {
+  if (target < game.ticks()) {
+    throw new Error(`cannot rewind: at tick ${game.ticks()}, requested ${target}`);
+  }
+  while (game.ticks() < target) {
+    const turn = record.turns[game.ticks()];
+    if (!turn) break;
+    game.addExecution(...executor.createExecs(turn));
+    game.executeNextTick();
+  }
+}
+
+async function runDaemon(recordPath: string): Promise<void> {
+  let { record, game, executor } = await bootstrapGame(recordPath);
+  const gameId = record.info.gameID;
+  const readline = await import("readline");
+  const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+  const reply = (s: string) => {
+    process.stdout.write(s + "\n");
+  };
+  reply(`OK tick=${game.ticks()}`);
+  for await (const lineRaw of rl) {
+    const line = lineRaw.trim();
+    if (!line) continue;
+    const parts = line.split(/\s+/);
+    const cmd = (parts[0] || "").toUpperCase();
+    try {
+      if (cmd === "STATUS") {
+        reply(`OK tick=${game.ticks()}`);
+      } else if (cmd === "RESET") {
+        ({ record, game, executor } = await bootstrapGame(recordPath));
+        reply(`OK tick=${game.ticks()}`);
+      } else if (cmd === "ADVANCE") {
+        const t = parseInt(parts[1], 10);
+        if (Number.isNaN(t)) {
+          reply("ERR usage ADVANCE <tick>");
+          continue;
+        }
+        advanceTo(game, executor, record, t);
+        reply(`OK tick=${game.ticks()}`);
+      } else if (cmd === "DUMP") {
+        const path = parts[1];
+        if (!path) {
+          reply("ERR usage DUMP <path> [units]");
+          continue;
+        }
+        const units = parts.slice(2).some((p) => p === "units" || p === "units=1");
+        const snap = snapshot(game, units, false, false, false, false);
+        fs.writeFileSync(
+          path,
+          JSON.stringify({
+            engine: "ts",
+            gameId,
+            every: 1,
+            finalTick: snap.tick,
+            ticks: [snap],
+          }),
+        );
+        reply(`OK tick=${game.ticks()} path=${path}`);
+      } else if (cmd === "QUIT" || cmd === "EXIT") {
+        reply("OK bye");
+        break;
+      } else {
+        reply(`ERR unknown command ${cmd}`);
+      }
+    } catch (e: any) {
+      reply(`ERR ${e?.message ?? e}`);
+    }
+  }
+}
+
+async function main() {
+  if (process.argv[2] === "--daemon" || process.env.OF_DUMP_DAEMON !== undefined) {
+    const recordPath = process.argv[2] === "--daemon" ? process.argv[3] : process.argv[2];
+    if (!recordPath) {
+      console.error("usage: tsx dump_ts_tick_state.ts --daemon <record.gz>");
+      process.exit(1);
+    }
+    await runDaemon(recordPath);
+    return;
+  }
+
+  const recordPath = process.argv[2];
+  const every = parseInt(process.argv[3] ?? "50", 10);
+  const outPath = process.argv[4] ?? "/tmp/ts_ticks.json";
+  const maxTicks = process.argv[5] ? parseInt(process.argv[5], 10) : undefined;
+  if (!recordPath) {
+    console.error("usage: tsx dump_ts_tick_state.ts <record.gz> <every> <outPath> [maxTicks]");
+    process.exit(1);
+  }
+
+  const { record, game, executor } = await bootstrapGame(recordPath);
+  const info = record.info;
+
+  let dumpUnits = process.env.OF_DUMP_UNITS !== undefined;
   const dumpOwnedTiles = process.env.OF_DUMP_OWNED_TILES !== undefined;
   const dumpBorderOrder = process.env.OF_DUMP_BORDER_ORDER !== undefined;
   const dumpOwnedOrder = process.env.OF_DUMP_OWNED_ORDER !== undefined;
@@ -277,12 +404,10 @@ async function main() {
   const dumpUnitsFrom = process.env.OF_DUMP_UNITS_FROM
     ? parseInt(process.env.OF_DUMP_UNITS_FROM, 10)
     : 0;
-  // Keep snapshots only from this tick onward (still replay from 0). Avoids
-  // JSON.stringify blowing past V8's string length on multi-thousand-tick
-  // fine dumps of large bot-count curriculum games.
   const dumpTicksFrom = process.env.OF_DUMP_TICKS_FROM
     ? parseInt(process.env.OF_DUMP_TICKS_FROM, 10)
     : 0;
+  const controlPath = process.env.OF_DUMP_CONTROL;
   const ndjson =
     process.env.OF_DUMP_NDJSON !== undefined || outPath.endsWith(".ndjson");
 
@@ -302,6 +427,7 @@ async function main() {
 
   const out: TickSnapshot[] = [];
   let lastEmittedTick: number | undefined;
+  let expandUntil: number | undefined;
   const pushSnap = (snap: TickSnapshot) => {
     lastEmittedTick = snap.tick;
     if (ndjsonFd !== null) {
@@ -313,10 +439,25 @@ async function main() {
 
   for (const turn of record.turns) {
     if (maxTicks !== undefined && turn.turnNumber > maxTicks) break;
+    if (expandUntil !== undefined && game.ticks() >= expandUntil) break;
     game.addExecution(...executor.createExecs(turn));
     game.executeNextTick();
+
+    if (controlPath && expandUntil === undefined) {
+      const until = pollExpandControl(controlPath);
+      if (until !== null) {
+        expandUntil =
+          until === Number.MAX_SAFE_INTEGER ? game.ticks() + 25 : until;
+        dumpUnits = true;
+        console.error(
+          `[dump_ts_tick_state] EXPAND control → units until tick ${expandUntil} (at ${game.ticks()})`,
+        );
+      }
+    }
+
     if (game.ticks() < dumpTicksFrom) continue;
-    if (game.ticks() % every === 0) {
+    const step = expandUntil !== undefined ? 1 : every;
+    if (game.ticks() % step === 0) {
       pushSnap(
         snapshot(
           game,
@@ -328,11 +469,9 @@ async function main() {
         ),
       );
     }
+    if (expandUntil !== undefined && game.ticks() >= expandUntil) break;
   }
-  if (
-    game.ticks() >= dumpTicksFrom &&
-    lastEmittedTick !== game.ticks()
-  ) {
+  if (game.ticks() >= dumpTicksFrom && lastEmittedTick !== game.ticks()) {
     pushSnap(
       snapshot(
         game,
@@ -355,9 +494,17 @@ async function main() {
 
   fs.writeFileSync(
     outPath,
-    JSON.stringify({ engine: "ts", gameId: info.gameID, every, finalTick: game.ticks(), ticks: out }),
+    JSON.stringify({
+      engine: "ts",
+      gameId: info.gameID,
+      every,
+      finalTick: game.ticks(),
+      ticks: out,
+    }),
   );
-  console.error(`[dump_ts_tick_state] wrote ${out.length} snapshots to ${outPath} (final tick ${game.ticks()})`);
+  console.error(
+    `[dump_ts_tick_state] wrote ${out.length} snapshots to ${outPath} (final tick ${game.ticks()})`,
+  );
 }
 
 main().catch((e) => {

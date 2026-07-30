@@ -18,9 +18,11 @@ bash "$ROOT/scripts/ensure_parity_openfront.sh" >&2
 RECORDS_DIR="${HASH_PARITY_RECORDS:-$ROOT/records/$PARITY_COMMIT}"
 LIMIT="${HASH_PARITY_LIMIT:-0}"
 MAX_TICKS="${HASH_PARITY_MAX_TICKS:-}"
+EVERY="${HASH_PARITY_EVERY:-1}"
 JOBS="${HASH_PARITY_JOBS:-1}"
 SKIP_BEFORE="${HASH_PARITY_SKIP_BEFORE:-5}"
 OUT_JSON="${HASH_PARITY_OUT:-/tmp/hash_parity_gate.$PARITY_COMMIT.json}"
+# Set HASH_PARITY_USE_BISECT=1 to use daemon binary-search instead of streaming.
 
 mapfile -t RECORDS < <(find "$RECORDS_DIR" -maxdepth 1 -type f \( -name '*.json.gz' -o -name '*.json' \) | sort)
 if [[ "$LIMIT" -gt 0 ]]; then
@@ -31,7 +33,7 @@ if [[ ${#RECORDS[@]} -eq 0 ]]; then
   exit 2
 fi
 
-echo "[hash_parity_gate] ${#RECORDS[@]} record(s) jobs=$JOBS max_ticks=${MAX_TICKS:-full}" >&2
+echo "[hash_parity_gate] ${#RECORDS[@]} record(s) jobs=$JOBS every=$EVERY max_ticks=${MAX_TICKS:-full} bisect=${HASH_PARITY_USE_BISECT:-0}" >&2
 
 # Build tick_dump once.
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/rust/target}"
@@ -47,7 +49,12 @@ run_one() {
   args+=(--skip-before "$SKIP_BEFORE")
   local out="/tmp/hash_parity_gate.$id.out"
   set +e
-  "$ROOT/scripts/hash_parity.sh" "${args[@]}" >"$out" 2>"/tmp/hash_parity_gate.$id.err"
+  if [[ "${HASH_PARITY_USE_BISECT:-0}" == "1" ]]; then
+    "$ROOT/scripts/hash_bisect.sh" "${args[@]}" >"$out" 2>"/tmp/hash_parity_gate.$id.err"
+  else
+    args+=(--every "$EVERY")
+    "$ROOT/scripts/hash_parity.sh" "${args[@]}" >"$out" 2>"/tmp/hash_parity_gate.$id.err"
+  fi
   local st=$?
   set -e
   local tick layer pass
@@ -58,7 +65,7 @@ run_one() {
 }
 
 export -f run_one
-export ROOT SKIP_BEFORE MAX_TICKS
+export ROOT SKIP_BEFORE MAX_TICKS EVERY
 
 RESULTS_FILE="$(mktemp)"
 if [[ "$JOBS" -le 1 ]]; then

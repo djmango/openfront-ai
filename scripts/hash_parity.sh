@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
 # One-command hash/bit-parity probe: native + TS dump in parallel as NDJSON,
-# online compare with early-stop, optional unit expand around first diverge.
-#
-# This replaces the dumb coarse-then-fine full-replay loop for day-to-day
-# tip hash work: stream NDJSON from both engines, early-stop on first diverge,
-# then optionally expand with OF_DUMP_UNITS near the window.
+# online compare with early-stop, then mid-game-resume unit dump at diverge
+# via dump daemons (ADVANCE to tick — no second full trailing replay).
 #
 # Usage (from repo root):
 #   scripts/hash_parity.sh <record.json.gz> [--max-ticks N] [--every N] [--skip-before N]
 #
+# For true binary search over a long horizon, prefer scripts/hash_bisect.sh.
+#
 # Env:
 #   CARGO_TARGET_DIR   - build/run tick_dump from here (default: rust/target)
-#   HASH_PARITY_JOBS   - unused placeholder for future multi-record fanout
-#   OF_DUMP_*          - forwarded to dumpers (UNITS auto-enabled on expand pass)
+#   HASH_PARITY_ALWAYS_EXPAND - expand even when layer is not units/hash/gameHash
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -47,7 +45,6 @@ if [[ ! -x "$TICK_DUMP" ]]; then
     -p openfront-engine --bin tick_dump >&2
 fi
 
-# Clear prior streams so the comparator does not read stale lines.
 rm -f "$TMP.native.ndjson" "$TMP.ts.ndjson" "$TMP.native.err" "$TMP.ts.err"
 : >"$TMP.native.ndjson"
 : >"$TMP.ts.ndjson"
@@ -59,8 +56,7 @@ if [[ -n "$MAX_TICKS" ]]; then
   TS_MAX_ARG=("$MAX_TICKS")
 fi
 
-# Parent shells may export dump filters from a prior expand pass.
-unset OF_DUMP_TICKS_FROM OF_DUMP_UNITS OF_DUMP_UNITS_FROM || true
+unset OF_DUMP_TICKS_FROM OF_DUMP_UNITS OF_DUMP_UNITS_FROM OF_DUMP_CONTROL || true
 
 echo "[hash_parity] launching native + TS dumps in parallel" >&2
 "$TICK_DUMP" "${NATIVE_ARGS[@]}" >"$TMP.native.err" 2>&1 &
@@ -92,7 +88,6 @@ echo "$COMPARE_OUT"
 DIVERGENT_TICK="$(echo "$COMPARE_OUT" | grep -oP 'DIVERGENCE_TICK=\K[0-9]+' | tail -1 || true)"
 DIVERGENT_LAYER="$(echo "$COMPARE_OUT" | grep -oP 'DIVERGENCE_LAYER=\K\S+' | tail -1 || true)"
 
-# Always stop dumpers once compare finishes (agree or diverge).
 cleanup
 trap - EXIT
 
@@ -113,29 +108,57 @@ echo "HASH_PARITY_PASS=0"
 echo "DIVERGENCE_TICK=$DIVERGENT_TICK"
 echo "DIVERGENCE_LAYER=${DIVERGENT_LAYER:-unknown}"
 
-# Auto expand: re-dump only near the window WITH units (still from tick 0,
-# but retain from window start - avoids multi-GB JSON and answers "which unit").
-# gameHash-only misses still expand: player fields may agree while unit/attack
-# state under the game hash does not.
+# Expand via dump daemons: warm once to the diverge tick (forward-only resume
+# inside each daemon), DUMP with units. Avoids a second trailing full-game dump
+# and avoids multi-GB every-tick JSON for the whole prefix.
 if [[ "${DIVERGENT_LAYER:-}" == "units" || "${DIVERGENT_LAYER:-}" == "hash" || "${DIVERGENT_LAYER:-}" == "gameHash" || "${HASH_PARITY_ALWAYS_EXPAND:-0}" == "1" ]]; then
-  if [[ "$DIVERGENT_TICK" -gt "$EXPAND_PAD" ]]; then FROM=$((DIVERGENT_TICK - EXPAND_PAD)); else FROM=0; fi
-  TO=$((DIVERGENT_TICK + EXPAND_PAD))
-  if [[ -n "$MAX_TICKS" && "$TO" -gt "$MAX_TICKS" ]]; then TO=$MAX_TICKS; fi
-  echo "[hash_parity] expand pass with OF_DUMP_UNITS ticks $FROM..$TO" >&2
-  export OF_DUMP_UNITS=1
-  export OF_DUMP_UNITS_FROM="$FROM"
-  export OF_DUMP_TICKS_FROM="$FROM"
-  "$TICK_DUMP" --repo "$ROOT" --record "$RECORD" --every 1 --max-ticks "$TO" \
-    --out "$TMP.native.expand.json" >&2
-  "$TSX" "$ROOT/scripts/dump_ts_tick_state.ts" \
-    "$RECORD" 1 "$TMP.ts.expand.json" "$TO" >&2
-  echo "[hash_parity] expand diff:" >&2
+  echo "[hash_parity] daemon expand at tick $DIVERGENT_TICK (units)" >&2
+  EXP_DIR="$TMP.expand"
+  rm -rf "$EXP_DIR"
+  mkdir -p "$EXP_DIR"
+  mkfifo "$EXP_DIR/native.in" "$EXP_DIR/ts.in"
+  "$TICK_DUMP" --daemon --repo "$ROOT" --record "$RECORD" \
+    <"$EXP_DIR/native.in" >"$EXP_DIR/native.out" 2>"$EXP_DIR/native.err" &
+  NP=$!
+  "$TSX" "$ROOT/scripts/dump_ts_tick_state.ts" --daemon "$RECORD" \
+    <"$EXP_DIR/ts.in" >"$EXP_DIR/ts.out" 2>"$EXP_DIR/ts.err" &
+  TP=$!
+  exec {EIN}>"$EXP_DIR/native.in"
+  exec {EIT}>"$EXP_DIR/ts.in"
+  wait_ok() {
+    local f="$1" i
+    for i in $(seq 1 12000); do
+      grep -q '^OK' "$f" 2>/dev/null && return 0
+      grep -q '^ERR' "$f" 2>/dev/null && { cat "$f" >&2; return 1; }
+      sleep 0.05
+    done
+    return 1
+  }
+  wait_ok "$EXP_DIR/native.out"
+  wait_ok "$EXP_DIR/ts.out"
+  : >"$EXP_DIR/native.out"; : >"$EXP_DIR/ts.out"
+  echo "ADVANCE $DIVERGENT_TICK" >&"$EIN"
+  echo "ADVANCE $DIVERGENT_TICK" >&"$EIT"
+  wait_ok "$EXP_DIR/native.out"
+  wait_ok "$EXP_DIR/ts.out"
+  : >"$EXP_DIR/native.out"; : >"$EXP_DIR/ts.out"
+  echo "DUMP $TMP.native.expand.json units" >&"$EIN"
+  echo "DUMP $TMP.ts.expand.json units" >&"$EIT"
+  wait_ok "$EXP_DIR/native.out"
+  wait_ok "$EXP_DIR/ts.out"
+  echo QUIT >&"$EIN" 2>/dev/null || true
+  echo QUIT >&"$EIT" 2>/dev/null || true
+  exec {EIN}>&-; exec {EIT}>&-
+  wait "$NP" 2>/dev/null || true
+  wait "$TP" 2>/dev/null || true
+  echo "[hash_parity] expand diff (single tick $DIVERGENT_TICK with units):" >&2
   uv run --no-project python "$ROOT/scripts/diff_tick_dumps.py" \
     "$TMP.native.expand.json" "$TMP.ts.expand.json" \
     --fields alive,tiles,troops,gold,hash,hashBits,unitsHash,numUnits \
-    --skip-before "$FROM" || true
+    --skip-before 0 || true
   echo "[hash_parity] expand dumps: $TMP.{native,ts}.expand.json" >&2
 fi
 
 echo "[hash_parity] streams kept at $TMP.{native,ts}.ndjson" >&2
+echo "[hash_parity] for logarithmic resume search: scripts/hash_bisect.sh $RECORD" >&2
 exit 1
