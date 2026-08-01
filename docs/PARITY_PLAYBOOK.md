@@ -87,7 +87,8 @@ retesting NDJSON false crashes. Remaining real misses:
 
 | game | fine tick | layer | note | status |
 |------|-----------|-------|------|--------|
-| `YdhKd1j6` | 2111 | units | Warship `#14761` empty-path teleport after water-graph invalidate | **fixed** (replan when `path` empty + `target_tile` set); hash_parity `--every 1 --max-ticks 2150` PASS. Later trade-ship drift @2190 is separate. |
+| `YdhKd1j6` | 2111 | units | Warship `#14761` empty-path teleport after water-graph invalidate | **fixed** (replan when `path` empty + `target_tile` set); hash_parity `--every 1 --max-ticks 2150` PASS. |
+| `YdhKd1j6` | 2190 | units | TradeShip `#15365` tile fork after water-graph replan | **fixed** — TS `WaterPathFinder.ensureFresh` runs twice/tick (`.rebuilt`+`.next`) and again on motion-plan `findPath`; native only decremented stagger once/tick → replan 1 tick late → equal-cost route fork. |
 | `xpia5Ua4` | 1885 | hash | `nation:Galicica` skipped reinforce to TraderXOX | **fixed** — `assistAllies` reject/accept emojis must `sendEmoji` (PRNG); missing draws desynced `chance(10)` trigger @1884. hash_parity `--every 1 --max-ticks 2000` PASS. |
 
 Use `scripts/hash_parity.sh` / `hash_bisect.sh` to drive these — not outcome bisect.

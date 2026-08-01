@@ -128,11 +128,14 @@ impl TransportShipExecution {
         Some(u.tile as TileRef)
     }
 
-    /// TS `WaterPathFinder.ensureFresh`.
-    fn ensure_water_path_fresh(&mut self, game: &Game) {
+    /// TS `WaterPathFinder.ensureFresh`. Returns `true` when the cached path
+    /// was invalidated (TS `_rebuilt`). See `TradeShipExecution` — TS calls
+    /// this twice per movement tick (`.rebuilt` + `.next`) and a third time
+    /// when recording a motion plan (`.findPath`).
+    fn ensure_water_path_fresh(&mut self, game: &Game) -> bool {
         let v = game.water_graph_version();
         if v == self.water_graph_version {
-            return;
+            return false;
         }
         if self.pending_version != v {
             self.pending_version = v;
@@ -140,13 +143,14 @@ impl TransportShipExecution {
         }
         if self.stagger_countdown > 0 {
             self.stagger_countdown -= 1;
-            return;
+            return false;
         }
         self.water_graph_version = v;
         self.path.clear();
         self.path_idx = 0;
         self.path_dst = None;
         self.motion_plan_dst = None;
+        true
     }
 
     fn refresh_path(&mut self, game: &mut Game, from: TileRef, to: TileRef) -> bool {
@@ -169,6 +173,7 @@ impl TransportShipExecution {
     }
 
     fn next_path_tile(&mut self, game: &mut Game, from: TileRef, to: TileRef) -> Option<TileRef> {
+        // TS `WaterPathFinder.next` → `ensureFresh` (2nd call this tick).
         self.ensure_water_path_fresh(game);
         if self.path_dst != Some(to) || self.path.is_empty() {
             if !self.refresh_path(game, from, to) {
@@ -320,6 +325,10 @@ impl Execution for TransportShipExecution {
         };
         let troops = self.troops.unwrap_or(0.0);
 
+        // TS `if (this.pathFinder.rebuilt) { this.motionPlanDst = null }` —
+        // first `ensureFresh` this movement tick (after lastMove throttle).
+        let _rebuilt = self.ensure_water_path_fresh(game);
+
         if self.retreating && !self.retreat_destination_resolved {
             let Some(retreat_dst) = closest_shore_by_water(game, self.owner_small_id, from) else {
                 game.add_troops(self.owner_small_id, troops);
@@ -344,9 +353,9 @@ impl Execution for TransportShipExecution {
         };
         game.move_unit(self.owner_small_id, uid, next);
         if records_new_motion_plan {
-            // TS records a new grid motion plan after moving when the
-            // destination changes (retreat/re-target), warming shared HPA
-            // caches with `findPath(boat.tile(), dst)`.
+            // TS `pathFinder.findPath(boat.tile(), dst)` → third `ensureFresh`,
+            // then warms shared HPA caches.
+            self.ensure_water_path_fresh(game);
             let _ = game.plan_water_path(next, dst);
             self.motion_plan_dst = Some(dst);
         }
