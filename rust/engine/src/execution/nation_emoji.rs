@@ -15,6 +15,14 @@ const EMOJI_CHARM_ALLIES_LEN: i32 = 3;
 const EMOJI_CLOWN_LEN: i32 = 2;
 const EMOJI_RAT_LEN: i32 = 1;
 const EMOJI_GREET_LEN: i32 = 1;
+/// TS `EMOJI_ASSIST_ACCEPT` (`👍🤝🎯`).
+pub(crate) const EMOJI_ASSIST_ACCEPT_LEN: i32 = 3;
+/// TS `EMOJI_ASSIST_RELATION_TOO_LOW` (`🥱🤦‍♂️`).
+pub(crate) const EMOJI_ASSIST_RELATION_TOO_LOW_LEN: i32 = 2;
+/// TS `EMOJI_ASSIST_TARGET_ME` (`🥺💀`).
+pub(crate) const EMOJI_ASSIST_TARGET_ME_LEN: i32 = 2;
+/// TS `EMOJI_ASSIST_TARGET_ALLY` (`🕊️👎`).
+pub(crate) const EMOJI_ASSIST_TARGET_ALLY_LEN: i32 = 2;
 
 #[derive(Debug, Default)]
 pub struct NationEmojiState {

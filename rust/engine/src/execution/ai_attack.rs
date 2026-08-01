@@ -747,9 +747,15 @@ fn player_has_structure_units(game: &Game, small_id: u16) -> bool {
 }
 
 fn has_neighboring_bot_with_structures(game: &Game, small_id: u16) -> bool {
+    // TS `hasNeighboringBotWithStructures`: must exclude friendlies — a
+    // allied/same-team bot with structures must not flip this gate, or we
+    // enter `attackBots` and can short-circuit (`botAttackTroopsSent > 0`)
+    // before human weakest/victim strategies.
     nearby_player_small_ids(game, small_id).into_iter().any(|sid| {
         game.player_by_small_id(sid).is_some_and(|p| {
-            p.player_type == PlayerType::Bot && player_has_structure_units(game, sid)
+            p.player_type == PlayerType::Bot
+                && !game.is_friendly(small_id, sid)
+                && player_has_structure_units(game, sid)
         })
     })
 }
@@ -1477,6 +1483,10 @@ fn nation_strategy_assist(
     if game.wire.disable_alliances() {
         return false;
     }
+    // TS `assistAllies` sends assist-status emojis via `sendEmoji` (not
+    // `maybeSendEmoji`) on the reject/accept paths. Those `randElement` draws
+    // are hash-neutral but must still run — skipping them desyncs the nation
+    // PRNG and later `chance(10)` trigger rolls (xpia5Ua4 Galicica @1656→1885).
     let allies = game.allied_small_ids(sid);
     for ally in allies {
         let targets = game.player_targets(ally);
@@ -1484,10 +1494,43 @@ fn nation_strategy_assist(
             continue;
         }
         if game.relation(sid, ally) < Relation::Friendly {
+            if let Some(state) = emoji.as_mut() {
+                super::nation_emoji::send_emoji(
+                    random,
+                    game,
+                    sid,
+                    state,
+                    Some(ally),
+                    super::nation_emoji::EMOJI_ASSIST_RELATION_TOO_LOW_LEN,
+                );
+            }
             continue;
         }
         for target in targets {
-            if target == sid || game.is_friendly(sid, target) {
+            if target == sid {
+                if let Some(state) = emoji.as_mut() {
+                    super::nation_emoji::send_emoji(
+                        random,
+                        game,
+                        sid,
+                        state,
+                        Some(ally),
+                        super::nation_emoji::EMOJI_ASSIST_TARGET_ME_LEN,
+                    );
+                }
+                continue;
+            }
+            if game.is_friendly(sid, target) {
+                if let Some(state) = emoji.as_mut() {
+                    super::nation_emoji::send_emoji(
+                        random,
+                        game,
+                        sid,
+                        state,
+                        Some(ally),
+                        super::nation_emoji::EMOJI_ASSIST_TARGET_ALLY_LEN,
+                    );
+                }
                 continue;
             }
             if !nation_try_attack_player(
@@ -1505,6 +1548,16 @@ fn nation_strategy_assist(
                 continue;
             }
             game.update_relation(sid, ally, -20);
+            if let Some(state) = emoji.as_mut() {
+                super::nation_emoji::send_emoji(
+                    random,
+                    game,
+                    sid,
+                    state,
+                    Some(ally),
+                    super::nation_emoji::EMOJI_ASSIST_ACCEPT_LEN,
+                );
+            }
             return true;
         }
     }
@@ -2831,6 +2884,57 @@ mod ai_attack_behavior_tests {
         assert!(
             capped >= 50_000.0,
             "capped={capped} should retain at least the incoming 50k"
+        );
+    }
+
+    /// TS `assistAllies` calls `sendEmoji(ally, EMOJI_ASSIST_RELATION_TOO_LOW)`
+    /// when an ally with targets has relation < Friendly. That `randElement`
+    /// draw is hash-neutral but must still advance the nation PRNG
+    /// (xpia5Ua4 Galicica @1656→1885).
+    #[test]
+    fn assist_relation_too_low_emoji_consumes_prng_like_ts() {
+        let Some(mut game) = new_game("Medium", "Free For All") else {
+            return;
+        };
+        let nation = add_player(&mut game, "nation_id", PlayerType::Nation);
+        let ally = add_player(&mut game, "ally_human", PlayerType::Human);
+        let enemy = add_player(&mut game, "enemy_id", PlayerType::Human);
+        conquer_round_robin(&mut game, &[nation, ally, enemy], 60);
+        game.add_troops(nation, 50_000.0);
+        game.add_troops(ally, 50_000.0);
+        game.add_troops(enemy, 50_000.0);
+
+        assert!(game.create_alliance_request(nation, ally, 0));
+        game.accept_alliance_request(nation, ally, 1);
+        // Alliance accept starts Friendly; drop below Friendly so assist takes
+        // the reject-emoji path while remaining allied (TS `isAlliedWith`).
+        game.update_relation(nation, ally, -100);
+        assert!(game.is_allied_with(nation, ally));
+        assert!(game.relation(nation, ally) < Relation::Friendly);
+        game.add_target_mark(ally, enemy);
+
+        let mut random = PseudoRandom::new(7);
+        let mut expected = PseudoRandom::new(7);
+        let mut emoji = crate::execution::nation_emoji::NationEmojiState::default();
+        let mut sent = 0.0;
+        let attacked = nation_strategy_assist(
+            &mut game,
+            &mut random,
+            nation,
+            0.3,
+            0.2,
+            &mut sent,
+            "Medium",
+            Some(&mut emoji),
+        );
+        assert!(!attacked, "relation-too-low path must not enqueue an attack");
+
+        // TS sendEmoji → randElement(EMOJI_ASSIST_RELATION_TOO_LOW) length 2.
+        let _ = expected.next_int(0, 2);
+        assert_eq!(
+            random.debug_state(),
+            expected.debug_state(),
+            "assist reject-emoji must consume exactly one randElement draw"
         );
     }
 }
