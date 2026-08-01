@@ -19,11 +19,11 @@ pub const DEFAULT_MAX_EPISODE_TICKS: i64 = 21_000;
 
 /// Default sim ticks per watch decision when stage config is unavailable.
 ///
-/// Prefer the curriculum stage's `decision_ticks` (V10 uses 10 everywhere).
+/// Prefer the curriculum stage's `decision_ticks` (V10 uses 15 everywhere).
 /// Watch `reset_watch` reads the stage value; this constant is only for
 /// deriving a safe `--max-steps` floor that cannot undercut
 /// [`DEFAULT_MAX_EPISODE_TICKS`] at that cadence.
-pub const WATCH_TICKS_PER_DECISION: i64 = 10;
+pub const WATCH_TICKS_PER_DECISION: i64 = 15;
 
 /// Decision cap that cannot undercut [`DEFAULT_MAX_EPISODE_TICKS`].
 pub const DEFAULT_WATCH_MAX_STEPS: usize =
@@ -41,7 +41,8 @@ mod episode_budget_tests {
 
     #[test]
     fn watch_steps_cover_default_tick_budget() {
-        assert_eq!(DEFAULT_WATCH_MAX_STEPS, 2164);
+        // 21000/15 + 64
+        assert_eq!(DEFAULT_WATCH_MAX_STEPS, 1464);
         assert!(
             (DEFAULT_WATCH_MAX_STEPS as i64) * WATCH_TICKS_PER_DECISION
                 >= DEFAULT_MAX_EPISODE_TICKS

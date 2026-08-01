@@ -14,8 +14,8 @@ AE=weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors
 COARSE=weights/ae/ae_v32_nostatic_d16c32.encoder.safetensors
 OFTRAIN=./rust/target/release/oftrain
 MAX_TICKS=21000
-# Over-provision for fastest cadence (10); stage may use 15.
-MAX_STEPS=$((MAX_TICKS / 10 + 64))
+# decision every 15 ticks + headroom (ofcore::watch_max_steps_for_ticks)
+MAX_STEPS=$((MAX_TICKS / 15 + 64))
 
 UPD=$(python3 -c "import json;print(json.load(open('$STATE'))['update'])")
 STAGE=$(python3 -c "import json;print(json.load(open('$STATE'))['stage'])")
@@ -29,11 +29,11 @@ pairs = [(int(a), int(b)) for a, b in re.findall(
 )]
 med = int(re.search(r"V10_MEDIUM_START:\s*usize\s*=\s*(\d+)", text).group(1))
 hard = int(re.search(r"V10_HARD_START:\s*usize\s*=\s*(\d+)", text).group(1))
-# decision_ticks: V10 is 10 for every stage
+# decision_ticks: V10 is 15 for every stage
 s = int("$STAGE")
 bots, n = pairs[s]
 diff = "Easy" if s < med else ("Medium" if s < hard else "Hard")
-dt = 10
+dt = 15
 print(bots, n, diff, dt)
 PY
 )"

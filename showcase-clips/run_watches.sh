@@ -20,7 +20,7 @@ OFTRAIN=./rust/target/release/oftrain
 
 # Shared with train (ofcore::DEFAULT_MAX_EPISODE_TICKS / pod --max-episode-ticks).
 MAX_TICKS=21000
-MAX_STEPS=$((MAX_TICKS / 10 + 64))
+MAX_STEPS=$((MAX_TICKS / 15 + 64))
 
 UPD=$(python3 -c "import json;print(json.load(open('$STATE'))['update'])")
 TAG_PREFIX="ppo_v11_u${UPD}"
