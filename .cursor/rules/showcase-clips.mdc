@@ -25,7 +25,7 @@ agent (ppo_v11 / oftrain `--watch` / `render_client_replay.py` / `ofshowcase`):
   21000) so episodes run to the same horizon as training. Do not silently
   lower it (e.g. 12000) or episodes look "cut short".
 - **Decision ticks:** watch must use the stage's `decision_ticks` (V10 is
-  **10 everywhere**). Do not invent a different cadence than train.
+  **15 everywhere**). Do not invent a different cadence than train.
 - **Engine:** `--engine node` for watches/clips/replays so the GameRecord is
   produced by the same TS sim the client replays (avoids native↔TS desync).
   Training stays `--engine native`. Pass `--engine native` on watch only for

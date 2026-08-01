@@ -1045,15 +1045,18 @@ fn build_v10_stages() -> Vec<Stage> {
             });
         }
     };
+    // Cadence is permanently 15 ticks/decision for every V10 stage (train,
+    // watch, replay). Do not reintroduce a faster late-Easy / Medium cadence —
+    // the dt=10 experiment cratered the live policy.
     // 0-7: 8-map warm-up (terrain/naval variety without World/Asia yet)
-    push(&V10_BRIDGE_MAPS, "Easy", 10, V10_MAP_WARMUP_LEN);
+    push(&V10_BRIDGE_MAPS, "Easy", 15, V10_MAP_WARMUP_LEN);
     // 8-27: full broad-16 through early/mid Easy density
-    push(&V10_BROAD_MAPS, "Easy", 10, 20);
-    // 28-35: broad Easy closeout → peak (same decision cadence)
-    push(&V10_BROAD_MAPS, "Easy", 10, 8);
-    push(&V10_BROAD_MAPS, "Medium", 10, 14); // 36-49
-    push(&V10_BROAD_MAPS, "Hard", 10, 10); // 50-59
-    push(&V10_BROAD_MAPS, "Impossible", 10, 8); // 60-67
+    push(&V10_BROAD_MAPS, "Easy", 15, 20);
+    // 28-35: broad Easy closeout → peak
+    push(&V10_BROAD_MAPS, "Easy", 15, 8);
+    push(&V10_BROAD_MAPS, "Medium", 15, 14); // 36-49
+    push(&V10_BROAD_MAPS, "Hard", 15, 10); // 50-59
+    push(&V10_BROAD_MAPS, "Impossible", 15, 8); // 60-67
     debug_assert_eq!(stages.len(), V10_STAGE_COUNT);
     apply_v10_stage_params(&mut stages);
     stages
@@ -1418,12 +1421,12 @@ mod tests {
     }
 
     #[test]
-    fn v10_decision_ticks_are_uniformly_ten() {
+    fn v10_decision_ticks_are_uniformly_fifteen() {
         let stages = stages_for_schedule(CurriculumSchedule::V10);
         assert_eq!(stages.len(), V10_STAGE_COUNT);
         for (i, stage) in stages.iter().enumerate() {
             assert_eq!(
-                stage.decision_ticks, 10,
+                stage.decision_ticks, 15,
                 "stage {i} decision_ticks={}",
                 stage.decision_ticks
             );
