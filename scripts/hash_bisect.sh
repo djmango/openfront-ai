@@ -32,11 +32,10 @@ TICK_DUMP="$TARGET_DIR/release/tick_dump"
 TSX="$ROOT/openfront/node_modules/.bin/tsx"
 FIELDS="${HASH_BISECT_FIELDS:-alive,tiles,hashBits,unitsHash,numUnits}"
 
-if [[ ! -x "$TICK_DUMP" ]]; then
-  echo "[hash_bisect] building tick_dump" >&2
-  cargo build --quiet --release --manifest-path "$ROOT/rust/Cargo.toml" \
-    -p openfront-engine --bin tick_dump >&2
-fi
+# Always invoke cargo so source edits are picked up (see hash_parity.sh).
+echo "[hash_bisect] ensuring tick_dump" >&2
+cargo build --quiet --release --manifest-path "$ROOT/rust/Cargo.toml" \
+  -p openfront-engine --bin tick_dump >&2
 
 if [[ -z "$MAX_TICKS" ]]; then
   MAX_TICKS="$(uv run --no-project python - "$RECORD" <<'PY'

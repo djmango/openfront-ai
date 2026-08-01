@@ -39,11 +39,12 @@ TSX="$ROOT/openfront/node_modules/.bin/tsx"
 
 echo "[hash_parity] $GAME_ID every=$EVERY max_ticks=${MAX_TICKS:-full}" >&2
 
-if [[ ! -x "$TICK_DUMP" ]]; then
-  echo "[hash_parity] building tick_dump into $TARGET_DIR" >&2
-  cargo build --quiet --release --manifest-path "$ROOT/rust/Cargo.toml" \
-    -p openfront-engine --bin tick_dump >&2
-fi
+# Always invoke cargo so source edits are picked up. Incremental builds are a
+# no-op when already fresh; skipping when the binary merely *exists* previously
+# left us testing a stale tick_dump after engine fixes.
+echo "[hash_parity] ensuring tick_dump in $TARGET_DIR" >&2
+cargo build --quiet --release --manifest-path "$ROOT/rust/Cargo.toml" \
+  -p openfront-engine --bin tick_dump >&2
 
 rm -f "$TMP.native.ndjson" "$TMP.ts.ndjson" "$TMP.native.err" "$TMP.ts.err"
 : >"$TMP.native.ndjson"
