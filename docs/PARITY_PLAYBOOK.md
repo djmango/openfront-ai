@@ -82,13 +82,15 @@ over JSON int hashes past `2^53`.
 
 ## Tip hash gate snapshot (`dd1277e245b5`)
 
-Coarse: `HASH_PARITY_EVERY=25 HASH_PARITY_MAX_TICKS=4000` → **39/41** after
-retesting NDJSON false crashes. Remaining real misses:
+Coarse: `HASH_PARITY_EVERY=25 HASH_PARITY_MAX_TICKS=4000` → **40/41** after
+trade-ship stagger fix (stale tip-gate false-fail on Ydh was pre-fix binary).
+Fine `YdhKd1j6 --every 1` now clears @2190 and next misses @2849. Remaining:
 
 | game | fine tick | layer | note | status |
 |------|-----------|-------|------|--------|
 | `YdhKd1j6` | 2111 | units | Warship `#14761` empty-path teleport after water-graph invalidate | **fixed** (replan when `path` empty + `target_tile` set); hash_parity `--every 1 --max-ticks 2150` PASS. |
 | `YdhKd1j6` | 2190 | units | TradeShip `#15365` tile fork after water-graph replan | **fixed** — TS `WaterPathFinder.ensureFresh` runs twice/tick (`.rebuilt`+`.next`) and again on motion-plan `findPath`; native only decremented stagger once/tick → replan 1 tick late → equal-cost route fork. Verified: `hash_parity --every 1 --max-ticks 2250 --skip-before 2150` PASS. |
+| `YdhKd1j6` | 2849 | units | Warship `#15554` equal-cost water route fork | **open** — same `from=803713→to=887626`, same len=131, shared prefix through `809708` then native W (`809707`) vs TS S (`811708`). Earlier replan `815712→803713` identical. Likely HPA cache / `refineEndpoints` bounded-A* tie order after prior cache warming. |
 | `xpia5Ua4` | 1885 | hash | `nation:Galicica` skipped reinforce to TraderXOX | **fixed** — `assistAllies` reject/accept emojis must `sendEmoji` (PRNG); missing draws desynced `chance(10)` trigger @1884. hash_parity `--every 1 --max-ticks 2000` PASS. |
 
 Use `scripts/hash_parity.sh` / `hash_bisect.sh` to drive these — not outcome bisect.
