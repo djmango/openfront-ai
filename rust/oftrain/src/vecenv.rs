@@ -898,7 +898,7 @@ impl EnvWorker {
             episode_stage: stage,
             max_episode_ticks,
             reward_config,
-            decision_ticks: 10,
+            decision_ticks: 15,
             rng: SmallRng::seed_from_u64(1000 + idx as u64),
             episode: 0,
             ep_reward: 0.0,
@@ -954,7 +954,7 @@ impl EnvWorker {
         nations: Value,
     ) -> Result<()> {
         self.episode_stage = self.stage;
-        // Always use the stage table's decision_ticks (V10 is uniformly 10).
+        // Always use the stage table's decision_ticks (V10 is uniformly 15).
         self.decision_ticks = self
             .stages
             .get(self.stage)

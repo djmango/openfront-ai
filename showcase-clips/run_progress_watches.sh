@@ -17,8 +17,8 @@ OFTRAIN=./rust/target/release/oftrain
 
 # Single source of truth with training.
 MAX_TICKS=21000
-# decision every 10 ticks + headroom (ofcore::watch_max_steps_for_ticks)
-MAX_STEPS=$((MAX_TICKS / 10 + 64))
+# decision every 15 ticks + headroom (ofcore::watch_max_steps_for_ticks)
+MAX_STEPS=$((MAX_TICKS / 15 + 64))
 
 read_stage_lobby() {
   # prints: bots nations difficulty
