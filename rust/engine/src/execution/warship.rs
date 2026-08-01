@@ -826,6 +826,20 @@ impl Execution for WarshipExecution {
             }
         }
 
+        // TS WaterPathFinder invalidation nulls the stepper path; the next
+        // `pathfinder.next()` rebuilds. Native `ensure_water_path_fresh` only
+        // clears `path` and keeps `target_tile` — without a replan here an
+        // empty path hits `path_idx >= len` and false-COMPLETE teleports to
+        // the target (YdhKd1j6 @2111 warship #14761).
+        if let Some(target) = self.target_tile {
+            if self.path.is_empty() {
+                if !self.refresh_path(game, from, target) {
+                    self.target_tile = None;
+                    return;
+                }
+            }
+        }
+
         if self.path_idx > 0 && self.path.get(self.path_idx - 1) != Some(&from) {
             let target = self.target_tile.expect("patrol target set above");
             if !self.refresh_path(game, from, target) {
@@ -2230,9 +2244,12 @@ mod tests {
             let ship_id = game.build_unit(p1, unit_type::WARSHIP, ship_tile);
 
             let mut exec = WarshipExecution::new_for_test(p1, ship_tile, ship_id);
+            exec.water_graph_version = game.water_graph_version();
             exec.target_tile = Some(target_tile);
-            exec.path.clear();
-            exec.path_idx = 0;
+            // Exhausted non-empty path with path[idx-1]==from (not the
+            // invalidate empty-path state, which must replan).
+            exec.path = vec![ship_tile];
+            exec.path_idx = 1;
 
             exec.tick(&mut game, 100);
 
@@ -2244,6 +2261,38 @@ mod tests {
             assert!(
                 exec.target_tile.is_none(),
                 "completed patrol target should be cleared"
+            );
+        }
+
+        #[test]
+        fn empty_path_after_water_invalidate_replans_instead_of_teleport() {
+            let mut game = water_game(80, 30);
+            let p1 = add_nation(&mut game, "p1");
+            let ship_tile = game.ref_xy(20, 10);
+            let far_target = game.ref_xy(60, 10);
+            let ship_id = game.build_unit(p1, unit_type::WARSHIP, ship_tile);
+
+            let mut exec = WarshipExecution::new_for_test(p1, ship_tile, ship_id);
+            // Stale version + empty path == ensure_water_path_fresh bump.
+            exec.water_graph_version = game.water_graph_version().wrapping_add(1);
+            exec.target_tile = Some(far_target);
+            exec.path.clear();
+            exec.path_idx = 0;
+
+            exec.tick(&mut game, 100);
+
+            assert!(
+                exec.target_tile.is_some(),
+                "invalidate+empty path must replan, not false-COMPLETE clear target"
+            );
+            assert_ne!(
+                game.unit_tile_of(p1, ship_id),
+                Some(far_target),
+                "must not teleport across an empty invalidated path"
+            );
+            assert!(
+                !exec.path.is_empty(),
+                "replan should rebuild a non-empty patrol path"
             );
         }
 

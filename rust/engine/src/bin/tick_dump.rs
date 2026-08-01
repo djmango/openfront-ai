@@ -78,6 +78,7 @@ struct UnitSnapshot {
 struct PlayerSnapshot {
     identity: String,
     id: String,
+    small_id: u16,
     name: String,
     player_type: String,
     team: Option<String>,
@@ -123,6 +124,16 @@ struct StationSnapshot {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct AttackSnapshot {
+    owner_small_id: u16,
+    target_small_id: u16,
+    troops: i64,
+    active: bool,
+    attack_live: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct TickSnapshot {
     tick: u32,
     in_spawn_phase: bool,
@@ -137,6 +148,8 @@ struct TickSnapshot {
     railroads: Option<Vec<RailroadSnapshot>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stations: Option<Vec<StationSnapshot>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attacks: Option<Vec<AttackSnapshot>>,
 }
 
 #[derive(Serialize)]
@@ -176,6 +189,7 @@ fn snapshot(
     dump_border_order: bool,
     dump_owned_order: bool,
     dump_rails: bool,
+    dump_attacks: bool,
 ) -> TickSnapshot {
     let warships: HashMap<(u16, i32), &openfront_engine::execution::WarshipExecution> = game
         .live_warships()
@@ -235,6 +249,7 @@ fn snapshot(
             PlayerSnapshot {
                 identity: player_identity(p),
                 id: p.id.clone(),
+                small_id: p.small_id,
                 name: p.name.clone(),
                 player_type: format!("{:?}", p.player_type),
                 team: p.team.clone(),
@@ -298,6 +313,26 @@ fn snapshot(
     } else {
         (None, None)
     };
+    let attacks = if dump_attacks {
+        Some(
+            game.active_attacks_debug()
+                .into_iter()
+                .map(
+                    |(owner_small_id, target_small_id, troops, active, attack_live, _, _)| {
+                        AttackSnapshot {
+                            owner_small_id,
+                            target_small_id,
+                            troops: troops as i64,
+                            active,
+                            attack_live,
+                        }
+                    },
+                )
+                .collect(),
+        )
+    } else {
+        None
+    };
     TickSnapshot {
         tick: game.ticks(),
         in_spawn_phase: game.in_spawn_phase(),
@@ -308,6 +343,7 @@ fn snapshot(
         players,
         railroads,
         stations,
+        attacks,
     }
 }
 
@@ -350,7 +386,7 @@ fn advance_to(game: &mut Game, record: &GameRecord, target: u32) -> Result<(), S
 }
 
 fn write_single_tick_dump(path: &std::path::Path, game: &Game, game_id: &str, units: bool) {
-    let snap = snapshot(game, units, false, false, false, false);
+    let snap = snapshot(game, units, false, false, false, false, false);
     let dump = Dump {
         engine: "native",
         game_id: game_id.to_string(),
@@ -447,6 +483,7 @@ fn main() {
     let dump_border_order = std::env::var_os("OF_DUMP_BORDER_ORDER").is_some();
     let dump_owned_order = std::env::var_os("OF_DUMP_OWNED_ORDER").is_some();
     let dump_rails = std::env::var_os("OF_DUMP_RAILS").is_some();
+    let dump_attacks = std::env::var_os("OF_DUMP_ATTACKS").is_some();
     let dump_units_from: u32 = std::env::var("OF_DUMP_UNITS_FROM")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -532,6 +569,7 @@ fn main() {
                 dump_border_order,
                 dump_owned_order,
                 dump_rails,
+                dump_attacks,
             );
             last_emitted_tick = Some(snap.tick);
             if let Some(f) = ndjson_file.as_mut() {
@@ -557,6 +595,7 @@ fn main() {
             dump_border_order,
             dump_owned_order,
             dump_rails,
+            dump_attacks,
         );
         if let Some(f) = ndjson_file.as_mut() {
             let line = serde_json::to_string(&snap).expect("serialize snap");

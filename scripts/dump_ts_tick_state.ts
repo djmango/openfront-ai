@@ -53,6 +53,7 @@ interface PlayerSnapshot {
   // cross-check against native's own per-player hash contribution without
   // re-deriving it from troops/tiles by hand.
   id: string;
+  smallId: number;
   name: string;
   playerType: string;
   team: string | null;
@@ -88,6 +89,14 @@ interface StationSnapshot {
   cluster: number | null;
 }
 
+interface AttackSnapshot {
+  ownerSmallId: number;
+  targetSmallId: number;
+  troops: number;
+  active: boolean;
+  attackLive: boolean;
+}
+
 interface TickSnapshot {
   tick: number;
   inSpawnPhase: boolean;
@@ -99,6 +108,7 @@ interface TickSnapshot {
   players: PlayerSnapshot[];
   railroads?: RailroadSnapshot[];
   stations?: StationSnapshot[];
+  attacks?: AttackSnapshot[];
 }
 
 function playerIdentity(p: Player): string {
@@ -119,11 +129,13 @@ function snapshot(
   dumpBorderOrder: boolean,
   dumpOwnedOrder: boolean,
   dumpRails: boolean,
+  dumpAttacks: boolean = false,
 ): TickSnapshot {
   const players: PlayerSnapshot[] = game.allPlayers().map((p) => {
     const base: PlayerSnapshot = {
       identity: playerIdentity(p),
       id: p.id(),
+      smallId: p.smallID(),
       name: p.name(),
       playerType: p.type(),
       team: p.team(),
@@ -221,6 +233,22 @@ function snapshot(
     }
     out.railroads = [...railSet.values()].sort((a, b) => a.id - b.id);
     out.stations = stationSnaps.sort((a, b) => a.id - b.id);
+  }
+  if (dumpAttacks) {
+    const attacks: AttackSnapshot[] = [];
+    for (const p of game.allPlayers()) {
+      for (const a of p.outgoingAttacks()) {
+        const target = a.target();
+        attacks.push({
+          ownerSmallId: p.smallID(),
+          targetSmallId: target.isPlayer() ? target.smallID() : 0,
+          troops: Math.round(a.troops()),
+          active: a.isActive(),
+          attackLive: typeof (a as any).isAlive === "function" ? (a as any).isAlive() : true,
+        });
+      }
+    }
+    out.attacks = attacks;
   }
   return out;
 }
@@ -401,6 +429,7 @@ async function main() {
   const dumpBorderOrder = process.env.OF_DUMP_BORDER_ORDER !== undefined;
   const dumpOwnedOrder = process.env.OF_DUMP_OWNED_ORDER !== undefined;
   const dumpRails = process.env.OF_DUMP_RAILS !== undefined;
+  const dumpAttacks = process.env.OF_DUMP_ATTACKS !== undefined;
   const dumpUnitsFrom = process.env.OF_DUMP_UNITS_FROM
     ? parseInt(process.env.OF_DUMP_UNITS_FROM, 10)
     : 0;
@@ -466,6 +495,7 @@ async function main() {
           dumpBorderOrder,
           dumpOwnedOrder,
           dumpRails,
+          dumpAttacks,
         ),
       );
     }
@@ -480,6 +510,7 @@ async function main() {
         dumpBorderOrder,
         dumpOwnedOrder,
         dumpRails,
+        dumpAttacks,
       ),
     );
   }

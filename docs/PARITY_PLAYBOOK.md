@@ -85,10 +85,10 @@ over JSON int hashes past `2^53`.
 Coarse: `HASH_PARITY_EVERY=25 HASH_PARITY_MAX_TICKS=4000` → **39/41** after
 retesting NDJSON false crashes. Remaining real misses:
 
-| game | fine tick | layer | note |
-|------|-----------|-------|------|
-| `YdhKd1j6` | 2111 | units | Warship `#14761` tile/target (agree through 2110) |
-| `xpia5Ua4` | 1885 | hash | `nation:Galicica` troops/hashBits |
+| game | fine tick | layer | note | status |
+|------|-----------|-------|------|--------|
+| `YdhKd1j6` | 2111 | units | Warship `#14761` empty-path teleport after water-graph invalidate | **fixed** (replan when `path` empty + `target_tile` set); hash_parity `--every 1 --max-ticks 2150` PASS. Later trade-ship drift @2190 is separate. |
+| `xpia5Ua4` | 1885 | hash | `nation:Galicica` skipped reinforce to TraderXOX | **fixed** — `assistAllies` reject/accept emojis must `sendEmoji` (PRNG); missing draws desynced `chance(10)` trigger @1884. hash_parity `--every 1 --max-ticks 2000` PASS. |
 
 Use `scripts/hash_parity.sh` / `hash_bisect.sh` to drive these — not outcome bisect.
 
