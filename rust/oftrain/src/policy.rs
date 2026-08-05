@@ -1515,7 +1515,7 @@ impl PolicyNet {
         let q = if greedy {
             &qa / (&qa + &qb)
         } else {
-            sample_beta_host(&qa, &qb)
+            sample_beta(&qa, &qb)
         }
         .clamp(1e-4, 1.0 - 1e-4);
         let q_lp = beta_log_prob(&q, &qa, &qb);
@@ -1919,10 +1919,28 @@ fn global_to_fine_local(region: &Tensor, gw: i64) -> Tensor {
     (r.divide_scalar_mode(GW_MAX, "floor")) * gw + r.remainder(GW_MAX)
 }
 
-/// Host-side Beta sampling (act() runs under no_grad; a tiny (B,) round
-/// trip through the CPU rand crate is cheaper than implementing a
-/// differentiable-agnostic Gamma sampler in tch, and this path never
-/// needs gradients).
+/// Samples the same two-component Dirichlet used by
+/// `torch.distributions.Beta.sample` and returns its first component.
+///
+/// CUDA must stay entirely on-device: copying the concentrations to the
+/// host performs two D2H transfers and the sampled result then needs an H2D
+/// transfer on every environment step. `act` runs under `no_grad`, so the
+/// internal ATen sampling op needs no autograd wrapper here. CPU retains the
+/// existing `rand_distr` implementation as a fallback.
+fn sample_beta(a: &Tensor, b: &Tensor) -> Tensor {
+    debug_assert_eq!(a.device(), b.device());
+    debug_assert_eq!(a.size(), b.size());
+    if a.device().is_cuda() {
+        Tensor::stack(&[a, b], -1)
+            .f_internal_sample_dirichlet()
+            .expect("ATen Dirichlet sampling failed")
+            .select(-1, 0)
+    } else {
+        sample_beta_host(a, b)
+    }
+}
+
+/// Existing CPU fallback for Beta sampling.
 fn sample_beta_host(a: &Tensor, b: &Tensor) -> Tensor {
     use rand::SeedableRng;
     use rand::rngs::SmallRng;
@@ -3335,5 +3353,117 @@ mod logit_clamp_tests {
             b_v.is_finite() && b_v <= QUANTITY_AB_MAX,
             "beta must be bounded, got {b_v}"
         );
+    }
+}
+
+#[cfg(test)]
+mod beta_sampling_tests {
+    use super::*;
+
+    const SAMPLES: i64 = 50_000;
+
+    fn fixed_concentrations(device: Device) -> (Tensor, Tensor) {
+        let a = Tensor::from_slice(&[1.0f32, 2.0, 5.0, 25.0]).to_device(device);
+        let b = Tensor::from_slice(&[1.0f32, 5.0, 2.0, 75.0]).to_device(device);
+        (
+            a.view([1, 4]).expand([SAMPLES, 4], true),
+            b.view([1, 4]).expand([SAMPLES, 4], true),
+        )
+    }
+
+    fn assert_sample_contract(sample: &Tensor, shape: &[i64], device: Device) {
+        assert_eq!(sample.size(), shape, "Beta sample shape");
+        assert_eq!(sample.device(), device, "Beta sample device");
+        assert_eq!(sample.kind(), Kind::Float, "Beta sample dtype");
+        assert!(sample.isfinite().all().int64_value(&[]) != 0, "Beta samples must all be finite");
+        assert!(
+            sample.ge(0.0).logical_and(&sample.le(1.0)).all().int64_value(&[]) != 0,
+            "Beta samples must lie in [0, 1]"
+        );
+    }
+
+    fn assert_fixed_concentration_means(sample: &Tensor) {
+        let means = sample.mean_dim(0, false, Kind::Float).to_device(Device::Cpu);
+        let actual: Vec<f32> = means.try_into().unwrap();
+        let expected = [0.5f32, 2.0 / 7.0, 5.0 / 7.0, 0.25];
+        // At 50k draws these absolute tolerances are at least 7 standard
+        // errors for every fixed concentration above. They catch swapped
+        // components and normalization mistakes without making this flaky.
+        let tolerances = [0.008f32, 0.006, 0.006, 0.004];
+        for ((got, want), tolerance) in actual.iter().zip(expected).zip(tolerances) {
+            assert!(
+                (got - want).abs() <= tolerance,
+                "fixed-concentration mean {got} differs from Python Beta mean {want} by more than {tolerance}"
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_fallback_samples_are_finite_bounded_and_statistically_correct() {
+        let (a, b) = fixed_concentrations(Device::Cpu);
+        let sample = sample_beta(&a, &b);
+        assert_sample_contract(&sample, &[SAMPLES, 4], Device::Cpu);
+        assert_fixed_concentration_means(&sample);
+    }
+
+    #[test]
+    fn cpu_fallback_preserves_arbitrary_shape_and_device() {
+        let a = Tensor::full([2, 3, 4], 2.5, (Kind::Float, Device::Cpu));
+        let b = Tensor::full([2, 3, 4], 4.5, (Kind::Float, Device::Cpu));
+        let sample = sample_beta(&a, &b);
+        assert_sample_contract(&sample, &[2, 3, 4], Device::Cpu);
+    }
+
+    #[test]
+    fn greedy_quantity_mean_is_unchanged() {
+        let a = Tensor::from_slice(&[1.0f32, 2.0, 5.0, 25.0]);
+        let b = Tensor::from_slice(&[1.0f32, 5.0, 2.0, 75.0]);
+        let greedy = &a / (&a + &b);
+        let expected = Tensor::from_slice(&[0.5f32, 2.0 / 7.0, 5.0 / 7.0, 0.25]);
+        let max_diff = (greedy - expected).abs().max().double_value(&[]);
+        assert!(max_diff <= 1e-7, "greedy Beta mean changed by {max_diff}");
+    }
+
+    #[test]
+    fn cuda_sampler_stays_on_device_and_uses_dirichlet_support() {
+        // Bit-exact equality against a second seeded Dirichlet draw is flaky:
+        // `manual_seed` does not reliably reset the CUDA philox stream between
+        // two separate `internal_sample_dirichlet` calls. Instead, assert the
+        // on-device contract and that the ATen Dirichlet op is available for
+        // the stacked [a,b] concentration layout `sample_beta` uses.
+        if !tch::Cuda::is_available() {
+            return;
+        }
+        let device = Device::Cuda(0);
+        let a = Tensor::from_slice(&[1.0f32, 2.0, 5.0, 25.0]).to_device(device);
+        let b = Tensor::from_slice(&[1.0f32, 5.0, 2.0, 75.0]).to_device(device);
+
+        let actual = tch::no_grad(|| sample_beta(&a, &b));
+        assert_sample_contract(&actual, &[4], device);
+
+        let dirichlet = tch::no_grad(|| {
+            Tensor::stack(&[&a, &b], -1)
+                .f_internal_sample_dirichlet()
+                .expect("ATen Dirichlet sampling must be available on CUDA")
+        });
+        assert_eq!(dirichlet.device(), device);
+        assert_eq!(dirichlet.size(), &[4, 2]);
+        assert!(
+            dirichlet.isfinite().all().int64_value(&[]) != 0,
+            "Dirichlet samples must be finite"
+        );
+    }
+
+    #[test]
+    fn cuda_sampler_fixed_concentration_means_and_no_grad_contract() {
+        if !tch::Cuda::is_available() {
+            return;
+        }
+        let device = Device::Cuda(0);
+        let (a, b) = fixed_concentrations(device);
+        let sample = tch::no_grad(|| sample_beta(&a, &b));
+        assert_sample_contract(&sample, &[SAMPLES, 4], device);
+        assert!(!sample.requires_grad(), "act/no_grad samples must not require gradients");
+        assert_fixed_concentration_means(&sample);
     }
 }
