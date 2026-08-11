@@ -47,16 +47,17 @@ docker run --rm -p 8086:8086 -v openfront-eval-data:/data openfront-eval
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RUN_NAME` | `ppo_v10` | HF policy run under `djmango/openfront-rl` |
+| `RUN_NAME` | `ppo_v11` | HF policy run under `djmango/openfront-rl` |
+| `SHOWCASE_FOLLOW_POLICY` | `1` | Derive watch stage + bots/nations/difficulty from `latest.state.json` + V10 table |
 | `PLAY_MAP` | `random` | Live play map key, or `random` to sample the curriculum pool |
 | `PLAY_BOTS` | `10` | Tribe bots |
 | `PLAY_NATIONS` | `1` | Nation opponents |
 | `PLAY_START_DELAY` | `15` | Lobby countdown (seconds) |
 | `PLAY_GREEDY` | `1` | Pass `--greedy` to webbot (`0` to sample) |
-| `STAGE` | `27` | Showcase UI label only - **not** the live trainer's `--stage` (pods train from checkpoint stage, usually starting at 0) |
-| `SHOWCASE_WATCH_STAGE` | (stage) | Stage passed to `oftrain --watch` for clip/replay opponents (independent of training progress) |
-| `SHOWCASE_BOTS` | `24` | Watch/replay bot count (matches live Easy ramp) |
-| `SHOWCASE_NATIONS` | `4` | Watch/replay nations |
+| `STAGE` | `23` | Fallback UI/watch stage when `SHOWCASE_FOLLOW_POLICY=0` |
+| `SHOWCASE_WATCH_STAGE` | (stage) | Fallback watch stage; ignored when follow-policy is on |
+| `SHOWCASE_BOTS` | `48` | Fallback bots (s23 table); ignored when follow-policy is on |
+| `SHOWCASE_NATIONS` | `5` | Fallback nations; ignored when follow-policy is on |
 | `SHOWCASE_V10` | `1` | Deprecated; watch is V10 by default |
 | `SHOWCASE_RECURRENT` | `auto` | Load recurrent policy for watch (`auto` = V10 default) |
 | `SHOWCASE_DEVICE` | daemon: `cuda` / clip: `cpu` | Watch device. One-shot `ofshowcase clip` defaults to `cpu` so busy trainers do not OOM; pass `--device cuda:0` to override |

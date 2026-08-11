@@ -15,5 +15,6 @@ pub use paths::{
 };
 pub use util::{
     featured_game_id, featured_showcase_entry, game_map_api_name, load_json, map_seed, policy_meta,
-    showcase_maps, utc_now, write_json, LEGACY_POLICY_RUNS,
+    showcase_follow_policy, showcase_lobby_for_stage, showcase_maps, utc_now, write_json,
+    LEGACY_POLICY_RUNS,
 };
