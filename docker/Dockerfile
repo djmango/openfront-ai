@@ -93,13 +93,15 @@ RUN --mount=type=cache,target=/root/.npm \
 ENV PATH="/app/.venv/bin:/app/openfront/node_modules/.bin:/app/rust/target/release:${PATH}"
 ENV PYTHONPATH=/app
 ENV DATA_DIR=/data
-ENV RUN_NAME=ppo_v10
-# Showcase UI / watch opponent stage only - independent of trainer --stage.
-ENV STAGE=27
-ENV SHOWCASE_WATCH_STAGE=27
-ENV SHOWCASE_BOTS=24
-ENV SHOWCASE_NATIONS=4
+ENV RUN_NAME=ppo_v11
+# Fallbacks only — ofshowcase follows the pulled checkpoint stage + V10 lobby
+# when SHOWCASE_FOLLOW_POLICY=1 (default).
+ENV STAGE=23
+ENV SHOWCASE_WATCH_STAGE=23
+ENV SHOWCASE_BOTS=48
+ENV SHOWCASE_NATIONS=5
 ENV SHOWCASE_DIFFICULTY=Easy
+ENV SHOWCASE_FOLLOW_POLICY=1
 ENV SHOWCASE_V10=1
 ENV SHOWCASE_RECURRENT=auto
 ENV CLIP_REUSE_SERVICES=auto
@@ -111,8 +113,8 @@ ENV CLIP_DEVICE_SCALE_FACTOR=1
 ENV OF_FORCE_SWIFTSHADER=1
 ENV REFRESH_HOURS=1
 ENV LIVE_SHOWCASE=0
-ENV AE_CKPT=weights/ae/ae_v31_d8c32.encoder.safetensors
-ENV SHOWCASE_COARSE_CKPT=weights/ae/ae_v31_d16c32.encoder.safetensors
+ENV AE_CKPT=weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors
+ENV SHOWCASE_COARSE_CKPT=weights/ae/ae_v32_nostatic_d16c32.encoder.safetensors
 ENV OFTRAIN_BIN=/app/rust/target/release/oftrain
 ENV OFSHOWCASE=/app/rust/target/release/ofshowcase
 

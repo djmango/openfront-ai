@@ -137,7 +137,7 @@ const LANDING_HTML: &str = r#"<!doctype html>
     <h1>OpenFront Agent</h1>
     <p class="lead">A reinforcement learning agent that plays
       <a href="https://openfront.io">OpenFront.io</a> on the real engine.
-      Current run <code>ppo_v10</code>: Easy→Impossible stage-table curriculum
+      Current run <code>ppo_v11</code>: Easy→Impossible stage-table curriculum
       across the broad map pool. Play it 1v1.</p>
     <figure class="preview">%%PREVIEW%%</figure>
     <div class="actions">
@@ -731,7 +731,7 @@ pub async fn run_hub(port: u16) -> Result<()> {
     let data = crate::paths::data_dir();
     std::fs::create_dir_all(&data)?;
 
-    let run_name = env_or("RUN_NAME", "ppo_v10");
+    let run_name = env_or("RUN_NAME", "ppo_v11");
     // Do not block hub bind on HF: play/debug/status must stay up even when Hub
     // is unreachable. Policy download is the daemon's job; webbot loads its own.
     eprintln!("[showcase_hub] starting (HF policy preload skipped; daemon owns weights)");

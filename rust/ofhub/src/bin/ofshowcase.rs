@@ -29,15 +29,15 @@ enum Cmd {
         /// Map key(s). Repeatable. Default: full curriculum pool.
         #[arg(long = "map")]
         maps: Vec<String>,
-        #[arg(long, env = "RUN_NAME", default_value = "ppo_v10")]
+        #[arg(long, env = "RUN_NAME", default_value = "ppo_v11")]
         run_name: String,
-        #[arg(long, env = "STAGE", default_value_t = 27)]
+        #[arg(long, env = "STAGE", default_value_t = 23)]
         stage: i64,
         #[arg(long, env = "SHOWCASE_WATCH_STAGE")]
         watch_stage: Option<i64>,
-        #[arg(long, env = "SHOWCASE_BOTS", default_value_t = 24)]
+        #[arg(long, env = "SHOWCASE_BOTS", default_value_t = 48)]
         bots: i64,
-        #[arg(long, env = "SHOWCASE_NATIONS", default_value = "4")]
+        #[arg(long, env = "SHOWCASE_NATIONS", default_value = "5")]
         nations: String,
         #[arg(long, env = "SHOWCASE_DIFFICULTY", default_value = "Easy")]
         difficulty: String,

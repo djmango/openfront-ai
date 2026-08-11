@@ -18,7 +18,8 @@ use serde_json::{json, Value};
 use crate::hf;
 use crate::paths::{clips_dir, data_dir, records_dir, repo_root, revision_path, state_path};
 use crate::util::{
-    featured_showcase_entry, load_json, map_seed, policy_meta, showcase_maps, utc_now, write_json,
+    featured_showcase_entry, load_json, map_seed, policy_meta, showcase_follow_policy,
+    showcase_lobby_for_stage, showcase_maps, utc_now, write_json,
 };
 
 fn env_or(key: &str, default: &str) -> String {
@@ -165,7 +166,7 @@ fn run_watch(
     let max_steps = env_or("SHOWCASE_MAX_STEPS", &default_steps);
     let coarse = env_or(
         "SHOWCASE_COARSE_CKPT",
-        "weights/ae/ae_v31_d16c32.encoder.safetensors",
+        "weights/ae/ae_v32_nostatic_d16c32.encoder.safetensors",
     );
     let coarse_path = {
         let p = PathBuf::from(&coarse);
@@ -597,13 +598,54 @@ async fn generate_showcase(
 }
 
 fn resolve_ae_path() -> PathBuf {
-    let ae = env_or("AE_CKPT", "weights/ae/ae_v31_d8c32.encoder.safetensors");
+    let ae = env_or(
+        "AE_CKPT",
+        "weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors",
+    );
     let p = PathBuf::from(&ae);
     if p.is_absolute() {
         p
     } else {
         repo_root().join(p)
     }
+}
+
+/// Resolve watch stage + lobby. With `SHOWCASE_FOLLOW_POLICY` (default on),
+/// prefer the pulled checkpoint's `stage` and the V10 density table.
+fn resolve_showcase_lobby(
+    policy: &Path,
+    stage_fallback: i64,
+    watch_stage_fallback: i64,
+    bots_fallback: i64,
+    nations_fallback: &str,
+    difficulty_fallback: &str,
+) -> (i64, i64, i64, String, String) {
+    if !showcase_follow_policy() {
+        return (
+            stage_fallback,
+            watch_stage_fallback,
+            bots_fallback,
+            nations_fallback.to_string(),
+            difficulty_fallback.to_string(),
+        );
+    }
+    let meta = policy_meta(policy).unwrap_or_else(|_| json!({}));
+    let policy_stage = meta
+        .get("policy_stage")
+        .and_then(Value::as_i64)
+        .unwrap_or(watch_stage_fallback);
+    let (bots, nations, difficulty) = showcase_lobby_for_stage(policy_stage.max(0) as usize);
+    log(&format!(
+        "follow-policy: update={:?} stage={policy_stage} lobby={bots}b/{nations}n {difficulty}",
+        meta.get("policy_update")
+    ));
+    (
+        policy_stage,
+        policy_stage,
+        bots,
+        nations.to_string(),
+        difficulty.to_string(),
+    )
 }
 
 /// One-shot MODEL-overlay clip generation (no forever loop).
@@ -625,16 +667,22 @@ pub struct ClipConfig {
 
 impl Default for ClipConfig {
     fn default() -> Self {
-        let stage: i64 = env_or("STAGE", "27").parse().unwrap_or(27);
+        // Fallbacks only — with SHOWCASE_FOLLOW_POLICY (default) these are
+        // replaced from the checkpoint stage + V10 density table after pull.
+        let (bots, nations, difficulty) = showcase_lobby_for_stage(23);
+        let stage_s = env_or("STAGE", "23");
+        let stage: i64 = stage_s.parse().unwrap_or(23);
+        let nations_s = nations.to_string();
+        let bots_s = bots.to_string();
         Self {
-            run_name: env_or("RUN_NAME", "ppo_v10"),
+            run_name: env_or("RUN_NAME", "ppo_v11"),
             stage,
-            watch_stage: env_or("SHOWCASE_WATCH_STAGE", &stage.to_string())
+            watch_stage: env_or("SHOWCASE_WATCH_STAGE", &stage_s)
                 .parse()
                 .unwrap_or(stage),
-            nations: env_or("SHOWCASE_NATIONS", "4"),
-            bots: env_or("SHOWCASE_BOTS", "24").parse().unwrap_or(24),
-            difficulty: env_or("SHOWCASE_DIFFICULTY", "Easy"),
+            nations: env_or("SHOWCASE_NATIONS", &nations_s),
+            bots: env_or("SHOWCASE_BOTS", &bots_s).parse().unwrap_or(bots),
+            difficulty: env_or("SHOWCASE_DIFFICULTY", difficulty),
             maps: Vec::new(),
             policy: None,
             force: false,
@@ -663,12 +711,13 @@ pub async fn run_clip(cfg: ClipConfig) -> Result<Value> {
         let name = ae
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("ae_v31_d8c32.encoder.safetensors");
+            .unwrap_or("ae_v32_nostatic_d8c32.encoder.safetensors");
         log(&format!("fetching AE encoder {name}"));
         let _ = hf::ensure_ae_encoder(&client, name, &ae).await;
     }
 
-    let policy = if let Some(p) = cfg.policy {
+    let mut cfg = cfg;
+    let policy = if let Some(p) = cfg.policy.take() {
         if !p.is_file() {
             bail!("policy not found: {}", p.display());
         }
@@ -676,6 +725,19 @@ pub async fn run_clip(cfg: ClipConfig) -> Result<Value> {
     } else {
         hf::ensure_policy(&client, &cfg.run_name).await?
     };
+    let (stage, watch_stage, bots, nations, difficulty) = resolve_showcase_lobby(
+        &policy,
+        cfg.stage,
+        cfg.watch_stage,
+        cfg.bots,
+        &cfg.nations,
+        &cfg.difficulty,
+    );
+    cfg.stage = stage;
+    cfg.watch_stage = watch_stage;
+    cfg.bots = bots;
+    cfg.nations = nations;
+    cfg.difficulty = difficulty;
 
     let maps = if cfg.maps.is_empty() {
         showcase_maps()
@@ -756,15 +818,20 @@ pub async fn run_clip(cfg: ClipConfig) -> Result<Value> {
 
 pub async fn run_daemon() -> Result<()> {
     fs::create_dir_all(data_dir())?;
-    // Defaults track the live V10 Easy-ramp run (broad map pool).
-    let run_name = env_or("RUN_NAME", "ppo_v10");
-    let stage: i64 = env_or("STAGE", "27").parse().unwrap_or(27);
-    let watch_stage: i64 = env_or("SHOWCASE_WATCH_STAGE", &stage.to_string())
+    // Defaults track live ppo_v11; lobby follows checkpoint stage unless
+    // SHOWCASE_FOLLOW_POLICY=0 (then STAGE/SHOWCASE_* envs win).
+    let run_name = env_or("RUN_NAME", "ppo_v11");
+    let stage_env: i64 = env_or("STAGE", "23").parse().unwrap_or(23);
+    let watch_stage_env: i64 = env_or("SHOWCASE_WATCH_STAGE", &stage_env.to_string())
         .parse()
-        .unwrap_or(stage);
-    let nations = env_or("SHOWCASE_NATIONS", "4");
-    let bots: i64 = env_or("SHOWCASE_BOTS", "24").parse().unwrap_or(24);
-    let difficulty = env_or("SHOWCASE_DIFFICULTY", "Easy");
+        .unwrap_or(stage_env);
+    let (bots_default, nations_default, difficulty_default) =
+        showcase_lobby_for_stage(watch_stage_env.max(0) as usize);
+    let nations_env = env_or("SHOWCASE_NATIONS", &nations_default.to_string());
+    let bots_env: i64 = env_or("SHOWCASE_BOTS", &bots_default.to_string())
+        .parse()
+        .unwrap_or(bots_default);
+    let difficulty_env = env_or("SHOWCASE_DIFFICULTY", difficulty_default);
     let refresh_hours: f64 = env_or("REFRESH_HOURS", "1").parse().unwrap_or(1.0);
 
     let ae = resolve_ae_path();
@@ -773,7 +840,7 @@ pub async fn run_daemon() -> Result<()> {
         let name = ae
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("ae_v31_d8c32.encoder.safetensors");
+            .unwrap_or("ae_v32_nostatic_d8c32.encoder.safetensors");
         log(&format!("fetching AE encoder {name}"));
         let _ = hf::ensure_ae_encoder(&client, name, &ae).await;
     }
@@ -782,9 +849,17 @@ pub async fn run_daemon() -> Result<()> {
         let mut sleep_hours = refresh_hours;
         match (async {
             let changed = policy_changed(&client, &run_name).await;
+            let policy = hf::ensure_policy(&client, &run_name).await?;
+            let (stage, watch_stage, bots, nations, difficulty) = resolve_showcase_lobby(
+                &policy,
+                stage_env,
+                watch_stage_env,
+                bots_env,
+                &nations_env,
+                &difficulty_env,
+            );
             let state = load_json(&state_path())?;
             if needs_showcase(&state, &run_name, watch_stage, changed) {
-                let policy = hf::ensure_policy(&client, &run_name).await?;
                 generate_showcase(
                     &client,
                     &policy,
@@ -804,7 +879,7 @@ pub async fn run_daemon() -> Result<()> {
                 }
             } else {
                 log(&format!(
-                    "showcase ready ({run_name}); next check in {refresh_hours}h"
+                    "showcase ready ({run_name} s{watch_stage}); next check in {refresh_hours}h"
                 ));
             }
             Ok::<(), anyhow::Error>(())
@@ -816,8 +891,7 @@ pub async fn run_daemon() -> Result<()> {
                 log(&format!("showcase generation failed: {e}"));
                 let mut state = load_json(&state_path()).unwrap_or_else(|_| json!({}));
                 if let Some(obj) = state.as_object_mut() {
-                    obj.insert("error".into(), json!(e.to_string()));
-                    obj.insert("failed_at".into(), json!(utc_now()));
+                    obj.insert("error".into(), json!(e.to_string()));                    obj.insert("failed_at".into(), json!(utc_now()));
                 }
                 let _ = write_json(&state_path(), &state);
                 sleep_hours = refresh_hours.min(0.25);
