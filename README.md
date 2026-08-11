@@ -199,10 +199,12 @@ encoders.
 - RL GameRecords: [djmango/openfront-replays](https://huggingface.co/datasets/djmango/openfront-replays)
   (sparse-turn parquet shards from training/watch; `ofhf replays` / `ofhf replays-pull`)
 - Encoders: [djmango/openfront-tile-autoencoder](https://huggingface.co/djmango/openfront-tile-autoencoder)
-  (`ae_v31_d8c32.pt`, `ae_v31_d8.pt`, `ae_v3.pt`)
-- Current Rust RL runs on HF use `latest.safetensors`,
-  `latest.state.json`, best-eval/milestone safetensors, and `manifest.json`
-  under the run name.
+  (`ae_v32_nostatic_*` / legacy `ae_v31_*`)
+- RL policies: [djmango/openfront-rl](https://huggingface.co/djmango/openfront-rl)
+  — **latest is `ppo_v11/latest.safetensors`** (see the
+  [model card](docs/hf/openfront-rl/README.md); Hub README is the same file).
+  Sparse milestones + curriculum snapshots only; prune with
+  `scripts/hf_prune_openfront_rl.py`.
 
 ## RL stack (Rust oftrain)
 
