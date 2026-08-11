@@ -351,11 +351,11 @@ fn empty_boat_was_net_positive_vs_waste_while_build_was_neutral() {
     assert_eq!(empty_build, 0.0);
     // Correct gate: no emitted intent → no combat bonus → pure -W_WASTE.
     assert_eq!(
-        ofcore::curriculum::v10_combat_action_bonus(ofcore::feat::A_BOAT, false, cfg),
+        ofcore::curriculum::v10_combat_action_bonus(ofcore::feat::A_BOAT, false, None, cfg),
         0.0
     );
     assert_eq!(
-        ofcore::curriculum::v10_combat_action_bonus(ofcore::feat::A_BUILD, false, cfg),
+        ofcore::curriculum::v10_combat_action_bonus(ofcore::feat::A_BUILD, false, None, cfg),
         0.0
     );
 }

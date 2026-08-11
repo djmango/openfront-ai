@@ -3,7 +3,7 @@
 
 use crate::feat::{
     A_ALLIANCE_REQUEST, A_ATTACK, A_BOAT, A_BREAK_ALLIANCE, A_BUILD, A_CANCEL_BOAT, A_DONATE_GOLD,
-    A_DONATE_TROOPS, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, EntsData,
+    A_DONATE_TROOPS, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, A_UPGRADE_STRUCTURE, EntsData,
 };
 use std::collections::{HashMap, VecDeque};
 
@@ -16,10 +16,10 @@ pub const W_DEATH: f64 = 1.0;
 pub const W_WASTE: f64 = 0.01;
 pub const PLACE_POW: f64 = 1.5;
 
-pub const K_LAND: f64 = 0.40;
-pub const K_MIL: f64 = 0.20;
-pub const K_ECO: f64 = 0.25;
-pub const K_BUILD: f64 = 0.15;
+pub const K_LAND: f64 = 0.35;
+pub const K_MIL: f64 = 0.18;
+pub const K_ECO: f64 = 0.27;
+pub const K_BUILD: f64 = 0.20;
 
 pub const DOMINANCE_EPS: f64 = 1e-9;
 pub const V83_CLOSEOUT_SHARE_START: f64 = 0.45;
@@ -43,12 +43,15 @@ pub const V10_NATION_INTRO_STAGE: usize = 8;
 pub const V10_ONE_NATION_WIN_AT: f64 = 0.80;
 /// First stage with 2+ nations (end of the 1-nation win-gate band).
 pub const V10_MULTI_NATION_STAGE: usize = 12;
-/// Softened gate for 2+ nation Easy density ramp and the starting point of
-/// the post-ramp smooth decay.
+/// Softened gate for 2+ nation Easy density ramp (`V10_MULTI_NATION_STAGE
+/// .. V10_EASY_RAMP_LEN`).
 pub const V10_NATION_RAMP_WIN_AT: f64 = 0.75;
+/// Gate for the Easy densify band and later (`V10_EASY_RAMP_LEN ..`).
+/// Lowered from 0.75 after s23/s24 plateaued for ~700 updates near WR 0.35.
+pub const V10_DENSIFY_WIN_AT: f64 = 0.50;
 /// Terminal Impossible-stage gate after the smooth decay from
-/// [`V10_NATION_RAMP_WIN_AT`].
-pub const V10_WIN_AT_END: f64 = 0.65;
+/// [`V10_DENSIFY_WIN_AT`].
+pub const V10_WIN_AT_END: f64 = 0.45;
 /// Floor for `lr * stage_lr_decay ^ stage`. Without this, mid-ladder stages
 /// decay to ~1e-6 and learning stalls even when the win gate is reachable.
 pub const V10_STAGE_LR_FLOOR: f64 = 1e-5;
@@ -762,24 +765,25 @@ pub const V10_BOT_NATION_DENSITY: [(u32, u32); V10_STAGE_COUNT] = [
     (30, 4), // 19
     (34, 4), // 20
     (38, 4), // 21
-    // --- Easy densify (22-27) ---
+    // --- Easy densify (22-27): longer 5-nation ramp, then first 6n ---
+    // Was a cliff (48/5 → 52/6 → 58/7) that demoted s24→23 at WR 0.075.
     (42, 5), // 22
-    (48, 5), // 23
-    (52, 6), // 24
-    (58, 7), // 25
-    (66, 8), // 26
-    (70, 9), // 27
+    (44, 5), // 23
+    (46, 5), // 24 stay on 5 nations
+    (48, 5), // 25
+    (50, 5), // 26 last pure 5n
+    (52, 6), // 27 first 6n (was 70/9)
     // --- closeout Easy (28-30) ---
-    (54, 6), // 28 CLOSEOUT
+    (56, 6), // 28 CLOSEOUT
     (60, 7), // 29
-    (68, 8), // 30
+    (66, 8), // 30
     // --- bridge-gate Easy (31-33) ---
-    (76, 9),  // 31 BRIDGE
-    (82, 10), // 32
-    (88, 10), // 33
+    (72, 8),  // 31 BRIDGE
+    (78, 9),  // 32
+    (84, 10), // 33
     // --- peak Easy (34-35) ---
-    (102, 12), // 34
-    (118, 14), // 35 peak Easy nations before Medium reset
+    (96, 12),  // 34
+    (110, 14), // 35 peak Easy nations before Medium reset
     // --- Medium (36-49): same lobbies as prior stages 68-81 ---
     (90, 4),   // 36 MEDIUM_START nation reset
     (94, 5),   // 37
@@ -922,8 +926,9 @@ pub const V10_PRIOR_BOT_NATION_DENSITY: [(u32, u32); V10_PRIOR_SIDECAR_LEN] = [
 ];
 
 /// Smooth win-rate gate: hold [`V10_RAMP_WIN_AT`] while bots-only, soften once
-/// nations appear, then ease from [`V10_NATION_RAMP_WIN_AT`] down to
-/// [`V10_WIN_AT_END`] by the final Impossible stage.
+/// nations appear ([`V10_ONE_NATION_WIN_AT`] / [`V10_NATION_RAMP_WIN_AT`]), then
+/// at densify ([`V10_EASY_RAMP_LEN`]) drop to [`V10_DENSIFY_WIN_AT`] and ease
+/// down to [`V10_WIN_AT_END`] by the final Impossible stage.
 pub fn v10_win_at_for_stage(index: usize) -> f64 {
     debug_assert!(index < V10_STAGE_COUNT);
     if index < V10_NATION_INTRO_STAGE {
@@ -938,7 +943,7 @@ pub fn v10_win_at_for_stage(index: usize) -> f64 {
     let span = (V10_STAGE_COUNT - 1 - V10_EASY_RAMP_LEN) as f64;
     let t = (index - V10_EASY_RAMP_LEN) as f64 / span;
     let s = t * t * (3.0 - 2.0 * t);
-    V10_NATION_RAMP_WIN_AT - s * (V10_NATION_RAMP_WIN_AT - V10_WIN_AT_END)
+    V10_DENSIFY_WIN_AT - s * (V10_DENSIFY_WIN_AT - V10_WIN_AT_END)
 }
 
 /// `max(floor, base_lr * decay ^ stage)` - shared by advance/demote/resume.
@@ -1338,13 +1343,39 @@ pub fn v10_diplo_panic_penalty(
     }
 }
 
+/// Multiplier on [`RewardConfig::v10_combat_action`] for a successful build.
+///
+/// Prefers economy (City/Factory/Port) over Defense Post spam — watches at
+/// s23/s24 showed builds dominated by Defense Posts while Cities/Factories
+/// were rare even in long games.
+pub fn v10_build_type_multiplier(build_type: i64) -> f64 {
+    match build_type {
+        0 => 2.0,  // City
+        1 => 1.5,  // Port
+        5 => 2.0,  // Factory
+        6 => 1.0,  // Warship
+        2 => 0.25, // Defense Post
+        3 => 0.75, // Missile Silo
+        4 => 1.0,  // SAM Launcher
+        _ => 0.5,
+    }
+}
+
 /// Small prior for productive combat/build actions (targeted attack/boat, build).
 ///
 /// `has_target` must mean the action actually emitted a usable intent
 /// (translated tile / player), not merely that the policy sampled a head
 /// value. Paying boat/build bonuses on empty translates made empty boats
 /// net-positive vs waste and suppressed real builds.
-pub fn v10_combat_action_bonus(action: i64, has_target: bool, config: RewardConfig) -> f64 {
+///
+/// `build_type` is the `feat::BUILD_TYPES` index when `action == A_BUILD`;
+/// ignored otherwise. Pass `None` for unknown/empty builds (falls back to 0.5×).
+pub fn v10_combat_action_bonus(
+    action: i64,
+    has_target: bool,
+    build_type: Option<i64>,
+    config: RewardConfig,
+) -> f64 {
     if config.v10_combat_action == 0.0 {
         return 0.0;
     }
@@ -1352,17 +1383,19 @@ pub fn v10_combat_action_bonus(action: i64, has_target: bool, config: RewardConf
     match action {
         A_ATTACK if has_target => coef,
         A_BOAT if has_target => coef * 0.75,
-        A_BUILD if has_target => coef * 0.5,
+        A_BUILD if has_target => coef * v10_build_type_multiplier(build_type.unwrap_or(-1)),
+        // Leveling Cities/Factories is real eco progress.
+        A_UPGRADE_STRUCTURE if has_target => coef * 1.25,
         _ => 0.0,
     }
 }
 
 /// Net shaping an empty boat/build translate used to receive under V10:
 /// combat-action bonus counted `tile_region.is_some()` as a target, so a
-/// wasted empty boat was `+0.015 - W_WASTE = +0.005` (free EV). Builds
+/// wasted empty boat was `+0.015 - W_WASTE = +0.005` (free EV). Generic builds
 /// were `+0.01 - W_WASTE = 0`. Callers must require a real emitted intent.
 pub fn v10_empty_action_net_reward(action: i64, config: RewardConfig) -> f64 {
-    let bogus_bonus = v10_combat_action_bonus(action, true, config);
+    let bogus_bonus = v10_combat_action_bonus(action, true, None, config);
     bogus_bonus - W_WASTE
 }
 
@@ -1594,12 +1627,31 @@ mod tests {
             v10_diplo_panic_penalty(A_EMBARGO, 0.10, 600, 1000, cfg),
             -0.08
         );
-        assert_eq!(v10_combat_action_bonus(A_ATTACK, true, cfg), 0.02);
-        assert_eq!(v10_combat_action_bonus(A_ATTACK, false, cfg), 0.0);
-        assert_eq!(v10_combat_action_bonus(A_BOAT, true, cfg), 0.015);
-        assert_eq!(v10_combat_action_bonus(A_BOAT, false, cfg), 0.0);
-        assert_eq!(v10_combat_action_bonus(A_BUILD, true, cfg), 0.01);
-        assert_eq!(v10_combat_action_bonus(A_BUILD, false, cfg), 0.0);
+        assert_eq!(v10_combat_action_bonus(A_ATTACK, true, None, cfg), 0.02);
+        assert_eq!(v10_combat_action_bonus(A_ATTACK, false, None, cfg), 0.0);
+        assert_eq!(v10_combat_action_bonus(A_BOAT, true, None, cfg), 0.015);
+        assert_eq!(v10_combat_action_bonus(A_BOAT, false, None, cfg), 0.0);
+        assert_eq!(v10_combat_action_bonus(A_BUILD, true, None, cfg), 0.01);
+        assert_eq!(v10_combat_action_bonus(A_BUILD, false, None, cfg), 0.0);
+        assert_eq!(
+            v10_combat_action_bonus(A_BUILD, true, Some(0), cfg),
+            0.04,
+            "City should pay 2× combat-action"
+        );
+        assert_eq!(
+            v10_combat_action_bonus(A_BUILD, true, Some(5), cfg),
+            0.04,
+            "Factory should pay 2× combat-action"
+        );
+        assert_eq!(
+            v10_combat_action_bonus(A_BUILD, true, Some(2), cfg),
+            0.005,
+            "Defense Post should be nerfed vs City/Factory"
+        );
+        assert_eq!(
+            v10_combat_action_bonus(A_UPGRADE_STRUCTURE, true, None, cfg),
+            0.025
+        );
         // Historical bug: counting sampled tile heads as targets made empty
         // boats net-positive and empty builds reward-neutral.
         assert!(v10_empty_action_net_reward(A_BOAT, cfg) > 0.0);
@@ -2033,9 +2085,22 @@ mod tests {
             V10_NATION_RAMP_WIN_AT
         );
         assert_eq!(v10[V10_EASY_RAMP_LEN - 1].win_at, V10_NATION_RAMP_WIN_AT);
+        assert_eq!(v10[V10_EASY_RAMP_LEN].win_at, V10_DENSIFY_WIN_AT);
+        assert!((V10_DENSIFY_WIN_AT - 0.50).abs() < 1e-9);
+        assert!(v10[V10_CLOSEOUT_STAGE].win_at <= V10_DENSIFY_WIN_AT + 1e-12);
         assert!(v10[V10_CLOSEOUT_STAGE].win_at < V10_NATION_RAMP_WIN_AT);
         assert!(v10[V10_CLOSEOUT_STAGE].win_at > V10_WIN_AT_END - 1e-9);
         assert!((v10[V10_STAGE_COUNT - 1].win_at - V10_WIN_AT_END).abs() < 1e-9);
+        // Longer 5-nation densify before first 6n.
+        for index in 22..=26 {
+            assert_eq!(
+                v10[index].nations,
+                Nations::Exact(5),
+                "stage {index} should stay on 5 nations"
+            );
+        }
+        assert_eq!(v10[27].nations, Nations::Exact(6));
+        assert!(v10[23].bots < 48, "s23 should be softer than the old 48/5 wall");
         assert!((stage_learning_rate(2.5e-4, 0.85, 28, V10_STAGE_LR_FLOOR)
             - V10_STAGE_LR_FLOOR)
             .abs()
