@@ -163,9 +163,14 @@ def main() -> int:
         time.sleep(1)
 
     if args.upload_readme:
-        print(f"[prune] uploading model card {args.upload_readme}", flush=True)
+        from pathlib import Path
+
+        readme_path = Path(args.upload_readme).expanduser().resolve()
+        if not readme_path.is_file():
+            raise SystemExit(f"README not found: {readme_path}")
+        print(f"[prune] uploading model card {readme_path}", flush=True)
         api.upload_file(
-            path_or_fileobj=args.upload_readme,
+            path_or_fileobj=str(readme_path),
             path_in_repo="README.md",
             repo_id=args.repo_id,
             repo_type="model",
