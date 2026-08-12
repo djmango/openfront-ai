@@ -26,6 +26,41 @@ pub fn showcase_maps() -> Vec<String> {
     maps
 }
 
+/// Lobby density + difficulty for a V10 curriculum stage (bots, nations, label).
+///
+/// Showcase watches must match the stage table the policy is actually on —
+/// hardcoding stale Easy/24b/4n lobbies while the trainer is on denser stages
+/// (or later Medium/Hard) produces out-of-distribution clips.
+pub fn showcase_lobby_for_stage(stage: usize) -> (i64, i64, &'static str) {
+    use ofcore::curriculum::{
+        V10_BOT_NATION_DENSITY, V10_HARD_START, V10_IMPOSSIBLE_START, V10_MEDIUM_START,
+    };
+    let idx = stage.min(V10_BOT_NATION_DENSITY.len().saturating_sub(1));
+    let (bots, nations) = V10_BOT_NATION_DENSITY[idx];
+    let difficulty = if idx < V10_MEDIUM_START {
+        "Easy"
+    } else if idx < V10_HARD_START {
+        "Medium"
+    } else if idx < V10_IMPOSSIBLE_START {
+        "Hard"
+    } else {
+        "Impossible"
+    };
+    (i64::from(bots), i64::from(nations), difficulty)
+}
+
+/// When true (default), daemon/clip derive watch stage + lobby from the
+/// pulled policy's `latest.state.json` instead of stale STAGE/SHOWCASE_* envs.
+pub fn showcase_follow_policy() -> bool {
+    match std::env::var("SHOWCASE_FOLLOW_POLICY") {
+        Ok(v) => {
+            let t = v.trim().to_ascii_lowercase();
+            !(t == "0" || t == "false" || t == "no" || t == "off")
+        }
+        Err(_) => true,
+    }
+}
+
 pub fn map_seed(map_name: &str) -> String {
     map_name.to_ascii_lowercase().replace(' ', "_")
 }
@@ -257,5 +292,14 @@ mod tests {
         assert_eq!(game_map_api_name("BlackSea"), "Black Sea");
         assert_eq!(game_map_api_name("BetweenTwoSeas"), "Between Two Seas");
         assert_eq!(game_map_api_name("Black Sea"), "Black Sea");
+    }
+
+    #[test]
+    fn showcase_lobby_tracks_v10_density_and_difficulty_bands() {
+        assert_eq!(showcase_lobby_for_stage(16), (26, 3, "Easy"));
+        assert_eq!(showcase_lobby_for_stage(23), (48, 5, "Easy"));
+        assert_eq!(showcase_lobby_for_stage(36), (90, 4, "Medium"));
+        assert_eq!(showcase_lobby_for_stage(50), (130, 6, "Hard"));
+        assert_eq!(showcase_lobby_for_stage(60), (155, 8, "Impossible"));
     }
 }

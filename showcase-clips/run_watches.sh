@@ -10,7 +10,7 @@ cd /workspace
 export PATH="/workspace/rust/.libtorch-venv/bin:$PATH"
 TORCH_ROOT="/workspace/rust/.libtorch-venv/lib/python3.11/site-packages"
 export LD_LIBRARY_PATH="${TORCH_ROOT}/torch/lib:${TORCH_ROOT}/nvidia/cu13/lib:${TORCH_ROOT}/nvidia/cudnn/lib:${LD_LIBRARY_PATH:-}"
-mkdir -p showcase-clips /opt/cursor/artifacts
+mkdir -p showcase-clips /workspace/artifacts
 
 POLICY=rust/checkpoints/ppo_v11/latest.safetensors
 STATE=rust/checkpoints/ppo_v11/latest.state.json

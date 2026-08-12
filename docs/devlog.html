@@ -84,27 +84,26 @@
 </nav>
 
 <div class="now" id="now">
-  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - July 27th, 2026</h2>
-  <p><b><code>ppo_v11</code> live on <b>4×A100 80GB</b></b> at update <b>806</b> /
-  stage <b>16</b> (~3.34M steps, 40 envs/shard). Still on s16 (26 bots /
-  <b>3 nations</b>, Easy) since u692 (~114 updates / ~21 h). Window WR
-  climbed from the ~0.075 trough through a brief <b>0.75 gate touch at
-  u801</b>, then slipped to ~<b>0.625</b> / DR ~0.20 by u806. Cadence
-  ~5.4 updates/hr. Train tick budget
-  <code>--max-episode-ticks 21000</code>.</p>
-  <p><b>AE v3.2 no-static</b> remains the live encoder pair
-  (<code>ae_v32_nostatic_d8c32</code> / <code>d16c32</code>).
-  Recent s16 games (u806, stochastic, 26b/3n Easy):
-  <a href="https://share.skg.gg/u/1uSQdl.webm">Europe</a> (timeout@21001) ·
-  <a href="https://share.skg.gg/u/qoNENe.webm">World</a> (death@16071) ·
-  <a href="https://share.skg.gg/u/j6vXAU.webm">Asia</a> (death@10611).
+  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 11th, 2026</h2>
+  <p><b><code>ppo_v11</code></b> at update <b>2486</b> / stage <b>23</b>
+  (~16.2M steps). Live lobby is Easy densify with <b>5 nations</b>
+  (curriculum densify band; Hard starts at stage <b>50</b>). Window WR
+  ~<b>0.425</b> / DR ~0.40 / CR ~0.825. Train tick budget
+  <code>--max-episode-ticks 21000</code>, decision_ticks=15, AE v3.2
+  no-static.</p>
+  <p>Fresh stochastic Node watches at the current stage (u2486):
+  <a href="https://share.skg.gg/u/mVp6gU.webm">Pangaea</a> (win@7771) ·
+  <a href="https://share.skg.gg/u/4iMMic.webm">Europe</a> (timeout@21001) ·
+  <a href="https://share.skg.gg/u/0xCL4E.webm">World</a> (death@16531).
+  OOD Medium stretch (s36, 90b/4n):
+  <a href="https://share.skg.gg/u/66idcY.webm">Europe</a> (death@10051).
   Scripts: <code>run_recent_watches.sh</code> /
-  <code>run_progress_watches.sh</code>.</p>
+  <code>render_u2486.sh</code>.</p>
   <p class="d" style="margin:.75rem 0 0">
-  Compressed ladder: Surpass/closeout ≈ stage <b>28</b>; first
-  <b>Medium = stage 36</b>. Near the s16 gate now — surpass
-  ~<b>Jul 28-29</b> UTC (base <b>Jul 29-30</b>); Medium
-  ~<b>Jul 29-31</b> UTC. Another WR slip like u801→u806 adds hours.</p>
+  Showcase hub defaults now follow <code>ppo_v11/latest</code> + checkpoint
+  stage (<code>SHOWCASE_FOLLOW_POLICY=1</code>) so openfrontai.skg.gg stops
+  regenerating stale early-run clips. Redeploy with
+  <code>docker/homelab_deploy.sh</code> to refresh the live hero.</p>
 </div>
 
 
