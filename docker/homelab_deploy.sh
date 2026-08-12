@@ -33,17 +33,19 @@ docker run -d \
   -p 127.0.0.1:8086:8086 \
   -p "[::1]:8086:8086" \
   -v "$DATA:/data" \
-  -e RUN_NAME="${RUN_NAME:-ppo_v10}" \
-  -e STAGE="${STAGE:-27}" \
-  -e SHOWCASE_WATCH_STAGE="${SHOWCASE_WATCH_STAGE:-27}" \
-  -e SHOWCASE_BOTS="${SHOWCASE_BOTS:-24}" \
-  -e SHOWCASE_NATIONS="${SHOWCASE_NATIONS:-4}" \
+  -e RUN_NAME="${RUN_NAME:-ppo_v11}" \
+  -e STAGE="${STAGE:-23}" \
+  -e SHOWCASE_WATCH_STAGE="${SHOWCASE_WATCH_STAGE:-23}" \
+  -e SHOWCASE_BOTS="${SHOWCASE_BOTS:-48}" \
+  -e SHOWCASE_NATIONS="${SHOWCASE_NATIONS:-5}" \
   -e SHOWCASE_DIFFICULTY="${SHOWCASE_DIFFICULTY:-Easy}" \
+  -e SHOWCASE_FOLLOW_POLICY="${SHOWCASE_FOLLOW_POLICY:-1}" \
   -e SHOWCASE_V10="${SHOWCASE_V10:-1}" \
   -e REFRESH_HOURS="${REFRESH_HOURS:-1}" \
   -e LIVE_SHOWCASE="${LIVE_SHOWCASE:-0}" \
   -e CLIP_MAX_SEC="${CLIP_MAX_SEC:-0}" \
-  -e AE_CKPT="${AE_CKPT:-weights/ae/ae_v31_d8c32.encoder.safetensors}" \
+  -e AE_CKPT="${AE_CKPT:-weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors}" \
+  -e SHOWCASE_COARSE_CKPT="${SHOWCASE_COARSE_CKPT:-weights/ae/ae_v32_nostatic_d16c32.encoder.safetensors}" \
   -e PLAY_MAP="${PLAY_MAP:-random}" \
   -e PLAY_BOTS="${PLAY_BOTS:-10}" \
   -e PLAY_NATIONS="${PLAY_NATIONS:-1}" \
