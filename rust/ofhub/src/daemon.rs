@@ -212,11 +212,14 @@ fn run_watch(
         "--debug".into(),
         "true".into(),
         // Match the live training recipe so VarStore load is strict.
+        // clap ArgAction::Set requires an explicit true/false value.
         "--foveate".into(),
+        "true".into(),
     ];
     // AMP is CUDA-oriented; skip it for CPU watch (busy-pod clip default).
     if use_cuda {
         args.push("--amp".into());
+        args.push("true".into());
     }
     if coarse_path.is_file() {
         args.push("--coarse-ckpt".into());
@@ -230,7 +233,9 @@ fn run_watch(
     };
     if recurrent {
         args.push("--persistent-actors".into());
+        args.push("true".into());
         args.push("--recurrent-policy".into());
+        args.push("true".into());
     }
     let status = Command::new(&bin)
         .args(&args)
