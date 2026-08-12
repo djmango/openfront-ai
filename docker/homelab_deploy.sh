@@ -44,8 +44,8 @@ docker run -d \
   -e REFRESH_HOURS="${REFRESH_HOURS:-1}" \
   -e LIVE_SHOWCASE="${LIVE_SHOWCASE:-0}" \
   -e CLIP_MAX_SEC="${CLIP_MAX_SEC:-0}" \
-  -e AE_CKPT="${AE_CKPT:-weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors}" \
-  -e SHOWCASE_COARSE_CKPT="${SHOWCASE_COARSE_CKPT:-weights/ae/ae_v32_nostatic_d16c32.encoder.safetensors}" \
+  -e AE_CKPT="${AE_CKPT:-/data/weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors}" \
+  -e SHOWCASE_COARSE_CKPT="${SHOWCASE_COARSE_CKPT:-/data/weights/ae/ae_v32_nostatic_d16c32.encoder.safetensors}" \
   -e PLAY_MAP="${PLAY_MAP:-random}" \
   -e PLAY_BOTS="${PLAY_BOTS:-10}" \
   -e PLAY_NATIONS="${PLAY_NATIONS:-1}" \
