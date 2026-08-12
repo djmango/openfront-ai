@@ -84,26 +84,28 @@
 </nav>
 
 <div class="now" id="now">
-  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 11th, 2026</h2>
-  <p><b><code>ppo_v11</code></b> at update <b>2486</b> / stage <b>23</b>
-  (~16.2M steps). Live lobby is Easy densify with <b>5 nations</b>
-  (curriculum densify band; Hard starts at stage <b>50</b>). Window WR
-  ~<b>0.425</b> / DR ~0.40 / CR ~0.825. Train tick budget
-  <code>--max-episode-ticks 21000</code>, decision_ticks=15, AE v3.2
-  no-static.</p>
-  <p>Fresh stochastic Node watches at the current stage (u2486):
+  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 12th, 2026</h2>
+  <p><b><code>ppo_v11</code></b> at update <b>2561</b> / stage <b>26</b>
+  (~16.8M steps). Live lobby is Easy densify (Hard starts at stage
+  <b>50</b>). Train tick budget <code>--max-episode-ticks 21000</code>,
+  decision_ticks=15, AE v3.2 no-static.</p>
+  <p>Compute move: leaving the 4×A100 RunPod burn for a slower
+  <b>1×H100</b> on
+  <a href="https://givemeanode.com">Give Me A Node</a>
+  (San Francisco Compute Company) so the remaining ~$500 credits last.
+  Thank you <a href="https://x.com/evanjconrad">Evan Conrad</a> and
+  SF Compute for the GPU grant - that keeps this open-source run alive
+  after the RunPod balance ran out.</p>
+  <p>Fresh stochastic Node watches (u2486 / stage 23):
   <a href="https://share.skg.gg/u/mVp6gU.webm">Pangaea</a> (win@7771) ·
   <a href="https://share.skg.gg/u/4iMMic.webm">Europe</a> (timeout@21001) ·
   <a href="https://share.skg.gg/u/0xCL4E.webm">World</a> (death@16531).
   OOD Medium stretch (s36, 90b/4n):
-  <a href="https://share.skg.gg/u/66idcY.webm">Europe</a> (death@10051).
-  Scripts: <code>run_recent_watches.sh</code> /
-  <code>render_u2486.sh</code>.</p>
+  <a href="https://share.skg.gg/u/66idcY.webm">Europe</a> (death@10051).</p>
   <p class="d" style="margin:.75rem 0 0">
-  Showcase hub defaults now follow <code>ppo_v11/latest</code> + checkpoint
-  stage (<code>SHOWCASE_FOLLOW_POLICY=1</code>) so openfrontai.skg.gg stops
-  regenerating stale early-run clips. Redeploy with
-  <code>docker/homelab_deploy.sh</code> to refresh the live hero.</p>
+  Showcase hub follows <code>ppo_v11/latest</code> + checkpoint stage
+  (<code>SHOWCASE_FOLLOW_POLICY=1</code>). Live site:
+  <a href="https://openfrontai.skg.gg">openfrontai.skg.gg</a>.</p>
 </div>
 
 
