@@ -4100,6 +4100,8 @@ pub fn run_benchmark(cfg: BenchmarkConfig<'_>) -> Result<()> {
                     "embargo_embargo_stop": info.action_pair_counts.embargo_embargo_stop,
                     "attack_retreat": info.action_pair_counts.attack_retreat,
                     "retreat_attack": info.action_pair_counts.retreat_attack,
+                    "alliance_request_break": info.action_pair_counts.alliance_request_break,
+                    "break_alliance_request": info.action_pair_counts.break_alliance_request,
                     "total": info.action_pair_counts.total(),
                 },
             })
@@ -7823,7 +7825,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             for info in &result.ep_infos {
                 if debug_eps {
                     eprintln!(
-                        "[ep] reward={:.3} components[str={:.3} delta={:.3} dom={:.3} churn={:.3} waste={:.3} death={:.3} terminal={:.3}] churn_pairs[boat_cancel={} embargo_stop={} attack_retreat={} retreat_attack={}] len={} tiles={:.1} tick={} place={}/{} score={:.3} won={} wasted={} stage={} rehearsal={} map={}",
+                        "[ep] reward={:.3} components[str={:.3} delta={:.3} dom={:.3} churn={:.3} waste={:.3} death={:.3} terminal={:.3}] churn_pairs[boat_cancel={} embargo_stop={} attack_retreat={} retreat_attack={} ally_break={} break_ally={}] len={} tiles={:.1} tick={} place={}/{} score={:.3} won={} wasted={} stage={} rehearsal={} map={}",
                         info.reward,
                         info.reward_components.strength,
                         info.reward_components.strength_delta,
@@ -7836,6 +7838,8 @@ pub fn run(mut cfg: Config) -> Result<()> {
                         info.action_pair_counts.embargo_embargo_stop,
                         info.action_pair_counts.attack_retreat,
                         info.action_pair_counts.retreat_attack,
+                        info.action_pair_counts.alliance_request_break,
+                        info.action_pair_counts.break_alliance_request,
                         info.length,
                         info.final_tiles,
                         info.final_tick,
@@ -7884,6 +7888,8 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     "action_pairs/embargo_embargo_stop": info.action_pair_counts.embargo_embargo_stop,
                     "action_pairs/attack_retreat": info.action_pair_counts.attack_retreat,
                     "action_pairs/retreat_attack": info.action_pair_counts.retreat_attack,
+                    "action_pairs/alliance_request_break": info.action_pair_counts.alliance_request_break,
+                    "action_pairs/break_alliance_request": info.action_pair_counts.break_alliance_request,
                     "action_pairs/total": info.action_pair_counts.total(),
                     "final_land_share": info.final_land_share,
                     "max_land_share": info.max_land_share,

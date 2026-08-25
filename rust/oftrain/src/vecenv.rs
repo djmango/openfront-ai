@@ -18,7 +18,7 @@ use ofcore::curriculum::{
     self, ActionChurnTracker, ActionPairCounts, ActionTarget, BoatOutcomeCounts, ChosenAction,
     CombatOutcome, CurriculumSchedule, DominanceShaper, InverseActionPair, RewardComponents,
     RewardConfig, Stage, TRANSPORT_UNIT_CLASS, V83_CLOSEOUT_SHARE_START, W_STR, W_WASTE,
-    DUO_SOLO_SCALE, W_DUO_ALLY_REQUEST, W_DUO_DONATE_PARTNER, action_churn_penalty,
+    DUO_SOLO_SCALE, action_churn_penalty,
     boat_outcome_reward, classify_boat_resolution, closeout_potential, combat_outcome_reward,
     dominance_potential, duo_synergy_reward, duo_welfare_reward, embargo_stop_outcome_reward,
     fast_win_bonus, formally_allied, land_share, normalized_strength_share, placement,
@@ -28,8 +28,9 @@ use ofcore::curriculum::{
     v83_action_churn_penalty,
 };
 use ofcore::feat::{
-    self, A_ALLIANCE_REQUEST, A_ATTACK, A_BOAT, A_BUILD, A_CANCEL_BOAT, A_DONATE_GOLD,
-    A_DONATE_TROOPS, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, ACTIONS, IS_LAND_BIT, MAG_MASK, REGION,
+    self, A_ALLIANCE_REQUEST, A_ATTACK, A_BOAT, A_BREAK_ALLIANCE, A_BUILD, A_CANCEL_BOAT,
+    A_DONATE_GOLD, A_DONATE_TROOPS, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, ACTIONS, IS_LAND_BIT,
+    MAG_MASK, REGION,
 };
 use ofcore::translate::{Choice, IntentTranslator, translate};
 
@@ -802,8 +803,8 @@ fn churn_action(
     boats_after: &[usize],
 ) -> ChosenAction {
     let target = match choice.action {
-        A_ATTACK | A_EMBARGO | A_EMBARGO_STOP | A_ALLIANCE_REQUEST | A_DONATE_GOLD
-        | A_DONATE_TROOPS if !intents.is_empty() => {
+        A_ATTACK | A_EMBARGO | A_EMBARGO_STOP | A_ALLIANCE_REQUEST | A_BREAK_ALLIANCE
+        | A_DONATE_GOLD | A_DONATE_TROOPS if !intents.is_empty() => {
             selected_player_id(choice, lut, ents).map(ActionTarget::Player)
         }
         A_RETREAT => intents
@@ -1905,24 +1906,9 @@ impl EnvWorker {
             self.was_alive[i] = obs_alive;
 
             if n > 1 {
-                let mut duo_r = welfare + synergy;
-                let partner = if i == 0 { partner_me } else { me_pre[0] };
-                if emitted_ok {
-                    if choice.action == A_ALLIANCE_REQUEST {
-                        if let Some(ActionTarget::Player(tid)) = chosen_action.target {
-                            if tid == partner {
-                                duo_r += W_DUO_ALLY_REQUEST;
-                            }
-                        }
-                    }
-                    if choice.action == A_DONATE_GOLD || choice.action == A_DONATE_TROOPS {
-                        if let Some(ActionTarget::Player(tid)) = chosen_action.target {
-                            if tid == partner {
-                                duo_r += W_DUO_DONATE_PARTNER;
-                            }
-                        }
-                    }
-                }
+                // Outcome-only: welfare + being alive/allied. Do not pay
+                // alliance_request or donate actions (those were a timeout farm).
+                let duo_r = welfare + synergy;
                 components.duo = duo_r;
                 reward += duo_r;
             }
@@ -2107,6 +2093,28 @@ mod churn_action_tests {
                 &[]
             ),
             ChosenAction::new(A_RETREAT, Some(ActionTarget::Player(5)))
+        );
+        assert_eq!(
+            churn_action(
+                &choice(A_ALLIANCE_REQUEST, Some(target_slot), None),
+                &lut,
+                &ents,
+                &[json!({"type": "allianceRequest", "recipientID": "target"})],
+                &[],
+                &[]
+            ),
+            ChosenAction::new(A_ALLIANCE_REQUEST, Some(ActionTarget::Player(5)))
+        );
+        assert_eq!(
+            churn_action(
+                &choice(A_BREAK_ALLIANCE, Some(target_slot), None),
+                &lut,
+                &ents,
+                &[json!({"type": "breakAlliance", "recipientID": "target"})],
+                &[],
+                &[]
+            ),
+            ChosenAction::new(A_BREAK_ALLIANCE, Some(ActionTarget::Player(5)))
         );
         assert_eq!(
             churn_action(
