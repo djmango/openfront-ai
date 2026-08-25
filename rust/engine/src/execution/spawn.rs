@@ -59,15 +59,20 @@ impl Execution for SpawnExecution {
         }
         let spawned = execute_player_spawn(game, &self.player_info, self.tile, &mut self.random);
         // TS `SpawnExecution.tick`: in singleplayer the spawn phase ends
-        // the moment the human player picks a spawn (GameRunner never adds
-        // a SpawnTimerExecution for singleplayer). Without this the RL
-        // path's game stays in the spawn phase forever - empty legality,
-        // no PlayerExecutions ticking, no win check.
+        // when the (typically one) human picks a spawn. Duo co-training
+        // has two humans; ending on the first pick would leave the partner
+        // unable to spawn under empty post-spawn legality. Wait until every
+        // human has a spawn tile. One-human FFA is unchanged.
         if spawned
             && game.wire.game_type() == "Singleplayer"
             && self.player_info.player_type == PlayerType::Human
         {
-            game.end_spawn_phase();
+            let humans_pending = game.all_players().iter().any(|p| {
+                p.player_type == PlayerType::Human && !game.has_spawned(p.small_id)
+            });
+            if !humans_pending {
+                game.end_spawn_phase();
+            }
         }
     }
 

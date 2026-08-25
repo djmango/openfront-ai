@@ -596,6 +596,10 @@ pub fn make_clut(lut: &[u8], me: i64, ents: &EntsData) -> [u8; MAX_SLOTS] {
     let me_slot: usize = if me >= 0 { slot_of(me as usize) } else { 0 };
     let mut clut = [3u8; MAX_SLOTS];
     clut[0] = 0;
+    // Formal `AllianceE` rows only. Team-mode teammates are already
+    // friendly (no-attack / donate) without a pact, but they stay
+    // class-3 here until they `alliance_request` — that pact is also
+    // what unlocks ally train gold (35k vs 25k team rate).
     for a in &ents.alliances {
         let (sa, sb) = (slot_of(a.0), slot_of(a.1));
         if sa == me_slot && sb < MAX_SLOTS {
@@ -1339,4 +1343,40 @@ pub fn legal_tile_mask(
         }
     }
     lt
+}
+
+#[cfg(test)]
+mod clut_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn teammates_are_enemies_in_clut_until_they_formally_ally() {
+        let ents = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true},
+                {"id": 2, "pid": "AGENTRL2", "alive": true}
+            ],
+            "units": [],
+            "attacks": [],
+            "alliances": []
+        }));
+        let lut = make_lut(&[1, 2]);
+        let clut = make_clut(&lut, 1, &ents);
+        let partner = lut[2] as usize;
+        assert_eq!(clut[partner], 3, "no pact → class-3 enemy, not class-2 ally");
+
+        let allied = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true},
+                {"id": 2, "pid": "AGENTRL2", "alive": true}
+            ],
+            "units": [],
+            "attacks": [],
+            "alliances": [[1, 2, 800]]
+        }));
+        let clut = make_clut(&lut, 1, &allied);
+        assert_eq!(clut[partner], 2, "formal pact → class-2 ally");
+        assert_eq!(clut[lut[1] as usize], 1);
+    }
 }

@@ -266,6 +266,8 @@ pub struct RewardComponents {
     pub waste: f64,
     pub death: f64,
     pub terminal: f64,
+    /// Team-mode duo: welfare / inequity / real-alliance synergy.
+    pub duo: f64,
 }
 
 impl RewardComponents {
@@ -285,6 +287,7 @@ impl RewardComponents {
         self.waste += other.waste;
         self.death += other.death;
         self.terminal += other.terminal;
+        self.duo += other.duo;
     }
 }
 
@@ -1366,6 +1369,59 @@ pub fn v10_empty_action_net_reward(action: i64, config: RewardConfig) -> f64 {
     bogus_bonus - W_WASTE
 }
 
+/// Scale applied to the inherited 1vN shaping terms when two co-trained
+/// humans share a Team-mode match, so team-win / welfare / real-alliance
+/// synergy can dominate.
+pub const DUO_SOLO_SCALE: f64 = 0.22;
+/// Per-decision bonus while both humans are alive.
+pub const W_DUO_BOTH_ALIVE: f64 = 0.02;
+/// `min(s1,s2)` welfare.
+pub const W_DUO_WELFARE_MIN: f64 = 0.015;
+/// Geometric-mean welfare.
+pub const W_DUO_GEO: f64 = 0.01;
+/// `|s1-s2|/(s1+s2)` inequity tax.
+pub const W_DUO_INEQUITY: f64 = 0.02;
+/// Per-decision bonus while the pair has a *formal* alliance (not merely
+/// the same team). This is the reward that teaches them to pact so the
+/// engine pays ally train gold (35k) instead of the team rate (25k).
+pub const W_DUO_ALLIED: f64 = 0.05;
+/// One-shot bonus when `alliance_request` targets the partner and is not wasted.
+pub const W_DUO_ALLY_REQUEST: f64 = 0.08;
+/// Bonus when donate gold/troops targets the partner.
+pub const W_DUO_DONATE_PARTNER: f64 = 0.04;
+
+/// True when `ents.alliances` contains a formal pact between `a` and `b`
+/// (small ids). Team membership alone is not an alliance.
+pub fn formally_allied(ents: &crate::feat::EntsData, a: usize, b: usize) -> bool {
+    if a == b {
+        return false;
+    }
+    ents.alliances.iter().any(|al| {
+        (al.0 == a && al.1 == b) || (al.0 == b && al.1 == a)
+    })
+}
+
+/// Min + geo-mean welfare minus inequity. Used as a dense team-strength
+/// potential so the pair grows together instead of one farming the other.
+pub fn duo_welfare_reward(s1: f64, s2: f64) -> f64 {
+    let mn = s1.min(s2);
+    let geo = (s1.max(0.0) * s2.max(0.0)).sqrt();
+    let ineq = (s1 - s2).abs() / (s1 + s2 + 1e-9);
+    W_DUO_WELFARE_MIN * mn + W_DUO_GEO * geo - W_DUO_INEQUITY * ineq
+}
+
+/// Survival + formal-alliance synergy. `allied` must be a real pact.
+pub fn duo_synergy_reward(both_alive: bool, allied: bool) -> f64 {
+    let mut r = 0.0;
+    if both_alive {
+        r += W_DUO_BOTH_ALIVE;
+    }
+    if allied && both_alive {
+        r += W_DUO_ALLIED;
+    }
+    r
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2085,5 +2141,48 @@ mod tests {
             break;
         }
         assert!(found, "expected a rehearsal sample within 200 draws");
+    }
+
+    #[test]
+    fn formally_allied_requires_a_pact_not_just_two_players() {
+        let ents = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true, "tiles": 10},
+                {"id": 2, "pid": "AGENTRL2", "alive": true, "tiles": 10}
+            ],
+            "units": [],
+            "attacks": [],
+            "alliances": []
+        }));
+        assert!(!formally_allied(&ents, 1, 2));
+        let allied = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true, "tiles": 10},
+                {"id": 2, "pid": "AGENTRL2", "alive": true, "tiles": 10}
+            ],
+            "units": [],
+            "attacks": [],
+            "alliances": [[1, 2, 500]]
+        }));
+        assert!(formally_allied(&allied, 1, 2));
+        assert!(formally_allied(&allied, 2, 1));
+        assert!(!formally_allied(&allied, 1, 1));
+    }
+
+    #[test]
+    fn duo_synergy_pays_alliance_only_when_formally_allied_and_alive() {
+        assert_eq!(duo_synergy_reward(true, false), W_DUO_BOTH_ALIVE);
+        assert_eq!(
+            duo_synergy_reward(true, true),
+            W_DUO_BOTH_ALIVE + W_DUO_ALLIED
+        );
+        assert_eq!(duo_synergy_reward(false, true), 0.0);
+    }
+
+    #[test]
+    fn duo_welfare_penalizes_lopsided_strength() {
+        let even = duo_welfare_reward(0.4, 0.4);
+        let lopsided = duo_welfare_reward(0.8, 0.05);
+        assert!(even > lopsided);
     }
 }

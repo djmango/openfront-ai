@@ -3525,16 +3525,17 @@ impl Game {
         if sender.is_disconnected || recipient.is_disconnected {
             return false;
         }
-        // TS `PlayerImpl.canSendAllianceRequest`: `this.isFriendly(other) ||
-        // !this.isAlive()` - only the SENDER's aliveness (`isAlive() ==
-        // this._tiles.size > 0`) gates the request; a dead recipient (0
-        // tiles) is not checked at all, so TS allows requesting an alliance
-        // with an eliminated player. Native previously also required
-        // `recipient.tiles_owned != 0`, which is stricter than TS.
+        // TS `PlayerImpl.canSendAllianceRequest` historically gated on
+        // `isFriendly` (team OR pact), which blocked teammates from ever
+        // forming a formal alliance. Train gold is 35k for "ally" vs 25k
+        // for "team", so teammates must be able to `alliance_request` each
+        // other. Only an existing pact (or a dead sender) blocks a request.
+        // Sender aliveness is `tiles_owned > 0` (`isAlive()`); a dead
+        // recipient is allowed, matching TS.
         if sender.tiles_owned == 0 {
             return false;
         }
-        if self.is_friendly(sender_small_id, recipient_small_id) {
+        if self.is_allied_with(sender_small_id, recipient_small_id) {
             return false;
         }
         if self.alliance_requests.iter().any(|r| {
@@ -3840,6 +3841,28 @@ mod relation_tests {
         let dead = add_human(&mut game, "dead");
         game.player_by_small_id_mut(alive).unwrap().tiles_owned = 1;
         assert!(game.can_send_alliance_request(alive, dead));
+    }
+
+    #[test]
+    fn teammates_can_send_alliance_request_until_formally_allied() {
+        let mut game = Game::default();
+        let a = add_human(&mut game, "a");
+        let b = add_human(&mut game, "b");
+        game.player_by_small_id_mut(a).unwrap().team = Some("Humans".into());
+        game.player_by_small_id_mut(b).unwrap().team = Some("Humans".into());
+        game.player_by_small_id_mut(a).unwrap().tiles_owned = 1;
+        game.player_by_small_id_mut(b).unwrap().tiles_owned = 1;
+        assert!(game.players_on_same_team(a, b));
+        assert!(game.is_friendly(a, b));
+        assert!(!game.is_allied_with(a, b));
+        assert!(
+            game.can_send_alliance_request(a, b),
+            "teammates must be able to pact for ally train gold"
+        );
+        assert!(game.create_alliance_request(a, b, 1));
+        game.accept_alliance_request(a, b, 2);
+        assert!(game.is_allied_with(a, b));
+        assert!(!game.can_send_alliance_request(a, b));
     }
 
     #[test]

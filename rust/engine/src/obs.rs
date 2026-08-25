@@ -68,15 +68,30 @@ pub fn build_obs_head_meta(game: &Game, client_id: &str, winner: Value) -> Value
 }
 
 /// TS `GameImpl.makeWinner()` tuple: `["player", clientID]` /
-/// `["nation", name]`. RL only runs FFA so the team arm is not ported.
+/// `["nation", name]` / `["team", teamName, ...clientIDs]`.
 pub fn winner_value(game: &Game) -> Value {
     match &game.winner {
         None => Value::Null,
-        Some(pid) => match game.player_by_id(pid) {
-            None => Value::Null,
-            Some(p) if p.client_id.is_empty() => json!(["nation", p.name]),
-            Some(p) => json!(["player", p.client_id]),
-        },
+        Some(pid) => {
+            let is_team = game.player_teams.iter().any(|t| t == pid)
+                || pid == crate::core::team_assignment::BOT_TEAM
+                || pid == crate::core::team_assignment::HUMANS_TEAM
+                || pid == crate::core::team_assignment::NATIONS_TEAM;
+            if is_team {
+                let mut row = vec![json!("team"), json!(pid)];
+                for p in game.all_players() {
+                    if p.team.as_deref() == Some(pid.as_str()) && !p.client_id.is_empty() {
+                        row.push(json!(p.client_id.clone()));
+                    }
+                }
+                return Value::Array(row);
+            }
+            match game.player_by_id(pid) {
+                None => Value::Null,
+                Some(p) if p.client_id.is_empty() => json!(["nation", p.name]),
+                Some(p) => json!(["player", p.client_id]),
+            }
+        }
     }
 }
 

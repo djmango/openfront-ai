@@ -169,6 +169,7 @@ impl Bridge {
                 defense_bonus,
             },
             structured: None,
+            duo: None,
         }
     }
 

@@ -223,6 +223,7 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
         cfg.engine,
         cfg.reward_config,
         cfg.curriculum_schedule,
+        1,
     )?;
     worker.reset_watch(map_name, &cfg.seed, bots, difficulty, nations.clone())?;
 

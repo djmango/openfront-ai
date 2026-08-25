@@ -123,8 +123,8 @@ fn owners_grid(session: &RlSession, hr: usize, wr: usize) -> Vec<i64> {
 #[test]
 fn boat_canboat_true_but_random_regions_mostly_fail_translate_or_engine() {
     let root = repo_root();
-    let (mut session, _head, terrain) =
-        RlSession::reset(&root, "Onion", "boat-mask-probe", 0, "Easy", Value::from(0))
+    let (mut session, _head, _ents, _legal, terrain, _duo) =
+        RlSession::reset(&root, "Onion", "boat-mask-probe", 0, "Easy", Value::from(0), 1)
             .expect("reset");
     let (sid, mut tr) = setup_coastal_agent(&mut session, &terrain);
 
@@ -205,8 +205,8 @@ fn boat_canboat_true_but_random_regions_mostly_fail_translate_or_engine() {
 #[test]
 fn warship_listed_buildable_with_zero_valid_sites_without_port() {
     let root = repo_root();
-    let (mut session, _head, terrain) =
-        RlSession::reset(&root, "Onion", "build-mask-probe", 0, "Easy", Value::from(0))
+    let (mut session, _head, _ents, _legal, terrain, _duo) =
+        RlSession::reset(&root, "Onion", "build-mask-probe", 0, "Easy", Value::from(0), 1)
             .expect("reset");
     let (sid, mut tr) = setup_coastal_agent(&mut session, &terrain);
 

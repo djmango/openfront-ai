@@ -9,6 +9,8 @@ use serde_json::Value;
 use std::path::Path;
 
 pub const AGENT_CLIENT_ID: &str = "AGENTRL1";
+pub const AGENT_CLIENT_ID_2: &str = "AGENTRL2";
+pub const AGENT_CLIENT_IDS: [&str; 2] = [AGENT_CLIENT_ID, AGENT_CLIENT_ID_2];
 
 pub enum EnvSession {
     /// Multiplexed TS engine (one daemon, many sessions).

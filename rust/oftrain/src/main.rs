@@ -650,6 +650,14 @@ struct Args {
     /// the anti-thrashing story. Matches `pod_train_v11.sh` (`AUTOSCALE_STEP=2`).
     #[arg(long, default_value_t = 2)]
     autoscale_step: usize,
+
+    /// Two-human Team-mode co-training (`AGENTRL1` + `AGENTRL2` on Humans).
+    /// Alliances stay enabled: teammates must actually `alliance_request`
+    /// each other to unlock ally train gold (35k vs 25k team rate) and to
+    /// appear as class-2 allies in the featurizer. Forces lockstep collect
+    /// (no work-conserving / autoscale).
+    #[arg(long, default_value_t = false)]
+    duo: bool,
 }
 
 fn parse_device(s: &str) -> Device {
@@ -1394,6 +1402,7 @@ fn main() -> anyhow::Result<()> {
 
     let cfg = train::Config {
         num_envs: initial_num_envs,
+        n_agents: if args.duo { 2 } else { 1 },
         num_gpus: args.num_gpus,
         stage: args.stage,
         curriculum_schedule,

@@ -157,6 +157,10 @@ pub struct Config {
     /// silently misindex after a scale-up. Logging/startup-only uses (e.g.
     /// the initial spawn-count message) are fine as-is.
     pub num_envs: usize,
+    /// RL humans per physical game. 1 = FFA solo (`AGENTRL1`). 2 = Team-mode
+    /// duo (`AGENTRL1` + `AGENTRL2`) with parameter-shared IPPO. Alliances
+    /// stay enabled; teammates must actually pact for ally train gold.
+    pub n_agents: u32,
     /// Number of GPU replicas/shards. 1 = original single-device path.
     /// >1 requires `device` to be `Cuda(_)`; shards use `Cuda(0..num_gpus)`.
     pub num_gpus: usize,
@@ -1765,7 +1769,7 @@ impl Config {
 }
 
 struct Worker {
-    choice_tx: Sender<Choice>,
+    choice_tx: Sender<Vec<Choice>>,
     stage_tx: Sender<usize>,
     /// Legacy fixed-group collectors receive directly from each worker.
     /// Ready-queue persistent actors instead use ActorShard::ready_rx.
@@ -1773,7 +1777,7 @@ struct Worker {
     handle: JoinHandle<()>,
 }
 
-type EnvStepResult = Result<EnvTransition, String>;
+type EnvStepResult = Result<Vec<EnvTransition>, String>;
 
 struct ReadyEnv {
     env: usize,
@@ -1789,6 +1793,10 @@ struct ReadyEnv {
 /// autoscale-grown envs (see the second call site) get appended at
 /// ever-increasing indices, and clumping would make the *ratio* drift as
 /// more envs get added rather than staying fixed at `node_fraction`.
+fn agents_per(cfg: &Config) -> usize {
+    cfg.n_agents.clamp(1, 2) as usize
+}
+
 fn engine_for_idx(idx: usize, default: EngineKind, node_fraction: f64) -> EngineKind {
     if node_fraction <= 0.0 {
         return default;
@@ -1812,7 +1820,8 @@ fn spawn_worker(
     engine: EngineKind,
     reward_config: RewardConfig,
     curriculum_schedule: ofcore::curriculum::CurriculumSchedule,
-) -> Result<(Worker, PreparedObs)> {
+    n_agents: u32,
+) -> Result<(Worker, Vec<PreparedObs>)> {
     spawn_worker_routed(
         idx,
         stage,
@@ -1820,6 +1829,7 @@ fn spawn_worker(
         engine,
         reward_config,
         curriculum_schedule,
+        n_agents,
         None,
     )
 }
@@ -1831,13 +1841,14 @@ fn spawn_worker_routed(
     engine: EngineKind,
     reward_config: RewardConfig,
     curriculum_schedule: ofcore::curriculum::CurriculumSchedule,
+    n_agents: u32,
     ready_route: Option<(usize, Sender<ReadyEnv>)>,
-) -> Result<(Worker, PreparedObs)> {
+) -> Result<(Worker, Vec<PreparedObs>)> {
     let routed = ready_route.is_some();
-    let (choice_tx, choice_rx) = mpsc::channel::<Choice>();
+    let (choice_tx, choice_rx) = mpsc::channel::<Vec<Choice>>();
     let (stage_tx, stage_rx) = mpsc::channel::<usize>();
     let (obs_tx, obs_rx) = mpsc::channel();
-    let (init_tx, init_rx) = mpsc::channel::<Result<PreparedObs, String>>();
+    let (init_tx, init_rx) = mpsc::channel::<Result<Vec<PreparedObs>, String>>();
     let handle = std::thread::Builder::new()
         .name(format!("env{idx}"))
         .spawn(move || {
@@ -1848,6 +1859,7 @@ fn spawn_worker_routed(
                 engine,
                 reward_config,
                 curriculum_schedule,
+                n_agents,
             ) {
                 Ok(w) => w,
                 Err(e) => {
@@ -1855,15 +1867,11 @@ fn spawn_worker_routed(
                     return;
                 }
             };
-            let first = w.prepare();
+            let first = w.prepare_all();
             if init_tx.send(Ok(first)).is_err() {
                 return;
             }
-            while let Ok(choice) = choice_rx.recv() {
-                // Curriculum advance: take the newest pending stage (if any);
-                // takes effect at this env's *next* episode reset inside
-                // `step()`, matching `rl/vec.py::set_stage`'s per-episode
-                // sampling (never mid-episode).
+            while let Ok(choices) = choice_rx.recv() {
                 let mut new_stage = None;
                 while let Ok(s) = stage_rx.try_recv() {
                     new_stage = Some(s);
@@ -1871,7 +1879,7 @@ fn spawn_worker_routed(
                 if let Some(s) = new_stage {
                     w.set_stage(s);
                 }
-                let result = w.step(&choice).map_err(|e| format!("{e:#}"));
+                let result = w.step_agents(&choices).map_err(|e| format!("{e:#}"));
                 let sent = match &ready_route {
                     Some((env, ready_tx)) => ready_tx.send(ReadyEnv { env: *env, result }).is_ok(),
                     None => obs_tx.send(result).is_ok(),
@@ -2721,13 +2729,49 @@ fn act_group(
     }
 
     let mut completed = Vec::with_capacity(n);
-    for (i, row) in rows.into_iter().enumerate() {
-        let mut row = row.ok_or_else(|| anyhow!("missing actor result for env {}", start + i))?;
-        actor.workers[start + i]
-            .choice_tx
-            .send(row.choice.take().expect("unsent actor choice"))
-            .map_err(|_| anyhow!("env {} choice channel closed", start + i))?;
-        completed.push(row);
+    let na = agents_per(cfg);
+    if na == 1 {
+        for (i, row) in rows.into_iter().enumerate() {
+            let mut row =
+                row.ok_or_else(|| anyhow!("missing actor result for env {}", start + i))?;
+            actor.workers[start + i]
+                .choice_tx
+                .send(vec![row.choice.take().expect("unsent actor choice")])
+                .map_err(|_| anyhow!("env {} choice channel closed", start + i))?;
+            completed.push(row);
+        }
+    } else {
+        anyhow::ensure!(
+            start % na == 0 && n % na == 0,
+            "duo act_group range must be a multiple of n_agents"
+        );
+        let phys_start = start / na;
+        let n_phys = n / na;
+        let mut rows: Vec<ActorRow> = rows
+            .into_iter()
+            .enumerate()
+            .map(|(i, row)| {
+                row.ok_or_else(|| anyhow!("missing actor result for env {}", start + i))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for p in 0..n_phys {
+            let mut batch = Vec::with_capacity(na);
+            for a in 0..na {
+                batch.push(
+                    rows[p * na + a]
+                        .choice
+                        .take()
+                        .expect("unsent actor choice"),
+                );
+            }
+            actor.workers[phys_start + p]
+                .choice_tx
+                .send(batch)
+                .map_err(|_| {
+                    anyhow!("env {} choice channel closed", phys_start + p)
+                })?;
+        }
+        completed = rows;
     }
     Ok(completed)
 }
@@ -3334,34 +3378,86 @@ fn recv_group(
     step_row: &mut [Option<Step>],
     ep_infos: &mut Vec<EpisodeInfo>,
 ) -> Result<()> {
-    for (j, i) in (start..end).enumerate() {
-        let transition = actor.workers[i]
+    let na = (actor.cur_obs.len() / actor.workers.len().max(1)).max(1);
+    if na == 1 {
+        for (j, i) in (start..end).enumerate() {
+            let mut transitions = actor.workers[i]
+                .obs_rx
+                .as_ref()
+                .ok_or_else(|| anyhow!("env {i} has no legacy obs receiver"))?
+                .recv()
+                .map_err(|_| anyhow!("env {i} obs channel closed"))?
+                .map_err(|e| anyhow!("env {i}: {e}"))?;
+            let transition = transitions
+                .pop()
+                .ok_or_else(|| anyhow!("env {i} returned no transitions"))?;
+            if let Some(info) = transition.info {
+                ep_infos.push(info);
+            }
+            let prev_obs = std::mem::replace(&mut actor.cur_obs[i], transition.next_obs);
+            if transition.done {
+                if let Some(state) = actor.recurrent.as_mut() {
+                    state.reset(i)?;
+                }
+            }
+            step_row[i] = Some(Step {
+                obs: prev_obs,
+                hidden_in: rows[j].hidden_in.clone(),
+                context: rows[j].context.clone(),
+                outcome: transition.outcome,
+                choice: rows[j].scalars.clone(),
+                logp: rows[j].logp,
+                value: rows[j].value,
+                reward: transition.reward as f32,
+                done: transition.done,
+            });
+        }
+        return Ok(());
+    }
+    anyhow::ensure!(
+        start % na == 0 && (end - start) % na == 0,
+        "duo recv_group range must be a multiple of n_agents"
+    );
+    let phys_start = start / na;
+    let n_phys = (end - start) / na;
+    for p in 0..n_phys {
+        let transitions = actor.workers[phys_start + p]
             .obs_rx
             .as_ref()
-            .ok_or_else(|| anyhow!("env {i} has no legacy obs receiver"))?
+            .ok_or_else(|| anyhow!("env {} has no legacy obs receiver", phys_start + p))?
             .recv()
-            .map_err(|_| anyhow!("env {i} obs channel closed"))?
-            .map_err(|e| anyhow!("env {i}: {e}"))?;
-        if let Some(info) = transition.info {
-            ep_infos.push(info);
-        }
-        let prev_obs = std::mem::replace(&mut actor.cur_obs[i], transition.next_obs);
-        if transition.done {
-            if let Some(state) = actor.recurrent.as_mut() {
-                state.reset(i)?;
+            .map_err(|_| anyhow!("env {} obs channel closed", phys_start + p))?
+            .map_err(|e| anyhow!("env {}: {e}", phys_start + p))?;
+        anyhow::ensure!(
+            transitions.len() == na,
+            "env {} returned {} transitions, expected {na}",
+            phys_start + p,
+            transitions.len()
+        );
+        for (a, transition) in transitions.into_iter().enumerate() {
+            let logical = start + p * na + a;
+            let j = p * na + a;
+            if let Some(info) = transition.info {
+                ep_infos.push(info);
             }
+            let prev_obs = std::mem::replace(&mut actor.cur_obs[logical], transition.next_obs);
+            if transition.done {
+                if let Some(state) = actor.recurrent.as_mut() {
+                    state.reset(logical)?;
+                }
+            }
+            step_row[logical] = Some(Step {
+                obs: prev_obs,
+                hidden_in: rows[j].hidden_in.clone(),
+                context: rows[j].context.clone(),
+                outcome: transition.outcome,
+                choice: rows[j].scalars.clone(),
+                logp: rows[j].logp,
+                value: rows[j].value,
+                reward: transition.reward as f32,
+                done: transition.done,
+            });
         }
-        step_row[i] = Some(Step {
-            obs: prev_obs,
-            hidden_in: rows[j].hidden_in.clone(),
-            context: rows[j].context.clone(),
-            outcome: transition.outcome,
-            choice: rows[j].scalars.clone(),
-            logp: rows[j].logp,
-            value: rows[j].value,
-            reward: transition.reward as f32,
-            done: transition.done,
-        });
     }
     Ok(())
 }
@@ -3499,7 +3595,7 @@ fn collect_rollout_ready(
                 anyhow::ensure!(t < cfg.rollout_len, "env {env} exceeded rollout length");
                 actor.workers[env]
                     .choice_tx
-                    .send(row.choice.take().expect("unsent actor choice"))
+                    .send(vec![row.choice.take().expect("unsent actor choice")])
                     .map_err(|_| anyhow!("env {env} choice channel closed"))?;
                 pending[env] = Some(PendingAct {
                     t,
@@ -3540,9 +3636,12 @@ fn collect_rollout_ready(
         let action = pending[env]
             .take()
             .ok_or_else(|| anyhow!("env {env} published without an action in flight"))?;
-        let transition = message
+        let mut transitions = message
             .result
             .map_err(|error| anyhow!("env {env}: {error}"))?;
+        let transition = transitions
+            .pop()
+            .ok_or_else(|| anyhow!("env {env} returned no transitions"))?;
         let prev_obs = std::mem::replace(&mut actor.cur_obs[env], transition.next_obs);
         if transition.done {
             if let Some(state) = actor.recurrent.as_mut() {
@@ -3618,17 +3717,20 @@ fn collect_rollout(
     policy_version: u64,
 ) -> Result<RolloutResult> {
     let collect_start = Instant::now();
-    let n = actor.workers.len();
+    let n_phys = actor.workers.len();
+    let na = agents_per(cfg);
+    let n = n_phys * na;
     let mut buffer: Vec<Vec<Step>> = Vec::with_capacity(cfg.rollout_len);
     let mut ep_infos = Vec::new();
 
     // Dual env-group pipelining (Python v4.1): split workers into two
     // halves; while group 0's engines step, encode+act group 1 (and vice
-    // versa). Disabled or N<=1 → single lockstep group.
-    let pipeline = cfg.pipeline_groups && n > 1;
-    let half = if pipeline { n.div_ceil(2) } else { n };
-    let g0 = (0, half);
-    let g1 = (half, n);
+    // versa). Disabled or N<=1 → single lockstep group. Ranges are logical
+    // (n_agents rows per physical game).
+    let pipeline = cfg.pipeline_groups && n_phys > 1;
+    let half = if pipeline { n_phys.div_ceil(2) } else { n_phys };
+    let g0 = (0, half * na);
+    let g1 = (half * na, n);
 
     // Prime: act+send group 0 before the step loop (matches Python's
     // `pack0 = act_group(groups[0]); vec.send_group(...)` before `for t`).
@@ -3727,9 +3829,10 @@ fn run_eval(
             engine,
             reward_config,
             curriculum_schedule,
+            1,
         )?;
         workers.push(w);
-        cur_obs.push(obs);
+        cur_obs.extend(obs);
     }
     let stages = ofcore::curriculum::stages_for_schedule(curriculum_schedule);
     let decision_ticks = stages[stage.min(stages.len().saturating_sub(1))]
@@ -3808,18 +3911,21 @@ fn run_eval(
             };
             workers[ei]
                 .choice_tx
-                .send(choice)
+                .send(vec![choice])
                 .map_err(|_| anyhow!("eval env {ei} choice channel closed"))?;
         }
         for (bi, &ei) in pending.iter().enumerate() {
             let _ = bi;
-            let transition = workers[ei]
+            let mut transitions = workers[ei]
                 .obs_rx
                 .as_ref()
                 .ok_or_else(|| anyhow!("eval env {ei} has no obs receiver"))?
                 .recv()
                 .map_err(|_| anyhow!("eval env {ei} obs channel closed"))?
                 .map_err(|e| anyhow!("eval env {ei}: {e}"))?;
+            let transition = transitions
+                .pop()
+                .ok_or_else(|| anyhow!("eval env {ei} returned no transitions"))?;
             cur_obs[ei] = transition.next_obs;
             if let Some(info) = transition.info {
                 results[ei] = Some(info);
@@ -3971,6 +4077,7 @@ pub fn run_benchmark(cfg: BenchmarkConfig<'_>) -> Result<()> {
                     "waste": info.reward_components.waste,
                     "death": info.reward_components.death,
                     "terminal": info.reward_components.terminal,
+                    "duo": info.reward_components.duo,
                 },
                 "action_pair_counts": {
                     "boat_cancel_boat": info.action_pair_counts.boat_cancel_boat,
@@ -4747,14 +4854,15 @@ fn build_actor_shard(
             engine,
             cfg.reward_config,
             cfg.curriculum_schedule,
+            cfg.n_agents,
             route,
         )?;
         workers.push(worker);
-        cur_obs.push(obs);
+        cur_obs.extend(obs);
     }
     let recurrent = cfg
         .recurrent_policy
-        .then(|| ActorRecurrentState::new(workers.len(), policy::RECURRENT_STATE as usize, device));
+        .then(|| ActorRecurrentState::new(cur_obs.len(), policy::RECURRENT_STATE as usize, device));
     Ok(ActorShard {
         device,
         workers,
@@ -6816,6 +6924,23 @@ pub fn run(mut cfg: Config) -> Result<()> {
         cfg.actor_max_batch > 0,
         "--actor-max-batch must be at least 1"
     );
+    cfg.n_agents = cfg.n_agents.clamp(1, 2);
+    if cfg.n_agents > 1 {
+        if cfg.work_conserving_actors {
+            println!(
+                "[train] --duo: disabling work-conserving actors (both humans must act on the same tick)"
+            );
+            cfg.work_conserving_actors = false;
+        }
+        if cfg.auto_scale_envs {
+            println!("[train] --duo: disabling auto-scale-envs");
+            cfg.auto_scale_envs = false;
+        }
+        println!(
+            "[train] team-mode duo: {} physical games × {} agents (alliances ON; pact for ally train gold)",
+            cfg.num_envs, cfg.n_agents
+        );
+    }
     if cfg.recurrent_policy {
         anyhow::ensure!(
             cfg.persistent_actors,
@@ -7122,9 +7247,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     worker_engine,
                     cfg.reward_config,
                     cfg.curriculum_schedule,
+                    cfg.n_agents,
                 )?;
                 workers.push(w);
-                cur_obs.push(obs);
+                cur_obs.extend(obs);
             }
         }
         let mut learner_vs = nn::VarStore::new(device);
@@ -7729,6 +7855,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     "reward/waste": info.reward_components.waste,
                     "reward/death": info.reward_components.death,
                     "reward/terminal": info.reward_components.terminal,
+                    "reward/duo": info.reward_components.duo,
                     "action_pairs/boat_cancel_boat": info.action_pair_counts.boat_cancel_boat,
                     "boats/useful_landing": info.boat_outcome_counts.useful_landing,
                     "boats/own_shore_return": info.boat_outcome_counts.own_shore_return,
@@ -8146,7 +8273,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     );
                 } else {
                     let add = target_n - current;
-                    let mut spawned: Vec<(usize, Worker, PreparedObs)> =
+                    let mut spawned: Vec<(usize, Worker, Vec<PreparedObs>)> =
                         Vec::with_capacity(add * actors.len());
                     let mut spawn_err: Option<anyhow::Error> = None;
                     'grow: for gi in 0..actors.len() {
@@ -8160,6 +8287,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                                 worker_engine,
                                 cfg.reward_config,
                                 cfg.curriculum_schedule,
+                                cfg.n_agents,
                             ) {
                                 Ok((w, obs)) => {
                                     next_env_idx += 1;
@@ -8186,7 +8314,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                         None => {
                             for (gi, w, obs) in spawned {
                                 actors[gi].workers.push(w);
-                                actors[gi].cur_obs.push(obs);
+                                actors[gi].cur_obs.extend(obs);
                             }
                             println!(
                                 "[autoscale] all shards: {current} -> {target_n} envs ({gpu_str} \
@@ -8840,6 +8968,7 @@ mod persistent_actor_tests {
     fn parity_config() -> Config {
         Config {
             num_envs: 1,
+            n_agents: 1,
             num_gpus: 1,
             stage: 0,
             curriculum_schedule: ofcore::curriculum::CurriculumSchedule::V10,
