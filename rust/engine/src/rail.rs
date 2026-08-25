@@ -1082,11 +1082,14 @@ fn train_relation(game: &Game, train_owner: u16, station_owner: u16) -> TrainRel
     if train_owner == station_owner {
         return TrainRelation::SelfTrade;
     }
-    if game.players_on_same_team(train_owner, station_owner) {
-        return TrainRelation::Team;
-    }
+    // Formal pact pays the ally rate (35k) even for teammates. Team-only
+    // (no alliance) stays at 25k. Checking ally first is the engine
+    // benefit of actually `alliance_request`ing a teammate.
     if game.is_allied_with(train_owner, station_owner) {
         return TrainRelation::Ally;
+    }
+    if game.players_on_same_team(train_owner, station_owner) {
+        return TrainRelation::Team;
     }
     TrainRelation::Other
 }

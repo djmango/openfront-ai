@@ -243,10 +243,10 @@ fn build_reachable_stations(game: &Game, small_id: u16) -> Vec<ReachableStation>
         if !game.can_trade(small_id, neighbor_id) {
             continue;
         }
-        let rel = if game.players_on_same_team(small_id, neighbor_id) {
-            TrainRelation::Team
-        } else if game.is_allied_with(small_id, neighbor_id) {
+        let rel = if game.is_allied_with(small_id, neighbor_id) {
             TrainRelation::Ally
+        } else if game.players_on_same_team(small_id, neighbor_id) {
+            TrainRelation::Team
         } else {
             TrainRelation::Other
         };
@@ -2193,13 +2193,14 @@ mod tests {
     }
 
     #[test]
-    fn build_reachable_stations_uses_team_weight_and_takes_precedence_over_ally() {
+    fn build_reachable_stations_uses_team_weight_for_teammates_without_alliance() {
         let (mut game, defender, neighbor) =
             adjacent_players("Medium", crate::game::PlayerType::Human, Some("team-a"));
         if let Some(p) = game.player_by_small_id_mut(defender) {
             p.team = Some("team-a".to_string());
         }
         assert!(game.players_on_same_team(defender, neighbor));
+        assert!(!game.is_allied_with(defender, neighbor));
         let tile = game.ref_xy(11, 10);
         let unit_id = game.build_unit(neighbor, unit_type::CITY, tile);
         connect_station(&mut game, neighbor, unit_id, unit_type::CITY);
@@ -2209,6 +2210,26 @@ mod tests {
         let expected = game.wire.train_gold(TrainRelation::Team, 0) as f64
             / game.wire.train_gold(TrainRelation::Ally, 0) as f64;
         assert!((result[0].weight - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn build_reachable_stations_uses_ally_weight_when_teammates_are_allied() {
+        let (mut game, defender, neighbor) =
+            adjacent_players("Medium", crate::game::PlayerType::Human, Some("team-a"));
+        if let Some(p) = game.player_by_small_id_mut(defender) {
+            p.team = Some("team-a".to_string());
+        }
+        assert!(game.players_on_same_team(defender, neighbor));
+        assert!(game.create_alliance_request(defender, neighbor, 0));
+        game.accept_alliance_request(defender, neighbor, 1);
+        assert!(game.is_allied_with(defender, neighbor));
+        let tile = game.ref_xy(11, 10);
+        let unit_id = game.build_unit(neighbor, unit_type::CITY, tile);
+        connect_station(&mut game, neighbor, unit_id, unit_type::CITY);
+
+        let result = build_reachable_stations(&game, defender);
+        assert_eq!(result.len(), 1);
+        assert!((result[0].weight - ally_weight(&game)).abs() < 1e-9);
     }
 
     #[test]
