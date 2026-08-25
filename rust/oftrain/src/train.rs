@@ -837,6 +837,13 @@ fn requested_stage_env_target_for_resize(
     (capped < prev_capped).then_some(capped)
 }
 
+/// Rollout rows are logical agent heads (`physical_envs * n_agents`).
+/// Sidecar `envs_per_shard` must stay the physical worker count used to respawn.
+fn physical_envs_per_shard(logical_rows: usize, n_agents: u32) -> usize {
+    let na = n_agents.clamp(1, 2) as usize;
+    (logical_rows / na).max(1)
+}
+
 /// Resolve per-shard env count at process start.
 ///
 /// Stage schedule values are a *floor* within a stage: an autoscale restart
@@ -1353,6 +1360,15 @@ mod v10_state_and_gate_tests {
             resolve_startup_envs_per_shard(24, Some(10), None, false),
             10
         );
+    }
+
+    #[test]
+    fn duo_logical_rows_do_not_inflate_physical_env_count() {
+        assert_eq!(physical_envs_per_shard(2, 2), 1);
+        assert_eq!(physical_envs_per_shard(4, 2), 2);
+        assert_eq!(physical_envs_per_shard(8, 2), 4);
+        assert_eq!(physical_envs_per_shard(24, 1), 24);
+        assert_eq!(physical_envs_per_shard(0, 2), 1);
     }
 
     #[test]
@@ -8072,7 +8088,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     reward_profile: Some(cfg.reward_config.reward_profile_id().to_string()),
                     return_stats: return_stats.clone(),
                     stage_env_targets: cfg.stage_env_targets.clone(),
-                    envs_per_shard: live_total_envs / devices.len(),
+                    envs_per_shard: physical_envs_per_shard(
+                        live_total_envs / devices.len(),
+                        cfg.n_agents,
+                    ),
                     requested_env_target: None,
                 };
                 if persistent_learner_enabled {
@@ -8339,7 +8358,8 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     current_best = report_eval_completion(completion, update, &metrics)?;
                 }
             }
-            let current_envs_per_shard = live_total_envs / devices.len();
+            let current_envs_per_shard =
+                physical_envs_per_shard(live_total_envs / devices.len(), cfg.n_agents);
             let reason = if resize_reason.is_empty() {
                 "curriculum_stage_env_target".to_string()
             } else {
@@ -8453,7 +8473,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 reward_profile: Some(cfg.reward_config.reward_profile_id().to_string()),
                 return_stats: return_stats.clone(),
                 stage_env_targets: cfg.stage_env_targets.clone(),
-                envs_per_shard: live_total_envs / devices.len(),
+                envs_per_shard: physical_envs_per_shard(
+                    live_total_envs / devices.len(),
+                    cfg.n_agents,
+                ),
                 requested_env_target: None,
             };
             if let Some(eval) = async_eval.as_mut() {
@@ -8653,7 +8676,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 reward_profile: Some(cfg.reward_config.reward_profile_id().to_string()),
                 return_stats: return_stats.clone(),
                 stage_env_targets: cfg.stage_env_targets.clone(),
-                envs_per_shard: live_total_envs / devices.len(),
+                envs_per_shard: physical_envs_per_shard(
+                    live_total_envs / devices.len(),
+                    cfg.n_agents,
+                ),
                 requested_env_target: None,
             };
             let path = format!("{}/policy_update{}.safetensors", cfg.ckpt_dir, update);
@@ -8718,11 +8744,14 @@ pub fn run(mut cfg: Config) -> Result<()> {
         reward_profile: Some(cfg.reward_config.reward_profile_id().to_string()),
         return_stats,
         stage_env_targets: cfg.stage_env_targets.clone(),
-        envs_per_shard: pending
-            .iter()
-            .map(|rollout| rollout.buffer.first().map(|row| row.len()).unwrap_or(0))
-            .sum::<usize>()
-            / devices.len(),
+        envs_per_shard: physical_envs_per_shard(
+            pending
+                .iter()
+                .map(|rollout| rollout.buffer.first().map(|row| row.len()).unwrap_or(0))
+                .sum::<usize>()
+                / devices.len(),
+            cfg.n_agents,
+        ),
         requested_env_target: None,
     };
     let final_path = format!("{}/policy_final.safetensors", cfg.ckpt_dir);
