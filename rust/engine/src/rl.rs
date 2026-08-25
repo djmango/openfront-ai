@@ -23,7 +23,10 @@ use crate::obs_typed::{entities_typed, legality_typed};
 use crate::prng::PseudoRandom;
 use ofcore::feat::{EntsData, Legal};
 use crate::record::{StampedIntent, Turn};
-use crate::session::{seed_to_game_id, terrain_bytes, AGENT_CLIENT_ID};
+use crate::core::team_assignment::{HUMANS_TEAM, NATIONS_TEAM};
+use crate::session::{
+    seed_to_game_id, terrain_bytes, AGENT_CLIENT_ID, AGENT_CLIENT_ID_2, AGENT_CLIENT_IDS,
+};
 use crate::spatial::can_build_transport_ship;
 use crate::util::simple_hash;
 use serde_json::{json, Value};
@@ -40,6 +43,7 @@ pub struct RlSession {
     turns: Vec<Turn>,
     last_winner: Value,
     git_commit: String,
+    n_agents: u32,
 }
 
 impl RlSession {
@@ -55,14 +59,17 @@ impl RlSession {
         bots: u32,
         difficulty: &str,
         nations: Value,
-    ) -> Result<(Self, Value, EntsData, Legal, Vec<u8>), String> {
+        n_agents: u32,
+    ) -> Result<(Self, Value, EntsData, Legal, Vec<u8>, Option<(Value, Legal)>), String> {
+        let n_agents = n_agents.clamp(1, 2);
+        let team_mode = n_agents > 1;
         let map_dir = repo_root
             .join("openfront/resources/maps")
             .join(map_key.to_lowercase());
-        let wire_json = json!({
+        let mut wire_json = json!({
             "gameMap": map_key,
             "gameMapSize": "Normal",
-            "gameMode": "Free For All",
+            "gameMode": if team_mode { "Team" } else { "Free For All" },
             "gameType": "Singleplayer",
             "difficulty": difficulty,
             "nations": nations,
@@ -74,6 +81,12 @@ impl RlSession {
             "instantBuild": false,
             "randomSpawn": false,
         });
+        if team_mode {
+            // Keep alliances ON. Teammates can donate/not-attack without a
+            // pact, but train gold is 35k for "ally" vs 25k for "team", so
+            // the pair must actually alliance_request each other.
+            wire_json["playerTeams"] = json!("Humans Vs Nations");
+        }
         let wire: WireGameConfig =
             serde_json::from_value(wire_json.clone()).map_err(|e| format!("wire config: {e}"))?;
         let cfg = Config::from_value(&wire_json, false).map_err(|e| format!("config: {e}"))?;
@@ -90,15 +103,23 @@ impl RlSession {
         // Mirror createGameRunner(): humans consume random.nextID() first,
         // then nations, so records replay bit-identically.
         let mut random = PseudoRandom::new(simple_hash(&game_id));
-        let humans = vec![PlayerInfo {
-            name: "Agent".into(),
-            player_type: PlayerType::Human,
-            client_id: Some(AGENT_CLIENT_ID.into()),
-            id: random.next_id(),
-            clan_tag: None,
-            friends: Vec::new(),
-            team: None,
-        }];
+        let human_names = ["Agent", "AgentB"];
+        let mut humans = Vec::with_capacity(n_agents as usize);
+        for i in 0..n_agents as usize {
+            humans.push(PlayerInfo {
+                name: human_names[i].into(),
+                player_type: PlayerType::Human,
+                client_id: Some(AGENT_CLIENT_IDS[i].into()),
+                id: random.next_id(),
+                clan_tag: None,
+                friends: Vec::new(),
+                team: if team_mode {
+                    Some(HUMANS_TEAM.into())
+                } else {
+                    None
+                },
+            });
+        }
         let nations = create_nations_for_game(
             &wire,
             &terrain.nations,
@@ -115,7 +136,11 @@ impl RlSession {
                 id: n.player_id.clone(),
                 clan_tag: None,
                 friends: Vec::new(),
-                team: None,
+                team: if team_mode {
+                    Some(NATIONS_TEAM.into())
+                } else {
+                    None
+                },
             })
             .collect();
 
@@ -128,8 +153,20 @@ impl RlSession {
             terrain.team_game_spawn_areas,
         );
         game.init_player_teams(humans.len(), nations.len());
-        for info in humans.iter().chain(nation_infos.iter()) {
-            game.add_from_info(info);
+        if team_mode {
+            let mut infos: Vec<PlayerInfo> = humans
+                .iter()
+                .chain(nation_infos.iter())
+                .cloned()
+                .collect();
+            game.assign_teams_for_players(&mut infos);
+            for info in &infos {
+                game.add_from_info(info);
+            }
+        } else {
+            for info in humans.iter().chain(nation_infos.iter()) {
+                game.add_from_info(info);
+            }
         }
 
         // GameRunner.init(): singleplayer has no spawn timer - the spawn
@@ -173,12 +210,21 @@ impl RlSession {
             turns: Vec::new(),
             last_winner: Value::Null,
             git_commit,
+            n_agents,
         };
         let head = build_obs_head_meta(&session.game, AGENT_CLIENT_ID, Value::Null);
         let ents = entities_typed(&session.game);
         let legal = legality_typed(&session.game, AGENT_CLIENT_ID);
         let terrain_raw = terrain_bytes(&session.game);
-        Ok((session, head, ents, legal, terrain_raw))
+        let duo = if n_agents > 1 {
+            Some((
+                build_obs_head_meta(&session.game, AGENT_CLIENT_ID_2, Value::Null),
+                legality_typed(&session.game, AGENT_CLIENT_ID_2),
+            ))
+        } else {
+            None
+        };
+        Ok((session, head, ents, legal, terrain_raw, duo))
     }
 
     /// Zero-copy view of the packed per-tile state buffer (owner id in the
@@ -197,15 +243,17 @@ impl RlSession {
     /// (breaking on a win update), return meta head + typed ents/legal.
     /// Read the post-step tile state via `tile_state()` (no bytes are built
     /// here - see its doc comment).
-    pub fn step(&mut self, intents: &[Value], ticks: u32) -> (Value, EntsData, Legal) {
+    pub fn step(&mut self, intents: &[Value], ticks: u32) -> (Value, EntsData, Legal, Option<(Value, Legal)>) {
         let wasted = self.count_wasted(intents);
         if !intents.is_empty() {
             let stamped: Vec<StampedIntent> = intents
                 .iter()
                 .filter_map(|v| {
                     let mut obj = v.clone();
-                    obj.as_object_mut()?
-                        .insert("clientID".into(), Value::String(AGENT_CLIENT_ID.into()));
+                    let map = obj.as_object_mut()?;
+                    if !map.contains_key("clientID") {
+                        map.insert("clientID".into(), Value::String(AGENT_CLIENT_ID.into()));
+                    }
                     serde_json::from_value(obj).ok()
                 })
                 .collect();
@@ -232,13 +280,22 @@ impl RlSession {
             }
         }
 
-        let mut head = build_obs_head_meta(&self.game, AGENT_CLIENT_ID, winner);
+        let mut head = build_obs_head_meta(&self.game, AGENT_CLIENT_ID, winner.clone());
         if let Some(obj) = head.as_object_mut() {
             obj.insert("wasted".into(), Value::from(wasted));
         }
         let ents = entities_typed(&self.game);
         let legal = legality_typed(&self.game, AGENT_CLIENT_ID);
-        (head, ents, legal)
+        let duo = if self.n_agents > 1 {
+            let mut head_b = build_obs_head_meta(&self.game, AGENT_CLIENT_ID_2, winner);
+            if let Some(obj) = head_b.as_object_mut() {
+                obj.insert("wasted".into(), Value::from(wasted));
+            }
+            Some((head_b, legality_typed(&self.game, AGENT_CLIENT_ID_2)))
+        } else {
+            None
+        };
+        (head, ents, legal, duo)
     }
 
     /// Persist a Node-compatible GameRecord v0.0.2 JSON (sparse turns).
@@ -253,13 +310,32 @@ impl RlSession {
             "gameID": self.game_id,
             "lobbyCreatedAt": start,
             "config": self.game_config,
-            "players": [{
-                "clientID": AGENT_CLIENT_ID,
-                "username": "Agent",
-                "clanTag": null,
-                "persistentID": null,
-                "stats": {},
-            }],
+            "players": if self.n_agents > 1 {
+                json!([
+                    {
+                        "clientID": AGENT_CLIENT_ID,
+                        "username": "Agent",
+                        "clanTag": null,
+                        "persistentID": null,
+                        "stats": {},
+                    },
+                    {
+                        "clientID": AGENT_CLIENT_ID_2,
+                        "username": "AgentB",
+                        "clanTag": null,
+                        "persistentID": null,
+                        "stats": {},
+                    }
+                ])
+            } else {
+                json!([{
+                    "clientID": AGENT_CLIENT_ID,
+                    "username": "Agent",
+                    "clanTag": null,
+                    "persistentID": null,
+                    "stats": {},
+                }])
+            },
             "start": start,
             "end": end,
             "duration": duration,
@@ -297,16 +373,22 @@ impl RlSession {
     /// would silently discard, checked against the same pre-step state the
     /// action masks were built from.
     fn count_wasted(&mut self, intents: &[Value]) -> u32 {
-        let Some(agent) = self.game.player_by_client_id(AGENT_CLIENT_ID) else {
-            return 0;
-        };
-        if !agent.alive {
-            return 0;
-        }
-        let sid = agent.small_id;
-        let gold = agent.gold;
         let mut wasted = 0u32;
         for intent in intents {
+            let cid = intent
+                .get("clientID")
+                .and_then(Value::as_str)
+                .unwrap_or(AGENT_CLIENT_ID);
+            let Some(agent) = self.game.player_by_client_id(cid) else {
+                wasted += 1;
+                continue;
+            };
+            if !agent.alive {
+                wasted += 1;
+                continue;
+            }
+            let sid = agent.small_id;
+            let gold = agent.gold;
             let itype = intent.get("type").and_then(Value::as_str).unwrap_or("");
             let is_wasted = match itype {
                 "boat" => {
@@ -327,7 +409,6 @@ impl RlSession {
                             .get("targetID")
                             .map(|v| v.is_null())
                             .unwrap_or(false);
-                        let agent = self.game.player_by_client_id(AGENT_CLIENT_ID).unwrap();
                         if terra {
                             !borders_neutral_land(&self.game, agent)
                         } else {
@@ -366,7 +447,6 @@ impl RlSession {
                         .unwrap_or_default();
                     let comp = self.game.get_water_component(tile);
                     let movable = comp.is_some_and(|c| {
-                        let agent = self.game.player_by_client_id(AGENT_CLIENT_ID).unwrap();
                         agent.units.iter().any(|u| {
                             u.unit_type == ut::WARSHIP
                                 && unit_ids.contains(&u.id)
@@ -377,7 +457,6 @@ impl RlSession {
                 }
                 "cancel_boat" => {
                     let uid = intent.get("unitID").and_then(Value::as_i64).unwrap_or(-1) as i32;
-                    let agent = self.game.player_by_client_id(AGENT_CLIENT_ID).unwrap();
                     !agent
                         .units
                         .iter()
@@ -427,8 +506,6 @@ impl RlSession {
                         None => true,
                         Some(o) => {
                             let other_sid = o.small_id;
-                            let agent =
-                                self.game.player_by_client_id(AGENT_CLIENT_ID).unwrap();
                             !can_extend_alliance(&self.game, agent, other_sid)
                         }
                     }
@@ -528,4 +605,94 @@ fn openfront_git_commit(repo_root: &Path) -> String {
         _ => {}
     }
     "DEV".into()
+}
+
+#[cfg(test)]
+mod duo_session_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn repo_root() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("repo root")
+    }
+
+    #[test]
+    fn duo_reset_is_team_mode_with_alliances_on() {
+        let (mut session, head, _ents, _legal, _terrain, duo) = RlSession::reset(
+            &repo_root(),
+            "Onion",
+            "duo-reset",
+            0,
+            "Easy",
+            Value::from(0),
+            2,
+        )
+        .expect("duo reset");
+        assert_eq!(session.game.wire.game_config().game_mode, "Team");
+        assert!(
+            !session.game.wire.disable_alliances(),
+            "duo must keep alliances enabled so the pair can pact for ally train gold"
+        );
+        let (head_b, _legal_b) = duo.expect("AGENTRL2 head");
+        assert_ne!(head["me"], head_b["me"]);
+
+        let w = session.game.width();
+        let h = session.game.height();
+        let mut tiles = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let t = y * w + x;
+                if session.game.is_land(t)
+                    && !session.game.is_impassable(t)
+                    && session.game.map.owner_id(t) == 0
+                {
+                    tiles.push(t);
+                    if tiles.len() == 2 {
+                        break;
+                    }
+                }
+            }
+            if tiles.len() == 2 {
+                break;
+            }
+        }
+        assert_eq!(tiles.len(), 2);
+        let _ = session.step(
+            &[
+                json!({"type": "spawn", "tile": tiles[0], "clientID": AGENT_CLIENT_ID}),
+                json!({"type": "spawn", "tile": tiles[1], "clientID": AGENT_CLIENT_ID_2}),
+            ],
+            5,
+        );
+        assert!(
+            !session.game.in_spawn_phase(),
+            "spawn phase ends only after both humans spawn"
+        );
+        let a = session
+            .game
+            .player_by_client_id(AGENT_CLIENT_ID)
+            .unwrap()
+            .small_id;
+        let b = session
+            .game
+            .player_by_client_id(AGENT_CLIENT_ID_2)
+            .unwrap()
+            .small_id;
+        assert!(session.game.players_on_same_team(a, b));
+        assert!(session.game.is_friendly(a, b));
+        assert!(!session.game.is_allied_with(a, b));
+        assert!(
+            session.game.can_send_alliance_request(a, b),
+            "teammates must be able to pact for ally train gold"
+        );
+        assert!(session.game.create_alliance_request(a, b, session.game.ticks()));
+        session
+            .game
+            .accept_alliance_request(a, b, session.game.ticks());
+        assert!(session.game.is_allied_with(a, b));
+        assert!(!session.game.can_send_alliance_request(a, b));
+    }
 }

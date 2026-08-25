@@ -31,6 +31,8 @@ pub struct RawObs {
     /// Native engine fills this to skip JSON `parse_ents` / `parse_legal`.
     /// Node / daemon backends leave it `None`.
     pub structured: Option<(ofcore::feat::EntsData, ofcore::feat::Legal)>,
+    /// Second human (AGENTRL2) head + legality when `--duo` is on.
+    pub duo: Option<(serde_json::Value, ofcore::feat::Legal)>,
 }
 
 pub struct PreparedTileState {
@@ -253,6 +255,7 @@ mod tests {
                 defense_bonus,
             },
             structured: None,
+            duo: None,
         }
     }
 
@@ -261,6 +264,7 @@ mod tests {
             head: Value::Null,
             tiles: TileState::Packed(state.to_vec()),
             structured: None,
+            duo: None,
         }
     }
 
@@ -393,6 +397,11 @@ pub trait GameEngine: Send {
     fn terrain(&self) -> &[u8];
 
     fn close(&mut self);
+
+    /// Number of live RL humans in the match (1 = FFA solo, 2 = Team duo).
+    fn set_agent_count(&mut self, n: u32) {
+        let _ = n;
+    }
 
     /// Persist a client GameRecord JSON (Node bridge + native engine).
     fn save_record(&mut self, _path: &str) -> Result<serde_json::Value> {

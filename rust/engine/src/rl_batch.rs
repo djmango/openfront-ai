@@ -45,7 +45,7 @@ pub fn step_many_parallel(
     sessions
         .par_iter_mut()
         .zip(intents.par_iter())
-        .map(|(session, ints)| session.step(ints, ticks))
+        .map(|(session, ints)| session.step(ints, ticks).0)
         .collect()
 }
 
@@ -71,7 +71,7 @@ mod tests {
         let mut par_sessions: Vec<RlSession> = (0..4)
             .map(|i| {
                 let seed = format!("batch-test-{i}");
-                RlSession::reset(&root, "Onion", &seed, 0, "Easy", Value::from(3))
+                RlSession::reset(&root, "Onion", &seed, 0, "Easy", Value::from(3), 1)
                     .unwrap()
                     .0
             })
@@ -79,17 +79,14 @@ mod tests {
         let mut seq_sessions: Vec<RlSession> = (0..4)
             .map(|i| {
                 let seed = format!("batch-test-{i}");
-                RlSession::reset(&root, "Onion", &seed, 0, "Easy", Value::from(3))
+                RlSession::reset(&root, "Onion", &seed, 0, "Easy", Value::from(3), 1)
                     .unwrap()
                     .0
             })
             .collect();
 
         let intents: Vec<Vec<Value>> = vec![Vec::new(); 4];
-        let par_heads: Vec<_> = step_many_parallel(&mut par_sessions, &intents, 5)
-            .into_iter()
-            .map(|(head, _, _)| head)
-            .collect();
+        let par_heads = step_many_parallel(&mut par_sessions, &intents, 5);
         let seq_heads: Vec<Value> = seq_sessions
             .iter_mut()
             .map(|s| s.step(&[], 5).0)

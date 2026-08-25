@@ -4,7 +4,7 @@
 //! Python side there's no GIL, so no multiprocessing/pickle framing is
 //! needed to keep JSON decode + featurization off the main thread.
 
-use anyhow::Result;
+use anyhow::{ensure, Result};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use serde_json::Value;
@@ -18,16 +18,18 @@ use ofcore::curriculum::{
     self, ActionChurnTracker, ActionPairCounts, ActionTarget, BoatOutcomeCounts, ChosenAction,
     CombatOutcome, CurriculumSchedule, DominanceShaper, InverseActionPair, RewardComponents,
     RewardConfig, Stage, TRANSPORT_UNIT_CLASS, V83_CLOSEOUT_SHARE_START, W_STR, W_WASTE,
-    action_churn_penalty, boat_outcome_reward, classify_boat_resolution, closeout_potential,
-    combat_outcome_reward, dominance_potential, embargo_stop_outcome_reward, fast_win_bonus,
-    land_share, normalized_strength_share, placement, placement_score, sample_episode,
-    stages_for_schedule, strength_delta_weight, tempo_pressure, terminal_reward, timeweight,
-    v10_closeout_entry_bonus, v10_combat_action_bonus, v10_diplo_panic_penalty,
-    v10_survival_reward, v10_timeout_after_closeout_penalty, v83_action_churn_penalty,
+    DUO_SOLO_SCALE, W_DUO_ALLY_REQUEST, W_DUO_DONATE_PARTNER, action_churn_penalty,
+    boat_outcome_reward, classify_boat_resolution, closeout_potential, combat_outcome_reward,
+    dominance_potential, duo_synergy_reward, duo_welfare_reward, embargo_stop_outcome_reward,
+    fast_win_bonus, formally_allied, land_share, normalized_strength_share, placement,
+    placement_score, sample_episode, stages_for_schedule, strength_delta_weight, tempo_pressure,
+    terminal_reward, timeweight, v10_closeout_entry_bonus, v10_combat_action_bonus,
+    v10_diplo_panic_penalty, v10_survival_reward, v10_timeout_after_closeout_penalty,
+    v83_action_churn_penalty,
 };
 use ofcore::feat::{
-    self, A_ATTACK, A_BOAT, A_BUILD, A_CANCEL_BOAT, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, ACTIONS,
-    IS_LAND_BIT, MAG_MASK, REGION,
+    self, A_ALLIANCE_REQUEST, A_ATTACK, A_BOAT, A_BUILD, A_CANCEL_BOAT, A_DONATE_GOLD,
+    A_DONATE_TROOPS, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, ACTIONS, IS_LAND_BIT, MAG_MASK, REGION,
 };
 use ofcore::translate::{Choice, IntentTranslator, translate};
 
@@ -70,6 +72,8 @@ pub(crate) fn compact_extras_local_n() -> usize {
 pub(crate) fn compact_extras_legal_ptarget_n() -> usize {
     feat::N_ACTIONS * feat::MAX_SLOTS
 }
+
+const AGENT_CLIENT_IDS: [&str; 2] = ["AGENTRL1", "AGENTRL2"];
 
 /// CPU-owned foveated rollout payload. Grid samples cross the actor/learner
 /// boundary as fp16 values; masks and crop metadata stay explicit so the
@@ -798,7 +802,8 @@ fn churn_action(
     boats_after: &[usize],
 ) -> ChosenAction {
     let target = match choice.action {
-        A_ATTACK | A_EMBARGO | A_EMBARGO_STOP if !intents.is_empty() => {
+        A_ATTACK | A_EMBARGO | A_EMBARGO_STOP | A_ALLIANCE_REQUEST | A_DONATE_GOLD
+        | A_DONATE_TROOPS if !intents.is_empty() => {
             selected_player_id(choice, lut, ents).map(ActionTarget::Player)
         }
         A_RETREAT => intents
@@ -832,6 +837,24 @@ fn churn_action(
     ChosenAction::new(choice.action, target)
 }
 
+fn humans_won(winner: &Value, n_agents: usize) -> bool {
+    let Some(a) = winner.as_array() else {
+        return false;
+    };
+    match a.first().and_then(|v| v.as_str()) {
+        Some("player") => {
+            n_agents == 1 && a.get(1).and_then(|v| v.as_str()) == Some("AGENTRL1")
+        }
+        Some("team") => {
+            a.get(1).and_then(|v| v.as_str()) == Some("Humans")
+                || a.iter().any(|v| {
+                    matches!(v.as_str(), Some("AGENTRL1") | Some("AGENTRL2"))
+                })
+        }
+        _ => false,
+    }
+}
+
 pub struct EnvWorker {
     pub idx: usize,
     bridge: Box<dyn GameEngine>,
@@ -853,18 +876,23 @@ pub struct EnvWorker {
     /// never re-walks the same entities/legal twice.
     cached_ents: Option<feat::EntsData>,
     cached_legal: Option<feat::Legal>,
+    /// AGENTRL2 head + legality when `n_agents == 2`.
+    n_agents: usize,
+    duo_head: Option<Value>,
+    cached_legal_duo: Option<feat::Legal>,
     lut: Vec<u8>,
     translator: Option<IntentTranslator>,
     land_total: i64,
-    prev_strength: f64,
-    dominance_shaper: DominanceShaper,
-    closeout_shaper: DominanceShaper,
-    closeout_tracker: CloseoutTracker,
-    action_churn_tracker: ActionChurnTracker,
-    boat_tracker: PendingBoatTracker,
-    combat_tracker: CombatStickyTracker,
-    prev_action: ActionOutcome,
-    last_commitment: Option<(i64, i64, i64, i64, i64, u64)>,
+    prev_strength: [f64; 2],
+    dominance_shaper: [DominanceShaper; 2],
+    closeout_shaper: [DominanceShaper; 2],
+    closeout_tracker: [CloseoutTracker; 2],
+    action_churn_tracker: [ActionChurnTracker; 2],
+    boat_tracker: [PendingBoatTracker; 2],
+    combat_tracker: [CombatStickyTracker; 2],
+    prev_action: [ActionOutcome; 2],
+    last_commitment: [Option<(i64, i64, i64, i64, i64, u64)>; 2],
+    was_alive: [bool; 2],
     ep_reward_components: RewardComponents,
     spawn_steps: i64,
     map_name: String,
@@ -887,8 +915,11 @@ impl EnvWorker {
         engine: EngineKind,
         reward_config: RewardConfig,
         curriculum_schedule: CurriculumSchedule,
+        n_agents: u32,
     ) -> Result<Self> {
-        let bridge = engine::create(engine)?;
+        let n_agents = n_agents.clamp(1, 2) as usize;
+        let mut bridge = engine::create(engine)?;
+        bridge.set_agent_count(n_agents as u32);
         let mut w = EnvWorker {
             idx,
             bridge,
@@ -907,18 +938,28 @@ impl EnvWorker {
             obs: None,
             cached_ents: None,
             cached_legal: None,
+            n_agents,
+            duo_head: None,
+            cached_legal_duo: None,
             lut: Vec::new(),
             translator: None,
             land_total: 1,
-            prev_strength: 0.0,
-            dominance_shaper: DominanceShaper::default(),
-            closeout_shaper: DominanceShaper::default(),
-            closeout_tracker: CloseoutTracker::default(),
-            action_churn_tracker: ActionChurnTracker::default(),
-            boat_tracker: PendingBoatTracker::default(),
-            combat_tracker: CombatStickyTracker::default(),
-            prev_action: ActionOutcome::default(),
-            last_commitment: None,
+            prev_strength: [0.0; 2],
+            dominance_shaper: [DominanceShaper::default(), DominanceShaper::default()],
+            closeout_shaper: [DominanceShaper::default(), DominanceShaper::default()],
+            closeout_tracker: [CloseoutTracker::default(), CloseoutTracker::default()],
+            action_churn_tracker: [
+                ActionChurnTracker::default(),
+                ActionChurnTracker::default(),
+            ],
+            boat_tracker: [PendingBoatTracker::default(), PendingBoatTracker::default()],
+            combat_tracker: [
+                CombatStickyTracker::default(),
+                CombatStickyTracker::default(),
+            ],
+            prev_action: [ActionOutcome::default(), ActionOutcome::default()],
+            last_commitment: [None, None],
+            was_alive: [false; 2],
             ep_reward_components: RewardComponents::default(),
             spawn_steps: 0,
             map_name: String::new(),
@@ -999,29 +1040,9 @@ impl EnvWorker {
         self.translator = Some(IntentTranslator::new(self.bridge.terrain(), width, hr, wr));
         self.lut.clear();
         self.set_obs(obs);
-        let initial_strengths = curriculum::strengths(self.ents(), self.land_total);
-        let me0 = self.obs.as_ref().unwrap().me().max(0) as usize;
-        // Seed prev_strength so the first post-spawn delta isn't a free
-        // +W_DELTA_GAIN * share windfall from 0.0.
-        self.prev_strength = initial_strengths.get(&me0).copied().unwrap_or(0.0);
-        self.dominance_shaper.reset(dominance_potential(
-            &initial_strengths,
-            me0,
-            self.reward_config.v81_potential_clamp,
-        ));
-        let initial_share = land_share(
-            ofcore::translate::my_tiles(self.ents(), self.obs.as_ref().unwrap().me()),
-            self.land_total,
-        );
-        self.closeout_shaper
-            .reset(closeout_potential(initial_share));
-        self.closeout_tracker
-            .reset(initial_share, self.obs.as_ref().unwrap().tick());
+        self.seed_agent_trackers();
         self.spawn_steps = 0;
         self.ep_reward = 0.0;
-        self.action_churn_tracker.reset();
-        self.boat_tracker.reset();
-        self.combat_tracker.reset();
         self.ep_reward_components = RewardComponents::default();
         self.ep_len = 0;
         self.ep_wasted = 0;
@@ -1166,29 +1187,9 @@ impl EnvWorker {
         self.translator = Some(IntentTranslator::new(self.bridge.terrain(), width, hr, wr));
         self.lut.clear();
         self.set_obs(obs);
-        let initial_strengths = curriculum::strengths(self.ents(), self.land_total);
-        let me0 = self.obs.as_ref().unwrap().me().max(0) as usize;
-        self.prev_strength = initial_strengths.get(&me0).copied().unwrap_or(0.0);
-        self.dominance_shaper.reset(dominance_potential(
-            &initial_strengths,
-            me0,
-            self.reward_config.v81_potential_clamp,
-        ));
-        let initial_share = land_share(
-            ofcore::translate::my_tiles(self.ents(), self.obs.as_ref().unwrap().me()),
-            self.land_total,
-        );
-        self.closeout_shaper
-            .reset(closeout_potential(initial_share));
-        self.closeout_tracker
-            .reset(initial_share, self.obs.as_ref().unwrap().tick());
+        self.seed_agent_trackers();
         self.spawn_steps = 0;
         self.ep_reward = 0.0;
-        self.action_churn_tracker.reset();
-        self.boat_tracker.reset();
-        self.combat_tracker.reset();
-        self.prev_action = ActionOutcome::default();
-        self.last_commitment = None;
         self.ep_reward_components = RewardComponents::default();
         self.ep_len = 0;
         self.ep_wasted = 0;
@@ -1199,6 +1200,7 @@ impl EnvWorker {
     /// Install a new observation and refresh the ents/legal cache from the
     /// native structured side-channel when present, otherwise JSON parse.
     fn set_obs(&mut self, mut obs: RawObs) {
+        let duo = obs.duo.take();
         if let Some((ents, legal)) = obs.structured.take() {
             self.cached_ents = Some(ents);
             self.cached_legal = Some(legal);
@@ -1206,7 +1208,66 @@ impl EnvWorker {
             self.cached_ents = Some(feat::parse_ents(obs.entities()));
             self.cached_legal = Some(feat::parse_legal(obs.legal_actions()));
         }
+        if let Some((head_b, legal_b)) = duo {
+            self.duo_head = Some(head_b);
+            self.cached_legal_duo = Some(legal_b);
+        } else {
+            self.duo_head = None;
+            self.cached_legal_duo = None;
+        }
         self.obs = Some(obs);
+    }
+
+    fn agent_head(&self, i: usize) -> &Value {
+        if i == 0 {
+            &self.obs.as_ref().unwrap().head
+        } else {
+            self.duo_head
+                .as_ref()
+                .unwrap_or(&self.obs.as_ref().unwrap().head)
+        }
+    }
+
+    fn agent_legal(&self, i: usize) -> &feat::Legal {
+        if i == 0 {
+            self.legal()
+        } else {
+            self.cached_legal_duo.as_ref().unwrap_or(self.legal())
+        }
+    }
+
+    fn agent_me(&self, i: usize) -> i64 {
+        self.agent_head(i)["me"].as_i64().unwrap_or(-1)
+    }
+
+    fn agent_alive(&self, i: usize) -> bool {
+        self.agent_head(i)["alive"].as_bool().unwrap_or(false)
+    }
+
+    fn seed_agent_trackers(&mut self) {
+        let initial_strengths = curriculum::strengths(self.ents(), self.land_total);
+        let tick = self.obs.as_ref().unwrap().tick();
+        for i in 0..self.n_agents {
+            let me = self.agent_me(i).max(0) as usize;
+            self.prev_strength[i] = initial_strengths.get(&me).copied().unwrap_or(0.0);
+            self.dominance_shaper[i].reset(dominance_potential(
+                &initial_strengths,
+                me,
+                self.reward_config.v81_potential_clamp,
+            ));
+            let share = land_share(
+                ofcore::translate::my_tiles(self.ents(), self.agent_me(i)),
+                self.land_total,
+            );
+            self.closeout_shaper[i].reset(closeout_potential(share));
+            self.closeout_tracker[i].reset(share, tick);
+            self.action_churn_tracker[i].reset();
+            self.boat_tracker[i].reset();
+            self.combat_tracker[i].reset();
+            self.prev_action[i] = ActionOutcome::default();
+            self.last_commitment[i] = None;
+            self.was_alive[i] = self.agent_alive(i);
+        }
     }
 
     pub fn ents(&self) -> &feat::EntsData {
@@ -1238,10 +1299,18 @@ impl EnvWorker {
     }
 
     pub fn prepare(&mut self) -> PreparedObs {
+        self.prepare_agent(0)
+    }
+
+    pub fn prepare_all(&mut self) -> Vec<PreparedObs> {
+        (0..self.n_agents).map(|i| self.prepare_agent(i)).collect()
+    }
+
+    fn prepare_agent(&mut self, agent_i: usize) -> PreparedObs {
         let profile = std::env::var_os("OF_COLLECT_PROFILE").is_some();
         let t0 = std::time::Instant::now();
         let lut = self.current_lut();
-        let me = self.obs.as_ref().unwrap().me();
+        let me = self.agent_me(agent_i);
         let clut = feat::make_clut(&lut, me, self.ents());
         let (hr, wr) = (self.hr, self.wr);
         let (gh, gw) = (hr / REGION, wr / REGION);
@@ -1266,7 +1335,8 @@ impl EnvWorker {
 
         let tick = self.obs.as_ref().unwrap().tick();
         let spawn_phase = self.obs.as_ref().unwrap().spawn_phase();
-        let alive = self.obs.as_ref().unwrap().alive();
+        let alive = self.agent_alive(agent_i);
+        let legal = self.agent_legal(agent_i).clone();
         let f = feat::featurize(
             gh,
             gw,
@@ -1279,7 +1349,7 @@ impl EnvWorker {
             alive,
             me,
             self.ents(),
-            self.legal(),
+            &legal,
         );
         debug_assert_eq!(f.clut, clut);
 
@@ -1310,7 +1380,7 @@ impl EnvWorker {
         };
 
         let out = PreparedObs {
-            prev_action: self.prev_action.clone(),
+            prev_action: self.prev_action[agent_i].clone(),
             compact: None,
             grid: None,
             grid_coarse: None,
@@ -1358,15 +1428,19 @@ impl EnvWorker {
     /// applying `choice` to the current one. Drives the threaded rollout
     /// loop in `train.rs`.
     pub fn step(&mut self, choice: &Choice) -> Result<EnvTransition> {
+        let mut outs = self.step_agents(std::slice::from_ref(choice))?;
+        Ok(outs.remove(0))
+    }
+
+    pub fn step_agents(&mut self, choices: &[Choice]) -> Result<Vec<EnvTransition>> {
         let profile = std::env::var_os("OF_COLLECT_PROFILE").is_some();
         let t0 = std::time::Instant::now();
-        let (reward, done, info, outcome) = self.apply(choice)?;
+        let scored = self.apply_agents(choices)?;
         let apply_us = t0.elapsed().as_micros();
         let t1 = std::time::Instant::now();
-        let prepared = self.prepare();
+        let prepared = self.prepare_all();
         let prepare_us = t1.elapsed().as_micros();
         if profile {
-            // Sampled stderr: cheap enough for a short A/B; not for prod logs.
             static STEP_N: AtomicU64 = AtomicU64::new(0);
             let n = STEP_N.fetch_add(1, Ordering::Relaxed);
             if n < 8 || n % 64 == 0 {
@@ -1376,13 +1450,19 @@ impl EnvWorker {
                 );
             }
         }
-        Ok(EnvTransition {
-            next_obs: prepared,
-            reward,
-            done,
-            info,
-            outcome,
-        })
+        Ok(scored
+            .into_iter()
+            .zip(prepared)
+            .map(
+                |((reward, done, info, outcome), next_obs)| EnvTransition {
+                    next_obs,
+                    reward,
+                    done,
+                    info,
+                    outcome,
+                },
+            )
+            .collect())
     }
 
     /// Translate + step. Auto-resets on episode end.
@@ -1390,15 +1470,21 @@ impl EnvWorker {
         &mut self,
         choice: &Choice,
     ) -> Result<(f64, bool, Option<EpisodeInfo>, ActionOutcome)> {
-        let name = ACTIONS[choice.action as usize];
+        let mut outs = self.apply_agents(std::slice::from_ref(choice))?;
+        Ok(outs.remove(0))
+    }
+
+    pub fn apply_agents(
+        &mut self,
+        choices: &[Choice],
+    ) -> Result<Vec<(f64, bool, Option<EpisodeInfo>, ActionOutcome)>> {
+        let n = self.n_agents.max(1);
+        ensure!(
+            choices.len() == n,
+            "apply_agents expected {n} choices, got {}",
+            choices.len()
+        );
         let lut = self.current_lut();
-        let boats_before = self.legal().boats.clone();
-        let pre_attack_ids: HashSet<String> =
-            self.ents().attacks.iter().map(|a| a.aid.clone()).collect();
-        let me_pre = self.obs.as_ref().unwrap().me().max(0) as usize;
-        let troops_before = player_troops(self.ents(), me_pre);
-        // Raw tiles are full (untrimmed width) resolution; translate wants
-        // owner ids trimmed to (hr, wr) matching the translator's grids.
         let width = self.obs.as_ref().unwrap().head["width"].as_u64().unwrap() as usize;
         let mut owners_trim = vec![0i64; self.hr * self.wr];
         {
@@ -1409,426 +1495,505 @@ impl EnvWorker {
                 }
             }
         }
-        let me = self.obs.as_ref().unwrap().me();
         let ents = self.ents().clone();
-        let legal = self.legal().clone();
-        let intents = translate(
-            choice,
-            self.translator.as_mut().unwrap(),
-            &owners_trim,
-            me,
-            &ents,
-            &legal,
-            &lut,
-        );
-
-        let new_obs = self.bridge.step(&intents, self.decision_ticks)?;
-        // Peek boats from the post-step structured/JSON before installing
-        // the new obs (churn attribution needs pre+post boat id sets).
-        let boats_after = if choice.action == A_BOAT {
-            if let Some((_, legal)) = new_obs.structured.as_ref() {
-                legal.boats.clone()
-            } else {
-                feat::parse_legal(new_obs.legal_actions()).boats
+        let mut all_intents: Vec<Value> = Vec::new();
+        let mut agent_intents: Vec<Vec<Value>> = Vec::with_capacity(n);
+        let mut boats_before: Vec<Vec<usize>> = Vec::with_capacity(n);
+        let mut me_pre: Vec<usize> = Vec::with_capacity(n);
+        let mut troops_before: Vec<f64> = Vec::with_capacity(n);
+        for i in 0..n {
+            let legal = self.agent_legal(i).clone();
+            boats_before.push(legal.boats.clone());
+            let me = self.agent_me(i);
+            me_pre.push(me.max(0) as usize);
+            troops_before.push(player_troops(&ents, me.max(0) as usize));
+            let mut intents = translate(
+                &choices[i],
+                self.translator.as_mut().unwrap(),
+                &owners_trim,
+                me,
+                &ents,
+                &legal,
+                &lut,
+            );
+            for intent in &mut intents {
+                if let Some(map) = intent.as_object_mut() {
+                    map.insert(
+                        "clientID".into(),
+                        Value::String(AGENT_CLIENT_IDS[i].into()),
+                    );
+                }
             }
+            all_intents.extend(intents.iter().cloned());
+            agent_intents.push(intents);
+        }
+        let pre_attack_ids: HashSet<String> = ents.attacks.iter().map(|a| a.aid.clone()).collect();
+
+        let new_obs = self.bridge.step(&all_intents, self.decision_ticks)?;
+        let boats_after_global = if let Some((_, legal)) = new_obs.structured.as_ref() {
+            legal.boats.clone()
         } else {
-            Vec::new()
+            feat::parse_legal(new_obs.legal_actions()).boats
         };
-        let chosen_action =
-            churn_action(choice, &lut, &ents, &intents, &boats_before, &boats_after);
-
-        // Snapshot relation before the intent lands (embargo_stop outcome).
-        let mut embargo_outcome_r = 0.0;
-        if choice.action == A_EMBARGO_STOP {
-            if let Some(ActionTarget::Player(target)) = chosen_action.target {
-                let rel = self
-                    .ents()
-                    .players
-                    .iter()
-                    .find(|p| p.id == me_pre)
-                    .map(|p| p.relation_to(target))
-                    .unwrap_or(0.0);
-                embargo_outcome_r = self.combat_tracker.observe_embargo_stop(
-                    rel,
-                    self.reward_config,
-                    self.episode_stage,
-                );
-            }
-        }
-        let combat_target = match chosen_action.target {
-            Some(ActionTarget::Player(id))
-                if choice.action == A_ATTACK || choice.action == A_RETREAT =>
-            {
-                Some(id)
-            }
-            _ => None,
-        };
-        let combat_outcome_r = self.combat_tracker.observe_combat(
-            choice.action,
-            combat_target,
-            self.reward_config.v81_churn_window,
-            self.reward_config,
-            self.episode_stage,
-        );
-
-        if let Some(ActionTarget::Unit(unit_id)) = chosen_action.target {
-            if choice.action == A_BOAT && !intents.is_empty() {
-                let after_ents = new_obs.structured.as_ref().map(|(e, _)| e.clone()).unwrap_or_else(|| {
-                    feat::parse_ents(new_obs.entities())
-                });
-                let troops = after_ents
-                    .units
-                    .iter()
-                    .find(|u| u.uid == unit_id as i64 && u.class == TRANSPORT_UNIT_CLASS)
-                    .map(|u| u.troops)
-                    .unwrap_or(0.0);
-                self.boat_tracker.note_launch(unit_id, troops);
-            } else if choice.action == A_CANCEL_BOAT {
-                self.boat_tracker.note_cancel(unit_id);
-            }
-        }
-        let inverse_pair = self
-            .action_churn_tracker
-            .observe(chosen_action, self.reward_config.v81_churn_window);
-        let engine_wasted = new_obs.wasted();
-        let mut wasted = engine_wasted;
-        if intents.is_empty() && name != "noop" && name != "spawn" {
-            wasted += 1;
-        }
-        let (target_kind, target_identity) = match chosen_action.target {
-            Some(ActionTarget::Player(id)) => (1, id as i64),
-            Some(ActionTarget::Unit(id)) => (2, id as i64),
-            None => (0, -1),
-        };
-        let (target_y, target_x) = choice
-            .tile_region
-            .map(|tile| normalized_tile_target(tile, self.hr / REGION, self.wr / REGION))
-            .unwrap_or((-1.0, -1.0));
-        let commitment = (
-            choice.action,
-            choice.player_slot.unwrap_or(-1),
-            choice.tile_region.unwrap_or(-1),
-            choice.build_type.unwrap_or(-1),
-            choice.nuke_type.unwrap_or(-1),
-            choice.quantity_frac.unwrap_or(-1.0).to_bits(),
-        );
-        let commitment_age = if self.last_commitment == Some(commitment) {
-            self.prev_action.commitment_age.saturating_add(1)
-        } else {
-            0
-        };
-        self.last_commitment = Some(commitment);
-        let outcome = ActionOutcome {
-            action: choice.action,
-            player_slot: choice.player_slot.unwrap_or(-1),
-            tile_region: choice.tile_region.unwrap_or(-1),
-            build_type: choice.build_type.unwrap_or(-1),
-            nuke_type: choice.nuke_type.unwrap_or(-1),
-            // The engine reports a count, so a multi-intent action can have
-            // both accepted and wasted components.
-            success: name == "noop" || intents.len() as i64 > engine_wasted,
-            wasted: wasted > 0,
-            target_identity,
-            target_y,
-            target_x,
-            quantity: choice.quantity_frac.unwrap_or(-1.0) as f32,
-            commitment_age,
-            had_action: true,
-            target_kind,
-        };
-        self.prev_action = outcome.clone();
         self.set_obs(new_obs);
 
         if self.obs.as_ref().unwrap().spawn_phase() {
             self.spawn_steps += 1;
             if self.spawn_steps >= 8 {
-                // Fallback: pick a uniformly random legal spawn tile.
                 self.spawn_randomly()?;
-            } else {
-                let composite = curriculum::strengths(self.ents(), self.land_total);
-                let me0 = self.obs.as_ref().unwrap().me().max(0) as usize;
-                self.prev_strength = composite.get(&me0).copied().unwrap_or(0.0);
-                self.dominance_shaper.reset(dominance_potential(
-                    &composite,
-                    me0,
-                    self.reward_config.v81_potential_clamp,
-                ));
-                let share = land_share(
-                    ofcore::translate::my_tiles(self.ents(), self.obs.as_ref().unwrap().me()),
-                    self.land_total,
-                );
-                self.closeout_shaper.reset(closeout_potential(share));
-                self.ep_len += 1;
-                return Ok((0.0, false, None, outcome));
             }
+            self.seed_agent_trackers();
+            self.ep_len += 1;
+            let dummy = ActionOutcome::default();
+            return Ok((0..n)
+                .map(|_| (0.0, false, None, dummy.clone()))
+                .collect());
         }
 
-        let obs_me = self.obs.as_ref().unwrap().me();
-        let obs_tick = self.obs.as_ref().unwrap().tick();
-        let obs_alive = self.obs.as_ref().unwrap().alive();
         let winner_val = self.obs.as_ref().unwrap().winner().clone();
-        let tiles = ofcore::translate::my_tiles(self.ents(), obs_me);
-        let share = land_share(tiles, self.land_total);
-        let closeout_just_entered =
-            self.closeout_tracker
-                .observe(share, obs_tick, inverse_pair.is_some());
-        let composite = curriculum::strengths(self.ents(), self.land_total);
-        let me = obs_me.max(0) as usize;
-        let mut done = false;
-        let mut won = false;
+        let obs_tick = self.obs.as_ref().unwrap().tick();
+        let alives: Vec<bool> = (0..n).map(|i| self.agent_alive(i)).collect();
+        let all_dead = alives.iter().all(|a| !*a);
+        let won = humans_won(&winner_val, n);
         let mut timed_out = false;
+        let mut done = false;
         let mut died = false;
-        if !obs_alive {
+        if all_dead {
             done = true;
             died = true;
         } else if !winner_val.is_null() {
-            won = winner_val
-                .as_array()
-                .map(|a| a.len() > 1 && a[1] == "AGENTRL1")
-                .unwrap_or(false);
             done = true;
         } else if obs_tick >= self.max_episode_ticks {
             done = true;
             timed_out = true;
         }
-        let mine = composite.get(&me).copied().unwrap_or(0.0);
 
-        let tw = timeweight(obs_tick);
-        let delta = mine - self.prev_strength;
-        let normalized_share = if self.reward_config.dominant_loss_active(self.episode_stage) {
-            normalized_strength_share(&composite, me)
+        let partner_me = if n > 1 {
+            self.agent_me(1).max(0) as usize
+        } else {
+            usize::MAX
+        };
+        let composite = curriculum::strengths(self.ents(), self.land_total);
+        let s0 = composite
+            .get(&(self.agent_me(0).max(0) as usize))
+            .copied()
+            .unwrap_or(0.0);
+        let s1 = if n > 1 {
+            composite.get(&partner_me).copied().unwrap_or(0.0)
         } else {
             0.0
         };
-        let has_active_attack = self.ents().attacks.iter().any(|a| a.from == me);
-        let delta_weight = strength_delta_weight(
-            delta,
-            normalized_share,
-            self.episode_stage,
-            self.reward_config,
-            has_active_attack,
-        );
-        let mut components = RewardComponents {
-            strength: W_STR * mine * tw,
-            strength_delta: delta_weight * delta,
-            ..RewardComponents::default()
-        };
-        let mut reward = components.strength + components.strength_delta;
-        components.action_churn = if self.curriculum_schedule.uses_v83_closeout() {
-            v83_action_churn_penalty(inverse_pair, self.episode_stage, share, self.reward_config)
-        } else {
-            action_churn_penalty(inverse_pair, self.episode_stage, self.reward_config)
-        };
-        // V8.6: combat sticky outcomes already price attack↔retreat thrash;
-        // stacking flat churn makes attacking a trap.
-        if self.reward_config.v86_skip_combat_churn
-            && matches!(
-                inverse_pair,
-                Some(InverseActionPair::AttackRetreat | InverseActionPair::RetreatAttack)
-            )
-        {
-            components.action_churn = 0.0;
-        }
-        if components.action_churn != 0.0 {
-            reward += components.action_churn;
-        }
-        components.embargo_outcome = embargo_outcome_r;
-        if components.embargo_outcome != 0.0 {
-            reward += components.embargo_outcome;
-        }
-        components.combat_outcome = combat_outcome_r;
-        if components.combat_outcome != 0.0 {
-            reward += components.combat_outcome;
-        }
-        let next_potential = if self.curriculum_schedule.uses_v83_closeout() && done {
-            0.0
-        } else {
-            dominance_potential(&composite, me, self.reward_config.v81_potential_clamp)
-        };
-        if self
-            .reward_config
-            .dominance_shaping_active(self.episode_stage)
-        {
-            components.dominance = self.dominance_shaper.transition(
-                next_potential,
-                self.reward_config.gamma,
-                self.reward_config.v81_dom_coef,
+        let both_alive = n > 1 && alives[0] && alives[1];
+        let allied = n > 1
+            && formally_allied(
+                self.ents(),
+                self.agent_me(0).max(0) as usize,
+                partner_me,
             );
-            reward += components.dominance;
-        } else {
-            // Avoid even adding zero in the disabled legacy-parity path.
-            self.dominance_shaper.reset(next_potential);
-        }
-        let next_closeout_potential = if done { 0.0 } else { closeout_potential(share) };
-        // Closeout potential is schedule-gated only (no curriculum stage gate).
-        if self.curriculum_schedule.uses_v83_closeout() && self.reward_config.v83_close_coef != 0.0
-        {
-            components.closeout = self.closeout_shaper.transition(
-                next_closeout_potential,
-                self.reward_config.gamma,
-                self.reward_config.v83_close_coef,
-            );
-            reward += components.closeout;
-        } else {
-            self.closeout_shaper.reset(next_closeout_potential);
-        }
-        // One-shot milestone for first crossing of 45% land (logged under closeout).
-        let entry_bonus = v10_closeout_entry_bonus(closeout_just_entered, self.reward_config);
-        if entry_bonus != 0.0 {
-            components.closeout += entry_bonus;
-            reward += entry_bonus;
-        }
-
-        let troops_after = player_troops(self.ents(), me);
-        let alive_transports = transport_unit_ids(self.ents(), me);
-        let new_sourced_attack = self.ents().attacks.iter().any(|a| {
-            a.from == me
-                && a.src_x.is_some()
-                && a.src_y.is_some()
-                && !pre_attack_ids.contains(&a.aid)
-        });
-        let has_sourced_attack = self
-            .ents()
-            .attacks
-            .iter()
-            .any(|a| a.from == me && a.src_x.is_some() && a.src_y.is_some());
-        components.boat_outcome = self.boat_tracker.resolve_missing(
-            &alive_transports,
-            troops_before,
-            troops_after,
-            new_sourced_attack,
-            has_sourced_attack,
-            self.reward_config,
-            self.episode_stage,
-        );
-        if components.boat_outcome != 0.0 {
-            reward += components.boat_outcome;
-        }
-
-        let tempo_share = if self.reward_config.tempo_active(self.episode_stage) {
-            normalized_strength_share(&composite, me)
+        let welfare = if n > 1 {
+            duo_welfare_reward(s0, s1)
         } else {
             0.0
         };
-        if self.reward_config.tempo_active(self.episode_stage) {
-            components.tempo = -self.reward_config.v84_tempo_coef
-                * tempo_pressure(
-                    obs_tick,
-                    self.max_episode_ticks,
-                    tempo_share,
-                    self.reward_config.tempo_share_threshold(),
-                )
-                * tw;
-            if components.tempo != 0.0 {
-                reward += components.tempo;
-            }
-        }
-
-        components.survival = v10_survival_reward(obs_alive, share, self.reward_config);
-        if components.survival != 0.0 {
-            reward += components.survival;
-        }
-        components.diplo_panic = v10_diplo_panic_penalty(
-            choice.action,
-            share,
-            obs_tick,
-            self.max_episode_ticks,
-            self.reward_config,
-        );
-        if components.diplo_panic != 0.0 {
-            reward += components.diplo_panic;
-        }
-        // Boat/build/attack must have actually emitted a non-wasted intent.
-        // The policy always samples tile_region (boat/build) or player_slot
-        // (attack); treating that sample as a "target" paid combat-action
-        // bonuses on empty/failed translates (empty boats were net +0.005
-        // after waste; attacks paid +0.02 whenever a slot was sampled).
-        let emitted_ok = !intents.is_empty() && (intents.len() as i64) > engine_wasted;
-        let has_action_target = match choice.action {
-            A_ATTACK | A_BOAT | A_BUILD => emitted_ok,
-            _ => {
-                choice.player_slot.is_some()
-                    || choice.tile_region.is_some()
-                    || matches!(chosen_action.target, Some(_))
-            }
+        let synergy = if n > 1 {
+            duo_synergy_reward(both_alive, allied)
+        } else {
+            0.0
         };
-        components.combat_action =
-            v10_combat_action_bonus(choice.action, has_action_target, self.reward_config);
-        if components.combat_action != 0.0 {
-            reward += components.combat_action;
-        }
+        let solo_scale = if n > 1 { DUO_SOLO_SCALE } else { 1.0 };
 
-        reward -= W_WASTE * wasted as f64;
-        components.waste = -W_WASTE * wasted as f64;
-        self.ep_wasted += wasted;
-        self.prev_strength = mine;
-
-        if !obs_alive {
-            let death = self.reward_config.death_penalty();
-            reward -= death;
-            components.death = -death;
-        }
-
-        let mut info = None;
-        if done {
-            let (place, n) = placement(self.ents(), obs_me, obs_alive, self.land_total);
-            components.terminal = terminal_reward(place, won)
-                + fast_win_bonus(
-                    won,
-                    obs_tick,
-                    self.max_episode_ticks,
-                    self.reward_config.v84_fast_win_coef,
-                );
-            if won {
-                components.terminal += self.reward_config.v85_extra_win_bonus;
+        let mut results = Vec::with_capacity(n);
+        let mut episode_info: Option<EpisodeInfo> = None;
+        for i in 0..n {
+            let choice = &choices[i];
+            let intents = &agent_intents[i];
+            let name = ACTIONS[choice.action as usize];
+            let boats_after = if choice.action == A_BOAT {
+                boats_after_global.clone()
+            } else {
+                Vec::new()
+            };
+            let chosen_action = churn_action(
+                choice,
+                &lut,
+                &ents,
+                intents,
+                &boats_before[i],
+                &boats_after,
+            );
+            let mut embargo_outcome_r = 0.0;
+            if choice.action == A_EMBARGO_STOP {
+                if let Some(ActionTarget::Player(target)) = chosen_action.target {
+                    let rel = ents
+                        .players
+                        .iter()
+                        .find(|p| p.id == me_pre[i])
+                        .map(|p| p.relation_to(target))
+                        .unwrap_or(0.0);
+                    embargo_outcome_r = self.combat_tracker[i].observe_embargo_stop(
+                        rel,
+                        self.reward_config,
+                        self.episode_stage,
+                    );
+                }
             }
-            components.terminal += v10_timeout_after_closeout_penalty(
-                timed_out,
-                self.closeout_tracker.reached(),
+            let combat_target = match chosen_action.target {
+                Some(ActionTarget::Player(id))
+                    if choice.action == A_ATTACK || choice.action == A_RETREAT =>
+                {
+                    Some(id)
+                }
+                _ => None,
+            };
+            let combat_outcome_r = self.combat_tracker[i].observe_combat(
+                choice.action,
+                combat_target,
+                self.reward_config.v81_churn_window,
                 self.reward_config,
+                self.episode_stage,
             );
-            reward += components.terminal;
+            if let Some(ActionTarget::Unit(unit_id)) = chosen_action.target {
+                if choice.action == A_BOAT && !intents.is_empty() {
+                    let troops = self
+                        .ents()
+                        .units
+                        .iter()
+                        .find(|u| u.uid == unit_id as i64 && u.class == TRANSPORT_UNIT_CLASS)
+                        .map(|u| u.troops)
+                        .unwrap_or(0.0);
+                    self.boat_tracker[i].note_launch(unit_id, troops);
+                } else if choice.action == A_CANCEL_BOAT {
+                    self.boat_tracker[i].note_cancel(unit_id);
+                }
+            }
+            let inverse_pair = self.action_churn_tracker[i]
+                .observe(chosen_action, self.reward_config.v81_churn_window);
+            let engine_wasted = self.obs.as_ref().unwrap().wasted();
+            let mut wasted = if i == 0 { engine_wasted } else { 0 };
+            if intents.is_empty() && name != "noop" && name != "spawn" {
+                wasted += 1;
+            }
+            let (target_kind, target_identity) = match chosen_action.target {
+                Some(ActionTarget::Player(id)) => (1, id as i64),
+                Some(ActionTarget::Unit(id)) => (2, id as i64),
+                None => (0, -1),
+            };
+            let (target_y, target_x) = choice
+                .tile_region
+                .map(|tile| normalized_tile_target(tile, self.hr / REGION, self.wr / REGION))
+                .unwrap_or((-1.0, -1.0));
+            let commitment = (
+                choice.action,
+                choice.player_slot.unwrap_or(-1),
+                choice.tile_region.unwrap_or(-1),
+                choice.build_type.unwrap_or(-1),
+                choice.nuke_type.unwrap_or(-1),
+                choice.quantity_frac.unwrap_or(-1.0).to_bits(),
+            );
+            let commitment_age = if self.last_commitment[i] == Some(commitment) {
+                self.prev_action[i].commitment_age.saturating_add(1)
+            } else {
+                0
+            };
+            self.last_commitment[i] = Some(commitment);
+            let outcome = ActionOutcome {
+                action: choice.action,
+                player_slot: choice.player_slot.unwrap_or(-1),
+                tile_region: choice.tile_region.unwrap_or(-1),
+                build_type: choice.build_type.unwrap_or(-1),
+                nuke_type: choice.nuke_type.unwrap_or(-1),
+                success: name == "noop" || intents.len() as i64 > engine_wasted,
+                wasted: wasted > 0,
+                target_identity,
+                target_y,
+                target_x,
+                quantity: choice.quantity_frac.unwrap_or(-1.0) as f32,
+                commitment_age,
+                had_action: true,
+                target_kind,
+            };
+            self.prev_action[i] = outcome.clone();
+
+            let obs_me = self.agent_me(i);
+            let obs_alive = alives[i];
+            let tiles = ofcore::translate::my_tiles(self.ents(), obs_me);
+            let share = land_share(tiles, self.land_total);
+            let closeout_just_entered =
+                self.closeout_tracker[i]
+                    .observe(share, obs_tick, inverse_pair.is_some());
+            let me = obs_me.max(0) as usize;
+            let mine = composite.get(&me).copied().unwrap_or(0.0);
+            let tw = timeweight(obs_tick);
+            let delta = mine - self.prev_strength[i];
+            let normalized_share = if self.reward_config.dominant_loss_active(self.episode_stage) {
+                normalized_strength_share(&composite, me)
+            } else {
+                0.0
+            };
+            let has_active_attack = self.ents().attacks.iter().any(|a| a.from == me);
+            let delta_weight = strength_delta_weight(
+                delta,
+                normalized_share,
+                self.episode_stage,
+                self.reward_config,
+                has_active_attack,
+            );
+            let mut components = RewardComponents {
+                strength: W_STR * mine * tw * solo_scale,
+                strength_delta: delta_weight * delta * solo_scale,
+                ..RewardComponents::default()
+            };
+            let mut reward = components.strength + components.strength_delta;
+            components.action_churn = if self.curriculum_schedule.uses_v83_closeout() {
+                v83_action_churn_penalty(
+                    inverse_pair,
+                    self.episode_stage,
+                    share,
+                    self.reward_config,
+                )
+            } else {
+                action_churn_penalty(inverse_pair, self.episode_stage, self.reward_config)
+            } * solo_scale;
+            if self.reward_config.v86_skip_combat_churn
+                && matches!(
+                    inverse_pair,
+                    Some(InverseActionPair::AttackRetreat | InverseActionPair::RetreatAttack)
+                )
+            {
+                components.action_churn = 0.0;
+            }
+            if components.action_churn != 0.0 {
+                reward += components.action_churn;
+            }
+            components.embargo_outcome = embargo_outcome_r * solo_scale;
+            if components.embargo_outcome != 0.0 {
+                reward += components.embargo_outcome;
+            }
+            components.combat_outcome = combat_outcome_r * solo_scale;
+            if components.combat_outcome != 0.0 {
+                reward += components.combat_outcome;
+            }
+            let next_potential = if self.curriculum_schedule.uses_v83_closeout() && done {
+                0.0
+            } else {
+                dominance_potential(&composite, me, self.reward_config.v81_potential_clamp)
+            };
+            if self
+                .reward_config
+                .dominance_shaping_active(self.episode_stage)
+            {
+                components.dominance = self.dominance_shaper[i].transition(
+                    next_potential,
+                    self.reward_config.gamma,
+                    self.reward_config.v81_dom_coef,
+                ) * solo_scale;
+                reward += components.dominance;
+            } else {
+                self.dominance_shaper[i].reset(next_potential);
+            }
+            let next_closeout_potential = if done { 0.0 } else { closeout_potential(share) };
+            if self.curriculum_schedule.uses_v83_closeout()
+                && self.reward_config.v83_close_coef != 0.0
+            {
+                components.closeout = self.closeout_shaper[i].transition(
+                    next_closeout_potential,
+                    self.reward_config.gamma,
+                    self.reward_config.v83_close_coef,
+                ) * solo_scale;
+                reward += components.closeout;
+            } else {
+                self.closeout_shaper[i].reset(next_closeout_potential);
+            }
+            let entry_bonus =
+                v10_closeout_entry_bonus(closeout_just_entered, self.reward_config) * solo_scale;
+            if entry_bonus != 0.0 {
+                components.closeout += entry_bonus;
+                reward += entry_bonus;
+            }
+
+            let troops_after = player_troops(self.ents(), me);
+            let alive_transports = transport_unit_ids(self.ents(), me);
+            let new_sourced_attack = self.ents().attacks.iter().any(|a| {
+                a.from == me
+                    && a.src_x.is_some()
+                    && a.src_y.is_some()
+                    && !pre_attack_ids.contains(&a.aid)
+            });
+            let has_sourced_attack = self
+                .ents()
+                .attacks
+                .iter()
+                .any(|a| a.from == me && a.src_x.is_some() && a.src_y.is_some());
+            components.boat_outcome = self.boat_tracker[i].resolve_missing(
+                &alive_transports,
+                troops_before[i],
+                troops_after,
+                new_sourced_attack,
+                has_sourced_attack,
+                self.reward_config,
+                self.episode_stage,
+            ) * solo_scale;
+            if components.boat_outcome != 0.0 {
+                reward += components.boat_outcome;
+            }
+
+            let tempo_share = if self.reward_config.tempo_active(self.episode_stage) {
+                normalized_strength_share(&composite, me)
+            } else {
+                0.0
+            };
+            if self.reward_config.tempo_active(self.episode_stage) {
+                components.tempo = -self.reward_config.v84_tempo_coef
+                    * tempo_pressure(
+                        obs_tick,
+                        self.max_episode_ticks,
+                        tempo_share,
+                        self.reward_config.tempo_share_threshold(),
+                    )
+                    * tw
+                    * solo_scale;
+                if components.tempo != 0.0 {
+                    reward += components.tempo;
+                }
+            }
+
+            components.survival =
+                v10_survival_reward(obs_alive, share, self.reward_config) * solo_scale;
+            if components.survival != 0.0 {
+                reward += components.survival;
+            }
+            components.diplo_panic = v10_diplo_panic_penalty(
+                choice.action,
+                share,
+                obs_tick,
+                self.max_episode_ticks,
+                self.reward_config,
+            ) * solo_scale;
+            if components.diplo_panic != 0.0 {
+                reward += components.diplo_panic;
+            }
+            let emitted_ok = !intents.is_empty() && (intents.len() as i64) > engine_wasted;
+            let has_action_target = match choice.action {
+                A_ATTACK | A_BOAT | A_BUILD => emitted_ok,
+                _ => {
+                    choice.player_slot.is_some()
+                        || choice.tile_region.is_some()
+                        || matches!(chosen_action.target, Some(_))
+                }
+            };
+            components.combat_action = v10_combat_action_bonus(
+                choice.action,
+                has_action_target,
+                self.reward_config,
+            ) * solo_scale;
+            if components.combat_action != 0.0 {
+                reward += components.combat_action;
+            }
+
+            reward -= W_WASTE * wasted as f64;
+            components.waste = -W_WASTE * wasted as f64;
+            self.ep_wasted += wasted;
+            self.prev_strength[i] = mine;
+
+            if !obs_alive && self.was_alive[i] {
+                let death = self.reward_config.death_penalty();
+                reward -= death;
+                components.death = -death;
+            }
+            self.was_alive[i] = obs_alive;
+
+            if n > 1 {
+                let mut duo_r = welfare + synergy;
+                let partner = if i == 0 { partner_me } else { me_pre[0] };
+                if emitted_ok {
+                    if choice.action == A_ALLIANCE_REQUEST {
+                        if let Some(ActionTarget::Player(tid)) = chosen_action.target {
+                            if tid == partner {
+                                duo_r += W_DUO_ALLY_REQUEST;
+                            }
+                        }
+                    }
+                    if choice.action == A_DONATE_GOLD || choice.action == A_DONATE_TROOPS {
+                        if let Some(ActionTarget::Player(tid)) = chosen_action.target {
+                            if tid == partner {
+                                duo_r += W_DUO_DONATE_PARTNER;
+                            }
+                        }
+                    }
+                }
+                components.duo = duo_r;
+                reward += duo_r;
+            }
+
+            if done {
+                let (place, _pn) = placement(self.ents(), obs_me, obs_alive, self.land_total);
+                components.terminal = (terminal_reward(place, won)
+                    + fast_win_bonus(
+                        won,
+                        obs_tick,
+                        self.max_episode_ticks,
+                        self.reward_config.v84_fast_win_coef,
+                    ))
+                    * if n > 1 { 1.0 } else { 1.0 };
+                if won {
+                    components.terminal += self.reward_config.v85_extra_win_bonus;
+                }
+                components.terminal += v10_timeout_after_closeout_penalty(
+                    timed_out,
+                    self.closeout_tracker[i].reached(),
+                    self.reward_config,
+                );
+                reward += components.terminal;
+            }
             self.ep_reward_components.add_assign(components);
             self.ep_reward += reward;
-            self.ep_len += 1;
-            info = Some(EpisodeInfo {
-                reward: self.ep_reward,
-                length: self.ep_len,
-                final_tiles: tiles,
-                final_land_share: share,
-                max_land_share: self.closeout_tracker.max_land_share,
-                closeout_reached: self.closeout_tracker.reached(),
-                closeout_entry_tick: self.closeout_tracker.entry_tick,
-                decisions_after_closeout: self.closeout_tracker.decisions_after_entry,
-                converted: self.closeout_tracker.reached() && won,
-                timeout_after_closeout: timed_out && self.closeout_tracker.reached(),
-                post_closeout_churn_pairs: self.closeout_tracker.post_entry_churn_pairs,
-                final_tick: obs_tick,
-                place,
-                n_players: n,
-                score: placement_score(place, n),
-                won,
-                died,
-                wasted: self.ep_wasted,
-                stage: self.stage,
-                map: self.map_name.clone(),
-                rehearsal: self.rehearsal,
-                reward_components: self.ep_reward_components,
-                action_pair_counts: self.action_churn_tracker.counts(),
-                boat_outcome_counts: self.boat_tracker.counts(),
-                embargo_bad_stops: self.combat_tracker.embargo_bad_stops,
-                embargo_good_stops: self.combat_tracker.embargo_good_stops,
-                premature_retreats: self.combat_tracker.premature_retreats,
-                thrash_reengages: self.combat_tracker.thrash_reengages,
-            });
+
+            if done && i == 0 {
+                let (place, pn) = placement(self.ents(), obs_me, obs_alive, self.land_total);
+                episode_info = Some(EpisodeInfo {
+                    reward: self.ep_reward,
+                    length: self.ep_len + 1,
+                    final_tiles: tiles,
+                    final_land_share: share,
+                    max_land_share: self.closeout_tracker[0].max_land_share,
+                    closeout_reached: self.closeout_tracker[0].reached(),
+                    closeout_entry_tick: self.closeout_tracker[0].entry_tick,
+                    decisions_after_closeout: self.closeout_tracker[0].decisions_after_entry,
+                    converted: self.closeout_tracker[0].reached() && won,
+                    timeout_after_closeout: timed_out && self.closeout_tracker[0].reached(),
+                    post_closeout_churn_pairs: self.closeout_tracker[0].post_entry_churn_pairs,
+                    final_tick: obs_tick,
+                    place,
+                    n_players: pn,
+                    score: placement_score(place, pn),
+                    won,
+                    died,
+                    wasted: self.ep_wasted,
+                    stage: self.stage,
+                    map: self.map_name.clone(),
+                    rehearsal: self.rehearsal,
+                    reward_components: self.ep_reward_components,
+                    action_pair_counts: self.action_churn_tracker[0].counts(),
+                    boat_outcome_counts: self.boat_tracker[0].counts(),
+                    embargo_bad_stops: self.combat_tracker[0].embargo_bad_stops,
+                    embargo_good_stops: self.combat_tracker[0].embargo_good_stops,
+                    premature_retreats: self.combat_tracker[0].premature_retreats,
+                    thrash_reengages: self.combat_tracker[0].thrash_reengages,
+                });
+            }
+            results.push((
+                reward,
+                done,
+                if i == 0 { episode_info.clone() } else { None },
+                outcome,
+            ));
+        }
+        self.ep_len += 1;
+        if done {
             self.spool_finished_episode(won, timed_out);
             self.reset_episode()?;
-        } else {
-            self.ep_reward_components.add_assign(components);
-            self.ep_reward += reward;
-            self.ep_len += 1;
         }
-        Ok((reward, done, info, outcome))
+        Ok(results)
     }
 
     /// Emergency fallback matching `rl/ppo_translate.py::spawn_randomly`:
@@ -1852,12 +2017,27 @@ impl EnvWorker {
         if candidates.is_empty() {
             return Ok(());
         }
-        let (y, x) = candidates[self.rng.gen_range(0..candidates.len())];
-        let tile = y * width as i64 + x;
-        let new_obs = self.bridge.step(
-            &[serde_json::json!({"type": "spawn", "tile": tile})],
-            self.decision_ticks,
-        )?;
+        let mut intents = Vec::new();
+        for i in 0..self.n_agents {
+            if self.agent_alive(i) {
+                continue;
+            }
+            if candidates.is_empty() {
+                break;
+            }
+            let idx = self.rng.gen_range(0..candidates.len());
+            let (y, x) = candidates.swap_remove(idx);
+            let tile = y * width as i64 + x;
+            intents.push(serde_json::json!({
+                "type": "spawn",
+                "tile": tile,
+                "clientID": AGENT_CLIENT_IDS[i],
+            }));
+        }
+        if intents.is_empty() {
+            return Ok(());
+        }
+        let new_obs = self.bridge.step(&intents, self.decision_ticks)?;
         self.set_obs(new_obs);
         Ok(())
     }
