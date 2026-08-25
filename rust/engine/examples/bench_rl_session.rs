@@ -108,13 +108,14 @@ fn repo_root() -> PathBuf {
 
 fn reset_session(root: &PathBuf, args: &Args, idx: usize) -> RlSession {
     let seed = format!("bench{idx}-{}", args.envs);
-    let (session, _head, _ents, _legal, _terrain) = RlSession::reset(
+    let (session, _head, _ents, _legal, _terrain, _duo) = RlSession::reset(
         root,
         &args.map,
         &seed,
         args.bots,
         &args.difficulty,
         Value::from(args.nations),
+        1,
     )
     .expect("RlSession::reset failed");
     session

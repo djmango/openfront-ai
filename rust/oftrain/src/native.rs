@@ -19,6 +19,7 @@ pub struct NativeEngine {
     width: usize,
     height: usize,
     terrain: Vec<u8>,
+    n_agents: u32,
 }
 
 impl NativeEngine {
@@ -29,6 +30,7 @@ impl NativeEngine {
             width: 0,
             height: 0,
             terrain: Vec::new(),
+            n_agents: 1,
         })
     }
 
@@ -44,6 +46,7 @@ impl NativeEngine {
         tiles: &[u16],
         ents: EntsData,
         legal: Legal,
+        duo: Option<(Value, Legal)>,
     ) -> RawObs {
         let n = width * height;
         debug_assert_eq!(tiles.len(), n);
@@ -51,11 +54,16 @@ impl NativeEngine {
             head,
             tiles: TileState::Packed(tiles.to_vec()),
             structured: Some((ents, legal)),
+            duo,
         }
     }
 }
 
 impl GameEngine for NativeEngine {
+    fn set_agent_count(&mut self, n: u32) {
+        self.n_agents = n.clamp(1, 2);
+    }
+
     fn reset(
         &mut self,
         map_name: &str,
@@ -64,9 +72,16 @@ impl GameEngine for NativeEngine {
         difficulty: &str,
         nations: Value,
     ) -> Result<RawObs> {
-        let (session, head, ents, legal, terrain) =
-            RlSession::reset(&self.repo_root, map_name, seed, bots, difficulty, nations)
-                .map_err(|e| anyhow!("native reset: {e}"))?;
+        let (session, head, ents, legal, terrain, duo) = RlSession::reset(
+            &self.repo_root,
+            map_name,
+            seed,
+            bots,
+            difficulty,
+            nations,
+            self.n_agents,
+        )
+        .map_err(|e| anyhow!("native reset: {e}"))?;
         self.width = head["width"].as_u64().ok_or_else(|| anyhow!("no width"))? as usize;
         self.height = head["height"]
             .as_u64()
@@ -82,6 +97,7 @@ impl GameEngine for NativeEngine {
             session.tile_state(),
             ents,
             legal,
+            duo,
         ))
     }
 
@@ -91,7 +107,7 @@ impl GameEngine for NativeEngine {
             .session
             .as_mut()
             .ok_or_else(|| anyhow!("step before reset"))?;
-        let (head, ents, legal) = session.step(intents, ticks);
+        let (head, ents, legal, duo) = session.step(intents, ticks);
         Ok(Self::decode(
             width,
             height,
@@ -99,6 +115,7 @@ impl GameEngine for NativeEngine {
             session.tile_state(),
             ents,
             legal,
+            duo,
         ))
     }
 
