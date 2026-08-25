@@ -306,36 +306,49 @@ impl RlSession {
         // OpenFront WinnerSchema is optional (field absent), not nullable.
         // Emitting `"winner": null` makes client GameRecordSchema.safeParse fail
         // and the join-lobby UI never starts the replay.
+        let human_players: Vec<Value> = AGENT_CLIENT_IDS
+            .iter()
+            .take(self.n_agents.max(1) as usize)
+            .map(|cid| {
+                let pid = self.game.player_by_client_id(cid).map(|p| p.id.clone());
+                let username = if *cid == AGENT_CLIENT_ID_2 {
+                    "AgentB"
+                } else {
+                    "Agent"
+                };
+                json!({
+                    "clientID": cid,
+                    "username": username,
+                    "clanTag": null,
+                    "persistentID": null,
+                    "stats": {},
+                    // Extra field; OpenFront PlayerSchema strips unknown keys.
+                    "playerID": pid,
+                })
+            })
+            .collect();
+        // Full id->name map for text analysis. Zod strips unknown `info` keys
+        // so the client replay path stays valid.
+        let roster: Vec<Value> = self
+            .game
+            .all_players()
+            .iter()
+            .map(|p| {
+                json!({
+                    "id": p.id,
+                    "clientID": p.client_id,
+                    "name": p.name,
+                    "playerType": format!("{:?}", p.player_type),
+                    "team": p.team,
+                })
+            })
+            .collect();
         let mut info = json!({
             "gameID": self.game_id,
             "lobbyCreatedAt": start,
             "config": self.game_config,
-            "players": if self.n_agents > 1 {
-                json!([
-                    {
-                        "clientID": AGENT_CLIENT_ID,
-                        "username": "Agent",
-                        "clanTag": null,
-                        "persistentID": null,
-                        "stats": {},
-                    },
-                    {
-                        "clientID": AGENT_CLIENT_ID_2,
-                        "username": "AgentB",
-                        "clanTag": null,
-                        "persistentID": null,
-                        "stats": {},
-                    }
-                ])
-            } else {
-                json!([{
-                    "clientID": AGENT_CLIENT_ID,
-                    "username": "Agent",
-                    "clanTag": null,
-                    "persistentID": null,
-                    "stats": {},
-                }])
-            },
+            "players": human_players,
+            "roster": roster,
             "start": start,
             "end": end,
             "duration": duration,

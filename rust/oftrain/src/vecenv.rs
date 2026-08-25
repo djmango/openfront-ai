@@ -1065,6 +1065,8 @@ impl EnvWorker {
             "stage": self.stage,
             "episode_stage": self.episode_stage,
             "engine": engine,
+            "n_agents": self.n_agents,
+            "duo": self.n_agents > 1,
             "won": won,
             "timed_out": timed_out,
             "run_name": std::env::var("HF_RUN_PREFIX")
