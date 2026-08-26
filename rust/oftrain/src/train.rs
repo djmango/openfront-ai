@@ -837,6 +837,13 @@ fn requested_stage_env_target_for_resize(
     (capped < prev_capped).then_some(capped)
 }
 
+/// Rollout rows are logical agent heads (`physical_envs * n_agents`).
+/// Sidecar `envs_per_shard` must stay the physical worker count used to respawn.
+fn physical_envs_per_shard(logical_rows: usize, n_agents: u32) -> usize {
+    let na = n_agents.clamp(1, 2) as usize;
+    (logical_rows / na).max(1)
+}
+
 /// Resolve per-shard env count at process start.
 ///
 /// Stage schedule values are a *floor* within a stage: an autoscale restart
@@ -1353,6 +1360,15 @@ mod v10_state_and_gate_tests {
             resolve_startup_envs_per_shard(24, Some(10), None, false),
             10
         );
+    }
+
+    #[test]
+    fn duo_logical_rows_do_not_inflate_physical_env_count() {
+        assert_eq!(physical_envs_per_shard(2, 2), 1);
+        assert_eq!(physical_envs_per_shard(4, 2), 2);
+        assert_eq!(physical_envs_per_shard(8, 2), 4);
+        assert_eq!(physical_envs_per_shard(24, 1), 24);
+        assert_eq!(physical_envs_per_shard(0, 2), 1);
     }
 
     #[test]
@@ -4084,6 +4100,8 @@ pub fn run_benchmark(cfg: BenchmarkConfig<'_>) -> Result<()> {
                     "embargo_embargo_stop": info.action_pair_counts.embargo_embargo_stop,
                     "attack_retreat": info.action_pair_counts.attack_retreat,
                     "retreat_attack": info.action_pair_counts.retreat_attack,
+                    "alliance_request_break": info.action_pair_counts.alliance_request_break,
+                    "break_alliance_request": info.action_pair_counts.break_alliance_request,
                     "total": info.action_pair_counts.total(),
                 },
             })
@@ -7807,7 +7825,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             for info in &result.ep_infos {
                 if debug_eps {
                     eprintln!(
-                        "[ep] reward={:.3} components[str={:.3} delta={:.3} dom={:.3} churn={:.3} waste={:.3} death={:.3} terminal={:.3}] churn_pairs[boat_cancel={} embargo_stop={} attack_retreat={} retreat_attack={}] len={} tiles={:.1} tick={} place={}/{} score={:.3} won={} wasted={} stage={} rehearsal={} map={}",
+                        "[ep] reward={:.3} components[str={:.3} delta={:.3} dom={:.3} churn={:.3} waste={:.3} death={:.3} terminal={:.3}] churn_pairs[boat_cancel={} embargo_stop={} attack_retreat={} retreat_attack={} ally_break={} break_ally={}] len={} tiles={:.1} tick={} place={}/{} score={:.3} won={} wasted={} stage={} rehearsal={} map={}",
                         info.reward,
                         info.reward_components.strength,
                         info.reward_components.strength_delta,
@@ -7820,6 +7838,8 @@ pub fn run(mut cfg: Config) -> Result<()> {
                         info.action_pair_counts.embargo_embargo_stop,
                         info.action_pair_counts.attack_retreat,
                         info.action_pair_counts.retreat_attack,
+                        info.action_pair_counts.alliance_request_break,
+                        info.action_pair_counts.break_alliance_request,
                         info.length,
                         info.final_tiles,
                         info.final_tick,
@@ -7868,6 +7888,8 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     "action_pairs/embargo_embargo_stop": info.action_pair_counts.embargo_embargo_stop,
                     "action_pairs/attack_retreat": info.action_pair_counts.attack_retreat,
                     "action_pairs/retreat_attack": info.action_pair_counts.retreat_attack,
+                    "action_pairs/alliance_request_break": info.action_pair_counts.alliance_request_break,
+                    "action_pairs/break_alliance_request": info.action_pair_counts.break_alliance_request,
                     "action_pairs/total": info.action_pair_counts.total(),
                     "final_land_share": info.final_land_share,
                     "max_land_share": info.max_land_share,
@@ -8072,7 +8094,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     reward_profile: Some(cfg.reward_config.reward_profile_id().to_string()),
                     return_stats: return_stats.clone(),
                     stage_env_targets: cfg.stage_env_targets.clone(),
-                    envs_per_shard: live_total_envs / devices.len(),
+                    envs_per_shard: physical_envs_per_shard(
+                        live_total_envs / devices.len(),
+                        cfg.n_agents,
+                    ),
                     requested_env_target: None,
                 };
                 if persistent_learner_enabled {
@@ -8339,7 +8364,8 @@ pub fn run(mut cfg: Config) -> Result<()> {
                     current_best = report_eval_completion(completion, update, &metrics)?;
                 }
             }
-            let current_envs_per_shard = live_total_envs / devices.len();
+            let current_envs_per_shard =
+                physical_envs_per_shard(live_total_envs / devices.len(), cfg.n_agents);
             let reason = if resize_reason.is_empty() {
                 "curriculum_stage_env_target".to_string()
             } else {
@@ -8453,7 +8479,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 reward_profile: Some(cfg.reward_config.reward_profile_id().to_string()),
                 return_stats: return_stats.clone(),
                 stage_env_targets: cfg.stage_env_targets.clone(),
-                envs_per_shard: live_total_envs / devices.len(),
+                envs_per_shard: physical_envs_per_shard(
+                    live_total_envs / devices.len(),
+                    cfg.n_agents,
+                ),
                 requested_env_target: None,
             };
             if let Some(eval) = async_eval.as_mut() {
@@ -8653,7 +8682,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 reward_profile: Some(cfg.reward_config.reward_profile_id().to_string()),
                 return_stats: return_stats.clone(),
                 stage_env_targets: cfg.stage_env_targets.clone(),
-                envs_per_shard: live_total_envs / devices.len(),
+                envs_per_shard: physical_envs_per_shard(
+                    live_total_envs / devices.len(),
+                    cfg.n_agents,
+                ),
                 requested_env_target: None,
             };
             let path = format!("{}/policy_update{}.safetensors", cfg.ckpt_dir, update);
@@ -8718,11 +8750,14 @@ pub fn run(mut cfg: Config) -> Result<()> {
         reward_profile: Some(cfg.reward_config.reward_profile_id().to_string()),
         return_stats,
         stage_env_targets: cfg.stage_env_targets.clone(),
-        envs_per_shard: pending
-            .iter()
-            .map(|rollout| rollout.buffer.first().map(|row| row.len()).unwrap_or(0))
-            .sum::<usize>()
-            / devices.len(),
+        envs_per_shard: physical_envs_per_shard(
+            pending
+                .iter()
+                .map(|rollout| rollout.buffer.first().map(|row| row.len()).unwrap_or(0))
+                .sum::<usize>()
+                / devices.len(),
+            cfg.n_agents,
+        ),
         requested_env_target: None,
     };
     let final_path = format!("{}/policy_final.safetensors", cfg.ckpt_dir);

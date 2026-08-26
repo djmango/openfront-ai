@@ -451,6 +451,8 @@ pub enum InverseActionPair {
     EmbargoEmbargoStop,
     AttackRetreat,
     RetreatAttack,
+    AllianceRequestBreak,
+    BreakAllianceRequest,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -459,6 +461,8 @@ pub struct ActionPairCounts {
     pub embargo_embargo_stop: u64,
     pub attack_retreat: u64,
     pub retreat_attack: u64,
+    pub alliance_request_break: u64,
+    pub break_alliance_request: u64,
 }
 
 impl ActionPairCounts {
@@ -468,6 +472,8 @@ impl ActionPairCounts {
             InverseActionPair::EmbargoEmbargoStop => self.embargo_embargo_stop += 1,
             InverseActionPair::AttackRetreat => self.attack_retreat += 1,
             InverseActionPair::RetreatAttack => self.retreat_attack += 1,
+            InverseActionPair::AllianceRequestBreak => self.alliance_request_break += 1,
+            InverseActionPair::BreakAllianceRequest => self.break_alliance_request += 1,
         }
     }
 
@@ -476,6 +482,8 @@ impl ActionPairCounts {
             + self.embargo_embargo_stop
             + self.attack_retreat
             + self.retreat_attack
+            + self.alliance_request_break
+            + self.break_alliance_request
     }
 }
 
@@ -538,6 +546,8 @@ fn inverse_action_pair(previous: ChosenAction, current: ChosenAction) -> Option<
         (A_EMBARGO, A_EMBARGO_STOP) => Some(InverseActionPair::EmbargoEmbargoStop),
         (A_ATTACK, A_RETREAT) => Some(InverseActionPair::AttackRetreat),
         (A_RETREAT, A_ATTACK) => Some(InverseActionPair::RetreatAttack),
+        (A_ALLIANCE_REQUEST, A_BREAK_ALLIANCE) => Some(InverseActionPair::AllianceRequestBreak),
+        (A_BREAK_ALLIANCE, A_ALLIANCE_REQUEST) => Some(InverseActionPair::BreakAllianceRequest),
         _ => None,
     }
 }
@@ -1384,11 +1394,13 @@ pub const W_DUO_INEQUITY: f64 = 0.02;
 /// Per-decision bonus while the pair has a *formal* alliance (not merely
 /// the same team). This is the reward that teaches them to pact so the
 /// engine pays ally train gold (35k) instead of the team rate (25k).
+///
+/// Outcome-only (devlog boat-churn rule): pay this *state*, never the
+/// `alliance_request` / `donate_*` actions. Per-action crumbs were a
+/// request↔break / donate-loop farm that made timeouts return ~170
+/// without a win. Do not reintroduce `W_DUO_ALLY_REQUEST` /
+/// `W_DUO_DONATE_PARTNER`.
 pub const W_DUO_ALLIED: f64 = 0.05;
-/// One-shot bonus when `alliance_request` targets the partner and is not wasted.
-pub const W_DUO_ALLY_REQUEST: f64 = 0.08;
-/// Bonus when donate gold/troops targets the partner.
-pub const W_DUO_DONATE_PARTNER: f64 = 0.04;
 
 /// True when `ents.alliances` contains a formal pact between `a` and `b`
 /// (small ids). Team membership alone is not an alliance.
@@ -1741,6 +1753,16 @@ mod tests {
                 player_action(A_RETREAT, 3),
                 player_action(A_ATTACK, 3),
                 InverseActionPair::RetreatAttack,
+            ),
+            (
+                player_action(A_ALLIANCE_REQUEST, 3),
+                player_action(A_BREAK_ALLIANCE, 3),
+                InverseActionPair::AllianceRequestBreak,
+            ),
+            (
+                player_action(A_BREAK_ALLIANCE, 3),
+                player_action(A_ALLIANCE_REQUEST, 3),
+                InverseActionPair::BreakAllianceRequest,
             ),
         ];
         for (first, second, expected) in cases {
@@ -2177,6 +2199,16 @@ mod tests {
             W_DUO_BOTH_ALIVE + W_DUO_ALLIED
         );
         assert_eq!(duo_synergy_reward(false, true), 0.0);
+    }
+
+    #[test]
+    fn duo_does_not_pay_request_or_donate_actions() {
+        // Outcome-only: these used to be W_DUO_ALLY_REQUEST=0.08 and
+        // W_DUO_DONATE_PARTNER=0.04. Re-adding them is the donate/pact farm.
+        assert_eq!(duo_synergy_reward(true, true), 0.07);
+        let even = duo_welfare_reward(0.4, 0.4);
+        assert!(even > 0.0);
+        assert!(even < 0.02);
     }
 
     #[test]

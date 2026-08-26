@@ -394,6 +394,14 @@ def sanitize_record_for_client(record: Path, dest_dir: Path) -> Path:
                     f"WARNING: gameMap {gm!r} not in GameMapType; "
                     "client may reject the record"
                 )
+        # Native stage-0 writes nations=0; GameConfigSchema is min(1) or
+        # "default"/"disabled". Zero fails Zod and the replay button never
+        # appears (JoinLobbyModal treats it as version_mismatch).
+        nations = cfg.get("nations")
+        if isinstance(nations, int) and nations < 1:
+            cfg["nations"] = "disabled"
+            changed = True
+            print(f"rewrote nations {nations} -> 'disabled' for client Zod")
     gid = info.get("gameID")
     if not isinstance(gid, str) or not (
         len(gid) == 8 and gid.isalnum()
