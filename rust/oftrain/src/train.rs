@@ -7142,6 +7142,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
         } else {
             println!("[train] --duo with local (IPPO) critic; pass --centralized-value to enable MAPPO V");
         }
+        if cfg.reward_config.duo_pact_success != 0.0 {
+            println!(
+                "[train] duo pact-success bonus={:.3} (one-shot on first formal alliance; not donate/request)",
+                cfg.reward_config.duo_pact_success
+            );
+        }
     }
     if cfg.recurrent_policy {
         anyhow::ensure!(
@@ -9211,6 +9217,7 @@ mod persistent_actor_tests {
                 v10_combat_action: 0.0,
                 v10_timeout_closeout: 0.0,
                 v10_closeout_entry: 0.0,
+                duo_pact_success: 0.0,
             },
             lambda: 0.95,
             clip: 0.2,

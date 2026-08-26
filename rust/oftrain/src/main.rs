@@ -219,6 +219,12 @@ struct Args {
     #[arg(long, default_value_t = 25.0)]
     v10_closeout_entry: f64,
 
+    /// Duo: one-shot bonus the first time teammates form a formal alliance.
+    /// Outcome-only (pact formed). 0 disables. Do not pay `alliance_request`
+    /// or `donate_*` actions.
+    #[arg(long, default_value_t = 0.0)]
+    duo_pact_bonus: f64,
+
     /// Resume a V8.6 (v8.3 schedule) checkpoint under V10 schedule + anti-spiral reward.
     #[arg(long, default_value_t = false, requires = "resume")]
     migrate_v86_to_v10: bool,
@@ -909,6 +915,7 @@ mod curriculum_flag_tests {
         assert_eq!(defaults.v10_combat_action, 0.02);
         assert_eq!(defaults.v10_timeout_closeout, 20.0);
         assert_eq!(defaults.v10_closeout_entry, 25.0);
+        assert_eq!(defaults.duo_pact_bonus, 0.0);
         assert!(defaults.kl_prior.is_none());
         assert_eq!(defaults.kl_coef, 0.05);
     }
@@ -1249,7 +1256,12 @@ fn main() -> anyhow::Result<()> {
         v10_combat_action: args.v10_combat_action,
         v10_timeout_closeout: args.v10_timeout_closeout,
         v10_closeout_entry: args.v10_closeout_entry,
+        duo_pact_success: args.duo_pact_bonus,
     };
+    anyhow::ensure!(
+        args.duo_pact_bonus.is_finite() && args.duo_pact_bonus >= 0.0,
+        "--duo-pact-bonus must be finite and non-negative"
+    );
     anyhow::ensure!(
         args.v10_timeout_closeout.is_finite() && args.v10_timeout_closeout >= 0.0,
         "--v10-timeout-closeout must be finite and non-negative"
