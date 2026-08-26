@@ -25,7 +25,7 @@ use ofcore::curriculum::{
     placement_score, sample_episode, stages_for_schedule, strength_delta_weight, tempo_pressure,
     terminal_reward, timeweight, v10_closeout_entry_bonus, v10_combat_action_bonus,
     v10_diplo_panic_penalty, v10_survival_reward, v10_timeout_after_closeout_penalty,
-    v83_action_churn_penalty,
+    duo_pact_success_bonus, v83_action_churn_penalty,
 };
 use ofcore::feat::{
     self, A_ALLIANCE_REQUEST, A_ATTACK, A_BOAT, A_BREAK_ALLIANCE, A_BUILD, A_CANCEL_BOAT,
@@ -930,6 +930,8 @@ pub struct EnvWorker {
     /// True if this human ever had `alive` this episode. Spawn-miss is a
     /// death/loss, not a placement gift (ghost humans with 0 tiles).
     ever_alive: [bool; 2],
+    /// Duo: already paid the one-shot formal-pact bonus this episode.
+    pact_bonus_paid: bool,
     ep_reward_components: RewardComponents,
     spawn_steps: i64,
     map_name: String,
@@ -999,6 +1001,7 @@ impl EnvWorker {
             last_commitment: [None, None],
             was_alive: [false; 2],
             ever_alive: [false; 2],
+            pact_bonus_paid: false,
             ep_reward_components: RewardComponents::default(),
             spawn_steps: 0,
             map_name: String::new(),
@@ -1080,6 +1083,7 @@ impl EnvWorker {
         self.lut.clear();
         self.set_obs(obs);
         self.ever_alive = [false; 2];
+        self.pact_bonus_paid = false;
         self.seed_agent_trackers();
         self.spawn_steps = 0;
         self.ep_reward = 0.0;
@@ -1230,6 +1234,7 @@ impl EnvWorker {
         self.lut.clear();
         self.set_obs(obs);
         self.ever_alive = [false; 2];
+        self.pact_bonus_paid = false;
         self.seed_agent_trackers();
         self.spawn_steps = 0;
         self.ep_reward = 0.0;
@@ -2006,7 +2011,11 @@ impl EnvWorker {
                 // donate actions, and do not pay alive/allied as a wage
                 // (those were the timeout farm). Absorbing terminal Φ=0.
                 let phi = if done { 0.0 } else { next_duo_phi };
-                let duo_r = self.duo_shaper[i].transition(phi, self.reward_config.gamma, 1.0);
+                let mut duo_r = self.duo_shaper[i].transition(phi, self.reward_config.gamma, 1.0);
+                // Outcome-only one-shot: first formal pact this episode.
+                if allied && !self.pact_bonus_paid {
+                    duo_r += duo_pact_success_bonus(true, self.reward_config);
+                }
                 components.duo = duo_r;
                 reward += duo_r;
             }
@@ -2080,6 +2089,9 @@ impl EnvWorker {
                 if i == 0 { episode_info.clone() } else { None },
                 outcome,
             ));
+        }
+        if n > 1 && allied {
+            self.pact_bonus_paid = true;
         }
         self.ep_len += 1;
         if done {

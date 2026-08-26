@@ -344,6 +344,7 @@ fn empty_boat_was_net_positive_vs_waste_while_build_was_neutral() {
         v10_combat_action: 0.02,
         v10_timeout_closeout: 20.0,
         v10_closeout_entry: 25.0,
+        duo_pact_success: 0.0,
     };
     let empty_boat = ofcore::curriculum::v10_empty_action_net_reward(ofcore::feat::A_BOAT, cfg);
     let empty_build = ofcore::curriculum::v10_empty_action_net_reward(ofcore::feat::A_BUILD, cfg);

@@ -132,6 +132,10 @@ pub struct RewardConfig {
     pub v10_timeout_closeout: f64,
     /// V10: one-shot bonus the first time land share crosses closeout entry (45%).
     pub v10_closeout_entry: f64,
+    /// Duo: one-shot bonus the first time the two humans form a *formal*
+    /// alliance this episode. Outcome-only (pact formed), never the
+    /// `alliance_request` / `donate_*` actions. 0 disables.
+    pub duo_pact_success: f64,
 }
 
 impl RewardConfig {
@@ -1333,6 +1337,18 @@ pub fn v10_closeout_entry_bonus(just_entered: bool, config: RewardConfig) -> f64
     }
 }
 
+/// One-shot when teammates first form a formal pact this episode.
+/// Disabled when `duo_pact_success` is 0. Callers must pass `just_formed`
+/// only on the transition into `formally_allied`, never on the
+/// `alliance_request` action itself and never per-tick while allied.
+pub fn duo_pact_success_bonus(just_formed: bool, config: RewardConfig) -> f64 {
+    if just_formed && config.duo_pact_success != 0.0 {
+        config.duo_pact_success.abs()
+    } else {
+        0.0
+    }
+}
+
 fn v10_diplo_panic_armed(land_share: f64, tick: i64, max_ticks: i64, config: RewardConfig) -> bool {
     let share_armed = finite_or_zero(land_share) >= config.v10_diplo_panic_share;
     let tick_frac = tick as f64 / max_ticks.max(1) as f64;
@@ -1503,6 +1519,7 @@ mod tests {
             v10_combat_action: 0.0,
             v10_timeout_closeout: 0.0,
             v10_closeout_entry: 0.0,
+            duo_pact_success: 0.0,
         }
     }
 
@@ -2231,6 +2248,18 @@ mod tests {
         let even = duo_welfare_reward(0.4, 0.4);
         assert!(even > 0.0);
         assert!(even < 0.02);
+    }
+
+    #[test]
+    fn duo_pact_success_is_oneshot_outcome_not_an_action_wage() {
+        let mut cfg = config();
+        cfg.duo_pact_success = 5.0;
+        assert_eq!(duo_pact_success_bonus(false, cfg), 0.0);
+        assert_eq!(duo_pact_success_bonus(true, cfg), 5.0);
+        cfg.duo_pact_success = 0.0;
+        assert_eq!(duo_pact_success_bonus(true, cfg), 0.0);
+        // Still smaller than a win so timeout-while-allied stays a loss.
+        assert!(5.0 < W_WIN);
     }
 
     #[test]
