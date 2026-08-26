@@ -600,6 +600,17 @@ struct Args {
     #[arg(long, default_value_t = 100)]
     resume_warmup_updates: u64,
 
+    /// Frozen playable prior for AlphaStar-style KL(π || π_prior) for the
+    /// whole RL run. Recurrent v11 checkpoints copy matching feedforward
+    /// tensors (LSTM keys skipped). Omit to disable the KL term.
+    #[arg(long)]
+    kl_prior: Option<String>,
+
+    /// Coefficient on mean(`log π − log π_prior`) over on-policy actions.
+    /// Ignored when `--kl-prior` is unset. Default 0.05.
+    #[arg(long, default_value_t = 0.05)]
+    kl_coef: f32,
+
     /// Value-loss form: `mse` (default; Python `F.mse_loss` parity) or
     /// `huber` (Rust stabilizer escape hatch after the 2026-07-12
     /// explosion).
@@ -891,6 +902,8 @@ mod curriculum_flag_tests {
         assert_eq!(defaults.v10_combat_action, 0.02);
         assert_eq!(defaults.v10_timeout_closeout, 20.0);
         assert_eq!(defaults.v10_closeout_entry, 25.0);
+        assert!(defaults.kl_prior.is_none());
+        assert_eq!(defaults.kl_coef, 0.05);
     }
 
     #[test]
@@ -1238,6 +1251,10 @@ fn main() -> anyhow::Result<()> {
         args.v10_closeout_entry.is_finite() && args.v10_closeout_entry >= 0.0,
         "--v10-closeout-entry must be finite and non-negative"
     );
+    anyhow::ensure!(
+        args.kl_coef.is_finite() && args.kl_coef >= 0.0,
+        "--kl-coef must be finite and non-negative"
+    );
     let curriculum_schedule = ofcore::curriculum::CurriculumSchedule::V10;
     let stage_count = ofcore::curriculum::stages_for_schedule(curriculum_schedule).len();
     anyhow::ensure!(
@@ -1465,6 +1482,8 @@ fn main() -> anyhow::Result<()> {
         init: args.init,
         resume: args.resume,
         resume_warmup_updates: args.resume_warmup_updates,
+        kl_prior: args.kl_prior,
+        kl_coef: args.kl_coef,
         value_loss: match args.value_loss.as_str() {
             "huber" => train::ValueLoss::Huber,
             _ => train::ValueLoss::Mse,

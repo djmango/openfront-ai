@@ -86,6 +86,8 @@ pub struct Player {
     pub troops: i32,
     pub gold: i64,
     pub tiles_owned: i32,
+    /// Sticky cache of TS `isAlive()` (`tiles > 0`). Starts false: a
+    /// rostered human with no land has not spawned.
     pub alive: bool,
     pub spawn_tile: Option<TileRef>,
     pub units: Vec<Unit>,
@@ -155,7 +157,10 @@ impl Default for Player {
             troops: 0,
             gold: 0,
             tiles_owned: 0,
-            alive: true,
+            // TS `isAlive()` is `_tiles.size > 0`. A rostered human with no
+            // land has not spawned yet; starting `true` made RL treat a
+            // no-show as a living timeout instead of a death.
+            alive: false,
             spawn_tile: None,
             units: vec![],
             border_tiles: OrderedTiles::default(),
@@ -180,6 +185,15 @@ impl Default for Player {
             outgoing_emoji_sends: Vec::new(),
             sent_donations: Vec::new(),
         }
+    }
+}
+
+impl Player {
+    /// TS `PlayerImpl.isAlive()`: `_tiles.size > 0`. Unspawned humans have a
+    /// roster slot but are not on the map; that is a death for RL, not a
+    /// placement-gift timeout.
+    pub fn is_alive(&self) -> bool {
+        self.tiles_owned > 0
     }
 }
 
@@ -3824,6 +3838,16 @@ mod relation_tests {
     // TS `PlayerImpl.test.ts` "Can't send alliance requests when dead" +
     // the asymmetric case it doesn't cover (see
     // `can_send_alliance_request`'s doc comment on the fix this caught).
+    #[test]
+    fn unspawned_human_is_not_alive() {
+        let mut game = Game::default();
+        let sid = add_human(&mut game, "human");
+        let p = game.player_by_small_id(sid).unwrap();
+        assert_eq!(p.tiles_owned, 0);
+        assert!(!p.is_alive(), "TS isAlive() is tiles > 0");
+        assert!(!p.alive, "sticky alive must start false so RL sees a no-show as dead");
+    }
+
     #[test]
     fn dead_sender_cannot_send_alliance_request() {
         let mut game = Game::default();

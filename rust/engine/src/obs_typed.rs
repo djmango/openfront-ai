@@ -38,7 +38,7 @@ pub fn entities_typed(game: &Game) -> EntsData {
                 troops: p.troops as f64,
                 gold: p.gold as f64,
                 tiles: p.tiles_owned as f64,
-                alive: p.alive,
+                alive: p.is_alive(),
                 traitor: game.is_traitor(sid),
                 embargoes: p.embargoes.keys().map(|id| id as usize).collect(),
                 relations: p
@@ -53,12 +53,12 @@ pub fn entities_typed(game: &Game) -> EntsData {
                     .into_iter()
                     .map(|id| id as usize)
                     .collect(),
-                troop_income: if p.alive {
+                troop_income: if p.is_alive() {
                     game.troop_increase_rate_raw_for(sid)
                 } else {
                     0.0
                 },
-                gold_income: if p.alive {
+                gold_income: if p.is_alive() {
                     game.wire.gold_addition_rate(p.player_type) as f64
                 } else {
                     0.0
