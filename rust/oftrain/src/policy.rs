@@ -46,6 +46,8 @@ pub const FOVEATE_SIZE: i64 = 48;
 pub const HIDDEN: i64 = 768;
 pub const GC: i64 = 384;
 pub const PC: i64 = 160;
+/// MAPPO centralized critic input: `cat(h, partner_pool, partner_scalars)`.
+pub const CENTRALIZED_VALUE_IN: i64 = HIDDEN + PC + N_SCALARS;
 pub const UC: i64 = 128; // unit token dim
 pub const BLOCKS: i64 = 6;
 pub const LC: i64 = 64;
@@ -158,6 +160,12 @@ pub struct Obs {
     pub legal_ptarget: Tensor, // (B, N_ACTIONS, MAX_SLOTS) f32
     pub legal_build: Tensor,   // (B, N_BUILD) f32
     pub legal_nuke: Tensor,    // (B, N_NUKE) f32
+    /// Teammate player tokens for the MAPPO critic. Zeros when `n_agents==1`.
+    /// Carried per row so minibatch shuffle / shape-bucketing cannot break
+    /// pairing (Yu et al. 2021 CTDE: local π, centralized V).
+    pub partner_players: Tensor, // (B, MAX_SLOTS, P_FEAT) f32
+    pub partner_pmask: Tensor,   // (B, MAX_SLOTS) f32
+    pub partner_scalars: Tensor, // (B, N_SCALARS) f32
     pub compact: Option<CompactObsMeta>,
 }
 
@@ -187,6 +195,9 @@ impl Obs {
             legal_ptarget: self.legal_ptarget.index_select(0, idx),
             legal_build: self.legal_build.index_select(0, idx),
             legal_nuke: self.legal_nuke.index_select(0, idx),
+            partner_players: self.partner_players.index_select(0, idx),
+            partner_pmask: self.partner_pmask.index_select(0, idx),
+            partner_scalars: self.partner_scalars.index_select(0, idx),
             compact: self.compact.as_ref().map(|m| CompactObsMeta {
                 origin_y: m.origin_y.index_select(0, idx),
                 origin_x: m.origin_x.index_select(0, idx),
@@ -758,6 +769,9 @@ pub struct PolicyNet {
     head_nuke: nn::Linear,
     head_quantity: nn::Linear,
     head_value: nn::Linear,
+    /// Yu et al. 2021 MAPPO: V concatenates pooled teammate player tokens
+    /// and teammate scalars onto the local trunk `h`. Policy heads stay on `h`.
+    centralized_value: bool,
     // Device-local constants used by action-dependent masks. Keeping these
     // beside the policy avoids rebuilding and uploading the same tiny tables
     // in every actor forward and every PPO sequence chunk.
@@ -798,7 +812,24 @@ impl PolicyNet {
         blocks: i64,
         recurrent: bool,
     ) -> Self {
+        Self::new_with_options(vs, amp, foveate, gc, blocks, recurrent, false)
+    }
+
+    pub fn new_with_options(
+        vs: &nn::Path,
+        amp: bool,
+        foveate: bool,
+        gc: i64,
+        blocks: i64,
+        recurrent: bool,
+        centralized_value: bool,
+    ) -> Self {
         let conv1 = |p: &nn::Path, ci, co| nn::conv2d(p, ci, co, 1, Default::default());
+        let value_in = if centralized_value {
+            CENTRALIZED_VALUE_IN
+        } else {
+            HIDDEN
+        };
         PolicyNet {
             grid_coarse_net: GridTower::new(&(vs / "grid_coarse"), C_GRID, gc, blocks),
             grid_fine_net: GridTower::new(&(vs / "grid_fine"), C_GRID_FINE, gc, blocks),
@@ -830,7 +861,8 @@ impl PolicyNet {
             head_build: nn::linear(vs / "head_build", HIDDEN, N_BUILD, Default::default()),
             head_nuke: nn::linear(vs / "head_nuke", HIDDEN, N_NUKE, Default::default()),
             head_quantity: nn::linear(vs / "head_quantity", HIDDEN, 2, Default::default()),
-            head_value: nn::linear(vs / "head_value", HIDDEN, 1, Default::default()),
+            head_value: nn::linear(vs / "head_value", value_in, 1, Default::default()),
+            centralized_value,
             needs_player: action_table(NEEDS_PLAYER, vs.device()),
             needs_tile: action_table(NEEDS_TILE, vs.device()),
             needs_unit: action_table(NEEDS_UNIT, vs.device()),
@@ -1042,6 +1074,9 @@ impl PolicyNet {
             legal_ptarget: o.legal_ptarget.shallow_clone(),
             legal_build: o.legal_build.shallow_clone(),
             legal_nuke: o.legal_nuke.shallow_clone(),
+            partner_players: o.partner_players.shallow_clone(),
+            partner_pmask: o.partner_pmask.shallow_clone(),
+            partner_scalars: o.partner_scalars.shallow_clone(),
             compact: Some(CompactObsMeta {
                 origin_y: fov.origin_y,
                 origin_x: fov.origin_x,
@@ -1174,7 +1209,8 @@ impl PolicyNet {
         // showed the resulting critic lag grow from v-loss 0.12 to 13k.
         // Huber loss in train.rs bounds the value gradient, so sharing the
         // trunk does not reintroduce the old unbounded-MSE failure mode.
-        let value = Self::sanitize_value(&self.head_value.forward(&h).squeeze_dim(-1));
+        // MAPPO (Yu et al. 2021): V may also see teammate tokens; π stays on `h`.
+        let value = self.value_from_h(&h, o);
         ForwardOutput {
             act_logits,
             player_logits,
@@ -1859,7 +1895,23 @@ impl PolicyNet {
 
     pub fn value_only(&self, o: &Obs) -> Tensor {
         let output = self.trunk_forward(o);
-        Self::sanitize_value(&self.head_value.forward(&output.h).squeeze_dim(-1))
+        self.value_from_h(&output.h, o)
+    }
+
+    /// Local critic: `Linear(h)`. MAPPO critic: `Linear(cat(h, partner_pool, partner_scalars))`
+    /// with `partner_pool = masked_mean(player_in(partner_players), partner_pmask)`.
+    fn value_from_h(&self, h: &Tensor, o: &Obs) -> Tensor {
+        let logits = if self.centralized_value {
+            let partner_tok = self.player_in.forward(&o.partner_players);
+            let m = o.partner_pmask.unsqueeze(-1);
+            let pool = (&partner_tok * &m).sum_dim_intlist(1i64, false, Kind::Float)
+                / m.sum_dim_intlist(1i64, false, Kind::Float).clamp_min(1.0);
+            let v_in = Tensor::cat(&[h, &pool, &o.partner_scalars], 1);
+            self.head_value.forward(&v_in)
+        } else {
+            self.head_value.forward(h)
+        };
+        Self::sanitize_value(&logits.squeeze_dim(-1))
     }
 
     pub fn initial_hidden(&self, batch: i64) -> Tensor {
@@ -2241,6 +2293,9 @@ mod tests {
             legal_ptarget: Tensor::ones([b, na, ms], opts),
             legal_build: Tensor::ones([b, N_BUILD], opts),
             legal_nuke: Tensor::ones([b, N_NUKE], opts),
+            partner_players: Tensor::zeros([b, ms, P_FEAT], opts),
+            partner_pmask: Tensor::zeros([b, ms], opts),
+            partner_scalars: Tensor::zeros([b, N_SCALARS], opts),
             compact: None,
         }
     }
@@ -2758,6 +2813,49 @@ mod tests {
             policy_norm > 0.0,
             "trunk MUST see nonzero gradient from the policy output, got {policy_norm}"
         );
+    }
+
+    #[test]
+    fn centralized_critic_reads_partner_features_policy_does_not() {
+        tch::manual_seed(11);
+        let vs = nn::VarStore::new(Device::Cpu);
+        let policy = PolicyNet::new_with_options(&vs.root(), false, false, 8, 1, false, true);
+        assert_eq!(
+            vs.variables()["head_value.weight"].size(),
+            vec![1, CENTRALIZED_VALUE_IN]
+        );
+        let mut o = synthetic_obs(Device::Cpu, 2, 6, 6);
+        o.partner_players = Tensor::rand([2, MAX_SLOTS, P_FEAT], (Kind::Float, Device::Cpu));
+        o.partner_pmask = Tensor::ones([2, MAX_SLOTS], (Kind::Float, Device::Cpu));
+        o.partner_scalars = Tensor::rand([2, N_SCALARS], (Kind::Float, Device::Cpu));
+        let (act_a, _, _, _, _, _, _, _, v_a) = tch::no_grad(|| policy.act(&o, true));
+        o.partner_scalars = &o.partner_scalars + 1.0;
+        let (act_b, _, _, _, _, _, _, _, v_b) = tch::no_grad(|| policy.act(&o, true));
+        let v_delta = (v_a - v_b).abs().max().double_value(&[]);
+        assert!(
+            v_delta > 1e-6,
+            "MAPPO V must change when teammate scalars change, got {v_delta}"
+        );
+        let act_delta = (act_a - act_b).abs().max().double_value(&[]);
+        assert_eq!(
+            act_delta, 0.0,
+            "local policy action must ignore teammate critic features"
+        );
+    }
+
+    #[test]
+    fn local_critic_ignores_partner_features() {
+        tch::manual_seed(12);
+        let vs = nn::VarStore::new(Device::Cpu);
+        let policy = PolicyNet::new(&vs.root(), false, false, 8, 1);
+        assert_eq!(vs.variables()["head_value.weight"].size(), vec![1, HIDDEN]);
+        let mut o = synthetic_obs(Device::Cpu, 2, 6, 6);
+        let v0 = tch::no_grad(|| policy.value_only(&o));
+        o.partner_scalars = Tensor::ones([2, N_SCALARS], (Kind::Float, Device::Cpu));
+        o.partner_players = Tensor::ones([2, MAX_SLOTS, P_FEAT], (Kind::Float, Device::Cpu));
+        o.partner_pmask = Tensor::ones([2, MAX_SLOTS], (Kind::Float, Device::Cpu));
+        let v1 = tch::no_grad(|| policy.value_only(&o));
+        assert_eq!((v0 - v1).abs().max().double_value(&[]), 0.0);
     }
 
     #[test]

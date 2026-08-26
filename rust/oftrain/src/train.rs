@@ -161,6 +161,9 @@ pub struct Config {
     /// duo (`AGENTRL1` + `AGENTRL2`) with parameter-shared IPPO. Alliances
     /// stay enabled; teammates must actually pact for ally train gold.
     pub n_agents: u32,
+    /// Yu et al. 2021 MAPPO: local actor, centralized V that sees teammate
+    /// player tokens + scalars. Default on with `--duo`.
+    pub centralized_value: bool,
     /// Number of GPU replicas/shards. 1 = original single-device path.
     /// >1 requires `device` to be `Cuda(_)`; shards use `Cuda(0..num_gpus)`.
     pub num_gpus: usize,
@@ -1217,6 +1220,7 @@ mod v10_state_and_gate_tests {
             "weights/ae/fine.encoder.safetensors",
             Some("weights/ae/coarse.encoder.safetensors"),
             &state,
+            false,
         );
         assert_eq!(manifest["format"], "oftrain-safetensors");
         assert_eq!(manifest["manifest_schema_version"], 1);
@@ -1245,6 +1249,11 @@ mod v10_state_and_gate_tests {
         assert_eq!(manifest["update"], 1);
         assert_eq!(manifest["stage"], 4);
         assert_eq!(manifest["curriculum_schedule"], "v10");
+        assert_eq!(manifest["architecture"]["critic"]["centralized"], false);
+        assert_eq!(
+            manifest["architecture"]["critic"]["value_in"],
+            policy::HIDDEN
+        );
     }
 
     #[test]
@@ -1695,6 +1704,7 @@ fn policy_manifest_value(
     ae_ckpt: &str,
     coarse_ckpt: Option<&str>,
     state: &TrainState,
+    centralized_value: bool,
 ) -> serde_json::Value {
     let mut architecture = serde_json::json!({
         "name": "oftrain-policy",
@@ -1719,6 +1729,14 @@ fn policy_manifest_value(
             "local_hidden": policy::LC,
             "transformer_layers": policy::TF_LAYERS,
             "attention_heads": policy::N_HEAD,
+        },
+        "critic": {
+            "centralized": centralized_value,
+            "value_in": if centralized_value {
+                policy::CENTRALIZED_VALUE_IN
+            } else {
+                policy::HIDDEN
+            },
         },
     });
     if recurrent_policy {
@@ -1769,6 +1787,7 @@ fn save_policy_manifest(cfg: &Config, state: &TrainState) -> Result<()> {
         &cfg.ae_ckpt,
         cfg.coarse_ckpt.as_deref(),
         state,
+        cfg.centralized_value,
     );
     save_atomic(&path, |tmp| {
         std::fs::write(tmp, serde_json::to_string_pretty(&manifest)?)?;
@@ -1818,6 +1837,18 @@ struct ReadyEnv {
 /// more envs get added rather than staying fixed at `node_fraction`.
 fn agents_per(cfg: &Config) -> usize {
     cfg.n_agents.clamp(1, 2) as usize
+}
+
+fn make_policy(vs: &nn::Path, cfg: &Config) -> PolicyNet {
+    PolicyNet::new_with_options(
+        vs,
+        cfg.amp,
+        cfg.foveate,
+        cfg.gc,
+        cfg.blocks,
+        cfg.recurrent_policy,
+        cfg.centralized_value,
+    )
 }
 
 fn engine_for_idx(idx: usize, default: EngineKind, node_fraction: f64) -> EngineKind {
@@ -2899,6 +2930,9 @@ mod packed_act_tests {
             legal_build: [1.0; ofcore::feat::N_BUILD],
             legal_nuke: [1.0; ofcore::feat::N_NUKE],
             local: vec![0.1; 5 * policy::LOCAL as usize * policy::LOCAL as usize],
+            partner_players: vec![0.0; ofcore::feat::MAX_SLOTS * ofcore::feat::P_FEAT],
+            partner_pmask: [0.0; ofcore::feat::MAX_SLOTS],
+            partner_scalars: [0.0; ofcore::feat::N_SCALARS],
         }
     }
 
@@ -4013,6 +4047,7 @@ pub struct BenchmarkConfig<'a> {
     pub gc: i64,
     pub blocks: i64,
     pub recurrent_policy: bool,
+    pub centralized_value: bool,
     pub pinned_h2d: bool,
     pub fp16_rollout: bool,
     pub compact_rollout: bool,
@@ -4022,13 +4057,14 @@ pub struct BenchmarkConfig<'a> {
 
 pub fn run_benchmark(cfg: BenchmarkConfig<'_>) -> Result<()> {
     let mut vs = nn::VarStore::new(cfg.device);
-    let policy = PolicyNet::new_with_recurrence(
+    let policy = PolicyNet::new_with_options(
         &vs.root(),
         cfg.amp,
         cfg.foveate,
         cfg.gc,
         cfg.blocks,
         cfg.recurrent_policy,
+        cfg.centralized_value,
     );
     vs.load(cfg.checkpoint)?;
     let ae = crate::ae::AePair::load(
@@ -4261,8 +4297,17 @@ fn manifest_source_is_recurrent(ckpt_path: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn manifest_source_is_centralized(ckpt_path: &str) -> bool {
+    for schema in [1u64, 3] {
+        if let Ok(m) = read_architecture_manifest(ckpt_path, schema) {
+            return m["architecture"]["critic"]["centralized"] == true;
+        }
+    }
+    false
+}
+
 /// Load `path` into `dest`. Tries a strict VarStore load first; on mismatch
-/// (recurrent ↔ feedforward) copies intersecting tensors.
+/// (recurrent ↔ feedforward, or local ↔ MAPPO critic) copies intersecting tensors.
 fn load_compatible_weights(
     dest: &mut nn::VarStore,
     path: &str,
@@ -4271,22 +4316,25 @@ fn load_compatible_weights(
     gc: i64,
     blocks: i64,
     dest_recurrent: bool,
+    dest_centralized: bool,
 ) -> Result<(usize, usize)> {
     match dest.load(path) {
         Ok(()) => return Ok((dest.variables().len(), 0)),
         Err(strict_err) => {
             let src_recurrent = manifest_source_is_recurrent(path);
-            if src_recurrent == dest_recurrent {
+            let src_centralized = manifest_source_is_centralized(path);
+            if src_recurrent == dest_recurrent && src_centralized == dest_centralized {
                 return Err(strict_err.into());
             }
             let mut src = nn::VarStore::new(Device::Cpu);
-            let _ = PolicyNet::new_with_recurrence(
+            let _ = PolicyNet::new_with_options(
                 &src.root(),
                 amp,
                 foveate,
                 gc,
                 blocks,
                 src_recurrent,
+                src_centralized,
             );
             src.load(path).map_err(|load_err| {
                 anyhow!("compatible load of {path} failed after strict mismatch ({strict_err}); source load: {load_err}")
@@ -4298,7 +4346,8 @@ fn load_compatible_weights(
             );
             println!(
                 "[train] compatible load {path}: copied {copied} tensors, skipped {skipped} \
-                 (source recurrent={src_recurrent} dest recurrent={dest_recurrent})"
+                 (source recurrent={src_recurrent} dest recurrent={dest_recurrent} \
+                 source centralized={src_centralized} dest centralized={dest_centralized})"
             );
             Ok((copied, skipped))
         }
@@ -4314,14 +4363,7 @@ fn build_frozen_prior(cfg: &Config, device: Device) -> Result<Option<(nn::VarSto
         return Ok(None);
     }
     let mut vs = nn::VarStore::new(device);
-    let policy = PolicyNet::new_with_recurrence(
-        &vs.root(),
-        cfg.amp,
-        cfg.foveate,
-        cfg.gc,
-        cfg.blocks,
-        cfg.recurrent_policy,
-    );
+    let policy = make_policy(&vs.root(), cfg);
     load_compatible_weights(
         &mut vs,
         path,
@@ -4330,6 +4372,7 @@ fn build_frozen_prior(cfg: &Config, device: Device) -> Result<Option<(nn::VarSto
         cfg.gc,
         cfg.blocks,
         cfg.recurrent_policy,
+        cfg.centralized_value,
     )?;
     vs.freeze();
     println!(
@@ -4415,14 +4458,7 @@ fn save_snapshot_checkpoint(
     // Materialize directly on CPU. The immutable snapshot remains owned by
     // the eval job and no training CUDA state or VarStore is touched.
     let vs = nn::VarStore::new(Device::Cpu);
-    let _ = PolicyNet::new_with_recurrence(
-        &vs.root(),
-        cfg.amp,
-        cfg.foveate,
-        cfg.gc,
-        cfg.blocks,
-        cfg.recurrent_policy,
-    );
+    let _ = make_policy(&vs.root(), cfg);
     apply_weight_snapshot(&vs, snapshot)?;
     save_checkpoint(&vs, path, state)
 }
@@ -4481,14 +4517,7 @@ impl AsyncEval {
                 // destroyed on this owner thread.
                 let initialized = (|| -> Result<(nn::VarStore, PolicyNet, crate::ae::AePair)> {
                     let vs = nn::VarStore::new(device);
-                    let policy = PolicyNet::new_with_recurrence(
-                        &vs.root(),
-                        cfg.amp,
-                        cfg.foveate,
-                        cfg.gc,
-                        cfg.blocks,
-                        cfg.recurrent_policy,
-                    );
+                    let policy = make_policy(&vs.root(), &cfg);
                     let path = std::path::Path::new(&cfg.ae_ckpt);
                     anyhow::ensure!(
                         path.exists(),
@@ -4949,14 +4978,7 @@ fn build_actor_shard(
     // All CUDA-bearing actor resources are created and destroyed on the
     // persistent actor thread.
     let vs = nn::VarStore::new(device);
-    let policy = PolicyNet::new_with_recurrence(
-        &vs.root(),
-        cfg.amp,
-        cfg.foveate,
-        cfg.gc,
-        cfg.blocks,
-        cfg.recurrent_policy,
-    );
+    let policy = make_policy(&vs.root(), cfg);
     apply_weight_snapshot(&vs, &initial_weights)?;
     if cfg.amp {
         cast_actor_inference_weights_bf16(&vs);
@@ -5459,14 +5481,7 @@ fn learner_loop(
     eprintln!("[phase] persistent learner initialization started");
     let initialized = (|| -> Result<LearnerShard> {
         let vs = nn::VarStore::new(device);
-        let policy = PolicyNet::new_with_recurrence(
-            &vs.root(),
-            cfg.amp,
-            cfg.foveate,
-            cfg.gc,
-            cfg.blocks,
-            cfg.recurrent_policy,
-        );
+        let policy = make_policy(&vs.root(), &cfg);
         apply_weight_snapshot(&vs, &initial_weights)?;
         let opt = nn::AdamW::default().build(&vs, initial_lr)?;
         let (prior_vs, prior) = match build_frozen_prior(&cfg, device)? {
@@ -7120,6 +7135,13 @@ pub fn run(mut cfg: Config) -> Result<()> {
             "[train] team-mode duo: {} physical games × {} agents (alliances ON; pact for ally train gold)",
             cfg.num_envs, cfg.n_agents
         );
+        if cfg.centralized_value {
+            println!(
+                "[train] MAPPO centralized critic: V=cat(h, partner_pool, partner_scalars); policy local"
+            );
+        } else {
+            println!("[train] --duo with local (IPPO) critic; pass --centralized-value to enable MAPPO V");
+        }
     }
     if cfg.recurrent_policy {
         anyhow::ensure!(
@@ -7208,14 +7230,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             );
         }
         let mut snapshot = nn::VarStore::new(Device::Cpu);
-        let _ = PolicyNet::new_with_recurrence(
-            &snapshot.root(),
-            cfg.amp,
-            cfg.foveate,
-            cfg.gc,
-            cfg.blocks,
-            cfg.recurrent_policy,
-        );
+        let _ = make_policy(&snapshot.root(), &cfg);
         snapshot.load(resume_path)?;
         let state_path = state_sidecar_path(resume_path);
         resumed_state = match std::fs::read_to_string(&state_path) {
@@ -7255,14 +7270,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
         Some(snapshot)
     } else if let Some(init_path) = &cfg.init {
         let mut snapshot = nn::VarStore::new(Device::Cpu);
-        let _ = PolicyNet::new_with_recurrence(
-            &snapshot.root(),
-            cfg.amp,
-            cfg.foveate,
-            cfg.gc,
-            cfg.blocks,
-            cfg.recurrent_policy,
-        );
+        let _ = make_policy(&snapshot.root(), &cfg);
         load_compatible_weights(
             &mut snapshot,
             init_path,
@@ -7271,6 +7279,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             cfg.gc,
             cfg.blocks,
             cfg.recurrent_policy,
+            cfg.centralized_value,
         )?;
         println!(
             "[train] warm-started weights from {init_path} (--init; fresh TrainState / optimizer)"
@@ -7367,14 +7376,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
     let persistent_learner_enabled = cfg.persistent_actors;
     if persistent_learner_enabled && hub_vs.is_none() {
         let snapshot = nn::VarStore::new(Device::Cpu);
-        let _ = PolicyNet::new_with_recurrence(
-            &snapshot.root(),
-            cfg.amp,
-            cfg.foveate,
-            cfg.gc,
-            cfg.blocks,
-            cfg.recurrent_policy,
-        );
+        let _ = make_policy(&snapshot.root(), &cfg);
         hub_vs = Some(snapshot);
     }
     // Build the packed host snapshot once. Phase 2 previously wrote the
@@ -7439,14 +7441,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             }
         }
         let mut learner_vs = nn::VarStore::new(device);
-        let learner_policy = PolicyNet::new_with_recurrence(
-            &learner_vs.root(),
-            cfg.amp,
-            cfg.foveate,
-            cfg.gc,
-            cfg.blocks,
-            cfg.recurrent_policy,
-        );
+        let learner_policy = make_policy(&learner_vs.root(), &cfg);
         if let Some(hub) = &hub_vs {
             learner_vs.copy(hub)?;
         } else {
@@ -7456,14 +7451,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 // parameters (VarStore::copy handles the cross-device
                 // transfer).
                 let mut snapshot = nn::VarStore::new(Device::Cpu);
-                let _ = PolicyNet::new_with_recurrence(
-                    &snapshot.root(),
-                    cfg.amp,
-                    cfg.foveate,
-                    cfg.gc,
-                    cfg.blocks,
-                    cfg.recurrent_policy,
-                );
+                let _ = make_policy(&snapshot.root(), &cfg);
                 snapshot.copy(&learner_vs)?;
                 snapshot
             });
@@ -7504,14 +7492,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             )?);
         } else {
             let mut actor_vs = nn::VarStore::new(device);
-            let actor_policy = PolicyNet::new_with_recurrence(
-                &actor_vs.root(),
-                cfg.amp,
-                cfg.foveate,
-                cfg.gc,
-                cfg.blocks,
-                cfg.recurrent_policy,
-            );
+            let actor_policy = make_policy(&actor_vs.root(), &cfg);
             actor_vs.copy(&learners[gi].vs)?;
             if cfg.amp {
                 cast_actor_inference_weights_bf16(&actor_vs);
@@ -9179,6 +9160,7 @@ mod persistent_actor_tests {
         Config {
             num_envs: 1,
             n_agents: 1,
+            centralized_value: false,
             num_gpus: 1,
             stage: 0,
             curriculum_schedule: ofcore::curriculum::CurriculumSchedule::V10,
@@ -9339,6 +9321,9 @@ mod persistent_actor_tests {
             legal_build: [1.0; ofcore::feat::N_BUILD],
             legal_nuke: [1.0; ofcore::feat::N_NUKE],
             local: vec![0.1; 5 * policy::LOCAL as usize * policy::LOCAL as usize],
+            partner_players: vec![0.0; ofcore::feat::MAX_SLOTS * ofcore::feat::P_FEAT],
+            partner_pmask: [0.0; ofcore::feat::MAX_SLOTS],
+            partner_scalars: [0.0; ofcore::feat::N_SCALARS],
         }
     }
 
