@@ -20,7 +20,7 @@ use ofcore::curriculum::{
     RewardConfig, Stage, TRANSPORT_UNIT_CLASS, V83_CLOSEOUT_SHARE_START, W_STR, W_WASTE,
     DUO_SOLO_SCALE, action_churn_penalty,
     boat_outcome_reward, classify_boat_resolution, closeout_potential, combat_outcome_reward,
-    dominance_potential, duo_synergy_reward, duo_welfare_reward, embargo_stop_outcome_reward,
+    dominance_potential, duo_potential, embargo_stop_outcome_reward,
     fast_win_bonus, formally_allied, land_share, normalized_strength_share, placement,
     placement_score, sample_episode, stages_for_schedule, strength_delta_weight, tempo_pressure,
     terminal_reward, timeweight, v10_closeout_entry_bonus, v10_combat_action_bonus,
@@ -380,7 +380,8 @@ pub struct EpisodeInfo {
     pub n_players: i64,
     pub score: f64,
     pub won: bool,
-    /// True when the episode ended because the agent died (`!alive`).
+    /// True when the episode ended because the agent died or never spawned
+    /// (`tiles == 0` / TS `!isAlive()`). A no-show is a death, not a timeout.
     pub died: bool,
     pub wasted: i64,
     pub stage: usize,
@@ -887,6 +888,7 @@ pub struct EnvWorker {
     prev_strength: [f64; 2],
     dominance_shaper: [DominanceShaper; 2],
     closeout_shaper: [DominanceShaper; 2],
+    duo_shaper: [DominanceShaper; 2],
     closeout_tracker: [CloseoutTracker; 2],
     action_churn_tracker: [ActionChurnTracker; 2],
     boat_tracker: [PendingBoatTracker; 2],
@@ -894,6 +896,9 @@ pub struct EnvWorker {
     prev_action: [ActionOutcome; 2],
     last_commitment: [Option<(i64, i64, i64, i64, i64, u64)>; 2],
     was_alive: [bool; 2],
+    /// True if this human ever had `alive` this episode. Spawn-miss is a
+    /// death/loss, not a placement gift (ghost humans with 0 tiles).
+    ever_alive: [bool; 2],
     ep_reward_components: RewardComponents,
     spawn_steps: i64,
     map_name: String,
@@ -948,6 +953,7 @@ impl EnvWorker {
             prev_strength: [0.0; 2],
             dominance_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             closeout_shaper: [DominanceShaper::default(), DominanceShaper::default()],
+            duo_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             closeout_tracker: [CloseoutTracker::default(), CloseoutTracker::default()],
             action_churn_tracker: [
                 ActionChurnTracker::default(),
@@ -961,6 +967,7 @@ impl EnvWorker {
             prev_action: [ActionOutcome::default(), ActionOutcome::default()],
             last_commitment: [None, None],
             was_alive: [false; 2],
+            ever_alive: [false; 2],
             ep_reward_components: RewardComponents::default(),
             spawn_steps: 0,
             map_name: String::new(),
@@ -1041,6 +1048,7 @@ impl EnvWorker {
         self.translator = Some(IntentTranslator::new(self.bridge.terrain(), width, hr, wr));
         self.lut.clear();
         self.set_obs(obs);
+        self.ever_alive = [false; 2];
         self.seed_agent_trackers();
         self.spawn_steps = 0;
         self.ep_reward = 0.0;
@@ -1190,6 +1198,7 @@ impl EnvWorker {
         self.translator = Some(IntentTranslator::new(self.bridge.terrain(), width, hr, wr));
         self.lut.clear();
         self.set_obs(obs);
+        self.ever_alive = [false; 2];
         self.seed_agent_trackers();
         self.spawn_steps = 0;
         self.ep_reward = 0.0;
@@ -1244,7 +1253,21 @@ impl EnvWorker {
     }
 
     fn agent_alive(&self, i: usize) -> bool {
-        self.agent_head(i)["alive"].as_bool().unwrap_or(false)
+        // TS `isAlive()` is tiles on the map, not the sticky `Player.alive`
+        // flag. Unspawned humans used to report alive=true with 0 tiles, so
+        // a no-show was a timeout instead of a death.
+        self.agent_on_map(i)
+    }
+
+    fn agent_on_map(&self, i: usize) -> bool {
+        let me = self.agent_me(i);
+        if me < 0 {
+            return false;
+        }
+        self.ents()
+            .players
+            .iter()
+            .any(|p| p.id as i64 == me && p.tiles > 0.0)
     }
 
     fn seed_agent_trackers(&mut self) {
@@ -1263,6 +1286,18 @@ impl EnvWorker {
                 self.land_total,
             );
             self.closeout_shaper[i].reset(closeout_potential(share));
+            if self.n_agents > 1 {
+                let partner = self.agent_me(1 - i).max(0) as usize;
+                let s_me = initial_strengths.get(&me).copied().unwrap_or(0.0);
+                let s_partner = initial_strengths.get(&partner).copied().unwrap_or(0.0);
+                let both = self.agent_alive(0) && self.agent_alive(1);
+                let allied = formally_allied(
+                    self.ents(),
+                    self.agent_me(0).max(0) as usize,
+                    self.agent_me(1).max(0) as usize,
+                );
+                self.duo_shaper[i].reset(duo_potential(s_me, s_partner, both, allied));
+            }
             self.closeout_tracker[i].reset(share, tick);
             self.action_churn_tracker[i].reset();
             self.boat_tracker[i].reset();
@@ -1270,6 +1305,7 @@ impl EnvWorker {
             self.prev_action[i] = ActionOutcome::default();
             self.last_commitment[i] = None;
             self.was_alive[i] = self.agent_alive(i);
+            self.ever_alive[i] |= self.was_alive[i];
         }
     }
 
@@ -1546,11 +1582,15 @@ impl EnvWorker {
                 self.spawn_randomly()?;
             }
             self.seed_agent_trackers();
-            self.ep_len += 1;
-            let dummy = ActionOutcome::default();
-            return Ok((0..n)
-                .map(|_| (0.0, false, None, dummy.clone()))
-                .collect());
+            let still_spawning = self.obs.as_ref().unwrap().spawn_phase() && self.spawn_steps < 16;
+            if still_spawning {
+                self.ep_len += 1;
+                let dummy = ActionOutcome::default();
+                return Ok((0..n)
+                    .map(|_| (0.0, false, None, dummy.clone()))
+                    .collect());
+            }
+            // Spawn never completed: fall through so never-alive is a death.
         }
 
         let winner_val = self.obs.as_ref().unwrap().winner().clone();
@@ -1569,6 +1609,9 @@ impl EnvWorker {
         } else if obs_tick >= self.max_episode_ticks {
             done = true;
             timed_out = true;
+        }
+        if done && self.ever_alive.iter().take(n).all(|alive| !*alive) {
+            died = true;
         }
 
         let partner_me = if n > 1 {
@@ -1593,13 +1636,8 @@ impl EnvWorker {
                 self.agent_me(0).max(0) as usize,
                 partner_me,
             );
-        let welfare = if n > 1 {
-            duo_welfare_reward(s0, s1)
-        } else {
-            0.0
-        };
-        let synergy = if n > 1 {
-            duo_synergy_reward(both_alive, allied)
+        let next_duo_phi = if n > 1 {
+            duo_potential(s0, s1, both_alive, allied)
         } else {
             0.0
         };
@@ -1904,18 +1942,28 @@ impl EnvWorker {
                 components.death = -death;
             }
             self.was_alive[i] = obs_alive;
+            self.ever_alive[i] |= obs_alive;
 
             if n > 1 {
-                // Outcome-only: welfare + being alive/allied. Do not pay
-                // alliance_request or donate actions (those were a timeout farm).
-                let duo_r = welfare + synergy;
+                // Ng 1999 PBRS on team Φ. Do not pay alliance_request /
+                // donate actions, and do not pay alive/allied as a wage
+                // (those were the timeout farm). Absorbing terminal Φ=0.
+                let phi = if done { 0.0 } else { next_duo_phi };
+                let duo_r = self.duo_shaper[i].transition(phi, self.reward_config.gamma, 1.0);
                 components.duo = duo_r;
                 reward += duo_r;
             }
 
             if done {
                 let (place, _pn) = placement(self.ents(), obs_me, obs_alive, self.land_total);
-                components.terminal = (terminal_reward(place, won)
+                // Never-spawned is a death/loss, not a placement gift.
+                if !self.ever_alive[i] && !won && components.death == 0.0 {
+                    let death = self.reward_config.death_penalty();
+                    reward -= death;
+                    components.death = -death;
+                }
+                let no_play = timed_out || !self.ever_alive[i];
+                components.terminal = (terminal_reward(place, won, no_play)
                     + fast_win_bonus(
                         won,
                         obs_tick,
