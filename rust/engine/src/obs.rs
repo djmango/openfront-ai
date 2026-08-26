@@ -63,7 +63,7 @@ pub fn build_obs_head_meta(game: &Game, client_id: &str, winner: Value) -> Value
         "spawnPhase": game.in_spawn_phase(),
         "winner": winner,
         "me": agent.map(|p| p.small_id as i32).unwrap_or(-1),
-        "alive": agent.map(|p| p.alive).unwrap_or(false),
+        "alive": agent.map(|p| p.is_alive()).unwrap_or(false),
     })
 }
 
@@ -109,7 +109,7 @@ pub fn entities(game: &Game) -> Value {
                 "troops": p.troops,
                 "gold": p.gold.to_string(),
                 "tiles": p.tiles_owned,
-                "alive": p.alive,
+                "alive": p.is_alive(),
                 "traitor": game.is_traitor(sid),
                 "embargoes": value_array(p.embargoes.keys()),
                 // Sparse relation scores for RL reward (V8.5 embargo outcome).
@@ -126,8 +126,8 @@ pub fn entities(game: &Game) -> Value {
                 ),
                 "reqsOut": game.outgoing_alliance_requests(sid),
                 "targets": game.player_targets(sid),
-                "troopIncome": if p.alive { game.troop_increase_rate_raw_for(sid) } else { 0.0 },
-                "goldIncome": if p.alive {
+                "troopIncome": if p.is_alive() { game.troop_increase_rate_raw_for(sid) } else { 0.0 },
+                "goldIncome": if p.is_alive() {
                     game.wire.gold_addition_rate(p.player_type).to_string()
                 } else {
                     "0".to_string()

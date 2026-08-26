@@ -2253,6 +2253,13 @@ mod tests {
     }
 
     #[test]
+    fn never_spawned_is_the_same_loss_as_timeout() {
+        // Callers pass timed_out=true when the human never owned tiles.
+        assert_eq!(terminal_reward(1, false, true), -W_WIN);
+        assert_eq!(terminal_reward(8, false, true), -W_WIN);
+    }
+
+    #[test]
     fn duo_pbrs_camping_does_not_accumulate_and_pact_is_a_oneshot() {
         let gamma = 0.999;
         let start = duo_potential(0.1, 0.1, true, false);

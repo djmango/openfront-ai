@@ -88,7 +88,8 @@
   <p>Duo collapse was not an entropy problem. Timeout paid placement,
   allied/alive were per-tick wages, and there was no KL to a policy that
   can play. <b>Timeout / never-spawn = −W_WIN</b> (and a death mark if they
-  never lived). Duo welfare + pact is <b>Ng 1999 PBRS</b>
+  never lived). Native `Player.alive` now matches TS `isAlive()` (`tiles > 0`):
+  a rostered human with no land is a death, not a living timeout. Duo welfare + pact is <b>Ng 1999 PBRS</b>
   (<code>γΦ(s′)−Φ(s)</code>, absorbing Φ=0), not a camping salary.
   PPO keeps <code>--kl-prior</code> (default coef 0.05) for the whole RL
   run; v11 recurrent weights compatible-load into the feedforward duo
