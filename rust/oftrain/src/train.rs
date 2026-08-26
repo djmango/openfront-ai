@@ -367,6 +367,13 @@ pub struct Config {
     /// Stage-advance warmup still uses V10's stage warmup; this only
     /// stretches the *first* post-resume window. Default 100; 0 disables.
     pub resume_warmup_updates: u64,
+    /// Frozen policy for AlphaStar-style KL(π || π_prior) throughout RL.
+    /// Compatible load: recurrent v11 checkpoints copy matching feedforward
+    /// tensors and skip LSTM keys. Empty/`None` disables the term.
+    pub kl_prior: Option<String>,
+    /// Coefficient on mean(`log π − log π_prior`) over on-policy actions.
+    /// Ignored when `kl_prior` is unset. Default 0.05.
+    pub kl_coef: f32,
     /// `--value-loss`: `Mse` (Python `F.mse_loss` parity, default) or
     /// `Huber` (Rust stabilizer escape hatch).
     pub value_loss: ValueLoss,
@@ -2060,6 +2067,11 @@ struct LearnerShard {
     vs: nn::VarStore,
     policy: PolicyNet,
     opt: nn::Optimizer,
+    /// Frozen AlphaStar-style SL/playable prior. `prior_vs` keeps the
+    /// tensors alive; evaluate is wrapped in `no_grad`.
+    #[allow(dead_code)]
+    prior_vs: Option<nn::VarStore>,
+    prior: Option<PolicyNet>,
 }
 
 /// Everything a training update needs out of one shard's rollout: the
@@ -4218,6 +4230,115 @@ fn apply_weight_snapshot(vs: &nn::VarStore, snapshot: &CpuWeightSnapshot) -> Res
     Ok(())
 }
 
+/// Copy same-name, same-shape tensors from `src` into `dest`. Extra keys
+/// (e.g. LSTM on a v11 checkpoint) and missing dest keys are skipped so a
+/// feedforward duo policy can warm-start / KL-anchor on a recurrent prior.
+fn copy_matching_weights(src: &nn::VarStore, dest: &mut nn::VarStore) -> Result<(usize, usize)> {
+    let src_vars = src.variables();
+    let mut dest_vars = dest.variables();
+    let mut copied = 0usize;
+    let mut skipped = 0usize;
+    tch::no_grad(|| {
+        for (name, src_t) in src_vars {
+            match dest_vars.remove(&name) {
+                Some(mut dest_t) if dest_t.size() == src_t.size() => {
+                    let source = src_t.to_device(dest_t.device()).to_kind(dest_t.kind());
+                    dest_t.f_copy_(&source)?;
+                    copied += 1;
+                }
+                Some(_) | None => skipped += 1,
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    })?;
+    Ok((copied, skipped))
+}
+
+fn manifest_source_is_recurrent(ckpt_path: &str) -> bool {
+    read_architecture_manifest(ckpt_path, 3)
+        .ok()
+        .map(|m| m["architecture"]["schema_version"] == 3)
+        .unwrap_or(false)
+}
+
+/// Load `path` into `dest`. Tries a strict VarStore load first; on mismatch
+/// (recurrent ↔ feedforward) copies intersecting tensors.
+fn load_compatible_weights(
+    dest: &mut nn::VarStore,
+    path: &str,
+    amp: bool,
+    foveate: bool,
+    gc: i64,
+    blocks: i64,
+    dest_recurrent: bool,
+) -> Result<(usize, usize)> {
+    match dest.load(path) {
+        Ok(()) => return Ok((dest.variables().len(), 0)),
+        Err(strict_err) => {
+            let src_recurrent = manifest_source_is_recurrent(path);
+            if src_recurrent == dest_recurrent {
+                return Err(strict_err.into());
+            }
+            let mut src = nn::VarStore::new(Device::Cpu);
+            let _ = PolicyNet::new_with_recurrence(
+                &src.root(),
+                amp,
+                foveate,
+                gc,
+                blocks,
+                src_recurrent,
+            );
+            src.load(path).map_err(|load_err| {
+                anyhow!("compatible load of {path} failed after strict mismatch ({strict_err}); source load: {load_err}")
+            })?;
+            let (copied, skipped) = copy_matching_weights(&src, dest)?;
+            anyhow::ensure!(
+                copied > 0,
+                "compatible load of {path} copied 0 tensors (strict error: {strict_err})"
+            );
+            println!(
+                "[train] compatible load {path}: copied {copied} tensors, skipped {skipped} \
+                 (source recurrent={src_recurrent} dest recurrent={dest_recurrent})"
+            );
+            Ok((copied, skipped))
+        }
+    }
+}
+
+fn build_frozen_prior(cfg: &Config, device: Device) -> Result<Option<(nn::VarStore, PolicyNet)>> {
+    let Some(path) = cfg.kl_prior.as_ref() else {
+        return Ok(None);
+    };
+    if cfg.kl_coef <= 0.0 {
+        println!("[train] --kl-prior set but --kl-coef is 0; skipping KL term");
+        return Ok(None);
+    }
+    let mut vs = nn::VarStore::new(device);
+    let policy = PolicyNet::new_with_recurrence(
+        &vs.root(),
+        cfg.amp,
+        cfg.foveate,
+        cfg.gc,
+        cfg.blocks,
+        cfg.recurrent_policy,
+    );
+    load_compatible_weights(
+        &mut vs,
+        path,
+        cfg.amp,
+        cfg.foveate,
+        cfg.gc,
+        cfg.blocks,
+        cfg.recurrent_policy,
+    )?;
+    vs.freeze();
+    println!(
+        "[train] frozen KL prior from {path} (kl_coef={:.4})",
+        cfg.kl_coef
+    );
+    Ok(Some((vs, policy)))
+}
+
 /// Conv towers / tile heads the actor runs under `--amp` via
 /// `conv2d_bf16`. Storing them as BF16 in the actor VarStore halves that
 /// shard of policy VRAM; the learner keeps f32 for Adam. One-step-lag
@@ -4245,7 +4366,7 @@ fn cast_actor_inference_weights_bf16(vs: &nn::VarStore) {
 
 #[derive(Clone)]
 struct EvalReportContext {
-    losses: (f64, f64, f64, f64),
+    losses: (f64, f64, f64, f64, f64),
     win_rate: Option<f64>,
     lr_now: f64,
     total_env_steps: u64,
@@ -4566,6 +4687,7 @@ fn report_eval_completion(
         completion.report.losses.1,
         completion.report.losses.2,
         completion.report.losses.3,
+        completion.report.losses.4,
         completion.report.win_rate,
         completion.report.lr_now,
         completion.report.total_env_steps,
@@ -4635,7 +4757,7 @@ mod async_eval_tests {
             promoted: false,
             best: Some((0.8, 4.0)),
             report: EvalReportContext {
-                losses: (1.0, 2.0, 3.0, 4.0),
+                losses: (1.0, 2.0, 3.0, 4.0, 0.0),
                 win_rate: Some(0.5),
                 lr_now: 1e-4,
                 total_env_steps: 99,
@@ -5273,7 +5395,7 @@ enum LearnerReply {
     Trained {
         id: u64,
         shard: usize,
-        losses: (f64, f64, f64, f64),
+        losses: (f64, f64, f64, f64, f64),
         weights: CpuWeightSnapshot,
         ret_stat: RetStat,
         train_seconds: f64,
@@ -5347,6 +5469,10 @@ fn learner_loop(
         );
         apply_weight_snapshot(&vs, &initial_weights)?;
         let opt = nn::AdamW::default().build(&vs, initial_lr)?;
+        let (prior_vs, prior) = match build_frozen_prior(&cfg, device)? {
+            Some((vs, policy)) => (Some(vs), Some(policy)),
+            None => (None, None),
+        };
         if let Device::Cuda(index) = device {
             Cuda::synchronize(index as i64);
         }
@@ -5355,6 +5481,8 @@ fn learner_loop(
             vs,
             policy,
             opt,
+            prior_vs,
+            prior,
         })
     })();
     let mut learner = match initialized {
@@ -5565,7 +5693,7 @@ fn learner_loop(
 }
 
 struct TrainReply {
-    losses: (f64, f64, f64, f64),
+    losses: (f64, f64, f64, f64, f64),
     weights: Vec<CpuWeightSnapshot>,
     train_seconds: f64,
     snapshot_seconds: f64,
@@ -5877,7 +6005,7 @@ impl PersistentLearner {
         }
         let mut trained: Vec<
             Option<(
-                (f64, f64, f64, f64),
+                (f64, f64, f64, f64, f64),
                 CpuWeightSnapshot,
                 RetStat,
                 f64,
@@ -5909,7 +6037,7 @@ impl PersistentLearner {
                 reply => return Err(learner_reply_error("matching train result", &reply)),
             }
         }
-        let mut losses = (0.0, 0.0, 0.0, 0.0);
+        let mut losses = (0.0, 0.0, 0.0, 0.0, 0.0);
         let mut weights = Vec::with_capacity(world);
         let mut train_seconds = 0.0f64;
         let mut snapshot_seconds = 0.0f64;
@@ -5921,6 +6049,7 @@ impl PersistentLearner {
             losses.1 += local.1 / world as f64;
             losses.2 += local.2 / world as f64;
             losses.3 += local.3 / world as f64;
+            losses.4 += local.4 / world as f64;
             self.ret_stat.add_batch(stat.count, stat.sum, stat.sum_sq);
             weights.push(snapshot);
             train_seconds = train_seconds.max(train_s);
@@ -6147,26 +6276,27 @@ fn sync_grads(shards: &[LearnerShard]) {
     }
 }
 
-/// True if any shard's (pg, v, ent, entq) loss tuple has a non-finite
+/// True if any shard's (pg, v, ent, entq, kl) loss tuple has a non-finite
 /// (NaN/Inf) component - see `train_update`'s NaN guard (docs/devlog.html's
 /// 2026-07-12 entry) for why this gates skipping `opt.step()` for a
 /// minibatch rather than applying a poisoned gradient.
-fn any_loss_non_finite(losses: &[(f64, f64, f64, f64)]) -> bool {
-    losses.iter().any(|(pg, v, ent, entq)| {
-        !pg.is_finite() || !v.is_finite() || !ent.is_finite() || !entq.is_finite()
+fn any_loss_non_finite(losses: &[(f64, f64, f64, f64, f64)]) -> bool {
+    losses.iter().any(|(pg, v, ent, entq, kl)| {
+        !pg.is_finite() || !v.is_finite() || !ent.is_finite() || !entq.is_finite() || !kl.is_finite()
     })
 }
 
-fn read_loss_scalars(losses: [&Tensor; 4]) -> (f64, f64, f64, f64) {
-    // One packed D2H read replaces four scalar synchronizations. PPO losses
+fn read_loss_scalars(losses: [&Tensor; 5]) -> (f64, f64, f64, f64, f64) {
+    // One packed D2H read replaces five scalar synchronizations. PPO losses
     // are Float tensors, so widening each returned f32 preserves every bit.
     let packed = Tensor::stack(&losses, 0).to_device(Device::Cpu);
-    let values = Vec::<f32>::try_from(&packed).unwrap_or_else(|_| vec![0.0; 4]);
+    let values = Vec::<f32>::try_from(&packed).unwrap_or_else(|_| vec![0.0; 5]);
     (
         values[0] as f64,
         values[1] as f64,
         values[2] as f64,
         values[3] as f64,
+        values.get(4).copied().unwrap_or(0.0) as f64,
     )
 }
 
@@ -6260,7 +6390,7 @@ fn train_update(
         &mut dyn FnMut(&mut LearnerShard, usize, usize, bool) -> Result<bool>,
     >,
     timings: &mut TrainTimings,
-) -> Result<(f64, f64, f64, f64)> {
+) -> Result<(f64, f64, f64, f64, f64)> {
     debug_assert!(!exclusive_owner || learners.len() == 1);
     let t_len = cfg.rollout_len;
     // Derive the live per-shard env count from the actual rollout data,
@@ -6284,7 +6414,7 @@ fn train_update(
     // returned as means, matching `rl/ppo.py`'s `*_sum / n_mb` (whose
     // entropy mean drives the entropy-floor controller; last-minibatch
     // snapshots read artificially noisy/low).
-    let mut loss_sums = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    let mut loss_sums = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let mut n_mb: usize = 0;
 
     // Per-shard full-rollout tensors, built once (CPU repack + one
@@ -6677,7 +6807,7 @@ fn train_update(
             for shard in learners.iter_mut() {
                 shard.opt.zero_grad();
             }
-            let mut mb_loss_sums = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+            let mut mb_loss_sums = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
             let mut discard_mb = false;
 
             for s_i in 0..n_subs {
@@ -6697,8 +6827,17 @@ fn train_update(
                         let shard = $shard;
                         let sb = $sb;
                         let idx_t = $idx_t;
-                        let (logp, ent, ent_q, value, quantity, adv_t, ret_t, old_logp_t) = if cfg
-                            .recurrent_policy
+                        let (
+                            logp,
+                            ent,
+                            ent_q,
+                            value,
+                            quantity,
+                            adv_t,
+                            ret_t,
+                            old_logp_t,
+                            gather_idx,
+                        ) = if cfg.recurrent_policy
                         {
                             let hidden_all = sb.hidden_in.as_ref().expect("recurrent hidden batch");
                             let context_all = sb.context.as_ref().expect("recurrent context batch");
@@ -6757,6 +6896,7 @@ fn train_update(
                                 sb.adv.index_select(0, &target_idx),
                                 sb.ret.index_select(0, &target_idx),
                                 sb.old_logp.index_select(0, &target_idx),
+                                target_idx,
                             )
                         } else {
                             let obs_t = sb.obs.index_select(&idx_t);
@@ -6771,6 +6911,7 @@ fn train_update(
                                 sb.adv.index_select(0, &idx_t),
                                 sb.ret.index_select(0, &idx_t),
                                 sb.old_logp.index_select(0, &idx_t),
+                                idx_t.shallow_clone(),
                             )
                         };
                         // Bound log-ratio before exp (see prior
@@ -6801,19 +6942,37 @@ fn train_update(
                             .sum(Kind::Float)
                             .clamp_min(1.0);
                         let entq_loss = ent_q.sum(Kind::Float) / &n_active;
+                        // AlphaStar reverse KL: mean(log π − log π_prior) on
+                        // on-policy actions. Freeze the prior forward; keep
+                        // autograd through `logp` so the coefficient actually
+                        // pulls the live policy toward the playable prior.
+                        let kl_loss = match shard.prior.as_ref() {
+                            Some(prior) if cfg.kl_coef > 0.0 => {
+                                let prior_logp = tch::no_grad(|| {
+                                    let (lp, _, _, _) = prior.evaluate(
+                                        &sb.obs.index_select(&gather_idx),
+                                        &sb.choice.index_select(&gather_idx),
+                                    );
+                                    lp
+                                });
+                                (&logp - prior_logp).mean(Kind::Float)
+                            }
+                            _ => Tensor::from(0f32).to_device(shard.device),
+                        };
                         let loss = (&pg_loss + cfg.vf_coef as f64 * &v_loss
                             - ent_coef as f64 * &ent_loss
-                            - cfg.entq_coef as f64 * &entq_loss)
+                            - cfg.entq_coef as f64 * &entq_loss
+                            + cfg.kl_coef as f64 * &kl_loss)
                             * w_sub;
 
                         // Grads accumulate across pixel-budget
                         // subs (zero_grad ran once above).
                         loss.backward();
 
-                        read_loss_scalars([&pg_loss, &v_loss, &ent_loss, &entq_loss])
+                        read_loss_scalars([&pg_loss, &v_loss, &ent_loss, &entq_loss, &kl_loss])
                     }};
                 }
-                let per_shard_losses: Vec<(f64, f64, f64, f64)> = if exclusive_owner {
+                let per_shard_losses: Vec<(f64, f64, f64, f64, f64)> = if exclusive_owner {
                     vec![backward_shard!(
                         &mut learners[0],
                         &mut shard_batches[0],
@@ -6851,18 +7010,19 @@ fn train_update(
                 if any_loss_non_finite(&per_shard_losses) {
                     eprintln!(
                         "[train] WARNING: non-finite loss in epoch={_epoch} mb={m} sub={s_i} \
-                         (per-shard pg/v/ent/entq={per_shard_losses:?}) - discarding this \
+                         (per-shard pg/v/ent/entq/kl={per_shard_losses:?}) - discarding this \
                          minibatch's gradients without stepping the optimizer (see \
                          docs/devlog.html's 2026-07-12 NaN-guard entry)"
                     );
                     discard_mb = true;
                     break;
                 }
-                for (pg, v, ent, entq) in &per_shard_losses {
+                for (pg, v, ent, entq, kl) in &per_shard_losses {
                     mb_loss_sums.0 += pg / n_shards * w_sub;
                     mb_loss_sums.1 += v / n_shards * w_sub;
                     mb_loss_sums.2 += ent / n_shards * w_sub;
                     mb_loss_sums.3 += entq / n_shards * w_sub;
+                    mb_loss_sums.4 += kl / n_shards * w_sub;
                 }
             }
 
@@ -6892,6 +7052,7 @@ fn train_update(
             loss_sums.1 += mb_loss_sums.1;
             loss_sums.2 += mb_loss_sums.2;
             loss_sums.3 += mb_loss_sums.3;
+            loss_sums.4 += mb_loss_sums.4;
             n_mb += 1;
             let fwdbwd_dt = mb_t0.elapsed().as_secs_f64();
 
@@ -6934,6 +7095,7 @@ fn train_update(
         loss_sums.1 / d,
         loss_sums.2 / d,
         loss_sums.3 / d,
+        loss_sums.4 / d,
     ))
 }
 
@@ -7092,9 +7254,6 @@ pub fn run(mut cfg: Config) -> Result<()> {
         );
         Some(snapshot)
     } else if let Some(init_path) = &cfg.init {
-        if cfg.recurrent_policy {
-            let _ = read_architecture_manifest(init_path, 3)?;
-        }
         let mut snapshot = nn::VarStore::new(Device::Cpu);
         let _ = PolicyNet::new_with_recurrence(
             &snapshot.root(),
@@ -7104,7 +7263,15 @@ pub fn run(mut cfg: Config) -> Result<()> {
             cfg.blocks,
             cfg.recurrent_policy,
         );
-        snapshot.load(init_path)?;
+        load_compatible_weights(
+            &mut snapshot,
+            init_path,
+            cfg.amp,
+            cfg.foveate,
+            cfg.gc,
+            cfg.blocks,
+            cfg.recurrent_policy,
+        )?;
         println!(
             "[train] warm-started weights from {init_path} (--init; fresh TrainState / optimizer)"
         );
@@ -7312,11 +7479,17 @@ pub fn run(mut cfg: Config) -> Result<()> {
             );
         }
 
+        let (prior_vs, prior) = match build_frozen_prior(&cfg, device)? {
+            Some((vs, policy)) => (Some(vs), Some(policy)),
+            None => (None, None),
+        };
         learners.push(LearnerShard {
             device,
             vs: learner_vs,
             policy: learner_policy,
             opt,
+            prior_vs,
+            prior,
         });
         if cfg.persistent_actors {
             let initial_version = resumed_state.as_ref().map(|s| s.update).unwrap_or(0);
@@ -8608,7 +8781,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             };
             println!(
                 "[update {:>5}] steps/s={:>7.1} decisions_total={:>9} eps_done={:>5} recent_reward={:>8.3} \
-                 pg={:>+.4} v={:>.4} ent={:>.3} entq={:>+.3} ecoef={:.4} stage={} lr={:.2e} elapsed={:.0}s \
+                 pg={:>+.4} v={:>.4} ent={:>.3} entq={:>+.3} kl={:>.4} ecoef={:.4} stage={} lr={:.2e} elapsed={:.0}s \
                  update_s={:.1} collect_s={:.1} train_s={:.1} epochs={} actor_work_s={:.1} \
                  batch_build_s={:.3} gradient_sync_s={:.3} learner_snapshot_s={:.3} \
                  refresh_s={:.3}{gpu_str}",
@@ -8621,6 +8794,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 last_losses.1,
                 last_losses.2,
                 last_losses.3,
+                last_losses.4,
                 ent_coef_now,
                 curr_stage,
                 lr_now,
@@ -8650,6 +8824,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 last_losses.1,
                 last_losses.2,
                 last_losses.3,
+                last_losses.4,
                 win_rate,
                 lr_now,
                 total_env_steps,
@@ -9106,6 +9281,8 @@ mod persistent_actor_tests {
             init: None,
             resume: None,
             resume_warmup_updates: 0,
+            kl_prior: None,
+            kl_coef: 0.0,
             value_loss: ValueLoss::Mse,
             auto_scale_envs: false,
             target_gpu_util: 0.95,
@@ -9213,6 +9390,8 @@ mod persistent_actor_tests {
             vs,
             policy,
             opt,
+            prior_vs: None,
+            prior: None,
         }
     }
 
@@ -9266,6 +9445,7 @@ mod persistent_actor_tests {
             (legacy_losses.1, owned_losses.1),
             (legacy_losses.2, owned_losses.2),
             (legacy_losses.3, owned_losses.3),
+            (legacy_losses.4, owned_losses.4),
         ] {
             assert!((legacy_loss - owned_loss).abs() < 1e-6);
         }
@@ -9302,13 +9482,21 @@ mod persistent_actor_tests {
             Tensor::from(-0.0f32),
             Tensor::from(f32::from_bits(0x3f80_0001)),
             Tensor::from(-17.5f32),
+            Tensor::from(0.03125f32),
         ];
-        let packed = read_loss_scalars([&tensors[0], &tensors[1], &tensors[2], &tensors[3]]);
+        let packed = read_loss_scalars([
+            &tensors[0],
+            &tensors[1],
+            &tensors[2],
+            &tensors[3],
+            &tensors[4],
+        ]);
         let individual = (
             f64::try_from(&tensors[0]).unwrap(),
             f64::try_from(&tensors[1]).unwrap(),
             f64::try_from(&tensors[2]).unwrap(),
             f64::try_from(&tensors[3]).unwrap(),
+            f64::try_from(&tensors[4]).unwrap(),
         );
         assert_eq!(
             [
@@ -9316,14 +9504,47 @@ mod persistent_actor_tests {
                 packed.1.to_bits(),
                 packed.2.to_bits(),
                 packed.3.to_bits(),
+                packed.4.to_bits(),
             ],
             [
                 individual.0.to_bits(),
                 individual.1.to_bits(),
                 individual.2.to_bits(),
                 individual.3.to_bits(),
+                individual.4.to_bits(),
             ]
         );
+    }
+
+    #[test]
+    fn copy_matching_weights_skips_recurrent_only_keys() {
+        let mut dest = nn::VarStore::new(Device::Cpu);
+        let _ = PolicyNet::new_with_recurrence(&dest.root(), false, false, 8, 1, false);
+        let src = nn::VarStore::new(Device::Cpu);
+        let _ = PolicyNet::new_with_recurrence(&src.root(), false, false, 8, 1, true);
+        tch::no_grad(|| {
+            for (_, mut t) in dest.variables() {
+                let _ = t.f_fill_(0.0);
+            }
+            for (_, mut t) in src.variables() {
+                let _ = t.f_fill_(0.5);
+            }
+        });
+        let (copied, skipped) = copy_matching_weights(&src, &mut dest).unwrap();
+        assert!(copied > 0, "expected overlapping trunk tensors, copied={copied}");
+        assert!(
+            skipped > 0,
+            "LSTM / extra recurrent keys must be skipped, skipped={skipped}"
+        );
+        let dest_vars = dest.variables();
+        for (name, src_t) in src.variables() {
+            if let Some(dest_t) = dest_vars.get(&name) {
+                if dest_t.size() == src_t.size() {
+                    let diff = (dest_t - src_t).abs().max().double_value(&[]);
+                    assert!(diff < 1e-6, "{name} not copied (diff={diff})");
+                }
+            }
+        }
     }
 
     #[test]
@@ -9819,6 +10040,27 @@ mod ratio_clamp_tests {
             "clamp must be a no-op for ordinary ratios: {clamped} vs {unclamped}"
         );
     }
+
+    #[test]
+    fn kl_to_prior_is_mean_logp_minus_prior_logp() {
+        // Matches the PPO KL term: mean(log π − log π_prior) on the
+        // on-policy actions (AlphaStar reverse KL). Prior logp is treated
+        // as a constant; the live logp must still carry autograd.
+        let logp = Tensor::from_slice(&[0.0f32, -1.0, -2.0]).set_requires_grad(true);
+        let prior_logp = Tensor::from_slice(&[-0.5f32, -0.5, -0.5]);
+        let prior_logp = tch::no_grad(|| prior_logp.shallow_clone());
+        let kl = (&logp - prior_logp).mean(Kind::Float);
+        let value = f64::try_from(&kl).unwrap();
+        let expected = ((0.0 + 0.5) + (-1.0 + 0.5) + (-2.0 + 0.5)) / 3.0;
+        assert!((value - expected).abs() < 1e-6, "kl={value} expected={expected}");
+        kl.backward();
+        let grad = logp.grad();
+        let grad_mean = f64::try_from(grad.mean(Kind::Float)).unwrap();
+        assert!(
+            (grad_mean - 1.0 / 3.0).abs() < 1e-6,
+            "d(mean(logp - c))/d logp must be 1/N, got {grad_mean}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -9827,26 +10069,27 @@ mod nan_guard_tests {
 
     #[test]
     fn all_finite_losses_are_not_flagged() {
-        let losses = vec![(0.02, 0.14, 2.1, -0.08), (0.01, 0.09, 3.6, -0.08)];
+        let losses = vec![(0.02, 0.14, 2.1, -0.08, 0.01), (0.01, 0.09, 3.6, -0.08, 0.0)];
         assert!(!any_loss_non_finite(&losses));
     }
 
     #[test]
     fn a_single_nan_value_loss_is_flagged() {
-        let losses = vec![(0.02, 0.14, 2.1, -0.08), (0.01, f64::NAN, 3.6, -0.08)];
+        let losses = vec![(0.02, 0.14, 2.1, -0.08, 0.0), (0.01, f64::NAN, 3.6, -0.08, 0.0)];
         assert!(any_loss_non_finite(&losses));
     }
 
     #[test]
     fn infinite_pg_loss_is_flagged() {
-        let losses = vec![(f64::INFINITY, 0.14, 2.1, -0.08)];
+        let losses = vec![(f64::INFINITY, 0.14, 2.1, -0.08, 0.0)];
         assert!(any_loss_non_finite(&losses));
     }
 
     #[test]
     fn nan_in_entropy_or_entq_is_also_flagged() {
-        assert!(any_loss_non_finite(&[(0.0, 0.0, f64::NAN, 0.0)]));
-        assert!(any_loss_non_finite(&[(0.0, 0.0, 0.0, f64::NAN)]));
+        assert!(any_loss_non_finite(&[(0.0, 0.0, f64::NAN, 0.0, 0.0)]));
+        assert!(any_loss_non_finite(&[(0.0, 0.0, 0.0, f64::NAN, 0.0)]));
+        assert!(any_loss_non_finite(&[(0.0, 0.0, 0.0, 0.0, f64::NAN)]));
     }
 
     #[test]
@@ -9855,7 +10098,7 @@ mod nan_guard_tests {
         // trillions *before* going NaN - large-but-finite values should
         // still train (badly, but not corrupt weights outright); only the
         // NaN/Inf endpoint itself should skip the optimizer step.
-        let losses = vec![(0.1, 1_265_838_468_017.77, 3.3, -0.27)];
+        let losses = vec![(0.1, 1_265_838_468_017.77, 3.3, -0.27, 0.05)];
         assert!(!any_loss_non_finite(&losses));
     }
 }

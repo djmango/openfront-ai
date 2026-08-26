@@ -266,7 +266,7 @@ pub struct RewardComponents {
     pub waste: f64,
     pub death: f64,
     pub terminal: f64,
-    /// Team-mode duo: welfare / inequity / real-alliance synergy.
+    /// Team-mode duo: Ng-1999 PBRS on [`duo_potential`] (not per-tick wages).
     pub duo: f64,
 }
 
@@ -1270,7 +1270,18 @@ pub fn placement_score(place: i64, n: i64) -> f64 {
     (n - place) as f64 / (n - 1).max(1) as f64
 }
 
-pub fn terminal_reward(place: i64, won: bool) -> f64 {
+/// Terminal outcome. Timeout without a win is a loss (`−W_WIN`), not a
+/// placement gift: paying `W_PLACE * place^{-p}` on the clock made camping
+/// until `max_episode_ticks` the PPO optimum (v4 safe-second / duo donate
+/// farm). The same rule applies when the caller flags a never-spawned
+/// human (`timed_out=true`): they did not play, so this is a death/loss,
+/// not a placement. AlphaStar's +1/0/−1 treats timeout as failure; this
+/// is the same rule at the existing win-bonus scale so a real win still
+/// dominates.
+pub fn terminal_reward(place: i64, won: bool, timed_out: bool) -> f64 {
+    if timed_out && !won {
+        return -W_WIN;
+    }
     let mut r = W_PLACE * (place as f64).powf(-PLACE_POW);
     if won {
         r += W_WIN;
@@ -1383,23 +1394,24 @@ pub fn v10_empty_action_net_reward(action: i64, config: RewardConfig) -> f64 {
 /// humans share a Team-mode match, so team-win / welfare / real-alliance
 /// synergy can dominate.
 pub const DUO_SOLO_SCALE: f64 = 0.22;
-/// Per-decision bonus while both humans are alive.
+/// Φ weight while both humans are alive. **Not a per-tick wage** — callers
+/// must apply [`duo_potential`] through [`DominanceShaper`] (Ng 1999 PBRS:
+/// `γ Φ(s') − Φ(s)`). Paying this every decision was a camping salary
+/// (~1400 steps × 0.02) that made timeout EV beat a rare win.
 pub const W_DUO_BOTH_ALIVE: f64 = 0.02;
-/// `min(s1,s2)` welfare.
+/// `min(s1,s2)` welfare term inside [`duo_potential`].
 pub const W_DUO_WELFARE_MIN: f64 = 0.015;
-/// Geometric-mean welfare.
+/// Geometric-mean welfare term inside [`duo_potential`].
 pub const W_DUO_GEO: f64 = 0.01;
-/// `|s1-s2|/(s1+s2)` inequity tax.
+/// `|s1-s2|/(s1+s2)` inequity tax inside [`duo_potential`].
 pub const W_DUO_INEQUITY: f64 = 0.02;
-/// Per-decision bonus while the pair has a *formal* alliance (not merely
-/// the same team). This is the reward that teaches them to pact so the
-/// engine pays ally train gold (35k) instead of the team rate (25k).
+/// Φ weight while the pair has a *formal* alliance (not merely the same
+/// team). PBRS pays the *transition* into a pact (so they still learn to
+/// request for ally train gold) without a per-tick allied wage.
 ///
-/// Outcome-only (devlog boat-churn rule): pay this *state*, never the
-/// `alliance_request` / `donate_*` actions. Per-action crumbs were a
-/// request↔break / donate-loop farm that made timeouts return ~170
-/// without a win. Do not reintroduce `W_DUO_ALLY_REQUEST` /
-/// `W_DUO_DONATE_PARTNER`.
+/// Outcome-only (devlog boat-churn rule): pay this *state* as a potential,
+/// never the `alliance_request` / `donate_*` actions. Do not reintroduce
+/// `W_DUO_ALLY_REQUEST` / `W_DUO_DONATE_PARTNER`.
 pub const W_DUO_ALLIED: f64 = 0.05;
 
 /// True when `ents.alliances` contains a formal pact between `a` and `b`
@@ -1413,8 +1425,8 @@ pub fn formally_allied(ents: &crate::feat::EntsData, a: usize, b: usize) -> bool
     })
 }
 
-/// Min + geo-mean welfare minus inequity. Used as a dense team-strength
-/// potential so the pair grows together instead of one farming the other.
+/// Min + geo-mean welfare minus inequity. A *state potential* Φ term, not
+/// a per-tick wage — see [`duo_potential`].
 pub fn duo_welfare_reward(s1: f64, s2: f64) -> f64 {
     let mn = s1.min(s2);
     let geo = (s1.max(0.0) * s2.max(0.0)).sqrt();
@@ -1422,7 +1434,8 @@ pub fn duo_welfare_reward(s1: f64, s2: f64) -> f64 {
     W_DUO_WELFARE_MIN * mn + W_DUO_GEO * geo - W_DUO_INEQUITY * ineq
 }
 
-/// Survival + formal-alliance synergy. `allied` must be a real pact.
+/// Survival + formal-alliance synergy as a *state potential*. `allied`
+/// must be a real pact. Callers apply this via PBRS, not as a wage.
 pub fn duo_synergy_reward(both_alive: bool, allied: bool) -> f64 {
     let mut r = 0.0;
     if both_alive {
@@ -1432,6 +1445,15 @@ pub fn duo_synergy_reward(both_alive: bool, allied: bool) -> f64 {
         r += W_DUO_ALLIED;
     }
     r
+}
+
+/// Team-mode state potential Φ: welfare + both-alive + formal pact.
+/// Ng 1999: the policy-invariant shaping is `F = γ Φ(s') − Φ(s)`
+/// ([`DominanceShaper::transition`] with coefficient 1). Camping at a
+/// constant Φ (timeout farm) telescopes to ~0; forming a pact or growing
+/// together is a one-shot delta.
+pub fn duo_potential(s1: f64, s2: f64, both_alive: bool, allied: bool) -> f64 {
+    finite_or_zero(duo_welfare_reward(s1, s2) + duo_synergy_reward(both_alive, allied))
 }
 
 #[cfg(test)]
@@ -2216,5 +2238,50 @@ mod tests {
         let even = duo_welfare_reward(0.4, 0.4);
         let lopsided = duo_welfare_reward(0.8, 0.05);
         assert!(even > lopsided);
+    }
+
+    #[test]
+    fn timeout_without_a_win_is_a_loss_not_a_placement_gift() {
+        let place_first = terminal_reward(1, false, false);
+        assert!(place_first > 0.0);
+        assert_eq!(terminal_reward(1, false, true), -W_WIN);
+        assert_eq!(terminal_reward(2, false, true), -W_WIN);
+        let win = terminal_reward(1, true, false);
+        assert!(win > W_WIN);
+        // Won-and-timeout should not happen, but a win still pays the win.
+        assert_eq!(terminal_reward(1, true, true), win);
+    }
+
+    #[test]
+    fn duo_pbrs_camping_does_not_accumulate_and_pact_is_a_oneshot() {
+        let gamma = 0.999;
+        let start = duo_potential(0.1, 0.1, true, false);
+        let mut shaper = DominanceShaper::default();
+        shaper.reset(start);
+        let mut camped = 0.0;
+        for _ in 0..1400 {
+            camped += shaper.transition(start, gamma, 1.0);
+        }
+        let wage_farm = 1400.0 * start;
+        // Constant Φ: each F = (γ−1)Φ. 1400 wages would be ~35; PBRS is
+        // a small negative drift (~1.4 Φ), not a timeout salary.
+        assert!(
+            camped.abs() < 0.1 * wage_farm,
+            "camping PBRS={camped} would-be wage={wage_farm} Φ={start}"
+        );
+        assert!(camped < 0.0);
+
+        shaper.reset(start);
+        let allied = duo_potential(0.1, 0.1, true, true);
+        let pact_delta = shaper.transition(allied, gamma, 1.0);
+        assert!(
+            (pact_delta - (gamma * allied - start)).abs() < 1e-12,
+            "pact delta {pact_delta}"
+        );
+        assert!(pact_delta > 0.0);
+
+        // Absorbing terminal: leftover Φ is charged once, not as a timeout gift.
+        let close = shaper.transition(0.0, gamma, 1.0);
+        assert!((close + allied).abs() < 1e-12);
     }
 }
