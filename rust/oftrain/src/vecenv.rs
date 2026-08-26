@@ -380,7 +380,8 @@ pub struct EpisodeInfo {
     pub n_players: i64,
     pub score: f64,
     pub won: bool,
-    /// True when the episode ended because the agent died (`!alive`).
+    /// True when the episode ended because the agent died or never spawned
+    /// (`tiles == 0` / TS `!isAlive()`). A no-show is a death, not a timeout.
     pub died: bool,
     pub wasted: i64,
     pub stage: usize,
@@ -1252,7 +1253,21 @@ impl EnvWorker {
     }
 
     fn agent_alive(&self, i: usize) -> bool {
-        self.agent_head(i)["alive"].as_bool().unwrap_or(false)
+        // TS `isAlive()` is tiles on the map, not the sticky `Player.alive`
+        // flag. Unspawned humans used to report alive=true with 0 tiles, so
+        // a no-show was a timeout instead of a death.
+        self.agent_on_map(i)
+    }
+
+    fn agent_on_map(&self, i: usize) -> bool {
+        let me = self.agent_me(i);
+        if me < 0 {
+            return false;
+        }
+        self.ents()
+            .players
+            .iter()
+            .any(|p| p.id as i64 == me && p.tiles > 0.0)
     }
 
     fn seed_agent_trackers(&mut self) {
