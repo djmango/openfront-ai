@@ -666,9 +666,16 @@ struct Args {
     /// Alliances stay enabled: teammates must actually `alliance_request`
     /// each other to unlock ally train gold (35k vs 25k team rate) and to
     /// appear as class-2 allies in the featurizer. Forces lockstep collect
-    /// (no work-conserving / autoscale).
+    /// (no work-conserving / autoscale). Default-on MAPPO centralized critic
+    /// (`--centralized-value`).
     #[arg(long, default_value_t = false)]
     duo: bool,
+
+    /// MAPPO centralized critic (Yu et al. 2021): value sees teammate player
+    /// tokens + scalars; the policy stays local. Default on with `--duo`.
+    /// Pass `--centralized-value=false` to keep an IPPO (local) critic.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", action = clap::ArgAction::Set)]
+    centralized_value: Option<bool>,
 }
 
 fn parse_device(s: &str) -> Device {
@@ -1374,6 +1381,7 @@ fn main() -> anyhow::Result<()> {
             curriculum_schedule,
             reward_config,
             recurrent_policy: args.recurrent_policy,
+            centralized_value: args.centralized_value.unwrap_or(args.duo),
             engine: watch_engine,
             stochastic: args.watch_stochastic,
         });
@@ -1400,6 +1408,7 @@ fn main() -> anyhow::Result<()> {
             gc: args.gc,
             blocks: args.blocks,
             recurrent_policy: args.recurrent_policy,
+            centralized_value: args.centralized_value.unwrap_or(args.duo),
             pinned_h2d: args.pinned_h2d,
             fp16_rollout: args.fp16_rollout,
             compact_rollout: args.compact_rollout,
@@ -1420,6 +1429,7 @@ fn main() -> anyhow::Result<()> {
     let cfg = train::Config {
         num_envs: initial_num_envs,
         n_agents: if args.duo { 2 } else { 1 },
+        centralized_value: args.centralized_value.unwrap_or(args.duo),
         num_gpus: args.num_gpus,
         stage: args.stage,
         curriculum_schedule,

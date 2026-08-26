@@ -758,6 +758,9 @@ fn build_native_compact_mixed(
     let mut legal_ptarget = Vec::with_capacity(items.len());
     let mut legal_build = Vec::with_capacity(items.len());
     let mut legal_nuke = Vec::with_capacity(items.len());
+    let mut partner_players = Vec::with_capacity(items.len());
+    let mut partner_pmask = Vec::with_capacity(items.len());
+    let mut partner_scalars = Vec::with_capacity(items.len());
     for &(group, row) in &location {
         let obs = &compact_groups[group];
         let row = row as i64;
@@ -798,6 +801,9 @@ fn build_native_compact_mixed(
         legal_ptarget.push(obs.legal_ptarget.narrow(0, row, 1));
         legal_build.push(obs.legal_build.narrow(0, row, 1));
         legal_nuke.push(obs.legal_nuke.narrow(0, row, 1));
+        partner_players.push(obs.partner_players.narrow(0, row, 1));
+        partner_pmask.push(obs.partner_pmask.narrow(0, row, 1));
+        partner_scalars.push(obs.partner_scalars.narrow(0, row, 1));
     }
     Ok(Obs {
         grid: cat_rows(&fine),
@@ -815,6 +821,9 @@ fn build_native_compact_mixed(
         legal_ptarget: cat_rows(&legal_ptarget),
         legal_build: cat_rows(&legal_build),
         legal_nuke: cat_rows(&legal_nuke),
+        partner_players: cat_rows(&partner_players),
+        partner_pmask: cat_rows(&partner_pmask),
+        partner_scalars: cat_rows(&partner_scalars),
         compact: Some(CompactObsMeta {
             origin_y: cat_rows(&origin_y),
             origin_x: cat_rows(&origin_x),
@@ -1065,6 +1074,9 @@ fn build_obs_from_parts(
     let mut legal_ptarget = Vec::with_capacity(b * feat::N_ACTIONS * feat::MAX_SLOTS);
     let mut legal_build = Vec::with_capacity(b * feat::N_BUILD);
     let mut legal_nuke = Vec::with_capacity(b * feat::N_NUKE);
+    let mut partner_players = Vec::with_capacity(b * feat::MAX_SLOTS * feat::P_FEAT);
+    let mut partner_pmask = Vec::with_capacity(b * feat::MAX_SLOTS);
+    let mut partner_scalars = Vec::with_capacity(b * feat::N_SCALARS);
 
     for (idx, it) in items.iter().enumerate() {
         if !resident_grid {
@@ -1111,6 +1123,9 @@ fn build_obs_from_parts(
         legal_ptarget.extend_from_slice(&it.legal_ptarget);
         legal_build.extend_from_slice(&it.legal_build);
         legal_nuke.extend_from_slice(&it.legal_nuke);
+        partner_players.extend_from_slice(&it.partner_players);
+        partner_pmask.extend_from_slice(&it.partner_pmask);
+        partner_scalars.extend_from_slice(&it.partner_scalars);
     }
 
     let t = |v: Vec<f32>, shape: &[i64]| -> Tensor {
@@ -1184,6 +1199,9 @@ fn build_obs_from_parts(
         legal_ptarget: t(legal_ptarget, &[bi, na, ms]),
         legal_build: t(legal_build, &[bi, feat::N_BUILD as i64]),
         legal_nuke: t(legal_nuke, &[bi, feat::N_NUKE as i64]),
+        partner_players: t(partner_players, &[bi, ms, feat::P_FEAT as i64]),
+        partner_pmask: t(partner_pmask, &[bi, ms]),
+        partner_scalars: t(partner_scalars, &[bi, feat::N_SCALARS as i64]),
         compact: None,
     })
 }
@@ -1292,6 +1310,10 @@ fn store_compact_host(
                 it.legal_ptarget.len() == legal_ptarget_n,
                 "compact legal_ptarget length mismatch"
             );
+            anyhow::ensure!(
+                it.partner_players.len() == players_n,
+                "compact partner_players length mismatch"
+            );
             buffers.extras.extend_from_slice(&it.players);
             buffers.extras.extend_from_slice(&it.units);
             buffers.extras.extend_from_slice(&it.umask);
@@ -1303,6 +1325,9 @@ fn store_compact_host(
             buffers.extras.extend_from_slice(&it.legal_actions);
             buffers.extras.extend_from_slice(&it.legal_build);
             buffers.extras.extend_from_slice(&it.legal_nuke);
+            buffers.extras.extend_from_slice(&it.partner_players);
+            buffers.extras.extend_from_slice(&it.partner_pmask);
+            buffers.extras.extend_from_slice(&it.partner_scalars);
         }
         anyhow::ensure!(
             buffers.grids.len() == fine_len + batch * coarse_n,
@@ -1374,6 +1399,9 @@ fn clear_full_resolution_payload(it: &mut PreparedObs) {
     it.legal_actions = [0.0; ofcore::feat::N_ACTIONS];
     it.legal_build = [0.0; ofcore::feat::N_BUILD];
     it.legal_nuke = [0.0; ofcore::feat::N_NUKE];
+    it.partner_players = Vec::new();
+    it.partner_pmask = [0.0; ofcore::feat::MAX_SLOTS];
+    it.partner_scalars = [0.0; ofcore::feat::N_SCALARS];
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -1395,6 +1423,9 @@ struct PackedCompactHost {
     legal_ptarget: Vec<f32>,
     legal_build: Vec<f32>,
     legal_nuke: Vec<f32>,
+    partner_players: Vec<f32>,
+    partner_pmask: Vec<f32>,
+    partner_scalars: Vec<f32>,
     origin_y: Vec<i64>,
     origin_x: Vec<i64>,
 }
@@ -1418,6 +1449,9 @@ impl PackedCompactHost {
         self.legal_ptarget.append(&mut other.legal_ptarget);
         self.legal_build.append(&mut other.legal_build);
         self.legal_nuke.append(&mut other.legal_nuke);
+        self.partner_players.append(&mut other.partner_players);
+        self.partner_pmask.append(&mut other.partner_pmask);
+        self.partner_scalars.append(&mut other.partner_scalars);
         self.origin_y.append(&mut other.origin_y);
         self.origin_x.append(&mut other.origin_x);
     }
@@ -1467,6 +1501,9 @@ fn pack_compact_host_range(compact: &[&CompactGrid], ch: usize, cw: usize) -> Pa
         out.legal_actions.extend_from_slice(c.legal_actions());
         out.legal_build.extend_from_slice(c.legal_build());
         out.legal_nuke.extend_from_slice(c.legal_nuke());
+        out.partner_players.extend_from_slice(c.partner_players());
+        out.partner_pmask.extend_from_slice(c.partner_pmask());
+        out.partner_scalars.extend_from_slice(c.partner_scalars());
         out.origin_y.push(c.origin_y);
         out.origin_x.push(c.origin_x);
     }
@@ -1540,6 +1577,9 @@ fn build_compact_host_obs(
         legal_ptarget,
         legal_build,
         legal_nuke,
+        partner_players,
+        partner_pmask,
+        partner_scalars,
         origin_y,
         origin_x,
     } = packed;
@@ -1593,6 +1633,12 @@ fn build_compact_host_obs(
         ),
         legal_build: up(legal_build, &[bi, feat::N_BUILD as i64]),
         legal_nuke: up(legal_nuke, &[bi, feat::N_NUKE as i64]),
+        partner_players: up(
+            partner_players,
+            &[bi, feat::MAX_SLOTS as i64, feat::P_FEAT as i64],
+        ),
+        partner_pmask: up(partner_pmask, &[bi, feat::MAX_SLOTS as i64]),
+        partner_scalars: up(partner_scalars, &[bi, feat::N_SCALARS as i64]),
         compact: Some(CompactObsMeta {
             origin_y: to_device_maybe_pinned(&Tensor::from_slice(&origin_y), device, pinned_h2d),
             origin_x: to_device_maybe_pinned(&Tensor::from_slice(&origin_x), device, pinned_h2d),
@@ -1694,6 +1740,9 @@ mod tests {
             legal_build: [1.0f32; feat::N_BUILD],
             legal_nuke: [1.0f32; feat::N_NUKE],
             local: vec![0.3f32; 5 * policy::LOCAL as usize * policy::LOCAL as usize],
+            partner_players: vec![0.0f32; feat::MAX_SLOTS * feat::P_FEAT],
+            partner_pmask: [0.0f32; feat::MAX_SLOTS],
+            partner_scalars: [0.0f32; feat::N_SCALARS],
         }
     }
 
@@ -2182,6 +2231,37 @@ mod tests {
                 .collect::<Vec<_>>(),
             legacy
         );
+    }
+
+    #[test]
+    fn compact_extras_roundtrip_partner_features() {
+        let mut items = vec![tiny_prepared_obs(4, 4), tiny_prepared_obs(4, 4)];
+        items[0].players.fill(1.0);
+        items[0].scalars.fill(3.0);
+        items[1].players.fill(2.0);
+        items[1].scalars.fill(4.0);
+        crate::vecenv::EnvWorker::fill_partner_features(&mut items);
+        let refs: Vec<&PreparedObs> = items.iter().collect();
+        let obs = build_obs(&refs, Device::Cpu, false, false);
+        let p0: Vec<f32> = Vec::try_from(obs.partner_players.narrow(0, 0, 1).reshape([-1])).unwrap();
+        let p1: Vec<f32> = Vec::try_from(obs.partner_players.narrow(0, 1, 1).reshape([-1])).unwrap();
+        assert!(p0.iter().all(|&x| (x - 2.0).abs() < 1e-6));
+        assert!(p1.iter().all(|&x| (x - 1.0).abs() < 1e-6));
+        let s0: Vec<f32> = Vec::try_from(obs.partner_scalars.narrow(0, 0, 1).reshape([-1])).unwrap();
+        assert!(s0.iter().all(|&x| (x - 4.0).abs() < 1e-6));
+
+        let direct = PolicyNet::compact_observation(&obs);
+        let arena = Arc::new(CompactHostArena::default());
+        store_compact_host(&mut items, &direct, &arena).unwrap();
+        assert!(items[0].partner_players.is_empty());
+        let stored = items[0].compact.as_ref().unwrap();
+        assert!(stored.partner_players().iter().all(|&x| (x - 2.0).abs() < 1e-6));
+        assert!(stored.partner_scalars().iter().all(|&x| (x - 4.0).abs() < 1e-6));
+        let refs: Vec<&PreparedObs> = items.iter().collect();
+        let rebuilt = build_compact_host_obs(&refs, Device::Cpu, false).unwrap();
+        let rp0: Vec<f32> =
+            Vec::try_from(rebuilt.partner_players.narrow(0, 0, 1).reshape([-1])).unwrap();
+        assert!(rp0.iter().all(|&x| (x - 2.0).abs() < 1e-6));
     }
 
     #[test]

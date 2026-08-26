@@ -39,8 +39,19 @@ use crate::engine::{self, EngineKind, GameEngine, RawObs};
 
 /// Per-env layout of [`CompactHostBuffers::extras`] (all f32):
 /// `players | units | umask | legal_utarget | local | legal_ptarget |
-/// pmask | scalars | legal_actions | legal_build | legal_nuke`.
+/// pmask | scalars | legal_actions | legal_build | legal_nuke |
+/// partner_players | partner_pmask | partner_scalars`.
+/// Partner tensors are appended so the local prefix stays aligned with
+/// older compact payloads; they are zeros when `n_agents==1`.
 pub(crate) fn compact_extras_per_env() -> usize {
+    compact_extras_core_n()
+        + compact_extras_players_n()
+        + feat::MAX_SLOTS
+        + feat::N_SCALARS
+}
+
+/// Bytes before the MAPPO partner block (local actor extras).
+pub(crate) fn compact_extras_core_n() -> usize {
     compact_extras_players_n()
         + compact_extras_units_n()
         + compact_extras_umask_n()
@@ -339,6 +350,19 @@ impl CompactGrid {
             + feat::N_ACTIONS
             + feat::N_BUILD;
         &self.extras_slice()[start..start + feat::N_NUKE]
+    }
+    pub fn partner_players(&self) -> &[f32] {
+        let start = compact_extras_core_n();
+        let n = compact_extras_players_n();
+        &self.extras_slice()[start..start + n]
+    }
+    pub fn partner_pmask(&self) -> &[f32] {
+        let start = compact_extras_core_n() + compact_extras_players_n();
+        &self.extras_slice()[start..start + feat::MAX_SLOTS]
+    }
+    pub fn partner_scalars(&self) -> &[f32] {
+        let start = compact_extras_core_n() + compact_extras_players_n() + feat::MAX_SLOTS;
+        &self.extras_slice()[start..start + feat::N_SCALARS]
     }
 
     #[cfg(test)]
@@ -646,6 +670,10 @@ pub struct PreparedObs {
     pub legal_build: [f32; feat::N_BUILD],
     pub legal_nuke: [f32; feat::N_NUKE],
     pub local: Vec<f32>, // (5, LOCAL, LOCAL)
+    /// Teammate compact extras for the MAPPO critic. Zeros when `n_agents==1`.
+    pub partner_players: Vec<f32>, // (MAX_SLOTS, P_FEAT)
+    pub partner_pmask: [f32; feat::MAX_SLOTS],
+    pub partner_scalars: [f32; feat::N_SCALARS],
 }
 
 impl PreparedObs {
@@ -675,6 +703,9 @@ impl PreparedObs {
         self.legal_actions = [0.0; feat::N_ACTIONS];
         self.legal_build = [0.0; feat::N_BUILD];
         self.legal_nuke = [0.0; feat::N_NUKE];
+        self.partner_players = Vec::new();
+        self.partner_pmask = [0.0; feat::MAX_SLOTS];
+        self.partner_scalars = [0.0; feat::N_SCALARS];
     }
 }
 
@@ -1342,7 +1373,30 @@ impl EnvWorker {
     }
 
     pub fn prepare_all(&mut self) -> Vec<PreparedObs> {
-        (0..self.n_agents).map(|i| self.prepare_agent(i)).collect()
+        let mut outs: Vec<PreparedObs> = (0..self.n_agents).map(|i| self.prepare_agent(i)).collect();
+        Self::fill_partner_features(&mut outs);
+        outs
+    }
+
+    /// Copy sibling player tokens / scalars into each row's partner extras.
+    /// Must run at prepare time: shape-bucketing and minibatch shuffle later
+    /// break adjacent-row pairing, so V cannot gather `i^1` on the GPU.
+    pub(crate) fn fill_partner_features(outs: &mut [PreparedObs]) {
+        if outs.len() != 2 {
+            return;
+        }
+        let a_players = outs[0].players.clone();
+        let a_pmask = outs[0].pmask;
+        let a_scalars = outs[0].scalars;
+        let b_players = outs[1].players.clone();
+        let b_pmask = outs[1].pmask;
+        let b_scalars = outs[1].scalars;
+        outs[0].partner_players = b_players;
+        outs[0].partner_pmask = b_pmask;
+        outs[0].partner_scalars = b_scalars;
+        outs[1].partner_players = a_players;
+        outs[1].partner_pmask = a_pmask;
+        outs[1].partner_scalars = a_scalars;
     }
 
     fn prepare_agent(&mut self, agent_i: usize) -> PreparedObs {
@@ -1444,6 +1498,9 @@ impl EnvWorker {
             legal_build: f.legal_build,
             legal_nuke: f.legal_nuke,
             local,
+            partner_players: vec![0.0; feat::MAX_SLOTS * feat::P_FEAT],
+            partner_pmask: [0.0; feat::MAX_SLOTS],
+            partner_scalars: [0.0; feat::N_SCALARS],
         };
         if profile {
             static PREPARE_N: AtomicU64 = AtomicU64::new(0);
@@ -2256,5 +2313,82 @@ mod churn_action_tests {
                 ..CloseoutTracker::default()
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod compact_extras_tests {
+    use super::*;
+
+    #[test]
+    fn partner_block_appends_after_local_extras() {
+        let partner_n = compact_extras_players_n() + feat::MAX_SLOTS + feat::N_SCALARS;
+        assert_eq!(compact_extras_per_env(), compact_extras_core_n() + partner_n);
+        assert!(partner_n > 0);
+    }
+
+    #[test]
+    fn fill_partner_features_swaps_sibling_player_rows() {
+        let a = PreparedObs {
+            prev_action: ActionOutcome::default(),
+            compact: None,
+            grid: None,
+            grid_coarse: None,
+            cgh: 0,
+            cgw: 0,
+            ae_raw: crate::ae::AeRaw {
+                owners: Vec::new(),
+                static_terrain: crate::ae::StaticTerrain {
+                    key: crate::ae::TerrainCacheKey {
+                        env_id: 0,
+                        episode: 0,
+                        static_id: 0,
+                        hr: 8,
+                        wr: 8,
+                    },
+                    map: std::sync::Arc::from("t"),
+                    land_mag: Vec::<f32>::new().into(),
+                },
+                fallout: Vec::new(),
+                stat: Vec::new(),
+                hr: 8,
+                wr: 8,
+            },
+            ego: Vec::new(),
+            db: Vec::new(),
+            transient: Vec::new(),
+            legal_tile: Vec::new(),
+            gh: 1,
+            gw: 1,
+            players: vec![1.0; feat::MAX_SLOTS * feat::P_FEAT],
+            pmask: [1.0; feat::MAX_SLOTS],
+            units: Vec::new(),
+            umask: [0.0; feat::MAX_UNITS],
+            legal_utarget: Vec::new(),
+            scalars: [3.0; feat::N_SCALARS],
+            me_slot: 0,
+            legal_actions: [0.0; feat::N_ACTIONS],
+            legal_ptarget: Vec::new(),
+            legal_build: [0.0; feat::N_BUILD],
+            legal_nuke: [0.0; feat::N_NUKE],
+            local: Vec::new(),
+            partner_players: vec![0.0; feat::MAX_SLOTS * feat::P_FEAT],
+            partner_pmask: [0.0; feat::MAX_SLOTS],
+            partner_scalars: [0.0; feat::N_SCALARS],
+        };
+        let mut b = a.clone();
+        b.players = vec![2.0; feat::MAX_SLOTS * feat::P_FEAT];
+        b.pmask = [0.5; feat::MAX_SLOTS];
+        b.scalars = [4.0; feat::N_SCALARS];
+        let mut outs = vec![a, b];
+        EnvWorker::fill_partner_features(&mut outs);
+        assert_eq!(outs[0].partner_players[0], 2.0);
+        assert_eq!(outs[1].partner_players[0], 1.0);
+        assert_eq!(outs[0].partner_pmask[0], 0.5);
+        assert_eq!(outs[1].partner_pmask[0], 1.0);
+        assert_eq!(outs[0].partner_scalars[0], 4.0);
+        assert_eq!(outs[1].partner_scalars[0], 3.0);
+        EnvWorker::fill_partner_features(&mut outs[..1]);
+        assert_eq!(outs[0].partner_players[0], 2.0, "solo slice is a no-op");
     }
 }

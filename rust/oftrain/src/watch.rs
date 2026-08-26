@@ -47,6 +47,8 @@ pub struct WatchConfig<'a> {
     pub reward_config: RewardConfig,
     /// Match training: V8.2+ / V10 policies need recurrent hidden state.
     pub recurrent_policy: bool,
+    /// MAPPO centralized critic. Must match the checkpoint's `head_value` width.
+    pub centralized_value: bool,
     /// Simulation backend for the watch episode (`native` or `node`).
     pub engine: EngineKind,
     /// When true (default), sample actions like training; when false, argmax.
@@ -171,13 +173,14 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
     }
 
     let mut vs = nn::VarStore::new(cfg.device);
-    let policy = PolicyNet::new_with_recurrence(
+    let policy = PolicyNet::new_with_options(
         &vs.root(),
         cfg.amp,
         cfg.foveate,
         cfg.gc,
         cfg.blocks,
         cfg.recurrent_policy,
+        cfg.centralized_value,
     );
     vs.load(cfg.policy)
         .with_context(|| format!("load policy {}", cfg.policy))?;
