@@ -86,15 +86,13 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 27th, 2026</h2>
-  <p>Live duo is <b>experiment F</b> on the homelab 3070: legal
-  donate/alliance bits on player tokens (trunk can see who it may pact
-  or send gold to), plus E's teammate clut. IPPO +
-  <code>--duo-pact-bonus 5</code>, timeout = loss, PBRS, from scratch,
-  no v11. E opened 5-0 then last 8 all timeout (fail gate c). See
+  <p>Live duo is <b>experiment G</b> on the homelab 3070:
+  <code>scalars[11]</code> is team tiles / map land (the 95% team-win
+  meter). Keeps F legal-diplo bits and E teammate clut. IPPO + pact
+  bonus 5, timeout = loss, PBRS, from scratch, no v11. F opened 6-0
+  plus a late Onion win, then last 8 timeout (fail gate c). See
   <a href="#duo-easy">Aug 26-27 writeup</a>.
-  Do not <code>--init ppo_v11</code> / <code>--kl-prior</code>. Do not
-  pay <code>donate_*</code> / <code>alliance_request</code> as actions.
-  Do not resume A/B/D/E stashes.</p>
+  Do not <code>--init ppo_v11</code>. Do not resume A/B/D/E/F stashes.</p>
 </div>
 
 
@@ -102,7 +100,7 @@
 <p class="session">Two-human Team-mode on a homelab RTX 3070 8GB
 (<code>--duo</code>, <code>AGENTRL1</code>+<code>AGENTRL2</code> on Humans,
 stage 0 Easy, 2 envs, rollout 8, feedforward, frozen AE v3.2). Loop until
-a good Easy winner. Live job: experiment F. Code:
+a good Easy winner. Live job: experiment G. Code:
 <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>
 stacked on timeout-loss / PBRS.</p>
 
@@ -139,7 +137,7 @@ failed because the MDP paid camping:</p>
   <li>Outcome-only diplomacy: do not pay <code>donate_*</code> or
     <code>alliance_request</code> as actions. Optional one-shot
     <code>--duo-pact-bonus</code> when a formal pact actually forms
-    (E uses 5).</li>
+    (still 5 on G).</li>
 </ul>
 <p>Tried and retired: <code>--init ppo_v11</code> +
 <code>--kl-prior</code> (incompatible with learning this MDP from
@@ -163,10 +161,11 @@ Masking donate.</p>
     never reads it. <code>alliance_request</code> is legal for the
     partner <i>and</i> bots, so requests go ~50/50.</li>
   <li><b>Win rule vs closeout Φ.</b> Team win is 95% <i>combined</i>
-    land. Closeout Φ still keys off 45% <i>individual</i> land. Nothing
-    in the scalars was team land share. An Onion timeout at ~52%
-    individual land with <code>term=-50</code> is this hole, not missing
-    PBRS.</li>
+    land. Closeout Φ still keys off 45% <i>individual</i> land. E put
+    claimed-among-players in <code>scalars[10]</code>. G adds
+    <code>scalars[11]</code> = team tiles / map land (win fires at
+    0.95). F timeouts sat at 0.2–0.4 leftover land with no such
+    meter.</li>
   <li>No comms. IPPO: neither π nor V sees partner extras. Feedforward,
     rollout 8, from scratch, no boat prior.</li>
 </ol>
@@ -177,8 +176,11 @@ Masking donate.</p>
 <code>scalars[10] = team claimed-land share</code> (was unused
 <code>doomsday_enabled</code>). Formal <code>is_ally</code> / ally train
 gold still need a pact.</p>
+<p>G's code change: <code>scalars[11] = team tiles / map land</code>
+(<code>N_SCALARS</code> 11→12). Team win fires at 0.95 of that meter.
+<code>scalars[10]</code> stays claimed-among-players.</p>
 
-<h3 id="duo-experiments">Experiments (A-E)</h3>
+<h3 id="duo-experiments">Experiments (A-G)</h3>
 <p>Shared recipe unless noted: homelab 3070, 2 games × 2 agents, stage 0
 Easy, rollout 8, frozen AE, timeout=loss, PBRS, from scratch, no v11.
 Fail gates: (a) ≥90 min and ≥8 eps and 0 wins; (b) entropy &lt; 0.3 for
@@ -232,17 +234,27 @@ Stashes under <code>rust/checkpoints/ppo_duo/</code>.</p>
       <code>ippo-E-20260827T0903Z.*</code>.</td>
   </tr>
   <tr>
-    <td><b>F legal diplo bits (live)</b></td>
+    <td>F legal diplo bits</td>
     <td><code>P_FEAT[28]</code> = donate legal to this slot,
       <code>P_FEAT[29]</code> = <code>alliance_request</code> legal to
-      this slot. Trunk already reads player tokens;
-      <code>legal_ptarget</code> stays the action mask. Keeps E's
-      teammate clut. <code>P_FEAT</code> 28→30, from scratch.</td>
-    <td>Started 2026-08-27T09:03:50Z. Same train flags as E.</td>
+      this slot. Trunk already reads player tokens.
+      <code>P_FEAT</code> 28→30, from scratch. Keeps E clut.</td>
+    <td>Opened <b>6-0</b> then a late Onion win (ep 12, land 0.88).
+      Final 7/22 WR 0.32. Last 8 all timeout (fail gate c) at ~131 min
+      / u1679. Water still 0. Legal bits did not hold Easy. Stash
+      <code>ippo-F-20260827T1117Z.*</code>.</td>
+  </tr>
+  <tr>
+    <td><b>G team/map-land 95% scalar (live)</b></td>
+    <td><code>scalars[11]</code> = ego+teammate tiles / map land.
+      Team win fires at 0.95 of that meter. <code>scalars[10]</code>
+      stays claimed-among-players. <code>N_SCALARS</code> 11→12.
+      Keeps E+F. From scratch.</td>
+    <td>Started 2026-08-27T11:17:50Z. Same train flags.</td>
   </tr>
 </table>
 <p>Water maps (Britannia, GreatLakes, BlackSea, BetweenTwoSeas) are 0
-wins across A, B, D2, and E so far. Compact maps are where every Easy
+wins across A, B, D2, E, and F so far. Compact maps are where every Easy
 win has happened except D1's two Pangaea flukes. E's Caucasus win at
 0.09 individual land (term ~255) is the team-95% rule showing up: the
 partner can carry, which is exactly what the old clut called an enemy.</p>
@@ -261,15 +273,15 @@ partner can carry, which is exactly what the old clut called an enemy.</p>
   <li><b>Pact-success bonus is not a substitute for identity.</b> D paid
     +5 the first time a formal alliance formed. Compact-map wins
     continued; the water tail did not move. The bonus is not farmable
-    (one-shot, outcome-only) and is still on for F.</li>
+    (one-shot, outcome-only) and is still on for G.</li>
   <li><b>Timeout=loss and PBRS fix camping; they do not teach who to
     land with.</b> Keep them. Do not "check Φ" as the next experiment
     while individual land at timeout is mid.</li>
   <li><b>Closeout Φ (45% me) and team win (95% us) are different
     meters.</b> E already has an Onion clock-out after closeout at 52%
-    individual land. Team claimed-land share is now in
-    <code>scalars[10]</code>; the 95% combined progress bar is still
-    not an explicit channel.</li>
+    individual land. <code>scalars[10]</code> is claimed-among-players;
+    G's <code>scalars[11]</code> is the 95% map-land win meter F
+    lacked.</li>
   <li><b>Do not warm-start this 8GB loop from v11.</b> v11 can play
     solo Easy. It cannot see a teammate that was never in its obs.
     From-scratch E produced a 5-0 open that v11-KL never did here.</li>
@@ -285,12 +297,13 @@ partner can carry, which is exactly what the old clut called an enemy.</p>
 <h3 id="duo-next">What is still open</h3>
 <ul>
   <li><b>Hold Easy, including water.</b> Success is multiple Easy wins
-    that do not become an all-timeout tail. F is live: donate /
-    alliance_request legality is now on the player tokens the trunk
-    already reads.</li>
-  <li>Still missing from the human-would-need-this list: an explicit
-    95% combined-land progress bit; comms; a critic that sees the
-    partner (MAPPO is built, was not the first hole).</li>
+    that do not become an all-timeout tail. G is live: the 95%
+    team/map-land win meter is now <code>scalars[11]</code>. Identity,
+    legal diplo bits, and the win rule are in the trunk.</li>
+  <li>Still missing from the human-would-need-this list: comms; a
+    critic that sees the partner (MAPPO is built; A ran before
+    identity/legal/win-meter existed). Next unused after G is MAPPO
+    with those channels in obs, not PBRS Φ.</li>
 </ul>
 
 <h3 id="duo-ops">Ops</h3>
@@ -1519,9 +1532,9 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
   <tr><td><code>ppo_duo</code></td><td><b>live</b> Aug 27 (homelab 3070)</td>
-    <td>Two-human Team-mode Easy. Experiment F (legal donate/alliance
-    bits on player tokens + E teammate clut, IPPO + pact bonus 5,
-    from scratch). E opened 5-0 then last 8 timeout. See
+    <td>Two-human Team-mode Easy. Experiment G (team/map-land 95% win
+    scalar + F legal diplo bits + E teammate clut, IPPO + pact bonus
+    5, from scratch). F opened 6-0 then last 8 timeout. See
     <a href="#duo-easy">Aug 26-27 writeup</a>.
     <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>.</td></tr>
   <tr><td><code>ppo_v11</code></td><td><b>live</b> Jul 26 (4×A100 80GB)</td>
@@ -3764,9 +3777,9 @@ from the raw cache IS that idea, done right).</p>
 
 <h3 id="next">Open threads</h3>
 <ul>
-  <li><b>Duo Easy (active, Aug 27):</b> experiment F (legal donate /
-    alliance bits on player tokens). E opened 5-0 then last 8 timeout.
-    Hold Easy, including water. See
+  <li><b>Duo Easy (active, Aug 27):</b> experiment G (team/map-land
+    95% win scalar). F opened 6-0 then last 8 timeout. Hold Easy,
+    including water. See
     <a href="#duo-easy">writeup</a>.</li>
   <li><b>V11 (active plan, Jul 23):</b> see <a href="#v11-plan">V11 plan</a>  - 
     neighbor pack, ego-split fronts, unit tokens + pointer, bigger model,
