@@ -30,7 +30,7 @@ pub const LOCAL: i64 = 64;
 pub const P_FEAT: i64 = ofcore::feat::P_FEAT as i64; // 30
 pub const U_FEAT: i64 = ofcore::feat::U_FEAT as i64;
 pub const MAX_UNITS: i64 = ofcore::feat::MAX_UNITS as i64;
-pub const N_SCALARS: i64 = 11;
+pub const N_SCALARS: i64 = ofcore::feat::N_SCALARS as i64;
 pub const N_BUILD: i64 = 7;
 pub const N_NUKE: i64 = 5;
 

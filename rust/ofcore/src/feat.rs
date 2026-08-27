@@ -13,7 +13,8 @@ pub const N_TRANSIENT: usize = 57;
 /// V11 neighbor pack: +7 columns (border geometry + relation continuum).
 /// Duo F: +2 (legal donate-to-this-slot, legal alliance_request-to-this-slot).
 pub const P_FEAT: usize = 30;
-pub const N_SCALARS: usize = 11;
+/// Duo G: +1 team tiles / map land (95% team-win meter).
+pub const N_SCALARS: usize = 12;
 pub const N_ACTIONS: usize = 21;
 pub const N_BUILD: usize = 7;
 pub const N_NUKE: usize = 5;
@@ -851,6 +852,15 @@ pub fn featurize(
     } else {
         0.0
     };
+    let map_land = land.iter().filter(|&&v| v == 1).count() as f64;
+    // Team win is 95% of map land (not of claimed-among-players). F's
+    // timeouts often sat at 0.2-0.4 individual land with no "how close
+    // to 95% combined" channel on the trunk.
+    let team_map_share = if map_land > 0.0 {
+        (team_tiles / map_land).clamp(0.0, 1.0) as f32
+    } else {
+        0.0
+    };
     let mut players = vec![0.0f32; MAX_SLOTS * P_FEAT];
     let mut pmask = [0.0f32; MAX_SLOTS];
     let mut n_alive = 0usize;
@@ -955,9 +965,10 @@ pub fn featurize(
         log_norm(me_troop_income.unwrap_or(0.0)),
         log_norm(me_gold_income.unwrap_or(0.0)),
         // Was unused doomsday_enabled (always 0). Fraction of *claimed*
-        // tiles owned by ego+teammates — not the 95% map-land win rule,
-        // but a labeled team-progress channel the trunk can actually see.
+        // tiles owned by ego+teammates.
         team_claimed_share,
+        // Team win meter: ego+teammate tiles / map land. Win fires at 0.95.
+        team_map_share,
     ];
 
     // Action masks (rl/obs.py._masks).
@@ -1514,6 +1525,43 @@ mod clut_tests {
         assert_eq!(
             feat.legal_ptarget[A_DONATE_GOLD as usize * MAX_SLOTS + partner],
             1.0
+        );
+    }
+
+    #[test]
+    fn scalars_include_team_map_land_share_toward_95pct_win() {
+        let ents = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true, "team": "Humans", "tiles": 30},
+                {"id": 2, "pid": "AGENTRL2", "alive": true, "team": "Humans", "tiles": 15},
+                {"id": 3, "pid": "bot", "alive": true, "team": "Bot", "tiles": 5}
+            ],
+            "units": [],
+            "attacks": [],
+            "alliances": []
+        }));
+        let lut = make_lut(&[1, 2, 3]);
+        let n = REGION * REGION; // 64 land tiles
+        let feat = featurize(
+            1,
+            1,
+            &lut,
+            &vec![1u8; n],
+            &vec![0u8; n],
+            &vec![0u8; n],
+            100,
+            false,
+            true,
+            1,
+            &ents,
+            &Legal::default(),
+        );
+        // claimed-among-players: 45/50. map-land win meter: 45/64.
+        assert!((feat.scalars[10] - 45.0 / 50.0).abs() < 1e-5);
+        assert!((feat.scalars[11] - 45.0 / 64.0).abs() < 1e-5);
+        assert!(
+            feat.scalars[11] < 0.95,
+            "45/64 is short of the 95% team win line"
         );
     }
 }
