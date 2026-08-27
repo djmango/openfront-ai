@@ -28,6 +28,7 @@
 
 <nav class="toc">
   <a href="#now">Now</a> ·
+  <a href="#duo-easy">Aug 26-27 duo Easy</a> ·
   <a href="#v11-4x">Jul 25 4×A100</a> ·
   <a href="#v11-soak">Jul 24-25 V11 soak</a> ·
   <a href="#v11-watch">watch / clips</a> ·
@@ -84,21 +85,220 @@
 </nav>
 
 <div class="now" id="now">
-  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 26th, 2026</h2>
-  <p>Duo collapse was not an entropy problem. Timeout paid placement,
-  allied/alive were per-tick wages, and there was no KL to a policy that
-  can play. <b>Timeout / never-spawn = −W_WIN</b> (and a death mark if they
-  never lived). Native `Player.alive` now matches TS `isAlive()` (`tiles > 0`):
-  a rostered human with no land is a death, not a living timeout. Duo welfare + pact is <b>Ng 1999 PBRS</b>
-  (<code>γΦ(s′)−Φ(s)</code>, absorbing Φ=0), not a camping salary.
-  PPO keeps <code>--kl-prior</code> (default coef 0.05) for the whole RL
-  run; v11 recurrent weights compatible-load into the feedforward duo
-  trunk. Do not <code>--resume</code> donate-collapsed <code>ppo_duo/latest</code>;
-  warm-start <code>--init</code> + <code>--kl-prior</code> from
-  <code>ppo_v11/latest</code>. Do not turn <code>--ent-floor</code> back
-  on, do not raise <code>W_WIN</code>, do not mask donate.</p>
+  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 27th, 2026</h2>
+  <p>Live duo is <b>experiment E</b> on the homelab 3070: IPPO +
+  <code>--duo-pact-bonus 5</code>, timeout = loss, Ng 1999 PBRS, from
+  scratch, no v11. The first five Easy episodes all won after we painted
+  teammates as teammates. Not a holding winner yet (water still clocks
+  out). See <a href="#duo-easy">Aug 26-27 writeup</a>.
+  Do not <code>--init ppo_v11</code> / <code>--kl-prior</code> on this
+  loop. Do not pay <code>donate_*</code> / <code>alliance_request</code>
+  as actions. Do not turn <code>--ent-floor</code> back on. Do not resume
+  donate-collapsed or A/B/D stashes.</p>
 </div>
 
+
+<h2 class="date" id="duo-easy">Aug 26-27, 2026 - Duo Easy: identity was the hole, not the critic</h2>
+<p class="session">Two-human Team-mode on a homelab RTX 3070 8GB
+(<code>--duo</code>, <code>AGENTRL1</code>+<code>AGENTRL2</code> on Humans,
+stage 0 Easy, 2 envs, rollout 8, feedforward, frozen AE v3.2). Loop until
+a good Easy winner. Live job: experiment E. Code:
+<a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>
+stacked on timeout-loss / PBRS.</p>
+
+<h3 id="duo-why">Why duo exists</h3>
+<p>OpenFront Team-mode is not FFA with a friend emoji. Engine
+<code>is_friendly</code> is <i>team or pact</i>: you cannot attack your
+partner, you can donate, and a <i>formal</i> alliance is what unlocks
+ally train gold (35k vs 25k team rate). The win rule is
+<b>95% combined claimed land</b>, not 45% individual closeout. Two
+independent IPPO heads that each think the other blob is an enemy cannot
+do that job.</p>
+
+<h3 id="duo-collapse">The collapse that started the loop</h3>
+<p>Early <code>ppo_duo</code> did not fail because entropy was low. It
+failed because the MDP paid camping:</p>
+<ul>
+  <li>Timeout paid placement. Sitting until the clock was a wage, not a
+    loss.</li>
+  <li>Per-tick allied/alive terms were a camping salary. Donate crumbs
+    and paying <code>alliance_request</code> as an action collapsed the
+    policy onto donate-dirac.</li>
+  <li>Native <code>Player.alive</code> started true with empty territory.
+    A rostered human who never appeared timed out instead of dying.
+    TS <code>isAlive()</code> is <code>tiles &gt; 0</code>.</li>
+</ul>
+<p>Fixes that stayed in every later run (do not revert):</p>
+<ul>
+  <li><b>Timeout / never-spawn = <code>-W_WIN</code></b>, and a death
+    mark if they never lived.</li>
+  <li>Unspawned humans are dead. Obs uses tiles for alive.</li>
+  <li>Duo welfare + pact go through <b>Ng 1999 PBRS</b>
+    (<code>γΦ(s′)−Φ(s)</code>, absorbing Φ=0 at done). Not a per-tick
+    wage.</li>
+  <li>Outcome-only diplomacy: do not pay <code>donate_*</code> or
+    <code>alliance_request</code> as actions. Optional one-shot
+    <code>--duo-pact-bonus</code> when a formal pact actually forms
+    (E uses 5).</li>
+</ul>
+<p>Tried and retired: <code>--init ppo_v11</code> +
+<code>--kl-prior</code> (incompatible with learning this MDP from
+scratch on 8GB; also not what produced the E win streak).
+<code>--ent-floor</code> as the main lever. Raising <code>W_WIN</code>.
+Masking donate.</p>
+
+<h3 id="duo-audit">If a human had the trunk, could they duo?</h3>
+<p><b>No, not until E.</b> The tensors and the engine disagreed.</p>
+<ol>
+  <li><b>Clut painted teammates as class-3 enemy until a formal pact.</b>
+    Spatial maps, local crop, units, and attack fronts all said "shoot
+    this blob." The engine forbade attacking it and allowed donating to
+    it. Obs and legality were two different games.</li>
+  <li><b>No teammate bit.</b> <code>P_FEAT[5] is_ally</code> is formal
+    pact only. <code>pid</code> was parsed and unused. JSON
+    <code>"type": "HUMAN"</code> was dropped. The accidental leak was
+    gold income 100 vs 50 for a bot.</li>
+  <li><b>Legal masks are not in the trunk.</b> Donate-only-to-teammate
+    exists in <code>legal_ptarget</code>; <code>trunk_forward</code>
+    never reads it. <code>alliance_request</code> is legal for the
+    partner <i>and</i> bots, so requests go ~50/50.</li>
+  <li><b>Win rule vs closeout Φ.</b> Team win is 95% <i>combined</i>
+    land. Closeout Φ still keys off 45% <i>individual</i> land. Nothing
+    in the scalars was team land share. An Onion timeout at ~52%
+    individual land with <code>term=-50</code> is this hole, not missing
+    PBRS.</li>
+  <li>No comms. IPPO: neither π nor V sees partner extras. Feedforward,
+    rollout 8, from scratch, no boat prior.</li>
+</ol>
+<p>E's code change: engine JSON + typed ents emit <code>PlayerE.team</code>.
+<code>make_clut</code> paints same-team humans class-2 without a pact
+(formal <code>AllianceE</code> still class-2 for pacted non-teammates).
+<code>P_FEAT[19] = is_teammate</code> (was unused doomsday).
+<code>scalars[10] = team claimed-land share</code> (was unused
+<code>doomsday_enabled</code>). Formal <code>is_ally</code> / ally train
+gold still need a pact.</p>
+
+<h3 id="duo-experiments">Experiments (A-E)</h3>
+<p>Shared recipe unless noted: homelab 3070, 2 games × 2 agents, stage 0
+Easy, rollout 8, frozen AE, timeout=loss, PBRS, from scratch, no v11.
+Fail gates: (a) ≥90 min and ≥8 eps and 0 wins; (b) entropy &lt; 0.3 for
+200 consecutive updates; (c) last 8 finished eps all timeout losses.
+Stashes under <code>rust/checkpoints/ppo_duo/</code>.</p>
+<table>
+  <tr><th>run</th><th>what changed</th><th>result</th></tr>
+  <tr>
+    <td>A MAPPO</td>
+    <td>Centralized critic (Yu et al. 2021 CTDE). Default-on with
+      <code>--duo</code>.</td>
+    <td>8/23 Easy wins, all compact (Caucasus 4, Onion 4). Then water
+      clock-outs. Gate (c). gpu_mem% ~84 so C (3 envs) skipped.
+      Stash <code>mappo-A-20260826T2015Z.*</code>.</td>
+  </tr>
+  <tr>
+    <td>B IPPO</td>
+    <td><code>--centralized-value=false</code>. Same MDP as A.</td>
+    <td>3/16 (Caucasus 1, Onion 2), then 8 straight timeouts. Same
+      shape as A. Entropy O(1). Critic choice was not the bottleneck.
+      Stash <code>ippo-B-20260826T2145Z.*</code>.</td>
+  </tr>
+  <tr>
+    <td>C</td>
+    <td>3 envs.</td>
+    <td>Skipped. 2 envs already 84-92% GPU mem on 8GB.</td>
+  </tr>
+  <tr>
+    <td>D IPPO + pact bonus</td>
+    <td><code>--duo-pact-bonus 5</code> (one-shot, both agents, formal
+      alliance only).</td>
+    <td>D1: 13/59 then OOM SIGKILL ~7.5GB (incl. 2 Pangaea wins). D2
+      restart: 7/47 (Caucasus 3/4, Onion 4/12, water 0), last 8 all
+      timeout. Pact bonus did not hold Easy. Identity hole still open.
+      Stash <code>ippo-D-20260827T0301Z.*</code> /
+      <code>ippo-D-restart-20260827T0735Z.*</code>.</td>
+  </tr>
+  <tr>
+    <td>listed-E (PBRS Φ log)</td>
+    <td>Check Φ mid-episode if all timeouts had ~0 land.</td>
+    <td>Skipped. D timeouts had mixed land (0-0.61). Not a missing-Φ
+      problem.</td>
+  </tr>
+  <tr>
+    <td><b>E teammate obs (live)</b></td>
+    <td>Class-2 clut + <code>is_teammate</code> + team claimed-land
+      scalar. Still IPPO + pact bonus 5, from scratch.</td>
+    <td>Opened <b>5-0</b> (Onion 2, Caucasus 3) in the first five
+      episodes. At ~75 min: 5/15, WR 0.33, then the water tail
+      (Britannia / GreatLakes / BlackSea timeouts, one Onion
+      timeout-after-closeout at 52% individual land). Entropy dipped
+      to 0.05 for 11 updates, recovered. First time the early win
+      <i>shape</i> changed. Not a holding winner yet.</td>
+  </tr>
+</table>
+<p>Water maps (Britannia, GreatLakes, BlackSea, BetweenTwoSeas) are 0
+wins across A, B, D2, and E so far. Compact maps are where every Easy
+win has happened except D1's two Pangaea flukes. E's Caucasus win at
+0.09 individual land (term ~255) is the team-95% rule showing up: the
+partner can carry, which is exactly what the old clut called an enemy.</p>
+
+<h3 id="duo-learnings">What we learned</h3>
+<ul>
+  <li><b>If a human with the tensors cannot identify the partner, the
+    policy cannot duo.</b> Reward sign can be perfect (win ~+250 vs
+    timeout -30) and the agent will still shoot "the other red blob"
+    because clut said enemy. E is the first run where map/local/unit
+    channels match engine friendliness.</li>
+  <li><b>MAPPO vs IPPO was not the bottleneck.</b> A and B printed the
+    same curve: a few compact-map wins, then water timeouts, leftover
+    land 0.2-0.44, conversions drying up. Centralizing V did not teach
+    identity.</li>
+  <li><b>Pact-success bonus is not a substitute for identity.</b> D paid
+    +5 the first time a formal alliance formed. Compact-map wins
+    continued; the water tail did not move. The bonus is not farmable
+    (one-shot, outcome-only) and is still on for E.</li>
+  <li><b>Timeout=loss and PBRS fix camping; they do not teach who to
+    land with.</b> Keep them. Do not "check Φ" as the next experiment
+    while individual land at timeout is mid.</li>
+  <li><b>Closeout Φ (45% me) and team win (95% us) are different
+    meters.</b> E already has an Onion clock-out after closeout at 52%
+    individual land. Team claimed-land share is now in
+    <code>scalars[10]</code>; the 95% combined progress bar is still
+    not an explicit channel.</li>
+  <li><b>Do not warm-start this 8GB loop from v11.</b> v11 can play
+    solo Easy. It cannot see a teammate that was never in its obs.
+    From-scratch E produced a 5-0 open that v11-KL never did here.</li>
+  <li><b>Action-pay diplomacy collapses.</b> Paying
+    <code>donate_*</code> / <code>alliance_request</code> as actions
+    is how we got donate-dirac. Outcome-only. Entropy floor will not
+    unstick that.</li>
+  <li><b>OOM is a real gate on 8GB.</b> D1 died at update 4558 /
+    ~7.5GB. 2 envs is the ceiling (C skipped). Kill by pid, never
+    <code>pkill -f oftrain</code>.</li>
+</ul>
+
+<h3 id="duo-next">What is still open</h3>
+<ul>
+  <li><b>Hold Easy, including water.</b> Success is multiple Easy wins
+    that do not become an all-timeout tail. E is promising, not done.</li>
+  <li><b>F if E fails:</b> put legal donate/alliance masks into the
+    trunk (<code>trunk_forward</code> still ignores
+    <code>legal_ptarget</code>). Not PBRS Φ.</li>
+  <li>Still missing from the human-would-need-this list: an explicit
+    95% combined-land progress bit; comms; a critic that sees the
+    partner (MAPPO is built, was not the first hole).</li>
+</ul>
+
+<h3 id="duo-ops">Ops</h3>
+<ul>
+  <li>Host: homelab RTX 3070 8GB, tmux <code>duo-train</code>,
+    <code>bash rust/checkpoints/ppo_duo/run.sh</code> (gitignored;
+    from scratch, no v11).</li>
+  <li>Log / metrics / state:
+    <code>rust/checkpoints/ppo_duo/{train.log,metrics.jsonl,latest.state.json}</code></li>
+  <li>PR: <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>
+    (<code>cursor/mappo-critic-808f</code>).</li>
+  <li>Do not commit <code>run.sh</code>, checkpoints, dirty
+    <code>openfront</code>, or <code>uv.lock</code>.</li>
+</ul>
 
 <h2 class="date" id="v11-4x">Jul 25, 2026 - 4×A100 scale-up (single pod)</h2>
 <p class="session">Moved live <code>ppo_v11</code> from 2×A100 to one 4×A100 80GB
@@ -1312,6 +1512,12 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <code>ae_v3.pt</code> until the v3.1 winner is wired into <code>rl/obs.py</code>.</p>
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
+  <tr><td><code>ppo_duo</code></td><td><b>live</b> Aug 27 (homelab 3070)</td>
+    <td>Two-human Team-mode Easy. Experiment E (teammate clut +
+    <code>is_teammate</code> + team land share, IPPO + pact bonus 5,
+    from scratch). Opened 5-0 on compact maps. See
+    <a href="#duo-easy">Aug 26-27 writeup</a>.
+    <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>.</td></tr>
   <tr><td><code>ppo_v11</code></td><td><b>live</b> Jul 26 (4×A100 80GB)</td>
     <td>Util stack + AE v3.2 no-static + recurrent LSTM. V10 Easy ramp:
     u571 / stage 19 / ~1.71M steps / 32 envs/shard (24 bots + 1 nation;
@@ -3441,6 +3647,17 @@ from intents alone.</p>
 
 <h3 id="lessons">Lessons</h3>
 <ul>
+  <li><b>If a human with the tensors cannot identify their partner, the
+    policy cannot duo.</b> Until E, clut painted teammates as enemies,
+    <code>P_FEAT</code> had no <code>is_teammate</code>, and scalars had
+    no team land share. Reward sign was already fine. See
+    <a href="#duo-easy">Aug 26-27 duo Easy</a>.</li>
+  <li><b>Critic choice is not identity.</b> MAPPO A and IPPO B printed
+    the same compact-win then water-timeout curve. Pact-success bonus
+    (D) did not hold Easy either.</li>
+  <li><b>Timeout=loss and PBRS fix camping, not teamwork.</b> Keep them.
+    Do not pay donate/request as actions. Do not <code>--ent-floor</code>
+    a dirac back to life. Do not warm-start this duo loop from v11.</li>
   <li><b>Only compress what's big.</b> The AE is for the map; exact small state rides the bypass. One
     decision dissolved four v2 loss-weight tuning runs the same evening.</li>
   <li><b>Detection beats regression on sparse targets.</b> Structure counts under MSE collapse to
@@ -3540,6 +3757,11 @@ from the raw cache IS that idea, done right).</p>
 
 <h3 id="next">Open threads</h3>
 <ul>
+  <li><b>Duo Easy (active, Aug 27):</b> experiment E is promising (5-0
+    open after teammate-visible obs) but water still clocks out. Hold
+    Easy, including Britannia / GreatLakes. If E fails: F is legal
+    donate/alliance masks into the trunk, not PBRS Φ. See
+    <a href="#duo-easy">writeup</a>.</li>
   <li><b>V11 (active plan, Jul 23):</b> see <a href="#v11-plan">V11 plan</a>  - 
     neighbor pack, ego-split fronts, unit tokens + pointer, bigger model,
     full LSTM replacing GRU, BC unfreeze on the new schema. V10 killed.</li>
