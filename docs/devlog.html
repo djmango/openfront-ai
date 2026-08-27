@@ -89,10 +89,13 @@
   <p>Live duo is <b>experiment G</b> on the homelab 3070:
   <code>scalars[11]</code> is team tiles / map land (the 95% team-win
   meter). Keeps F legal-diplo bits and E teammate clut. IPPO + pact
-  bonus 5, timeout = loss, PBRS, from scratch, no v11. F opened 6-0
-  plus a late Onion win, then last 8 timeout (fail gate c). See
-  <a href="#duo-easy">Aug 26-27 writeup</a>.
-  Do not <code>--init ppo_v11</code>. Do not resume A/B/D/E/F stashes.</p>
+  bonus 5, timeout = loss, PBRS, no v11. Holding compact Easy
+  (Onion 28/34, Caucasus 20/22, Pangaea 4/6); water is opening
+  (Britannia 7/26, one GreatLakes, one BlackSea) but not holding
+  (BetweenTwoSeas 0/20). Resumed after SIGKILL at u5376 — do not
+  from-scratch this winning run. Do not <code>--init ppo_v11</code>.
+  Do not load A/B/D/E/F stashes. See
+  <a href="#duo-easy">Aug 26-27 writeup</a>.</p>
 </div>
 
 
@@ -249,15 +252,26 @@ Stashes under <code>rust/checkpoints/ppo_duo/</code>.</p>
     <td><code>scalars[11]</code> = ego+teammate tiles / map land.
       Team win fires at 0.95 of that meter. <code>scalars[10]</code>
       stays claimed-among-players. <code>N_SCALARS</code> 11→12.
-      Keeps E+F. From scratch.</td>
-    <td>Started 2026-08-27T11:17:50Z. Same train flags.</td>
+      Keeps E+F. From scratch, then <b>resumed</b> after SIGKILL
+      (u5376 / 17:34Z → 18:01:29Z, same weights).</td>
+    <td>Loop 2026-08-27T23:32Z: u~10040, 153 eps / <b>61 wins</b>,
+      window WR 0.43, entropy ~1.3 O(1), gpu_mem% 91. Compact
+      holding (Onion 28/34, Caucasus 20/22, Pangaea 4/6). Water
+      opening not holding (Britannia 7/26, GreatLakes 1, BlackSea 1,
+      BetweenTwoSeas 0/20). Last 8 still has wins (not gate c).
+      Keep G. Crash snapshot
+      <code>ippo-G-sigkill-20260827T1734Z.*</code>.</td>
   </tr>
 </table>
-<p>Water maps (Britannia, GreatLakes, BlackSea, BetweenTwoSeas) are 0
-wins across A, B, D2, E, and F so far. Compact maps are where every Easy
-win has happened except D1's two Pangaea flukes. E's Caucasus win at
-0.09 individual land (term ~255) is the team-95% rule showing up: the
-partner can carry, which is exactly what the old clut called an enemy.</p>
+<p>Water maps (Britannia, GreatLakes, BlackSea, BetweenTwoSeas) were 0
+wins across A, B, D2, E, and F. Compact maps were where every Easy win
+happened except D1's two Pangaea flukes. G is the first run in this
+loop to <i>hold</i> compact (Onion/Caucasus/Pangaea keep paying) and
+to open water: Britannia repeating (7/26), first GreatLakes, first
+BlackSea. BetweenTwoSeas is still 0/20 (closeout timeouts at 0.5–0.84
+land). E's Caucasus win at 0.09 individual land (term ~255) is the
+team-95% rule showing up: the partner can carry, which is exactly what
+the old clut called an enemy.</p>
 
 <h3 id="duo-learnings">What we learned</h3>
 <ul>
@@ -290,27 +304,34 @@ partner can carry, which is exactly what the old clut called an enemy.</p>
     is how we got donate-dirac. Outcome-only. Entropy floor will not
     unstick that.</li>
   <li><b>OOM is a real gate on 8GB.</b> D1 died at update 4558 /
-    ~7.5GB. 2 envs is the ceiling (C skipped). Kill by pid, never
-    <code>pkill -f oftrain</code>.</li>
+    ~7.5GB. G SIGKILL at u5376 / gpu_mem% 88 with the same 2 envs.
+    2 envs is the ceiling (C skipped). Kill by pid, never
+    <code>pkill -f oftrain</code>. Resume a winning G run; do not
+    from-scratch it.</li>
+  <li><b>G recovered from water tails; A–F did not.</b> Same
+    compact-open then water-clock-out shape, but G reprinted 4-win
+    clusters and a 7-Caucasus streak instead of dying on gate (c)
+    after the first tail. The 95% map-land meter is the difference
+    that held compact. Water is not held yet.</li>
 </ul>
 
 <h3 id="duo-next">What is still open</h3>
 <ul>
-  <li><b>Hold Easy, including water.</b> Success is multiple Easy wins
-    that do not become an all-timeout tail. G is live: the 95%
-    team/map-land win meter is now <code>scalars[11]</code>. Identity,
-    legal diplo bits, and the win rule are in the trunk.</li>
+  <li><b>Hold Easy, including water.</b> Compact is holding on G.
+    Success that still is not met: water wins that stick, especially
+    BetweenTwoSeas. Do not switch while last-8 still has wins.</li>
   <li>Still missing from the human-would-need-this list: comms; a
     critic that sees the partner (MAPPO is built; A ran before
-    identity/legal/win-meter existed). Next unused after G is MAPPO
-    with those channels in obs, not PBRS Φ.</li>
+    identity/legal/win-meter existed). Next unused after a G fail
+    gate is MAPPO with those channels in obs, not PBRS Φ.</li>
 </ul>
 
 <h3 id="duo-ops">Ops</h3>
 <ul>
   <li>Host: homelab RTX 3070 8GB, tmux <code>duo-train</code>,
     <code>bash rust/checkpoints/ppo_duo/run.sh</code> (gitignored;
-    from scratch, no v11).</li>
+    now <code>--resume latest</code> after the G SIGKILL, no v11).
+    Do not strip resume to from-scratch while G is winning.</li>
   <li>Log / metrics / state:
     <code>rust/checkpoints/ppo_duo/{train.log,metrics.jsonl,latest.state.json}</code></li>
   <li>PR: <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>
@@ -1534,7 +1555,8 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
   <tr><td><code>ppo_duo</code></td><td><b>live</b> Aug 27 (homelab 3070)</td>
     <td>Two-human Team-mode Easy. Experiment G (team/map-land 95% win
     scalar + F legal diplo bits + E teammate clut, IPPO + pact bonus
-    5, from scratch). F opened 6-0 then last 8 timeout. See
+    5). Compact holding; water opening not holding. Resumed after
+    SIGKILL. See
     <a href="#duo-easy">Aug 26-27 writeup</a>.
     <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>.</td></tr>
   <tr><td><code>ppo_v11</code></td><td><b>live</b> Jul 26 (4×A100 80GB)</td>
@@ -3777,9 +3799,10 @@ from the raw cache IS that idea, done right).</p>
 
 <h3 id="next">Open threads</h3>
 <ul>
-  <li><b>Duo Easy (active, Aug 27):</b> experiment G (team/map-land
-    95% win scalar). F opened 6-0 then last 8 timeout. Hold Easy,
-    including water. See
+  <li><b>Duo Easy (active, Aug 27):</b> experiment G holding compact
+    Easy (61/153, window WR 0.43). Water opening (Britannia repeating;
+    first GreatLakes + BlackSea) but BetweenTwoSeas still 0. Next
+    unused after a fail gate: MAPPO so V sees the partner. See
     <a href="#duo-easy">writeup</a>.</li>
   <li><b>V11 (active plan, Jul 23):</b> see <a href="#v11-plan">V11 plan</a>  - 
     neighbor pack, ego-split fronts, unit tokens + pointer, bigger model,
