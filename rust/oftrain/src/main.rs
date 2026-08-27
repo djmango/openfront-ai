@@ -670,10 +670,10 @@ struct Args {
 
     /// Two-human Team-mode co-training (`AGENTRL1` + `AGENTRL2` on Humans).
     /// Alliances stay enabled: teammates must actually `alliance_request`
-    /// each other to unlock ally train gold (35k vs 25k team rate) and to
-    /// appear as class-2 allies in the featurizer. Forces lockstep collect
-    /// (no work-conserving / autoscale). Default-on MAPPO centralized critic
-    /// (`--centralized-value`).
+    /// each other to unlock ally train gold (35k vs 25k team rate). Same-team
+    /// humans are class-2 in clut from `PlayerE.team` even before that pact.
+    /// Forces lockstep collect (no work-conserving / autoscale). Default-on
+    /// MAPPO centralized critic (`--centralized-value`).
     #[arg(long, default_value_t = false)]
     duo: bool,
 
