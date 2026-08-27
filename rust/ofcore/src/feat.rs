@@ -11,7 +11,8 @@ pub const N_STATIC: usize = 6;
 /// V11: ego-split attack fronts add 4 planes (own/ally/enemy × src/retreat).
 pub const N_TRANSIENT: usize = 57;
 /// V11 neighbor pack: +7 columns (border geometry + relation continuum).
-pub const P_FEAT: usize = 28;
+/// Duo F: +2 (legal donate-to-this-slot, legal alliance_request-to-this-slot).
+pub const P_FEAT: usize = 30;
 pub const N_SCALARS: usize = 11;
 pub const N_ACTIONS: usize = 21;
 pub const N_BUILD: usize = 7;
@@ -921,6 +922,12 @@ pub fn featurize(
         f[25] = relation;
         f[26] = targeting_me as u8 as f32;
         f[27] = (blen > 0) as u8 as f32;
+        // Legal diplo targets live in `legal_ptarget` but the trunk never
+        // reads that mask. Put donate / alliance_request legality on the
+        // player token so π sees *who* it is allowed to pact or send gold to.
+        f[28] = (legal.donatable_gold.contains(&p.id)
+            || legal.donatable_troops.contains(&p.id)) as u8 as f32;
+        f[29] = legal.alliance_requestable.contains(&p.id) as u8 as f32;
     }
 
     let (units, umask, unit_uids, legal_utarget) =
@@ -1449,5 +1456,64 @@ mod clut_tests {
         assert_eq!(clut[lut[2] as usize], 2, "same Humans team → class-2");
         assert_eq!(clut[lut[3] as usize], 3, "Bot team stays class-3");
         assert_eq!(clut[lut[1] as usize], 1);
+    }
+
+    #[test]
+    fn player_tokens_carry_legal_donate_and_alliance_request() {
+        let ents = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true, "team": "Humans"},
+                {"id": 2, "pid": "AGENTRL2", "alive": true, "team": "Humans"},
+                {"id": 3, "pid": "bot", "alive": true, "team": "Bot"}
+            ],
+            "units": [],
+            "attacks": [],
+            "alliances": []
+        }));
+        let lut = make_lut(&[1, 2, 3]);
+        let mut legal = Legal::default();
+        legal.present = true;
+        legal.donatable_gold = vec![2];
+        legal.alliance_requestable = vec![2, 3];
+        let n = REGION * REGION;
+        let feat = featurize(
+            1,
+            1,
+            &lut,
+            &vec![1u8; n],
+            &vec![0u8; n],
+            &vec![0u8; n],
+            100,
+            false,
+            true,
+            1,
+            &ents,
+            &legal,
+        );
+        let partner = lut[2] as usize;
+        let bot = lut[3] as usize;
+        let me = lut[1] as usize;
+        assert_eq!(
+            feat.players[partner * P_FEAT + 28],
+            1.0,
+            "donate legal to teammate"
+        );
+        assert_eq!(
+            feat.players[partner * P_FEAT + 29],
+            1.0,
+            "request legal to teammate"
+        );
+        assert_eq!(feat.players[bot * P_FEAT + 28], 0.0, "cannot donate to bot");
+        assert_eq!(
+            feat.players[bot * P_FEAT + 29],
+            1.0,
+            "request still legal to bots"
+        );
+        assert_eq!(feat.players[me * P_FEAT + 28], 0.0);
+        assert_eq!(feat.players[me * P_FEAT + 29], 0.0);
+        assert_eq!(
+            feat.legal_ptarget[A_DONATE_GOLD as usize * MAX_SLOTS + partner],
+            1.0
+        );
     }
 }
