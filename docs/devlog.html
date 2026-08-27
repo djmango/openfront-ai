@@ -86,15 +86,15 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 27th, 2026</h2>
-  <p>Live duo is <b>experiment E</b> on the homelab 3070: IPPO +
-  <code>--duo-pact-bonus 5</code>, timeout = loss, Ng 1999 PBRS, from
-  scratch, no v11. The first five Easy episodes all won after we painted
-  teammates as teammates. Not a holding winner yet (water still clocks
-  out). See <a href="#duo-easy">Aug 26-27 writeup</a>.
-  Do not <code>--init ppo_v11</code> / <code>--kl-prior</code> on this
-  loop. Do not pay <code>donate_*</code> / <code>alliance_request</code>
-  as actions. Do not turn <code>--ent-floor</code> back on. Do not resume
-  donate-collapsed or A/B/D stashes.</p>
+  <p>Live duo is <b>experiment F</b> on the homelab 3070: legal
+  donate/alliance bits on player tokens (trunk can see who it may pact
+  or send gold to), plus E's teammate clut. IPPO +
+  <code>--duo-pact-bonus 5</code>, timeout = loss, PBRS, from scratch,
+  no v11. E opened 5-0 then last 8 all timeout (fail gate c). See
+  <a href="#duo-easy">Aug 26-27 writeup</a>.
+  Do not <code>--init ppo_v11</code> / <code>--kl-prior</code>. Do not
+  pay <code>donate_*</code> / <code>alliance_request</code> as actions.
+  Do not resume A/B/D/E stashes.</p>
 </div>
 
 
@@ -102,7 +102,7 @@
 <p class="session">Two-human Team-mode on a homelab RTX 3070 8GB
 (<code>--duo</code>, <code>AGENTRL1</code>+<code>AGENTRL2</code> on Humans,
 stage 0 Easy, 2 envs, rollout 8, feedforward, frozen AE v3.2). Loop until
-a good Easy winner. Live job: experiment E. Code:
+a good Easy winner. Live job: experiment F. Code:
 <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>
 stacked on timeout-loss / PBRS.</p>
 
@@ -223,15 +223,22 @@ Stashes under <code>rust/checkpoints/ppo_duo/</code>.</p>
       problem.</td>
   </tr>
   <tr>
-    <td><b>E teammate obs (live)</b></td>
+    <td>E teammate obs</td>
     <td>Class-2 clut + <code>is_teammate</code> + team claimed-land
       scalar. Still IPPO + pact bonus 5, from scratch.</td>
-    <td>Opened <b>5-0</b> (Onion 2, Caucasus 3) in the first five
-      episodes. At ~75 min: 5/15, WR 0.33, then the water tail
-      (Britannia / GreatLakes / BlackSea timeouts, one Onion
-      timeout-after-closeout at 52% individual land). Entropy dipped
-      to 0.05 for 11 updates, recovered. First time the early win
-      <i>shape</i> changed. Not a holding winner yet.</td>
+    <td>Opened <b>5-0</b> (Onion 2, Caucasus 3). Final 5/17 WR 0.29.
+      Last 8 all timeout (fail gate c) at ~84 min / u1183. Water 0
+      wins. Identity changed the open; it did not hold Easy. Stash
+      <code>ippo-E-20260827T0903Z.*</code>.</td>
+  </tr>
+  <tr>
+    <td><b>F legal diplo bits (live)</b></td>
+    <td><code>P_FEAT[28]</code> = donate legal to this slot,
+      <code>P_FEAT[29]</code> = <code>alliance_request</code> legal to
+      this slot. Trunk already reads player tokens;
+      <code>legal_ptarget</code> stays the action mask. Keeps E's
+      teammate clut. <code>P_FEAT</code> 28→30, from scratch.</td>
+    <td>Started 2026-08-27T09:03:50Z. Same train flags as E.</td>
   </tr>
 </table>
 <p>Water maps (Britannia, GreatLakes, BlackSea, BetweenTwoSeas) are 0
@@ -254,7 +261,7 @@ partner can carry, which is exactly what the old clut called an enemy.</p>
   <li><b>Pact-success bonus is not a substitute for identity.</b> D paid
     +5 the first time a formal alliance formed. Compact-map wins
     continued; the water tail did not move. The bonus is not farmable
-    (one-shot, outcome-only) and is still on for E.</li>
+    (one-shot, outcome-only) and is still on for F.</li>
   <li><b>Timeout=loss and PBRS fix camping; they do not teach who to
     land with.</b> Keep them. Do not "check Φ" as the next experiment
     while individual land at timeout is mid.</li>
@@ -278,10 +285,9 @@ partner can carry, which is exactly what the old clut called an enemy.</p>
 <h3 id="duo-next">What is still open</h3>
 <ul>
   <li><b>Hold Easy, including water.</b> Success is multiple Easy wins
-    that do not become an all-timeout tail. E is promising, not done.</li>
-  <li><b>F if E fails:</b> put legal donate/alliance masks into the
-    trunk (<code>trunk_forward</code> still ignores
-    <code>legal_ptarget</code>). Not PBRS Φ.</li>
+    that do not become an all-timeout tail. F is live: donate /
+    alliance_request legality is now on the player tokens the trunk
+    already reads.</li>
   <li>Still missing from the human-would-need-this list: an explicit
     95% combined-land progress bit; comms; a critic that sees the
     partner (MAPPO is built, was not the first hole).</li>
@@ -1513,9 +1519,9 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
   <tr><td><code>ppo_duo</code></td><td><b>live</b> Aug 27 (homelab 3070)</td>
-    <td>Two-human Team-mode Easy. Experiment E (teammate clut +
-    <code>is_teammate</code> + team land share, IPPO + pact bonus 5,
-    from scratch). Opened 5-0 on compact maps. See
+    <td>Two-human Team-mode Easy. Experiment F (legal donate/alliance
+    bits on player tokens + E teammate clut, IPPO + pact bonus 5,
+    from scratch). E opened 5-0 then last 8 timeout. See
     <a href="#duo-easy">Aug 26-27 writeup</a>.
     <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>.</td></tr>
   <tr><td><code>ppo_v11</code></td><td><b>live</b> Jul 26 (4×A100 80GB)</td>
@@ -3654,7 +3660,8 @@ from intents alone.</p>
     <a href="#duo-easy">Aug 26-27 duo Easy</a>.</li>
   <li><b>Critic choice is not identity.</b> MAPPO A and IPPO B printed
     the same compact-win then water-timeout curve. Pact-success bonus
-    (D) did not hold Easy either.</li>
+    (D) did not hold Easy either. E's 5-0 open did not hold past the
+    water tail.</li>
   <li><b>Timeout=loss and PBRS fix camping, not teamwork.</b> Keep them.
     Do not pay donate/request as actions. Do not <code>--ent-floor</code>
     a dirac back to life. Do not warm-start this duo loop from v11.</li>
@@ -3757,10 +3764,9 @@ from the raw cache IS that idea, done right).</p>
 
 <h3 id="next">Open threads</h3>
 <ul>
-  <li><b>Duo Easy (active, Aug 27):</b> experiment E is promising (5-0
-    open after teammate-visible obs) but water still clocks out. Hold
-    Easy, including Britannia / GreatLakes. If E fails: F is legal
-    donate/alliance masks into the trunk, not PBRS Φ. See
+  <li><b>Duo Easy (active, Aug 27):</b> experiment F (legal donate /
+    alliance bits on player tokens). E opened 5-0 then last 8 timeout.
+    Hold Easy, including water. See
     <a href="#duo-easy">writeup</a>.</li>
   <li><b>V11 (active plan, Jul 23):</b> see <a href="#v11-plan">V11 plan</a>  - 
     neighbor pack, ego-split fronts, unit tokens + pointer, bigger model,
