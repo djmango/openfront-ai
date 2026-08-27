@@ -65,14 +65,15 @@ pub fn entities_typed(game: &Game) -> EntsData {
                 },
                 doomsday: false,
                 doomsday_ticks: 0.0,
+                team: p.team.clone(),
             }
         })
         .collect();
 
     // Formal alliances only. Team-mode teammates are already friendly
-    // (no-attack / donate) without a pact, but they must
-    // `alliance_request` each other to appear as class-2 (ally) in clut
-    // and to unlock ally train gold. Do not inject synthetic AllianceE.
+    // (no-attack / donate) without a pact. `make_clut` now paints same-team
+    // humans class-2 from `PlayerE.team`; a formal pact is still required
+    // for ally train gold and `P_FEAT[5] is_ally`. Do not inject synthetic AllianceE.
     let mut alliances: Vec<AllianceE> = Vec::new();
     let mut seen: std::collections::HashSet<(u16, u16)> = std::collections::HashSet::new();
     for p in game.all_players() {

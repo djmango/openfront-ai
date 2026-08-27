@@ -293,6 +293,8 @@ pub struct PlayerE {
     pub gold_income: f64,
     pub doomsday: bool,
     pub doomsday_ticks: f64,
+    /// Engine team name (`Humans`, `Bot`, …). `None` / empty = FFA or omitted.
+    pub team: Option<String>,
 }
 
 fn relation_list(v: &Value) -> Vec<(usize, f64)> {
@@ -367,6 +369,10 @@ pub fn parse_ents(v: &Value) -> EntsData {
                         gold_income: num(&p["goldIncome"]),
                         doomsday: p["doomsday"].as_bool().unwrap_or(false),
                         doomsday_ticks: num(&p["doomsdayTicks"]),
+                        team: p["team"]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string()),
                     })
                 })
                 .collect()
@@ -588,7 +594,22 @@ pub fn make_lut(player_ids: &[usize]) -> Vec<u8> {
     lut
 }
 
-/// Slot → ego class LUT (0 neutral, 1 own, 2 ally, 3 enemy). Shared by
+fn me_team_name(ents: &EntsData, me: i64) -> Option<&str> {
+    ents.players
+        .iter()
+        .find(|p| p.id as i64 == me)
+        .and_then(|p| p.team.as_deref())
+        .filter(|t| !t.is_empty())
+}
+
+fn player_is_teammate(p: &PlayerE, me: i64, me_team: Option<&str>) -> bool {
+    let Some(team) = me_team else {
+        return false;
+    };
+    p.id as i64 != me && p.team.as_deref() == Some(team)
+}
+
+/// Slot → ego class LUT (0 neutral, 1 own, 2 ally/teammate, 3 enemy). Shared by
 /// [`featurize`] and the fused tile+ego prepare path so both see identical
 /// classing without a second full-map scan.
 pub fn make_clut(lut: &[u8], me: i64, ents: &EntsData) -> [u8; MAX_SLOTS] {
@@ -596,10 +617,19 @@ pub fn make_clut(lut: &[u8], me: i64, ents: &EntsData) -> [u8; MAX_SLOTS] {
     let me_slot: usize = if me >= 0 { slot_of(me as usize) } else { 0 };
     let mut clut = [3u8; MAX_SLOTS];
     clut[0] = 0;
-    // Formal `AllianceE` rows only. Team-mode teammates are already
-    // friendly (no-attack / donate) without a pact, but they stay
-    // class-3 here until they `alliance_request` — that pact is also
-    // what unlocks ally train gold (35k vs 25k team rate).
+    // Same-team humans are friendly in the engine without a pact. Paint them
+    // class-2 so the map/local/unit ego channels match "don't attack this
+    // blob". Formal `AllianceE` still sets class-2 for pacted non-teammates
+    // and is what `P_FEAT[5] is_ally` / ally train gold key off.
+    let me_team = me_team_name(ents, me);
+    for p in &ents.players {
+        if player_is_teammate(p, me, me_team) {
+            let slot = slot_of(p.id);
+            if slot > 0 && slot < MAX_SLOTS {
+                clut[slot] = 2;
+            }
+        }
+    }
     for a in &ents.alliances {
         let (sa, sb) = (slot_of(a.0), slot_of(a.1));
         if sa == me_slot && sb < MAX_SLOTS {
@@ -806,6 +836,20 @@ pub fn featurize(
         neighbor_border_stats(owners, land, mag, me_slot, gh, gw);
 
     let me_player = ents.players.iter().find(|p| p.id as i64 == me);
+    let me_team = me_team_name(ents, me);
+    let mut team_tiles = 0.0f64;
+    let mut claimed_tiles = 0.0f64;
+    for p in &ents.players {
+        claimed_tiles += p.tiles.max(0.0);
+        if p.id as i64 == me || player_is_teammate(p, me, me_team) {
+            team_tiles += p.tiles.max(0.0);
+        }
+    }
+    let team_claimed_share = if claimed_tiles > 0.0 {
+        (team_tiles / claimed_tiles).clamp(0.0, 1.0) as f32
+    } else {
+        0.0
+    };
     let mut players = vec![0.0f32; MAX_SLOTS * P_FEAT];
     let mut pmask = [0.0f32; MAX_SLOTS];
     let mut n_alive = 0usize;
@@ -853,7 +897,9 @@ pub fn featurize(
         f[16] = marked.contains(&slot) as u8 as f32;
         f[17] = log_norm(p.troop_income);
         f[18] = log_norm(p.gold_income);
-        f[19] = p.doomsday as u8 as f32;
+        // Was unused doomsday (always 0 in RL). Duo needs an explicit
+        // teammate bit: class-2 on the map is also used for pacted bots.
+        f[19] = player_is_teammate(p, me, me_team) as u8 as f32;
         f[20] = (p.doomsday_ticks / 3000.0).clamp(0.0, 1.0) as f32;
         // V11 neighbor pack
         f[21] = log_norm(blen as f64);
@@ -901,7 +947,10 @@ pub fn featurize(
         me_slot as f32 / MAX_SLOTS as f32,
         log_norm(me_troop_income.unwrap_or(0.0)),
         log_norm(me_gold_income.unwrap_or(0.0)),
-        ents.doomsday_enabled as u8 as f32,
+        // Was unused doomsday_enabled (always 0). Fraction of *claimed*
+        // tiles owned by ego+teammates — not the 95% map-land win rule,
+        // but a labeled team-progress channel the trunk can actually see.
+        team_claimed_share,
     ];
 
     // Action masks (rl/obs.py._masks).
@@ -1364,7 +1413,10 @@ mod clut_tests {
         let lut = make_lut(&[1, 2]);
         let clut = make_clut(&lut, 1, &ents);
         let partner = lut[2] as usize;
-        assert_eq!(clut[partner], 3, "no pact → class-3 enemy, not class-2 ally");
+        assert_eq!(
+            clut[partner], 3,
+            "no team field and no pact → class-3 enemy, not class-2 ally"
+        );
 
         let allied = parse_ents(&json!({
             "players": [
@@ -1377,6 +1429,25 @@ mod clut_tests {
         }));
         let clut = make_clut(&lut, 1, &allied);
         assert_eq!(clut[partner], 2, "formal pact → class-2 ally");
+        assert_eq!(clut[lut[1] as usize], 1);
+    }
+
+    #[test]
+    fn teammates_with_team_field_are_class2_without_a_pact() {
+        let ents = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true, "team": "Humans"},
+                {"id": 2, "pid": "AGENTRL2", "alive": true, "team": "Humans"},
+                {"id": 3, "pid": "bot", "alive": true, "team": "Bot"}
+            ],
+            "units": [],
+            "attacks": [],
+            "alliances": []
+        }));
+        let lut = make_lut(&[1, 2, 3]);
+        let clut = make_clut(&lut, 1, &ents);
+        assert_eq!(clut[lut[2] as usize], 2, "same Humans team → class-2");
+        assert_eq!(clut[lut[3] as usize], 3, "Bot team stays class-3");
         assert_eq!(clut[lut[1] as usize], 1);
     }
 }

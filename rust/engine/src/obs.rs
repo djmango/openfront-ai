@@ -132,6 +132,7 @@ pub fn entities(game: &Game) -> Value {
                 } else {
                     "0".to_string()
                 },
+                "team": p.team,
                 // Doomsday clock defaults to disabled in TS and RL configs
                 // never enable it; emit the disabled constants.
                 "doomsday": false,
