@@ -86,13 +86,14 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 28th, 2026</h2>
-  <p>Live duo is <b>experiment J</b> on the homelab 3070: City/Port
-    delete penalty (completed-count drop, not the
-    <code>delete_unit</code> action). Resume I weights, keep sequential
-    spawn + eco PBRS / first City+Port. I hit fail-c (last 8 timeout;
-    4/15, all Caucasus; spawn stagger worked). Next unused after J:
-    <b>K MAPPO</b>. Do not
-    <code>--init ppo_v11</code>. Do not load A–I stashes as
+  <p>Live duo is <b>experiment K</b> on the homelab 3070: MAPPO
+    centralized critic from-scratch (identity + legal bits + 95% meter
+    now in obs; MAPPO A ran before those). J hit fail-c (last 8 timeout;
+    4/14, all Caucasus; 1 City then deleted, 0 Ports). Keep sequential
+    spawn + eco PBRS / first City+Port + delete penalties. Next unused
+    after K: <b>L LSTM</b>. Do not
+    <code>--init ppo_v11</code>. Do not <code>--resume</code> IPPO J
+    into MAPPO. Do not load A–J stashes as
     <code>--init</code>. See
     <a href="#duo-easy">Aug 26-28 writeup</a>.</p>
 </div>
@@ -102,7 +103,7 @@
 <p class="session">Two-human Team-mode on a homelab RTX 3070 8GB
 (<code>--duo</code>, <code>AGENTRL1</code>+<code>AGENTRL2</code> on Humans,
 stage 0 Easy, 2 envs, rollout 8, feedforward, frozen AE v3.2). Loop until
-a good Easy winner. Live job: experiment J (resume I). Code:
+a good Easy winner. Live job: experiment K (MAPPO from-scratch). Code:
 <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>
 stacked on timeout-loss / PBRS.</p>
 
@@ -182,7 +183,7 @@ gold still need a pact.</p>
 (<code>N_SCALARS</code> 11→12). Team win fires at 0.95 of that meter.
 <code>scalars[10]</code> stays claimed-among-players.</p>
 
-<h3 id="duo-experiments">Experiments (A-I)</h3>
+<h3 id="duo-experiments">Experiments (A-K)</h3>
 <p>Shared recipe unless noted: homelab 3070, 2 games × 2 agents, stage 0
 Easy, rollout 8, frozen AE, timeout=loss, PBRS, from scratch, no v11.
 Fail gates: (a) ≥90 min and ≥8 eps and 0 wins; (b) entropy &lt; 0.3 for
@@ -299,14 +300,31 @@ Stashes under <code>rust/checkpoints/ppo_duo/</code>.</p>
       steps).</td>
   </tr>
   <tr>
-    <td><b>J City/Port delete penalty (live)</b></td>
+    <td>J City/Port delete penalty</td>
     <td>Reward-only, <b>resume I weights</b> (same tensors, sequential
       spawn stays). <code>--duo-city-delete 3</code> /
       <code>--duo-port-delete 5</code> on completed-count drop.
       Never the <code>delete_unit</code> action. Keeps eco PBRS +
       first City/Port one-shots. Started 2026-08-28T10:02:52Z.</td>
-    <td>Live. Compact must still pay. Fail → <b>K MAPPO</b>
-      (from-scratch after stash).</td>
+    <td>Fail gate (c) at ~75 min / u20432: last 8 timeout
+      (GreatLakes/BlackSea/Britannia/Onion). Final <b>4/14</b>, all
+      Caucasus (4/4). Onion 0/3, GreatLakes 0/3, Britannia 0/3,
+      BlackSea 0/1. Entropy O(1). One City on an Onion timeout then
+      a delete; 0 Ports. vs I's 4 Cities: the penalty suppressed
+      building more than it kept structures standing. Compact still
+      blob-and-attack (0 cities on the 4 Caucasus wins). Stash
+      <code>ippo-J-fail-c-20260828T1118Z.*</code> (u20432 / 653824
+      steps).</td>
+  </tr>
+  <tr>
+    <td><b>K MAPPO (live)</b></td>
+    <td>Centralized critic from-scratch so V sees teammate tokens +
+      scalars. Identity / legal bits / 95% meter are now in obs
+      (MAPPO A ran before those). Keeps sequential spawn + eco PBRS
+      + first City/Port + delete penalties. Started
+      2026-08-28T11:18:54Z. <code>--centralized-value=true</code>,
+      no <code>--resume</code>.</td>
+    <td>Live. Fail → <b>L LSTM</b> (from-scratch after stash).</td>
   </tr>
 </table>
 <p>Water maps (Britannia, GreatLakes, BlackSea, BetweenTwoSeas) were 0
@@ -428,21 +446,24 @@ the partner too. Donate exists but is not donate-dirac.</p>
     city purchase as a strength loss. H's income PBRS + first
     City/Port one-shots did fire (3 City completions) and they
     <i>deleted</i> every one; 0 Ports; last 8 still timeout. Do not
-    pay <code>build</code> as an action. J is the delete-penalty
-    test if I still builds-then-deletes. I did (4 Cities, 0 Ports,
-    last 8 timeout) so J is live.</li>
+    pay <code>build</code> as an action. J's delete-penalty on
+    completed-count drop (never the <code>delete_unit</code> action)
+    did not keep Cities standing: 1 City on an Onion timeout then a
+    delete, 0 Ports, last 8 still timeout. vs I's 4 Cities all
+    deleted, J mostly stopped building them. Compact Caucasus 4/4
+    with zero cities (blob-and-attack). Fail-c → K MAPPO
+    from-scratch with identity now in obs.</li>
 </ul>
 
 <h3 id="duo-next">What is still open</h3>
 <ul>
-  <li><b>J (live): City/Port delete penalty.</b>
-    Completed-count drop, not <code>delete_unit</code>. Resume I.
-    Compact must keep paying. Clock starts at the
-    <code>starting experiment J</code> log line. Same fail gates
+  <li><b>K (live): MAPPO</b> so V sees the partner (identity + legal
+    + 95% meter now in obs; MAPPO A ran before those existed). From-scratch
+    after stashing J. Clock starts at the
+    <code>starting experiment K</code> log line. Same fail gates
     (a/b/c).</li>
-  <li><b>K MAPPO</b> so V sees the partner (identity + legal + 95%
-    meter now in obs; MAPPO A ran before those existed). Critic input
-    changes, so from-scratch (stash first). After J, not instead of J.</li>
+  <li><b>L LSTM</b> (recurrent policy, from-scratch). After K, not
+    instead of K. Not comms first.</li>
   <li>Still missing from the human-would-need-this list: comms. Spawn
     is not a comms problem after the first blob is on the map.</li>
 </ul>
@@ -451,11 +472,13 @@ the partner too. Donate exists but is not donate-dirac.</p>
 <ul>
   <li>Host: homelab RTX 3070 8GB, tmux <code>duo-train</code>,
     <code>bash rust/checkpoints/ppo_duo/run.sh</code> (gitignored;
-    J is <code>--resume latest</code> plus
+    K is from-scratch MAPPO:
+    <code>--centralized-value=true</code>, no <code>--resume</code>,
+    plus
     <code>--duo-eco-coef 0.25 --duo-city-bonus 3 --duo-port-bonus 5
     --duo-city-delete 3 --duo-port-delete 5
-    --v84-boat-cancelled=-0.15</code>, no v11). Do not strip resume
-    to from-scratch while compact still pays.</li>
+    --v84-boat-cancelled=-0.15</code>, no v11). Do not
+    <code>--resume</code> IPPO J weights into MAPPO.</li>
   <li>Log / metrics / state:
     <code>rust/checkpoints/ppo_duo/{train.log,metrics.jsonl,latest.state.json}</code></li>
   <li>PR: <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>
@@ -1677,8 +1700,9 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
   <tr><td><code>ppo_duo</code></td><td><b>live</b> Aug 28 (homelab 3070)</td>
-    <td>Two-human Team-mode Easy. Experiment J: City/Port delete
-    penalty, resume I + sequential spawn + eco PBRS. Next unused: K MAPPO. See
+    <td>Two-human Team-mode Easy. Experiment K: MAPPO from-scratch
+    (identity + legal + 95% in obs) + sequential spawn + eco PBRS +
+    City/Port delete penalties. Next unused: L LSTM. See
     <a href="#duo-easy">Aug 26-28 writeup</a>.
     <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>.</td></tr>
   <tr><td><code>ppo_v11</code></td><td><b>live</b> Jul 26 (4×A100 80GB)</td>
@@ -3921,8 +3945,8 @@ from the raw cache IS that idea, done right).</p>
 
 <h3 id="next">Open threads</h3>
 <ul>
-  <li><b>Duo Easy (active, Aug 28):</b> experiment J City/Port delete
-    penalty, resume I. Next unused: <b>K MAPPO</b>.
+  <li><b>Duo Easy (active, Aug 28):</b> experiment K MAPPO
+    from-scratch. Next unused: <b>L LSTM</b>.
     See <a href="#duo-easy">writeup</a>.</li>
   <li><b>V11 (active plan, Jul 23):</b> see <a href="#v11-plan">V11 plan</a>  - 
     neighbor pack, ego-split fronts, unit tokens + pointer, bigger model,
