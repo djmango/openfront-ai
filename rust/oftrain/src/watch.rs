@@ -49,6 +49,8 @@ pub struct WatchConfig<'a> {
     pub recurrent_policy: bool,
     /// MAPPO centralized critic. Must match the checkpoint's `head_value` width.
     pub centralized_value: bool,
+    /// Partner last-action residual. Must match the checkpoint's `comms` layer.
+    pub duo_comms: bool,
     /// Simulation backend for the watch episode (`native` or `node`).
     pub engine: EngineKind,
     /// When true (default), sample actions like training; when false, argmax.
@@ -181,6 +183,7 @@ pub fn run_watch(cfg: WatchConfig<'_>) -> Result<()> {
         cfg.blocks,
         cfg.recurrent_policy,
         cfg.centralized_value,
+        cfg.duo_comms,
     );
     vs.load(cfg.policy)
         .with_context(|| format!("load policy {}", cfg.policy))?;

@@ -166,6 +166,8 @@ pub struct Obs {
     pub partner_players: Tensor, // (B, MAX_SLOTS, P_FEAT) f32
     pub partner_pmask: Tensor,   // (B, MAX_SLOTS) f32
     pub partner_scalars: Tensor, // (B, N_SCALARS) f32
+    /// Partner's previous `ActionOutcome` (14 floats). Zeros when solo.
+    pub partner_context: Tensor, // (B, RECURRENT_CONTEXT_FLOATS) f32
     pub compact: Option<CompactObsMeta>,
 }
 
@@ -198,6 +200,7 @@ impl Obs {
             partner_players: self.partner_players.index_select(0, idx),
             partner_pmask: self.partner_pmask.index_select(0, idx),
             partner_scalars: self.partner_scalars.index_select(0, idx),
+            partner_context: self.partner_context.index_select(0, idx),
             compact: self.compact.as_ref().map(|m| CompactObsMeta {
                 origin_y: m.origin_y.index_select(0, idx),
                 origin_x: m.origin_x.index_select(0, idx),
@@ -770,8 +773,12 @@ pub struct PolicyNet {
     head_quantity: nn::Linear,
     head_value: nn::Linear,
     /// Yu et al. 2021 MAPPO: V concatenates pooled teammate player tokens
-    /// and teammate scalars onto the local trunk `h`. Policy heads stay on `h`.
+    /// and teammate scalars onto the local trunk `h`. Policy heads stay on `h`
+    /// except `--duo-comms`, which adds the partner's last action into `h`.
     centralized_value: bool,
+    /// Linear(14 → HIDDEN) residual on partner last-action. `None` keeps 1v1
+    /// / pre-M checkpoints loadable.
+    comms: Option<nn::Linear>,
     // Device-local constants used by action-dependent masks. Keeping these
     // beside the policy avoids rebuilding and uploading the same tiny tables
     // in every actor forward and every PPO sequence chunk.
@@ -812,7 +819,7 @@ impl PolicyNet {
         blocks: i64,
         recurrent: bool,
     ) -> Self {
-        Self::new_with_options(vs, amp, foveate, gc, blocks, recurrent, false)
+        Self::new_with_options(vs, amp, foveate, gc, blocks, recurrent, false, false)
     }
 
     pub fn new_with_options(
@@ -823,6 +830,7 @@ impl PolicyNet {
         blocks: i64,
         recurrent: bool,
         centralized_value: bool,
+        duo_comms: bool,
     ) -> Self {
         let conv1 = |p: &nn::Path, ci, co| nn::conv2d(p, ci, co, 1, Default::default());
         let value_in = if centralized_value {
@@ -863,6 +871,14 @@ impl PolicyNet {
             head_quantity: nn::linear(vs / "head_quantity", HIDDEN, 2, Default::default()),
             head_value: nn::linear(vs / "head_value", value_in, 1, Default::default()),
             centralized_value,
+            comms: duo_comms.then(|| {
+                nn::linear(
+                    vs / "comms",
+                    RECURRENT_CONTEXT_FLOATS,
+                    HIDDEN,
+                    Default::default(),
+                )
+            }),
             needs_player: action_table(NEEDS_PLAYER, vs.device()),
             needs_tile: action_table(NEEDS_TILE, vs.device()),
             needs_unit: action_table(NEEDS_UNIT, vs.device()),
@@ -1077,6 +1093,7 @@ impl PolicyNet {
             partner_players: o.partner_players.shallow_clone(),
             partner_pmask: o.partner_pmask.shallow_clone(),
             partner_scalars: o.partner_scalars.shallow_clone(),
+            partner_context: o.partner_context.shallow_clone(),
             compact: Some(CompactObsMeta {
                 origin_y: fov.origin_y,
                 origin_x: fov.origin_x,
@@ -1128,6 +1145,11 @@ impl PolicyNet {
         );
         let h = self.trunk1.forward(&cat).silu();
         let h = self.trunk2.forward(&h).silu();
+        let h = if let Some(comms) = &self.comms {
+            h + comms.forward(&o.partner_context)
+        } else {
+            h
+        };
         // Single chokepoint for the whole forward pass: every head (value,
         // action logits, quantity, tile, player) is derived from `h`/`p`/
         // `gc_map`/`gf_map`, so sanitizing NaN/Inf here - rather than
@@ -2296,6 +2318,7 @@ mod tests {
             partner_players: Tensor::zeros([b, ms, P_FEAT], opts),
             partner_pmask: Tensor::zeros([b, ms], opts),
             partner_scalars: Tensor::zeros([b, N_SCALARS], opts),
+            partner_context: Tensor::zeros([b, RECURRENT_CONTEXT_FLOATS], opts),
             compact: None,
         }
     }
@@ -2819,7 +2842,7 @@ mod tests {
     fn centralized_critic_reads_partner_features_policy_does_not() {
         tch::manual_seed(11);
         let vs = nn::VarStore::new(Device::Cpu);
-        let policy = PolicyNet::new_with_options(&vs.root(), false, false, 8, 1, false, true);
+        let policy = PolicyNet::new_with_options(&vs.root(), false, false, 8, 1, false, true, false);
         assert_eq!(
             vs.variables()["head_value.weight"].size(),
             vec![1, CENTRALIZED_VALUE_IN]
@@ -2856,6 +2879,27 @@ mod tests {
         o.partner_pmask = Tensor::ones([2, MAX_SLOTS], (Kind::Float, Device::Cpu));
         let v1 = tch::no_grad(|| policy.value_only(&o));
         assert_eq!((v0 - v1).abs().max().double_value(&[]), 0.0);
+    }
+
+    #[test]
+    fn duo_comms_policy_reads_partner_last_action() {
+        tch::manual_seed(13);
+        let vs = nn::VarStore::new(Device::Cpu);
+        let policy =
+            PolicyNet::new_with_options(&vs.root(), false, false, 8, 1, false, true, true);
+        assert!(vs.variables().contains_key("comms.weight"));
+        let mut o = synthetic_obs(Device::Cpu, 2, 6, 6);
+        let (act_a, _, _, _, _, _, _, _, _) = tch::no_grad(|| policy.act(&o, true));
+        o.partner_context = Tensor::ones(
+            [2, RECURRENT_CONTEXT_FLOATS],
+            (Kind::Float, Device::Cpu),
+        );
+        let (act_b, _, _, _, _, _, _, _, _) = tch::no_grad(|| policy.act(&o, true));
+        let act_delta = (act_a - act_b).abs().max().double_value(&[]);
+        assert!(
+            act_delta > 1e-6,
+            "duo-comms π must change when partner last-action changes, got {act_delta}"
+        );
     }
 
     #[test]

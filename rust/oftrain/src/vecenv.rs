@@ -42,11 +42,16 @@ use crate::engine::{self, EngineKind, GameEngine, RawObs};
 /// Per-env layout of [`CompactHostBuffers::extras`] (all f32):
 /// `players | units | umask | legal_utarget | local | legal_ptarget |
 /// pmask | scalars | legal_actions | legal_build | legal_nuke |
-/// partner_players | partner_pmask | partner_scalars`.
+/// partner_players | partner_pmask | partner_scalars | partner_context`.
 /// Partner tensors are appended so the local prefix stays aligned with
 /// older compact payloads; they are zeros when `n_agents==1`.
+/// `partner_context` is the sibling's previous [`ActionOutcome`] (14 floats).
 pub(crate) fn compact_extras_per_env() -> usize {
-    compact_extras_core_n() + compact_extras_players_n() + feat::MAX_SLOTS + feat::N_SCALARS
+    compact_extras_core_n()
+        + compact_extras_players_n()
+        + feat::MAX_SLOTS
+        + feat::N_SCALARS
+        + crate::recurrent::CONTEXT_FLOATS
 }
 
 /// Bytes before the MAPPO partner block (local actor extras).
@@ -363,6 +368,13 @@ impl CompactGrid {
         let start = compact_extras_core_n() + compact_extras_players_n() + feat::MAX_SLOTS;
         &self.extras_slice()[start..start + feat::N_SCALARS]
     }
+    pub fn partner_context(&self) -> &[f32] {
+        let start = compact_extras_core_n()
+            + compact_extras_players_n()
+            + feat::MAX_SLOTS
+            + feat::N_SCALARS;
+        &self.extras_slice()[start..start + crate::recurrent::CONTEXT_FLOATS]
+    }
 
     #[cfg(test)]
     pub(crate) fn grid_storage_ptr(&self) -> *const half::f16 {
@@ -673,6 +685,9 @@ pub struct PreparedObs {
     pub partner_players: Vec<f32>, // (MAX_SLOTS, P_FEAT)
     pub partner_pmask: [f32; feat::MAX_SLOTS],
     pub partner_scalars: [f32; feat::N_SCALARS],
+    /// Partner's previous action (simultaneous-step delay). Zeros when
+    /// `n_agents==1` or before the first action of an episode.
+    pub partner_context: [f32; crate::recurrent::CONTEXT_FLOATS],
 }
 
 impl PreparedObs {
@@ -705,6 +720,7 @@ impl PreparedObs {
         self.partner_players = Vec::new();
         self.partner_pmask = [0.0; feat::MAX_SLOTS];
         self.partner_scalars = [0.0; feat::N_SCALARS];
+        self.partner_context = [0.0; crate::recurrent::CONTEXT_FLOATS];
     }
 }
 
@@ -1415,15 +1431,19 @@ impl EnvWorker {
         let a_players = outs[0].players.clone();
         let a_pmask = outs[0].pmask;
         let a_scalars = outs[0].scalars;
+        let a_context = outs[0].prev_action.as_floats();
         let b_players = outs[1].players.clone();
         let b_pmask = outs[1].pmask;
         let b_scalars = outs[1].scalars;
+        let b_context = outs[1].prev_action.as_floats();
         outs[0].partner_players = b_players;
         outs[0].partner_pmask = b_pmask;
         outs[0].partner_scalars = b_scalars;
+        outs[0].partner_context = b_context;
         outs[1].partner_players = a_players;
         outs[1].partner_pmask = a_pmask;
         outs[1].partner_scalars = a_scalars;
+        outs[1].partner_context = a_context;
     }
 
     fn prepare_agent(&mut self, agent_i: usize) -> PreparedObs {
@@ -1524,6 +1544,7 @@ impl EnvWorker {
             partner_players: vec![0.0; feat::MAX_SLOTS * feat::P_FEAT],
             partner_pmask: [0.0; feat::MAX_SLOTS],
             partner_scalars: [0.0; feat::N_SCALARS],
+            partner_context: [0.0; crate::recurrent::CONTEXT_FLOATS],
         };
         if profile {
             static PREPARE_N: AtomicU64 = AtomicU64::new(0);
@@ -2423,7 +2444,10 @@ mod compact_extras_tests {
 
     #[test]
     fn partner_block_appends_after_local_extras() {
-        let partner_n = compact_extras_players_n() + feat::MAX_SLOTS + feat::N_SCALARS;
+        let partner_n = compact_extras_players_n()
+            + feat::MAX_SLOTS
+            + feat::N_SCALARS
+            + crate::recurrent::CONTEXT_FLOATS;
         assert_eq!(
             compact_extras_per_env(),
             compact_extras_core_n() + partner_n
@@ -2479,11 +2503,14 @@ mod compact_extras_tests {
             partner_players: vec![0.0; feat::MAX_SLOTS * feat::P_FEAT],
             partner_pmask: [0.0; feat::MAX_SLOTS],
             partner_scalars: [0.0; feat::N_SCALARS],
+            partner_context: [0.0; crate::recurrent::CONTEXT_FLOATS],
         };
         let mut b = a.clone();
         b.players = vec![2.0; feat::MAX_SLOTS * feat::P_FEAT];
         b.pmask = [0.5; feat::MAX_SLOTS];
         b.scalars = [4.0; feat::N_SCALARS];
+        b.prev_action.action = 7;
+        b.prev_action.had_action = true;
         let mut outs = vec![a, b];
         EnvWorker::fill_partner_features(&mut outs);
         assert_eq!(outs[0].partner_players[0], 2.0);
@@ -2492,6 +2519,9 @@ mod compact_extras_tests {
         assert_eq!(outs[1].partner_pmask[0], 1.0);
         assert_eq!(outs[0].partner_scalars[0], 4.0);
         assert_eq!(outs[1].partner_scalars[0], 3.0);
+        assert_eq!(outs[0].partner_context[0], 7.0);
+        assert_eq!(outs[0].partner_context[12], 1.0);
+        assert_eq!(outs[1].partner_context[0], -1.0);
         EnvWorker::fill_partner_features(&mut outs[..1]);
         assert_eq!(outs[0].partner_players[0], 2.0, "solo slice is a no-op");
     }

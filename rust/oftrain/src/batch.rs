@@ -761,6 +761,7 @@ fn build_native_compact_mixed(
     let mut partner_players = Vec::with_capacity(items.len());
     let mut partner_pmask = Vec::with_capacity(items.len());
     let mut partner_scalars = Vec::with_capacity(items.len());
+    let mut partner_context = Vec::with_capacity(items.len());
     for &(group, row) in &location {
         let obs = &compact_groups[group];
         let row = row as i64;
@@ -804,6 +805,7 @@ fn build_native_compact_mixed(
         partner_players.push(obs.partner_players.narrow(0, row, 1));
         partner_pmask.push(obs.partner_pmask.narrow(0, row, 1));
         partner_scalars.push(obs.partner_scalars.narrow(0, row, 1));
+        partner_context.push(obs.partner_context.narrow(0, row, 1));
     }
     Ok(Obs {
         grid: cat_rows(&fine),
@@ -824,6 +826,7 @@ fn build_native_compact_mixed(
         partner_players: cat_rows(&partner_players),
         partner_pmask: cat_rows(&partner_pmask),
         partner_scalars: cat_rows(&partner_scalars),
+        partner_context: cat_rows(&partner_context),
         compact: Some(CompactObsMeta {
             origin_y: cat_rows(&origin_y),
             origin_x: cat_rows(&origin_x),
@@ -1077,6 +1080,7 @@ fn build_obs_from_parts(
     let mut partner_players = Vec::with_capacity(b * feat::MAX_SLOTS * feat::P_FEAT);
     let mut partner_pmask = Vec::with_capacity(b * feat::MAX_SLOTS);
     let mut partner_scalars = Vec::with_capacity(b * feat::N_SCALARS);
+    let mut partner_context = Vec::with_capacity(b * crate::recurrent::CONTEXT_FLOATS);
 
     for (idx, it) in items.iter().enumerate() {
         if !resident_grid {
@@ -1126,6 +1130,7 @@ fn build_obs_from_parts(
         partner_players.extend_from_slice(&it.partner_players);
         partner_pmask.extend_from_slice(&it.partner_pmask);
         partner_scalars.extend_from_slice(&it.partner_scalars);
+        partner_context.extend_from_slice(&it.partner_context);
     }
 
     let t = |v: Vec<f32>, shape: &[i64]| -> Tensor {
@@ -1202,6 +1207,10 @@ fn build_obs_from_parts(
         partner_players: t(partner_players, &[bi, ms, feat::P_FEAT as i64]),
         partner_pmask: t(partner_pmask, &[bi, ms]),
         partner_scalars: t(partner_scalars, &[bi, feat::N_SCALARS as i64]),
+        partner_context: t(
+            partner_context,
+            &[bi, crate::recurrent::CONTEXT_FLOATS as i64],
+        ),
         compact: None,
     })
 }
@@ -1328,6 +1337,7 @@ fn store_compact_host(
             buffers.extras.extend_from_slice(&it.partner_players);
             buffers.extras.extend_from_slice(&it.partner_pmask);
             buffers.extras.extend_from_slice(&it.partner_scalars);
+            buffers.extras.extend_from_slice(&it.partner_context);
         }
         anyhow::ensure!(
             buffers.grids.len() == fine_len + batch * coarse_n,
@@ -1402,6 +1412,7 @@ fn clear_full_resolution_payload(it: &mut PreparedObs) {
     it.partner_players = Vec::new();
     it.partner_pmask = [0.0; ofcore::feat::MAX_SLOTS];
     it.partner_scalars = [0.0; ofcore::feat::N_SCALARS];
+    it.partner_context = [0.0; crate::recurrent::CONTEXT_FLOATS];
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -1426,6 +1437,7 @@ struct PackedCompactHost {
     partner_players: Vec<f32>,
     partner_pmask: Vec<f32>,
     partner_scalars: Vec<f32>,
+    partner_context: Vec<f32>,
     origin_y: Vec<i64>,
     origin_x: Vec<i64>,
 }
@@ -1452,6 +1464,7 @@ impl PackedCompactHost {
         self.partner_players.append(&mut other.partner_players);
         self.partner_pmask.append(&mut other.partner_pmask);
         self.partner_scalars.append(&mut other.partner_scalars);
+        self.partner_context.append(&mut other.partner_context);
         self.origin_y.append(&mut other.origin_y);
         self.origin_x.append(&mut other.origin_x);
     }
@@ -1504,6 +1517,7 @@ fn pack_compact_host_range(compact: &[&CompactGrid], ch: usize, cw: usize) -> Pa
         out.partner_players.extend_from_slice(c.partner_players());
         out.partner_pmask.extend_from_slice(c.partner_pmask());
         out.partner_scalars.extend_from_slice(c.partner_scalars());
+        out.partner_context.extend_from_slice(c.partner_context());
         out.origin_y.push(c.origin_y);
         out.origin_x.push(c.origin_x);
     }
@@ -1580,6 +1594,7 @@ fn build_compact_host_obs(
         partner_players,
         partner_pmask,
         partner_scalars,
+        partner_context,
         origin_y,
         origin_x,
     } = packed;
@@ -1639,6 +1654,10 @@ fn build_compact_host_obs(
         ),
         partner_pmask: up(partner_pmask, &[bi, feat::MAX_SLOTS as i64]),
         partner_scalars: up(partner_scalars, &[bi, feat::N_SCALARS as i64]),
+        partner_context: up(
+            partner_context,
+            &[bi, crate::recurrent::CONTEXT_FLOATS as i64],
+        ),
         compact: Some(CompactObsMeta {
             origin_y: to_device_maybe_pinned(&Tensor::from_slice(&origin_y), device, pinned_h2d),
             origin_x: to_device_maybe_pinned(&Tensor::from_slice(&origin_x), device, pinned_h2d),
@@ -1743,6 +1762,7 @@ mod tests {
             partner_players: vec![0.0f32; feat::MAX_SLOTS * feat::P_FEAT],
             partner_pmask: [0.0f32; feat::MAX_SLOTS],
             partner_scalars: [0.0f32; feat::N_SCALARS],
+            partner_context: [0.0f32; crate::recurrent::CONTEXT_FLOATS],
         }
     }
 
@@ -2257,6 +2277,7 @@ mod tests {
         let stored = items[0].compact.as_ref().unwrap();
         assert!(stored.partner_players().iter().all(|&x| (x - 2.0).abs() < 1e-6));
         assert!(stored.partner_scalars().iter().all(|&x| (x - 4.0).abs() < 1e-6));
+        assert_eq!(stored.partner_context().len(), crate::recurrent::CONTEXT_FLOATS);
         let refs: Vec<&PreparedObs> = items.iter().collect();
         let rebuilt = build_compact_host_obs(&refs, Device::Cpu, false).unwrap();
         let rp0: Vec<f32> =

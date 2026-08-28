@@ -164,6 +164,9 @@ pub struct Config {
     /// Yu et al. 2021 MAPPO: local actor, centralized V that sees teammate
     /// player tokens + scalars. Default on with `--duo`.
     pub centralized_value: bool,
+    /// π residual on the partner's last ActionOutcome (14 floats, one-step
+    /// delay). Off keeps feedforward checkpoints loadable.
+    pub duo_comms: bool,
     /// Number of GPU replicas/shards. 1 = original single-device path.
     /// >1 requires `device` to be `Cuda(_)`; shards use `Cuda(0..num_gpus)`.
     pub num_gpus: usize,
@@ -1224,6 +1227,7 @@ mod v10_state_and_gate_tests {
             Some("weights/ae/coarse.encoder.safetensors"),
             &state,
             false,
+            false,
         );
         assert_eq!(manifest["format"], "oftrain-safetensors");
         assert_eq!(manifest["manifest_schema_version"], 1);
@@ -1256,6 +1260,11 @@ mod v10_state_and_gate_tests {
         assert_eq!(
             manifest["architecture"]["critic"]["value_in"],
             policy::HIDDEN
+        );
+        assert_eq!(manifest["architecture"]["comms"]["partner_action"], false);
+        assert_eq!(
+            manifest["architecture"]["comms"]["context_features"],
+            policy::RECURRENT_CONTEXT_FLOATS
         );
     }
 
@@ -1708,6 +1717,7 @@ fn policy_manifest_value(
     coarse_ckpt: Option<&str>,
     state: &TrainState,
     centralized_value: bool,
+    duo_comms: bool,
 ) -> serde_json::Value {
     let mut architecture = serde_json::json!({
         "name": "oftrain-policy",
@@ -1740,6 +1750,10 @@ fn policy_manifest_value(
             } else {
                 policy::HIDDEN
             },
+        },
+        "comms": {
+            "partner_action": duo_comms,
+            "context_features": policy::RECURRENT_CONTEXT_FLOATS,
         },
     });
     if recurrent_policy {
@@ -1791,6 +1805,7 @@ fn save_policy_manifest(cfg: &Config, state: &TrainState) -> Result<()> {
         cfg.coarse_ckpt.as_deref(),
         state,
         cfg.centralized_value,
+        cfg.duo_comms,
     );
     save_atomic(&path, |tmp| {
         std::fs::write(tmp, serde_json::to_string_pretty(&manifest)?)?;
@@ -1851,6 +1866,7 @@ fn make_policy(vs: &nn::Path, cfg: &Config) -> PolicyNet {
         cfg.blocks,
         cfg.recurrent_policy,
         cfg.centralized_value,
+        cfg.duo_comms,
     )
 }
 
@@ -2932,6 +2948,7 @@ mod packed_act_tests {
             partner_players: vec![0.0; ofcore::feat::MAX_SLOTS * ofcore::feat::P_FEAT],
             partner_pmask: [0.0; ofcore::feat::MAX_SLOTS],
             partner_scalars: [0.0; ofcore::feat::N_SCALARS],
+            partner_context: [0.0; crate::recurrent::CONTEXT_FLOATS],
         }
     }
 
@@ -4059,6 +4076,7 @@ pub struct BenchmarkConfig<'a> {
     pub blocks: i64,
     pub recurrent_policy: bool,
     pub centralized_value: bool,
+    pub duo_comms: bool,
     pub pinned_h2d: bool,
     pub fp16_rollout: bool,
     pub compact_rollout: bool,
@@ -4076,6 +4094,7 @@ pub fn run_benchmark(cfg: BenchmarkConfig<'_>) -> Result<()> {
         cfg.blocks,
         cfg.recurrent_policy,
         cfg.centralized_value,
+        cfg.duo_comms,
     );
     vs.load(cfg.checkpoint)?;
     let ae = crate::ae::AePair::load(
@@ -4317,6 +4336,15 @@ fn manifest_source_is_centralized(ckpt_path: &str) -> bool {
     false
 }
 
+fn manifest_source_has_comms(ckpt_path: &str) -> bool {
+    for schema in [1u64, 3] {
+        if let Ok(m) = read_architecture_manifest(ckpt_path, schema) {
+            return m["architecture"]["comms"]["partner_action"] == true;
+        }
+    }
+    false
+}
+
 /// Load `path` into `dest`. Tries a strict VarStore load first; on mismatch
 /// (recurrent ↔ feedforward, or local ↔ MAPPO critic) copies intersecting tensors.
 fn load_compatible_weights(
@@ -4328,13 +4356,18 @@ fn load_compatible_weights(
     blocks: i64,
     dest_recurrent: bool,
     dest_centralized: bool,
+    dest_comms: bool,
 ) -> Result<(usize, usize)> {
     match dest.load(path) {
         Ok(()) => return Ok((dest.variables().len(), 0)),
         Err(strict_err) => {
             let src_recurrent = manifest_source_is_recurrent(path);
             let src_centralized = manifest_source_is_centralized(path);
-            if src_recurrent == dest_recurrent && src_centralized == dest_centralized {
+            let src_comms = manifest_source_has_comms(path);
+            if src_recurrent == dest_recurrent
+                && src_centralized == dest_centralized
+                && src_comms == dest_comms
+            {
                 return Err(strict_err.into());
             }
             let mut src = nn::VarStore::new(Device::Cpu);
@@ -4346,6 +4379,7 @@ fn load_compatible_weights(
                 blocks,
                 src_recurrent,
                 src_centralized,
+                src_comms,
             );
             src.load(path).map_err(|load_err| {
                 anyhow!("compatible load of {path} failed after strict mismatch ({strict_err}); source load: {load_err}")
@@ -4384,6 +4418,7 @@ fn build_frozen_prior(cfg: &Config, device: Device) -> Result<Option<(nn::VarSto
         cfg.blocks,
         cfg.recurrent_policy,
         cfg.centralized_value,
+        cfg.duo_comms,
     )?;
     vs.freeze();
     println!(
@@ -7158,6 +7193,11 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 "[train] --duo with local (IPPO) critic; pass --centralized-value to enable MAPPO V"
             );
         }
+        if cfg.duo_comms {
+            println!(
+                "[train] duo comms: π residual on partner last ActionOutcome (14 floats, one-step delay)"
+            );
+        }
         if cfg.reward_config.duo_pact_success != 0.0 {
             println!(
                 "[train] duo pact-success bonus={:.3} (one-shot on first formal alliance; not donate/request)",
@@ -7320,6 +7360,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             cfg.blocks,
             cfg.recurrent_policy,
             cfg.centralized_value,
+            cfg.duo_comms,
         )?;
         println!(
             "[train] warm-started weights from {init_path} (--init; fresh TrainState / optimizer)"
@@ -9205,6 +9246,7 @@ mod persistent_actor_tests {
             num_envs: 1,
             n_agents: 1,
             centralized_value: false,
+            duo_comms: false,
             num_gpus: 1,
             stage: 0,
             curriculum_schedule: ofcore::curriculum::CurriculumSchedule::V10,
@@ -9374,6 +9416,7 @@ mod persistent_actor_tests {
             partner_players: vec![0.0; ofcore::feat::MAX_SLOTS * ofcore::feat::P_FEAT],
             partner_pmask: [0.0; ofcore::feat::MAX_SLOTS],
             partner_scalars: [0.0; ofcore::feat::N_SCALARS],
+            partner_context: [0.0; crate::recurrent::CONTEXT_FLOATS],
         }
     }
 

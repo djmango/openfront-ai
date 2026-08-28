@@ -86,16 +86,16 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 28th, 2026</h2>
-  <p>Live duo is <b>experiment L</b> on the homelab 3070: LSTM recurrent
-    policy from-scratch (MAPPO V stays; identity + legal + 95% in obs).
-    K hit fail-c after opening water (20/49, Britannia 8/13, GreatLakes
-    4/11, then last 8 timeout on BTS/GreatLakes/Onion). Keep sequential
-    spawn + eco PBRS / first City+Port + delete penalties.
-    <code>--recurrent-policy=true --persistent-actors=true
-    --bptt-chunk-len 8 --minibatches 2</code> (LSTM requires minibatches
-    ≤ envs/shard). Next unused after L: <b>M comms</b>. Do not
-    <code>--init ppo_v11</code>. Do not <code>--resume</code> K/IPPO
-    into LSTM. Do not load A–K stashes as
+  <p>Live duo is <b>experiment M</b> on the homelab 3070: partner last-action
+    comms (<code>--duo-comms</code>; π residual on the teammate's previous
+    <code>ActionOutcome</code>, 14 floats, one-step delay). L LSTM hit
+    fail-4 after three CUDA OOMs on 8GB (3/16, Caucasus 1/10, Onion 2/5).
+    Feedforward MAPPO V stays; identity + legal + 95% in obs. Keep
+    sequential spawn + eco PBRS / first City+Port + delete penalties.
+    <code>--recurrent-policy=false --minibatches 8</code> (clap defaults
+    recurrent on). Next unused after M: <b>N unnamed</b>. Do not
+    <code>--init ppo_v11</code>. Do not <code>--resume</code> L LSTM /
+    K/IPPO. Do not load A–L stashes as
     <code>--init</code>. See
     <a href="#duo-easy">Aug 26-28 writeup</a>.</p>
 </div>
@@ -104,8 +104,8 @@
 <h2 class="date" id="duo-easy">Aug 26-28, 2026 - Duo Easy: identity held compact; economy is the water hole</h2>
 <p class="session">Two-human Team-mode on a homelab RTX 3070 8GB
 (<code>--duo</code>, <code>AGENTRL1</code>+<code>AGENTRL2</code> on Humans,
-stage 0 Easy, 2 envs, rollout 8, LSTM (L), frozen AE v3.2). Loop until
-a good Easy winner. Live job: experiment L (LSTM from-scratch). Code:
+stage 0 Easy, 2 envs, rollout 8, feedforward (M), frozen AE v3.2). Loop until
+a good Easy winner. Live job: experiment M (comms from-scratch). Code:
 <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>
 stacked on timeout-loss / PBRS.</p>
 
@@ -185,7 +185,7 @@ gold still need a pact.</p>
 (<code>N_SCALARS</code> 11→12). Team win fires at 0.95 of that meter.
 <code>scalars[10]</code> stays claimed-among-players.</p>
 
-<h3 id="duo-experiments">Experiments (A-L)</h3>
+<h3 id="duo-experiments">Experiments (A-M)</h3>
 <p>Shared recipe unless noted: homelab 3070, 2 games × 2 agents, stage 0
 Easy, rollout 8, frozen AE, timeout=loss, PBRS, from scratch, no v11.
 Fail gates: (a) ≥90 min and ≥8 eps and 0 wins; (b) entropy &lt; 0.3 for
@@ -336,14 +336,31 @@ Stashes under <code>rust/checkpoints/ppo_duo/</code>.</p>
       steps).</td>
   </tr>
   <tr>
-    <td><b>L LSTM (live)</b></td>
+    <td>L LSTM</td>
     <td>Recurrent policy from-scratch. MAPPO V stays. Sequential spawn
       + eco + delete flags stay.
       <code>--recurrent-policy=true --persistent-actors=true
       --bptt-chunk-len 8 --minibatches 2</code> (LSTM requires
       minibatches ≤ envs/shard; 2 envs on 8GB). Started
       2026-08-28T15:15:52Z. No <code>--resume</code>.</td>
-    <td>Live. Fail → <b>M comms</b> (after L, not instead of L).</td>
+    <td>Fail gate (4) at ~75 min / u1069: three CUDA OOMs
+      (u273 / u621 / u1068) on 8GB. Restarts did not stop the OOM.
+      Final <b>3/16</b> WR 0.19. Caucasus 1/10, Onion 2/5,
+      BlackSea 0/1. Entropy opened O(1), trailing 0.001 (streak 89,
+      not gate b). Last 8 not all timeout. LSTM+MAPPO+2envs does not
+      fit 8GB. Stash <code>lstm-L-oom-20260828T1630Z.*</code>
+      (u1069 / 34208 steps).</td>
+  </tr>
+  <tr>
+    <td><b>M comms (live)</b></td>
+    <td>Partner last-action into π: <code>h += Linear(partner
+      ActionOutcome)</code> (14 floats, one-step delay). Feedforward
+      MAPPO V stays. Sequential spawn + eco + delete flags stay.
+      <code>--duo-comms --centralized-value=true
+      --recurrent-policy=false --minibatches 8</code>. Started
+      2026-08-28T16:43:18Z (16:42:28 died: clap defaults recurrent
+      on). No <code>--resume</code>.</td>
+    <td>Live. Fail → <b>N unnamed</b> (after M, not instead of M).</td>
   </tr>
 </table>
 <p>Water maps (Britannia, GreatLakes, BlackSea, BetweenTwoSeas) were 0
@@ -479,32 +496,40 @@ the partner too. Donate exists but is not donate-dirac.</p>
     seeing the partner was enough to open water; it did not hold Easy
     through the BTS hole. L is LSTM so the policy has memory of the
     partner across the 8-step rollout.</li>
+  <li><b>LSTM + MAPPO + 2 envs does not fit 8GB.</b> L opened 3 compact
+    wins then three CUDA OOMs (u273 / u621 / u1068) at 6.9–7.3 GiB of
+    7.66. Restarts with <code>--resume latest</code> of its own schema-3
+    weights did not stop the OOM. Sequence models multiply memory before
+    they multiply quality (same lesson as seq-8 BC). M drops the LSTM
+    and gives π an explicit one-step partner-action channel instead.</li>
 </ul>
 
 <h3 id="duo-next">What is still open</h3>
 <ul>
-  <li><b>L (live): LSTM</b> recurrent policy from-scratch. MAPPO V
-    stays. Clock starts at the last successful
-    <code>starting experiment L</code> log line
-    (2026-08-28T15:15:52Z; two earlier launches died on
-    minibatches=8 &gt; 2 envs). Same fail gates (a/b/c).</li>
-  <li><b>M comms</b>. After L, not instead of L.</li>
-  <li>Still missing from the human-would-need-this list until M: comms.
-    Spawn is not a comms problem after the first blob is on the map.</li>
+  <li><b>M (live): comms</b>. π residual on the partner's last
+    <code>ActionOutcome</code> (14 floats, simultaneous-step delay).
+    Clock starts at the last successful
+    <code>starting experiment M</code> log line
+    (2026-08-28T16:43:18Z; 16:42:28 died because clap defaults
+    <code>--recurrent-policy=true</code>). Same fail gates (a/b/c/4).
+    Feedforward; do not revive LSTM on this 8GB card.</li>
+  <li><b>N unnamed</b>. After M, not instead of M.</li>
 </ul>
 
 <h3 id="duo-ops">Ops</h3>
 <ul>
   <li>Host: homelab RTX 3070 8GB, tmux <code>duo-train</code>,
     <code>bash rust/checkpoints/ppo_duo/run.sh</code> (gitignored;
-    L is from-scratch LSTM + MAPPO:
-    <code>--recurrent-policy=true --persistent-actors=true
-    --bptt-chunk-len 8 --minibatches 2 --centralized-value=true</code>,
-    no <code>--resume</code>, plus
+    M is from-scratch feedforward MAPPO + comms:
+    <code>--duo-comms --centralized-value=true
+    --recurrent-policy=false --minibatches 8</code>,
+    no <code>--resume</code> of L/K, plus
     <code>--duo-eco-coef 0.25 --duo-city-bonus 3 --duo-port-bonus 5
     --duo-city-delete 3 --duo-port-delete 5
     --v84-boat-cancelled=-0.15</code>, no v11). Do not
-    <code>--resume</code> K feedforward weights into LSTM.</li>
+    <code>--resume</code> L LSTM weights into M. Clap defaults
+    recurrent on: always pass <code>--recurrent-policy=false</code>
+    for feedforward.</li>
   <li>Log / metrics / state:
     <code>rust/checkpoints/ppo_duo/{train.log,metrics.jsonl,latest.state.json}</code></li>
   <li>PR: <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>
@@ -1726,9 +1751,9 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
   <tr><td><code>ppo_duo</code></td><td><b>live</b> Aug 28 (homelab 3070)</td>
-    <td>Two-human Team-mode Easy. Experiment L: LSTM from-scratch
-    (MAPPO V + identity + legal + 95% + sequential spawn + eco PBRS +
-    City/Port delete). Next unused: M comms. See
+    <td>Two-human Team-mode Easy. Experiment M: comms from-scratch
+    (MAPPO V + partner last-action + identity + legal + 95% + sequential spawn + eco PBRS +
+    City/Port delete). Next unused: N unnamed. See
     <a href="#duo-easy">Aug 26-28 writeup</a>.
     <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>.</td></tr>
   <tr><td><code>ppo_v11</code></td><td><b>live</b> Jul 26 (4×A100 80GB)</td>
@@ -3971,8 +3996,8 @@ from the raw cache IS that idea, done right).</p>
 
 <h3 id="next">Open threads</h3>
 <ul>
-  <li><b>Duo Easy (active, Aug 28):</b> experiment L LSTM
-    from-scratch. Next unused: <b>M comms</b>.
+  <li><b>Duo Easy (active, Aug 28):</b> experiment M comms
+    from-scratch. Next unused: <b>N unnamed</b>.
     See <a href="#duo-easy">writeup</a>.</li>
   <li><b>V11 (active plan, Jul 23):</b> see <a href="#v11-plan">V11 plan</a>  - 
     neighbor pack, ego-split fronts, unit tokens + pointer, bigger model,
