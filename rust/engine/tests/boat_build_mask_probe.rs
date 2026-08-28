@@ -7,7 +7,7 @@
 //! 2. Build: `buildableTypes` is gold-only. Warship is listed with zero valid
 //!    spawn sites until a Port exists. City reward (+0.01) equals waste (-0.01).
 
-use ofcore::feat::{EntsData, REGION, GW_MAX};
+use ofcore::feat::{EntsData, GW_MAX, REGION};
 use ofcore::translate::IntentTranslator;
 use openfront_engine::core::schemas::unit_type as ut;
 use openfront_engine::execution::nation_structures::resolve_structure_spawn_tile;
@@ -84,7 +84,10 @@ fn setup_coastal_agent(session: &mut RlSession, terrain: &[u8]) -> (u16, IntentT
             }
         }
     }
-    assert!(gifted > 50, "failed to gift coastal territory; gifted={gifted}");
+    assert!(
+        gifted > 50,
+        "failed to gift coastal territory; gifted={gifted}"
+    );
 
     {
         let p = session.game.player_by_small_id_mut(sid).expect("agent");
@@ -123,9 +126,16 @@ fn owners_grid(session: &RlSession, hr: usize, wr: usize) -> Vec<i64> {
 #[test]
 fn boat_canboat_true_but_random_regions_mostly_fail_translate_or_engine() {
     let root = repo_root();
-    let (mut session, _head, _ents, _legal, terrain, _duo) =
-        RlSession::reset(&root, "Onion", "boat-mask-probe", 0, "Easy", Value::from(0), 1)
-            .expect("reset");
+    let (mut session, _head, _ents, _legal, terrain, _duo) = RlSession::reset(
+        &root,
+        "Onion",
+        "boat-mask-probe",
+        0,
+        "Easy",
+        Value::from(0),
+        1,
+    )
+    .expect("reset");
     let (sid, mut tr) = setup_coastal_agent(&mut session, &terrain);
 
     let legal = legality(&session.game, AGENT_CLIENT_ID);
@@ -205,9 +215,16 @@ fn boat_canboat_true_but_random_regions_mostly_fail_translate_or_engine() {
 #[test]
 fn warship_listed_buildable_with_zero_valid_sites_without_port() {
     let root = repo_root();
-    let (mut session, _head, _ents, _legal, terrain, _duo) =
-        RlSession::reset(&root, "Onion", "build-mask-probe", 0, "Easy", Value::from(0), 1)
-            .expect("reset");
+    let (mut session, _head, _ents, _legal, terrain, _duo) = RlSession::reset(
+        &root,
+        "Onion",
+        "build-mask-probe",
+        0,
+        "Easy",
+        Value::from(0),
+        1,
+    )
+    .expect("reset");
     let (sid, mut tr) = setup_coastal_agent(&mut session, &terrain);
 
     let legal = legality(&session.game, AGENT_CLIENT_ID);
@@ -254,9 +271,7 @@ fn warship_listed_buildable_with_zero_valid_sites_without_port() {
                                 p.units.iter().any(|u| {
                                     u.unit_type == ut::PORT
                                         && !u.under_construction
-                                        && session
-                                            .game
-                                            .has_water_component(u.tile as u32, comp)
+                                        && session.game.has_water_component(u.tile as u32, comp)
                                 })
                             })
                             .unwrap_or(false);
@@ -268,8 +283,7 @@ fn warship_listed_buildable_with_zero_valid_sites_without_port() {
             }
             if let Some(tile) = tr.build_tile(region, &owners, sid as i64, "City") {
                 city_translate += 1;
-                if resolve_structure_spawn_tile(&session.game, sid, "City", tile as u32).is_some()
-                {
+                if resolve_structure_spawn_tile(&session.game, sid, "City", tile as u32).is_some() {
                     city_engine_ok += 1;
                 }
             }
@@ -345,10 +359,16 @@ fn empty_boat_was_net_positive_vs_waste_while_build_was_neutral() {
         v10_timeout_closeout: 20.0,
         v10_closeout_entry: 25.0,
         duo_pact_success: 0.0,
+        duo_eco_coef: 0.0,
+        duo_first_city: 0.0,
+        duo_first_port: 0.0,
     };
     let empty_boat = ofcore::curriculum::v10_empty_action_net_reward(ofcore::feat::A_BOAT, cfg);
     let empty_build = ofcore::curriculum::v10_empty_action_net_reward(ofcore::feat::A_BUILD, cfg);
-    assert!((empty_boat - 0.005).abs() < 1e-9, "empty boat net={empty_boat}");
+    assert!(
+        (empty_boat - 0.005).abs() < 1e-9,
+        "empty boat net={empty_boat}"
+    );
     assert_eq!(empty_build, 0.0);
     // Correct gate: no emitted intent → no combat bonus → pure -W_WASTE.
     assert_eq!(
