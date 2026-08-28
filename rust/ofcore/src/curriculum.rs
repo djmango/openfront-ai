@@ -146,6 +146,11 @@ pub struct RewardConfig {
     /// Duo: one-shot when the team first owns a completed Port. Outcome-only.
     /// 0 disables.
     pub duo_first_port: f64,
+    /// Duo: per completed City lost (count drop). Outcome-only, never the
+    /// `delete_unit` action. 0 disables. Positive magnitude; callers subtract.
+    pub duo_city_delete: f64,
+    /// Duo: per completed Port lost (count drop). Outcome-only. 0 disables.
+    pub duo_port_delete: f64,
 }
 
 impl RewardConfig {
@@ -1371,6 +1376,17 @@ pub fn duo_first_structure_bonus(just_completed: bool, amount: f64) -> f64 {
     }
 }
 
+/// Penalty when the team's completed City/Port count drops. `dropped` is
+/// `prev.saturating_sub(now)`. Disabled when `amount` is 0. Never keyed off
+/// the `delete_unit` action (that would be donate-dirac with extra steps).
+pub fn duo_structure_delete_penalty(dropped: usize, amount: f64) -> f64 {
+    if dropped == 0 || amount == 0.0 {
+        0.0
+    } else {
+        -amount.abs() * dropped as f64
+    }
+}
+
 /// City / Port class indices (`feat::unit_class`).
 pub const CITY_UNIT_CLASS: usize = 0;
 pub const PORT_UNIT_CLASS: usize = 1;
@@ -1586,6 +1602,8 @@ mod tests {
             duo_eco_coef: 0.0,
             duo_first_city: 0.0,
             duo_first_port: 0.0,
+            duo_city_delete: 0.0,
+            duo_port_delete: 0.0,
         }
     }
 
@@ -2352,6 +2370,15 @@ mod tests {
         assert_eq!(duo_first_structure_bonus(true, 5.0), 5.0);
         assert_eq!(duo_first_structure_bonus(true, 0.0), 0.0);
         assert!(3.0 + 5.0 < W_WIN);
+    }
+
+    #[test]
+    fn structure_delete_penalty_is_count_drop_not_an_action_wage() {
+        assert_eq!(duo_structure_delete_penalty(0, 3.0), 0.0);
+        assert_eq!(duo_structure_delete_penalty(1, 3.0), -3.0);
+        assert_eq!(duo_structure_delete_penalty(2, 5.0), -10.0);
+        assert_eq!(duo_structure_delete_penalty(1, 0.0), 0.0);
+        assert!(3.0 < W_WIN);
     }
 
     #[test]
