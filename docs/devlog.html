@@ -86,17 +86,16 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 28th, 2026</h2>
-  <p>Live duo is <b>experiment H</b> on the homelab 3070: resume G's
-  compact-winning weights with <i>reward-only</i> economy. Ng 1999 PBRS
-  on log team gold-<i>income</i> (<code>--duo-eco-coef 0.25</code>),
-  one-shot first completed City (+3) and Port (+5), boat-cancel
-  <code>-0.15</code>. Same tensors as G (<code>N_SCALARS=12</code>). Do
-  not from-scratch. Next unused after H: <b>I sequential spawn</b>
-  (noop for the placed partner, same-continent match; not LSTM / not
-  a proposal bit). MAPPO is K. Do not
-  <code>--init ppo_v11</code>. Do not load A–G stashes as
-  <code>--init</code>. See
-  <a href="#duo-easy">Aug 26-28 writeup</a>.</p>
+  <p>Live duo is <b>experiment I</b> on the homelab 3070: sequential
+    spawn (placed partner noops; simultaneous first pick is staggered
+    so the second head sees class-2 clut). Resume H weights
+    (<code>N_SCALARS=12</code>), keep eco PBRS / first City+Port /
+    boat-cancel. H hit fail-c (last 8 timeout; 4/20, all Caucasus).
+    Next unused after I: <b>J delete-penalty</b> if they still build
+    then delete; MAPPO is K. Do not
+    <code>--init ppo_v11</code>. Do not load A–H stashes as
+    <code>--init</code>. See
+    <a href="#duo-easy">Aug 26-28 writeup</a>.</p>
 </div>
 
 
@@ -104,7 +103,7 @@
 <p class="session">Two-human Team-mode on a homelab RTX 3070 8GB
 (<code>--duo</code>, <code>AGENTRL1</code>+<code>AGENTRL2</code> on Humans,
 stage 0 Easy, 2 envs, rollout 8, feedforward, frozen AE v3.2). Loop until
-a good Easy winner. Live job: experiment H (resume G). Code:
+a good Easy winner. Live job: experiment I (resume H). Code:
 <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>
 stacked on timeout-loss / PBRS.</p>
 
@@ -268,33 +267,35 @@ Stashes under <code>rust/checkpoints/ppo_duo/</code>.</p>
       <code>ippo-G-sigkill-20260827T2350Z.*</code>).</td>
   </tr>
   <tr>
-    <td><b>H eco PBRS + first City/Port (live)</b></td>
+    <td>H eco PBRS + first City/Port</td>
     <td>Reward-only, <b>resume G weights</b> (same
       <code>N_SCALARS=12</code>, no new obs).
       <code>--duo-eco-coef 0.25</code> Ng 1999 PBRS on log team
-      gold-<i>income</i> (cities/ports raise Φ; spending gold stock
-      does not drop it the way <code>K_ECO</code> does). One-shot
-      first completed City +3 / Port +5 (outcome-only, never the
-      <code>build</code> action). <code>--v84-boat-cancelled=-0.15</code>
-      (was −0.03). Keeps IPPO + pact bonus 5. Started
-      2026-08-28T06:31:09Z, pid 3813876, resume u16296.</td>
-    <td>Live. Compact should keep paying; watch water and whether
-      completed City/Port counts rise. Fail → <b>I sequential spawn</b>.
-      If they build then delete → J. MAPPO is after that (K).</td>
+      gold-<i>income</i>. One-shot first completed City +3 / Port +5
+      (outcome-only). <code>--v84-boat-cancelled=-0.15</code>.
+      Keeps IPPO + pact bonus 5. Started 2026-08-28T06:31:09Z,
+      resume u16296.</td>
+    <td>Fail gate (c): last 8 finished eps all timeout. Final
+      <b>4/20</b>, all Caucasus (4/4). Onion 0/5, Britannia 0/6,
+      GreatLakes 0/4, BlackSea 0/1. Window WR 0.30. Entropy O(1).
+      Three City completions, all then deleted; 0 Ports. Compact
+      Caucasus still paid early; Onion collapsed vs G's 38/51.
+      Stash <code>ippo-H-fail-c-20260828T0834Z.*</code> (u18021 /
+      576672 steps).</td>
   </tr>
   <tr>
-    <td><b>I sequential spawn (next)</b></td>
+    <td><b>I sequential spawn (live)</b></td>
     <td>Same-continent matching, not a spawn-proposal messenger.
-      Keep spawn phase until both humans have a tile. Mask: spawn
-      only if <code>!has_spawned</code>; <b>noop</b> if already
-      placed (today spawn-only, so a second spawn teleports). Second
-      player sees class-2 clut (world state) and can match landmass.
-      No proposed-spawn bit, no LSTM as the first lever. Obs shape
-      unchanged so <b>resume H</b> if the run is still compact-winning.
-      Do not do this while H is live.</td>
-    <td>Queued. Goal: BetweenTwoSeas / water leftover-on-same-continent,
-      not adjacent camping (G already wins compact 150–240 tiles
-      apart).</td>
+      Spawn-phase mask: spawn only if unplaced; <b>noop</b> once
+      tiles &gt; 0. <code>execute_player_spawn</code> returns false
+      without relinquish if already spawned (no teleport).
+      <code>apply_agents</code> keeps only agent 0's spawn when
+      both are still empty, so agent 1's next obs sees class-2 clut.
+      No proposed-spawn bit, no LSTM. Resume H weights (no tensor
+      change). Keeps H eco flags. Started 2026-08-28T08:38:37Z.</td>
+    <td>Live. Watch compact (Caucasus must still pay) and
+      BetweenTwoSeas / same-continent leftover. Fail → J if they
+      still build-then-delete, else K MAPPO.</td>
   </tr>
 </table>
 <p>Water maps (Britannia, GreatLakes, BlackSea, BetweenTwoSeas) were 0
@@ -414,28 +415,27 @@ the partner too. Donate exists but is not donate-dirac.</p>
     "they cannot boat" as the diagnosis — dest is always land.</li>
   <li><b>Gold-stock eco is the wrong Φ.</b> <code>K_ECO</code> reads a
     city purchase as a strength loss. H's income PBRS + first
-    City/Port one-shots are the test of that. Do not pay
-    <code>build</code> as an action (donate-dirac with extra steps).</li>
+    City/Port one-shots did fire (3 City completions) and they
+    <i>deleted</i> every one; 0 Ports; last 8 still timeout. Do not
+    pay <code>build</code> as an action. J is the delete-penalty
+    test if I still builds-then-deletes.</li>
 </ul>
 
 <h3 id="duo-next">What is still open</h3>
 <ul>
-  <li><b>H (live):</b> will they build a city/port economy on water
-    without deleting it, and will BetweenTwoSeas leave 0? Compact
-    should keep paying — do not from-scratch G's weights. Clock starts
-    2026-08-28T06:31:09Z. Same fail gates (a/b/c).</li>
-  <li><b>I (next unused): sequential spawn / same-continent match.</b>
-    Do not end the spawn phase until both humans have a tile. Let the
-    placed partner <code>noop</code> (today the mask is spawn-only;
-    another spawn teleports). The second head sees class-2 clut and
-    can match landmass. Not a proposed-spawn channel, not LSTM, not
-    MAPPO. Resume H weights (no tensor-shape change). This is the
-    water leftover-on-same-continent lever.</li>
-  <li><b>J if they build then still delete:</b> penalize delete of
-    City/Port as an outcome, not the <code>build</code> action.</li>
+  <li><b>I (live): sequential spawn / same-continent match.</b>
+    Placed partner noops; simultaneous first pick is staggered.
+    Resume H weights. Compact must keep paying. Clock starts at the
+    <code>starting experiment I</code> log line. Same fail gates
+    (a/b/c).</li>
+  <li><b>J if they build then still delete:</b> H completed 3 Cities
+    and deleted all of them. Penalize delete of City/Port as an
+    outcome, not the <code>build</code> action. First unused after I
+    if I still deletes.</li>
   <li><b>K MAPPO</b> so V sees the partner (identity + legal + 95%
     meter now in obs; MAPPO A ran before those existed). Critic input
-    changes, so from-scratch (stash first). After I, not instead of I.</li>
+    changes, so from-scratch (stash first). After I (or J), not
+    instead of I.</li>
   <li>Still missing from the human-would-need-this list: comms. Spawn
     is not a comms problem after the first blob is on the map.</li>
 </ul>
@@ -444,7 +444,7 @@ the partner too. Donate exists but is not donate-dirac.</p>
 <ul>
   <li>Host: homelab RTX 3070 8GB, tmux <code>duo-train</code>,
     <code>bash rust/checkpoints/ppo_duo/run.sh</code> (gitignored;
-    H is <code>--resume latest</code> plus
+    I is <code>--resume latest</code> plus
     <code>--duo-eco-coef 0.25 --duo-city-bonus 3 --duo-port-bonus 5
     --v84-boat-cancelled=-0.15</code>, no v11). Do not strip resume
     to from-scratch while compact still pays.</li>
@@ -1669,9 +1669,9 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
   <tr><td><code>ppo_duo</code></td><td><b>live</b> Aug 28 (homelab 3070)</td>
-    <td>Two-human Team-mode Easy. Experiment H: resume G compact-hold
-    + eco PBRS 0.25 + first City/Port one-shots + boat-cancel −0.15.
-    G finished 101/245 (Caucasus 44/46, BTS 0/30). See
+    <td>Two-human Team-mode Easy. Experiment I: sequential spawn,
+    resume H + eco PBRS 0.25 + first City/Port + boat-cancel −0.15.
+    Next unused: J delete-penalty (if they still delete), else K MAPPO. See
     <a href="#duo-easy">Aug 26-28 writeup</a>.
     <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>.</td></tr>
   <tr><td><code>ppo_v11</code></td><td><b>live</b> Jul 26 (4×A100 80GB)</td>
@@ -3914,9 +3914,9 @@ from the raw cache IS that idea, done right).</p>
 
 <h3 id="next">Open threads</h3>
 <ul>
-  <li><b>Duo Easy (active, Aug 28):</b> experiment H resume G + eco
-    income PBRS / first City+Port. Next unused: <b>I sequential spawn</b>
-    (same-continent; noop once placed). Then J delete-penalty, K MAPPO.
+  <li><b>Duo Easy (active, Aug 28):</b> experiment I sequential spawn,
+    resume H. Next unused: <b>J delete-penalty</b> if they still
+    build-then-delete, else K MAPPO.
     See <a href="#duo-easy">writeup</a>.</li>
   <li><b>V11 (active plan, Jul 23):</b> see <a href="#v11-plan">V11 plan</a>  - 
     neighbor pack, ego-split fronts, unit tokens + pointer, bigger model,
