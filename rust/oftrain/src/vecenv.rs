@@ -21,7 +21,8 @@ use ofcore::curriculum::{
     TRANSPORT_UNIT_CLASS, V83_CLOSEOUT_SHARE_START, W_STR, W_WASTE, action_churn_penalty,
     boat_outcome_reward, classify_boat_resolution, closeout_potential, combat_outcome_reward,
     dominance_potential, duo_first_structure_bonus, duo_pact_success_bonus, duo_potential,
-    economy_potential, embargo_stop_outcome_reward, fast_win_bonus, formally_allied, land_share,
+    duo_structure_delete_penalty, economy_potential, embargo_stop_outcome_reward, fast_win_bonus,
+    formally_allied, land_share,
     normalized_strength_share, placement, placement_score, player_gold_income, sample_episode,
     stages_for_schedule, strength_delta_weight, team_completed_structures, tempo_pressure,
     terminal_reward, timeweight, v10_closeout_entry_bonus, v10_combat_action_bonus,
@@ -934,6 +935,9 @@ pub struct EnvWorker {
     city_bonus_paid: bool,
     /// Duo: already paid the first completed-Port one-shot this episode.
     port_bonus_paid: bool,
+    /// Last step's completed City/Port counts (for delete-penalty drops).
+    prev_n_cities: usize,
+    prev_n_ports: usize,
     ep_reward_components: RewardComponents,
     spawn_steps: i64,
     map_name: String,
@@ -1004,6 +1008,8 @@ impl EnvWorker {
             pact_bonus_paid: false,
             city_bonus_paid: false,
             port_bonus_paid: false,
+            prev_n_cities: 0,
+            prev_n_ports: 0,
             ep_reward_components: RewardComponents::default(),
             spawn_steps: 0,
             map_name: String::new(),
@@ -1088,6 +1094,8 @@ impl EnvWorker {
         self.pact_bonus_paid = false;
         self.city_bonus_paid = false;
         self.port_bonus_paid = false;
+        self.prev_n_cities = 0;
+        self.prev_n_ports = 0;
         self.seed_agent_trackers();
         self.spawn_steps = 0;
         self.ep_reward = 0.0;
@@ -1241,6 +1249,8 @@ impl EnvWorker {
         self.pact_bonus_paid = false;
         self.city_bonus_paid = false;
         self.port_bonus_paid = false;
+        self.prev_n_cities = 0;
+        self.prev_n_ports = 0;
         self.seed_agent_trackers();
         self.spawn_steps = 0;
         self.ep_reward = 0.0;
@@ -2047,6 +2057,18 @@ impl EnvWorker {
                 if n_ports > 0 && !self.port_bonus_paid {
                     duo_r += duo_first_structure_bonus(true, self.reward_config.duo_first_port);
                 }
+                // Outcome-only: completed City/Port count dropped. Never
+                // the `delete_unit` action.
+                let dropped_cities = self.prev_n_cities.saturating_sub(n_cities);
+                let dropped_ports = self.prev_n_ports.saturating_sub(n_ports);
+                duo_r += duo_structure_delete_penalty(
+                    dropped_cities,
+                    self.reward_config.duo_city_delete,
+                );
+                duo_r += duo_structure_delete_penalty(
+                    dropped_ports,
+                    self.reward_config.duo_port_delete,
+                );
                 components.duo = duo_r;
                 reward += duo_r;
             }
@@ -2130,6 +2152,8 @@ impl EnvWorker {
         if n > 1 && n_ports > 0 {
             self.port_bonus_paid = true;
         }
+        self.prev_n_cities = n_cities;
+        self.prev_n_ports = n_ports;
         self.ep_len += 1;
         if done {
             self.spool_finished_episode(won, timed_out);

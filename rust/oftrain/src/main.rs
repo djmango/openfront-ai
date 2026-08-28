@@ -237,6 +237,15 @@ struct Args {
     #[arg(long, default_value_t = 0.0)]
     duo_port_bonus: f64,
 
+    /// Duo: penalty per completed City lost (count drop). Outcome-only, not
+    /// the `delete_unit` action. 0 disables. Positive magnitude.
+    #[arg(long, default_value_t = 0.0)]
+    duo_city_delete: f64,
+
+    /// Duo: penalty per completed Port lost (count drop). 0 disables.
+    #[arg(long, default_value_t = 0.0)]
+    duo_port_delete: f64,
+
     /// Resume a V8.6 (v8.3 schedule) checkpoint under V10 schedule + anti-spiral reward.
     #[arg(long, default_value_t = false, requires = "resume")]
     migrate_v86_to_v10: bool,
@@ -937,6 +946,8 @@ mod curriculum_flag_tests {
         assert_eq!(defaults.duo_eco_coef, 0.0);
         assert_eq!(defaults.duo_city_bonus, 0.0);
         assert_eq!(defaults.duo_port_bonus, 0.0);
+        assert_eq!(defaults.duo_city_delete, 0.0);
+        assert_eq!(defaults.duo_port_delete, 0.0);
         assert!(defaults.kl_prior.is_none());
         assert_eq!(defaults.kl_coef, 0.05);
     }
@@ -1281,6 +1292,8 @@ fn main() -> anyhow::Result<()> {
         duo_eco_coef: args.duo_eco_coef,
         duo_first_city: args.duo_city_bonus,
         duo_first_port: args.duo_port_bonus,
+        duo_city_delete: args.duo_city_delete,
+        duo_port_delete: args.duo_port_delete,
     };
     anyhow::ensure!(
         args.duo_pact_bonus.is_finite() && args.duo_pact_bonus >= 0.0,
@@ -1297,6 +1310,14 @@ fn main() -> anyhow::Result<()> {
     anyhow::ensure!(
         args.duo_port_bonus.is_finite() && args.duo_port_bonus >= 0.0,
         "--duo-port-bonus must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.duo_city_delete.is_finite() && args.duo_city_delete >= 0.0,
+        "--duo-city-delete must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.duo_port_delete.is_finite() && args.duo_port_delete >= 0.0,
+        "--duo-port-delete must be finite and non-negative"
     );
     anyhow::ensure!(
         args.v10_timeout_closeout.is_finite() && args.v10_timeout_closeout >= 0.0,

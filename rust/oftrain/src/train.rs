@@ -7176,6 +7176,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 cfg.reward_config.duo_first_city, cfg.reward_config.duo_first_port
             );
         }
+        if cfg.reward_config.duo_city_delete != 0.0 || cfg.reward_config.duo_port_delete != 0.0 {
+            println!(
+                "[train] duo structure-delete penalties city={:.3} port={:.3} (count drop; not the delete_unit action)",
+                cfg.reward_config.duo_city_delete, cfg.reward_config.duo_port_delete
+            );
+        }
     }
     if cfg.recurrent_policy {
         anyhow::ensure!(
@@ -9253,6 +9259,8 @@ mod persistent_actor_tests {
                 duo_eco_coef: 0.0,
                 duo_first_city: 0.0,
                 duo_first_port: 0.0,
+                duo_city_delete: 0.0,
+                duo_port_delete: 0.0,
             },
             lambda: 0.95,
             clip: 0.2,
