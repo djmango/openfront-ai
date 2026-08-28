@@ -312,7 +312,22 @@ training owns the 3070). Compact wins
     Distances ~150–240 tiles on compact maps, sometimes &lt;20 on
     BlackSea. Independent IPPO heads both prefer fat interior land.
     <code>min_distance_between_players</code> is 30 only on the random
-    path.</li>
+    path. They do <i>not</i> see where the partner is proposing to
+    spawn: both intents land in one engine step from an empty map
+    (player tokens have no x,y; clut has no partner blob yet). Spawn
+    phase then <i>ends</i> as soon as both humans have a tile, so they
+    cannot iterate. The engine can re-roll (relinquish + re-place)
+    during the phase, but the mask is spawn-only and spawn steps pay
+    0 until the game starts. Once one blob is on the map, class-2 clut
+    <i>is</i> the channel — that is world state, not a message. The
+    messenger problem is only the simultaneous first pick. History
+    (LSTM) would help a proposal handshake that overshoots; matching
+    continent is simpler with sequential spawn (second player sees the
+    first, first is allowed to noop instead of teleport). Do not do
+    this in H (obs + phase-end change). Compact already wins 150–240
+    tiles apart; the water hole is leftover enemy on the same
+    landmass, which same-continent spawn would help more than
+    adjacent spawn.</li>
   <li><b>Boats:</b> destination is always land (zero ocean/OOB). Compact
     wins barely boat (Caucasus 2, Pangaea 3). Water maps do launch real
     crossings (BTS 18, Britannia 21). Failure is commit, not targeting:
@@ -402,7 +417,12 @@ the partner too. Donate exists but is not donate-dirac.</p>
     input changes, so from-scratch (stash H first). Not PBRS Φ.</li>
   <li><b>J if they build then still delete:</b> penalize delete of
     City/Port as an outcome, not the <code>build</code> action.</li>
-  <li>Still missing from the human-would-need-this list: comms.</li>
+  <li>Still missing from the human-would-need-this list: comms.
+    Spawn is not a comms problem after the first blob is on the map
+    (class-2 clut). It is a simultaneous-commit problem on tick 1.
+    Later, if water still fails after eco: sequential spawn + noop
+    for the placed partner, not a proposed-spawn bit and not LSTM
+    as the first lever.</li>
 </ul>
 
 <h3 id="duo-ops">Ops</h3>
