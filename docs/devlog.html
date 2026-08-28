@@ -91,10 +91,9 @@
   on log team gold-<i>income</i> (<code>--duo-eco-coef 0.25</code>),
   one-shot first completed City (+3) and Port (+5), boat-cancel
   <code>-0.15</code>. Same tensors as G (<code>N_SCALARS=12</code>). Do
-  not from-scratch. G held compact Easy (Caucasus 44/46, Onion 38/51,
-  Pangaea 7/9; 101/245) and opened Britannia (10/39) but
-  BetweenTwoSeas stayed 0/30 — they blob-and-attack and almost never
-  build a city/port economy. Do not
+  not from-scratch. Next unused after H: <b>I sequential spawn</b>
+  (noop for the placed partner, same-continent match; not LSTM / not
+  a proposal bit). MAPPO is K. Do not
   <code>--init ppo_v11</code>. Do not load A–G stashes as
   <code>--init</code>. See
   <a href="#duo-easy">Aug 26-28 writeup</a>.</p>
@@ -185,7 +184,7 @@ gold still need a pact.</p>
 (<code>N_SCALARS</code> 11→12). Team win fires at 0.95 of that meter.
 <code>scalars[10]</code> stays claimed-among-players.</p>
 
-<h3 id="duo-experiments">Experiments (A-H)</h3>
+<h3 id="duo-experiments">Experiments (A-I)</h3>
 <p>Shared recipe unless noted: homelab 3070, 2 games × 2 agents, stage 0
 Easy, rollout 8, frozen AE, timeout=loss, PBRS, from scratch, no v11.
 Fail gates: (a) ≥90 min and ≥8 eps and 0 wins; (b) entropy &lt; 0.3 for
@@ -280,8 +279,22 @@ Stashes under <code>rust/checkpoints/ppo_duo/</code>.</p>
       (was −0.03). Keeps IPPO + pact bonus 5. Started
       2026-08-28T06:31:09Z, pid 3813876, resume u16296.</td>
     <td>Live. Compact should keep paying; watch water and whether
-      completed City/Port counts rise. Fail → MAPPO (I). If they
-      build then delete → J (delete penalty).</td>
+      completed City/Port counts rise. Fail → <b>I sequential spawn</b>.
+      If they build then delete → J. MAPPO is after that (K).</td>
+  </tr>
+  <tr>
+    <td><b>I sequential spawn (next)</b></td>
+    <td>Same-continent matching, not a spawn-proposal messenger.
+      Keep spawn phase until both humans have a tile. Mask: spawn
+      only if <code>!has_spawned</code>; <b>noop</b> if already
+      placed (today spawn-only, so a second spawn teleports). Second
+      player sees class-2 clut (world state) and can match landmass.
+      No proposed-spawn bit, no LSTM as the first lever. Obs shape
+      unchanged so <b>resume H</b> if the run is still compact-winning.
+      Do not do this while H is live.</td>
+    <td>Queued. Goal: BetweenTwoSeas / water leftover-on-same-continent,
+      not adjacent camping (G already wins compact 150–240 tiles
+      apart).</td>
   </tr>
 </table>
 <p>Water maps (Britannia, GreatLakes, BlackSea, BetweenTwoSeas) were 0
@@ -323,11 +336,11 @@ training owns the 3070). Compact wins
     messenger problem is only the simultaneous first pick. History
     (LSTM) would help a proposal handshake that overshoots; matching
     continent is simpler with sequential spawn (second player sees the
-    first, first is allowed to noop instead of teleport). Do not do
-    this in H (obs + phase-end change). Compact already wins 150–240
-    tiles apart; the water hole is leftover enemy on the same
-    landmass, which same-continent spawn would help more than
-    adjacent spawn.</li>
+    first, first is allowed to noop instead of teleport). That is
+    <a href="#duo-next">experiment I</a>, next after H — not H itself
+    (H is reward-only). Compact already wins 150–240 tiles apart; the
+    water hole is leftover enemy on the same landmass, which
+    same-continent spawn would help more than adjacent spawn.</li>
   <li><b>Boats:</b> destination is always land (zero ocean/OOB). Compact
     wins barely boat (Caucasus 2, Pangaea 3). Water maps do launch real
     crossings (BTS 18, Britannia 21). Failure is commit, not targeting:
@@ -411,18 +424,20 @@ the partner too. Donate exists but is not donate-dirac.</p>
     without deleting it, and will BetweenTwoSeas leave 0? Compact
     should keep paying — do not from-scratch G's weights. Clock starts
     2026-08-28T06:31:09Z. Same fail gates (a/b/c).</li>
-  <li><b>I if H fail-c or eco still zero</b> after ~2h with compact
-    still holding: MAPPO so V sees the partner (identity + legal +
-    95% meter now in obs; MAPPO A ran before those existed). Critic
-    input changes, so from-scratch (stash H first). Not PBRS Φ.</li>
+  <li><b>I (next unused): sequential spawn / same-continent match.</b>
+    Do not end the spawn phase until both humans have a tile. Let the
+    placed partner <code>noop</code> (today the mask is spawn-only;
+    another spawn teleports). The second head sees class-2 clut and
+    can match landmass. Not a proposed-spawn channel, not LSTM, not
+    MAPPO. Resume H weights (no tensor-shape change). This is the
+    water leftover-on-same-continent lever.</li>
   <li><b>J if they build then still delete:</b> penalize delete of
     City/Port as an outcome, not the <code>build</code> action.</li>
-  <li>Still missing from the human-would-need-this list: comms.
-    Spawn is not a comms problem after the first blob is on the map
-    (class-2 clut). It is a simultaneous-commit problem on tick 1.
-    Later, if water still fails after eco: sequential spawn + noop
-    for the placed partner, not a proposed-spawn bit and not LSTM
-    as the first lever.</li>
+  <li><b>K MAPPO</b> so V sees the partner (identity + legal + 95%
+    meter now in obs; MAPPO A ran before those existed). Critic input
+    changes, so from-scratch (stash first). After I, not instead of I.</li>
+  <li>Still missing from the human-would-need-this list: comms. Spawn
+    is not a comms problem after the first blob is on the map.</li>
 </ul>
 
 <h3 id="duo-ops">Ops</h3>
@@ -3900,10 +3915,9 @@ from the raw cache IS that idea, done right).</p>
 <h3 id="next">Open threads</h3>
 <ul>
   <li><b>Duo Easy (active, Aug 28):</b> experiment H resume G + eco
-    income PBRS / first City+Port. G held compact (101/245) and died
-    on BetweenTwoSeas (0/30) with almost no buildings. Next unused
-    after an H fail gate: MAPPO so V sees the partner. See
-    <a href="#duo-easy">writeup</a>.</li>
+    income PBRS / first City+Port. Next unused: <b>I sequential spawn</b>
+    (same-continent; noop once placed). Then J delete-penalty, K MAPPO.
+    See <a href="#duo-easy">writeup</a>.</li>
   <li><b>V11 (active plan, Jul 23):</b> see <a href="#v11-plan">V11 plan</a>  - 
     neighbor pack, ego-split fronts, unit tokens + pointer, bigger model,
     full LSTM replacing GRU, BC unfreeze on the new schema. V10 killed.</li>
