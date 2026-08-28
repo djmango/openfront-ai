@@ -706,6 +706,12 @@ struct Args {
     /// Pass `--centralized-value=false` to keep an IPPO (local) critic.
     #[arg(long, num_args = 0..=1, default_missing_value = "true", action = clap::ArgAction::Set)]
     centralized_value: Option<bool>,
+
+    /// Duo: π sees the partner's last action (14-float ActionOutcome from
+    /// the previous simultaneous step). Clut/world state is not a message;
+    /// this is. Off by default so feedforward checkpoints stay loadable.
+    #[arg(long, default_value_t = false)]
+    duo_comms: bool,
 }
 
 fn parse_device(s: &str) -> Device {
@@ -1451,6 +1457,7 @@ fn main() -> anyhow::Result<()> {
             reward_config,
             recurrent_policy: args.recurrent_policy,
             centralized_value: args.centralized_value.unwrap_or(args.duo),
+            duo_comms: args.duo_comms,
             engine: watch_engine,
             stochastic: args.watch_stochastic,
         });
@@ -1478,6 +1485,7 @@ fn main() -> anyhow::Result<()> {
             blocks: args.blocks,
             recurrent_policy: args.recurrent_policy,
             centralized_value: args.centralized_value.unwrap_or(args.duo),
+            duo_comms: args.duo_comms,
             pinned_h2d: args.pinned_h2d,
             fp16_rollout: args.fp16_rollout,
             compact_rollout: args.compact_rollout,
@@ -1499,6 +1507,7 @@ fn main() -> anyhow::Result<()> {
         num_envs: initial_num_envs,
         n_agents: if args.duo { 2 } else { 1 },
         centralized_value: args.centralized_value.unwrap_or(args.duo),
+        duo_comms: args.duo_comms,
         num_gpus: args.num_gpus,
         stage: args.stage,
         curriculum_schedule,
