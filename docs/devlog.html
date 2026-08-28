@@ -90,10 +90,10 @@
   <code>scalars[11]</code> is team tiles / map land (the 95% team-win
   meter). Keeps F legal-diplo bits and E teammate clut. IPPO + pact
   bonus 5, timeout = loss, PBRS, no v11. Compact Easy is holding
-  (Caucasus 36/38, Onion 34/41, Pangaea 4/6; 86/198, window WR 0.53).
-  Britannia 10/38; GreatLakes 1, BlackSea 1, BetweenTwoSeas 0/20.
-  Recovered from a 7-timeout water tail with an Onion win before
-  gate (c). Resumed twice after SIGKILL (u5376, u10423) — do not
+  (Caucasus 36/38, Onion 36/46, Pangaea 4/6; 88/210). Window WR 0.28
+  because BetweenTwoSeas filled the last 40 (still 0/26). Britannia
+  10/39; GreatLakes 1, BlackSea 1. Last 8 has two Onion wins (not
+  gate c). Resumed twice after SIGKILL (u5376, u10423) — do not
   from-scratch this winning run. Do not
   <code>--init ppo_v11</code>. Do not load A/B/D/E/F stashes. See
   <a href="#duo-easy">Aug 26-28 writeup</a>.</p>
@@ -255,12 +255,12 @@ Stashes under <code>rust/checkpoints/ppo_duo/</code>.</p>
       stays claimed-among-players. <code>N_SCALARS</code> 11→12.
       Keeps E+F. From scratch, then <b>resumed</b> after SIGKILL
       at u5376 and again at u10423 (same weights).</td>
-    <td>Loop 2026-08-28T03:08Z: u12754, 198 eps / <b>86 wins</b>,
-      window WR 0.53, entropy 0.90 O(1), gpu_mem% 85. Compact holding
-      (Caucasus 36/38, Onion 34/41, Pangaea 4/6). Recovered from a
-      7-timeout water tail with an Onion win (not gate c). Britannia
-      10/38, GreatLakes 1, BlackSea 1, BetweenTwoSeas 0/20. Keep G.
-      Crash snapshots
+    <td>Loop 2026-08-28T04:00Z: u13729, 210 eps / <b>88 wins</b>,
+      window WR 0.28, entropy 0.87 O(1), gpu_mem% 85. Compact holding
+      (Caucasus 36/38, Onion 36/46, Pangaea 4/6). Last 8 has two
+      Onion wins (not gate c). Window WR dropped because
+      BetweenTwoSeas is 0/26. Britannia 10/39, GreatLakes 1, BlackSea
+      1. Keep G. Crash snapshots
       <code>ippo-G-sigkill-20260827T1734Z.*</code> /
       <code>ippo-G-sigkill-20260827T2350Z.*</code>.</td>
   </tr>
@@ -1557,9 +1557,9 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
   <tr><td><code>ppo_duo</code></td><td><b>live</b> Aug 27 (homelab 3070)</td>
     <td>Two-human Team-mode Easy. Experiment G (team/map-land 95% win
     scalar + F legal diplo bits + E teammate clut, IPPO + pact bonus
-    5). Compact holding (86/198, window WR 0.53). Britannia 10/38;
-    BetweenTwoSeas still 0. Resumed after SIGKILL at u5376 and
-    u10423. See
+    5). Compact holding (88/210). Window WR 0.28 on BTS-heavy
+    sample (BetweenTwoSeas still 0/26). Resumed after SIGKILL at
+    u5376 and u10423. See
     <a href="#duo-easy">Aug 26-27 writeup</a>.
     <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>.</td></tr>
   <tr><td><code>ppo_v11</code></td><td><b>live</b> Jul 26 (4×A100 80GB)</td>
@@ -3803,9 +3803,9 @@ from the raw cache IS that idea, done right).</p>
 <h3 id="next">Open threads</h3>
 <ul>
   <li><b>Duo Easy (active, Aug 28):</b> experiment G holding compact
-    Easy (86/198, window WR 0.53). Recovered from a water tail with
-    Onion before gate (c). BetweenTwoSeas still 0. Next unused after
-    a fail gate: MAPPO so V sees the partner. See
+    Easy (88/210). Window WR 0.28 on a BetweenTwoSeas-heavy sample
+    (still 0/26). Last 8 has wins. Next unused after a fail gate:
+    MAPPO so V sees the partner. See
     <a href="#duo-easy">writeup</a>.</li>
   <li><b>V11 (active plan, Jul 23):</b> see <a href="#v11-plan">V11 plan</a>  - 
     neighbor pack, ego-split fronts, unit tokens + pointer, bigger model,
