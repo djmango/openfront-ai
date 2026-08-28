@@ -87,17 +87,12 @@
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 28th, 2026</h2>
   <p>Live duo is <b>experiment M</b> on the homelab 3070: partner last-action
-    comms (<code>--duo-comms</code>; π residual on the teammate's previous
-    <code>ActionOutcome</code>, 14 floats, one-step delay). L LSTM hit
-    fail-4 after three CUDA OOMs on 8GB (3/16, Caucasus 1/10, Onion 2/5).
-    Feedforward MAPPO V stays; identity + legal + 95% in obs. Keep
-    sequential spawn + eco PBRS / first City+Port + delete penalties.
-    <code>--recurrent-policy=false --minibatches 8</code> (clap defaults
-    recurrent on). Next unused after M: <b>N unnamed</b>. Do not
-    <code>--init ppo_v11</code>. Do not <code>--resume</code> L LSTM /
-    K/IPPO. Do not load A–L stashes as
-    <code>--init</code>. See
-    <a href="#duo-easy">Aug 26-28 writeup</a>.</p>
+    comms (<code>--duo-comms</code>). Snapshot ~u3893 / <b>5/54</b>
+    (WR 0.09): Onion <b>4/14</b>, Caucasus 1/4, water still 0. Compact
+    is repeating; last-8 water tail is mixed term+timeout (not gate c).
+    L LSTM OOMed 3× on 8GB. Next unused: <b>N unnamed</b>. Do not
+    <code>--init ppo_v11</code> or A–L stashes. See
+    <a href="#duo-easy">scoreboard</a>.</p>
 </div>
 
 
@@ -191,6 +186,161 @@ Easy, rollout 8, frozen AE, timeout=loss, PBRS, from scratch, no v11.
 Fail gates: (a) ≥90 min and ≥8 eps and 0 wins; (b) entropy &lt; 0.3 for
 200 consecutive updates; (c) last 8 finished eps all timeout losses.
 Stashes under <code>rust/checkpoints/ppo_duo/</code>.</p>
+
+<p id="duo-scoreboard"><b>Scoreboard</b> (compact = Caucasus / Onion / Pangaea;
+water = Britannia / GreatLakes / BlackSea / BetweenTwoSeas). M is live;
+numbers as of 2026-08-28T21:29Z.</p>
+<table>
+  <tr>
+    <th>run</th>
+    <th>lever</th>
+    <th>W/L</th>
+    <th>WR</th>
+    <th>compact</th>
+    <th>water</th>
+    <th>ended</th>
+  </tr>
+  <tr>
+    <td>A MAPPO</td>
+    <td>Centralized V, from scratch</td>
+    <td>8/23</td>
+    <td>0.35</td>
+    <td>Caucasus 4, Onion 4</td>
+    <td>0</td>
+    <td>gate c</td>
+  </tr>
+  <tr>
+    <td>B IPPO</td>
+    <td>Local V, same MDP as A</td>
+    <td>3/16</td>
+    <td>0.19</td>
+    <td>Caucasus 1, Onion 2</td>
+    <td>0</td>
+    <td>gate c</td>
+  </tr>
+  <tr>
+    <td>C 3 envs</td>
+    <td>VRAM</td>
+    <td>—</td>
+    <td>—</td>
+    <td>—</td>
+    <td>—</td>
+    <td>skipped (8GB)</td>
+  </tr>
+  <tr>
+    <td>D1 pact bonus</td>
+    <td><code>--duo-pact-bonus 5</code></td>
+    <td>13/59</td>
+    <td>0.22</td>
+    <td>incl. 2 Pangaea</td>
+    <td>0</td>
+    <td>OOM ~7.5GB</td>
+  </tr>
+  <tr>
+    <td>D2 pact restart</td>
+    <td>resume D after OOM</td>
+    <td>7/47</td>
+    <td>0.15</td>
+    <td>Caucasus 3/4, Onion 4/12</td>
+    <td>0</td>
+    <td>gate c</td>
+  </tr>
+  <tr>
+    <td>listed-E Φ log</td>
+    <td>check mid-episode Φ</td>
+    <td>—</td>
+    <td>—</td>
+    <td>—</td>
+    <td>—</td>
+    <td>skipped (timeouts had land)</td>
+  </tr>
+  <tr>
+    <td>E teammate obs</td>
+    <td>class-2 clut + is_teammate</td>
+    <td>5/17</td>
+    <td>0.29</td>
+    <td>opened 5-0 (Onion 2, Caucasus 3)</td>
+    <td>0</td>
+    <td>gate c</td>
+  </tr>
+  <tr>
+    <td>F legal diplo bits</td>
+    <td>donate / alliance_request in P_FEAT</td>
+    <td>7/22</td>
+    <td>0.32</td>
+    <td>opened 6-0 + late Onion</td>
+    <td>0</td>
+    <td>gate c</td>
+  </tr>
+  <tr>
+    <td>G 95% meter</td>
+    <td><code>scalars[11]</code> team/map-land</td>
+    <td><b>101/245</b></td>
+    <td>0.41</td>
+    <td>Caucasus 44/46, Onion 38/51, Pangaea 7/9</td>
+    <td>Britannia 10/39, GL 1/39, BlackSea 1/31, BTS <b>0/30</b></td>
+    <td>SIGKILL u16296 (not gate c)</td>
+  </tr>
+  <tr>
+    <td>H eco PBRS</td>
+    <td>income Φ + first City/Port; resume G</td>
+    <td>4/20</td>
+    <td>0.20</td>
+    <td>Caucasus 4/4; Onion 0/5</td>
+    <td>0</td>
+    <td>gate c</td>
+  </tr>
+  <tr>
+    <td>I sequential spawn</td>
+    <td>second head sees partner; resume H</td>
+    <td>4/15</td>
+    <td>0.27</td>
+    <td>Caucasus 4/4; Onion 0/3</td>
+    <td>0</td>
+    <td>gate c</td>
+  </tr>
+  <tr>
+    <td>J delete penalty</td>
+    <td>City/Port count-drop −3/−5; resume I</td>
+    <td>4/14</td>
+    <td>0.29</td>
+    <td>Caucasus 4/4; Onion 0/3</td>
+    <td>0</td>
+    <td>gate c</td>
+  </tr>
+  <tr>
+    <td>K MAPPO + identity</td>
+    <td>from-scratch MAPPO after E/F/G obs</td>
+    <td><b>20/49</b></td>
+    <td>0.41</td>
+    <td>Onion 7/12, Caucasus 1/4</td>
+    <td>Britannia <b>8/13</b>, GL <b>4/11</b>, BTS 0/8</td>
+    <td>gate c</td>
+  </tr>
+  <tr>
+    <td>L LSTM</td>
+    <td>recurrent π + MAPPO V, from scratch</td>
+    <td>3/16</td>
+    <td>0.19</td>
+    <td>Caucasus 1/10, Onion 2/5</td>
+    <td>BlackSea 0/1</td>
+    <td>3× CUDA OOM (gate 4)</td>
+  </tr>
+  <tr>
+    <td><b>M comms (live)</b></td>
+    <td>π residual on partner last action</td>
+    <td><b>5/54</b></td>
+    <td>0.09</td>
+    <td>Onion <b>4/14</b>, Caucasus 1/4</td>
+    <td>Britannia 0/13, GL 0/12, BTS 0/10, BlackSea 0/1</td>
+    <td>live (~u3893 / 4.4h). Compact repeating; water 0</td>
+  </tr>
+</table>
+<p>Best compact hold is still <b>G</b> (101/245). Best water open is still
+<b>K</b> (Britannia 8/13, GreatLakes 4/11) then a timeout tail. Nothing
+has held BetweenTwoSeas (G 0/30, K 0/8, M 0/10). H–J resumed G and
+lost Onion. M is the G-shaped compact-open without K's water yet.</p>
+<p>Notes for each run (what changed, stash names):</p>
 <table>
   <tr><th>run</th><th>what changed</th><th>result</th></tr>
   <tr>
@@ -360,18 +510,25 @@ Stashes under <code>rust/checkpoints/ppo_duo/</code>.</p>
       --recurrent-policy=false --minibatches 8</code>. Started
       2026-08-28T16:43:18Z (16:42:28 died: clap defaults recurrent
       on). No <code>--resume</code>.</td>
-    <td>Live. Fail → <b>N unnamed</b> (after M, not instead of M).</td>
+    <td>Live at ~u3893 / 124576 steps / ~4.4h. <b>5/54</b> WR 0.09.
+      Onion <b>4/14</b> (repeating 19:40–20:27), Caucasus 1/4. Water
+      still 0 (Britannia 0/13, GreatLakes 0/12, BetweenTwoSeas 0/10,
+      BlackSea 0/1). Last 8 mixed water term+timeout (not gate c).
+      Entropy O(1). Fail → <b>N unnamed</b> (after M, not instead of
+      M).</td>
   </tr>
 </table>
 <p>Water maps (Britannia, GreatLakes, BlackSea, BetweenTwoSeas) were 0
-wins across A, B, D2, E, and F. Compact maps were where every Easy win
-happened except D1's two Pangaea flukes. G is the first run in this
-loop to <i>hold</i> compact (Onion/Caucasus/Pangaea keep paying) and
-to open water: Britannia repeating (10/39), first GreatLakes, first
-BlackSea. BetweenTwoSeas finished <b>0/30</b>. E's Caucasus win at
-0.09 individual land (term ~255) is the team-95% rule showing up: the
-partner can carry, which is exactly what the old clut called an
-enemy.</p>
+wins across A, B, D2, E, F, H–J, L, and so far M. Compact maps were
+where every Easy win happened except D1's two Pangaea flukes. G is
+the first run in this loop to <i>hold</i> compact
+(Onion/Caucasus/Pangaea keep paying) and to open water: Britannia
+repeating (10/39), first GreatLakes, first BlackSea. BetweenTwoSeas
+finished <b>0/30</b>. K opened water without G's compact hold
+(Britannia 8/13, GreatLakes 4/11) then gate-c. M is repeating Onion
+(4/14) without water yet. E's Caucasus win at 0.09 individual land
+(term ~255) is the team-95% rule showing up: the partner can carry,
+which is exactly what the old clut called an enemy.</p>
 
 <h3 id="duo-g-games">G games: when it is not winning, and why economy did not learn</h3>
 <p>Occupancy clips of native GameRecords (not full OpenFront WebGL —
@@ -508,11 +665,9 @@ the partner too. Donate exists but is not donate-dirac.</p>
 <ul>
   <li><b>M (live): comms</b>. π residual on the partner's last
     <code>ActionOutcome</code> (14 floats, simultaneous-step delay).
-    Clock starts at the last successful
-    <code>starting experiment M</code> log line
-    (2026-08-28T16:43:18Z; 16:42:28 died because clap defaults
-    <code>--recurrent-policy=true</code>). Same fail gates (a/b/c/4).
-    Feedforward; do not revive LSTM on this 8GB card.</li>
+    Clock starts at 2026-08-28T16:43:18Z. Snapshot ~u3893 /
+    <b>5/54</b>: Onion 4/14 repeating, water 0. Same fail gates
+    (a/b/c/4). Feedforward; do not revive LSTM on this 8GB card.</li>
   <li><b>N unnamed</b>. After M, not instead of M.</li>
 </ul>
 
@@ -1751,10 +1906,11 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
   <tr><td><code>ppo_duo</code></td><td><b>live</b> Aug 28 (homelab 3070)</td>
-    <td>Two-human Team-mode Easy. Experiment M: comms from-scratch
-    (MAPPO V + partner last-action + identity + legal + 95% + sequential spawn + eco PBRS +
-    City/Port delete). Next unused: N unnamed. See
-    <a href="#duo-easy">Aug 26-28 writeup</a>.
+    <td>Two-human Team-mode Easy. Experiment M live ~u3893 /
+    <b>5/54</b> (Onion 4/14, water 0). Comms from-scratch
+    (MAPPO V + partner last-action + identity + legal + 95% +
+    sequential spawn + eco PBRS + City/Port delete). Scoreboard:
+    <a href="#duo-scoreboard">A–M</a>.
     <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>.</td></tr>
   <tr><td><code>ppo_v11</code></td><td><b>live</b> Jul 26 (4×A100 80GB)</td>
     <td>Util stack + AE v3.2 no-static + recurrent LSTM. V10 Easy ramp:
@@ -3997,8 +4153,9 @@ from the raw cache IS that idea, done right).</p>
 <h3 id="next">Open threads</h3>
 <ul>
   <li><b>Duo Easy (active, Aug 28):</b> experiment M comms
-    from-scratch. Next unused: <b>N unnamed</b>.
-    See <a href="#duo-easy">writeup</a>.</li>
+    from-scratch, live <b>5/54</b> (Onion repeating, water 0).
+    Next unused: <b>N unnamed</b>.
+    See <a href="#duo-scoreboard">scoreboard</a>.</li>
   <li><b>V11 (active plan, Jul 23):</b> see <a href="#v11-plan">V11 plan</a>  - 
     neighbor pack, ego-split fronts, unit tokens + pointer, bigger model,
     full LSTM replacing GRU, BC unfreeze on the new schema. V10 killed.</li>
