@@ -11,8 +11,10 @@ pub const N_STATIC: usize = 6;
 /// V11: ego-split attack fronts add 4 planes (own/ally/enemy × src/retreat).
 pub const N_TRANSIENT: usize = 57;
 /// V11 neighbor pack: +7 columns (border geometry + relation continuum).
-pub const P_FEAT: usize = 28;
-pub const N_SCALARS: usize = 11;
+/// Duo F: +2 (legal donate-to-this-slot, legal alliance_request-to-this-slot).
+pub const P_FEAT: usize = 30;
+/// Duo G: +1 team tiles / map land (95% team-win meter).
+pub const N_SCALARS: usize = 12;
 pub const N_ACTIONS: usize = 21;
 pub const N_BUILD: usize = 7;
 pub const N_NUKE: usize = 5;
@@ -293,6 +295,8 @@ pub struct PlayerE {
     pub gold_income: f64,
     pub doomsday: bool,
     pub doomsday_ticks: f64,
+    /// Engine team name (`Humans`, `Bot`, …). `None` / empty = FFA or omitted.
+    pub team: Option<String>,
 }
 
 fn relation_list(v: &Value) -> Vec<(usize, f64)> {
@@ -367,6 +371,10 @@ pub fn parse_ents(v: &Value) -> EntsData {
                         gold_income: num(&p["goldIncome"]),
                         doomsday: p["doomsday"].as_bool().unwrap_or(false),
                         doomsday_ticks: num(&p["doomsdayTicks"]),
+                        team: p["team"]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string()),
                     })
                 })
                 .collect()
@@ -588,7 +596,22 @@ pub fn make_lut(player_ids: &[usize]) -> Vec<u8> {
     lut
 }
 
-/// Slot → ego class LUT (0 neutral, 1 own, 2 ally, 3 enemy). Shared by
+fn me_team_name(ents: &EntsData, me: i64) -> Option<&str> {
+    ents.players
+        .iter()
+        .find(|p| p.id as i64 == me)
+        .and_then(|p| p.team.as_deref())
+        .filter(|t| !t.is_empty())
+}
+
+fn player_is_teammate(p: &PlayerE, me: i64, me_team: Option<&str>) -> bool {
+    let Some(team) = me_team else {
+        return false;
+    };
+    p.id as i64 != me && p.team.as_deref() == Some(team)
+}
+
+/// Slot → ego class LUT (0 neutral, 1 own, 2 ally/teammate, 3 enemy). Shared by
 /// [`featurize`] and the fused tile+ego prepare path so both see identical
 /// classing without a second full-map scan.
 pub fn make_clut(lut: &[u8], me: i64, ents: &EntsData) -> [u8; MAX_SLOTS] {
@@ -596,10 +619,19 @@ pub fn make_clut(lut: &[u8], me: i64, ents: &EntsData) -> [u8; MAX_SLOTS] {
     let me_slot: usize = if me >= 0 { slot_of(me as usize) } else { 0 };
     let mut clut = [3u8; MAX_SLOTS];
     clut[0] = 0;
-    // Formal `AllianceE` rows only. Team-mode teammates are already
-    // friendly (no-attack / donate) without a pact, but they stay
-    // class-3 here until they `alliance_request` — that pact is also
-    // what unlocks ally train gold (35k vs 25k team rate).
+    // Same-team humans are friendly in the engine without a pact. Paint them
+    // class-2 so the map/local/unit ego channels match "don't attack this
+    // blob". Formal `AllianceE` still sets class-2 for pacted non-teammates
+    // and is what `P_FEAT[5] is_ally` / ally train gold key off.
+    let me_team = me_team_name(ents, me);
+    for p in &ents.players {
+        if player_is_teammate(p, me, me_team) {
+            let slot = slot_of(p.id);
+            if slot > 0 && slot < MAX_SLOTS {
+                clut[slot] = 2;
+            }
+        }
+    }
     for a in &ents.alliances {
         let (sa, sb) = (slot_of(a.0), slot_of(a.1));
         if sa == me_slot && sb < MAX_SLOTS {
@@ -806,6 +838,29 @@ pub fn featurize(
         neighbor_border_stats(owners, land, mag, me_slot, gh, gw);
 
     let me_player = ents.players.iter().find(|p| p.id as i64 == me);
+    let me_team = me_team_name(ents, me);
+    let mut team_tiles = 0.0f64;
+    let mut claimed_tiles = 0.0f64;
+    for p in &ents.players {
+        claimed_tiles += p.tiles.max(0.0);
+        if p.id as i64 == me || player_is_teammate(p, me, me_team) {
+            team_tiles += p.tiles.max(0.0);
+        }
+    }
+    let team_claimed_share = if claimed_tiles > 0.0 {
+        (team_tiles / claimed_tiles).clamp(0.0, 1.0) as f32
+    } else {
+        0.0
+    };
+    let map_land = land.iter().filter(|&&v| v == 1).count() as f64;
+    // Team win is 95% of map land (not of claimed-among-players). F's
+    // timeouts often sat at 0.2-0.4 individual land with no "how close
+    // to 95% combined" channel on the trunk.
+    let team_map_share = if map_land > 0.0 {
+        (team_tiles / map_land).clamp(0.0, 1.0) as f32
+    } else {
+        0.0
+    };
     let mut players = vec![0.0f32; MAX_SLOTS * P_FEAT];
     let mut pmask = [0.0f32; MAX_SLOTS];
     let mut n_alive = 0usize;
@@ -853,7 +908,9 @@ pub fn featurize(
         f[16] = marked.contains(&slot) as u8 as f32;
         f[17] = log_norm(p.troop_income);
         f[18] = log_norm(p.gold_income);
-        f[19] = p.doomsday as u8 as f32;
+        // Was unused doomsday (always 0 in RL). Duo needs an explicit
+        // teammate bit: class-2 on the map is also used for pacted bots.
+        f[19] = player_is_teammate(p, me, me_team) as u8 as f32;
         f[20] = (p.doomsday_ticks / 3000.0).clamp(0.0, 1.0) as f32;
         // V11 neighbor pack
         f[21] = log_norm(blen as f64);
@@ -875,6 +932,12 @@ pub fn featurize(
         f[25] = relation;
         f[26] = targeting_me as u8 as f32;
         f[27] = (blen > 0) as u8 as f32;
+        // Legal diplo targets live in `legal_ptarget` but the trunk never
+        // reads that mask. Put donate / alliance_request legality on the
+        // player token so π sees *who* it is allowed to pact or send gold to.
+        f[28] = (legal.donatable_gold.contains(&p.id)
+            || legal.donatable_troops.contains(&p.id)) as u8 as f32;
+        f[29] = legal.alliance_requestable.contains(&p.id) as u8 as f32;
     }
 
     let (units, umask, unit_uids, legal_utarget) =
@@ -901,14 +964,25 @@ pub fn featurize(
         me_slot as f32 / MAX_SLOTS as f32,
         log_norm(me_troop_income.unwrap_or(0.0)),
         log_norm(me_gold_income.unwrap_or(0.0)),
-        ents.doomsday_enabled as u8 as f32,
+        // Was unused doomsday_enabled (always 0). Fraction of *claimed*
+        // tiles owned by ego+teammates.
+        team_claimed_share,
+        // Team win meter: ego+teammate tiles / map land. Win fires at 0.95.
+        team_map_share,
     ];
 
     // Action masks (rl/obs.py._masks).
     let mut act = [0.0f32; N_ACTIONS];
     let mut ptarget = vec![0.0f32; N_ACTIONS * MAX_SLOTS];
     if spawn_phase {
-        act[A_SPAWN as usize] = 1.0;
+        // Sequential spawn: the placed partner noops instead of
+        // re-emitting spawn (which used to teleport). Unspawned heads
+        // stay spawn-only so they cannot stall into `spawn_randomly`.
+        if alive {
+            act[A_NOOP as usize] = 1.0;
+        } else {
+            act[A_SPAWN as usize] = 1.0;
+        }
     } else {
         act[A_NOOP as usize] = 1.0;
     }
@@ -1364,7 +1438,10 @@ mod clut_tests {
         let lut = make_lut(&[1, 2]);
         let clut = make_clut(&lut, 1, &ents);
         let partner = lut[2] as usize;
-        assert_eq!(clut[partner], 3, "no pact → class-3 enemy, not class-2 ally");
+        assert_eq!(
+            clut[partner], 3,
+            "no team field and no pact → class-3 enemy, not class-2 ally"
+        );
 
         let allied = parse_ents(&json!({
             "players": [
@@ -1378,5 +1455,162 @@ mod clut_tests {
         let clut = make_clut(&lut, 1, &allied);
         assert_eq!(clut[partner], 2, "formal pact → class-2 ally");
         assert_eq!(clut[lut[1] as usize], 1);
+    }
+
+    #[test]
+    fn teammates_with_team_field_are_class2_without_a_pact() {
+        let ents = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true, "team": "Humans"},
+                {"id": 2, "pid": "AGENTRL2", "alive": true, "team": "Humans"},
+                {"id": 3, "pid": "bot", "alive": true, "team": "Bot"}
+            ],
+            "units": [],
+            "attacks": [],
+            "alliances": []
+        }));
+        let lut = make_lut(&[1, 2, 3]);
+        let clut = make_clut(&lut, 1, &ents);
+        assert_eq!(clut[lut[2] as usize], 2, "same Humans team → class-2");
+        assert_eq!(clut[lut[3] as usize], 3, "Bot team stays class-3");
+        assert_eq!(clut[lut[1] as usize], 1);
+    }
+
+    #[test]
+    fn player_tokens_carry_legal_donate_and_alliance_request() {
+        let ents = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true, "team": "Humans"},
+                {"id": 2, "pid": "AGENTRL2", "alive": true, "team": "Humans"},
+                {"id": 3, "pid": "bot", "alive": true, "team": "Bot"}
+            ],
+            "units": [],
+            "attacks": [],
+            "alliances": []
+        }));
+        let lut = make_lut(&[1, 2, 3]);
+        let mut legal = Legal::default();
+        legal.present = true;
+        legal.donatable_gold = vec![2];
+        legal.alliance_requestable = vec![2, 3];
+        let n = REGION * REGION;
+        let feat = featurize(
+            1,
+            1,
+            &lut,
+            &vec![1u8; n],
+            &vec![0u8; n],
+            &vec![0u8; n],
+            100,
+            false,
+            true,
+            1,
+            &ents,
+            &legal,
+        );
+        let partner = lut[2] as usize;
+        let bot = lut[3] as usize;
+        let me = lut[1] as usize;
+        assert_eq!(
+            feat.players[partner * P_FEAT + 28],
+            1.0,
+            "donate legal to teammate"
+        );
+        assert_eq!(
+            feat.players[partner * P_FEAT + 29],
+            1.0,
+            "request legal to teammate"
+        );
+        assert_eq!(feat.players[bot * P_FEAT + 28], 0.0, "cannot donate to bot");
+        assert_eq!(
+            feat.players[bot * P_FEAT + 29],
+            1.0,
+            "request still legal to bots"
+        );
+        assert_eq!(feat.players[me * P_FEAT + 28], 0.0);
+        assert_eq!(feat.players[me * P_FEAT + 29], 0.0);
+        assert_eq!(
+            feat.legal_ptarget[A_DONATE_GOLD as usize * MAX_SLOTS + partner],
+            1.0
+        );
+    }
+
+    #[test]
+    fn scalars_include_team_map_land_share_toward_95pct_win() {
+        let ents = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true, "team": "Humans", "tiles": 30},
+                {"id": 2, "pid": "AGENTRL2", "alive": true, "team": "Humans", "tiles": 15},
+                {"id": 3, "pid": "bot", "alive": true, "team": "Bot", "tiles": 5}
+            ],
+            "units": [],
+            "attacks": [],
+            "alliances": []
+        }));
+        let lut = make_lut(&[1, 2, 3]);
+        let n = REGION * REGION; // 64 land tiles
+        let feat = featurize(
+            1,
+            1,
+            &lut,
+            &vec![1u8; n],
+            &vec![0u8; n],
+            &vec![0u8; n],
+            100,
+            false,
+            true,
+            1,
+            &ents,
+            &Legal::default(),
+        );
+        // claimed-among-players: 45/50. map-land win meter: 45/64.
+        assert!((feat.scalars[10] - 45.0 / 50.0).abs() < 1e-5);
+        assert!((feat.scalars[11] - 45.0 / 64.0).abs() < 1e-5);
+        assert!(
+            feat.scalars[11] < 0.95,
+            "45/64 is short of the 95% team win line"
+        );
+    }
+
+    fn spawn_mask_feat(spawn_phase: bool, alive: bool) -> Feat {
+        let ents = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true, "team": "Humans", "tiles": 0}
+            ],
+            "units": [],
+            "attacks": [],
+            "alliances": []
+        }));
+        let lut = make_lut(&[1]);
+        let n = REGION * REGION;
+        featurize(
+            1,
+            1,
+            &lut,
+            &vec![1u8; n],
+            &vec![0u8; n],
+            &vec![0u8; n],
+            1,
+            spawn_phase,
+            alive,
+            1,
+            &ents,
+            &Legal::default(),
+        )
+    }
+
+    #[test]
+    fn spawn_phase_masks_spawn_until_placed_then_noop() {
+        let unspawned = spawn_mask_feat(true, false);
+        assert_eq!(unspawned.legal_actions[A_SPAWN as usize], 1.0);
+        assert_eq!(unspawned.legal_actions[A_NOOP as usize], 0.0);
+
+        let placed = spawn_mask_feat(true, true);
+        assert_eq!(placed.legal_actions[A_SPAWN as usize], 0.0);
+        assert_eq!(placed.legal_actions[A_NOOP as usize], 1.0);
+
+        let playing = spawn_mask_feat(false, true);
+        assert_eq!(playing.legal_actions[A_NOOP as usize], 1.0);
+        assert_eq!(playing.legal_actions[A_SPAWN as usize], 0.0);
     }
 }

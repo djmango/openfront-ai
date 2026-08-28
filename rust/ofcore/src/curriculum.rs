@@ -132,6 +132,25 @@ pub struct RewardConfig {
     pub v10_timeout_closeout: f64,
     /// V10: one-shot bonus the first time land share crosses closeout entry (45%).
     pub v10_closeout_entry: f64,
+    /// Duo: one-shot bonus the first time the two humans form a *formal*
+    /// alliance this episode. Outcome-only (pact formed), never the
+    /// `alliance_request` / `donate_*` actions. 0 disables.
+    pub duo_pact_success: f64,
+    /// Duo: Ng 1999 PBRS coefficient on log team gold-*income* (not gold
+    /// stock). Cities/ports raise income; spending gold on a city does not
+    /// drop this the way `K_ECO` gold-share does. 0 disables.
+    pub duo_eco_coef: f64,
+    /// Duo: one-shot when the team first owns a completed City. Outcome-only
+    /// (structure exists), never the `build` action. 0 disables.
+    pub duo_first_city: f64,
+    /// Duo: one-shot when the team first owns a completed Port. Outcome-only.
+    /// 0 disables.
+    pub duo_first_port: f64,
+    /// Duo: per completed City lost (count drop). Outcome-only, never the
+    /// `delete_unit` action. 0 disables. Positive magnitude; callers subtract.
+    pub duo_city_delete: f64,
+    /// Duo: per completed Port lost (count drop). Outcome-only. 0 disables.
+    pub duo_port_delete: f64,
 }
 
 impl RewardConfig {
@@ -1333,6 +1352,82 @@ pub fn v10_closeout_entry_bonus(just_entered: bool, config: RewardConfig) -> f64
     }
 }
 
+/// One-shot when teammates first form a formal pact this episode.
+/// Disabled when `duo_pact_success` is 0. Callers must pass `just_formed`
+/// only on the transition into `formally_allied`, never on the
+/// `alliance_request` action itself and never per-tick while allied.
+pub fn duo_pact_success_bonus(just_formed: bool, config: RewardConfig) -> f64 {
+    if just_formed && config.duo_pact_success != 0.0 {
+        config.duo_pact_success.abs()
+    } else {
+        0.0
+    }
+}
+
+/// One-shot when the team first owns a completed City or Port.
+/// Disabled when `amount` is 0. Callers must pass `just_completed` only on
+/// the 0→1 transition, never the `build` action and never per-tick while
+/// the structure stands (that would be a camping wage).
+pub fn duo_first_structure_bonus(just_completed: bool, amount: f64) -> f64 {
+    if just_completed && amount != 0.0 {
+        amount.abs()
+    } else {
+        0.0
+    }
+}
+
+/// Penalty when the team's completed City/Port count drops. `dropped` is
+/// `prev.saturating_sub(now)`. Disabled when `amount` is 0. Never keyed off
+/// the `delete_unit` action (that would be donate-dirac with extra steps).
+pub fn duo_structure_delete_penalty(dropped: usize, amount: f64) -> f64 {
+    if dropped == 0 || amount == 0.0 {
+        0.0
+    } else {
+        -amount.abs() * dropped as f64
+    }
+}
+
+/// City / Port class indices (`feat::unit_class`).
+pub const CITY_UNIT_CLASS: usize = 0;
+pub const PORT_UNIT_CLASS: usize = 1;
+/// Normalize log-income Φ into ~[0, 1] before `duo_eco_coef`. Ally train
+/// gold is 35k; a couple of cities sit in this ballpark.
+pub const ECO_INCOME_REF: f64 = 100_000.0;
+
+/// Team gold-*income* potential. Buildings raise income; cashing gold into
+/// a city does not drop this (unlike `K_ECO` which is gold *stock* share).
+/// Ng 1999: apply via [`DominanceShaper`], absorbing Φ=0 at done.
+pub fn economy_potential(income_a: f64, income_b: f64, coef: f64) -> f64 {
+    if coef == 0.0 {
+        return 0.0;
+    }
+    let a = finite_or_zero(income_a).max(0.0);
+    let b = finite_or_zero(income_b).max(0.0);
+    let norm = (1.0 + ECO_INCOME_REF).ln();
+    coef * ((1.0 + a).ln() + (1.0 + b).ln()) * 0.5 / norm
+}
+
+pub fn player_gold_income(ents: &crate::feat::EntsData, pid: usize) -> f64 {
+    ents.players
+        .iter()
+        .find(|p| p.id == pid)
+        .map(|p| finite_or_zero(p.gold_income).max(0.0))
+        .unwrap_or(0.0)
+}
+
+/// Completed (not-under-construction) structures of `class` owned by any
+/// of `owners` (agent small-ids).
+pub fn team_completed_structures(
+    ents: &crate::feat::EntsData,
+    owners: &[usize],
+    class: usize,
+) -> usize {
+    ents.units
+        .iter()
+        .filter(|u| u.class == class && !u.constructing && owners.iter().any(|&o| o == u.owner))
+        .count()
+}
+
 fn v10_diplo_panic_armed(land_share: f64, tick: i64, max_ticks: i64, config: RewardConfig) -> bool {
     let share_armed = finite_or_zero(land_share) >= config.v10_diplo_panic_share;
     let tick_frac = tick as f64 / max_ticks.max(1) as f64;
@@ -1420,9 +1515,9 @@ pub fn formally_allied(ents: &crate::feat::EntsData, a: usize, b: usize) -> bool
     if a == b {
         return false;
     }
-    ents.alliances.iter().any(|al| {
-        (al.0 == a && al.1 == b) || (al.0 == b && al.1 == a)
-    })
+    ents.alliances
+        .iter()
+        .any(|al| (al.0 == a && al.1 == b) || (al.0 == b && al.1 == a))
 }
 
 /// Min + geo-mean welfare minus inequity. A *state potential* Φ term, not
@@ -1503,6 +1598,12 @@ mod tests {
             v10_combat_action: 0.0,
             v10_timeout_closeout: 0.0,
             v10_closeout_entry: 0.0,
+            duo_pact_success: 0.0,
+            duo_eco_coef: 0.0,
+            duo_first_city: 0.0,
+            duo_first_port: 0.0,
+            duo_city_delete: 0.0,
+            duo_port_delete: 0.0,
         }
     }
 
@@ -2087,7 +2188,10 @@ mod tests {
         let Nations::Exact(imp_end_n) = v10[V10_STAGE_COUNT - 1].nations else {
             panic!("expected Exact nations");
         };
-        assert!(imp_end_n > imp_start_n, "Impossible band should ramp nations");
+        assert!(
+            imp_end_n > imp_start_n,
+            "Impossible band should ramp nations"
+        );
         assert!(CurriculumSchedule::V10.uses_v83_closeout());
         assert_eq!(V10_ENV_TARGETS.len(), v10.len());
         for (index, (stage, &(bots, nations))) in
@@ -2128,18 +2232,15 @@ mod tests {
         assert_eq!(v10[0].win_at, V10_RAMP_WIN_AT);
         assert_eq!(v10[V10_NATION_INTRO_STAGE - 1].win_at, V10_RAMP_WIN_AT);
         assert_eq!(v10[V10_NATION_INTRO_STAGE].win_at, V10_ONE_NATION_WIN_AT);
-        assert_eq!(
-            v10[V10_MULTI_NATION_STAGE].win_at,
-            V10_NATION_RAMP_WIN_AT
-        );
+        assert_eq!(v10[V10_MULTI_NATION_STAGE].win_at, V10_NATION_RAMP_WIN_AT);
         assert_eq!(v10[V10_EASY_RAMP_LEN - 1].win_at, V10_NATION_RAMP_WIN_AT);
         assert!(v10[V10_CLOSEOUT_STAGE].win_at < V10_NATION_RAMP_WIN_AT);
         assert!(v10[V10_CLOSEOUT_STAGE].win_at > V10_WIN_AT_END - 1e-9);
         assert!((v10[V10_STAGE_COUNT - 1].win_at - V10_WIN_AT_END).abs() < 1e-9);
-        assert!((stage_learning_rate(2.5e-4, 0.85, 28, V10_STAGE_LR_FLOOR)
-            - V10_STAGE_LR_FLOOR)
-            .abs()
-            < 1e-15);
+        assert!(
+            (stage_learning_rate(2.5e-4, 0.85, 28, V10_STAGE_LR_FLOOR) - V10_STAGE_LR_FLOOR).abs()
+                < 1e-15
+        );
         assert_eq!(
             imply_stage_from_learning_rate(2.5e-4 * 0.85_f64.powi(28), 2.5e-4, 0.85),
             Some(28)
@@ -2231,6 +2332,82 @@ mod tests {
         let even = duo_welfare_reward(0.4, 0.4);
         assert!(even > 0.0);
         assert!(even < 0.02);
+    }
+
+    #[test]
+    fn duo_pact_success_is_oneshot_outcome_not_an_action_wage() {
+        let mut cfg = config();
+        cfg.duo_pact_success = 5.0;
+        assert_eq!(duo_pact_success_bonus(false, cfg), 0.0);
+        assert_eq!(duo_pact_success_bonus(true, cfg), 5.0);
+        cfg.duo_pact_success = 0.0;
+        assert_eq!(duo_pact_success_bonus(true, cfg), 0.0);
+        // Still smaller than a win so timeout-while-allied stays a loss.
+        assert!(5.0 < W_WIN);
+    }
+
+    #[test]
+    fn economy_potential_is_income_not_gold_stock_and_stays_below_a_win() {
+        assert_eq!(economy_potential(50_000.0, 50_000.0, 0.0), 0.0);
+        let before = economy_potential(25_000.0, 25_000.0, 0.25);
+        let after_city = economy_potential(40_000.0, 25_000.0, 0.25);
+        assert!(after_city > before);
+        // Spending gold stock is invisible to this Φ (that's the K_ECO hole).
+        assert_eq!(
+            economy_potential(25_000.0, 25_000.0, 0.25),
+            economy_potential(25_000.0, 25_000.0, 0.25)
+        );
+        let saturated = economy_potential(ECO_INCOME_REF, ECO_INCOME_REF, 0.25);
+        assert!(saturated > 0.0);
+        assert!(saturated < 1.0);
+        assert!(saturated < W_WIN);
+    }
+
+    #[test]
+    fn first_city_and_port_are_oneshot_outcomes_not_build_wages() {
+        assert_eq!(duo_first_structure_bonus(false, 3.0), 0.0);
+        assert_eq!(duo_first_structure_bonus(true, 3.0), 3.0);
+        assert_eq!(duo_first_structure_bonus(true, 5.0), 5.0);
+        assert_eq!(duo_first_structure_bonus(true, 0.0), 0.0);
+        assert!(3.0 + 5.0 < W_WIN);
+    }
+
+    #[test]
+    fn structure_delete_penalty_is_count_drop_not_an_action_wage() {
+        assert_eq!(duo_structure_delete_penalty(0, 3.0), 0.0);
+        assert_eq!(duo_structure_delete_penalty(1, 3.0), -3.0);
+        assert_eq!(duo_structure_delete_penalty(2, 5.0), -10.0);
+        assert_eq!(duo_structure_delete_penalty(1, 0.0), 0.0);
+        assert!(3.0 < W_WIN);
+    }
+
+    #[test]
+    fn team_completed_structures_ignores_construction_and_foreign_owners() {
+        let ents = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true, "goldIncome": 25000},
+                {"id": 2, "pid": "AGENTRL2", "alive": true, "goldIncome": 25000},
+                {"id": 3, "pid": "BOT", "alive": true}
+            ],
+            "units": [
+                {"type": "City", "owner": 1, "constructing": false, "x": 0, "y": 0},
+                {"type": "City", "owner": 1, "constructing": true, "x": 1, "y": 0},
+                {"type": "Port", "owner": 2, "constructing": false, "x": 2, "y": 0},
+                {"type": "City", "owner": 3, "constructing": false, "x": 3, "y": 0}
+            ],
+            "attacks": [],
+            "alliances": []
+        }));
+        let owners = [1usize, 2];
+        assert_eq!(
+            team_completed_structures(&ents, &owners, CITY_UNIT_CLASS),
+            1
+        );
+        assert_eq!(
+            team_completed_structures(&ents, &owners, PORT_UNIT_CLASS),
+            1
+        );
+        assert_eq!(player_gold_income(&ents, 1), 25000.0);
     }
 
     #[test]

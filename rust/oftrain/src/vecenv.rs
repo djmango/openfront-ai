@@ -4,7 +4,7 @@
 //! Python side there's no GIL, so no multiprocessing/pickle framing is
 //! needed to keep JSON decode + featurization off the main thread.
 
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use serde_json::Value;
@@ -15,14 +15,16 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ofcore::curriculum::{
-    self, ActionChurnTracker, ActionPairCounts, ActionTarget, BoatOutcomeCounts, ChosenAction,
-    CombatOutcome, CurriculumSchedule, DominanceShaper, InverseActionPair, RewardComponents,
-    RewardConfig, Stage, TRANSPORT_UNIT_CLASS, V83_CLOSEOUT_SHARE_START, W_STR, W_WASTE,
-    DUO_SOLO_SCALE, action_churn_penalty,
+    self, ActionChurnTracker, ActionPairCounts, ActionTarget, BoatOutcomeCounts, CITY_UNIT_CLASS,
+    ChosenAction, CombatOutcome, CurriculumSchedule, DUO_SOLO_SCALE, DominanceShaper,
+    InverseActionPair, PORT_UNIT_CLASS, RewardComponents, RewardConfig, Stage,
+    TRANSPORT_UNIT_CLASS, V83_CLOSEOUT_SHARE_START, W_STR, W_WASTE, action_churn_penalty,
     boat_outcome_reward, classify_boat_resolution, closeout_potential, combat_outcome_reward,
-    dominance_potential, duo_potential, embargo_stop_outcome_reward,
-    fast_win_bonus, formally_allied, land_share, normalized_strength_share, placement,
-    placement_score, sample_episode, stages_for_schedule, strength_delta_weight, tempo_pressure,
+    dominance_potential, duo_first_structure_bonus, duo_pact_success_bonus, duo_potential,
+    duo_structure_delete_penalty, economy_potential, embargo_stop_outcome_reward, fast_win_bonus,
+    formally_allied, land_share,
+    normalized_strength_share, placement, placement_score, player_gold_income, sample_episode,
+    stages_for_schedule, strength_delta_weight, team_completed_structures, tempo_pressure,
     terminal_reward, timeweight, v10_closeout_entry_bonus, v10_combat_action_bonus,
     v10_diplo_panic_penalty, v10_survival_reward, v10_timeout_after_closeout_penalty,
     v83_action_churn_penalty,
@@ -39,8 +41,21 @@ use crate::engine::{self, EngineKind, GameEngine, RawObs};
 
 /// Per-env layout of [`CompactHostBuffers::extras`] (all f32):
 /// `players | units | umask | legal_utarget | local | legal_ptarget |
-/// pmask | scalars | legal_actions | legal_build | legal_nuke`.
+/// pmask | scalars | legal_actions | legal_build | legal_nuke |
+/// partner_players | partner_pmask | partner_scalars | partner_context`.
+/// Partner tensors are appended so the local prefix stays aligned with
+/// older compact payloads; they are zeros when `n_agents==1`.
+/// `partner_context` is the sibling's previous [`ActionOutcome`] (14 floats).
 pub(crate) fn compact_extras_per_env() -> usize {
+    compact_extras_core_n()
+        + compact_extras_players_n()
+        + feat::MAX_SLOTS
+        + feat::N_SCALARS
+        + crate::recurrent::CONTEXT_FLOATS
+}
+
+/// Bytes before the MAPPO partner block (local actor extras).
+pub(crate) fn compact_extras_core_n() -> usize {
     compact_extras_players_n()
         + compact_extras_units_n()
         + compact_extras_umask_n()
@@ -339,6 +354,26 @@ impl CompactGrid {
             + feat::N_ACTIONS
             + feat::N_BUILD;
         &self.extras_slice()[start..start + feat::N_NUKE]
+    }
+    pub fn partner_players(&self) -> &[f32] {
+        let start = compact_extras_core_n();
+        let n = compact_extras_players_n();
+        &self.extras_slice()[start..start + n]
+    }
+    pub fn partner_pmask(&self) -> &[f32] {
+        let start = compact_extras_core_n() + compact_extras_players_n();
+        &self.extras_slice()[start..start + feat::MAX_SLOTS]
+    }
+    pub fn partner_scalars(&self) -> &[f32] {
+        let start = compact_extras_core_n() + compact_extras_players_n() + feat::MAX_SLOTS;
+        &self.extras_slice()[start..start + feat::N_SCALARS]
+    }
+    pub fn partner_context(&self) -> &[f32] {
+        let start = compact_extras_core_n()
+            + compact_extras_players_n()
+            + feat::MAX_SLOTS
+            + feat::N_SCALARS;
+        &self.extras_slice()[start..start + crate::recurrent::CONTEXT_FLOATS]
     }
 
     #[cfg(test)]
@@ -646,6 +681,13 @@ pub struct PreparedObs {
     pub legal_build: [f32; feat::N_BUILD],
     pub legal_nuke: [f32; feat::N_NUKE],
     pub local: Vec<f32>, // (5, LOCAL, LOCAL)
+    /// Teammate compact extras for the MAPPO critic. Zeros when `n_agents==1`.
+    pub partner_players: Vec<f32>, // (MAX_SLOTS, P_FEAT)
+    pub partner_pmask: [f32; feat::MAX_SLOTS],
+    pub partner_scalars: [f32; feat::N_SCALARS],
+    /// Partner's previous action (simultaneous-step delay). Zeros when
+    /// `n_agents==1` or before the first action of an episode.
+    pub partner_context: [f32; crate::recurrent::CONTEXT_FLOATS],
 }
 
 impl PreparedObs {
@@ -675,6 +717,10 @@ impl PreparedObs {
         self.legal_actions = [0.0; feat::N_ACTIONS];
         self.legal_build = [0.0; feat::N_BUILD];
         self.legal_nuke = [0.0; feat::N_NUKE];
+        self.partner_players = Vec::new();
+        self.partner_pmask = [0.0; feat::MAX_SLOTS];
+        self.partner_scalars = [0.0; feat::N_SCALARS];
+        self.partner_context = [0.0; crate::recurrent::CONTEXT_FLOATS];
     }
 }
 
@@ -805,7 +851,9 @@ fn churn_action(
 ) -> ChosenAction {
     let target = match choice.action {
         A_ATTACK | A_EMBARGO | A_EMBARGO_STOP | A_ALLIANCE_REQUEST | A_BREAK_ALLIANCE
-        | A_DONATE_GOLD | A_DONATE_TROOPS if !intents.is_empty() => {
+        | A_DONATE_GOLD | A_DONATE_TROOPS
+            if !intents.is_empty() =>
+        {
             selected_player_id(choice, lut, ents).map(ActionTarget::Player)
         }
         A_RETREAT => intents
@@ -844,14 +892,11 @@ fn humans_won(winner: &Value, n_agents: usize) -> bool {
         return false;
     };
     match a.first().and_then(|v| v.as_str()) {
-        Some("player") => {
-            n_agents == 1 && a.get(1).and_then(|v| v.as_str()) == Some("AGENTRL1")
-        }
+        Some("player") => n_agents == 1 && a.get(1).and_then(|v| v.as_str()) == Some("AGENTRL1"),
         Some("team") => {
             a.get(1).and_then(|v| v.as_str()) == Some("Humans")
-                || a.iter().any(|v| {
-                    matches!(v.as_str(), Some("AGENTRL1") | Some("AGENTRL2"))
-                })
+                || a.iter()
+                    .any(|v| matches!(v.as_str(), Some("AGENTRL1") | Some("AGENTRL2")))
         }
         _ => false,
     }
@@ -889,6 +934,7 @@ pub struct EnvWorker {
     dominance_shaper: [DominanceShaper; 2],
     closeout_shaper: [DominanceShaper; 2],
     duo_shaper: [DominanceShaper; 2],
+    eco_shaper: [DominanceShaper; 2],
     closeout_tracker: [CloseoutTracker; 2],
     action_churn_tracker: [ActionChurnTracker; 2],
     boat_tracker: [PendingBoatTracker; 2],
@@ -899,6 +945,15 @@ pub struct EnvWorker {
     /// True if this human ever had `alive` this episode. Spawn-miss is a
     /// death/loss, not a placement gift (ghost humans with 0 tiles).
     ever_alive: [bool; 2],
+    /// Duo: already paid the one-shot formal-pact bonus this episode.
+    pact_bonus_paid: bool,
+    /// Duo: already paid the first completed-City one-shot this episode.
+    city_bonus_paid: bool,
+    /// Duo: already paid the first completed-Port one-shot this episode.
+    port_bonus_paid: bool,
+    /// Last step's completed City/Port counts (for delete-penalty drops).
+    prev_n_cities: usize,
+    prev_n_ports: usize,
     ep_reward_components: RewardComponents,
     spawn_steps: i64,
     map_name: String,
@@ -954,11 +1009,9 @@ impl EnvWorker {
             dominance_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             closeout_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             duo_shaper: [DominanceShaper::default(), DominanceShaper::default()],
+            eco_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             closeout_tracker: [CloseoutTracker::default(), CloseoutTracker::default()],
-            action_churn_tracker: [
-                ActionChurnTracker::default(),
-                ActionChurnTracker::default(),
-            ],
+            action_churn_tracker: [ActionChurnTracker::default(), ActionChurnTracker::default()],
             boat_tracker: [PendingBoatTracker::default(), PendingBoatTracker::default()],
             combat_tracker: [
                 CombatStickyTracker::default(),
@@ -968,6 +1021,11 @@ impl EnvWorker {
             last_commitment: [None, None],
             was_alive: [false; 2],
             ever_alive: [false; 2],
+            pact_bonus_paid: false,
+            city_bonus_paid: false,
+            port_bonus_paid: false,
+            prev_n_cities: 0,
+            prev_n_ports: 0,
             ep_reward_components: RewardComponents::default(),
             spawn_steps: 0,
             map_name: String::new(),
@@ -1049,6 +1107,11 @@ impl EnvWorker {
         self.lut.clear();
         self.set_obs(obs);
         self.ever_alive = [false; 2];
+        self.pact_bonus_paid = false;
+        self.city_bonus_paid = false;
+        self.port_bonus_paid = false;
+        self.prev_n_cities = 0;
+        self.prev_n_ports = 0;
         self.seed_agent_trackers();
         self.spawn_steps = 0;
         self.ep_reward = 0.0;
@@ -1199,6 +1262,11 @@ impl EnvWorker {
         self.lut.clear();
         self.set_obs(obs);
         self.ever_alive = [false; 2];
+        self.pact_bonus_paid = false;
+        self.city_bonus_paid = false;
+        self.port_bonus_paid = false;
+        self.prev_n_cities = 0;
+        self.prev_n_ports = 0;
         self.seed_agent_trackers();
         self.spawn_steps = 0;
         self.ep_reward = 0.0;
@@ -1297,6 +1365,11 @@ impl EnvWorker {
                     self.agent_me(1).max(0) as usize,
                 );
                 self.duo_shaper[i].reset(duo_potential(s_me, s_partner, both, allied));
+                self.eco_shaper[i].reset(economy_potential(
+                    player_gold_income(self.ents(), me),
+                    player_gold_income(self.ents(), partner),
+                    self.reward_config.duo_eco_coef,
+                ));
             }
             self.closeout_tracker[i].reset(share, tick);
             self.action_churn_tracker[i].reset();
@@ -1342,7 +1415,35 @@ impl EnvWorker {
     }
 
     pub fn prepare_all(&mut self) -> Vec<PreparedObs> {
-        (0..self.n_agents).map(|i| self.prepare_agent(i)).collect()
+        let mut outs: Vec<PreparedObs> =
+            (0..self.n_agents).map(|i| self.prepare_agent(i)).collect();
+        Self::fill_partner_features(&mut outs);
+        outs
+    }
+
+    /// Copy sibling player tokens / scalars into each row's partner extras.
+    /// Must run at prepare time: shape-bucketing and minibatch shuffle later
+    /// break adjacent-row pairing, so V cannot gather `i^1` on the GPU.
+    pub(crate) fn fill_partner_features(outs: &mut [PreparedObs]) {
+        if outs.len() != 2 {
+            return;
+        }
+        let a_players = outs[0].players.clone();
+        let a_pmask = outs[0].pmask;
+        let a_scalars = outs[0].scalars;
+        let a_context = outs[0].prev_action.as_floats();
+        let b_players = outs[1].players.clone();
+        let b_pmask = outs[1].pmask;
+        let b_scalars = outs[1].scalars;
+        let b_context = outs[1].prev_action.as_floats();
+        outs[0].partner_players = b_players;
+        outs[0].partner_pmask = b_pmask;
+        outs[0].partner_scalars = b_scalars;
+        outs[0].partner_context = b_context;
+        outs[1].partner_players = a_players;
+        outs[1].partner_pmask = a_pmask;
+        outs[1].partner_scalars = a_scalars;
+        outs[1].partner_context = a_context;
     }
 
     fn prepare_agent(&mut self, agent_i: usize) -> PreparedObs {
@@ -1353,11 +1454,7 @@ impl EnvWorker {
         let clut = feat::make_clut(&lut, me, self.ents());
         let (hr, wr) = (self.hr, self.wr);
         let (gh, gw) = (hr / REGION, wr / REGION);
-        let width = self
-            .obs
-            .as_ref()
-            .unwrap()
-            .head["width"]
+        let width = self.obs.as_ref().unwrap().head["width"]
             .as_u64()
             .unwrap_or(wr as u64) as usize;
         let tiles = self.obs.as_ref().unwrap().prepare_tiles_with_ego(
@@ -1444,6 +1541,10 @@ impl EnvWorker {
             legal_build: f.legal_build,
             legal_nuke: f.legal_nuke,
             local,
+            partner_players: vec![0.0; feat::MAX_SLOTS * feat::P_FEAT],
+            partner_pmask: [0.0; feat::MAX_SLOTS],
+            partner_scalars: [0.0; feat::N_SCALARS],
+            partner_context: [0.0; crate::recurrent::CONTEXT_FLOATS],
         };
         if profile {
             static PREPARE_N: AtomicU64 = AtomicU64::new(0);
@@ -1492,15 +1593,13 @@ impl EnvWorker {
         Ok(scored
             .into_iter()
             .zip(prepared)
-            .map(
-                |((reward, done, info, outcome), next_obs)| EnvTransition {
-                    next_obs,
-                    reward,
-                    done,
-                    info,
-                    outcome,
-                },
-            )
+            .map(|((reward, done, info, outcome), next_obs)| EnvTransition {
+                next_obs,
+                reward,
+                done,
+                info,
+                outcome,
+            })
             .collect())
     }
 
@@ -1557,14 +1656,18 @@ impl EnvWorker {
             );
             for intent in &mut intents {
                 if let Some(map) = intent.as_object_mut() {
-                    map.insert(
-                        "clientID".into(),
-                        Value::String(AGENT_CLIENT_IDS[i].into()),
-                    );
+                    map.insert("clientID".into(), Value::String(AGENT_CLIENT_IDS[i].into()));
                 }
             }
             all_intents.extend(intents.iter().cloned());
             agent_intents.push(intents);
+        }
+        if let Some(staggered) = stagger_simultaneous_duo_spawn(
+            self.obs.as_ref().unwrap().spawn_phase(),
+            &(0..n).map(|i| !self.agent_alive(i)).collect::<Vec<_>>(),
+            &agent_intents,
+        ) {
+            all_intents = staggered;
         }
         let pre_attack_ids: HashSet<String> = ents.attacks.iter().map(|a| a.aid.clone()).collect();
 
@@ -1586,9 +1689,7 @@ impl EnvWorker {
             if still_spawning {
                 self.ep_len += 1;
                 let dummy = ActionOutcome::default();
-                return Ok((0..n)
-                    .map(|_| (0.0, false, None, dummy.clone()))
-                    .collect());
+                return Ok((0..n).map(|_| (0.0, false, None, dummy.clone())).collect());
             }
             // Spawn never completed: fall through so never-alive is a death.
         }
@@ -1630,16 +1731,35 @@ impl EnvWorker {
             0.0
         };
         let both_alive = n > 1 && alives[0] && alives[1];
-        let allied = n > 1
-            && formally_allied(
-                self.ents(),
-                self.agent_me(0).max(0) as usize,
-                partner_me,
-            );
+        let allied =
+            n > 1 && formally_allied(self.ents(), self.agent_me(0).max(0) as usize, partner_me);
         let next_duo_phi = if n > 1 {
             duo_potential(s0, s1, both_alive, allied)
         } else {
             0.0
+        };
+        let next_eco_phi = if n > 1 {
+            economy_potential(
+                player_gold_income(self.ents(), self.agent_me(0).max(0) as usize),
+                player_gold_income(self.ents(), partner_me),
+                self.reward_config.duo_eco_coef,
+            )
+        } else {
+            0.0
+        };
+        let team_owners: [usize; 2] = [
+            self.agent_me(0).max(0) as usize,
+            if n > 1 { partner_me } else { usize::MAX },
+        ];
+        let n_cities = if n > 1 {
+            team_completed_structures(self.ents(), &team_owners, CITY_UNIT_CLASS)
+        } else {
+            0
+        };
+        let n_ports = if n > 1 {
+            team_completed_structures(self.ents(), &team_owners, PORT_UNIT_CLASS)
+        } else {
+            0
         };
         let solo_scale = if n > 1 { DUO_SOLO_SCALE } else { 1.0 };
 
@@ -1654,14 +1774,8 @@ impl EnvWorker {
             } else {
                 Vec::new()
             };
-            let chosen_action = churn_action(
-                choice,
-                &lut,
-                &ents,
-                intents,
-                &boats_before[i],
-                &boats_after,
-            );
+            let chosen_action =
+                churn_action(choice, &lut, &ents, intents, &boats_before[i], &boats_after);
             let mut embargo_outcome_r = 0.0;
             if choice.action == A_EMBARGO_STOP {
                 if let Some(ActionTarget::Player(target)) = chosen_action.target {
@@ -1760,8 +1874,7 @@ impl EnvWorker {
             let tiles = ofcore::translate::my_tiles(self.ents(), obs_me);
             let share = land_share(tiles, self.land_total);
             let closeout_just_entered =
-                self.closeout_tracker[i]
-                    .observe(share, obs_tick, inverse_pair.is_some());
+                self.closeout_tracker[i].observe(share, obs_tick, inverse_pair.is_some());
             let me = obs_me.max(0) as usize;
             let mine = composite.get(&me).copied().unwrap_or(0.0);
             let tw = timeweight(obs_tick);
@@ -1922,11 +2035,9 @@ impl EnvWorker {
                         || matches!(chosen_action.target, Some(_))
                 }
             };
-            components.combat_action = v10_combat_action_bonus(
-                choice.action,
-                has_action_target,
-                self.reward_config,
-            ) * solo_scale;
+            components.combat_action =
+                v10_combat_action_bonus(choice.action, has_action_target, self.reward_config)
+                    * solo_scale;
             if components.combat_action != 0.0 {
                 reward += components.combat_action;
             }
@@ -1949,7 +2060,36 @@ impl EnvWorker {
                 // donate actions, and do not pay alive/allied as a wage
                 // (those were the timeout farm). Absorbing terminal Φ=0.
                 let phi = if done { 0.0 } else { next_duo_phi };
-                let duo_r = self.duo_shaper[i].transition(phi, self.reward_config.gamma, 1.0);
+                let mut duo_r = self.duo_shaper[i].transition(phi, self.reward_config.gamma, 1.0);
+                // Ng 1999 PBRS on log team gold-income. Cities/ports raise
+                // income; spending gold stock on a city does not drop Φ
+                // (unlike K_ECO). Absorbing terminal Φ=0.
+                let eco_phi = if done { 0.0 } else { next_eco_phi };
+                duo_r += self.eco_shaper[i].transition(eco_phi, self.reward_config.gamma, 1.0);
+                // Outcome-only one-shot: first formal pact this episode.
+                if allied && !self.pact_bonus_paid {
+                    duo_r += duo_pact_success_bonus(true, self.reward_config);
+                }
+                // Outcome-only one-shots: first completed City / Port.
+                // Never the `build` action; never per-tick while standing.
+                if n_cities > 0 && !self.city_bonus_paid {
+                    duo_r += duo_first_structure_bonus(true, self.reward_config.duo_first_city);
+                }
+                if n_ports > 0 && !self.port_bonus_paid {
+                    duo_r += duo_first_structure_bonus(true, self.reward_config.duo_first_port);
+                }
+                // Outcome-only: completed City/Port count dropped. Never
+                // the `delete_unit` action.
+                let dropped_cities = self.prev_n_cities.saturating_sub(n_cities);
+                let dropped_ports = self.prev_n_ports.saturating_sub(n_ports);
+                duo_r += duo_structure_delete_penalty(
+                    dropped_cities,
+                    self.reward_config.duo_city_delete,
+                );
+                duo_r += duo_structure_delete_penalty(
+                    dropped_ports,
+                    self.reward_config.duo_port_delete,
+                );
                 components.duo = duo_r;
                 reward += duo_r;
             }
@@ -2024,6 +2164,17 @@ impl EnvWorker {
                 outcome,
             ));
         }
+        if n > 1 && allied {
+            self.pact_bonus_paid = true;
+        }
+        if n > 1 && n_cities > 0 {
+            self.city_bonus_paid = true;
+        }
+        if n > 1 && n_ports > 0 {
+            self.port_bonus_paid = true;
+        }
+        self.prev_n_cities = n_cities;
+        self.prev_n_ports = n_ports;
         self.ep_len += 1;
         if done {
             self.spool_finished_episode(won, timed_out);
@@ -2084,6 +2235,34 @@ impl EnvWorker {
 
     pub fn close(&mut self) {
         self.bridge.close();
+    }
+}
+
+/// During spawn, if every agent is still unplaced and all emit spawn in
+/// the same step, keep only agent 0's intents so agent 1's next obs sees
+/// the partner blob (class-2 clut) instead of a simultaneous empty-map
+/// commit. Without this, both heads still land on tick 1 and sequential
+/// spawn is a no-op.
+fn stagger_simultaneous_duo_spawn(
+    spawn_phase: bool,
+    unspawned: &[bool],
+    agent_intents: &[Vec<Value>],
+) -> Option<Vec<Value>> {
+    if !spawn_phase || agent_intents.len() < 2 {
+        return None;
+    }
+    if unspawned.len() != agent_intents.len() || !unspawned.iter().all(|&u| u) {
+        return None;
+    }
+    let is_spawn = |intents: &[Value]| {
+        intents
+            .iter()
+            .any(|v| v.get("type").and_then(|t| t.as_str()) == Some("spawn"))
+    };
+    if agent_intents.iter().all(|intents| is_spawn(intents)) {
+        Some(agent_intents[0].clone())
+    } else {
+        None
     }
 }
 
@@ -2255,6 +2434,141 @@ mod churn_action_tests {
                 max_land_share: 0.20,
                 ..CloseoutTracker::default()
             }
+        );
+    }
+}
+
+#[cfg(test)]
+mod compact_extras_tests {
+    use super::*;
+
+    #[test]
+    fn partner_block_appends_after_local_extras() {
+        let partner_n = compact_extras_players_n()
+            + feat::MAX_SLOTS
+            + feat::N_SCALARS
+            + crate::recurrent::CONTEXT_FLOATS;
+        assert_eq!(
+            compact_extras_per_env(),
+            compact_extras_core_n() + partner_n
+        );
+        assert!(partner_n > 0);
+    }
+
+    #[test]
+    fn fill_partner_features_swaps_sibling_player_rows() {
+        let a = PreparedObs {
+            prev_action: ActionOutcome::default(),
+            compact: None,
+            grid: None,
+            grid_coarse: None,
+            cgh: 0,
+            cgw: 0,
+            ae_raw: crate::ae::AeRaw {
+                owners: Vec::new(),
+                static_terrain: crate::ae::StaticTerrain {
+                    key: crate::ae::TerrainCacheKey {
+                        env_id: 0,
+                        episode: 0,
+                        static_id: 0,
+                        hr: 8,
+                        wr: 8,
+                    },
+                    map: std::sync::Arc::from("t"),
+                    land_mag: Vec::<f32>::new().into(),
+                },
+                fallout: Vec::new(),
+                stat: Vec::new(),
+                hr: 8,
+                wr: 8,
+            },
+            ego: Vec::new(),
+            db: Vec::new(),
+            transient: Vec::new(),
+            legal_tile: Vec::new(),
+            gh: 1,
+            gw: 1,
+            players: vec![1.0; feat::MAX_SLOTS * feat::P_FEAT],
+            pmask: [1.0; feat::MAX_SLOTS],
+            units: Vec::new(),
+            umask: [0.0; feat::MAX_UNITS],
+            legal_utarget: Vec::new(),
+            scalars: [3.0; feat::N_SCALARS],
+            me_slot: 0,
+            legal_actions: [0.0; feat::N_ACTIONS],
+            legal_ptarget: Vec::new(),
+            legal_build: [0.0; feat::N_BUILD],
+            legal_nuke: [0.0; feat::N_NUKE],
+            local: Vec::new(),
+            partner_players: vec![0.0; feat::MAX_SLOTS * feat::P_FEAT],
+            partner_pmask: [0.0; feat::MAX_SLOTS],
+            partner_scalars: [0.0; feat::N_SCALARS],
+            partner_context: [0.0; crate::recurrent::CONTEXT_FLOATS],
+        };
+        let mut b = a.clone();
+        b.players = vec![2.0; feat::MAX_SLOTS * feat::P_FEAT];
+        b.pmask = [0.5; feat::MAX_SLOTS];
+        b.scalars = [4.0; feat::N_SCALARS];
+        b.prev_action.action = 7;
+        b.prev_action.had_action = true;
+        let mut outs = vec![a, b];
+        EnvWorker::fill_partner_features(&mut outs);
+        assert_eq!(outs[0].partner_players[0], 2.0);
+        assert_eq!(outs[1].partner_players[0], 1.0);
+        assert_eq!(outs[0].partner_pmask[0], 0.5);
+        assert_eq!(outs[1].partner_pmask[0], 1.0);
+        assert_eq!(outs[0].partner_scalars[0], 4.0);
+        assert_eq!(outs[1].partner_scalars[0], 3.0);
+        assert_eq!(outs[0].partner_context[0], 7.0);
+        assert_eq!(outs[0].partner_context[12], 1.0);
+        assert_eq!(outs[1].partner_context[0], -1.0);
+        EnvWorker::fill_partner_features(&mut outs[..1]);
+        assert_eq!(outs[0].partner_players[0], 2.0, "solo slice is a no-op");
+    }
+}
+
+#[cfg(test)]
+mod sequential_spawn_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn spawn_intent(tile: i64) -> Vec<Value> {
+        vec![json!({"type": "spawn", "tile": tile, "clientID": "AGENTRL1"})]
+    }
+
+    #[test]
+    fn drops_agent1_spawn_when_both_unplaced() {
+        let kept = stagger_simultaneous_duo_spawn(
+            true,
+            &[true, true],
+            &[spawn_intent(10), spawn_intent(20)],
+        )
+        .expect("should stagger");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0]["tile"], 10);
+    }
+
+    #[test]
+    fn does_not_stagger_once_a_partner_is_on_the_map() {
+        assert!(
+            stagger_simultaneous_duo_spawn(
+                true,
+                &[false, true],
+                &[spawn_intent(10), spawn_intent(20)],
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn does_not_stagger_outside_spawn_phase() {
+        assert!(
+            stagger_simultaneous_duo_spawn(
+                false,
+                &[true, true],
+                &[spawn_intent(10), spawn_intent(20)],
+            )
+            .is_none()
         );
     }
 }
