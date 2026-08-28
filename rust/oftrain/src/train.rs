@@ -477,12 +477,18 @@ fn expand_v10_sidecar_if_needed(state: &mut TrainState) -> bool {
             .min(ofcore::curriculum::V10_SHORT_SIDECAR_LEN - 1);
         Some(ofcore::curriculum::remap_v10_short_sidecar_stage(as_short))
     } else if targets_len == ofcore::curriculum::V10_SHORT_SIDECAR_LEN {
-        Some(ofcore::curriculum::remap_v10_short_sidecar_stage(state.stage))
+        Some(ofcore::curriculum::remap_v10_short_sidecar_stage(
+            state.stage,
+        ))
     } else if targets_len == ofcore::curriculum::V10_PRIOR_SIDECAR_LEN {
-        Some(ofcore::curriculum::remap_v10_prior_sidecar_stage(state.stage))
+        Some(ofcore::curriculum::remap_v10_prior_sidecar_stage(
+            state.stage,
+        ))
     } else if state.stage >= ofcore::curriculum::V10_STAGE_COUNT {
         // Targets already cleared/reset but stage index is still from a longer table.
-        Some(ofcore::curriculum::remap_v10_prior_sidecar_stage(state.stage))
+        Some(ofcore::curriculum::remap_v10_prior_sidecar_stage(
+            state.stage,
+        ))
     } else {
         None
     };
@@ -578,9 +584,7 @@ fn reconcile_resume_stage_and_lr(
     // Floored LRs are shared by many stages (plateau). Only treat as ambiguous
     // when lr_now is *at* the floor — values below the floor still diagnose the
     // historical "stage rewritten down, lr left high-stage" cliff.
-    let lr_at_floor = floor > 0.0
-        && state.lr_now >= floor * 0.99
-        && state.lr_now <= floor * 1.01;
+    let lr_at_floor = floor > 0.0 && state.lr_now >= floor * 0.99 && state.lr_now <= floor * 1.01;
     if !skip_stage_restore && !lr_at_floor {
         if let Some(implied) =
             ofcore::curriculum::imply_stage_from_learning_rate(state.lr_now, base_lr, decay)
@@ -606,8 +610,7 @@ fn reconcile_resume_stage_and_lr(
             state.stage
         );
     }
-    let corrected =
-        ofcore::curriculum::stage_learning_rate(base_lr, decay, state.stage, floor);
+    let corrected = ofcore::curriculum::stage_learning_rate(base_lr, decay, state.stage, floor);
     if (corrected - state.lr_now).abs() > 1e-15 {
         println!(
             "[train] recomputed resume lr_now: {:.2e} -> {corrected:.2e} \
@@ -620,7 +623,7 @@ fn reconcile_resume_stage_and_lr(
 
 #[cfg(test)]
 mod resume_stage_lr_tests {
-    use super::{reconcile_resume_stage_and_lr, TrainState};
+    use super::{TrainState, reconcile_resume_stage_and_lr};
     use ofcore::curriculum::{V10_REWARD_PROFILE, V10_STAGE_LR_FLOOR};
 
     fn state(stage: usize, lr_now: f64) -> TrainState {
@@ -2036,7 +2039,8 @@ fn transfer_act_results(
     value: &Tensor,
     len: usize,
 ) -> Result<PackedActHost> {
-    let discrete_cpu = Tensor::stack(&[a, player, tile, unit, build, nuke], 1).to_device(Device::Cpu);
+    let discrete_cpu =
+        Tensor::stack(&[a, player, tile, unit, build, nuke], 1).to_device(Device::Cpu);
     let floats_cpu = Tensor::stack(&[qty, logp, value], 1).to_device(Device::Cpu);
     let discrete: Vec<i64> = discrete_cpu.reshape([-1]).try_into()?;
     let floats: Vec<f32> = floats_cpu.reshape([-1]).try_into()?;
@@ -2631,7 +2635,9 @@ fn act_contiguous_obs(
     };
     let (a, player, tile, unit, build, nuke, qty, logp, value) = action;
     Ok(ActorBatchHost {
-        packed: transfer_act_results(&a, &player, &tile, &unit, &build, &nuke, &qty, &logp, &value, n)?,
+        packed: transfer_act_results(
+            &a, &player, &tile, &unit, &build, &nuke, &qty, &logp, &value, n,
+        )?,
         hidden_in,
     })
 }
@@ -2816,19 +2822,12 @@ fn act_group(
         for p in 0..n_phys {
             let mut batch = Vec::with_capacity(na);
             for a in 0..na {
-                batch.push(
-                    rows[p * na + a]
-                        .choice
-                        .take()
-                        .expect("unsent actor choice"),
-                );
+                batch.push(rows[p * na + a].choice.take().expect("unsent actor choice"));
             }
             actor.workers[phys_start + p]
                 .choice_tx
                 .send(batch)
-                .map_err(|_| {
-                    anyhow!("env {} choice channel closed", phys_start + p)
-                })?;
+                .map_err(|_| anyhow!("env {} choice channel closed", phys_start + p))?;
         }
         completed = rows;
     }
@@ -3234,7 +3233,10 @@ mod packed_act_tests {
                 .pop()
                 .unwrap();
             let normalized = |row: &(Vec<i64>, Vec<f32>)| {
-                choice_from_act_values(row.0[0], row.0[1], row.0[2], row.0[3], row.0[4], row.0[5], row.1[0]).1
+                choice_from_act_values(
+                    row.0[0], row.0[1], row.0[2], row.0[3], row.0[4], row.0[5], row.1[0],
+                )
+                .1
             };
             let actual_choice = normalized(&bucketed[i]);
             let expected_choice = normalized(&singleton);
@@ -3350,7 +3352,14 @@ mod packed_act_tests {
             let (discrete, floats) = packed.row(i).unwrap();
             assert_eq!(
                 discrete,
-                &[a_v[i], player_v[i], tile_v[i], unit_v[i], build_v[i], nuke_v[i]]
+                &[
+                    a_v[i],
+                    player_v[i],
+                    tile_v[i],
+                    unit_v[i],
+                    build_v[i],
+                    nuke_v[i]
+                ]
             );
             assert_eq!(
                 floats.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
@@ -3369,8 +3378,9 @@ mod packed_act_tests {
                 discrete[5],
                 floats[0],
             );
-            let reference_choice =
-                choice_from_act_vecs(i, &a_v, &player_v, &tile_v, &unit_v, &build_v, &nuke_v, &qty_v);
+            let reference_choice = choice_from_act_vecs(
+                i, &a_v, &player_v, &tile_v, &unit_v, &build_v, &nuke_v, &qty_v,
+            );
             assert_eq!(
                 choice_bits(&packed_choice.0),
                 choice_bits(&reference_choice.0)
@@ -3405,9 +3415,10 @@ mod packed_act_tests {
             .iter()
             .map(|values| Tensor::from_slice(values))
             .collect();
-        let packed =
-            transfer_act_results(&d[0], &d[1], &d[2], &d[3], &d[4], &d[5], &f[0], &f[1], &f[2], 2)
-                .unwrap();
+        let packed = transfer_act_results(
+            &d[0], &d[1], &d[2], &d[3], &d[4], &d[5], &f[0], &f[1], &f[2], 2,
+        )
+        .unwrap();
 
         for row in 0..2 {
             let (actual_d, actual_f) = packed.row(row).unwrap();
@@ -6297,7 +6308,11 @@ fn sync_grads(shards: &[LearnerShard]) {
 /// minibatch rather than applying a poisoned gradient.
 fn any_loss_non_finite(losses: &[(f64, f64, f64, f64, f64)]) -> bool {
     losses.iter().any(|(pg, v, ent, entq, kl)| {
-        !pg.is_finite() || !v.is_finite() || !ent.is_finite() || !entq.is_finite() || !kl.is_finite()
+        !pg.is_finite()
+            || !v.is_finite()
+            || !ent.is_finite()
+            || !entq.is_finite()
+            || !kl.is_finite()
     })
 }
 
@@ -6852,8 +6867,7 @@ fn train_update(
                             ret_t,
                             old_logp_t,
                             gather_idx,
-                        ) = if cfg.recurrent_policy
-                        {
+                        ) = if cfg.recurrent_policy {
                             let hidden_all = sb.hidden_in.as_ref().expect("recurrent hidden batch");
                             let context_all = sb.context.as_ref().expect("recurrent context batch");
                             let reset_all =
@@ -7140,12 +7154,26 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 "[train] MAPPO centralized critic: V=cat(h, partner_pool, partner_scalars); policy local"
             );
         } else {
-            println!("[train] --duo with local (IPPO) critic; pass --centralized-value to enable MAPPO V");
+            println!(
+                "[train] --duo with local (IPPO) critic; pass --centralized-value to enable MAPPO V"
+            );
         }
         if cfg.reward_config.duo_pact_success != 0.0 {
             println!(
                 "[train] duo pact-success bonus={:.3} (one-shot on first formal alliance; not donate/request)",
                 cfg.reward_config.duo_pact_success
+            );
+        }
+        if cfg.reward_config.duo_eco_coef != 0.0 {
+            println!(
+                "[train] duo eco PBRS coef={:.3} on log team gold-income (not gold stock; cities/ports raise Φ)",
+                cfg.reward_config.duo_eco_coef
+            );
+        }
+        if cfg.reward_config.duo_first_city != 0.0 || cfg.reward_config.duo_first_port != 0.0 {
+            println!(
+                "[train] duo first-structure bonuses city={:.3} port={:.3} (one-shot on completed building; not the build action)",
+                cfg.reward_config.duo_first_city, cfg.reward_config.duo_first_port
             );
         }
     }
@@ -8170,7 +8198,11 @@ pub fn run(mut cfg: Config) -> Result<()> {
                         println!(
                             "[train] stage {curr_stage} env floor {floor} capped to \
                              max_envs={} (live={live_envs_per_shard}); skipping noop resize",
-                            if cfg.auto_scale_envs { cfg.max_envs } else { floor }
+                            if cfg.auto_scale_envs {
+                                cfg.max_envs
+                            } else {
+                                floor
+                            }
                         );
                     }
                 }
@@ -9218,6 +9250,9 @@ mod persistent_actor_tests {
                 v10_timeout_closeout: 0.0,
                 v10_closeout_entry: 0.0,
                 duo_pact_success: 0.0,
+                duo_eco_coef: 0.0,
+                duo_first_city: 0.0,
+                duo_first_port: 0.0,
             },
             lambda: 0.95,
             clip: 0.2,
@@ -9523,7 +9558,10 @@ mod persistent_actor_tests {
             }
         });
         let (copied, skipped) = copy_matching_weights(&src, &mut dest).unwrap();
-        assert!(copied > 0, "expected overlapping trunk tensors, copied={copied}");
+        assert!(
+            copied > 0,
+            "expected overlapping trunk tensors, copied={copied}"
+        );
         assert!(
             skipped > 0,
             "LSTM / extra recurrent keys must be skipped, skipped={skipped}"
@@ -9567,9 +9605,16 @@ mod persistent_actor_tests {
                 rand::rngs::SmallRng::seed_from_u64(77),
             )
             .unwrap();
-            let one_reply = one.train(vec![parity_rollout()], cfg.lr, 0.01, cfg.epochs).unwrap();
+            let one_reply = one
+                .train(vec![parity_rollout()], cfg.lr, 0.01, cfg.epochs)
+                .unwrap();
             let two_reply = two
-                .train(vec![parity_rollout(), parity_rollout()], cfg.lr, 0.01, cfg.epochs)
+                .train(
+                    vec![parity_rollout(), parity_rollout()],
+                    cfg.lr,
+                    0.01,
+                    cfg.epochs,
+                )
                 .unwrap();
 
             assert!(one_reply.averaged_gradients.is_empty());
@@ -9670,8 +9715,12 @@ mod persistent_actor_tests {
             rand::rngs::SmallRng::seed_from_u64(55),
         )
         .unwrap();
-        let one_reply = one.train(vec![rollout()], cfg.lr, 0.01, cfg.epochs).unwrap();
-        let two_reply = two.train(vec![rollout(), rollout()], cfg.lr, 0.01, cfg.epochs).unwrap();
+        let one_reply = one
+            .train(vec![rollout()], cfg.lr, 0.01, cfg.epochs)
+            .unwrap();
+        let two_reply = two
+            .train(vec![rollout(), rollout()], cfg.lr, 0.01, cfg.epochs)
+            .unwrap();
         assert!(one_reply.averaged_gradients.is_empty());
         assert_eq!(
             two_reply.averaged_gradients.len(),
@@ -9734,7 +9783,9 @@ mod persistent_actor_tests {
         )
         .unwrap();
         assert!(params > 0);
-        let reply = learner.train(vec![parity_rollout()], cfg.lr, 0.01, cfg.epochs).unwrap();
+        let reply = learner
+            .train(vec![parity_rollout()], cfg.lr, 0.01, cfg.epochs)
+            .unwrap();
         assert!(reply.train_seconds >= 0.0);
         assert!(reply.snapshot_seconds >= 0.0);
         assert!(!reply.weights[0].values.is_empty());
@@ -10044,7 +10095,10 @@ mod ratio_clamp_tests {
         let kl = (&logp - prior_logp).mean(Kind::Float);
         let value = f64::try_from(&kl).unwrap();
         let expected = ((0.0 + 0.5) + (-1.0 + 0.5) + (-2.0 + 0.5)) / 3.0;
-        assert!((value - expected).abs() < 1e-6, "kl={value} expected={expected}");
+        assert!(
+            (value - expected).abs() < 1e-6,
+            "kl={value} expected={expected}"
+        );
         kl.backward();
         let grad = logp.grad();
         let grad_mean = f64::try_from(grad.mean(Kind::Float)).unwrap();
@@ -10061,13 +10115,19 @@ mod nan_guard_tests {
 
     #[test]
     fn all_finite_losses_are_not_flagged() {
-        let losses = vec![(0.02, 0.14, 2.1, -0.08, 0.01), (0.01, 0.09, 3.6, -0.08, 0.0)];
+        let losses = vec![
+            (0.02, 0.14, 2.1, -0.08, 0.01),
+            (0.01, 0.09, 3.6, -0.08, 0.0),
+        ];
         assert!(!any_loss_non_finite(&losses));
     }
 
     #[test]
     fn a_single_nan_value_loss_is_flagged() {
-        let losses = vec![(0.02, 0.14, 2.1, -0.08, 0.0), (0.01, f64::NAN, 3.6, -0.08, 0.0)];
+        let losses = vec![
+            (0.02, 0.14, 2.1, -0.08, 0.0),
+            (0.01, f64::NAN, 3.6, -0.08, 0.0),
+        ];
         assert!(any_loss_non_finite(&losses));
     }
 

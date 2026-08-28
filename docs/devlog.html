@@ -28,7 +28,7 @@
 
 <nav class="toc">
   <a href="#now">Now</a> ·
-  <a href="#duo-easy">Aug 26-27 duo Easy</a> ·
+  <a href="#duo-easy">Aug 26-28 duo Easy</a> ·
   <a href="#v11-4x">Jul 25 4×A100</a> ·
   <a href="#v11-soak">Jul 24-25 V11 soak</a> ·
   <a href="#v11-watch">watch / clips</a> ·
@@ -86,25 +86,26 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 28th, 2026</h2>
-  <p>Live duo is <b>experiment G</b> on the homelab 3070:
-  <code>scalars[11]</code> is team tiles / map land (the 95% team-win
-  meter). Keeps F legal-diplo bits and E teammate clut. IPPO + pact
-  bonus 5, timeout = loss, PBRS, no v11. Compact Easy is holding
-  (Caucasus 38/40, Onion 37/48, Pangaea 7/9; 94/228). Window WR 0.23
-  because BetweenTwoSeas filled the last 40 (still 0/30). Britannia
-  10/39; GreatLakes 1, BlackSea 1. Last 8 has three compact wins (not
-  gate c). Resumed twice after SIGKILL (u5376, u10423) — do not
-  from-scratch this winning run. Do not
-  <code>--init ppo_v11</code>. Do not load A/B/D/E/F stashes. See
+  <p>Live duo is <b>experiment H</b> on the homelab 3070: resume G's
+  compact-winning weights with <i>reward-only</i> economy. Ng 1999 PBRS
+  on log team gold-<i>income</i> (<code>--duo-eco-coef 0.25</code>),
+  one-shot first completed City (+3) and Port (+5), boat-cancel
+  <code>-0.15</code>. Same tensors as G (<code>N_SCALARS=12</code>). Do
+  not from-scratch. G held compact Easy (Caucasus 44/46, Onion 38/51,
+  Pangaea 7/9; 101/245) and opened Britannia (10/39) but
+  BetweenTwoSeas stayed 0/30 — they blob-and-attack and almost never
+  build a city/port economy. Do not
+  <code>--init ppo_v11</code>. Do not load A–G stashes as
+  <code>--init</code>. See
   <a href="#duo-easy">Aug 26-28 writeup</a>.</p>
 </div>
 
 
-<h2 class="date" id="duo-easy">Aug 26-27, 2026 - Duo Easy: identity was the hole, not the critic</h2>
+<h2 class="date" id="duo-easy">Aug 26-28, 2026 - Duo Easy: identity held compact; economy is the water hole</h2>
 <p class="session">Two-human Team-mode on a homelab RTX 3070 8GB
 (<code>--duo</code>, <code>AGENTRL1</code>+<code>AGENTRL2</code> on Humans,
 stage 0 Easy, 2 envs, rollout 8, feedforward, frozen AE v3.2). Loop until
-a good Easy winner. Live job: experiment G. Code:
+a good Easy winner. Live job: experiment H (resume G). Code:
 <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>
 stacked on timeout-loss / PBRS.</p>
 
@@ -141,7 +142,7 @@ failed because the MDP paid camping:</p>
   <li>Outcome-only diplomacy: do not pay <code>donate_*</code> or
     <code>alliance_request</code> as actions. Optional one-shot
     <code>--duo-pact-bonus</code> when a formal pact actually forms
-    (still 5 on G).</li>
+    (still 5 on H).</li>
 </ul>
 <p>Tried and retired: <code>--init ppo_v11</code> +
 <code>--kl-prior</code> (incompatible with learning this MDP from
@@ -184,7 +185,7 @@ gold still need a pact.</p>
 (<code>N_SCALARS</code> 11→12). Team win fires at 0.95 of that meter.
 <code>scalars[10]</code> stays claimed-among-players.</p>
 
-<h3 id="duo-experiments">Experiments (A-G)</h3>
+<h3 id="duo-experiments">Experiments (A-H)</h3>
 <p>Shared recipe unless noted: homelab 3070, 2 games × 2 agents, stage 0
 Easy, rollout 8, frozen AE, timeout=loss, PBRS, from scratch, no v11.
 Fail gates: (a) ≥90 min and ≥8 eps and 0 wins; (b) entropy &lt; 0.3 for
@@ -249,30 +250,94 @@ Stashes under <code>rust/checkpoints/ppo_duo/</code>.</p>
       <code>ippo-F-20260827T1117Z.*</code>.</td>
   </tr>
   <tr>
-    <td><b>G team/map-land 95% scalar (live)</b></td>
+    <td>G team/map-land 95% scalar</td>
     <td><code>scalars[11]</code> = ego+teammate tiles / map land.
       Team win fires at 0.95 of that meter. <code>scalars[10]</code>
       stays claimed-among-players. <code>N_SCALARS</code> 11→12.
       Keeps E+F. From scratch, then <b>resumed</b> after SIGKILL
-      at u5376 and again at u10423 (same weights).</td>
-    <td>Loop 2026-08-28T05:26Z: u15151, 228 eps / <b>94 wins</b>,
-      window WR 0.23, entropy 0.63 O(1), gpu_mem% 85. Compact holding
-      (Caucasus 38/40, Onion 37/48, Pangaea 7/9). Last 8 has three
-      compact wins (not gate c). BetweenTwoSeas 0/30. Britannia
-      10/39, GreatLakes 1, BlackSea 1. Keep G. Crash snapshots
-      <code>ippo-G-sigkill-20260827T1734Z.*</code> /
-      <code>ippo-G-sigkill-20260827T2350Z.*</code>.</td>
+      at u5376 and u10423 (same weights).</td>
+    <td>Held compact Easy. Final 101/245, window WR 0.38, entropy O(1).
+      Caucasus <b>44/46</b>, Onion 38/51, Pangaea 7/9. Water:
+      Britannia 10/39, BlackSea 1/31, GreatLakes 1/39,
+      BetweenTwoSeas <b>0/30</b>. Last 8 still had compact wins
+      (not gate c). Occupancy clips: blob-and-attack on compact;
+      on BTS they own the main landmass and miss 95% because leftover
+      red is on the <i>same</i> continent, with almost no cities/ports.
+      SIGKILL at u16296 (OOM during oftrain rebuild). Stash
+      <code>ippo-G-compact-hold-20260828T0627Z.*</code> (also crash
+      snapshots <code>ippo-G-sigkill-20260827T1734Z.*</code> /
+      <code>ippo-G-sigkill-20260827T2350Z.*</code>).</td>
+  </tr>
+  <tr>
+    <td><b>H eco PBRS + first City/Port (live)</b></td>
+    <td>Reward-only, <b>resume G weights</b> (same
+      <code>N_SCALARS=12</code>, no new obs).
+      <code>--duo-eco-coef 0.25</code> Ng 1999 PBRS on log team
+      gold-<i>income</i> (cities/ports raise Φ; spending gold stock
+      does not drop it the way <code>K_ECO</code> does). One-shot
+      first completed City +3 / Port +5 (outcome-only, never the
+      <code>build</code> action). <code>--v84-boat-cancelled=-0.15</code>
+      (was −0.03). Keeps IPPO + pact bonus 5. Started
+      2026-08-28T06:31:09Z, pid 3813876, resume u16296.</td>
+    <td>Live. Compact should keep paying; watch water and whether
+      completed City/Port counts rise. Fail → MAPPO (I). If they
+      build then delete → J (delete penalty).</td>
   </tr>
 </table>
 <p>Water maps (Britannia, GreatLakes, BlackSea, BetweenTwoSeas) were 0
 wins across A, B, D2, E, and F. Compact maps were where every Easy win
 happened except D1's two Pangaea flukes. G is the first run in this
 loop to <i>hold</i> compact (Onion/Caucasus/Pangaea keep paying) and
-to open water: Britannia repeating (7/26), first GreatLakes, first
-BlackSea. BetweenTwoSeas is still 0/20 (closeout timeouts at 0.5–0.84
-land). E's Caucasus win at 0.09 individual land (term ~255) is the
-team-95% rule showing up: the partner can carry, which is exactly what
-the old clut called an enemy.</p>
+to open water: Britannia repeating (10/39), first GreatLakes, first
+BlackSea. BetweenTwoSeas finished <b>0/30</b>. E's Caucasus win at
+0.09 individual land (term ~255) is the team-95% rule showing up: the
+partner can carry, which is exactly what the old clut called an
+enemy.</p>
+
+<h3 id="duo-g-games">G games: when it is not winning, and why economy did not learn</h3>
+<p>Occupancy clips of native GameRecords (not full OpenFront WebGL —
+training owns the 3070). Compact wins
+(<code>duo_g_caucasus_win_nCPoTIHg</code>,
+<code>duo_g_pangaea_win_pMjStsDC</code>) vs a BetweenTwoSeas timeout
+(<code>duo_g_between_two_seas_timeout_lw9uzM9o</code>).</p>
+<ul>
+  <li><b>When it is not winning:</b> water, especially BetweenTwoSeas.
+    Timeout=loss at 21k ticks. They often own most of the main
+    landmass and still miss the 95% team-land closeout because leftover
+    opponent sits on the <i>same</i> continent. Compact maps
+    blob-and-attack and win without an economy.</li>
+  <li><b>Spawn together is learned, not scripted.</b> Those maps have no
+    <code>teamGameSpawnAreas</code>. Both humans emit <code>spawn</code>
+    on tick 1 (not the 8-step <code>spawn_randomly</code> fallback).
+    Distances ~150–240 tiles on compact maps, sometimes &lt;20 on
+    BlackSea. Independent IPPO heads both prefer fat interior land.
+    <code>min_distance_between_players</code> is 30 only on the random
+    path.</li>
+  <li><b>Boats:</b> destination is always land (zero ocean/OOB). Compact
+    wins barely boat (Caucasus 2, Pangaea 3). Water maps do launch real
+    crossings (BTS 18, Britannia 21). Failure is commit, not targeting:
+    cancel ~30–40% (BTS 7/18, Britannia 9/21); almost never a Port (one
+    late Port in a different Caucasus win). On a BTS timeout, 13/18
+    boats left the main landmass while leftover red was still on it.</li>
+  <li><b>Building:</b> compact wins almost none (Caucasus win: zero
+    buildings). Pangaea: 1 City then deletes. Long water games:
+    Factory/City/Defense Post/Warship/Silo, then delete count ≈ build
+    count. Not a city/port economy.</li>
+  <li><b>Why economy does not learn (the MDP):</b>
+    <code>v10_closeout_entry</code> default +25 at 45% individual land
+    and <code>W_WIN=30</code> pay blob-and-attack. Cities are delayed
+    (rollout 8). <code>K_ECO=0.25</code> is gold <i>stock</i> share —
+    buying a city drops gold share; <code>K_BUILD=0.15</code> only then
+    slowly counts structure value. <code>v10_combat_action</code> pays
+    build as an action (+0.01 if emitted intent) — tiny, and the
+    donate-dirac lesson is do not pay build as an action. Timeout after
+    closeout extra −20. Pressure is convert land, not eco.</li>
+</ul>
+<p>Boat outcome rewards already exist at stage 0: useful +0.15, destroyed
+−0.20, cancelled −0.03 (too cheap — H raises this to −0.15), own-shore
+−0.05. Diplo noise is still high on water (embargo /
+<code>alliance_request</code> / <code>targetPlayer</code>); they embargo
+the partner too. Donate exists but is not donate-dirac.</p>
 
 <h3 id="duo-learnings">What we learned</h3>
 <ul>
@@ -288,7 +353,7 @@ the old clut called an enemy.</p>
   <li><b>Pact-success bonus is not a substitute for identity.</b> D paid
     +5 the first time a formal alliance formed. Compact-map wins
     continued; the water tail did not move. The bonus is not farmable
-    (one-shot, outcome-only) and is still on for G.</li>
+    (one-shot, outcome-only) and is still on for H.</li>
   <li><b>Timeout=loss and PBRS fix camping; they do not teach who to
     land with.</b> Keep them. Do not "check Φ" as the next experiment
     while individual land at timeout is mid.</li>
@@ -307,32 +372,47 @@ the old clut called an enemy.</p>
   <li><b>OOM is a real gate on 8GB.</b> D1 died at update 4558 /
     ~7.5GB. G SIGKILL at u5376 / gpu_mem% 88 with the same 2 envs.
     2 envs is the ceiling (C skipped). Kill by pid, never
-    <code>pkill -f oftrain</code>. Resume a winning G run; do not
-    from-scratch it.</li>
+    <code>pkill -f oftrain</code>. Resume a winning compact run; do not
+    from-scratch it. G's compact-hold stash is
+    <code>ippo-G-compact-hold-20260828T0627Z.*</code>.</li>
   <li><b>G recovered from water tails; A–F did not.</b> Same
     compact-open then water-clock-out shape, but G reprinted 4-win
     clusters and a 7-Caucasus streak instead of dying on gate (c)
     after the first tail. The 95% map-land meter is the difference
     that held compact. Water is not held yet.</li>
+  <li><b>Blob-and-attack wins compact; it does not close water.</b> G
+    occupancy: leftover opponent on the same continent, boats that
+    leave the fight, cancel 30–40%, almost no Ports. Do not treat
+    "they cannot boat" as the diagnosis — dest is always land.</li>
+  <li><b>Gold-stock eco is the wrong Φ.</b> <code>K_ECO</code> reads a
+    city purchase as a strength loss. H's income PBRS + first
+    City/Port one-shots are the test of that. Do not pay
+    <code>build</code> as an action (donate-dirac with extra steps).</li>
 </ul>
 
 <h3 id="duo-next">What is still open</h3>
 <ul>
-  <li><b>Hold Easy, including water.</b> Compact is holding on G.
-    Success that still is not met: water wins that stick, especially
-    BetweenTwoSeas. Do not switch while last-8 still has wins.</li>
-  <li>Still missing from the human-would-need-this list: comms; a
-    critic that sees the partner (MAPPO is built; A ran before
-    identity/legal/win-meter existed). Next unused after a G fail
-    gate is MAPPO with those channels in obs, not PBRS Φ.</li>
+  <li><b>H (live):</b> will they build a city/port economy on water
+    without deleting it, and will BetweenTwoSeas leave 0? Compact
+    should keep paying — do not from-scratch G's weights. Clock starts
+    2026-08-28T06:31:09Z. Same fail gates (a/b/c).</li>
+  <li><b>I if H fail-c or eco still zero</b> after ~2h with compact
+    still holding: MAPPO so V sees the partner (identity + legal +
+    95% meter now in obs; MAPPO A ran before those existed). Critic
+    input changes, so from-scratch (stash H first). Not PBRS Φ.</li>
+  <li><b>J if they build then still delete:</b> penalize delete of
+    City/Port as an outcome, not the <code>build</code> action.</li>
+  <li>Still missing from the human-would-need-this list: comms.</li>
 </ul>
 
 <h3 id="duo-ops">Ops</h3>
 <ul>
   <li>Host: homelab RTX 3070 8GB, tmux <code>duo-train</code>,
     <code>bash rust/checkpoints/ppo_duo/run.sh</code> (gitignored;
-    now <code>--resume latest</code> after the G SIGKILL, no v11).
-    Do not strip resume to from-scratch while G is winning.</li>
+    H is <code>--resume latest</code> plus
+    <code>--duo-eco-coef 0.25 --duo-city-bonus 3 --duo-port-bonus 5
+    --v84-boat-cancelled=-0.15</code>, no v11). Do not strip resume
+    to from-scratch while compact still pays.</li>
   <li>Log / metrics / state:
     <code>rust/checkpoints/ppo_duo/{train.log,metrics.jsonl,latest.state.json}</code></li>
   <li>PR: <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>
@@ -1553,13 +1633,11 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <code>ae_v3.pt</code> until the v3.1 winner is wired into <code>rl/obs.py</code>.</p>
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
-  <tr><td><code>ppo_duo</code></td><td><b>live</b> Aug 27 (homelab 3070)</td>
-    <td>Two-human Team-mode Easy. Experiment G (team/map-land 95% win
-    scalar + F legal diplo bits + E teammate clut, IPPO + pact bonus
-    5). Compact holding (94/228). Window WR 0.23 on BTS-heavy
-    sample (BetweenTwoSeas still 0/30). Resumed after SIGKILL at
-    u5376 and u10423. See
-    <a href="#duo-easy">Aug 26-27 writeup</a>.
+  <tr><td><code>ppo_duo</code></td><td><b>live</b> Aug 28 (homelab 3070)</td>
+    <td>Two-human Team-mode Easy. Experiment H: resume G compact-hold
+    + eco PBRS 0.25 + first City/Port one-shots + boat-cancel −0.15.
+    G finished 101/245 (Caucasus 44/46, BTS 0/30). See
+    <a href="#duo-easy">Aug 26-28 writeup</a>.
     <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>.</td></tr>
   <tr><td><code>ppo_v11</code></td><td><b>live</b> Jul 26 (4×A100 80GB)</td>
     <td>Util stack + AE v3.2 no-static + recurrent LSTM. V10 Easy ramp:
@@ -3801,10 +3879,10 @@ from the raw cache IS that idea, done right).</p>
 
 <h3 id="next">Open threads</h3>
 <ul>
-  <li><b>Duo Easy (active, Aug 28):</b> experiment G holding compact
-    Easy (94/228). Window WR 0.23 on a BetweenTwoSeas-heavy sample
-    (still 0/30). Last 8 has compact wins. Next unused after a fail
-    gate: MAPPO so V sees the partner. See
+  <li><b>Duo Easy (active, Aug 28):</b> experiment H resume G + eco
+    income PBRS / first City+Port. G held compact (101/245) and died
+    on BetweenTwoSeas (0/30) with almost no buildings. Next unused
+    after an H fail gate: MAPPO so V sees the partner. See
     <a href="#duo-easy">writeup</a>.</li>
   <li><b>V11 (active plan, Jul 23):</b> see <a href="#v11-plan">V11 plan</a>  - 
     neighbor pack, ego-split fronts, unit tokens + pointer, bigger model,
