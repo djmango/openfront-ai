@@ -32,7 +32,11 @@ pub fn execute_player_spawn(
         return false;
     };
 
-    if game.config.random_spawn && game.has_spawned(small_id) {
+    // Already placed: no-op, do not relinquish + re-conquer (teleport).
+    // TS only gates this after the spawn phase ends; during the phase a
+    // second spawn used to hop the blob. Duo sequential spawn needs the
+    // placed partner to stay put so the other head can match landmass.
+    if game.has_spawned(small_id) {
         return false;
     }
 
@@ -200,5 +204,34 @@ mod tests {
             loose_tiles.contains(&wall_tile),
             "loose spawn footprints keep tip mag31 Mountain tiles"
         );
+    }
+
+    #[test]
+    fn second_spawn_does_not_teleport_an_already_placed_player() {
+        let mut game = crate::test_util::plains_game(40, 40);
+        let info = crate::game::PlayerInfo {
+            name: "p".to_string(),
+            player_type: crate::game::PlayerType::Human,
+            client_id: Some("p".to_string()),
+            id: "p".to_string(),
+            clan_tag: None,
+            friends: Vec::new(),
+            team: None,
+        };
+        let mut random = crate::prng::PseudoRandom::new(1);
+        let first = game.map.ref_xy(10, 10);
+        let second = game.map.ref_xy(30, 30);
+        assert!(execute_player_spawn(
+            &mut game, &info, Some(first), &mut random
+        ));
+        let small_id = game.player_by_id("p").unwrap().small_id;
+        assert!(game.has_spawned(small_id));
+        assert_eq!(game.spawn_tile_of(small_id), Some(first));
+        assert!(!execute_player_spawn(
+            &mut game, &info, Some(second), &mut random
+        ));
+        assert_eq!(game.spawn_tile_of(small_id), Some(first));
+        assert_eq!(game.map.owner_id(first), small_id);
+        assert_eq!(game.map.owner_id(second), 0);
     }
 }
