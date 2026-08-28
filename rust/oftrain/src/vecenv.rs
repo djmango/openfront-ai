@@ -1631,6 +1631,13 @@ impl EnvWorker {
             all_intents.extend(intents.iter().cloned());
             agent_intents.push(intents);
         }
+        if let Some(staggered) = stagger_simultaneous_duo_spawn(
+            self.obs.as_ref().unwrap().spawn_phase(),
+            &(0..n).map(|i| !self.agent_alive(i)).collect::<Vec<_>>(),
+            &agent_intents,
+        ) {
+            all_intents = staggered;
+        }
         let pre_attack_ids: HashSet<String> = ents.attacks.iter().map(|a| a.aid.clone()).collect();
 
         let new_obs = self.bridge.step(&all_intents, self.decision_ticks)?;
@@ -2186,6 +2193,34 @@ impl EnvWorker {
     }
 }
 
+/// During spawn, if every agent is still unplaced and all emit spawn in
+/// the same step, keep only agent 0's intents so agent 1's next obs sees
+/// the partner blob (class-2 clut) instead of a simultaneous empty-map
+/// commit. Without this, both heads still land on tick 1 and sequential
+/// spawn is a no-op.
+fn stagger_simultaneous_duo_spawn(
+    spawn_phase: bool,
+    unspawned: &[bool],
+    agent_intents: &[Vec<Value>],
+) -> Option<Vec<Value>> {
+    if !spawn_phase || agent_intents.len() < 2 {
+        return None;
+    }
+    if unspawned.len() != agent_intents.len() || !unspawned.iter().all(|&u| u) {
+        return None;
+    }
+    let is_spawn = |intents: &[Value]| {
+        intents
+            .iter()
+            .any(|v| v.get("type").and_then(|t| t.as_str()) == Some("spawn"))
+    };
+    if agent_intents.iter().all(|intents| is_spawn(intents)) {
+        Some(agent_intents[0].clone())
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod churn_action_tests {
     use super::*;
@@ -2435,5 +2470,51 @@ mod compact_extras_tests {
         assert_eq!(outs[1].partner_scalars[0], 3.0);
         EnvWorker::fill_partner_features(&mut outs[..1]);
         assert_eq!(outs[0].partner_players[0], 2.0, "solo slice is a no-op");
+    }
+}
+
+#[cfg(test)]
+mod sequential_spawn_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn spawn_intent(tile: i64) -> Vec<Value> {
+        vec![json!({"type": "spawn", "tile": tile, "clientID": "AGENTRL1"})]
+    }
+
+    #[test]
+    fn drops_agent1_spawn_when_both_unplaced() {
+        let kept = stagger_simultaneous_duo_spawn(
+            true,
+            &[true, true],
+            &[spawn_intent(10), spawn_intent(20)],
+        )
+        .expect("should stagger");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0]["tile"], 10);
+    }
+
+    #[test]
+    fn does_not_stagger_once_a_partner_is_on_the_map() {
+        assert!(
+            stagger_simultaneous_duo_spawn(
+                true,
+                &[false, true],
+                &[spawn_intent(10), spawn_intent(20)],
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn does_not_stagger_outside_spawn_phase() {
+        assert!(
+            stagger_simultaneous_duo_spawn(
+                false,
+                &[true, true],
+                &[spawn_intent(10), spawn_intent(20)],
+            )
+            .is_none()
+        );
     }
 }

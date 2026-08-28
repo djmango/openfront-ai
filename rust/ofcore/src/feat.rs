@@ -975,7 +975,14 @@ pub fn featurize(
     let mut act = [0.0f32; N_ACTIONS];
     let mut ptarget = vec![0.0f32; N_ACTIONS * MAX_SLOTS];
     if spawn_phase {
-        act[A_SPAWN as usize] = 1.0;
+        // Sequential spawn: the placed partner noops instead of
+        // re-emitting spawn (which used to teleport). Unspawned heads
+        // stay spawn-only so they cannot stall into `spawn_randomly`.
+        if alive {
+            act[A_NOOP as usize] = 1.0;
+        } else {
+            act[A_SPAWN as usize] = 1.0;
+        }
     } else {
         act[A_NOOP as usize] = 1.0;
     }
@@ -1563,5 +1570,47 @@ mod clut_tests {
             feat.scalars[11] < 0.95,
             "45/64 is short of the 95% team win line"
         );
+    }
+
+    fn spawn_mask_feat(spawn_phase: bool, alive: bool) -> Feat {
+        let ents = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true, "team": "Humans", "tiles": 0}
+            ],
+            "units": [],
+            "attacks": [],
+            "alliances": []
+        }));
+        let lut = make_lut(&[1]);
+        let n = REGION * REGION;
+        featurize(
+            1,
+            1,
+            &lut,
+            &vec![1u8; n],
+            &vec![0u8; n],
+            &vec![0u8; n],
+            1,
+            spawn_phase,
+            alive,
+            1,
+            &ents,
+            &Legal::default(),
+        )
+    }
+
+    #[test]
+    fn spawn_phase_masks_spawn_until_placed_then_noop() {
+        let unspawned = spawn_mask_feat(true, false);
+        assert_eq!(unspawned.legal_actions[A_SPAWN as usize], 1.0);
+        assert_eq!(unspawned.legal_actions[A_NOOP as usize], 0.0);
+
+        let placed = spawn_mask_feat(true, true);
+        assert_eq!(placed.legal_actions[A_SPAWN as usize], 0.0);
+        assert_eq!(placed.legal_actions[A_NOOP as usize], 1.0);
+
+        let playing = spawn_mask_feat(false, true);
+        assert_eq!(playing.legal_actions[A_NOOP as usize], 1.0);
+        assert_eq!(playing.legal_actions[A_SPAWN as usize], 0.0);
     }
 }
