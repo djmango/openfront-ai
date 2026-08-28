@@ -5,8 +5,8 @@ and report the first checkpoint tick at which any player's state diverges.
 Both dumpers share one schema (see rust/engine/src/bin/tick_dump.rs and
 scripts/dump_ts_tick_state.ts): a list of per-`every`-tick snapshots, each
 with a list of per-player {identity, id, name, tiles, troops, gold, alive,
-hash, numUnits}. `identity` (clientID- or nation-name-keyed) is the join key
-- stable across both engines, unlike array position.
+hash, numUnits, unitsHash}. Join key is player `id` (not `identity` —
+`nation:Name` collides for bots and hides real diffs).
 
 This is the comparison half of bisect_parity.sh's coarse-then-fine loop; run
 directly if you already have two dump files and just want the diff.
@@ -33,7 +33,7 @@ import sys
 import argparse
 
 
-DEFAULT_FIELDS = ["alive", "tiles", "troops", "gold", "hash", "numUnits"]
+DEFAULT_FIELDS = ["alive", "tiles", "troops", "gold", "hashBits", "hash", "unitsHash", "numUnits"]
 # `troops` is TS-side-rounded and gold can differ by rounding-mode noise on
 # both sides even when nothing is actually wrong; treat these as "soft" -
 # still reported, but don't count as the *first* divergence on their own
@@ -46,7 +46,13 @@ def load(path):
         data = json.load(f)
     by_tick = {}
     for snap in data["ticks"]:
-        by_tick[snap["tick"]] = {p["identity"]: p for p in snap["players"]}
+        # Join on stable player id — `identity` collides for bots that share
+        # a nation display name (nation:Name), which hides real hash diffs.
+        players = {}
+        for p in snap["players"]:
+            key = str(p["id"] if p.get("id") is not None else p["identity"])
+            players[key] = p
+        by_tick[snap["tick"]] = players
     return data, by_tick
 
 
@@ -61,26 +67,72 @@ def normalize(field, value):
     # dodge Number precision loss (see dump_ts_tick_state.ts); native emits a
     # plain JSON integer. Compare numerically on both sides so this isn't a
     # spurious int-vs-str divergence on every single tick.
-    if field == "gold" and value is not None:
+    if field in ("gold", "unitsHash") and value is not None:
         return int(value)
+    if field in ("hashBits", "gameHashBits") and value is not None:
+        return str(value)
     return value
 
 
 def diff_at_tick(native_players, ts_players, fields):
     diffs = []
     all_ids = set(native_players) | set(ts_players)
+    # Prefer hashBits over truncated hash ints when available.
+    use_fields = list(fields)
+    sample = next(iter(native_players.values()), None) or next(
+        iter(ts_players.values()), None
+    )
+    if (
+        sample is not None
+        and sample.get("hashBits") is not None
+        and "hashBits" in use_fields
+        and "hash" in use_fields
+    ):
+        use_fields = [f for f in use_fields if f != "hash"]
     for ident in sorted(all_ids):
         n = native_players.get(ident)
         t = ts_players.get(ident)
         if n is None or t is None:
             diffs.append((ident, "presence", n is not None, t is not None))
             continue
-        for f in fields:
+        for f in use_fields:
             nv = normalize(f, n.get(camel(f)))
             tv = normalize(f, t.get(camel(f)))
             if nv != tv:
                 diffs.append((ident, f, nv, tv))
     return diffs
+
+
+def unit_deep_lines(native_player, ts_player):
+    """When dumps include per-unit snapshots, list the first concrete unit diffs."""
+    n_units = {u["id"]: u for u in (native_player or {}).get("units") or []}
+    t_units = {u["id"]: u for u in (ts_player or {}).get("units") or []}
+    if not n_units and not t_units:
+        return []
+    lines = []
+    for uid in sorted(set(n_units) | set(t_units)):
+        nu, tu = n_units.get(uid), t_units.get(uid)
+        if nu is None or tu is None:
+            lines.append(f"    unit#{uid} presence native={nu is not None} ts={tu is not None}")
+            continue
+        for f in (
+            "unitType",
+            "tile",
+            "hash",
+            "level",
+            "underConstruction",
+            "health",
+            "veterancy",
+            "veterancyProgress",
+            "targetTile",
+            "patrolTile",
+            "retreatPort",
+            "retreating",
+            "docked",
+        ):
+            if nu.get(f) != tu.get(f):
+                lines.append(f"    unit#{uid} {f} native={nu.get(f)!r} ts={tu.get(f)!r}")
+    return lines
 
 
 def main():
@@ -130,8 +182,15 @@ def main():
 
     tick, diffs = report
     print(f"FIRST DIVERGENCE at checkpoint tick {tick}:")
-    for ident, field, nv, tv in diffs:
-        print(f"  {ident}: {field} native={nv!r} ts={tv!r}")
+    for pid, field, nv, tv in diffs:
+        np = native_by_tick[tick].get(pid) or {}
+        tp = ts_by_tick[tick].get(pid) or {}
+        ident = np.get("identity") or tp.get("identity")
+        label = f"{ident}(id={pid})" if ident else pid
+        print(f"  {label}: {field} native={nv!r} ts={tv!r}")
+        if field in ("unitsHash", "numUnits", "hash"):
+            for line in unit_deep_lines(np, tp):
+                print(line)
     # Machine-readable line for bisect_parity.sh to grep out the tick.
     print(f"DIVERGENCE_TICK={tick}")
     return 1

@@ -153,12 +153,21 @@ impl TradeShipExecution {
     }
 
     /// TS `WaterPathFinder.ensureFresh` - after a water-graph rebuild, keep the
-    /// old cached path for `stagger` ticks, then drop it so the next step
-    /// re-runs A* against the new graph.
-    fn ensure_water_path_fresh(&mut self, game: &Game) {
+    /// old cached path for `stagger` countdown steps, then drop it so the next
+    /// step re-runs A* against the new graph.
+    ///
+    /// Returns `true` when this call invalidated the cached path (TS `_rebuilt`).
+    ///
+    /// Important: TS `TradeShipExecution` / `TransportShipExecution` call
+    /// `ensureFresh` **twice** per movement tick (`.rebuilt` getter, then
+    /// `.next()`), and a **third** time when recording a motion plan
+    /// (`.findPath`). Each call can decrement `staggerCountdown`, so native
+    /// must mirror that call count or ships replan one tick late and pick a
+    /// different equal-cost water route (`YdhKd1j6` TradeShip `#15365` @2190).
+    fn ensure_water_path_fresh(&mut self, game: &Game) -> bool {
         let v = game.water_graph_version();
         if v == self.water_graph_version {
-            return;
+            return false;
         }
         if self.pending_version != v {
             self.pending_version = v;
@@ -166,12 +175,13 @@ impl TradeShipExecution {
         }
         if self.stagger_countdown > 0 {
             self.stagger_countdown -= 1;
-            return;
+            return false;
         }
         self.water_graph_version = v;
         self.path.clear();
         self.path_idx = 0;
         self.path_dst = None;
+        true
     }
 
     fn refresh_path(&mut self, game: &mut Game, from: TileRef, to: TileRef) -> bool {
@@ -193,6 +203,7 @@ impl TradeShipExecution {
     }
 
     fn next_path_tile(&mut self, game: &mut Game, from: TileRef, to: TileRef) -> Option<TileRef> {
+        // TS `WaterPathFinder.next` → `ensureFresh` (2nd call this tick).
         self.ensure_water_path_fresh(game);
         if self.path_dst != Some(to) || self.path.is_empty() {
             if !self.refresh_path(game, from, to) {
@@ -269,6 +280,9 @@ impl Execution for TradeShipExecution {
             self.water_graph_version = game.water_graph_version();
             self.stagger_assigned = true;
         }
+        // TS `const rebuiltThisTick = this.pathFinder.rebuilt` — first
+        // `ensureFresh` every tick (even when later early-returning).
+        let _rebuilt = self.ensure_water_path_fresh(game);
 
         // TS `TradeShipExecution.tick`: the ship is lazily built on the first tick.
         if self.ship_unit_id.is_none() {
@@ -387,16 +401,19 @@ impl Execution for TradeShipExecution {
             return;
         }
 
+        // TS clears `motionPlanDst` when `rebuilt`; native clears `path_dst` in
+        // `ensure_water_path_fresh`, so this check must run after the tick-start
+        // ensure (and before `next_path_tile` refreshes `path_dst`).
         let records_new_motion_plan = self.path_dst != Some(dst_tile);
         let Some(next) = self.next_path_tile(game, cur_tile, dst_tile) else {
             self.complete(game);
             return;
         };
         if records_new_motion_plan {
-            // TS records a grid motion plan when the destination changes by
-            // running a second `findPath(result.node, dst)`. That lookup also
-            // warms the shared HPA edge-path cache; without this side effect,
+            // TS `pathFinder.findPath(from, dst)` → third `ensureFresh`, then
+            // warms the shared HPA edge-path cache. Without both side effects,
             // later trade ships can choose different equal-cost water routes.
+            self.ensure_water_path_fresh(game);
             let _ = game.plan_water_path(next, dst_tile);
         }
         if game.map.is_water(next) && game.map.is_shoreline(next) {
@@ -474,6 +491,40 @@ mod piracy_tests {
             friends: Vec::new(),
             team: None,
         })
+    }
+
+    /// TS `TradeShipExecution` calls `ensureFresh` twice per movement tick
+    /// (`.rebuilt` + `.next`). With `stagger=2`, that drains the countdown in
+    /// one tick so the following tick rebuilds — a single call/tick replans
+    /// one tick late and can fork equal-cost water routes.
+    #[test]
+    fn stagger_countdown_drains_with_ts_double_ensure_fresh() {
+        let game = water_game(20, 20);
+        let mut exec = TradeShipExecution::new_for_test(1, 0, 123);
+        exec.stagger = 2;
+        exec.stagger_assigned = true;
+        // Pretend we still hold a path cached against an older graph version.
+        exec.water_graph_version = game.water_graph_version().wrapping_add(1);
+        exec.pending_version = u32::MAX;
+        exec.path = vec![game.ref_xy(1, 1), game.ref_xy(2, 1)];
+        exec.path_idx = 1;
+        exec.path_dst = Some(game.ref_xy(10, 10));
+
+        // Movement tick N: `.rebuilt` then `.next` (no motion-plan findPath).
+        assert!(!exec.ensure_water_path_fresh(&game));
+        assert_eq!(exec.stagger_countdown, 1);
+        assert!(!exec.path.is_empty());
+        assert!(!exec.ensure_water_path_fresh(&game));
+        assert_eq!(exec.stagger_countdown, 0);
+        assert!(!exec.path.is_empty(), "countdown must fully drain before rebuild");
+
+        // Movement tick N+1: first ensureFresh rebuilds.
+        assert!(exec.ensure_water_path_fresh(&game));
+        assert!(exec.path.is_empty());
+        assert_eq!(exec.path_dst, None);
+        assert_eq!(exec.water_graph_version, game.water_graph_version());
+        // Second ensureFresh same tick is a no-op once versions match.
+        assert!(!exec.ensure_water_path_fresh(&game));
     }
 
     #[test]
