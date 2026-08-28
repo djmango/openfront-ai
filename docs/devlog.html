@@ -85,17 +85,17 @@
 </nav>
 
 <div class="now" id="now">
-  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 27th, 2026</h2>
+  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 28th, 2026</h2>
   <p>Live duo is <b>experiment G</b> on the homelab 3070:
   <code>scalars[11]</code> is team tiles / map land (the 95% team-win
   meter). Keeps F legal-diplo bits and E teammate clut. IPPO + pact
-  bonus 5, timeout = loss, PBRS, no v11. Holding compact Easy
-  (Onion 28/34, Caucasus 20/22, Pangaea 4/6); water is opening
-  (Britannia 7/26, one GreatLakes, one BlackSea) but not holding
-  (BetweenTwoSeas 0/20). Resumed after SIGKILL at u5376 — do not
-  from-scratch this winning run. Do not <code>--init ppo_v11</code>.
-  Do not load A/B/D/E/F stashes. See
-  <a href="#duo-easy">Aug 26-27 writeup</a>.</p>
+  bonus 5, timeout = loss, PBRS, no v11. Compact Easy is holding hard
+  (Caucasus 35/37, Onion 30/36, Pangaea 4/6; last 8 all wins; window
+  WR 0.73). Water is not: Britannia 7/26, GreatLakes 1, BlackSea 1,
+  BetweenTwoSeas 0/20. Resumed twice after SIGKILL (u5376, u10423) —
+  do not from-scratch this winning run. Do not
+  <code>--init ppo_v11</code>. Do not load A/B/D/E/F stashes. See
+  <a href="#duo-easy">Aug 26-28 writeup</a>.</p>
 </div>
 
 
@@ -253,14 +253,14 @@ Stashes under <code>rust/checkpoints/ppo_duo/</code>.</p>
       Team win fires at 0.95 of that meter. <code>scalars[10]</code>
       stays claimed-among-players. <code>N_SCALARS</code> 11→12.
       Keeps E+F. From scratch, then <b>resumed</b> after SIGKILL
-      (u5376 / 17:34Z → 18:01:29Z, same weights).</td>
-    <td>Loop 2026-08-27T23:32Z: u~10040, 153 eps / <b>61 wins</b>,
-      window WR 0.43, entropy ~1.3 O(1), gpu_mem% 91. Compact
-      holding (Onion 28/34, Caucasus 20/22, Pangaea 4/6). Water
-      opening not holding (Britannia 7/26, GreatLakes 1, BlackSea 1,
-      BetweenTwoSeas 0/20). Last 8 still has wins (not gate c).
-      Keep G. Crash snapshot
-      <code>ippo-G-sigkill-20260827T1734Z.*</code>.</td>
+      at u5376 and again at u10423 (same weights).</td>
+    <td>Loop 2026-08-28T00:08Z: u10617, 171 eps / <b>78 wins</b>,
+      window WR <b>0.73</b>, entropy 2.2 O(1). Last 8 all compact
+      wins. Caucasus 35/37, Onion 30/36, Pangaea 4/6. Water still
+      not holding (Britannia 7/26, GreatLakes 1, BlackSea 1,
+      BetweenTwoSeas 0/20). Keep G. Crash snapshots
+      <code>ippo-G-sigkill-20260827T1734Z.*</code> /
+      <code>ippo-G-sigkill-20260827T2350Z.*</code>.</td>
   </tr>
 </table>
 <p>Water maps (Britannia, GreatLakes, BlackSea, BetweenTwoSeas) were 0
@@ -3799,10 +3799,10 @@ from the raw cache IS that idea, done right).</p>
 
 <h3 id="next">Open threads</h3>
 <ul>
-  <li><b>Duo Easy (active, Aug 27):</b> experiment G holding compact
-    Easy (61/153, window WR 0.43). Water opening (Britannia repeating;
-    first GreatLakes + BlackSea) but BetweenTwoSeas still 0. Next
-    unused after a fail gate: MAPPO so V sees the partner. See
+  <li><b>Duo Easy (active, Aug 28):</b> experiment G holding compact
+    Easy (78/171, window WR 0.73, last 8 all wins). Water not holding
+    (BetweenTwoSeas still 0). Next unused after a fail gate: MAPPO
+    so V sees the partner. See
     <a href="#duo-easy">writeup</a>.</li>
   <li><b>V11 (active plan, Jul 23):</b> see <a href="#v11-plan">V11 plan</a>  - 
     neighbor pack, ego-split fronts, unit tokens + pointer, bigger model,
