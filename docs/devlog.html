@@ -90,9 +90,10 @@
     comms (<code>--duo-comms</code>). Snapshot ~u3893 / <b>5/54</b>
     (WR 0.09): Onion <b>4/14</b>, Caucasus 1/4, water still 0. Compact
     is repeating; last-8 water tail is mixed term+timeout (not gate c).
-    L LSTM OOMed 3× on 8GB. Next unused: <b>N unnamed</b>. Do not
-    <code>--init ppo_v11</code> or A–L stashes. See
-    <a href="#duo-easy">scoreboard</a>.</p>
+    L LSTM OOMed 3× on 8GB. Next unused: <b>N on M's weights</b>
+    (one lever, <code>--resume</code> M, not from-scratch). Carry
+    forward every working stack item. See
+    <a href="#duo-carry">carry-forward</a>.</p>
 </div>
 
 
@@ -100,7 +101,8 @@
 <p class="session">Two-human Team-mode on a homelab RTX 3070 8GB
 (<code>--duo</code>, <code>AGENTRL1</code>+<code>AGENTRL2</code> on Humans,
 stage 0 Easy, 2 envs, rollout 8, feedforward (M), frozen AE v3.2). Loop until
-a good Easy winner. Live job: experiment M (comms from-scratch). Code:
+a good Easy winner. Live job: experiment M (comms; Onion repeating).
+Carry-forward: next experiment resumes M, does not from-scratch. Code:
 <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>
 stacked on timeout-loss / PBRS.</p>
 
@@ -182,7 +184,7 @@ gold still need a pact.</p>
 
 <h3 id="duo-experiments">Experiments (A-M)</h3>
 <p>Shared recipe unless noted: homelab 3070, 2 games × 2 agents, stage 0
-Easy, rollout 8, frozen AE, timeout=loss, PBRS, from scratch, no v11.
+Easy, rollout 8, frozen AE, timeout=loss, PBRS, carry-forward stack, no v11.
 Fail gates: (a) ≥90 min and ≥8 eps and 0 wins; (b) entropy &lt; 0.3 for
 200 consecutive updates; (c) last 8 finished eps all timeout losses.
 Stashes under <code>rust/checkpoints/ppo_duo/</code>.</p>
@@ -340,6 +342,93 @@ numbers as of 2026-08-28T21:29Z.</p>
 <b>K</b> (Britannia 8/13, GreatLakes 4/11) then a timeout tail. Nothing
 has held BetweenTwoSeas (G 0/30, K 0/8, M 0/10). H–J resumed G and
 lost Onion. M is the G-shaped compact-open without K's water yet.</p>
+
+<h3 id="duo-carry">Carry forward: keep the wins, add one lever</h3>
+<p>From-scratch K / L / M re-paid compact that G already held (101/245).
+H–J resumed G then extra reward collapsed Onion. The rule now:</p>
+<ul>
+  <li><b>Code that worked stays on.</b> Do not strip identity, the 95%
+    meter, sequential spawn, MAPPO V, comms, timeout=loss, PBRS, or
+    the pact/eco/delete flags to “try a clean slate.”</li>
+  <li><b>Weights: resume the last run that still holds compact.</b>
+    Next experiment is <code>--resume</code> that checkpoint plus one
+    new lever. New tensors (comms Linear, MAPPO V) use compatible
+    load (<code>--init</code>), not a full from-scratch trunk.</li>
+  <li><b>Do not resume a collapsed run.</b> H/I/J lost Onion. L OOMed.
+    Fallback stashes: G compact-hold
+    (<code>ippo-G-compact-hold-20260828T0627Z</code>) or K water-open
+    (<code>mappo-K-fail-c-20260828T1514Z</code>, Britannia 8/13).
+    M should have <code>--init</code> K (keep water, random-init comms)
+    instead of from-scratch — that miss is why M’s water is still 0
+    while compact is repeating.</li>
+  <li>From-scratch only when tensors cannot transfer (LSTM schema 3)
+    or you would be resuming the same weights that just lost compact.
+    Never <code>--init ppo_v11</code>.</li>
+</ul>
+<table>
+  <tr><th>keep</th><th>from</th><th>why</th></tr>
+  <tr>
+    <td>timeout=loss, unspawned=dead, Ng PBRS, no action-pay donate/build/delete</td>
+    <td>pre-A</td>
+    <td>Camping wage is how the loop started. Do not revert.</td>
+  </tr>
+  <tr>
+    <td><code>--duo-pact-bonus 5</code></td>
+    <td>D</td>
+    <td>One-shot, not farmable. Cheap to keep.</td>
+  </tr>
+  <tr>
+    <td>class-2 clut, <code>is_teammate</code>, <code>scalars[10]</code></td>
+    <td>E</td>
+    <td>Without this a human cannot identify the partner.</td>
+  </tr>
+  <tr>
+    <td>legal donate / <code>alliance_request</code> bits</td>
+    <td>F</td>
+    <td>Trunk can see who it is legal to help.</td>
+  </tr>
+  <tr>
+    <td><code>scalars[11]</code> team/map-land 95% meter</td>
+    <td>G</td>
+    <td>Only run that <i>held</i> compact (44/46 Caucasus, 38/51 Onion).</td>
+  </tr>
+  <tr>
+    <td>sequential spawn (second head sees partner)</td>
+    <td>I</td>
+    <td>Gap-15 held on every GameRecord. Spawn is not a comms problem
+      after the first blob is on the map.</td>
+  </tr>
+  <tr>
+    <td>eco income PBRS 0.25 + first City/Port 3/5</td>
+    <td>H</td>
+    <td>Cities did complete (then got deleted). Reward-only, not an action.</td>
+  </tr>
+  <tr>
+    <td>City/Port delete −3/−5 on count drop</td>
+    <td>J</td>
+    <td>Still on. It suppressed building more than it kept structures.
+      Do not pay <code>delete_unit</code> as an action.</td>
+  </tr>
+  <tr>
+    <td>MAPPO centralized V</td>
+    <td>K</td>
+    <td>Opened water (Britannia 8/13, GreatLakes 4/11) with identity
+      already in obs. Keep V even when π is feedforward.</td>
+  </tr>
+  <tr>
+    <td><code>--duo-comms</code> partner last-action residual</td>
+    <td>M</td>
+    <td>Live. Onion repeating 4/14. Keep the layer; next lever resumes M.</td>
+  </tr>
+  <tr>
+    <td>feedforward (<code>--recurrent-policy=false</code>)</td>
+    <td>L (negative)</td>
+    <td>LSTM+MAPPO+2envs OOMs on 8GB. Do not revive.</td>
+  </tr>
+</table>
+<p>Drop: v11-KL, LSTM on this card, 3 envs, paying donate/build/delete
+as actions, from-scratch as the default, resuming H/I/J collapsed
+weights.</p>
 <p>Notes for each run (what changed, stash names):</p>
 <table>
   <tr><th>run</th><th>what changed</th><th>result</th></tr>
@@ -514,7 +603,7 @@ lost Onion. M is the G-shaped compact-open without K's water yet.</p>
       Onion <b>4/14</b> (repeating 19:40–20:27), Caucasus 1/4. Water
       still 0 (Britannia 0/13, GreatLakes 0/12, BetweenTwoSeas 0/10,
       BlackSea 0/1). Last 8 mixed water term+timeout (not gate c).
-      Entropy O(1). Fail → <b>N unnamed</b> (after M, not instead of
+      Entropy O(1). Fail → <b>N on M's weights</b> (after M, not instead of
       M).</td>
   </tr>
 </table>
@@ -659,6 +748,12 @@ the partner too. Donate exists but is not donate-dirac.</p>
     weights did not stop the OOM. Sequence models multiply memory before
     they multiply quality (same lesson as seq-8 BC). M drops the LSTM
     and gives π an explicit one-step partner-action channel instead.</li>
+  <li><b>From-scratch is not a virtue.</b> K and M re-learned compact
+    that G already held. M should have <code>--init</code> K (keep
+    Britannia 8/13, random-init the comms Linear). H–J show the other
+    failure: resume G then pile on reward noise and Onion dies. Carry
+    the last compact-holding checkpoint; add one lever; compatible-load
+    new tensors. See <a href="#duo-carry">carry-forward</a>.</li>
 </ul>
 
 <h3 id="duo-next">What is still open</h3>
@@ -668,21 +763,27 @@ the partner too. Donate exists but is not donate-dirac.</p>
     Clock starts at 2026-08-28T16:43:18Z. Snapshot ~u3893 /
     <b>5/54</b>: Onion 4/14 repeating, water 0. Same fail gates
     (a/b/c/4). Feedforward; do not revive LSTM on this 8GB card.</li>
-  <li><b>N unnamed</b>. After M, not instead of M.</li>
+  <li><b>N:</b> one new lever on <b>M's weights</b>
+    (<code>--resume</code> the M stash, not from-scratch). Candidates:
+    boat-commit / leftover-continent Φ. After M, not instead of M. If M
+    loses compact before water, <code>--init</code> G compact-hold or K
+    water-open per <a href="#duo-carry">carry-forward</a>.</li>
 </ul>
 
 <h3 id="duo-ops">Ops</h3>
 <ul>
   <li>Host: homelab RTX 3070 8GB, tmux <code>duo-train</code>,
     <code>bash rust/checkpoints/ppo_duo/run.sh</code> (gitignored;
-    M is from-scratch feedforward MAPPO + comms:
+    M is feedforward MAPPO + comms, <b>crash-resume latest</b> of this
+    run (carry-forward, not from-scratch):
     <code>--duo-comms --centralized-value=true
     --recurrent-policy=false --minibatches 8</code>,
-    no <code>--resume</code> of L/K, plus
+    plus
     <code>--duo-eco-coef 0.25 --duo-city-bonus 3 --duo-port-bonus 5
     --duo-city-delete 3 --duo-port-delete 5
-    --v84-boat-cancelled=-0.15</code>, no v11). Do not
-    <code>--resume</code> L LSTM weights into M. Clap defaults
+    --v84-boat-cancelled=-0.15 --duo-pact-bonus 5</code>. Next
+    experiment resumes M. Do not
+    <code>--resume</code> L LSTM or H–J collapsed weights. Clap defaults
     recurrent on: always pass <code>--recurrent-policy=false</code>
     for feedforward.</li>
   <li>Log / metrics / state:
@@ -4153,9 +4254,9 @@ from the raw cache IS that idea, done right).</p>
 <h3 id="next">Open threads</h3>
 <ul>
   <li><b>Duo Easy (active, Aug 28):</b> experiment M comms
-    from-scratch, live <b>5/54</b> (Onion repeating, water 0).
-    Next unused: <b>N unnamed</b>.
-    See <a href="#duo-scoreboard">scoreboard</a>.</li>
+    live <b>5/54</b> (Onion repeating, water 0). Next: <b>N resumes M</b>
+    (one lever, not from-scratch).
+    See <a href="#duo-carry">carry-forward</a>.</li>
   <li><b>V11 (active plan, Jul 23):</b> see <a href="#v11-plan">V11 plan</a>  - 
     neighbor pack, ego-split fronts, unit tokens + pointer, bigger model,
     full LSTM replacing GRU, BC unfreeze on the new schema. V10 killed.</li>
