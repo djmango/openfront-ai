@@ -4,37 +4,36 @@
 //! Python side there's no GIL, so no multiprocessing/pickle framing is
 //! needed to keep JSON decode + featurization off the main thread.
 
-use anyhow::{Result, ensure};
+use anyhow::{ensure, Result};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use ofcore::curriculum::{
-    self, ActionChurnTracker, ActionPairCounts, ActionTarget, BoatOutcomeCounts, CITY_UNIT_CLASS,
-    ChosenAction, CombatOutcome, CurriculumSchedule, DUO_SOLO_SCALE, DominanceShaper,
-    InverseActionPair, PORT_UNIT_CLASS, RewardComponents, RewardConfig, Stage,
-    TRANSPORT_UNIT_CLASS, V83_CLOSEOUT_SHARE_START, W_STR, W_WASTE, action_churn_penalty,
-    boat_outcome_reward, classify_boat_resolution, closeout_potential, combat_outcome_reward,
-    dominance_potential, duo_first_structure_bonus, duo_pact_success_bonus, duo_potential,
-    duo_structure_delete_penalty, economy_potential, embargo_stop_outcome_reward, fast_win_bonus,
-    formally_allied, land_share,
+    self, action_churn_penalty, boat_commit_potential, boat_outcome_reward,
+    classify_boat_resolution, closeout_potential, combat_outcome_reward, dominance_potential,
+    duo_first_structure_bonus, duo_pact_success_bonus, duo_potential, duo_structure_delete_penalty,
+    economy_potential, embargo_stop_outcome_reward, fast_win_bonus, formally_allied, land_share,
     normalized_strength_share, placement, placement_score, player_gold_income, sample_episode,
-    stages_for_schedule, strength_delta_weight, team_completed_structures, tempo_pressure,
-    terminal_reward, timeweight, v10_closeout_entry_bonus, v10_combat_action_bonus,
+    stages_for_schedule, strength_delta_weight, team_completed_structures, team_transport_ships,
+    tempo_pressure, terminal_reward, timeweight, v10_closeout_entry_bonus, v10_combat_action_bonus,
     v10_diplo_panic_penalty, v10_survival_reward, v10_timeout_after_closeout_penalty,
-    v83_action_churn_penalty,
+    v83_action_churn_penalty, ActionChurnTracker, ActionPairCounts, ActionTarget,
+    BoatOutcomeCounts, ChosenAction, CombatOutcome, CurriculumSchedule, DominanceShaper,
+    InverseActionPair, RewardComponents, RewardConfig, Stage, CITY_UNIT_CLASS, DUO_SOLO_SCALE,
+    PORT_UNIT_CLASS, TRANSPORT_UNIT_CLASS, V83_CLOSEOUT_SHARE_START, W_STR, W_WASTE,
 };
 use ofcore::feat::{
-    self, A_ALLIANCE_REQUEST, A_ATTACK, A_BOAT, A_BREAK_ALLIANCE, A_BUILD, A_CANCEL_BOAT,
-    A_DONATE_GOLD, A_DONATE_TROOPS, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, ACTIONS, IS_LAND_BIT,
-    MAG_MASK, REGION,
+    self, ACTIONS, A_ALLIANCE_REQUEST, A_ATTACK, A_BOAT, A_BREAK_ALLIANCE, A_BUILD, A_CANCEL_BOAT,
+    A_DONATE_GOLD, A_DONATE_TROOPS, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, IS_LAND_BIT, MAG_MASK,
+    REGION,
 };
-use ofcore::translate::{Choice, IntentTranslator, translate};
+use ofcore::translate::{translate, Choice, IntentTranslator};
 
 use crate::ae::{self, AeRaw, StaticTerrain, TerrainCacheKey};
 use crate::engine::{self, EngineKind, GameEngine, RawObs};
@@ -935,6 +934,7 @@ pub struct EnvWorker {
     closeout_shaper: [DominanceShaper; 2],
     duo_shaper: [DominanceShaper; 2],
     eco_shaper: [DominanceShaper; 2],
+    boat_commit_shaper: [DominanceShaper; 2],
     closeout_tracker: [CloseoutTracker; 2],
     action_churn_tracker: [ActionChurnTracker; 2],
     boat_tracker: [PendingBoatTracker; 2],
@@ -1010,6 +1010,7 @@ impl EnvWorker {
             closeout_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             duo_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             eco_shaper: [DominanceShaper::default(), DominanceShaper::default()],
+            boat_commit_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             closeout_tracker: [CloseoutTracker::default(), CloseoutTracker::default()],
             action_churn_tracker: [ActionChurnTracker::default(), ActionChurnTracker::default()],
             boat_tracker: [PendingBoatTracker::default(), PendingBoatTracker::default()],
@@ -1369,6 +1370,11 @@ impl EnvWorker {
                     player_gold_income(self.ents(), me),
                     player_gold_income(self.ents(), partner),
                     self.reward_config.duo_eco_coef,
+                ));
+                let owners = [me, partner];
+                self.boat_commit_shaper[i].reset(boat_commit_potential(
+                    team_transport_ships(self.ents(), &owners),
+                    self.reward_config.duo_boat_commit,
                 ));
             }
             self.closeout_tracker[i].reset(share, tick);
@@ -1751,6 +1757,14 @@ impl EnvWorker {
             self.agent_me(0).max(0) as usize,
             if n > 1 { partner_me } else { usize::MAX },
         ];
+        let next_boat_phi = if n > 1 {
+            boat_commit_potential(
+                team_transport_ships(self.ents(), &team_owners),
+                self.reward_config.duo_boat_commit,
+            )
+        } else {
+            0.0
+        };
         let n_cities = if n > 1 {
             team_completed_structures(self.ents(), &team_owners, CITY_UNIT_CLASS)
         } else {
@@ -2066,6 +2080,12 @@ impl EnvWorker {
                 // (unlike K_ECO). Absorbing terminal Φ=0.
                 let eco_phi = if done { 0.0 } else { next_eco_phi };
                 duo_r += self.eco_shaper[i].transition(eco_phi, self.reward_config.gamma, 1.0);
+                // Ng 1999 PBRS on team in-flight TransportShip count.
+                // Launch raises Φ; land/cancel/destroy drops it. Never the
+                // `boat` action. Absorbing terminal Φ=0.
+                let boat_phi = if done { 0.0 } else { next_boat_phi };
+                duo_r +=
+                    self.boat_commit_shaper[i].transition(boat_phi, self.reward_config.gamma, 1.0);
                 // Outcome-only one-shot: first formal pact this episode.
                 if allied && !self.pact_bonus_paid {
                     duo_r += duo_pact_success_bonus(true, self.reward_config);
@@ -2086,10 +2106,8 @@ impl EnvWorker {
                     dropped_cities,
                     self.reward_config.duo_city_delete,
                 );
-                duo_r += duo_structure_delete_penalty(
-                    dropped_ports,
-                    self.reward_config.duo_port_delete,
-                );
+                duo_r +=
+                    duo_structure_delete_penalty(dropped_ports, self.reward_config.duo_port_delete);
                 components.duo = duo_r;
                 reward += duo_r;
             }
@@ -2550,25 +2568,21 @@ mod sequential_spawn_tests {
 
     #[test]
     fn does_not_stagger_once_a_partner_is_on_the_map() {
-        assert!(
-            stagger_simultaneous_duo_spawn(
-                true,
-                &[false, true],
-                &[spawn_intent(10), spawn_intent(20)],
-            )
-            .is_none()
-        );
+        assert!(stagger_simultaneous_duo_spawn(
+            true,
+            &[false, true],
+            &[spawn_intent(10), spawn_intent(20)],
+        )
+        .is_none());
     }
 
     #[test]
     fn does_not_stagger_outside_spawn_phase() {
-        assert!(
-            stagger_simultaneous_duo_spawn(
-                false,
-                &[true, true],
-                &[spawn_intent(10), spawn_intent(20)],
-            )
-            .is_none()
-        );
+        assert!(stagger_simultaneous_duo_spawn(
+            false,
+            &[true, true],
+            &[spawn_intent(10), spawn_intent(20)],
+        )
+        .is_none());
     }
 }

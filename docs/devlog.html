@@ -86,13 +86,12 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 30th, 2026</h2>
-  <p>Live duo is <b>experiment M</b> on the homelab 3070: partner last-action
-    comms (<code>--duo-comms</code>). <b>Easy including water is open:</b>
-    first BetweenTwoSeas <code>qlmRclS1</code> 19:37, first GreatLakes
-    <code>z4bOdwHy</code> 03:03, plus Britannia / BlackSea / compact.
-    Snapshot ~u30886 / book <b>37/190</b> (peak ~80; spool IDs overwrite).
-    Keep M running. Do not start N unless a fail gate fires. See
-    <a href="#duo-scoreboard">A–M scoreboard</a> and
+  <p>Live duo is <b>experiment N</b> on the homelab 3070: boat-commit
+    PBRS (<code>--duo-boat-commit 0.5</code>) on <b>M's weights</b>.
+    M hit Easy including water then fail-c (last 8 Britannia/GL
+    timeout). N started 2026-08-30T07:41:36Z, <code>--resume</code>
+    <code>mappo-M-fail-c-20260830T0741Z</code>. See
+    <a href="#duo-scoreboard">A–N scoreboard</a> and
     <a href="#duo-carry">carry-forward</a>.</p>
 </div>
 
@@ -100,10 +99,11 @@
 <h2 class="date" id="duo-easy">Aug 26-28, 2026 - Duo Easy: identity held compact; economy is the water hole</h2>
 <p class="session">Two-human Team-mode on a homelab RTX 3070 8GB
 (<code>--duo</code>, <code>AGENTRL1</code>+<code>AGENTRL2</code> on Humans,
-stage 0 Easy, 2 envs, rollout 8, feedforward (M), frozen AE v3.2). Loop until
-Easy including water. Hit 2026-08-30T03:03Z (GL <code>z4bOdwHy</code>;
-BTS already open). Live job: experiment M (comms; keep running).
-Carry-forward: next lever resumes M, does not from-scratch. Code:
+stage 0 Easy, 2 envs, rollout 8, feedforward, frozen AE v3.2). Loop until
+Easy including water. Hit 2026-08-30T03:03Z on M (GL <code>z4bOdwHy</code>;
+BTS already open). M then fail-c (water timeout tail). Live job:
+experiment N (boat-commit PBRS on M weights). Carry-forward: next
+lever resumes N, does not from-scratch. Code:
 <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>
 stacked on timeout-loss / PBRS.</p>
 
@@ -191,9 +191,10 @@ Fail gates: (a) ≥90 min and ≥8 eps and 0 wins; (b) entropy &lt; 0.3 for
 Stashes under <code>rust/checkpoints/ppo_duo/</code>.</p>
 
 <p id="duo-scoreboard"><b>Scoreboard</b> (compact = Caucasus / Onion / Pangaea;
-water = Britannia / GreatLakes / BlackSea / BetweenTwoSeas). M is live;
-numbers as of 2026-08-30T03:05Z. M book counts drift because the replay
-spool reuses IDs (~190 files); peak book ~80, current book 37.</p>
+water = Britannia / GreatLakes / BlackSea / BetweenTwoSeas). N is live
+(resume M). M numbers at fail-c 2026-08-30T07:36Z. Book counts drift
+because the replay spool reuses IDs (~190 files); M peak ~80, book at
+gate 45.</p>
 <table>
   <tr>
     <th>run</th>
@@ -331,21 +332,30 @@ spool reuses IDs (~190 files); peak book ~80, current book 37.</p>
     <td>3× CUDA OOM (gate 4)</td>
   </tr>
   <tr>
-    <td><b>M comms (live)</b></td>
+    <td>M comms</td>
     <td>π residual on partner last action</td>
-    <td>peak ~<b>80</b>; book <b>37/190</b></td>
-    <td>peak 0.42; book 0.19</td>
+    <td>peak ~<b>80</b>; book <b>45/190</b></td>
+    <td>peak 0.42; book 0.24</td>
     <td>Onion peak 34/38 (book 26), Caucasus peak 22/35, Pangaea peak 16/20</td>
     <td>Britannia opened+held, BlackSea 2–3, BTS <b>1/15</b> 19:37, GL <b>1/22</b> 03:03</td>
-    <td>live (~u30886 / ~34h). <b>Easy including water open</b></td>
+    <td>gate c ~u33667 (Britannia/GL timeout tail). <b>Easy including water open</b></td>
+  </tr>
+  <tr>
+    <td><b>N boat-commit (live)</b></td>
+    <td>PBRS on team in-flight TransportShips, resume M</td>
+    <td>—</td>
+    <td>—</td>
+    <td>—</td>
+    <td>—</td>
+    <td>live (started 07:41:36Z from M u33720)</td>
   </tr>
 </table>
 <p>Best compact <i>hold</i> is still <b>G</b> (101/245). Best water
 <i>rate</i> on a short run is still <b>K</b> (Britannia 8/13, GreatLakes
 4/11). First run to open <b>every</b> Easy map including BTS and GL is
 <b>M</b> (BTS <code>qlmRclS1</code> 19:37, GL <code>z4bOdwHy</code>
-03:03). H–J resumed G and lost Onion. Keep M running; do not start N
-unless a fail gate fires.</p>
+03:03). M then the same K-style water timeout tail (gate c). N resumes
+M and prices committing a boat. H–J resumed G and lost Onion.</p>
 
 <h3 id="duo-carry">Carry forward: keep the wins, add one lever</h3>
 <p>From-scratch K / L / M re-paid compact that G already held (101/245).
@@ -422,8 +432,15 @@ H–J resumed G then extra reward collapsed Onion. The rule now:</p>
   <tr>
     <td><code>--duo-comms</code> partner last-action residual</td>
     <td>M</td>
-    <td>Live. Opened every Easy map including BTS and GL. Keep the
-      layer; next lever resumes M.</td>
+    <td>Opened every Easy map including BTS and GL, then gate-c water
+      tail. Keep the layer; N resumes M.</td>
+  </tr>
+  <tr>
+    <td><code>--duo-boat-commit 0.5</code> in-flight TransportShip PBRS</td>
+    <td>N</td>
+    <td>Live. Resume M. Φ = 0.5 × team living boats; absorbing 0 at
+      done. Never the <code>boat</code> action. Next unused lever is
+      leftover-continent Φ.</td>
   </tr>
   <tr>
     <td>feedforward (<code>--recurrent-policy=false</code>)</td>
@@ -596,7 +613,7 @@ weights.</p>
       (u1069 / 34208 steps).</td>
   </tr>
   <tr>
-    <td><b>M comms (live)</b></td>
+    <td>M comms</td>
     <td>Partner last-action into π: <code>h += Linear(partner
       ActionOutcome)</code> (14 floats, one-step delay). Feedforward
       MAPPO V stays. Sequential spawn + eco + delete flags stay.
@@ -604,11 +621,21 @@ weights.</p>
       --recurrent-policy=false --minibatches 8</code>. Started
       2026-08-28T16:43:18Z (16:42:28 died: clap defaults recurrent
       on). No <code>--resume</code>.</td>
-    <td>Live ~u30886 / 988384 steps / ~34h. Peak book ~80; current
-      <b>37/190</b>. Compact repeating (Onion). Water opened: Britannia,
-      BlackSea, BTS <code>qlmRclS1</code> 19:37, GL <code>z4bOdwHy</code>
-      03:03. <b>Easy including water.</b> Two CUDA OOMs, both resumed.
-      Keep M. Fail → <b>N on M's weights</b>.</td>
+    <td>Peak book ~80; book at gate <b>45/190</b>. Compact repeating
+      (Onion). Water opened: Britannia, BlackSea, BTS
+      <code>qlmRclS1</code> 19:37, GL <code>z4bOdwHy</code> 03:03.
+      <b>Easy including water.</b> Three CUDA OOMs, all resumed.
+      Fail-c at ~u33667 (last 8 Britannia/GL timeout). Stash
+      <code>mappo-M-fail-c-20260830T0741Z.*</code>.</td>
+  </tr>
+  <tr>
+    <td><b>N boat-commit (live)</b></td>
+    <td>Ng 1999 PBRS on team in-flight TransportShip count
+      (<code>--duo-boat-commit 0.5</code>). Not the <code>boat</code>
+      action. <code>--resume</code> M stash. Stacked flags stay.
+      Started 2026-08-30T07:41:36Z.</td>
+    <td>Live. Clock starts at N launch. Same fail gates (a/b/c/4).
+      Fail → leftover-continent Φ on N's weights.</td>
   </tr>
 </table>
 <p>Water maps (Britannia, GreatLakes, BlackSea, BetweenTwoSeas) were 0
@@ -763,26 +790,24 @@ the partner too. Donate exists but is not donate-dirac.</p>
 
 <h3 id="duo-next">What is still open</h3>
 <ul>
-  <li><b>M (live): comms</b>. π residual on the partner's last
-    <code>ActionOutcome</code> (14 floats, simultaneous-step delay).
-    Clock starts at 2026-08-28T16:43:18Z. Easy including water hit
-    2026-08-30T03:03Z (GL <code>z4bOdwHy</code>; BTS already
-    <code>qlmRclS1</code>). Keep M. Same fail gates (a/b/c/4).
-    Feedforward; do not revive LSTM on this 8GB card.</li>
-  <li><b>N:</b> one new lever on <b>M's weights</b>
-    (<code>--resume</code> the M stash, not from-scratch). Candidates:
-    boat-commit / leftover-continent Φ. Not while M is live unless a
-    fail gate fires. If M loses compact, <code>--init</code> G
-    compact-hold or K water-open per <a href="#duo-carry">carry-forward</a>.</li>
+  <li><b>N (live): boat-commit</b>. PBRS on team in-flight
+    TransportShip count (<code>--duo-boat-commit 0.5</code>) on M's
+    weights. Clock starts at 2026-08-30T07:41:36Z. Same fail gates
+    (a/b/c/4). Feedforward; do not revive LSTM on this 8GB card.</li>
+  <li><b>O:</b> leftover-continent Φ on <b>N's weights</b>
+    (<code>--resume</code> the N stash, not from-scratch). Not while N
+    is live unless a fail gate fires. If N loses compact,
+    <code>--init</code> M fail-c / G compact-hold / K water-open per
+    <a href="#duo-carry">carry-forward</a>.</li>
 </ul>
 
 <h3 id="duo-ops">Ops</h3>
 <ul>
   <li>Host: homelab RTX 3070 8GB, tmux <code>duo-train</code>,
     <code>bash rust/checkpoints/ppo_duo/run.sh</code> (gitignored;
-    M is feedforward MAPPO + comms, <b>crash-resume latest</b> of this
+    N is feedforward MAPPO + comms + boat-commit, <b>crash-resume latest</b> of this
     run (carry-forward, not from-scratch):
-    <code>--duo-comms --centralized-value=true
+    <code>--duo-comms --duo-boat-commit 0.5 --centralized-value=true
     --recurrent-policy=false --minibatches 8</code>,
     plus
     <code>--duo-eco-coef 0.25 --duo-city-bonus 3 --duo-port-bonus 5
@@ -2013,12 +2038,12 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
   <tr><td><code>ppo_duo</code></td><td><b>live</b> Aug 30 (homelab 3070)</td>
-    <td>Two-human Team-mode Easy. Experiment M live ~u30886.
-    <b>Easy including water open</b> (BTS + GL + Britannia + BlackSea).
-    Carry-forward stack (MAPPO V + comms + identity + legal + 95% +
-    sequential spawn + eco PBRS + City/Port delete). Keep M; N
-    <code>--resume</code>s M if a fail gate fires.
-    <a href="#duo-scoreboard">A–M</a>.
+    <td>Two-human Team-mode Easy. Experiment N live (boat-commit PBRS
+    on M weights; started 07:41:36Z). M opened Easy including water
+    then fail-c. Carry-forward stack (MAPPO V + comms + boat-commit +
+    identity + legal + 95% + sequential spawn + eco PBRS + City/Port
+    delete).
+    <a href="#duo-scoreboard">A–N</a>.
     <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>.</td></tr>
   <tr><td><code>ppo_v11</code></td><td><b>live</b> Jul 26 (4×A100 80GB)</td>
     <td>Util stack + AE v3.2 no-static + recurrent LSTM. V10 Easy ramp:

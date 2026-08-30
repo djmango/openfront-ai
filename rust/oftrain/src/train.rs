@@ -7222,6 +7222,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 cfg.reward_config.duo_city_delete, cfg.reward_config.duo_port_delete
             );
         }
+        if cfg.reward_config.duo_boat_commit != 0.0 {
+            println!(
+                "[train] duo boat-commit PBRS coef={:.3} on team in-flight TransportShip count (not the boat action; absorbing Φ=0)",
+                cfg.reward_config.duo_boat_commit
+            );
+        }
     }
     if cfg.recurrent_policy {
         anyhow::ensure!(
@@ -9303,6 +9309,7 @@ mod persistent_actor_tests {
                 duo_first_port: 0.0,
                 duo_city_delete: 0.0,
                 duo_port_delete: 0.0,
+                duo_boat_commit: 0.0,
             },
             lambda: 0.95,
             clip: 0.2,
