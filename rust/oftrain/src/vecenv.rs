@@ -17,6 +17,7 @@ use std::sync::Mutex;
 use ofcore::curriculum::{
     self, action_churn_penalty, boat_commit_potential, boat_land_potential, boat_outcome_reward,
     city_stand_potential, classify_boat_resolution, closeout_potential, combat_outcome_reward,
+    defense_stand_potential,
     continent_span_potential, dominance_potential, duo_first_structure_bonus,
     duo_pact_success_bonus, duo_potential, duo_structure_delete_penalty, economy_potential,
     embargo_stop_outcome_reward, fast_win_bonus, formally_allied, label_continents, land_share,
@@ -28,7 +29,8 @@ use ofcore::curriculum::{
     v10_survival_reward, v10_timeout_after_closeout_penalty, v83_action_churn_penalty,
     ActionChurnTracker, ActionPairCounts, ActionTarget, BoatOutcomeCounts, ChosenAction,
     CombatOutcome, CurriculumSchedule, DominanceShaper, InverseActionPair, RewardComponents,
-    RewardConfig, Stage, CITY_UNIT_CLASS, DUO_SOLO_SCALE, PORT_UNIT_CLASS, TRANSPORT_UNIT_CLASS,
+    RewardConfig, Stage, CITY_UNIT_CLASS, DEFENSE_UNIT_CLASS, DUO_SOLO_SCALE, PORT_UNIT_CLASS,
+    TRANSPORT_UNIT_CLASS,
     V83_CLOSEOUT_SHARE_START, W_STR, W_WASTE,
 };
 use ofcore::feat::{
@@ -939,6 +941,7 @@ pub struct EnvWorker {
     leftover_continent_shaper: [DominanceShaper; 2],
     port_stand_shaper: [DominanceShaper; 2],
     city_stand_shaper: [DominanceShaper; 2],
+    defense_stand_shaper: [DominanceShaper; 2],
     continent_span_shaper: [DominanceShaper; 2],
     boat_land_shaper: [DominanceShaper; 2],
     closeout_tracker: [CloseoutTracker; 2],
@@ -1022,6 +1025,7 @@ impl EnvWorker {
             leftover_continent_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             port_stand_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             city_stand_shaper: [DominanceShaper::default(), DominanceShaper::default()],
+            defense_stand_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             continent_span_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             boat_land_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             closeout_tracker: [CloseoutTracker::default(), CloseoutTracker::default()],
@@ -1400,6 +1404,10 @@ impl EnvWorker {
                 self.city_stand_shaper[i].reset(city_stand_potential(
                     team_completed_structures(self.ents(), &owners, CITY_UNIT_CLASS),
                     self.reward_config.duo_city_stand,
+                ));
+                self.defense_stand_shaper[i].reset(defense_stand_potential(
+                    team_completed_structures(self.ents(), &owners, DEFENSE_UNIT_CLASS),
+                    self.reward_config.duo_defense_stand,
                 ));
                 self.continent_span_shaper[i].reset(self.continent_span_phi());
                 self.boat_land_shaper[i].reset(0.0);
@@ -1887,6 +1895,16 @@ impl EnvWorker {
         } else {
             0.0
         };
+        let n_posts = if n > 1 {
+            team_completed_structures(self.ents(), &team_owners, DEFENSE_UNIT_CLASS)
+        } else {
+            0
+        };
+        let next_defense_phi = if n > 1 {
+            defense_stand_potential(n_posts, self.reward_config.duo_defense_stand)
+        } else {
+            0.0
+        };
         let next_span_phi = if n > 1 {
             self.continent_span_phi()
         } else {
@@ -2225,6 +2243,15 @@ impl EnvWorker {
                 let city_phi = if done { 0.0 } else { next_city_phi };
                 duo_r +=
                     self.city_stand_shaper[i].transition(city_phi, self.reward_config.gamma, 1.0);
+                // Ng 1999 PBRS on team completed Defense Post count.
+                // Completing a post raises Φ; losing one drops it. Never
+                // the `build` action. Absorbing terminal Φ=0.
+                let defense_phi = if done { 0.0 } else { next_defense_phi };
+                duo_r += self.defense_stand_shaper[i].transition(
+                    defense_phi,
+                    self.reward_config.gamma,
+                    1.0,
+                );
                 // Ng 1999 PBRS on occupied landmass count. First tile on a
                 // new continent raises Φ even if leftover red is still
                 // there. Never a boat/attack action. Absorbing terminal Φ=0.

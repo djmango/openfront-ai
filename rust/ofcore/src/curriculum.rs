@@ -182,6 +182,12 @@ pub struct RewardConfig {
     /// Φ=0. Never the `build` action. Distinct from first-city one-shot and
     /// the delete-penalty. 0 disables.
     pub duo_city_stand: f64,
+    /// Duo: Ng 1999 PBRS coefficient on team completed Defense Post count.
+    /// Completing a Defense Post raises Φ; losing one drops it. Absorbing
+    /// terminal Φ=0. Never the `build` action. Distinct from city/port
+    /// stand (those collapsed compact on S / held water-timeout on P).
+    /// 0 disables.
+    pub duo_defense_stand: f64,
 }
 
 impl RewardConfig {
@@ -1422,9 +1428,10 @@ pub fn duo_structure_delete_penalty(dropped: usize, amount: f64) -> f64 {
     }
 }
 
-/// City / Port class indices (`feat::unit_class`).
+/// City / Port / Defense Post class indices (`feat::unit_class`).
 pub const CITY_UNIT_CLASS: usize = 0;
 pub const PORT_UNIT_CLASS: usize = 1;
+pub const DEFENSE_UNIT_CLASS: usize = 2;
 /// Normalize log-income Φ into ~[0, 1] before `duo_eco_coef`. Ally train
 /// gold is 35k; a couple of cities sit in this ballpark.
 pub const ECO_INCOME_REF: f64 = 100_000.0;
@@ -1641,6 +1648,18 @@ pub fn city_stand_potential(n_cities: usize, coef: f64) -> f64 {
         return 0.0;
     }
     finite_or_zero(coef.abs() * n_cities as f64)
+}
+
+/// Team standing-Defense-Post potential. `n_posts` is completed
+/// (not-under-construction) Defense Posts. Ng 1999: apply via
+/// [`DominanceShaper`], absorbing Φ=0 at done. Disabled when `coef`
+/// is 0. Stays well below a win so timeout-with-posts is still a loss.
+/// Never the `build` action.
+pub fn defense_stand_potential(n_posts: usize, coef: f64) -> f64 {
+    if coef == 0.0 {
+        return 0.0;
+    }
+    finite_or_zero(coef.abs() * n_posts as f64)
 }
 
 /// Number of 4-connected landmasses with at least one team tile.
@@ -1890,6 +1909,7 @@ mod tests {
             duo_continent_span: 0.0,
             duo_boat_land: 0.0,
             duo_city_stand: 0.0,
+            duo_defense_stand: 0.0,
         }
     }
 
@@ -2841,6 +2861,42 @@ mod tests {
         assert_eq!(counts.useful_landing, 1);
         assert_eq!(
             boat_land_potential(counts.useful_landing as usize, 0.5),
+            0.5
+        );
+    }
+
+    #[test]
+    fn defense_stand_potential_is_completed_count_not_a_build_action_wage() {
+        assert_eq!(defense_stand_potential(0, 0.5), 0.0);
+        assert_eq!(defense_stand_potential(1, 0.0), 0.0);
+        assert_eq!(defense_stand_potential(1, 0.5), 0.5);
+        assert_eq!(defense_stand_potential(2, 0.5), 1.0);
+        assert!(defense_stand_potential(8, 0.5) < W_WIN);
+        let ents = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true},
+                {"id": 2, "pid": "AGENTRL2", "alive": true},
+                {"id": 3, "pid": "BOT", "alive": true}
+            ],
+            "units": [
+                {"type": "Defense Post", "owner": 1, "constructing": false, "x": 0, "y": 0},
+                {"type": "Defense Post", "owner": 2, "constructing": true, "x": 1, "y": 0},
+                {"type": "Defense Post", "owner": 3, "constructing": false, "x": 2, "y": 0},
+                {"type": "City", "owner": 1, "constructing": false, "x": 3, "y": 0}
+            ],
+            "attacks": [],
+            "alliances": []
+        }));
+        let owners = [1usize, 2];
+        assert_eq!(
+            team_completed_structures(&ents, &owners, DEFENSE_UNIT_CLASS),
+            1
+        );
+        assert_eq!(
+            defense_stand_potential(
+                team_completed_structures(&ents, &owners, DEFENSE_UNIT_CLASS),
+                0.5
+            ),
             0.5
         );
     }
