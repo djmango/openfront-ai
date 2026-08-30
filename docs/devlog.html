@@ -85,14 +85,14 @@
 </nav>
 
 <div class="now" id="now">
-  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 28th, 2026</h2>
+  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 30th, 2026</h2>
   <p>Live duo is <b>experiment M</b> on the homelab 3070: partner last-action
-    comms (<code>--duo-comms</code>). Snapshot ~u3893 / <b>5/54</b>
-    (WR 0.09): Onion <b>4/14</b>, Caucasus 1/4, water still 0. Compact
-    is repeating; last-8 water tail is mixed term+timeout (not gate c).
-    L LSTM OOMed 3× on 8GB. Next unused: <b>N on M's weights</b>
-    (one lever, <code>--resume</code> M, not from-scratch). Carry
-    forward every working stack item. See
+    comms (<code>--duo-comms</code>). <b>Easy including water is open:</b>
+    first BetweenTwoSeas <code>qlmRclS1</code> 19:37, first GreatLakes
+    <code>z4bOdwHy</code> 03:03, plus Britannia / BlackSea / compact.
+    Snapshot ~u30886 / book <b>37/190</b> (peak ~80; spool IDs overwrite).
+    Keep M running. Do not start N unless a fail gate fires. See
+    <a href="#duo-scoreboard">A–M scoreboard</a> and
     <a href="#duo-carry">carry-forward</a>.</p>
 </div>
 
@@ -101,8 +101,9 @@
 <p class="session">Two-human Team-mode on a homelab RTX 3070 8GB
 (<code>--duo</code>, <code>AGENTRL1</code>+<code>AGENTRL2</code> on Humans,
 stage 0 Easy, 2 envs, rollout 8, feedforward (M), frozen AE v3.2). Loop until
-a good Easy winner. Live job: experiment M (comms; Onion repeating).
-Carry-forward: next experiment resumes M, does not from-scratch. Code:
+Easy including water. Hit 2026-08-30T03:03Z (GL <code>z4bOdwHy</code>;
+BTS already open). Live job: experiment M (comms; keep running).
+Carry-forward: next lever resumes M, does not from-scratch. Code:
 <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>
 stacked on timeout-loss / PBRS.</p>
 
@@ -191,7 +192,8 @@ Stashes under <code>rust/checkpoints/ppo_duo/</code>.</p>
 
 <p id="duo-scoreboard"><b>Scoreboard</b> (compact = Caucasus / Onion / Pangaea;
 water = Britannia / GreatLakes / BlackSea / BetweenTwoSeas). M is live;
-numbers as of 2026-08-28T21:29Z.</p>
+numbers as of 2026-08-30T03:05Z. M book counts drift because the replay
+spool reuses IDs (~190 files); peak book ~80, current book 37.</p>
 <table>
   <tr>
     <th>run</th>
@@ -331,17 +333,19 @@ numbers as of 2026-08-28T21:29Z.</p>
   <tr>
     <td><b>M comms (live)</b></td>
     <td>π residual on partner last action</td>
-    <td><b>5/54</b></td>
-    <td>0.09</td>
-    <td>Onion <b>4/14</b>, Caucasus 1/4</td>
-    <td>Britannia 0/13, GL 0/12, BTS 0/10, BlackSea 0/1</td>
-    <td>live (~u3893 / 4.4h). Compact repeating; water 0</td>
+    <td>peak ~<b>80</b>; book <b>37/190</b></td>
+    <td>peak 0.42; book 0.19</td>
+    <td>Onion peak 34/38 (book 26), Caucasus peak 22/35, Pangaea peak 16/20</td>
+    <td>Britannia opened+held, BlackSea 2–3, BTS <b>1/15</b> 19:37, GL <b>1/22</b> 03:03</td>
+    <td>live (~u30886 / ~34h). <b>Easy including water open</b></td>
   </tr>
 </table>
-<p>Best compact hold is still <b>G</b> (101/245). Best water open is still
-<b>K</b> (Britannia 8/13, GreatLakes 4/11) then a timeout tail. Nothing
-has held BetweenTwoSeas (G 0/30, K 0/8, M 0/10). H–J resumed G and
-lost Onion. M is the G-shaped compact-open without K's water yet.</p>
+<p>Best compact <i>hold</i> is still <b>G</b> (101/245). Best water
+<i>rate</i> on a short run is still <b>K</b> (Britannia 8/13, GreatLakes
+4/11). First run to open <b>every</b> Easy map including BTS and GL is
+<b>M</b> (BTS <code>qlmRclS1</code> 19:37, GL <code>z4bOdwHy</code>
+03:03). H–J resumed G and lost Onion. Keep M running; do not start N
+unless a fail gate fires.</p>
 
 <h3 id="duo-carry">Carry forward: keep the wins, add one lever</h3>
 <p>From-scratch K / L / M re-paid compact that G already held (101/245).
@@ -359,8 +363,8 @@ H–J resumed G then extra reward collapsed Onion. The rule now:</p>
     (<code>ippo-G-compact-hold-20260828T0627Z</code>) or K water-open
     (<code>mappo-K-fail-c-20260828T1514Z</code>, Britannia 8/13).
     M should have <code>--init</code> K (keep water, random-init comms)
-    instead of from-scratch — that miss is why M’s water is still 0
-    while compact is repeating.</li>
+    instead of from-scratch — that miss delayed water, but M later
+    opened BTS and GL on its own weights.</li>
   <li>From-scratch only when tensors cannot transfer (LSTM schema 3)
     or you would be resuming the same weights that just lost compact.
     Never <code>--init ppo_v11</code>.</li>
@@ -418,7 +422,8 @@ H–J resumed G then extra reward collapsed Onion. The rule now:</p>
   <tr>
     <td><code>--duo-comms</code> partner last-action residual</td>
     <td>M</td>
-    <td>Live. Onion repeating 4/14. Keep the layer; next lever resumes M.</td>
+    <td>Live. Opened every Easy map including BTS and GL. Keep the
+      layer; next lever resumes M.</td>
   </tr>
   <tr>
     <td>feedforward (<code>--recurrent-policy=false</code>)</td>
@@ -599,23 +604,23 @@ weights.</p>
       --recurrent-policy=false --minibatches 8</code>. Started
       2026-08-28T16:43:18Z (16:42:28 died: clap defaults recurrent
       on). No <code>--resume</code>.</td>
-    <td>Live at ~u3893 / 124576 steps / ~4.4h. <b>5/54</b> WR 0.09.
-      Onion <b>4/14</b> (repeating 19:40–20:27), Caucasus 1/4. Water
-      still 0 (Britannia 0/13, GreatLakes 0/12, BetweenTwoSeas 0/10,
-      BlackSea 0/1). Last 8 mixed water term+timeout (not gate c).
-      Entropy O(1). Fail → <b>N on M's weights</b> (after M, not instead of
-      M).</td>
+    <td>Live ~u30886 / 988384 steps / ~34h. Peak book ~80; current
+      <b>37/190</b>. Compact repeating (Onion). Water opened: Britannia,
+      BlackSea, BTS <code>qlmRclS1</code> 19:37, GL <code>z4bOdwHy</code>
+      03:03. <b>Easy including water.</b> Two CUDA OOMs, both resumed.
+      Keep M. Fail → <b>N on M's weights</b>.</td>
   </tr>
 </table>
 <p>Water maps (Britannia, GreatLakes, BlackSea, BetweenTwoSeas) were 0
-wins across A, B, D2, E, F, H–J, L, and so far M. Compact maps were
+wins across A, B, D2, E, F, H–J, and L. Compact maps were
 where every Easy win happened except D1's two Pangaea flukes. G is
 the first run in this loop to <i>hold</i> compact
 (Onion/Caucasus/Pangaea keep paying) and to open water: Britannia
 repeating (10/39), first GreatLakes, first BlackSea. BetweenTwoSeas
-finished <b>0/30</b>. K opened water without G's compact hold
-(Britannia 8/13, GreatLakes 4/11) then gate-c. M is repeating Onion
-(4/14) without water yet. E's Caucasus win at 0.09 individual land
+finished <b>0/30</b> on G. K opened water without G's compact hold
+(Britannia 8/13, GreatLakes 4/11) then gate-c. M later opened
+<b>all four water maps</b> including the first BTS win in this loop.
+E's Caucasus win at 0.09 individual land
 (term ~255) is the team-95% rule showing up: the partner can carry,
 which is exactly what the old clut called an enemy.</p>
 
@@ -760,14 +765,15 @@ the partner too. Donate exists but is not donate-dirac.</p>
 <ul>
   <li><b>M (live): comms</b>. π residual on the partner's last
     <code>ActionOutcome</code> (14 floats, simultaneous-step delay).
-    Clock starts at 2026-08-28T16:43:18Z. Snapshot ~u3893 /
-    <b>5/54</b>: Onion 4/14 repeating, water 0. Same fail gates
-    (a/b/c/4). Feedforward; do not revive LSTM on this 8GB card.</li>
+    Clock starts at 2026-08-28T16:43:18Z. Easy including water hit
+    2026-08-30T03:03Z (GL <code>z4bOdwHy</code>; BTS already
+    <code>qlmRclS1</code>). Keep M. Same fail gates (a/b/c/4).
+    Feedforward; do not revive LSTM on this 8GB card.</li>
   <li><b>N:</b> one new lever on <b>M's weights</b>
     (<code>--resume</code> the M stash, not from-scratch). Candidates:
-    boat-commit / leftover-continent Φ. After M, not instead of M. If M
-    loses compact before water, <code>--init</code> G compact-hold or K
-    water-open per <a href="#duo-carry">carry-forward</a>.</li>
+    boat-commit / leftover-continent Φ. Not while M is live unless a
+    fail gate fires. If M loses compact, <code>--init</code> G
+    compact-hold or K water-open per <a href="#duo-carry">carry-forward</a>.</li>
 </ul>
 
 <h3 id="duo-ops">Ops</h3>
@@ -2006,11 +2012,12 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <code>ae_v3.pt</code> until the v3.1 winner is wired into <code>rl/obs.py</code>.</p>
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
-  <tr><td><code>ppo_duo</code></td><td><b>live</b> Aug 28 (homelab 3070)</td>
-    <td>Two-human Team-mode Easy. Experiment M live ~u3893 /
-    <b>5/54</b> (Onion 4/14, water 0). Comms from-scratch
-    (MAPPO V + partner last-action + identity + legal + 95% +
-    sequential spawn + eco PBRS + City/Port delete). Scoreboard:
+  <tr><td><code>ppo_duo</code></td><td><b>live</b> Aug 30 (homelab 3070)</td>
+    <td>Two-human Team-mode Easy. Experiment M live ~u30886.
+    <b>Easy including water open</b> (BTS + GL + Britannia + BlackSea).
+    Carry-forward stack (MAPPO V + comms + identity + legal + 95% +
+    sequential spawn + eco PBRS + City/Port delete). Keep M; N
+    <code>--resume</code>s M if a fail gate fires.
     <a href="#duo-scoreboard">A–M</a>.
     <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>.</td></tr>
   <tr><td><code>ppo_v11</code></td><td><b>live</b> Jul 26 (4×A100 80GB)</td>
@@ -4253,10 +4260,11 @@ from the raw cache IS that idea, done right).</p>
 
 <h3 id="next">Open threads</h3>
 <ul>
-  <li><b>Duo Easy (active, Aug 28):</b> experiment M comms
-    live <b>5/54</b> (Onion repeating, water 0). Next: <b>N resumes M</b>
-    (one lever, not from-scratch).
-    See <a href="#duo-carry">carry-forward</a>.</li>
+  <li><b>Duo Easy (active, Aug 30):</b> experiment M comms
+    live; <b>Easy including water open</b> (GL 03:03, BTS 19:37).
+    Keep M. N only on a fail gate (<code>--resume</code> M).
+    See <a href="#duo-scoreboard">scoreboard</a> and
+    <a href="#duo-carry">carry-forward</a>.</li>
   <li><b>V11 (active plan, Jul 23):</b> see <a href="#v11-plan">V11 plan</a>  - 
     neighbor pack, ego-split fronts, unit tokens + pointer, bigger model,
     full LSTM replacing GRU, BC unfreeze on the new schema. V10 killed.</li>
