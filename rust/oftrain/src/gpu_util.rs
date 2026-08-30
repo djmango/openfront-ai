@@ -28,8 +28,36 @@ pub struct GpuSnapshot {
 
 impl GpuSnapshot {
     pub fn min_mean_util(&self) -> f64 {
-        self.util_mean_per_gpu.iter().cloned().fold(f64::INFINITY, f64::min).max(0.0)
+        self.util_mean_per_gpu
+            .iter()
+            .cloned()
+            .fold(f64::INFINITY, f64::min)
+            .max(0.0)
     }
+
+    /// Instantaneous max SM util across GPUs, as a 0-1 fraction.
+    pub fn max_instant_util_frac(&self) -> f64 {
+        self.util_per_gpu
+            .iter()
+            .copied()
+            .fold(0.0_f64, f64::max)
+            .clamp(0.0, 100.0)
+            / 100.0
+    }
+}
+
+/// Sleep so a work interval at `util_frac` (0-1) averages down to `cap`.
+/// Cap ≤ 0 disables. Util at or below cap → no sleep. Capped at 5s so a
+/// stuck 100% sample cannot freeze the loop.
+pub fn duty_sleep_secs(work_s: f64, util_frac: f64, cap: f64) -> f64 {
+    if !(cap > 0.0 && cap <= 1.0) || !util_frac.is_finite() || util_frac <= cap {
+        return 0.0;
+    }
+    let work = work_s.max(0.0);
+    if work == 0.0 {
+        return 0.0;
+    }
+    (work * (util_frac / cap - 1.0)).clamp(0.0, 5.0)
 }
 
 pub struct GpuUtilSampler {
@@ -60,7 +88,10 @@ impl GpuUtilSampler {
             }
             std::thread::sleep(interval);
         });
-        GpuUtilSampler { state, _handle: handle }
+        GpuUtilSampler {
+            state,
+            _handle: handle,
+        }
     }
 
     pub fn snapshot(&self) -> GpuSnapshot {
@@ -70,7 +101,10 @@ impl GpuUtilSampler {
 
 fn query_nvidia_smi() -> Option<(Vec<f64>, f64)> {
     let out = Command::new("nvidia-smi")
-        .args(["--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"])
+        .args([
+            "--query-gpu=utilization.gpu,memory.used,memory.total",
+            "--format=csv,noheader,nounits",
+        ])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -216,5 +250,20 @@ mod tests {
         // A hypothetical rocm-smi invocation/version that doesn't include
         // our expected columns should fail closed, not misparse.
         assert!(parse_rocm_smi_csv("device,Temperature (Sensor edge) (C)\ncard0,45.0\n").is_none());
+    }
+
+    #[test]
+    fn duty_sleep_is_zero_at_or_below_cap_and_when_disabled() {
+        assert_eq!(duty_sleep_secs(4.0, 0.80, 0.80), 0.0);
+        assert_eq!(duty_sleep_secs(4.0, 0.50, 0.80), 0.0);
+        assert_eq!(duty_sleep_secs(4.0, 1.00, 0.0), 0.0);
+        assert_eq!(duty_sleep_secs(4.0, 1.00, -1.0), 0.0);
+    }
+
+    #[test]
+    fn duty_sleep_makes_100pct_work_average_to_80pct() {
+        // 4s at 100% + 1s sleep → 80% duty.
+        assert!((duty_sleep_secs(4.0, 1.0, 0.80) - 1.0).abs() < 1e-12);
+        assert!(duty_sleep_secs(4.0, 1.0, 0.80) <= 5.0);
     }
 }

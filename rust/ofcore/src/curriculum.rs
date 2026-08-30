@@ -171,6 +171,12 @@ pub struct RewardConfig {
     /// continent drops it. Absorbing terminal Φ=0. Never a boat/attack
     /// action. 0 disables.
     pub duo_continent_span: f64,
+    /// Duo: Ng 1999 PBRS on team UsefulLanding count this episode.
+    /// Completing an invade landing raises Φ; own-shore / cancel / destroy
+    /// do not. Absorbing terminal Φ=0. Never the `boat` action. Distinct
+    /// from in-flight boat-commit (landing drops that Φ) and from the
+    /// v84 one-shot. 0 disables.
+    pub duo_boat_land: f64,
 }
 
 impl RewardConfig {
@@ -1673,6 +1679,19 @@ pub fn continent_span_potential(n_continents: usize, coef: f64) -> f64 {
     finite_or_zero(coef.abs() * n_continents as f64)
 }
 
+/// Team useful-landing potential. `n_landings` is UsefulLanding outcomes
+/// this episode (not own-shore / cancel / destroy). Ng 1999: apply via
+/// [`DominanceShaper`], absorbing Φ=0 at done. Disabled when `coef` is 0.
+/// Complements boat-commit: launch raises commit Φ, a useful land drops
+/// commit Φ and raises this. Never the `boat` action. Stays well below a
+/// win so timeout-after-landings is still a loss.
+pub fn boat_land_potential(n_landings: usize, coef: f64) -> f64 {
+    if coef == 0.0 {
+        return 0.0;
+    }
+    finite_or_zero(coef.abs() * n_landings as f64)
+}
+
 fn v10_diplo_panic_armed(land_share: f64, tick: i64, max_ticks: i64, config: RewardConfig) -> bool {
     let share_armed = finite_or_zero(land_share) >= config.v10_diplo_panic_share;
     let tick_frac = tick as f64 / max_ticks.max(1) as f64;
@@ -1853,6 +1872,7 @@ mod tests {
             duo_leftover_continent: 0.0,
             duo_port_stand: 0.0,
             duo_continent_span: 0.0,
+            duo_boat_land: 0.0,
         }
     }
 
@@ -2774,6 +2794,38 @@ mod tests {
             0
         );
         assert_eq!(continent_span_potential(0, 0.5), 0.0);
+    }
+
+    #[test]
+    fn boat_land_potential_is_useful_landing_count_not_a_boat_action_wage() {
+        assert_eq!(boat_land_potential(0, 0.5), 0.0);
+        assert_eq!(boat_land_potential(1, 0.0), 0.0);
+        assert_eq!(boat_land_potential(1, 0.5), 0.5);
+        assert_eq!(boat_land_potential(2, 0.5), 1.0);
+        assert!(boat_land_potential(8, 0.5) < W_WIN);
+        // Own-shore / cancel / destroy are not UsefulLanding — they do not
+        // raise this Φ. Only an invade landing does.
+        assert_eq!(
+            classify_boat_resolution(false, 100.0, 500.0, 500.0, true, false),
+            BoatOutcome::UsefulLanding
+        );
+        assert_eq!(
+            classify_boat_resolution(false, 100.0, 500.0, 575.0, false, false),
+            BoatOutcome::OwnShoreReturn
+        );
+        assert_eq!(
+            classify_boat_resolution(true, 100.0, 500.0, 575.0, false, false),
+            BoatOutcome::Cancelled
+        );
+        let mut counts = BoatOutcomeCounts::default();
+        counts.record(BoatOutcome::UsefulLanding);
+        counts.record(BoatOutcome::OwnShoreReturn);
+        counts.record(BoatOutcome::Cancelled);
+        assert_eq!(counts.useful_landing, 1);
+        assert_eq!(
+            boat_land_potential(counts.useful_landing as usize, 0.5),
+            0.5
+        );
     }
 
     #[test]

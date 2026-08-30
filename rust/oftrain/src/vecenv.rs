@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use ofcore::curriculum::{
-    self, action_churn_penalty, boat_commit_potential, boat_outcome_reward,
+    self, action_churn_penalty, boat_commit_potential, boat_land_potential, boat_outcome_reward,
     classify_boat_resolution, closeout_potential, combat_outcome_reward, continent_span_potential,
     dominance_potential, duo_first_structure_bonus, duo_pact_success_bonus, duo_potential,
     duo_structure_delete_penalty, economy_potential, embargo_stop_outcome_reward, fast_win_bonus,
@@ -480,11 +480,6 @@ impl PendingBoatTracker {
         config: RewardConfig,
         stage: usize,
     ) -> f64 {
-        if !config.boat_outcome_active(stage) {
-            self.pending
-                .retain(|unit_id, _| alive_ids.contains(unit_id));
-            return 0.0;
-        }
         let mut reward = 0.0;
         let finished: Vec<usize> = self
             .pending
@@ -492,6 +487,7 @@ impl PendingBoatTracker {
             .copied()
             .filter(|id| !alive_ids.contains(id))
             .collect();
+        let oneshot = config.boat_outcome_active(stage);
         for unit_id in finished {
             let Some(boat) = self.pending.remove(&unit_id) else {
                 continue;
@@ -505,7 +501,9 @@ impl PendingBoatTracker {
                 has_sourced_attack,
             );
             self.counts.record(outcome);
-            reward += boat_outcome_reward(outcome, config);
+            if oneshot {
+                reward += boat_outcome_reward(outcome, config);
+            }
         }
         reward
     }
@@ -940,6 +938,7 @@ pub struct EnvWorker {
     leftover_continent_shaper: [DominanceShaper; 2],
     port_stand_shaper: [DominanceShaper; 2],
     continent_span_shaper: [DominanceShaper; 2],
+    boat_land_shaper: [DominanceShaper; 2],
     closeout_tracker: [CloseoutTracker; 2],
     action_churn_tracker: [ActionChurnTracker; 2],
     boat_tracker: [PendingBoatTracker; 2],
@@ -1021,6 +1020,7 @@ impl EnvWorker {
             leftover_continent_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             port_stand_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             continent_span_shaper: [DominanceShaper::default(), DominanceShaper::default()],
+            boat_land_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             closeout_tracker: [CloseoutTracker::default(), CloseoutTracker::default()],
             action_churn_tracker: [ActionChurnTracker::default(), ActionChurnTracker::default()],
             boat_tracker: [PendingBoatTracker::default(), PendingBoatTracker::default()],
@@ -1395,6 +1395,7 @@ impl EnvWorker {
                     self.reward_config.duo_port_stand,
                 ));
                 self.continent_span_shaper[i].reset(self.continent_span_phi());
+                self.boat_land_shaper[i].reset(0.0);
             }
             self.closeout_tracker[i].reset(share, tick);
             self.action_churn_tracker[i].reset();
@@ -1472,6 +1473,15 @@ impl EnvWorker {
             &team,
         );
         continent_span_potential(n, coef)
+    }
+
+    /// Team UsefulLanding count this episode (both humans). Own-shore /
+    /// cancel / destroy do not count. Used by boat-land Φ.
+    fn team_useful_landings(&self) -> usize {
+        self.boat_tracker
+            .iter()
+            .map(|t| t.counts().useful_landing as usize)
+            .sum()
     }
 
     pub fn legal(&self) -> &feat::Legal {
@@ -2206,6 +2216,20 @@ impl EnvWorker {
                     self.reward_config.gamma,
                     1.0,
                 );
+                // Ng 1999 PBRS on team UsefulLanding count. Invade landing
+                // raises Φ; own-shore / cancel / destroy do not. Complements
+                // boat-commit (landing drops that Φ). Never the `boat`
+                // action. Absorbing terminal Φ=0.
+                let land_phi = if done {
+                    0.0
+                } else {
+                    boat_land_potential(
+                        self.team_useful_landings(),
+                        self.reward_config.duo_boat_land,
+                    )
+                };
+                duo_r +=
+                    self.boat_land_shaper[i].transition(land_phi, self.reward_config.gamma, 1.0);
                 // Outcome-only one-shot: first formal pact this episode.
                 if allied && !self.pact_bonus_paid {
                     duo_r += duo_pact_success_bonus(true, self.reward_config);
