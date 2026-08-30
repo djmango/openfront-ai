@@ -264,6 +264,12 @@ struct Args {
     #[arg(long, default_value_t = 0.0)]
     duo_port_stand: f64,
 
+    /// Duo: PBRS on how many 4-connected landmasses the team occupies
+    /// (first tile on a new continent raises Φ even if leftover red
+    /// is still there). Never a boat/attack action. 0 disables.
+    #[arg(long, default_value_t = 0.0)]
+    duo_continent_span: f64,
+
     /// Resume a V8.6 (v8.3 schedule) checkpoint under V10 schedule + anti-spiral reward.
     #[arg(long, default_value_t = false, requires = "resume")]
     migrate_v86_to_v10: bool,
@@ -975,6 +981,7 @@ mod curriculum_flag_tests {
         assert_eq!(defaults.duo_boat_commit, 0.0);
         assert_eq!(defaults.duo_leftover_continent, 0.0);
         assert_eq!(defaults.duo_port_stand, 0.0);
+        assert_eq!(defaults.duo_continent_span, 0.0);
         assert!(defaults.kl_prior.is_none());
         assert_eq!(defaults.kl_coef, 0.05);
     }
@@ -995,7 +1002,7 @@ mod curriculum_flag_tests {
     #[cfg(feature = "native-engine")]
     #[test]
     fn v10_broad_maps_all_load_through_the_rust_engine() {
-        use openfront_engine::core::terrain::{GameMapSize, load_fresh_terrain};
+        use openfront_engine::core::terrain::{load_fresh_terrain, GameMapSize};
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
@@ -1324,6 +1331,7 @@ fn main() -> anyhow::Result<()> {
         duo_boat_commit: args.duo_boat_commit,
         duo_leftover_continent: args.duo_leftover_continent,
         duo_port_stand: args.duo_port_stand,
+        duo_continent_span: args.duo_continent_span,
     };
     anyhow::ensure!(
         args.duo_pact_bonus.is_finite() && args.duo_pact_bonus >= 0.0,
@@ -1360,6 +1368,10 @@ fn main() -> anyhow::Result<()> {
     anyhow::ensure!(
         args.duo_port_stand.is_finite() && args.duo_port_stand >= 0.0,
         "--duo-port-stand must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.duo_continent_span.is_finite() && args.duo_continent_span >= 0.0,
+        "--duo-continent-span must be finite and non-negative"
     );
     anyhow::ensure!(
         args.v10_timeout_closeout.is_finite() && args.v10_timeout_closeout >= 0.0,

@@ -7240,6 +7240,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 cfg.reward_config.duo_port_stand
             );
         }
+        if cfg.reward_config.duo_continent_span != 0.0 {
+            println!(
+                "[train] duo continent-span PBRS coef={:.3} on occupied landmass count (not a boat/attack action; absorbing Φ=0)",
+                cfg.reward_config.duo_continent_span
+            );
+        }
     }
     if cfg.recurrent_policy {
         anyhow::ensure!(
@@ -9324,6 +9330,7 @@ mod persistent_actor_tests {
                 duo_boat_commit: 0.0,
                 duo_leftover_continent: 0.0,
                 duo_port_stand: 0.0,
+                duo_continent_span: 0.0,
             },
             lambda: 0.95,
             clip: 0.2,
