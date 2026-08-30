@@ -7234,6 +7234,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 cfg.reward_config.duo_leftover_continent
             );
         }
+        if cfg.reward_config.duo_port_stand != 0.0 {
+            println!(
+                "[train] duo port-stand PBRS coef={:.3} on team completed Port count (not the build action; absorbing Φ=0)",
+                cfg.reward_config.duo_port_stand
+            );
+        }
     }
     if cfg.recurrent_policy {
         anyhow::ensure!(
@@ -9317,6 +9323,7 @@ mod persistent_actor_tests {
                 duo_port_delete: 0.0,
                 duo_boat_commit: 0.0,
                 duo_leftover_continent: 0.0,
+                duo_port_stand: 0.0,
             },
             lambda: 0.95,
             clip: 0.2,

@@ -24,6 +24,7 @@ use ofcore::curriculum::{
     duo_potential, duo_structure_delete_penalty, economy_potential, embargo_stop_outcome_reward,
     fast_win_bonus, formally_allied, label_continents, land_share, leftover_continent_counts,
     leftover_continent_potential, normalized_strength_share, placement, placement_score,
+    port_stand_potential,
     player_gold_income, sample_episode, stages_for_schedule, strength_delta_weight,
     team_completed_structures, team_owner_ids, team_transport_ships, tempo_pressure,
     terminal_reward, timeweight, v10_closeout_entry_bonus, v10_combat_action_bonus,
@@ -938,6 +939,7 @@ pub struct EnvWorker {
     eco_shaper: [DominanceShaper; 2],
     boat_commit_shaper: [DominanceShaper; 2],
     leftover_continent_shaper: [DominanceShaper; 2],
+    port_stand_shaper: [DominanceShaper; 2],
     closeout_tracker: [CloseoutTracker; 2],
     action_churn_tracker: [ActionChurnTracker; 2],
     boat_tracker: [PendingBoatTracker; 2],
@@ -1017,6 +1019,7 @@ impl EnvWorker {
             eco_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             boat_commit_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             leftover_continent_shaper: [DominanceShaper::default(), DominanceShaper::default()],
+            port_stand_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             closeout_tracker: [CloseoutTracker::default(), CloseoutTracker::default()],
             action_churn_tracker: [ActionChurnTracker::default(), ActionChurnTracker::default()],
             boat_tracker: [PendingBoatTracker::default(), PendingBoatTracker::default()],
@@ -1386,6 +1389,10 @@ impl EnvWorker {
                     self.reward_config.duo_boat_commit,
                 ));
                 self.leftover_continent_shaper[i].reset(self.leftover_continent_phi());
+                self.port_stand_shaper[i].reset(port_stand_potential(
+                    team_completed_structures(self.ents(), &owners, PORT_UNIT_CLASS),
+                    self.reward_config.duo_port_stand,
+                ));
             }
             self.closeout_tracker[i].reset(share, tick);
             self.action_churn_tracker[i].reset();
@@ -1820,6 +1827,11 @@ impl EnvWorker {
         } else {
             0
         };
+        let next_port_phi = if n > 1 {
+            port_stand_potential(n_ports, self.reward_config.duo_port_stand)
+        } else {
+            0.0
+        };
         let solo_scale = if n > 1 { DUO_SOLO_SCALE } else { 1.0 };
 
         let mut results = Vec::with_capacity(n);
@@ -2141,6 +2153,12 @@ impl EnvWorker {
                     self.reward_config.gamma,
                     1.0,
                 );
+                // Ng 1999 PBRS on team completed Port count. Completing a
+                // Port raises Φ; losing one drops it. Never the `build`
+                // action. Absorbing terminal Φ=0.
+                let port_phi = if done { 0.0 } else { next_port_phi };
+                duo_r +=
+                    self.port_stand_shaper[i].transition(port_phi, self.reward_config.gamma, 1.0);
                 // Outcome-only one-shot: first formal pact this episode.
                 if allied && !self.pact_bonus_paid {
                     duo_r += duo_pact_success_bonus(true, self.reward_config);
