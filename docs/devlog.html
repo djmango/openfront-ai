@@ -86,12 +86,12 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 30th, 2026</h2>
-  <p>Live duo is <b>experiment O</b> on the homelab 3070: leftover-continent
-    PBRS (<code>--duo-leftover-continent 0.5</code>) on <b>N's weights</b>.
-    N kept compact (Caucasus 4/4, Onion 3/5) then fail-c (last 8
-    Britannia/GL timeout). O <code>--resume</code>s
-    <code>mappo-N-fail-c-20260830T1032Z</code>. See
-    <a href="#duo-scoreboard">A–O scoreboard</a> and
+  <p>Live duo is <b>experiment P</b> on the homelab 3070: standing-Port
+    PBRS (<code>--duo-port-stand 0.5</code>) on <b>O's weights</b>.
+    O kept compact (Caucasus 2/4) then fail-c (last 8 water/Onion
+    timeout). P <code>--resume</code>s
+    <code>mappo-O-fail-c-20260830T1246Z</code>. See
+    <a href="#duo-scoreboard">A–P scoreboard</a> and
     <a href="#duo-carry">carry-forward</a>.</p>
 </div>
 
@@ -192,8 +192,8 @@ Fail gates: (a) ≥90 min and ≥8 eps and 0 wins; (b) entropy &lt; 0.3 for
 Stashes under <code>rust/checkpoints/ppo_duo/</code>.</p>
 
 <p id="duo-scoreboard"><b>Scoreboard</b> (compact = Caucasus / Onion / Pangaea;
-water = Britannia / GreatLakes / BlackSea / BetweenTwoSeas). O is live
-(resume N). N numbers at fail-c 2026-08-30T10:32Z (N-only 7/26). Book
+water = Britannia / GreatLakes / BlackSea / BetweenTwoSeas). P is live
+(resume O). O numbers at fail-c 2026-08-30T12:45Z (O-only 2/21). Book
 counts drift because the replay spool reuses IDs (~190 files); M peak
 ~80, book at M gate 45.</p>
 <table>
@@ -351,21 +351,30 @@ counts drift because the replay spool reuses IDs (~190 files); M peak
     <td>gate c ~u35780 (last 8 Britannia/GL timeout)</td>
   </tr>
   <tr>
-    <td><b>O leftover-continent (live)</b></td>
+    <td>O leftover-continent</td>
     <td>PBRS on leftover opponent tiles on occupied continents, resume N</td>
+    <td>O-only <b>2/21</b></td>
+    <td>0.10</td>
+    <td>Caucasus 2/4, Onion 0/5</td>
+    <td>Britannia 0/7, GL 0/4, BlackSea 0/1</td>
+    <td>gate c ~u37532 (last 8 water/Onion timeout)</td>
+  </tr>
+  <tr>
+    <td><b>P port-stand (live)</b></td>
+    <td>PBRS on team completed Port count, resume O</td>
     <td>—</td>
     <td>—</td>
     <td>—</td>
     <td>—</td>
-    <td>live (from N stash <code>mappo-N-fail-c-20260830T1032Z</code>)</td>
+    <td>live (from O stash <code>mappo-O-fail-c-20260830T1246Z</code>)</td>
   </tr>
 </table>
 <p>Best compact <i>hold</i> is still <b>G</b> (101/245). Best water
 <i>rate</i> on a short run is still <b>K</b> (Britannia 8/13, GreatLakes
 4/11). First run to open <b>every</b> Easy map including BTS and GL is
 <b>M</b> (BTS <code>qlmRclS1</code> 19:37, GL <code>z4bOdwHy</code>
-03:03). M then N both died on a Britannia/GL timeout tail (gate c). O
-resumes N and prices mopping leftover red on the same continent.
+03:03). M then N then O died on a Britannia/GL timeout tail (gate c). P
+resumes O and prices standing Ports (G occupancy: almost none).
 H–J resumed G and lost Onion.</p>
 
 <h3 id="duo-carry">Carry forward: keep the wins, add one lever</h3>
@@ -459,9 +468,16 @@ H–J resumed G then extra reward collapsed Onion. The rule now:</p>
   <tr>
     <td><code>--duo-leftover-continent 0.5</code> leftover-opponent PBRS</td>
     <td>O</td>
-    <td>Live. Resume N. Φ = 0.5 × team / (team + leftover red) on
-      continents the team occupies. Fleeing a dirty continent drops Φ.
-      Never an attack/boat action.</td>
+    <td>Kept compact, then gate-c water tail. Φ = 0.5 × team /
+      (team + leftover red) on occupied continents. Keep the layer;
+      P resumes O.</td>
+  </tr>
+  <tr>
+    <td><code>--duo-port-stand 0.5</code> completed-Port PBRS</td>
+    <td>P</td>
+    <td>Live. Resume O. Φ = 0.5 × team completed Ports; absorbing 0
+      at done. Never the <code>build</code> action. Distinct from
+      first-port one-shot and delete-penalty.</td>
   </tr>
   <tr>
     <td>feedforward (<code>--recurrent-policy=false</code>)</td>
@@ -662,13 +678,26 @@ weights.</p>
       (u35780 / 1144960 steps).</td>
   </tr>
   <tr>
-    <td><b>O leftover-continent (live)</b></td>
+    <td>O leftover-continent</td>
     <td>Ng 1999 PBRS on leftover opponent tiles on continents the team
       occupies (<code>--duo-leftover-continent 0.5</code>). Not an
       attack/boat action. <code>--resume</code> N stash. Stacked flags
-      stay including boat-commit. Started after N fail-c.</td>
-    <td>Live. Clock starts at O launch. Same fail gates (a/b/c/4).
-      Fail → one new lever on O's weights (not from-scratch).</td>
+      stay including boat-commit. Started 2026-08-30T10:37:22Z.</td>
+    <td>Fail gate (c) at ~128 min / u37532: last 8 water/Onion
+      timeout. O-only <b>2/21</b>. Compact held (Caucasus 2/4).
+      Water O-only 0. Stash
+      <code>mappo-O-fail-c-20260830T1246Z.*</code>
+      (u37532 / 1201024 steps).</td>
+  </tr>
+  <tr>
+    <td><b>P port-stand (live)</b></td>
+    <td>Ng 1999 PBRS on team completed Port count
+      (<code>--duo-port-stand 0.5</code>). Not the <code>build</code>
+      action. <code>--resume</code> O stash. Stacked flags stay
+      including leftover-continent + boat-commit. Started after O
+      fail-c.</td>
+    <td>Live. Clock starts at P launch. Same fail gates (a/b/c/4).
+      Fail → one new lever on P's weights (not from-scratch).</td>
   </tr>
 </table>
 <p>Water maps (Britannia, GreatLakes, BlackSea, BetweenTwoSeas) were 0
@@ -823,40 +852,39 @@ the partner too. Donate exists but is not donate-dirac.</p>
 
 <h3 id="duo-next">What is still open</h3>
 <ul>
-  <li><b>O (live): leftover-continent</b>. PBRS on leftover opponent
-    tiles on occupied continents (<code>--duo-leftover-continent
-    0.5</code>) on N's weights. Same fail gates (a/b/c/4).
-    Feedforward; do not revive LSTM on this 8GB card. Boat-commit
-    stays on.</li>
-  <li><b>After O:</b> one unused lever on <b>O's weights</b>
-    (<code>--resume</code> the O stash, not from-scratch). Not while O
-    is live unless a fail gate fires. If O loses compact,
-    <code>--init</code> N fail-c / M fail-c / G compact-hold / K
-    water-open per <a href="#duo-carry">carry-forward</a>.</li>
+  <li><b>P (live): port-stand</b>. PBRS on team completed Port count
+    (<code>--duo-port-stand 0.5</code>) on O's weights. Same fail
+    gates (a/b/c/4). Feedforward; do not revive LSTM on this 8GB card.
+    Leftover-continent and boat-commit stay on.</li>
+  <li><b>After P:</b> one unused lever on <b>P's weights</b>
+    (<code>--resume</code> the P stash, not from-scratch). Not while P
+    is live unless a fail gate fires. If P loses compact,
+    <code>--init</code> O fail-c / N fail-c / M fail-c / G compact-hold
+    / K water-open per <a href="#duo-carry">carry-forward</a>.</li>
 </ul>
 
 <h3 id="duo-ops">Ops</h3>
 <ul>
   <li>Host: homelab RTX 3070 8GB, tmux <code>duo-train</code>,
     <code>bash rust/checkpoints/ppo_duo/run.sh</code> (gitignored;
-    O is feedforward MAPPO + comms + boat-commit + leftover-continent, <b>crash-resume latest</b> of this
+    P is feedforward MAPPO + comms + boat-commit + leftover-continent + port-stand, <b>crash-resume latest</b> of this
     run (carry-forward, not from-scratch):
     <code>--duo-comms --duo-boat-commit 0.5 --duo-leftover-continent 0.5
+    --duo-port-stand 0.5
     --centralized-value=true
     --recurrent-policy=false --minibatches 8</code>,
     plus
     <code>--duo-eco-coef 0.25 --duo-city-bonus 3 --duo-port-bonus 5
     --duo-city-delete 3 --duo-port-delete 5
     --v84-boat-cancelled=-0.15 --duo-pact-bonus 5</code>. Next
-    experiment resumes O. Do not
+    experiment resumes P. Do not
     <code>--resume</code> L LSTM or H–J collapsed weights. Clap defaults
     recurrent on: always pass <code>--recurrent-policy=false</code>
     for feedforward.</li>
   <li>Log / metrics / state:
     <code>rust/checkpoints/ppo_duo/{train.log,metrics.jsonl,latest.state.json}</code></li>
-  <li>PR: <a href="https://github.com/djmango/openfront-ai/pull/122">#122</a>
-    (O leftover-continent, stacked on
-    <a href="https://github.com/djmango/openfront-ai/pull/121">#121</a>).</li>
+  <li>PR: (P port-stand, stacked on
+    <a href="https://github.com/djmango/openfront-ai/pull/122">#122</a>).</li>
   <li>Do not commit <code>run.sh</code>, checkpoints, dirty
     <code>openfront</code>, or <code>uv.lock</code>.</li>
 </ul>
@@ -4321,9 +4349,9 @@ from the raw cache IS that idea, done right).</p>
 
 <h3 id="next">Open threads</h3>
 <ul>
-  <li><b>Duo Easy (active, Aug 30):</b> experiment O leftover-continent
-    live on N's weights. <b>Easy including water already open</b> on M
-    (GL 03:03, BTS 19:37). N fail-c (Britannia/GL timeout tail).
+  <li><b>Duo Easy (active, Aug 30):</b> experiment P port-stand
+    live on O's weights. <b>Easy including water already open</b> on M
+    (GL 03:03, BTS 19:37). O fail-c (water/Onion timeout tail).
     See <a href="#duo-scoreboard">scoreboard</a> and
     <a href="#duo-carry">carry-forward</a>.</li>
   <li><b>V11 (active plan, Jul 23):</b> see <a href="#v11-plan">V11 plan</a>  - 

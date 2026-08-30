@@ -160,6 +160,11 @@ pub struct RewardConfig {
     /// landmasses. Mopping leftover red raises Φ; fleeing a dirty continent
     /// drops it. Absorbing terminal Φ=0. Never an attack/boat action. 0 disables.
     pub duo_leftover_continent: f64,
+    /// Duo: Ng 1999 PBRS coefficient on team completed Port count.
+    /// Completing a Port raises Φ; losing one drops it. Absorbing terminal
+    /// Φ=0. Never the `build` action. Distinct from first-port one-shot and
+    /// the delete-penalty. 0 disables.
+    pub duo_port_stand: f64,
 }
 
 impl RewardConfig {
@@ -1595,6 +1600,17 @@ pub fn leftover_continent_potential(team: u64, leftover: u64, coef: f64) -> f64 
     finite_or_zero(coef.abs() * team as f64 / (team + leftover) as f64)
 }
 
+/// Team standing-Port potential. `n_ports` is completed (not-under-construction)
+/// Ports. Ng 1999: apply via [`DominanceShaper`], absorbing Φ=0 at done.
+/// Disabled when `coef` is 0. Stays well below a win so timeout-with-ports
+/// is still a loss (terminal charges −Φ). Never the `build` action.
+pub fn port_stand_potential(n_ports: usize, coef: f64) -> f64 {
+    if coef == 0.0 {
+        return 0.0;
+    }
+    finite_or_zero(coef.abs() * n_ports as f64)
+}
+
 fn v10_diplo_panic_armed(land_share: f64, tick: i64, max_ticks: i64, config: RewardConfig) -> bool {
     let share_armed = finite_or_zero(land_share) >= config.v10_diplo_panic_share;
     let tick_frac = tick as f64 / max_ticks.max(1) as f64;
@@ -1773,6 +1789,7 @@ mod tests {
             duo_port_delete: 0.0,
             duo_boat_commit: 0.0,
             duo_leftover_continent: 0.0,
+            duo_port_stand: 0.0,
         }
     }
 
@@ -2633,6 +2650,42 @@ mod tests {
         let mut ids = team_owner_ids(&ents, &[1, 2]);
         ids.sort();
         assert_eq!(ids, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn port_stand_potential_is_completed_count_not_a_build_action_wage() {
+        assert_eq!(port_stand_potential(0, 0.5), 0.0);
+        assert_eq!(port_stand_potential(1, 0.0), 0.0);
+        assert_eq!(port_stand_potential(1, 0.5), 0.5);
+        assert_eq!(port_stand_potential(2, 0.5), 1.0);
+        assert!(port_stand_potential(8, 0.5) < W_WIN);
+        let ents = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true},
+                {"id": 2, "pid": "AGENTRL2", "alive": true},
+                {"id": 3, "pid": "BOT", "alive": true}
+            ],
+            "units": [
+                {"type": "Port", "owner": 1, "constructing": false, "x": 0, "y": 0},
+                {"type": "Port", "owner": 2, "constructing": true, "x": 1, "y": 0},
+                {"type": "Port", "owner": 3, "constructing": false, "x": 2, "y": 0},
+                {"type": "City", "owner": 1, "constructing": false, "x": 3, "y": 0}
+            ],
+            "attacks": [],
+            "alliances": []
+        }));
+        let owners = [1usize, 2];
+        assert_eq!(
+            team_completed_structures(&ents, &owners, PORT_UNIT_CLASS),
+            1
+        );
+        assert_eq!(
+            port_stand_potential(
+                team_completed_structures(&ents, &owners, PORT_UNIT_CLASS),
+                0.5
+            ),
+            0.5
+        );
     }
 
     #[test]
