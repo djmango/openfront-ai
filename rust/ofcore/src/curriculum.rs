@@ -2,8 +2,8 @@
 //! `rl/curriculum.py`; see that file for the design rationale in comments.
 
 use crate::feat::{
-    A_ALLIANCE_REQUEST, A_ATTACK, A_BOAT, A_BREAK_ALLIANCE, A_BUILD, A_CANCEL_BOAT, A_DONATE_GOLD,
-    A_DONATE_TROOPS, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, EntsData,
+    EntsData, A_ALLIANCE_REQUEST, A_ATTACK, A_BOAT, A_BREAK_ALLIANCE, A_BUILD, A_CANCEL_BOAT,
+    A_DONATE_GOLD, A_DONATE_TROOPS, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT,
 };
 use std::collections::{HashMap, VecDeque};
 
@@ -151,6 +151,10 @@ pub struct RewardConfig {
     pub duo_city_delete: f64,
     /// Duo: per completed Port lost (count drop). Outcome-only. 0 disables.
     pub duo_port_delete: f64,
+    /// Duo: Ng 1999 PBRS coefficient on team in-flight TransportShip count.
+    /// Launching a boat raises Φ; landing / cancel / destroy drops it.
+    /// Absorbing terminal Φ=0. Never the `boat` action. 0 disables.
+    pub duo_boat_commit: f64,
 }
 
 impl RewardConfig {
@@ -1211,7 +1215,11 @@ fn finite_nonnegative(value: f64) -> f64 {
 }
 
 fn finite_or_zero(value: f64) -> f64 {
-    if value.is_finite() { value } else { 0.0 }
+    if value.is_finite() {
+        value
+    } else {
+        0.0
+    }
 }
 
 /// V8.1 Φ(s), derived from the exact composite map used by placement.
@@ -1428,6 +1436,28 @@ pub fn team_completed_structures(
         .count()
 }
 
+/// Living TransportShips owned by any of `owners` (agent small-ids).
+/// State count for [`boat_commit_potential`], not the `boat` action.
+pub fn team_transport_ships(ents: &crate::feat::EntsData, owners: &[usize]) -> usize {
+    ents.units
+        .iter()
+        .filter(|u| {
+            u.class == TRANSPORT_UNIT_CLASS && u.uid >= 0 && owners.iter().any(|&o| o == u.owner)
+        })
+        .count()
+}
+
+/// Team in-flight boat potential. `n_boats` is living TransportShips.
+/// Ng 1999: apply via [`DominanceShaper`], absorbing Φ=0 at done.
+/// Disabled when `coef` is 0. Stays well below a win so timeout-with-boats
+/// is still a loss (terminal charges −Φ).
+pub fn boat_commit_potential(n_boats: usize, coef: f64) -> f64 {
+    if coef == 0.0 {
+        return 0.0;
+    }
+    finite_or_zero(coef.abs() * n_boats as f64)
+}
+
 fn v10_diplo_panic_armed(land_share: f64, tick: i64, max_ticks: i64, config: RewardConfig) -> bool {
     let share_armed = finite_or_zero(land_share) >= config.v10_diplo_panic_share;
     let tick_frac = tick as f64 / max_ticks.max(1) as f64;
@@ -1604,6 +1634,7 @@ mod tests {
             duo_first_port: 0.0,
             duo_city_delete: 0.0,
             duo_port_delete: 0.0,
+            duo_boat_commit: 0.0,
         }
     }
 
@@ -2265,8 +2296,8 @@ mod tests {
 
     #[test]
     fn sample_episode_rehearsal_uses_past_lobby_setup() {
-        use rand::SeedableRng;
         use rand::rngs::SmallRng;
+        use rand::SeedableRng;
         let stages = stages_for_schedule(CurriculumSchedule::V10);
         let mut rng = SmallRng::seed_from_u64(42);
         let mut found = false;
@@ -2379,6 +2410,36 @@ mod tests {
         assert_eq!(duo_structure_delete_penalty(2, 5.0), -10.0);
         assert_eq!(duo_structure_delete_penalty(1, 0.0), 0.0);
         assert!(3.0 < W_WIN);
+    }
+
+    #[test]
+    fn boat_commit_potential_is_inflight_count_not_a_boat_action_wage() {
+        assert_eq!(boat_commit_potential(0, 0.5), 0.0);
+        assert_eq!(boat_commit_potential(1, 0.0), 0.0);
+        assert_eq!(boat_commit_potential(1, 0.5), 0.5);
+        assert_eq!(boat_commit_potential(2, 0.5), 1.0);
+        assert!(boat_commit_potential(8, 0.5) < W_WIN);
+        let ents = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true},
+                {"id": 2, "pid": "AGENTRL2", "alive": true},
+                {"id": 3, "pid": "BOT", "alive": true}
+            ],
+            "units": [
+                {"type": "Transport", "owner": 1, "uid": 11, "constructing": false, "x": 0, "y": 0},
+                {"type": "Transport", "owner": 2, "uid": 12, "constructing": false, "x": 1, "y": 0},
+                {"type": "Transport", "owner": 3, "uid": 13, "constructing": false, "x": 2, "y": 0},
+                {"type": "Port", "owner": 1, "constructing": false, "x": 3, "y": 0}
+            ],
+            "attacks": [],
+            "alliances": []
+        }));
+        let owners = [1usize, 2];
+        assert_eq!(team_transport_ships(&ents, &owners), 2);
+        assert_eq!(
+            boat_commit_potential(team_transport_ships(&ents, &owners), 0.5),
+            1.0
+        );
     }
 
     #[test]
