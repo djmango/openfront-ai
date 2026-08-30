@@ -391,7 +391,7 @@ counts drift because the replay spool reuses IDs (~190 files); M peak
     <td>0.00</td>
     <td>Caucasus 0/4 TERM, Onion 0/5 TIMEOUT</td>
     <td>Britannia 0/10, GL 0/6, BlackSea 0/1</td>
-    <td>gate a ~u43268 (0 wins after 131 min)</td>
+    <td>gate a u43307 (0 wins after 131 min)</td>
   </tr>
   <tr>
     <td><b>T defense-stand (live)</b></td>
@@ -811,9 +811,10 @@ weights.</p>
       (<code>--duo-city-stand 0.5</code>). Not the <code>build</code>
       action. <code>--resume</code> Q stash. No boat-land. Started
       after R fail-a.</td>
-    <td>Fail gate (a) at ~131 min / u43268: 0 wins after 26 eps.
+    <td>Fail gate (a) at ~131 min / u43307: 0 wins after 26 eps.
       Compact died (Caucasus 0/4 TERM, Onion 0/5 TIMEOUT). Stash
-      <code>mappo-S-fail-a-20260830T2231Z.*</code>. T inits Q, not S.</td>
+      <code>mappo-S-fail-a-20260830T2231Z.*</code>
+      (u43307 / 1385824). T inits Q, not S.</td>
   </tr>
   <tr>
     <td><b>T defense-stand (live)</b></td>
@@ -1007,9 +1008,9 @@ the partner too. Donate exists but is not donate-dirac.</p>
     for feedforward.</li>
   <li>Log / metrics / state:
     <code>rust/checkpoints/ppo_duo/{train.log,metrics.jsonl,latest.state.json}</code></li>
-  <li>PR: <a href="https://github.com/djmango/openfront-ai/pull/126">#126</a>
-    (S city-stand, stacked on
-    <a href="https://github.com/djmango/openfront-ai/pull/125">#125</a>).</li>
+  <li>PR: <a href="https://github.com/djmango/openfront-ai/pull/127">#127</a>
+    (T defense-stand, stacked on
+    <a href="https://github.com/djmango/openfront-ai/pull/126">#126</a>).</li>
   <li>Do not commit <code>run.sh</code>, checkpoints, dirty
     <code>openfront</code>, or <code>uv.lock</code>.</li>
 </ul>
