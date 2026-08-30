@@ -2,8 +2,8 @@
 //! `rl/curriculum.py`; see that file for the design rationale in comments.
 
 use crate::feat::{
-    A_ALLIANCE_REQUEST, A_ATTACK, A_BOAT, A_BREAK_ALLIANCE, A_BUILD, A_CANCEL_BOAT, A_DONATE_GOLD,
-    A_DONATE_TROOPS, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, EntsData,
+    EntsData, A_ALLIANCE_REQUEST, A_ATTACK, A_BOAT, A_BREAK_ALLIANCE, A_BUILD, A_CANCEL_BOAT,
+    A_DONATE_GOLD, A_DONATE_TROOPS, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -165,6 +165,12 @@ pub struct RewardConfig {
     /// Φ=0. Never the `build` action. Distinct from first-port one-shot and
     /// the delete-penalty. 0 disables.
     pub duo_port_stand: f64,
+    /// Duo: Ng 1999 PBRS on how many 4-connected landmasses the team occupies.
+    /// First tile on a new continent raises Φ regardless of leftover red
+    /// (leftover-continent purity can drop on that landing). Fleeing a
+    /// continent drops it. Absorbing terminal Φ=0. Never a boat/attack
+    /// action. 0 disables.
+    pub duo_continent_span: f64,
 }
 
 impl RewardConfig {
@@ -1225,7 +1231,11 @@ fn finite_nonnegative(value: f64) -> f64 {
 }
 
 fn finite_or_zero(value: f64) -> f64 {
-    if value.is_finite() { value } else { 0.0 }
+    if value.is_finite() {
+        value
+    } else {
+        0.0
+    }
 }
 
 /// V8.1 Φ(s), derived from the exact composite map used by placement.
@@ -1611,6 +1621,58 @@ pub fn port_stand_potential(n_ports: usize, coef: f64) -> f64 {
     finite_or_zero(coef.abs() * n_ports as f64)
 }
 
+/// Number of 4-connected landmasses with at least one team tile.
+/// Untouched islands do not count. Fleeing a continent drops the count.
+pub fn occupied_continent_count(
+    continent: &[u16],
+    wr: usize,
+    hr: usize,
+    map_width: usize,
+    owner_at: impl Fn(usize) -> u16,
+    team: &[u16],
+) -> usize {
+    let n = wr.saturating_mul(hr);
+    if wr == 0 || hr == 0 || continent.len() < n {
+        return 0;
+    }
+    let mut max_id = 0u16;
+    for &c in &continent[..n] {
+        max_id = max_id.max(c);
+    }
+    if max_id == 0 {
+        return 0;
+    }
+    let n_c = max_id as usize + 1;
+    let mut occupied = vec![false; n_c];
+    let team_set: HashSet<u16> = team.iter().copied().collect();
+    for y in 0..hr {
+        for x in 0..wr {
+            let cid = continent[y * wr + x] as usize;
+            if cid == 0 || occupied[cid] {
+                continue;
+            }
+            let owner = owner_at(y * map_width + x);
+            if owner != 0 && team_set.contains(&owner) {
+                occupied[cid] = true;
+            }
+        }
+    }
+    occupied.iter().skip(1).filter(|&&o| o).count()
+}
+
+/// Continent-span potential. `n_continents` is landmasses the team occupies.
+/// Ng 1999: apply via [`DominanceShaper`], absorbing Φ=0 at done.
+/// Disabled when `coef` is 0. Distinct from leftover-continent purity:
+/// first tile on a new island raises this even when that island is dirty.
+/// Max is `coef × n`; Easy water maps stay well below a win so
+/// timeout-after-span is still a loss. Never a boat/attack action.
+pub fn continent_span_potential(n_continents: usize, coef: f64) -> f64 {
+    if coef == 0.0 {
+        return 0.0;
+    }
+    finite_or_zero(coef.abs() * n_continents as f64)
+}
+
 fn v10_diplo_panic_armed(land_share: f64, tick: i64, max_ticks: i64, config: RewardConfig) -> bool {
     let share_armed = finite_or_zero(land_share) >= config.v10_diplo_panic_share;
     let tick_frac = tick as f64 / max_ticks.max(1) as f64;
@@ -1790,6 +1852,7 @@ mod tests {
             duo_boat_commit: 0.0,
             duo_leftover_continent: 0.0,
             duo_port_stand: 0.0,
+            duo_continent_span: 0.0,
         }
     }
 
@@ -2451,8 +2514,8 @@ mod tests {
 
     #[test]
     fn sample_episode_rehearsal_uses_past_lobby_setup() {
-        use rand::SeedableRng;
         use rand::rngs::SmallRng;
+        use rand::SeedableRng;
         let stages = stages_for_schedule(CurriculumSchedule::V10);
         let mut rng = SmallRng::seed_from_u64(42);
         let mut found = false;
@@ -2650,6 +2713,67 @@ mod tests {
         let mut ids = team_owner_ids(&ents, &[1, 2]);
         ids.sort();
         assert_eq!(ids, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn continent_span_potential_is_occupied_count_not_a_boat_action_wage() {
+        assert_eq!(continent_span_potential(0, 0.5), 0.0);
+        assert_eq!(continent_span_potential(1, 0.0), 0.0);
+        assert_eq!(continent_span_potential(1, 0.5), 0.5);
+        assert_eq!(continent_span_potential(2, 0.5), 1.0);
+        assert!(continent_span_potential(8, 0.5) < W_WIN);
+        // Two islands: land on rows 0 and 2, water on row 1.
+        let w = 4usize;
+        let h = 3usize;
+        let mut land = vec![0u8; w * h];
+        for x in 0..w {
+            land[x] = 1;
+            land[2 * w + x] = 1;
+        }
+        let labels = label_continents(&land, w, h);
+        // Continent A (row 0): team. Continent B (row 2): leftover only.
+        // Span is 1 — leftover red on an untouched island does not count.
+        let owners = [
+            1u16, 1, 3, 3, // row 0
+            0, 0, 0, 0, // water
+            3, 3, 3, 3, // row 2, no team
+        ];
+        let team = [1u16];
+        assert_eq!(
+            occupied_continent_count(&labels, w, h, w, |i| owners[i], &team),
+            1
+        );
+        assert_eq!(
+            continent_span_potential(
+                occupied_continent_count(&labels, w, h, w, |i| owners[i], &team),
+                0.5
+            ),
+            0.5
+        );
+        // First tile on dirty B raises span (1 → 2) even though leftover
+        // purity would drop. That is the complementary lever.
+        let landed = [
+            1u16, 1, 3, 3, // row 0
+            0, 0, 0, 0, // water
+            1, 3, 3, 3, // row 2, first team tile
+        ];
+        assert_eq!(
+            occupied_continent_count(&labels, w, h, w, |i| landed[i], &team),
+            2
+        );
+        assert_eq!(
+            continent_span_potential(
+                occupied_continent_count(&labels, w, h, w, |i| landed[i], &team),
+                0.5
+            ),
+            1.0
+        );
+        let fled = [0u16; 12];
+        assert_eq!(
+            occupied_continent_count(&labels, w, h, w, |i| fled[i], &team),
+            0
+        );
+        assert_eq!(continent_span_potential(0, 0.5), 0.0);
     }
 
     #[test]
