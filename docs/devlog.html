@@ -86,13 +86,10 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 30th, 2026</h2>
-  <p>Live duo is <b>experiment R</b> on the homelab 3070: boat-land
-    PBRS (<code>--duo-boat-land 0.5</code>) on <b>Q's weights</b>,
-    full-tilt SM (no GPU util cap). Q kept compact (Caucasus 4/4,
-    Onion 1/4) then fail-c (last 8 water/Onion timeout). R
-    <code>--resume</code>s
-    <code>mappo-Q-fail-c-20260830T1801Z</code>. See
-    <a href="#duo-scoreboard">A–R scoreboard</a> and
+  <p>Live duo is <b>experiment S</b> on the homelab 3070: city-stand
+    PBRS (<code>--duo-city-stand 0.5</code>) on <b>Q's weights</b>
+    (not R — R lost compact). R fail-a 0/21 after 125 min. See
+    <a href="#duo-scoreboard">A–S scoreboard</a> and
     <a href="#duo-carry">carry-forward</a>.</p>
 </div>
 
@@ -105,7 +102,7 @@ Easy including water. Hit 2026-08-30T03:03Z on M (GL <code>z4bOdwHy</code>;
 BTS already open). M then fail-c (water timeout tail). N boat-commit
 then O leftover-continent then P port-stand then Q continent-span
 each died on the same Britannia/GL timeout tail (gate c). Live job:
-experiment R (boat-land Φ on Q weights, full-tilt SM).
+experiment S (city-stand Φ on Q weights; R lost compact).
 Carry-forward: next lever resumes R, does not from-scratch. Code:
 <a href="https://github.com/djmango/openfront-ai/pull/125">#125</a>
 stacked on timeout-loss / PBRS.</p>
@@ -380,8 +377,17 @@ counts drift because the replay spool reuses IDs (~190 files); M peak
     <td>gate c ~u41521 (last 8 water/Onion timeout)</td>
   </tr>
   <tr>
-    <td><b>R boat-land (live)</b></td>
+    <td>R boat-land</td>
     <td>PBRS on team UsefulLanding count, resume Q</td>
+    <td>R-only <b>0/21</b></td>
+    <td>0.00</td>
+    <td>Caucasus 0/4 TERM, Onion 0/5 TIMEOUT</td>
+    <td>Britannia 0/7, GL 0/4, BlackSea 0/1</td>
+    <td>gate a ~u43423 (0 wins after 125 min)</td>
+  </tr>
+  <tr>
+    <td><b>S city-stand (live)</b></td>
+    <td>PBRS on team completed City count, resume Q (not R)</td>
     <td>—</td>
     <td>—</td>
     <td>—</td>
@@ -518,10 +524,16 @@ H–J resumed G then extra reward collapsed Onion. The rule now:</p>
   <tr>
     <td><code>--duo-boat-land 0.5</code> UsefulLanding PBRS</td>
     <td>R</td>
-    <td>Live. Resume Q. Φ = 0.5 × team UsefulLanding count this
-      episode; absorbing 0 at done. Own-shore / cancel / destroy do
-      not raise Φ. Never the <code>boat</code> action. Complements
-      boat-commit (landing drops that Φ).</td>
+    <td>Gate-a 0/21; compact died (Caucasus 0/4 TERM). Do not keep
+      stacked on S. Φ = 0.5 × UsefulLanding count. Never the
+      <code>boat</code> action.</td>
+  </tr>
+  <tr>
+    <td><code>--duo-city-stand 0.5</code> completed-City PBRS</td>
+    <td>S</td>
+    <td>Live. Resume Q (not R). Φ = 0.5 × team completed Cities;
+      absorbing 0 at done. Never the <code>build</code> action.
+      Complements first-city one-shot / delete-penalty / port-stand.</td>
   </tr>
   <tr>
     <td><code>--max-gpu-util</code> SM duty-cycle cap</td>
@@ -768,15 +780,22 @@ weights.</p>
       (u41521 / 1328672 steps).</td>
   </tr>
   <tr>
-    <td><b>R boat-land (live)</b></td>
+    <td>R boat-land</td>
     <td>Ng 1999 PBRS on team UsefulLanding count
       (<code>--duo-boat-land 0.5</code>). Not the <code>boat</code>
-      action. <code>--resume</code> Q stash. Stacked flags stay
-      including continent-span + port-stand + leftover-continent +
-      boat-commit. Homelab is full-tilt SM (no
-      <code>--max-gpu-util</code>). Started after Q fail-c.</td>
-    <td>Live. Clock starts at R launch. Same fail gates (a/b/c/4).
-      Fail → one new lever on R's weights (not from-scratch).</td>
+      action. <code>--resume</code> Q stash. Started after Q fail-c.</td>
+    <td>Fail gate (a) at ~125 min / u43423: 0 wins after 21 eps.
+      Compact died (Caucasus 0/4 TERM, Onion 0/5 TIMEOUT). Stash
+      <code>mappo-R-fail-a-20260830T2016Z.*</code>. S resumes Q, not R.</td>
+  </tr>
+  <tr>
+    <td><b>S city-stand (live)</b></td>
+    <td>Ng 1999 PBRS on team completed City count
+      (<code>--duo-city-stand 0.5</code>). Not the <code>build</code>
+      action. <code>--resume</code> Q stash. No boat-land. Started
+      after R fail-a.</td>
+    <td>Live. Clock starts at S launch. Same fail gates (a/b/c/4).
+      Fail → one new lever on S's weights if compact holds.</td>
   </tr>
 </table>
 <p>Water maps (Britannia, GreatLakes, BlackSea, BetweenTwoSeas) were 0
@@ -931,17 +950,12 @@ the partner too. Donate exists but is not donate-dirac.</p>
 
 <h3 id="duo-next">What is still open</h3>
 <ul>
-  <li><b>R (live): boat-land</b>. PBRS on team UsefulLanding count
-    (<code>--duo-boat-land 0.5</code>) on Q's weights. Same fail
-    gates (a/b/c/4). Feedforward; do not revive LSTM on this 8GB card.
-    Continent-span, port-stand, leftover-continent, and boat-commit
-    stay on. Homelab is full-tilt SM (no
-    <code>--max-gpu-util</code>).</li>
-  <li><b>After R:</b> one unused lever on <b>R's weights</b>
-    (<code>--resume</code> the R stash, not from-scratch). Not while R
-    is live unless a fail gate fires. If R loses compact,
-    <code>--init</code> Q fail-c / P fail-c / O fail-c / N fail-c / M
-    fail-c / G compact-hold / K water-open per
+  <li><b>S (live): city-stand</b>. PBRS on team completed City count
+    (<code>--duo-city-stand 0.5</code>) on Q's weights. R fail-a lost
+    compact so S does <b>not</b> resume R and does not stack
+    boat-land. Same fail gates. Full-tilt SM.</li>
+  <li><b>After S:</b> one unused lever on <b>S's weights</b> if compact
+    holds, else <code>--init</code> Q fail-c per
     <a href="#duo-carry">carry-forward</a>.</li>
 </ul>
 
@@ -949,26 +963,24 @@ the partner too. Donate exists but is not donate-dirac.</p>
 <ul>
   <li>Host: homelab RTX 3070 8GB, tmux <code>duo-train</code>,
     <code>bash rust/checkpoints/ppo_duo/run.sh</code> (gitignored;
-    R is feedforward MAPPO + comms + boat-commit + leftover-continent + port-stand + continent-span + boat-land, <b>crash-resume latest</b> of this
-    run (carry-forward, not from-scratch):
+    S is feedforward MAPPO + comms + boat-commit + leftover-continent + port-stand + continent-span + city-stand, <b>crash-resume latest</b> of this
+    run (carry-forward from Q, not R):
     <code>--duo-comms --duo-boat-commit 0.5 --duo-leftover-continent 0.5
-    --duo-port-stand 0.5 --duo-continent-span 0.5 --duo-boat-land 0.5
+    --duo-port-stand 0.5 --duo-continent-span 0.5 --duo-city-stand 0.5
     --centralized-value=true
-    --recurrent-policy=false --minibatches 8</code>,
-    plus
+    --recurrent-policy=false --minibatches 8</code>.
+    No <code>--duo-boat-land</code>. No <code>--max-gpu-util</code>. Plus
     <code>--duo-eco-coef 0.25 --duo-city-bonus 3 --duo-port-bonus 5
     --duo-city-delete 3 --duo-port-delete 5
     --v84-boat-cancelled=-0.15 --duo-pact-bonus 5</code>. Next
-    experiment resumes R. Do not
-    <code>--resume</code> L LSTM or H–J collapsed weights. Clap defaults
+    experiment resumes S if compact holds. Do not
+    <code>--resume</code> L LSTM, H–J, or R collapsed weights. Clap defaults
     recurrent on: always pass <code>--recurrent-policy=false</code>
-    for feedforward. Do not pass <code>--max-gpu-util</code> (full-tilt
-    SM; the 80% duty-cycle was tried then dropped).</li>
+    for feedforward.</li>
   <li>Log / metrics / state:
     <code>rust/checkpoints/ppo_duo/{train.log,metrics.jsonl,latest.state.json}</code></li>
-  <li>PR: <a href="https://github.com/djmango/openfront-ai/pull/125">#125</a>
-    (R boat-land, full-tilt SM, stacked on
-    <a href="https://github.com/djmango/openfront-ai/pull/124">#124</a>).</li>
+  <li>PR: this branch (S city-stand), stacked on
+    <a href="https://github.com/djmango/openfront-ai/pull/125">#125</a>.</li>
   <li>Do not commit <code>run.sh</code>, checkpoints, dirty
     <code>openfront</code>, or <code>uv.lock</code>.</li>
 </ul>
@@ -4433,10 +4445,10 @@ from the raw cache IS that idea, done right).</p>
 
 <h3 id="next">Open threads</h3>
 <ul>
-  <li><b>Duo Easy (active, Aug 30):</b> experiment R boat-land
-    live on Q's weights, full-tilt SM (no GPU util cap).
+  <li><b>Duo Easy (active, Aug 30):</b> experiment S city-stand
+    live on Q's weights (R fail-a lost compact). Full-tilt SM.
     <b>Easy including water already open</b> on M
-    (GL 03:03, BTS 19:37). Q fail-c (water/Onion timeout tail).
+    (GL 03:03, BTS 19:37).
     See <a href="#duo-scoreboard">scoreboard</a> and
     <a href="#duo-carry">carry-forward</a>.</li>
   <li><b>V11 (active plan, Jul 23):</b> see <a href="#v11-plan">V11 plan</a>  - 

@@ -177,6 +177,11 @@ pub struct RewardConfig {
     /// from in-flight boat-commit (landing drops that Φ) and from the
     /// v84 one-shot. 0 disables.
     pub duo_boat_land: f64,
+    /// Duo: Ng 1999 PBRS coefficient on team completed City count.
+    /// Completing a City raises Φ; losing one drops it. Absorbing terminal
+    /// Φ=0. Never the `build` action. Distinct from first-city one-shot and
+    /// the delete-penalty. 0 disables.
+    pub duo_city_stand: f64,
 }
 
 impl RewardConfig {
@@ -1627,6 +1632,17 @@ pub fn port_stand_potential(n_ports: usize, coef: f64) -> f64 {
     finite_or_zero(coef.abs() * n_ports as f64)
 }
 
+/// Team standing-City potential. `n_cities` is completed (not-under-construction)
+/// Cities. Ng 1999: apply via [`DominanceShaper`], absorbing Φ=0 at done.
+/// Disabled when `coef` is 0. Stays well below a win so timeout-with-cities
+/// is still a loss. Never the `build` action.
+pub fn city_stand_potential(n_cities: usize, coef: f64) -> f64 {
+    if coef == 0.0 {
+        return 0.0;
+    }
+    finite_or_zero(coef.abs() * n_cities as f64)
+}
+
 /// Number of 4-connected landmasses with at least one team tile.
 /// Untouched islands do not count. Fleeing a continent drops the count.
 pub fn occupied_continent_count(
@@ -1873,6 +1889,7 @@ mod tests {
             duo_port_stand: 0.0,
             duo_continent_span: 0.0,
             duo_boat_land: 0.0,
+            duo_city_stand: 0.0,
         }
     }
 
@@ -2824,6 +2841,42 @@ mod tests {
         assert_eq!(counts.useful_landing, 1);
         assert_eq!(
             boat_land_potential(counts.useful_landing as usize, 0.5),
+            0.5
+        );
+    }
+
+    #[test]
+    fn city_stand_potential_is_completed_count_not_a_build_action_wage() {
+        assert_eq!(city_stand_potential(0, 0.5), 0.0);
+        assert_eq!(city_stand_potential(1, 0.0), 0.0);
+        assert_eq!(city_stand_potential(1, 0.5), 0.5);
+        assert_eq!(city_stand_potential(2, 0.5), 1.0);
+        assert!(city_stand_potential(8, 0.5) < W_WIN);
+        let ents = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true},
+                {"id": 2, "pid": "AGENTRL2", "alive": true},
+                {"id": 3, "pid": "BOT", "alive": true}
+            ],
+            "units": [
+                {"type": "City", "owner": 1, "constructing": false, "x": 0, "y": 0},
+                {"type": "City", "owner": 2, "constructing": true, "x": 1, "y": 0},
+                {"type": "City", "owner": 3, "constructing": false, "x": 2, "y": 0},
+                {"type": "Port", "owner": 1, "constructing": false, "x": 3, "y": 0}
+            ],
+            "attacks": [],
+            "alliances": []
+        }));
+        let owners = [1usize, 2];
+        assert_eq!(
+            team_completed_structures(&ents, &owners, CITY_UNIT_CLASS),
+            1
+        );
+        assert_eq!(
+            city_stand_potential(
+                team_completed_structures(&ents, &owners, CITY_UNIT_CLASS),
+                0.5
+            ),
             0.5
         );
     }

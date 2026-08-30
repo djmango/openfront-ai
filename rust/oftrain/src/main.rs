@@ -277,6 +277,12 @@ struct Args {
     #[arg(long, default_value_t = 0.0)]
     duo_boat_land: f64,
 
+    /// Duo: PBRS coefficient on team completed City count (completing a
+    /// City raises Φ, losing one drops it). Never the `build` action.
+    /// Distinct from `--duo-city-bonus` / `--duo-city-delete`. 0 disables.
+    #[arg(long, default_value_t = 0.0)]
+    duo_city_stand: f64,
+
     /// Resume a V8.6 (v8.3 schedule) checkpoint under V10 schedule + anti-spiral reward.
     #[arg(long, default_value_t = false, requires = "resume")]
     migrate_v86_to_v10: bool,
@@ -998,6 +1004,7 @@ mod curriculum_flag_tests {
         assert_eq!(defaults.duo_port_stand, 0.0);
         assert_eq!(defaults.duo_continent_span, 0.0);
         assert_eq!(defaults.duo_boat_land, 0.0);
+        assert_eq!(defaults.duo_city_stand, 0.0);
         assert!(defaults.kl_prior.is_none());
         assert_eq!(defaults.kl_coef, 0.05);
     }
@@ -1350,6 +1357,7 @@ fn main() -> anyhow::Result<()> {
         duo_port_stand: args.duo_port_stand,
         duo_continent_span: args.duo_continent_span,
         duo_boat_land: args.duo_boat_land,
+        duo_city_stand: args.duo_city_stand,
     };
     anyhow::ensure!(
         args.duo_pact_bonus.is_finite() && args.duo_pact_bonus >= 0.0,
@@ -1394,6 +1402,10 @@ fn main() -> anyhow::Result<()> {
     anyhow::ensure!(
         args.duo_boat_land.is_finite() && args.duo_boat_land >= 0.0,
         "--duo-boat-land must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.duo_city_stand.is_finite() && args.duo_city_stand >= 0.0,
+        "--duo-city-stand must be finite and non-negative"
     );
     anyhow::ensure!(
         args.v10_timeout_closeout.is_finite() && args.v10_timeout_closeout >= 0.0,

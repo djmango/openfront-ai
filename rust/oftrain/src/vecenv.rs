@@ -16,19 +16,20 @@ use std::sync::Mutex;
 
 use ofcore::curriculum::{
     self, action_churn_penalty, boat_commit_potential, boat_land_potential, boat_outcome_reward,
-    classify_boat_resolution, closeout_potential, combat_outcome_reward, continent_span_potential,
-    dominance_potential, duo_first_structure_bonus, duo_pact_success_bonus, duo_potential,
-    duo_structure_delete_penalty, economy_potential, embargo_stop_outcome_reward, fast_win_bonus,
-    formally_allied, label_continents, land_share, leftover_continent_counts,
-    leftover_continent_potential, normalized_strength_share, occupied_continent_count, placement,
-    placement_score, player_gold_income, port_stand_potential, sample_episode, stages_for_schedule,
-    strength_delta_weight, team_completed_structures, team_owner_ids, team_transport_ships,
-    tempo_pressure, terminal_reward, timeweight, v10_closeout_entry_bonus, v10_combat_action_bonus,
-    v10_diplo_panic_penalty, v10_survival_reward, v10_timeout_after_closeout_penalty,
-    v83_action_churn_penalty, ActionChurnTracker, ActionPairCounts, ActionTarget,
-    BoatOutcomeCounts, ChosenAction, CombatOutcome, CurriculumSchedule, DominanceShaper,
-    InverseActionPair, RewardComponents, RewardConfig, Stage, CITY_UNIT_CLASS, DUO_SOLO_SCALE,
-    PORT_UNIT_CLASS, TRANSPORT_UNIT_CLASS, V83_CLOSEOUT_SHARE_START, W_STR, W_WASTE,
+    city_stand_potential, classify_boat_resolution, closeout_potential, combat_outcome_reward,
+    continent_span_potential, dominance_potential, duo_first_structure_bonus,
+    duo_pact_success_bonus, duo_potential, duo_structure_delete_penalty, economy_potential,
+    embargo_stop_outcome_reward, fast_win_bonus, formally_allied, label_continents, land_share,
+    leftover_continent_counts, leftover_continent_potential, normalized_strength_share,
+    occupied_continent_count, placement, placement_score, player_gold_income, port_stand_potential,
+    sample_episode, stages_for_schedule, strength_delta_weight, team_completed_structures,
+    team_owner_ids, team_transport_ships, tempo_pressure, terminal_reward, timeweight,
+    v10_closeout_entry_bonus, v10_combat_action_bonus, v10_diplo_panic_penalty,
+    v10_survival_reward, v10_timeout_after_closeout_penalty, v83_action_churn_penalty,
+    ActionChurnTracker, ActionPairCounts, ActionTarget, BoatOutcomeCounts, ChosenAction,
+    CombatOutcome, CurriculumSchedule, DominanceShaper, InverseActionPair, RewardComponents,
+    RewardConfig, Stage, CITY_UNIT_CLASS, DUO_SOLO_SCALE, PORT_UNIT_CLASS, TRANSPORT_UNIT_CLASS,
+    V83_CLOSEOUT_SHARE_START, W_STR, W_WASTE,
 };
 use ofcore::feat::{
     self, ACTIONS, A_ALLIANCE_REQUEST, A_ATTACK, A_BOAT, A_BREAK_ALLIANCE, A_BUILD, A_CANCEL_BOAT,
@@ -937,6 +938,7 @@ pub struct EnvWorker {
     boat_commit_shaper: [DominanceShaper; 2],
     leftover_continent_shaper: [DominanceShaper; 2],
     port_stand_shaper: [DominanceShaper; 2],
+    city_stand_shaper: [DominanceShaper; 2],
     continent_span_shaper: [DominanceShaper; 2],
     boat_land_shaper: [DominanceShaper; 2],
     closeout_tracker: [CloseoutTracker; 2],
@@ -1019,6 +1021,7 @@ impl EnvWorker {
             boat_commit_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             leftover_continent_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             port_stand_shaper: [DominanceShaper::default(), DominanceShaper::default()],
+            city_stand_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             continent_span_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             boat_land_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             closeout_tracker: [CloseoutTracker::default(), CloseoutTracker::default()],
@@ -1393,6 +1396,10 @@ impl EnvWorker {
                 self.port_stand_shaper[i].reset(port_stand_potential(
                     team_completed_structures(self.ents(), &owners, PORT_UNIT_CLASS),
                     self.reward_config.duo_port_stand,
+                ));
+                self.city_stand_shaper[i].reset(city_stand_potential(
+                    team_completed_structures(self.ents(), &owners, CITY_UNIT_CLASS),
+                    self.reward_config.duo_city_stand,
                 ));
                 self.continent_span_shaper[i].reset(self.continent_span_phi());
                 self.boat_land_shaper[i].reset(0.0);
@@ -1875,6 +1882,11 @@ impl EnvWorker {
         } else {
             0.0
         };
+        let next_city_phi = if n > 1 {
+            city_stand_potential(n_cities, self.reward_config.duo_city_stand)
+        } else {
+            0.0
+        };
         let next_span_phi = if n > 1 {
             self.continent_span_phi()
         } else {
@@ -2207,6 +2219,12 @@ impl EnvWorker {
                 let port_phi = if done { 0.0 } else { next_port_phi };
                 duo_r +=
                     self.port_stand_shaper[i].transition(port_phi, self.reward_config.gamma, 1.0);
+                // Ng 1999 PBRS on team completed City count. Completing a
+                // City raises Φ; losing one drops it. Never the `build`
+                // action. Absorbing terminal Φ=0.
+                let city_phi = if done { 0.0 } else { next_city_phi };
+                duo_r +=
+                    self.city_stand_shaper[i].transition(city_phi, self.reward_config.gamma, 1.0);
                 // Ng 1999 PBRS on occupied landmass count. First tile on a
                 // new continent raises Φ even if leftover red is still
                 // there. Never a boat/attack action. Absorbing terminal Φ=0.
