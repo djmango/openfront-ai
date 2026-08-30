@@ -87,10 +87,10 @@
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 30th, 2026</h2>
   <p>Live duo is <b>experiment R</b> on the homelab 3070: boat-land
-    PBRS (<code>--duo-boat-land 0.5</code>) on <b>Q's weights</b>, plus
-    <code>--max-gpu-util 0.80</code> so Whisper can share SM time
-    (VRAM stays allocated). Q kept compact (Caucasus 4/4, Onion 1/4)
-    then fail-c (last 8 water/Onion timeout). R <code>--resume</code>s
+    PBRS (<code>--duo-boat-land 0.5</code>) on <b>Q's weights</b>,
+    full-tilt SM (no GPU util cap). Q kept compact (Caucasus 4/4,
+    Onion 1/4) then fail-c (last 8 water/Onion timeout). R
+    <code>--resume</code>s
     <code>mappo-Q-fail-c-20260830T1801Z</code>. See
     <a href="#duo-scoreboard">A–R scoreboard</a> and
     <a href="#duo-carry">carry-forward</a>.</p>
@@ -105,7 +105,7 @@ Easy including water. Hit 2026-08-30T03:03Z on M (GL <code>z4bOdwHy</code>;
 BTS already open). M then fail-c (water timeout tail). N boat-commit
 then O leftover-continent then P port-stand then Q continent-span
 each died on the same Britannia/GL timeout tail (gate c). Live job:
-experiment R (boat-land Φ on Q weights + 80% SM duty-cycle).
+experiment R (boat-land Φ on Q weights, full-tilt SM).
 Carry-forward: next lever resumes R, does not from-scratch. Code:
 <a href="https://github.com/djmango/openfront-ai/pull/125">#125</a>
 stacked on timeout-loss / PBRS.</p>
@@ -381,7 +381,7 @@ counts drift because the replay spool reuses IDs (~190 files); M peak
   </tr>
   <tr>
     <td><b>R boat-land (live)</b></td>
-    <td>PBRS on team UsefulLanding count, resume Q; 80% SM cap</td>
+    <td>PBRS on team UsefulLanding count, resume Q</td>
     <td>—</td>
     <td>—</td>
     <td>—</td>
@@ -396,9 +396,9 @@ counts drift because the replay spool reuses IDs (~190 files); M peak
 03:03). M then N then O then P died on a Britannia/GL timeout tail
 (gate c). Q then fail-c the same way (Caucasus 4/4 then water
 timeout). R resumes Q and prices UsefulLanding (boat-commit Φ
-drops on land; landing itself was unpaid). Homelab also caps SM
-util at 80% so Whisper can share the 3070 — that does not free
-VRAM. H–J resumed G and lost Onion.</p>
+drops on land; landing itself was unpaid). Homelab is full-tilt
+SM again (an 80% duty-cycle was tried, then dropped — it does
+not free VRAM). H–J resumed G and lost Onion.</p>
 
 <h3 id="duo-carry">Carry forward: keep the wins, add one lever</h3>
 <p>From-scratch K / L / M re-paid compact that G already held (101/245).
@@ -524,12 +524,12 @@ H–J resumed G then extra reward collapsed Onion. The rule now:</p>
       boat-commit (landing drops that Φ).</td>
   </tr>
   <tr>
-    <td><code>--max-gpu-util 0.80</code> SM duty-cycle cap</td>
-    <td>R (ops)</td>
-    <td>Homelab share. Sleep after each update so SM util averages
-      ~80% for Whisper / other GPU jobs. Distinct from
+    <td><code>--max-gpu-util</code> SM duty-cycle cap</td>
+    <td>R (ops, off)</td>
+    <td>Tried 0.80 so Whisper could share SM time, then dropped.
+      Default 0 is full-tilt. Distinct from
       <code>--target-gpu-util</code> (autoscale growth). Does
-      <b>not</b> free VRAM (~7.8/8.2 GiB stays allocated).</td>
+      <b>not</b> free VRAM. Live job omits the flag.</td>
   </tr>
   <tr>
     <td>feedforward (<code>--recurrent-policy=false</code>)</td>
@@ -773,9 +773,8 @@ weights.</p>
       (<code>--duo-boat-land 0.5</code>). Not the <code>boat</code>
       action. <code>--resume</code> Q stash. Stacked flags stay
       including continent-span + port-stand + leftover-continent +
-      boat-commit. Homelab also passes
-      <code>--max-gpu-util 0.80</code> (SM duty-cycle; does not free
-      VRAM). Started after Q fail-c.</td>
+      boat-commit. Homelab is full-tilt SM (no
+      <code>--max-gpu-util</code>). Started after Q fail-c.</td>
     <td>Live. Clock starts at R launch. Same fail gates (a/b/c/4).
       Fail → one new lever on R's weights (not from-scratch).</td>
   </tr>
@@ -936,7 +935,8 @@ the partner too. Donate exists but is not donate-dirac.</p>
     (<code>--duo-boat-land 0.5</code>) on Q's weights. Same fail
     gates (a/b/c/4). Feedforward; do not revive LSTM on this 8GB card.
     Continent-span, port-stand, leftover-continent, and boat-commit
-    stay on. Homelab SM cap <code>--max-gpu-util 0.80</code>.</li>
+    stay on. Homelab is full-tilt SM (no
+    <code>--max-gpu-util</code>).</li>
   <li><b>After R:</b> one unused lever on <b>R's weights</b>
     (<code>--resume</code> the R stash, not from-scratch). Not while R
     is live unless a fail gate fires. If R loses compact,
@@ -953,7 +953,6 @@ the partner too. Donate exists but is not donate-dirac.</p>
     run (carry-forward, not from-scratch):
     <code>--duo-comms --duo-boat-commit 0.5 --duo-leftover-continent 0.5
     --duo-port-stand 0.5 --duo-continent-span 0.5 --duo-boat-land 0.5
-    --max-gpu-util 0.80
     --centralized-value=true
     --recurrent-policy=false --minibatches 8</code>,
     plus
@@ -963,12 +962,12 @@ the partner too. Donate exists but is not donate-dirac.</p>
     experiment resumes R. Do not
     <code>--resume</code> L LSTM or H–J collapsed weights. Clap defaults
     recurrent on: always pass <code>--recurrent-policy=false</code>
-    for feedforward. <code>--max-gpu-util 0.80</code> is SM
-    duty-cycle only — it does not shrink the ~7.8 GiB allocation.</li>
+    for feedforward. Do not pass <code>--max-gpu-util</code> (full-tilt
+    SM; the 80% duty-cycle was tried then dropped).</li>
   <li>Log / metrics / state:
     <code>rust/checkpoints/ppo_duo/{train.log,metrics.jsonl,latest.state.json}</code></li>
   <li>PR: <a href="https://github.com/djmango/openfront-ai/pull/125">#125</a>
-    (R boat-land + GPU 80% cap, stacked on
+    (R boat-land, full-tilt SM, stacked on
     <a href="https://github.com/djmango/openfront-ai/pull/124">#124</a>).</li>
   <li>Do not commit <code>run.sh</code>, checkpoints, dirty
     <code>openfront</code>, or <code>uv.lock</code>.</li>
@@ -4435,8 +4434,7 @@ from the raw cache IS that idea, done right).</p>
 <h3 id="next">Open threads</h3>
 <ul>
   <li><b>Duo Easy (active, Aug 30):</b> experiment R boat-land
-    live on Q's weights, with <code>--max-gpu-util 0.80</code> so
-    Whisper can share SM time (VRAM stays allocated).
+    live on Q's weights, full-tilt SM (no GPU util cap).
     <b>Easy including water already open</b> on M
     (GL 03:03, BTS 19:37). Q fail-c (water/Onion timeout tail).
     See <a href="#duo-scoreboard">scoreboard</a> and
