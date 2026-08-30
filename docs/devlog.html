@@ -86,12 +86,13 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 30th, 2026</h2>
-  <p>Live duo is <b>experiment Q</b> on the homelab 3070: continent-span
-    PBRS (<code>--duo-continent-span 0.5</code>) on <b>P's weights</b>.
-    P kept compact (Caucasus 2/4, Onion 1/5) then fail-c (last 8
-    water/Onion timeout). Q <code>--resume</code>s
-    <code>mappo-P-fail-c-20260830T1631Z</code>. See
-    <a href="#duo-scoreboard">A–Q scoreboard</a> and
+  <p>Live duo is <b>experiment R</b> on the homelab 3070: boat-land
+    PBRS (<code>--duo-boat-land 0.5</code>) on <b>Q's weights</b>, plus
+    <code>--max-gpu-util 0.80</code> so Whisper can share SM time
+    (VRAM stays allocated). Q kept compact (Caucasus 4/4, Onion 1/4)
+    then fail-c (last 8 water/Onion timeout). R <code>--resume</code>s
+    <code>mappo-Q-fail-c-20260830T1801Z</code>. See
+    <a href="#duo-scoreboard">A–R scoreboard</a> and
     <a href="#duo-carry">carry-forward</a>.</p>
 </div>
 
@@ -102,11 +103,11 @@
 stage 0 Easy, 2 envs, rollout 8, feedforward, frozen AE v3.2). Loop until
 Easy including water. Hit 2026-08-30T03:03Z on M (GL <code>z4bOdwHy</code>;
 BTS already open). M then fail-c (water timeout tail). N boat-commit
-then O leftover-continent then P port-stand each died on the same
-Britannia/GL timeout tail (gate c). Live job: experiment Q
-(continent-span Φ on P weights). Carry-forward: next lever resumes
-Q, does not from-scratch. Code:
-<a href="https://github.com/djmango/openfront-ai/pull/123">#123</a>
+then O leftover-continent then P port-stand then Q continent-span
+each died on the same Britannia/GL timeout tail (gate c). Live job:
+experiment R (boat-land Φ on Q weights + 80% SM duty-cycle).
+Carry-forward: next lever resumes R, does not from-scratch. Code:
+<a href="https://github.com/djmango/openfront-ai/pull/124">#124</a>
 stacked on timeout-loss / PBRS.</p>
 
 <h3 id="duo-why">Why duo exists</h3>
@@ -370,13 +371,22 @@ counts drift because the replay spool reuses IDs (~190 files); M peak
     <td>gate c ~u40362 (last 8 water/Onion timeout)</td>
   </tr>
   <tr>
-    <td><b>Q continent-span (live)</b></td>
+    <td>Q continent-span</td>
     <td>PBRS on occupied landmass count, resume P</td>
+    <td>Q-only <b>5/16</b></td>
+    <td>0.31</td>
+    <td>Caucasus 4/4, Onion 1/4</td>
+    <td>Britannia 0/4, GL 0/3, BlackSea 0/1</td>
+    <td>gate c ~u41521 (last 8 water/Onion timeout)</td>
+  </tr>
+  <tr>
+    <td><b>R boat-land (live)</b></td>
+    <td>PBRS on team UsefulLanding count, resume Q; 80% SM cap</td>
     <td>—</td>
     <td>—</td>
     <td>—</td>
     <td>—</td>
-    <td>live (from P stash <code>mappo-P-fail-c-20260830T1631Z</code>)</td>
+    <td>live (from Q stash <code>mappo-Q-fail-c-20260830T1801Z</code>)</td>
   </tr>
 </table>
 <p>Best compact <i>hold</i> is still <b>G</b> (101/245). Best water
@@ -384,9 +394,11 @@ counts drift because the replay spool reuses IDs (~190 files); M peak
 4/11). First run to open <b>every</b> Easy map including BTS and GL is
 <b>M</b> (BTS <code>qlmRclS1</code> 19:37, GL <code>z4bOdwHy</code>
 03:03). M then N then O then P died on a Britannia/GL timeout tail
-(gate c). Q resumes P and prices occupying a new landmass (leftover-
-continent can punish the first tile on a dirty island).
-H–J resumed G and lost Onion.</p>
+(gate c). Q then fail-c the same way (Caucasus 4/4 then water
+timeout). R resumes Q and prices UsefulLanding (boat-commit Φ
+drops on land; landing itself was unpaid). Homelab also caps SM
+util at 80% so Whisper can share the 3070 — that does not free
+VRAM. H–J resumed G and lost Onion.</p>
 
 <h3 id="duo-carry">Carry forward: keep the wins, add one lever</h3>
 <p>From-scratch K / L / M re-paid compact that G already held (101/245).
@@ -400,7 +412,9 @@ H–J resumed G then extra reward collapsed Onion. The rule now:</p>
     new lever. New tensors (comms Linear, MAPPO V) use compatible
     load (<code>--init</code>), not a full from-scratch trunk.</li>
   <li><b>Do not resume a collapsed run.</b> H/I/J lost Onion. L OOMed.
-    Fallback stashes: P fail-c
+    Fallback stashes: Q fail-c
+    (<code>mappo-Q-fail-c-20260830T1801Z</code>, compact still held),
+    P fail-c
     (<code>mappo-P-fail-c-20260830T1631Z</code>, compact still held),
     O fail-c (<code>mappo-O-fail-c-20260830T1246Z</code>), N fail-c
     (<code>mappo-N-fail-c-20260830T1032Z</code>),
@@ -495,10 +509,27 @@ H–J resumed G then extra reward collapsed Onion. The rule now:</p>
   <tr>
     <td><code>--duo-continent-span 0.5</code> occupied-landmass PBRS</td>
     <td>Q</td>
-    <td>Live. Resume P. Φ = 0.5 × continents the team occupies;
-      absorbing 0 at done. First tile on a new island raises Φ even
-      when leftover-continent purity drops. Never a boat/attack
-      action.</td>
+    <td>Kept compact (Caucasus 4/4), then gate-c water tail. Φ = 0.5
+      × continents the team occupies; absorbing 0 at done. First tile
+      on a new island raises Φ even when leftover-continent purity
+      drops. Never a boat/attack action. Keep the layer; R resumes
+      Q.</td>
+  </tr>
+  <tr>
+    <td><code>--duo-boat-land 0.5</code> UsefulLanding PBRS</td>
+    <td>R</td>
+    <td>Live. Resume Q. Φ = 0.5 × team UsefulLanding count this
+      episode; absorbing 0 at done. Own-shore / cancel / destroy do
+      not raise Φ. Never the <code>boat</code> action. Complements
+      boat-commit (landing drops that Φ).</td>
+  </tr>
+  <tr>
+    <td><code>--max-gpu-util 0.80</code> SM duty-cycle cap</td>
+    <td>R (ops)</td>
+    <td>Homelab share. Sleep after each update so SM util averages
+      ~80% for Whisper / other GPU jobs. Distinct from
+      <code>--target-gpu-util</code> (autoscale growth). Does
+      <b>not</b> free VRAM (~7.8/8.2 GiB stays allocated).</td>
   </tr>
   <tr>
     <td>feedforward (<code>--recurrent-policy=false</code>)</td>
@@ -724,14 +755,29 @@ weights.</p>
       (u40362 / 1291584 steps).</td>
   </tr>
   <tr>
-    <td><b>Q continent-span (live)</b></td>
+    <td>Q continent-span</td>
     <td>Ng 1999 PBRS on occupied landmass count
       (<code>--duo-continent-span 0.5</code>). Not a boat/attack
       action. <code>--resume</code> P stash. Stacked flags stay
       including port-stand + leftover-continent + boat-commit.
-      Started after P fail-c.</td>
-    <td>Live. Clock starts at Q launch. Same fail gates (a/b/c/4).
-      Fail → one new lever on Q's weights (not from-scratch).</td>
+      Started 2026-08-30T16:37:21Z.</td>
+    <td>Fail gate (c) at ~83 min / u41521: last 8 water/Onion
+      timeout. Q-only <b>5/16</b>. Compact held (Caucasus 4/4, Onion
+      1/4). Water Q-only 0. Stash
+      <code>mappo-Q-fail-c-20260830T1801Z.*</code>
+      (u41521 / 1328672 steps).</td>
+  </tr>
+  <tr>
+    <td><b>R boat-land (live)</b></td>
+    <td>Ng 1999 PBRS on team UsefulLanding count
+      (<code>--duo-boat-land 0.5</code>). Not the <code>boat</code>
+      action. <code>--resume</code> Q stash. Stacked flags stay
+      including continent-span + port-stand + leftover-continent +
+      boat-commit. Homelab also passes
+      <code>--max-gpu-util 0.80</code> (SM duty-cycle; does not free
+      VRAM). Started after Q fail-c.</td>
+    <td>Live. Clock starts at R launch. Same fail gates (a/b/c/4).
+      Fail → one new lever on R's weights (not from-scratch).</td>
   </tr>
 </table>
 <p>Water maps (Britannia, GreatLakes, BlackSea, BetweenTwoSeas) were 0
@@ -886,40 +932,43 @@ the partner too. Donate exists but is not donate-dirac.</p>
 
 <h3 id="duo-next">What is still open</h3>
 <ul>
-  <li><b>Q (live): continent-span</b>. PBRS on occupied landmass count
-    (<code>--duo-continent-span 0.5</code>) on P's weights. Same fail
+  <li><b>R (live): boat-land</b>. PBRS on team UsefulLanding count
+    (<code>--duo-boat-land 0.5</code>) on Q's weights. Same fail
     gates (a/b/c/4). Feedforward; do not revive LSTM on this 8GB card.
-    Port-stand, leftover-continent, and boat-commit stay on.</li>
-  <li><b>After Q:</b> one unused lever on <b>Q's weights</b>
-    (<code>--resume</code> the Q stash, not from-scratch). Not while Q
-    is live unless a fail gate fires. If Q loses compact,
-    <code>--init</code> P fail-c / O fail-c / N fail-c / M fail-c / G
-    compact-hold / K water-open per <a href="#duo-carry">carry-forward</a>.</li>
+    Continent-span, port-stand, leftover-continent, and boat-commit
+    stay on. Homelab SM cap <code>--max-gpu-util 0.80</code>.</li>
+  <li><b>After R:</b> one unused lever on <b>R's weights</b>
+    (<code>--resume</code> the R stash, not from-scratch). Not while R
+    is live unless a fail gate fires. If R loses compact,
+    <code>--init</code> Q fail-c / P fail-c / O fail-c / N fail-c / M
+    fail-c / G compact-hold / K water-open per
+    <a href="#duo-carry">carry-forward</a>.</li>
 </ul>
 
 <h3 id="duo-ops">Ops</h3>
 <ul>
   <li>Host: homelab RTX 3070 8GB, tmux <code>duo-train</code>,
     <code>bash rust/checkpoints/ppo_duo/run.sh</code> (gitignored;
-    Q is feedforward MAPPO + comms + boat-commit + leftover-continent + port-stand + continent-span, <b>crash-resume latest</b> of this
+    R is feedforward MAPPO + comms + boat-commit + leftover-continent + port-stand + continent-span + boat-land, <b>crash-resume latest</b> of this
     run (carry-forward, not from-scratch):
     <code>--duo-comms --duo-boat-commit 0.5 --duo-leftover-continent 0.5
-    --duo-port-stand 0.5 --duo-continent-span 0.5
+    --duo-port-stand 0.5 --duo-continent-span 0.5 --duo-boat-land 0.5
+    --max-gpu-util 0.80
     --centralized-value=true
     --recurrent-policy=false --minibatches 8</code>,
     plus
     <code>--duo-eco-coef 0.25 --duo-city-bonus 3 --duo-port-bonus 5
     --duo-city-delete 3 --duo-port-delete 5
     --v84-boat-cancelled=-0.15 --duo-pact-bonus 5</code>. Next
-    experiment resumes Q. Do not
+    experiment resumes R. Do not
     <code>--resume</code> L LSTM or H–J collapsed weights. Clap defaults
     recurrent on: always pass <code>--recurrent-policy=false</code>
-    for feedforward.</li>
+    for feedforward. <code>--max-gpu-util 0.80</code> is SM
+    duty-cycle only — it does not shrink the ~7.8 GiB allocation.</li>
   <li>Log / metrics / state:
     <code>rust/checkpoints/ppo_duo/{train.log,metrics.jsonl,latest.state.json}</code></li>
-  <li>PR: <a href="https://github.com/djmango/openfront-ai/pull/124">#124</a>
-    (Q continent-span, stacked on
-    <a href="https://github.com/djmango/openfront-ai/pull/123">#123</a>).</li>
+  <li>PR: this branch (R boat-land + GPU 80% cap), stacked on
+    <a href="https://github.com/djmango/openfront-ai/pull/124">#124</a>.</li>
   <li>Do not commit <code>run.sh</code>, checkpoints, dirty
     <code>openfront</code>, or <code>uv.lock</code>.</li>
 </ul>
@@ -4384,9 +4433,11 @@ from the raw cache IS that idea, done right).</p>
 
 <h3 id="next">Open threads</h3>
 <ul>
-  <li><b>Duo Easy (active, Aug 30):</b> experiment Q continent-span
-    live on P's weights. <b>Easy including water already open</b> on M
-    (GL 03:03, BTS 19:37). P fail-c (water/Onion timeout tail).
+  <li><b>Duo Easy (active, Aug 30):</b> experiment R boat-land
+    live on Q's weights, with <code>--max-gpu-util 0.80</code> so
+    Whisper can share SM time (VRAM stays allocated).
+    <b>Easy including water already open</b> on M
+    (GL 03:03, BTS 19:37). Q fail-c (water/Onion timeout tail).
     See <a href="#duo-scoreboard">scoreboard</a> and
     <a href="#duo-carry">carry-forward</a>.</li>
   <li><b>V11 (active plan, Jul 23):</b> see <a href="#v11-plan">V11 plan</a>  - 

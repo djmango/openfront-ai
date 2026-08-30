@@ -90,20 +90,20 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use ofcore::curriculum::RewardConfig;
 use ofcore::feat::ACTIONS;
 use ofcore::translate::Choice;
 use rand::seq::SliceRandom;
 use rand::{RngCore, SeedableRng};
 use tch::nn::OptimizerConfig;
-use tch::{Cuda, Device, Kind, Tensor, nn};
+use tch::{nn, Cuda, Device, Kind, Tensor};
 
 use crate::autoscale;
 use crate::balance;
 use crate::batch::{self, ChoiceScalars};
 use crate::engine::EngineKind;
-use crate::gpu_util::GpuUtilSampler;
+use crate::gpu_util::{duty_sleep_secs, GpuUtilSampler};
 use crate::metrics::MetricsWriter;
 use crate::policy::{self, PolicyNet};
 use crate::recurrent::ActorRecurrentState;
@@ -390,6 +390,10 @@ pub struct Config {
     pub auto_scale_envs: bool,
     /// `--target-gpu-util`: 0-1 fraction set point for `auto_scale_envs`.
     pub target_gpu_util: f64,
+    /// `--max-gpu-util`: 0-1 SM-util ceiling. After each update, sleep so
+    /// duty cycle sits at the cap. 0 disables (full-tilt). Distinct from
+    /// `target_gpu_util` (autoscale growth).
+    pub max_gpu_util: f64,
     /// `--min-envs`: per-shard floor for `auto_scale_envs` (defaults to
     /// `num_envs` if the user didn't pass an explicit value - see
     /// `main.rs`).
@@ -626,7 +630,7 @@ fn reconcile_resume_stage_and_lr(
 
 #[cfg(test)]
 mod resume_stage_lr_tests {
-    use super::{TrainState, reconcile_resume_stage_and_lr};
+    use super::{reconcile_resume_stage_and_lr, TrainState};
     use ofcore::curriculum::{V10_REWARD_PROFILE, V10_STAGE_LR_FLOOR};
 
     fn state(stage: usize, lr_now: f64) -> TrainState {
@@ -1125,10 +1129,9 @@ mod v10_state_and_gate_tests {
         assert!(dir.join("policy_update40.safetensors").exists());
         assert!(dir.join("policy_update50.safetensors").exists());
         assert!(dir.join("latest.safetensors").exists());
-        assert!(
-            dir.join("curriculum_advance_u50_s1_to_2.safetensors")
-                .exists()
-        );
+        assert!(dir
+            .join("curriculum_advance_u50_s1_to_2.safetensors")
+            .exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1490,14 +1493,12 @@ mod v10_state_and_gate_tests {
         let mut wrong_profile =
             state_for_schedule(Some(ofcore::curriculum::LEGACY_V83_SCHEDULE_ID), 5);
         wrong_profile.reward_profile = Some("wrong".to_string());
-        assert!(
-            reconcile_resume_schedule(
-                &mut wrong_profile,
-                ofcore::curriculum::CurriculumSchedule::V10,
-                true,
-            )
-            .is_err()
-        );
+        assert!(reconcile_resume_schedule(
+            &mut wrong_profile,
+            ofcore::curriculum::CurriculumSchedule::V10,
+            true,
+        )
+        .is_err());
     }
 }
 
@@ -7246,6 +7247,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 cfg.reward_config.duo_continent_span
             );
         }
+        if cfg.reward_config.duo_boat_land != 0.0 {
+            println!(
+                "[train] duo boat-land PBRS coef={:.3} on team UsefulLanding count (not the boat action; absorbing Φ=0)",
+                cfg.reward_config.duo_boat_land
+            );
+        }
     }
     if cfg.recurrent_policy {
         anyhow::ensure!(
@@ -7692,6 +7699,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
     } else {
         None
     };
+    if cfg.max_gpu_util > 0.0 {
+        println!(
+            "[train] max GPU SM util cap={:.0}% (duty-cycle sleep after each update; leaves headroom for other GPU jobs)",
+            cfg.max_gpu_util * 100.0
+        );
+    }
 
     // Resolve `auto_scale_envs`' bounds once up front (cheap, and only
     // ever logged/used when the flag is actually on): `max_envs=0` means
@@ -8925,6 +8938,24 @@ pub fn run(mut cfg: Config) -> Result<()> {
             }
         }
 
+        if cfg.max_gpu_util > 0.0 {
+            if let Some(s) = gpu_sampler.as_ref() {
+                let u = s.snapshot().max_instant_util_frac();
+                let sleep_s =
+                    duty_sleep_secs(update_start.elapsed().as_secs_f64(), u, cfg.max_gpu_util);
+                if sleep_s > 0.02 {
+                    if update % cfg.log_every.max(1) == 0 {
+                        println!(
+                            "[gpu-cap] sleep={sleep_s:.2}s util={:.0}% cap={:.0}%",
+                            u * 100.0,
+                            cfg.max_gpu_util * 100.0
+                        );
+                    }
+                    std::thread::sleep(Duration::from_secs_f64(sleep_s));
+                }
+            }
+        }
+
         if cfg.ckpt_every > 0 && (update % cfg.ckpt_every == 0) && update > 0 {
             let state = TrainState {
                 checkpoint_schema_version: if cfg.recurrent_policy { 3 } else { 1 },
@@ -9236,11 +9267,9 @@ mod persistent_actor_tests {
             .accept(&LearnerCommand::Shutdown { id: 3 })
             .unwrap();
         assert!(protocol.stopped);
-        assert!(
-            protocol
-                .accept(&LearnerCommand::Shutdown { id: 4 })
-                .is_err()
-        );
+        assert!(protocol
+            .accept(&LearnerCommand::Shutdown { id: 4 })
+            .is_err());
     }
 
     #[test]
@@ -9331,6 +9360,7 @@ mod persistent_actor_tests {
                 duo_leftover_continent: 0.0,
                 duo_port_stand: 0.0,
                 duo_continent_span: 0.0,
+                duo_boat_land: 0.0,
             },
             lambda: 0.95,
             clip: 0.2,
@@ -9388,6 +9418,7 @@ mod persistent_actor_tests {
             value_loss: ValueLoss::Mse,
             auto_scale_envs: false,
             target_gpu_util: 0.95,
+            max_gpu_util: 0.0,
             min_envs: 1,
             max_envs: 1,
             autoscale_check_every: 5,

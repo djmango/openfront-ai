@@ -270,6 +270,13 @@ struct Args {
     #[arg(long, default_value_t = 0.0)]
     duo_continent_span: f64,
 
+    /// Duo: PBRS on team UsefulLanding count this episode (invade
+    /// landing raises Φ; own-shore / cancel / destroy do not).
+    /// Never the `boat` action. Distinct from `--duo-boat-commit`.
+    /// 0 disables.
+    #[arg(long, default_value_t = 0.0)]
+    duo_boat_land: f64,
+
     /// Resume a V8.6 (v8.3 schedule) checkpoint under V10 schedule + anti-spiral reward.
     #[arg(long, default_value_t = false, requires = "resume")]
     migrate_v86_to_v10: bool,
@@ -688,6 +695,14 @@ struct Args {
     #[arg(long, default_value_t = 0.92)]
     target_gpu_util: f64,
 
+    /// Ceiling on instantaneous GPU SM util (0-1). After each update, if
+    /// nvidia-smi util exceeds this, sleep so the duty cycle sits at the
+    /// cap. 0 disables (full-tilt, the pod default). Homelab sharing:
+    /// `--max-gpu-util 0.80` leaves headroom for Whisper / other GPU jobs.
+    /// Distinct from `--target-gpu-util` (autoscale growth set point).
+    #[arg(long, default_value_t = 0.0)]
+    max_gpu_util: f64,
+
     /// Floor for `--auto-scale-envs`: never scale below this many envs per
     /// shard. Unset defaults to `--num-envs` (never scale below whatever
     /// the run was started with). No effect without `--auto-scale-envs`.
@@ -982,6 +997,7 @@ mod curriculum_flag_tests {
         assert_eq!(defaults.duo_leftover_continent, 0.0);
         assert_eq!(defaults.duo_port_stand, 0.0);
         assert_eq!(defaults.duo_continent_span, 0.0);
+        assert_eq!(defaults.duo_boat_land, 0.0);
         assert!(defaults.kl_prior.is_none());
         assert_eq!(defaults.kl_coef, 0.05);
     }
@@ -1040,6 +1056,7 @@ mod recurrent_flag_tests {
         assert_eq!(defaults.max_epochs, 12);
         assert!((defaults.balance_target_ratio - 0.95).abs() < 1e-9);
         assert!((defaults.target_gpu_util - 0.92).abs() < 1e-9);
+        assert_eq!(defaults.max_gpu_util, 0.0);
         assert!((defaults.actor_max_padding_waste - 0.50).abs() < 1e-9);
         assert_eq!(defaults.max_envs, 40);
         assert_eq!(defaults.autoscale_step, 2);
@@ -1332,6 +1349,7 @@ fn main() -> anyhow::Result<()> {
         duo_leftover_continent: args.duo_leftover_continent,
         duo_port_stand: args.duo_port_stand,
         duo_continent_span: args.duo_continent_span,
+        duo_boat_land: args.duo_boat_land,
     };
     anyhow::ensure!(
         args.duo_pact_bonus.is_finite() && args.duo_pact_bonus >= 0.0,
@@ -1374,6 +1392,10 @@ fn main() -> anyhow::Result<()> {
         "--duo-continent-span must be finite and non-negative"
     );
     anyhow::ensure!(
+        args.duo_boat_land.is_finite() && args.duo_boat_land >= 0.0,
+        "--duo-boat-land must be finite and non-negative"
+    );
+    anyhow::ensure!(
         args.v10_timeout_closeout.is_finite() && args.v10_timeout_closeout >= 0.0,
         "--v10-timeout-closeout must be finite and non-negative"
     );
@@ -1384,6 +1406,10 @@ fn main() -> anyhow::Result<()> {
     anyhow::ensure!(
         args.kl_coef.is_finite() && args.kl_coef >= 0.0,
         "--kl-coef must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.max_gpu_util.is_finite() && args.max_gpu_util >= 0.0 && args.max_gpu_util <= 1.0,
+        "--max-gpu-util must be a finite 0-1 fraction"
     );
     let curriculum_schedule = ofcore::curriculum::CurriculumSchedule::V10;
     let stage_count = ofcore::curriculum::stages_for_schedule(curriculum_schedule).len();
@@ -1626,6 +1652,7 @@ fn main() -> anyhow::Result<()> {
         },
         auto_scale_envs: args.auto_scale_envs,
         target_gpu_util: args.target_gpu_util,
+        max_gpu_util: args.max_gpu_util,
         // Never scale below whatever the run was explicitly started with
         // (`--num-envs`) unless the user gave an explicit floor of their own.
         // Do not seed from `initial_num_envs` (stage_env_targets[--stage]),
