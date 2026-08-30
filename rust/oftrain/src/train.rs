@@ -7228,6 +7228,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 cfg.reward_config.duo_boat_commit
             );
         }
+        if cfg.reward_config.duo_leftover_continent != 0.0 {
+            println!(
+                "[train] duo leftover-continent PBRS coef={:.3} on team/(team+leftover opponent) on occupied landmasses (not an attack/boat action; absorbing Φ=0)",
+                cfg.reward_config.duo_leftover_continent
+            );
+        }
     }
     if cfg.recurrent_policy {
         anyhow::ensure!(
@@ -9310,6 +9316,7 @@ mod persistent_actor_tests {
                 duo_city_delete: 0.0,
                 duo_port_delete: 0.0,
                 duo_boat_commit: 0.0,
+                duo_leftover_continent: 0.0,
             },
             lambda: 0.95,
             clip: 0.2,

@@ -2,10 +2,10 @@
 //! `rl/curriculum.py`; see that file for the design rationale in comments.
 
 use crate::feat::{
-    EntsData, A_ALLIANCE_REQUEST, A_ATTACK, A_BOAT, A_BREAK_ALLIANCE, A_BUILD, A_CANCEL_BOAT,
-    A_DONATE_GOLD, A_DONATE_TROOPS, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT,
+    A_ALLIANCE_REQUEST, A_ATTACK, A_BOAT, A_BREAK_ALLIANCE, A_BUILD, A_CANCEL_BOAT, A_DONATE_GOLD,
+    A_DONATE_TROOPS, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, EntsData,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 pub const W_STR: f64 = 0.02;
 pub const W_DELTA_GAIN: f64 = 5.0;
@@ -155,6 +155,11 @@ pub struct RewardConfig {
     /// Launching a boat raises Φ; landing / cancel / destroy drops it.
     /// Absorbing terminal Φ=0. Never the `boat` action. 0 disables.
     pub duo_boat_commit: f64,
+    /// Duo: Ng 1999 PBRS on leftover opponent tiles on continents the team
+    /// already occupies. Φ = coef × team / (team + leftover_opp) on those
+    /// landmasses. Mopping leftover red raises Φ; fleeing a dirty continent
+    /// drops it. Absorbing terminal Φ=0. Never an attack/boat action. 0 disables.
+    pub duo_leftover_continent: f64,
 }
 
 impl RewardConfig {
@@ -1215,11 +1220,7 @@ fn finite_nonnegative(value: f64) -> f64 {
 }
 
 fn finite_or_zero(value: f64) -> f64 {
-    if value.is_finite() {
-        value
-    } else {
-        0.0
-    }
+    if value.is_finite() { value } else { 0.0 }
 }
 
 /// V8.1 Φ(s), derived from the exact composite map used by placement.
@@ -1458,6 +1459,142 @@ pub fn boat_commit_potential(n_boats: usize, coef: f64) -> f64 {
     finite_or_zero(coef.abs() * n_boats as f64)
 }
 
+/// Owner ids on the same engine team as any of `agent_ids` (the two humans),
+/// plus the agents themselves if they have no team string yet.
+pub fn team_owner_ids(ents: &crate::feat::EntsData, agent_ids: &[usize]) -> Vec<u16> {
+    let mut teams = HashSet::new();
+    for p in &ents.players {
+        if agent_ids.iter().any(|&id| id == p.id) {
+            if let Some(t) = &p.team {
+                teams.insert(t.as_str());
+            }
+        }
+    }
+    ents.players
+        .iter()
+        .filter(|p| {
+            agent_ids.iter().any(|&id| id == p.id)
+                || p.team
+                    .as_deref()
+                    .map(|t| teams.contains(t))
+                    .unwrap_or(false)
+        })
+        .map(|p| p.id as u16)
+        .collect()
+}
+
+/// 4-connected land components. 0 = water, 1.. = continent ids.
+/// `land` is a `height * width` row-major mask (`1` = land).
+pub fn label_continents(land: &[u8], width: usize, height: usize) -> Vec<u16> {
+    let n = width.saturating_mul(height);
+    let mut labels = vec![0u16; n.min(land.len())];
+    if width == 0 || height == 0 || land.len() < n {
+        return labels;
+    }
+    let mut next = 1u16;
+    let mut stack = Vec::new();
+    for start in 0..n {
+        if land[start] == 0 || labels[start] != 0 {
+            continue;
+        }
+        let id = next;
+        next = next.saturating_add(1);
+        if next == 0 {
+            next = u16::MAX;
+        }
+        labels[start] = id;
+        stack.clear();
+        stack.push(start);
+        while let Some(i) = stack.pop() {
+            let x = i % width;
+            let y = i / width;
+            let nbrs = [
+                (x.wrapping_sub(1), y),
+                (x + 1, y),
+                (x, y.wrapping_sub(1)),
+                (x, y + 1),
+            ];
+            for (nx, ny) in nbrs {
+                if nx >= width || ny >= height {
+                    continue;
+                }
+                let j = ny * width + nx;
+                if land[j] != 0 && labels[j] == 0 {
+                    labels[j] = id;
+                    stack.push(j);
+                }
+            }
+        }
+    }
+    labels
+}
+
+/// Team tiles and leftover opponent tiles on continents the team occupies.
+/// TerraNullius (owner 0) is not leftover opponent. Continents with no team
+/// tiles do not contribute (so leftover red on an untouched island is ignored;
+/// fleeing a dirty continent drops team tiles and therefore Φ).
+pub fn leftover_continent_counts(
+    continent: &[u16],
+    wr: usize,
+    hr: usize,
+    map_width: usize,
+    owner_at: impl Fn(usize) -> u16,
+    team: &[u16],
+) -> (u64, u64) {
+    let n = wr.saturating_mul(hr);
+    if wr == 0 || hr == 0 || continent.len() < n {
+        return (0, 0);
+    }
+    let mut max_id = 0u16;
+    for &c in &continent[..n] {
+        max_id = max_id.max(c);
+    }
+    if max_id == 0 {
+        return (0, 0);
+    }
+    let n_c = max_id as usize + 1;
+    let mut team_c = vec![0u64; n_c];
+    let mut left_c = vec![0u64; n_c];
+    let team_set: HashSet<u16> = team.iter().copied().collect();
+    for y in 0..hr {
+        for x in 0..wr {
+            let cid = continent[y * wr + x] as usize;
+            if cid == 0 {
+                continue;
+            }
+            let owner = owner_at(y * map_width + x);
+            if owner == 0 {
+                continue;
+            }
+            if team_set.contains(&owner) {
+                team_c[cid] += 1;
+            } else {
+                left_c[cid] += 1;
+            }
+        }
+    }
+    let mut team_on = 0u64;
+    let mut left_on = 0u64;
+    for cid in 1..n_c {
+        if team_c[cid] > 0 {
+            team_on += team_c[cid];
+            left_on += left_c[cid];
+        }
+    }
+    (team_on, left_on)
+}
+
+/// Continent-purity potential. `team` / `leftover` are tiles on landmasses
+/// the team occupies. Ng 1999: apply via [`DominanceShaper`], absorbing
+/// Φ=0 at done. Disabled when `coef` is 0. Max is `coef` (clean continents),
+/// well below a win so timeout-after-mop is still a loss.
+pub fn leftover_continent_potential(team: u64, leftover: u64, coef: f64) -> f64 {
+    if coef == 0.0 || team == 0 {
+        return 0.0;
+    }
+    finite_or_zero(coef.abs() * team as f64 / (team + leftover) as f64)
+}
+
 fn v10_diplo_panic_armed(land_share: f64, tick: i64, max_ticks: i64, config: RewardConfig) -> bool {
     let share_armed = finite_or_zero(land_share) >= config.v10_diplo_panic_share;
     let tick_frac = tick as f64 / max_ticks.max(1) as f64;
@@ -1635,6 +1772,7 @@ mod tests {
             duo_city_delete: 0.0,
             duo_port_delete: 0.0,
             duo_boat_commit: 0.0,
+            duo_leftover_continent: 0.0,
         }
     }
 
@@ -2296,8 +2434,8 @@ mod tests {
 
     #[test]
     fn sample_episode_rehearsal_uses_past_lobby_setup() {
-        use rand::rngs::SmallRng;
         use rand::SeedableRng;
+        use rand::rngs::SmallRng;
         let stages = stages_for_schedule(CurriculumSchedule::V10);
         let mut rng = SmallRng::seed_from_u64(42);
         let mut found = false;
@@ -2440,6 +2578,61 @@ mod tests {
             boat_commit_potential(team_transport_ships(&ents, &owners), 0.5),
             1.0
         );
+    }
+
+    #[test]
+    fn leftover_continent_potential_is_purity_not_an_action_wage() {
+        assert_eq!(leftover_continent_potential(0, 10, 0.5), 0.0);
+        assert_eq!(leftover_continent_potential(10, 0, 0.0), 0.0);
+        assert_eq!(leftover_continent_potential(10, 0, 0.5), 0.5);
+        assert_eq!(leftover_continent_potential(10, 10, 0.5), 0.25);
+        assert!(leftover_continent_potential(100, 0, 0.5) < W_WIN);
+        // Two islands: land on rows 0 and 2, water on row 1.
+        let w = 4usize;
+        let h = 3usize;
+        let mut land = vec![0u8; w * h];
+        for x in 0..w {
+            land[x] = 1;
+            land[2 * w + x] = 1;
+        }
+        let labels = label_continents(&land, w, h);
+        assert_eq!(labels[0], labels[3]);
+        assert_eq!(labels[2 * w], labels[2 * w + 3]);
+        assert_ne!(labels[0], labels[2 * w]);
+        assert_eq!(labels[w], 0);
+        // owners row-major on the same grid (map_width == wr).
+        // Continent A (row 0): team 1,1 leftover 3,3. Continent B (row 2): leftover only.
+        let owners = [
+            1u16, 1, 3, 3, // row 0
+            0, 0, 0, 0, // water
+            3, 3, 3, 3, // row 2, no team
+        ];
+        let team = [1u16];
+        let (team_n, left_n) = leftover_continent_counts(&labels, w, h, w, |i| owners[i], &team);
+        assert_eq!(team_n, 2);
+        assert_eq!(left_n, 2);
+        let dirty = leftover_continent_potential(team_n, left_n, 0.5);
+        assert!((dirty - 0.25).abs() < 1e-12);
+        // Fleeing continent A (no team tiles left) drops Φ to 0. Leftover
+        // on the untouched island still does not count.
+        let fled = [0u16; 12];
+        let (t2, l2) = leftover_continent_counts(&labels, w, h, w, |i| fled[i], &team);
+        assert_eq!((t2, l2), (0, 0));
+        assert_eq!(leftover_continent_potential(t2, l2, 0.5), 0.0);
+        let ents = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true, "team": "Humans"},
+                {"id": 2, "pid": "AGENTRL2", "alive": true, "team": "Humans"},
+                {"id": 3, "pid": "NATION", "alive": true, "team": "Humans"},
+                {"id": 4, "pid": "BOT", "alive": true, "team": "Bot"}
+            ],
+            "units": [],
+            "attacks": [],
+            "alliances": []
+        }));
+        let mut ids = team_owner_ids(&ents, &[1, 2]);
+        ids.sort();
+        assert_eq!(ids, vec![1, 2, 3]);
     }
 
     #[test]
