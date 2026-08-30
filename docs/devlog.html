@@ -86,10 +86,10 @@
 
 <div class="now" id="now">
   <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 30th, 2026</h2>
-  <p>Live duo is <b>experiment S</b> on the homelab 3070: city-stand
-    PBRS (<code>--duo-city-stand 0.5</code>) on <b>Q's weights</b>
-    (not R — R lost compact). R fail-a 0/21 after 125 min. See
-    <a href="#duo-scoreboard">A–S scoreboard</a> and
+  <p>Live duo is <b>experiment T</b> on the homelab 3070: defense-stand
+    PBRS (<code>--duo-defense-stand 0.5</code>) on <b>Q's weights</b>
+    (not S — S lost compact). S fail-a 0/26 after 131 min. See
+    <a href="#duo-scoreboard">A–T scoreboard</a> and
     <a href="#duo-carry">carry-forward</a>.</p>
 </div>
 
@@ -101,11 +101,10 @@ stage 0 Easy, 2 envs, rollout 8, feedforward, frozen AE v3.2). Loop until
 Easy including water. Hit 2026-08-30T03:03Z on M (GL <code>z4bOdwHy</code>;
 BTS already open). M then fail-c (water timeout tail). N boat-commit
 then O leftover-continent then P port-stand then Q continent-span
-each died on the same Britannia/GL timeout tail (gate c). Live job:
-experiment S (city-stand Φ on Q weights; R lost compact).
-Carry-forward: next lever resumes S if compact holds. Code:
-<a href="https://github.com/djmango/openfront-ai/pull/126">#126</a>
-stacked on timeout-loss / PBRS.</p>
+each died on the same Britannia/GL timeout tail (gate c). R then S
+lost compact (gate a). Live job: experiment T (defense-stand Φ on
+Q weights; not S). Carry-forward: next lever resumes T if compact
+holds. Code: stacked on timeout-loss / PBRS.</p>
 
 <h3 id="duo-why">Why duo exists</h3>
 <p>OpenFront Team-mode is not FFA with a friend emoji. Engine
@@ -386,8 +385,17 @@ counts drift because the replay spool reuses IDs (~190 files); M peak
     <td>gate a ~u43423 (0 wins after 125 min)</td>
   </tr>
   <tr>
-    <td><b>S city-stand (live)</b></td>
+    <td>S city-stand</td>
     <td>PBRS on team completed City count, resume Q (not R)</td>
+    <td>S-only <b>0/26</b></td>
+    <td>0.00</td>
+    <td>Caucasus 0/4 TERM, Onion 0/5 TIMEOUT</td>
+    <td>Britannia 0/10, GL 0/6, BlackSea 0/1</td>
+    <td>gate a ~u43268 (0 wins after 131 min)</td>
+  </tr>
+  <tr>
+    <td><b>T defense-stand (live)</b></td>
+    <td>PBRS on team completed Defense Post count, init Q (not S)</td>
     <td>—</td>
     <td>—</td>
     <td>—</td>
@@ -419,7 +427,8 @@ H–J resumed G then extra reward collapsed Onion. The rule now:</p>
     load (<code>--init</code>), not a full from-scratch trunk.</li>
   <li><b>Do not resume a collapsed run.</b> H/I/J lost Onion. L OOMed.
     Fallback stashes: Q fail-c
-    (<code>mappo-Q-fail-c-20260830T1801Z</code>, compact still held),
+    (<code>mappo-Q-fail-c-20260830T1801Z</code>, compact still held;
+    do not resume R or S),
     P fail-c
     (<code>mappo-P-fail-c-20260830T1631Z</code>, compact still held),
     O fail-c (<code>mappo-O-fail-c-20260830T1246Z</code>), N fail-c
@@ -531,9 +540,17 @@ H–J resumed G then extra reward collapsed Onion. The rule now:</p>
   <tr>
     <td><code>--duo-city-stand 0.5</code> completed-City PBRS</td>
     <td>S</td>
-    <td>Live. Resume Q (not R). Φ = 0.5 × team completed Cities;
-      absorbing 0 at done. Never the <code>build</code> action.
-      Complements first-city one-shot / delete-penalty / port-stand.</td>
+    <td>Gate-a 0/26; compact died (Caucasus 0/4 TERM). Do not keep
+      stacked on T. Φ = 0.5 × team completed Cities. Never the
+      <code>build</code> action.</td>
+  </tr>
+  <tr>
+    <td><code>--duo-defense-stand 0.5</code> completed-Defense-Post PBRS</td>
+    <td>T</td>
+    <td>Live. <code>--init</code> Q (not S). Φ = 0.5 × team completed
+      Defense Posts; absorbing 0 at done. Never the <code>build</code>
+      action. Caucasus TERMs on R/S were blob-and-attack without
+      standing defense. Complements port-stand; city-stand stays off.</td>
   </tr>
   <tr>
     <td><code>--max-gpu-util</code> SM duty-cycle cap</td>
@@ -789,13 +806,23 @@ weights.</p>
       <code>mappo-R-fail-a-20260830T2016Z.*</code>. S resumes Q, not R.</td>
   </tr>
   <tr>
-    <td><b>S city-stand (live)</b></td>
+    <td>S city-stand</td>
     <td>Ng 1999 PBRS on team completed City count
       (<code>--duo-city-stand 0.5</code>). Not the <code>build</code>
       action. <code>--resume</code> Q stash. No boat-land. Started
       after R fail-a.</td>
-    <td>Live. Clock starts at S launch. Same fail gates (a/b/c/4).
-      Fail → one new lever on S's weights if compact holds.</td>
+    <td>Fail gate (a) at ~131 min / u43268: 0 wins after 26 eps.
+      Compact died (Caucasus 0/4 TERM, Onion 0/5 TIMEOUT). Stash
+      <code>mappo-S-fail-a-20260830T2231Z.*</code>. T inits Q, not S.</td>
+  </tr>
+  <tr>
+    <td><b>T defense-stand (live)</b></td>
+    <td>Ng 1999 PBRS on team completed Defense Post count
+      (<code>--duo-defense-stand 0.5</code>). Not the <code>build</code>
+      action. <code>--init</code> Q stash. No boat-land, no city-stand.
+      Started after S fail-a.</td>
+    <td>Live. Clock starts at T launch. Same fail gates (a/b/c/4).
+      Fail → one new lever on T's weights if compact holds.</td>
   </tr>
 </table>
 <p>Water maps (Britannia, GreatLakes, BlackSea, BetweenTwoSeas) were 0
@@ -950,11 +977,11 @@ the partner too. Donate exists but is not donate-dirac.</p>
 
 <h3 id="duo-next">What is still open</h3>
 <ul>
-  <li><b>S (live): city-stand</b>. PBRS on team completed City count
-    (<code>--duo-city-stand 0.5</code>) on Q's weights. R fail-a lost
-    compact so S does <b>not</b> resume R and does not stack
-    boat-land. Same fail gates. Full-tilt SM.</li>
-  <li><b>After S:</b> one unused lever on <b>S's weights</b> if compact
+  <li><b>T (live): defense-stand</b>. PBRS on team completed Defense
+    Post count (<code>--duo-defense-stand 0.5</code>) on Q's weights.
+    S fail-a lost compact so T does <b>not</b> resume S and does not
+    stack city-stand or boat-land. Same fail gates. Full-tilt SM.</li>
+  <li><b>After T:</b> one unused lever on <b>T's weights</b> if compact
     holds, else <code>--init</code> Q fail-c per
     <a href="#duo-carry">carry-forward</a>.</li>
 </ul>
@@ -963,18 +990,19 @@ the partner too. Donate exists but is not donate-dirac.</p>
 <ul>
   <li>Host: homelab RTX 3070 8GB, tmux <code>duo-train</code>,
     <code>bash rust/checkpoints/ppo_duo/run.sh</code> (gitignored;
-    S is feedforward MAPPO + comms + boat-commit + leftover-continent + port-stand + continent-span + city-stand, <b>crash-resume latest</b> of this
-    run (carry-forward from Q, not R):
+    T is feedforward MAPPO + comms + boat-commit + leftover-continent + port-stand + continent-span + defense-stand, <b>crash-resume latest</b> of this
+    run (carry-forward from Q, not S/R):
     <code>--duo-comms --duo-boat-commit 0.5 --duo-leftover-continent 0.5
-    --duo-port-stand 0.5 --duo-continent-span 0.5 --duo-city-stand 0.5
+    --duo-port-stand 0.5 --duo-continent-span 0.5 --duo-defense-stand 0.5
     --centralized-value=true
     --recurrent-policy=false --minibatches 8</code>.
-    No <code>--duo-boat-land</code>. No <code>--max-gpu-util</code>. Plus
+    No <code>--duo-boat-land</code>. No <code>--duo-city-stand</code>.
+    No <code>--max-gpu-util</code>. Plus
     <code>--duo-eco-coef 0.25 --duo-city-bonus 3 --duo-port-bonus 5
     --duo-city-delete 3 --duo-port-delete 5
     --v84-boat-cancelled=-0.15 --duo-pact-bonus 5</code>. Next
-    experiment resumes S if compact holds. Do not
-    <code>--resume</code> L LSTM, H–J, or R collapsed weights. Clap defaults
+    experiment resumes T if compact holds. Do not
+    <code>--resume</code> L LSTM, H–J, R, or S collapsed weights. Clap defaults
     recurrent on: always pass <code>--recurrent-policy=false</code>
     for feedforward.</li>
   <li>Log / metrics / state:
@@ -4446,8 +4474,8 @@ from the raw cache IS that idea, done right).</p>
 
 <h3 id="next">Open threads</h3>
 <ul>
-  <li><b>Duo Easy (active, Aug 30):</b> experiment S city-stand
-    live on Q's weights (R fail-a lost compact). Full-tilt SM.
+  <li><b>Duo Easy (active, Aug 30):</b> experiment T defense-stand
+    live on Q's weights (S fail-a lost compact). Full-tilt SM.
     <b>Easy including water already open</b> on M
     (GL 03:03, BTS 19:37).
     See <a href="#duo-scoreboard">scoreboard</a> and

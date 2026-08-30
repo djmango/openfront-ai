@@ -7259,6 +7259,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 cfg.reward_config.duo_city_stand
             );
         }
+        if cfg.reward_config.duo_defense_stand != 0.0 {
+            println!(
+                "[train] duo defense-stand PBRS coef={:.3} on team completed Defense Post count (not the build action; absorbing Φ=0)",
+                cfg.reward_config.duo_defense_stand
+            );
+        }
     }
     if cfg.recurrent_policy {
         anyhow::ensure!(
@@ -9368,6 +9374,7 @@ mod persistent_actor_tests {
                 duo_continent_span: 0.0,
                 duo_boat_land: 0.0,
                 duo_city_stand: 0.0,
+                duo_defense_stand: 0.0,
             },
             lambda: 0.95,
             clip: 0.2,
