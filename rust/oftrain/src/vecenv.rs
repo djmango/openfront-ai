@@ -4,36 +4,38 @@
 //! Python side there's no GIL, so no multiprocessing/pickle framing is
 //! needed to keep JSON decode + featurization off the main thread.
 
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ofcore::curriculum::{
-    self, action_churn_penalty, boat_commit_potential, boat_outcome_reward,
-    classify_boat_resolution, closeout_potential, combat_outcome_reward, dominance_potential,
-    duo_first_structure_bonus, duo_pact_success_bonus, duo_potential, duo_structure_delete_penalty,
-    economy_potential, embargo_stop_outcome_reward, fast_win_bonus, formally_allied, land_share,
-    normalized_strength_share, placement, placement_score, player_gold_income, sample_episode,
-    stages_for_schedule, strength_delta_weight, team_completed_structures, team_transport_ships,
-    tempo_pressure, terminal_reward, timeweight, v10_closeout_entry_bonus, v10_combat_action_bonus,
+    self, ActionChurnTracker, ActionPairCounts, ActionTarget, BoatOutcomeCounts, CITY_UNIT_CLASS,
+    ChosenAction, CombatOutcome, CurriculumSchedule, DUO_SOLO_SCALE, DominanceShaper,
+    InverseActionPair, PORT_UNIT_CLASS, RewardComponents, RewardConfig, Stage,
+    TRANSPORT_UNIT_CLASS, V83_CLOSEOUT_SHARE_START, W_STR, W_WASTE, action_churn_penalty,
+    boat_commit_potential, boat_outcome_reward, classify_boat_resolution, closeout_potential,
+    combat_outcome_reward, dominance_potential, duo_first_structure_bonus, duo_pact_success_bonus,
+    duo_potential, duo_structure_delete_penalty, economy_potential, embargo_stop_outcome_reward,
+    fast_win_bonus, formally_allied, label_continents, land_share, leftover_continent_counts,
+    leftover_continent_potential, normalized_strength_share, placement, placement_score,
+    player_gold_income, sample_episode, stages_for_schedule, strength_delta_weight,
+    team_completed_structures, team_owner_ids, team_transport_ships, tempo_pressure,
+    terminal_reward, timeweight, v10_closeout_entry_bonus, v10_combat_action_bonus,
     v10_diplo_panic_penalty, v10_survival_reward, v10_timeout_after_closeout_penalty,
-    v83_action_churn_penalty, ActionChurnTracker, ActionPairCounts, ActionTarget,
-    BoatOutcomeCounts, ChosenAction, CombatOutcome, CurriculumSchedule, DominanceShaper,
-    InverseActionPair, RewardComponents, RewardConfig, Stage, CITY_UNIT_CLASS, DUO_SOLO_SCALE,
-    PORT_UNIT_CLASS, TRANSPORT_UNIT_CLASS, V83_CLOSEOUT_SHARE_START, W_STR, W_WASTE,
+    v83_action_churn_penalty,
 };
 use ofcore::feat::{
-    self, ACTIONS, A_ALLIANCE_REQUEST, A_ATTACK, A_BOAT, A_BREAK_ALLIANCE, A_BUILD, A_CANCEL_BOAT,
-    A_DONATE_GOLD, A_DONATE_TROOPS, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, IS_LAND_BIT, MAG_MASK,
-    REGION,
+    self, A_ALLIANCE_REQUEST, A_ATTACK, A_BOAT, A_BREAK_ALLIANCE, A_BUILD, A_CANCEL_BOAT,
+    A_DONATE_GOLD, A_DONATE_TROOPS, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, ACTIONS, IS_LAND_BIT,
+    MAG_MASK, REGION,
 };
-use ofcore::translate::{translate, Choice, IntentTranslator};
+use ofcore::translate::{Choice, IntentTranslator, translate};
 
 use crate::ae::{self, AeRaw, StaticTerrain, TerrainCacheKey};
 use crate::engine::{self, EngineKind, GameEngine, RawObs};
@@ -935,6 +937,7 @@ pub struct EnvWorker {
     duo_shaper: [DominanceShaper; 2],
     eco_shaper: [DominanceShaper; 2],
     boat_commit_shaper: [DominanceShaper; 2],
+    leftover_continent_shaper: [DominanceShaper; 2],
     closeout_tracker: [CloseoutTracker; 2],
     action_churn_tracker: [ActionChurnTracker; 2],
     boat_tracker: [PendingBoatTracker; 2],
@@ -961,6 +964,8 @@ pub struct EnvWorker {
     hr: usize,
     wr: usize,
     land: Vec<u8>,
+    /// 4-connected land-component ids for leftover-continent Φ (0 = water).
+    continent_of: Vec<u16>,
     mag: Vec<u8>,
     ae_static: StaticTerrain,
     engine_kind: EngineKind,
@@ -1011,6 +1016,7 @@ impl EnvWorker {
             duo_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             eco_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             boat_commit_shaper: [DominanceShaper::default(), DominanceShaper::default()],
+            leftover_continent_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             closeout_tracker: [CloseoutTracker::default(), CloseoutTracker::default()],
             action_churn_tracker: [ActionChurnTracker::default(), ActionChurnTracker::default()],
             boat_tracker: [PendingBoatTracker::default(), PendingBoatTracker::default()],
@@ -1034,6 +1040,7 @@ impl EnvWorker {
             hr: 0,
             wr: 0,
             land: Vec::new(),
+            continent_of: Vec::new(),
             mag: Vec::new(),
             ae_static: StaticTerrain {
                 key: TerrainCacheKey {
@@ -1091,6 +1098,7 @@ impl EnvWorker {
             }
         }
         self.land = land;
+        self.continent_of = label_continents(&self.land, wr, hr);
         self.mag = mag;
         self.ae_static = StaticTerrain {
             key: TerrainCacheKey {
@@ -1246,6 +1254,7 @@ impl EnvWorker {
             }
         }
         self.land = land;
+        self.continent_of = label_continents(&self.land, wr, hr);
         self.mag = mag;
         self.ae_static = StaticTerrain {
             key: TerrainCacheKey {
@@ -1376,6 +1385,7 @@ impl EnvWorker {
                     team_transport_ships(self.ents(), &owners),
                     self.reward_config.duo_boat_commit,
                 ));
+                self.leftover_continent_shaper[i].reset(self.leftover_continent_phi());
             }
             self.closeout_tracker[i].reset(share, tick);
             self.action_churn_tracker[i].reset();
@@ -1392,6 +1402,36 @@ impl EnvWorker {
         self.cached_ents
             .as_ref()
             .expect("obs cache missing; call set_obs first")
+    }
+
+    /// Leftover-opponent purity on continents the team occupies.
+    /// Disabled when `duo_leftover_continent` is 0 or obs is missing.
+    fn leftover_continent_phi(&self) -> f64 {
+        let coef = self.reward_config.duo_leftover_continent;
+        if coef == 0.0 || self.n_agents <= 1 {
+            return 0.0;
+        }
+        let Some(obs) = self.obs.as_ref() else {
+            return 0.0;
+        };
+        let map_width = obs.head["width"].as_u64().unwrap_or(self.wr as u64) as usize;
+        if map_width == 0 {
+            return 0.0;
+        }
+        let agents = [
+            self.agent_me(0).max(0) as usize,
+            self.agent_me(1).max(0) as usize,
+        ];
+        let team = team_owner_ids(self.ents(), &agents);
+        let (team_n, leftover_n) = leftover_continent_counts(
+            &self.continent_of,
+            self.wr,
+            self.hr,
+            map_width,
+            |src| obs.owner_at(src),
+            &team,
+        );
+        leftover_continent_potential(team_n, leftover_n, coef)
     }
 
     pub fn legal(&self) -> &feat::Legal {
@@ -1765,6 +1805,11 @@ impl EnvWorker {
         } else {
             0.0
         };
+        let next_leftover_phi = if n > 1 {
+            self.leftover_continent_phi()
+        } else {
+            0.0
+        };
         let n_cities = if n > 1 {
             team_completed_structures(self.ents(), &team_owners, CITY_UNIT_CLASS)
         } else {
@@ -2086,6 +2131,16 @@ impl EnvWorker {
                 let boat_phi = if done { 0.0 } else { next_boat_phi };
                 duo_r +=
                     self.boat_commit_shaper[i].transition(boat_phi, self.reward_config.gamma, 1.0);
+                // Ng 1999 PBRS on leftover opponent tiles on continents the
+                // team occupies. Mop leftover red raises Φ; flee a dirty
+                // continent drops it. Never an attack/boat action.
+                // Absorbing terminal Φ=0.
+                let leftover_phi = if done { 0.0 } else { next_leftover_phi };
+                duo_r += self.leftover_continent_shaper[i].transition(
+                    leftover_phi,
+                    self.reward_config.gamma,
+                    1.0,
+                );
                 // Outcome-only one-shot: first formal pact this episode.
                 if allied && !self.pact_bonus_paid {
                     duo_r += duo_pact_success_bonus(true, self.reward_config);
@@ -2568,21 +2623,25 @@ mod sequential_spawn_tests {
 
     #[test]
     fn does_not_stagger_once_a_partner_is_on_the_map() {
-        assert!(stagger_simultaneous_duo_spawn(
-            true,
-            &[false, true],
-            &[spawn_intent(10), spawn_intent(20)],
-        )
-        .is_none());
+        assert!(
+            stagger_simultaneous_duo_spawn(
+                true,
+                &[false, true],
+                &[spawn_intent(10), spawn_intent(20)],
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn does_not_stagger_outside_spawn_phase() {
-        assert!(stagger_simultaneous_duo_spawn(
-            false,
-            &[true, true],
-            &[spawn_intent(10), spawn_intent(20)],
-        )
-        .is_none());
+        assert!(
+            stagger_simultaneous_duo_spawn(
+                false,
+                &[true, true],
+                &[spawn_intent(10), spawn_intent(20)],
+            )
+            .is_none()
+        );
     }
 }
