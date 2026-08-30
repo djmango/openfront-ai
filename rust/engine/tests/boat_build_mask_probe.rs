@@ -369,6 +369,7 @@ fn empty_boat_was_net_positive_vs_waste_while_build_was_neutral() {
         duo_port_stand: 0.0,
         duo_continent_span: 0.0,
         duo_boat_land: 0.0,
+        duo_city_stand: 0.0,
     };
     let empty_boat = ofcore::curriculum::v10_empty_action_net_reward(ofcore::feat::A_BOAT, cfg);
     let empty_build = ofcore::curriculum::v10_empty_action_net_reward(ofcore::feat::A_BUILD, cfg);
