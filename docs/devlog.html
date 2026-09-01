@@ -29,6 +29,7 @@
 <nav class="toc">
   <a href="#now">Now</a> ·
   <a href="#duo-easy">Aug 26-28 duo Easy</a> ·
+  <a href="#duo-learned">duo learnings</a> ·
   <a href="#v11-4x">Jul 25 4×A100</a> ·
   <a href="#v11-soak">Jul 24-25 V11 soak</a> ·
   <a href="#v11-watch">watch / clips</a> ·
@@ -91,7 +92,8 @@
     (pid 1989700). Live ~90 min post-resume: U-only spool
     <b>79/159</b> (WR 0.50), Britannia <b>4/17</b>, BlackSea
     6/31, GreatLakes 1/17. Hold through 2026-09-02T12:00Z. See
-    <a href="#duo-scoreboard">A–U scoreboard</a> and
+    <a href="#duo-scoreboard">A–U scoreboard</a>,
+    <a href="#duo-learned">what we learned</a>, and
     <a href="#duo-carry">carry-forward</a>.</p>
 </div>
 
@@ -1004,6 +1006,66 @@ the partner too. Donate exists but is not donate-dirac.</p>
     fail-a / fail-c hopped each run off a water tail. U peels
     those levers and keeps M's flags so the policy can train.</li>
 </ul>
+
+<h3 id="duo-learned">What we learned (merge this)</h3>
+<p>Water converting and water timing out are the same book, not two
+stories. A water map is a mix of games. Britannia on U is
+<b>4 wins and 13 timeouts</b> (4/17). BlackSea is 6/31. GreatLakes
+is 1/17. BetweenTwoSeas is 0/15. When a water game hits 95% combined
+team land before 21k ticks, it <i>wins</i>. When leftover opponent
+is still on the landmass at the clock, it <i>timeouts</i> (−W_WIN).
+Those are different episodes, often back to back. “Some wins” is
+the 4 Britannias. “Tails still clock out” is the other 13. It can
+be both because 4/17 is not 0 and it is not 17/17.</p>
+<p>The hair-trigger we used to fire on “last 8 finished eps all
+timeout” is exactly that mix showing up as a streak. M opened every
+Easy map including BTS and GL, then a Britannia/GL timeout streak
+looked like collapse and we hopped. N–T after that hop zeroed the
+water book and then compact. U is the same M weights and M flags
+left on the GPU. Compact held (Caucasus 30/32, Onion 29/34). Water
+started paying again (BlackSea, Britannia, one GreatLakes) without
+a new lever. A CUDA OOM at u43253 crash-resumed; that is not a
+reason to change the MDP.</p>
+<ul>
+  <li><b>Do not hop on a water timeout streak.</b> Fail-c was how we
+    left M. Timeout=loss is working: sitting is a loss, not a wage.
+    The policy still has to land boats and finish leftover tiles.
+    That takes more than eight water games.</li>
+  <li><b>Do not stack more PBRS on a working MDP.</b> Boat-commit,
+    leftover-continent, port-stand, continent-span, boat-land,
+    city-stand, defense-stand each looked like “the missing Φ.”
+    After M they were noise. Optional flags can live in the binary;
+    they stay off.</li>
+  <li><b>Carry the last book that opened the maps you care about.</b>
+    G held compact (no identity/comms). K had the best short water
+    rate (no BTS). M opened every Easy map. T was 3/181 Onion-only.
+    The overnight pick is M’s weights, not G’s count and not T’s
+    recency.</li>
+  <li><b>Identity + MAPPO + one comms channel is the stack that
+    held.</b> Teammate clut, legal donate/alliance bits, 95%
+    team-land meter, sequential spawn, eco first-city/port, city/port
+    delete penalty, centralized V, <code>--duo-comms</code>. LSTM
+    does not fit 8GB. Do not <code>--init ppo_v11</code>.</li>
+  <li><b>Easy including water is not closed.</b> BTS still 0 on U.
+    GL is 1. Compact is the wage. Keep U through the overnight lock
+    unless entropy collapses or the job dies after a restart.</li>
+</ul>
+
+<h3 id="duo-u-games">U games (occupancy, training owns the 3070)</h3>
+<p>Native occupancy of live U GameRecords. Green = AGENTRL1, cyan =
+AGENTRL2, red = bots. Not OpenFront WebGL.</p>
+<ul>
+  <li>Onion win <code>2hYhgXmj</code> (compact still paying)</li>
+  <li>Caucasus win <code>nK1C3g1M</code> (post-OOM resume)</li>
+  <li>Britannia win <code>2paxGhGN</code> (water converting)</li>
+  <li>BlackSea win <code>qdqFa72D</code></li>
+  <li>GreatLakes win <code>ribkxC5k</code> (first U GL)</li>
+</ul>
+<video src="/workspace/artifacts/duo_u_clips/duo_u_onion_win_2hYhgXmj.mp4" controls></video>
+<video src="/workspace/artifacts/duo_u_clips/duo_u_caucasus_win_nK1C3g1M.mp4" controls></video>
+<video src="/workspace/artifacts/duo_u_clips/duo_u_britannia_win_2paxGhGN.mp4" controls></video>
+<video src="/workspace/artifacts/duo_u_clips/duo_u_blacksea_win_qdqFa72D.mp4" controls></video>
+<video src="/workspace/artifacts/duo_u_clips/duo_u_greatlakes_win_ribkxC5k.mp4" controls></video>
 
 <h3 id="duo-next">What is still open</h3>
 <ul>
@@ -4517,7 +4579,8 @@ from the raw cache IS that idea, done right).</p>
     79/159; Britannia 4/17, BlackSea 6/31, GreatLakes 1/17.
     <b>Easy including water already open</b> on M
     (GL 03:03, BTS 19:37).
-    See <a href="#duo-scoreboard">scoreboard</a> and
+    See <a href="#duo-scoreboard">scoreboard</a>,
+    <a href="#duo-learned">what we learned</a>, and
     <a href="#duo-carry">carry-forward</a>.</li>
   <li><b>V11 (active plan, Jul 23):</b> see <a href="#v11-plan">V11 plan</a>  - 
     neighbor pack, ego-split fronts, unit tokens + pointer, bigger model,
