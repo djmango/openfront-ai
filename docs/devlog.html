@@ -85,11 +85,11 @@
 </nav>
 
 <div class="now" id="now">
-  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 30th, 2026</h2>
-  <p>Live duo is <b>experiment T</b> on the homelab 3070: defense-stand
-    PBRS (<code>--duo-defense-stand 0.5</code>) on <b>Q's weights</b>
-    (not S — S lost compact). S fail-a 0/26 after 131 min. See
-    <a href="#duo-scoreboard">A–T scoreboard</a> and
+  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - September 1st, 2026</h2>
+  <p>Live duo is <b>experiment U</b> on the homelab 3070: peel N–T
+    PBRS off <b>M's weights</b> and let M's MDP train. T ended
+    3/181 Onion-only after ~29h. See
+    <a href="#duo-scoreboard">A–U scoreboard</a> and
     <a href="#duo-carry">carry-forward</a>.</p>
 </div>
 
@@ -102,9 +102,11 @@ Easy including water. Hit 2026-08-30T03:03Z on M (GL <code>z4bOdwHy</code>;
 BTS already open). M then fail-c (water timeout tail). N boat-commit
 then O leftover-continent then P port-stand then Q continent-span
 each died on the same Britannia/GL timeout tail (gate c). R then S
-lost compact (gate a). Live job: experiment T (defense-stand Φ on
-Q weights; not S). Carry-forward: next lever resumes T if compact
-holds. Code: stacked on timeout-loss / PBRS.</p>
+lost compact (gate a). T defense-stand on Q ran ~29h then 3/181
+Onion-only (Caucasus all TERM, water 0). Live job: experiment U
+(M weights + M flags; no N–T levers). Post-M PBRS hops hurt more
+than they helped — let M learn. Code: stacked on timeout-loss /
+PBRS through comms only.</p>
 
 <h3 id="duo-why">Why duo exists</h3>
 <p>OpenFront Team-mode is not FFA with a friend emoji. Engine
@@ -185,13 +187,14 @@ gold still need a pact.</p>
 <h3 id="duo-experiments">Experiments (A-M)</h3>
 <p>Shared recipe unless noted: homelab 3070, 2 games × 2 agents, stage 0
 Easy, rollout 8, frozen AE, timeout=loss, PBRS, carry-forward stack, no v11.
-Fail gates: (a) ≥90 min and ≥8 eps and 0 wins; (b) entropy &lt; 0.3 for
-200 consecutive updates; (c) last 8 finished eps all timeout losses.
-Stashes under <code>rust/checkpoints/ppo_duo/</code>.</p>
+Fail gates historically: (a) ≥90 min and ≥8 eps and 0 wins; (b) entropy
+&lt; 0.3 for 200 consecutive updates; (c) last 8 finished eps all
+timeout losses. U drops a/c so a water tail is time to learn, not a
+hop. Stashes under <code>rust/checkpoints/ppo_duo/</code>.</p>
 
 <p id="duo-scoreboard"><b>Scoreboard</b> (compact = Caucasus / Onion / Pangaea;
-water = Britannia / GreatLakes / BlackSea / BetweenTwoSeas). Q is live
-(resume P). P numbers at fail-c 2026-08-30T16:30Z (P-only 3/32). Book
+water = Britannia / GreatLakes / BlackSea / BetweenTwoSeas). U is live
+(init M). T numbers at peel 2026-09-01T04:13Z (T-only 3/181). Book
 counts drift because the replay spool reuses IDs (~190 files); M peak
 ~80, book at M gate 45.</p>
 <table>
@@ -394,13 +397,22 @@ counts drift because the replay spool reuses IDs (~190 files); M peak
     <td>gate a u43307 (0 wins after 131 min)</td>
   </tr>
   <tr>
-    <td><b>T defense-stand (live)</b></td>
+    <td>T defense-stand</td>
     <td>PBRS on team completed Defense Post count, init Q (not S)</td>
+    <td>T-only <b>3/181</b></td>
+    <td>0.02</td>
+    <td>Onion 3/38, Caucasus 0/32 TERM</td>
+    <td>Britannia 0/24, GL 0/22, BlackSea 0/31, BTS 0/15</td>
+    <td>peeled u57239 (let M learn; ~29h)</td>
+  </tr>
+  <tr>
+    <td><b>U let M learn (live)</b></td>
+    <td>No new lever. Init M; flags through comms only</td>
     <td>—</td>
     <td>—</td>
     <td>—</td>
     <td>—</td>
-    <td>live (from Q stash <code>mappo-Q-fail-c-20260830T1801Z</code>)</td>
+    <td>live (from M stash <code>mappo-M-fail-c-20260830T0741Z</code>)</td>
   </tr>
 </table>
 <p>Best compact <i>hold</i> is still <b>G</b> (101/245). Best water
@@ -410,33 +422,38 @@ counts drift because the replay spool reuses IDs (~190 files); M peak
 03:03). M then N then O then P died on a Britannia/GL timeout tail
 (gate c). Q then fail-c the same way (Caucasus 4/4 then water
 timeout). R resumes Q and prices UsefulLanding (boat-commit Φ
-drops on land; landing itself was unpaid). Homelab is full-tilt
+drops on land; landing itself was unpaid) then gate-a 0/21.
+S city-stand on Q gate-a 0/26. T defense-stand on Q ran ~29h
+for 3 Onion wins and Caucasus all TERM. Homelab is full-tilt
 SM again (an 80% duty-cycle was tried, then dropped — it does
-not free VRAM). H–J resumed G and lost Onion.</p>
+not free VRAM). H–J resumed G and lost Onion. U peels N–T and
+lets M train.</p>
 
-<h3 id="duo-carry">Carry forward: keep the wins, add one lever</h3>
+<h3 id="duo-carry">Carry forward: keep the wins; U adds no lever</h3>
 <p>From-scratch K / L / M re-paid compact that G already held (101/245).
-H–J resumed G then extra reward collapsed Onion. The rule now:</p>
+H–J resumed G then extra reward collapsed Onion. N–T stacked more
+PBRS after M and lost the water M had opened. The rule now:</p>
 <ul>
   <li><b>Code that worked stays on.</b> Do not strip identity, the 95%
     meter, sequential spawn, MAPPO V, comms, timeout=loss, PBRS, or
     the pact/eco/delete flags to “try a clean slate.”</li>
+  <li><b>U is not a new lever.</b> Init M, flags through comms only,
+    and let that MDP train. Do not hop on a water timeout tail or a
+    slow first hour. Hair-trigger fail-a / fail-c is what produced
+    N–T.</li>
   <li><b>Weights: resume the last run that still holds compact.</b>
-    Next experiment is <code>--resume</code> that checkpoint plus one
-    new lever. New tensors (comms Linear, MAPPO V) use compatible
-    load (<code>--init</code>), not a full from-scratch trunk.</li>
+    After U, that is U / M. New tensors (comms Linear, MAPPO V) use
+    compatible load (<code>--init</code>), not a full from-scratch
+    trunk. Do not add a lever while U is live.</li>
   <li><b>Do not resume a collapsed run.</b> H/I/J lost Onion. L OOMed.
-    Fallback stashes: Q fail-c
-    (<code>mappo-Q-fail-c-20260830T1801Z</code>, compact still held;
-    do not resume R or S),
-    P fail-c
-    (<code>mappo-P-fail-c-20260830T1631Z</code>, compact still held),
-    O fail-c (<code>mappo-O-fail-c-20260830T1246Z</code>), N fail-c
-    (<code>mappo-N-fail-c-20260830T1032Z</code>),
-    M fail-c (<code>mappo-M-fail-c-20260830T0741Z</code>, Easy+water
-    open), G compact-hold
+    R/S lost compact. T peeled (3/181 Onion-only). Fallback stashes
+    for U: M fail-c
+    (<code>mappo-M-fail-c-20260830T0741Z</code>, Easy+water open),
+    G compact-hold
     (<code>ippo-G-compact-hold-20260828T0627Z</code>), or K water-open
     (<code>mappo-K-fail-c-20260828T1514Z</code>, Britannia 8/13).
+    Q fail-c (<code>mappo-Q-fail-c-20260830T1801Z</code>) held compact
+    but water 0 — not the U start. Do not resume N–T, R, or S.
     M should have <code>--init</code> K (keep water, random-init comms)
     instead of from-scratch — that miss delayed water, but M later
     opened BTS and GL on its own weights.</li>
@@ -498,37 +515,29 @@ H–J resumed G then extra reward collapsed Onion. The rule now:</p>
     <td><code>--duo-comms</code> partner last-action residual</td>
     <td>M</td>
     <td>Opened every Easy map including BTS and GL, then gate-c water
-      tail. Keep the layer; N resumes M.</td>
+      tail. Keep the layer; U inits M and trains on this MDP.</td>
   </tr>
   <tr>
     <td><code>--duo-boat-commit 0.5</code> in-flight TransportShip PBRS</td>
-    <td>N</td>
-    <td>Kept compact, then gate-c water tail. Φ = 0.5 × team living
-      boats; absorbing 0 at done. Never the <code>boat</code> action.
-      Keep the layer; O resumes N.</td>
+    <td>N (off)</td>
+    <td>N-only 7/26 then gate-c water tail. Peeled on U. Do not
+      restack while U is live.</td>
   </tr>
   <tr>
     <td><code>--duo-leftover-continent 0.5</code> leftover-opponent PBRS</td>
-    <td>O</td>
-    <td>Kept compact, then gate-c water tail. Φ = 0.5 × team /
-      (team + leftover red) on occupied continents. Keep the layer;
-      P resumes O.</td>
+    <td>O (off)</td>
+    <td>O-only 2/21 then gate-c. Peeled on U. Do not restack.</td>
   </tr>
   <tr>
     <td><code>--duo-port-stand 0.5</code> completed-Port PBRS</td>
-    <td>P</td>
-    <td>Kept compact, then gate-c water tail. Φ = 0.5 × team completed
-      Ports; absorbing 0 at done. Never the <code>build</code> action.
-      Keep the layer; Q resumes P.</td>
+    <td>P (off)</td>
+    <td>P-only 3/32 then gate-c. Peeled on U. Do not restack.</td>
   </tr>
   <tr>
     <td><code>--duo-continent-span 0.5</code> occupied-landmass PBRS</td>
-    <td>Q</td>
-    <td>Kept compact (Caucasus 4/4), then gate-c water tail. Φ = 0.5
-      × continents the team occupies; absorbing 0 at done. First tile
-      on a new island raises Φ even when leftover-continent purity
-      drops. Never a boat/attack action. Keep the layer; R resumes
-      Q.</td>
+    <td>Q (off)</td>
+    <td>Q-only 5/16, Caucasus 4/4, then gate-c water. Peeled on U.
+      Do not restack.</td>
   </tr>
   <tr>
     <td><code>--duo-boat-land 0.5</code> UsefulLanding PBRS</td>
@@ -546,11 +555,11 @@ H–J resumed G then extra reward collapsed Onion. The rule now:</p>
   </tr>
   <tr>
     <td><code>--duo-defense-stand 0.5</code> completed-Defense-Post PBRS</td>
-    <td>T</td>
-    <td>Live. <code>--init</code> Q (not S). Φ = 0.5 × team completed
-      Defense Posts; absorbing 0 at done. Never the <code>build</code>
-      action. Caucasus TERMs on R/S were blob-and-attack without
-      standing defense. Complements port-stand; city-stand stays off.</td>
+    <td>T (off)</td>
+    <td>T-only 3/181 Onion-only after ~29h; Caucasus 0/32 TERM;
+      water 0. Peeled on U. Do not restack. Stash
+      <code>mappo-T-let-learn-20260901T0411Z.*</code>
+      (u57239 / 1831648).</td>
   </tr>
   <tr>
     <td><code>--max-gpu-util</code> SM duty-cycle cap</td>
@@ -817,13 +826,24 @@ weights.</p>
       (u43307 / 1385824). T inits Q, not S.</td>
   </tr>
   <tr>
-    <td><b>T defense-stand (live)</b></td>
+    <td>T defense-stand</td>
     <td>Ng 1999 PBRS on team completed Defense Post count
       (<code>--duo-defense-stand 0.5</code>). Not the <code>build</code>
       action. <code>--init</code> Q stash. No boat-land, no city-stand.
       Started after S fail-a.</td>
-    <td>Live. Clock starts at T launch. Same fail gates (a/b/c/4).
-      Fail → one new lever on T's weights if compact holds.</td>
+    <td>Peeled after ~29h / u57239: T-only <b>3/181</b>. Onion
+      3/38, Caucasus 0/32 TERM, water 0. Stash
+      <code>mappo-T-let-learn-20260901T0411Z.*</code>. U inits M,
+      not T.</td>
+  </tr>
+  <tr>
+    <td><b>U let M learn (live)</b></td>
+    <td>No new lever. <code>--init</code> M stash. Flags through
+      comms / MAPPO / eco / delete / pact only. No N–T PBRS.</td>
+    <td>Live. Clock starts at U launch
+      (2026-09-01T04:13:25Z). Fail gates: entropy collapse / dead
+      after restart only. Do not hop on last-8 timeout or 90 min
+      with 0 wins.</td>
   </tr>
 </table>
 <p>Water maps (Britannia, GreatLakes, BlackSea, BetweenTwoSeas) were 0
@@ -974,43 +994,48 @@ the partner too. Donate exists but is not donate-dirac.</p>
     failure: resume G then pile on reward noise and Onion dies. Carry
     the last compact-holding checkpoint; add one lever; compatible-load
     new tensors. See <a href="#duo-carry">carry-forward</a>.</li>
+  <li><b>Stacking more PBRS after a working MDP is not learning.</b>
+    N–T after M zeroed water that M had opened, then R/S deleted
+    Caucasus, then T spent ~29h for 3 Onion wins. Hair-trigger
+    fail-a / fail-c hopped each run off a water tail. U peels
+    those levers and keeps M's flags so the policy can train.</li>
 </ul>
 
 <h3 id="duo-next">What is still open</h3>
 <ul>
-  <li><b>T (live): defense-stand</b>. PBRS on team completed Defense
-    Post count (<code>--duo-defense-stand 0.5</code>) on Q's weights.
-    S fail-a lost compact so T does <b>not</b> resume S and does not
-    stack city-stand or boat-land. Same fail gates. Full-tilt SM.</li>
-  <li><b>After T:</b> one unused lever on <b>T's weights</b> if compact
-    holds, else <code>--init</code> Q fail-c per
-    <a href="#duo-carry">carry-forward</a>.</li>
+  <li><b>U (live): let M learn</b>. Init M
+    (<code>mappo-M-fail-c-20260830T0741Z</code>). Flags through
+    <code>--duo-comms</code> only. No N–T PBRS. Fail gates are
+    entropy collapse and dead-after-restart only. Full-tilt SM.
+    Do not add a lever while U is live.</li>
+  <li><b>After U:</b> only if a remaining fail gate fires. Else keep
+    U. See <a href="#duo-carry">carry-forward</a>.</li>
 </ul>
 
 <h3 id="duo-ops">Ops</h3>
 <ul>
   <li>Host: homelab RTX 3070 8GB, tmux <code>duo-train</code>,
     <code>bash rust/checkpoints/ppo_duo/run.sh</code> (gitignored;
-    T is feedforward MAPPO + comms + boat-commit + leftover-continent + port-stand + continent-span + defense-stand, <b>crash-resume latest</b> of this
-    run (carry-forward from Q, not S/R):
-    <code>--duo-comms --duo-boat-commit 0.5 --duo-leftover-continent 0.5
-    --duo-port-stand 0.5 --duo-continent-span 0.5 --duo-defense-stand 0.5
-    --centralized-value=true
+    U is feedforward MAPPO + comms only, <b>crash-resume latest</b> of this
+    run (carry-forward from M, not T/Q/R/S):
+    <code>--duo-comms --centralized-value=true
     --recurrent-policy=false --minibatches 8</code>.
-    No <code>--duo-boat-land</code>. No <code>--duo-city-stand</code>.
+    No N–T PBRS
+    (<code>--duo-boat-commit</code>, leftover-continent, port-stand,
+    continent-span, boat-land, city-stand, defense-stand).
     No <code>--max-gpu-util</code>. Plus
     <code>--duo-eco-coef 0.25 --duo-city-bonus 3 --duo-port-bonus 5
     --duo-city-delete 3 --duo-port-delete 5
-    --v84-boat-cancelled=-0.15 --duo-pact-bonus 5</code>. Next
-    experiment resumes T if compact holds. Do not
-    <code>--resume</code> L LSTM, H–J, R, or S collapsed weights. Clap defaults
+    --v84-boat-cancelled=-0.15 --duo-pact-bonus 5</code>. Do not
+    add a lever while U is live. Do not
+    <code>--resume</code> L LSTM, H–J, N–T, R, or S. Clap defaults
     recurrent on: always pass <code>--recurrent-policy=false</code>
     for feedforward.</li>
   <li>Log / metrics / state:
     <code>rust/checkpoints/ppo_duo/{train.log,metrics.jsonl,latest.state.json}</code></li>
-  <li>PR: <a href="https://github.com/djmango/openfront-ai/pull/127">#127</a>
-    (T defense-stand, stacked on
-    <a href="https://github.com/djmango/openfront-ai/pull/126">#126</a>).</li>
+  <li>PR: U peel stacked on
+    <a href="https://github.com/djmango/openfront-ai/pull/127">#127</a>
+    (T defense-stand).</li>
   <li>Do not commit <code>run.sh</code>, checkpoints, dirty
     <code>openfront</code>, or <code>uv.lock</code>.</li>
 </ul>
@@ -4475,8 +4500,8 @@ from the raw cache IS that idea, done right).</p>
 
 <h3 id="next">Open threads</h3>
 <ul>
-  <li><b>Duo Easy (active, Aug 30):</b> experiment T defense-stand
-    live on Q's weights (S fail-a lost compact). Full-tilt SM.
+  <li><b>Duo Easy (active, Sep 1):</b> experiment U lets M learn
+    (N–T PBRS peeled). Full-tilt SM.
     <b>Easy including water already open</b> on M
     (GL 03:03, BTS 19:37).
     See <a href="#duo-scoreboard">scoreboard</a> and
