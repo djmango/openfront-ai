@@ -28,6 +28,8 @@
 
 <nav class="toc">
   <a href="#now">Now</a> ·
+  <a href="#duo-easy">Aug 26-28 duo Easy</a> ·
+  <a href="#duo-learned">duo learnings</a> ·
   <a href="#v11-4x">Jul 25 4×A100</a> ·
   <a href="#v11-soak">Jul 24-25 V11 soak</a> ·
   <a href="#v11-watch">watch / clips</a> ·
@@ -84,30 +86,1035 @@
 </nav>
 
 <div class="now" id="now">
-  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - August 12th, 2026</h2>
-  <p><b><code>ppo_v11</code></b> at update <b>2561</b> / stage <b>26</b>
-  (~16.8M steps). Live lobby is Easy densify (Hard starts at stage
-  <b>50</b>). Train tick budget <code>--max-episode-ticks 21000</code>,
-  decision_ticks=15, AE v3.2 no-static.</p>
-  <p>Compute move: leaving the 4×A100 RunPod burn for a slower
-  <b>1×H100</b> on
-  <a href="https://givemeanode.com">Give Me A Node</a>
-  (San Francisco Compute Company) so the remaining ~$500 credits last.
-  Thank you <a href="https://x.com/evanjconrad">Evan Conrad</a> and
-  SF Compute for the GPU grant - that keeps this open-source run alive
-  after the RunPod balance ran out.</p>
-  <p>Fresh stochastic Node watches (u2486 / stage 23):
-  <a href="https://share.skg.gg/u/mVp6gU.webm">Pangaea</a> (win@7771) ·
-  <a href="https://share.skg.gg/u/4iMMic.webm">Europe</a> (timeout@21001) ·
-  <a href="https://share.skg.gg/u/0xCL4E.webm">World</a> (death@16531).
-  OOD Medium stretch (s36, 90b/4n):
-  <a href="https://share.skg.gg/u/66idcY.webm">Europe</a> (death@10051).</p>
-  <p class="d" style="margin:.75rem 0 0">
-  Showcase hub follows <code>ppo_v11/latest</code> + checkpoint stage
-  (<code>SHOWCASE_FOLLOW_POLICY=1</code>). Live site:
-  <a href="https://openfrontai.skg.gg">openfrontai.skg.gg</a>.</p>
+  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - September 1st, 2026</h2>
+  <p>Overnight lock: <b>experiment U</b> on the homelab 3070
+    (M weights + M flags). Crash-resumed after CUDA OOM
+    (pid 1989700). Live ~90 min post-resume: U-only spool
+    <b>79/159</b> (WR 0.50), Britannia <b>4/17</b>, BlackSea
+    6/31, GreatLakes 1/17. Hold through 2026-09-02T12:00Z. See
+    <a href="#duo-scoreboard">A–U scoreboard</a>,
+    <a href="#duo-learned">what we learned</a>, and
+    <a href="#duo-carry">carry-forward</a>.</p>
+  <p class="d" style="margin:.75rem 0 0"><code>ppo_v11</code> is parked
+    at update 2561 / stage 26 (1×H100). Showcase:
+    <a href="https://openfrontai.skg.gg">openfrontai.skg.gg</a>.</p>
 </div>
 
+
+<h2 class="date" id="duo-easy">Aug 26-28, 2026 - Duo Easy: identity held compact; economy is the water hole</h2>
+<p class="session">Two-human Team-mode on a homelab RTX 3070 8GB
+(<code>--duo</code>, <code>AGENTRL1</code>+<code>AGENTRL2</code> on Humans,
+stage 0 Easy, 2 envs, rollout 8, feedforward, frozen AE v3.2). Loop until
+Easy including water. Hit 2026-08-30T03:03Z on M (GL <code>z4bOdwHy</code>;
+BTS already open). M then fail-c (water timeout tail). N boat-commit
+then O leftover-continent then P port-stand then Q continent-span
+each died on the same Britannia/GL timeout tail (gate c). R then S
+lost compact (gate a). T defense-stand on Q ran ~29h then 3/181
+Onion-only (Caucasus all TERM, water 0). Live job: experiment U
+(M weights + M flags; no N–T levers). Overnight lock through
+2026-09-02T12:00Z — G/K/Q/T are not the start. Post-M PBRS hops
+hurt more than they helped. Code: stacked on timeout-loss /
+PBRS through comms only.</p>
+
+<h3 id="duo-why">Why duo exists</h3>
+<p>OpenFront Team-mode is not FFA with a friend emoji. Engine
+<code>is_friendly</code> is <i>team or pact</i>: you cannot attack your
+partner, you can donate, and a <i>formal</i> alliance is what unlocks
+ally train gold (35k vs 25k team rate). The win rule is
+<b>95% combined claimed land</b>, not 45% individual closeout. Two
+independent IPPO heads that each think the other blob is an enemy cannot
+do that job.</p>
+
+<h3 id="duo-collapse">The collapse that started the loop</h3>
+<p>Early <code>ppo_duo</code> did not fail because entropy was low. It
+failed because the MDP paid camping:</p>
+<ul>
+  <li>Timeout paid placement. Sitting until the clock was a wage, not a
+    loss.</li>
+  <li>Per-tick allied/alive terms were a camping salary. Donate crumbs
+    and paying <code>alliance_request</code> as an action collapsed the
+    policy onto donate-dirac.</li>
+  <li>Native <code>Player.alive</code> started true with empty territory.
+    A rostered human who never appeared timed out instead of dying.
+    TS <code>isAlive()</code> is <code>tiles &gt; 0</code>.</li>
+</ul>
+<p>Fixes that stayed in every later run (do not revert):</p>
+<ul>
+  <li><b>Timeout / never-spawn = <code>-W_WIN</code></b>, and a death
+    mark if they never lived.</li>
+  <li>Unspawned humans are dead. Obs uses tiles for alive.</li>
+  <li>Duo welfare + pact go through <b>Ng 1999 PBRS</b>
+    (<code>γΦ(s′)−Φ(s)</code>, absorbing Φ=0 at done). Not a per-tick
+    wage.</li>
+  <li>Outcome-only diplomacy: do not pay <code>donate_*</code> or
+    <code>alliance_request</code> as actions. Optional one-shot
+    <code>--duo-pact-bonus</code> when a formal pact actually forms
+    (still 5 on H).</li>
+</ul>
+<p>Tried and retired: <code>--init ppo_v11</code> +
+<code>--kl-prior</code> (incompatible with learning this MDP from
+scratch on 8GB; also not what produced the E win streak).
+<code>--ent-floor</code> as the main lever. Raising <code>W_WIN</code>.
+Masking donate.</p>
+
+<h3 id="duo-audit">If a human had the trunk, could they duo?</h3>
+<p><b>No, not until E.</b> The tensors and the engine disagreed.</p>
+<ol>
+  <li><b>Clut painted teammates as class-3 enemy until a formal pact.</b>
+    Spatial maps, local crop, units, and attack fronts all said "shoot
+    this blob." The engine forbade attacking it and allowed donating to
+    it. Obs and legality were two different games.</li>
+  <li><b>No teammate bit.</b> <code>P_FEAT[5] is_ally</code> is formal
+    pact only. <code>pid</code> was parsed and unused. JSON
+    <code>"type": "HUMAN"</code> was dropped. The accidental leak was
+    gold income 100 vs 50 for a bot.</li>
+  <li><b>Legal masks are not in the trunk.</b> Donate-only-to-teammate
+    exists in <code>legal_ptarget</code>; <code>trunk_forward</code>
+    never reads it. <code>alliance_request</code> is legal for the
+    partner <i>and</i> bots, so requests go ~50/50.</li>
+  <li><b>Win rule vs closeout Φ.</b> Team win is 95% <i>combined</i>
+    land. Closeout Φ still keys off 45% <i>individual</i> land. E put
+    claimed-among-players in <code>scalars[10]</code>. G adds
+    <code>scalars[11]</code> = team tiles / map land (win fires at
+    0.95). F timeouts sat at 0.2–0.4 leftover land with no such
+    meter.</li>
+  <li>No comms. IPPO: neither π nor V sees partner extras. Feedforward,
+    rollout 8, from scratch, no boat prior.</li>
+</ol>
+<p>E's code change: engine JSON + typed ents emit <code>PlayerE.team</code>.
+<code>make_clut</code> paints same-team humans class-2 without a pact
+(formal <code>AllianceE</code> still class-2 for pacted non-teammates).
+<code>P_FEAT[19] = is_teammate</code> (was unused doomsday).
+<code>scalars[10] = team claimed-land share</code> (was unused
+<code>doomsday_enabled</code>). Formal <code>is_ally</code> / ally train
+gold still need a pact.</p>
+<p>G's code change: <code>scalars[11] = team tiles / map land</code>
+(<code>N_SCALARS</code> 11→12). Team win fires at 0.95 of that meter.
+<code>scalars[10]</code> stays claimed-among-players.</p>
+
+<h3 id="duo-experiments">Experiments (A-M)</h3>
+<p>Shared recipe unless noted: homelab 3070, 2 games × 2 agents, stage 0
+Easy, rollout 8, frozen AE, timeout=loss, PBRS, carry-forward stack, no v11.
+Fail gates historically: (a) ≥90 min and ≥8 eps and 0 wins; (b) entropy
+&lt; 0.3 for 200 consecutive updates; (c) last 8 finished eps all
+timeout losses. U drops a/c so a water tail is time to learn, not a
+hop. Stashes under <code>rust/checkpoints/ppo_duo/</code>.</p>
+
+<p id="duo-scoreboard"><b>Scoreboard</b> (compact = Caucasus / Onion / Pangaea;
+water = Britannia / GreatLakes / BlackSea / BetweenTwoSeas). U is live
+(init M). T numbers at peel 2026-09-01T04:13Z (T-only 3/181). Book
+counts drift because the replay spool reuses IDs (~190 files); M peak
+~80, book at M gate 45.</p>
+<table>
+  <tr>
+    <th>run</th>
+    <th>lever</th>
+    <th>W/L</th>
+    <th>WR</th>
+    <th>compact</th>
+    <th>water</th>
+    <th>ended</th>
+  </tr>
+  <tr>
+    <td>A MAPPO</td>
+    <td>Centralized V, from scratch</td>
+    <td>8/23</td>
+    <td>0.35</td>
+    <td>Caucasus 4, Onion 4</td>
+    <td>0</td>
+    <td>gate c</td>
+  </tr>
+  <tr>
+    <td>B IPPO</td>
+    <td>Local V, same MDP as A</td>
+    <td>3/16</td>
+    <td>0.19</td>
+    <td>Caucasus 1, Onion 2</td>
+    <td>0</td>
+    <td>gate c</td>
+  </tr>
+  <tr>
+    <td>C 3 envs</td>
+    <td>VRAM</td>
+    <td>—</td>
+    <td>—</td>
+    <td>—</td>
+    <td>—</td>
+    <td>skipped (8GB)</td>
+  </tr>
+  <tr>
+    <td>D1 pact bonus</td>
+    <td><code>--duo-pact-bonus 5</code></td>
+    <td>13/59</td>
+    <td>0.22</td>
+    <td>incl. 2 Pangaea</td>
+    <td>0</td>
+    <td>OOM ~7.5GB</td>
+  </tr>
+  <tr>
+    <td>D2 pact restart</td>
+    <td>resume D after OOM</td>
+    <td>7/47</td>
+    <td>0.15</td>
+    <td>Caucasus 3/4, Onion 4/12</td>
+    <td>0</td>
+    <td>gate c</td>
+  </tr>
+  <tr>
+    <td>listed-E Φ log</td>
+    <td>check mid-episode Φ</td>
+    <td>—</td>
+    <td>—</td>
+    <td>—</td>
+    <td>—</td>
+    <td>skipped (timeouts had land)</td>
+  </tr>
+  <tr>
+    <td>E teammate obs</td>
+    <td>class-2 clut + is_teammate</td>
+    <td>5/17</td>
+    <td>0.29</td>
+    <td>opened 5-0 (Onion 2, Caucasus 3)</td>
+    <td>0</td>
+    <td>gate c</td>
+  </tr>
+  <tr>
+    <td>F legal diplo bits</td>
+    <td>donate / alliance_request in P_FEAT</td>
+    <td>7/22</td>
+    <td>0.32</td>
+    <td>opened 6-0 + late Onion</td>
+    <td>0</td>
+    <td>gate c</td>
+  </tr>
+  <tr>
+    <td>G 95% meter</td>
+    <td><code>scalars[11]</code> team/map-land</td>
+    <td><b>101/245</b></td>
+    <td>0.41</td>
+    <td>Caucasus 44/46, Onion 38/51, Pangaea 7/9</td>
+    <td>Britannia 10/39, GL 1/39, BlackSea 1/31, BTS <b>0/30</b></td>
+    <td>SIGKILL u16296 (not gate c)</td>
+  </tr>
+  <tr>
+    <td>H eco PBRS</td>
+    <td>income Φ + first City/Port; resume G</td>
+    <td>4/20</td>
+    <td>0.20</td>
+    <td>Caucasus 4/4; Onion 0/5</td>
+    <td>0</td>
+    <td>gate c</td>
+  </tr>
+  <tr>
+    <td>I sequential spawn</td>
+    <td>second head sees partner; resume H</td>
+    <td>4/15</td>
+    <td>0.27</td>
+    <td>Caucasus 4/4; Onion 0/3</td>
+    <td>0</td>
+    <td>gate c</td>
+  </tr>
+  <tr>
+    <td>J delete penalty</td>
+    <td>City/Port count-drop −3/−5; resume I</td>
+    <td>4/14</td>
+    <td>0.29</td>
+    <td>Caucasus 4/4; Onion 0/3</td>
+    <td>0</td>
+    <td>gate c</td>
+  </tr>
+  <tr>
+    <td>K MAPPO + identity</td>
+    <td>from-scratch MAPPO after E/F/G obs</td>
+    <td><b>20/49</b></td>
+    <td>0.41</td>
+    <td>Onion 7/12, Caucasus 1/4</td>
+    <td>Britannia <b>8/13</b>, GL <b>4/11</b>, BTS 0/8</td>
+    <td>gate c</td>
+  </tr>
+  <tr>
+    <td>L LSTM</td>
+    <td>recurrent π + MAPPO V, from scratch</td>
+    <td>3/16</td>
+    <td>0.19</td>
+    <td>Caucasus 1/10, Onion 2/5</td>
+    <td>BlackSea 0/1</td>
+    <td>3× CUDA OOM (gate 4)</td>
+  </tr>
+  <tr>
+    <td>M comms</td>
+    <td>π residual on partner last action</td>
+    <td>peak ~<b>80</b>; book <b>45/190</b></td>
+    <td>peak 0.42; book 0.24</td>
+    <td>Onion peak 34/38 (book 26), Caucasus peak 22/35, Pangaea peak 16/20</td>
+    <td>Britannia opened+held, BlackSea 2–3, BTS <b>1/15</b> 19:37, GL <b>1/22</b> 03:03</td>
+    <td>gate c ~u33667 (Britannia/GL timeout tail). <b>Easy including water open</b></td>
+  </tr>
+  <tr>
+    <td>N boat-commit</td>
+    <td>PBRS on team in-flight TransportShips, resume M</td>
+    <td>N-only <b>7/26</b></td>
+    <td>0.27</td>
+    <td>Caucasus 4/4, Onion 3/5</td>
+    <td>Britannia 0/8, GL 0/8, BlackSea 0/1</td>
+    <td>gate c ~u35780 (last 8 Britannia/GL timeout)</td>
+  </tr>
+  <tr>
+    <td>O leftover-continent</td>
+    <td>PBRS on leftover opponent tiles on occupied continents, resume N</td>
+    <td>O-only <b>2/21</b></td>
+    <td>0.10</td>
+    <td>Caucasus 2/4, Onion 0/5</td>
+    <td>Britannia 0/7, GL 0/4, BlackSea 0/1</td>
+    <td>gate c ~u37532 (last 8 water/Onion timeout)</td>
+  </tr>
+  <tr>
+    <td>P port-stand</td>
+    <td>PBRS on team completed Port count, resume O</td>
+    <td>P-only <b>3/32</b></td>
+    <td>0.09</td>
+    <td>Caucasus 2/4, Onion 1/5</td>
+    <td>Britannia 0/12, GL 0/8, BlackSea 0/1</td>
+    <td>gate c ~u40362 (last 8 water/Onion timeout)</td>
+  </tr>
+  <tr>
+    <td>Q continent-span</td>
+    <td>PBRS on occupied landmass count, resume P</td>
+    <td>Q-only <b>5/16</b></td>
+    <td>0.31</td>
+    <td>Caucasus 4/4, Onion 1/4</td>
+    <td>Britannia 0/4, GL 0/3, BlackSea 0/1</td>
+    <td>gate c ~u41521 (last 8 water/Onion timeout)</td>
+  </tr>
+  <tr>
+    <td>R boat-land</td>
+    <td>PBRS on team UsefulLanding count, resume Q</td>
+    <td>R-only <b>0/21</b></td>
+    <td>0.00</td>
+    <td>Caucasus 0/4 TERM, Onion 0/5 TIMEOUT</td>
+    <td>Britannia 0/7, GL 0/4, BlackSea 0/1</td>
+    <td>gate a ~u43423 (0 wins after 125 min)</td>
+  </tr>
+  <tr>
+    <td>S city-stand</td>
+    <td>PBRS on team completed City count, resume Q (not R)</td>
+    <td>S-only <b>0/26</b></td>
+    <td>0.00</td>
+    <td>Caucasus 0/4 TERM, Onion 0/5 TIMEOUT</td>
+    <td>Britannia 0/10, GL 0/6, BlackSea 0/1</td>
+    <td>gate a u43307 (0 wins after 131 min)</td>
+  </tr>
+  <tr>
+    <td>T defense-stand</td>
+    <td>PBRS on team completed Defense Post count, init Q (not S)</td>
+    <td>T-only <b>3/181</b></td>
+    <td>0.02</td>
+    <td>Onion 3/38, Caucasus 0/32 TERM</td>
+    <td>Britannia 0/24, GL 0/22, BlackSea 0/31, BTS 0/15</td>
+    <td>peeled u57239 (let M learn; ~29h)</td>
+  </tr>
+  <tr>
+    <td><b>U let M learn (live)</b></td>
+    <td>No new lever. Init M; flags through comms only</td>
+    <td>—</td>
+    <td>—</td>
+    <td>—</td>
+    <td>—</td>
+    <td>live (from M stash <code>mappo-M-fail-c-20260830T0741Z</code>)</td>
+  </tr>
+</table>
+<p>Best compact <i>hold</i> is still <b>G</b> (101/245). Best water
+<i>rate</i> on a short run is still <b>K</b> (Britannia 8/13, GreatLakes
+4/11). First run to open <b>every</b> Easy map including BTS and GL is
+<b>M</b> (BTS <code>qlmRclS1</code> 19:37, GL <code>z4bOdwHy</code>
+03:03). M then N then O then P died on a Britannia/GL timeout tail
+(gate c). Q then fail-c the same way (Caucasus 4/4 then water
+timeout). R resumes Q and prices UsefulLanding (boat-commit Φ
+drops on land; landing itself was unpaid) then gate-a 0/21.
+S city-stand on Q gate-a 0/26. T defense-stand on Q ran ~29h
+for 3 Onion wins and Caucasus all TERM. Homelab is full-tilt
+SM again (an 80% duty-cycle was tried, then dropped — it does
+not free VRAM). H–J resumed G and lost Onion. U peels N–T and
+lets M train.</p>
+
+<h3 id="duo-carry">Carry forward: keep the wins; U adds no lever</h3>
+<p>From-scratch K / L / M re-paid compact that G already held (101/245).
+H–J resumed G then extra reward collapsed Onion. N–T stacked more
+PBRS after M and lost the water M had opened. The rule now:</p>
+<ul>
+  <li><b>Code that worked stays on.</b> Do not strip identity, the 95%
+    meter, sequential spawn, MAPPO V, comms, timeout=loss, PBRS, or
+    the pact/eco/delete flags to “try a clean slate.”</li>
+  <li><b>U is not a new lever.</b> Init M, flags through comms only,
+    and let that MDP train. Do not hop on a water timeout tail or a
+    slow first hour. Hair-trigger fail-a / fail-c is what produced
+    N–T.</li>
+  <li><b>Weights: resume the last run that still holds compact.</b>
+    After U, that is U / M. New tensors (comms Linear, MAPPO V) use
+    compatible load (<code>--init</code>), not a full from-scratch
+    trunk. Do not add a lever while U is live.</li>
+  <li><b>Do not resume a collapsed run.</b> H/I/J lost Onion. L OOMed.
+    R/S lost compact. T peeled (3/181 Onion-only). Fallback stashes
+    for U: M fail-c
+    (<code>mappo-M-fail-c-20260830T0741Z</code>, Easy+water open),
+    G compact-hold
+    (<code>ippo-G-compact-hold-20260828T0627Z</code>), or K water-open
+    (<code>mappo-K-fail-c-20260828T1514Z</code>, Britannia 8/13).
+    Q fail-c (<code>mappo-Q-fail-c-20260830T1801Z</code>) held compact
+    but water 0 — not the U start. Do not resume N–T, R, or S.
+    M should have <code>--init</code> K (keep water, random-init comms)
+    instead of from-scratch — that miss delayed water, but M later
+    opened BTS and GL on its own weights.</li>
+  <li>From-scratch only when tensors cannot transfer (LSTM schema 3)
+    or you would be resuming the same weights that just lost compact.
+    Never <code>--init ppo_v11</code>.</li>
+</ul>
+<table>
+  <tr><th>keep</th><th>from</th><th>why</th></tr>
+  <tr>
+    <td>timeout=loss, unspawned=dead, Ng PBRS, no action-pay donate/build/delete</td>
+    <td>pre-A</td>
+    <td>Camping wage is how the loop started. Do not revert.</td>
+  </tr>
+  <tr>
+    <td><code>--duo-pact-bonus 5</code></td>
+    <td>D</td>
+    <td>One-shot, not farmable. Cheap to keep.</td>
+  </tr>
+  <tr>
+    <td>class-2 clut, <code>is_teammate</code>, <code>scalars[10]</code></td>
+    <td>E</td>
+    <td>Without this a human cannot identify the partner.</td>
+  </tr>
+  <tr>
+    <td>legal donate / <code>alliance_request</code> bits</td>
+    <td>F</td>
+    <td>Trunk can see who it is legal to help.</td>
+  </tr>
+  <tr>
+    <td><code>scalars[11]</code> team/map-land 95% meter</td>
+    <td>G</td>
+    <td>Only run that <i>held</i> compact (44/46 Caucasus, 38/51 Onion).</td>
+  </tr>
+  <tr>
+    <td>sequential spawn (second head sees partner)</td>
+    <td>I</td>
+    <td>Gap-15 held on every GameRecord. Spawn is not a comms problem
+      after the first blob is on the map.</td>
+  </tr>
+  <tr>
+    <td>eco income PBRS 0.25 + first City/Port 3/5</td>
+    <td>H</td>
+    <td>Cities did complete (then got deleted). Reward-only, not an action.</td>
+  </tr>
+  <tr>
+    <td>City/Port delete −3/−5 on count drop</td>
+    <td>J</td>
+    <td>Still on. It suppressed building more than it kept structures.
+      Do not pay <code>delete_unit</code> as an action.</td>
+  </tr>
+  <tr>
+    <td>MAPPO centralized V</td>
+    <td>K</td>
+    <td>Opened water (Britannia 8/13, GreatLakes 4/11) with identity
+      already in obs. Keep V even when π is feedforward.</td>
+  </tr>
+  <tr>
+    <td><code>--duo-comms</code> partner last-action residual</td>
+    <td>M</td>
+    <td>Opened every Easy map including BTS and GL, then gate-c water
+      tail. Keep the layer; U inits M and trains on this MDP.</td>
+  </tr>
+  <tr>
+    <td><code>--duo-boat-commit 0.5</code> in-flight TransportShip PBRS</td>
+    <td>N (off)</td>
+    <td>N-only 7/26 then gate-c water tail. Peeled on U. Do not
+      restack while U is live.</td>
+  </tr>
+  <tr>
+    <td><code>--duo-leftover-continent 0.5</code> leftover-opponent PBRS</td>
+    <td>O (off)</td>
+    <td>O-only 2/21 then gate-c. Peeled on U. Do not restack.</td>
+  </tr>
+  <tr>
+    <td><code>--duo-port-stand 0.5</code> completed-Port PBRS</td>
+    <td>P (off)</td>
+    <td>P-only 3/32 then gate-c. Peeled on U. Do not restack.</td>
+  </tr>
+  <tr>
+    <td><code>--duo-continent-span 0.5</code> occupied-landmass PBRS</td>
+    <td>Q (off)</td>
+    <td>Q-only 5/16, Caucasus 4/4, then gate-c water. Peeled on U.
+      Do not restack.</td>
+  </tr>
+  <tr>
+    <td><code>--duo-boat-land 0.5</code> UsefulLanding PBRS</td>
+    <td>R</td>
+    <td>Gate-a 0/21; compact died (Caucasus 0/4 TERM). Do not keep
+      stacked on S. Φ = 0.5 × UsefulLanding count. Never the
+      <code>boat</code> action.</td>
+  </tr>
+  <tr>
+    <td><code>--duo-city-stand 0.5</code> completed-City PBRS</td>
+    <td>S</td>
+    <td>Gate-a 0/26; compact died (Caucasus 0/4 TERM). Do not keep
+      stacked on T. Φ = 0.5 × team completed Cities. Never the
+      <code>build</code> action.</td>
+  </tr>
+  <tr>
+    <td><code>--duo-defense-stand 0.5</code> completed-Defense-Post PBRS</td>
+    <td>T (off)</td>
+    <td>T-only 3/181 Onion-only after ~29h; Caucasus 0/32 TERM;
+      water 0. Peeled on U. Do not restack. Stash
+      <code>mappo-T-let-learn-20260901T0411Z.*</code>
+      (u57239 / 1831648).</td>
+  </tr>
+  <tr>
+    <td><code>--max-gpu-util</code> SM duty-cycle cap</td>
+    <td>R (ops, off)</td>
+    <td>Tried 0.80 so Whisper could share SM time, then dropped.
+      Default 0 is full-tilt. Distinct from
+      <code>--target-gpu-util</code> (autoscale growth). Does
+      <b>not</b> free VRAM. Live job omits the flag.</td>
+  </tr>
+  <tr>
+    <td>feedforward (<code>--recurrent-policy=false</code>)</td>
+    <td>L (negative)</td>
+    <td>LSTM+MAPPO+2envs OOMs on 8GB. Do not revive.</td>
+  </tr>
+</table>
+<p>Drop: v11-KL, LSTM on this card, 3 envs, paying donate/build/delete
+as actions, from-scratch as the default, resuming H/I/J collapsed
+weights.</p>
+<p>Notes for each run (what changed, stash names):</p>
+<table>
+  <tr><th>run</th><th>what changed</th><th>result</th></tr>
+  <tr>
+    <td>A MAPPO</td>
+    <td>Centralized critic (Yu et al. 2021 CTDE). Default-on with
+      <code>--duo</code>.</td>
+    <td>8/23 Easy wins, all compact (Caucasus 4, Onion 4). Then water
+      clock-outs. Gate (c). gpu_mem% ~84 so C (3 envs) skipped.
+      Stash <code>mappo-A-20260826T2015Z.*</code>.</td>
+  </tr>
+  <tr>
+    <td>B IPPO</td>
+    <td><code>--centralized-value=false</code>. Same MDP as A.</td>
+    <td>3/16 (Caucasus 1, Onion 2), then 8 straight timeouts. Same
+      shape as A. Entropy O(1). Critic choice was not the bottleneck.
+      Stash <code>ippo-B-20260826T2145Z.*</code>.</td>
+  </tr>
+  <tr>
+    <td>C</td>
+    <td>3 envs.</td>
+    <td>Skipped. 2 envs already 84-92% GPU mem on 8GB.</td>
+  </tr>
+  <tr>
+    <td>D IPPO + pact bonus</td>
+    <td><code>--duo-pact-bonus 5</code> (one-shot, both agents, formal
+      alliance only).</td>
+    <td>D1: 13/59 then OOM SIGKILL ~7.5GB (incl. 2 Pangaea wins). D2
+      restart: 7/47 (Caucasus 3/4, Onion 4/12, water 0), last 8 all
+      timeout. Pact bonus did not hold Easy. Identity hole still open.
+      Stash <code>ippo-D-20260827T0301Z.*</code> /
+      <code>ippo-D-restart-20260827T0735Z.*</code>.</td>
+  </tr>
+  <tr>
+    <td>listed-E (PBRS Φ log)</td>
+    <td>Check Φ mid-episode if all timeouts had ~0 land.</td>
+    <td>Skipped. D timeouts had mixed land (0-0.61). Not a missing-Φ
+      problem.</td>
+  </tr>
+  <tr>
+    <td>E teammate obs</td>
+    <td>Class-2 clut + <code>is_teammate</code> + team claimed-land
+      scalar. Still IPPO + pact bonus 5, from scratch.</td>
+    <td>Opened <b>5-0</b> (Onion 2, Caucasus 3). Final 5/17 WR 0.29.
+      Last 8 all timeout (fail gate c) at ~84 min / u1183. Water 0
+      wins. Identity changed the open; it did not hold Easy. Stash
+      <code>ippo-E-20260827T0903Z.*</code>.</td>
+  </tr>
+  <tr>
+    <td>F legal diplo bits</td>
+    <td><code>P_FEAT[28]</code> = donate legal to this slot,
+      <code>P_FEAT[29]</code> = <code>alliance_request</code> legal to
+      this slot. Trunk already reads player tokens.
+      <code>P_FEAT</code> 28→30, from scratch. Keeps E clut.</td>
+    <td>Opened <b>6-0</b> then a late Onion win (ep 12, land 0.88).
+      Final 7/22 WR 0.32. Last 8 all timeout (fail gate c) at ~131 min
+      / u1679. Water still 0. Legal bits did not hold Easy. Stash
+      <code>ippo-F-20260827T1117Z.*</code>.</td>
+  </tr>
+  <tr>
+    <td>G team/map-land 95% scalar</td>
+    <td><code>scalars[11]</code> = ego+teammate tiles / map land.
+      Team win fires at 0.95 of that meter. <code>scalars[10]</code>
+      stays claimed-among-players. <code>N_SCALARS</code> 11→12.
+      Keeps E+F. From scratch, then <b>resumed</b> after SIGKILL
+      at u5376 and u10423 (same weights).</td>
+    <td>Held compact Easy. Final 101/245, window WR 0.38, entropy O(1).
+      Caucasus <b>44/46</b>, Onion 38/51, Pangaea 7/9. Water:
+      Britannia 10/39, BlackSea 1/31, GreatLakes 1/39,
+      BetweenTwoSeas <b>0/30</b>. Last 8 still had compact wins
+      (not gate c). Occupancy clips: blob-and-attack on compact;
+      on BTS they own the main landmass and miss 95% because leftover
+      red is on the <i>same</i> continent, with almost no cities/ports.
+      SIGKILL at u16296 (OOM during oftrain rebuild). Stash
+      <code>ippo-G-compact-hold-20260828T0627Z.*</code> (also crash
+      snapshots <code>ippo-G-sigkill-20260827T1734Z.*</code> /
+      <code>ippo-G-sigkill-20260827T2350Z.*</code>).</td>
+  </tr>
+  <tr>
+    <td>H eco PBRS + first City/Port</td>
+    <td>Reward-only, <b>resume G weights</b> (same
+      <code>N_SCALARS=12</code>, no new obs).
+      <code>--duo-eco-coef 0.25</code> Ng 1999 PBRS on log team
+      gold-<i>income</i>. One-shot first completed City +3 / Port +5
+      (outcome-only). <code>--v84-boat-cancelled=-0.15</code>.
+      Keeps IPPO + pact bonus 5. Started 2026-08-28T06:31:09Z,
+      resume u16296.</td>
+    <td>Fail gate (c): last 8 finished eps all timeout. Final
+      <b>4/20</b>, all Caucasus (4/4). Onion 0/5, Britannia 0/6,
+      GreatLakes 0/4, BlackSea 0/1. Window WR 0.30. Entropy O(1).
+      Three City completions, all then deleted; 0 Ports. Compact
+      Caucasus still paid early; Onion collapsed vs G's 38/51.
+      Stash <code>ippo-H-fail-c-20260828T0834Z.*</code> (u18021 /
+      576672 steps).</td>
+  </tr>
+  <tr>
+    <td>I sequential spawn</td>
+    <td>Same-continent matching, not a spawn-proposal messenger.
+      Spawn-phase mask: spawn only if unplaced; <b>noop</b> once
+      tiles &gt; 0. No teleport. Simultaneous first pick staggered
+      so agent 1 sees class-2 clut. Resume H weights. Keeps H eco
+      flags. Started 2026-08-28T08:38:37Z.</td>
+    <td>Fail gate (c): last 8 finished eps all timeout (water/Onion).
+      Final <b>4/15</b>, all Caucasus (4/4). Onion 0/3, Britannia 0/4,
+      GreatLakes 0/3, BlackSea 0/1. Window WR 0.25. Entropy O(1).
+      Spawn stagger held: AGENTRL1 turn 1, AGENTRL2 turn 16 (gap 15)
+      on all 15 GameRecords. Four City builds, 0 Ports. Sequential
+      spawn did not close water. Stash
+      <code>ippo-I-fail-c-20260828T1001Z.*</code> (u19281 / 616992
+      steps).</td>
+  </tr>
+  <tr>
+    <td>J City/Port delete penalty</td>
+    <td>Reward-only, <b>resume I weights</b> (same tensors, sequential
+      spawn stays). <code>--duo-city-delete 3</code> /
+      <code>--duo-port-delete 5</code> on completed-count drop.
+      Never the <code>delete_unit</code> action. Keeps eco PBRS +
+      first City/Port one-shots. Started 2026-08-28T10:02:52Z.</td>
+    <td>Fail gate (c) at ~75 min / u20432: last 8 timeout
+      (GreatLakes/BlackSea/Britannia/Onion). Final <b>4/14</b>, all
+      Caucasus (4/4). Onion 0/3, GreatLakes 0/3, Britannia 0/3,
+      BlackSea 0/1. Entropy O(1). One City on an Onion timeout then
+      a delete; 0 Ports. vs I's 4 Cities: the penalty suppressed
+      building more than it kept structures standing. Compact still
+      blob-and-attack (0 cities on the 4 Caucasus wins). Stash
+      <code>ippo-J-fail-c-20260828T1118Z.*</code> (u20432 / 653824
+      steps).</td>
+  </tr>
+  <tr>
+    <td>K MAPPO</td>
+    <td>Centralized critic from-scratch so V sees teammate tokens +
+      scalars. Identity / legal bits / 95% meter are now in obs
+      (MAPPO A ran before those). Keeps sequential spawn + eco PBRS
+      + first City/Port + delete penalties. Started
+      2026-08-28T11:18:54Z. <code>--centralized-value=true</code>,
+      no <code>--resume</code>.</td>
+    <td>Fail gate (c) at ~235 min / u3384: last 8 timeout
+      (BTS/GreatLakes/Onion). Final <b>20/49</b> at the gate check
+      (WR 0.41). Opened water: Britannia <b>8/13</b>, GreatLakes
+      <b>4/11</b>. Onion 7/12, Caucasus 1/4, BlackSea 0/1,
+      BetweenTwoSeas <b>0/8</b>. Entropy O(1). Same compact-then-water-tail
+      shape as A–J, but water paid before the tail. Stash
+      <code>mappo-K-fail-c-20260828T1514Z.*</code> (u3384 / 108288
+      steps).</td>
+  </tr>
+  <tr>
+    <td>L LSTM</td>
+    <td>Recurrent policy from-scratch. MAPPO V stays. Sequential spawn
+      + eco + delete flags stay.
+      <code>--recurrent-policy=true --persistent-actors=true
+      --bptt-chunk-len 8 --minibatches 2</code> (LSTM requires
+      minibatches ≤ envs/shard; 2 envs on 8GB). Started
+      2026-08-28T15:15:52Z. No <code>--resume</code>.</td>
+    <td>Fail gate (4) at ~75 min / u1069: three CUDA OOMs
+      (u273 / u621 / u1068) on 8GB. Restarts did not stop the OOM.
+      Final <b>3/16</b> WR 0.19. Caucasus 1/10, Onion 2/5,
+      BlackSea 0/1. Entropy opened O(1), trailing 0.001 (streak 89,
+      not gate b). Last 8 not all timeout. LSTM+MAPPO+2envs does not
+      fit 8GB. Stash <code>lstm-L-oom-20260828T1630Z.*</code>
+      (u1069 / 34208 steps).</td>
+  </tr>
+  <tr>
+    <td>M comms</td>
+    <td>Partner last-action into π: <code>h += Linear(partner
+      ActionOutcome)</code> (14 floats, one-step delay). Feedforward
+      MAPPO V stays. Sequential spawn + eco + delete flags stay.
+      <code>--duo-comms --centralized-value=true
+      --recurrent-policy=false --minibatches 8</code>. Started
+      2026-08-28T16:43:18Z (16:42:28 died: clap defaults recurrent
+      on). No <code>--resume</code>.</td>
+    <td>Peak book ~80; book at gate <b>45/190</b>. Compact repeating
+      (Onion). Water opened: Britannia, BlackSea, BTS
+      <code>qlmRclS1</code> 19:37, GL <code>z4bOdwHy</code> 03:03.
+      <b>Easy including water.</b> Three CUDA OOMs, all resumed.
+      Fail-c at ~u33667 (last 8 Britannia/GL timeout). Stash
+      <code>mappo-M-fail-c-20260830T0741Z.*</code>.</td>
+  </tr>
+  <tr>
+    <td>N boat-commit</td>
+    <td>Ng 1999 PBRS on team in-flight TransportShip count
+      (<code>--duo-boat-commit 0.5</code>). Not the <code>boat</code>
+      action. <code>--resume</code> M stash. Stacked flags stay.
+      Started 2026-08-30T07:41:36Z.</td>
+    <td>Fail gate (c) at ~169 min / u35780: last 8 Britannia/GL
+      timeout. N-only <b>7/26</b>. Compact held (Caucasus 4/4, Onion
+      3/5). Water N-only 0. Stash
+      <code>mappo-N-fail-c-20260830T1032Z.*</code>
+      (u35780 / 1144960 steps).</td>
+  </tr>
+  <tr>
+    <td>O leftover-continent</td>
+    <td>Ng 1999 PBRS on leftover opponent tiles on continents the team
+      occupies (<code>--duo-leftover-continent 0.5</code>). Not an
+      attack/boat action. <code>--resume</code> N stash. Stacked flags
+      stay including boat-commit. Started 2026-08-30T10:37:22Z.</td>
+    <td>Fail gate (c) at ~128 min / u37532: last 8 water/Onion
+      timeout. O-only <b>2/21</b>. Compact held (Caucasus 2/4).
+      Water O-only 0. Stash
+      <code>mappo-O-fail-c-20260830T1246Z.*</code>
+      (u37532 / 1201024 steps).</td>
+  </tr>
+  <tr>
+    <td>P port-stand</td>
+    <td>Ng 1999 PBRS on team completed Port count
+      (<code>--duo-port-stand 0.5</code>). Not the <code>build</code>
+      action. <code>--resume</code> O stash. Stacked flags stay
+      including leftover-continent + boat-commit. Started
+      2026-08-30T12:49:35Z.</td>
+    <td>Fail gate (c) at ~221 min / u40362: last 8 water/Onion
+      timeout. P-only <b>3/32</b>. Compact held (Caucasus 2/4, Onion
+      1/5). Water P-only 0. Stash
+      <code>mappo-P-fail-c-20260830T1631Z.*</code>
+      (u40362 / 1291584 steps).</td>
+  </tr>
+  <tr>
+    <td>Q continent-span</td>
+    <td>Ng 1999 PBRS on occupied landmass count
+      (<code>--duo-continent-span 0.5</code>). Not a boat/attack
+      action. <code>--resume</code> P stash. Stacked flags stay
+      including port-stand + leftover-continent + boat-commit.
+      Started 2026-08-30T16:37:21Z.</td>
+    <td>Fail gate (c) at ~83 min / u41521: last 8 water/Onion
+      timeout. Q-only <b>5/16</b>. Compact held (Caucasus 4/4, Onion
+      1/4). Water Q-only 0. Stash
+      <code>mappo-Q-fail-c-20260830T1801Z.*</code>
+      (u41521 / 1328672 steps).</td>
+  </tr>
+  <tr>
+    <td>R boat-land</td>
+    <td>Ng 1999 PBRS on team UsefulLanding count
+      (<code>--duo-boat-land 0.5</code>). Not the <code>boat</code>
+      action. <code>--resume</code> Q stash. Started after Q fail-c.</td>
+    <td>Fail gate (a) at ~125 min / u43423: 0 wins after 21 eps.
+      Compact died (Caucasus 0/4 TERM, Onion 0/5 TIMEOUT). Stash
+      <code>mappo-R-fail-a-20260830T2016Z.*</code>. S resumes Q, not R.</td>
+  </tr>
+  <tr>
+    <td>S city-stand</td>
+    <td>Ng 1999 PBRS on team completed City count
+      (<code>--duo-city-stand 0.5</code>). Not the <code>build</code>
+      action. <code>--resume</code> Q stash. No boat-land. Started
+      after R fail-a.</td>
+    <td>Fail gate (a) at ~131 min / u43307: 0 wins after 26 eps.
+      Compact died (Caucasus 0/4 TERM, Onion 0/5 TIMEOUT). Stash
+      <code>mappo-S-fail-a-20260830T2231Z.*</code>
+      (u43307 / 1385824). T inits Q, not S.</td>
+  </tr>
+  <tr>
+    <td>T defense-stand</td>
+    <td>Ng 1999 PBRS on team completed Defense Post count
+      (<code>--duo-defense-stand 0.5</code>). Not the <code>build</code>
+      action. <code>--init</code> Q stash. No boat-land, no city-stand.
+      Started after S fail-a.</td>
+    <td>Peeled after ~29h / u57239: T-only <b>3/181</b>. Onion
+      3/38, Caucasus 0/32 TERM, water 0. Stash
+      <code>mappo-T-let-learn-20260901T0411Z.*</code>. U inits M,
+      not T.</td>
+  </tr>
+  <tr>
+    <td><b>U let M learn (live)</b></td>
+    <td>No new lever. <code>--init</code> M stash. Flags through
+      comms / MAPPO / eco / delete / pact only. No N–T PBRS.</td>
+    <td>Crash-resumed 15:01:06Z pid 1989700 after OOM at u43253.
+      Live u44365. U-only spool <b>79/159</b> (WR 0.50). Compact:
+      Caucasus 30/32, Onion 29/34, Pangaea 9/13. Water: BlackSea
+      6/31, Britannia 4/17, GreatLakes 1/17. BTS still 0. Fail
+      gates: entropy collapse / dead after restart only.</td>
+  </tr>
+</table>
+<p>Water maps (Britannia, GreatLakes, BlackSea, BetweenTwoSeas) were 0
+wins across A, B, D2, E, F, H–J, and L. Compact maps were
+where every Easy win happened except D1's two Pangaea flukes. G is
+the first run in this loop to <i>hold</i> compact
+(Onion/Caucasus/Pangaea keep paying) and to open water: Britannia
+repeating (10/39), first GreatLakes, first BlackSea. BetweenTwoSeas
+finished <b>0/30</b> on G. K opened water without G's compact hold
+(Britannia 8/13, GreatLakes 4/11) then gate-c. M later opened
+<b>all four water maps</b> including the first BTS win in this loop.
+E's Caucasus win at 0.09 individual land
+(term ~255) is the team-95% rule showing up: the partner can carry,
+which is exactly what the old clut called an enemy.</p>
+
+<h3 id="duo-g-games">G games: when it is not winning, and why economy did not learn</h3>
+<p>Occupancy clips of native GameRecords (not full OpenFront WebGL —
+training owns the 3070). Compact wins
+(<code>duo_g_caucasus_win_nCPoTIHg</code>,
+<code>duo_g_pangaea_win_pMjStsDC</code>) vs a BetweenTwoSeas timeout
+(<code>duo_g_between_two_seas_timeout_lw9uzM9o</code>).</p>
+<ul>
+  <li><b>When it is not winning:</b> water, especially BetweenTwoSeas.
+    Timeout=loss at 21k ticks. They often own most of the main
+    landmass and still miss the 95% team-land closeout because leftover
+    opponent sits on the <i>same</i> continent. Compact maps
+    blob-and-attack and win without an economy.</li>
+  <li><b>Spawn together is learned, not scripted.</b> Those maps have no
+    <code>teamGameSpawnAreas</code>. Both humans emit <code>spawn</code>
+    on tick 1 (not the 8-step <code>spawn_randomly</code> fallback).
+    Distances ~150–240 tiles on compact maps, sometimes &lt;20 on
+    BlackSea. Independent IPPO heads both prefer fat interior land.
+    <code>min_distance_between_players</code> is 30 only on the random
+    path. They do <i>not</i> see where the partner is proposing to
+    spawn: both intents land in one engine step from an empty map
+    (player tokens have no x,y; clut has no partner blob yet). Spawn
+    phase then <i>ends</i> as soon as both humans have a tile, so they
+    cannot iterate. The engine can re-roll (relinquish + re-place)
+    during the phase, but the mask is spawn-only and spawn steps pay
+    0 until the game starts. Once one blob is on the map, class-2 clut
+    <i>is</i> the channel — that is world state, not a message. The
+    messenger problem is only the simultaneous first pick. History
+    (LSTM) would help a proposal handshake that overshoots; matching
+    continent is simpler with sequential spawn (second player sees the
+    first, first is allowed to noop instead of teleport). That is
+    <a href="#duo-next">experiment I</a>, next after H — not H itself
+    (H is reward-only). Compact already wins 150–240 tiles apart; the
+    water hole is leftover enemy on the same landmass, which
+    same-continent spawn would help more than adjacent spawn.</li>
+  <li><b>Boats:</b> destination is always land (zero ocean/OOB). Compact
+    wins barely boat (Caucasus 2, Pangaea 3). Water maps do launch real
+    crossings (BTS 18, Britannia 21). Failure is commit, not targeting:
+    cancel ~30–40% (BTS 7/18, Britannia 9/21); almost never a Port (one
+    late Port in a different Caucasus win). On a BTS timeout, 13/18
+    boats left the main landmass while leftover red was still on it.</li>
+  <li><b>Building:</b> compact wins almost none (Caucasus win: zero
+    buildings). Pangaea: 1 City then deletes. Long water games:
+    Factory/City/Defense Post/Warship/Silo, then delete count ≈ build
+    count. Not a city/port economy.</li>
+  <li><b>Why economy does not learn (the MDP):</b>
+    <code>v10_closeout_entry</code> default +25 at 45% individual land
+    and <code>W_WIN=30</code> pay blob-and-attack. Cities are delayed
+    (rollout 8). <code>K_ECO=0.25</code> is gold <i>stock</i> share —
+    buying a city drops gold share; <code>K_BUILD=0.15</code> only then
+    slowly counts structure value. <code>v10_combat_action</code> pays
+    build as an action (+0.01 if emitted intent) — tiny, and the
+    donate-dirac lesson is do not pay build as an action. Timeout after
+    closeout extra −20. Pressure is convert land, not eco.</li>
+</ul>
+<p>Boat outcome rewards already exist at stage 0: useful +0.15, destroyed
+−0.20, cancelled −0.03 (too cheap — H raises this to −0.15), own-shore
+−0.05. Diplo noise is still high on water (embargo /
+<code>alliance_request</code> / <code>targetPlayer</code>); they embargo
+the partner too. Donate exists but is not donate-dirac.</p>
+
+<h3 id="duo-learnings">What we learned</h3>
+<ul>
+  <li><b>If a human with the tensors cannot identify the partner, the
+    policy cannot duo.</b> Reward sign can be perfect (win ~+250 vs
+    timeout -30) and the agent will still shoot "the other red blob"
+    because clut said enemy. E is the first run where map/local/unit
+    channels match engine friendliness.</li>
+  <li><b>MAPPO vs IPPO was not the bottleneck.</b> A and B printed the
+    same curve: a few compact-map wins, then water timeouts, leftover
+    land 0.2-0.44, conversions drying up. Centralizing V did not teach
+    identity.</li>
+  <li><b>Pact-success bonus is not a substitute for identity.</b> D paid
+    +5 the first time a formal alliance formed. Compact-map wins
+    continued; the water tail did not move. The bonus is not farmable
+    (one-shot, outcome-only) and is still on for H.</li>
+  <li><b>Timeout=loss and PBRS fix camping; they do not teach who to
+    land with.</b> Keep them. Do not "check Φ" as the next experiment
+    while individual land at timeout is mid.</li>
+  <li><b>Closeout Φ (45% me) and team win (95% us) are different
+    meters.</b> E already has an Onion clock-out after closeout at 52%
+    individual land. <code>scalars[10]</code> is claimed-among-players;
+    G's <code>scalars[11]</code> is the 95% map-land win meter F
+    lacked.</li>
+  <li><b>Do not warm-start this 8GB loop from v11.</b> v11 can play
+    solo Easy. It cannot see a teammate that was never in its obs.
+    From-scratch E produced a 5-0 open that v11-KL never did here.</li>
+  <li><b>Action-pay diplomacy collapses.</b> Paying
+    <code>donate_*</code> / <code>alliance_request</code> as actions
+    is how we got donate-dirac. Outcome-only. Entropy floor will not
+    unstick that.</li>
+  <li><b>OOM is a real gate on 8GB.</b> D1 died at update 4558 /
+    ~7.5GB. G SIGKILL at u5376 / gpu_mem% 88 with the same 2 envs.
+    2 envs is the ceiling (C skipped). Kill by pid, never
+    <code>pkill -f oftrain</code>. Resume a winning compact run; do not
+    from-scratch it. G's compact-hold stash is
+    <code>ippo-G-compact-hold-20260828T0627Z.*</code>.</li>
+  <li><b>G recovered from water tails; A–F did not.</b> Same
+    compact-open then water-clock-out shape, but G reprinted 4-win
+    clusters and a 7-Caucasus streak instead of dying on gate (c)
+    after the first tail. The 95% map-land meter is the difference
+    that held compact. Water is not held yet.</li>
+  <li><b>Blob-and-attack wins compact; it does not close water.</b> G
+    occupancy: leftover opponent on the same continent, boats that
+    leave the fight, cancel 30–40%, almost no Ports. Do not treat
+    "they cannot boat" as the diagnosis — dest is always land.</li>
+  <li><b>Gold-stock eco is the wrong Φ.</b> <code>K_ECO</code> reads a
+    city purchase as a strength loss. H's income PBRS + first
+    City/Port one-shots did fire (3 City completions) and they
+    <i>deleted</i> every one; 0 Ports; last 8 still timeout. Do not
+    pay <code>build</code> as an action. J's delete-penalty on
+    completed-count drop (never the <code>delete_unit</code> action)
+    did not keep Cities standing: 1 City on an Onion timeout then a
+    delete, 0 Ports, last 8 still timeout. vs I's 4 Cities all
+    deleted, J mostly stopped building them. Compact Caucasus 4/4
+    with zero cities (blob-and-attack). Fail-c → K MAPPO
+    from-scratch with identity now in obs.</li>
+  <li><b>MAPPO with identity opened water, then the same timeout tail.</b>
+    K (from-scratch MAPPO after identity/legal/95%) hit <b>20/49</b>,
+    Britannia 8/13 and GreatLakes 4/11, then last 8 timeout on
+    BetweenTwoSeas / GreatLakes / Onion. Gate (c). BTS 0/8. Critic
+    seeing the partner was enough to open water; it did not hold Easy
+    through the BTS hole. L is LSTM so the policy has memory of the
+    partner across the 8-step rollout.</li>
+  <li><b>LSTM + MAPPO + 2 envs does not fit 8GB.</b> L opened 3 compact
+    wins then three CUDA OOMs (u273 / u621 / u1068) at 6.9–7.3 GiB of
+    7.66. Restarts with <code>--resume latest</code> of its own schema-3
+    weights did not stop the OOM. Sequence models multiply memory before
+    they multiply quality (same lesson as seq-8 BC). M drops the LSTM
+    and gives π an explicit one-step partner-action channel instead.</li>
+  <li><b>From-scratch is not a virtue.</b> K and M re-learned compact
+    that G already held. M should have <code>--init</code> K (keep
+    Britannia 8/13, random-init the comms Linear). H–J show the other
+    failure: resume G then pile on reward noise and Onion dies. Carry
+    the last compact-holding checkpoint; add one lever; compatible-load
+    new tensors. See <a href="#duo-carry">carry-forward</a>.</li>
+  <li><b>Stacking more PBRS after a working MDP is not learning.</b>
+    N–T after M zeroed water that M had opened, then R/S deleted
+    Caucasus, then T spent ~29h for 3 Onion wins. Hair-trigger
+    fail-a / fail-c hopped each run off a water tail. U peels
+    those levers and keeps M's flags so the policy can train.</li>
+</ul>
+
+<h3 id="duo-learned">What we learned (merge this)</h3>
+<p>Water converting and water timing out are the same book, not two
+stories. A water map is a mix of games. Britannia on U is
+<b>4 wins and 13 timeouts</b> (4/17). BlackSea is 6/31. GreatLakes
+is 1/17. BetweenTwoSeas is 0/15. When a water game hits 95% combined
+team land before 21k ticks, it <i>wins</i>. When leftover opponent
+is still on the landmass at the clock, it <i>timeouts</i> (−W_WIN).
+Those are different episodes, often back to back. “Some wins” is
+the 4 Britannias. “Tails still clock out” is the other 13. It can
+be both because 4/17 is not 0 and it is not 17/17.</p>
+<p>The hair-trigger we used to fire on “last 8 finished eps all
+timeout” is exactly that mix showing up as a streak. M opened every
+Easy map including BTS and GL, then a Britannia/GL timeout streak
+looked like collapse and we hopped. N–T after that hop zeroed the
+water book and then compact. U is the same M weights and M flags
+left on the GPU. Compact held (Caucasus 30/32, Onion 29/34). Water
+started paying again (BlackSea, Britannia, one GreatLakes) without
+a new lever. A CUDA OOM at u43253 crash-resumed; that is not a
+reason to change the MDP.</p>
+<ul>
+  <li><b>Do not hop on a water timeout streak.</b> Fail-c was how we
+    left M. Timeout=loss is working: sitting is a loss, not a wage.
+    The policy still has to land boats and finish leftover tiles.
+    That takes more than eight water games.</li>
+  <li><b>Do not stack more PBRS on a working MDP.</b> Boat-commit,
+    leftover-continent, port-stand, continent-span, boat-land,
+    city-stand, defense-stand each looked like “the missing Φ.”
+    After M they were noise. Optional flags can live in the binary;
+    they stay off.</li>
+  <li><b>Carry the last book that opened the maps you care about.</b>
+    G held compact (no identity/comms). K had the best short water
+    rate (no BTS). M opened every Easy map. T was 3/181 Onion-only.
+    The overnight pick is M’s weights, not G’s count and not T’s
+    recency.</li>
+  <li><b>Identity + MAPPO + one comms channel is the stack that
+    held.</b> Teammate clut, legal donate/alliance bits, 95%
+    team-land meter, sequential spawn, eco first-city/port, city/port
+    delete penalty, centralized V, <code>--duo-comms</code>. LSTM
+    does not fit 8GB. Do not <code>--init ppo_v11</code>.</li>
+  <li><b>Easy including water is not closed.</b> BTS still 0 on U.
+    GL is 1. Compact is the wage. Keep U through the overnight lock
+    unless entropy collapses or the job dies after a restart.</li>
+</ul>
+
+<h3 id="duo-u-games">U games (occupancy, training owns the 3070)</h3>
+<p>Native occupancy of live U GameRecords. Green = AGENTRL1, cyan =
+AGENTRL2, red = bots. Not OpenFront WebGL.</p>
+<ul>
+  <li>Onion win <code>2hYhgXmj</code> (compact still paying)</li>
+  <li>Caucasus win <code>nK1C3g1M</code> (post-OOM resume)</li>
+  <li>Britannia win <code>2paxGhGN</code> (water converting)</li>
+  <li>BlackSea win <code>qdqFa72D</code></li>
+  <li>GreatLakes win <code>ribkxC5k</code> (first U GL)</li>
+</ul>
+<video src="/workspace/artifacts/duo_u_clips/duo_u_onion_win_2hYhgXmj.mp4" controls></video>
+<video src="/workspace/artifacts/duo_u_clips/duo_u_caucasus_win_nK1C3g1M.mp4" controls></video>
+<video src="/workspace/artifacts/duo_u_clips/duo_u_britannia_win_2paxGhGN.mp4" controls></video>
+<video src="/workspace/artifacts/duo_u_clips/duo_u_blacksea_win_qdqFa72D.mp4" controls></video>
+<video src="/workspace/artifacts/duo_u_clips/duo_u_greatlakes_win_ribkxC5k.mp4" controls></video>
+
+<h3 id="duo-next">What is still open</h3>
+<ul>
+  <li><b>U (overnight lock): let M learn</b>. Init M
+    (<code>mappo-M-fail-c-20260830T0741Z</code>). Flags through
+    <code>--duo-comms</code> only. No N–T PBRS. Hold through
+    2026-09-02T12:00Z. Crash-resumed; spool 79/159, Britannia
+    4/17. Fail gates are entropy collapse and
+    dead-after-restart only. Do not --init G or K. Do not add a
+    lever.</li>
+  <li><b>Why not G / K / Q / T:</b> G held compact (101/245) but
+    is IPPO without identity/comms (H–J resume-G collapsed Onion).
+    K had the best short water rate but never BTS. Q held compact
+    with water 0. T was 3/181 Onion-only. M is the only book that
+    opened every Easy map.</li>
+</ul>
+
+<h3 id="duo-ops">Ops</h3>
+<ul>
+  <li>Host: homelab RTX 3070 8GB, tmux <code>duo-train</code>,
+    <code>bash rust/checkpoints/ppo_duo/run.sh</code> (gitignored;
+    U is feedforward MAPPO + comms only, <b>crash-resume latest</b> of this
+    run (carry-forward from M, not T/Q/R/S):
+    <code>--duo-comms --centralized-value=true
+    --recurrent-policy=false --minibatches 8</code>.
+    No N–T PBRS
+    (<code>--duo-boat-commit</code>, leftover-continent, port-stand,
+    continent-span, boat-land, city-stand, defense-stand).
+    No <code>--max-gpu-util</code>. Plus
+    <code>--duo-eco-coef 0.25 --duo-city-bonus 3 --duo-port-bonus 5
+    --duo-city-delete 3 --duo-port-delete 5
+    --v84-boat-cancelled=-0.15 --duo-pact-bonus 5</code>. Do not
+    add a lever while U is live. Overnight lock through
+    2026-09-02T12:00Z. Do not
+    <code>--resume</code> L LSTM, H–J, N–T, R, or S. Do not
+    <code>--init</code> G or K tonight. Clap defaults
+    recurrent on: always pass <code>--recurrent-policy=false</code>
+    for feedforward.</li>
+  <li>Log / metrics / state:
+    <code>rust/checkpoints/ppo_duo/{train.log,metrics.jsonl,latest.state.json}</code></li>
+  <li>PR: <a href="https://github.com/djmango/openfront-ai/pull/128">#128</a>
+    (U peel, stacked on
+    <a href="https://github.com/djmango/openfront-ai/pull/127">#127</a>).</li>
+  <li>Do not commit <code>run.sh</code>, checkpoints, dirty
+    <code>openfront</code>, or <code>uv.lock</code>.</li>
+</ul>
 
 <h2 class="date" id="v11-4x">Jul 25, 2026 - 4×A100 scale-up (single pod)</h2>
 <p class="session">Moved live <code>ppo_v11</code> from 2×A100 to one 4×A100 80GB
@@ -1321,6 +2328,14 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <code>ae_v3.pt</code> until the v3.1 winner is wired into <code>rl/obs.py</code>.</p>
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
+  <tr><td><code>ppo_duo</code></td><td><b>live</b> Aug 30 (homelab 3070)</td>
+    <td>Two-human Team-mode Easy. Experiment N live (boat-commit PBRS
+    on M weights; started 07:41:36Z). M opened Easy including water
+    then fail-c. Carry-forward stack (MAPPO V + comms + boat-commit +
+    identity + legal + 95% + sequential spawn + eco PBRS + City/Port
+    delete).
+    <a href="#duo-scoreboard">A–N</a>.
+    <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>.</td></tr>
   <tr><td><code>ppo_v11</code></td><td><b>live</b> Jul 26 (4×A100 80GB)</td>
     <td>Util stack + AE v3.2 no-static + recurrent LSTM. V10 Easy ramp:
     u571 / stage 19 / ~1.71M steps / 32 envs/shard (24 bots + 1 nation;
@@ -3450,6 +4465,18 @@ from intents alone.</p>
 
 <h3 id="lessons">Lessons</h3>
 <ul>
+  <li><b>If a human with the tensors cannot identify their partner, the
+    policy cannot duo.</b> Until E, clut painted teammates as enemies,
+    <code>P_FEAT</code> had no <code>is_teammate</code>, and scalars had
+    no team land share. Reward sign was already fine. See
+    <a href="#duo-easy">Aug 26-27 duo Easy</a>.</li>
+  <li><b>Critic choice is not identity.</b> MAPPO A and IPPO B printed
+    the same compact-win then water-timeout curve. Pact-success bonus
+    (D) did not hold Easy either. E's 5-0 open did not hold past the
+    water tail.</li>
+  <li><b>Timeout=loss and PBRS fix camping, not teamwork.</b> Keep them.
+    Do not pay donate/request as actions. Do not <code>--ent-floor</code>
+    a dirac back to life. Do not warm-start this duo loop from v11.</li>
   <li><b>Only compress what's big.</b> The AE is for the map; exact small state rides the bypass. One
     decision dissolved four v2 loss-weight tuning runs the same evening.</li>
   <li><b>Detection beats regression on sparse targets.</b> Structure counts under MSE collapse to
@@ -3549,6 +4576,15 @@ from the raw cache IS that idea, done right).</p>
 
 <h3 id="next">Open threads</h3>
 <ul>
+  <li><b>Duo Easy (overnight lock, Sep 1):</b> experiment U lets M
+    learn (N–T PBRS peeled). Hold through 2026-09-02T12:00Z.
+    Full-tilt SM. Crash-resumed 15:01:06Z after OOM. Spool
+    79/159; Britannia 4/17, BlackSea 6/31, GreatLakes 1/17.
+    <b>Easy including water already open</b> on M
+    (GL 03:03, BTS 19:37).
+    See <a href="#duo-scoreboard">scoreboard</a>,
+    <a href="#duo-learned">what we learned</a>, and
+    <a href="#duo-carry">carry-forward</a>.</li>
   <li><b>V11 (active plan, Jul 23):</b> see <a href="#v11-plan">V11 plan</a>  - 
     neighbor pack, ego-split fronts, unit tokens + pointer, bigger model,
     full LSTM replacing GRU, BC unfreeze on the new schema. V10 killed.</li>

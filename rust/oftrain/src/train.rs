@@ -90,20 +90,20 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use ofcore::curriculum::RewardConfig;
 use ofcore::feat::ACTIONS;
 use ofcore::translate::Choice;
 use rand::seq::SliceRandom;
 use rand::{RngCore, SeedableRng};
 use tch::nn::OptimizerConfig;
-use tch::{Cuda, Device, Kind, Tensor, nn};
+use tch::{nn, Cuda, Device, Kind, Tensor};
 
 use crate::autoscale;
 use crate::balance;
 use crate::batch::{self, ChoiceScalars};
 use crate::engine::EngineKind;
-use crate::gpu_util::GpuUtilSampler;
+use crate::gpu_util::{duty_sleep_secs, GpuUtilSampler};
 use crate::metrics::MetricsWriter;
 use crate::policy::{self, PolicyNet};
 use crate::recurrent::ActorRecurrentState;
@@ -161,6 +161,12 @@ pub struct Config {
     /// duo (`AGENTRL1` + `AGENTRL2`) with parameter-shared IPPO. Alliances
     /// stay enabled; teammates must actually pact for ally train gold.
     pub n_agents: u32,
+    /// Yu et al. 2021 MAPPO: local actor, centralized V that sees teammate
+    /// player tokens + scalars. Default on with `--duo`.
+    pub centralized_value: bool,
+    /// π residual on the partner's last ActionOutcome (14 floats, one-step
+    /// delay). Off keeps feedforward checkpoints loadable.
+    pub duo_comms: bool,
     /// Number of GPU replicas/shards. 1 = original single-device path.
     /// >1 requires `device` to be `Cuda(_)`; shards use `Cuda(0..num_gpus)`.
     pub num_gpus: usize,
@@ -367,6 +373,13 @@ pub struct Config {
     /// Stage-advance warmup still uses V10's stage warmup; this only
     /// stretches the *first* post-resume window. Default 100; 0 disables.
     pub resume_warmup_updates: u64,
+    /// Frozen policy for AlphaStar-style KL(π || π_prior) throughout RL.
+    /// Compatible load: recurrent v11 checkpoints copy matching feedforward
+    /// tensors and skip LSTM keys. Empty/`None` disables the term.
+    pub kl_prior: Option<String>,
+    /// Coefficient on mean(`log π − log π_prior`) over on-policy actions.
+    /// Ignored when `kl_prior` is unset. Default 0.05.
+    pub kl_coef: f32,
     /// `--value-loss`: `Mse` (Python `F.mse_loss` parity, default) or
     /// `Huber` (Rust stabilizer escape hatch).
     pub value_loss: ValueLoss,
@@ -377,6 +390,10 @@ pub struct Config {
     pub auto_scale_envs: bool,
     /// `--target-gpu-util`: 0-1 fraction set point for `auto_scale_envs`.
     pub target_gpu_util: f64,
+    /// `--max-gpu-util`: 0-1 SM-util ceiling. After each update, sleep so
+    /// duty cycle sits at the cap. 0 disables (full-tilt). Distinct from
+    /// `target_gpu_util` (autoscale growth).
+    pub max_gpu_util: f64,
     /// `--min-envs`: per-shard floor for `auto_scale_envs` (defaults to
     /// `num_envs` if the user didn't pass an explicit value - see
     /// `main.rs`).
@@ -467,12 +484,18 @@ fn expand_v10_sidecar_if_needed(state: &mut TrainState) -> bool {
             .min(ofcore::curriculum::V10_SHORT_SIDECAR_LEN - 1);
         Some(ofcore::curriculum::remap_v10_short_sidecar_stage(as_short))
     } else if targets_len == ofcore::curriculum::V10_SHORT_SIDECAR_LEN {
-        Some(ofcore::curriculum::remap_v10_short_sidecar_stage(state.stage))
+        Some(ofcore::curriculum::remap_v10_short_sidecar_stage(
+            state.stage,
+        ))
     } else if targets_len == ofcore::curriculum::V10_PRIOR_SIDECAR_LEN {
-        Some(ofcore::curriculum::remap_v10_prior_sidecar_stage(state.stage))
+        Some(ofcore::curriculum::remap_v10_prior_sidecar_stage(
+            state.stage,
+        ))
     } else if state.stage >= ofcore::curriculum::V10_STAGE_COUNT {
         // Targets already cleared/reset but stage index is still from a longer table.
-        Some(ofcore::curriculum::remap_v10_prior_sidecar_stage(state.stage))
+        Some(ofcore::curriculum::remap_v10_prior_sidecar_stage(
+            state.stage,
+        ))
     } else {
         None
     };
@@ -568,9 +591,7 @@ fn reconcile_resume_stage_and_lr(
     // Floored LRs are shared by many stages (plateau). Only treat as ambiguous
     // when lr_now is *at* the floor — values below the floor still diagnose the
     // historical "stage rewritten down, lr left high-stage" cliff.
-    let lr_at_floor = floor > 0.0
-        && state.lr_now >= floor * 0.99
-        && state.lr_now <= floor * 1.01;
+    let lr_at_floor = floor > 0.0 && state.lr_now >= floor * 0.99 && state.lr_now <= floor * 1.01;
     if !skip_stage_restore && !lr_at_floor {
         if let Some(implied) =
             ofcore::curriculum::imply_stage_from_learning_rate(state.lr_now, base_lr, decay)
@@ -596,8 +617,7 @@ fn reconcile_resume_stage_and_lr(
             state.stage
         );
     }
-    let corrected =
-        ofcore::curriculum::stage_learning_rate(base_lr, decay, state.stage, floor);
+    let corrected = ofcore::curriculum::stage_learning_rate(base_lr, decay, state.stage, floor);
     if (corrected - state.lr_now).abs() > 1e-15 {
         println!(
             "[train] recomputed resume lr_now: {:.2e} -> {corrected:.2e} \
@@ -1109,10 +1129,9 @@ mod v10_state_and_gate_tests {
         assert!(dir.join("policy_update40.safetensors").exists());
         assert!(dir.join("policy_update50.safetensors").exists());
         assert!(dir.join("latest.safetensors").exists());
-        assert!(
-            dir.join("curriculum_advance_u50_s1_to_2.safetensors")
-                .exists()
-        );
+        assert!(dir
+            .join("curriculum_advance_u50_s1_to_2.safetensors")
+            .exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1210,6 +1229,8 @@ mod v10_state_and_gate_tests {
             "weights/ae/fine.encoder.safetensors",
             Some("weights/ae/coarse.encoder.safetensors"),
             &state,
+            false,
+            false,
         );
         assert_eq!(manifest["format"], "oftrain-safetensors");
         assert_eq!(manifest["manifest_schema_version"], 1);
@@ -1238,6 +1259,16 @@ mod v10_state_and_gate_tests {
         assert_eq!(manifest["update"], 1);
         assert_eq!(manifest["stage"], 4);
         assert_eq!(manifest["curriculum_schedule"], "v10");
+        assert_eq!(manifest["architecture"]["critic"]["centralized"], false);
+        assert_eq!(
+            manifest["architecture"]["critic"]["value_in"],
+            policy::HIDDEN
+        );
+        assert_eq!(manifest["architecture"]["comms"]["partner_action"], false);
+        assert_eq!(
+            manifest["architecture"]["comms"]["context_features"],
+            policy::RECURRENT_CONTEXT_FLOATS
+        );
     }
 
     #[test]
@@ -1462,14 +1493,12 @@ mod v10_state_and_gate_tests {
         let mut wrong_profile =
             state_for_schedule(Some(ofcore::curriculum::LEGACY_V83_SCHEDULE_ID), 5);
         wrong_profile.reward_profile = Some("wrong".to_string());
-        assert!(
-            reconcile_resume_schedule(
-                &mut wrong_profile,
-                ofcore::curriculum::CurriculumSchedule::V10,
-                true,
-            )
-            .is_err()
-        );
+        assert!(reconcile_resume_schedule(
+            &mut wrong_profile,
+            ofcore::curriculum::CurriculumSchedule::V10,
+            true,
+        )
+        .is_err());
     }
 }
 
@@ -1688,6 +1717,8 @@ fn policy_manifest_value(
     ae_ckpt: &str,
     coarse_ckpt: Option<&str>,
     state: &TrainState,
+    centralized_value: bool,
+    duo_comms: bool,
 ) -> serde_json::Value {
     let mut architecture = serde_json::json!({
         "name": "oftrain-policy",
@@ -1712,6 +1743,18 @@ fn policy_manifest_value(
             "local_hidden": policy::LC,
             "transformer_layers": policy::TF_LAYERS,
             "attention_heads": policy::N_HEAD,
+        },
+        "critic": {
+            "centralized": centralized_value,
+            "value_in": if centralized_value {
+                policy::CENTRALIZED_VALUE_IN
+            } else {
+                policy::HIDDEN
+            },
+        },
+        "comms": {
+            "partner_action": duo_comms,
+            "context_features": policy::RECURRENT_CONTEXT_FLOATS,
         },
     });
     if recurrent_policy {
@@ -1762,6 +1805,8 @@ fn save_policy_manifest(cfg: &Config, state: &TrainState) -> Result<()> {
         &cfg.ae_ckpt,
         cfg.coarse_ckpt.as_deref(),
         state,
+        cfg.centralized_value,
+        cfg.duo_comms,
     );
     save_atomic(&path, |tmp| {
         std::fs::write(tmp, serde_json::to_string_pretty(&manifest)?)?;
@@ -1811,6 +1856,19 @@ struct ReadyEnv {
 /// more envs get added rather than staying fixed at `node_fraction`.
 fn agents_per(cfg: &Config) -> usize {
     cfg.n_agents.clamp(1, 2) as usize
+}
+
+fn make_policy(vs: &nn::Path, cfg: &Config) -> PolicyNet {
+    PolicyNet::new_with_options(
+        vs,
+        cfg.amp,
+        cfg.foveate,
+        cfg.gc,
+        cfg.blocks,
+        cfg.recurrent_policy,
+        cfg.centralized_value,
+        cfg.duo_comms,
+    )
 }
 
 fn engine_for_idx(idx: usize, default: EngineKind, node_fraction: f64) -> EngineKind {
@@ -1998,7 +2056,8 @@ fn transfer_act_results(
     value: &Tensor,
     len: usize,
 ) -> Result<PackedActHost> {
-    let discrete_cpu = Tensor::stack(&[a, player, tile, unit, build, nuke], 1).to_device(Device::Cpu);
+    let discrete_cpu =
+        Tensor::stack(&[a, player, tile, unit, build, nuke], 1).to_device(Device::Cpu);
     let floats_cpu = Tensor::stack(&[qty, logp, value], 1).to_device(Device::Cpu);
     let discrete: Vec<i64> = discrete_cpu.reshape([-1]).try_into()?;
     let floats: Vec<f32> = floats_cpu.reshape([-1]).try_into()?;
@@ -2060,6 +2119,11 @@ struct LearnerShard {
     vs: nn::VarStore,
     policy: PolicyNet,
     opt: nn::Optimizer,
+    /// Frozen AlphaStar-style SL/playable prior. `prior_vs` keeps the
+    /// tensors alive; evaluate is wrapped in `no_grad`.
+    #[allow(dead_code)]
+    prior_vs: Option<nn::VarStore>,
+    prior: Option<PolicyNet>,
 }
 
 /// Everything a training update needs out of one shard's rollout: the
@@ -2588,7 +2652,9 @@ fn act_contiguous_obs(
     };
     let (a, player, tile, unit, build, nuke, qty, logp, value) = action;
     Ok(ActorBatchHost {
-        packed: transfer_act_results(&a, &player, &tile, &unit, &build, &nuke, &qty, &logp, &value, n)?,
+        packed: transfer_act_results(
+            &a, &player, &tile, &unit, &build, &nuke, &qty, &logp, &value, n,
+        )?,
         hidden_in,
     })
 }
@@ -2773,19 +2839,12 @@ fn act_group(
         for p in 0..n_phys {
             let mut batch = Vec::with_capacity(na);
             for a in 0..na {
-                batch.push(
-                    rows[p * na + a]
-                        .choice
-                        .take()
-                        .expect("unsent actor choice"),
-                );
+                batch.push(rows[p * na + a].choice.take().expect("unsent actor choice"));
             }
             actor.workers[phys_start + p]
                 .choice_tx
                 .send(batch)
-                .map_err(|_| {
-                    anyhow!("env {} choice channel closed", phys_start + p)
-                })?;
+                .map_err(|_| anyhow!("env {} choice channel closed", phys_start + p))?;
         }
         completed = rows;
     }
@@ -2887,6 +2946,10 @@ mod packed_act_tests {
             legal_build: [1.0; ofcore::feat::N_BUILD],
             legal_nuke: [1.0; ofcore::feat::N_NUKE],
             local: vec![0.1; 5 * policy::LOCAL as usize * policy::LOCAL as usize],
+            partner_players: vec![0.0; ofcore::feat::MAX_SLOTS * ofcore::feat::P_FEAT],
+            partner_pmask: [0.0; ofcore::feat::MAX_SLOTS],
+            partner_scalars: [0.0; ofcore::feat::N_SCALARS],
+            partner_context: [0.0; crate::recurrent::CONTEXT_FLOATS],
         }
     }
 
@@ -3188,7 +3251,10 @@ mod packed_act_tests {
                 .pop()
                 .unwrap();
             let normalized = |row: &(Vec<i64>, Vec<f32>)| {
-                choice_from_act_values(row.0[0], row.0[1], row.0[2], row.0[3], row.0[4], row.0[5], row.1[0]).1
+                choice_from_act_values(
+                    row.0[0], row.0[1], row.0[2], row.0[3], row.0[4], row.0[5], row.1[0],
+                )
+                .1
             };
             let actual_choice = normalized(&bucketed[i]);
             let expected_choice = normalized(&singleton);
@@ -3304,7 +3370,14 @@ mod packed_act_tests {
             let (discrete, floats) = packed.row(i).unwrap();
             assert_eq!(
                 discrete,
-                &[a_v[i], player_v[i], tile_v[i], unit_v[i], build_v[i], nuke_v[i]]
+                &[
+                    a_v[i],
+                    player_v[i],
+                    tile_v[i],
+                    unit_v[i],
+                    build_v[i],
+                    nuke_v[i]
+                ]
             );
             assert_eq!(
                 floats.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
@@ -3323,8 +3396,9 @@ mod packed_act_tests {
                 discrete[5],
                 floats[0],
             );
-            let reference_choice =
-                choice_from_act_vecs(i, &a_v, &player_v, &tile_v, &unit_v, &build_v, &nuke_v, &qty_v);
+            let reference_choice = choice_from_act_vecs(
+                i, &a_v, &player_v, &tile_v, &unit_v, &build_v, &nuke_v, &qty_v,
+            );
             assert_eq!(
                 choice_bits(&packed_choice.0),
                 choice_bits(&reference_choice.0)
@@ -3359,9 +3433,10 @@ mod packed_act_tests {
             .iter()
             .map(|values| Tensor::from_slice(values))
             .collect();
-        let packed =
-            transfer_act_results(&d[0], &d[1], &d[2], &d[3], &d[4], &d[5], &f[0], &f[1], &f[2], 2)
-                .unwrap();
+        let packed = transfer_act_results(
+            &d[0], &d[1], &d[2], &d[3], &d[4], &d[5], &f[0], &f[1], &f[2], 2,
+        )
+        .unwrap();
 
         for row in 0..2 {
             let (actual_d, actual_f) = packed.row(row).unwrap();
@@ -4001,6 +4076,8 @@ pub struct BenchmarkConfig<'a> {
     pub gc: i64,
     pub blocks: i64,
     pub recurrent_policy: bool,
+    pub centralized_value: bool,
+    pub duo_comms: bool,
     pub pinned_h2d: bool,
     pub fp16_rollout: bool,
     pub compact_rollout: bool,
@@ -4010,13 +4087,15 @@ pub struct BenchmarkConfig<'a> {
 
 pub fn run_benchmark(cfg: BenchmarkConfig<'_>) -> Result<()> {
     let mut vs = nn::VarStore::new(cfg.device);
-    let policy = PolicyNet::new_with_recurrence(
+    let policy = PolicyNet::new_with_options(
         &vs.root(),
         cfg.amp,
         cfg.foveate,
         cfg.gc,
         cfg.blocks,
         cfg.recurrent_policy,
+        cfg.centralized_value,
+        cfg.duo_comms,
     );
     vs.load(cfg.checkpoint)?;
     let ae = crate::ae::AePair::load(
@@ -4218,6 +4297,138 @@ fn apply_weight_snapshot(vs: &nn::VarStore, snapshot: &CpuWeightSnapshot) -> Res
     Ok(())
 }
 
+/// Copy same-name, same-shape tensors from `src` into `dest`. Extra keys
+/// (e.g. LSTM on a v11 checkpoint) and missing dest keys are skipped so a
+/// feedforward duo policy can warm-start / KL-anchor on a recurrent prior.
+fn copy_matching_weights(src: &nn::VarStore, dest: &mut nn::VarStore) -> Result<(usize, usize)> {
+    let src_vars = src.variables();
+    let mut dest_vars = dest.variables();
+    let mut copied = 0usize;
+    let mut skipped = 0usize;
+    tch::no_grad(|| {
+        for (name, src_t) in src_vars {
+            match dest_vars.remove(&name) {
+                Some(mut dest_t) if dest_t.size() == src_t.size() => {
+                    let source = src_t.to_device(dest_t.device()).to_kind(dest_t.kind());
+                    dest_t.f_copy_(&source)?;
+                    copied += 1;
+                }
+                Some(_) | None => skipped += 1,
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    })?;
+    Ok((copied, skipped))
+}
+
+fn manifest_source_is_recurrent(ckpt_path: &str) -> bool {
+    read_architecture_manifest(ckpt_path, 3)
+        .ok()
+        .map(|m| m["architecture"]["schema_version"] == 3)
+        .unwrap_or(false)
+}
+
+fn manifest_source_is_centralized(ckpt_path: &str) -> bool {
+    for schema in [1u64, 3] {
+        if let Ok(m) = read_architecture_manifest(ckpt_path, schema) {
+            return m["architecture"]["critic"]["centralized"] == true;
+        }
+    }
+    false
+}
+
+fn manifest_source_has_comms(ckpt_path: &str) -> bool {
+    for schema in [1u64, 3] {
+        if let Ok(m) = read_architecture_manifest(ckpt_path, schema) {
+            return m["architecture"]["comms"]["partner_action"] == true;
+        }
+    }
+    false
+}
+
+/// Load `path` into `dest`. Tries a strict VarStore load first; on mismatch
+/// (recurrent ↔ feedforward, or local ↔ MAPPO critic) copies intersecting tensors.
+fn load_compatible_weights(
+    dest: &mut nn::VarStore,
+    path: &str,
+    amp: bool,
+    foveate: bool,
+    gc: i64,
+    blocks: i64,
+    dest_recurrent: bool,
+    dest_centralized: bool,
+    dest_comms: bool,
+) -> Result<(usize, usize)> {
+    match dest.load(path) {
+        Ok(()) => return Ok((dest.variables().len(), 0)),
+        Err(strict_err) => {
+            let src_recurrent = manifest_source_is_recurrent(path);
+            let src_centralized = manifest_source_is_centralized(path);
+            let src_comms = manifest_source_has_comms(path);
+            if src_recurrent == dest_recurrent
+                && src_centralized == dest_centralized
+                && src_comms == dest_comms
+            {
+                return Err(strict_err.into());
+            }
+            let mut src = nn::VarStore::new(Device::Cpu);
+            let _ = PolicyNet::new_with_options(
+                &src.root(),
+                amp,
+                foveate,
+                gc,
+                blocks,
+                src_recurrent,
+                src_centralized,
+                src_comms,
+            );
+            src.load(path).map_err(|load_err| {
+                anyhow!("compatible load of {path} failed after strict mismatch ({strict_err}); source load: {load_err}")
+            })?;
+            let (copied, skipped) = copy_matching_weights(&src, dest)?;
+            anyhow::ensure!(
+                copied > 0,
+                "compatible load of {path} copied 0 tensors (strict error: {strict_err})"
+            );
+            println!(
+                "[train] compatible load {path}: copied {copied} tensors, skipped {skipped} \
+                 (source recurrent={src_recurrent} dest recurrent={dest_recurrent} \
+                 source centralized={src_centralized} dest centralized={dest_centralized})"
+            );
+            Ok((copied, skipped))
+        }
+    }
+}
+
+fn build_frozen_prior(cfg: &Config, device: Device) -> Result<Option<(nn::VarStore, PolicyNet)>> {
+    let Some(path) = cfg.kl_prior.as_ref() else {
+        return Ok(None);
+    };
+    if cfg.kl_coef <= 0.0 {
+        println!("[train] --kl-prior set but --kl-coef is 0; skipping KL term");
+        return Ok(None);
+    }
+    let mut vs = nn::VarStore::new(device);
+    let policy = make_policy(&vs.root(), cfg);
+    load_compatible_weights(
+        &mut vs,
+        path,
+        cfg.amp,
+        cfg.foveate,
+        cfg.gc,
+        cfg.blocks,
+        cfg.recurrent_policy,
+        cfg.centralized_value,
+        cfg.duo_comms,
+    )?;
+    vs.freeze();
+    println!(
+        "[train] frozen KL prior from {path} (kl_coef={:.4})",
+        cfg.kl_coef
+    );
+    Ok(Some((vs, policy)))
+}
+
 /// Conv towers / tile heads the actor runs under `--amp` via
 /// `conv2d_bf16`. Storing them as BF16 in the actor VarStore halves that
 /// shard of policy VRAM; the learner keeps f32 for Adam. One-step-lag
@@ -4245,7 +4456,7 @@ fn cast_actor_inference_weights_bf16(vs: &nn::VarStore) {
 
 #[derive(Clone)]
 struct EvalReportContext {
-    losses: (f64, f64, f64, f64),
+    losses: (f64, f64, f64, f64, f64),
     win_rate: Option<f64>,
     lr_now: f64,
     total_env_steps: u64,
@@ -4294,14 +4505,7 @@ fn save_snapshot_checkpoint(
     // Materialize directly on CPU. The immutable snapshot remains owned by
     // the eval job and no training CUDA state or VarStore is touched.
     let vs = nn::VarStore::new(Device::Cpu);
-    let _ = PolicyNet::new_with_recurrence(
-        &vs.root(),
-        cfg.amp,
-        cfg.foveate,
-        cfg.gc,
-        cfg.blocks,
-        cfg.recurrent_policy,
-    );
+    let _ = make_policy(&vs.root(), cfg);
     apply_weight_snapshot(&vs, snapshot)?;
     save_checkpoint(&vs, path, state)
 }
@@ -4360,14 +4564,7 @@ impl AsyncEval {
                 // destroyed on this owner thread.
                 let initialized = (|| -> Result<(nn::VarStore, PolicyNet, crate::ae::AePair)> {
                     let vs = nn::VarStore::new(device);
-                    let policy = PolicyNet::new_with_recurrence(
-                        &vs.root(),
-                        cfg.amp,
-                        cfg.foveate,
-                        cfg.gc,
-                        cfg.blocks,
-                        cfg.recurrent_policy,
-                    );
+                    let policy = make_policy(&vs.root(), &cfg);
                     let path = std::path::Path::new(&cfg.ae_ckpt);
                     anyhow::ensure!(
                         path.exists(),
@@ -4566,6 +4763,7 @@ fn report_eval_completion(
         completion.report.losses.1,
         completion.report.losses.2,
         completion.report.losses.3,
+        completion.report.losses.4,
         completion.report.win_rate,
         completion.report.lr_now,
         completion.report.total_env_steps,
@@ -4635,7 +4833,7 @@ mod async_eval_tests {
             promoted: false,
             best: Some((0.8, 4.0)),
             report: EvalReportContext {
-                losses: (1.0, 2.0, 3.0, 4.0),
+                losses: (1.0, 2.0, 3.0, 4.0, 0.0),
                 win_rate: Some(0.5),
                 lr_now: 1e-4,
                 total_env_steps: 99,
@@ -4827,14 +5025,7 @@ fn build_actor_shard(
     // All CUDA-bearing actor resources are created and destroyed on the
     // persistent actor thread.
     let vs = nn::VarStore::new(device);
-    let policy = PolicyNet::new_with_recurrence(
-        &vs.root(),
-        cfg.amp,
-        cfg.foveate,
-        cfg.gc,
-        cfg.blocks,
-        cfg.recurrent_policy,
-    );
+    let policy = make_policy(&vs.root(), cfg);
     apply_weight_snapshot(&vs, &initial_weights)?;
     if cfg.amp {
         cast_actor_inference_weights_bf16(&vs);
@@ -5273,7 +5464,7 @@ enum LearnerReply {
     Trained {
         id: u64,
         shard: usize,
-        losses: (f64, f64, f64, f64),
+        losses: (f64, f64, f64, f64, f64),
         weights: CpuWeightSnapshot,
         ret_stat: RetStat,
         train_seconds: f64,
@@ -5337,16 +5528,13 @@ fn learner_loop(
     eprintln!("[phase] persistent learner initialization started");
     let initialized = (|| -> Result<LearnerShard> {
         let vs = nn::VarStore::new(device);
-        let policy = PolicyNet::new_with_recurrence(
-            &vs.root(),
-            cfg.amp,
-            cfg.foveate,
-            cfg.gc,
-            cfg.blocks,
-            cfg.recurrent_policy,
-        );
+        let policy = make_policy(&vs.root(), &cfg);
         apply_weight_snapshot(&vs, &initial_weights)?;
         let opt = nn::AdamW::default().build(&vs, initial_lr)?;
+        let (prior_vs, prior) = match build_frozen_prior(&cfg, device)? {
+            Some((vs, policy)) => (Some(vs), Some(policy)),
+            None => (None, None),
+        };
         if let Device::Cuda(index) = device {
             Cuda::synchronize(index as i64);
         }
@@ -5355,6 +5543,8 @@ fn learner_loop(
             vs,
             policy,
             opt,
+            prior_vs,
+            prior,
         })
     })();
     let mut learner = match initialized {
@@ -5565,7 +5755,7 @@ fn learner_loop(
 }
 
 struct TrainReply {
-    losses: (f64, f64, f64, f64),
+    losses: (f64, f64, f64, f64, f64),
     weights: Vec<CpuWeightSnapshot>,
     train_seconds: f64,
     snapshot_seconds: f64,
@@ -5877,7 +6067,7 @@ impl PersistentLearner {
         }
         let mut trained: Vec<
             Option<(
-                (f64, f64, f64, f64),
+                (f64, f64, f64, f64, f64),
                 CpuWeightSnapshot,
                 RetStat,
                 f64,
@@ -5909,7 +6099,7 @@ impl PersistentLearner {
                 reply => return Err(learner_reply_error("matching train result", &reply)),
             }
         }
-        let mut losses = (0.0, 0.0, 0.0, 0.0);
+        let mut losses = (0.0, 0.0, 0.0, 0.0, 0.0);
         let mut weights = Vec::with_capacity(world);
         let mut train_seconds = 0.0f64;
         let mut snapshot_seconds = 0.0f64;
@@ -5921,6 +6111,7 @@ impl PersistentLearner {
             losses.1 += local.1 / world as f64;
             losses.2 += local.2 / world as f64;
             losses.3 += local.3 / world as f64;
+            losses.4 += local.4 / world as f64;
             self.ret_stat.add_batch(stat.count, stat.sum, stat.sum_sq);
             weights.push(snapshot);
             train_seconds = train_seconds.max(train_s);
@@ -6147,26 +6338,31 @@ fn sync_grads(shards: &[LearnerShard]) {
     }
 }
 
-/// True if any shard's (pg, v, ent, entq) loss tuple has a non-finite
+/// True if any shard's (pg, v, ent, entq, kl) loss tuple has a non-finite
 /// (NaN/Inf) component - see `train_update`'s NaN guard (docs/devlog.html's
 /// 2026-07-12 entry) for why this gates skipping `opt.step()` for a
 /// minibatch rather than applying a poisoned gradient.
-fn any_loss_non_finite(losses: &[(f64, f64, f64, f64)]) -> bool {
-    losses.iter().any(|(pg, v, ent, entq)| {
-        !pg.is_finite() || !v.is_finite() || !ent.is_finite() || !entq.is_finite()
+fn any_loss_non_finite(losses: &[(f64, f64, f64, f64, f64)]) -> bool {
+    losses.iter().any(|(pg, v, ent, entq, kl)| {
+        !pg.is_finite()
+            || !v.is_finite()
+            || !ent.is_finite()
+            || !entq.is_finite()
+            || !kl.is_finite()
     })
 }
 
-fn read_loss_scalars(losses: [&Tensor; 4]) -> (f64, f64, f64, f64) {
-    // One packed D2H read replaces four scalar synchronizations. PPO losses
+fn read_loss_scalars(losses: [&Tensor; 5]) -> (f64, f64, f64, f64, f64) {
+    // One packed D2H read replaces five scalar synchronizations. PPO losses
     // are Float tensors, so widening each returned f32 preserves every bit.
     let packed = Tensor::stack(&losses, 0).to_device(Device::Cpu);
-    let values = Vec::<f32>::try_from(&packed).unwrap_or_else(|_| vec![0.0; 4]);
+    let values = Vec::<f32>::try_from(&packed).unwrap_or_else(|_| vec![0.0; 5]);
     (
         values[0] as f64,
         values[1] as f64,
         values[2] as f64,
         values[3] as f64,
+        values.get(4).copied().unwrap_or(0.0) as f64,
     )
 }
 
@@ -6260,7 +6456,7 @@ fn train_update(
         &mut dyn FnMut(&mut LearnerShard, usize, usize, bool) -> Result<bool>,
     >,
     timings: &mut TrainTimings,
-) -> Result<(f64, f64, f64, f64)> {
+) -> Result<(f64, f64, f64, f64, f64)> {
     debug_assert!(!exclusive_owner || learners.len() == 1);
     let t_len = cfg.rollout_len;
     // Derive the live per-shard env count from the actual rollout data,
@@ -6284,7 +6480,7 @@ fn train_update(
     // returned as means, matching `rl/ppo.py`'s `*_sum / n_mb` (whose
     // entropy mean drives the entropy-floor controller; last-minibatch
     // snapshots read artificially noisy/low).
-    let mut loss_sums = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    let mut loss_sums = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let mut n_mb: usize = 0;
 
     // Per-shard full-rollout tensors, built once (CPU repack + one
@@ -6677,7 +6873,7 @@ fn train_update(
             for shard in learners.iter_mut() {
                 shard.opt.zero_grad();
             }
-            let mut mb_loss_sums = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+            let mut mb_loss_sums = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
             let mut discard_mb = false;
 
             for s_i in 0..n_subs {
@@ -6697,9 +6893,17 @@ fn train_update(
                         let shard = $shard;
                         let sb = $sb;
                         let idx_t = $idx_t;
-                        let (logp, ent, ent_q, value, quantity, adv_t, ret_t, old_logp_t) = if cfg
-                            .recurrent_policy
-                        {
+                        let (
+                            logp,
+                            ent,
+                            ent_q,
+                            value,
+                            quantity,
+                            adv_t,
+                            ret_t,
+                            old_logp_t,
+                            gather_idx,
+                        ) = if cfg.recurrent_policy {
                             let hidden_all = sb.hidden_in.as_ref().expect("recurrent hidden batch");
                             let context_all = sb.context.as_ref().expect("recurrent context batch");
                             let reset_all =
@@ -6757,6 +6961,7 @@ fn train_update(
                                 sb.adv.index_select(0, &target_idx),
                                 sb.ret.index_select(0, &target_idx),
                                 sb.old_logp.index_select(0, &target_idx),
+                                target_idx,
                             )
                         } else {
                             let obs_t = sb.obs.index_select(&idx_t);
@@ -6771,6 +6976,7 @@ fn train_update(
                                 sb.adv.index_select(0, &idx_t),
                                 sb.ret.index_select(0, &idx_t),
                                 sb.old_logp.index_select(0, &idx_t),
+                                idx_t.shallow_clone(),
                             )
                         };
                         // Bound log-ratio before exp (see prior
@@ -6801,19 +7007,37 @@ fn train_update(
                             .sum(Kind::Float)
                             .clamp_min(1.0);
                         let entq_loss = ent_q.sum(Kind::Float) / &n_active;
+                        // AlphaStar reverse KL: mean(log π − log π_prior) on
+                        // on-policy actions. Freeze the prior forward; keep
+                        // autograd through `logp` so the coefficient actually
+                        // pulls the live policy toward the playable prior.
+                        let kl_loss = match shard.prior.as_ref() {
+                            Some(prior) if cfg.kl_coef > 0.0 => {
+                                let prior_logp = tch::no_grad(|| {
+                                    let (lp, _, _, _) = prior.evaluate(
+                                        &sb.obs.index_select(&gather_idx),
+                                        &sb.choice.index_select(&gather_idx),
+                                    );
+                                    lp
+                                });
+                                (&logp - prior_logp).mean(Kind::Float)
+                            }
+                            _ => Tensor::from(0f32).to_device(shard.device),
+                        };
                         let loss = (&pg_loss + cfg.vf_coef as f64 * &v_loss
                             - ent_coef as f64 * &ent_loss
-                            - cfg.entq_coef as f64 * &entq_loss)
+                            - cfg.entq_coef as f64 * &entq_loss
+                            + cfg.kl_coef as f64 * &kl_loss)
                             * w_sub;
 
                         // Grads accumulate across pixel-budget
                         // subs (zero_grad ran once above).
                         loss.backward();
 
-                        read_loss_scalars([&pg_loss, &v_loss, &ent_loss, &entq_loss])
+                        read_loss_scalars([&pg_loss, &v_loss, &ent_loss, &entq_loss, &kl_loss])
                     }};
                 }
-                let per_shard_losses: Vec<(f64, f64, f64, f64)> = if exclusive_owner {
+                let per_shard_losses: Vec<(f64, f64, f64, f64, f64)> = if exclusive_owner {
                     vec![backward_shard!(
                         &mut learners[0],
                         &mut shard_batches[0],
@@ -6851,18 +7075,19 @@ fn train_update(
                 if any_loss_non_finite(&per_shard_losses) {
                     eprintln!(
                         "[train] WARNING: non-finite loss in epoch={_epoch} mb={m} sub={s_i} \
-                         (per-shard pg/v/ent/entq={per_shard_losses:?}) - discarding this \
+                         (per-shard pg/v/ent/entq/kl={per_shard_losses:?}) - discarding this \
                          minibatch's gradients without stepping the optimizer (see \
                          docs/devlog.html's 2026-07-12 NaN-guard entry)"
                     );
                     discard_mb = true;
                     break;
                 }
-                for (pg, v, ent, entq) in &per_shard_losses {
+                for (pg, v, ent, entq, kl) in &per_shard_losses {
                     mb_loss_sums.0 += pg / n_shards * w_sub;
                     mb_loss_sums.1 += v / n_shards * w_sub;
                     mb_loss_sums.2 += ent / n_shards * w_sub;
                     mb_loss_sums.3 += entq / n_shards * w_sub;
+                    mb_loss_sums.4 += kl / n_shards * w_sub;
                 }
             }
 
@@ -6892,6 +7117,7 @@ fn train_update(
             loss_sums.1 += mb_loss_sums.1;
             loss_sums.2 += mb_loss_sums.2;
             loss_sums.3 += mb_loss_sums.3;
+            loss_sums.4 += mb_loss_sums.4;
             n_mb += 1;
             let fwdbwd_dt = mb_t0.elapsed().as_secs_f64();
 
@@ -6934,6 +7160,7 @@ fn train_update(
         loss_sums.1 / d,
         loss_sums.2 / d,
         loss_sums.3 / d,
+        loss_sums.4 / d,
     ))
 }
 
@@ -6958,6 +7185,86 @@ pub fn run(mut cfg: Config) -> Result<()> {
             "[train] team-mode duo: {} physical games × {} agents (alliances ON; pact for ally train gold)",
             cfg.num_envs, cfg.n_agents
         );
+        if cfg.centralized_value {
+            println!(
+                "[train] MAPPO centralized critic: V=cat(h, partner_pool, partner_scalars); policy local"
+            );
+        } else {
+            println!(
+                "[train] --duo with local (IPPO) critic; pass --centralized-value to enable MAPPO V"
+            );
+        }
+        if cfg.duo_comms {
+            println!(
+                "[train] duo comms: π residual on partner last ActionOutcome (14 floats, one-step delay)"
+            );
+        }
+        if cfg.reward_config.duo_pact_success != 0.0 {
+            println!(
+                "[train] duo pact-success bonus={:.3} (one-shot on first formal alliance; not donate/request)",
+                cfg.reward_config.duo_pact_success
+            );
+        }
+        if cfg.reward_config.duo_eco_coef != 0.0 {
+            println!(
+                "[train] duo eco PBRS coef={:.3} on log team gold-income (not gold stock; cities/ports raise Φ)",
+                cfg.reward_config.duo_eco_coef
+            );
+        }
+        if cfg.reward_config.duo_first_city != 0.0 || cfg.reward_config.duo_first_port != 0.0 {
+            println!(
+                "[train] duo first-structure bonuses city={:.3} port={:.3} (one-shot on completed building; not the build action)",
+                cfg.reward_config.duo_first_city, cfg.reward_config.duo_first_port
+            );
+        }
+        if cfg.reward_config.duo_city_delete != 0.0 || cfg.reward_config.duo_port_delete != 0.0 {
+            println!(
+                "[train] duo structure-delete penalties city={:.3} port={:.3} (count drop; not the delete_unit action)",
+                cfg.reward_config.duo_city_delete, cfg.reward_config.duo_port_delete
+            );
+        }
+        if cfg.reward_config.duo_boat_commit != 0.0 {
+            println!(
+                "[train] duo boat-commit PBRS coef={:.3} on team in-flight TransportShip count (not the boat action; absorbing Φ=0)",
+                cfg.reward_config.duo_boat_commit
+            );
+        }
+        if cfg.reward_config.duo_leftover_continent != 0.0 {
+            println!(
+                "[train] duo leftover-continent PBRS coef={:.3} on team/(team+leftover opponent) on occupied landmasses (not an attack/boat action; absorbing Φ=0)",
+                cfg.reward_config.duo_leftover_continent
+            );
+        }
+        if cfg.reward_config.duo_port_stand != 0.0 {
+            println!(
+                "[train] duo port-stand PBRS coef={:.3} on team completed Port count (not the build action; absorbing Φ=0)",
+                cfg.reward_config.duo_port_stand
+            );
+        }
+        if cfg.reward_config.duo_continent_span != 0.0 {
+            println!(
+                "[train] duo continent-span PBRS coef={:.3} on occupied landmass count (not a boat/attack action; absorbing Φ=0)",
+                cfg.reward_config.duo_continent_span
+            );
+        }
+        if cfg.reward_config.duo_boat_land != 0.0 {
+            println!(
+                "[train] duo boat-land PBRS coef={:.3} on team UsefulLanding count (not the boat action; absorbing Φ=0)",
+                cfg.reward_config.duo_boat_land
+            );
+        }
+        if cfg.reward_config.duo_city_stand != 0.0 {
+            println!(
+                "[train] duo city-stand PBRS coef={:.3} on team completed City count (not the build action; absorbing Φ=0)",
+                cfg.reward_config.duo_city_stand
+            );
+        }
+        if cfg.reward_config.duo_defense_stand != 0.0 {
+            println!(
+                "[train] duo defense-stand PBRS coef={:.3} on team completed Defense Post count (not the build action; absorbing Φ=0)",
+                cfg.reward_config.duo_defense_stand
+            );
+        }
     }
     if cfg.recurrent_policy {
         anyhow::ensure!(
@@ -7046,14 +7353,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             );
         }
         let mut snapshot = nn::VarStore::new(Device::Cpu);
-        let _ = PolicyNet::new_with_recurrence(
-            &snapshot.root(),
-            cfg.amp,
-            cfg.foveate,
-            cfg.gc,
-            cfg.blocks,
-            cfg.recurrent_policy,
-        );
+        let _ = make_policy(&snapshot.root(), &cfg);
         snapshot.load(resume_path)?;
         let state_path = state_sidecar_path(resume_path);
         resumed_state = match std::fs::read_to_string(&state_path) {
@@ -7092,19 +7392,19 @@ pub fn run(mut cfg: Config) -> Result<()> {
         );
         Some(snapshot)
     } else if let Some(init_path) = &cfg.init {
-        if cfg.recurrent_policy {
-            let _ = read_architecture_manifest(init_path, 3)?;
-        }
         let mut snapshot = nn::VarStore::new(Device::Cpu);
-        let _ = PolicyNet::new_with_recurrence(
-            &snapshot.root(),
+        let _ = make_policy(&snapshot.root(), &cfg);
+        load_compatible_weights(
+            &mut snapshot,
+            init_path,
             cfg.amp,
             cfg.foveate,
             cfg.gc,
             cfg.blocks,
             cfg.recurrent_policy,
-        );
-        snapshot.load(init_path)?;
+            cfg.centralized_value,
+            cfg.duo_comms,
+        )?;
         println!(
             "[train] warm-started weights from {init_path} (--init; fresh TrainState / optimizer)"
         );
@@ -7200,14 +7500,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
     let persistent_learner_enabled = cfg.persistent_actors;
     if persistent_learner_enabled && hub_vs.is_none() {
         let snapshot = nn::VarStore::new(Device::Cpu);
-        let _ = PolicyNet::new_with_recurrence(
-            &snapshot.root(),
-            cfg.amp,
-            cfg.foveate,
-            cfg.gc,
-            cfg.blocks,
-            cfg.recurrent_policy,
-        );
+        let _ = make_policy(&snapshot.root(), &cfg);
         hub_vs = Some(snapshot);
     }
     // Build the packed host snapshot once. Phase 2 previously wrote the
@@ -7272,14 +7565,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             }
         }
         let mut learner_vs = nn::VarStore::new(device);
-        let learner_policy = PolicyNet::new_with_recurrence(
-            &learner_vs.root(),
-            cfg.amp,
-            cfg.foveate,
-            cfg.gc,
-            cfg.blocks,
-            cfg.recurrent_policy,
-        );
+        let learner_policy = make_policy(&learner_vs.root(), &cfg);
         if let Some(hub) = &hub_vs {
             learner_vs.copy(hub)?;
         } else {
@@ -7289,14 +7575,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 // parameters (VarStore::copy handles the cross-device
                 // transfer).
                 let mut snapshot = nn::VarStore::new(Device::Cpu);
-                let _ = PolicyNet::new_with_recurrence(
-                    &snapshot.root(),
-                    cfg.amp,
-                    cfg.foveate,
-                    cfg.gc,
-                    cfg.blocks,
-                    cfg.recurrent_policy,
-                );
+                let _ = make_policy(&snapshot.root(), &cfg);
                 snapshot.copy(&learner_vs)?;
                 snapshot
             });
@@ -7312,11 +7591,17 @@ pub fn run(mut cfg: Config) -> Result<()> {
             );
         }
 
+        let (prior_vs, prior) = match build_frozen_prior(&cfg, device)? {
+            Some((vs, policy)) => (Some(vs), Some(policy)),
+            None => (None, None),
+        };
         learners.push(LearnerShard {
             device,
             vs: learner_vs,
             policy: learner_policy,
             opt,
+            prior_vs,
+            prior,
         });
         if cfg.persistent_actors {
             let initial_version = resumed_state.as_ref().map(|s| s.update).unwrap_or(0);
@@ -7331,14 +7616,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             )?);
         } else {
             let mut actor_vs = nn::VarStore::new(device);
-            let actor_policy = PolicyNet::new_with_recurrence(
-                &actor_vs.root(),
-                cfg.amp,
-                cfg.foveate,
-                cfg.gc,
-                cfg.blocks,
-                cfg.recurrent_policy,
-            );
+            let actor_policy = make_policy(&actor_vs.root(), &cfg);
             actor_vs.copy(&learners[gi].vs)?;
             if cfg.amp {
                 cast_actor_inference_weights_bf16(&actor_vs);
@@ -7433,6 +7711,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
     } else {
         None
     };
+    if cfg.max_gpu_util > 0.0 {
+        println!(
+            "[train] max GPU SM util cap={:.0}% (duty-cycle sleep after each update; leaves headroom for other GPU jobs)",
+            cfg.max_gpu_util * 100.0
+        );
+    }
 
     // Resolve `auto_scale_envs`' bounds once up front (cheap, and only
     // ever logged/used when the flag is actually on): `max_envs=0` means
@@ -8010,7 +8294,11 @@ pub fn run(mut cfg: Config) -> Result<()> {
                         println!(
                             "[train] stage {curr_stage} env floor {floor} capped to \
                              max_envs={} (live={live_envs_per_shard}); skipping noop resize",
-                            if cfg.auto_scale_envs { cfg.max_envs } else { floor }
+                            if cfg.auto_scale_envs {
+                                cfg.max_envs
+                            } else {
+                                floor
+                            }
                         );
                     }
                 }
@@ -8608,7 +8896,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
             };
             println!(
                 "[update {:>5}] steps/s={:>7.1} decisions_total={:>9} eps_done={:>5} recent_reward={:>8.3} \
-                 pg={:>+.4} v={:>.4} ent={:>.3} entq={:>+.3} ecoef={:.4} stage={} lr={:.2e} elapsed={:.0}s \
+                 pg={:>+.4} v={:>.4} ent={:>.3} entq={:>+.3} kl={:>.4} ecoef={:.4} stage={} lr={:.2e} elapsed={:.0}s \
                  update_s={:.1} collect_s={:.1} train_s={:.1} epochs={} actor_work_s={:.1} \
                  batch_build_s={:.3} gradient_sync_s={:.3} learner_snapshot_s={:.3} \
                  refresh_s={:.3}{gpu_str}",
@@ -8621,6 +8909,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 last_losses.1,
                 last_losses.2,
                 last_losses.3,
+                last_losses.4,
                 ent_coef_now,
                 curr_stage,
                 lr_now,
@@ -8650,6 +8939,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 last_losses.1,
                 last_losses.2,
                 last_losses.3,
+                last_losses.4,
                 win_rate,
                 lr_now,
                 total_env_steps,
@@ -8657,6 +8947,24 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 None,
             ) {
                 eprintln!("[train] WARNING: metrics log failed: {e:#}");
+            }
+        }
+
+        if cfg.max_gpu_util > 0.0 {
+            if let Some(s) = gpu_sampler.as_ref() {
+                let u = s.snapshot().max_instant_util_frac();
+                let sleep_s =
+                    duty_sleep_secs(update_start.elapsed().as_secs_f64(), u, cfg.max_gpu_util);
+                if sleep_s > 0.02 {
+                    if update % cfg.log_every.max(1) == 0 {
+                        println!(
+                            "[gpu-cap] sleep={sleep_s:.2}s util={:.0}% cap={:.0}%",
+                            u * 100.0,
+                            cfg.max_gpu_util * 100.0
+                        );
+                    }
+                    std::thread::sleep(Duration::from_secs_f64(sleep_s));
+                }
             }
         }
 
@@ -8971,11 +9279,9 @@ mod persistent_actor_tests {
             .accept(&LearnerCommand::Shutdown { id: 3 })
             .unwrap();
         assert!(protocol.stopped);
-        assert!(
-            protocol
-                .accept(&LearnerCommand::Shutdown { id: 4 })
-                .is_err()
-        );
+        assert!(protocol
+            .accept(&LearnerCommand::Shutdown { id: 4 })
+            .is_err());
     }
 
     #[test]
@@ -9004,6 +9310,8 @@ mod persistent_actor_tests {
         Config {
             num_envs: 1,
             n_agents: 1,
+            centralized_value: false,
+            duo_comms: false,
             num_gpus: 1,
             stage: 0,
             curriculum_schedule: ofcore::curriculum::CurriculumSchedule::V10,
@@ -9054,6 +9362,19 @@ mod persistent_actor_tests {
                 v10_combat_action: 0.0,
                 v10_timeout_closeout: 0.0,
                 v10_closeout_entry: 0.0,
+                duo_pact_success: 0.0,
+                duo_eco_coef: 0.0,
+                duo_first_city: 0.0,
+                duo_first_port: 0.0,
+                duo_city_delete: 0.0,
+                duo_port_delete: 0.0,
+                duo_boat_commit: 0.0,
+                duo_leftover_continent: 0.0,
+                duo_port_stand: 0.0,
+                duo_continent_span: 0.0,
+                duo_boat_land: 0.0,
+                duo_city_stand: 0.0,
+                duo_defense_stand: 0.0,
             },
             lambda: 0.95,
             clip: 0.2,
@@ -9106,9 +9427,12 @@ mod persistent_actor_tests {
             init: None,
             resume: None,
             resume_warmup_updates: 0,
+            kl_prior: None,
+            kl_coef: 0.0,
             value_loss: ValueLoss::Mse,
             auto_scale_envs: false,
             target_gpu_util: 0.95,
+            max_gpu_util: 0.0,
             min_envs: 1,
             max_envs: 1,
             autoscale_check_every: 5,
@@ -9162,6 +9486,10 @@ mod persistent_actor_tests {
             legal_build: [1.0; ofcore::feat::N_BUILD],
             legal_nuke: [1.0; ofcore::feat::N_NUKE],
             local: vec![0.1; 5 * policy::LOCAL as usize * policy::LOCAL as usize],
+            partner_players: vec![0.0; ofcore::feat::MAX_SLOTS * ofcore::feat::P_FEAT],
+            partner_pmask: [0.0; ofcore::feat::MAX_SLOTS],
+            partner_scalars: [0.0; ofcore::feat::N_SCALARS],
+            partner_context: [0.0; crate::recurrent::CONTEXT_FLOATS],
         }
     }
 
@@ -9213,6 +9541,8 @@ mod persistent_actor_tests {
             vs,
             policy,
             opt,
+            prior_vs: None,
+            prior: None,
         }
     }
 
@@ -9266,6 +9596,7 @@ mod persistent_actor_tests {
             (legacy_losses.1, owned_losses.1),
             (legacy_losses.2, owned_losses.2),
             (legacy_losses.3, owned_losses.3),
+            (legacy_losses.4, owned_losses.4),
         ] {
             assert!((legacy_loss - owned_loss).abs() < 1e-6);
         }
@@ -9302,13 +9633,21 @@ mod persistent_actor_tests {
             Tensor::from(-0.0f32),
             Tensor::from(f32::from_bits(0x3f80_0001)),
             Tensor::from(-17.5f32),
+            Tensor::from(0.03125f32),
         ];
-        let packed = read_loss_scalars([&tensors[0], &tensors[1], &tensors[2], &tensors[3]]);
+        let packed = read_loss_scalars([
+            &tensors[0],
+            &tensors[1],
+            &tensors[2],
+            &tensors[3],
+            &tensors[4],
+        ]);
         let individual = (
             f64::try_from(&tensors[0]).unwrap(),
             f64::try_from(&tensors[1]).unwrap(),
             f64::try_from(&tensors[2]).unwrap(),
             f64::try_from(&tensors[3]).unwrap(),
+            f64::try_from(&tensors[4]).unwrap(),
         );
         assert_eq!(
             [
@@ -9316,14 +9655,50 @@ mod persistent_actor_tests {
                 packed.1.to_bits(),
                 packed.2.to_bits(),
                 packed.3.to_bits(),
+                packed.4.to_bits(),
             ],
             [
                 individual.0.to_bits(),
                 individual.1.to_bits(),
                 individual.2.to_bits(),
                 individual.3.to_bits(),
+                individual.4.to_bits(),
             ]
         );
+    }
+
+    #[test]
+    fn copy_matching_weights_skips_recurrent_only_keys() {
+        let mut dest = nn::VarStore::new(Device::Cpu);
+        let _ = PolicyNet::new_with_recurrence(&dest.root(), false, false, 8, 1, false);
+        let src = nn::VarStore::new(Device::Cpu);
+        let _ = PolicyNet::new_with_recurrence(&src.root(), false, false, 8, 1, true);
+        tch::no_grad(|| {
+            for (_, mut t) in dest.variables() {
+                let _ = t.f_fill_(0.0);
+            }
+            for (_, mut t) in src.variables() {
+                let _ = t.f_fill_(0.5);
+            }
+        });
+        let (copied, skipped) = copy_matching_weights(&src, &mut dest).unwrap();
+        assert!(
+            copied > 0,
+            "expected overlapping trunk tensors, copied={copied}"
+        );
+        assert!(
+            skipped > 0,
+            "LSTM / extra recurrent keys must be skipped, skipped={skipped}"
+        );
+        let dest_vars = dest.variables();
+        for (name, src_t) in src.variables() {
+            if let Some(dest_t) = dest_vars.get(&name) {
+                if dest_t.size() == src_t.size() {
+                    let diff = (dest_t - src_t).abs().max().double_value(&[]);
+                    assert!(diff < 1e-6, "{name} not copied (diff={diff})");
+                }
+            }
+        }
     }
 
     #[test]
@@ -9354,9 +9729,16 @@ mod persistent_actor_tests {
                 rand::rngs::SmallRng::seed_from_u64(77),
             )
             .unwrap();
-            let one_reply = one.train(vec![parity_rollout()], cfg.lr, 0.01, cfg.epochs).unwrap();
+            let one_reply = one
+                .train(vec![parity_rollout()], cfg.lr, 0.01, cfg.epochs)
+                .unwrap();
             let two_reply = two
-                .train(vec![parity_rollout(), parity_rollout()], cfg.lr, 0.01, cfg.epochs)
+                .train(
+                    vec![parity_rollout(), parity_rollout()],
+                    cfg.lr,
+                    0.01,
+                    cfg.epochs,
+                )
                 .unwrap();
 
             assert!(one_reply.averaged_gradients.is_empty());
@@ -9457,8 +9839,12 @@ mod persistent_actor_tests {
             rand::rngs::SmallRng::seed_from_u64(55),
         )
         .unwrap();
-        let one_reply = one.train(vec![rollout()], cfg.lr, 0.01, cfg.epochs).unwrap();
-        let two_reply = two.train(vec![rollout(), rollout()], cfg.lr, 0.01, cfg.epochs).unwrap();
+        let one_reply = one
+            .train(vec![rollout()], cfg.lr, 0.01, cfg.epochs)
+            .unwrap();
+        let two_reply = two
+            .train(vec![rollout(), rollout()], cfg.lr, 0.01, cfg.epochs)
+            .unwrap();
         assert!(one_reply.averaged_gradients.is_empty());
         assert_eq!(
             two_reply.averaged_gradients.len(),
@@ -9521,7 +9907,9 @@ mod persistent_actor_tests {
         )
         .unwrap();
         assert!(params > 0);
-        let reply = learner.train(vec![parity_rollout()], cfg.lr, 0.01, cfg.epochs).unwrap();
+        let reply = learner
+            .train(vec![parity_rollout()], cfg.lr, 0.01, cfg.epochs)
+            .unwrap();
         assert!(reply.train_seconds >= 0.0);
         assert!(reply.snapshot_seconds >= 0.0);
         assert!(!reply.weights[0].values.is_empty());
@@ -9819,6 +10207,30 @@ mod ratio_clamp_tests {
             "clamp must be a no-op for ordinary ratios: {clamped} vs {unclamped}"
         );
     }
+
+    #[test]
+    fn kl_to_prior_is_mean_logp_minus_prior_logp() {
+        // Matches the PPO KL term: mean(log π − log π_prior) on the
+        // on-policy actions (AlphaStar reverse KL). Prior logp is treated
+        // as a constant; the live logp must still carry autograd.
+        let logp = Tensor::from_slice(&[0.0f32, -1.0, -2.0]).set_requires_grad(true);
+        let prior_logp = Tensor::from_slice(&[-0.5f32, -0.5, -0.5]);
+        let prior_logp = tch::no_grad(|| prior_logp.shallow_clone());
+        let kl = (&logp - prior_logp).mean(Kind::Float);
+        let value = f64::try_from(&kl).unwrap();
+        let expected = ((0.0 + 0.5) + (-1.0 + 0.5) + (-2.0 + 0.5)) / 3.0;
+        assert!(
+            (value - expected).abs() < 1e-6,
+            "kl={value} expected={expected}"
+        );
+        kl.backward();
+        let grad = logp.grad();
+        let grad_mean = f64::try_from(grad.mean(Kind::Float)).unwrap();
+        assert!(
+            (grad_mean - 1.0 / 3.0).abs() < 1e-6,
+            "d(mean(logp - c))/d logp must be 1/N, got {grad_mean}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -9827,26 +10239,33 @@ mod nan_guard_tests {
 
     #[test]
     fn all_finite_losses_are_not_flagged() {
-        let losses = vec![(0.02, 0.14, 2.1, -0.08), (0.01, 0.09, 3.6, -0.08)];
+        let losses = vec![
+            (0.02, 0.14, 2.1, -0.08, 0.01),
+            (0.01, 0.09, 3.6, -0.08, 0.0),
+        ];
         assert!(!any_loss_non_finite(&losses));
     }
 
     #[test]
     fn a_single_nan_value_loss_is_flagged() {
-        let losses = vec![(0.02, 0.14, 2.1, -0.08), (0.01, f64::NAN, 3.6, -0.08)];
+        let losses = vec![
+            (0.02, 0.14, 2.1, -0.08, 0.0),
+            (0.01, f64::NAN, 3.6, -0.08, 0.0),
+        ];
         assert!(any_loss_non_finite(&losses));
     }
 
     #[test]
     fn infinite_pg_loss_is_flagged() {
-        let losses = vec![(f64::INFINITY, 0.14, 2.1, -0.08)];
+        let losses = vec![(f64::INFINITY, 0.14, 2.1, -0.08, 0.0)];
         assert!(any_loss_non_finite(&losses));
     }
 
     #[test]
     fn nan_in_entropy_or_entq_is_also_flagged() {
-        assert!(any_loss_non_finite(&[(0.0, 0.0, f64::NAN, 0.0)]));
-        assert!(any_loss_non_finite(&[(0.0, 0.0, 0.0, f64::NAN)]));
+        assert!(any_loss_non_finite(&[(0.0, 0.0, f64::NAN, 0.0, 0.0)]));
+        assert!(any_loss_non_finite(&[(0.0, 0.0, 0.0, f64::NAN, 0.0)]));
+        assert!(any_loss_non_finite(&[(0.0, 0.0, 0.0, 0.0, f64::NAN)]));
     }
 
     #[test]
@@ -9855,7 +10274,7 @@ mod nan_guard_tests {
         // trillions *before* going NaN - large-but-finite values should
         // still train (badly, but not corrupt weights outright); only the
         // NaN/Inf endpoint itself should skip the optimizer step.
-        let losses = vec![(0.1, 1_265_838_468_017.77, 3.3, -0.27)];
+        let losses = vec![(0.1, 1_265_838_468_017.77, 3.3, -0.27, 0.05)];
         assert!(!any_loss_non_finite(&losses));
     }
 }

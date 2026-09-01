@@ -651,6 +651,16 @@ mod duo_session_tests {
         );
         let (head_b, _legal_b) = duo.expect("AGENTRL2 head");
         assert_ne!(head["me"], head_b["me"]);
+        assert_eq!(
+            head["alive"],
+            json!(false),
+            "unspawned AGENTRL1 must not look alive (0 tiles)"
+        );
+        assert_eq!(
+            head_b["alive"],
+            json!(false),
+            "unspawned AGENTRL2 must not look alive (0 tiles)"
+        );
 
         let w = session.game.width();
         let h = session.game.height();
@@ -694,6 +704,14 @@ mod duo_session_tests {
             .player_by_client_id(AGENT_CLIENT_ID_2)
             .unwrap()
             .small_id;
+        assert!(
+            session.game.player_by_small_id(a).unwrap().is_alive(),
+            "AGENTRL1 must be on the map after spawn"
+        );
+        assert!(
+            session.game.player_by_small_id(b).unwrap().is_alive(),
+            "AGENTRL2 must be on the map after spawn"
+        );
         assert!(session.game.players_on_same_team(a, b));
         assert!(session.game.is_friendly(a, b));
         assert!(!session.game.is_allied_with(a, b));
