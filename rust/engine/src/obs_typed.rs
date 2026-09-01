@@ -38,7 +38,7 @@ pub fn entities_typed(game: &Game) -> EntsData {
                 troops: p.troops as f64,
                 gold: p.gold as f64,
                 tiles: p.tiles_owned as f64,
-                alive: p.alive,
+                alive: p.is_alive(),
                 traitor: game.is_traitor(sid),
                 embargoes: p.embargoes.keys().map(|id| id as usize).collect(),
                 relations: p
@@ -53,26 +53,27 @@ pub fn entities_typed(game: &Game) -> EntsData {
                     .into_iter()
                     .map(|id| id as usize)
                     .collect(),
-                troop_income: if p.alive {
+                troop_income: if p.is_alive() {
                     game.troop_increase_rate_raw_for(sid)
                 } else {
                     0.0
                 },
-                gold_income: if p.alive {
+                gold_income: if p.is_alive() {
                     game.wire.gold_addition_rate(p.player_type) as f64
                 } else {
                     0.0
                 },
                 doomsday: false,
                 doomsday_ticks: 0.0,
+                team: p.team.clone(),
             }
         })
         .collect();
 
     // Formal alliances only. Team-mode teammates are already friendly
-    // (no-attack / donate) without a pact, but they must
-    // `alliance_request` each other to appear as class-2 (ally) in clut
-    // and to unlock ally train gold. Do not inject synthetic AllianceE.
+    // (no-attack / donate) without a pact. `make_clut` now paints same-team
+    // humans class-2 from `PlayerE.team`; a formal pact is still required
+    // for ally train gold and `P_FEAT[5] is_ally`. Do not inject synthetic AllianceE.
     let mut alliances: Vec<AllianceE> = Vec::new();
     let mut seen: std::collections::HashSet<(u16, u16)> = std::collections::HashSet::new();
     for p in game.all_players() {

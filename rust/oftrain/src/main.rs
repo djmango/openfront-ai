@@ -219,6 +219,76 @@ struct Args {
     #[arg(long, default_value_t = 25.0)]
     v10_closeout_entry: f64,
 
+    /// Duo: one-shot bonus the first time teammates form a formal alliance.
+    /// Outcome-only (pact formed). 0 disables. Do not pay `alliance_request`
+    /// or `donate_*` actions.
+    #[arg(long, default_value_t = 0.0)]
+    duo_pact_bonus: f64,
+
+    /// Duo: PBRS coefficient on log team gold-income (not gold stock). 0 disables.
+    #[arg(long, default_value_t = 0.0)]
+    duo_eco_coef: f64,
+
+    /// Duo: one-shot when the team first owns a completed City. 0 disables.
+    #[arg(long, default_value_t = 0.0)]
+    duo_city_bonus: f64,
+
+    /// Duo: one-shot when the team first owns a completed Port. 0 disables.
+    #[arg(long, default_value_t = 0.0)]
+    duo_port_bonus: f64,
+
+    /// Duo: penalty per completed City lost (count drop). Outcome-only, not
+    /// the `delete_unit` action. 0 disables. Positive magnitude.
+    #[arg(long, default_value_t = 0.0)]
+    duo_city_delete: f64,
+
+    /// Duo: penalty per completed Port lost (count drop). 0 disables.
+    #[arg(long, default_value_t = 0.0)]
+    duo_port_delete: f64,
+
+    /// Duo: PBRS coefficient on team in-flight TransportShip count
+    /// (launch raises Φ, land/cancel drops it). Never the `boat` action.
+    /// 0 disables.
+    #[arg(long, default_value_t = 0.0)]
+    duo_boat_commit: f64,
+
+    /// Duo: PBRS on leftover opponent tiles on continents the team occupies
+    /// (mop leftover red raises Φ; flee a dirty continent drops it).
+    /// Never an attack/boat action. 0 disables.
+    #[arg(long, default_value_t = 0.0)]
+    duo_leftover_continent: f64,
+
+    /// Duo: PBRS coefficient on team completed Port count (completing a
+    /// Port raises Φ, losing one drops it). Never the `build` action.
+    /// Distinct from `--duo-port-bonus` / `--duo-port-delete`. 0 disables.
+    #[arg(long, default_value_t = 0.0)]
+    duo_port_stand: f64,
+
+    /// Duo: PBRS on how many 4-connected landmasses the team occupies
+    /// (first tile on a new continent raises Φ even if leftover red
+    /// is still there). Never a boat/attack action. 0 disables.
+    #[arg(long, default_value_t = 0.0)]
+    duo_continent_span: f64,
+
+    /// Duo: PBRS on team UsefulLanding count this episode (invade
+    /// landing raises Φ; own-shore / cancel / destroy do not).
+    /// Never the `boat` action. Distinct from `--duo-boat-commit`.
+    /// 0 disables.
+    #[arg(long, default_value_t = 0.0)]
+    duo_boat_land: f64,
+
+    /// Duo: PBRS coefficient on team completed City count (completing a
+    /// City raises Φ, losing one drops it). Never the `build` action.
+    /// Distinct from `--duo-city-bonus` / `--duo-city-delete`. 0 disables.
+    #[arg(long, default_value_t = 0.0)]
+    duo_city_stand: f64,
+
+    /// Duo: PBRS coefficient on team completed Defense Post count
+    /// (completing a post raises Φ, losing one drops it). Never the
+    /// `build` action. Distinct from city/port stand. 0 disables.
+    #[arg(long, default_value_t = 0.0)]
+    duo_defense_stand: f64,
+
     /// Resume a V8.6 (v8.3 schedule) checkpoint under V10 schedule + anti-spiral reward.
     #[arg(long, default_value_t = false, requires = "resume")]
     migrate_v86_to_v10: bool,
@@ -342,7 +412,10 @@ struct Args {
     /// Frozen fine AE encoder safetensors (from `ofae` / HF
     /// `ae_v32_nostatic_d8c32.encoder.safetensors`). Required for
     /// production obs parity (`C_GRID=99`, static structures bypass AE).
-    #[arg(long, default_value = "weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors")]
+    #[arg(
+        long,
+        default_value = "weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors"
+    )]
     ckpt: String,
 
     /// Optional frozen coarse /16 AE encoder safetensors (from
@@ -600,6 +673,17 @@ struct Args {
     #[arg(long, default_value_t = 100)]
     resume_warmup_updates: u64,
 
+    /// Frozen playable prior for AlphaStar-style KL(π || π_prior) for the
+    /// whole RL run. Recurrent v11 checkpoints copy matching feedforward
+    /// tensors (LSTM keys skipped). Omit to disable the KL term.
+    #[arg(long)]
+    kl_prior: Option<String>,
+
+    /// Coefficient on mean(`log π − log π_prior`) over on-policy actions.
+    /// Ignored when `--kl-prior` is unset. Default 0.05.
+    #[arg(long, default_value_t = 0.05)]
+    kl_coef: f32,
+
     /// Value-loss form: `mse` (default; Python `F.mse_loss` parity) or
     /// `huber` (Rust stabilizer escape hatch after the 2026-07-12
     /// explosion).
@@ -622,6 +706,14 @@ struct Args {
     /// No effect without `--auto-scale-envs`.
     #[arg(long, default_value_t = 0.92)]
     target_gpu_util: f64,
+
+    /// Ceiling on instantaneous GPU SM util (0-1). After each update, if
+    /// nvidia-smi util exceeds this, sleep so the duty cycle sits at the
+    /// cap. 0 disables (full-tilt, the pod default). Homelab sharing:
+    /// `--max-gpu-util 0.80` leaves headroom for Whisper / other GPU jobs.
+    /// Distinct from `--target-gpu-util` (autoscale growth set point).
+    #[arg(long, default_value_t = 0.0)]
+    max_gpu_util: f64,
 
     /// Floor for `--auto-scale-envs`: never scale below this many envs per
     /// shard. Unset defaults to `--num-envs` (never scale below whatever
@@ -653,11 +745,24 @@ struct Args {
 
     /// Two-human Team-mode co-training (`AGENTRL1` + `AGENTRL2` on Humans).
     /// Alliances stay enabled: teammates must actually `alliance_request`
-    /// each other to unlock ally train gold (35k vs 25k team rate) and to
-    /// appear as class-2 allies in the featurizer. Forces lockstep collect
-    /// (no work-conserving / autoscale).
+    /// each other to unlock ally train gold (35k vs 25k team rate). Same-team
+    /// humans are class-2 in clut from `PlayerE.team` even before that pact.
+    /// Forces lockstep collect (no work-conserving / autoscale). Default-on
+    /// MAPPO centralized critic (`--centralized-value`).
     #[arg(long, default_value_t = false)]
     duo: bool,
+
+    /// MAPPO centralized critic (Yu et al. 2021): value sees teammate player
+    /// tokens + scalars; the policy stays local. Default on with `--duo`.
+    /// Pass `--centralized-value=false` to keep an IPPO (local) critic.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", action = clap::ArgAction::Set)]
+    centralized_value: Option<bool>,
+
+    /// Duo: π sees the partner's last action (14-float ActionOutcome from
+    /// the previous simultaneous step). Clut/world state is not a message;
+    /// this is. Off by default so feedforward checkpoints stay loadable.
+    #[arg(long, default_value_t = false)]
+    duo_comms: bool,
 }
 
 fn parse_device(s: &str) -> Device {
@@ -857,7 +962,10 @@ mod curriculum_flag_tests {
     #[test]
     fn v10_reward_recipe_is_the_cli_default() {
         let defaults = Args::try_parse_from(["oftrain"]).unwrap();
-        assert_eq!(defaults.max_episode_ticks, ofcore::DEFAULT_MAX_EPISODE_TICKS);
+        assert_eq!(
+            defaults.max_episode_ticks,
+            ofcore::DEFAULT_MAX_EPISODE_TICKS
+        );
         assert_eq!(defaults.max_steps, ofcore::DEFAULT_WATCH_MAX_STEPS);
         assert_eq!(defaults.v81_dom_coef, 0.25);
         assert_eq!(defaults.v81_min_stage, 0);
@@ -891,6 +999,21 @@ mod curriculum_flag_tests {
         assert_eq!(defaults.v10_combat_action, 0.02);
         assert_eq!(defaults.v10_timeout_closeout, 20.0);
         assert_eq!(defaults.v10_closeout_entry, 25.0);
+        assert_eq!(defaults.duo_pact_bonus, 0.0);
+        assert_eq!(defaults.duo_eco_coef, 0.0);
+        assert_eq!(defaults.duo_city_bonus, 0.0);
+        assert_eq!(defaults.duo_port_bonus, 0.0);
+        assert_eq!(defaults.duo_city_delete, 0.0);
+        assert_eq!(defaults.duo_port_delete, 0.0);
+        assert_eq!(defaults.duo_boat_commit, 0.0);
+        assert_eq!(defaults.duo_leftover_continent, 0.0);
+        assert_eq!(defaults.duo_port_stand, 0.0);
+        assert_eq!(defaults.duo_continent_span, 0.0);
+        assert_eq!(defaults.duo_boat_land, 0.0);
+        assert_eq!(defaults.duo_city_stand, 0.0);
+        assert_eq!(defaults.duo_defense_stand, 0.0);
+        assert!(defaults.kl_prior.is_none());
+        assert_eq!(defaults.kl_coef, 0.05);
     }
 
     #[test]
@@ -909,7 +1032,7 @@ mod curriculum_flag_tests {
     #[cfg(feature = "native-engine")]
     #[test]
     fn v10_broad_maps_all_load_through_the_rust_engine() {
-        use openfront_engine::core::terrain::{GameMapSize, load_fresh_terrain};
+        use openfront_engine::core::terrain::{load_fresh_terrain, GameMapSize};
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
@@ -947,6 +1070,7 @@ mod recurrent_flag_tests {
         assert_eq!(defaults.max_epochs, 12);
         assert!((defaults.balance_target_ratio - 0.95).abs() < 1e-9);
         assert!((defaults.target_gpu_util - 0.92).abs() < 1e-9);
+        assert_eq!(defaults.max_gpu_util, 0.0);
         assert!((defaults.actor_max_padding_waste - 0.50).abs() < 1e-9);
         assert_eq!(defaults.max_envs, 40);
         assert_eq!(defaults.autoscale_step, 2);
@@ -1229,7 +1353,72 @@ fn main() -> anyhow::Result<()> {
         v10_combat_action: args.v10_combat_action,
         v10_timeout_closeout: args.v10_timeout_closeout,
         v10_closeout_entry: args.v10_closeout_entry,
+        duo_pact_success: args.duo_pact_bonus,
+        duo_eco_coef: args.duo_eco_coef,
+        duo_first_city: args.duo_city_bonus,
+        duo_first_port: args.duo_port_bonus,
+        duo_city_delete: args.duo_city_delete,
+        duo_port_delete: args.duo_port_delete,
+        duo_boat_commit: args.duo_boat_commit,
+        duo_leftover_continent: args.duo_leftover_continent,
+        duo_port_stand: args.duo_port_stand,
+        duo_continent_span: args.duo_continent_span,
+        duo_boat_land: args.duo_boat_land,
+        duo_city_stand: args.duo_city_stand,
+        duo_defense_stand: args.duo_defense_stand,
     };
+    anyhow::ensure!(
+        args.duo_pact_bonus.is_finite() && args.duo_pact_bonus >= 0.0,
+        "--duo-pact-bonus must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.duo_eco_coef.is_finite() && args.duo_eco_coef >= 0.0,
+        "--duo-eco-coef must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.duo_city_bonus.is_finite() && args.duo_city_bonus >= 0.0,
+        "--duo-city-bonus must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.duo_port_bonus.is_finite() && args.duo_port_bonus >= 0.0,
+        "--duo-port-bonus must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.duo_city_delete.is_finite() && args.duo_city_delete >= 0.0,
+        "--duo-city-delete must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.duo_port_delete.is_finite() && args.duo_port_delete >= 0.0,
+        "--duo-port-delete must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.duo_boat_commit.is_finite() && args.duo_boat_commit >= 0.0,
+        "--duo-boat-commit must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.duo_leftover_continent.is_finite() && args.duo_leftover_continent >= 0.0,
+        "--duo-leftover-continent must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.duo_port_stand.is_finite() && args.duo_port_stand >= 0.0,
+        "--duo-port-stand must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.duo_continent_span.is_finite() && args.duo_continent_span >= 0.0,
+        "--duo-continent-span must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.duo_boat_land.is_finite() && args.duo_boat_land >= 0.0,
+        "--duo-boat-land must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.duo_city_stand.is_finite() && args.duo_city_stand >= 0.0,
+        "--duo-city-stand must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.duo_defense_stand.is_finite() && args.duo_defense_stand >= 0.0,
+        "--duo-defense-stand must be finite and non-negative"
+    );
     anyhow::ensure!(
         args.v10_timeout_closeout.is_finite() && args.v10_timeout_closeout >= 0.0,
         "--v10-timeout-closeout must be finite and non-negative"
@@ -1237,6 +1426,14 @@ fn main() -> anyhow::Result<()> {
     anyhow::ensure!(
         args.v10_closeout_entry.is_finite() && args.v10_closeout_entry >= 0.0,
         "--v10-closeout-entry must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.kl_coef.is_finite() && args.kl_coef >= 0.0,
+        "--kl-coef must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.max_gpu_util.is_finite() && args.max_gpu_util >= 0.0 && args.max_gpu_util <= 1.0,
+        "--max-gpu-util must be a finite 0-1 fraction"
     );
     let curriculum_schedule = ofcore::curriculum::CurriculumSchedule::V10;
     let stage_count = ofcore::curriculum::stages_for_schedule(curriculum_schedule).len();
@@ -1327,12 +1524,12 @@ fn main() -> anyhow::Result<()> {
         // Showcase / client-replay records must come from the Node/TS engine.
         // Bare `--watch` therefore defaults to Node even though clap `--engine`
         // defaults to native for training. Explicit `--engine …` still wins.
-        let watch_engine = if std::env::args().any(|a| a == "--engine" || a.starts_with("--engine="))
-        {
-            args.engine
-        } else {
-            engine::EngineKind::Node
-        };
+        let watch_engine =
+            if std::env::args().any(|a| a == "--engine" || a.starts_with("--engine=")) {
+                args.engine
+            } else {
+                engine::EngineKind::Node
+            };
         return watch::run_watch(watch::WatchConfig {
             policy,
             record: std::path::PathBuf::from(record),
@@ -1357,6 +1554,8 @@ fn main() -> anyhow::Result<()> {
             curriculum_schedule,
             reward_config,
             recurrent_policy: args.recurrent_policy,
+            centralized_value: args.centralized_value.unwrap_or(args.duo),
+            duo_comms: args.duo_comms,
             engine: watch_engine,
             stochastic: args.watch_stochastic,
         });
@@ -1383,6 +1582,8 @@ fn main() -> anyhow::Result<()> {
             gc: args.gc,
             blocks: args.blocks,
             recurrent_policy: args.recurrent_policy,
+            centralized_value: args.centralized_value.unwrap_or(args.duo),
+            duo_comms: args.duo_comms,
             pinned_h2d: args.pinned_h2d,
             fp16_rollout: args.fp16_rollout,
             compact_rollout: args.compact_rollout,
@@ -1403,6 +1604,8 @@ fn main() -> anyhow::Result<()> {
     let cfg = train::Config {
         num_envs: initial_num_envs,
         n_agents: if args.duo { 2 } else { 1 },
+        centralized_value: args.centralized_value.unwrap_or(args.duo),
+        duo_comms: args.duo_comms,
         num_gpus: args.num_gpus,
         stage: args.stage,
         curriculum_schedule,
@@ -1465,12 +1668,15 @@ fn main() -> anyhow::Result<()> {
         init: args.init,
         resume: args.resume,
         resume_warmup_updates: args.resume_warmup_updates,
+        kl_prior: args.kl_prior,
+        kl_coef: args.kl_coef,
         value_loss: match args.value_loss.as_str() {
             "huber" => train::ValueLoss::Huber,
             _ => train::ValueLoss::Mse,
         },
         auto_scale_envs: args.auto_scale_envs,
         target_gpu_util: args.target_gpu_util,
+        max_gpu_util: args.max_gpu_util,
         // Never scale below whatever the run was explicitly started with
         // (`--num-envs`) unless the user gave an explicit floor of their own.
         // Do not seed from `initial_num_envs` (stage_env_targets[--stage]),

@@ -17,9 +17,9 @@ C_GRID_FINE = C_GRID + 1
 
 LOCAL = 64
 N_LOCAL = 5
-P_FEAT = 28
+P_FEAT = 30
 U_FEAT = 12
-N_SCALARS = 11
+N_SCALARS = 12
 
 ACTIONS = [
     "noop",

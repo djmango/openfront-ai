@@ -10,37 +10,56 @@ use rand::{Rng, SeedableRng};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use ofcore::curriculum::{
-    self, ActionChurnTracker, ActionPairCounts, ActionTarget, BoatOutcomeCounts, ChosenAction,
+    self, action_churn_penalty, boat_commit_potential, boat_land_potential, boat_outcome_reward,
+    city_stand_potential, classify_boat_resolution, closeout_potential, combat_outcome_reward,
+    defense_stand_potential,
+    continent_span_potential, dominance_potential, duo_first_structure_bonus,
+    duo_pact_success_bonus, duo_potential, duo_structure_delete_penalty, economy_potential,
+    embargo_stop_outcome_reward, fast_win_bonus, formally_allied, label_continents, land_share,
+    leftover_continent_counts, leftover_continent_potential, normalized_strength_share,
+    occupied_continent_count, placement, placement_score, player_gold_income, port_stand_potential,
+    sample_episode, stages_for_schedule, strength_delta_weight, team_completed_structures,
+    team_owner_ids, team_transport_ships, tempo_pressure, terminal_reward, timeweight,
+    v10_closeout_entry_bonus, v10_combat_action_bonus, v10_diplo_panic_penalty,
+    v10_survival_reward, v10_timeout_after_closeout_penalty, v83_action_churn_penalty,
+    ActionChurnTracker, ActionPairCounts, ActionTarget, BoatOutcomeCounts, ChosenAction,
     CombatOutcome, CurriculumSchedule, DominanceShaper, InverseActionPair, RewardComponents,
-    RewardConfig, Stage, TRANSPORT_UNIT_CLASS, V83_CLOSEOUT_SHARE_START, W_STR, W_WASTE,
-    DUO_SOLO_SCALE, action_churn_penalty,
-    boat_outcome_reward, classify_boat_resolution, closeout_potential, combat_outcome_reward,
-    dominance_potential, duo_synergy_reward, duo_welfare_reward, embargo_stop_outcome_reward,
-    fast_win_bonus, formally_allied, land_share, normalized_strength_share, placement,
-    placement_score, sample_episode, stages_for_schedule, strength_delta_weight, tempo_pressure,
-    terminal_reward, timeweight, v10_closeout_entry_bonus, v10_combat_action_bonus,
-    v10_diplo_panic_penalty, v10_survival_reward, v10_timeout_after_closeout_penalty,
-    v83_action_churn_penalty,
+    RewardConfig, Stage, CITY_UNIT_CLASS, DEFENSE_UNIT_CLASS, DUO_SOLO_SCALE, PORT_UNIT_CLASS,
+    TRANSPORT_UNIT_CLASS,
+    V83_CLOSEOUT_SHARE_START, W_STR, W_WASTE,
 };
 use ofcore::feat::{
-    self, A_ALLIANCE_REQUEST, A_ATTACK, A_BOAT, A_BREAK_ALLIANCE, A_BUILD, A_CANCEL_BOAT,
-    A_DONATE_GOLD, A_DONATE_TROOPS, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, ACTIONS, IS_LAND_BIT,
-    MAG_MASK, REGION,
+    self, ACTIONS, A_ALLIANCE_REQUEST, A_ATTACK, A_BOAT, A_BREAK_ALLIANCE, A_BUILD, A_CANCEL_BOAT,
+    A_DONATE_GOLD, A_DONATE_TROOPS, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, IS_LAND_BIT, MAG_MASK,
+    REGION,
 };
-use ofcore::translate::{Choice, IntentTranslator, translate};
+use ofcore::translate::{translate, Choice, IntentTranslator};
 
 use crate::ae::{self, AeRaw, StaticTerrain, TerrainCacheKey};
 use crate::engine::{self, EngineKind, GameEngine, RawObs};
 
 /// Per-env layout of [`CompactHostBuffers::extras`] (all f32):
 /// `players | units | umask | legal_utarget | local | legal_ptarget |
-/// pmask | scalars | legal_actions | legal_build | legal_nuke`.
+/// pmask | scalars | legal_actions | legal_build | legal_nuke |
+/// partner_players | partner_pmask | partner_scalars | partner_context`.
+/// Partner tensors are appended so the local prefix stays aligned with
+/// older compact payloads; they are zeros when `n_agents==1`.
+/// `partner_context` is the sibling's previous [`ActionOutcome`] (14 floats).
 pub(crate) fn compact_extras_per_env() -> usize {
+    compact_extras_core_n()
+        + compact_extras_players_n()
+        + feat::MAX_SLOTS
+        + feat::N_SCALARS
+        + crate::recurrent::CONTEXT_FLOATS
+}
+
+/// Bytes before the MAPPO partner block (local actor extras).
+pub(crate) fn compact_extras_core_n() -> usize {
     compact_extras_players_n()
         + compact_extras_units_n()
         + compact_extras_umask_n()
@@ -340,6 +359,26 @@ impl CompactGrid {
             + feat::N_BUILD;
         &self.extras_slice()[start..start + feat::N_NUKE]
     }
+    pub fn partner_players(&self) -> &[f32] {
+        let start = compact_extras_core_n();
+        let n = compact_extras_players_n();
+        &self.extras_slice()[start..start + n]
+    }
+    pub fn partner_pmask(&self) -> &[f32] {
+        let start = compact_extras_core_n() + compact_extras_players_n();
+        &self.extras_slice()[start..start + feat::MAX_SLOTS]
+    }
+    pub fn partner_scalars(&self) -> &[f32] {
+        let start = compact_extras_core_n() + compact_extras_players_n() + feat::MAX_SLOTS;
+        &self.extras_slice()[start..start + feat::N_SCALARS]
+    }
+    pub fn partner_context(&self) -> &[f32] {
+        let start = compact_extras_core_n()
+            + compact_extras_players_n()
+            + feat::MAX_SLOTS
+            + feat::N_SCALARS;
+        &self.extras_slice()[start..start + crate::recurrent::CONTEXT_FLOATS]
+    }
 
     #[cfg(test)]
     pub(crate) fn grid_storage_ptr(&self) -> *const half::f16 {
@@ -380,7 +419,8 @@ pub struct EpisodeInfo {
     pub n_players: i64,
     pub score: f64,
     pub won: bool,
-    /// True when the episode ended because the agent died (`!alive`).
+    /// True when the episode ended because the agent died or never spawned
+    /// (`tiles == 0` / TS `!isAlive()`). A no-show is a death, not a timeout.
     pub died: bool,
     pub wasted: i64,
     pub stage: usize,
@@ -443,11 +483,6 @@ impl PendingBoatTracker {
         config: RewardConfig,
         stage: usize,
     ) -> f64 {
-        if !config.boat_outcome_active(stage) {
-            self.pending
-                .retain(|unit_id, _| alive_ids.contains(unit_id));
-            return 0.0;
-        }
         let mut reward = 0.0;
         let finished: Vec<usize> = self
             .pending
@@ -455,6 +490,7 @@ impl PendingBoatTracker {
             .copied()
             .filter(|id| !alive_ids.contains(id))
             .collect();
+        let oneshot = config.boat_outcome_active(stage);
         for unit_id in finished {
             let Some(boat) = self.pending.remove(&unit_id) else {
                 continue;
@@ -468,7 +504,9 @@ impl PendingBoatTracker {
                 has_sourced_attack,
             );
             self.counts.record(outcome);
-            reward += boat_outcome_reward(outcome, config);
+            if oneshot {
+                reward += boat_outcome_reward(outcome, config);
+            }
         }
         reward
     }
@@ -645,6 +683,13 @@ pub struct PreparedObs {
     pub legal_build: [f32; feat::N_BUILD],
     pub legal_nuke: [f32; feat::N_NUKE],
     pub local: Vec<f32>, // (5, LOCAL, LOCAL)
+    /// Teammate compact extras for the MAPPO critic. Zeros when `n_agents==1`.
+    pub partner_players: Vec<f32>, // (MAX_SLOTS, P_FEAT)
+    pub partner_pmask: [f32; feat::MAX_SLOTS],
+    pub partner_scalars: [f32; feat::N_SCALARS],
+    /// Partner's previous action (simultaneous-step delay). Zeros when
+    /// `n_agents==1` or before the first action of an episode.
+    pub partner_context: [f32; crate::recurrent::CONTEXT_FLOATS],
 }
 
 impl PreparedObs {
@@ -674,6 +719,10 @@ impl PreparedObs {
         self.legal_actions = [0.0; feat::N_ACTIONS];
         self.legal_build = [0.0; feat::N_BUILD];
         self.legal_nuke = [0.0; feat::N_NUKE];
+        self.partner_players = Vec::new();
+        self.partner_pmask = [0.0; feat::MAX_SLOTS];
+        self.partner_scalars = [0.0; feat::N_SCALARS];
+        self.partner_context = [0.0; crate::recurrent::CONTEXT_FLOATS];
     }
 }
 
@@ -804,7 +853,9 @@ fn churn_action(
 ) -> ChosenAction {
     let target = match choice.action {
         A_ATTACK | A_EMBARGO | A_EMBARGO_STOP | A_ALLIANCE_REQUEST | A_BREAK_ALLIANCE
-        | A_DONATE_GOLD | A_DONATE_TROOPS if !intents.is_empty() => {
+        | A_DONATE_GOLD | A_DONATE_TROOPS
+            if !intents.is_empty() =>
+        {
             selected_player_id(choice, lut, ents).map(ActionTarget::Player)
         }
         A_RETREAT => intents
@@ -843,14 +894,11 @@ fn humans_won(winner: &Value, n_agents: usize) -> bool {
         return false;
     };
     match a.first().and_then(|v| v.as_str()) {
-        Some("player") => {
-            n_agents == 1 && a.get(1).and_then(|v| v.as_str()) == Some("AGENTRL1")
-        }
+        Some("player") => n_agents == 1 && a.get(1).and_then(|v| v.as_str()) == Some("AGENTRL1"),
         Some("team") => {
             a.get(1).and_then(|v| v.as_str()) == Some("Humans")
-                || a.iter().any(|v| {
-                    matches!(v.as_str(), Some("AGENTRL1") | Some("AGENTRL2"))
-                })
+                || a.iter()
+                    .any(|v| matches!(v.as_str(), Some("AGENTRL1") | Some("AGENTRL2")))
         }
         _ => false,
     }
@@ -887,6 +935,15 @@ pub struct EnvWorker {
     prev_strength: [f64; 2],
     dominance_shaper: [DominanceShaper; 2],
     closeout_shaper: [DominanceShaper; 2],
+    duo_shaper: [DominanceShaper; 2],
+    eco_shaper: [DominanceShaper; 2],
+    boat_commit_shaper: [DominanceShaper; 2],
+    leftover_continent_shaper: [DominanceShaper; 2],
+    port_stand_shaper: [DominanceShaper; 2],
+    city_stand_shaper: [DominanceShaper; 2],
+    defense_stand_shaper: [DominanceShaper; 2],
+    continent_span_shaper: [DominanceShaper; 2],
+    boat_land_shaper: [DominanceShaper; 2],
     closeout_tracker: [CloseoutTracker; 2],
     action_churn_tracker: [ActionChurnTracker; 2],
     boat_tracker: [PendingBoatTracker; 2],
@@ -894,6 +951,18 @@ pub struct EnvWorker {
     prev_action: [ActionOutcome; 2],
     last_commitment: [Option<(i64, i64, i64, i64, i64, u64)>; 2],
     was_alive: [bool; 2],
+    /// True if this human ever had `alive` this episode. Spawn-miss is a
+    /// death/loss, not a placement gift (ghost humans with 0 tiles).
+    ever_alive: [bool; 2],
+    /// Duo: already paid the one-shot formal-pact bonus this episode.
+    pact_bonus_paid: bool,
+    /// Duo: already paid the first completed-City one-shot this episode.
+    city_bonus_paid: bool,
+    /// Duo: already paid the first completed-Port one-shot this episode.
+    port_bonus_paid: bool,
+    /// Last step's completed City/Port counts (for delete-penalty drops).
+    prev_n_cities: usize,
+    prev_n_ports: usize,
     ep_reward_components: RewardComponents,
     spawn_steps: i64,
     map_name: String,
@@ -901,6 +970,8 @@ pub struct EnvWorker {
     hr: usize,
     wr: usize,
     land: Vec<u8>,
+    /// 4-connected land-component ids for leftover-continent Φ (0 = water).
+    continent_of: Vec<u16>,
     mag: Vec<u8>,
     ae_static: StaticTerrain,
     engine_kind: EngineKind,
@@ -948,11 +1019,17 @@ impl EnvWorker {
             prev_strength: [0.0; 2],
             dominance_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             closeout_shaper: [DominanceShaper::default(), DominanceShaper::default()],
+            duo_shaper: [DominanceShaper::default(), DominanceShaper::default()],
+            eco_shaper: [DominanceShaper::default(), DominanceShaper::default()],
+            boat_commit_shaper: [DominanceShaper::default(), DominanceShaper::default()],
+            leftover_continent_shaper: [DominanceShaper::default(), DominanceShaper::default()],
+            port_stand_shaper: [DominanceShaper::default(), DominanceShaper::default()],
+            city_stand_shaper: [DominanceShaper::default(), DominanceShaper::default()],
+            defense_stand_shaper: [DominanceShaper::default(), DominanceShaper::default()],
+            continent_span_shaper: [DominanceShaper::default(), DominanceShaper::default()],
+            boat_land_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             closeout_tracker: [CloseoutTracker::default(), CloseoutTracker::default()],
-            action_churn_tracker: [
-                ActionChurnTracker::default(),
-                ActionChurnTracker::default(),
-            ],
+            action_churn_tracker: [ActionChurnTracker::default(), ActionChurnTracker::default()],
             boat_tracker: [PendingBoatTracker::default(), PendingBoatTracker::default()],
             combat_tracker: [
                 CombatStickyTracker::default(),
@@ -961,6 +1038,12 @@ impl EnvWorker {
             prev_action: [ActionOutcome::default(), ActionOutcome::default()],
             last_commitment: [None, None],
             was_alive: [false; 2],
+            ever_alive: [false; 2],
+            pact_bonus_paid: false,
+            city_bonus_paid: false,
+            port_bonus_paid: false,
+            prev_n_cities: 0,
+            prev_n_ports: 0,
             ep_reward_components: RewardComponents::default(),
             spawn_steps: 0,
             map_name: String::new(),
@@ -968,6 +1051,7 @@ impl EnvWorker {
             hr: 0,
             wr: 0,
             land: Vec::new(),
+            continent_of: Vec::new(),
             mag: Vec::new(),
             ae_static: StaticTerrain {
                 key: TerrainCacheKey {
@@ -1025,6 +1109,7 @@ impl EnvWorker {
             }
         }
         self.land = land;
+        self.continent_of = label_continents(&self.land, wr, hr);
         self.mag = mag;
         self.ae_static = StaticTerrain {
             key: TerrainCacheKey {
@@ -1041,6 +1126,12 @@ impl EnvWorker {
         self.translator = Some(IntentTranslator::new(self.bridge.terrain(), width, hr, wr));
         self.lut.clear();
         self.set_obs(obs);
+        self.ever_alive = [false; 2];
+        self.pact_bonus_paid = false;
+        self.city_bonus_paid = false;
+        self.port_bonus_paid = false;
+        self.prev_n_cities = 0;
+        self.prev_n_ports = 0;
         self.seed_agent_trackers();
         self.spawn_steps = 0;
         self.ep_reward = 0.0;
@@ -1174,6 +1265,7 @@ impl EnvWorker {
             }
         }
         self.land = land;
+        self.continent_of = label_continents(&self.land, wr, hr);
         self.mag = mag;
         self.ae_static = StaticTerrain {
             key: TerrainCacheKey {
@@ -1190,6 +1282,12 @@ impl EnvWorker {
         self.translator = Some(IntentTranslator::new(self.bridge.terrain(), width, hr, wr));
         self.lut.clear();
         self.set_obs(obs);
+        self.ever_alive = [false; 2];
+        self.pact_bonus_paid = false;
+        self.city_bonus_paid = false;
+        self.port_bonus_paid = false;
+        self.prev_n_cities = 0;
+        self.prev_n_ports = 0;
         self.seed_agent_trackers();
         self.spawn_steps = 0;
         self.ep_reward = 0.0;
@@ -1244,7 +1342,21 @@ impl EnvWorker {
     }
 
     fn agent_alive(&self, i: usize) -> bool {
-        self.agent_head(i)["alive"].as_bool().unwrap_or(false)
+        // TS `isAlive()` is tiles on the map, not the sticky `Player.alive`
+        // flag. Unspawned humans used to report alive=true with 0 tiles, so
+        // a no-show was a timeout instead of a death.
+        self.agent_on_map(i)
+    }
+
+    fn agent_on_map(&self, i: usize) -> bool {
+        let me = self.agent_me(i);
+        if me < 0 {
+            return false;
+        }
+        self.ents()
+            .players
+            .iter()
+            .any(|p| p.id as i64 == me && p.tiles > 0.0)
     }
 
     fn seed_agent_trackers(&mut self) {
@@ -1263,6 +1375,43 @@ impl EnvWorker {
                 self.land_total,
             );
             self.closeout_shaper[i].reset(closeout_potential(share));
+            if self.n_agents > 1 {
+                let partner = self.agent_me(1 - i).max(0) as usize;
+                let s_me = initial_strengths.get(&me).copied().unwrap_or(0.0);
+                let s_partner = initial_strengths.get(&partner).copied().unwrap_or(0.0);
+                let both = self.agent_alive(0) && self.agent_alive(1);
+                let allied = formally_allied(
+                    self.ents(),
+                    self.agent_me(0).max(0) as usize,
+                    self.agent_me(1).max(0) as usize,
+                );
+                self.duo_shaper[i].reset(duo_potential(s_me, s_partner, both, allied));
+                self.eco_shaper[i].reset(economy_potential(
+                    player_gold_income(self.ents(), me),
+                    player_gold_income(self.ents(), partner),
+                    self.reward_config.duo_eco_coef,
+                ));
+                let owners = [me, partner];
+                self.boat_commit_shaper[i].reset(boat_commit_potential(
+                    team_transport_ships(self.ents(), &owners),
+                    self.reward_config.duo_boat_commit,
+                ));
+                self.leftover_continent_shaper[i].reset(self.leftover_continent_phi());
+                self.port_stand_shaper[i].reset(port_stand_potential(
+                    team_completed_structures(self.ents(), &owners, PORT_UNIT_CLASS),
+                    self.reward_config.duo_port_stand,
+                ));
+                self.city_stand_shaper[i].reset(city_stand_potential(
+                    team_completed_structures(self.ents(), &owners, CITY_UNIT_CLASS),
+                    self.reward_config.duo_city_stand,
+                ));
+                self.defense_stand_shaper[i].reset(defense_stand_potential(
+                    team_completed_structures(self.ents(), &owners, DEFENSE_UNIT_CLASS),
+                    self.reward_config.duo_defense_stand,
+                ));
+                self.continent_span_shaper[i].reset(self.continent_span_phi());
+                self.boat_land_shaper[i].reset(0.0);
+            }
             self.closeout_tracker[i].reset(share, tick);
             self.action_churn_tracker[i].reset();
             self.boat_tracker[i].reset();
@@ -1270,6 +1419,7 @@ impl EnvWorker {
             self.prev_action[i] = ActionOutcome::default();
             self.last_commitment[i] = None;
             self.was_alive[i] = self.agent_alive(i);
+            self.ever_alive[i] |= self.was_alive[i];
         }
     }
 
@@ -1277,6 +1427,76 @@ impl EnvWorker {
         self.cached_ents
             .as_ref()
             .expect("obs cache missing; call set_obs first")
+    }
+
+    /// Leftover-opponent purity on continents the team occupies.
+    /// Disabled when `duo_leftover_continent` is 0 or obs is missing.
+    fn leftover_continent_phi(&self) -> f64 {
+        let coef = self.reward_config.duo_leftover_continent;
+        if coef == 0.0 || self.n_agents <= 1 {
+            return 0.0;
+        }
+        let Some(obs) = self.obs.as_ref() else {
+            return 0.0;
+        };
+        let map_width = obs.head["width"].as_u64().unwrap_or(self.wr as u64) as usize;
+        if map_width == 0 {
+            return 0.0;
+        }
+        let agents = [
+            self.agent_me(0).max(0) as usize,
+            self.agent_me(1).max(0) as usize,
+        ];
+        let team = team_owner_ids(self.ents(), &agents);
+        let (team_n, leftover_n) = leftover_continent_counts(
+            &self.continent_of,
+            self.wr,
+            self.hr,
+            map_width,
+            |src| obs.owner_at(src),
+            &team,
+        );
+        leftover_continent_potential(team_n, leftover_n, coef)
+    }
+
+    /// Occupied-landmass count Φ. Disabled when `duo_continent_span` is 0
+    /// or obs is missing. Complementary to leftover-continent: first tile
+    /// on a new island raises this even when leftover red is still there.
+    fn continent_span_phi(&self) -> f64 {
+        let coef = self.reward_config.duo_continent_span;
+        if coef == 0.0 || self.n_agents <= 1 {
+            return 0.0;
+        }
+        let Some(obs) = self.obs.as_ref() else {
+            return 0.0;
+        };
+        let map_width = obs.head["width"].as_u64().unwrap_or(self.wr as u64) as usize;
+        if map_width == 0 {
+            return 0.0;
+        }
+        let agents = [
+            self.agent_me(0).max(0) as usize,
+            self.agent_me(1).max(0) as usize,
+        ];
+        let team = team_owner_ids(self.ents(), &agents);
+        let n = occupied_continent_count(
+            &self.continent_of,
+            self.wr,
+            self.hr,
+            map_width,
+            |src| obs.owner_at(src),
+            &team,
+        );
+        continent_span_potential(n, coef)
+    }
+
+    /// Team UsefulLanding count this episode (both humans). Own-shore /
+    /// cancel / destroy do not count. Used by boat-land Φ.
+    fn team_useful_landings(&self) -> usize {
+        self.boat_tracker
+            .iter()
+            .map(|t| t.counts().useful_landing as usize)
+            .sum()
     }
 
     pub fn legal(&self) -> &feat::Legal {
@@ -1306,7 +1526,35 @@ impl EnvWorker {
     }
 
     pub fn prepare_all(&mut self) -> Vec<PreparedObs> {
-        (0..self.n_agents).map(|i| self.prepare_agent(i)).collect()
+        let mut outs: Vec<PreparedObs> =
+            (0..self.n_agents).map(|i| self.prepare_agent(i)).collect();
+        Self::fill_partner_features(&mut outs);
+        outs
+    }
+
+    /// Copy sibling player tokens / scalars into each row's partner extras.
+    /// Must run at prepare time: shape-bucketing and minibatch shuffle later
+    /// break adjacent-row pairing, so V cannot gather `i^1` on the GPU.
+    pub(crate) fn fill_partner_features(outs: &mut [PreparedObs]) {
+        if outs.len() != 2 {
+            return;
+        }
+        let a_players = outs[0].players.clone();
+        let a_pmask = outs[0].pmask;
+        let a_scalars = outs[0].scalars;
+        let a_context = outs[0].prev_action.as_floats();
+        let b_players = outs[1].players.clone();
+        let b_pmask = outs[1].pmask;
+        let b_scalars = outs[1].scalars;
+        let b_context = outs[1].prev_action.as_floats();
+        outs[0].partner_players = b_players;
+        outs[0].partner_pmask = b_pmask;
+        outs[0].partner_scalars = b_scalars;
+        outs[0].partner_context = b_context;
+        outs[1].partner_players = a_players;
+        outs[1].partner_pmask = a_pmask;
+        outs[1].partner_scalars = a_scalars;
+        outs[1].partner_context = a_context;
     }
 
     fn prepare_agent(&mut self, agent_i: usize) -> PreparedObs {
@@ -1317,11 +1565,7 @@ impl EnvWorker {
         let clut = feat::make_clut(&lut, me, self.ents());
         let (hr, wr) = (self.hr, self.wr);
         let (gh, gw) = (hr / REGION, wr / REGION);
-        let width = self
-            .obs
-            .as_ref()
-            .unwrap()
-            .head["width"]
+        let width = self.obs.as_ref().unwrap().head["width"]
             .as_u64()
             .unwrap_or(wr as u64) as usize;
         let tiles = self.obs.as_ref().unwrap().prepare_tiles_with_ego(
@@ -1408,6 +1652,10 @@ impl EnvWorker {
             legal_build: f.legal_build,
             legal_nuke: f.legal_nuke,
             local,
+            partner_players: vec![0.0; feat::MAX_SLOTS * feat::P_FEAT],
+            partner_pmask: [0.0; feat::MAX_SLOTS],
+            partner_scalars: [0.0; feat::N_SCALARS],
+            partner_context: [0.0; crate::recurrent::CONTEXT_FLOATS],
         };
         if profile {
             static PREPARE_N: AtomicU64 = AtomicU64::new(0);
@@ -1456,15 +1704,13 @@ impl EnvWorker {
         Ok(scored
             .into_iter()
             .zip(prepared)
-            .map(
-                |((reward, done, info, outcome), next_obs)| EnvTransition {
-                    next_obs,
-                    reward,
-                    done,
-                    info,
-                    outcome,
-                },
-            )
+            .map(|((reward, done, info, outcome), next_obs)| EnvTransition {
+                next_obs,
+                reward,
+                done,
+                info,
+                outcome,
+            })
             .collect())
     }
 
@@ -1521,14 +1767,18 @@ impl EnvWorker {
             );
             for intent in &mut intents {
                 if let Some(map) = intent.as_object_mut() {
-                    map.insert(
-                        "clientID".into(),
-                        Value::String(AGENT_CLIENT_IDS[i].into()),
-                    );
+                    map.insert("clientID".into(), Value::String(AGENT_CLIENT_IDS[i].into()));
                 }
             }
             all_intents.extend(intents.iter().cloned());
             agent_intents.push(intents);
+        }
+        if let Some(staggered) = stagger_simultaneous_duo_spawn(
+            self.obs.as_ref().unwrap().spawn_phase(),
+            &(0..n).map(|i| !self.agent_alive(i)).collect::<Vec<_>>(),
+            &agent_intents,
+        ) {
+            all_intents = staggered;
         }
         let pre_attack_ids: HashSet<String> = ents.attacks.iter().map(|a| a.aid.clone()).collect();
 
@@ -1546,11 +1796,13 @@ impl EnvWorker {
                 self.spawn_randomly()?;
             }
             self.seed_agent_trackers();
-            self.ep_len += 1;
-            let dummy = ActionOutcome::default();
-            return Ok((0..n)
-                .map(|_| (0.0, false, None, dummy.clone()))
-                .collect());
+            let still_spawning = self.obs.as_ref().unwrap().spawn_phase() && self.spawn_steps < 16;
+            if still_spawning {
+                self.ep_len += 1;
+                let dummy = ActionOutcome::default();
+                return Ok((0..n).map(|_| (0.0, false, None, dummy.clone())).collect());
+            }
+            // Spawn never completed: fall through so never-alive is a death.
         }
 
         let winner_val = self.obs.as_ref().unwrap().winner().clone();
@@ -1570,6 +1822,9 @@ impl EnvWorker {
             done = true;
             timed_out = true;
         }
+        if done && self.ever_alive.iter().take(n).all(|alive| !*alive) {
+            died = true;
+        }
 
         let partner_me = if n > 1 {
             self.agent_me(1).max(0) as usize
@@ -1587,19 +1842,71 @@ impl EnvWorker {
             0.0
         };
         let both_alive = n > 1 && alives[0] && alives[1];
-        let allied = n > 1
-            && formally_allied(
-                self.ents(),
-                self.agent_me(0).max(0) as usize,
-                partner_me,
-            );
-        let welfare = if n > 1 {
-            duo_welfare_reward(s0, s1)
+        let allied =
+            n > 1 && formally_allied(self.ents(), self.agent_me(0).max(0) as usize, partner_me);
+        let next_duo_phi = if n > 1 {
+            duo_potential(s0, s1, both_alive, allied)
         } else {
             0.0
         };
-        let synergy = if n > 1 {
-            duo_synergy_reward(both_alive, allied)
+        let next_eco_phi = if n > 1 {
+            economy_potential(
+                player_gold_income(self.ents(), self.agent_me(0).max(0) as usize),
+                player_gold_income(self.ents(), partner_me),
+                self.reward_config.duo_eco_coef,
+            )
+        } else {
+            0.0
+        };
+        let team_owners: [usize; 2] = [
+            self.agent_me(0).max(0) as usize,
+            if n > 1 { partner_me } else { usize::MAX },
+        ];
+        let next_boat_phi = if n > 1 {
+            boat_commit_potential(
+                team_transport_ships(self.ents(), &team_owners),
+                self.reward_config.duo_boat_commit,
+            )
+        } else {
+            0.0
+        };
+        let next_leftover_phi = if n > 1 {
+            self.leftover_continent_phi()
+        } else {
+            0.0
+        };
+        let n_cities = if n > 1 {
+            team_completed_structures(self.ents(), &team_owners, CITY_UNIT_CLASS)
+        } else {
+            0
+        };
+        let n_ports = if n > 1 {
+            team_completed_structures(self.ents(), &team_owners, PORT_UNIT_CLASS)
+        } else {
+            0
+        };
+        let next_port_phi = if n > 1 {
+            port_stand_potential(n_ports, self.reward_config.duo_port_stand)
+        } else {
+            0.0
+        };
+        let next_city_phi = if n > 1 {
+            city_stand_potential(n_cities, self.reward_config.duo_city_stand)
+        } else {
+            0.0
+        };
+        let n_posts = if n > 1 {
+            team_completed_structures(self.ents(), &team_owners, DEFENSE_UNIT_CLASS)
+        } else {
+            0
+        };
+        let next_defense_phi = if n > 1 {
+            defense_stand_potential(n_posts, self.reward_config.duo_defense_stand)
+        } else {
+            0.0
+        };
+        let next_span_phi = if n > 1 {
+            self.continent_span_phi()
         } else {
             0.0
         };
@@ -1616,14 +1923,8 @@ impl EnvWorker {
             } else {
                 Vec::new()
             };
-            let chosen_action = churn_action(
-                choice,
-                &lut,
-                &ents,
-                intents,
-                &boats_before[i],
-                &boats_after,
-            );
+            let chosen_action =
+                churn_action(choice, &lut, &ents, intents, &boats_before[i], &boats_after);
             let mut embargo_outcome_r = 0.0;
             if choice.action == A_EMBARGO_STOP {
                 if let Some(ActionTarget::Player(target)) = chosen_action.target {
@@ -1722,8 +2023,7 @@ impl EnvWorker {
             let tiles = ofcore::translate::my_tiles(self.ents(), obs_me);
             let share = land_share(tiles, self.land_total);
             let closeout_just_entered =
-                self.closeout_tracker[i]
-                    .observe(share, obs_tick, inverse_pair.is_some());
+                self.closeout_tracker[i].observe(share, obs_tick, inverse_pair.is_some());
             let me = obs_me.max(0) as usize;
             let mine = composite.get(&me).copied().unwrap_or(0.0);
             let tw = timeweight(obs_tick);
@@ -1884,11 +2184,9 @@ impl EnvWorker {
                         || matches!(chosen_action.target, Some(_))
                 }
             };
-            components.combat_action = v10_combat_action_bonus(
-                choice.action,
-                has_action_target,
-                self.reward_config,
-            ) * solo_scale;
+            components.combat_action =
+                v10_combat_action_bonus(choice.action, has_action_target, self.reward_config)
+                    * solo_scale;
             if components.combat_action != 0.0 {
                 reward += components.combat_action;
             }
@@ -1904,18 +2202,115 @@ impl EnvWorker {
                 components.death = -death;
             }
             self.was_alive[i] = obs_alive;
+            self.ever_alive[i] |= obs_alive;
 
             if n > 1 {
-                // Outcome-only: welfare + being alive/allied. Do not pay
-                // alliance_request or donate actions (those were a timeout farm).
-                let duo_r = welfare + synergy;
+                // Ng 1999 PBRS on team Φ. Do not pay alliance_request /
+                // donate actions, and do not pay alive/allied as a wage
+                // (those were the timeout farm). Absorbing terminal Φ=0.
+                let phi = if done { 0.0 } else { next_duo_phi };
+                let mut duo_r = self.duo_shaper[i].transition(phi, self.reward_config.gamma, 1.0);
+                // Ng 1999 PBRS on log team gold-income. Cities/ports raise
+                // income; spending gold stock on a city does not drop Φ
+                // (unlike K_ECO). Absorbing terminal Φ=0.
+                let eco_phi = if done { 0.0 } else { next_eco_phi };
+                duo_r += self.eco_shaper[i].transition(eco_phi, self.reward_config.gamma, 1.0);
+                // Ng 1999 PBRS on team in-flight TransportShip count.
+                // Launch raises Φ; land/cancel/destroy drops it. Never the
+                // `boat` action. Absorbing terminal Φ=0.
+                let boat_phi = if done { 0.0 } else { next_boat_phi };
+                duo_r +=
+                    self.boat_commit_shaper[i].transition(boat_phi, self.reward_config.gamma, 1.0);
+                // Ng 1999 PBRS on leftover opponent tiles on continents the
+                // team occupies. Mop leftover red raises Φ; flee a dirty
+                // continent drops it. Never an attack/boat action.
+                // Absorbing terminal Φ=0.
+                let leftover_phi = if done { 0.0 } else { next_leftover_phi };
+                duo_r += self.leftover_continent_shaper[i].transition(
+                    leftover_phi,
+                    self.reward_config.gamma,
+                    1.0,
+                );
+                // Ng 1999 PBRS on team completed Port count. Completing a
+                // Port raises Φ; losing one drops it. Never the `build`
+                // action. Absorbing terminal Φ=0.
+                let port_phi = if done { 0.0 } else { next_port_phi };
+                duo_r +=
+                    self.port_stand_shaper[i].transition(port_phi, self.reward_config.gamma, 1.0);
+                // Ng 1999 PBRS on team completed City count. Completing a
+                // City raises Φ; losing one drops it. Never the `build`
+                // action. Absorbing terminal Φ=0.
+                let city_phi = if done { 0.0 } else { next_city_phi };
+                duo_r +=
+                    self.city_stand_shaper[i].transition(city_phi, self.reward_config.gamma, 1.0);
+                // Ng 1999 PBRS on team completed Defense Post count.
+                // Completing a post raises Φ; losing one drops it. Never
+                // the `build` action. Absorbing terminal Φ=0.
+                let defense_phi = if done { 0.0 } else { next_defense_phi };
+                duo_r += self.defense_stand_shaper[i].transition(
+                    defense_phi,
+                    self.reward_config.gamma,
+                    1.0,
+                );
+                // Ng 1999 PBRS on occupied landmass count. First tile on a
+                // new continent raises Φ even if leftover red is still
+                // there. Never a boat/attack action. Absorbing terminal Φ=0.
+                let span_phi = if done { 0.0 } else { next_span_phi };
+                duo_r += self.continent_span_shaper[i].transition(
+                    span_phi,
+                    self.reward_config.gamma,
+                    1.0,
+                );
+                // Ng 1999 PBRS on team UsefulLanding count. Invade landing
+                // raises Φ; own-shore / cancel / destroy do not. Complements
+                // boat-commit (landing drops that Φ). Never the `boat`
+                // action. Absorbing terminal Φ=0.
+                let land_phi = if done {
+                    0.0
+                } else {
+                    boat_land_potential(
+                        self.team_useful_landings(),
+                        self.reward_config.duo_boat_land,
+                    )
+                };
+                duo_r +=
+                    self.boat_land_shaper[i].transition(land_phi, self.reward_config.gamma, 1.0);
+                // Outcome-only one-shot: first formal pact this episode.
+                if allied && !self.pact_bonus_paid {
+                    duo_r += duo_pact_success_bonus(true, self.reward_config);
+                }
+                // Outcome-only one-shots: first completed City / Port.
+                // Never the `build` action; never per-tick while standing.
+                if n_cities > 0 && !self.city_bonus_paid {
+                    duo_r += duo_first_structure_bonus(true, self.reward_config.duo_first_city);
+                }
+                if n_ports > 0 && !self.port_bonus_paid {
+                    duo_r += duo_first_structure_bonus(true, self.reward_config.duo_first_port);
+                }
+                // Outcome-only: completed City/Port count dropped. Never
+                // the `delete_unit` action.
+                let dropped_cities = self.prev_n_cities.saturating_sub(n_cities);
+                let dropped_ports = self.prev_n_ports.saturating_sub(n_ports);
+                duo_r += duo_structure_delete_penalty(
+                    dropped_cities,
+                    self.reward_config.duo_city_delete,
+                );
+                duo_r +=
+                    duo_structure_delete_penalty(dropped_ports, self.reward_config.duo_port_delete);
                 components.duo = duo_r;
                 reward += duo_r;
             }
 
             if done {
                 let (place, _pn) = placement(self.ents(), obs_me, obs_alive, self.land_total);
-                components.terminal = (terminal_reward(place, won)
+                // Never-spawned is a death/loss, not a placement gift.
+                if !self.ever_alive[i] && !won && components.death == 0.0 {
+                    let death = self.reward_config.death_penalty();
+                    reward -= death;
+                    components.death = -death;
+                }
+                let no_play = timed_out || !self.ever_alive[i];
+                components.terminal = (terminal_reward(place, won, no_play)
                     + fast_win_bonus(
                         won,
                         obs_tick,
@@ -1976,6 +2371,17 @@ impl EnvWorker {
                 outcome,
             ));
         }
+        if n > 1 && allied {
+            self.pact_bonus_paid = true;
+        }
+        if n > 1 && n_cities > 0 {
+            self.city_bonus_paid = true;
+        }
+        if n > 1 && n_ports > 0 {
+            self.port_bonus_paid = true;
+        }
+        self.prev_n_cities = n_cities;
+        self.prev_n_ports = n_ports;
         self.ep_len += 1;
         if done {
             self.spool_finished_episode(won, timed_out);
@@ -2036,6 +2442,34 @@ impl EnvWorker {
 
     pub fn close(&mut self) {
         self.bridge.close();
+    }
+}
+
+/// During spawn, if every agent is still unplaced and all emit spawn in
+/// the same step, keep only agent 0's intents so agent 1's next obs sees
+/// the partner blob (class-2 clut) instead of a simultaneous empty-map
+/// commit. Without this, both heads still land on tick 1 and sequential
+/// spawn is a no-op.
+fn stagger_simultaneous_duo_spawn(
+    spawn_phase: bool,
+    unspawned: &[bool],
+    agent_intents: &[Vec<Value>],
+) -> Option<Vec<Value>> {
+    if !spawn_phase || agent_intents.len() < 2 {
+        return None;
+    }
+    if unspawned.len() != agent_intents.len() || !unspawned.iter().all(|&u| u) {
+        return None;
+    }
+    let is_spawn = |intents: &[Value]| {
+        intents
+            .iter()
+            .any(|v| v.get("type").and_then(|t| t.as_str()) == Some("spawn"))
+    };
+    if agent_intents.iter().all(|intents| is_spawn(intents)) {
+        Some(agent_intents[0].clone())
+    } else {
+        None
     }
 }
 
@@ -2208,5 +2642,136 @@ mod churn_action_tests {
                 ..CloseoutTracker::default()
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod compact_extras_tests {
+    use super::*;
+
+    #[test]
+    fn partner_block_appends_after_local_extras() {
+        let partner_n = compact_extras_players_n()
+            + feat::MAX_SLOTS
+            + feat::N_SCALARS
+            + crate::recurrent::CONTEXT_FLOATS;
+        assert_eq!(
+            compact_extras_per_env(),
+            compact_extras_core_n() + partner_n
+        );
+        assert!(partner_n > 0);
+    }
+
+    #[test]
+    fn fill_partner_features_swaps_sibling_player_rows() {
+        let a = PreparedObs {
+            prev_action: ActionOutcome::default(),
+            compact: None,
+            grid: None,
+            grid_coarse: None,
+            cgh: 0,
+            cgw: 0,
+            ae_raw: crate::ae::AeRaw {
+                owners: Vec::new(),
+                static_terrain: crate::ae::StaticTerrain {
+                    key: crate::ae::TerrainCacheKey {
+                        env_id: 0,
+                        episode: 0,
+                        static_id: 0,
+                        hr: 8,
+                        wr: 8,
+                    },
+                    map: std::sync::Arc::from("t"),
+                    land_mag: Vec::<f32>::new().into(),
+                },
+                fallout: Vec::new(),
+                stat: Vec::new(),
+                hr: 8,
+                wr: 8,
+            },
+            ego: Vec::new(),
+            db: Vec::new(),
+            transient: Vec::new(),
+            legal_tile: Vec::new(),
+            gh: 1,
+            gw: 1,
+            players: vec![1.0; feat::MAX_SLOTS * feat::P_FEAT],
+            pmask: [1.0; feat::MAX_SLOTS],
+            units: Vec::new(),
+            umask: [0.0; feat::MAX_UNITS],
+            legal_utarget: Vec::new(),
+            scalars: [3.0; feat::N_SCALARS],
+            me_slot: 0,
+            legal_actions: [0.0; feat::N_ACTIONS],
+            legal_ptarget: Vec::new(),
+            legal_build: [0.0; feat::N_BUILD],
+            legal_nuke: [0.0; feat::N_NUKE],
+            local: Vec::new(),
+            partner_players: vec![0.0; feat::MAX_SLOTS * feat::P_FEAT],
+            partner_pmask: [0.0; feat::MAX_SLOTS],
+            partner_scalars: [0.0; feat::N_SCALARS],
+            partner_context: [0.0; crate::recurrent::CONTEXT_FLOATS],
+        };
+        let mut b = a.clone();
+        b.players = vec![2.0; feat::MAX_SLOTS * feat::P_FEAT];
+        b.pmask = [0.5; feat::MAX_SLOTS];
+        b.scalars = [4.0; feat::N_SCALARS];
+        b.prev_action.action = 7;
+        b.prev_action.had_action = true;
+        let mut outs = vec![a, b];
+        EnvWorker::fill_partner_features(&mut outs);
+        assert_eq!(outs[0].partner_players[0], 2.0);
+        assert_eq!(outs[1].partner_players[0], 1.0);
+        assert_eq!(outs[0].partner_pmask[0], 0.5);
+        assert_eq!(outs[1].partner_pmask[0], 1.0);
+        assert_eq!(outs[0].partner_scalars[0], 4.0);
+        assert_eq!(outs[1].partner_scalars[0], 3.0);
+        assert_eq!(outs[0].partner_context[0], 7.0);
+        assert_eq!(outs[0].partner_context[12], 1.0);
+        assert_eq!(outs[1].partner_context[0], -1.0);
+        EnvWorker::fill_partner_features(&mut outs[..1]);
+        assert_eq!(outs[0].partner_players[0], 2.0, "solo slice is a no-op");
+    }
+}
+
+#[cfg(test)]
+mod sequential_spawn_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn spawn_intent(tile: i64) -> Vec<Value> {
+        vec![json!({"type": "spawn", "tile": tile, "clientID": "AGENTRL1"})]
+    }
+
+    #[test]
+    fn drops_agent1_spawn_when_both_unplaced() {
+        let kept = stagger_simultaneous_duo_spawn(
+            true,
+            &[true, true],
+            &[spawn_intent(10), spawn_intent(20)],
+        )
+        .expect("should stagger");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0]["tile"], 10);
+    }
+
+    #[test]
+    fn does_not_stagger_once_a_partner_is_on_the_map() {
+        assert!(stagger_simultaneous_duo_spawn(
+            true,
+            &[false, true],
+            &[spawn_intent(10), spawn_intent(20)],
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn does_not_stagger_outside_spawn_phase() {
+        assert!(stagger_simultaneous_duo_spawn(
+            false,
+            &[true, true],
+            &[spawn_intent(10), spawn_intent(20)],
+        )
+        .is_none());
     }
 }

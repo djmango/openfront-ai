@@ -2,10 +2,10 @@
 //! `rl/curriculum.py`; see that file for the design rationale in comments.
 
 use crate::feat::{
-    A_ALLIANCE_REQUEST, A_ATTACK, A_BOAT, A_BREAK_ALLIANCE, A_BUILD, A_CANCEL_BOAT, A_DONATE_GOLD,
-    A_DONATE_TROOPS, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT, EntsData,
+    EntsData, A_ALLIANCE_REQUEST, A_ATTACK, A_BOAT, A_BREAK_ALLIANCE, A_BUILD, A_CANCEL_BOAT,
+    A_DONATE_GOLD, A_DONATE_TROOPS, A_EMBARGO, A_EMBARGO_STOP, A_RETREAT,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 pub const W_STR: f64 = 0.02;
 pub const W_DELTA_GAIN: f64 = 5.0;
@@ -132,6 +132,62 @@ pub struct RewardConfig {
     pub v10_timeout_closeout: f64,
     /// V10: one-shot bonus the first time land share crosses closeout entry (45%).
     pub v10_closeout_entry: f64,
+    /// Duo: one-shot bonus the first time the two humans form a *formal*
+    /// alliance this episode. Outcome-only (pact formed), never the
+    /// `alliance_request` / `donate_*` actions. 0 disables.
+    pub duo_pact_success: f64,
+    /// Duo: Ng 1999 PBRS coefficient on log team gold-*income* (not gold
+    /// stock). Cities/ports raise income; spending gold on a city does not
+    /// drop this the way `K_ECO` gold-share does. 0 disables.
+    pub duo_eco_coef: f64,
+    /// Duo: one-shot when the team first owns a completed City. Outcome-only
+    /// (structure exists), never the `build` action. 0 disables.
+    pub duo_first_city: f64,
+    /// Duo: one-shot when the team first owns a completed Port. Outcome-only.
+    /// 0 disables.
+    pub duo_first_port: f64,
+    /// Duo: per completed City lost (count drop). Outcome-only, never the
+    /// `delete_unit` action. 0 disables. Positive magnitude; callers subtract.
+    pub duo_city_delete: f64,
+    /// Duo: per completed Port lost (count drop). Outcome-only. 0 disables.
+    pub duo_port_delete: f64,
+    /// Duo: Ng 1999 PBRS coefficient on team in-flight TransportShip count.
+    /// Launching a boat raises Φ; landing / cancel / destroy drops it.
+    /// Absorbing terminal Φ=0. Never the `boat` action. 0 disables.
+    pub duo_boat_commit: f64,
+    /// Duo: Ng 1999 PBRS on leftover opponent tiles on continents the team
+    /// already occupies. Φ = coef × team / (team + leftover_opp) on those
+    /// landmasses. Mopping leftover red raises Φ; fleeing a dirty continent
+    /// drops it. Absorbing terminal Φ=0. Never an attack/boat action. 0 disables.
+    pub duo_leftover_continent: f64,
+    /// Duo: Ng 1999 PBRS coefficient on team completed Port count.
+    /// Completing a Port raises Φ; losing one drops it. Absorbing terminal
+    /// Φ=0. Never the `build` action. Distinct from first-port one-shot and
+    /// the delete-penalty. 0 disables.
+    pub duo_port_stand: f64,
+    /// Duo: Ng 1999 PBRS on how many 4-connected landmasses the team occupies.
+    /// First tile on a new continent raises Φ regardless of leftover red
+    /// (leftover-continent purity can drop on that landing). Fleeing a
+    /// continent drops it. Absorbing terminal Φ=0. Never a boat/attack
+    /// action. 0 disables.
+    pub duo_continent_span: f64,
+    /// Duo: Ng 1999 PBRS on team UsefulLanding count this episode.
+    /// Completing an invade landing raises Φ; own-shore / cancel / destroy
+    /// do not. Absorbing terminal Φ=0. Never the `boat` action. Distinct
+    /// from in-flight boat-commit (landing drops that Φ) and from the
+    /// v84 one-shot. 0 disables.
+    pub duo_boat_land: f64,
+    /// Duo: Ng 1999 PBRS coefficient on team completed City count.
+    /// Completing a City raises Φ; losing one drops it. Absorbing terminal
+    /// Φ=0. Never the `build` action. Distinct from first-city one-shot and
+    /// the delete-penalty. 0 disables.
+    pub duo_city_stand: f64,
+    /// Duo: Ng 1999 PBRS coefficient on team completed Defense Post count.
+    /// Completing a Defense Post raises Φ; losing one drops it. Absorbing
+    /// terminal Φ=0. Never the `build` action. Distinct from city/port
+    /// stand (those collapsed compact on S / held water-timeout on P).
+    /// 0 disables.
+    pub duo_defense_stand: f64,
 }
 
 impl RewardConfig {
@@ -266,7 +322,7 @@ pub struct RewardComponents {
     pub waste: f64,
     pub death: f64,
     pub terminal: f64,
-    /// Team-mode duo: welfare / inequity / real-alliance synergy.
+    /// Team-mode duo: Ng-1999 PBRS on [`duo_potential`] (not per-tick wages).
     pub duo: f64,
 }
 
@@ -1192,7 +1248,11 @@ fn finite_nonnegative(value: f64) -> f64 {
 }
 
 fn finite_or_zero(value: f64) -> f64 {
-    if value.is_finite() { value } else { 0.0 }
+    if value.is_finite() {
+        value
+    } else {
+        0.0
+    }
 }
 
 /// V8.1 Φ(s), derived from the exact composite map used by placement.
@@ -1270,7 +1330,18 @@ pub fn placement_score(place: i64, n: i64) -> f64 {
     (n - place) as f64 / (n - 1).max(1) as f64
 }
 
-pub fn terminal_reward(place: i64, won: bool) -> f64 {
+/// Terminal outcome. Timeout without a win is a loss (`−W_WIN`), not a
+/// placement gift: paying `W_PLACE * place^{-p}` on the clock made camping
+/// until `max_episode_ticks` the PPO optimum (v4 safe-second / duo donate
+/// farm). The same rule applies when the caller flags a never-spawned
+/// human (`timed_out=true`): they did not play, so this is a death/loss,
+/// not a placement. AlphaStar's +1/0/−1 treats timeout as failure; this
+/// is the same rule at the existing win-bonus scale so a real win still
+/// dominates.
+pub fn terminal_reward(place: i64, won: bool, timed_out: bool) -> f64 {
+    if timed_out && !won {
+        return -W_WIN;
+    }
     let mut r = W_PLACE * (place as f64).powf(-PLACE_POW);
     if won {
         r += W_WIN;
@@ -1320,6 +1391,340 @@ pub fn v10_closeout_entry_bonus(just_entered: bool, config: RewardConfig) -> f64
     } else {
         0.0
     }
+}
+
+/// One-shot when teammates first form a formal pact this episode.
+/// Disabled when `duo_pact_success` is 0. Callers must pass `just_formed`
+/// only on the transition into `formally_allied`, never on the
+/// `alliance_request` action itself and never per-tick while allied.
+pub fn duo_pact_success_bonus(just_formed: bool, config: RewardConfig) -> f64 {
+    if just_formed && config.duo_pact_success != 0.0 {
+        config.duo_pact_success.abs()
+    } else {
+        0.0
+    }
+}
+
+/// One-shot when the team first owns a completed City or Port.
+/// Disabled when `amount` is 0. Callers must pass `just_completed` only on
+/// the 0→1 transition, never the `build` action and never per-tick while
+/// the structure stands (that would be a camping wage).
+pub fn duo_first_structure_bonus(just_completed: bool, amount: f64) -> f64 {
+    if just_completed && amount != 0.0 {
+        amount.abs()
+    } else {
+        0.0
+    }
+}
+
+/// Penalty when the team's completed City/Port count drops. `dropped` is
+/// `prev.saturating_sub(now)`. Disabled when `amount` is 0. Never keyed off
+/// the `delete_unit` action (that would be donate-dirac with extra steps).
+pub fn duo_structure_delete_penalty(dropped: usize, amount: f64) -> f64 {
+    if dropped == 0 || amount == 0.0 {
+        0.0
+    } else {
+        -amount.abs() * dropped as f64
+    }
+}
+
+/// City / Port / Defense Post class indices (`feat::unit_class`).
+pub const CITY_UNIT_CLASS: usize = 0;
+pub const PORT_UNIT_CLASS: usize = 1;
+pub const DEFENSE_UNIT_CLASS: usize = 2;
+/// Normalize log-income Φ into ~[0, 1] before `duo_eco_coef`. Ally train
+/// gold is 35k; a couple of cities sit in this ballpark.
+pub const ECO_INCOME_REF: f64 = 100_000.0;
+
+/// Team gold-*income* potential. Buildings raise income; cashing gold into
+/// a city does not drop this (unlike `K_ECO` which is gold *stock* share).
+/// Ng 1999: apply via [`DominanceShaper`], absorbing Φ=0 at done.
+pub fn economy_potential(income_a: f64, income_b: f64, coef: f64) -> f64 {
+    if coef == 0.0 {
+        return 0.0;
+    }
+    let a = finite_or_zero(income_a).max(0.0);
+    let b = finite_or_zero(income_b).max(0.0);
+    let norm = (1.0 + ECO_INCOME_REF).ln();
+    coef * ((1.0 + a).ln() + (1.0 + b).ln()) * 0.5 / norm
+}
+
+pub fn player_gold_income(ents: &crate::feat::EntsData, pid: usize) -> f64 {
+    ents.players
+        .iter()
+        .find(|p| p.id == pid)
+        .map(|p| finite_or_zero(p.gold_income).max(0.0))
+        .unwrap_or(0.0)
+}
+
+/// Completed (not-under-construction) structures of `class` owned by any
+/// of `owners` (agent small-ids).
+pub fn team_completed_structures(
+    ents: &crate::feat::EntsData,
+    owners: &[usize],
+    class: usize,
+) -> usize {
+    ents.units
+        .iter()
+        .filter(|u| u.class == class && !u.constructing && owners.iter().any(|&o| o == u.owner))
+        .count()
+}
+
+/// Living TransportShips owned by any of `owners` (agent small-ids).
+/// State count for [`boat_commit_potential`], not the `boat` action.
+pub fn team_transport_ships(ents: &crate::feat::EntsData, owners: &[usize]) -> usize {
+    ents.units
+        .iter()
+        .filter(|u| {
+            u.class == TRANSPORT_UNIT_CLASS && u.uid >= 0 && owners.iter().any(|&o| o == u.owner)
+        })
+        .count()
+}
+
+/// Team in-flight boat potential. `n_boats` is living TransportShips.
+/// Ng 1999: apply via [`DominanceShaper`], absorbing Φ=0 at done.
+/// Disabled when `coef` is 0. Stays well below a win so timeout-with-boats
+/// is still a loss (terminal charges −Φ).
+pub fn boat_commit_potential(n_boats: usize, coef: f64) -> f64 {
+    if coef == 0.0 {
+        return 0.0;
+    }
+    finite_or_zero(coef.abs() * n_boats as f64)
+}
+
+/// Owner ids on the same engine team as any of `agent_ids` (the two humans),
+/// plus the agents themselves if they have no team string yet.
+pub fn team_owner_ids(ents: &crate::feat::EntsData, agent_ids: &[usize]) -> Vec<u16> {
+    let mut teams = HashSet::new();
+    for p in &ents.players {
+        if agent_ids.iter().any(|&id| id == p.id) {
+            if let Some(t) = &p.team {
+                teams.insert(t.as_str());
+            }
+        }
+    }
+    ents.players
+        .iter()
+        .filter(|p| {
+            agent_ids.iter().any(|&id| id == p.id)
+                || p.team
+                    .as_deref()
+                    .map(|t| teams.contains(t))
+                    .unwrap_or(false)
+        })
+        .map(|p| p.id as u16)
+        .collect()
+}
+
+/// 4-connected land components. 0 = water, 1.. = continent ids.
+/// `land` is a `height * width` row-major mask (`1` = land).
+pub fn label_continents(land: &[u8], width: usize, height: usize) -> Vec<u16> {
+    let n = width.saturating_mul(height);
+    let mut labels = vec![0u16; n.min(land.len())];
+    if width == 0 || height == 0 || land.len() < n {
+        return labels;
+    }
+    let mut next = 1u16;
+    let mut stack = Vec::new();
+    for start in 0..n {
+        if land[start] == 0 || labels[start] != 0 {
+            continue;
+        }
+        let id = next;
+        next = next.saturating_add(1);
+        if next == 0 {
+            next = u16::MAX;
+        }
+        labels[start] = id;
+        stack.clear();
+        stack.push(start);
+        while let Some(i) = stack.pop() {
+            let x = i % width;
+            let y = i / width;
+            let nbrs = [
+                (x.wrapping_sub(1), y),
+                (x + 1, y),
+                (x, y.wrapping_sub(1)),
+                (x, y + 1),
+            ];
+            for (nx, ny) in nbrs {
+                if nx >= width || ny >= height {
+                    continue;
+                }
+                let j = ny * width + nx;
+                if land[j] != 0 && labels[j] == 0 {
+                    labels[j] = id;
+                    stack.push(j);
+                }
+            }
+        }
+    }
+    labels
+}
+
+/// Team tiles and leftover opponent tiles on continents the team occupies.
+/// TerraNullius (owner 0) is not leftover opponent. Continents with no team
+/// tiles do not contribute (so leftover red on an untouched island is ignored;
+/// fleeing a dirty continent drops team tiles and therefore Φ).
+pub fn leftover_continent_counts(
+    continent: &[u16],
+    wr: usize,
+    hr: usize,
+    map_width: usize,
+    owner_at: impl Fn(usize) -> u16,
+    team: &[u16],
+) -> (u64, u64) {
+    let n = wr.saturating_mul(hr);
+    if wr == 0 || hr == 0 || continent.len() < n {
+        return (0, 0);
+    }
+    let mut max_id = 0u16;
+    for &c in &continent[..n] {
+        max_id = max_id.max(c);
+    }
+    if max_id == 0 {
+        return (0, 0);
+    }
+    let n_c = max_id as usize + 1;
+    let mut team_c = vec![0u64; n_c];
+    let mut left_c = vec![0u64; n_c];
+    let team_set: HashSet<u16> = team.iter().copied().collect();
+    for y in 0..hr {
+        for x in 0..wr {
+            let cid = continent[y * wr + x] as usize;
+            if cid == 0 {
+                continue;
+            }
+            let owner = owner_at(y * map_width + x);
+            if owner == 0 {
+                continue;
+            }
+            if team_set.contains(&owner) {
+                team_c[cid] += 1;
+            } else {
+                left_c[cid] += 1;
+            }
+        }
+    }
+    let mut team_on = 0u64;
+    let mut left_on = 0u64;
+    for cid in 1..n_c {
+        if team_c[cid] > 0 {
+            team_on += team_c[cid];
+            left_on += left_c[cid];
+        }
+    }
+    (team_on, left_on)
+}
+
+/// Continent-purity potential. `team` / `leftover` are tiles on landmasses
+/// the team occupies. Ng 1999: apply via [`DominanceShaper`], absorbing
+/// Φ=0 at done. Disabled when `coef` is 0. Max is `coef` (clean continents),
+/// well below a win so timeout-after-mop is still a loss.
+pub fn leftover_continent_potential(team: u64, leftover: u64, coef: f64) -> f64 {
+    if coef == 0.0 || team == 0 {
+        return 0.0;
+    }
+    finite_or_zero(coef.abs() * team as f64 / (team + leftover) as f64)
+}
+
+/// Team standing-Port potential. `n_ports` is completed (not-under-construction)
+/// Ports. Ng 1999: apply via [`DominanceShaper`], absorbing Φ=0 at done.
+/// Disabled when `coef` is 0. Stays well below a win so timeout-with-ports
+/// is still a loss (terminal charges −Φ). Never the `build` action.
+pub fn port_stand_potential(n_ports: usize, coef: f64) -> f64 {
+    if coef == 0.0 {
+        return 0.0;
+    }
+    finite_or_zero(coef.abs() * n_ports as f64)
+}
+
+/// Team standing-City potential. `n_cities` is completed (not-under-construction)
+/// Cities. Ng 1999: apply via [`DominanceShaper`], absorbing Φ=0 at done.
+/// Disabled when `coef` is 0. Stays well below a win so timeout-with-cities
+/// is still a loss. Never the `build` action.
+pub fn city_stand_potential(n_cities: usize, coef: f64) -> f64 {
+    if coef == 0.0 {
+        return 0.0;
+    }
+    finite_or_zero(coef.abs() * n_cities as f64)
+}
+
+/// Team standing-Defense-Post potential. `n_posts` is completed
+/// (not-under-construction) Defense Posts. Ng 1999: apply via
+/// [`DominanceShaper`], absorbing Φ=0 at done. Disabled when `coef`
+/// is 0. Stays well below a win so timeout-with-posts is still a loss.
+/// Never the `build` action.
+pub fn defense_stand_potential(n_posts: usize, coef: f64) -> f64 {
+    if coef == 0.0 {
+        return 0.0;
+    }
+    finite_or_zero(coef.abs() * n_posts as f64)
+}
+
+/// Number of 4-connected landmasses with at least one team tile.
+/// Untouched islands do not count. Fleeing a continent drops the count.
+pub fn occupied_continent_count(
+    continent: &[u16],
+    wr: usize,
+    hr: usize,
+    map_width: usize,
+    owner_at: impl Fn(usize) -> u16,
+    team: &[u16],
+) -> usize {
+    let n = wr.saturating_mul(hr);
+    if wr == 0 || hr == 0 || continent.len() < n {
+        return 0;
+    }
+    let mut max_id = 0u16;
+    for &c in &continent[..n] {
+        max_id = max_id.max(c);
+    }
+    if max_id == 0 {
+        return 0;
+    }
+    let n_c = max_id as usize + 1;
+    let mut occupied = vec![false; n_c];
+    let team_set: HashSet<u16> = team.iter().copied().collect();
+    for y in 0..hr {
+        for x in 0..wr {
+            let cid = continent[y * wr + x] as usize;
+            if cid == 0 || occupied[cid] {
+                continue;
+            }
+            let owner = owner_at(y * map_width + x);
+            if owner != 0 && team_set.contains(&owner) {
+                occupied[cid] = true;
+            }
+        }
+    }
+    occupied.iter().skip(1).filter(|&&o| o).count()
+}
+
+/// Continent-span potential. `n_continents` is landmasses the team occupies.
+/// Ng 1999: apply via [`DominanceShaper`], absorbing Φ=0 at done.
+/// Disabled when `coef` is 0. Distinct from leftover-continent purity:
+/// first tile on a new island raises this even when that island is dirty.
+/// Max is `coef × n`; Easy water maps stay well below a win so
+/// timeout-after-span is still a loss. Never a boat/attack action.
+pub fn continent_span_potential(n_continents: usize, coef: f64) -> f64 {
+    if coef == 0.0 {
+        return 0.0;
+    }
+    finite_or_zero(coef.abs() * n_continents as f64)
+}
+
+/// Team useful-landing potential. `n_landings` is UsefulLanding outcomes
+/// this episode (not own-shore / cancel / destroy). Ng 1999: apply via
+/// [`DominanceShaper`], absorbing Φ=0 at done. Disabled when `coef` is 0.
+/// Complements boat-commit: launch raises commit Φ, a useful land drops
+/// commit Φ and raises this. Never the `boat` action. Stays well below a
+/// win so timeout-after-landings is still a loss.
+pub fn boat_land_potential(n_landings: usize, coef: f64) -> f64 {
+    if coef == 0.0 {
+        return 0.0;
+    }
+    finite_or_zero(coef.abs() * n_landings as f64)
 }
 
 fn v10_diplo_panic_armed(land_share: f64, tick: i64, max_ticks: i64, config: RewardConfig) -> bool {
@@ -1383,23 +1788,24 @@ pub fn v10_empty_action_net_reward(action: i64, config: RewardConfig) -> f64 {
 /// humans share a Team-mode match, so team-win / welfare / real-alliance
 /// synergy can dominate.
 pub const DUO_SOLO_SCALE: f64 = 0.22;
-/// Per-decision bonus while both humans are alive.
+/// Φ weight while both humans are alive. **Not a per-tick wage** — callers
+/// must apply [`duo_potential`] through [`DominanceShaper`] (Ng 1999 PBRS:
+/// `γ Φ(s') − Φ(s)`). Paying this every decision was a camping salary
+/// (~1400 steps × 0.02) that made timeout EV beat a rare win.
 pub const W_DUO_BOTH_ALIVE: f64 = 0.02;
-/// `min(s1,s2)` welfare.
+/// `min(s1,s2)` welfare term inside [`duo_potential`].
 pub const W_DUO_WELFARE_MIN: f64 = 0.015;
-/// Geometric-mean welfare.
+/// Geometric-mean welfare term inside [`duo_potential`].
 pub const W_DUO_GEO: f64 = 0.01;
-/// `|s1-s2|/(s1+s2)` inequity tax.
+/// `|s1-s2|/(s1+s2)` inequity tax inside [`duo_potential`].
 pub const W_DUO_INEQUITY: f64 = 0.02;
-/// Per-decision bonus while the pair has a *formal* alliance (not merely
-/// the same team). This is the reward that teaches them to pact so the
-/// engine pays ally train gold (35k) instead of the team rate (25k).
+/// Φ weight while the pair has a *formal* alliance (not merely the same
+/// team). PBRS pays the *transition* into a pact (so they still learn to
+/// request for ally train gold) without a per-tick allied wage.
 ///
-/// Outcome-only (devlog boat-churn rule): pay this *state*, never the
-/// `alliance_request` / `donate_*` actions. Per-action crumbs were a
-/// request↔break / donate-loop farm that made timeouts return ~170
-/// without a win. Do not reintroduce `W_DUO_ALLY_REQUEST` /
-/// `W_DUO_DONATE_PARTNER`.
+/// Outcome-only (devlog boat-churn rule): pay this *state* as a potential,
+/// never the `alliance_request` / `donate_*` actions. Do not reintroduce
+/// `W_DUO_ALLY_REQUEST` / `W_DUO_DONATE_PARTNER`.
 pub const W_DUO_ALLIED: f64 = 0.05;
 
 /// True when `ents.alliances` contains a formal pact between `a` and `b`
@@ -1408,13 +1814,13 @@ pub fn formally_allied(ents: &crate::feat::EntsData, a: usize, b: usize) -> bool
     if a == b {
         return false;
     }
-    ents.alliances.iter().any(|al| {
-        (al.0 == a && al.1 == b) || (al.0 == b && al.1 == a)
-    })
+    ents.alliances
+        .iter()
+        .any(|al| (al.0 == a && al.1 == b) || (al.0 == b && al.1 == a))
 }
 
-/// Min + geo-mean welfare minus inequity. Used as a dense team-strength
-/// potential so the pair grows together instead of one farming the other.
+/// Min + geo-mean welfare minus inequity. A *state potential* Φ term, not
+/// a per-tick wage — see [`duo_potential`].
 pub fn duo_welfare_reward(s1: f64, s2: f64) -> f64 {
     let mn = s1.min(s2);
     let geo = (s1.max(0.0) * s2.max(0.0)).sqrt();
@@ -1422,7 +1828,8 @@ pub fn duo_welfare_reward(s1: f64, s2: f64) -> f64 {
     W_DUO_WELFARE_MIN * mn + W_DUO_GEO * geo - W_DUO_INEQUITY * ineq
 }
 
-/// Survival + formal-alliance synergy. `allied` must be a real pact.
+/// Survival + formal-alliance synergy as a *state potential*. `allied`
+/// must be a real pact. Callers apply this via PBRS, not as a wage.
 pub fn duo_synergy_reward(both_alive: bool, allied: bool) -> f64 {
     let mut r = 0.0;
     if both_alive {
@@ -1432,6 +1839,15 @@ pub fn duo_synergy_reward(both_alive: bool, allied: bool) -> f64 {
         r += W_DUO_ALLIED;
     }
     r
+}
+
+/// Team-mode state potential Φ: welfare + both-alive + formal pact.
+/// Ng 1999: the policy-invariant shaping is `F = γ Φ(s') − Φ(s)`
+/// ([`DominanceShaper::transition`] with coefficient 1). Camping at a
+/// constant Φ (timeout farm) telescopes to ~0; forming a pact or growing
+/// together is a one-shot delta.
+pub fn duo_potential(s1: f64, s2: f64, both_alive: bool, allied: bool) -> f64 {
+    finite_or_zero(duo_welfare_reward(s1, s2) + duo_synergy_reward(both_alive, allied))
 }
 
 #[cfg(test)]
@@ -1481,6 +1897,19 @@ mod tests {
             v10_combat_action: 0.0,
             v10_timeout_closeout: 0.0,
             v10_closeout_entry: 0.0,
+            duo_pact_success: 0.0,
+            duo_eco_coef: 0.0,
+            duo_first_city: 0.0,
+            duo_first_port: 0.0,
+            duo_city_delete: 0.0,
+            duo_port_delete: 0.0,
+            duo_boat_commit: 0.0,
+            duo_leftover_continent: 0.0,
+            duo_port_stand: 0.0,
+            duo_continent_span: 0.0,
+            duo_boat_land: 0.0,
+            duo_city_stand: 0.0,
+            duo_defense_stand: 0.0,
         }
     }
 
@@ -2065,7 +2494,10 @@ mod tests {
         let Nations::Exact(imp_end_n) = v10[V10_STAGE_COUNT - 1].nations else {
             panic!("expected Exact nations");
         };
-        assert!(imp_end_n > imp_start_n, "Impossible band should ramp nations");
+        assert!(
+            imp_end_n > imp_start_n,
+            "Impossible band should ramp nations"
+        );
         assert!(CurriculumSchedule::V10.uses_v83_closeout());
         assert_eq!(V10_ENV_TARGETS.len(), v10.len());
         for (index, (stage, &(bots, nations))) in
@@ -2106,18 +2538,15 @@ mod tests {
         assert_eq!(v10[0].win_at, V10_RAMP_WIN_AT);
         assert_eq!(v10[V10_NATION_INTRO_STAGE - 1].win_at, V10_RAMP_WIN_AT);
         assert_eq!(v10[V10_NATION_INTRO_STAGE].win_at, V10_ONE_NATION_WIN_AT);
-        assert_eq!(
-            v10[V10_MULTI_NATION_STAGE].win_at,
-            V10_NATION_RAMP_WIN_AT
-        );
+        assert_eq!(v10[V10_MULTI_NATION_STAGE].win_at, V10_NATION_RAMP_WIN_AT);
         assert_eq!(v10[V10_EASY_RAMP_LEN - 1].win_at, V10_NATION_RAMP_WIN_AT);
         assert!(v10[V10_CLOSEOUT_STAGE].win_at < V10_NATION_RAMP_WIN_AT);
         assert!(v10[V10_CLOSEOUT_STAGE].win_at > V10_WIN_AT_END - 1e-9);
         assert!((v10[V10_STAGE_COUNT - 1].win_at - V10_WIN_AT_END).abs() < 1e-9);
-        assert!((stage_learning_rate(2.5e-4, 0.85, 28, V10_STAGE_LR_FLOOR)
-            - V10_STAGE_LR_FLOOR)
-            .abs()
-            < 1e-15);
+        assert!(
+            (stage_learning_rate(2.5e-4, 0.85, 28, V10_STAGE_LR_FLOOR) - V10_STAGE_LR_FLOOR).abs()
+                < 1e-15
+        );
         assert_eq!(
             imply_stage_from_learning_rate(2.5e-4 * 0.85_f64.powi(28), 2.5e-4, 0.85),
             Some(28)
@@ -2142,8 +2571,8 @@ mod tests {
 
     #[test]
     fn sample_episode_rehearsal_uses_past_lobby_setup() {
-        use rand::SeedableRng;
         use rand::rngs::SmallRng;
+        use rand::SeedableRng;
         let stages = stages_for_schedule(CurriculumSchedule::V10);
         let mut rng = SmallRng::seed_from_u64(42);
         let mut found = false;
@@ -2212,9 +2641,423 @@ mod tests {
     }
 
     #[test]
+    fn duo_pact_success_is_oneshot_outcome_not_an_action_wage() {
+        let mut cfg = config();
+        cfg.duo_pact_success = 5.0;
+        assert_eq!(duo_pact_success_bonus(false, cfg), 0.0);
+        assert_eq!(duo_pact_success_bonus(true, cfg), 5.0);
+        cfg.duo_pact_success = 0.0;
+        assert_eq!(duo_pact_success_bonus(true, cfg), 0.0);
+        // Still smaller than a win so timeout-while-allied stays a loss.
+        assert!(5.0 < W_WIN);
+    }
+
+    #[test]
+    fn economy_potential_is_income_not_gold_stock_and_stays_below_a_win() {
+        assert_eq!(economy_potential(50_000.0, 50_000.0, 0.0), 0.0);
+        let before = economy_potential(25_000.0, 25_000.0, 0.25);
+        let after_city = economy_potential(40_000.0, 25_000.0, 0.25);
+        assert!(after_city > before);
+        // Spending gold stock is invisible to this Φ (that's the K_ECO hole).
+        assert_eq!(
+            economy_potential(25_000.0, 25_000.0, 0.25),
+            economy_potential(25_000.0, 25_000.0, 0.25)
+        );
+        let saturated = economy_potential(ECO_INCOME_REF, ECO_INCOME_REF, 0.25);
+        assert!(saturated > 0.0);
+        assert!(saturated < 1.0);
+        assert!(saturated < W_WIN);
+    }
+
+    #[test]
+    fn first_city_and_port_are_oneshot_outcomes_not_build_wages() {
+        assert_eq!(duo_first_structure_bonus(false, 3.0), 0.0);
+        assert_eq!(duo_first_structure_bonus(true, 3.0), 3.0);
+        assert_eq!(duo_first_structure_bonus(true, 5.0), 5.0);
+        assert_eq!(duo_first_structure_bonus(true, 0.0), 0.0);
+        assert!(3.0 + 5.0 < W_WIN);
+    }
+
+    #[test]
+    fn structure_delete_penalty_is_count_drop_not_an_action_wage() {
+        assert_eq!(duo_structure_delete_penalty(0, 3.0), 0.0);
+        assert_eq!(duo_structure_delete_penalty(1, 3.0), -3.0);
+        assert_eq!(duo_structure_delete_penalty(2, 5.0), -10.0);
+        assert_eq!(duo_structure_delete_penalty(1, 0.0), 0.0);
+        assert!(3.0 < W_WIN);
+    }
+
+    #[test]
+    fn boat_commit_potential_is_inflight_count_not_a_boat_action_wage() {
+        assert_eq!(boat_commit_potential(0, 0.5), 0.0);
+        assert_eq!(boat_commit_potential(1, 0.0), 0.0);
+        assert_eq!(boat_commit_potential(1, 0.5), 0.5);
+        assert_eq!(boat_commit_potential(2, 0.5), 1.0);
+        assert!(boat_commit_potential(8, 0.5) < W_WIN);
+        let ents = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true},
+                {"id": 2, "pid": "AGENTRL2", "alive": true},
+                {"id": 3, "pid": "BOT", "alive": true}
+            ],
+            "units": [
+                {"type": "Transport", "owner": 1, "uid": 11, "constructing": false, "x": 0, "y": 0},
+                {"type": "Transport", "owner": 2, "uid": 12, "constructing": false, "x": 1, "y": 0},
+                {"type": "Transport", "owner": 3, "uid": 13, "constructing": false, "x": 2, "y": 0},
+                {"type": "Port", "owner": 1, "constructing": false, "x": 3, "y": 0}
+            ],
+            "attacks": [],
+            "alliances": []
+        }));
+        let owners = [1usize, 2];
+        assert_eq!(team_transport_ships(&ents, &owners), 2);
+        assert_eq!(
+            boat_commit_potential(team_transport_ships(&ents, &owners), 0.5),
+            1.0
+        );
+    }
+
+    #[test]
+    fn leftover_continent_potential_is_purity_not_an_action_wage() {
+        assert_eq!(leftover_continent_potential(0, 10, 0.5), 0.0);
+        assert_eq!(leftover_continent_potential(10, 0, 0.0), 0.0);
+        assert_eq!(leftover_continent_potential(10, 0, 0.5), 0.5);
+        assert_eq!(leftover_continent_potential(10, 10, 0.5), 0.25);
+        assert!(leftover_continent_potential(100, 0, 0.5) < W_WIN);
+        // Two islands: land on rows 0 and 2, water on row 1.
+        let w = 4usize;
+        let h = 3usize;
+        let mut land = vec![0u8; w * h];
+        for x in 0..w {
+            land[x] = 1;
+            land[2 * w + x] = 1;
+        }
+        let labels = label_continents(&land, w, h);
+        assert_eq!(labels[0], labels[3]);
+        assert_eq!(labels[2 * w], labels[2 * w + 3]);
+        assert_ne!(labels[0], labels[2 * w]);
+        assert_eq!(labels[w], 0);
+        // owners row-major on the same grid (map_width == wr).
+        // Continent A (row 0): team 1,1 leftover 3,3. Continent B (row 2): leftover only.
+        let owners = [
+            1u16, 1, 3, 3, // row 0
+            0, 0, 0, 0, // water
+            3, 3, 3, 3, // row 2, no team
+        ];
+        let team = [1u16];
+        let (team_n, left_n) = leftover_continent_counts(&labels, w, h, w, |i| owners[i], &team);
+        assert_eq!(team_n, 2);
+        assert_eq!(left_n, 2);
+        let dirty = leftover_continent_potential(team_n, left_n, 0.5);
+        assert!((dirty - 0.25).abs() < 1e-12);
+        // Fleeing continent A (no team tiles left) drops Φ to 0. Leftover
+        // on the untouched island still does not count.
+        let fled = [0u16; 12];
+        let (t2, l2) = leftover_continent_counts(&labels, w, h, w, |i| fled[i], &team);
+        assert_eq!((t2, l2), (0, 0));
+        assert_eq!(leftover_continent_potential(t2, l2, 0.5), 0.0);
+        let ents = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true, "team": "Humans"},
+                {"id": 2, "pid": "AGENTRL2", "alive": true, "team": "Humans"},
+                {"id": 3, "pid": "NATION", "alive": true, "team": "Humans"},
+                {"id": 4, "pid": "BOT", "alive": true, "team": "Bot"}
+            ],
+            "units": [],
+            "attacks": [],
+            "alliances": []
+        }));
+        let mut ids = team_owner_ids(&ents, &[1, 2]);
+        ids.sort();
+        assert_eq!(ids, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn continent_span_potential_is_occupied_count_not_a_boat_action_wage() {
+        assert_eq!(continent_span_potential(0, 0.5), 0.0);
+        assert_eq!(continent_span_potential(1, 0.0), 0.0);
+        assert_eq!(continent_span_potential(1, 0.5), 0.5);
+        assert_eq!(continent_span_potential(2, 0.5), 1.0);
+        assert!(continent_span_potential(8, 0.5) < W_WIN);
+        // Two islands: land on rows 0 and 2, water on row 1.
+        let w = 4usize;
+        let h = 3usize;
+        let mut land = vec![0u8; w * h];
+        for x in 0..w {
+            land[x] = 1;
+            land[2 * w + x] = 1;
+        }
+        let labels = label_continents(&land, w, h);
+        // Continent A (row 0): team. Continent B (row 2): leftover only.
+        // Span is 1 — leftover red on an untouched island does not count.
+        let owners = [
+            1u16, 1, 3, 3, // row 0
+            0, 0, 0, 0, // water
+            3, 3, 3, 3, // row 2, no team
+        ];
+        let team = [1u16];
+        assert_eq!(
+            occupied_continent_count(&labels, w, h, w, |i| owners[i], &team),
+            1
+        );
+        assert_eq!(
+            continent_span_potential(
+                occupied_continent_count(&labels, w, h, w, |i| owners[i], &team),
+                0.5
+            ),
+            0.5
+        );
+        // First tile on dirty B raises span (1 → 2) even though leftover
+        // purity would drop. That is the complementary lever.
+        let landed = [
+            1u16, 1, 3, 3, // row 0
+            0, 0, 0, 0, // water
+            1, 3, 3, 3, // row 2, first team tile
+        ];
+        assert_eq!(
+            occupied_continent_count(&labels, w, h, w, |i| landed[i], &team),
+            2
+        );
+        assert_eq!(
+            continent_span_potential(
+                occupied_continent_count(&labels, w, h, w, |i| landed[i], &team),
+                0.5
+            ),
+            1.0
+        );
+        let fled = [0u16; 12];
+        assert_eq!(
+            occupied_continent_count(&labels, w, h, w, |i| fled[i], &team),
+            0
+        );
+        assert_eq!(continent_span_potential(0, 0.5), 0.0);
+    }
+
+    #[test]
+    fn boat_land_potential_is_useful_landing_count_not_a_boat_action_wage() {
+        assert_eq!(boat_land_potential(0, 0.5), 0.0);
+        assert_eq!(boat_land_potential(1, 0.0), 0.0);
+        assert_eq!(boat_land_potential(1, 0.5), 0.5);
+        assert_eq!(boat_land_potential(2, 0.5), 1.0);
+        assert!(boat_land_potential(8, 0.5) < W_WIN);
+        // Own-shore / cancel / destroy are not UsefulLanding — they do not
+        // raise this Φ. Only an invade landing does.
+        assert_eq!(
+            classify_boat_resolution(false, 100.0, 500.0, 500.0, true, false),
+            BoatOutcome::UsefulLanding
+        );
+        assert_eq!(
+            classify_boat_resolution(false, 100.0, 500.0, 575.0, false, false),
+            BoatOutcome::OwnShoreReturn
+        );
+        assert_eq!(
+            classify_boat_resolution(true, 100.0, 500.0, 575.0, false, false),
+            BoatOutcome::Cancelled
+        );
+        let mut counts = BoatOutcomeCounts::default();
+        counts.record(BoatOutcome::UsefulLanding);
+        counts.record(BoatOutcome::OwnShoreReturn);
+        counts.record(BoatOutcome::Cancelled);
+        assert_eq!(counts.useful_landing, 1);
+        assert_eq!(
+            boat_land_potential(counts.useful_landing as usize, 0.5),
+            0.5
+        );
+    }
+
+    #[test]
+    fn defense_stand_potential_is_completed_count_not_a_build_action_wage() {
+        assert_eq!(defense_stand_potential(0, 0.5), 0.0);
+        assert_eq!(defense_stand_potential(1, 0.0), 0.0);
+        assert_eq!(defense_stand_potential(1, 0.5), 0.5);
+        assert_eq!(defense_stand_potential(2, 0.5), 1.0);
+        assert!(defense_stand_potential(8, 0.5) < W_WIN);
+        let ents = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true},
+                {"id": 2, "pid": "AGENTRL2", "alive": true},
+                {"id": 3, "pid": "BOT", "alive": true}
+            ],
+            "units": [
+                {"type": "Defense Post", "owner": 1, "constructing": false, "x": 0, "y": 0},
+                {"type": "Defense Post", "owner": 2, "constructing": true, "x": 1, "y": 0},
+                {"type": "Defense Post", "owner": 3, "constructing": false, "x": 2, "y": 0},
+                {"type": "City", "owner": 1, "constructing": false, "x": 3, "y": 0}
+            ],
+            "attacks": [],
+            "alliances": []
+        }));
+        let owners = [1usize, 2];
+        assert_eq!(
+            team_completed_structures(&ents, &owners, DEFENSE_UNIT_CLASS),
+            1
+        );
+        assert_eq!(
+            defense_stand_potential(
+                team_completed_structures(&ents, &owners, DEFENSE_UNIT_CLASS),
+                0.5
+            ),
+            0.5
+        );
+    }
+
+    #[test]
+    fn city_stand_potential_is_completed_count_not_a_build_action_wage() {
+        assert_eq!(city_stand_potential(0, 0.5), 0.0);
+        assert_eq!(city_stand_potential(1, 0.0), 0.0);
+        assert_eq!(city_stand_potential(1, 0.5), 0.5);
+        assert_eq!(city_stand_potential(2, 0.5), 1.0);
+        assert!(city_stand_potential(8, 0.5) < W_WIN);
+        let ents = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true},
+                {"id": 2, "pid": "AGENTRL2", "alive": true},
+                {"id": 3, "pid": "BOT", "alive": true}
+            ],
+            "units": [
+                {"type": "City", "owner": 1, "constructing": false, "x": 0, "y": 0},
+                {"type": "City", "owner": 2, "constructing": true, "x": 1, "y": 0},
+                {"type": "City", "owner": 3, "constructing": false, "x": 2, "y": 0},
+                {"type": "Port", "owner": 1, "constructing": false, "x": 3, "y": 0}
+            ],
+            "attacks": [],
+            "alliances": []
+        }));
+        let owners = [1usize, 2];
+        assert_eq!(
+            team_completed_structures(&ents, &owners, CITY_UNIT_CLASS),
+            1
+        );
+        assert_eq!(
+            city_stand_potential(
+                team_completed_structures(&ents, &owners, CITY_UNIT_CLASS),
+                0.5
+            ),
+            0.5
+        );
+    }
+
+    #[test]
+    fn port_stand_potential_is_completed_count_not_a_build_action_wage() {
+        assert_eq!(port_stand_potential(0, 0.5), 0.0);
+        assert_eq!(port_stand_potential(1, 0.0), 0.0);
+        assert_eq!(port_stand_potential(1, 0.5), 0.5);
+        assert_eq!(port_stand_potential(2, 0.5), 1.0);
+        assert!(port_stand_potential(8, 0.5) < W_WIN);
+        let ents = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true},
+                {"id": 2, "pid": "AGENTRL2", "alive": true},
+                {"id": 3, "pid": "BOT", "alive": true}
+            ],
+            "units": [
+                {"type": "Port", "owner": 1, "constructing": false, "x": 0, "y": 0},
+                {"type": "Port", "owner": 2, "constructing": true, "x": 1, "y": 0},
+                {"type": "Port", "owner": 3, "constructing": false, "x": 2, "y": 0},
+                {"type": "City", "owner": 1, "constructing": false, "x": 3, "y": 0}
+            ],
+            "attacks": [],
+            "alliances": []
+        }));
+        let owners = [1usize, 2];
+        assert_eq!(
+            team_completed_structures(&ents, &owners, PORT_UNIT_CLASS),
+            1
+        );
+        assert_eq!(
+            port_stand_potential(
+                team_completed_structures(&ents, &owners, PORT_UNIT_CLASS),
+                0.5
+            ),
+            0.5
+        );
+    }
+
+    #[test]
+    fn team_completed_structures_ignores_construction_and_foreign_owners() {
+        let ents = parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true, "goldIncome": 25000},
+                {"id": 2, "pid": "AGENTRL2", "alive": true, "goldIncome": 25000},
+                {"id": 3, "pid": "BOT", "alive": true}
+            ],
+            "units": [
+                {"type": "City", "owner": 1, "constructing": false, "x": 0, "y": 0},
+                {"type": "City", "owner": 1, "constructing": true, "x": 1, "y": 0},
+                {"type": "Port", "owner": 2, "constructing": false, "x": 2, "y": 0},
+                {"type": "City", "owner": 3, "constructing": false, "x": 3, "y": 0}
+            ],
+            "attacks": [],
+            "alliances": []
+        }));
+        let owners = [1usize, 2];
+        assert_eq!(
+            team_completed_structures(&ents, &owners, CITY_UNIT_CLASS),
+            1
+        );
+        assert_eq!(
+            team_completed_structures(&ents, &owners, PORT_UNIT_CLASS),
+            1
+        );
+        assert_eq!(player_gold_income(&ents, 1), 25000.0);
+    }
+
+    #[test]
     fn duo_welfare_penalizes_lopsided_strength() {
         let even = duo_welfare_reward(0.4, 0.4);
         let lopsided = duo_welfare_reward(0.8, 0.05);
         assert!(even > lopsided);
+    }
+
+    #[test]
+    fn timeout_without_a_win_is_a_loss_not_a_placement_gift() {
+        let place_first = terminal_reward(1, false, false);
+        assert!(place_first > 0.0);
+        assert_eq!(terminal_reward(1, false, true), -W_WIN);
+        assert_eq!(terminal_reward(2, false, true), -W_WIN);
+        let win = terminal_reward(1, true, false);
+        assert!(win > W_WIN);
+        // Won-and-timeout should not happen, but a win still pays the win.
+        assert_eq!(terminal_reward(1, true, true), win);
+    }
+
+    #[test]
+    fn never_spawned_is_the_same_loss_as_timeout() {
+        // Callers pass timed_out=true when the human never owned tiles.
+        assert_eq!(terminal_reward(1, false, true), -W_WIN);
+        assert_eq!(terminal_reward(8, false, true), -W_WIN);
+    }
+
+    #[test]
+    fn duo_pbrs_camping_does_not_accumulate_and_pact_is_a_oneshot() {
+        let gamma = 0.999;
+        let start = duo_potential(0.1, 0.1, true, false);
+        let mut shaper = DominanceShaper::default();
+        shaper.reset(start);
+        let mut camped = 0.0;
+        for _ in 0..1400 {
+            camped += shaper.transition(start, gamma, 1.0);
+        }
+        let wage_farm = 1400.0 * start;
+        // Constant Φ: each F = (γ−1)Φ. 1400 wages would be ~35; PBRS is
+        // a small negative drift (~1.4 Φ), not a timeout salary.
+        assert!(
+            camped.abs() < 0.1 * wage_farm,
+            "camping PBRS={camped} would-be wage={wage_farm} Φ={start}"
+        );
+        assert!(camped < 0.0);
+
+        shaper.reset(start);
+        let allied = duo_potential(0.1, 0.1, true, true);
+        let pact_delta = shaper.transition(allied, gamma, 1.0);
+        assert!(
+            (pact_delta - (gamma * allied - start)).abs() < 1e-12,
+            "pact delta {pact_delta}"
+        );
+        assert!(pact_delta > 0.0);
+
+        // Absorbing terminal: leftover Φ is charged once, not as a timeout gift.
+        let close = shaper.transition(0.0, gamma, 1.0);
+        assert!((close + allied).abs() < 1e-12);
     }
 }
