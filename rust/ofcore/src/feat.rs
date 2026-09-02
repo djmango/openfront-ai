@@ -13,7 +13,7 @@ pub const N_TRANSIENT: usize = 57;
 /// V11 neighbor pack: +7 columns (border geometry + relation continuum).
 /// Duo F: +2 (legal donate-to-this-slot, legal alliance_request-to-this-slot).
 pub const P_FEAT: usize = 30;
-/// Duo G: +1 team tiles / map land (95% team-win meter).
+/// Duo G: +1 team tiles / map land (80% team-win meter).
 pub const N_SCALARS: usize = 12;
 pub const N_ACTIONS: usize = 21;
 pub const N_BUILD: usize = 7;
@@ -853,9 +853,9 @@ pub fn featurize(
         0.0
     };
     let map_land = land.iter().filter(|&&v| v == 1).count() as f64;
-    // Team win is 95% of map land (not of claimed-among-players). F's
+    // Team win is 80% of map land (not of claimed-among-players). F's
     // timeouts often sat at 0.2-0.4 individual land with no "how close
-    // to 95% combined" channel on the trunk.
+    // to 80% combined" channel on the trunk.
     let team_map_share = if map_land > 0.0 {
         (team_tiles / map_land).clamp(0.0, 1.0) as f32
     } else {
@@ -967,7 +967,7 @@ pub fn featurize(
         // Was unused doomsday_enabled (always 0). Fraction of *claimed*
         // tiles owned by ego+teammates.
         team_claimed_share,
-        // Team win meter: ego+teammate tiles / map land. Win fires at 0.95.
+        // Team win meter: ego+teammate tiles / map land. Win fires at 0.80.
         team_map_share,
     ];
 
@@ -1536,7 +1536,7 @@ mod clut_tests {
     }
 
     #[test]
-    fn scalars_include_team_map_land_share_toward_95pct_win() {
+    fn scalars_include_team_map_land_share_toward_80pct_win() {
         let ents = parse_ents(&json!({
             "players": [
                 {"id": 1, "pid": "AGENTRL1", "alive": true, "team": "Humans", "tiles": 30},
@@ -1567,8 +1567,8 @@ mod clut_tests {
         assert!((feat.scalars[10] - 45.0 / 50.0).abs() < 1e-5);
         assert!((feat.scalars[11] - 45.0 / 64.0).abs() < 1e-5);
         assert!(
-            feat.scalars[11] < 0.95,
-            "45/64 is short of the 95% team win line"
+            feat.scalars[11] < crate::curriculum::DUO_TEAM_WIN_MAP_SHARE as f32,
+            "45/64 is short of the 80% team win line"
         );
     }
 
