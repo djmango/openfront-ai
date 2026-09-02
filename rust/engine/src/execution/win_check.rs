@@ -172,6 +172,8 @@ mod tests {
             name: id.to_string(),
             client_id: format!("{id}-client"),
             tiles_owned: tiles,
+            // WinCheck iterates `players_alive()` (`p.alive`), not `is_alive()`.
+            alive: true,
             ..Default::default()
         }
     }
