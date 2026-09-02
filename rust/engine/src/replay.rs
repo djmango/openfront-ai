@@ -133,7 +133,8 @@ fn terminal_candidate(game: &Game) -> Option<TerminalCandidate> {
         if team == crate::core::team_assignment::BOT_TEAM {
             return None;
         }
-        let land_reached = (*tiles as f64 / denominator) * 100.0 > 95.0;
+        let land_reached = (*tiles as f64 / denominator) * 100.0
+            > crate::execution::win_check::PERCENTAGE_TILES_TO_WIN_TEAM;
         let reason = if land_reached {
             "land_share"
         } else if max_timer_reached {

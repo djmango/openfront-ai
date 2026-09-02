@@ -24,6 +24,9 @@ pub const K_BUILD: f64 = 0.15;
 pub const DOMINANCE_EPS: f64 = 1e-9;
 pub const V83_CLOSEOUT_SHARE_START: f64 = 0.45;
 pub const V83_CLOSEOUT_SHARE_FULL: f64 = 0.80;
+/// Duo team win: combined ego+teammate tiles / map land. Matches FFA 80%
+/// (Team mode used to require 95%, which leftover islands could block).
+pub const DUO_TEAM_WIN_MAP_SHARE: f64 = 0.80;
 pub const LEGACY_V83_SCHEDULE_ID: &str = "v8.3";
 pub const V86_REWARD_PROFILE: &str = "v8.6-attack-fair-v1";
 /// V10 anti-death-spiral: dense V8.6-like reward + survival / anti-diplo / combat priors.

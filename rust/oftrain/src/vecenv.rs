@@ -889,12 +889,18 @@ fn churn_action(
     ChosenAction::new(choice.action, target)
 }
 
-fn humans_won(winner: &Value, n_agents: usize) -> bool {
+fn humans_won(winner: &Value, _n_agents: usize) -> bool {
     let Some(a) = winner.as_array() else {
         return false;
     };
     match a.first().and_then(|v| v.as_str()) {
-        Some("player") => n_agents == 1 && a.get(1).and_then(|v| v.as_str()) == Some("AGENTRL1"),
+        // Duo used to require n_agents == 1, so a player-encoded win
+        // (or "both humans still alive") never counted. Either agent
+        // winning is a team win.
+        Some("player") => matches!(
+            a.get(1).and_then(|v| v.as_str()),
+            Some("AGENTRL1") | Some("AGENTRL2")
+        ),
         Some("team") => {
             a.get(1).and_then(|v| v.as_str()) == Some("Humans")
                 || a.iter()
@@ -902,6 +908,27 @@ fn humans_won(winner: &Value, n_agents: usize) -> bool {
         }
         _ => false,
     }
+}
+
+/// Combined AGENTRL1+AGENTRL2 (or Humans team) tiles / map land.
+fn duo_combined_map_share(ents: &feat::EntsData, land_total: i64) -> f64 {
+    if land_total <= 0 {
+        return 0.0;
+    }
+    let team_tiles: f64 = ents
+        .players
+        .iter()
+        .filter(|p| {
+            matches!(p.pid.as_str(), "AGENTRL1" | "AGENTRL2") || p.team.as_deref() == Some("Humans")
+        })
+        .map(|p| p.tiles.max(0.0))
+        .sum();
+    team_tiles / land_total as f64
+}
+
+fn duo_territory_win(ents: &feat::EntsData, land_total: i64, n_agents: usize) -> bool {
+    n_agents >= 2
+        && duo_combined_map_share(ents, land_total) >= ofcore::curriculum::DUO_TEAM_WIN_MAP_SHARE
 }
 
 pub struct EnvWorker {
@@ -1809,13 +1836,18 @@ impl EnvWorker {
         let obs_tick = self.obs.as_ref().unwrap().tick();
         let alives: Vec<bool> = (0..n).map(|i| self.agent_alive(i)).collect();
         let all_dead = alives.iter().all(|a| !*a);
-        let won = humans_won(&winner_val, n);
+        let won = humans_won(&winner_val, n) || duo_territory_win(self.ents(), self.land_total, n);
         let mut timed_out = false;
         let mut done = false;
         let mut died = false;
         if all_dead {
             done = true;
             died = true;
+        } else if won {
+            // Combined 80% map land (or a Humans / AGENTRL* winner) is
+            // a team win. End here so they do not clock out after
+            // painting the map.
+            done = true;
         } else if !winner_val.is_null() {
             done = true;
         } else if obs_tick >= self.max_episode_ticks {
@@ -2642,6 +2674,34 @@ mod churn_action_tests {
                 ..CloseoutTracker::default()
             }
         );
+    }
+
+    #[test]
+    fn humans_won_counts_either_duo_agent_as_a_player_win() {
+        assert!(humans_won(&json!(["player", "AGENTRL1"]), 2));
+        assert!(humans_won(&json!(["player", "AGENTRL2"]), 2));
+        assert!(humans_won(
+            &json!(["team", "Humans", "AGENTRL1", "AGENTRL2"]),
+            2
+        ));
+        assert!(!humans_won(&json!(["player", "bot-1"]), 2));
+    }
+
+    #[test]
+    fn duo_territory_win_is_combined_80_percent_map_land() {
+        let ents = feat::parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true, "team": "Humans", "tiles": 50},
+                {"id": 2, "pid": "AGENTRL2", "alive": true, "team": "Humans", "tiles": 30},
+                {"id": 3, "pid": "bot", "alive": true, "team": "Bot", "tiles": 20}
+            ],
+            "units": [],
+            "attacks": [],
+            "alliances": []
+        }));
+        assert!(duo_territory_win(&ents, 100, 2));
+        assert!(!duo_territory_win(&ents, 101, 2));
+        assert!(!duo_territory_win(&ents, 100, 1));
     }
 }
 
