@@ -6,9 +6,13 @@ use crate::game::Game;
 
 /// TS `WinCheckExecution.HARD_TIME_LIMIT_SECONDS` (170 min).
 const HARD_TIME_LIMIT_SECONDS: u32 = 170 * 60;
-/// TS `Config.percentageTilesOwnedToWin()`.
-const PERCENTAGE_TILES_TO_WIN_FFA: f64 = 80.0;
-const PERCENTAGE_TILES_TO_WIN_TEAM: f64 = 95.0;
+/// TS `Config.percentageTilesOwnedToWin()` for FFA.
+pub const PERCENTAGE_TILES_TO_WIN_FFA: f64 = 80.0;
+/// Combined team land share to win. OpenFront Team mode used 95%, which
+/// blocked a duo "both painted the map" finish whenever leftover bots
+/// held islands. Recategorized to the FFA 80% line: if AGENTRL1+AGENTRL2
+/// together control >80% of map land, that is a win.
+pub const PERCENTAGE_TILES_TO_WIN_TEAM: f64 = 80.0;
 
 pub struct WinCheckExecution {
     active: bool,
@@ -231,6 +235,60 @@ mod tests {
         execution.tick(&mut game, 10);
 
         assert_eq!(game.winner.as_deref(), Some("Red"));
+    }
+
+    fn set_land(game: &mut Game, n: u32) {
+        let meta = crate::map::MapMeta {
+            width: n,
+            height: 1,
+            num_land_tiles: n,
+        };
+        let terrain = vec![0x80u8; n as usize];
+        game.map = crate::map::GameMap::from_terrain_bytes(&meta, &terrain).unwrap();
+    }
+
+    #[test]
+    fn team_mode_wins_when_duo_combines_over_80_percent() {
+        let mut game = Game::default();
+        configure(&mut game, "Team", json!({}));
+        set_land(&mut game, 100);
+        let mut a = player("rl1", 50);
+        a.team = Some("Humans".to_string());
+        let mut b = player("rl2", 31);
+        b.team = Some("Humans".to_string());
+        let mut bot = player("bot", 19);
+        bot.team = Some("Bot".to_string());
+        game.add_player(a);
+        game.add_player(b);
+        game.add_player(bot);
+        let mut execution = WinCheckExecution::new();
+
+        execution.tick(&mut game, 10);
+
+        assert_eq!(game.winner.as_deref(), Some("Humans"));
+        assert!(!execution.is_active());
+    }
+
+    #[test]
+    fn team_mode_does_not_win_at_exactly_80_percent() {
+        let mut game = Game::default();
+        configure(&mut game, "Team", json!({}));
+        set_land(&mut game, 100);
+        let mut a = player("rl1", 50);
+        a.team = Some("Humans".to_string());
+        let mut b = player("rl2", 30);
+        b.team = Some("Humans".to_string());
+        let mut bot = player("bot", 20);
+        bot.team = Some("Bot".to_string());
+        game.add_player(a);
+        game.add_player(b);
+        game.add_player(bot);
+        let mut execution = WinCheckExecution::new();
+
+        execution.tick(&mut game, 10);
+
+        assert_eq!(game.winner, None);
+        assert!(execution.is_active());
     }
 
     #[test]
