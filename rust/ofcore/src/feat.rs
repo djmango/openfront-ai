@@ -967,7 +967,7 @@ pub fn featurize(
         // Was unused doomsday_enabled (always 0). Fraction of *claimed*
         // tiles owned by ego+teammates.
         team_claimed_share,
-        // Team win meter: ego+teammate tiles / map land. Win fires at 0.80.
+        // Team win meter: ego+teammate tiles / map land. Win fires at >= 0.80.
         team_map_share,
     ];
 
