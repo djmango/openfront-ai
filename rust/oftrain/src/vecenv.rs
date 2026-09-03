@@ -22,7 +22,8 @@ use ofcore::curriculum::{
     duo_pact_success_bonus, duo_potential, duo_structure_delete_penalty, economy_potential,
     embargo_stop_outcome_reward, fast_win_bonus, formally_allied, label_continents, land_share,
     leftover_continent_counts, leftover_continent_potential, normalized_strength_share,
-    occupied_continent_count, placement, placement_score, player_gold_income, port_stand_potential,
+    occupied_continent_count, partner_tiles_potential, placement, placement_score,
+    player_gold_income, port_stand_potential, team_territory_win,
     sample_episode, stages_for_schedule, strength_delta_weight, team_completed_structures,
     team_owner_ids, team_transport_ships, tempo_pressure, terminal_reward, timeweight,
     v10_closeout_entry_bonus, v10_combat_action_bonus, v10_diplo_panic_penalty,
@@ -910,25 +911,19 @@ fn humans_won(winner: &Value, _n_agents: usize) -> bool {
     }
 }
 
-/// Combined AGENTRL1+AGENTRL2 (or Humans team) tiles / map land.
-fn duo_combined_map_share(ents: &feat::EntsData, land_total: i64) -> f64 {
-    if land_total <= 0 {
-        return 0.0;
-    }
-    let team_tiles: f64 = ents
-        .players
+/// Combined AGENTRL1+AGENTRL2 (or Humans team) tiles.
+fn duo_team_tiles(ents: &feat::EntsData) -> f64 {
+    ents.players
         .iter()
         .filter(|p| {
             matches!(p.pid.as_str(), "AGENTRL1" | "AGENTRL2") || p.team.as_deref() == Some("Humans")
         })
         .map(|p| p.tiles.max(0.0))
-        .sum();
-    team_tiles / land_total as f64
+        .sum()
 }
 
 fn duo_territory_win(ents: &feat::EntsData, land_total: i64, n_agents: usize) -> bool {
-    n_agents >= 2
-        && duo_combined_map_share(ents, land_total) >= ofcore::curriculum::DUO_TEAM_WIN_MAP_SHARE
+    n_agents >= 2 && team_territory_win(duo_team_tiles(ents), land_total)
 }
 
 pub struct EnvWorker {
@@ -971,6 +966,7 @@ pub struct EnvWorker {
     defense_stand_shaper: [DominanceShaper; 2],
     continent_span_shaper: [DominanceShaper; 2],
     boat_land_shaper: [DominanceShaper; 2],
+    partner_tiles_shaper: [DominanceShaper; 2],
     closeout_tracker: [CloseoutTracker; 2],
     action_churn_tracker: [ActionChurnTracker; 2],
     boat_tracker: [PendingBoatTracker; 2],
@@ -1055,6 +1051,7 @@ impl EnvWorker {
             defense_stand_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             continent_span_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             boat_land_shaper: [DominanceShaper::default(), DominanceShaper::default()],
+            partner_tiles_shaper: [DominanceShaper::default(), DominanceShaper::default()],
             closeout_tracker: [CloseoutTracker::default(), CloseoutTracker::default()],
             action_churn_tracker: [ActionChurnTracker::default(), ActionChurnTracker::default()],
             boat_tracker: [PendingBoatTracker::default(), PendingBoatTracker::default()],
@@ -1438,6 +1435,13 @@ impl EnvWorker {
                 ));
                 self.continent_span_shaper[i].reset(self.continent_span_phi());
                 self.boat_land_shaper[i].reset(0.0);
+                let t0 = ofcore::translate::my_tiles(self.ents(), self.agent_me(0));
+                let t1 = ofcore::translate::my_tiles(self.ents(), self.agent_me(1));
+                self.partner_tiles_shaper[i].reset(partner_tiles_potential(
+                    t0.min(t1),
+                    self.land_total,
+                    self.reward_config.duo_partner_tiles,
+                ));
             }
             self.closeout_tracker[i].reset(share, tick);
             self.action_churn_tracker[i].reset();
@@ -1942,6 +1946,17 @@ impl EnvWorker {
         } else {
             0.0
         };
+        let next_partner_phi = if n > 1 {
+            let t0 = ofcore::translate::my_tiles(self.ents(), self.agent_me(0));
+            let t1 = ofcore::translate::my_tiles(self.ents(), self.agent_me(1));
+            partner_tiles_potential(
+                t0.min(t1),
+                self.land_total,
+                self.reward_config.duo_partner_tiles,
+            )
+        } else {
+            0.0
+        };
         let solo_scale = if n > 1 { DUO_SOLO_SCALE } else { 1.0 };
 
         let mut results = Vec::with_capacity(n);
@@ -2307,6 +2322,15 @@ impl EnvWorker {
                 };
                 duo_r +=
                     self.boat_land_shaper[i].transition(land_phi, self.reward_config.gamma, 1.0);
+                // Ng 1999 PBRS on the weaker partner's tiles. Leader
+                // paint does not raise Φ; statue-partner growth does.
+                // Absorbing terminal Φ=0.
+                let partner_phi = if done { 0.0 } else { next_partner_phi };
+                duo_r += self.partner_tiles_shaper[i].transition(
+                    partner_phi,
+                    self.reward_config.gamma,
+                    1.0,
+                );
                 // Outcome-only one-shot: first formal pact this episode.
                 if allied && !self.pact_bonus_paid {
                     duo_r += duo_pact_success_bonus(true, self.reward_config);
@@ -2702,6 +2726,29 @@ mod churn_action_tests {
         assert!(duo_territory_win(&ents, 100, 2));
         assert!(!duo_territory_win(&ents, 101, 2));
         assert!(!duo_territory_win(&ents, 100, 1));
+        // Inclusive 80%: exactly 80/100 is a win (engine Team WinCheck too).
+        let exact = feat::parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true, "team": "Humans", "tiles": 50},
+                {"id": 2, "pid": "AGENTRL2", "alive": true, "team": "Humans", "tiles": 30}
+            ],
+            "units": [],
+            "attacks": [],
+            "alliances": []
+        }));
+        assert!(duo_territory_win(&exact, 100, 2));
+        // iXmTO1gV GreatLakes occupancy at timeout: 86.8% must end as a win.
+        let gl = feat::parse_ents(&json!({
+            "players": [
+                {"id": 1, "pid": "AGENTRL1", "alive": true, "team": "Humans", "tiles": 1656756},
+                {"id": 2, "pid": "AGENTRL2", "alive": true, "team": "Humans", "tiles": 25638},
+                {"id": 3, "pid": "Rashidun", "alive": true, "team": "Bot", "tiles": 158370}
+            ],
+            "units": [],
+            "attacks": [],
+            "alliances": []
+        }));
+        assert!(duo_territory_win(&gl, 1_938_051, 2));
     }
 }
 

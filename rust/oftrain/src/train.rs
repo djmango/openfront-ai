@@ -7265,6 +7265,12 @@ pub fn run(mut cfg: Config) -> Result<()> {
                 cfg.reward_config.duo_defense_stand
             );
         }
+        if cfg.reward_config.duo_partner_tiles != 0.0 {
+            println!(
+                "[train] duo partner-tiles PBRS coef={:.3} on ln(1+min(A1,A2) tiles)/ln(1+land) (statue partner earns nothing from leader paint; absorbing Φ=0)",
+                cfg.reward_config.duo_partner_tiles
+            );
+        }
     }
     if cfg.recurrent_policy {
         anyhow::ensure!(
@@ -9375,6 +9381,7 @@ mod persistent_actor_tests {
                 duo_boat_land: 0.0,
                 duo_city_stand: 0.0,
                 duo_defense_stand: 0.0,
+                duo_partner_tiles: 0.0,
             },
             lambda: 0.95,
             clip: 0.2,

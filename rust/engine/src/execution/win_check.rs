@@ -11,7 +11,8 @@ pub const PERCENTAGE_TILES_TO_WIN_FFA: f64 = 80.0;
 /// Combined team land share to win. OpenFront Team mode used 95%, which
 /// blocked a duo "both painted the map" finish whenever leftover bots
 /// held islands. Recategorized to the FFA 80% line: if AGENTRL1+AGENTRL2
-/// together control >80% of map land, that is a win.
+/// together control **at least** 80% of map land, that is a win.
+/// Inclusive (`>=`): sitting on the line is a win, not a timeout.
 pub const PERCENTAGE_TILES_TO_WIN_TEAM: f64 = 80.0;
 
 pub struct WinCheckExecution {
@@ -104,7 +105,7 @@ impl WinCheckExecution {
         let Some((leader_team, leader_tiles)) = leader else {
             return;
         };
-        if Self::percentage_owned(game, leader_tiles) > PERCENTAGE_TILES_TO_WIN_TEAM
+        if Self::percentage_owned(game, leader_tiles) >= PERCENTAGE_TILES_TO_WIN_TEAM
             || Self::time_limit_reached(game)
         {
             // TS refuses to finish a team game while the synthetic bot team leads.
@@ -272,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn team_mode_does_not_win_at_exactly_80_percent() {
+    fn team_mode_wins_at_exactly_80_percent() {
         let mut game = Game::default();
         configure(&mut game, "Team", json!({}));
         set_land(&mut game, 100);
@@ -289,8 +290,55 @@ mod tests {
 
         execution.tick(&mut game, 10);
 
+        assert_eq!(game.winner.as_deref(), Some("Humans"));
+        assert!(!execution.is_active());
+    }
+
+    #[test]
+    fn team_mode_does_not_win_at_79_percent() {
+        let mut game = Game::default();
+        configure(&mut game, "Team", json!({}));
+        set_land(&mut game, 100);
+        let mut a = player("rl1", 50);
+        a.team = Some("Humans".to_string());
+        let mut b = player("rl2", 29);
+        b.team = Some("Humans".to_string());
+        let mut bot = player("bot", 21);
+        bot.team = Some("Bot".to_string());
+        game.add_player(a);
+        game.add_player(b);
+        game.add_player(bot);
+        let mut execution = WinCheckExecution::new();
+
+        execution.tick(&mut game, 10);
+
         assert_eq!(game.winner, None);
         assert!(execution.is_active());
+    }
+
+    #[test]
+    fn team_mode_wins_greatlakes_ixmto1gv_share() {
+        // Native occupancy of live U game iXmTO1gV at t=21001:
+        // A1+A2 = 1_682_394 / 1_938_051 land = 86.8%. That must be a win
+        // even if one human is a spawn blob and leftover nations remain.
+        let mut game = Game::default();
+        configure(&mut game, "Team", json!({}));
+        set_land(&mut game, 1_938_051);
+        let mut a = player("AGENTRL1", 1_656_756);
+        a.team = Some("Humans".to_string());
+        let mut b = player("AGENTRL2", 25_638);
+        b.team = Some("Humans".to_string());
+        let mut nation = player("Rashidun", 158_370);
+        nation.team = Some("Bot".to_string());
+        game.add_player(a);
+        game.add_player(b);
+        game.add_player(nation);
+        let mut execution = WinCheckExecution::new();
+
+        execution.tick(&mut game, 10);
+
+        assert_eq!(game.winner.as_deref(), Some("Humans"));
+        assert!(!execution.is_active());
     }
 
     #[test]
