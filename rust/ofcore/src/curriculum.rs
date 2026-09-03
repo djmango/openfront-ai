@@ -26,7 +26,22 @@ pub const V83_CLOSEOUT_SHARE_START: f64 = 0.45;
 pub const V83_CLOSEOUT_SHARE_FULL: f64 = 0.80;
 /// Duo team win: combined ego+teammate tiles / map land. Matches FFA 80%
 /// (Team mode used to require 95%, which leftover islands could block).
+/// Inclusive: 80.0% is a win. Engine `WinCheck` / replay use the same
+/// `>= 80` contract so a painted map cannot timeout.
 pub const DUO_TEAM_WIN_MAP_SHARE: f64 = 0.80;
+
+/// Combined team tiles / map land. `land_total` is land tiles (no water).
+pub fn team_map_share(team_tiles: f64, land_total: i64) -> f64 {
+    if !team_tiles.is_finite() || land_total <= 0 {
+        return 0.0;
+    }
+    (team_tiles / land_total as f64).max(0.0)
+}
+
+/// True when combined team land is at least [`DUO_TEAM_WIN_MAP_SHARE`].
+pub fn team_territory_win(team_tiles: f64, land_total: i64) -> bool {
+    team_map_share(team_tiles, land_total) >= DUO_TEAM_WIN_MAP_SHARE
+}
 pub const LEGACY_V83_SCHEDULE_ID: &str = "v8.3";
 pub const V86_REWARD_PROFILE: &str = "v8.6-attack-fair-v1";
 /// V10 anti-death-spiral: dense V8.6-like reward + survival / anti-diplo / combat priors.
@@ -191,6 +206,13 @@ pub struct RewardConfig {
     /// stand (those collapsed compact on S / held water-timeout on P).
     /// 0 disables.
     pub duo_defense_stand: f64,
+    /// Duo: Ng 1999 PBRS on the weaker partner's tiles.
+    /// Φ = coef × ln(1+min(tiles_a,tiles_b)) / ln(1+land_total).
+    /// Leader painting does not change min, so a spawn-blob partner
+    /// earns nothing from the painter. Weak-partner growth raises Φ
+    /// for both heads. Absorbing terminal Φ=0. Never an action wage.
+    /// 0 disables.
+    pub duo_partner_tiles: f64,
 }
 
 impl RewardConfig {
@@ -1730,6 +1752,23 @@ pub fn boat_land_potential(n_landings: usize, coef: f64) -> f64 {
     finite_or_zero(coef.abs() * n_landings as f64)
 }
 
+/// Weaker-partner tile potential. `min_tiles` is min(A1, A2) land.
+/// Ng 1999: apply via [`DominanceShaper`], absorbing Φ=0 at done.
+/// Disabled when `coef` is 0. Leader expansion does not raise Φ;
+/// the statue partner growing does. Max is `coef` (min owns all land),
+/// well below a win so timeout-with-a-blob is still a loss.
+pub fn partner_tiles_potential(min_tiles: f64, land_total: i64, coef: f64) -> f64 {
+    if coef == 0.0 || land_total <= 0 {
+        return 0.0;
+    }
+    let min_t = finite_or_zero(min_tiles).max(0.0);
+    let denom = (1.0 + land_total as f64).ln();
+    if denom <= 0.0 {
+        return 0.0;
+    }
+    finite_or_zero(coef.abs() * (1.0 + min_t).ln() / denom)
+}
+
 fn v10_diplo_panic_armed(land_share: f64, tick: i64, max_ticks: i64, config: RewardConfig) -> bool {
     let share_armed = finite_or_zero(land_share) >= config.v10_diplo_panic_share;
     let tick_frac = tick as f64 / max_ticks.max(1) as f64;
@@ -1913,6 +1952,7 @@ mod tests {
             duo_boat_land: 0.0,
             duo_city_stand: 0.0,
             duo_defense_stand: 0.0,
+            duo_partner_tiles: 0.0,
         }
     }
 
@@ -2718,6 +2758,36 @@ mod tests {
             boat_commit_potential(team_transport_ships(&ents, &owners), 0.5),
             1.0
         );
+    }
+
+    #[test]
+    fn team_territory_win_is_inclusive_80_percent() {
+        assert!(team_territory_win(80.0, 100));
+        assert!(team_territory_win(80.0001, 100));
+        assert!(!team_territory_win(79.0, 100));
+        assert!(!team_territory_win(0.0, 100));
+        assert!(!team_territory_win(80.0, 0));
+        // iXmTO1gV GreatLakes t=21001 (live U timeout that should have won).
+        assert!(team_territory_win(1_656_756.0 + 25_638.0, 1_938_051));
+        // kVmhCVox Onion timeout at 63%.
+        assert!(!team_territory_win(14_680.0 + 118_068.0, 210_555));
+        // sVE1mBeN Pangaea win at 81.9%.
+        assert!(team_territory_win(199_402.0 + 144_924.0, 420_335));
+    }
+
+    #[test]
+    fn partner_tiles_potential_ignores_leader_paint_and_pays_weak_growth() {
+        let land = 1_938_051i64;
+        let coef = 0.4;
+        let statue = partner_tiles_potential(807.0, land, coef);
+        let leader_painted = partner_tiles_potential(807.0, land, coef);
+        let partner_grew = partner_tiles_potential(25_638.0, land, coef);
+        assert_eq!(statue, leader_painted);
+        assert!(partner_grew > statue);
+        assert_eq!(partner_tiles_potential(807.0, land, 0.0), 0.0);
+        assert_eq!(partner_tiles_potential(0.0, land, coef), 0.0);
+        assert!(partner_tiles_potential(land as f64, land, coef) < W_WIN);
+        assert!(partner_tiles_potential(land as f64, land, coef) <= coef + 1e-12);
     }
 
     #[test]

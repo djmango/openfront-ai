@@ -289,6 +289,12 @@ struct Args {
     #[arg(long, default_value_t = 0.0)]
     duo_defense_stand: f64,
 
+    /// Duo: PBRS on the weaker partner's tiles
+    /// (`ln(1+min(A1,A2))/ln(1+land)`). Leader painting does not raise
+    /// Φ; the statue partner growing does. Never an action wage. 0 disables.
+    #[arg(long, default_value_t = 0.0)]
+    duo_partner_tiles: f64,
+
     /// Resume a V8.6 (v8.3 schedule) checkpoint under V10 schedule + anti-spiral reward.
     #[arg(long, default_value_t = false, requires = "resume")]
     migrate_v86_to_v10: bool,
@@ -1012,6 +1018,7 @@ mod curriculum_flag_tests {
         assert_eq!(defaults.duo_boat_land, 0.0);
         assert_eq!(defaults.duo_city_stand, 0.0);
         assert_eq!(defaults.duo_defense_stand, 0.0);
+        assert_eq!(defaults.duo_partner_tiles, 0.0);
         assert!(defaults.kl_prior.is_none());
         assert_eq!(defaults.kl_coef, 0.05);
     }
@@ -1366,6 +1373,7 @@ fn main() -> anyhow::Result<()> {
         duo_boat_land: args.duo_boat_land,
         duo_city_stand: args.duo_city_stand,
         duo_defense_stand: args.duo_defense_stand,
+        duo_partner_tiles: args.duo_partner_tiles,
     };
     anyhow::ensure!(
         args.duo_pact_bonus.is_finite() && args.duo_pact_bonus >= 0.0,
@@ -1418,6 +1426,10 @@ fn main() -> anyhow::Result<()> {
     anyhow::ensure!(
         args.duo_defense_stand.is_finite() && args.duo_defense_stand >= 0.0,
         "--duo-defense-stand must be finite and non-negative"
+    );
+    anyhow::ensure!(
+        args.duo_partner_tiles.is_finite() && args.duo_partner_tiles >= 0.0,
+        "--duo-partner-tiles must be finite and non-negative"
     );
     anyhow::ensure!(
         args.v10_timeout_closeout.is_finite() && args.v10_timeout_closeout >= 0.0,
