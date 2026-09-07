@@ -86,14 +86,16 @@
 </nav>
 
 <div class="now" id="now">
-  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - September 3rd, 2026</h2>
-  <p>U abandoned. <b>Experiment V</b> on the homelab 3070: from-scratch
-    <code>--init</code> M (fresh TrainState, not U's 89k statue-partner
-    habit). Team win is <b>inclusive 80%</b> in engine WinCheck, replay,
-    and vecenv (GreatLakes <code>iXmTO1gV</code> at 86.8% is a win).
-    Reward: partner-tiles PBRS (weaker human's land) + leftover-continent
-    + boat-land, plus U's pact/eco/city-port. Status timers killed.
-    See <a href="#duo-scoreboard">A–U scoreboard</a> and
+  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - September 7th, 2026</h2>
+  <p><b>Experiment V is dead.</b> Started 2026-09-03T19:06:09Z
+    (<code>--init</code> M, inclusive 80% team win, partner-tiles 0.4 /
+    leftover-continent 0.25 / boat-land 0.2). CUDA OOM at
+    <b>u11835</b> / 187 eps / 12.6h (2026-09-04T07:40Z, silu 1.16&nbsp;GiB
+    on the 8GB 3070). Not restarted. V-only spool
+    <b>88/187</b> (WR 0.47): compact <b>63/91 = 0.69</b>, water
+    <b>25/96 = 0.26</b>, BetweenTwoSeas <b>6/15</b> (U was 0).
+    Rolling-40 at death was 13/40 — water-heavy, not the book.
+    See <a href="#duo-scoreboard">scoreboard</a> and
     <a href="#duo-learned">what we learned</a>.</p>
   <p class="d" style="margin:.75rem 0 0"><code>ppo_v11</code> is parked
     at update 2561 / stage 26 (1×H100). Showcase:
@@ -201,10 +203,10 @@ timeout losses. U drops a/c so a water tail is time to learn, not a
 hop. Stashes under <code>rust/checkpoints/ppo_duo/</code>.</p>
 
 <p id="duo-scoreboard"><b>Scoreboard</b> (compact = Caucasus / Onion / Pangaea;
-water = Britannia / GreatLakes / BlackSea / BetweenTwoSeas). U is live
-(init M). T numbers at peel 2026-09-01T04:13Z (T-only 3/181). Book
-counts drift because the replay spool reuses IDs (~190 files); M peak
-~80, book at M gate 45.</p>
+water = Britannia / GreatLakes / BlackSea / BetweenTwoSeas). V is dead
+(CUDA OOM u11835). T numbers at peel 2026-09-01T04:13Z (T-only 3/181).
+Book counts drift because the replay spool reuses IDs (~190 files);
+filter V by <code>spooled_at</code> after 2026-09-03T19:06:09Z.</p>
 <table>
   <tr>
     <th>run</th>
@@ -414,13 +416,22 @@ counts drift because the replay spool reuses IDs (~190 files); M peak
     <td>peeled u57239 (let M learn; ~29h)</td>
   </tr>
   <tr>
-    <td><b>U let M learn (live)</b></td>
-    <td>No new lever. Init M; flags through comms only</td>
-    <td>—</td>
-    <td>—</td>
-    <td>—</td>
-    <td>—</td>
-    <td>live (from M stash <code>mappo-M-fail-c-20260830T0741Z</code>)</td>
+    <td>U let M learn</td>
+    <td>No new lever. Init M; flags through comms only. Abandoned Sep 3 (statue partner; 80% closer missed GreatLakes 86.8%)</td>
+    <td>post-80% swap ~24/164</td>
+    <td>~0.15</td>
+    <td>~27% (Onion / Caucasus)</td>
+    <td>~2% (BTS 0)</td>
+    <td>abandoned for V; stash <code>mappo-U-abandoned-20260903T1904Z</code></td>
+  </tr>
+  <tr>
+    <td><b>V scratch + 80% + 3Φ</b></td>
+    <td>Init M. Inclusive 80% win. Partner-tiles 0.4, leftover-continent 0.25, boat-land 0.2</td>
+    <td><b>88/187</b></td>
+    <td>0.47</td>
+    <td>Onion 31/38, Caucasus 24/34, Pangaea 8/19 (63/91 = 0.69)</td>
+    <td>BTS 6/15, Britannia 9/24, GL 5/22, BlackSea 5/35 (25/96 = 0.26)</td>
+    <td>CUDA OOM u11835 @ 12.6h (not restarted)</td>
   </tr>
 </table>
 <p>Best compact <i>hold</i> is still <b>G</b> (101/245). Best water
@@ -435,7 +446,9 @@ S city-stand on Q gate-a 0/26. T defense-stand on Q ran ~29h
 for 3 Onion wins and Caucasus all TERM. Homelab is full-tilt
 SM again (an 80% duty-cycle was tried, then dropped — it does
 not free VRAM). H–J resumed G and lost Onion. U peels N–T and
-lets M train.</p>
+lets M train. V then abandoned U, trained from M with
+inclusive 80% + partner/leftover/boat-land, and landed
+88/187 before the 8GB OOM.</p>
 
 <h3 id="duo-carry">Carry forward: keep the wins; U adds no lever</h3>
 <p>From-scratch K / L / M re-paid compact that G already held (101/245).
@@ -1049,9 +1062,51 @@ reason to change the MDP.</p>
     team-land meter, sequential spawn, eco first-city/port, city/port
     delete penalty, centralized V, <code>--duo-comms</code>. LSTM
     does not fit 8GB. Do not <code>--init ppo_v11</code>.</li>
-  <li><b>Easy including water is not closed.</b> BTS still 0 on U.
-    GL is 1. Compact is the wage. Keep U through the overnight lock
-    unless entropy collapses or the job dies after a restart.</li>
+  <li><b>Easy including water is not closed.</b> U left BTS at 0.
+    V opened it (6/15) and raised water to 25/96, then died on the
+    same 8GB OOM. Do not restart a dead job to “finish the book.”</li>
+</ul>
+
+<p><b>V (Sep 3–4).</b> Inclusive 80% plus three PBRS terms from a
+fresh M TrainState, not another hop on U’s 89k statue-partner
+weights. 12.6 hours, 187 finished games, then CUDA OOM
+(<code>silu</code> tried 1.16&nbsp;GiB with 1.12&nbsp;GiB free).
+V-only spool (mtime / <code>spooled_at</code> after 19:06:09Z):</p>
+<ul>
+  <li><b>88/187 = 0.47</b> overall. Compact <b>63/91 = 0.69</b>
+    (Onion 31/38, Caucasus 24/34, Pangaea 8/19). Water
+    <b>25/96 = 0.26</b> (BTS 6/15, Britannia 9/24, GreatLakes 5/22,
+    BlackSea 5/35 + 2 deaths).</li>
+  <li>Rolling 40 at death was 13/40. That window was water-heavy
+    (BlackSea / GL timeouts). The honest book is 88/187, not the
+    last forty.</li>
+  <li>Two deaths in 187 games. Not a death spiral. Timeouts are
+    leftover nations and far shores, same as the U recordings, but
+    they convert far more often now that 80% actually ends the
+    episode and the weaker partner’s tiles are in Φ.</li>
+  <li>Entropy dipped below 0.3 in bursts (max streak 7 in the last
+    650 updates), not a 200-update collapse. The job died of VRAM,
+    not fail-b.</li>
+</ul>
+<p>What that means for the next run, if there is one:</p>
+<ul>
+  <li><b>The 80% closer was the missing win, not “they played badly.”</b>
+    U’s GreatLakes <code>iXmTO1gV</code> sat at 86.8% and timed out
+    because engine Team WinCheck used a strict <code>&gt; 80</code>.
+    Inclusive <code>&gt;=</code> in engine, replay, and vecenv is
+    locked to those occupancy numbers. Keep it.</li>
+  <li><b>From-scratch M + the three Φ together beat U’s no-lever hold.</b>
+    U’s post-80% book was ~15% overall / ~2% water / BTS 0. V is
+    47% / 26% water / BTS 6/15. Partner-tiles prices the spawn blob;
+    leftover-continent prices the tan third; boat-land prices a
+    useful landing. Do not peel them one-at-a-time the N–T way.</li>
+  <li><b>Do not resume U.</b> Those weights learned one-human paint.
+    V’s stash is <code>latest</code> at u11836 (schema 1) plus
+    <code>mappo-U-abandoned-20260903T1904Z</code> if someone needs
+    the old run.</li>
+  <li><b>8GB still OOMs around 12h / ~89% VRAM.</b> Same
+    <code>silu</code> allocate as U’s crashes. Crash-resume is
+    fine; do not change the MDP because of it.</li>
 </ul>
 
 <h3 id="duo-u-games">U games (occupancy, training owns the 3070)</h3>
@@ -1072,18 +1127,19 @@ AGENTRL2, red = bots. Not OpenFront WebGL.</p>
 
 <h3 id="duo-next">What is still open</h3>
 <ul>
-  <li><b>U (overnight lock): let M learn</b>. Init M
-    (<code>mappo-M-fail-c-20260830T0741Z</code>). Flags through
-    <code>--duo-comms</code> only. No N–T PBRS. Hold through
-    2026-09-02T12:00Z. Crash-resumed; spool 79/159, Britannia
-    4/17. Fail gates are entropy collapse and
-    dead-after-restart only. Do not --init G or K. Do not add a
-    lever.</li>
-  <li><b>Why not G / K / Q / T:</b> G held compact (101/245) but
-    is IPPO without identity/comms (H–J resume-G collapsed Onion).
-    K had the best short water rate but never BTS. Q held compact
-    with water 0. T was 3/181 Onion-only. M is the only book that
-    opened every Easy map.</li>
+  <li><b>V is dead; do not restart it from this note.</b>
+    Landing is 88/187 at u11835 / CUDA OOM. Next start, if any,
+    is a human call: resume V <code>latest</code> (schema 1) or
+    <code>--init</code> V after an 8GB VRAM fix. Do not resume U.</li>
+  <li><b>Water is still the hole, but it is no longer 2%.</b>
+    BlackSea 5/35. GreatLakes 5/22. BTS is open (6/15). Compact
+    holds (Onion 31/38). The closer and the three Φ are the
+    stack that did that.</li>
+  <li><b>Why not G / K / Q / T / U:</b> G held compact (101/245) but
+    is IPPO without identity/comms. K had the best short water
+    rate but never BTS. Q water 0. T was 3/181 Onion-only. U
+    painted with one human and timed out games that were already
+    over 80%.</li>
 </ul>
 
 <h3 id="duo-ops">Ops</h3>
