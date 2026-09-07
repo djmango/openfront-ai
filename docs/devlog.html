@@ -1145,22 +1145,15 @@ AGENTRL2, red = bots. Not OpenFront WebGL.</p>
 <h3 id="duo-ops">Ops</h3>
 <ul>
   <li>Host: homelab RTX 3070 8GB, tmux <code>duo-train</code>,
-    <code>bash rust/checkpoints/ppo_duo/run.sh</code> (gitignored;
-    U is feedforward MAPPO + comms only, <b>crash-resume latest</b> of this
-    run (carry-forward from M, not T/Q/R/S):
-    <code>--duo-comms --centralized-value=true
-    --recurrent-policy=false --minibatches 8</code>.
-    No N–T PBRS
-    (<code>--duo-boat-commit</code>, leftover-continent, port-stand,
-    continent-span, boat-land, city-stand, defense-stand).
-    No <code>--max-gpu-util</code>. Plus
-    <code>--duo-eco-coef 0.25 --duo-city-bonus 3 --duo-port-bonus 5
-    --duo-city-delete 3 --duo-port-delete 5
-    --v84-boat-cancelled=-0.15 --duo-pact-bonus 5</code>. Do not
-    add a lever while U is live. Overnight lock through
-    2026-09-02T12:00Z. Do not
-    <code>--resume</code> L LSTM, H–J, N–T, R, or S. Do not
-    <code>--init</code> G or K tonight. Clap defaults
+    <code>bash rust/checkpoints/ppo_duo/run.sh</code> (gitignored).
+    <b>V is dead</b> (CUDA OOM u11835, 2026-09-04T07:40Z). Do not
+    restart from this note. Last V flags: MAPPO + comms +
+    <code>--init</code> M + inclusive 80% +
+    <code>--duo-partner-tiles 0.4 --duo-leftover-continent 0.25
+    --duo-boat-land 0.2</code> plus pact/eco/city-port/delete.
+    No boat-commit / port-stand / continent-span / city-stand /
+    defense-stand. Stash U at
+    <code>mappo-U-abandoned-20260903T1904Z</code>. Clap defaults
     recurrent on: always pass <code>--recurrent-policy=false</code>
     for feedforward.</li>
   <li>Log / metrics / state:
