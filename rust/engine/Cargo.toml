@@ -8,6 +8,10 @@ description = "OpenFront game engine (Rust port, hash-gated)"
 [lib]
 name = "openfront_engine"
 path = "src/lib.rs"
+# `cdylib` exposes the C ABI in `src/puffer_ffi.rs` as
+# rust/target/release/libopenfront_engine.so for out-of-tree C envs
+# (PufferLib-style). `lib` keeps the existing Rust consumers working.
+crate-type = ["lib", "cdylib"]
 
 [[bin]]
 name = "openfront-replay"

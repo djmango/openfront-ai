@@ -16,6 +16,7 @@ pub mod map;
 pub mod obs;
 pub mod obs_typed;
 pub mod prng;
+pub mod puffer_ffi;
 pub mod rail;
 pub mod record;
 pub mod replay;
