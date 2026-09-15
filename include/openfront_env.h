@@ -19,15 +19,56 @@
  *
  * Config string (`ofenv_create`):
  *   repo_root=/path/to/openfront-ai, map=plains, seed=s1, bots=3,
- *   difficulty=Easy, n_agents=1, ticks_per_decision=8
+ *   difficulty=Easy, n_agents=1, ticks_per_decision=8, stage=0
  * (a JSON object with the same keys is also accepted). `repo_root` is
  * required; `map` defaults to `plains`, `seed` to `s1`, `bots` to 3,
  * `difficulty` to `Easy`, `n_agents` to 1 (clamped to 1..=2),
- * `ticks_per_decision` to 8, `nations` to 0.
+ * `ticks_per_decision` to 8, `nations` to 0, `stage` to 0 (the pinned V10
+ * curriculum stage; see ofenv_set_stage / ofenv_stage_info).
  *
  * intents_json for ofenv_step is a JSON array of engine intent objects, e.g.
  *   [{"type":"spawn","tile":12345}]
  * NULL, "", or "[]" means no intents. `clientID` defaults to AGENTRL1.
+ *
+ * Reward / terminal (see rust/engine/src/puffer_ffi.rs for the full list):
+ *
+ *   ofenv_reward(env, agent) returns the agent's per-decision reward from the
+ *   trainer's V10 curriculum recipe (`ofcore::curriculum`, the component
+ *   functions `oftrain/src/vecenv.rs` calls). ofenv_terminal(env, agent) is
+ *   the trainer's episode-done flag: a winner decided, all agents off the map,
+ *   or the tick cap ofcore::DEFAULT_MAX_EPISODE_TICKS (21000) reached. During
+ *   the spawn phase both are 0.
+ *
+ *   WIRED components (from engine/session state plus per-decision trackers the
+ *   env keeps internally):
+ *     strength         W_STR * composite_strength(me) * timeweight(tick)
+ *     strength_delta   strength_delta_weight(..) * delta (dominant-loss aware)
+ *     dominance        V8.1 log strength-ratio potential (PBRS), stage-gated
+ *     closeout         V8.3 land-share closeout potential (PBRS) + the V10
+ *                      closeout-entry one-shot bonus
+ *     tempo            -v84_tempo_coef * tempo_pressure(..) * timeweight
+ *     survival         v10_survival_reward(alive, land_share)
+ *     waste            -W_WASTE * engine-wasted intents (agent 0 only, the
+ *                      trainer's i==0 rule)
+ *     death            -death_penalty() on the alive->off-map transition
+ *     terminal         terminal_reward(place, won, no_play) + fast-win bonus
+ *                      + extra win bonus + timeout-after-closeout penalty
+ *
+ *   NOT WIRED (these need the policy's structured action choice, which the FFI
+ *   never sees; they are documented, not faked, and read as 0.0 here):
+ *     action_churn       (ActionChurnTracker / v83_action_churn_penalty)
+ *     embargo_outcome    (CombatTracker embargo-stop relation window)
+ *     combat_outcome     (CombatTracker attack/retreat window)
+ *     boat_outcome       (BoatTracker launch/resolve windows)
+ *     diplo_panic        (v10_diplo_panic_penalty; needs the chosen action id)
+ *     combat_action      (v10_combat_action_bonus; needs the chosen action id)
+ *     duo                (all duo_* team terms + DUO_SOLO_SCALE, 2-agent mode)
+ *
+ *   ofenv_set_stage(env, stage) rebuilds the session for that V10 stage's
+ *   bots / nations / difficulty / decision_ticks (map kept if it is in the
+ *   stage's pool). ofenv_stage_info(env) is JSON: index, name, difficulty,
+ *   decision_ticks, bots, nations, win_at (win gate), env_target (env floor),
+ *   maps, reward_profile.
  */
 
 #ifndef OPENFRONT_ENV_H
@@ -182,18 +223,29 @@ const unsigned short *ofenv_tiles(OFEnv env, int *n);
  * sizes, action names). Owned by the env; valid until the next call. */
 const char *ofenv_meta(OFEnv env);
 
-/* Host-side default reward for `agent` (0-based). No trainer shaping is
- * exported; this is documented as:
- *   (tiles / map_land now) - (tiles / map_land before)
- *   + 1.0 if this agent won this decision
- *   - 1.0 if it was on the map and is no longer
- * 0.0 for an out-of-range agent. */
+/* Curriculum-shaped per-decision reward for `agent` (0-based), built from the
+ * trainer's V10 recipe (see the "Reward / terminal" list above). 0.0 during
+ * the spawn phase and for an out-of-range agent. */
 double ofenv_reward(OFEnv env, int agent);
 
-/* 1 when the episode is over for `agent` (a winner was decided, or an agent
- * that had been on the map is gone and the spawn phase has ended), else 0.
- * Returns 1 for an out-of-range agent. */
+/* 1 when the episode is over for `agent` this decision (a winner was decided,
+ * all agents are off the map, or the tick cap was reached), else 0. Returns 1
+ * for an out-of-range agent. */
 int ofenv_terminal(OFEnv env, int agent);
+
+/* Number of V10 curriculum stages (ofcore::curriculum::V10_STAGE_COUNT). */
+int ofenv_stage_count(void);
+
+/* Pin the env to V10 curriculum stage `stage` (0-based): rebuilds the session
+ * for that stage's bots / nations / difficulty / decision_ticks (the map is
+ * kept when it is in the stage's map pool, else the pool's first map is used).
+ * 0 on success, -1 on error (out-of-range stage or session build failure). */
+int ofenv_set_stage(OFEnv env, int stage);
+
+/* NUL-terminated JSON for the pinned stage (index, name, difficulty,
+ * decision_ticks, bots, nations, win_at, env_target, maps, reward_profile).
+ * Never NULL for a live env; valid until the next call on this handle. */
+const char *ofenv_stage_info(OFEnv env);
 
 /* Total floats in ofenv_obs() / ofenv_mask() (n_agents * per-agent stride). */
 int ofenv_obs_size(OFEnv env);

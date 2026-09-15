@@ -52,20 +52,65 @@
 //! The fixed tile plane is what makes the total a compile-time constant;
 //! `gh`/`gw` for the live map are reported in [`ofenv_meta`].
 //!
-//! # Reward / terminal (no reference implementation exists in the trainer)
+//! # Reward / terminal (the trainer's V10 curriculum, partially wired)
 //!
-//! `ofenv_reward` is a documented host-side default, not the trainer's
-//! shaping:
-//! `share_delta + 1.0*won + (-1.0)*newly_dead`, where `share_delta` is the
-//! change in this agent's tiles / map-land this decision. `ofenv_terminal`
-//! is 1 once the match has a winner or once an agent that had been on the
-//! map is no longer on it (spawn phase itself is never terminal).
+//! `ofenv_reward(env, agent)` returns a *per-decision* shape built from
+//! `ofcore::curriculum`'s V10 reward recipe (`RewardConfig` defaults here
+//! mirror the `oftrain` CLI defaults, see [`trainer_default_reward_config`]),
+//! the same component functions `oftrain/src/vecenv.rs` calls. `ofenv_terminal`
+//! is the trainer's episode-done condition: all agents off the map, a winner
+//! decided (human win / Humans team / combined-80% duo territory), or the
+//! tick cap `ofcore::DEFAULT_MAX_EPISODE_TICKS` reached. During the spawn
+//! phase both are 0 (mirrors vecenv's spawn early-return).
+//!
+//! WIRED (computed from `RlSession` state plus per-decision trackers the FFI
+//! keeps in [`OFEnvState`]: `prev_strength`, the dominance/closeout
+//! `DominanceShaper`s, `was_alive`, `closeout_max_share`, `closeout_entry_paid`):
+//!   - `strength`        `W_STR * composite_strength(me) * timeweight(tick)`
+//!   - `strength_delta`  `strength_delta_weight(..) * delta` (dominant-loss aware)
+//!   - `dominance`       PBRS `DominanceShaper` on `dominance_potential`
+//!   - `closeout`        PBRS on `closeout_potential` + `v10_closeout_entry_bonus`
+//!   - `tempo`           `-v84_tempo_coef * tempo_pressure(..) * timeweight`
+//!   - `survival`        `v10_survival_reward(alive, land_share, cfg)`
+//!   - `waste`           `-W_WASTE * engine_wasted` for agent 0 (vecenv's `i==0`
+//!                       rule); the per-agent "+1 for an empty non-noop intent"
+//!                       increment is NOT wired
+//!   - `death`           `-death_penalty()` on the alive→dead transition
+//!   - `terminal`        `terminal_reward(place, won, no_play) +
+//!                       fast_win_bonus + v85_extra_win_bonus +
+//!                       v10_timeout_after_closeout_penalty`, only on the done
+//!                       decision
+//!
+//! NOT WIRED (needs trainer state that does not exist inside `RlSession` — the
+//! FFI never sees the policy's structured `Choice`, so it cannot replay these):
+//!   - `action_churn` (`ActionChurnTracker` / `v83_action_churn_penalty`; needs
+//!     the chosen action id + resolved target id per decision)
+//!   - `embargo_outcome` (`CombatTracker::observe_embargo_stop`; needs the
+//!     embargo-stop target's relation and the sticky-window tracker)
+//!   - `combat_outcome` (`CombatTracker::observe_combat`; needs attack/retreat
+//!     target ids and the just-opened-attack bookkeeping)
+//!   - `boat_outcome` (`BoatTracker` launch/resolve windows, pre/post troop
+//!     deltas, `classify_boat_resolution`; needs the boat launch decision history)
+//!   - `diplo_panic` (`v10_diplo_panic_penalty`; needs the chosen action id)
+//!   - `combat_action` (`v10_combat_action_bonus`; needs the chosen action id and
+//!     whether it emitted a real intent)
+//!   - `duo` (all `duo_*` terms + `DUO_SOLO_SCALE`: team PBRS, pacts, structures,
+//!     `W_DUO_*`; these fire only for the 2-agent team mode and need the
+//!     one-shot-paid flags the trainer keeps in `EnvWorker`)
+//!
+//! `ofenv_stage_info` reports the V10 curriculum stage the env is pinned to;
+//! `ofenv_set_stage` rebuilds the `RlSession` for that stage's bots / nations /
+//! difficulty / decision_ticks.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::PathBuf;
 
+use ofcore::curriculum::{
+    self, CurriculumSchedule, DominanceShaper, Nations, RewardComponents, RewardConfig,
+    V10_ENV_TARGETS, V10_STAGE_COUNT, W_STR, W_WASTE,
+};
 use ofcore::feat::{
     self, Legal, A_ALLIANCE_EXTENSION, ACTIONS, BUILD_TYPES, IS_LAND_BIT, MAG_MASK, MAX_SLOTS,
     MAX_UNITS, N_ACTIONS, N_BUILD, N_NUKE, N_SCALARS, P_FEAT, U_FEAT,
@@ -184,6 +229,7 @@ struct Cfg {
     nations: Value,
     n_agents: u32,
     ticks_per_decision: u32,
+    stage: usize,
 }
 
 impl Cfg {
@@ -250,6 +296,13 @@ impl Cfg {
             },
             None => Value::from(0),
         };
+        let stage = match get("stage") {
+            Some(s) => s
+                .parse::<usize>()
+                .map_err(|e| format!("stage={s}: {e}"))?
+                .min(V10_STAGE_COUNT - 1),
+            None => 0,
+        };
         Ok(Cfg {
             repo_root: PathBuf::from(repo_root),
             map: map.to_string(),
@@ -259,6 +312,7 @@ impl Cfg {
             nations,
             n_agents,
             ticks_per_decision,
+            stage,
         })
     }
 }
@@ -293,6 +347,138 @@ pub struct OFEnvState {
     ever_on_map: Vec<bool>,
     meta: CString,
     step_count: u64,
+    // --- curriculum reward state (see the module doc's WIRED / NOT WIRED) ---
+    /// Pinned V10 curriculum stage (see `ofenv_set_stage`).
+    stage: usize,
+    /// V10 reward recipe; defaults mirror the `oftrain` CLI defaults.
+    reward_config: RewardConfig,
+    /// Episode tick cap (`ofcore::DEFAULT_MAX_EPISODE_TICKS`).
+    max_episode_ticks: i64,
+    /// Composite strength at the previous decision, per agent.
+    prev_strength: Vec<f64>,
+    /// PBRS shaper for the V8.1 dominance potential, per agent.
+    dominance_shaper: Vec<DominanceShaper>,
+    /// PBRS shaper for the V8.3 closeout potential, per agent.
+    closeout_shaper: Vec<DominanceShaper>,
+    /// On-map at the previous decision (death-transition detection).
+    was_alive: Vec<bool>,
+    /// Max land share seen this episode, per agent (timeout-after-closeout).
+    closeout_max_share: Vec<f64>,
+    /// Whether the one-shot closeout-entry bonus has been paid, per agent.
+    closeout_entry_paid: Vec<bool>,
+    /// Debug components of the last reward (mirrored into `ofenv_meta`).
+    components: Vec<RewardComponents>,
+    /// JSON of the current stage (`ofenv_stage_info`).
+    stage_info: CString,
+    /// Engine-wasted intents reported by the last `RlSession::step`.
+    last_wasted: u32,
+}
+
+/// Episode tick cap used by `ofenv_terminal` (mirrors the trainer default).
+pub const OFENV_MAX_EPISODE_TICKS: i64 = ofcore::DEFAULT_MAX_EPISODE_TICKS;
+
+/// The V10 reward recipe the `oftrain` CLI runs with by default. Values are
+/// the `clap` defaults in `oftrain/src/main.rs` (see its
+/// `v10_reward_recipe_is_the_cli_default` test); `duo_*` terms stay 0 by
+/// default and are not applied by this FFI anyway (see the module doc).
+pub fn trainer_default_reward_config() -> RewardConfig {
+    RewardConfig {
+        gamma: 0.999,
+        v81_dom_coef: 0.25,
+        v81_min_stage: 0,
+        v81_potential_clamp: 2.0,
+        v81_dominant_loss: true,
+        v81_dominance_threshold: 0.30,
+        v81_delta_loss_dominant: 5.0,
+        v81_churn_coef: 0.05,
+        v81_churn_window: 16,
+        v81_churn_min_stage: 0,
+        v83_close_coef: 4.0,
+        v83_churn_coef: 0.06,
+        v84_boat_useful: 0.15,
+        v84_boat_destroyed: -0.20,
+        v84_boat_cancelled: -0.03,
+        v84_boat_own_shore: -0.05,
+        v84_boat_min_stage: 0,
+        v84_tempo_coef: 0.015,
+        v84_tempo_min_stage: 0,
+        v84_fast_win_coef: 40.0,
+        v85_tempo_share_threshold: 0.30,
+        v85_extra_win_bonus: 200.0,
+        v85_embargo_bad_stop: -0.15,
+        v85_embargo_good_stop: 0.02,
+        v85_embargo_min_stage: 0,
+        v85_premature_retreat: -0.03,
+        v85_thrash_reengage: -0.03,
+        v85_combat_min_stage: 0,
+        v86_delta_loss: 5.5,
+        v86_attack_symmetric_loss: true,
+        v86_skip_combat_churn: true,
+        v86_death_penalty: 3.0,
+        v10_survival_coef: 0.01,
+        v10_diplo_panic: 0.08,
+        v10_diplo_panic_share: 0.35,
+        v10_diplo_panic_tick_frac: 0.55,
+        v10_combat_action: 0.02,
+        v10_timeout_closeout: 20.0,
+        v10_closeout_entry: 25.0,
+        duo_pact_success: 0.0,
+        duo_eco_coef: 0.0,
+        duo_first_city: 0.0,
+        duo_first_port: 0.0,
+        duo_city_delete: 0.0,
+        duo_port_delete: 0.0,
+        duo_boat_commit: 0.0,
+        duo_leftover_continent: 0.0,
+        duo_port_stand: 0.0,
+        duo_continent_span: 0.0,
+        duo_boat_land: 0.0,
+        duo_city_stand: 0.0,
+        duo_defense_stand: 0.0,
+        duo_partner_tiles: 0.0,
+    }
+}
+
+/// A V10 stage table row, resolved for the FFI (maps pool kept for
+/// `ofenv_stage_info`). `nations` mirrors `Nations::{Default, Exact}`.
+pub struct StageParams {
+    pub index: usize,
+    pub name: String,
+    pub difficulty: String,
+    pub bots: u32,
+    pub nations: u32,
+    pub nations_default: bool,
+    pub decision_ticks: u32,
+    pub win_at: f64,
+    pub env_target: usize,
+    pub maps: Vec<String>,
+}
+
+/// Resolve stage `index` of the V10 schedule into concrete session knobs.
+pub fn stage_params(index: usize) -> Option<StageParams> {
+    if index >= V10_STAGE_COUNT {
+        return None;
+    }
+    let stages = curriculum::stages_for_schedule(CurriculumSchedule::V10);
+    let st = stages.get(index)?;
+    let (nations, nations_default) = match st.nations {
+        Nations::Default => (0, true),
+        Nations::Exact(n) => (n, false),
+    };
+    Some(StageParams {
+        index,
+        // `Stage` has no `name` field in ofcore::curriculum; the session
+        // difficulty is the closest stable label.
+        name: st.difficulty.to_string(),
+        difficulty: st.difficulty.to_string(),
+        bots: st.bots,
+        nations,
+        nations_default,
+        decision_ticks: st.decision_ticks,
+        win_at: st.win_at,
+        env_target: V10_ENV_TARGETS.get(index).copied().unwrap_or(0),
+        maps: st.maps.iter().map(|m| m.to_string()).collect(),
+    })
 }
 
 impl OFEnvState {
@@ -420,35 +606,261 @@ impl OFEnvState {
         }
     }
 
-    fn update_rewards(&mut self) {
-        let won = winner_includes_agent(&self.winner);
+    /// 1 when the episode is done for every agent: all agents off the map, a
+    /// winner decided, or the tick cap reached. Mirrors `vecenv`'s `done`.
+    fn episode_done(&self) -> (bool, bool, bool) {
         let n = self.n_agents;
+        let tick = self.session.game.ticks() as i64;
+        let alive: Vec<bool> = (0..n).map(|a| self.on_map(a)).collect();
+        let all_dead = alive.iter().all(|&a| !a);
+        let won = winner_includes_agent(&self.winner) || self.duo_territory_win();
+        let winner_decided = !self.winner.is_null();
+        let timed_out = !won && !winner_decided && !all_dead && tick >= self.max_episode_ticks;
+        let done = all_dead || won || winner_decided || tick >= self.max_episode_ticks;
+        (done, won, timed_out)
+    }
+
+    /// Combined human team land >= `DUO_TEAM_WIN_MAP_SHARE` (Team mode only).
+    fn duo_territory_win(&self) -> bool {
+        if self.n_agents < 2 {
+            return false;
+        }
+        let team_tiles: f64 = (0..self.n_agents).map(|a| self.tiles_of(a)).sum();
+        curriculum::team_territory_win(team_tiles, self.land_total.max(0.0) as i64)
+    }
+
+    fn stage_info_json(&self) -> CString {
+        let p = match stage_params(self.stage) {
+            Some(p) => p,
+            None => return CString::default(),
+        };
+        let v = json!({
+            "schedule": CurriculumSchedule::V10.id(),
+            "index": p.index,
+            "name": p.name,
+            "difficulty": p.difficulty,
+            "decision_ticks": p.decision_ticks,
+            "bots": p.bots,
+            "nations": p.nations,
+            "nations_default": p.nations_default,
+            "win_at": p.win_at,
+            "env_target": p.env_target,
+            "maps": p.maps,
+            "stage_count": V10_STAGE_COUNT,
+            "uses_v83_closeout": CurriculumSchedule::V10.uses_v83_closeout(),
+            "reward_profile": self.reward_config.reward_profile_id(),
+        });
+        CString::new(v.to_string()).unwrap_or_default()
+    }
+
+    /// Seed / reset the per-decision trackers from the current state. Mirrors
+    /// `vecenv::seed_agent_trackers` (called every spawn-phase decision) so the
+    /// first post-spawn delta is not an artificial jump from zero.
+    fn seed_trackers(&mut self) {
+        let land_total = self.land_total.max(1.0) as i64;
+        let composite = curriculum::strengths(&self.ents, land_total);
+        for agent in 0..self.n_agents {
+            let me = self.me(agent).max(0) as usize;
+            let mine = composite.get(&me).copied().unwrap_or(0.0);
+            let share = curriculum::land_share(self.tiles_of(agent), land_total);
+            self.prev_strength[agent] = mine;
+            self.was_alive[agent] = self.on_map(agent);
+            self.closeout_max_share[agent] = share;
+            self.closeout_entry_paid[agent] = share >= curriculum::V83_CLOSEOUT_SHARE_START;
+            let potential = curriculum::dominance_potential(
+                &composite,
+                me,
+                self.reward_config.v81_potential_clamp,
+            );
+            self.dominance_shaper[agent].reset(potential);
+            self.closeout_shaper[agent].reset(curriculum::closeout_potential(share));
+        }
+    }
+
+    /// Compute the per-decision V10 reward and done flags for every agent from
+    /// the current post-step session state. See the module doc for the wired
+    /// versus not-wired component list.
+    fn update_curriculum_rewards(&mut self) {
+        let n = self.n_agents;
+        let spawn_phase = self.session.game.in_spawn_phase();
+        if spawn_phase {
+            // vecenv returns (0.0, false) during the spawn phase and re-seeds
+            // its trackers every spawn decision.
+            self.seed_trackers();
+            for a in 0..n {
+                self.reward[a] = 0.0;
+                self.terminal[a] = 0;
+                self.components[a] = RewardComponents::default();
+                self.prev_share[a] = 0.0;
+            }
+            return;
+        }
+
+        let tick = self.session.game.ticks() as i64;
+        let max_ticks = self.max_episode_ticks.max(1);
+        let land_total = self.land_total.max(1.0) as i64;
+        let composite = curriculum::strengths(&self.ents, land_total);
+        let (done, won, timed_out) = self.episode_done();
+
         for agent in 0..n {
-            let on_map = self.on_map(agent);
-            let share = if self.land_total > 0.0 {
-                (self.tiles_of(agent) / self.land_total).clamp(0.0, 1.0)
+            let me_i = self.me(agent);
+            let me = me_i.max(0) as usize;
+            let tiles = self.tiles_of(agent);
+            let alive = tiles > 0.0;
+            let share = curriculum::land_share(tiles, land_total);
+            let mine = composite.get(&me).copied().unwrap_or(0.0);
+            let tw = curriculum::timeweight(tick);
+            let delta = mine - self.prev_strength[agent];
+            let normalized_share = if self.reward_config.dominant_loss_active(self.stage) {
+                curriculum::normalized_strength_share(&composite, me)
             } else {
                 0.0
             };
-            let mut r = share - self.prev_share[agent];
-            if won {
-                r += 1.0;
+            let has_active_attack = self.ents.attacks.iter().any(|a| a.from == me);
+            let delta_weight = curriculum::strength_delta_weight(
+                delta,
+                normalized_share,
+                self.stage,
+                self.reward_config,
+                has_active_attack,
+            );
+            let mut c = RewardComponents {
+                strength: W_STR * mine * tw,
+                strength_delta: delta_weight * delta,
+                ..RewardComponents::default()
+            };
+            let mut reward = c.strength + c.strength_delta;
+
+            // V8.1 dominance PBRS.
+            let next_potential = if done {
+                0.0
+            } else {
+                curriculum::dominance_potential(
+                    &composite,
+                    me,
+                    self.reward_config.v81_potential_clamp,
+                )
+            };
+            if self.reward_config.dominance_shaping_active(self.stage) {
+                c.dominance = self.dominance_shaper[agent].transition(
+                    next_potential,
+                    self.reward_config.gamma,
+                    self.reward_config.v81_dom_coef,
+                );
+                reward += c.dominance;
+            } else {
+                self.dominance_shaper[agent].reset(next_potential);
             }
-            if self.ever_on_map[agent] && !on_map {
-                r -= 1.0;
+
+            // V8.3 closeout PBRS + V10 closeout-entry one-shot.
+            let next_closeout = if done {
+                0.0
+            } else {
+                curriculum::closeout_potential(share)
+            };
+            if CurriculumSchedule::V10.uses_v83_closeout()
+                && self.reward_config.v83_close_coef != 0.0
+            {
+                c.closeout = self.closeout_shaper[agent].transition(
+                    next_closeout,
+                    self.reward_config.gamma,
+                    self.reward_config.v83_close_coef,
+                );
+                reward += c.closeout;
+            } else {
+                self.closeout_shaper[agent].reset(next_closeout);
             }
-            self.reward[agent] = r;
-            self.prev_share[agent] = share;
-            if on_map {
+            if share > self.closeout_max_share[agent] {
+                self.closeout_max_share[agent] = share;
+            }
+            let just_entered = !done
+                && share >= curriculum::V83_CLOSEOUT_SHARE_START
+                && !self.closeout_entry_paid[agent];
+            if just_entered {
+                self.closeout_entry_paid[agent] = true;
+            }
+            let entry_bonus =
+                curriculum::v10_closeout_entry_bonus(just_entered, self.reward_config);
+            if entry_bonus != 0.0 {
+                c.closeout += entry_bonus;
+                reward += entry_bonus;
+            }
+            let closeout_reached =
+                self.closeout_max_share[agent] >= curriculum::V83_CLOSEOUT_SHARE_START;
+
+            // V8.4 tempo pressure while dominant.
+            if self.reward_config.tempo_active(self.stage) {
+                let tempo_share = curriculum::normalized_strength_share(&composite, me);
+                let t = -self.reward_config.v84_tempo_coef
+                    * curriculum::tempo_pressure(
+                        tick,
+                        max_ticks,
+                        tempo_share,
+                        self.reward_config.tempo_share_threshold(),
+                    )
+                    * tw;
+                c.tempo = t;
+                if t != 0.0 {
+                    reward += t;
+                }
+            }
+
+            // V10 survival shaping.
+            c.survival = curriculum::v10_survival_reward(alive, share, self.reward_config);
+            if c.survival != 0.0 {
+                reward += c.survival;
+            }
+
+            // Waste: engine count for agent 0 only (vecenv's `i == 0` rule).
+            let wasted = if agent == 0 { self.last_wasted as f64 } else { 0.0 };
+            c.waste = -W_WASTE * wasted;
+            if wasted != 0.0 {
+                reward += c.waste;
+            }
+
+            // Death on the alive -> off-map transition.
+            if !alive && self.was_alive[agent] {
+                let death = self.reward_config.death_penalty();
+                c.death = -death;
+                reward -= death;
+            }
+            self.was_alive[agent] = alive;
+            if alive {
                 self.ever_on_map[agent] = true;
             }
-            let dead = self.ever_on_map[agent] && !on_map;
-            let spawn_phase = self.session.game.in_spawn_phase();
-            self.terminal[agent] = if !self.winner.is_null() || (dead && !spawn_phase) {
-                1
-            } else {
-                0
-            };
+            self.prev_share[agent] = share;
+            self.prev_strength[agent] = mine;
+
+            // Terminal on the done decision.
+            if done {
+                if !self.ever_on_map[agent] && !won && c.death == 0.0 {
+                    let death = self.reward_config.death_penalty();
+                    c.death = -death;
+                    reward -= death;
+                }
+                let (place, _pn) = curriculum::placement(&self.ents, me_i, alive, land_total);
+                let no_play = timed_out || !self.ever_on_map[agent];
+                c.terminal = curriculum::terminal_reward(place, won, no_play)
+                    + curriculum::fast_win_bonus(
+                        won,
+                        tick,
+                        max_ticks,
+                        self.reward_config.v84_fast_win_coef,
+                    );
+                if won {
+                    c.terminal += self.reward_config.v85_extra_win_bonus;
+                }
+                c.terminal += curriculum::v10_timeout_after_closeout_penalty(
+                    timed_out,
+                    closeout_reached,
+                    self.reward_config,
+                );
+                reward += c.terminal;
+            }
+
+            self.reward[agent] = reward;
+            self.terminal[agent] = if done { 1 } else { 0 };
+            self.components[agent] = c;
         }
     }
 
@@ -463,8 +875,27 @@ impl OFEnvState {
                 "share": self.prev_share[agent],
                 "reward": self.reward[agent],
                 "terminal": self.terminal[agent],
+                "reward_components": {
+                    "strength": self.components[agent].strength,
+                    "strength_delta": self.components[agent].strength_delta,
+                    "dominance": self.components[agent].dominance,
+                    "closeout": self.components[agent].closeout,
+                    "action_churn": self.components[agent].action_churn,
+                    "boat_outcome": self.components[agent].boat_outcome,
+                    "tempo": self.components[agent].tempo,
+                    "embargo_outcome": self.components[agent].embargo_outcome,
+                    "combat_outcome": self.components[agent].combat_outcome,
+                    "survival": self.components[agent].survival,
+                    "diplo_panic": self.components[agent].diplo_panic,
+                    "combat_action": self.components[agent].combat_action,
+                    "waste": self.components[agent].waste,
+                    "death": self.components[agent].death,
+                    "terminal": self.components[agent].terminal,
+                    "duo": self.components[agent].duo,
+                },
             }));
         }
+        let stage = stage_params(self.stage);
         let v = json!({
             "step": self.step_count,
             "tick": self.session.game.ticks(),
@@ -484,6 +915,12 @@ impl OFEnvState {
             "difficulty": self.cfg.difficulty,
             "n_agents": self.n_agents,
             "ticks_per_decision": self.cfg.ticks_per_decision,
+            "stage": self.stage,
+            "stage_name": stage.as_ref().map(|s| s.name.clone()).unwrap_or_default(),
+            "win_at": stage.as_ref().map(|s| s.win_at).unwrap_or(0.0),
+            "env_target": stage.as_ref().map(|s| s.env_target).unwrap_or(0),
+            "max_episode_ticks": self.max_episode_ticks,
+            "reward_profile": self.reward_config.reward_profile_id(),
             "obs_per_agent": OFENV_OBS_PER_AGENT,
             "mask_per_agent": OFENV_MASK_PER_AGENT,
             "obs_size": self.obs.len(),
@@ -590,9 +1027,26 @@ fn new_state(cfg: Cfg) -> Result<OFEnvState, String> {
         ever_on_map: vec![false; n_agents],
         meta: CString::default(),
         step_count: 0,
+        stage: 0,
+        reward_config: trainer_default_reward_config(),
+        max_episode_ticks: OFENV_MAX_EPISODE_TICKS,
+        prev_strength: vec![0.0; n_agents],
+        dominance_shaper: vec![DominanceShaper::default(); n_agents],
+        closeout_shaper: vec![DominanceShaper::default(); n_agents],
+        was_alive: vec![false; n_agents],
+        closeout_max_share: vec![0.0; n_agents],
+        closeout_entry_paid: vec![false; n_agents],
+        components: vec![RewardComponents::default(); n_agents],
+        stage_info: CString::default(),
+        last_wasted: 0,
     };
+    // The pinned stage comes from the config (`stage=NN`, default 0). Session
+    // knobs stay exactly as parsed so `ofenv_create` semantics are unchanged;
+    // `ofenv_set_stage` is what applies a stage's bots/nations/difficulty.
+    state.stage = state.cfg.stage.min(V10_STAGE_COUNT - 1);
+    state.stage_info = state.stage_info_json();
     state.rebuild_buffers();
-    state.update_rewards();
+    state.update_curriculum_rewards();
     // reset() is not a decision: report zero reward/terminal for it.
     state.reward.iter_mut().for_each(|r| *r = 0.0);
     state.terminal.iter_mut().for_each(|t| *t = 0);
@@ -712,7 +1166,11 @@ pub extern "C" fn ofenv_step(env: *mut c_void, intents_json: *const c_char) -> c
         }
     };
     let ticks = state.cfg.ticks_per_decision;
-    state.session.step(&intents, ticks);
+    let (head, _ents, _legal, _duo) = state.session.step(&intents, ticks);
+    state.last_wasted = head
+        .get("wasted")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32;
     state.step_count += 1;
     // Refresh per-agent caches straight from the engine (the session's step
     // return is already the post-step state).
@@ -724,7 +1182,7 @@ pub extern "C" fn ofenv_step(env: *mut c_void, intents_json: *const c_char) -> c
     state.tiles = state.session.tile_state().to_vec();
     state.winner = crate::obs::winner_value(&state.session.game);
     state.rebuild_buffers();
-    state.update_rewards();
+    state.update_curriculum_rewards();
     state.build_meta();
     0
 }
@@ -788,8 +1246,9 @@ pub extern "C" fn ofenv_meta(env: *mut c_void) -> *const c_char {
     state.meta.as_ptr()
 }
 
-/// `double ofenv_reward(OFEnv, int agent)` - see the module doc; 0.0 for an
-/// out-of-range agent.
+/// `double ofenv_reward(OFEnv, int agent)` - the agent's curriculum-shaped
+/// per-decision reward (see the module doc for the wired / not-wired
+/// components). 0.0 during the spawn phase and for an out-of-range agent.
 #[no_mangle]
 pub extern "C" fn ofenv_reward(env: *mut c_void, agent: c_int) -> f64 {
     let Ok(state) = (unsafe { state_mut(env) }) else {
@@ -801,8 +1260,9 @@ pub extern "C" fn ofenv_reward(env: *mut c_void, agent: c_int) -> f64 {
     state.reward[agent as usize]
 }
 
-/// `int ofenv_terminal(OFEnv, int agent)` - 1 when the episode is over for
-/// this agent (winner decided, or an agent that had been on the map is gone).
+/// `int ofenv_terminal(OFEnv, int agent)` - the trainer's episode-done flag
+/// for this decision (win, elimination, or the tick cap). 1 for an
+/// out-of-range agent.
 #[no_mangle]
 pub extern "C" fn ofenv_terminal(env: *mut c_void, agent: c_int) -> c_int {
     let Ok(state) = (unsafe { state_mut(env) }) else {
@@ -812,6 +1272,82 @@ pub extern "C" fn ofenv_terminal(env: *mut c_void, agent: c_int) -> c_int {
         return 1;
     }
     state.terminal[agent as usize]
+}
+
+/// `int ofenv_stage_count(void)` - number of V10 curriculum stages
+/// (`ofcore::curriculum::V10_STAGE_COUNT`).
+#[no_mangle]
+pub extern "C" fn ofenv_stage_count() -> c_int {
+    V10_STAGE_COUNT as c_int
+}
+
+/// `int ofenv_set_stage(OFEnv, int stage)` - rebuild the session for that
+/// stage's bots / nations / difficulty / decision_ticks (the map is kept when
+/// it is in the stage's map pool, else the pool's first map is used). 0 on
+/// success, -1 on error (out-of-range stage or a session build failure; see
+/// [`ofenv_last_error`]).
+#[no_mangle]
+pub extern "C" fn ofenv_set_stage(env: *mut c_void, stage: c_int) -> c_int {
+    clear_error();
+    let Ok(state) = (unsafe { state_mut(env) }) else {
+        return -1;
+    };
+    if stage < 0 || stage as usize >= V10_STAGE_COUNT {
+        set_error(format!(
+            "ofenv_set_stage: stage {stage} is outside 0..{}",
+            V10_STAGE_COUNT - 1
+        ));
+        return -1;
+    }
+    let stage = stage as usize;
+    let params = match stage_params(stage) {
+        Some(p) => p,
+        None => {
+            set_error(format!("ofenv_set_stage: stage {stage} has no params"));
+            return -1;
+        }
+    };
+    let mut cfg = state.cfg.clone();
+    cfg.bots = params.bots;
+    cfg.difficulty = params.difficulty.clone();
+    cfg.nations = if params.nations_default {
+        Value::String("default".into())
+    } else {
+        Value::from(params.nations as i64)
+    };
+    cfg.ticks_per_decision = params.decision_ticks.max(1);
+    if !params
+        .maps
+        .iter()
+        .any(|m| m.eq_ignore_ascii_case(&cfg.map))
+    {
+        if let Some(first) = params.maps.first() {
+            cfg.map = first.clone();
+        }
+    }
+    cfg.stage = stage;
+    match new_state(cfg) {
+        Ok(fresh) => {
+            *state = fresh;
+            0
+        }
+        Err(e) => {
+            set_error(format!("ofenv_set_stage({stage}): {e}"));
+            -1
+        }
+    }
+}
+
+/// `const char* ofenv_stage_info(OFEnv)` - NUL-terminated JSON for the pinned
+/// stage: schedule id, index, name, difficulty, decision_ticks, bots, nations,
+/// win_at (win gate), env_target (env floor), maps, stage_count,
+/// reward_profile. Never NULL for a live env.
+#[no_mangle]
+pub extern "C" fn ofenv_stage_info(env: *mut c_void) -> *const c_char {
+    let Ok(state) = (unsafe { state_mut(env) }) else {
+        return LAST_ERROR.with(|e| e.borrow().as_ptr());
+    };
+    state.stage_info.as_ptr()
 }
 
 /// `int ofenv_obs_size(OFEnv)` - total floats in the observation buffer
