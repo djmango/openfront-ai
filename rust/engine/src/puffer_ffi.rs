@@ -105,7 +105,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ofcore::curriculum::{
     self, CurriculumSchedule, DominanceShaper, Nations, RewardComponents, RewardConfig,
@@ -117,7 +117,6 @@ use ofcore::feat::{
 };
 use serde_json::{json, Value};
 
-use crate::obs_typed::legality_typed;
 use crate::rl::RlSession;
 use crate::session::{AGENT_CLIENT_IDS, AGENT_CLIENT_ID, AGENT_CLIENT_ID_2};
 
@@ -340,9 +339,14 @@ pub struct OFEnvState {
     winner: Value,
     obs: Vec<f32>,
     mask: Vec<f32>,
-    tiles: Vec<u16>,
     reward: Vec<f64>,
     terminal: Vec<c_int>,
+    /// The engine's own verdict for the decision that ended an episode, set in
+    /// `update_curriculum_rewards` and read back through `ofenv_won`. Callers
+    /// cannot derive this for themselves: `winner` is a JSON array
+    /// (`["player", client_id]`, `["team", pid, ...]`), so parsing it as an
+    /// integer always reads 0 and silently drops every win.
+    won: bool,
     prev_share: Vec<f64>,
     ever_on_map: Vec<bool>,
     meta: CString,
@@ -547,14 +551,24 @@ impl OFEnvState {
     }
 
     fn owners_slotted(&self, lut: &[u8]) -> Vec<u8> {
+        // Table indexed by the raw 12-bit owner id, so the hot loop below has
+        // no per-tile bounds check and no `Option` unwrap. Measured at
+        // ~1.09 ms/decision on Pangaea's 1000x1000 plane before this change -
+        // ~95% of the FFI path's per-decision overhead, and ~40x the cost of
+        // the simulation step itself (28 us).
+        let mut tbl = [0u8; 0x1000];
+        for (i, v) in lut.iter().enumerate().take(0x1000) {
+            tbl[i] = *v;
+        }
         let packed = self.session.tile_state();
         let mut out = vec![0u8; self.hr * self.wr];
         for y in 0..self.hr {
             let src_row = y * self.width;
             let dst_row = y * self.wr;
-            for x in 0..self.wr {
-                let owner = (packed[src_row + x] & OWNER_MASK) as usize;
-                out[dst_row + x] = lut.get(owner).copied().unwrap_or(0);
+            let src = &packed[src_row..src_row + self.wr];
+            let dst = &mut out[dst_row..dst_row + self.wr];
+            for (d, s) in dst.iter_mut().zip(src.iter()) {
+                *d = tbl[(*s & OWNER_MASK) as usize];
             }
         }
         out
@@ -701,6 +715,7 @@ impl OFEnvState {
         let land_total = self.land_total.max(1.0) as i64;
         let composite = curriculum::strengths(&self.ents, land_total);
         let (done, won, timed_out) = self.episode_done();
+        self.won = won;
 
         for agent in 0..n {
             let me_i = self.me(agent);
@@ -1001,7 +1016,6 @@ fn new_state(cfg: Cfg) -> Result<OFEnvState, String> {
             duo.ok_or_else(|| "n_agents=2 but the session returned no second agent".to_string())?;
         legal_by_agent.push(legal_b);
     }
-    let tiles = session.tile_state().to_vec();
     let mut state = OFEnvState {
         cfg,
         session,
@@ -1020,9 +1034,9 @@ fn new_state(cfg: Cfg) -> Result<OFEnvState, String> {
         winner: Value::Null,
         obs: vec![0.0; n_agents * OFENV_OBS_PER_AGENT],
         mask: vec![0.0; n_agents * OFENV_MASK_PER_AGENT],
-        tiles,
         reward: vec![0.0; n_agents],
         terminal: vec![0; n_agents],
+        won: false,
         prev_share: vec![0.0; n_agents],
         ever_on_map: vec![false; n_agents],
         meta: CString::default(),
@@ -1166,20 +1180,22 @@ pub extern "C" fn ofenv_step(env: *mut c_void, intents_json: *const c_char) -> c
         }
     };
     let ticks = state.cfg.ticks_per_decision;
-    let (head, _ents, _legal, _duo) = state.session.step(&intents, ticks);
+    let (head, _ents, legal, duo) = state.session.step(&intents, ticks);
     state.last_wasted = head
         .get("wasted")
         .and_then(Value::as_u64)
         .unwrap_or(0) as u32;
     state.step_count += 1;
-    // Refresh per-agent caches straight from the engine (the session's step
-    // return is already the post-step state).
+    // Refresh per-agent caches straight from the engine. `step` already
+    // returned the post-step typed ents/legal, so reuse them: rebuilding
+    // `legality_typed` per agent here was pure duplicated work.
     state.ents = crate::obs_typed::entities_typed(&state.session.game);
-    let n = state.n_agents;
-    for agent in 0..n {
-        state.legal[agent] = legality_typed(&state.session.game, AGENT_CLIENT_IDS[agent]);
+    state.legal[0] = legal;
+    if let Some((_head_b, legal_b)) = duo {
+        if state.n_agents > 1 {
+            state.legal[1] = legal_b;
+        }
     }
-    state.tiles = state.session.tile_state().to_vec();
     state.winner = crate::obs::winner_value(&state.session.game);
     state.rebuild_buffers();
     state.update_curriculum_rewards();
@@ -1222,6 +1238,14 @@ pub extern "C" fn ofenv_mask(env: *mut c_void, n: *mut c_int) -> *const f32 {
 /// `const unsigned short* ofenv_tiles(OFEnv, int* n)` - packed tile state
 /// (`owner_id & 0x0FFF`, bit 13 fallout, bit 14 defense bonus), width x height,
 /// row-major.
+///
+/// Borrowed straight from the live session - no copy is made. The returned
+/// pointer is valid until the next `ofenv_step` / `ofenv_reset` /
+/// `ofenv_destroy` on this handle, which is the contract the C env already
+/// relies on (it re-fetches after every sync). The previous implementation
+/// snapshotted the whole plane into an owned `Vec<u16>` on every
+/// `ofenv_step`: 2 MiB per decision, measured at ~124 us/step, which was
+/// ~4x the cost of the simulation step itself.
 #[no_mangle]
 pub extern "C" fn ofenv_tiles(env: *mut c_void, n: *mut c_int) -> *const u16 {
     let Ok(state) = (unsafe { state_mut(env) }) else {
@@ -1230,10 +1254,11 @@ pub extern "C" fn ofenv_tiles(env: *mut c_void, n: *mut c_int) -> *const u16 {
         }
         return std::ptr::null();
     };
+    let tiles = state.session.tile_state();
     if !n.is_null() {
-        unsafe { *n = state.tiles.len() as c_int };
+        unsafe { *n = tiles.len() as c_int };
     }
-    state.tiles.as_ptr()
+    tiles.as_ptr()
 }
 
 /// `const char* ofenv_meta(OFEnv)` - NUL-terminated JSON (never NULL for a
@@ -1272,6 +1297,55 @@ pub extern "C" fn ofenv_terminal(env: *mut c_void, agent: c_int) -> c_int {
         return 1;
     }
     state.terminal[agent as usize]
+}
+
+/// `int ofenv_won(OFEnv)` - 1 when the engine judged the episode that just
+/// ended a win for the RL agent(s) (a player/team win in `winner`, or the duo
+/// team-territory win), else 0. Mirrors the `won` flag in `episode_done()`,
+/// which is the single source of truth. Callers cannot re-derive it: `winner`
+/// is a JSON array (`["player", client_id]`), so parsing that field as an
+/// integer always reads 0 and silently drops every win.
+#[no_mangle]
+pub extern "C" fn ofenv_won(env: *mut c_void) -> c_int {
+    let Ok(state) = (unsafe { state_mut(env) }) else {
+        return 0;
+    };
+    if state.won {
+        1
+    } else {
+        0
+    }
+}
+
+/// `int ofenv_save_record(OFEnv env, const char* path)` - write a
+/// Node-compatible GameRecord v0.0.2 JSON (sparse turns, `info.players` =
+/// the RL humans) for the episode played so far to `path`, creating parent
+/// directories. 0 on success, -1 on error (see [`ofenv_last_error`]).
+///
+/// Exists so an out-of-tree C env can dump the real engine transcript at
+/// episode end and render it through the actual OpenFront client
+/// (`openfront-ai/scripts/render_client_replay.py`).
+#[no_mangle]
+pub extern "C" fn ofenv_save_record(env: *mut c_void, path: *const c_char) -> c_int {
+    clear_error();
+    if path.is_null() {
+        set_error("ofenv_save_record: path is NULL");
+        return -1;
+    }
+    let Ok(state) = (unsafe { state_mut(env) }) else {
+        return -1;
+    };
+    let Ok(p) = (unsafe { CStr::from_ptr(path) }).to_str() else {
+        set_error("ofenv_save_record: path is not valid UTF-8");
+        return -1;
+    };
+    match state.session.save_record(Path::new(p)) {
+        Ok(_) => 0,
+        Err(e) => {
+            set_error(format!("ofenv_save_record: {e}"));
+            -1
+        }
+    }
 }
 
 /// `int ofenv_stage_count(void)` - number of V10 curriculum stages

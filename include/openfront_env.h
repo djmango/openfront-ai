@@ -233,6 +233,13 @@ double ofenv_reward(OFEnv env, int agent);
  * for an out-of-range agent. */
 int ofenv_terminal(OFEnv env, int agent);
 
+/* 1 when the engine judged the episode that just ended a win for the RL
+ * agent(s): a player/team win recorded in `winner`, or the duo
+ * team-territory win. Mirrors the `won` flag in the engine's `episode_done()`.
+ * `winner` is a JSON array, so take this from here - parsing that field as an
+ * integer always yields 0 and drops every win. 0 otherwise. */
+int ofenv_won(OFEnv env);
+
 /* Number of V10 curriculum stages (ofcore::curriculum::V10_STAGE_COUNT). */
 int ofenv_stage_count(void);
 
@@ -254,6 +261,11 @@ int ofenv_mask_size(OFEnv env);
 /* Message for the most recent failed FFI call on this thread; "" when the
  * last call succeeded. Never NULL. */
 const char *ofenv_last_error(void);
+
+/* Write a Node-compatible GameRecord v0.0.2 JSON (sparse turns, info.players
+ * = the RL humans) for the episode played so far to `path`; parent dirs are
+ * created. 0 on success, -1 on error (see ofenv_last_error). */
+int ofenv_save_record(OFEnv env, const char *path);
 
 #ifdef __cplusplus
 } /* extern "C" */
