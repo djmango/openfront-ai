@@ -73,13 +73,52 @@ pub(crate) fn terrain_bytes(game: &crate::game::Game) -> Vec<u8> {
     game.map.terrain_bytes().to_vec()
 }
 
-pub(crate) fn seed_to_game_id(seed: &str) -> String {
+/// Derive the 8-char game id from an episode seed.
+///
+/// Bit-for-bit port of `bridge/session.ts::seedToGameID` (also duplicated
+/// identically in `bridge/env.ts:74-85`):
+///
+/// ```ts
+/// let h = simpleHash(`rl-${seed}`);          // 0 .. 2^31, integer-valued f64
+/// for (let i = 0; i < 8; i++) {
+///   h = (h * 1103515245 + 12345) & 0x7fffffff;
+///   out += alphabet[h % alphabet.length];
+/// }
+/// ```
+///
+/// The arithmetic is **IEEE-754 double**, not wrapping u32. For
+/// `h > 2^22` the exact product `h * 1103515245` exceeds 2^53, so the
+/// double multiplication ROUNDS to the nearest representable double
+/// (ulp is 2^9 at the top of the range, so the value moves by up to
+/// ~256) and only *then* is it truncated: JS `& 0x7fffffff` applies
+/// `ToInt32` (mod 2^32, then the 31-bit mask) to the **already-rounded**
+/// double. So the TS result is
+/// `trunc(round64(h * 1103515245 + 12345)) mod 2^31`, which is a
+/// uint32-truncation of a rounded double - not the low 31 bits of the
+/// exact integer product. The two disagree on essentially every step
+/// (for seed "parity", all 8 steps differ), which is why the native
+/// engine used to derive a different game id (`pyr6b8nU` vs TS
+/// `QqkIuyke`) and therefore seeded `PseudoRandom` differently, giving
+/// different bot spawn tiles from the first decision tick on.
+///
+/// `f64`s are the same IEEE-754 doubles JS uses, `f64 %` is an exact
+/// `fmod`, and every intermediate here is an integer-valued double, so
+/// the port is exact.
+///
+/// Note on the input hash: `simple_hash` is `Math.abs` of a wrapping-i32
+/// djb2-fold, i.e. a value in `0 ..= 2^31`. The `i64` widening below
+/// reproduces `Math.abs(-2^31) == 2^31` for the one input where
+/// `i32::abs` would otherwise disagree (and panic in a debug build).
+pub fn seed_to_game_id(seed: &str) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let mut h = simple_hash(&format!("rl-{seed}")) as u32;
+    let h0 = simple_hash(&format!("rl-{seed}")) as i64;
+    let mut h = if h0 < 0 { (-h0) as f64 } else { h0 as f64 };
     let mut out = String::with_capacity(8);
     for _ in 0..8 {
-        h = h.wrapping_mul(1_103_515_245).wrapping_add(12_345) & 0x7fff_ffff;
-        out.push(ALPHABET[(h as usize) % ALPHABET.len()] as char);
+        let d = h * 1_103_515_245.0 + 12_345.0; // rounds to nearest f64
+        let masked = (d % 4_294_967_296.0) as u32 & 0x7fff_ffff; // ToInt32, then mask
+        h = masked as f64;
+        out.push(ALPHABET[(masked as usize) % ALPHABET.len()] as char);
     }
     out
 }
