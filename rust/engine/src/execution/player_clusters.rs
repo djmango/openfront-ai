@@ -257,9 +257,10 @@ fn is_surrounded(game: &Game, small_id: u16, cluster: &OrderedTiles) -> bool {
 
 fn get_capturing_player(game: &Game, small_id: u16, cluster: &OrderedTiles) -> Option<u16> {
     // TS iterates cluster Set insertion order; Map keeps first-seen neighbor
-    // order. TS `getCapturingPlayer` uses `map.neighbors4(...)` (W,E,N,S on
-    // live tip `dd1277e245b5`) - the first-seen order below feeds `getMode`'s
-    // tie-break (first enemy with the strictly-greatest border count wins).
+    // order. TS `getCapturingPlayer` uses `map.neighbors4(...)` (N,S,W,E on the
+    // current tip, `GameMap.ts:393-403`) - the first-seen order below feeds
+    // `getMode`'s tie-break (first enemy with the strictly-greatest border
+    // count wins).
     let mut neighbors: Vec<(u16, u32)> = Vec::new();
     for t in cluster.iter() {
         game.map.for_each_neighbor4(t, |n| {
@@ -306,9 +307,9 @@ fn flood_owned(game: &Game, small_id: u16, start: TileRef) -> OrderedTiles {
     }
 
     // TS `PlayerExecution.removeCluster` floods via `forEachNeighbor`
-    // (W,E,N,S on live tip `dd1277e245b5`), then conquers the resulting
-    // `Set<TileRef>` in insertion order. That DFS visit order feeds the
-    // captor's insertion-ordered owned/border sets and must match TS.
+    // (N,S,W,E on the current tip, `GameMap.ts:383-391`), then conquers the
+    // resulting `Set<TileRef>` in insertion order. That DFS visit order feeds
+    // the captor's insertion-ordered owned/border sets and must match TS.
     while let Some(t) = stack.pop() {
         game.map.for_each_neighbor4(t, |n| {
             if result.contains(n) || game.map.owner_id(n) != small_id {

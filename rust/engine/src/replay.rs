@@ -944,17 +944,18 @@ mod tests {
     /// against the live `openfront/` submodule's *current* map).
     ///
     /// Past turn 300, Nation-AI `AttackExecution` instances (deferred during
-    /// the spawn phase, see `NationExecution`) activate en masse and desync
-    /// permanently no matter how period-correct the assets are: native's
-    /// `for_each_neighbor4` intentionally visits N,S,W,E to match *current*
-    /// upstream TS's `neighbors()`, but at this record's own `gitCommit`
-    /// TS's `AttackExecution.addNeighbors` still used the older W,E,N,S
-    /// order (unified to N,S,W,E one `openfront` commit later than
-    /// `PARITY_COMMIT`, see `docs/bot-ai-parity-rate/README.md`). Each
-    /// neighbor visited draws one PRNG value while building the conquest
-    /// frontier, so the order mismatch reorders every subsequent draw -
-    /// this is expected, documented drift in the frozen archive, not a
-    /// native bug, so the bound stays at 300 rather than chasing it further.
+    /// the spawn phase, see `NationExecution`) activate en masse. Native's
+    /// conquest frontier now uses the N,S,W,E visit order, which is what the
+    /// *current* tip TS uses everywhere (`GameMap.neighbors()` /
+    /// `forEachNeighbor` / `neighbors4`, `GameMap.ts:375-403`); each visited
+    /// neighbor draws one PRNG value while `addNeighbors` builds the frontier,
+    /// so the order fully determines the resulting draw binding. This record's
+    /// own `gitCommit` predates that unification (it used the older W,E,N,S
+    /// order, see `docs/bot-ai-parity-rate/README.md`), so this frozen archive
+    /// keeps its 300-tick bound: the post-spawn drift here is expected,
+    /// documented drift in the record, not a native bug. Do NOT "fix" native
+    /// back to W,E,N,S for this record - that reorders the frontier draws on
+    /// every current-tip record.
     #[test]
     fn parity_single_record() {
         let repo_root = std::env::var("OPENFRONT_REPO")

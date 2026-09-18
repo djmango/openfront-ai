@@ -1114,13 +1114,13 @@ impl Game {
 
     fn refresh_borders_around(&mut self, tile: TileRef) {
         let mut neighbors = [TileRef::MAX; 4];
-        let mut n = 0usize;
-        self.map.for_each_neighbor4(tile, |t| {
-            if n < 4 {
-                neighbors[n] = t;
-                n += 1;
-            }
-        });
+        // TS `GameImpl.updateBorders`: `updateBorderStatus(tile)` then its four
+        // cardinal neighbors in `neighbors4` order = **N,S,W,E**
+        // (`GameMap.ts:393-403`). The visit order is observable: each call
+        // appends any newly-border tile to the player's `TileSet`, and
+        // `AttackExecution.refreshToConquer` later iterates that set while
+        // drawing one PRNG value per enqueued neighbor.
+        let n = self.map.neighbors_nswe(tile, &mut neighbors);
         self.update_border_status(tile);
         for i in 0..n {
             self.update_border_status(neighbors[i]);

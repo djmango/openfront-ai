@@ -306,57 +306,49 @@ impl GameMap {
         x == 0 || x + 1 == self.width || y == 0 || y + 1 == self.height
     }
 
+    /// **The current tip TS order: north, south, west, east.**
+    ///
+    /// TS `GameMap.neighbors()` (`openfront/src/core/game/GameMap.ts:375-378`),
+    /// `forEachNeighbor` (`GameMap.ts:383-391`) and `neighbors4`
+    /// (`GameMap.ts:393-403`) ALL visit N,S,W,E on the current tip (upstream
+    /// commit `22d5aba5a`, "standardize cardinal-neighbor iteration on
+    /// `neighbors()` N,S,W,E order", PR #4495). Order-sensitive call sites -
+    /// PRNG draws per neighbor (`AttackExecution.addNeighbors`),
+    /// insertion-ordered set appends (`GameImpl.updateBorders`), first-match
+    /// wins (`AttackExecution.handleDeadDefender`) - depend on this exact
+    /// order.
+    ///
+    /// History: this function previously iterated W,E,N,S, with a doc comment
+    /// claiming that matched the tip. `docs/bot-ai-parity-investigation/`
+    /// root-caused that as the dominant native-vs-TS divergence (first
+    /// post-spawn `AttackExecution` expansion) and fixed it to N,S,W,E; it was
+    /// later flipped back to W,E,N,S with a rewritten - and inverted -
+    /// justification comment, which re-broke the first post-spawn expansion on
+    /// every current-tip record. Do not flip it back again: the archived
+    /// pre-unification records in `records/0c4c7d7993c9/` are the only thing
+    /// that ever wanted W,E,N,S, and their tests are tick-bounded for exactly
+    /// that reason (see `replay.rs`).
     pub fn for_each_neighbor4(&self, t: TileRef, mut f: impl FnMut(TileRef)) {
-        let w = self.width;
-        let x = self.x(t);
-        // TS `GameMap.forEachNeighbor` / `neighbors4` order on the live
-        // production tip (`dd1277e245b5`): west, east, north, south.
-        // Note this intentionally differs from `neighbors()` (N,S,W,E) on
-        // that same tip - AttackExecution / cluster capture use neighbors4,
-        // while shore-coerce and WaterManager mini-map walks use neighbors().
-        // Native previously tracked a post-unification pin where both APIs
-        // were N,S,W,E; that desynced every live-tip human game at ~tick 310.
-        if x > 0 {
-            f(t - 1);
-        }
-        if x + 1 < w {
-            f(t + 1);
-        }
-        if t >= w {
-            f(t - w);
-        }
-        if t < (self.height - 1) * w {
-            f(t + w);
-        }
+        self.for_each_neighbor_nswe(t, f)
     }
 
-    /// TS `GameMap.neighbors4` / `forEachNeighbor` order: west, east, north, south.
+    /// Buffer form of [`Self::for_each_neighbor4`] (N,S,W,E - the tip TS order).
     pub fn neighbors4_ts(&self, t: TileRef, buf: &mut [TileRef; 4]) -> usize {
-        let w = self.width;
-        let x = self.x(t);
-        let mut n = 0usize;
-        if x > 0 {
-            buf[n] = t - 1;
-            n += 1;
-        }
-        if x + 1 < w {
-            buf[n] = t + 1;
-            n += 1;
-        }
-        if t >= w {
-            buf[n] = t - w;
-            n += 1;
-        }
-        if t < (self.height - 1) * w {
-            buf[n] = t + w;
-            n += 1;
-        }
-        n
+        self.neighbors_nswe(t, buf)
     }
 
-    /// TS `GameMap.neighbors()` order: north, south, west, east (live tip
-    /// `dd1277e245b5`). Use this when the TS call site iterates `neighbors()`,
-    /// not `neighbors4` / `forEachNeighbor`.
+    /// Explicit name for the tip TS order (north, south, west, east).
+    ///
+    /// TS `GameMap.neighbors()` (`GameMap.ts:375-378`), `forEachNeighbor`
+    /// (`GameMap.ts:383-391`) and `neighbors4` (`GameMap.ts:393-403`) all
+    /// visit N,S,W,E on the current tip. [`Self::for_each_neighbor4`] and
+    /// [`Self::neighbors4_ts`] delegate here, so the order has exactly one
+    /// implementation; this explicit name is the one to use at call sites
+    /// where the order is load-bearing (PRNG draws per neighbor in
+    /// `AttackExecution.addNeighbors`, insertion-ordered set appends in
+    /// `GameImpl.updateBorders`, first-match wins in
+    /// `AttackExecution.handleDeadDefender`) so a future edit cannot
+    /// silently re-invert them.
     pub fn for_each_neighbor_nswe(&self, t: TileRef, mut f: impl FnMut(TileRef)) {
         let w = self.width;
         let x = self.x(t);
@@ -498,8 +490,10 @@ impl GameMap {
     }
 }
 
-// TS `NeighborIteration.test.ts` + live tip (`dd1277e245b5`) GameMap:
-// `forEachNeighbor`/`neighbors4` are W,E,N,S while `neighbors()` is N,S,W,E.
+// TS `GameMap` cardinal-neighbour order on the current tip: `neighbors()`,
+// `forEachNeighbor` and `neighbors4` are ALL N,S,W,E (`GameMap.ts:375-403`).
+// Native's `for_each_neighbor4` / `neighbors4_ts` delegate to the same
+// `*_nswe` helpers so there is exactly one implementation of that order.
 #[cfg(test)]
 mod neighbor_order_tests {
     use super::{GameMap, MapMeta, TileRef};
@@ -536,16 +530,16 @@ mod neighbor_order_tests {
     }
 
     #[test]
-    fn for_each_neighbor4_visits_w_e_n_s_for_interior_tiles() {
+    fn for_each_neighbor4_visits_n_s_w_e_for_interior_tiles() {
         let map = map16();
         let tile = map.ref_xy(5, 7);
         assert_eq!(
             collect_neighbors4(&map, tile),
             vec![
-                map.ref_xy(4, 7), // W
-                map.ref_xy(6, 7), // E
                 map.ref_xy(5, 6), // N
                 map.ref_xy(5, 8), // S
+                map.ref_xy(4, 7), // W
+                map.ref_xy(6, 7), // E
             ]
         );
     }
@@ -570,34 +564,36 @@ mod neighbor_order_tests {
         let map = map16();
         let w = map.width;
         let h = map.height;
-        // top-left corner: E, S only (W,E,N,S with missing W/N).
+        // top-left corner: S, E (N,S,W,E with missing N/W).
         assert_eq!(
             collect_neighbors4(&map, map.ref_xy(0, 0)),
-            vec![map.ref_xy(1, 0), map.ref_xy(0, 1)]
+            vec![map.ref_xy(0, 1), map.ref_xy(1, 0)]
         );
-        // bottom-right corner: W, N only.
+        // bottom-right corner: N, W.
         assert_eq!(
             collect_neighbors4(&map, map.ref_xy(w - 1, h - 1)),
-            vec![map.ref_xy(w - 2, h - 1), map.ref_xy(w - 1, h - 2)]
+            vec![map.ref_xy(w - 1, h - 2), map.ref_xy(w - 2, h - 1)]
         );
-        // left edge: E, N, S.
+        // left edge: N, S, E.
         assert_eq!(
             collect_neighbors4(&map, map.ref_xy(0, 5)),
-            vec![map.ref_xy(1, 5), map.ref_xy(0, 4), map.ref_xy(0, 6)]
+            vec![map.ref_xy(0, 4), map.ref_xy(0, 6), map.ref_xy(1, 5)]
         );
-        // bottom edge: W, E, N.
+        // bottom edge: N, W, E.
         assert_eq!(
             collect_neighbors4(&map, map.ref_xy(5, h - 1)),
             vec![
+                map.ref_xy(5, h - 2),
                 map.ref_xy(4, h - 1),
                 map.ref_xy(6, h - 1),
-                map.ref_xy(5, h - 2),
             ]
         );
     }
 
+    /// `for_each_neighbor4` and `neighbors4_ts` must agree tile-for-tile with the
+    /// tip TS order (they are two wrappers over the same N,S,W,E helpers).
     #[test]
-    fn for_each_neighbor4_matches_neighbors4_ts_for_every_tile() {
+    fn for_each_neighbor4_and_neighbors4_ts_agree_on_every_tile() {
         let map = map16();
         for t in 0..(map.width * map.height) {
             let via_callback = collect_neighbors4(&map, t);

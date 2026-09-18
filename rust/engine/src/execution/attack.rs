@@ -1303,13 +1303,10 @@ impl AttackExecution {
                 .unwrap_or_default();
             for tile in tiles {
                 let mut neighbors = [TileRef::MAX; 4];
-                let mut n = 0usize;
-                game.map.for_each_neighbor4(tile, |nb| {
-                    if n < 4 {
-                        neighbors[n] = nb;
-                        n += 1;
-                    }
-                });
+                // TS `handleDeadDefender` uses `forEachNeighbor` (N,S,W,E): the
+                // first player-owner neighbor in visit order takes the tile, so
+                // the order is observable.
+                let n = game.map.neighbors_nswe(tile, &mut neighbors);
                 let mut borders_owner = false;
                 for i in 0..n {
                     if game.map.owner_id(neighbors[i]) == owner_small {
@@ -1341,7 +1338,19 @@ impl AttackExecution {
     }
 
     fn add_neighbors(&mut self, game: &Game, tile: TileRef, tick: u32) {
-        game.map.for_each_neighbor4(tile, |neighbor| {
+        // TS `AttackExecution.addNeighbors` iterates `map.neighbors4()`, which on
+        // the current tip visits **north, south, west, east**
+        // (`openfront/src/core/game/GameMap.ts:393-403`;
+        // `forEachNeighbor` at `GameMap.ts:383-391` and `neighbors()` at
+        // `GameMap.ts:375-378` agree). This loop draws exactly one
+        // `random.nextInt(0,7)` per enqueued neighbor, in visit order
+        // (`AttackExecution.ts:377-379`), so the visit order decides which tile
+        // each jitter value binds to and therefore the conquest-frontier pop
+        // order. `for_each_neighbor_nswe` is named explicitly here (rather than
+        // the aliased `for_each_neighbor4`) because this is *the* draw-binding
+        // site: it silently desynced the first post-spawn expansion on every
+        // early-curriculum record when it ran W,E,N,S.
+        game.map.for_each_neighbor_nswe(tile, |neighbor| {
             if game.map.is_water(neighbor) {
                 return;
             }

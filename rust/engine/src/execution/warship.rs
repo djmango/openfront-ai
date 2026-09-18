@@ -362,7 +362,8 @@ impl WarshipExecution {
         let mut best = None;
         let mut best_distance = game.manhattan_dist(from, target);
         // TS `WarshipExecution.bestNeighborToward` iterates
-        // `this.mg.forEachNeighbor(...)` (W,E,N,S on live tip `dd1277e245b5`).
+        // `this.mg.forEachNeighbor(...)` (N,S,W,E on the current tip,
+        // `GameMap.ts:383-391`).
         // The `distance < best_distance` (strict) comparison keeps the FIRST
         // neighbor achieving the minimum, so visit order decides ties.
         game.map.for_each_neighbor4(from, |neighbor| {
