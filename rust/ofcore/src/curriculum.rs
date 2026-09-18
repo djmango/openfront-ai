@@ -1364,14 +1364,19 @@ pub fn placement_score(place: i64, n: i64) -> f64 {
 /// is the same rule at the existing win-bonus scale so a real win still
 /// dominates.
 pub fn terminal_reward(place: i64, won: bool, timed_out: bool) -> f64 {
-    if timed_out && !won {
+    if !won {
+        // A loss is a loss however it arrives. This used to pay
+        // `W_PLACE * place^-1.5` (up to +15 for a 1st-place death) on every
+        // path that was not flagged a timeout, while a timeout paid -W_WIN.
+        // Since W_DEATH is only 1.0, dying early beat surviving to the cap by
+        // up to 45 points - the same camping-shaped loophole this function
+        // already closed on the clock path, just reached through death. The
+        // doc above says it outright: a death is "a death/loss, not a
+        // placement". Keep every loss negative so a win (45) dominates.
+        let _ = timed_out;
         return -W_WIN;
     }
-    let mut r = W_PLACE * (place as f64).powf(-PLACE_POW);
-    if won {
-        r += W_WIN;
-    }
-    r
+    W_PLACE * (place as f64).powf(-PLACE_POW) + W_WIN
 }
 
 /// Alive+land survival shaping: small positive signal so death is not the only
@@ -3083,13 +3088,21 @@ mod tests {
     }
 
     #[test]
-    fn timeout_without_a_win_is_a_loss_not_a_placement_gift() {
-        let place_first = terminal_reward(1, false, false);
-        assert!(place_first > 0.0);
+    fn every_loss_is_a_loss_not_a_placement_gift() {
+        // A death (no timeout flag) used to pay a placement gift:
+        // terminal_reward(1, false, false) == W_PLACE == +15, while surviving to
+        // the cap paid -W_WIN. With W_DEATH at 1.0, dying in first place was
+        // worth up to 45 points more than playing on, so the PPO optimum was to
+        // die rather than contest the clock. Every loss now pays -W_WIN on every
+        // path, and a win (45+) dominates it by more than the death penalty can
+        // ever repay.
+        assert_eq!(terminal_reward(1, false, false), -W_WIN);
+        assert_eq!(terminal_reward(8, false, false), -W_WIN);
         assert_eq!(terminal_reward(1, false, true), -W_WIN);
         assert_eq!(terminal_reward(2, false, true), -W_WIN);
         let win = terminal_reward(1, true, false);
         assert!(win > W_WIN);
+        assert!(win - terminal_reward(1, false, false) > W_DEATH);
         // Won-and-timeout should not happen, but a win still pays the win.
         assert_eq!(terminal_reward(1, true, true), win);
     }
