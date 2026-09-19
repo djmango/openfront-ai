@@ -271,6 +271,16 @@ pub struct InitDump {
     pub bots: Vec<(u16, String, i64, usize)>,
     /// bot index -> owned tiles (the PORT's spawn footprint)
     pub owned: HashMap<usize, Vec<u32>>,
+    /// nation index -> (small_id, id, cell_x, cell_y, spawn_tile, spawn_tick,
+    /// n_tiles). The cell is the manifest `coordinates`; spawn_tile is the
+    /// PORT's sampled land tile and spawn_tick the PORT's tick for it.
+    pub nation_rows: Vec<(u16, String, i64, i64, i64, u32, usize)>,
+    /// nation index -> owned tiles (the PORT's spawn footprint)
+    pub nation_owned: HashMap<usize, Vec<u32>>,
+    /// nation index -> the rejection-draw count the PORT's sampler burned
+    pub nation_tries: HashMap<usize, u32>,
+    /// nation index -> the PORT's starting troops for the nation
+    pub nation_troops: HashMap<usize, f64>,
     /// engine roster from the same file (reference, not port)
     pub players: Vec<(u16, char, String, i64, u32, i32)>,
 }
@@ -320,6 +330,35 @@ pub fn parse_init(path: &Path) -> Result<InitDump, String> {
                 let tiles: Vec<u32> = it.filter_map(|x| x.parse().ok()).collect();
                 d.owned.insert(bi, tiles);
             }
+            "nation" => {
+                let ni: usize = it.next().unwrap_or("0").parse().unwrap_or(0);
+                let sid: u16 = it.next().unwrap_or("0").parse().unwrap_or(0);
+                let id = it.next().unwrap_or("").to_string();
+                let cx: i64 = it.next().unwrap_or("-1").parse().unwrap_or(-1);
+                let cy: i64 = it.next().unwrap_or("-1").parse().unwrap_or(-1);
+                let tile: i64 = it.next().unwrap_or("-1").parse().unwrap_or(-1);
+                let tick: u32 = it.next().unwrap_or("0").parse().unwrap_or(0);
+                let n: usize = it.next().unwrap_or("0").parse().unwrap_or(0);
+                while d.nation_rows.len() <= ni {
+                    d.nation_rows.push((0, String::new(), -1, -1, -1, 0, 0));
+                }
+                d.nation_rows[ni] = (sid, id, cx, cy, tile, tick, n);
+            }
+            "nationowned" => {
+                let ni: usize = it.next().unwrap_or("0").parse().unwrap_or(0);
+                let tiles: Vec<u32> = it.filter_map(|x| x.parse().ok()).collect();
+                d.nation_owned.insert(ni, tiles);
+            }
+            "nationtries" => {
+                let ni: usize = it.next().unwrap_or("0").parse().unwrap_or(0);
+                let n: u32 = it.next().unwrap_or("0").parse().unwrap_or(0);
+                d.nation_tries.insert(ni, n);
+            }
+            "nationtroops" => {
+                let ni: usize = it.next().unwrap_or("0").parse().unwrap_or(0);
+                let t: f64 = it.next().unwrap_or("0").parse().unwrap_or(0.0);
+                d.nation_troops.insert(ni, t);
+            }
             other => return Err(format!("unknown init tag {other:?} in {}", path.display())),
         }
     }
@@ -339,6 +378,20 @@ pub fn plane_from_init(d: &InitDump, w: u32, h: u32) -> Result<Vec<u16>, String>
             let slot = plane
                 .get_mut(t as usize)
                 .ok_or_else(|| format!("init tile {t} out of range for {w}x{h}"))?;
+            *slot = sid;
+        }
+    }
+    // Nations own tiles too - the engine's boundary-0 plane includes them.
+    for (ni, tiles) in &d.nation_owned {
+        let sid = d
+            .nation_rows
+            .get(*ni)
+            .map(|n| n.0)
+            .ok_or_else(|| format!("init dump has `nationowned {ni}` with no `nation {ni}`"))?;
+        for &t in tiles {
+            let slot = plane
+                .get_mut(t as usize)
+                .ok_or_else(|| format!("init nation tile {t} out of range for {w}x{h}"))?;
             *slot = sid;
         }
     }

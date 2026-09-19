@@ -16,7 +16,11 @@
 //! (`rust/engine/src/bin/prng_dump.rs`, which drives an actual `RlSession`), so
 //! the comparison is against the engine, not against a second copy of this port.
 
-use std::collections::HashMap;
+/// Verbatim copy of the engine's nation-name tables (draw-count parity for
+/// fabricated nations). See the file header for provenance.
+pub mod nation_names;
+
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -1203,6 +1207,446 @@ impl<'a> SpawnCtx<'a> {
         }
         out
     }
+
+    /// The tile list `get_spawn_tiles(..., require_all_valid = false)` returns: the
+/// same cardinal BFS component as [`SpawnCtx::spawn_tiles`], but filtered to the
+/// valid tiles only (`!has_owner(t) && is_land(t)`), `spawn_util.rs:132-139`.
+///
+/// This is the NATION spawn footprint: `NationExecution` enqueues a
+/// `SpawnExecution` with an EXPLICIT tile (`execution/nation.rs:135-139`), and
+/// `find_spawn`'s explicit branch (`spawn_util.rs:71-77`) calls
+/// `get_spawn_tiles(..., false)` - so unlike a bot's spawn (which requires every
+/// footprint tile to be valid) a nation keeps only the valid subset.
+pub fn spawn_tiles_valid(&self, center: u32) -> Vec<u32> {
+    let (w, h) = (self.width, self.height);
+    let mut out = Vec::new();
+    for t in self.spawn_tiles(center) {
+        debug_assert!(t < w * h);
+        if self.is_land(t) && !self.has_owner(t) {
+            out.push(t);
+        }
+    }
+    out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Nation spawn - `rust/engine/src/execution/nation.rs` + `core/nation.rs`
+// ---------------------------------------------------------------------------
+
+/// One manifest `nations[]` row (`map::Nation`): a name and, for every map this
+/// matrix drives, a `coordinates` pair used as the nation's `spawn_cell`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ManifestNation {
+    pub name: String,
+    pub coordinates: Option<[i32; 2]>,
+}
+
+/// Read `manifest.json`'s `nations` array (Normal map size: NO scaling -
+/// `core/terrain.rs:123-127` halves coordinates only for `Compact`).
+pub fn load_manifest_nations(map_dir: &Path) -> Result<Vec<ManifestNation>, String> {
+    let manifest_path = map_dir.join("manifest.json");
+    let bytes = fs::read(&manifest_path).map_err(|e| format!("{}: {e}", manifest_path.display()))?;
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", manifest_path.display()))?;
+    let arr = manifest
+        .get("nations")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| format!("{}: no \"nations\" array", manifest_path.display()))?;
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, n) in arr.iter().enumerate() {
+        let name = n
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("{}: nations[{i}].name missing", manifest_path.display()))?
+            .to_string();
+        let coordinates = match n.get("coordinates") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::Array(a)) if a.len() == 2 => Some([
+                a[0].as_i64().ok_or_else(|| format!("{}: nations[{i}].coordinates[0]", manifest_path.display()))? as i32,
+                a[1].as_i64().ok_or_else(|| format!("{}: nations[{i}].coordinates[1]", manifest_path.display()))? as i32,
+            ]),
+            Some(other) => {
+                return Err(format!(
+                    "{}: nations[{i}].coordinates is {other}, expected [x, y]",
+                    manifest_path.display()
+                ))
+            }
+        };
+        out.push(ManifestNation { name, coordinates });
+    }
+    Ok(out)
+}
+
+/// `Config::start_manpower(PlayerType::Nation)` (`core/config.rs:217-227`).
+pub fn start_manpower_nation(difficulty: &str) -> f64 {
+    match difficulty {
+        "Easy" => 12_500.0,
+        "Medium" => 18_750.0,
+        "Hard" => 25_000.0,
+        "Impossible" => 31_250.0,
+        _ => 18_750.0,
+    }
+}
+
+/// `NationExecution::attack_rate_for_difficulty` (`nation.rs:58-66`); the draw
+/// itself is taken from the nation's own stream, so this returns the RANGE.
+fn attack_rate_range(difficulty: &str) -> (i32, i32) {
+    match difficulty {
+        "Easy" => (65, 100),
+        "Medium" => (55, 70),
+        "Hard" => (45, 60),
+        "Impossible" => (30, 50),
+        _ => (55, 70),
+    }
+}
+
+/// `NationExecution::random_spawn_land` (`nation.rs:198-228`): up to 50 tries,
+/// `x = next_int(cx-25, cx+25)`, `y = next_int(cy-25, cy+25)`, reject invalid
+/// coords, reject unless land AND unowned, reject Mountain with `chance(2)`.
+///
+/// `delta = 25` and `MAX = 50` are the engine's literals; the draw ORDER (x then
+/// y, then the Mountain `chance(2)` only when the tile IS Mountain) is what makes
+/// this reproducible. Returns `(tile, tries)` or `(None, tries)` when all 50 fail.
+pub fn random_spawn_land(
+    map: &MapPlane,
+    owner_plane: &[u16],
+    cell: [i32; 2],
+    random: &mut PseudoRandom,
+) -> (Option<u32>, u32) {
+    let delta = 25i32;
+    let mut tries = 0u32;
+    while tries < 50 {
+        tries += 1;
+        let x = random.next_int(cell[0] - delta, cell[0] + delta);
+        let y = random.next_int(cell[1] - delta, cell[1] + delta);
+        if x < 0 || y < 0 || x as u32 >= map.width || y as u32 >= map.height {
+            continue;
+        }
+        let tile = (y as u32) * map.width + (x as u32);
+        let t = map.terrain[tile as usize];
+        if t & IS_LAND_BIT == 0 {
+            continue;
+        }
+        if owner_plane[tile as usize] != 0 {
+            continue;
+        }
+        // `terrain_type(t) == Mountain` is magnitude >= 20 (`map.rs:214-227`).
+        if (t & 0x1f) >= 20 && random.chance(2) {
+            continue;
+        }
+        return (Some(tile), tries);
+    }
+    (None, tries)
+}
+
+/// One nation's spawn, as the port computes it.
+#[derive(Clone, Debug, Default)]
+pub struct NationSpawn {
+    pub idx: usize,
+    /// `1 + human_count + idx` - the engine's `add_from_info` order.
+    pub small_id: u16,
+    pub player_id: String,
+    /// The manifest row's `coordinates` (the nation's `spawn_cell`).
+    pub cell: Option<[i32; 2]>,
+    pub spawn_tile: Option<u32>,
+    /// Engine tick counter the spawn lands on (bots: 1, nations: 2 - the nation's
+    /// `SpawnExecution` is enqueued during tick 1 and ticked on tick 2).
+    pub spawn_tick: u32,
+    pub tries: u32,
+    /// The loose footprint (`get_spawn_tiles(..., false)`), the initial owned set.
+    pub owned: Vec<u32>,
+    pub troops: f64,
+    pub attack_rate: i32,
+    pub attack_tick: i32,
+    /// `trigger_ratio`, `reserve_ratio`, `expand_ratio` x100, as drawn.
+    pub ratios: [i32; 3],
+}
+
+/// The nation player ids (`core/nation.rs:84-141`): `count` next_id draws AFTER
+/// the humans, from `PseudoRandom(simple_hash(game_id))`, with the manifest list
+/// shuffled first (`shuffle_array` = `len - 1` draws).
+pub fn nation_ids(
+    game_id: &str,
+    human_count: u32,
+    nation_count: u32,
+    manifest_names: &[String],
+) -> Vec<String> {
+    let mut pr = PseudoRandom::new(simple_hash(game_id));
+    for _ in 0..human_count {
+        pr.next_id();
+    }
+    let manifest_len = manifest_names.len();
+    let mut order: Vec<i32> = (0..manifest_len as i32).collect();
+    pr.shuffle_array(&mut order);
+    let from_manifest = (nation_count as usize).min(manifest_len);
+    // `used_names` (`core/nation.rs:103`) = the names of the nations the
+    // manifest actually contributed, i.e. the first `from_manifest` of the
+    // SHUFFLED order - not the whole manifest.
+    let mut used: HashSet<String> = order
+        .iter()
+        .take(from_manifest)
+        .map(|&i| manifest_names[i as usize].clone())
+        .collect();
+    let mut ids: Vec<String> = (0..from_manifest).map(|_| pr.next_id()).collect();
+    // `core/nation.rs:120-131`: the engine FABRICATES the rest, drawing a
+    // unique name (two `next_int` draws, more on a collision) and THEN a
+    // `next_id`. Vanilla maps ship enough manifest nations that this never
+    // fires; a spawn-area map like `baikalnukewars` declares zero and hits it
+    // on the first requested nation.
+    for _ in from_manifest..nation_count as usize {
+        let name = generate_unique_nation_name(&mut pr, &used);
+        used.insert(name);
+        ids.push(pr.next_id());
+    }
+    ids
+}
+
+/// `core/nation.rs:168-180` - exactly TWO `next_int` draws per attempt.
+pub fn generate_nation_name(random: &mut PseudoRandom) -> String {
+    let template = nation_names::NAME_TEMPLATES
+        [random.next_int(0, nation_names::NAME_TEMPLATES.len() as i32) as usize];
+    let noun = nation_names::NOUNS[random.next_int(0, nation_names::NOUNS.len() as i32) as usize];
+    let mut parts: Vec<String> = Vec::new();
+    for part in template {
+        match part {
+            nation_names::TemplatePart::PluralNoun => parts.push(pluralize(noun)),
+            nation_names::TemplatePart::Noun => parts.push(noun.to_string()),
+            nation_names::TemplatePart::Lit(s) => parts.push(s.to_string()),
+        }
+    }
+    parts.join(" ")
+}
+
+/// `core/nation.rs:143-159`: first unique draw wins; after 1000 collisions the
+/// engine appends a counter (`"{base} {counter}"`).
+pub fn generate_unique_nation_name(random: &mut PseudoRandom, used: &HashSet<String>) -> String {
+    for _ in 0..1000 {
+        let name = generate_nation_name(random);
+        if !used.contains(&name) {
+            return name;
+        }
+    }
+    let base = generate_nation_name(random);
+    let mut counter = 1u32;
+    loop {
+        let candidate = format!("{base} {counter}");
+        if !used.contains(&candidate) {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
+/// `core/nation.rs:182-209` (verbatim semantics).
+pub fn pluralize(noun: &str) -> String {
+    for &(key, plural) in SPECIAL_PLURALS {
+        if key == noun {
+            return plural.to_string();
+        }
+    }
+    if noun.ends_with('s')
+        || noun.ends_with("ch")
+        || noun.ends_with("sh")
+        || noun.ends_with('x')
+        || noun.ends_with('z')
+    {
+        return format!("{noun}es");
+    }
+    if noun.ends_with('y') {
+        let bytes = noun.as_bytes();
+        if bytes.len() >= 2 {
+            let prev = bytes[bytes.len() - 2] as char;
+            if !"aeiou".contains(prev) {
+                return format!("{}ies", &noun[..noun.len() - 1]);
+            }
+        }
+    }
+    if O_TO_OES.contains(&noun) {
+        return format!("{noun}es");
+    }
+    format!("{noun}s")
+}
+
+const O_TO_OES: &[&str] = &["Potato", "Tomato", "Volcano", "Torpedo"];
+
+const SPECIAL_PLURALS: &[(&str, &str)] = &[
+    ("Cactus", "Cacti"),
+    ("Platypus", "Platypuses"),
+    ("Moose", "Moose"),
+    ("Octopus", "Octopi"),
+    ("Cyclops", "Cyclopes"),
+    ("Samurai", "Samurai"),
+    ("Fish", "Fish"),
+    ("Salmon", "Salmon"),
+    ("Cod", "Cod"),
+    ("Enderman", "Endermen"),
+    ("Mitochondria", "Mitochondria"),
+];
+
+/// The shuffled manifest order the same stream produces.
+pub fn nation_manifest_order(game_id: &str, human_count: u32, manifest_len: usize) -> Vec<i32> {
+    let mut pr = PseudoRandom::new(simple_hash(game_id));
+    for _ in 0..human_count {
+        pr.next_id();
+    }
+    let mut order: Vec<i32> = (0..manifest_len as i32).collect();
+    pr.shuffle_array(&mut order);
+    order
+}
+
+/// The port's nation spawn plan for one (map, N, nations) case.
+///
+/// ORDERING (this is the whole point, and it is the engine's, not a guess):
+/// every `NationExecution` is enqueued BEFORE the `SpawnExecution`s of the bots
+/// (`rl.rs:171-190`), and `add_execution` puts a NEW exec on `uninit`, whose
+/// `init` runs at the END of the tick and which only `tick`s on the NEXT one
+/// (`game.rs:3657-3700`). So on tick 1 the nations run FIRST, sample their
+/// centres against a plane where **no bot has spawned yet**, and enqueue their
+/// own `SpawnExecution`; the bots then spawn later in that same tick; on tick 2
+/// the nations' explicit-tile spawns execute, sequentially, against the FULL bot
+/// plane. Hence: centres are sampled against the initial plane, footprints are
+/// cut against the plane as it stands at spawn time.
+pub fn nation_spawns(
+    map: &MapPlane,
+    nations: &[ManifestNation],
+    game_id: &str,
+    human_count: u32,
+    nation_count: u32,
+    difficulty: &str,
+    bot_plane: &[u16],
+    bot_centres: &[u32],
+) -> Vec<NationSpawn> {
+    // `create_random_nations` (`core/nation.rs:84-134`) always produces
+    // `nation_count` nations: every manifest nation first (shuffled), then
+    // FABRICATED ones while `remaining > 0`. Gating on the manifest length is
+    // wrong - a map that declares zero nations still gets `nation_count`
+    // players, created unconditionally by `NationExecution::init`
+    // (`nation.rs:74-76`), placement being a separate and failable concern.
+    let n = nation_count as usize;
+    let order = nation_manifest_order(game_id, human_count, nations.len());
+    let manifest_names: Vec<String> = nations.iter().map(|m| m.name.clone()).collect();
+    let ids = nation_ids(game_id, human_count, nation_count, &manifest_names);
+    let seed_base = simple_hash(game_id);
+    let (w, h) = (map.width, map.height);
+    let wh = (w as usize) * (h as usize);
+
+    // Tick-1 owner plane: nothing has spawned yet (the human never does here).
+    let empty: Vec<u16> = vec![0u16; wh];
+
+    let mut out: Vec<NationSpawn> = Vec::with_capacity(n);
+    // --- pass 1: every centre is sampled against the tick-1 plane ------------
+    for i in 0..n {
+        let player_id = ids[i].clone();
+        // Manifest nation (cell = its `coordinates`) or fabricated
+        // (`coordinates: None`, `core/nation.rs:124-128`).
+        let cell = if i < nations.len() {
+            nations[order[i] as usize].coordinates
+        } else {
+            None
+        };
+        let mut random = PseudoRandom::new(simple_hash(&player_id).wrapping_add(seed_base));
+        let ratios = [
+            random.next_int(50, 60),
+            random.next_int(30, 40),
+            random.next_int(10, 20),
+        ];
+        let (lo, hi) = attack_rate_range(difficulty);
+        let attack_rate = random.next_int(lo, hi);
+        let attack_tick = random.next_int(0, attack_rate);
+        let (tile, tries) = match cell {
+            Some(c) => random_spawn_land(map, &empty, c, &mut random),
+            None => (None, 0),
+        };
+        out.push(NationSpawn {
+            idx: i,
+            small_id: 1 + human_count as u16 + i as u16,
+            player_id,
+            cell,
+            spawn_tile: tile,
+            spawn_tick: 2,
+            tries,
+            owned: Vec::new(),
+            troops: start_manpower_nation(difficulty),
+            attack_rate,
+            attack_tick,
+            ratios,
+        });
+    }
+
+    // --- pass 2: footprints, sequentially, against the spawning plane --------
+    // (bots filled their tiles on tick 1; nation i-1 placed before nation i on
+    // tick 2 because its `SpawnExecution` sits earlier in `execs`.)
+    let mut plane: Vec<u16> = if bot_plane.len() == wh {
+        bot_plane.to_vec()
+    } else {
+        vec![0u16; wh]
+    };
+    // Spawn CENTRES seen by `too_close_to_existing_spawn` (`game.rs:3622-3640`):
+    // every player's `spawn_tile` except the one asking. The bots placed on
+    // tick 1, so their centres are all in place before the first nation spawns.
+    let mut centres: Vec<u32> = bot_centres.to_vec();
+    for (ni, s) in out.iter_mut().enumerate() {
+        if ni >= nations.len() {
+            // FABRICATED nation: `spawn_cell.is_none()` (`nation.rs:98-106`) so
+            // the engine enqueues `SpawnExecution::new(game_id, info, None)`,
+            // whose OWN `PseudoRandom(simple_hash(id) + simple_hash(game_id))`
+            // (`spawn.rs:27-32`) starts at draw 0 and drives the generic
+            // `find_spawn` (`spawn_util.rs:65-104`) - the same routine the bots
+            // use. `random_spawn_land` is never called, hence tries = 0.
+            let ctx = SpawnCtx {
+                terrain: &map.terrain,
+                owner_tiles: &[],
+                owner_ids: &[],
+                prev: &centres,
+                width: w,
+                height: h,
+                min_dist: 30,
+                owner_plane: Some(&plane),
+            };
+            let seed = simple_hash(&s.player_id).wrapping_add(seed_base);
+            let res = select_spawn(
+                &ctx,
+                &SpawnJob {
+                    seed,
+                    explicit: u32::MAX,
+                },
+            );
+            if res.spawned {
+                s.spawn_tile = Some(res.tile);
+                s.owned = ctx.spawn_tiles(res.tile);
+                for t in &s.owned {
+                    plane[*t as usize] = s.small_id;
+                }
+                centres.push(res.tile);
+            }
+            continue;
+        }
+        if let Some(tile) = s.spawn_tile {
+            let ctx = SpawnCtx {
+                terrain: &map.terrain,
+                owner_tiles: &[],
+                owner_ids: &[],
+                prev: &[],
+                width: w,
+                height: h,
+                min_dist: 30,
+                owner_plane: Some(&plane),
+            };
+            s.owned = ctx.spawn_tiles_valid(tile);
+            if s.owned.is_empty() {
+                // `SpawnExecution` is one-shot: a footprint that survives the
+                // validity filter never retries, so the nation never spawns.
+                s.spawn_tile = None;
+            } else {
+                for t in &s.owned {
+                    plane[*t as usize] = s.small_id;
+                }
+                centres.push(tile);
+            }
+        }
+    }
+    out
 }
 
 /// `TribeSpawner` (`bot/tribe_spawner.rs:266-292`): a fresh
@@ -1246,6 +1690,11 @@ pub struct SpawnReference {
     pub min_dist: u32,
     pub players: Vec<RefPlayer>,
     pub bots: Vec<RefBot>,
+    /// `nation` rows, in the order the engine registered them.
+    pub nation_rows: Vec<RefNation>,
+    /// Per-nation owned tile lists, in nation order (`nationowned` rows). The
+    /// engine reference emits these alongside the `player` roster row.
+    pub nation_owned: Vec<Vec<u32>>,
     /// `[bot]` -> `(tile, owner_small_id)` overrides the engine had in place
     /// before that bot selected.
     pub owner_before: Vec<Vec<(u32, u16)>>,
@@ -1265,6 +1714,20 @@ pub struct RefPlayer {
     pub tiles_owned: i64,
 }
 
+/// One engine nation (`nation` row): identity + spawn facts, engine-sourced.
+#[derive(Clone, Debug, Default)]
+pub struct RefNation {
+    pub idx: usize,
+    pub small_id: u16,
+    pub id: String,
+    /// The manifest `coordinates` the nation's `spawn_cell` came from (-1,-1
+    /// when the manifest declares none - then the engine random-spawns).
+    pub cell: (i64, i64),
+    pub spawn_tile: i64,
+    pub spawn_tick: u32,
+    pub tiles_owned: i64,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct RefBot {
     pub small_id: u16,
@@ -1274,6 +1737,18 @@ pub struct RefBot {
     pub x: u32,
     pub y: u32,
     pub tiles_owned: i64,
+}
+
+impl SpawnReference {
+    /// The `nations` spec as a COUNT. `disabled` = 0; `default` = the map's whole
+    /// manifest (Normal map size - `get_compact_map_nation_count`); otherwise the
+    /// integer the reference recorded.
+    pub fn nations_int(&self) -> u32 {
+        match self.nations.trim() {
+            "disabled" => 0,
+            n => n.parse().unwrap_or(0),
+        }
+    }
 }
 
 pub fn parse_spawn_reference(text: &str) -> Result<SpawnReference, String> {
@@ -1320,6 +1795,28 @@ pub fn parse_spawn_reference(text: &str) -> Result<SpawnReference, String> {
                     y: num_u32(f[7])?,
                     tiles_owned: num_i64(f[8])?,
                 };
+            }
+            "nationowned" => {
+                let ni: usize = f[1].parse().map_err(|_| err("nationowned index"))?;
+                if r.nation_owned.len() <= ni {
+                    r.nation_owned.resize(ni + 1, Vec::new());
+                }
+                r.nation_owned[ni] = f[2..].iter().filter_map(|x| x.parse().ok()).collect();
+            }
+            "nation" => {
+                // `nation <ni> <sid> <id> <cellx> <celly> <spawn_tile> <spawn_tick> <tiles_owned>`
+                // Identity/tick columns are ALSO in the `player` row; this row
+                // exists so a nation can be matched without scanning the roster.
+                let ni: usize = f[1].parse().map_err(|_| err("nation index"))?;
+                r.nation_rows.push(RefNation {
+                    idx: ni,
+                    small_id: f[2].parse().map_err(|_| err("nation small_id"))?,
+                    id: f[3].to_string(),
+                    cell: (num_i64(f[4])?, num_i64(f[5])?),
+                    spawn_tile: num_i64(f[6])?,
+                    spawn_tick: num_u32(f[7])?,
+                    tiles_owned: num_i64(f[8])?,
+                });
             }
             "owner" => {
                 let bi: usize = f[1].parse().map_err(|_| err("owner bot"))?;
@@ -1601,5 +2098,141 @@ pub fn format_spawn_report(r: &SpawnReference, rep: &SpawnReport, side: &str) ->
         out.push('\n');
     }
     out.push_str(&format!("bit_exact {}\n", rep.all_match()));
+    out
+}
+// ---------------------------------------------------------------------------
+// Nation parity report - the port's nation plan vs the engine reference
+// ---------------------------------------------------------------------------
+
+/// Every per-nation integer the task requires to be bit-exact, tallied.
+#[derive(Debug, Default)]
+pub struct NationReport {
+    pub lines: Vec<String>,
+    /// id, small_id, spawn_tile, spawn_tick, tiles_owned(count), owned(set).
+    pub ids: Tally,
+    pub sids: Tally,
+    pub tiles: Tally,
+    pub ticks: Tally,
+    pub counts: Tally,
+    pub owned: Tally,
+    pub engine_nations: usize,
+    pub port_nations: usize,
+}
+
+impl NationReport {
+    pub fn all_match(&self) -> bool {
+        self.engine_nations == self.port_nations
+            && self.ids.total == self.ids.matched
+            && self.sids.total == self.sids.matched
+            && self.tiles.total == self.tiles.matched
+            && self.ticks.total == self.ticks.matched
+            && self.counts.total == self.counts.matched
+            && self.owned.total == self.owned.matched
+    }
+    pub fn first_divergence(&self) -> Option<String> {
+        for t in [
+            &self.ids,
+            &self.sids,
+            &self.tiles,
+            &self.ticks,
+            &self.counts,
+            &self.owned,
+        ] {
+            if let Some(d) = &t.first_divergence {
+                return Some(d.clone());
+            }
+        }
+        None
+    }
+}
+
+/// Compare the port's nation plan against the engine's recorded nation rows
+/// (identity, spawn tile, spawn tick, owned set, owned count) - nation by nation.
+pub fn compare_nation_spawns(r: &SpawnReference, plan: &[NationSpawn]) -> NationReport {
+    let mut rep = NationReport::default();
+    let engine: Vec<&RefPlayer> = {
+        let mut v: Vec<&RefPlayer> = r.players.iter().filter(|p| p.ptype == 'N').collect();
+        v.sort_by_key(|p| p.small_id);
+        v
+    };
+    rep.engine_nations = engine.len();
+    rep.port_nations = plan.len();
+    if engine.len() != plan.len() {
+        rep.ids.first_divergence = Some(format!(
+            "nation count: engine {} vs port {}",
+            engine.len(),
+            plan.len()
+        ));
+    }
+    for (i, (e, p)) in engine.iter().zip(plan.iter()).enumerate() {
+        rep.ids.push(&format!("nation{i}.id"), i, &e.id, &p.player_id);
+        rep.sids
+            .push(&format!("nation{i}.small_id"), i, &e.small_id, &p.small_id);
+        let e_tile = e.spawn_tile;
+        let p_tile = p.spawn_tile.map(|t| t as i64).unwrap_or(-1);
+        rep.tiles
+            .push(&format!("nation{i}.spawn_tile"), i, &e_tile, &p_tile);
+        rep.ticks
+            .push(&format!("nation{i}.spawn_tick"), i, &e.spawn_tick, &p.spawn_tick);
+        rep.counts.push(
+            &format!("nation{i}.tiles_owned"),
+            i,
+            &e.tiles_owned,
+            &(p.owned.len() as i64),
+        );
+        // Engine owned list (if the reference carries one) vs the port's set.
+        let mut want: Vec<u32> = r
+            .nation_owned
+            .get(i)
+            .cloned()
+            .unwrap_or_default();
+        want.sort_unstable();
+        let mut have = p.owned.clone();
+        have.sort_unstable();
+        rep.owned
+            .push(&format!("nation{i}.owned_set"), i, &want, &have);
+        rep.lines.push(format!(
+            "nation{i} sid={} id={} cell={} spawn_tile engine={} port={} spawn_tick engine={} port={} owned engine={} port={} {}",
+            p.small_id,
+            p.player_id,
+            match p.cell {
+                Some(c) => format!("{},{}", c[0], c[1]),
+                None => "none".to_string(),
+            },
+            e_tile,
+            p_tile,
+            e.spawn_tick,
+            p.spawn_tick,
+            e.tiles_owned,
+            p.owned.len(),
+            if e_tile == p_tile && e.tiles_owned == p.owned.len() as i64 { "OK" } else { "MISMATCH" }
+        ));
+    }
+    rep
+}
+
+pub fn format_nation_report(r: &SpawnReference, rep: &NationReport, side: &str) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "=== {side} vs engine (NATION spawn) ===\n\
+         map {}  seed {}  game_id {}  agents {}  nations {}  humans {}  difficulty Easy\n\
+         engine nations {}  port nations {}\n",
+        r.map, r.seed, r.game_id, r.agents, r.nations, r.human_agents,
+        rep.engine_nations, rep.port_nations
+    ));
+    out.push_str(&format!("{}\n", rep.ids.line("nation id")));
+    out.push_str(&format!("{}\n", rep.sids.line("nation small_id")));
+    out.push_str(&format!("{}\n", rep.tiles.line("nation spawn tile")));
+    out.push_str(&format!("{}\n", rep.ticks.line("nation spawn tick")));
+    out.push_str(&format!("{}\n", rep.counts.line("nation tiles_owned (count)")));
+    out.push_str(&format!("{}\n", rep.owned.line("nation owned set (tiles)")));
+    for l in &rep.lines {
+        out.push_str(l);
+        out.push('\n');
+    }
+    match rep.first_divergence() {
+        None => out.push_str("FIRST DIVERGENCE: none\n"),
+        Some(d) => out.push_str(&format!("FIRST DIVERGENCE: {d}\n")),
+    }
     out
 }

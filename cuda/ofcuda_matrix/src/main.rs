@@ -251,6 +251,8 @@ struct Row {
     ran_ticks: u32,
     init_sets: bool,
     init_hash: bool,
+    /// Nations (if any) matched the engine on id/sid/tile/tick/owned/troops.
+    init_nations: bool,
     tick_match: usize,
     tick_total: usize,
     hash_match: usize,
@@ -307,6 +309,7 @@ impl Row {
     fn pass(&self) -> bool {
         self.init_sets
             && self.init_hash
+            && self.init_nations
             && self.tick_match == self.tick_total
             && self.hash_match == self.hash_total
             && self.count_match == self.count_total
@@ -449,6 +452,26 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
     }
     let (w, h) = (orc.width, orc.height);
     let wh = (w as usize) * (h as usize);
+    // Health signal that does not depend on the payload: a cell that resolved
+    // a 0-area map measures nothing and must never be able to report PASS.
+    if w == 0 || h == 0 {
+        return Err(format!(
+            "map {} resolved to {w}x{h} (oracle {}): refusing to run a 0-area cell",
+            c.map,
+            oracle_path.display()
+        ));
+    }
+    // Same for a nations cell: if the port's init dump carries no nation row,
+    // the nation layer was not exercised and the cell must not report a result.
+    if c.nations > 0 && init.nation_rows.is_empty() {
+        return Err(format!(
+            "nations={} cell {} but {} carries no `nation` row: the nation layer \
+             was not exercised - refusing to score it",
+            c.nations,
+            c.map,
+            init_path.display()
+        ));
+    }
 
     // ---- terrain (ofcuda_map) ----
     let mdir = ofcuda_map::map_dir(&a.maps_root, &c.map);
@@ -476,6 +499,14 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         ran_ticks: 0,
         ..Default::default()
     };
+
+    // Engine player types by small_id: drives the kernel's attacker-type flag.
+    let bot_sids: std::collections::HashSet<u16> = orc
+        .roster
+        .iter()
+        .filter(|r| r.1 == 'B')
+        .map(|r| r.0)
+        .collect();
 
     // ---- init: the port's spawn output vs the engine's spawn output ----
     let init_plane = plane_from_init(&init, w, h)?;
@@ -526,6 +557,79 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
             }
         }
     }
+    // ---- nations: every integer the nation spawn layer produces -----------
+    // Each field is checked against the ENGINE, from two independent sources:
+    // the oracle's roster + boundary-0 `OWNED`/`PLAYER` rows, and the reference
+    // file's own `player` rows (which `ofcuda_spawn` wrote from the engine).
+    let mut nation_fail: Vec<String> = Vec::new();
+    let mut nation_ok = true;
+    for (ni, n) in init.nation_rows.iter().enumerate() {
+        let (sid, id, _cx, _cy, tile, tick, n_tiles) = n;
+        match orc.roster.iter().find(|r| r.0 == *sid) {
+            None => {
+                nation_ok = false;
+                nation_fail.push(format!("nation {ni} sid {sid} missing from engine roster"));
+            }
+            Some(r) => {
+                if r.1 != 'N' {
+                    nation_ok = false;
+                    nation_fail.push(format!("nation {ni} sid {sid} engine type {} != N", r.1));
+                }
+                if r.2 != *id {
+                    nation_ok = false;
+                    nation_fail
+                        .push(format!("nation {ni} id engine {} vs port {id}", r.2));
+                }
+                if r.3 != *tile {
+                    nation_ok = false;
+                    nation_fail.push(format!(
+                        "nation {ni} spawn tile engine {} vs port {tile}",
+                        r.3
+                    ));
+                }
+            }
+        }
+        // The reference file carries the engine's own spawn tick for the same
+        // sid (`ofcuda_spawn` records when `spawn_tile` first appeared).
+        if let Some(p) = init.players.iter().find(|p| p.0 == *sid) {
+            if p.4 != *tick {
+                nation_ok = false;
+                nation_fail.push(format!(
+                    "nation {ni} spawn tick engine {} vs port {tick}",
+                    p.4
+                ));
+            }
+        } else {
+            nation_ok = false;
+            nation_fail.push(format!("nation {ni} sid {sid} missing from reference players"));
+        }
+        // Owned count + the set itself (the set is folded into the plane above,
+        // so a mismatch there also fails `init_hash`/`init_sets`).
+        let eng_set = b0.owned0.get(sid).cloned().unwrap_or_default();
+        if eng_set.len() != *n_tiles {
+            nation_ok = false;
+            nation_fail.push(format!(
+                "nation {ni} tiles_owned engine {} vs port {n_tiles}",
+                eng_set.len()
+            ));
+        }
+        // Troops: `config::start_manpower(PlayerType::Nation)` at difficulty Easy.
+        let eng_troops = b0
+            .players
+            .iter()
+            .find(|p| p.sid == *sid)
+            .map(|p| p.troops)
+            .unwrap_or(-1);
+        let port_troops = init.nation_troops.get(&ni).copied().unwrap_or(f64::NAN);
+        if eng_troops as f64 != port_troops {
+            nation_ok = false;
+            nation_fail.push(format!(
+                "nation {ni} troops engine {eng_troops} vs port {port_troops}"
+            ));
+        }
+    }
+    row.init_nations = nation_ok;
+
     row.init_sets = sets_ok;
 
     let mut detail = String::new();
@@ -535,7 +639,7 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
          # engine land from manifest {}\n\
          ### INIT (engine spawn output vs the CUDA spawn/init dump)\n\
          init_plane_hash {:#018x} engine_boundary0_hash {:#018x} match {}\n\
-         per-player owned sets match: {}\n\
+         per-player owned sets match: {}   nations match: {}\n\
          engine boundary0 owned_total {}, port plane owned {}\n",
         row.map,
         c.agents,
@@ -552,6 +656,7 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         b0.hash,
         yn(row.init_hash),
         yn(row.init_sets),
+        yn(row.init_nations),
         b0.owned_total,
         init_owners.values().map(|v| v.len()).sum::<usize>(),
     ));
@@ -572,6 +677,23 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
                 .unwrap_or(0)
         ));
     }
+    for (ni, n) in init.nation_rows.iter().enumerate() {
+        detail.push_str(&format!(
+            "NATION {ni} sid={} id={} cell={},{} spawn_tile={} spawn_tick={} n_owned={} tries={} troops={}\n",
+            n.0,
+            n.1,
+            n.2,
+            n.3,
+            n.4,
+            n.5,
+            n.6,
+            init.nation_tries.get(&ni).copied().unwrap_or(0),
+            init.nation_troops.get(&ni).copied().unwrap_or(f64::NAN),
+        ));
+    }
+    for m in &nation_fail {
+        detail.push_str(&format!("NATION_MISMATCH {m}\n"));
+    }
     detail.push_str(&format!(
         "SELFCHECK engine owned_tiles-vs-plane diff {} (nonzero => the engine's own \
          two representations disagree; PLAYER counts are then not a plane count)\n",
@@ -581,7 +703,7 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
     if init.bots.iter().filter(|b| b.2 < 0).count() > 0 {
         row.note = "PORT FAILED TO PLACE SOME BOT".into();
     }
-    if !sets_ok || !row.init_hash {
+    if !sets_ok || !row.init_hash || !row.init_nations {
         // A failed init makes every later comparison meaningless. Report it.
         row.note = format!("{} INIT MISMATCH", row.note).trim().to_string();
         write_cell(a, c, &detail, None, None)?;
@@ -890,7 +1012,12 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
                         tick,
                         s.idx as u32,
                         s.owner,
-                        1, // every actor in this matrix is a bot (nations disabled)
+                        // The engine's troop-loss branch is chosen by the
+                        // ATTACKER's player type (`game.rs:890`): bots take the
+                        // bot branch, nations/humans the other one. The type
+                        // comes from the engine roster in the oracle dump, not
+                        // from a guess about which cells exist.
+                        if bot_sids.contains(&s.owner) { 1 } else { 0 },
                         &mut d_plane,
                         &mut d_heap_tiles,
                         &mut d_heap_pri,
@@ -1381,39 +1508,11 @@ fn main() {
             "=== cell {} N={} nations={} ticks={}",
             c.map, c.agents, c.nations, c.ticks
         );
-        // The spawn layer ports BOTS only (`ofcuda_spawn`/`spawnall`): with
-        // `nations > 0` the engine also seeds `PlayerType::Nation` players,
-        // spawned *after* the bots (their spawn tick is >= every bot's) against
-        // the full bot plane, and their footprint never reaches the reference
-        // file. Boundary 0 therefore cannot be rebuilt from the port, so these
-        // cells are SKIPPED rather than failed - this is a spawn-layer gap, not
-        // a tick gap (the tick engine takes the plane as given, see the `1, //
-        // every actor in this matrix is a bot` argument below). Counted apart so
-        // a nations cell can never masquerade as a tick failure.
-        if c.nations > 0 {
-            skip += 1;
-            let note = format!(
-                "SKIPPED: nations={} not ported (spawn layer ports bots only; the \
-                 nation spawns after the bots against the full bot plane)",
-                c.nations
-            );
-            println!("{}\t-\t{}\t0\t{n}\t{n}\t{n}\t{n}\t{n}\t{n}\t{n}\t{n}\t{note}",
-                c.map, c.agents, n = "-");
-            let row = Row {
-                map: c.map.to_lowercase(),
-                agents: c.agents,
-                nations: c.nations,
-                ticks: c.ticks,
-                first_div: note.clone(),
-                note: note.clone(),
-                ..Default::default()
-            };
-            if let Err(e) = append_row(&a, &row) {
-                eprintln!("error writing cells.tsv: {e}");
-                std::process::exit(1);
-            }
-            continue;
-        }
+        // Nations ARE ported (`ofcuda_prng::nation_spawns`): the nation layer is
+        // driven from the same reference file as the bots, its spawn tile/tick/
+        // owned set are checked against the engine at boundary 0, and its
+        // attacker type is fed to the tick kernel so a nation's troops loss is
+        // the engine's non-bot branch (game.rs:890).
         match run_cell(&a, c) {
             Ok(row) => {
                 if let Err(e) = append_row(&a, &row) {
@@ -1461,7 +1560,7 @@ fn main() {
         }
     }
     eprintln!(
-        "cells: {pass} passed, {fail} failed/not-driven, {skip} skipped (nations>0, spawn layer ports bots only)"
+        "cells: {pass} passed, {fail} failed/not-driven, {skip} skipped"
     );
 }
 

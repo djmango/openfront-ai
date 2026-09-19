@@ -32,7 +32,8 @@ use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig1D};
 use cuda_device::{DisjointSlice, kernel, launch_bounds, launch_contract, thread};
 use cuda_host::cuda_module;
 use ofcuda_prng::{
-    compare_spawn_bots, format_spawn_report, load_map_normal, map_dir, parse_spawn_reference,
+    compare_nation_spawns, compare_spawn_bots, format_nation_report, format_spawn_report,
+    load_manifest_nations, load_map_normal, map_dir, nation_spawns, parse_spawn_reference,
     spawn_bots_cpu, starvation_diagnostic, tribe_bot_ids, SpawnCtx, SpawnReference, SpawnResult,
 };
 use std::path::PathBuf;
@@ -110,6 +111,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cpu = spawn_bots_cpu(&map, &r);
     let port_ids = tribe_bot_ids(&r.game_id, r.agents);
     let mut rep = compare_spawn_bots(&r, &cpu, &port_ids);
+
+    // --- nations -----------------------------------------------------------
+    // The nation spawner is a SEPARATE layer from the bot spawner: nations are
+    // registered before the bots (`rl.rs:171-190`) and sample their centre on
+    // tick 1 against a plane no bot has touched yet, then cut their footprint
+    // on tick 2 against the FULL bot plane (`nation.rs:79-141`). So the bot
+    // plan has to be computed first and fed in as the plane the nation sees.
+    let (n_nations, difficulty) = (r.nations_int(), "Easy");
+    let manifest = load_manifest_nations(&map_path)?;
+    let mut bot_plane = vec![0u16; (map.width as usize) * (map.height as usize)];
+    for (bi, b) in cpu.iter().enumerate() {
+        if b.result.spawned {
+            let sid = r.bots.get(bi).map(|x| x.small_id).unwrap_or(0);
+            for t in &b.tiles {
+                bot_plane[*t as usize] = sid;
+            }
+        }
+    }
+    let nation_plan = nation_spawns(
+        &map,
+        &manifest,
+        &r.game_id,
+        r.human_agents,
+        n_nations,
+        difficulty,
+        &bot_plane,
+        // Spawn centres already on the board when the nations spawn: the bots'
+        // centres (tick 1). `find_spawn`'s min-distance rule reads every
+        // player's `spawn_tile` (`game.rs:3628-3638`).
+        &cpu.iter()
+            .filter(|b| b.result.spawned)
+            .map(|b| b.result.tile)
+            .collect::<Vec<u32>>(),
+    );
+    let nation_rep = compare_nation_spawns(&r, &nation_plan);
 
     // --- GPU: one `spawn_select` launch per bot, in engine order ------------
     let mut dev = "skipped (--no-gpu)".to_string();
@@ -321,6 +357,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ));
             }
         }
+        // Nations: same row shape as the engine reference (`nation` /
+        // `nationowned`), so the init dump and the ref can be diffed field for
+        // field. `spawn_tick` = 2 is the engine's (nations spawn on the tick
+        // after the bots); the port computes it, it is not copied.
+        for (ni, ns) in nation_plan.iter().enumerate() {
+            let (cx, cy) = match ns.cell {
+                Some(c) => (c[0] as i64, c[1] as i64),
+                None => (-1i64, -1i64),
+            };
+            d.push_str(&format!(
+                "nation {ni} {} {} {} {} {} {} {}\n",
+                ns.small_id,
+                ns.player_id,
+                cx,
+                cy,
+                ns.spawn_tile.map(|t| t as i64).unwrap_or(-1),
+                ns.spawn_tick,
+                ns.owned.len()
+            ));
+            // The sampler's rejection count, from the port's own counter. The
+            // oracle captures the ENGINE's equivalent (its `SPAWN_DEBUG` print),
+            // so these two numbers are compared directly downstream.
+            d.push_str(&format!("nationtries {ni} {}\n", ns.tries));
+            // The nation's starting troops (config::start_manpower(Nation)),
+            // compared downstream against the engine's PLAYER row.
+            d.push_str(&format!("nationtroops {ni} {}\n", ns.troops));
+            if let Some(t) = ns.spawn_tile {
+                let mut line = format!("nationowned {ni}");
+                let mut own = ns.owned.clone();
+                own.sort_unstable();
+                for x in &own {
+                    line.push(' ');
+                    line.push_str(&x.to_string());
+                }
+                let _ = t;
+                d.push_str(&line);
+                d.push('\n');
+            }
+        }
         std::fs::write(path, d)?;
     }
 
@@ -328,6 +403,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log.push_str(&format!("# device: {dev}\n"));
     log.push_str(&format!("# reference: {ref_path}\n"));
     log.push_str(&format_spawn_report(&r, &rep, "CUDA port"));
+    if nation_rep.engine_nations > 0 || !nation_plan.is_empty() {
+        log.push_str(&format_nation_report(&r, &nation_rep, "CUDA port"));
+    } else {
+        log.push_str("nations: none declared (manifest count 0) - nation layer not exercised\n");
+    }
     log.push_str(&format!("gpu_vs_hostcpu_spawn {gpu_match}/{gpu_total}\n"));
     log.push_str(&diag);
     log.push_str("--- per-bot ---\n");
@@ -339,11 +419,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log.push_str(&counts);
 
     let gpu_ok = no_gpu || gpu_match == gpu_total;
-    let ok = rep.all_match() && gpu_ok;
+    let nat_ok = nation_rep.all_match();
+    let ok = rep.all_match() && gpu_ok && nat_ok;
     log.push_str(&format!(
-        "HOST_BIT_EXACT {}  GPU_VS_ENGINE {}  ALL_BIT_EXACT {}\n",
+        "HOST_BIT_EXACT {}  GPU_VS_ENGINE {}  NATION_BIT_EXACT {}  ALL_BIT_EXACT {}\n",
         rep.all_match(),
         if no_gpu { "skipped".to_string() } else { format!("{}", gpu_match == gpu_total) },
+        nat_ok,
         ok
     ));
     rep.lines = lines;

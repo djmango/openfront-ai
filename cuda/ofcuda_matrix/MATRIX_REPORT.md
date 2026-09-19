@@ -419,6 +419,10 @@ All paths relative to `/opt/data/workspaces/skg/ofcuda_matrix`.
   forced square (`stills/*_060.png` measured: 800x40, 800x53, 76x800 — one pixel of rounding
   versus the table's `out_px`).
 
+* `out/report/` is the FINAL render set (above). `out/reportA/` and `out/reportB/` are
+  earlier intermediate render batches from before the fix and are **superseded** — do not
+  read them as results; `out/report/` is the one to look at.
+
 **The report and the re-runnable commands**
 
 * `MATRIX_REPORT.md` — this file (`<!-- MATRIX_TABLE -->` and `<!-- ARTIFACTS -->` filled).

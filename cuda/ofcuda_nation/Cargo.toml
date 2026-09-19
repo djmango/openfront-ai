@@ -1,0 +1,23 @@
+[package]
+name = "ofcuda_nation"
+version = "0.1.0"
+edition = "2021"
+default-run = "ofcuda_nation"
+
+# Standalone workspace root: lives next to openfront-ai but must NOT join
+# `rust/Cargo.toml`'s member list. An empty `[workspace]` table keeps it
+# standalone while still allowing a path dependency on the engine crate.
+# This crate NEVER calls CUDA: it is the independent oracle for the CUDA
+# nation spawner.
+[workspace]
+
+[dependencies]
+openfront-engine = { path = "/opt/data/workspaces/skg/openfront-ai/rust/engine" }
+serde_json = "1"
+
+[[bin]]
+name = "ofcuda_nation"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 2

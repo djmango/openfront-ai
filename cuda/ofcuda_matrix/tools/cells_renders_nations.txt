@@ -1,0 +1,5 @@
+# Nations render cells: the nation spawn layer driven end to end, dumped
+# per-tick so a human can SEE the nation's territory on the plane.
+# Format: <map> <agents> [nations] [ticks]
+pangaea 18 1
+pangaea 18 2
