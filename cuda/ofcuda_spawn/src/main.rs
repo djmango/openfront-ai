@@ -28,6 +28,7 @@
 
 use clap::Parser;
 use openfront_engine::game::{Game, PlayerType};
+use openfront_engine::prng::PseudoRandom;
 use openfront_engine::rl::RlSession;
 use openfront_engine::util::simple_hash;
 use serde_json::{json, Value};
@@ -78,6 +79,38 @@ fn nations_value(spec: &str) -> Value {
             }
         },
     }
+}
+
+/// The manifest's `nations` array, in file order. Coordinates are the nation's
+/// spawn cell under Normal map size (`core/terrain.rs` scales only Compact).
+fn manifest_nations(repo: &std::path::Path, map: &str) -> Vec<(String, i64, i64)> {
+    let dir = repo
+        .join("openfront/resources/maps")
+        .join(map.to_lowercase());
+    let Ok(text) = std::fs::read_to_string(dir.join("manifest.json")) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(arr) = v.get("nations").and_then(|x| x.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .map(|n| {
+            let name = n
+                .get("name")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let c = n.get("coordinates").and_then(|x| x.as_array());
+            (
+                name,
+                c.and_then(|c| c.first()).and_then(|v| v.as_i64()).unwrap_or(-1),
+                c.and_then(|c| c.get(1)).and_then(|v| v.as_i64()).unwrap_or(-1),
+            )
+        })
+        .collect()
 }
 
 fn type_tag(t: PlayerType) -> &'static str {
@@ -234,6 +267,52 @@ fn main() {
         for t in &own {
             w(format!("owned {bi} {t}"));
         }
+    }
+
+    // Nations in registration order (small_id order == the order their player
+    // ids were drawn, i.e. `create_nations_for_game`'s order). Same identity
+    // columns as the `player` row, plus the owned tile LIST, so a nation can be
+    // checked tile-for-tile without scanning the roster.
+    let mut nation_players: Vec<_> = game
+        .all_players()
+        .iter()
+        .filter(|p| p.player_type == PlayerType::Nation)
+        .collect();
+    nation_players.sort_by_key(|p| p.small_id);
+    // The nations' spawn cells: the manifest list shuffled with the ENGINE's own
+    // PRNG (`create_random_nations`), never a port-side guess. `nation i` is the
+    // i-th entry of that shuffle, matching the i-th `next_id` draw.
+    let manifest = manifest_nations(&args.repo, &args.map);
+    let mut order_pr = PseudoRandom::new(game_hash);
+    for _ in 0..args.human_agents {
+        order_pr.next_id();
+    }
+    let idx: Vec<i32> = (0..manifest.len() as i32).collect();
+    let order = order_pr.shuffle_array(&idx);
+
+    for (ni, n) in nation_players.iter().enumerate() {
+        let (cellx, celly) = manifest
+            .get(order.get(ni).copied().unwrap_or(ni as i32) as usize)
+            .map(|(_, x, y)| (*x, *y))
+            .unwrap_or((-1, -1));
+        w(format!(
+            "nation {ni} {} {} {} {} {} {} {}",
+            n.small_id,
+            n.id,
+            cellx,
+            celly,
+            n.spawn_tile.map(|t| t as i64).unwrap_or(-1),
+            spawn_tick.get(&n.small_id).copied().unwrap_or(0),
+            n.tiles_owned
+        ));
+        let mut own = n.owned_tiles.clone();
+        own.sort_unstable();
+        let mut line = format!("nationowned {ni}");
+        for t in &own {
+            line.push(' ');
+            line.push_str(&t.to_string());
+        }
+        w(line);
     }
 
     match &args.out {
