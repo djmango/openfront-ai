@@ -929,6 +929,36 @@ dump fails immediately for exactly that reason). **Unported:** player-vs-player 
 `refresh_to_conquer`, fallout/defense modifiers, boat attacks, and cluster capture, which needs a player
 loss and there is none in this window.
 
+**MEASURED SPEED, AND THE HONEST ANSWER 2026-09-18 (`ofcuda_env`).**
+The composed tick that reproduces the whole record **launches no kernel**. Grepping `src/main.rs` and
+`src/lib.rs` for any device symbol returns nothing: the heap, the budget, the plane update and the hash all
+run on the **host**. So 2598/2598 is a HOST result and `k` for the tick is **unmeasurable** - inventing it is
+exactly how the retracted ~700x happened.
+- **Host composed tick: 142 ticks/s (7.03 ms/tick)** on the proven window, 130 on the later/heavier one, 183
+  early, i.e. **9.5 decisions/s** at 15 ticks/decision. The live CPU env on this box in the same minutes runs
+  ~115-134 decisions/s (~1.7k-2.0k engine ticks/s across 64 envs), so the composed host tick is currently
+  **~12-14x SLOWER per decision** than the thing it is meant to replace. It is a verification harness, not an
+  environment.
+- **The one stage with both implementations measured on identical input:** `ofcuda_hash` 64.5 ms/tick against
+  its CPU reference at 8.3 ms/tick, i.e. **k_hash = 0.13 - the device is 7.8x SLOWER**, and that is harness
+  wall time dominated by a 2 MB readback every tick. Amdahl at k=0.13 gives 0.136x, but that is arithmetic on
+  one stage and must never be quoted as a whole-env figure. The cap is still 20x as k->inf (Env 94-95%).
+- **Batch scaling: not supported.** Per-case 64-256-thread launches only, batched variant unimplemented. No
+  scaling point was fabricated.
+- **Where the host tick actually goes: ~87% is plane hashing** (FNV over the 2 MB plane = 1.98 ms). The engine
+  expansion that the CUDA kernel implements is **0.038 ms/tick = 0.5% of the tick**. The ported mechanic is
+  half a percent of the harness, and the verification scaffolding dominates it.
+- **Fixed per-iteration cost**, from the live log: Train 2.633 s + Model 2.631 s.
+- **Contention at measurement time:** GPU 0-7% util, 51.5 W, 2429 MiB held by the trainer; CPU 7.0-8.1 of 8
+  saturated, so the host rates above are lower bounds.
+
+**What this means for the plan:** correctness is proven per slice and end-to-end on the deterministic planes;
+**speed is not realized at all yet**. Three things are needed and none of them is the port itself: (1) the tick
+must run device-resident with **no per-tick readback**, which is precisely what makes the one measured device
+stage 7.8x slower; (2) **hashing must leave the hot loop**, being verification rather than game and currently
+87% of the tick; (3) **batched launches across many envs**, the only lever that moves the 20x ceiling, made
+mandatory by the fixed 5.26 s/iteration.
+
 **Still unproven after all four:** the `tiles_used` divisor's true `f64` start troops are now wired (see
 the composed-tick block above), so what remains is the following: the nonzero-stage `ofenv_set_stage` branch at startup never fired; all
 five refusal guards are untested live (0 refused); **optimizer state is not serialized at all**

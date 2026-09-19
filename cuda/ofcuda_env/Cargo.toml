@@ -27,3 +27,9 @@ ofcuda_prng = { path = "../ofcuda_prng" }
 [[bin]]
 name = "ofcuda_env"
 path = "src/main.rs"
+
+# Measurement-only companion for the speed report: host attribution of the
+# composed tick. Launches no kernel; adds no copy of any core.
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
