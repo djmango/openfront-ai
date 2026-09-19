@@ -372,6 +372,15 @@ impl Execution for TransportShipExecution {
 
 impl TransportShipExecution {
     fn land(&mut self, game: &mut Game, dst: TileRef, uid: i32, troops: f64) {
+        // MEASUREMENT ONLY (env-gated, no semantic effect).
+        if std::env::var_os("OF_ENG_CONQUER").is_some() {
+            eprintln!(
+                "ENG_LAND tick={} owner={} dst={}",
+                game.ticks(),
+                self.owner_small_id,
+                dst
+            );
+        }
         // TS `TransportShipExecution.tick`: the "already own it" check compares
         // against the *current* owner of `dst`, but the subsequent attack target
         // is the `target` snapshotted in `init()` (owner of `ref_tile`), not

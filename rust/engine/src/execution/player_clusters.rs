@@ -335,6 +335,15 @@ fn remove_cluster(game: &mut Game, small_id: u16, cluster: &OrderedTiles) {
         return;
     };
     let tiles = flood_owned(game, small_id, first);
+    if std::env::var_os("OF_ENG_CLUSTER").is_some() {
+        eprintln!(
+            "ENG_CLUSTER_REMOVE tick={} victim={} captor={} tiles={}",
+            game.ticks(),
+            small_id,
+            captor,
+            tiles.len()
+        );
+    }
     let wipe_all = game
         .player_by_small_id(small_id)
         .is_some_and(|p| p.tiles_owned == tiles.len() as i32);

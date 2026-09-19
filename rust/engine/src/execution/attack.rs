@@ -281,6 +281,29 @@ impl Execution for AttackExecution {
                 }
             });
 
+            // MEASUREMENT ONLY (env-gated, no semantic effect): per-pop record
+            // for the TS-parity bisect. Filter with OF_ENG_TRACE=1 plus optional
+            // OF_ENG_TICK / OF_ENG_OWNER / OF_ENG_TARGET.
+            if std::env::var_os("OF_ENG_TRACE").is_some() {
+                let want_tick = std::env::var("OF_ENG_TICK").ok().and_then(|s| s.parse::<u32>().ok());
+                let want_own = std::env::var("OF_ENG_OWNER").ok().and_then(|s| s.parse::<u16>().ok());
+                let want_tgt = std::env::var("OF_ENG_TARGET").ok().and_then(|s| s.parse::<u16>().ok());
+                if want_tick.map_or(true, |t| t == tick)
+                    && want_own.map_or(true, |o| o == self.owner_small_id)
+                    && want_tgt.map_or(true, |g| g == self.target_small_id)
+                {
+                    eprintln!(
+                        "ENG_POP tick={tick} owner={} target={} tile={} own={} on_border={} is_land={} budget={num_tiles_per_tick:.6} troops={troop_count:.6}",
+                        self.owner_small_id,
+                        self.target_small_id,
+                        tile_to_conquer,
+                        game.map.owner_id(tile_to_conquer),
+                        on_border,
+                        game.is_land(tile_to_conquer),
+                    );
+                }
+            }
+
             if game.map.owner_id(tile_to_conquer) != self.target_small_id || !on_border {
                 continue;
             }
@@ -1301,6 +1324,16 @@ impl AttackExecution {
         };
         if defender.tiles_owned >= 100 {
             return;
+        }
+        // MEASUREMENT ONLY (env-gated, no semantic effect).
+        if std::env::var_os("OF_ENG_CONQUER").is_some() {
+            eprintln!(
+                "ENG_DEADDEF tick={} owner={} target={} tiles_owned={}",
+                game.ticks(),
+                self.owner_small_id,
+                self.target_small_id,
+                defender.tiles_owned
+            );
         }
         let target_small = self.target_small_id;
         let owner_small = self.owner_small_id;

@@ -1155,6 +1155,19 @@ impl Game {
     }
 
     pub fn conquer(&mut self, small_id: u16, tile: TileRef) {
+        if std::env::var_os("OF_ENG_CONQUER").is_some() {
+            let want = std::env::var("OF_ENG_TICK").ok().and_then(|s| s.parse::<u32>().ok());
+            if want.map_or(true, |t| t == self.ticks) {
+                eprintln!("ENG_CONQUER_PUB tick={} owner={small_id} tile={tile}", self.ticks);
+            }
+        }
+        if std::env::var_os("OF_ENG_BT").is_some() && tile == 141384 {
+            eprintln!(
+                "ENG_CONQUER_BT owner={small_id} tile={tile} tick={}\n{}",
+                self.ticks,
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
         self.conquer_one(small_id, tile, true);
     }
 
@@ -1237,6 +1250,13 @@ impl Game {
             return;
         }
         let tick = self.ticks;
+        // MEASUREMENT ONLY (env-gated, no semantic effect).
+        if std::env::var_os("OF_ENG_CONQUER").is_some() {
+            let want = std::env::var("OF_ENG_TICK").ok().and_then(|s| s.parse::<u32>().ok());
+            if want.map_or(true, |t| t == tick) {
+                eprintln!("ENG_CONQUER tick={tick} owner={small_id} tile={tile} prev={}", self.map.owner_id(tile));
+            }
+        }
         let prev = self.map.owner_id(tile);
         if prev > 0 {
             if let Some(p) = self.player_by_small_id_mut(prev) {
