@@ -20,11 +20,28 @@ use std::path::Path;
 // Oracle dump
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct AttackSnap {
     pub owner: u16,
     pub target: u16,
     pub troops: f64,
+    /// `AttackExecution::source_tile()` (`attack.rs:1172`), `None` when the
+    /// attack has no source tile. `None` selects `refresh_to_conquer`
+    /// (`attack.rs:160-164`) as the init frontier.
+    pub source: Option<u32>,
+    /// `to_conquer_len()` at the boundary - the ENGINE's own carried heap size,
+    /// so a device re-create can be *checked* against it, not assumed.
+    pub heap_len: usize,
+    /// `border_tile_count()` at the boundary, same purpose.
+    pub border_len: usize,
+    /// `AttackExecution::attack_id()` (`attack.rs:1139`). `AttackExecution::init`
+    /// mints a fresh id (`attack.rs:156`), so a CHANGED id for a live
+    /// `(owner, target)` is the engine having RE-CREATED the attack - a new exec
+    /// object with a fresh `PseudoRandom::new(123)` and an empty `to_conquer`,
+    /// appended to the end of `execs` (`game.rs:3657-3700`). It is the one
+    /// unambiguous re-create signal in the record; troop bits only ever *hint*
+    /// at it.
+    pub attack_id: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -200,10 +217,29 @@ pub fn parse_oracle(path: &Path) -> Result<Oracle, String> {
                 let owner: u16 = it.next().unwrap_or("0").parse().unwrap_or(0);
                 let target: u16 = it.next().unwrap_or("0").parse().unwrap_or(0);
                 let bits = hex64(it.next().unwrap_or("0"));
+                // v2 record: `... {troops_bits} {source|-1} {heap_len} {border_len} {attack_id}`.
+                // A v1 line (`... {bits} 1`) is REJECTED rather than mis-read:
+                // the trailing `1` was a literal placeholder, and parsing it as a
+                // source tile would silently invent state.
+                let missing = || {
+                    format!(
+                        "{}: ATTACK at boundary {b} is a v1 line (no source/heap/attack_id). \
+                         Regenerate the oracle dump with the current `oracle` binary.",
+                        path.display()
+                    )
+                };
+                let src_raw: i64 = it.next().ok_or_else(missing)?.parse().unwrap_or(-1);
+                let heap_len: usize = it.next().ok_or_else(missing)?.parse().unwrap_or(0);
+                let border_len: usize = it.next().ok_or_else(missing)?.parse().unwrap_or(0);
+                let attack_id = it.next().ok_or_else(missing)?.to_string();
                 get!(b).attacks.push(AttackSnap {
                     owner,
                     target,
                     troops: f64::from_bits(bits),
+                    source: if src_raw < 0 { None } else { Some(src_raw as u32) },
+                    heap_len,
+                    border_len,
+                    attack_id,
                 });
             }
             other => return Err(format!("unknown oracle tag {other:?} in {}", path.display())),

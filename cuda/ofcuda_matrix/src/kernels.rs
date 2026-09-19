@@ -348,10 +348,32 @@ pub mod device {
         }
     }
 
-    /// The attack's creation: `AttackExecution::init`'s `refresh_to_conquer`
-    /// (`attack.rs:160-164`), run on the device, with the plane as of the
-    /// boundary the attack appears at and stamped with `game.ticks()` as it was
-    /// during the tick the init ran in.
+    /// `AttackExecution::init`'s frontier seed (`attack.rs:156-164`), run on the
+    /// device: the attack's heap and border set are built from the owner's
+    /// border tiles (`refresh_to_conquer`, `attack.rs:1265-1274`) and every
+    /// enqueue draws from the attack's OWN stream.
+    ///
+    /// This is BOTH device entry points the engine has, because they are the
+    /// same call in the engine:
+    ///
+    /// * **creation** - a `(owner, target)` the device has no slot for. The
+    ///   engine constructed a new `AttackExecution` and `execute_next_tick`
+    ///   initialised it AT THE END of the tick that produced the boundary it
+    ///   first appears at (`game.rs:3657-3700`), then appended it to `execs`,
+    ///   so its first pop is the following tick.
+    /// * **RE-CREATE** - a live `(owner, target)` whose `attack_id` CHANGED
+    ///   (`attack.rs:156`). The bot AI re-issued the attack
+    ///   (`game.add_land_attack_from`, `game.rs:1469-1484`), the new exec was
+    ///   coalesced/merged in `init` (`merge_outgoing_land_attacks`,
+    ///   `game.rs:2122-2156`, which adds the old attack's troops and kills it)
+    ///   and the OLD attack still ticks in that same tick, first, in its old
+    ///   `execs` position. So the re-create lands at the END of the tick:
+    ///   `fresh_prng = 1` restores `PseudoRandom::new(123)`
+    ///   (`attack.rs:47-57`) and the frontier is rebuilt from scratch.
+    ///
+    /// `fresh_prng = 0` rebuilds from the slot's carried stream instead, which
+    /// is what a caller that has already written a fresh state into `prng`
+    /// wants (the creation path).
     #[kernel]
     #[launch_bounds(256)]
     #[allow(clippy::too_many_arguments)]
@@ -362,7 +384,8 @@ pub mod device {
         tick: u32,
         slot: u32,
         owner_col: u16,
-        plane: &mut [u16],
+        fresh_prng: u32,
+        plane: &[u16],
         mut heap_tiles: &mut [u32],
         mut heap_pri: &mut [f32],
         mut border: &mut [u32],
@@ -387,7 +410,11 @@ pub mod device {
         scal[soff + 5] = 0;
         scal[soff + 3] = 1;
         let mut heap = Heap::new();
-        let mut pr = Prng::from_state(&prng[pse..pse + 5]);
+        let mut pr = if fresh_prng != 0 {
+            Prng::new(SEED)
+        } else {
+            Prng::from_state(&prng[pse..pse + 5])
+        };
         let mut blen = 0usize;
         let om = owner_col as usize * 2;
         let oboff = ob_meta[om] as usize;

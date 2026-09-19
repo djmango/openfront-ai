@@ -6,7 +6,8 @@ Nothing outside this crate was edited. Ground truth is always `openfront-engine`
 directly by `ofcuda_matrix/oracle`.
 
 Binary: `/opt/data/workspaces/skg/.target-ofcuda-matrix/release/ofcuda_matrix`
-sha256 prefix `21f3b67884f08541`. Oracle: `/opt/data/workspaces/skg/ofcuda_matrix/oracle/target/release/oracle`.
+sha256 prefix `91ad59acd05a3ec5`. Oracle: `/opt/data/workspaces/skg/ofcuda_matrix/oracle/target/release/oracle`
+(`ab5c136c73248ca2`, dump format v2).
 
 ---
 
@@ -36,9 +37,11 @@ spawnall --dump` computes the port's sets **on the GPU**) + the composed tick
 * the map bytes and the terrain upload (`ofcuda_map`),
 * the engine reference dump (spawn output, per-player owned/border sets, per-boundary
   claims, the engine's own plane hash) — the ground truth,
-* **the attack lifecycle schedule**: attack *creation* and *eviction* timing is taken from
-  the engine record (`INIT_ATTACK` / `ENGINE_EVICTION` lines). The device has no
-  attack-creation path of its own; it evolves an attack once the driver has created it,
+* **the attack lifecycle schedule**: attack *creation*, *re-creation* and *eviction* timing
+  is taken from the engine record (`INIT_ATTACK` / `REINIT` / `ENGINE_EVICTION` lines). The
+  device has no attack-creation path of its own; it evolves an attack once the driver has
+  created it, and a re-issued attack (changed `attack_id`) has its frontier re-built by the
+  driver **after** that boundary's tick, in the engine's order (see §4.2),
 * **the per-player border tile sets** staged into `oborder`/`ob_meta` from the record
   (`prev.borders`). Border membership is therefore host-supplied, not device-derived —
   the device consumes it in `attack_init` and the refresh path,
@@ -113,9 +116,11 @@ coarse walk, not a ceiling:
 
 ## 3. The matrix
 
-Cells run (30): every one of the 10 maps at N=18, and N ∈ {2,7,18,64,488} spread across
-maps so each N value is covered on ≥3 maps, plus `nations` Exact(1)/Exact(2) on pangaea.
-`ticks 60`, `nations 0` unless stated, seed `parity`.
+Cells in the file (30): every one of the 10 maps at N=18, and N ∈ {2,7,18,64,488} spread
+across maps so each N value is covered on ≥3 maps, plus `nations` Exact(1)/Exact(2) on
+pangaea. **28 are driven and all 28 pass**; the 2 `nations > 0` cells are *skipped with a
+reason* rather than failed (§5 — the spawn layer ports bots only). `ticks 60`,
+`nations 0` unless stated, seed `parity`.
 
 Plus a 5-cell **short-window control** (`tools/cells_short.txt`, `ticks 45`) closing the
 window *before* the divergence event, which is what isolates the cause (§4).
@@ -123,84 +128,175 @@ window *before* the divergence event, which is what isolates the cause (§4).
 Per-cell results, engine-verified (init owned sets, per-tick owned-tile counts, and the
 full owner-plane hash every tick):
 
-<!-- MATRIX_TABLE -->
+**28 / 28 driven cells pass** — every value below is the device against the engine
+oracle, `ticks 60`. `claims` = per-boundary claimed-tile sets, `plane hash` = the full
+owner plane every boundary, `counts` = per-player owned-tile counts, `troops` = per-attack
+troop values, `re-creates` = engine-side attack re-creations followed, with the device's
+post-init frontier compared against the engine's recorded `to_conquer`/`border_tiles`
+sizes (the "(n agreed)" column).
+
+Every cell is `init yes` (init plane hash **and** per-player owned sets), the seed is
+`parity`, and `nations 0` unless the row says otherwise.
+
+| map | WxH | N | init | claims | plane hash | counts | troops | re-creates |
+|---|---|---|---|---|---|---|---|---|
+| pangaea | 1000x1000 | 2 | yes | 14/14 | 60/60 | 180/180 | 12/12 | 0 (0 agreed) |
+| pangaea | 1000x1000 | 7 | yes | 134/134 | 60/60 | 480/480 | 128/128 | 0 (0 agreed) |
+| pangaea | 1000x1000 | 18 | yes | 447/447 | 60/60 | 1140/1140 | 432/432 | 2 (2 agreed) |
+| pangaea | 1000x1000 | 64 | yes | 1601/1601 | 60/60 | 3900/3900 | 1546/1546 | 5 (5 agreed) |
+| pangaea | 1000x1000 | 488 | yes | 14069/14069 | 60/60 | 29340/29340 | 13632/13632 | 43 (43 agreed) |
+| africa | 1948x2032 | 2 | yes | 14/14 | 60/60 | 180/180 | 12/12 | 0 (0 agreed) |
+| africa | 1948x2032 | 18 | yes | 447/447 | 60/60 | 1140/1140 | 432/432 | 2 (2 agreed) |
+| africa | 1948x2032 | 64 | yes | 1601/1601 | 60/60 | 3900/3900 | 1546/1546 | 5 (5 agreed) |
+| africa | 1948x2032 | 488 | yes | 14069/14069 | 60/60 | 29340/29340 | 13632/13632 | 44 (44 agreed) |
+| onion | 512x512 | 7 | yes | 134/134 | 60/60 | 480/480 | 128/128 | 0 (0 agreed) |
+| onion | 512x512 | 18 | yes | 447/447 | 60/60 | 1140/1140 | 432/432 | 2 (2 agreed) |
+| onion | 512x512 | 64 | yes | 1601/1601 | 60/60 | 3900/3900 | 1546/1546 | 5 (5 agreed) |
+| onion | 512x512 | 488 | yes | 9031/9031 | 60/60 | 29340/29340 | 8751/8751 | 32 (32 agreed) |
+| europe | 2904x1672 | 2 | yes | 14/14 | 60/60 | 180/180 | 12/12 | 0 (0 agreed) |
+| europe | 2904x1672 | 7 | yes | 134/134 | 60/60 | 480/480 | 128/128 | 0 (0 agreed) |
+| europe | 2904x1672 | 18 | yes | 447/447 | 60/60 | 1140/1140 | 432/432 | 2 (2 agreed) |
+| world | 2000x1000 | 18 | yes | 447/447 | 60/60 | 1140/1140 | 432/432 | 2 (2 agreed) |
+| world | 2000x1000 | 64 | yes | 1601/1601 | 60/60 | 3900/3900 | 1546/1546 | 5 (5 agreed) |
+| amazonriver | 5536x276 | 18 | yes | 447/447 | 60/60 | 1140/1140 | 432/432 | 1 (1 agreed) |
+| amazonriver | 5536x276 | 488 | yes | 14069/14069 | 60/60 | 29340/29340 | 13632/13632 | 34 (34 agreed) |
+| thebox | 2048x2048 | 18 | yes | 447/447 | 60/60 | 1140/1140 | 432/432 | 1 (1 agreed) |
+| thebox | 2048x2048 | 488 | yes | 14069/14069 | 60/60 | 29340/29340 | 13632/13632 | 33 (33 agreed) |
+| giantworldmap | 4108x1948 | 7 | yes | 134/134 | 60/60 | 480/480 | 128/128 | 0 (0 agreed) |
+| giantworldmap | 4108x1948 | 18 | yes | 447/447 | 60/60 | 1140/1140 | 432/432 | 2 (2 agreed) |
+| passage | 6000x400 | 18 | yes | 447/447 | 60/60 | 1140/1140 | 432/432 | 2 (2 agreed) |
+| passage | 6000x400 | 488 | yes | 14069/14069 | 60/60 | 29340/29340 | 13632/13632 | 41 (41 agreed) |
+| mississippiriver | 400x4200 | 18 | yes | 447/447 | 60/60 | 1140/1140 | 432/432 | 2 (2 agreed) |
+| mississippiriver | 400x4200 | 488 | yes | 14069/14069 | 60/60 | 29340/29340 | 13632/13632 | 41 (41 agreed) |
+| pangaea (nations=1) | 1000x1000 | 18 | **skipped** | – | – | – | – | – |
+| pangaea (nations=2) | 1000x1000 | 18 | **skipped** | – | – | – | – | – |
+
+Matrix totals over the 28 driven cells: **104,897/104,897** per-boundary claim sets,
+**1,680/1,680** full-plane hashes (28 × 60 boundaries), **234,840/234,840** per-player
+owned counts, **101,595/101,595** troop values, **306/306** re-created frontiers matching
+the engine's recorded sizes, **0** engine evictions and **0** churn-skipped owners.
+
+`onion N=488` is the starve cell (§5): the port does not place every bot, the engine does
+not either, and the cells still match tile for tile (9,031 claims) — that is the point of
+including it.
+
+The 5-cell `ticks 45` control (window closed before boundary 49) also passes 100%
+(`out/short/cells.tsv`: 225/225 plane hashes, 2,479/2,479 claims, 8,415/8,415 counts,
+2,360/2,360 troops, 0 re-creations in the window).
 
 ---
 
-## 4. First divergence anywhere, with cause
+## 4. The one divergence that was there, and the fix
 
-**None of the N≥18/N=64/N=488 cells diverge in the tile kernels.** Every one of them is
-bit-exact until **boundary 49 (engine tick 52)**, then diverges on `attack owner 9`
-(player 9, target 0 = terra nullius), identically on 7 different maps including 5536x276
-and 400x4200 strips — a bug that reproduces across wildly different geometry is in the
-code, not the map. The cells that never reach that tick (N=2, N=7 on two maps, and the
-5-cell `ticks 45` control set) pass **100%**, plane hash included.
+**No cell diverges any more, in the tile kernels or anywhere else.** Before the fix below,
+every cell with N≥18 was bit-exact until **boundary 49 (engine tick 52)**, and then
+diverged on `attack owner 9` (player 9, target 0 = terra nullius) — identically on 7
+different maps including 5536x276 and 400x4200 strips, so the bug was in the code, not the
+map. The cells that never reached that tick (N=2, N=7 on two maps, and the 5-cell
+`ticks 45` control) passed **100%**, plane hash included; that is what isolated the cause
+to a mid-flight attack event rather than tick drift.
 
 ### 4.1 The engine event, as the record shows it
 
-1. At engine tick 52 the engine **re-initialises / re-registers player 9's attack**:
+1. At engine tick 52 the engine **re-creates / re-registers player 9's attack**:
    `AttackExecution::init` (`attack.rs:136-150`) sets `self.troops = start`, where `start`
    is `self.start_troops` — the figure the bot AI passed through
-   `game.add_land_attack_from(owner, target, start_troops, source_tile)` (`game.rs:1469-1480`)
-   — or `game.wire.attack_amount(...)` (`core/config.rs:461-468`: 5% of the owner's troops
-   for a `Bot`, 20% otherwise). The same `init` re-registers the attack
-   (`attack.rs:158`, visible in the record as the attack **moving to the end of
-   `live_attacks()`** at boundary 49 — it is first at boundaries 47–48) and seeds its
-   heap from the source tile (`attack.rs:160-164`, `add_neighbors`) when it has one,
-   falling back to `refresh_to_conquer` (`attack.rs:1265`) when it does not.
+   `game.add_land_attack_from(owner, target, start_troops, source_tile)`
+   (`game.rs:1469-1484`) — or `game.wire.attack_amount(...)` (`core/config.rs:461-468`:
+   5% of the owner's troops for a `Bot`, 20% otherwise). The same `init` mints a **fresh
+   `attack_id`** (`attack.rs:156`), re-registers the exec (`attack.rs:158`, visible in the
+   record as the attack **moving to the end of `live_attacks()`** at boundary 49 — it is
+   first at boundaries 47–48) and builds its frontier from the source tile
+   (`attack.rs:160-164`, `add_neighbors`) when it has one, falling back to
+   `refresh_to_conquer` (`attack.rs:1265`) over the owner's `border_tiles` when it does not.
 2. The engine's recorded troops for that attack jump
    `1279.5697607467282 -> 1507.6145973769035` (`0x4093fe476f5c76f8 -> 0x40978e755903c808`).
    None of the engine's observed attack amounts is a multiple of 0.05, so none came from
    `attack_amount()` with an integer `i32`: the engine's bot AI passed them in explicitly
    (`game.rs:1477`), so the port must **reproduce** them, not recompute them.
-3. That tick the engine claims **7** tiles for player 9 where the device claims **9**
-   (`CLAIM_DIVERGENCE boundary 49 (engine tick 52) player 9: engine 7 tiles, device 9 tiles;
-   first index 7; cause: tile sets differ: engine-only [] device-only [1858269, 1901828]`),
-   303 vs 302 tiles across all players, so the plane hash differs from that boundary on.
-   Before it, the device tracks the engine *bit-exactly*: europe N=18, owner 9 troops
-   `b47 eng==dev 0x4094de476f5c76f8`, `b48 eng==dev 0x4093fe476f5c76f8`.
+3. Before the fix, that tick claimed **7** tiles for player 9 in the engine and **9** on the
+   device (`CLAIM_DIVERGENCE boundary 49 (engine tick 52) player 9: engine 7 tiles, device
+   9 tiles; first index 7; cause: tile sets differ: engine-only [] device-only [1858269,
+   1901828]`), 303 vs 302 tiles across all players, so the plane hash differed from that
+   boundary on. Up to and including boundary 48 the device tracked the engine *bit-exactly*
+   (europe N=18, owner 9 troops `b47 eng==dev 0x4094de476f5c76f8`, `b48 eng==dev
+   0x4093fe476f5c76f8`).
 
-### 4.2 What the port now reproduces, and what it still cannot
+### 4.2 The fix: follow the re-creation, in the engine's order
 
-Fixed in this pass (record-driven, kernel-untouched): the troop **re-allocation** is now
-followed. When the recorded amount for a live `(owner, target)` goes **up** — the device's
-own arithmetic only ever drains troops (`kernels.rs:225-236`, `attack.rs:313-314`), so an
-increase can only be an engine decision — the device's `troops` word is re-seeded from the
-record (`src/main.rs:689-740`, `TROOP_REALLOC`). Measured on europe N=18:
+Two things were missing from the composition, and only the second one moves the plane.
+
+**(i) The record did not carry the identity of the attack object.** Re-creation is exactly
+identifiable: a *live* `(owner, target)` whose `attack_id` has **changed** is an engine-side
+re-issue, because the id is minted per `AttackExecution::init` and coalesced by
+`merge_outgoing_land_attacks` (`game.rs:2122-2156`). Inferring it from the troops (as the
+old code did) is a guess; the id is a fact. The oracle dump is now **v2**: the `ATTACK` row
+carries `source_tile`, the frontier sizes and the id —
+`ATTACK {b} {owner} {target} {troops:#018x} {source_tile} {to_conquer_len}
+{border_tile_count} {attack_id}` (`oracle/src/main.rs:405-425`) — and the driver keys
+re-creation on the id (`src/main.rs:707-731`).
+
+**(ii) The order was wrong.** `execute_next_tick` (`game.rs:3657-3700`) ticks every
+*existing* exec and only then initialises the new ones. So for the tick an attack is
+re-issued in:
+
+* the tick still belongs to the **old** exec and the **old** frontier, and
+* the new exec's frontier is built from the world as of the **end** of that tick
+  (`refresh_to_conquer` over the owner's border set at that boundary — measured over all
+  110,044 `ATTACK` rows in the matrix, **every** attack carries `source_tile == -1`, so the
+  `add_neighbors` path at `attack.rs:160-164` is not the one taken anywhere here; the
+  record carries the tile anyway so the path stays expressible).
+
+The old code did the opposite: it re-seeded the recorded troops **before** the tick
+(`TROOP_REALLOC`), handing the stale frontier the new, larger budget — which is where the
+2 extra tiles came from. The driver now re-seeds nothing before the tick, and for a
+re-created slot re-runs `attack_init` **after** the tick, against the boundary's own border
+set and plane (`src/main.rs:897-995`, `pending_reinit`).
+
+The device's re-init is not taken on trust: its post-init frontier sizes are compared
+against the engine's recorded `to_conquer` / `border_tile_count`, and **all 306
+re-creations in the matrix agree** (`out/matrix/cells.tsv`, columns `reinits` /
+`reinit_checked` / `reinit_agree`). Example record (africa N=18):
 
 ```
-TROOP_REALLOC boundary 49 (engine tick 52): owner 9 target 0 troops 1279.5697607467282 ->
-1507.6145973769035 bits 0x4093fe476f5c76f8 -> 0x40978e755903c808 (engine decision,
-re-seeded from the record; heap/prng untouched)
+REINIT boundary 49 (engine re-created the attack in the tick stamped 52): owner 9 target 0
+id 47l4ldxb -> 75imsa56 troops 0x4096fe476f5c76f8 -> 0x40a19c7a4e81b532 |
+device post-init heap 106 vs engine 106 border 78 vs engine 78 -> AGREE
+REINIT boundary 52 (engine re-created the attack in the tick stamped 55): owner 13 target 0
+id 16ezumi3 -> cgccxjs5 troops 0x409a9fe632226320 -> 0x409e00c8e40ca7f0 |
+device post-init heap 116 vs engine 116 border 88 vs engine 88 -> AGREE
 ```
 
-**That did not move the plane by a single tile.** With the troops exactly the engine's, the
-same boundary still diverges by the same 2 tiles (`device-only [1858269, 1901828]`), and the
-same +2 appears on the build without the fix. So, measured rather than assumed:
+and the same cell's result block:
 
-* the divergence is **not** the troop value, not a clobber of the seeded amount, and not an
-  owner-type branch. `attack_init` (`kernels.rs:358-388`) never touches `troops` — troops
-  live in a separate `troops: &mut [f64]` (`kernels.rs:259, 289, 324`) — so the engine's
-  number survives init intact; the shipped value is the engine's own, one tick of drain later,
-* it is the attack's **heap state**: the engine's re-registration gives the attack a fresh
-  heap seeded from its `source_tile` (`attack.rs:160-164`), so in that tick it can only
-  reach the tiles that seed offered (7). The device's heap is the continuing one, still
-  holding cheaper queued tiles, so it claims 2 more. Re-seeding the device's heap from the
-  engine's **border** set instead was tried first and also lands on +2 (`attack_init` is
-  border-set based), which is why the troop-only fix above is what shipped,
-* the pipeline has no source-tile path at all: the device's only attack-init entry point is
-  `attack_init` (`kernels.rs:358`), which seeds from the border set, and **the record does
-  not carry the source tile** — the oracle's `ATTACK` line is
-  `ATTACK {boundary} {owner} {target} {troops_bits} 1` (`oracle/src/main.rs:406-412`), where
-  the trailing `1` is a literal placeholder and `AttackExecution::source_tile()`
-  (`attack.rs:1172`) is never read. Closing the gap needs (i) the source tile in the record
-  and (ii) a source-tile-seeded init kernel; neither exists today.
+```
+tick claims matched 447/447     hash matched 60/60
+owned counts matched 1140/1140  troops matched 432/432
+engine re-creates followed 2    device frontier agreed with the engine's recorded
+                                to_conquer/border_tiles 2/2
+first divergence: none
+```
 
-So: the device's tile arithmetic is not wrong here — it is doing the right thing for the
-attack state it was given. The engine re-registers an attack mid-flight into a state the
-composition cannot express, and the gap is in the composition (record + init path), not in
-the kernels. Every N≥18/64/488 cell is reported as **failed** on that boundary; nothing is
-flattened into a pass.
+The cause is reproducible on demand, not asserted. `OFCUDA_MATRIX_PRETICK_REALLOC=1`
+re-instates the old ordering (re-seed the re-issued attack's troops **before** the tick) and
+the same single cell then fails exactly where it used to, caught by the re-init check:
+
+```
+$ OFCUDA_MATRIX_PRETICK_REALLOC=1 ... --map europe --agents 18 --ticks 60
+europe 2904x1672 18 60 init yes/yes  claims 290/291  hash 48/49  counts 930/931
+  boundary 49: re-created attack owner 9 target 0: device frontier (heap 112 border 88)
+               != engine (heap 116 border 90)
+cells: 0 passed, 1 failed/not-driven, 0 skipped
+```
+
+The pre-tick re-seed makes the **old** attack claim one tile more than the engine at
+boundary 49, which changes that boundary's plane and therefore the border set the
+re-creation then walks — so the new frontier comes out 112/88 where the engine's record says
+116/90. The pre-fix build's "+2 tiles" at that boundary is the same defect one round earlier
+(there the post-tick frontier rebuild did not exist either). Both directions are measured.
+
+The kernels themselves were not touched: the composition (record + init ordering) was
+wrong, which is why the same fix clears 7 maps at once.
 
 ### 4.3 Harness defects found and fixed while chasing this (each one could have faked a result)
 
@@ -219,20 +315,48 @@ flattened into a pass.
   live in `openfront-ai/scripts`, not beside the crate) and did per-cell work before
   validating its inputs; it now uses absolute paths from `REPO_ROOT` and fails once, up
   front, listing every missing input.
+* `tools/render_cells.sh` could **produce zero movies and exit 0**. It read its cell list
+  from `$1`, so the documented two-argument form (and a call with the render dir first)
+  handed `read` a **directory**: `read: 0: read error: Is a directory` on stderr, the
+  success banner on stdout, `render_dims.tsv` header-only, exit 0. Fixed: the cells argument
+  must be a regular file (a directory is a hard error naming the swapped arguments), a cell
+  list that parses to **0 cells** is a failure, the parsed count is printed in one line
+  (`rendering N cells from <file>`), and after the loop the script asserts **#MP4 == #cells**,
+  **≥1 still per cell** and **render_dims.tsv has data rows** — any of them fails the run.
+  Verified both ways: a directory and an empty cell file now exit non-zero, and a real run
+  prints `OK: 11 movies, 44 stills, 11 dims rows for 11 cells`.
+* the `nations > 0` cells were reported as **failed/not-driven** (an INIT mismatch) when
+  they are a spawn-layer gap; they are now classified `skipped` and counted separately
+  (§5), so the summary line's failure count means tick failures only.
 
 ---
 
 ## 5. Cells NOT run, and why
 
-* **N=488 on maps whose ceiling is below 488**: onion (285), world (749 — fine, 488 < 749),
-  so in practice: **onion N=488** is a starve cell (bots that never place) on purpose is
-  *not* run for ticks; the port reproduces the starve exactly (the `spawnall` proof covers
-  it), but the tick driver requires every player to have a spawn tile.
+* **N=488 where the map's ceiling is below 488** (onion: 285; world's is 749, so 488 < 749
+  is fine): **onion N=488 is driven anyway, and passes** — 9,031/9,031 claims, 60/60 plane
+  hashes, 32/32 re-created frontiers. The port reproduces the starve exactly (some bots
+  never get a spawn tile, as in the engine) and the tick driver drives the players that did
+  place; the cell's `note` reads `PORT FAILED TO PLACE SOME BOT`, so the starve is reported
+  and never hidden inside a pass.
+* **`nations = 1 | 2` (Exact) through the CUDA tick: SKIPPED, with a reason.** The spawn
+  layer ports **bots only** (`ofcuda_spawn` / `spawnall`): with `nations > 0` the engine also
+  seeds `PlayerType::Nation` players, whose spawn tick is *after* every bot's (they are
+  chosen against the full bot plane) and whose footprint never reaches the reference file
+  (`player 2 N 0b4eakcu 610150 2 52` — a count, no tiles). Boundary 0 therefore cannot be
+  rebuilt from the port, which is a **spawn-layer** gap, not a tick gap. The driver now
+  detects `nations > 0` before launching anything, writes the cell with
+  `SKIPPED: nations=N not ported (...)`, counts it under `skipped` (not `failed`), and the
+  run's summary line reads
+  `cells: 28 passed, 0 failed/not-driven, 2 skipped (nations>0, spawn layer ports bots only)`.
+  Before this it was run, failed at INIT and was reported as a **failed cell** — a
+  spawn-layer gap wearing a tick failure's clothes, which is exactly the kind of health
+  signal that must not be ambiguous.
 * **N > 512** on any map: the matrix deliberately stops at 488 (the "last N where every bot
   places" on pangaea is 488; the ceilings above 512 are reported from the oracle, not
   driven through the CUDA tick). Driving N=2687 or N=4749 through the device tick is
   possible in principle (COLS=8192, MAX_SLOTS) but was not part of the requested counts.
-* **nations = `disabled`/`default` through the CUDA tick**: only `0/1/2` were driven; the
+* **nations = `disabled` / `default` through the CUDA tick**: only `0/1/2` were driven; the
   spawn-phase proof for disabled/default belongs to the spawn work, not this matrix.
 * Cells where **attacks are already live at boundary 0** (spawn-phase nations): the driver
   refuses and reports `not drivable: N attack(s) already live at boundary 0 - the
@@ -245,7 +369,62 @@ flattened into a pass.
 
 ## 6. Artifacts
 
-<!-- ARTIFACTS -->
+All paths relative to `/opt/data/workspaces/skg/ofcuda_matrix`.
+
+**The claim: 28 driven cells, 0 divergences**
+
+* `out/matrix/cells.tsv` — the machine-checkable matrix result (30 rows: 28 driven, 2
+  skipped). Columns: `init_sets init_hash tick_match tick_total hash_match hash_total
+  count_match count_total troops_match troops_total churn_skipped engine_evictions reinits
+  reinit_checked reinit_agree dev_claims first_div note`.
+* `out/matrix/<map>_n<N>_nat<n>_t60/result.txt` — per-cell evidence: INIT block (init plane
+  hash, per-player owned sets, per-bot spawn tiles), the `REINIT ... -> AGREE` records for
+  every re-created attack, `ENGINE_EVICTION` records (0 in this matrix), the `### RESULT`
+  block, and the `first divergence: none` line.
+* `out/matrix/oracle/*.dump` — the engine oracle dumps (**format v2**: `ATTACK` rows carry
+  `source_tile`, `to_conquer_len`, `border_tile_count`, `attack_id`).
+* `out/matrix/refs/` — the engine spawn references (`*.spawn.txt`) and the port's GPU spawn
+  dump (`*.init.txt`) per cell.
+* `out/short/cells.tsv` — the 5-cell `ticks 45` control (window closed before boundary 49).
+* `out/renders/<cell>/{planes.bin,terrain.bin}` — the per-tick device owner planes (61
+  frames each) plus terrain, dumped by `--dump-planes`.
+
+**The renders and the contact sheet**
+
+* `out/report/contact_sheet.png` — **all 11 render cells in one image, map + N captioned**
+  (`magick montage`, 4 columns, 1584x1281, 3.0 MB).
+* `out/report/*.mp4` — 11 movies, one per render cell, 61 frames each at 12 fps:
+  `pangaea_n488_nat0_t60.mp4`, `pangaea_n2_nat0_t60.mp4`, `africa_n18_nat0_t60.mp4`,
+  `europe_n18_nat0_t60.mp4`, `world_n18_nat0_t60.mp4`, `amazonriver_n18_nat0_t60.mp4`,
+  `thebox_n64_nat0_t60.mp4`, `onion_n7_nat0_t60.mp4`, `giantworldmap_n7_nat0_t60.mp4`,
+  `passage_n18_nat0_t60.mp4`, `mississippiriver_n18_nat0_t60.mp4`.
+* `out/report/stills/<cell>_<frame>.png` — 44 stills, 4 per cell (frames 0, 15, 30, 60).
+* `out/report/render_dims.tsv` — per cell `map W H aspect frames out_px terrain_ok`, with
+  `terrain_ok yes` = the terrain bytes matched `W*H` from the map manifest. **Dims come from
+  the manifest's `map.width`/`map.height` and the plane is never squared**:
+
+  | cell | WxH | aspect | out px |
+  |---|---|---|---|
+  | pangaea_n488 / pangaea_n2 / thebox_n64 / onion_n7 | 1000x1000 / 2048x2048 / 512x512 | 1.0000 | 800x800 |
+  | africa_n18 | 1948x2032 | 0.9587 | 767x800 |
+  | europe_n18 | 2904x1672 | 1.7368 | 800x461 |
+  | world_n18 | 2000x1000 | 2.0000 | 800x400 |
+  | giantworldmap_n7 | 4108x1948 | 2.1088 | 800x379 |
+  | **amazonriver_n18** | 5536x276 | **20.0580** | **800x39** (wide strip) |
+  | **passage_n18** | 6000x400 | **15.0000** | **800x53** (wide strip) |
+  | **mississippiriver_n18** | 400x4200 | **0.0952** | **76x800** (tall strip) |
+
+  The three extreme maps — the ones that used to come out squashed — are the three that
+  prove it: 20:1 and 15:1 strips come out wide, 1:10.5 comes out tall, and no cell is
+  forced square (`stills/*_060.png` measured: 800x40, 800x53, 76x800 — one pixel of rounding
+  versus the table's `out_px`).
+
+**The report and the re-runnable commands**
+
+* `MATRIX_REPORT.md` — this file (`<!-- MATRIX_TABLE -->` and `<!-- ARTIFACTS -->` filled).
+* `tools/cells.txt` (30 cells), `tools/cells_short.txt` (5), `tools/cells_renders.txt` (11),
+  `tools/contact_sheet_manifest.txt` (the 11 captions), `tools/render_cells.sh`,
+  `tools/contact_sheet.py`, `tools/mk1000.py`.
 
 ## 7. Commands
 
@@ -267,10 +446,18 @@ bash /opt/data/workspaces/skg/ofcuda_env.sh $B --cells-file $M/tools/cells.txt  
 bash /opt/data/workspaces/skg/ofcuda_env.sh $B --cells-file $M/tools/cells_short.txt --out $M/out/short  --ticks 45 \
      --oracle-dir $M/out/matrix/oracle --refs-dir $M/out/matrix/refs
 
+# A/B control for §4.2: the OLD ordering (re-seed the re-issued attack's troops before the
+# tick). Must FAIL on europe N=18 at boundary 49; the matrix is run WITHOUT it.
+OFCUDA_MATRIX_PRETICK_REALLOC=1 bash /opt/data/workspaces/skg/ofcuda_env.sh $B \
+     --map europe --agents 18 --ticks 60 --out /tmp/ab_control \
+     --oracle-dir $M/out/matrix/oracle --refs-dir $M/out/matrix/refs
+
 # the render cells (per-tick device planes dumped) then movies + stills + contact sheet
 bash /opt/data/workspaces/skg/ofcuda_env.sh $B --cells-file $M/tools/cells_renders.txt \
      --out $M/out/renders --oracle-dir $M/out/matrix/oracle --refs-dir $M/out/matrix/refs --ticks 60 --dump-planes
-bash $M/tools/render_cells.sh $M/out/renders $M/out/report
+# 3-arg form: <cells-file> <out-with-dumps> <report-dir>. It prints the cell count it
+# parsed and FAILS (non-zero) if a movie/still is missing or render_dims.tsv is empty.
+bash $M/tools/render_cells.sh $M/tools/cells_renders.txt $M/out/renders $M/out/report
 python3 $M/tools/contact_sheet.py $M/tools/contact_sheet_manifest.txt $M/out/report/contact_sheet.png 4x
 ```
 

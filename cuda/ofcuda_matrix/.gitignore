@@ -1,0 +1,14 @@
+# Regenerable per-run output. The bulk of this crate's output is per-cell spawn
+# references, oracle dumps and rendered media - tens of MB, fully reproducible from
+# the committed source, scripts and cells files. Keep only the summary tables and
+# the contact sheet.
+out/**/*.dump
+out/**/*.spawn.txt
+out/**/*.init.txt
+out/**/stills/
+out/**/*.mp4
+out/**/planes.bin
+target/
+oracle/target/
+*.ll
+*.ptx

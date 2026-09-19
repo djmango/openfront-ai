@@ -1,6 +1,0 @@
-map	w	h	N	nations	ticks	init_sets	init_hash	tick_match	tick_total	hash_match	hash_total	count_match	count_total	troops_match	troops_total	churn_skipped	engine_evictions	reinits	dev_claims	first_div	note
-pangaea	1000	1000	18	0	45	yes	yes	243	243	45	45	855	855	232	232	0	0	0	2835	none	
-europe	2904	1672	18	0	45	yes	yes	243	243	45	45	855	855	232	232	0	0	0	3319	none	
-passage	6000	400	18	0	45	yes	yes	243	243	45	45	855	855	232	232	0	0	0	3211	none	
-thebox	2048	2048	64	0	45	yes	yes	875	875	45	45	2925	2925	832	832	0	0	0	12163	none	
-africa	1948	2032	64	0	45	yes	yes	875	875	45	45	2925	2925	832	832	0	0	0	9487	none	

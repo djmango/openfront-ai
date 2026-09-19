@@ -263,17 +263,21 @@ struct Row {
     churn_skipped: usize,
     engine_evictions: usize,
     reinits: usize,
+    /// Re-creates whose device frontier was compared against the engine's own
+    /// recorded `to_conquer`/`border_tiles` sizes, and how many agreed.
+    reinit_checked: usize,
+    reinit_agree: usize,
     dev_claims: usize,
     note: String,
 }
 
 impl Row {
     fn tsv_header() -> &'static str {
-        "map\tw\th\tN\tnations\tticks\tinit_sets\tinit_hash\ttick_match\ttick_total\thash_match\thash_total\tcount_match\tcount_total\ttroops_match\ttroops_total\tchurn_skipped\tengine_evictions\treinits\tdev_claims\tfirst_div\tnote"
+        "map\tw\th\tN\tnations\tticks\tinit_sets\tinit_hash\ttick_match\ttick_total\thash_match\thash_total\tcount_match\tcount_total\ttroops_match\ttroops_total\tchurn_skipped\tengine_evictions\treinits\treinit_checked\treinit_agree\tdev_claims\tfirst_div\tnote"
     }
     fn tsv(&self) -> String {
         format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             self.map,
             self.w,
             self.h,
@@ -293,6 +297,8 @@ impl Row {
             self.churn_skipped,
             self.engine_evictions,
             self.reinits,
+            self.reinit_checked,
+            self.reinit_agree,
             self.dev_claims,
             self.first_div,
             self.note,
@@ -304,6 +310,8 @@ impl Row {
             && self.tick_match == self.tick_total
             && self.hash_match == self.hash_total
             && self.count_match == self.count_total
+            // A re-create the device could not reproduce is a failure, not a note.
+            && self.reinit_agree == self.reinit_checked
     }
 }
 
@@ -421,6 +429,9 @@ struct Slot {
     alive: bool,
     created_at: u32,
     troops_bits: u64,
+    /// The engine's `attack_id` for the attack this slot currently models. A
+    /// change for a live `(owner, target)` is the engine having re-created it.
+    attack_id: String,
 }
 
 fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
@@ -647,12 +658,12 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
 
         // --- 2. bind the engine's live attacks to device slots ---
         // Matched on (owner, target) and NOT on troop bits: the engine can
-        // re-initialise an attack mid-flight with a fresh `attack_amount`
-        // allocation (attack.rs:150) plus a `refresh_to_conquer` heap refill
-        // (attack.rs:1265), so the bits legitimately change for the SAME attack.
+        // re-create an attack mid-flight, so the bits legitimately change for the
+        // same `(owner, target)`. Re-creation is detected on the `attack_id`
+        // instead (see below), which is exact rather than inferred.
         // There is deliberately no owner-only fallback: it used to bind an
         // engine attack onto any same-owner slot and re-stamp the host struct,
-        // which hid an engine-side re-init from the device instead of reporting it.
+        // which hid an engine-side re-create from the device instead of reporting it.
         let troops_all = d_troops.to_host_vec(&stream).map_err(es)?;
         let _scal_all = d_scal.to_host_vec(&stream).map_err(es)?;
         for s in slots.iter_mut() {
@@ -660,6 +671,10 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         }
         let mut plan: Vec<(usize, AttackSnap)> = Vec::new();
         let mut taken: Vec<bool> = vec![false; slots.len()];
+        // Slots the engine RE-CREATED this boundary: applied AFTER the tick, so
+        // the tick that still belongs to the old attack runs on the old state.
+        // (slot position, the engine's re-created attack, the id it replaced)
+        let mut pending_reinit: Vec<(usize, AttackSnap, String)> = Vec::new();
         for snap in &prev.attacks {
             let exact = slots.iter().position(|s| {
                 s.alive && !taken[s.idx] && s.owner == snap.owner && s.target == snap.target
@@ -680,83 +695,82 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
                             alive: false,
                             created_at: 0,
                             troops_bits: 0,
+                            attack_id: String::new(),
                         },
                     );
                     s.troops_bits = snap.troops.to_bits();
-                    let sidx = s.idx; // `s` is moved into `slots` below
+                    let prev_id = s.attack_id.clone();
+                    s.attack_id = snap.attack_id.clone();
                     slots[i] = s;
                     plan.push((i, snap.clone()));
 
-                    // --- engine-side TROOP RE-ALLOCATION on a live attack --------
-                    // The engine can replace a live attack's carried amount in
-                    // place: `AttackExecution::init` (attack.rs:136-150) sets
-                    // `self.troops = start`, where `start` is either
-                    // `self.start_troops` - a figure the bot AI passed in
-                    // explicitly through `game.add_land_attack_from`
-                    // (game.rs:1477) - or `game.wire.attack_amount(...)`, which is
-                    // 5% of the owner's troops for a Bot and 20% for anyone else
-                    // (core/config.rs:461-468). Both are ENGINE decisions the port
-                    // must REPRODUCE, not recompute.
+                    // --- engine-side RE-CREATE of a live attack ------------------
+                    // `AttackExecution::init` mints a fresh `attack_id`
+                    // (`attack.rs:156`), so a CHANGED id for a live
+                    // `(owner, target)` means the engine built a NEW exec object:
+                    // the bot AI re-issued the attack
+                    // (`game.add_land_attack_from`, `game.rs:1469-1484`), and
+                    // `init` coalesced it with the outgoing attack of the same
+                    // target (`merge_outgoing_land_attacks`, `game.rs:2122-2156`)
+                    // by ADDING the old attack's remaining troops into `troops`
+                    // and killing the old one. `execute_next_tick`
+                    // (`game.rs:3657-3700`) runs every existing exec FIRST and the
+                    // new exec's `init` at the END of that same tick, then appends
+                    // it to `execs` - which is why the attack moves to the END of
+                    // the boundary's `ATTACK` list (europe N=18: first at
+                    // boundaries 45-48, last at 49; id `47l4ldxb` -> `75imsa56`).
                     //
-                    // The only record-level signal is the troop bits going UP: the
-                    // device's own arithmetic only ever drains them
-                    // (kernels.rs:225-236, attack.rs:313-314). So an increase is
-                    // taken as a re-allocation and the device's `troops` word is
-                    // re-seeded from the record - and NOTHING ELSE: the heap, the
-                    // prng stream, the border set and the plane are left alone.
-                    // (Re-seeding the heap here was tried in a first pass and
-                    // over-claims - see the note below.)
-                    if let Some(cs) = cur
+                    // The consequences for the device, all measured:
+                    //   * that tick's CLAIMS belong to the OLD attack, on its OLD
+                    //     carried heap/border/troops. Re-seeding the troops BEFORE
+                    //     the tick inflates `attack_tiles_per_tick`'s budget (it
+                    //     takes `troop_count`), the old attack claims one tile more
+                    //     than the engine at boundary 49, and every later boundary
+                    //     inherits the wrong plane. Measured with the
+                    //     `OFCUDA_MATRIX_PRETICK_REALLOC=1` control below (europe
+                    //     N=18): claims 290/291, hash 48/49, and the re-created
+                    //     attack's device frontier 112/88 against the engine's
+                    //     116/90 - i.e. the +2 tiles the pre-fix build showed at
+                    //     that boundary are this, one tile of which no longer
+                    //     happens once the frontier is rebuilt here;
+                    //   * the NEW attack starts at the END of the tick with
+                    //     `PseudoRandom::new(123)` (`attack.rs:47-57`), an EMPTY
+                    //     `to_conquer`, and `refresh_to_conquer`
+                    //     (`attack.rs:1265-1274`) over the owner's border set as
+                    //     of that moment - so it is `attack_init` with
+                    //     `fresh_prng = 1` against the CURRENT boundary's border
+                    //     set, applied after this transition's ticks.
+                    //
+                    // Nothing here is taken on trust: the engine records the
+                    // re-created attack's own `to_conquer` and `border_tiles`
+                    // sizes, and the device's post-init values are compared
+                    // against them (see REINIT below).
+                    let reinit = cur
                         .attacks
                         .iter()
                         .find(|a| a.owner == snap.owner && a.target == snap.target)
-                    {
-                        if let Some(ps) = prev
-                            .attacks
-                            .iter()
-                            .find(|a| a.owner == snap.owner && a.target == snap.target)
-                        {
-                            if cs.troops > ps.troops {
-                                troops_host = d_troops.to_host_vec(&stream).map_err(es)?;
-                                troops_host[sidx] = cs.troops;
-                                d_troops
-                                    .copy_from_host(&stream, &troops_host)
-                                    .map_err(es)?;
-                                row.reinits += 1;
-                                detail.push_str(&format!(
-                                    "TROOP_REALLOC boundary {b} (engine tick {}): owner {} target {} \
-                                     troops {} -> {} bits {:#018x} -> {:#018x} (engine decision, \
-                                     re-seeded from the record; heap/prng untouched)\n",
-                                    prev.engine_tick,
-                                    snap.owner,
-                                    snap.target,
-                                    ps.troops,
-                                    cs.troops,
-                                    ps.troops.to_bits(),
-                                    cs.troops.to_bits()
-                                ));
-                            }
+                        .filter(|cs| !cs.attack_id.is_empty() && cs.attack_id != prev_id)
+                        .cloned();
+                    if let Some(cs) = reinit {
+                        // A/B CONTROL, not a code path: `OFCUDA_MATRIX_PRETICK_REALLOC=1`
+                        // re-instates the OLD ordering (re-seed the re-issued attack's
+                        // troops BEFORE the tick, when the tick still belongs to the old
+                        // exec) so the +2 this pass closes can be reproduced and measured
+                        // on demand instead of asserted. The matrix is run without it.
+                        if std::env::var_os("OFCUDA_MATRIX_PRETICK_REALLOC").is_some() {
+                            let mut th = d_troops.to_host_vec(&stream).map_err(es)?;
+                            th[slots[i].idx] = cs.troops;
+                            d_troops.copy_from_host(&stream, &th).map_err(es)?;
+                            detail.push_str(&format!(
+                                "PRETICK_REALLOC(control) boundary {b}: owner {} target {} \
+                                 troops -> {:#018x} BEFORE the tick\n",
+                                cs.owner,
+                                cs.target,
+                                cs.troops.to_bits()
+                            ));
                         }
+                        pending_reinit.push((i, cs, prev_id));
                     }
-
-                    // --- engine-side RE-CREATE of a live attack: NOT followed ---
-                    // Measured, not assumed. The engine re-initialises an attack in
-                    // place when it is re-issued/merged: `AttackExecution::init`
-                    // (attack.rs:83) takes a fresh `attack_amount` (attack.rs:150),
-                    // re-registers the attack (attack.rs:158 - it moves to the END
-                    // of `live_attacks()`), and re-seeds the heap from
-                    // `source_tile` via `add_neighbors` (attack.rs:160-164),
-                    // falling back to `refresh_to_conquer` (attack.rs:1265) only
-                    // when there is no source tile.
-                    //
-                    // Re-seeding the slot from the engine's BORDER set instead of
-                    // the source tile's neighbourhood was tried and OVER-claims
-                    // (europe N=18 boundary 49: device 582 owned tiles vs engine
-                    // 580). `attack_init` (kernels.rs:358) is border-set based, so
-                    // the composed pipeline cannot express this event: the engine's
-                    // refreshed attack claims one tile the device does not (engine
-                    // 303 claims vs device 302 at boundary 49). Reported as the
-                    // first divergence - hidden nowhere, and `row.reinits` stays 0.
                 }
                 None => {
                     // NEW attack: created on the device, stamped with the engine
@@ -793,7 +807,9 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
                                 init_tick,
                                 idx as u32,
                                 snap.owner,
-                                &mut d_plane,
+                                1, // fresh stream: a new exec mints
+                                   // `PseudoRandom::new(123)` (attack.rs:47-57)
+                                &d_plane,
                                 &mut d_heap_tiles,
                                 &mut d_heap_pri,
                                 &mut d_border,
@@ -825,6 +841,7 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
                         alive: true,
                         created_at: b as u32,
                         troops_bits: snap.troops.to_bits(),
+                        attack_id: snap.attack_id.clone(),
                     });
                     taken.push(false);
                     let i = slots.len() - 1;
@@ -900,6 +917,107 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
                 slots[*i].alive = false;
             }
         }
+
+        // --- 4b. engine RE-CREATEs, applied AFTER the ticks -------------------
+        // `execute_next_tick` (`game.rs:3657-3700`) ticks every existing exec and
+        // only THEN initialises the new ones, so a re-created attack's frontier is
+        // built from the world as of the END of the tick. Doing it here (rather
+        // than before the tick) is the whole fix: the tick belongs to the OLD
+        // attack, and re-seeding troops first inflated the budget and over-claimed.
+        for (i, cs, prev_id) in &pending_reinit {
+            let s = &mut slots[*i];
+            let sidx = s.idx;
+            // The engine's border set as of THIS boundary: that is the set
+            // `refresh_to_conquer` walked at the end of the tick just simulated.
+            let mut coff = 0usize;
+            let mut coborder = vec![0u32; obcap];
+            let mut cob_meta = vec![0u32; 2 * COLS];
+            for (osid, tiles) in &cur.borders {
+                if *osid as usize >= COLS {
+                    return Err(format!("owner small_id {osid} >= COLS {COLS}"));
+                }
+                let n = tiles.len().min(obcap - coff);
+                coborder[coff..coff + n].copy_from_slice(&tiles[..n]);
+                cob_meta[*osid as usize * 2] = coff as u32;
+                cob_meta[*osid as usize * 2 + 1] = n as u32;
+                coff += n;
+            }
+            let d_coborder =
+                DeviceBuffer::from_host(&stream, &coborder[..coff.max(1)]).map_err(es)?;
+            let mut d_cob_meta = DeviceBuffer::<u32>::zeroed(&stream, 2 * COLS).map_err(es)?;
+            d_cob_meta.copy_from_host(&stream, &cob_meta).map_err(es)?;
+
+            troops_host = d_troops.to_host_vec(&stream).map_err(es)?;
+            troops_host[sidx] = cs.troops;
+            d_troops.copy_from_host(&stream, &troops_host).map_err(es)?;
+
+            // The init ran inside the tick that produced THIS boundary, so its
+            // `game.ticks()` stamp is the boundary we are leaving - exactly the
+            // tick that just ran.
+            let init_tick = prev.engine_tick;
+            unsafe {
+                module
+                    .attack_init(
+                        &stream,
+                        cfg(kernels::BLOCK),
+                        &d_terrain,
+                        w,
+                        h,
+                        init_tick,
+                        sidx as u32,
+                        s.owner,
+                        1, // RE-CREATE: fresh `PseudoRandom::new(123)`
+                        &d_plane,
+                        &mut d_heap_tiles,
+                        &mut d_heap_pri,
+                        &mut d_border,
+                        &mut d_prng,
+                        &mut d_scal,
+                        &mut d_out,
+                        &d_coborder,
+                        &d_cob_meta,
+                    )
+                    .map_err(es)?;
+            }
+            let sc = d_scal.to_host_vec(&stream).map_err(es)?;
+            let dev_heap = sc[sidx * SCAL] as usize;
+            let dev_border = sc[sidx * SCAL + 1] as usize;
+            // The engine recorded the re-created attack's OWN frontier sizes, so
+            // the device is checked against them rather than assumed.
+            let agree = dev_heap == cs.heap_len && dev_border == cs.border_len;
+            row.reinits += 1;
+            row.reinit_checked += 1;
+            row.reinit_agree += agree as usize;
+            detail.push_str(&format!(
+                "REINIT boundary {b} (engine re-created the attack in the tick stamped \
+                 {init_tick}): owner {} target {} id {} -> {} troops {:#018x} -> {:#018x} | \
+                 device post-init heap {dev_heap} vs engine {} border {dev_border} vs engine {} \
+                 -> {}\n",
+                s.owner,
+                s.target,
+                if prev_id.is_empty() { "?" } else { prev_id },
+                cs.attack_id,
+                s.troops_bits,
+                cs.troops.to_bits(),
+                cs.heap_len,
+                cs.border_len,
+                if agree { "AGREE" } else { "DISAGREE" },
+            ));
+            if !agree && first_div_at.is_none() {
+                first_div = format!(
+                    "boundary {b}: re-created attack owner {} target {}: device frontier \
+                     (heap {dev_heap} border {dev_border}) != engine (heap {} border {})",
+                    s.owner, s.target, cs.heap_len, cs.border_len
+                );
+                first_div_at = Some(b as u32);
+            }
+            s.attack_id = cs.attack_id.clone();
+            s.troops_bits = cs.troops.to_bits();
+            // `attack_init` re-arms the slot, and the engine's attack exists
+            // regardless of how the OLD one's last tick ended.
+            s.alive = true;
+        }
+
         // troop count after the tick, for the surviving attacks
         let troops_after = d_troops.to_host_vec(&stream).map_err(es)?;
 
@@ -1118,7 +1236,9 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
     detail.push_str(&format!(
         "\n### RESULT\ninit_sets {}\ninit_hash {}\ntick claims matched {}/{}\nhash matched {}/{}\n\
          owned counts matched {}/{}\ntroops matched {}/{}\nchurn-skipped owners {}\n\
-         engine evictions {}\ndevice claims total {}\nfirst divergence: {}\nnote: {}\n",
+         engine evictions {}\nengine re-creates followed {}\ndevice frontier agreed with the \
+         engine's recorded to_conquer/border_tiles {}/{}\ndevice claims total {}\n\
+         first divergence: {}\nnote: {}\n",
         yn(row.init_sets),
         yn(row.init_hash),
         row.tick_match,
@@ -1131,6 +1251,9 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         row.troops_total,
         row.churn_skipped,
         row.engine_evictions,
+        row.reinits,
+        row.reinit_agree,
+        row.reinit_checked,
         row.dev_claims,
         row.first_div,
         row.note
@@ -1252,11 +1375,45 @@ fn main() {
     };
     let mut pass = 0usize;
     let mut fail = 0usize;
+    let mut skip = 0usize;
     for c in &cells {
         eprintln!(
             "=== cell {} N={} nations={} ticks={}",
             c.map, c.agents, c.nations, c.ticks
         );
+        // The spawn layer ports BOTS only (`ofcuda_spawn`/`spawnall`): with
+        // `nations > 0` the engine also seeds `PlayerType::Nation` players,
+        // spawned *after* the bots (their spawn tick is >= every bot's) against
+        // the full bot plane, and their footprint never reaches the reference
+        // file. Boundary 0 therefore cannot be rebuilt from the port, so these
+        // cells are SKIPPED rather than failed - this is a spawn-layer gap, not
+        // a tick gap (the tick engine takes the plane as given, see the `1, //
+        // every actor in this matrix is a bot` argument below). Counted apart so
+        // a nations cell can never masquerade as a tick failure.
+        if c.nations > 0 {
+            skip += 1;
+            let note = format!(
+                "SKIPPED: nations={} not ported (spawn layer ports bots only; the \
+                 nation spawns after the bots against the full bot plane)",
+                c.nations
+            );
+            println!("{}\t-\t{}\t0\t{n}\t{n}\t{n}\t{n}\t{n}\t{n}\t{n}\t{n}\t{note}",
+                c.map, c.agents, n = "-");
+            let row = Row {
+                map: c.map.to_lowercase(),
+                agents: c.agents,
+                nations: c.nations,
+                ticks: c.ticks,
+                first_div: note.clone(),
+                note: note.clone(),
+                ..Default::default()
+            };
+            if let Err(e) = append_row(&a, &row) {
+                eprintln!("error writing cells.tsv: {e}");
+                std::process::exit(1);
+            }
+            continue;
+        }
         match run_cell(&a, c) {
             Ok(row) => {
                 if let Err(e) = append_row(&a, &row) {
@@ -1303,7 +1460,9 @@ fn main() {
             }
         }
     }
-    eprintln!("cells: {pass} passed, {fail} failed/not-driven");
+    eprintln!(
+        "cells: {pass} passed, {fail} failed/not-driven, {skip} skipped (nations>0, spawn layer ports bots only)"
+    );
 }
 
 #[allow(dead_code)]

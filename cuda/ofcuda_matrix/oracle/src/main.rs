@@ -256,7 +256,7 @@ fn replay_cell(
     let (w, h) = (session.game.width(), session.game.height());
 
     let mut o = String::with_capacity(1 << 20);
-    o.push_str("# ofcuda_matrix engine oracle v1\n");
+    o.push_str("# ofcuda_matrix engine oracle v2\n");
     o.push_str(&format!("REPO {REPO}\n"));
     o.push_str(&format!("MAP {map}\n"));
     o.push_str(&format!("SEED {seed}\n"));
@@ -404,11 +404,24 @@ fn emit_borders(o: &mut String, b: u32, players: &[openfront_engine::game::Playe
 
 fn emit_attacks(o: &mut String, b: u32, game: &Game) {
     for a in game.live_attacks() {
+        // The engine's `AttackExecution::init` seeds the frontier from
+        // `source_tile` when it has one (attack.rs:160-164) and falls back to
+        // `refresh_to_conquer` over the owner's border set only when it does not
+        // (attack.rs:1265). The port's only attack-creation entry point used to be
+        // border-set based, so `source_tile` was the one piece of state the record
+        // did not carry and the composition could not express. It is emitted here
+        // (tile, or -1 for none) along with the heap and border sizes, so the port
+        // can be *checked* against the engine's post-init frontier instead of
+        // argued about.
         o.push_str(&format!(
-            "ATTACK {b} {} {} {:#018x} 1\n",
+            "ATTACK {b} {} {} {:#018x} {} {} {} {}\n",
             a.owner_small_id(),
             a.target_small_id(),
-            a.troops().to_bits()
+            a.troops().to_bits(),
+            a.source_tile().map(|t| t as i64).unwrap_or(-1),
+            a.to_conquer_len(),
+            a.border_tile_count(),
+            a.attack_id(),
         ));
     }
 }

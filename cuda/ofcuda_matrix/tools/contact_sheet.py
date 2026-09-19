@@ -38,7 +38,21 @@ def main() -> int:
     if not rows:
         print("no stills to tile")
         return 1
-    cmd = ["magick", "montage"]
+    cmd = [
+        "magick",
+        "montage",
+        # Font settings MUST come before the per-image -label arguments: magick
+        # applies them as they are parsed, so a -pointsize placed after the
+        # images labels nothing and the sheet comes out caption-less.
+        "-font",
+        "DejaVu-Sans",
+        "-pointsize",
+        "22",
+        "-background",
+        "#1b1b1b",
+        "-fill",
+        "white",
+    ]
     for label, png in rows:
         cmd += ["-label", label, png]
     cmd += [
@@ -46,12 +60,6 @@ def main() -> int:
         tile,
         "-geometry",
         "380x380+8+8",
-        "-background",
-        "#1b1b1b",
-        "-fill",
-        "white",
-        "-pointsize",
-        "22",
         out,
     ]
     subprocess.run(cmd, check=True)

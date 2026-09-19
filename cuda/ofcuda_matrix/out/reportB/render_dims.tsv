@@ -1,7 +1,0 @@
-cell	map	W	H	aspect	frames	out_px	terrain_ok
-amazonriver_n18_nat0_t60	amazonriver	5536	276	20.0580	51	800x39	yes
-mississippiriver_n18_nat0_t60	mississippiriver	400	4200	0.0952	51	76x800	yes
-thebox_n64_nat0_t60	thebox	2048	2048	1.0000	51	800x800	yes
-world_n18_nat0_t60	world	2000	1000	2.0000	51	800x400	yes
-pangaea_n2_nat0_t60	pangaea	1000	1000	1.0000	61	800x800	yes
-onion_n7_nat0_t60	onion	512	512	1.0000	61	800x800	yes
