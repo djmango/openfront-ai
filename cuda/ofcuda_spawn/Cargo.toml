@@ -1,0 +1,23 @@
+[package]
+name = "ofcuda_spawn"
+version = "0.1.0"
+edition = "2021"
+default-run = "ofcuda_spawn"
+
+# Standalone workspace root: lives next to openfront-ai but must NOT join
+# `rust/Cargo.toml`'s member list. An empty `[workspace]` table keeps it
+# standalone while still allowing a path dependency on the engine crate.
+[workspace]
+
+[dependencies]
+openfront-engine = { path = "/opt/data/workspaces/skg/openfront-ai/rust/engine" }
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+
+[[bin]]
+name = "ofcuda_spawn"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 2

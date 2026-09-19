@@ -136,6 +136,20 @@ impl PseudoRandom {
     pub fn draws(&self) -> u64 {
         self.calls - 12
     }
+
+    /// `prng.rs:75-90` `next_id`: one draw, mapped into 36^8, then 8 base-36
+    /// digits most-significant-first.
+    pub fn next_id(&mut self) -> String {
+        const POW36_8: f64 = 2_821_109_907_456.0; // 36^8
+        let mut v = (self.next() * POW36_8).floor() as u64;
+        let mut out = ['0'; 8];
+        for slot in out.iter_mut().rev() {
+            let digit = (v % 36) as u8;
+            *slot = b"0123456789abcdefghijklmnopqrstuvwxyz"[digit as usize] as char;
+            v /= 36;
+        }
+        out.iter().collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -230,6 +244,15 @@ pub struct SpawnCtx<'a> {
     pub height: u32,
     /// `game.wire.min_distance_between_players()` = 30 (`core/config.rs:358-360`).
     pub min_dist: u32,
+    /// Optional O(1) owner lookup over a full `width*height` plane.
+    ///
+    /// The engine keeps ownership in a real tile plane, so its lookups are
+    /// O(1); the port's recorded-window path instead carries the engine's
+    /// owner-override *list*. Scanning that list is O(owned) per query, which
+    /// makes a generic N-bot run O(N^2) in the owned-tile count. The 2-bot
+    /// reference case is tiny so the list is used there (it is the engine's own
+    /// overlay, so parity is unchanged); the generic driver feeds a plane.
+    pub owner_plane: Option<&'a [u16]>,
 }
 
 impl<'a> SpawnCtx<'a> {
@@ -239,6 +262,9 @@ impl<'a> SpawnCtx<'a> {
     }
     #[inline]
     pub fn owner(&self, t: u32) -> u16 {
+        if let Some(p) = self.owner_plane {
+            return p[t as usize];
+        }
         let mut i = 0usize;
         while i < self.owner_tiles.len() {
             if self.owner_tiles[i] == t {
@@ -843,6 +869,7 @@ pub fn cpu_port_output(r: &Reference, map: &MapPlane) -> PortOutput {
                 width: map.width,
                 height: map.height,
                 min_dist: 30,
+                owner_plane: None,
             };
             jobs.push(select_spawn(&ctx, &SpawnJob { seed: sp.seed, explicit: u32::MAX }));
         }
@@ -855,6 +882,7 @@ pub fn cpu_port_output(r: &Reference, map: &MapPlane) -> PortOutput {
                 width: map.width,
                 height: map.height,
                 min_dist: 30,
+                owner_plane: None,
             };
             jobs.push(select_spawn(
                 &ctx,
@@ -1194,7 +1222,7 @@ pub fn tribe_bot_ids(game_id: &str, n: u32) -> Vec<String> {
 }
 
 /// One bot's port-side spawn, plus the initial owned set when it succeeded.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct BotSpawn {
     pub result: SpawnResult,
     pub tiles: Vec<u32>,
@@ -1213,6 +1241,9 @@ pub struct SpawnReference {
     pub human_agents: u32,
     pub width: u32,
     pub height: u32,
+    /// `game.wire.min_distance_between_players()`, read from the reference file
+    /// (engine-sourced), never assumed.
+    pub min_dist: u32,
     pub players: Vec<RefPlayer>,
     pub bots: Vec<RefBot>,
     /// `[bot]` -> `(tile, owner_small_id)` overrides the engine had in place
@@ -1266,6 +1297,7 @@ pub fn parse_spawn_reference(text: &str) -> Result<SpawnReference, String> {
             "human_agents" => r.human_agents = num_u32(f[1])?,
             "width" => r.width = num_u32(f[1])?,
             "height" => r.height = num_u32(f[1])?,
+            "min_dist" => r.min_dist = num_u32(f[1])?,
             "player" => r.players.push(RefPlayer {
                 small_id: f[1].parse().map_err(|_| err("player small_id"))?,
                 ptype: f[2].chars().next().ok_or_else(|| err("player type"))?,
@@ -1325,6 +1357,11 @@ pub fn parse_spawn_reference(text: &str) -> Result<SpawnReference, String> {
     if r.owned.len() < r.bots.len() {
         r.owned.resize(r.bots.len(), Vec::new());
     }
+    if r.min_dist == 0 {
+        // v1 references written before the field existed: the config for this
+        // map is 30 (`core/config.rs:358-360`), and `spawn_bots_cpu` used 30.
+        r.min_dist = 30;
+    }
     Ok(r)
 }
 
@@ -1333,19 +1370,19 @@ pub fn parse_spawn_reference(text: &str) -> Result<SpawnReference, String> {
 /// plane and its centre into `prev`. Uses the same `select_spawn` the CUDA
 /// kernel's `spawn_select` implements field-by-field.
 pub fn spawn_bots_cpu(map: &MapPlane, r: &SpawnReference) -> Vec<BotSpawn> {
-    let mut owner_tiles: Vec<u32> = Vec::new();
-    let mut owner_ids: Vec<u16> = Vec::new();
+    let mut owner_plane: Vec<u16> = vec![0u16; (map.width as usize) * (map.height as usize)];
     let mut prev: Vec<u32> = Vec::new();
     let mut out = Vec::with_capacity(r.bots.len());
     for b in &r.bots {
         let ctx = SpawnCtx {
             terrain: &map.terrain,
-            owner_tiles: &owner_tiles,
-            owner_ids: &owner_ids,
+            owner_tiles: &[],
+            owner_ids: &[],
             prev: &prev,
             width: map.width,
             height: map.height,
             min_dist: 30,
+            owner_plane: Some(&owner_plane),
         };
         let result = select_spawn(
             &ctx,
@@ -1361,14 +1398,102 @@ pub fn spawn_bots_cpu(map: &MapPlane, r: &SpawnReference) -> Vec<BotSpawn> {
         };
         if result.spawned {
             for t in &tiles {
-                owner_tiles.push(*t);
-                owner_ids.push(b.small_id);
+                owner_plane[*t as usize] = b.small_id;
             }
             prev.push(result.tile);
         }
         out.push(BotSpawn { result, tiles });
     }
     out
+}
+
+/// Why a bot failed to spawn, measured rather than assumed.
+///
+/// Replays the first `upto` bots exactly (same `select_spawn`), then sweeps the
+/// whole map for the *next* bot's chances and classifies every unowned land tile
+/// with the very predicates `select_spawn` uses:
+/// * `land_unowned`   - land tiles with no owner,
+/// * `valid_footprint`- of those, tiles whose footprint is entirely
+///   land+unowned (a spawn *could* be placed on that centre),
+/// * `too_close`      - of those, centres rejected by the min-distance rule,
+/// * `far_enough`     - of those, centres that survive everything.
+///
+/// `far_enough == 0` while `valid_footprint > 0` means no try in the 1000-draw
+/// loop can succeed: retries are exhausted by the *min-distance* rule, not by
+/// land capacity (the two constraints are counted separately on purpose).
+pub fn starvation_diagnostic(map: &MapPlane, r: &SpawnReference, upto: usize) -> Starvation {
+    let w = map.width;
+    let h = map.height;
+    let md = r.min_dist.max(1);
+    let mut seat: Vec<u16> = vec![0u16; (w as usize) * (h as usize)];
+    let mut prev: Vec<u32> = Vec::new();
+    for b in r.bots.iter().take(upto) {
+        let ctx = SpawnCtx {
+            terrain: &map.terrain,
+            owner_tiles: &[],
+            owner_ids: &[],
+            prev: &prev,
+            width: w,
+            height: h,
+            min_dist: md,
+            owner_plane: Some(&seat),
+        };
+        let res = select_spawn(
+            &ctx,
+            &SpawnJob {
+                seed: b.seed,
+                explicit: u32::MAX,
+            },
+        );
+        if res.spawned {
+            for t in ctx.spawn_tiles(res.tile) {
+                seat[t as usize] = b.small_id;
+            }
+            prev.push(res.tile);
+        }
+    }
+    let ctx = SpawnCtx {
+        terrain: &map.terrain,
+        owner_tiles: &[],
+        owner_ids: &[],
+        prev: &prev,
+        width: w,
+        height: h,
+        min_dist: md,
+        owner_plane: Some(&seat),
+    };
+    let mut st = Starvation::default();
+    for t in 0..(w * h) {
+        if !ctx.is_land(t) || ctx.has_owner(t) {
+            continue;
+        }
+        st.land_unowned += 1;
+        let (_, invalid) = ctx.footprint(t);
+        if invalid > 0 {
+            st.footprint_bad += 1;
+            continue;
+        }
+        st.valid_footprint += 1;
+        if ctx.is_border(t) {
+            st.border += 1;
+        } else if ctx.too_close(t) {
+            st.too_close += 1;
+        } else {
+            st.far_enough += 1;
+        }
+    }
+    st
+}
+
+/// Counts from [`starvation_diagnostic`].
+#[derive(Default, Debug, Clone)]
+pub struct Starvation {
+    pub land_unowned: u64,
+    pub valid_footprint: u64,
+    pub border: u64,
+    pub too_close: u64,
+    pub far_enough: u64,
+    pub footprint_bad: u64,
 }
 
 /// The result of one (N, nations) case.

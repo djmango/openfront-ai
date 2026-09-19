@@ -20,3 +20,9 @@ path = "src/main.rs"
 [[bin]]
 name = "ofcuda_prng_cpu"
 path = "src/bin/cpu.rs"
+
+# Generic N-bot spawn / initial-state check: same device kernel, host driver
+# generalised to arbitrary N. See src/bin/spawnall.rs.
+[[bin]]
+name = "spawnall"
+path = "src/bin/spawnall.rs"

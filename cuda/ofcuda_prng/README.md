@@ -54,3 +54,24 @@ Outputs: `comparison_gpu.txt` (written by the program), `comparison_gpu_raw.txt`
 
 On an RTX 5080 (sm_120a): engine-vs-GPU and engine-vs-CPU are element-for-element equal on
 every row of the table, `ALL_BIT_EXACT true`.
+
+## Arbitrary agent counts (`spawnall`)
+
+`src/bin/spawnall.rs` generalises the spawn / initial-state path to an arbitrary number of
+bots and any nations spec, and checks it against the real engine. `--agents N` invokes the
+`ofcuda_spawn` oracle (which drives `openfront-engine`) to rebuild the ground truth, then
+compares, per bot: the tribe **id**, the **spawn tile** (host `select_spawn` *and* the real
+`spawn_select` kernel), the **initial owned tile set** and the **tile count**.
+
+```
+bash /opt/data/workspaces/skg/ofcuda_env.sh \
+     /opt/data/workspaces/skg/ofcuda_prng/target/release/spawnall \
+     --agents 22 --nations 0                 # add --no-gpu / --diag / --dump FILE
+bash /opt/data/workspaces/skg/ofcuda_prng/scripts/run_matrix.sh --gpu 2 4 7 18 22 26 64
+```
+
+Verified bit-exact for N ∈ {2, 4, 7, 18, 22, 26, 64, 100, 200, 300, 400, 488, 489, 490, 500,
+550, 700, 1200, 2000, 3000} and nations ∈ {0, 1, 2, disabled, default}. See
+[SPAWN_N_REPORT.md](SPAWN_N_REPORT.md) for the per-N table and the measured cause of the
+engine's own starvation at N ≥ 489 (min-distance packing + the 1000-try budget, not land
+capacity).
