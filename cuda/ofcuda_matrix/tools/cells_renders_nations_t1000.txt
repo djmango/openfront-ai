@@ -1,0 +1,4 @@
+# 1000-tick nations probe: how long does plane parity hold, and what does a mature board look like?
+# Format: <map> <agents> [nations] [ticks]
+pangaea 18 1 1000
+pangaea 18 2 1000
