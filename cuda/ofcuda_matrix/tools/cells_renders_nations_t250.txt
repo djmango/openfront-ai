@@ -1,0 +1,10 @@
+# Nations render cells at 250 ticks.
+# Rationale: at the default 60-tick window a nation owns ~490 of 1,000,000 tiles
+# (0.05% of the map), so it renders as a dot. 250 ticks grows territories into
+# legible shapes. The plane stays bit-exact across the full 250 ticks
+# (hash 250/250, counts 5000/5000 and 5250/5250); the ONLY divergence on this
+# window is the attack-EVENT stream at engine tick 106 (nation owner), which does
+# not move the plane. Do not read this render as proof of event-stream parity.
+# Format: <map> <agents> [nations] [ticks]
+pangaea 18 1 250
+pangaea 18 2 250
