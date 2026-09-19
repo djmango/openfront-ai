@@ -615,7 +615,7 @@ mod tests {
             identity: "x".into(),
             synthetic: false,
         };
-        let s = step_row(&r);
+        let s = ofcuda_econ::step_row(&r);
         let (t, g, raw) = ofcuda_econ::core_impl::econ_step(
             r.player_type,
             r.difficulty,
