@@ -41,6 +41,7 @@
 //! largest N at which the engine places every bot (the spawn ceiling).
 
 use openfront_engine::game::{Game, PlayerType};
+use openfront_engine::map::TileRef;
 use openfront_engine::rl::RlSession;
 use openfront_engine::util::simple_hash;
 use serde_json::json;
@@ -305,10 +306,63 @@ fn replay_cell(
         emit_attacks(&mut o, 0, game);
     }
 
+    // ---- optional single-attack trace -------------------------------------
+    // `OF_TRACE_ATK=owner:target` (and optionally `OF_TRACE_TILE=<tile>`)
+    // prints, per boundary, the engine's OWN live values for that attack and its
+    // target player immediately BEFORE the tick and immediately AFTER it. This
+    // is the only way to see what the engine's intra-tick executions actually
+    // changed, since the per-boundary dump only exposes the post-tick record.
+    let trace: Option<(u16, u16)> =
+        std::env::var("OF_TRACE_ATK").ok().and_then(|s| {
+            let mut it = s.split(':');
+            Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+        });
+    let trace_tile: Option<TileRef> = std::env::var("OF_TRACE_TILE")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    let mut trace_out = String::new();
+    let mut snap = |game: &Game, b: u32, tag: &str| -> Option<()> {
+        let (o_id, t_id) = trace?;
+        let a = game
+            .live_attacks()
+            .find(|a| a.owner_small_id() == o_id && a.target_small_id() == t_id)?;
+        let p = game.player_by_small_id(t_id);
+        let (dtroops, dtiles) = p.map(|p| (p.troops, p.tiles_owned)).unwrap_or((-1, -1));
+        let inc = if p.is_some() {
+            game.troop_increase_rate_raw_for(t_id)
+        } else {
+            f64::NAN
+        };
+        let atiles = game
+            .player_by_small_id(o_id)
+            .map(|p| p.tiles_owned)
+            .unwrap_or(-1);
+        let mut line = format!(
+            "TRACE {b} {tag} owner={o_id} target={t_id} atk={:.12} atk_bits={:#018x} atk_tiles={atiles} def_troops={dtroops} def_tiles={dtiles} def_inc_raw={inc:.12}\n",
+            a.troops(),
+            a.troops().to_bits(),
+        );
+        if tag == "pre" {
+            if let Some(t) = trace_tile {
+                let (mag, speed, attacker_loss) =
+                    game.attack_logic_at_tile(a.troops(), o_id, t_id, t, true);
+                line.push_str(&format!(
+                    "TRACELOGIC {b} tile={t} mag={mag} speed={speed} attacker_loss={attacker_loss:.12} loss_bits={:#018x} def_troops={dtroops} def_tiles={dtiles} atk={:.12}\n",
+                    attacker_loss.to_bits(),
+                    a.troops(),
+                ));
+            }
+        }
+        trace_out.push_str(&line);
+        Some(())
+    };
+
     // ---- the post-spawn ticks ---------------------------------------------
     for b in 1..=ticks {
+        snap(&session.game, b, "pre");
         session.game.execute_next_tick();
         let game = &session.game;
+        snap(game, b, "post");
         let plane = engine_plane(game);
         emit_boundary(&mut o, b, game.ticks(), &plane);
         let players: Vec<_> = game.all_players().to_vec();
@@ -343,6 +397,7 @@ fn replay_cell(
         }
         prev_owned = players.iter().map(|p| p.owned_tiles.clone()).collect();
     }
+    o.push_str(&trace_out);
     Ok(o)
 }
 

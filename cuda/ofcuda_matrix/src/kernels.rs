@@ -300,6 +300,34 @@ pub mod device {
                     heap, pr, bsub, blen, psub, owner_col, target_col, terrain, w, h, tick, oborder,
                     oboff, obn,
                 );
+                // `attack.rs:264-268` calls `refresh_to_conquer` and then
+                // `retreat(game, 0.0)` (`attack.rs:1244-1263`), which BEFORE
+                // zeroing `self.troops` runs
+                // `game.add_troops(self.owner_small_id, (troops - deaths).max(0.0))`,
+                // `deaths = troops * malus / 100` with `malus = 0` on this path.
+                //
+                // This is the THIRD intra-tick mutation of a player's live pool
+                // (after `PlayerExecution` income and `conquer_one`'s
+                // `tiles_owned += 1`): an attack that DIES returns its survivors
+                // to its OWNER, and any LATER attack in exec order that targets
+                // that owner reads the inflated `defender_troops`. Traced on
+                // pangaea N=488 nat=0, boundary 172: player 269's own attack
+                // (269 -> 0) died in the same tick and returned 3955.93 -> +3955,
+                // so 441's attack read
+                // `defender_troops = 14126 (record) + 111 (income) + 3955 = 18192`
+                // and `defender_tiles = 822 + 1 = 823`, which reproduces the
+                // engine's `attacker_loss` = 104.261740669 to 5.7e-13.
+                //
+                // `retreat` subtracts `start_troops` first only when
+                // `!self.remove_troops && self.source_tile.is_none()`. The
+                // measured bot attack has no usable `start_troops` (its survivors
+                // came out exactly `troops - pop_loss`), so no subtraction is
+                // modelled. A cell whose dying attacks carry pending troops would
+                // need `start_troops` threaded through `Slot`.
+                let ocol = owner_col as usize;
+                if ocol * 3 < pst.len() && *troop_count >= 1.0 {
+                    pst[ocol * 3] += (*troop_count).floor();
+                }
                 *troop_count = 0.0;
                 return false;
             }
@@ -344,6 +372,9 @@ pub mod device {
                     defsig[defsig.len() - 1]
                 };
                 let dbuf = 0.7 + 0.3 * dsig;
+                // `defender_troop_loss` stays the EXACT fraction - it feeds
+                // `alt_attacker_loss` below, and the engine computes it that way
+                // (`attack.rs`: `defender_troops as f64 / defender_tiles as f64`).
                 let def_loss = dtroops / dtiles;
                 let cur = within(dtroops / *troop_count, 0.6, 2.0) * mag * 0.8 * dbuf;
                 let alt = 1.3 * def_loss * (mag / 100.0);
@@ -351,7 +382,21 @@ pub mod device {
                 let t_used = within(dtroops / (5.0 * *troop_count), 0.2, 1.5) * speed * dbuf;
                 num -= t_used; // attack.rs:311
                 *troop_count -= attack_loss; // attack.rs:312
-                pst[tidx] = dtroops - def_loss; // game.remove_troops(target, ..)
+                // `game.remove_troops(target, defender_loss)` (`game.rs:1130`):
+                // `to_remove = min(p.troops, to_int(defender_loss))` and `to_int`
+                // is `floor` (`util.rs:26`). A `Player`'s troops are an `i32`, so
+                // the defender's pool steps by WHOLE troops. Subtracting the exact
+                // fraction here shed a fraction MORE than the engine on every pop,
+                // leaving the device's defender lower; `attacker_loss` is
+                // (approximately) proportional to the defender's troops, so the
+                // device's attacker then lost slightly LESS per pop and drifted
+                // ABOVE the engine - the measured `device >= engine` troop drift.
+                let to_remove = if def_loss > 0.0 {
+                    def_loss.floor().min(dtroops)
+                } else {
+                    0.0
+                };
+                pst[tidx] = dtroops - to_remove; // game.remove_troops(target, ..)
                 pst[tidx + 1] = raw_tiles - 1.0; // game.conquer(owner, tile)
             } else {
                 num -= tiles_used(*troop_count, terrain[tile as usize]); // attack.rs:313
@@ -362,6 +407,26 @@ pub mod device {
                 *ncl += 1;
             } else {
                 *drops += 1;
+            }
+            // `game.conquer(owner, tile)` -> `conquer_one` (`game.rs:1233-1267`)
+            // also does `p.tiles_owned += 1` for the CONQUEROR. The loser's side
+            // is the `pst[tidx + 1]` decrement above (reachable only when the
+            // target is a player, matching `conquer_one`'s `if prev > 0`).
+            //
+            // This is the second half of the same class of intra-tick mutation as
+            // the income: a player's OWN claims grow its `tiles_owned` mid-tick,
+            // and any LATER attack (exec order) that targets that player reads
+            // `defender_tiles` from the grown value, which moves
+            // `large_defender_attack_debuff`, `alt_attacker_loss` and
+            // `defender_troop_loss`. Traced on pangaea N=488 nat=0 boundary 166:
+            // the engine used `defender_tiles = 815` for player 269 while the
+            // per-boundary record still said 812 (269's own attack into terra
+            // nullius had already claimed 3 tiles earlier in the same tick), and
+            // `(defender_troops = 13677, defender_tiles = 815)` reproduces the
+            // engine's `attacker_loss` to 5.7e-13.
+            let ocol = owner_col as usize;
+            if ocol * 3 + 1 < pst.len() {
+                pst[ocol * 3 + 1] += 1.0;
             }
             psub[tile as usize] = owner_col; // conquer, IN PLACE (map.set_owner)
         }

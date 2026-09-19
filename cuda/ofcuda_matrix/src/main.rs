@@ -326,6 +326,40 @@ impl Row {
     }
 }
 
+/// `Config::max_troops` (`core/config.rs:363-388`), difficulty `Easy` and
+/// `city_level_sum = 0`.
+///
+/// `city_level_sum` needs `ConstructionExecution` (completed cities), which this
+/// port does not model. The traced cells agree with 0, but the assumption is
+/// explicit rather than implied: a cell with completed cities would need
+/// `city_troop_increase()` added here.
+fn eng_max_troops(ptype: char, tiles: f64) -> f64 {
+    let mut m = 2.0 * (tiles.powf(0.6) * 1000.0 + 50_000.0);
+    match ptype {
+        'B' => m /= 3.0,
+        'N' => m *= 0.5, // difficulty "Easy"
+        // 'H' only differs when `game_config.infinite_troops`, which no cell sets.
+        _ => {}
+    }
+    m
+}
+
+/// `Config::troop_increase_rate_raw` (`core/config.rs:433-458`), difficulty
+/// `Easy`, `city_level_sum = 0`. Returns the RAW f64; the caller floors it the
+/// way `game.add_troops` does.
+fn troop_increase_rate_raw(ptype: char, troops: f64, tiles: f64) -> f64 {
+    let max = eng_max_troops(ptype, tiles);
+    let mut to_add = 10.0 + troops.powf(0.73) / 4.0;
+    to_add *= 1.0 - troops / max;
+    if ptype == 'B' {
+        to_add *= 0.5;
+    }
+    if ptype == 'N' {
+        to_add *= 0.9; // difficulty "Easy"
+    }
+    (troops + to_add).min(max) - troops
+}
+
 fn yn(b: bool) -> &'static str {
     if b { "yes" } else { "NO" }
 }
@@ -818,6 +852,20 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         // `prev` is the boundary the tick is leaving, i.e. the state the
         // engine's own `tick` read. Nothing is carried over: the record is the
         // source, so a device-side drift cannot accumulate silently.
+        //
+        // `PlayerExecution::tick` INCOME, PORTED (`execution/player.rs:84-88`):
+        // the engine runs `game.add_troops(small_id, game.troop_increase_rate_raw_for(small_id))`
+        // for every player. Every `PlayerExecution` is created at spawn and every
+        // `AttackExecution` is appended to `execs` when it is created, so ALL the
+        // player executions precede ALL the attacks in `execute_next_tick`'s exec
+        // order: the income is a pure TICK-START mutation of each player's live
+        // troop count, and an attack that targets a player reads `p.troops`
+        // AFTER it. The port previously seeded `pst` from the per-boundary record
+        // and never added income, so a player-target attack opened ~3.6e-4
+        // relative lower (a smaller `defender_troops`, so a smaller
+        // `alt_attacker_loss`), the device's attacker lost slightly less per pop
+        // and drifted ABOVE the engine - the exact `device >= engine` drift this
+        // harness was chasing.
         pst_host.fill(0.0);
         for p in &prev.players {
             let i = p.sid as usize * 3;
@@ -829,6 +877,24 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
                     'N' => 2.0,
                     _ => 0.0,
                 };
+            }
+        }
+        // Applied as a second pass so each player's income uses its OWN
+        // tick-start troops/tiles, exactly as `troop_increase_rate_raw_for` does.
+        for p in &prev.players {
+            let i = p.sid as usize * 3;
+            if i + 2 >= pst_host.len() || p.tiles <= 0 {
+                continue; // `PlayerExecution::tick` returns early with no tiles
+            }
+            let inc = troop_increase_rate_raw(p.ptype, pst_host[i], p.tiles as f64);
+            // `game.add_troops` (`game.rs:1147-1155`): `p.troops += to_int(amount)`,
+            // `to_int` is `floor` (`util.rs:26`). A negative rate means
+            // `add_troops` forwards to `remove_troops` -> `to_int(-amount)`, i.e.
+            // the magnitude is floored before being negated.
+            if inc < 0.0 {
+                pst_host[i] -= (-inc).floor();
+            } else {
+                pst_host[i] += inc.floor();
             }
         }
         d_pst.copy_from_host(&stream, &pst_host).map_err(es)?;
@@ -1406,11 +1472,58 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         // troops after the tick, where the engine still lists the attack
         let mut troop_log = String::new();
         for snap in &cur.attacks {
-            let mine_bits = slots
+            // Prefer the LIVE slot for this `(owner, target)`. `slots` is never
+            // compacted, so a re-created attack leaves its dead predecessor
+            // (troops already zeroed on the death path) at a LOWER index than
+            // the live successor; matching the first slot blindly reported the
+            // dead sibling's 0x0 as a `device` value and invented a troop
+            // divergence that the simulation does not have. Matching the live
+            // slot reflects what the device is actually running.
+            //
+            // A slot that EXISTS but is dead while the engine still lists the
+            // attack is a REAL divergence (the device dropped an attack the
+            // engine kept) and must still be reported - so the dead slot's
+            // zeroed troops are used as the fallback, not dropped as a
+            // "not created yet" deferral.
+            let live = slots
                 .iter()
-                .filter(|s| s.owner == snap.owner && s.target == snap.target)
-                .map(|s| troops_after[s.idx].to_bits())
-                .next();
+                .find(|s| s.alive && s.owner == snap.owner && s.target == snap.target);
+            let mine_bits = match live {
+                Some(s) => Some(troops_after[s.idx].to_bits()),
+                None => {
+                    // No LIVE slot models this `(owner, target)`. Two very
+                    // different situations land here and they must not be
+                    // confused:
+                    //
+                    //  * the engine STARTED this attack this tick (a fresh
+                    //    attack, or a re-create whose predecessor already died)
+                    //    -> the device creates its slot in the NEXT transition
+                    //    (`init` runs at the very end of the tick that produced
+                    //    this boundary), a deferral, counted as neither. A stale
+                    //    DEAD predecessor left at a lower index by an earlier
+                    //    instance of the same `(owner, target)` must NOT be read
+                    //    as the live attack - that is the phantom `device 0x0`
+                    //    this check used to report.
+                    //
+                    //  * the device WAS modelling this attack at the start of
+                    //    the tick (`prev.attacks` lists it) but its slot is dead
+                    //    now -> the device dropped an attack the engine kept
+                    //    alive. That IS a real divergence: report it against the
+                    //    dead slot's zeroed troops.
+                    let modelled_before = prev
+                        .attacks
+                        .iter()
+                        .any(|p| p.owner == snap.owner && p.target == snap.target);
+                    if modelled_before {
+                        slots
+                            .iter()
+                            .find(|s| s.owner == snap.owner && s.target == snap.target)
+                            .map(|s| troops_after[s.idx].to_bits())
+                    } else {
+                        None
+                    }
+                }
+            };
             let Some(mine_bits) = mine_bits else {
                 // First boundary this attack appears at: the device creates it
                 // in the NEXT transition (its `init` runs at the very end of the
