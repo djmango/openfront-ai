@@ -1,0 +1,4 @@
+cell	map	W	H	aspect	frames	out_px	terrain_ok
+giantworldmap_n7_nat0_t60	giantworldmap	4108	1948	2.1088	61	800x379	yes
+africa_n18_nat0_t60	africa	1948	2032	0.9587	51	766x800	yes
+europe_n18_nat0_t60	europe	2904	1672	1.7368	51	800x460	yes

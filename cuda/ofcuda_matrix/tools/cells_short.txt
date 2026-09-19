@@ -1,0 +1,9 @@
+# Short-window cells: same maps/agent counts, window CLOSED before the engine's
+# in-place attack re-init at engine tick 52 (boundary 49). If the device is
+# correct up to that event, these must pass 100%; they are the control that
+# shows the N>=18 divergence is the re-init and not tick drift.
+pangaea 18 0 45
+europe 18 0 45
+passage 18 0 45
+thebox 64 0 45
+africa 64 0 45

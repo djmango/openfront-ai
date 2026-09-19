@@ -1,0 +1,44 @@
+# ofcuda_matrix MATRIX cells. Format: <map> <agents> [nations] [ticks]
+# All 10 maps at N=18, plus >=3 maps at each other N (2, 7, 64, 488).
+# nations=0 everywhere except two pangaea N=18 cells that exercise Exact(1)/Exact(2).
+# ---- pangaea: every N
+pangaea 2
+pangaea 7
+pangaea 18
+pangaea 64
+pangaea 488
+# ---- africa (3.96M tiles): every N
+africa 2
+africa 18
+africa 64
+africa 488
+# ---- onion (512x512, smallest): every N
+onion 7
+onion 18
+onion 64
+onion 488
+# ---- europe (4.86M tiles)
+europe 2
+europe 7
+europe 18
+# ---- world (2.0M tiles)
+world 18
+world 64
+# ---- amazonriver (5536x276 strip)
+amazonriver 18
+amazonriver 488
+# ---- thebox (2048x2048 all land)
+thebox 18
+thebox 488
+# ---- giantworldmap (4108x1948)
+giantworldmap 7
+giantworldmap 18
+# ---- passage (6000x400)
+passage 18
+passage 488
+# ---- mississippiriver (400x4200)
+mississippiriver 18
+mississippiriver 488
+# ---- nations variants (Exact(1) / Exact(2)), pangaea N=18
+pangaea 18 1
+pangaea 18 2

@@ -1,0 +1,174 @@
+# ofcuda_spawn reference v1  (engine ground truth, arbitrary N)
+# repo /opt/data/workspaces/skg/openfront-ai
+map pangaea
+seed parity
+game_id QqkIuyke
+game_hash 223241348
+agents 2
+nations 0
+human_agents 1
+width 1000
+height 1000
+min_dist 30
+player 1 H nd8079oo -1 0 0
+player 2 B 7kmb47oc 107254 1 52
+player 3 B su965kfe 334545 1 52
+bot 0 2 7kmb47oc 979863364 107254 254 107 52
+owned 0 103252
+owned 0 103253
+owned 0 103254
+owned 0 103255
+owned 0 104251
+owned 0 104252
+owned 0 104253
+owned 0 104254
+owned 0 104255
+owned 0 104256
+owned 0 105250
+owned 0 105251
+owned 0 105252
+owned 0 105253
+owned 0 105254
+owned 0 105255
+owned 0 105256
+owned 0 105257
+owned 0 106250
+owned 0 106251
+owned 0 106252
+owned 0 106253
+owned 0 106254
+owned 0 106255
+owned 0 106256
+owned 0 106257
+owned 0 107250
+owned 0 107251
+owned 0 107252
+owned 0 107253
+owned 0 107254
+owned 0 107255
+owned 0 107256
+owned 0 107257
+owned 0 108250
+owned 0 108251
+owned 0 108252
+owned 0 108253
+owned 0 108254
+owned 0 108255
+owned 0 108256
+owned 0 108257
+owned 0 109251
+owned 0 109252
+owned 0 109253
+owned 0 109254
+owned 0 109255
+owned 0 109256
+owned 0 110252
+owned 0 110253
+owned 0 110254
+owned 0 110255
+bot 1 3 su965kfe 1225099288 334545 545 334 52
+owner 1 107254 2
+owner 1 106254 2
+owner 1 108254 2
+owner 1 107253 2
+owner 1 107255 2
+owner 1 106255 2
+owner 1 108255 2
+owner 1 107256 2
+owner 1 106256 2
+owner 1 108256 2
+owner 1 107257 2
+owner 1 106257 2
+owner 1 108257 2
+owner 1 105257 2
+owner 1 105256 2
+owner 1 104256 2
+owner 1 105255 2
+owner 1 104255 2
+owner 1 105254 2
+owner 1 104254 2
+owner 1 105253 2
+owner 1 104253 2
+owner 1 106253 2
+owner 1 105252 2
+owner 1 104252 2
+owner 1 106252 2
+owner 1 105251 2
+owner 1 104251 2
+owner 1 106251 2
+owner 1 105250 2
+owner 1 106250 2
+owner 1 107250 2
+owner 1 108250 2
+owner 1 107251 2
+owner 1 108251 2
+owner 1 107252 2
+owner 1 108252 2
+owner 1 109252 2
+owner 1 108253 2
+owner 1 109253 2
+owner 1 110253 2
+owner 1 109254 2
+owner 1 110254 2
+owner 1 109255 2
+owner 1 110255 2
+owner 1 109256 2
+owner 1 110252 2
+owner 1 109251 2
+owner 1 103252 2
+owner 1 103253 2
+owner 1 103254 2
+owner 1 103255 2
+prev 1 107254
+owned 1 330543
+owned 1 330544
+owned 1 330545
+owned 1 330546
+owned 1 331542
+owned 1 331543
+owned 1 331544
+owned 1 331545
+owned 1 331546
+owned 1 331547
+owned 1 332541
+owned 1 332542
+owned 1 332543
+owned 1 332544
+owned 1 332545
+owned 1 332546
+owned 1 332547
+owned 1 332548
+owned 1 333541
+owned 1 333542
+owned 1 333543
+owned 1 333544
+owned 1 333545
+owned 1 333546
+owned 1 333547
+owned 1 333548
+owned 1 334541
+owned 1 334542
+owned 1 334543
+owned 1 334544
+owned 1 334545
+owned 1 334546
+owned 1 334547
+owned 1 334548
+owned 1 335541
+owned 1 335542
+owned 1 335543
+owned 1 335544
+owned 1 335545
+owned 1 335546
+owned 1 335547
+owned 1 335548
+owned 1 336542
+owned 1 336543
+owned 1 336544
+owned 1 336545
+owned 1 336546
+owned 1 336547
+owned 1 337543
+owned 1 337544
+owned 1 337545
+owned 1 337546

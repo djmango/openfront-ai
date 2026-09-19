@@ -1,0 +1,14 @@
+# ofcuda_matrix cells that are ALSO dumped per-tick for rendering.
+# One per map (all 10 maps) + a second agent count on pangaea, so the movies span
+# different maps AND different N. Format: <map> <agents> [nations] [ticks]
+pangaea 488
+pangaea 2
+africa 18
+europe 18
+world 18
+amazonriver 18
+thebox 64
+onion 7
+giantworldmap 7
+passage 18
+mississippiriver 18

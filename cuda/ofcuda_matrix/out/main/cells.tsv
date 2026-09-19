@@ -1,0 +1,2 @@
+map	w	h	N	nations	ticks	init_sets	init_hash	tick_match	tick_total	hash_match	hash_total	count_match	count_total	troops_match	troops_total	churn_skipped	engine_evictions	dev_claims	first_div	note
+europe	2904	1672	18	0	60	yes	yes	302	303	49	50	949	950	301	303	0	0	4162	boundary 49 (engine tick 52): attack owner 9 target 0 troops engine 0x40978e755903c808 vs device 0x40931e476f5c76f8 (troop arithmetic diverged)	

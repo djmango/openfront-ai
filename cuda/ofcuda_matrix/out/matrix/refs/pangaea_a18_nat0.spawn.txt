@@ -1,0 +1,9094 @@
+# ofcuda_spawn reference v1  (engine ground truth, arbitrary N)
+# repo /opt/data/workspaces/skg/openfront-ai
+map pangaea
+seed parity
+game_id QqkIuyke
+game_hash 223241348
+agents 18
+nations 0
+human_agents 1
+width 1000
+height 1000
+min_dist 30
+player 1 H nd8079oo -1 0 0
+player 2 B 7kmb47oc 107254 1 52
+player 3 B su965kfe 334545 1 52
+player 4 B 4918e5rs 767276 1 52
+player 5 B 0grah7qg 298498 1 52
+player 6 B 79lbhuod 271614 1 52
+player 7 B 0eay8wsu 705481 1 52
+player 8 B l4g4juu8 944611 1 52
+player 9 B gsw4n5km 89583 1 52
+player 10 B ooz4f963 896690 1 52
+player 11 B g49bog52 331181 1 52
+player 12 B vl3arc4y 468222 1 52
+player 13 B 26spmsu2 876730 1 52
+player 14 B 666fmd2f 281683 1 52
+player 15 B vybu8oes 224588 1 52
+player 16 B tlx2iciq 365649 1 52
+player 17 B 8i7cuo9t 384665 1 52
+player 18 B ay8xa67r 622435 1 52
+player 19 B fha1xhrw 384416 1 52
+bot 0 2 7kmb47oc 979863364 107254 254 107 52
+owned 0 103252
+owned 0 103253
+owned 0 103254
+owned 0 103255
+owned 0 104251
+owned 0 104252
+owned 0 104253
+owned 0 104254
+owned 0 104255
+owned 0 104256
+owned 0 105250
+owned 0 105251
+owned 0 105252
+owned 0 105253
+owned 0 105254
+owned 0 105255
+owned 0 105256
+owned 0 105257
+owned 0 106250
+owned 0 106251
+owned 0 106252
+owned 0 106253
+owned 0 106254
+owned 0 106255
+owned 0 106256
+owned 0 106257
+owned 0 107250
+owned 0 107251
+owned 0 107252
+owned 0 107253
+owned 0 107254
+owned 0 107255
+owned 0 107256
+owned 0 107257
+owned 0 108250
+owned 0 108251
+owned 0 108252
+owned 0 108253
+owned 0 108254
+owned 0 108255
+owned 0 108256
+owned 0 108257
+owned 0 109251
+owned 0 109252
+owned 0 109253
+owned 0 109254
+owned 0 109255
+owned 0 109256
+owned 0 110252
+owned 0 110253
+owned 0 110254
+owned 0 110255
+bot 1 3 su965kfe 1225099288 334545 545 334 52
+owner 1 107254 2
+owner 1 106254 2
+owner 1 108254 2
+owner 1 107253 2
+owner 1 107255 2
+owner 1 106255 2
+owner 1 108255 2
+owner 1 107256 2
+owner 1 106256 2
+owner 1 108256 2
+owner 1 107257 2
+owner 1 106257 2
+owner 1 108257 2
+owner 1 105257 2
+owner 1 105256 2
+owner 1 104256 2
+owner 1 105255 2
+owner 1 104255 2
+owner 1 105254 2
+owner 1 104254 2
+owner 1 105253 2
+owner 1 104253 2
+owner 1 106253 2
+owner 1 105252 2
+owner 1 104252 2
+owner 1 106252 2
+owner 1 105251 2
+owner 1 104251 2
+owner 1 106251 2
+owner 1 105250 2
+owner 1 106250 2
+owner 1 107250 2
+owner 1 108250 2
+owner 1 107251 2
+owner 1 108251 2
+owner 1 107252 2
+owner 1 108252 2
+owner 1 109252 2
+owner 1 108253 2
+owner 1 109253 2
+owner 1 110253 2
+owner 1 109254 2
+owner 1 110254 2
+owner 1 109255 2
+owner 1 110255 2
+owner 1 109256 2
+owner 1 110252 2
+owner 1 109251 2
+owner 1 103252 2
+owner 1 103253 2
+owner 1 103254 2
+owner 1 103255 2
+prev 1 107254
+owned 1 330543
+owned 1 330544
+owned 1 330545
+owned 1 330546
+owned 1 331542
+owned 1 331543
+owned 1 331544
+owned 1 331545
+owned 1 331546
+owned 1 331547
+owned 1 332541
+owned 1 332542
+owned 1 332543
+owned 1 332544
+owned 1 332545
+owned 1 332546
+owned 1 332547
+owned 1 332548
+owned 1 333541
+owned 1 333542
+owned 1 333543
+owned 1 333544
+owned 1 333545
+owned 1 333546
+owned 1 333547
+owned 1 333548
+owned 1 334541
+owned 1 334542
+owned 1 334543
+owned 1 334544
+owned 1 334545
+owned 1 334546
+owned 1 334547
+owned 1 334548
+owned 1 335541
+owned 1 335542
+owned 1 335543
+owned 1 335544
+owned 1 335545
+owned 1 335546
+owned 1 335547
+owned 1 335548
+owned 1 336542
+owned 1 336543
+owned 1 336544
+owned 1 336545
+owned 1 336546
+owned 1 336547
+owned 1 337543
+owned 1 337544
+owned 1 337545
+owned 1 337546
+bot 2 4 4918e5rs 1160776865 767276 276 767 52
+owner 2 107254 2
+owner 2 106254 2
+owner 2 108254 2
+owner 2 107253 2
+owner 2 107255 2
+owner 2 106255 2
+owner 2 108255 2
+owner 2 107256 2
+owner 2 106256 2
+owner 2 108256 2
+owner 2 107257 2
+owner 2 106257 2
+owner 2 108257 2
+owner 2 105257 2
+owner 2 105256 2
+owner 2 104256 2
+owner 2 105255 2
+owner 2 104255 2
+owner 2 105254 2
+owner 2 104254 2
+owner 2 105253 2
+owner 2 104253 2
+owner 2 106253 2
+owner 2 105252 2
+owner 2 104252 2
+owner 2 106252 2
+owner 2 105251 2
+owner 2 104251 2
+owner 2 106251 2
+owner 2 105250 2
+owner 2 106250 2
+owner 2 107250 2
+owner 2 108250 2
+owner 2 107251 2
+owner 2 108251 2
+owner 2 107252 2
+owner 2 108252 2
+owner 2 109252 2
+owner 2 108253 2
+owner 2 109253 2
+owner 2 110253 2
+owner 2 109254 2
+owner 2 110254 2
+owner 2 109255 2
+owner 2 110255 2
+owner 2 109256 2
+owner 2 110252 2
+owner 2 109251 2
+owner 2 103252 2
+owner 2 103253 2
+owner 2 103254 2
+owner 2 103255 2
+owner 2 334545 3
+owner 2 333545 3
+owner 2 335545 3
+owner 2 334544 3
+owner 2 334546 3
+owner 2 333546 3
+owner 2 335546 3
+owner 2 334547 3
+owner 2 333547 3
+owner 2 335547 3
+owner 2 334548 3
+owner 2 333548 3
+owner 2 335548 3
+owner 2 332548 3
+owner 2 332547 3
+owner 2 331547 3
+owner 2 332546 3
+owner 2 331546 3
+owner 2 332545 3
+owner 2 331545 3
+owner 2 332544 3
+owner 2 331544 3
+owner 2 333544 3
+owner 2 332543 3
+owner 2 331543 3
+owner 2 333543 3
+owner 2 332542 3
+owner 2 331542 3
+owner 2 333542 3
+owner 2 332541 3
+owner 2 333541 3
+owner 2 334541 3
+owner 2 335541 3
+owner 2 334542 3
+owner 2 335542 3
+owner 2 334543 3
+owner 2 335543 3
+owner 2 336543 3
+owner 2 335544 3
+owner 2 336544 3
+owner 2 337544 3
+owner 2 336545 3
+owner 2 337545 3
+owner 2 336546 3
+owner 2 337546 3
+owner 2 336547 3
+owner 2 337543 3
+owner 2 336542 3
+owner 2 330543 3
+owner 2 330544 3
+owner 2 330545 3
+owner 2 330546 3
+prev 2 107254
+prev 2 334545
+owned 2 763274
+owned 2 763275
+owned 2 763276
+owned 2 763277
+owned 2 764273
+owned 2 764274
+owned 2 764275
+owned 2 764276
+owned 2 764277
+owned 2 764278
+owned 2 765272
+owned 2 765273
+owned 2 765274
+owned 2 765275
+owned 2 765276
+owned 2 765277
+owned 2 765278
+owned 2 765279
+owned 2 766272
+owned 2 766273
+owned 2 766274
+owned 2 766275
+owned 2 766276
+owned 2 766277
+owned 2 766278
+owned 2 766279
+owned 2 767272
+owned 2 767273
+owned 2 767274
+owned 2 767275
+owned 2 767276
+owned 2 767277
+owned 2 767278
+owned 2 767279
+owned 2 768272
+owned 2 768273
+owned 2 768274
+owned 2 768275
+owned 2 768276
+owned 2 768277
+owned 2 768278
+owned 2 768279
+owned 2 769273
+owned 2 769274
+owned 2 769275
+owned 2 769276
+owned 2 769277
+owned 2 769278
+owned 2 770274
+owned 2 770275
+owned 2 770276
+owned 2 770277
+bot 3 5 0grah7qg -2107334215 298498 498 298 52
+owner 3 107254 2
+owner 3 106254 2
+owner 3 108254 2
+owner 3 107253 2
+owner 3 107255 2
+owner 3 106255 2
+owner 3 108255 2
+owner 3 107256 2
+owner 3 106256 2
+owner 3 108256 2
+owner 3 107257 2
+owner 3 106257 2
+owner 3 108257 2
+owner 3 105257 2
+owner 3 105256 2
+owner 3 104256 2
+owner 3 105255 2
+owner 3 104255 2
+owner 3 105254 2
+owner 3 104254 2
+owner 3 105253 2
+owner 3 104253 2
+owner 3 106253 2
+owner 3 105252 2
+owner 3 104252 2
+owner 3 106252 2
+owner 3 105251 2
+owner 3 104251 2
+owner 3 106251 2
+owner 3 105250 2
+owner 3 106250 2
+owner 3 107250 2
+owner 3 108250 2
+owner 3 107251 2
+owner 3 108251 2
+owner 3 107252 2
+owner 3 108252 2
+owner 3 109252 2
+owner 3 108253 2
+owner 3 109253 2
+owner 3 110253 2
+owner 3 109254 2
+owner 3 110254 2
+owner 3 109255 2
+owner 3 110255 2
+owner 3 109256 2
+owner 3 110252 2
+owner 3 109251 2
+owner 3 103252 2
+owner 3 103253 2
+owner 3 103254 2
+owner 3 103255 2
+owner 3 334545 3
+owner 3 333545 3
+owner 3 335545 3
+owner 3 334544 3
+owner 3 334546 3
+owner 3 333546 3
+owner 3 335546 3
+owner 3 334547 3
+owner 3 333547 3
+owner 3 335547 3
+owner 3 334548 3
+owner 3 333548 3
+owner 3 335548 3
+owner 3 332548 3
+owner 3 332547 3
+owner 3 331547 3
+owner 3 332546 3
+owner 3 331546 3
+owner 3 332545 3
+owner 3 331545 3
+owner 3 332544 3
+owner 3 331544 3
+owner 3 333544 3
+owner 3 332543 3
+owner 3 331543 3
+owner 3 333543 3
+owner 3 332542 3
+owner 3 331542 3
+owner 3 333542 3
+owner 3 332541 3
+owner 3 333541 3
+owner 3 334541 3
+owner 3 335541 3
+owner 3 334542 3
+owner 3 335542 3
+owner 3 334543 3
+owner 3 335543 3
+owner 3 336543 3
+owner 3 335544 3
+owner 3 336544 3
+owner 3 337544 3
+owner 3 336545 3
+owner 3 337545 3
+owner 3 336546 3
+owner 3 337546 3
+owner 3 336547 3
+owner 3 337543 3
+owner 3 336542 3
+owner 3 330543 3
+owner 3 330544 3
+owner 3 330545 3
+owner 3 330546 3
+owner 3 767276 4
+owner 3 766276 4
+owner 3 768276 4
+owner 3 767275 4
+owner 3 767277 4
+owner 3 766277 4
+owner 3 768277 4
+owner 3 767278 4
+owner 3 766278 4
+owner 3 768278 4
+owner 3 767279 4
+owner 3 766279 4
+owner 3 768279 4
+owner 3 765279 4
+owner 3 765278 4
+owner 3 764278 4
+owner 3 765277 4
+owner 3 764277 4
+owner 3 765276 4
+owner 3 764276 4
+owner 3 765275 4
+owner 3 764275 4
+owner 3 766275 4
+owner 3 765274 4
+owner 3 764274 4
+owner 3 766274 4
+owner 3 765273 4
+owner 3 764273 4
+owner 3 766273 4
+owner 3 765272 4
+owner 3 766272 4
+owner 3 767272 4
+owner 3 768272 4
+owner 3 767273 4
+owner 3 768273 4
+owner 3 767274 4
+owner 3 768274 4
+owner 3 769274 4
+owner 3 768275 4
+owner 3 769275 4
+owner 3 770275 4
+owner 3 769276 4
+owner 3 770276 4
+owner 3 769277 4
+owner 3 770277 4
+owner 3 769278 4
+owner 3 770274 4
+owner 3 769273 4
+owner 3 763274 4
+owner 3 763275 4
+owner 3 763276 4
+owner 3 763277 4
+prev 3 107254
+prev 3 334545
+prev 3 767276
+owned 3 294496
+owned 3 294497
+owned 3 294498
+owned 3 294499
+owned 3 295495
+owned 3 295496
+owned 3 295497
+owned 3 295498
+owned 3 295499
+owned 3 295500
+owned 3 296494
+owned 3 296495
+owned 3 296496
+owned 3 296497
+owned 3 296498
+owned 3 296499
+owned 3 296500
+owned 3 296501
+owned 3 297494
+owned 3 297495
+owned 3 297496
+owned 3 297497
+owned 3 297498
+owned 3 297499
+owned 3 297500
+owned 3 297501
+owned 3 298494
+owned 3 298495
+owned 3 298496
+owned 3 298497
+owned 3 298498
+owned 3 298499
+owned 3 298500
+owned 3 298501
+owned 3 299494
+owned 3 299495
+owned 3 299496
+owned 3 299497
+owned 3 299498
+owned 3 299499
+owned 3 299500
+owned 3 299501
+owned 3 300495
+owned 3 300496
+owned 3 300497
+owned 3 300498
+owned 3 300499
+owned 3 300500
+owned 3 301496
+owned 3 301497
+owned 3 301498
+owned 3 301499
+bot 4 6 79lbhuod 919150858 271614 614 271 52
+owner 4 107254 2
+owner 4 106254 2
+owner 4 108254 2
+owner 4 107253 2
+owner 4 107255 2
+owner 4 106255 2
+owner 4 108255 2
+owner 4 107256 2
+owner 4 106256 2
+owner 4 108256 2
+owner 4 107257 2
+owner 4 106257 2
+owner 4 108257 2
+owner 4 105257 2
+owner 4 105256 2
+owner 4 104256 2
+owner 4 105255 2
+owner 4 104255 2
+owner 4 105254 2
+owner 4 104254 2
+owner 4 105253 2
+owner 4 104253 2
+owner 4 106253 2
+owner 4 105252 2
+owner 4 104252 2
+owner 4 106252 2
+owner 4 105251 2
+owner 4 104251 2
+owner 4 106251 2
+owner 4 105250 2
+owner 4 106250 2
+owner 4 107250 2
+owner 4 108250 2
+owner 4 107251 2
+owner 4 108251 2
+owner 4 107252 2
+owner 4 108252 2
+owner 4 109252 2
+owner 4 108253 2
+owner 4 109253 2
+owner 4 110253 2
+owner 4 109254 2
+owner 4 110254 2
+owner 4 109255 2
+owner 4 110255 2
+owner 4 109256 2
+owner 4 110252 2
+owner 4 109251 2
+owner 4 103252 2
+owner 4 103253 2
+owner 4 103254 2
+owner 4 103255 2
+owner 4 334545 3
+owner 4 333545 3
+owner 4 335545 3
+owner 4 334544 3
+owner 4 334546 3
+owner 4 333546 3
+owner 4 335546 3
+owner 4 334547 3
+owner 4 333547 3
+owner 4 335547 3
+owner 4 334548 3
+owner 4 333548 3
+owner 4 335548 3
+owner 4 332548 3
+owner 4 332547 3
+owner 4 331547 3
+owner 4 332546 3
+owner 4 331546 3
+owner 4 332545 3
+owner 4 331545 3
+owner 4 332544 3
+owner 4 331544 3
+owner 4 333544 3
+owner 4 332543 3
+owner 4 331543 3
+owner 4 333543 3
+owner 4 332542 3
+owner 4 331542 3
+owner 4 333542 3
+owner 4 332541 3
+owner 4 333541 3
+owner 4 334541 3
+owner 4 335541 3
+owner 4 334542 3
+owner 4 335542 3
+owner 4 334543 3
+owner 4 335543 3
+owner 4 336543 3
+owner 4 335544 3
+owner 4 336544 3
+owner 4 337544 3
+owner 4 336545 3
+owner 4 337545 3
+owner 4 336546 3
+owner 4 337546 3
+owner 4 336547 3
+owner 4 337543 3
+owner 4 336542 3
+owner 4 330543 3
+owner 4 330544 3
+owner 4 330545 3
+owner 4 330546 3
+owner 4 767276 4
+owner 4 766276 4
+owner 4 768276 4
+owner 4 767275 4
+owner 4 767277 4
+owner 4 766277 4
+owner 4 768277 4
+owner 4 767278 4
+owner 4 766278 4
+owner 4 768278 4
+owner 4 767279 4
+owner 4 766279 4
+owner 4 768279 4
+owner 4 765279 4
+owner 4 765278 4
+owner 4 764278 4
+owner 4 765277 4
+owner 4 764277 4
+owner 4 765276 4
+owner 4 764276 4
+owner 4 765275 4
+owner 4 764275 4
+owner 4 766275 4
+owner 4 765274 4
+owner 4 764274 4
+owner 4 766274 4
+owner 4 765273 4
+owner 4 764273 4
+owner 4 766273 4
+owner 4 765272 4
+owner 4 766272 4
+owner 4 767272 4
+owner 4 768272 4
+owner 4 767273 4
+owner 4 768273 4
+owner 4 767274 4
+owner 4 768274 4
+owner 4 769274 4
+owner 4 768275 4
+owner 4 769275 4
+owner 4 770275 4
+owner 4 769276 4
+owner 4 770276 4
+owner 4 769277 4
+owner 4 770277 4
+owner 4 769278 4
+owner 4 770274 4
+owner 4 769273 4
+owner 4 763274 4
+owner 4 763275 4
+owner 4 763276 4
+owner 4 763277 4
+owner 4 298498 5
+owner 4 297498 5
+owner 4 299498 5
+owner 4 298497 5
+owner 4 298499 5
+owner 4 297499 5
+owner 4 299499 5
+owner 4 298500 5
+owner 4 297500 5
+owner 4 299500 5
+owner 4 298501 5
+owner 4 297501 5
+owner 4 299501 5
+owner 4 296501 5
+owner 4 296500 5
+owner 4 295500 5
+owner 4 296499 5
+owner 4 295499 5
+owner 4 296498 5
+owner 4 295498 5
+owner 4 296497 5
+owner 4 295497 5
+owner 4 297497 5
+owner 4 296496 5
+owner 4 295496 5
+owner 4 297496 5
+owner 4 296495 5
+owner 4 295495 5
+owner 4 297495 5
+owner 4 296494 5
+owner 4 297494 5
+owner 4 298494 5
+owner 4 299494 5
+owner 4 298495 5
+owner 4 299495 5
+owner 4 298496 5
+owner 4 299496 5
+owner 4 300496 5
+owner 4 299497 5
+owner 4 300497 5
+owner 4 301497 5
+owner 4 300498 5
+owner 4 301498 5
+owner 4 300499 5
+owner 4 301499 5
+owner 4 300500 5
+owner 4 301496 5
+owner 4 300495 5
+owner 4 294496 5
+owner 4 294497 5
+owner 4 294498 5
+owner 4 294499 5
+prev 4 107254
+prev 4 334545
+prev 4 767276
+prev 4 298498
+owned 4 267612
+owned 4 267613
+owned 4 267614
+owned 4 267615
+owned 4 268611
+owned 4 268612
+owned 4 268613
+owned 4 268614
+owned 4 268615
+owned 4 268616
+owned 4 269610
+owned 4 269611
+owned 4 269612
+owned 4 269613
+owned 4 269614
+owned 4 269615
+owned 4 269616
+owned 4 269617
+owned 4 270610
+owned 4 270611
+owned 4 270612
+owned 4 270613
+owned 4 270614
+owned 4 270615
+owned 4 270616
+owned 4 270617
+owned 4 271610
+owned 4 271611
+owned 4 271612
+owned 4 271613
+owned 4 271614
+owned 4 271615
+owned 4 271616
+owned 4 271617
+owned 4 272610
+owned 4 272611
+owned 4 272612
+owned 4 272613
+owned 4 272614
+owned 4 272615
+owned 4 272616
+owned 4 272617
+owned 4 273611
+owned 4 273612
+owned 4 273613
+owned 4 273614
+owned 4 273615
+owned 4 273616
+owned 4 274612
+owned 4 274613
+owned 4 274614
+owned 4 274615
+bot 5 7 0eay8wsu 312910098 705481 481 705 52
+owner 5 107254 2
+owner 5 106254 2
+owner 5 108254 2
+owner 5 107253 2
+owner 5 107255 2
+owner 5 106255 2
+owner 5 108255 2
+owner 5 107256 2
+owner 5 106256 2
+owner 5 108256 2
+owner 5 107257 2
+owner 5 106257 2
+owner 5 108257 2
+owner 5 105257 2
+owner 5 105256 2
+owner 5 104256 2
+owner 5 105255 2
+owner 5 104255 2
+owner 5 105254 2
+owner 5 104254 2
+owner 5 105253 2
+owner 5 104253 2
+owner 5 106253 2
+owner 5 105252 2
+owner 5 104252 2
+owner 5 106252 2
+owner 5 105251 2
+owner 5 104251 2
+owner 5 106251 2
+owner 5 105250 2
+owner 5 106250 2
+owner 5 107250 2
+owner 5 108250 2
+owner 5 107251 2
+owner 5 108251 2
+owner 5 107252 2
+owner 5 108252 2
+owner 5 109252 2
+owner 5 108253 2
+owner 5 109253 2
+owner 5 110253 2
+owner 5 109254 2
+owner 5 110254 2
+owner 5 109255 2
+owner 5 110255 2
+owner 5 109256 2
+owner 5 110252 2
+owner 5 109251 2
+owner 5 103252 2
+owner 5 103253 2
+owner 5 103254 2
+owner 5 103255 2
+owner 5 334545 3
+owner 5 333545 3
+owner 5 335545 3
+owner 5 334544 3
+owner 5 334546 3
+owner 5 333546 3
+owner 5 335546 3
+owner 5 334547 3
+owner 5 333547 3
+owner 5 335547 3
+owner 5 334548 3
+owner 5 333548 3
+owner 5 335548 3
+owner 5 332548 3
+owner 5 332547 3
+owner 5 331547 3
+owner 5 332546 3
+owner 5 331546 3
+owner 5 332545 3
+owner 5 331545 3
+owner 5 332544 3
+owner 5 331544 3
+owner 5 333544 3
+owner 5 332543 3
+owner 5 331543 3
+owner 5 333543 3
+owner 5 332542 3
+owner 5 331542 3
+owner 5 333542 3
+owner 5 332541 3
+owner 5 333541 3
+owner 5 334541 3
+owner 5 335541 3
+owner 5 334542 3
+owner 5 335542 3
+owner 5 334543 3
+owner 5 335543 3
+owner 5 336543 3
+owner 5 335544 3
+owner 5 336544 3
+owner 5 337544 3
+owner 5 336545 3
+owner 5 337545 3
+owner 5 336546 3
+owner 5 337546 3
+owner 5 336547 3
+owner 5 337543 3
+owner 5 336542 3
+owner 5 330543 3
+owner 5 330544 3
+owner 5 330545 3
+owner 5 330546 3
+owner 5 767276 4
+owner 5 766276 4
+owner 5 768276 4
+owner 5 767275 4
+owner 5 767277 4
+owner 5 766277 4
+owner 5 768277 4
+owner 5 767278 4
+owner 5 766278 4
+owner 5 768278 4
+owner 5 767279 4
+owner 5 766279 4
+owner 5 768279 4
+owner 5 765279 4
+owner 5 765278 4
+owner 5 764278 4
+owner 5 765277 4
+owner 5 764277 4
+owner 5 765276 4
+owner 5 764276 4
+owner 5 765275 4
+owner 5 764275 4
+owner 5 766275 4
+owner 5 765274 4
+owner 5 764274 4
+owner 5 766274 4
+owner 5 765273 4
+owner 5 764273 4
+owner 5 766273 4
+owner 5 765272 4
+owner 5 766272 4
+owner 5 767272 4
+owner 5 768272 4
+owner 5 767273 4
+owner 5 768273 4
+owner 5 767274 4
+owner 5 768274 4
+owner 5 769274 4
+owner 5 768275 4
+owner 5 769275 4
+owner 5 770275 4
+owner 5 769276 4
+owner 5 770276 4
+owner 5 769277 4
+owner 5 770277 4
+owner 5 769278 4
+owner 5 770274 4
+owner 5 769273 4
+owner 5 763274 4
+owner 5 763275 4
+owner 5 763276 4
+owner 5 763277 4
+owner 5 298498 5
+owner 5 297498 5
+owner 5 299498 5
+owner 5 298497 5
+owner 5 298499 5
+owner 5 297499 5
+owner 5 299499 5
+owner 5 298500 5
+owner 5 297500 5
+owner 5 299500 5
+owner 5 298501 5
+owner 5 297501 5
+owner 5 299501 5
+owner 5 296501 5
+owner 5 296500 5
+owner 5 295500 5
+owner 5 296499 5
+owner 5 295499 5
+owner 5 296498 5
+owner 5 295498 5
+owner 5 296497 5
+owner 5 295497 5
+owner 5 297497 5
+owner 5 296496 5
+owner 5 295496 5
+owner 5 297496 5
+owner 5 296495 5
+owner 5 295495 5
+owner 5 297495 5
+owner 5 296494 5
+owner 5 297494 5
+owner 5 298494 5
+owner 5 299494 5
+owner 5 298495 5
+owner 5 299495 5
+owner 5 298496 5
+owner 5 299496 5
+owner 5 300496 5
+owner 5 299497 5
+owner 5 300497 5
+owner 5 301497 5
+owner 5 300498 5
+owner 5 301498 5
+owner 5 300499 5
+owner 5 301499 5
+owner 5 300500 5
+owner 5 301496 5
+owner 5 300495 5
+owner 5 294496 5
+owner 5 294497 5
+owner 5 294498 5
+owner 5 294499 5
+owner 5 271614 6
+owner 5 270614 6
+owner 5 272614 6
+owner 5 271613 6
+owner 5 271615 6
+owner 5 270615 6
+owner 5 272615 6
+owner 5 271616 6
+owner 5 270616 6
+owner 5 272616 6
+owner 5 271617 6
+owner 5 270617 6
+owner 5 272617 6
+owner 5 269617 6
+owner 5 269616 6
+owner 5 268616 6
+owner 5 269615 6
+owner 5 268615 6
+owner 5 269614 6
+owner 5 268614 6
+owner 5 269613 6
+owner 5 268613 6
+owner 5 270613 6
+owner 5 269612 6
+owner 5 268612 6
+owner 5 270612 6
+owner 5 269611 6
+owner 5 268611 6
+owner 5 270611 6
+owner 5 269610 6
+owner 5 270610 6
+owner 5 271610 6
+owner 5 272610 6
+owner 5 271611 6
+owner 5 272611 6
+owner 5 271612 6
+owner 5 272612 6
+owner 5 273612 6
+owner 5 272613 6
+owner 5 273613 6
+owner 5 274613 6
+owner 5 273614 6
+owner 5 274614 6
+owner 5 273615 6
+owner 5 274615 6
+owner 5 273616 6
+owner 5 274612 6
+owner 5 273611 6
+owner 5 267612 6
+owner 5 267613 6
+owner 5 267614 6
+owner 5 267615 6
+prev 5 107254
+prev 5 334545
+prev 5 767276
+prev 5 298498
+prev 5 271614
+owned 5 701479
+owned 5 701480
+owned 5 701481
+owned 5 701482
+owned 5 702478
+owned 5 702479
+owned 5 702480
+owned 5 702481
+owned 5 702482
+owned 5 702483
+owned 5 703477
+owned 5 703478
+owned 5 703479
+owned 5 703480
+owned 5 703481
+owned 5 703482
+owned 5 703483
+owned 5 703484
+owned 5 704477
+owned 5 704478
+owned 5 704479
+owned 5 704480
+owned 5 704481
+owned 5 704482
+owned 5 704483
+owned 5 704484
+owned 5 705477
+owned 5 705478
+owned 5 705479
+owned 5 705480
+owned 5 705481
+owned 5 705482
+owned 5 705483
+owned 5 705484
+owned 5 706477
+owned 5 706478
+owned 5 706479
+owned 5 706480
+owned 5 706481
+owned 5 706482
+owned 5 706483
+owned 5 706484
+owned 5 707478
+owned 5 707479
+owned 5 707480
+owned 5 707481
+owned 5 707482
+owned 5 707483
+owned 5 708479
+owned 5 708480
+owned 5 708481
+owned 5 708482
+bot 6 8 l4g4juu8 1373847271 944611 611 944 52
+owner 6 107254 2
+owner 6 106254 2
+owner 6 108254 2
+owner 6 107253 2
+owner 6 107255 2
+owner 6 106255 2
+owner 6 108255 2
+owner 6 107256 2
+owner 6 106256 2
+owner 6 108256 2
+owner 6 107257 2
+owner 6 106257 2
+owner 6 108257 2
+owner 6 105257 2
+owner 6 105256 2
+owner 6 104256 2
+owner 6 105255 2
+owner 6 104255 2
+owner 6 105254 2
+owner 6 104254 2
+owner 6 105253 2
+owner 6 104253 2
+owner 6 106253 2
+owner 6 105252 2
+owner 6 104252 2
+owner 6 106252 2
+owner 6 105251 2
+owner 6 104251 2
+owner 6 106251 2
+owner 6 105250 2
+owner 6 106250 2
+owner 6 107250 2
+owner 6 108250 2
+owner 6 107251 2
+owner 6 108251 2
+owner 6 107252 2
+owner 6 108252 2
+owner 6 109252 2
+owner 6 108253 2
+owner 6 109253 2
+owner 6 110253 2
+owner 6 109254 2
+owner 6 110254 2
+owner 6 109255 2
+owner 6 110255 2
+owner 6 109256 2
+owner 6 110252 2
+owner 6 109251 2
+owner 6 103252 2
+owner 6 103253 2
+owner 6 103254 2
+owner 6 103255 2
+owner 6 334545 3
+owner 6 333545 3
+owner 6 335545 3
+owner 6 334544 3
+owner 6 334546 3
+owner 6 333546 3
+owner 6 335546 3
+owner 6 334547 3
+owner 6 333547 3
+owner 6 335547 3
+owner 6 334548 3
+owner 6 333548 3
+owner 6 335548 3
+owner 6 332548 3
+owner 6 332547 3
+owner 6 331547 3
+owner 6 332546 3
+owner 6 331546 3
+owner 6 332545 3
+owner 6 331545 3
+owner 6 332544 3
+owner 6 331544 3
+owner 6 333544 3
+owner 6 332543 3
+owner 6 331543 3
+owner 6 333543 3
+owner 6 332542 3
+owner 6 331542 3
+owner 6 333542 3
+owner 6 332541 3
+owner 6 333541 3
+owner 6 334541 3
+owner 6 335541 3
+owner 6 334542 3
+owner 6 335542 3
+owner 6 334543 3
+owner 6 335543 3
+owner 6 336543 3
+owner 6 335544 3
+owner 6 336544 3
+owner 6 337544 3
+owner 6 336545 3
+owner 6 337545 3
+owner 6 336546 3
+owner 6 337546 3
+owner 6 336547 3
+owner 6 337543 3
+owner 6 336542 3
+owner 6 330543 3
+owner 6 330544 3
+owner 6 330545 3
+owner 6 330546 3
+owner 6 767276 4
+owner 6 766276 4
+owner 6 768276 4
+owner 6 767275 4
+owner 6 767277 4
+owner 6 766277 4
+owner 6 768277 4
+owner 6 767278 4
+owner 6 766278 4
+owner 6 768278 4
+owner 6 767279 4
+owner 6 766279 4
+owner 6 768279 4
+owner 6 765279 4
+owner 6 765278 4
+owner 6 764278 4
+owner 6 765277 4
+owner 6 764277 4
+owner 6 765276 4
+owner 6 764276 4
+owner 6 765275 4
+owner 6 764275 4
+owner 6 766275 4
+owner 6 765274 4
+owner 6 764274 4
+owner 6 766274 4
+owner 6 765273 4
+owner 6 764273 4
+owner 6 766273 4
+owner 6 765272 4
+owner 6 766272 4
+owner 6 767272 4
+owner 6 768272 4
+owner 6 767273 4
+owner 6 768273 4
+owner 6 767274 4
+owner 6 768274 4
+owner 6 769274 4
+owner 6 768275 4
+owner 6 769275 4
+owner 6 770275 4
+owner 6 769276 4
+owner 6 770276 4
+owner 6 769277 4
+owner 6 770277 4
+owner 6 769278 4
+owner 6 770274 4
+owner 6 769273 4
+owner 6 763274 4
+owner 6 763275 4
+owner 6 763276 4
+owner 6 763277 4
+owner 6 298498 5
+owner 6 297498 5
+owner 6 299498 5
+owner 6 298497 5
+owner 6 298499 5
+owner 6 297499 5
+owner 6 299499 5
+owner 6 298500 5
+owner 6 297500 5
+owner 6 299500 5
+owner 6 298501 5
+owner 6 297501 5
+owner 6 299501 5
+owner 6 296501 5
+owner 6 296500 5
+owner 6 295500 5
+owner 6 296499 5
+owner 6 295499 5
+owner 6 296498 5
+owner 6 295498 5
+owner 6 296497 5
+owner 6 295497 5
+owner 6 297497 5
+owner 6 296496 5
+owner 6 295496 5
+owner 6 297496 5
+owner 6 296495 5
+owner 6 295495 5
+owner 6 297495 5
+owner 6 296494 5
+owner 6 297494 5
+owner 6 298494 5
+owner 6 299494 5
+owner 6 298495 5
+owner 6 299495 5
+owner 6 298496 5
+owner 6 299496 5
+owner 6 300496 5
+owner 6 299497 5
+owner 6 300497 5
+owner 6 301497 5
+owner 6 300498 5
+owner 6 301498 5
+owner 6 300499 5
+owner 6 301499 5
+owner 6 300500 5
+owner 6 301496 5
+owner 6 300495 5
+owner 6 294496 5
+owner 6 294497 5
+owner 6 294498 5
+owner 6 294499 5
+owner 6 271614 6
+owner 6 270614 6
+owner 6 272614 6
+owner 6 271613 6
+owner 6 271615 6
+owner 6 270615 6
+owner 6 272615 6
+owner 6 271616 6
+owner 6 270616 6
+owner 6 272616 6
+owner 6 271617 6
+owner 6 270617 6
+owner 6 272617 6
+owner 6 269617 6
+owner 6 269616 6
+owner 6 268616 6
+owner 6 269615 6
+owner 6 268615 6
+owner 6 269614 6
+owner 6 268614 6
+owner 6 269613 6
+owner 6 268613 6
+owner 6 270613 6
+owner 6 269612 6
+owner 6 268612 6
+owner 6 270612 6
+owner 6 269611 6
+owner 6 268611 6
+owner 6 270611 6
+owner 6 269610 6
+owner 6 270610 6
+owner 6 271610 6
+owner 6 272610 6
+owner 6 271611 6
+owner 6 272611 6
+owner 6 271612 6
+owner 6 272612 6
+owner 6 273612 6
+owner 6 272613 6
+owner 6 273613 6
+owner 6 274613 6
+owner 6 273614 6
+owner 6 274614 6
+owner 6 273615 6
+owner 6 274615 6
+owner 6 273616 6
+owner 6 274612 6
+owner 6 273611 6
+owner 6 267612 6
+owner 6 267613 6
+owner 6 267614 6
+owner 6 267615 6
+owner 6 705481 7
+owner 6 704481 7
+owner 6 706481 7
+owner 6 705480 7
+owner 6 705482 7
+owner 6 704482 7
+owner 6 706482 7
+owner 6 705483 7
+owner 6 704483 7
+owner 6 706483 7
+owner 6 705484 7
+owner 6 704484 7
+owner 6 706484 7
+owner 6 703484 7
+owner 6 703483 7
+owner 6 702483 7
+owner 6 703482 7
+owner 6 702482 7
+owner 6 703481 7
+owner 6 702481 7
+owner 6 703480 7
+owner 6 702480 7
+owner 6 704480 7
+owner 6 703479 7
+owner 6 702479 7
+owner 6 704479 7
+owner 6 703478 7
+owner 6 702478 7
+owner 6 704478 7
+owner 6 703477 7
+owner 6 704477 7
+owner 6 705477 7
+owner 6 706477 7
+owner 6 705478 7
+owner 6 706478 7
+owner 6 705479 7
+owner 6 706479 7
+owner 6 707479 7
+owner 6 706480 7
+owner 6 707480 7
+owner 6 708480 7
+owner 6 707481 7
+owner 6 708481 7
+owner 6 707482 7
+owner 6 708482 7
+owner 6 707483 7
+owner 6 708479 7
+owner 6 707478 7
+owner 6 701479 7
+owner 6 701480 7
+owner 6 701481 7
+owner 6 701482 7
+prev 6 107254
+prev 6 334545
+prev 6 767276
+prev 6 298498
+prev 6 271614
+prev 6 705481
+owned 6 940609
+owned 6 940610
+owned 6 940611
+owned 6 940612
+owned 6 941608
+owned 6 941609
+owned 6 941610
+owned 6 941611
+owned 6 941612
+owned 6 941613
+owned 6 942607
+owned 6 942608
+owned 6 942609
+owned 6 942610
+owned 6 942611
+owned 6 942612
+owned 6 942613
+owned 6 942614
+owned 6 943607
+owned 6 943608
+owned 6 943609
+owned 6 943610
+owned 6 943611
+owned 6 943612
+owned 6 943613
+owned 6 943614
+owned 6 944607
+owned 6 944608
+owned 6 944609
+owned 6 944610
+owned 6 944611
+owned 6 944612
+owned 6 944613
+owned 6 944614
+owned 6 945607
+owned 6 945608
+owned 6 945609
+owned 6 945610
+owned 6 945611
+owned 6 945612
+owned 6 945613
+owned 6 945614
+owned 6 946608
+owned 6 946609
+owned 6 946610
+owned 6 946611
+owned 6 946612
+owned 6 946613
+owned 6 947609
+owned 6 947610
+owned 6 947611
+owned 6 947612
+bot 7 9 gsw4n5km 1786011062 89583 583 89 52
+owner 7 107254 2
+owner 7 106254 2
+owner 7 108254 2
+owner 7 107253 2
+owner 7 107255 2
+owner 7 106255 2
+owner 7 108255 2
+owner 7 107256 2
+owner 7 106256 2
+owner 7 108256 2
+owner 7 107257 2
+owner 7 106257 2
+owner 7 108257 2
+owner 7 105257 2
+owner 7 105256 2
+owner 7 104256 2
+owner 7 105255 2
+owner 7 104255 2
+owner 7 105254 2
+owner 7 104254 2
+owner 7 105253 2
+owner 7 104253 2
+owner 7 106253 2
+owner 7 105252 2
+owner 7 104252 2
+owner 7 106252 2
+owner 7 105251 2
+owner 7 104251 2
+owner 7 106251 2
+owner 7 105250 2
+owner 7 106250 2
+owner 7 107250 2
+owner 7 108250 2
+owner 7 107251 2
+owner 7 108251 2
+owner 7 107252 2
+owner 7 108252 2
+owner 7 109252 2
+owner 7 108253 2
+owner 7 109253 2
+owner 7 110253 2
+owner 7 109254 2
+owner 7 110254 2
+owner 7 109255 2
+owner 7 110255 2
+owner 7 109256 2
+owner 7 110252 2
+owner 7 109251 2
+owner 7 103252 2
+owner 7 103253 2
+owner 7 103254 2
+owner 7 103255 2
+owner 7 334545 3
+owner 7 333545 3
+owner 7 335545 3
+owner 7 334544 3
+owner 7 334546 3
+owner 7 333546 3
+owner 7 335546 3
+owner 7 334547 3
+owner 7 333547 3
+owner 7 335547 3
+owner 7 334548 3
+owner 7 333548 3
+owner 7 335548 3
+owner 7 332548 3
+owner 7 332547 3
+owner 7 331547 3
+owner 7 332546 3
+owner 7 331546 3
+owner 7 332545 3
+owner 7 331545 3
+owner 7 332544 3
+owner 7 331544 3
+owner 7 333544 3
+owner 7 332543 3
+owner 7 331543 3
+owner 7 333543 3
+owner 7 332542 3
+owner 7 331542 3
+owner 7 333542 3
+owner 7 332541 3
+owner 7 333541 3
+owner 7 334541 3
+owner 7 335541 3
+owner 7 334542 3
+owner 7 335542 3
+owner 7 334543 3
+owner 7 335543 3
+owner 7 336543 3
+owner 7 335544 3
+owner 7 336544 3
+owner 7 337544 3
+owner 7 336545 3
+owner 7 337545 3
+owner 7 336546 3
+owner 7 337546 3
+owner 7 336547 3
+owner 7 337543 3
+owner 7 336542 3
+owner 7 330543 3
+owner 7 330544 3
+owner 7 330545 3
+owner 7 330546 3
+owner 7 767276 4
+owner 7 766276 4
+owner 7 768276 4
+owner 7 767275 4
+owner 7 767277 4
+owner 7 766277 4
+owner 7 768277 4
+owner 7 767278 4
+owner 7 766278 4
+owner 7 768278 4
+owner 7 767279 4
+owner 7 766279 4
+owner 7 768279 4
+owner 7 765279 4
+owner 7 765278 4
+owner 7 764278 4
+owner 7 765277 4
+owner 7 764277 4
+owner 7 765276 4
+owner 7 764276 4
+owner 7 765275 4
+owner 7 764275 4
+owner 7 766275 4
+owner 7 765274 4
+owner 7 764274 4
+owner 7 766274 4
+owner 7 765273 4
+owner 7 764273 4
+owner 7 766273 4
+owner 7 765272 4
+owner 7 766272 4
+owner 7 767272 4
+owner 7 768272 4
+owner 7 767273 4
+owner 7 768273 4
+owner 7 767274 4
+owner 7 768274 4
+owner 7 769274 4
+owner 7 768275 4
+owner 7 769275 4
+owner 7 770275 4
+owner 7 769276 4
+owner 7 770276 4
+owner 7 769277 4
+owner 7 770277 4
+owner 7 769278 4
+owner 7 770274 4
+owner 7 769273 4
+owner 7 763274 4
+owner 7 763275 4
+owner 7 763276 4
+owner 7 763277 4
+owner 7 298498 5
+owner 7 297498 5
+owner 7 299498 5
+owner 7 298497 5
+owner 7 298499 5
+owner 7 297499 5
+owner 7 299499 5
+owner 7 298500 5
+owner 7 297500 5
+owner 7 299500 5
+owner 7 298501 5
+owner 7 297501 5
+owner 7 299501 5
+owner 7 296501 5
+owner 7 296500 5
+owner 7 295500 5
+owner 7 296499 5
+owner 7 295499 5
+owner 7 296498 5
+owner 7 295498 5
+owner 7 296497 5
+owner 7 295497 5
+owner 7 297497 5
+owner 7 296496 5
+owner 7 295496 5
+owner 7 297496 5
+owner 7 296495 5
+owner 7 295495 5
+owner 7 297495 5
+owner 7 296494 5
+owner 7 297494 5
+owner 7 298494 5
+owner 7 299494 5
+owner 7 298495 5
+owner 7 299495 5
+owner 7 298496 5
+owner 7 299496 5
+owner 7 300496 5
+owner 7 299497 5
+owner 7 300497 5
+owner 7 301497 5
+owner 7 300498 5
+owner 7 301498 5
+owner 7 300499 5
+owner 7 301499 5
+owner 7 300500 5
+owner 7 301496 5
+owner 7 300495 5
+owner 7 294496 5
+owner 7 294497 5
+owner 7 294498 5
+owner 7 294499 5
+owner 7 271614 6
+owner 7 270614 6
+owner 7 272614 6
+owner 7 271613 6
+owner 7 271615 6
+owner 7 270615 6
+owner 7 272615 6
+owner 7 271616 6
+owner 7 270616 6
+owner 7 272616 6
+owner 7 271617 6
+owner 7 270617 6
+owner 7 272617 6
+owner 7 269617 6
+owner 7 269616 6
+owner 7 268616 6
+owner 7 269615 6
+owner 7 268615 6
+owner 7 269614 6
+owner 7 268614 6
+owner 7 269613 6
+owner 7 268613 6
+owner 7 270613 6
+owner 7 269612 6
+owner 7 268612 6
+owner 7 270612 6
+owner 7 269611 6
+owner 7 268611 6
+owner 7 270611 6
+owner 7 269610 6
+owner 7 270610 6
+owner 7 271610 6
+owner 7 272610 6
+owner 7 271611 6
+owner 7 272611 6
+owner 7 271612 6
+owner 7 272612 6
+owner 7 273612 6
+owner 7 272613 6
+owner 7 273613 6
+owner 7 274613 6
+owner 7 273614 6
+owner 7 274614 6
+owner 7 273615 6
+owner 7 274615 6
+owner 7 273616 6
+owner 7 274612 6
+owner 7 273611 6
+owner 7 267612 6
+owner 7 267613 6
+owner 7 267614 6
+owner 7 267615 6
+owner 7 705481 7
+owner 7 704481 7
+owner 7 706481 7
+owner 7 705480 7
+owner 7 705482 7
+owner 7 704482 7
+owner 7 706482 7
+owner 7 705483 7
+owner 7 704483 7
+owner 7 706483 7
+owner 7 705484 7
+owner 7 704484 7
+owner 7 706484 7
+owner 7 703484 7
+owner 7 703483 7
+owner 7 702483 7
+owner 7 703482 7
+owner 7 702482 7
+owner 7 703481 7
+owner 7 702481 7
+owner 7 703480 7
+owner 7 702480 7
+owner 7 704480 7
+owner 7 703479 7
+owner 7 702479 7
+owner 7 704479 7
+owner 7 703478 7
+owner 7 702478 7
+owner 7 704478 7
+owner 7 703477 7
+owner 7 704477 7
+owner 7 705477 7
+owner 7 706477 7
+owner 7 705478 7
+owner 7 706478 7
+owner 7 705479 7
+owner 7 706479 7
+owner 7 707479 7
+owner 7 706480 7
+owner 7 707480 7
+owner 7 708480 7
+owner 7 707481 7
+owner 7 708481 7
+owner 7 707482 7
+owner 7 708482 7
+owner 7 707483 7
+owner 7 708479 7
+owner 7 707478 7
+owner 7 701479 7
+owner 7 701480 7
+owner 7 701481 7
+owner 7 701482 7
+owner 7 944611 8
+owner 7 943611 8
+owner 7 945611 8
+owner 7 944610 8
+owner 7 944612 8
+owner 7 943612 8
+owner 7 945612 8
+owner 7 944613 8
+owner 7 943613 8
+owner 7 945613 8
+owner 7 944614 8
+owner 7 943614 8
+owner 7 945614 8
+owner 7 942614 8
+owner 7 942613 8
+owner 7 941613 8
+owner 7 942612 8
+owner 7 941612 8
+owner 7 942611 8
+owner 7 941611 8
+owner 7 942610 8
+owner 7 941610 8
+owner 7 943610 8
+owner 7 942609 8
+owner 7 941609 8
+owner 7 943609 8
+owner 7 942608 8
+owner 7 941608 8
+owner 7 943608 8
+owner 7 942607 8
+owner 7 943607 8
+owner 7 944607 8
+owner 7 945607 8
+owner 7 944608 8
+owner 7 945608 8
+owner 7 944609 8
+owner 7 945609 8
+owner 7 946609 8
+owner 7 945610 8
+owner 7 946610 8
+owner 7 947610 8
+owner 7 946611 8
+owner 7 947611 8
+owner 7 946612 8
+owner 7 947612 8
+owner 7 946613 8
+owner 7 947609 8
+owner 7 946608 8
+owner 7 940609 8
+owner 7 940610 8
+owner 7 940611 8
+owner 7 940612 8
+prev 7 107254
+prev 7 334545
+prev 7 767276
+prev 7 298498
+prev 7 271614
+prev 7 705481
+prev 7 944611
+owned 7 85581
+owned 7 85582
+owned 7 85583
+owned 7 85584
+owned 7 86580
+owned 7 86581
+owned 7 86582
+owned 7 86583
+owned 7 86584
+owned 7 86585
+owned 7 87579
+owned 7 87580
+owned 7 87581
+owned 7 87582
+owned 7 87583
+owned 7 87584
+owned 7 87585
+owned 7 87586
+owned 7 88579
+owned 7 88580
+owned 7 88581
+owned 7 88582
+owned 7 88583
+owned 7 88584
+owned 7 88585
+owned 7 88586
+owned 7 89579
+owned 7 89580
+owned 7 89581
+owned 7 89582
+owned 7 89583
+owned 7 89584
+owned 7 89585
+owned 7 89586
+owned 7 90579
+owned 7 90580
+owned 7 90581
+owned 7 90582
+owned 7 90583
+owned 7 90584
+owned 7 90585
+owned 7 90586
+owned 7 91580
+owned 7 91581
+owned 7 91582
+owned 7 91583
+owned 7 91584
+owned 7 91585
+owned 7 92581
+owned 7 92582
+owned 7 92583
+owned 7 92584
+bot 8 10 ooz4f963 1067254298 896690 690 896 52
+owner 8 107254 2
+owner 8 106254 2
+owner 8 108254 2
+owner 8 107253 2
+owner 8 107255 2
+owner 8 106255 2
+owner 8 108255 2
+owner 8 107256 2
+owner 8 106256 2
+owner 8 108256 2
+owner 8 107257 2
+owner 8 106257 2
+owner 8 108257 2
+owner 8 105257 2
+owner 8 105256 2
+owner 8 104256 2
+owner 8 105255 2
+owner 8 104255 2
+owner 8 105254 2
+owner 8 104254 2
+owner 8 105253 2
+owner 8 104253 2
+owner 8 106253 2
+owner 8 105252 2
+owner 8 104252 2
+owner 8 106252 2
+owner 8 105251 2
+owner 8 104251 2
+owner 8 106251 2
+owner 8 105250 2
+owner 8 106250 2
+owner 8 107250 2
+owner 8 108250 2
+owner 8 107251 2
+owner 8 108251 2
+owner 8 107252 2
+owner 8 108252 2
+owner 8 109252 2
+owner 8 108253 2
+owner 8 109253 2
+owner 8 110253 2
+owner 8 109254 2
+owner 8 110254 2
+owner 8 109255 2
+owner 8 110255 2
+owner 8 109256 2
+owner 8 110252 2
+owner 8 109251 2
+owner 8 103252 2
+owner 8 103253 2
+owner 8 103254 2
+owner 8 103255 2
+owner 8 334545 3
+owner 8 333545 3
+owner 8 335545 3
+owner 8 334544 3
+owner 8 334546 3
+owner 8 333546 3
+owner 8 335546 3
+owner 8 334547 3
+owner 8 333547 3
+owner 8 335547 3
+owner 8 334548 3
+owner 8 333548 3
+owner 8 335548 3
+owner 8 332548 3
+owner 8 332547 3
+owner 8 331547 3
+owner 8 332546 3
+owner 8 331546 3
+owner 8 332545 3
+owner 8 331545 3
+owner 8 332544 3
+owner 8 331544 3
+owner 8 333544 3
+owner 8 332543 3
+owner 8 331543 3
+owner 8 333543 3
+owner 8 332542 3
+owner 8 331542 3
+owner 8 333542 3
+owner 8 332541 3
+owner 8 333541 3
+owner 8 334541 3
+owner 8 335541 3
+owner 8 334542 3
+owner 8 335542 3
+owner 8 334543 3
+owner 8 335543 3
+owner 8 336543 3
+owner 8 335544 3
+owner 8 336544 3
+owner 8 337544 3
+owner 8 336545 3
+owner 8 337545 3
+owner 8 336546 3
+owner 8 337546 3
+owner 8 336547 3
+owner 8 337543 3
+owner 8 336542 3
+owner 8 330543 3
+owner 8 330544 3
+owner 8 330545 3
+owner 8 330546 3
+owner 8 767276 4
+owner 8 766276 4
+owner 8 768276 4
+owner 8 767275 4
+owner 8 767277 4
+owner 8 766277 4
+owner 8 768277 4
+owner 8 767278 4
+owner 8 766278 4
+owner 8 768278 4
+owner 8 767279 4
+owner 8 766279 4
+owner 8 768279 4
+owner 8 765279 4
+owner 8 765278 4
+owner 8 764278 4
+owner 8 765277 4
+owner 8 764277 4
+owner 8 765276 4
+owner 8 764276 4
+owner 8 765275 4
+owner 8 764275 4
+owner 8 766275 4
+owner 8 765274 4
+owner 8 764274 4
+owner 8 766274 4
+owner 8 765273 4
+owner 8 764273 4
+owner 8 766273 4
+owner 8 765272 4
+owner 8 766272 4
+owner 8 767272 4
+owner 8 768272 4
+owner 8 767273 4
+owner 8 768273 4
+owner 8 767274 4
+owner 8 768274 4
+owner 8 769274 4
+owner 8 768275 4
+owner 8 769275 4
+owner 8 770275 4
+owner 8 769276 4
+owner 8 770276 4
+owner 8 769277 4
+owner 8 770277 4
+owner 8 769278 4
+owner 8 770274 4
+owner 8 769273 4
+owner 8 763274 4
+owner 8 763275 4
+owner 8 763276 4
+owner 8 763277 4
+owner 8 298498 5
+owner 8 297498 5
+owner 8 299498 5
+owner 8 298497 5
+owner 8 298499 5
+owner 8 297499 5
+owner 8 299499 5
+owner 8 298500 5
+owner 8 297500 5
+owner 8 299500 5
+owner 8 298501 5
+owner 8 297501 5
+owner 8 299501 5
+owner 8 296501 5
+owner 8 296500 5
+owner 8 295500 5
+owner 8 296499 5
+owner 8 295499 5
+owner 8 296498 5
+owner 8 295498 5
+owner 8 296497 5
+owner 8 295497 5
+owner 8 297497 5
+owner 8 296496 5
+owner 8 295496 5
+owner 8 297496 5
+owner 8 296495 5
+owner 8 295495 5
+owner 8 297495 5
+owner 8 296494 5
+owner 8 297494 5
+owner 8 298494 5
+owner 8 299494 5
+owner 8 298495 5
+owner 8 299495 5
+owner 8 298496 5
+owner 8 299496 5
+owner 8 300496 5
+owner 8 299497 5
+owner 8 300497 5
+owner 8 301497 5
+owner 8 300498 5
+owner 8 301498 5
+owner 8 300499 5
+owner 8 301499 5
+owner 8 300500 5
+owner 8 301496 5
+owner 8 300495 5
+owner 8 294496 5
+owner 8 294497 5
+owner 8 294498 5
+owner 8 294499 5
+owner 8 271614 6
+owner 8 270614 6
+owner 8 272614 6
+owner 8 271613 6
+owner 8 271615 6
+owner 8 270615 6
+owner 8 272615 6
+owner 8 271616 6
+owner 8 270616 6
+owner 8 272616 6
+owner 8 271617 6
+owner 8 270617 6
+owner 8 272617 6
+owner 8 269617 6
+owner 8 269616 6
+owner 8 268616 6
+owner 8 269615 6
+owner 8 268615 6
+owner 8 269614 6
+owner 8 268614 6
+owner 8 269613 6
+owner 8 268613 6
+owner 8 270613 6
+owner 8 269612 6
+owner 8 268612 6
+owner 8 270612 6
+owner 8 269611 6
+owner 8 268611 6
+owner 8 270611 6
+owner 8 269610 6
+owner 8 270610 6
+owner 8 271610 6
+owner 8 272610 6
+owner 8 271611 6
+owner 8 272611 6
+owner 8 271612 6
+owner 8 272612 6
+owner 8 273612 6
+owner 8 272613 6
+owner 8 273613 6
+owner 8 274613 6
+owner 8 273614 6
+owner 8 274614 6
+owner 8 273615 6
+owner 8 274615 6
+owner 8 273616 6
+owner 8 274612 6
+owner 8 273611 6
+owner 8 267612 6
+owner 8 267613 6
+owner 8 267614 6
+owner 8 267615 6
+owner 8 705481 7
+owner 8 704481 7
+owner 8 706481 7
+owner 8 705480 7
+owner 8 705482 7
+owner 8 704482 7
+owner 8 706482 7
+owner 8 705483 7
+owner 8 704483 7
+owner 8 706483 7
+owner 8 705484 7
+owner 8 704484 7
+owner 8 706484 7
+owner 8 703484 7
+owner 8 703483 7
+owner 8 702483 7
+owner 8 703482 7
+owner 8 702482 7
+owner 8 703481 7
+owner 8 702481 7
+owner 8 703480 7
+owner 8 702480 7
+owner 8 704480 7
+owner 8 703479 7
+owner 8 702479 7
+owner 8 704479 7
+owner 8 703478 7
+owner 8 702478 7
+owner 8 704478 7
+owner 8 703477 7
+owner 8 704477 7
+owner 8 705477 7
+owner 8 706477 7
+owner 8 705478 7
+owner 8 706478 7
+owner 8 705479 7
+owner 8 706479 7
+owner 8 707479 7
+owner 8 706480 7
+owner 8 707480 7
+owner 8 708480 7
+owner 8 707481 7
+owner 8 708481 7
+owner 8 707482 7
+owner 8 708482 7
+owner 8 707483 7
+owner 8 708479 7
+owner 8 707478 7
+owner 8 701479 7
+owner 8 701480 7
+owner 8 701481 7
+owner 8 701482 7
+owner 8 944611 8
+owner 8 943611 8
+owner 8 945611 8
+owner 8 944610 8
+owner 8 944612 8
+owner 8 943612 8
+owner 8 945612 8
+owner 8 944613 8
+owner 8 943613 8
+owner 8 945613 8
+owner 8 944614 8
+owner 8 943614 8
+owner 8 945614 8
+owner 8 942614 8
+owner 8 942613 8
+owner 8 941613 8
+owner 8 942612 8
+owner 8 941612 8
+owner 8 942611 8
+owner 8 941611 8
+owner 8 942610 8
+owner 8 941610 8
+owner 8 943610 8
+owner 8 942609 8
+owner 8 941609 8
+owner 8 943609 8
+owner 8 942608 8
+owner 8 941608 8
+owner 8 943608 8
+owner 8 942607 8
+owner 8 943607 8
+owner 8 944607 8
+owner 8 945607 8
+owner 8 944608 8
+owner 8 945608 8
+owner 8 944609 8
+owner 8 945609 8
+owner 8 946609 8
+owner 8 945610 8
+owner 8 946610 8
+owner 8 947610 8
+owner 8 946611 8
+owner 8 947611 8
+owner 8 946612 8
+owner 8 947612 8
+owner 8 946613 8
+owner 8 947609 8
+owner 8 946608 8
+owner 8 940609 8
+owner 8 940610 8
+owner 8 940611 8
+owner 8 940612 8
+owner 8 89583 9
+owner 8 88583 9
+owner 8 90583 9
+owner 8 89582 9
+owner 8 89584 9
+owner 8 88584 9
+owner 8 90584 9
+owner 8 89585 9
+owner 8 88585 9
+owner 8 90585 9
+owner 8 89586 9
+owner 8 88586 9
+owner 8 90586 9
+owner 8 87586 9
+owner 8 87585 9
+owner 8 86585 9
+owner 8 87584 9
+owner 8 86584 9
+owner 8 87583 9
+owner 8 86583 9
+owner 8 87582 9
+owner 8 86582 9
+owner 8 88582 9
+owner 8 87581 9
+owner 8 86581 9
+owner 8 88581 9
+owner 8 87580 9
+owner 8 86580 9
+owner 8 88580 9
+owner 8 87579 9
+owner 8 88579 9
+owner 8 89579 9
+owner 8 90579 9
+owner 8 89580 9
+owner 8 90580 9
+owner 8 89581 9
+owner 8 90581 9
+owner 8 91581 9
+owner 8 90582 9
+owner 8 91582 9
+owner 8 92582 9
+owner 8 91583 9
+owner 8 92583 9
+owner 8 91584 9
+owner 8 92584 9
+owner 8 91585 9
+owner 8 92581 9
+owner 8 91580 9
+owner 8 85581 9
+owner 8 85582 9
+owner 8 85583 9
+owner 8 85584 9
+prev 8 107254
+prev 8 334545
+prev 8 767276
+prev 8 298498
+prev 8 271614
+prev 8 705481
+prev 8 944611
+prev 8 89583
+owned 8 892688
+owned 8 892689
+owned 8 892690
+owned 8 892691
+owned 8 893687
+owned 8 893688
+owned 8 893689
+owned 8 893690
+owned 8 893691
+owned 8 893692
+owned 8 894686
+owned 8 894687
+owned 8 894688
+owned 8 894689
+owned 8 894690
+owned 8 894691
+owned 8 894692
+owned 8 894693
+owned 8 895686
+owned 8 895687
+owned 8 895688
+owned 8 895689
+owned 8 895690
+owned 8 895691
+owned 8 895692
+owned 8 895693
+owned 8 896686
+owned 8 896687
+owned 8 896688
+owned 8 896689
+owned 8 896690
+owned 8 896691
+owned 8 896692
+owned 8 896693
+owned 8 897686
+owned 8 897687
+owned 8 897688
+owned 8 897689
+owned 8 897690
+owned 8 897691
+owned 8 897692
+owned 8 897693
+owned 8 898687
+owned 8 898688
+owned 8 898689
+owned 8 898690
+owned 8 898691
+owned 8 898692
+owned 8 899688
+owned 8 899689
+owned 8 899690
+owned 8 899691
+bot 9 11 g49bog52 471077977 331181 181 331 52
+owner 9 107254 2
+owner 9 106254 2
+owner 9 108254 2
+owner 9 107253 2
+owner 9 107255 2
+owner 9 106255 2
+owner 9 108255 2
+owner 9 107256 2
+owner 9 106256 2
+owner 9 108256 2
+owner 9 107257 2
+owner 9 106257 2
+owner 9 108257 2
+owner 9 105257 2
+owner 9 105256 2
+owner 9 104256 2
+owner 9 105255 2
+owner 9 104255 2
+owner 9 105254 2
+owner 9 104254 2
+owner 9 105253 2
+owner 9 104253 2
+owner 9 106253 2
+owner 9 105252 2
+owner 9 104252 2
+owner 9 106252 2
+owner 9 105251 2
+owner 9 104251 2
+owner 9 106251 2
+owner 9 105250 2
+owner 9 106250 2
+owner 9 107250 2
+owner 9 108250 2
+owner 9 107251 2
+owner 9 108251 2
+owner 9 107252 2
+owner 9 108252 2
+owner 9 109252 2
+owner 9 108253 2
+owner 9 109253 2
+owner 9 110253 2
+owner 9 109254 2
+owner 9 110254 2
+owner 9 109255 2
+owner 9 110255 2
+owner 9 109256 2
+owner 9 110252 2
+owner 9 109251 2
+owner 9 103252 2
+owner 9 103253 2
+owner 9 103254 2
+owner 9 103255 2
+owner 9 334545 3
+owner 9 333545 3
+owner 9 335545 3
+owner 9 334544 3
+owner 9 334546 3
+owner 9 333546 3
+owner 9 335546 3
+owner 9 334547 3
+owner 9 333547 3
+owner 9 335547 3
+owner 9 334548 3
+owner 9 333548 3
+owner 9 335548 3
+owner 9 332548 3
+owner 9 332547 3
+owner 9 331547 3
+owner 9 332546 3
+owner 9 331546 3
+owner 9 332545 3
+owner 9 331545 3
+owner 9 332544 3
+owner 9 331544 3
+owner 9 333544 3
+owner 9 332543 3
+owner 9 331543 3
+owner 9 333543 3
+owner 9 332542 3
+owner 9 331542 3
+owner 9 333542 3
+owner 9 332541 3
+owner 9 333541 3
+owner 9 334541 3
+owner 9 335541 3
+owner 9 334542 3
+owner 9 335542 3
+owner 9 334543 3
+owner 9 335543 3
+owner 9 336543 3
+owner 9 335544 3
+owner 9 336544 3
+owner 9 337544 3
+owner 9 336545 3
+owner 9 337545 3
+owner 9 336546 3
+owner 9 337546 3
+owner 9 336547 3
+owner 9 337543 3
+owner 9 336542 3
+owner 9 330543 3
+owner 9 330544 3
+owner 9 330545 3
+owner 9 330546 3
+owner 9 767276 4
+owner 9 766276 4
+owner 9 768276 4
+owner 9 767275 4
+owner 9 767277 4
+owner 9 766277 4
+owner 9 768277 4
+owner 9 767278 4
+owner 9 766278 4
+owner 9 768278 4
+owner 9 767279 4
+owner 9 766279 4
+owner 9 768279 4
+owner 9 765279 4
+owner 9 765278 4
+owner 9 764278 4
+owner 9 765277 4
+owner 9 764277 4
+owner 9 765276 4
+owner 9 764276 4
+owner 9 765275 4
+owner 9 764275 4
+owner 9 766275 4
+owner 9 765274 4
+owner 9 764274 4
+owner 9 766274 4
+owner 9 765273 4
+owner 9 764273 4
+owner 9 766273 4
+owner 9 765272 4
+owner 9 766272 4
+owner 9 767272 4
+owner 9 768272 4
+owner 9 767273 4
+owner 9 768273 4
+owner 9 767274 4
+owner 9 768274 4
+owner 9 769274 4
+owner 9 768275 4
+owner 9 769275 4
+owner 9 770275 4
+owner 9 769276 4
+owner 9 770276 4
+owner 9 769277 4
+owner 9 770277 4
+owner 9 769278 4
+owner 9 770274 4
+owner 9 769273 4
+owner 9 763274 4
+owner 9 763275 4
+owner 9 763276 4
+owner 9 763277 4
+owner 9 298498 5
+owner 9 297498 5
+owner 9 299498 5
+owner 9 298497 5
+owner 9 298499 5
+owner 9 297499 5
+owner 9 299499 5
+owner 9 298500 5
+owner 9 297500 5
+owner 9 299500 5
+owner 9 298501 5
+owner 9 297501 5
+owner 9 299501 5
+owner 9 296501 5
+owner 9 296500 5
+owner 9 295500 5
+owner 9 296499 5
+owner 9 295499 5
+owner 9 296498 5
+owner 9 295498 5
+owner 9 296497 5
+owner 9 295497 5
+owner 9 297497 5
+owner 9 296496 5
+owner 9 295496 5
+owner 9 297496 5
+owner 9 296495 5
+owner 9 295495 5
+owner 9 297495 5
+owner 9 296494 5
+owner 9 297494 5
+owner 9 298494 5
+owner 9 299494 5
+owner 9 298495 5
+owner 9 299495 5
+owner 9 298496 5
+owner 9 299496 5
+owner 9 300496 5
+owner 9 299497 5
+owner 9 300497 5
+owner 9 301497 5
+owner 9 300498 5
+owner 9 301498 5
+owner 9 300499 5
+owner 9 301499 5
+owner 9 300500 5
+owner 9 301496 5
+owner 9 300495 5
+owner 9 294496 5
+owner 9 294497 5
+owner 9 294498 5
+owner 9 294499 5
+owner 9 271614 6
+owner 9 270614 6
+owner 9 272614 6
+owner 9 271613 6
+owner 9 271615 6
+owner 9 270615 6
+owner 9 272615 6
+owner 9 271616 6
+owner 9 270616 6
+owner 9 272616 6
+owner 9 271617 6
+owner 9 270617 6
+owner 9 272617 6
+owner 9 269617 6
+owner 9 269616 6
+owner 9 268616 6
+owner 9 269615 6
+owner 9 268615 6
+owner 9 269614 6
+owner 9 268614 6
+owner 9 269613 6
+owner 9 268613 6
+owner 9 270613 6
+owner 9 269612 6
+owner 9 268612 6
+owner 9 270612 6
+owner 9 269611 6
+owner 9 268611 6
+owner 9 270611 6
+owner 9 269610 6
+owner 9 270610 6
+owner 9 271610 6
+owner 9 272610 6
+owner 9 271611 6
+owner 9 272611 6
+owner 9 271612 6
+owner 9 272612 6
+owner 9 273612 6
+owner 9 272613 6
+owner 9 273613 6
+owner 9 274613 6
+owner 9 273614 6
+owner 9 274614 6
+owner 9 273615 6
+owner 9 274615 6
+owner 9 273616 6
+owner 9 274612 6
+owner 9 273611 6
+owner 9 267612 6
+owner 9 267613 6
+owner 9 267614 6
+owner 9 267615 6
+owner 9 705481 7
+owner 9 704481 7
+owner 9 706481 7
+owner 9 705480 7
+owner 9 705482 7
+owner 9 704482 7
+owner 9 706482 7
+owner 9 705483 7
+owner 9 704483 7
+owner 9 706483 7
+owner 9 705484 7
+owner 9 704484 7
+owner 9 706484 7
+owner 9 703484 7
+owner 9 703483 7
+owner 9 702483 7
+owner 9 703482 7
+owner 9 702482 7
+owner 9 703481 7
+owner 9 702481 7
+owner 9 703480 7
+owner 9 702480 7
+owner 9 704480 7
+owner 9 703479 7
+owner 9 702479 7
+owner 9 704479 7
+owner 9 703478 7
+owner 9 702478 7
+owner 9 704478 7
+owner 9 703477 7
+owner 9 704477 7
+owner 9 705477 7
+owner 9 706477 7
+owner 9 705478 7
+owner 9 706478 7
+owner 9 705479 7
+owner 9 706479 7
+owner 9 707479 7
+owner 9 706480 7
+owner 9 707480 7
+owner 9 708480 7
+owner 9 707481 7
+owner 9 708481 7
+owner 9 707482 7
+owner 9 708482 7
+owner 9 707483 7
+owner 9 708479 7
+owner 9 707478 7
+owner 9 701479 7
+owner 9 701480 7
+owner 9 701481 7
+owner 9 701482 7
+owner 9 944611 8
+owner 9 943611 8
+owner 9 945611 8
+owner 9 944610 8
+owner 9 944612 8
+owner 9 943612 8
+owner 9 945612 8
+owner 9 944613 8
+owner 9 943613 8
+owner 9 945613 8
+owner 9 944614 8
+owner 9 943614 8
+owner 9 945614 8
+owner 9 942614 8
+owner 9 942613 8
+owner 9 941613 8
+owner 9 942612 8
+owner 9 941612 8
+owner 9 942611 8
+owner 9 941611 8
+owner 9 942610 8
+owner 9 941610 8
+owner 9 943610 8
+owner 9 942609 8
+owner 9 941609 8
+owner 9 943609 8
+owner 9 942608 8
+owner 9 941608 8
+owner 9 943608 8
+owner 9 942607 8
+owner 9 943607 8
+owner 9 944607 8
+owner 9 945607 8
+owner 9 944608 8
+owner 9 945608 8
+owner 9 944609 8
+owner 9 945609 8
+owner 9 946609 8
+owner 9 945610 8
+owner 9 946610 8
+owner 9 947610 8
+owner 9 946611 8
+owner 9 947611 8
+owner 9 946612 8
+owner 9 947612 8
+owner 9 946613 8
+owner 9 947609 8
+owner 9 946608 8
+owner 9 940609 8
+owner 9 940610 8
+owner 9 940611 8
+owner 9 940612 8
+owner 9 89583 9
+owner 9 88583 9
+owner 9 90583 9
+owner 9 89582 9
+owner 9 89584 9
+owner 9 88584 9
+owner 9 90584 9
+owner 9 89585 9
+owner 9 88585 9
+owner 9 90585 9
+owner 9 89586 9
+owner 9 88586 9
+owner 9 90586 9
+owner 9 87586 9
+owner 9 87585 9
+owner 9 86585 9
+owner 9 87584 9
+owner 9 86584 9
+owner 9 87583 9
+owner 9 86583 9
+owner 9 87582 9
+owner 9 86582 9
+owner 9 88582 9
+owner 9 87581 9
+owner 9 86581 9
+owner 9 88581 9
+owner 9 87580 9
+owner 9 86580 9
+owner 9 88580 9
+owner 9 87579 9
+owner 9 88579 9
+owner 9 89579 9
+owner 9 90579 9
+owner 9 89580 9
+owner 9 90580 9
+owner 9 89581 9
+owner 9 90581 9
+owner 9 91581 9
+owner 9 90582 9
+owner 9 91582 9
+owner 9 92582 9
+owner 9 91583 9
+owner 9 92583 9
+owner 9 91584 9
+owner 9 92584 9
+owner 9 91585 9
+owner 9 92581 9
+owner 9 91580 9
+owner 9 85581 9
+owner 9 85582 9
+owner 9 85583 9
+owner 9 85584 9
+owner 9 896690 10
+owner 9 895690 10
+owner 9 897690 10
+owner 9 896689 10
+owner 9 896691 10
+owner 9 895691 10
+owner 9 897691 10
+owner 9 896692 10
+owner 9 895692 10
+owner 9 897692 10
+owner 9 896693 10
+owner 9 895693 10
+owner 9 897693 10
+owner 9 894693 10
+owner 9 894692 10
+owner 9 893692 10
+owner 9 894691 10
+owner 9 893691 10
+owner 9 894690 10
+owner 9 893690 10
+owner 9 894689 10
+owner 9 893689 10
+owner 9 895689 10
+owner 9 894688 10
+owner 9 893688 10
+owner 9 895688 10
+owner 9 894687 10
+owner 9 893687 10
+owner 9 895687 10
+owner 9 894686 10
+owner 9 895686 10
+owner 9 896686 10
+owner 9 897686 10
+owner 9 896687 10
+owner 9 897687 10
+owner 9 896688 10
+owner 9 897688 10
+owner 9 898688 10
+owner 9 897689 10
+owner 9 898689 10
+owner 9 899689 10
+owner 9 898690 10
+owner 9 899690 10
+owner 9 898691 10
+owner 9 899691 10
+owner 9 898692 10
+owner 9 899688 10
+owner 9 898687 10
+owner 9 892688 10
+owner 9 892689 10
+owner 9 892690 10
+owner 9 892691 10
+prev 9 107254
+prev 9 334545
+prev 9 767276
+prev 9 298498
+prev 9 271614
+prev 9 705481
+prev 9 944611
+prev 9 89583
+prev 9 896690
+owned 9 327179
+owned 9 327180
+owned 9 327181
+owned 9 327182
+owned 9 328178
+owned 9 328179
+owned 9 328180
+owned 9 328181
+owned 9 328182
+owned 9 328183
+owned 9 329177
+owned 9 329178
+owned 9 329179
+owned 9 329180
+owned 9 329181
+owned 9 329182
+owned 9 329183
+owned 9 329184
+owned 9 330177
+owned 9 330178
+owned 9 330179
+owned 9 330180
+owned 9 330181
+owned 9 330182
+owned 9 330183
+owned 9 330184
+owned 9 331177
+owned 9 331178
+owned 9 331179
+owned 9 331180
+owned 9 331181
+owned 9 331182
+owned 9 331183
+owned 9 331184
+owned 9 332177
+owned 9 332178
+owned 9 332179
+owned 9 332180
+owned 9 332181
+owned 9 332182
+owned 9 332183
+owned 9 332184
+owned 9 333178
+owned 9 333179
+owned 9 333180
+owned 9 333181
+owned 9 333182
+owned 9 333183
+owned 9 334179
+owned 9 334180
+owned 9 334181
+owned 9 334182
+bot 10 12 vl3arc4y 2110741002 468222 222 468 52
+owner 10 107254 2
+owner 10 106254 2
+owner 10 108254 2
+owner 10 107253 2
+owner 10 107255 2
+owner 10 106255 2
+owner 10 108255 2
+owner 10 107256 2
+owner 10 106256 2
+owner 10 108256 2
+owner 10 107257 2
+owner 10 106257 2
+owner 10 108257 2
+owner 10 105257 2
+owner 10 105256 2
+owner 10 104256 2
+owner 10 105255 2
+owner 10 104255 2
+owner 10 105254 2
+owner 10 104254 2
+owner 10 105253 2
+owner 10 104253 2
+owner 10 106253 2
+owner 10 105252 2
+owner 10 104252 2
+owner 10 106252 2
+owner 10 105251 2
+owner 10 104251 2
+owner 10 106251 2
+owner 10 105250 2
+owner 10 106250 2
+owner 10 107250 2
+owner 10 108250 2
+owner 10 107251 2
+owner 10 108251 2
+owner 10 107252 2
+owner 10 108252 2
+owner 10 109252 2
+owner 10 108253 2
+owner 10 109253 2
+owner 10 110253 2
+owner 10 109254 2
+owner 10 110254 2
+owner 10 109255 2
+owner 10 110255 2
+owner 10 109256 2
+owner 10 110252 2
+owner 10 109251 2
+owner 10 103252 2
+owner 10 103253 2
+owner 10 103254 2
+owner 10 103255 2
+owner 10 334545 3
+owner 10 333545 3
+owner 10 335545 3
+owner 10 334544 3
+owner 10 334546 3
+owner 10 333546 3
+owner 10 335546 3
+owner 10 334547 3
+owner 10 333547 3
+owner 10 335547 3
+owner 10 334548 3
+owner 10 333548 3
+owner 10 335548 3
+owner 10 332548 3
+owner 10 332547 3
+owner 10 331547 3
+owner 10 332546 3
+owner 10 331546 3
+owner 10 332545 3
+owner 10 331545 3
+owner 10 332544 3
+owner 10 331544 3
+owner 10 333544 3
+owner 10 332543 3
+owner 10 331543 3
+owner 10 333543 3
+owner 10 332542 3
+owner 10 331542 3
+owner 10 333542 3
+owner 10 332541 3
+owner 10 333541 3
+owner 10 334541 3
+owner 10 335541 3
+owner 10 334542 3
+owner 10 335542 3
+owner 10 334543 3
+owner 10 335543 3
+owner 10 336543 3
+owner 10 335544 3
+owner 10 336544 3
+owner 10 337544 3
+owner 10 336545 3
+owner 10 337545 3
+owner 10 336546 3
+owner 10 337546 3
+owner 10 336547 3
+owner 10 337543 3
+owner 10 336542 3
+owner 10 330543 3
+owner 10 330544 3
+owner 10 330545 3
+owner 10 330546 3
+owner 10 767276 4
+owner 10 766276 4
+owner 10 768276 4
+owner 10 767275 4
+owner 10 767277 4
+owner 10 766277 4
+owner 10 768277 4
+owner 10 767278 4
+owner 10 766278 4
+owner 10 768278 4
+owner 10 767279 4
+owner 10 766279 4
+owner 10 768279 4
+owner 10 765279 4
+owner 10 765278 4
+owner 10 764278 4
+owner 10 765277 4
+owner 10 764277 4
+owner 10 765276 4
+owner 10 764276 4
+owner 10 765275 4
+owner 10 764275 4
+owner 10 766275 4
+owner 10 765274 4
+owner 10 764274 4
+owner 10 766274 4
+owner 10 765273 4
+owner 10 764273 4
+owner 10 766273 4
+owner 10 765272 4
+owner 10 766272 4
+owner 10 767272 4
+owner 10 768272 4
+owner 10 767273 4
+owner 10 768273 4
+owner 10 767274 4
+owner 10 768274 4
+owner 10 769274 4
+owner 10 768275 4
+owner 10 769275 4
+owner 10 770275 4
+owner 10 769276 4
+owner 10 770276 4
+owner 10 769277 4
+owner 10 770277 4
+owner 10 769278 4
+owner 10 770274 4
+owner 10 769273 4
+owner 10 763274 4
+owner 10 763275 4
+owner 10 763276 4
+owner 10 763277 4
+owner 10 298498 5
+owner 10 297498 5
+owner 10 299498 5
+owner 10 298497 5
+owner 10 298499 5
+owner 10 297499 5
+owner 10 299499 5
+owner 10 298500 5
+owner 10 297500 5
+owner 10 299500 5
+owner 10 298501 5
+owner 10 297501 5
+owner 10 299501 5
+owner 10 296501 5
+owner 10 296500 5
+owner 10 295500 5
+owner 10 296499 5
+owner 10 295499 5
+owner 10 296498 5
+owner 10 295498 5
+owner 10 296497 5
+owner 10 295497 5
+owner 10 297497 5
+owner 10 296496 5
+owner 10 295496 5
+owner 10 297496 5
+owner 10 296495 5
+owner 10 295495 5
+owner 10 297495 5
+owner 10 296494 5
+owner 10 297494 5
+owner 10 298494 5
+owner 10 299494 5
+owner 10 298495 5
+owner 10 299495 5
+owner 10 298496 5
+owner 10 299496 5
+owner 10 300496 5
+owner 10 299497 5
+owner 10 300497 5
+owner 10 301497 5
+owner 10 300498 5
+owner 10 301498 5
+owner 10 300499 5
+owner 10 301499 5
+owner 10 300500 5
+owner 10 301496 5
+owner 10 300495 5
+owner 10 294496 5
+owner 10 294497 5
+owner 10 294498 5
+owner 10 294499 5
+owner 10 271614 6
+owner 10 270614 6
+owner 10 272614 6
+owner 10 271613 6
+owner 10 271615 6
+owner 10 270615 6
+owner 10 272615 6
+owner 10 271616 6
+owner 10 270616 6
+owner 10 272616 6
+owner 10 271617 6
+owner 10 270617 6
+owner 10 272617 6
+owner 10 269617 6
+owner 10 269616 6
+owner 10 268616 6
+owner 10 269615 6
+owner 10 268615 6
+owner 10 269614 6
+owner 10 268614 6
+owner 10 269613 6
+owner 10 268613 6
+owner 10 270613 6
+owner 10 269612 6
+owner 10 268612 6
+owner 10 270612 6
+owner 10 269611 6
+owner 10 268611 6
+owner 10 270611 6
+owner 10 269610 6
+owner 10 270610 6
+owner 10 271610 6
+owner 10 272610 6
+owner 10 271611 6
+owner 10 272611 6
+owner 10 271612 6
+owner 10 272612 6
+owner 10 273612 6
+owner 10 272613 6
+owner 10 273613 6
+owner 10 274613 6
+owner 10 273614 6
+owner 10 274614 6
+owner 10 273615 6
+owner 10 274615 6
+owner 10 273616 6
+owner 10 274612 6
+owner 10 273611 6
+owner 10 267612 6
+owner 10 267613 6
+owner 10 267614 6
+owner 10 267615 6
+owner 10 705481 7
+owner 10 704481 7
+owner 10 706481 7
+owner 10 705480 7
+owner 10 705482 7
+owner 10 704482 7
+owner 10 706482 7
+owner 10 705483 7
+owner 10 704483 7
+owner 10 706483 7
+owner 10 705484 7
+owner 10 704484 7
+owner 10 706484 7
+owner 10 703484 7
+owner 10 703483 7
+owner 10 702483 7
+owner 10 703482 7
+owner 10 702482 7
+owner 10 703481 7
+owner 10 702481 7
+owner 10 703480 7
+owner 10 702480 7
+owner 10 704480 7
+owner 10 703479 7
+owner 10 702479 7
+owner 10 704479 7
+owner 10 703478 7
+owner 10 702478 7
+owner 10 704478 7
+owner 10 703477 7
+owner 10 704477 7
+owner 10 705477 7
+owner 10 706477 7
+owner 10 705478 7
+owner 10 706478 7
+owner 10 705479 7
+owner 10 706479 7
+owner 10 707479 7
+owner 10 706480 7
+owner 10 707480 7
+owner 10 708480 7
+owner 10 707481 7
+owner 10 708481 7
+owner 10 707482 7
+owner 10 708482 7
+owner 10 707483 7
+owner 10 708479 7
+owner 10 707478 7
+owner 10 701479 7
+owner 10 701480 7
+owner 10 701481 7
+owner 10 701482 7
+owner 10 944611 8
+owner 10 943611 8
+owner 10 945611 8
+owner 10 944610 8
+owner 10 944612 8
+owner 10 943612 8
+owner 10 945612 8
+owner 10 944613 8
+owner 10 943613 8
+owner 10 945613 8
+owner 10 944614 8
+owner 10 943614 8
+owner 10 945614 8
+owner 10 942614 8
+owner 10 942613 8
+owner 10 941613 8
+owner 10 942612 8
+owner 10 941612 8
+owner 10 942611 8
+owner 10 941611 8
+owner 10 942610 8
+owner 10 941610 8
+owner 10 943610 8
+owner 10 942609 8
+owner 10 941609 8
+owner 10 943609 8
+owner 10 942608 8
+owner 10 941608 8
+owner 10 943608 8
+owner 10 942607 8
+owner 10 943607 8
+owner 10 944607 8
+owner 10 945607 8
+owner 10 944608 8
+owner 10 945608 8
+owner 10 944609 8
+owner 10 945609 8
+owner 10 946609 8
+owner 10 945610 8
+owner 10 946610 8
+owner 10 947610 8
+owner 10 946611 8
+owner 10 947611 8
+owner 10 946612 8
+owner 10 947612 8
+owner 10 946613 8
+owner 10 947609 8
+owner 10 946608 8
+owner 10 940609 8
+owner 10 940610 8
+owner 10 940611 8
+owner 10 940612 8
+owner 10 89583 9
+owner 10 88583 9
+owner 10 90583 9
+owner 10 89582 9
+owner 10 89584 9
+owner 10 88584 9
+owner 10 90584 9
+owner 10 89585 9
+owner 10 88585 9
+owner 10 90585 9
+owner 10 89586 9
+owner 10 88586 9
+owner 10 90586 9
+owner 10 87586 9
+owner 10 87585 9
+owner 10 86585 9
+owner 10 87584 9
+owner 10 86584 9
+owner 10 87583 9
+owner 10 86583 9
+owner 10 87582 9
+owner 10 86582 9
+owner 10 88582 9
+owner 10 87581 9
+owner 10 86581 9
+owner 10 88581 9
+owner 10 87580 9
+owner 10 86580 9
+owner 10 88580 9
+owner 10 87579 9
+owner 10 88579 9
+owner 10 89579 9
+owner 10 90579 9
+owner 10 89580 9
+owner 10 90580 9
+owner 10 89581 9
+owner 10 90581 9
+owner 10 91581 9
+owner 10 90582 9
+owner 10 91582 9
+owner 10 92582 9
+owner 10 91583 9
+owner 10 92583 9
+owner 10 91584 9
+owner 10 92584 9
+owner 10 91585 9
+owner 10 92581 9
+owner 10 91580 9
+owner 10 85581 9
+owner 10 85582 9
+owner 10 85583 9
+owner 10 85584 9
+owner 10 896690 10
+owner 10 895690 10
+owner 10 897690 10
+owner 10 896689 10
+owner 10 896691 10
+owner 10 895691 10
+owner 10 897691 10
+owner 10 896692 10
+owner 10 895692 10
+owner 10 897692 10
+owner 10 896693 10
+owner 10 895693 10
+owner 10 897693 10
+owner 10 894693 10
+owner 10 894692 10
+owner 10 893692 10
+owner 10 894691 10
+owner 10 893691 10
+owner 10 894690 10
+owner 10 893690 10
+owner 10 894689 10
+owner 10 893689 10
+owner 10 895689 10
+owner 10 894688 10
+owner 10 893688 10
+owner 10 895688 10
+owner 10 894687 10
+owner 10 893687 10
+owner 10 895687 10
+owner 10 894686 10
+owner 10 895686 10
+owner 10 896686 10
+owner 10 897686 10
+owner 10 896687 10
+owner 10 897687 10
+owner 10 896688 10
+owner 10 897688 10
+owner 10 898688 10
+owner 10 897689 10
+owner 10 898689 10
+owner 10 899689 10
+owner 10 898690 10
+owner 10 899690 10
+owner 10 898691 10
+owner 10 899691 10
+owner 10 898692 10
+owner 10 899688 10
+owner 10 898687 10
+owner 10 892688 10
+owner 10 892689 10
+owner 10 892690 10
+owner 10 892691 10
+owner 10 331181 11
+owner 10 330181 11
+owner 10 332181 11
+owner 10 331180 11
+owner 10 331182 11
+owner 10 330182 11
+owner 10 332182 11
+owner 10 331183 11
+owner 10 330183 11
+owner 10 332183 11
+owner 10 331184 11
+owner 10 330184 11
+owner 10 332184 11
+owner 10 329184 11
+owner 10 329183 11
+owner 10 328183 11
+owner 10 329182 11
+owner 10 328182 11
+owner 10 329181 11
+owner 10 328181 11
+owner 10 329180 11
+owner 10 328180 11
+owner 10 330180 11
+owner 10 329179 11
+owner 10 328179 11
+owner 10 330179 11
+owner 10 329178 11
+owner 10 328178 11
+owner 10 330178 11
+owner 10 329177 11
+owner 10 330177 11
+owner 10 331177 11
+owner 10 332177 11
+owner 10 331178 11
+owner 10 332178 11
+owner 10 331179 11
+owner 10 332179 11
+owner 10 333179 11
+owner 10 332180 11
+owner 10 333180 11
+owner 10 334180 11
+owner 10 333181 11
+owner 10 334181 11
+owner 10 333182 11
+owner 10 334182 11
+owner 10 333183 11
+owner 10 334179 11
+owner 10 333178 11
+owner 10 327179 11
+owner 10 327180 11
+owner 10 327181 11
+owner 10 327182 11
+prev 10 107254
+prev 10 334545
+prev 10 767276
+prev 10 298498
+prev 10 271614
+prev 10 705481
+prev 10 944611
+prev 10 89583
+prev 10 896690
+prev 10 331181
+owned 10 464220
+owned 10 464221
+owned 10 464222
+owned 10 464223
+owned 10 465219
+owned 10 465220
+owned 10 465221
+owned 10 465222
+owned 10 465223
+owned 10 465224
+owned 10 466218
+owned 10 466219
+owned 10 466220
+owned 10 466221
+owned 10 466222
+owned 10 466223
+owned 10 466224
+owned 10 466225
+owned 10 467218
+owned 10 467219
+owned 10 467220
+owned 10 467221
+owned 10 467222
+owned 10 467223
+owned 10 467224
+owned 10 467225
+owned 10 468218
+owned 10 468219
+owned 10 468220
+owned 10 468221
+owned 10 468222
+owned 10 468223
+owned 10 468224
+owned 10 468225
+owned 10 469218
+owned 10 469219
+owned 10 469220
+owned 10 469221
+owned 10 469222
+owned 10 469223
+owned 10 469224
+owned 10 469225
+owned 10 470219
+owned 10 470220
+owned 10 470221
+owned 10 470222
+owned 10 470223
+owned 10 470224
+owned 10 471220
+owned 10 471221
+owned 10 471222
+owned 10 471223
+bot 11 13 26spmsu2 1249151528 876730 730 876 52
+owner 11 107254 2
+owner 11 106254 2
+owner 11 108254 2
+owner 11 107253 2
+owner 11 107255 2
+owner 11 106255 2
+owner 11 108255 2
+owner 11 107256 2
+owner 11 106256 2
+owner 11 108256 2
+owner 11 107257 2
+owner 11 106257 2
+owner 11 108257 2
+owner 11 105257 2
+owner 11 105256 2
+owner 11 104256 2
+owner 11 105255 2
+owner 11 104255 2
+owner 11 105254 2
+owner 11 104254 2
+owner 11 105253 2
+owner 11 104253 2
+owner 11 106253 2
+owner 11 105252 2
+owner 11 104252 2
+owner 11 106252 2
+owner 11 105251 2
+owner 11 104251 2
+owner 11 106251 2
+owner 11 105250 2
+owner 11 106250 2
+owner 11 107250 2
+owner 11 108250 2
+owner 11 107251 2
+owner 11 108251 2
+owner 11 107252 2
+owner 11 108252 2
+owner 11 109252 2
+owner 11 108253 2
+owner 11 109253 2
+owner 11 110253 2
+owner 11 109254 2
+owner 11 110254 2
+owner 11 109255 2
+owner 11 110255 2
+owner 11 109256 2
+owner 11 110252 2
+owner 11 109251 2
+owner 11 103252 2
+owner 11 103253 2
+owner 11 103254 2
+owner 11 103255 2
+owner 11 334545 3
+owner 11 333545 3
+owner 11 335545 3
+owner 11 334544 3
+owner 11 334546 3
+owner 11 333546 3
+owner 11 335546 3
+owner 11 334547 3
+owner 11 333547 3
+owner 11 335547 3
+owner 11 334548 3
+owner 11 333548 3
+owner 11 335548 3
+owner 11 332548 3
+owner 11 332547 3
+owner 11 331547 3
+owner 11 332546 3
+owner 11 331546 3
+owner 11 332545 3
+owner 11 331545 3
+owner 11 332544 3
+owner 11 331544 3
+owner 11 333544 3
+owner 11 332543 3
+owner 11 331543 3
+owner 11 333543 3
+owner 11 332542 3
+owner 11 331542 3
+owner 11 333542 3
+owner 11 332541 3
+owner 11 333541 3
+owner 11 334541 3
+owner 11 335541 3
+owner 11 334542 3
+owner 11 335542 3
+owner 11 334543 3
+owner 11 335543 3
+owner 11 336543 3
+owner 11 335544 3
+owner 11 336544 3
+owner 11 337544 3
+owner 11 336545 3
+owner 11 337545 3
+owner 11 336546 3
+owner 11 337546 3
+owner 11 336547 3
+owner 11 337543 3
+owner 11 336542 3
+owner 11 330543 3
+owner 11 330544 3
+owner 11 330545 3
+owner 11 330546 3
+owner 11 767276 4
+owner 11 766276 4
+owner 11 768276 4
+owner 11 767275 4
+owner 11 767277 4
+owner 11 766277 4
+owner 11 768277 4
+owner 11 767278 4
+owner 11 766278 4
+owner 11 768278 4
+owner 11 767279 4
+owner 11 766279 4
+owner 11 768279 4
+owner 11 765279 4
+owner 11 765278 4
+owner 11 764278 4
+owner 11 765277 4
+owner 11 764277 4
+owner 11 765276 4
+owner 11 764276 4
+owner 11 765275 4
+owner 11 764275 4
+owner 11 766275 4
+owner 11 765274 4
+owner 11 764274 4
+owner 11 766274 4
+owner 11 765273 4
+owner 11 764273 4
+owner 11 766273 4
+owner 11 765272 4
+owner 11 766272 4
+owner 11 767272 4
+owner 11 768272 4
+owner 11 767273 4
+owner 11 768273 4
+owner 11 767274 4
+owner 11 768274 4
+owner 11 769274 4
+owner 11 768275 4
+owner 11 769275 4
+owner 11 770275 4
+owner 11 769276 4
+owner 11 770276 4
+owner 11 769277 4
+owner 11 770277 4
+owner 11 769278 4
+owner 11 770274 4
+owner 11 769273 4
+owner 11 763274 4
+owner 11 763275 4
+owner 11 763276 4
+owner 11 763277 4
+owner 11 298498 5
+owner 11 297498 5
+owner 11 299498 5
+owner 11 298497 5
+owner 11 298499 5
+owner 11 297499 5
+owner 11 299499 5
+owner 11 298500 5
+owner 11 297500 5
+owner 11 299500 5
+owner 11 298501 5
+owner 11 297501 5
+owner 11 299501 5
+owner 11 296501 5
+owner 11 296500 5
+owner 11 295500 5
+owner 11 296499 5
+owner 11 295499 5
+owner 11 296498 5
+owner 11 295498 5
+owner 11 296497 5
+owner 11 295497 5
+owner 11 297497 5
+owner 11 296496 5
+owner 11 295496 5
+owner 11 297496 5
+owner 11 296495 5
+owner 11 295495 5
+owner 11 297495 5
+owner 11 296494 5
+owner 11 297494 5
+owner 11 298494 5
+owner 11 299494 5
+owner 11 298495 5
+owner 11 299495 5
+owner 11 298496 5
+owner 11 299496 5
+owner 11 300496 5
+owner 11 299497 5
+owner 11 300497 5
+owner 11 301497 5
+owner 11 300498 5
+owner 11 301498 5
+owner 11 300499 5
+owner 11 301499 5
+owner 11 300500 5
+owner 11 301496 5
+owner 11 300495 5
+owner 11 294496 5
+owner 11 294497 5
+owner 11 294498 5
+owner 11 294499 5
+owner 11 271614 6
+owner 11 270614 6
+owner 11 272614 6
+owner 11 271613 6
+owner 11 271615 6
+owner 11 270615 6
+owner 11 272615 6
+owner 11 271616 6
+owner 11 270616 6
+owner 11 272616 6
+owner 11 271617 6
+owner 11 270617 6
+owner 11 272617 6
+owner 11 269617 6
+owner 11 269616 6
+owner 11 268616 6
+owner 11 269615 6
+owner 11 268615 6
+owner 11 269614 6
+owner 11 268614 6
+owner 11 269613 6
+owner 11 268613 6
+owner 11 270613 6
+owner 11 269612 6
+owner 11 268612 6
+owner 11 270612 6
+owner 11 269611 6
+owner 11 268611 6
+owner 11 270611 6
+owner 11 269610 6
+owner 11 270610 6
+owner 11 271610 6
+owner 11 272610 6
+owner 11 271611 6
+owner 11 272611 6
+owner 11 271612 6
+owner 11 272612 6
+owner 11 273612 6
+owner 11 272613 6
+owner 11 273613 6
+owner 11 274613 6
+owner 11 273614 6
+owner 11 274614 6
+owner 11 273615 6
+owner 11 274615 6
+owner 11 273616 6
+owner 11 274612 6
+owner 11 273611 6
+owner 11 267612 6
+owner 11 267613 6
+owner 11 267614 6
+owner 11 267615 6
+owner 11 705481 7
+owner 11 704481 7
+owner 11 706481 7
+owner 11 705480 7
+owner 11 705482 7
+owner 11 704482 7
+owner 11 706482 7
+owner 11 705483 7
+owner 11 704483 7
+owner 11 706483 7
+owner 11 705484 7
+owner 11 704484 7
+owner 11 706484 7
+owner 11 703484 7
+owner 11 703483 7
+owner 11 702483 7
+owner 11 703482 7
+owner 11 702482 7
+owner 11 703481 7
+owner 11 702481 7
+owner 11 703480 7
+owner 11 702480 7
+owner 11 704480 7
+owner 11 703479 7
+owner 11 702479 7
+owner 11 704479 7
+owner 11 703478 7
+owner 11 702478 7
+owner 11 704478 7
+owner 11 703477 7
+owner 11 704477 7
+owner 11 705477 7
+owner 11 706477 7
+owner 11 705478 7
+owner 11 706478 7
+owner 11 705479 7
+owner 11 706479 7
+owner 11 707479 7
+owner 11 706480 7
+owner 11 707480 7
+owner 11 708480 7
+owner 11 707481 7
+owner 11 708481 7
+owner 11 707482 7
+owner 11 708482 7
+owner 11 707483 7
+owner 11 708479 7
+owner 11 707478 7
+owner 11 701479 7
+owner 11 701480 7
+owner 11 701481 7
+owner 11 701482 7
+owner 11 944611 8
+owner 11 943611 8
+owner 11 945611 8
+owner 11 944610 8
+owner 11 944612 8
+owner 11 943612 8
+owner 11 945612 8
+owner 11 944613 8
+owner 11 943613 8
+owner 11 945613 8
+owner 11 944614 8
+owner 11 943614 8
+owner 11 945614 8
+owner 11 942614 8
+owner 11 942613 8
+owner 11 941613 8
+owner 11 942612 8
+owner 11 941612 8
+owner 11 942611 8
+owner 11 941611 8
+owner 11 942610 8
+owner 11 941610 8
+owner 11 943610 8
+owner 11 942609 8
+owner 11 941609 8
+owner 11 943609 8
+owner 11 942608 8
+owner 11 941608 8
+owner 11 943608 8
+owner 11 942607 8
+owner 11 943607 8
+owner 11 944607 8
+owner 11 945607 8
+owner 11 944608 8
+owner 11 945608 8
+owner 11 944609 8
+owner 11 945609 8
+owner 11 946609 8
+owner 11 945610 8
+owner 11 946610 8
+owner 11 947610 8
+owner 11 946611 8
+owner 11 947611 8
+owner 11 946612 8
+owner 11 947612 8
+owner 11 946613 8
+owner 11 947609 8
+owner 11 946608 8
+owner 11 940609 8
+owner 11 940610 8
+owner 11 940611 8
+owner 11 940612 8
+owner 11 89583 9
+owner 11 88583 9
+owner 11 90583 9
+owner 11 89582 9
+owner 11 89584 9
+owner 11 88584 9
+owner 11 90584 9
+owner 11 89585 9
+owner 11 88585 9
+owner 11 90585 9
+owner 11 89586 9
+owner 11 88586 9
+owner 11 90586 9
+owner 11 87586 9
+owner 11 87585 9
+owner 11 86585 9
+owner 11 87584 9
+owner 11 86584 9
+owner 11 87583 9
+owner 11 86583 9
+owner 11 87582 9
+owner 11 86582 9
+owner 11 88582 9
+owner 11 87581 9
+owner 11 86581 9
+owner 11 88581 9
+owner 11 87580 9
+owner 11 86580 9
+owner 11 88580 9
+owner 11 87579 9
+owner 11 88579 9
+owner 11 89579 9
+owner 11 90579 9
+owner 11 89580 9
+owner 11 90580 9
+owner 11 89581 9
+owner 11 90581 9
+owner 11 91581 9
+owner 11 90582 9
+owner 11 91582 9
+owner 11 92582 9
+owner 11 91583 9
+owner 11 92583 9
+owner 11 91584 9
+owner 11 92584 9
+owner 11 91585 9
+owner 11 92581 9
+owner 11 91580 9
+owner 11 85581 9
+owner 11 85582 9
+owner 11 85583 9
+owner 11 85584 9
+owner 11 896690 10
+owner 11 895690 10
+owner 11 897690 10
+owner 11 896689 10
+owner 11 896691 10
+owner 11 895691 10
+owner 11 897691 10
+owner 11 896692 10
+owner 11 895692 10
+owner 11 897692 10
+owner 11 896693 10
+owner 11 895693 10
+owner 11 897693 10
+owner 11 894693 10
+owner 11 894692 10
+owner 11 893692 10
+owner 11 894691 10
+owner 11 893691 10
+owner 11 894690 10
+owner 11 893690 10
+owner 11 894689 10
+owner 11 893689 10
+owner 11 895689 10
+owner 11 894688 10
+owner 11 893688 10
+owner 11 895688 10
+owner 11 894687 10
+owner 11 893687 10
+owner 11 895687 10
+owner 11 894686 10
+owner 11 895686 10
+owner 11 896686 10
+owner 11 897686 10
+owner 11 896687 10
+owner 11 897687 10
+owner 11 896688 10
+owner 11 897688 10
+owner 11 898688 10
+owner 11 897689 10
+owner 11 898689 10
+owner 11 899689 10
+owner 11 898690 10
+owner 11 899690 10
+owner 11 898691 10
+owner 11 899691 10
+owner 11 898692 10
+owner 11 899688 10
+owner 11 898687 10
+owner 11 892688 10
+owner 11 892689 10
+owner 11 892690 10
+owner 11 892691 10
+owner 11 331181 11
+owner 11 330181 11
+owner 11 332181 11
+owner 11 331180 11
+owner 11 331182 11
+owner 11 330182 11
+owner 11 332182 11
+owner 11 331183 11
+owner 11 330183 11
+owner 11 332183 11
+owner 11 331184 11
+owner 11 330184 11
+owner 11 332184 11
+owner 11 329184 11
+owner 11 329183 11
+owner 11 328183 11
+owner 11 329182 11
+owner 11 328182 11
+owner 11 329181 11
+owner 11 328181 11
+owner 11 329180 11
+owner 11 328180 11
+owner 11 330180 11
+owner 11 329179 11
+owner 11 328179 11
+owner 11 330179 11
+owner 11 329178 11
+owner 11 328178 11
+owner 11 330178 11
+owner 11 329177 11
+owner 11 330177 11
+owner 11 331177 11
+owner 11 332177 11
+owner 11 331178 11
+owner 11 332178 11
+owner 11 331179 11
+owner 11 332179 11
+owner 11 333179 11
+owner 11 332180 11
+owner 11 333180 11
+owner 11 334180 11
+owner 11 333181 11
+owner 11 334181 11
+owner 11 333182 11
+owner 11 334182 11
+owner 11 333183 11
+owner 11 334179 11
+owner 11 333178 11
+owner 11 327179 11
+owner 11 327180 11
+owner 11 327181 11
+owner 11 327182 11
+owner 11 468222 12
+owner 11 467222 12
+owner 11 469222 12
+owner 11 468221 12
+owner 11 468223 12
+owner 11 467223 12
+owner 11 469223 12
+owner 11 468224 12
+owner 11 467224 12
+owner 11 469224 12
+owner 11 468225 12
+owner 11 467225 12
+owner 11 469225 12
+owner 11 466225 12
+owner 11 466224 12
+owner 11 465224 12
+owner 11 466223 12
+owner 11 465223 12
+owner 11 466222 12
+owner 11 465222 12
+owner 11 466221 12
+owner 11 465221 12
+owner 11 467221 12
+owner 11 466220 12
+owner 11 465220 12
+owner 11 467220 12
+owner 11 466219 12
+owner 11 465219 12
+owner 11 467219 12
+owner 11 466218 12
+owner 11 467218 12
+owner 11 468218 12
+owner 11 469218 12
+owner 11 468219 12
+owner 11 469219 12
+owner 11 468220 12
+owner 11 469220 12
+owner 11 470220 12
+owner 11 469221 12
+owner 11 470221 12
+owner 11 471221 12
+owner 11 470222 12
+owner 11 471222 12
+owner 11 470223 12
+owner 11 471223 12
+owner 11 470224 12
+owner 11 471220 12
+owner 11 470219 12
+owner 11 464220 12
+owner 11 464221 12
+owner 11 464222 12
+owner 11 464223 12
+prev 11 107254
+prev 11 334545
+prev 11 767276
+prev 11 298498
+prev 11 271614
+prev 11 705481
+prev 11 944611
+prev 11 89583
+prev 11 896690
+prev 11 331181
+prev 11 468222
+owned 11 872728
+owned 11 872729
+owned 11 872730
+owned 11 872731
+owned 11 873727
+owned 11 873728
+owned 11 873729
+owned 11 873730
+owned 11 873731
+owned 11 873732
+owned 11 874726
+owned 11 874727
+owned 11 874728
+owned 11 874729
+owned 11 874730
+owned 11 874731
+owned 11 874732
+owned 11 874733
+owned 11 875726
+owned 11 875727
+owned 11 875728
+owned 11 875729
+owned 11 875730
+owned 11 875731
+owned 11 875732
+owned 11 875733
+owned 11 876726
+owned 11 876727
+owned 11 876728
+owned 11 876729
+owned 11 876730
+owned 11 876731
+owned 11 876732
+owned 11 876733
+owned 11 877726
+owned 11 877727
+owned 11 877728
+owned 11 877729
+owned 11 877730
+owned 11 877731
+owned 11 877732
+owned 11 877733
+owned 11 878727
+owned 11 878728
+owned 11 878729
+owned 11 878730
+owned 11 878731
+owned 11 878732
+owned 11 879728
+owned 11 879729
+owned 11 879730
+owned 11 879731
+bot 12 14 666fmd2f -2125171585 281683 683 281 52
+owner 12 107254 2
+owner 12 106254 2
+owner 12 108254 2
+owner 12 107253 2
+owner 12 107255 2
+owner 12 106255 2
+owner 12 108255 2
+owner 12 107256 2
+owner 12 106256 2
+owner 12 108256 2
+owner 12 107257 2
+owner 12 106257 2
+owner 12 108257 2
+owner 12 105257 2
+owner 12 105256 2
+owner 12 104256 2
+owner 12 105255 2
+owner 12 104255 2
+owner 12 105254 2
+owner 12 104254 2
+owner 12 105253 2
+owner 12 104253 2
+owner 12 106253 2
+owner 12 105252 2
+owner 12 104252 2
+owner 12 106252 2
+owner 12 105251 2
+owner 12 104251 2
+owner 12 106251 2
+owner 12 105250 2
+owner 12 106250 2
+owner 12 107250 2
+owner 12 108250 2
+owner 12 107251 2
+owner 12 108251 2
+owner 12 107252 2
+owner 12 108252 2
+owner 12 109252 2
+owner 12 108253 2
+owner 12 109253 2
+owner 12 110253 2
+owner 12 109254 2
+owner 12 110254 2
+owner 12 109255 2
+owner 12 110255 2
+owner 12 109256 2
+owner 12 110252 2
+owner 12 109251 2
+owner 12 103252 2
+owner 12 103253 2
+owner 12 103254 2
+owner 12 103255 2
+owner 12 334545 3
+owner 12 333545 3
+owner 12 335545 3
+owner 12 334544 3
+owner 12 334546 3
+owner 12 333546 3
+owner 12 335546 3
+owner 12 334547 3
+owner 12 333547 3
+owner 12 335547 3
+owner 12 334548 3
+owner 12 333548 3
+owner 12 335548 3
+owner 12 332548 3
+owner 12 332547 3
+owner 12 331547 3
+owner 12 332546 3
+owner 12 331546 3
+owner 12 332545 3
+owner 12 331545 3
+owner 12 332544 3
+owner 12 331544 3
+owner 12 333544 3
+owner 12 332543 3
+owner 12 331543 3
+owner 12 333543 3
+owner 12 332542 3
+owner 12 331542 3
+owner 12 333542 3
+owner 12 332541 3
+owner 12 333541 3
+owner 12 334541 3
+owner 12 335541 3
+owner 12 334542 3
+owner 12 335542 3
+owner 12 334543 3
+owner 12 335543 3
+owner 12 336543 3
+owner 12 335544 3
+owner 12 336544 3
+owner 12 337544 3
+owner 12 336545 3
+owner 12 337545 3
+owner 12 336546 3
+owner 12 337546 3
+owner 12 336547 3
+owner 12 337543 3
+owner 12 336542 3
+owner 12 330543 3
+owner 12 330544 3
+owner 12 330545 3
+owner 12 330546 3
+owner 12 767276 4
+owner 12 766276 4
+owner 12 768276 4
+owner 12 767275 4
+owner 12 767277 4
+owner 12 766277 4
+owner 12 768277 4
+owner 12 767278 4
+owner 12 766278 4
+owner 12 768278 4
+owner 12 767279 4
+owner 12 766279 4
+owner 12 768279 4
+owner 12 765279 4
+owner 12 765278 4
+owner 12 764278 4
+owner 12 765277 4
+owner 12 764277 4
+owner 12 765276 4
+owner 12 764276 4
+owner 12 765275 4
+owner 12 764275 4
+owner 12 766275 4
+owner 12 765274 4
+owner 12 764274 4
+owner 12 766274 4
+owner 12 765273 4
+owner 12 764273 4
+owner 12 766273 4
+owner 12 765272 4
+owner 12 766272 4
+owner 12 767272 4
+owner 12 768272 4
+owner 12 767273 4
+owner 12 768273 4
+owner 12 767274 4
+owner 12 768274 4
+owner 12 769274 4
+owner 12 768275 4
+owner 12 769275 4
+owner 12 770275 4
+owner 12 769276 4
+owner 12 770276 4
+owner 12 769277 4
+owner 12 770277 4
+owner 12 769278 4
+owner 12 770274 4
+owner 12 769273 4
+owner 12 763274 4
+owner 12 763275 4
+owner 12 763276 4
+owner 12 763277 4
+owner 12 298498 5
+owner 12 297498 5
+owner 12 299498 5
+owner 12 298497 5
+owner 12 298499 5
+owner 12 297499 5
+owner 12 299499 5
+owner 12 298500 5
+owner 12 297500 5
+owner 12 299500 5
+owner 12 298501 5
+owner 12 297501 5
+owner 12 299501 5
+owner 12 296501 5
+owner 12 296500 5
+owner 12 295500 5
+owner 12 296499 5
+owner 12 295499 5
+owner 12 296498 5
+owner 12 295498 5
+owner 12 296497 5
+owner 12 295497 5
+owner 12 297497 5
+owner 12 296496 5
+owner 12 295496 5
+owner 12 297496 5
+owner 12 296495 5
+owner 12 295495 5
+owner 12 297495 5
+owner 12 296494 5
+owner 12 297494 5
+owner 12 298494 5
+owner 12 299494 5
+owner 12 298495 5
+owner 12 299495 5
+owner 12 298496 5
+owner 12 299496 5
+owner 12 300496 5
+owner 12 299497 5
+owner 12 300497 5
+owner 12 301497 5
+owner 12 300498 5
+owner 12 301498 5
+owner 12 300499 5
+owner 12 301499 5
+owner 12 300500 5
+owner 12 301496 5
+owner 12 300495 5
+owner 12 294496 5
+owner 12 294497 5
+owner 12 294498 5
+owner 12 294499 5
+owner 12 271614 6
+owner 12 270614 6
+owner 12 272614 6
+owner 12 271613 6
+owner 12 271615 6
+owner 12 270615 6
+owner 12 272615 6
+owner 12 271616 6
+owner 12 270616 6
+owner 12 272616 6
+owner 12 271617 6
+owner 12 270617 6
+owner 12 272617 6
+owner 12 269617 6
+owner 12 269616 6
+owner 12 268616 6
+owner 12 269615 6
+owner 12 268615 6
+owner 12 269614 6
+owner 12 268614 6
+owner 12 269613 6
+owner 12 268613 6
+owner 12 270613 6
+owner 12 269612 6
+owner 12 268612 6
+owner 12 270612 6
+owner 12 269611 6
+owner 12 268611 6
+owner 12 270611 6
+owner 12 269610 6
+owner 12 270610 6
+owner 12 271610 6
+owner 12 272610 6
+owner 12 271611 6
+owner 12 272611 6
+owner 12 271612 6
+owner 12 272612 6
+owner 12 273612 6
+owner 12 272613 6
+owner 12 273613 6
+owner 12 274613 6
+owner 12 273614 6
+owner 12 274614 6
+owner 12 273615 6
+owner 12 274615 6
+owner 12 273616 6
+owner 12 274612 6
+owner 12 273611 6
+owner 12 267612 6
+owner 12 267613 6
+owner 12 267614 6
+owner 12 267615 6
+owner 12 705481 7
+owner 12 704481 7
+owner 12 706481 7
+owner 12 705480 7
+owner 12 705482 7
+owner 12 704482 7
+owner 12 706482 7
+owner 12 705483 7
+owner 12 704483 7
+owner 12 706483 7
+owner 12 705484 7
+owner 12 704484 7
+owner 12 706484 7
+owner 12 703484 7
+owner 12 703483 7
+owner 12 702483 7
+owner 12 703482 7
+owner 12 702482 7
+owner 12 703481 7
+owner 12 702481 7
+owner 12 703480 7
+owner 12 702480 7
+owner 12 704480 7
+owner 12 703479 7
+owner 12 702479 7
+owner 12 704479 7
+owner 12 703478 7
+owner 12 702478 7
+owner 12 704478 7
+owner 12 703477 7
+owner 12 704477 7
+owner 12 705477 7
+owner 12 706477 7
+owner 12 705478 7
+owner 12 706478 7
+owner 12 705479 7
+owner 12 706479 7
+owner 12 707479 7
+owner 12 706480 7
+owner 12 707480 7
+owner 12 708480 7
+owner 12 707481 7
+owner 12 708481 7
+owner 12 707482 7
+owner 12 708482 7
+owner 12 707483 7
+owner 12 708479 7
+owner 12 707478 7
+owner 12 701479 7
+owner 12 701480 7
+owner 12 701481 7
+owner 12 701482 7
+owner 12 944611 8
+owner 12 943611 8
+owner 12 945611 8
+owner 12 944610 8
+owner 12 944612 8
+owner 12 943612 8
+owner 12 945612 8
+owner 12 944613 8
+owner 12 943613 8
+owner 12 945613 8
+owner 12 944614 8
+owner 12 943614 8
+owner 12 945614 8
+owner 12 942614 8
+owner 12 942613 8
+owner 12 941613 8
+owner 12 942612 8
+owner 12 941612 8
+owner 12 942611 8
+owner 12 941611 8
+owner 12 942610 8
+owner 12 941610 8
+owner 12 943610 8
+owner 12 942609 8
+owner 12 941609 8
+owner 12 943609 8
+owner 12 942608 8
+owner 12 941608 8
+owner 12 943608 8
+owner 12 942607 8
+owner 12 943607 8
+owner 12 944607 8
+owner 12 945607 8
+owner 12 944608 8
+owner 12 945608 8
+owner 12 944609 8
+owner 12 945609 8
+owner 12 946609 8
+owner 12 945610 8
+owner 12 946610 8
+owner 12 947610 8
+owner 12 946611 8
+owner 12 947611 8
+owner 12 946612 8
+owner 12 947612 8
+owner 12 946613 8
+owner 12 947609 8
+owner 12 946608 8
+owner 12 940609 8
+owner 12 940610 8
+owner 12 940611 8
+owner 12 940612 8
+owner 12 89583 9
+owner 12 88583 9
+owner 12 90583 9
+owner 12 89582 9
+owner 12 89584 9
+owner 12 88584 9
+owner 12 90584 9
+owner 12 89585 9
+owner 12 88585 9
+owner 12 90585 9
+owner 12 89586 9
+owner 12 88586 9
+owner 12 90586 9
+owner 12 87586 9
+owner 12 87585 9
+owner 12 86585 9
+owner 12 87584 9
+owner 12 86584 9
+owner 12 87583 9
+owner 12 86583 9
+owner 12 87582 9
+owner 12 86582 9
+owner 12 88582 9
+owner 12 87581 9
+owner 12 86581 9
+owner 12 88581 9
+owner 12 87580 9
+owner 12 86580 9
+owner 12 88580 9
+owner 12 87579 9
+owner 12 88579 9
+owner 12 89579 9
+owner 12 90579 9
+owner 12 89580 9
+owner 12 90580 9
+owner 12 89581 9
+owner 12 90581 9
+owner 12 91581 9
+owner 12 90582 9
+owner 12 91582 9
+owner 12 92582 9
+owner 12 91583 9
+owner 12 92583 9
+owner 12 91584 9
+owner 12 92584 9
+owner 12 91585 9
+owner 12 92581 9
+owner 12 91580 9
+owner 12 85581 9
+owner 12 85582 9
+owner 12 85583 9
+owner 12 85584 9
+owner 12 896690 10
+owner 12 895690 10
+owner 12 897690 10
+owner 12 896689 10
+owner 12 896691 10
+owner 12 895691 10
+owner 12 897691 10
+owner 12 896692 10
+owner 12 895692 10
+owner 12 897692 10
+owner 12 896693 10
+owner 12 895693 10
+owner 12 897693 10
+owner 12 894693 10
+owner 12 894692 10
+owner 12 893692 10
+owner 12 894691 10
+owner 12 893691 10
+owner 12 894690 10
+owner 12 893690 10
+owner 12 894689 10
+owner 12 893689 10
+owner 12 895689 10
+owner 12 894688 10
+owner 12 893688 10
+owner 12 895688 10
+owner 12 894687 10
+owner 12 893687 10
+owner 12 895687 10
+owner 12 894686 10
+owner 12 895686 10
+owner 12 896686 10
+owner 12 897686 10
+owner 12 896687 10
+owner 12 897687 10
+owner 12 896688 10
+owner 12 897688 10
+owner 12 898688 10
+owner 12 897689 10
+owner 12 898689 10
+owner 12 899689 10
+owner 12 898690 10
+owner 12 899690 10
+owner 12 898691 10
+owner 12 899691 10
+owner 12 898692 10
+owner 12 899688 10
+owner 12 898687 10
+owner 12 892688 10
+owner 12 892689 10
+owner 12 892690 10
+owner 12 892691 10
+owner 12 331181 11
+owner 12 330181 11
+owner 12 332181 11
+owner 12 331180 11
+owner 12 331182 11
+owner 12 330182 11
+owner 12 332182 11
+owner 12 331183 11
+owner 12 330183 11
+owner 12 332183 11
+owner 12 331184 11
+owner 12 330184 11
+owner 12 332184 11
+owner 12 329184 11
+owner 12 329183 11
+owner 12 328183 11
+owner 12 329182 11
+owner 12 328182 11
+owner 12 329181 11
+owner 12 328181 11
+owner 12 329180 11
+owner 12 328180 11
+owner 12 330180 11
+owner 12 329179 11
+owner 12 328179 11
+owner 12 330179 11
+owner 12 329178 11
+owner 12 328178 11
+owner 12 330178 11
+owner 12 329177 11
+owner 12 330177 11
+owner 12 331177 11
+owner 12 332177 11
+owner 12 331178 11
+owner 12 332178 11
+owner 12 331179 11
+owner 12 332179 11
+owner 12 333179 11
+owner 12 332180 11
+owner 12 333180 11
+owner 12 334180 11
+owner 12 333181 11
+owner 12 334181 11
+owner 12 333182 11
+owner 12 334182 11
+owner 12 333183 11
+owner 12 334179 11
+owner 12 333178 11
+owner 12 327179 11
+owner 12 327180 11
+owner 12 327181 11
+owner 12 327182 11
+owner 12 468222 12
+owner 12 467222 12
+owner 12 469222 12
+owner 12 468221 12
+owner 12 468223 12
+owner 12 467223 12
+owner 12 469223 12
+owner 12 468224 12
+owner 12 467224 12
+owner 12 469224 12
+owner 12 468225 12
+owner 12 467225 12
+owner 12 469225 12
+owner 12 466225 12
+owner 12 466224 12
+owner 12 465224 12
+owner 12 466223 12
+owner 12 465223 12
+owner 12 466222 12
+owner 12 465222 12
+owner 12 466221 12
+owner 12 465221 12
+owner 12 467221 12
+owner 12 466220 12
+owner 12 465220 12
+owner 12 467220 12
+owner 12 466219 12
+owner 12 465219 12
+owner 12 467219 12
+owner 12 466218 12
+owner 12 467218 12
+owner 12 468218 12
+owner 12 469218 12
+owner 12 468219 12
+owner 12 469219 12
+owner 12 468220 12
+owner 12 469220 12
+owner 12 470220 12
+owner 12 469221 12
+owner 12 470221 12
+owner 12 471221 12
+owner 12 470222 12
+owner 12 471222 12
+owner 12 470223 12
+owner 12 471223 12
+owner 12 470224 12
+owner 12 471220 12
+owner 12 470219 12
+owner 12 464220 12
+owner 12 464221 12
+owner 12 464222 12
+owner 12 464223 12
+owner 12 876730 13
+owner 12 875730 13
+owner 12 877730 13
+owner 12 876729 13
+owner 12 876731 13
+owner 12 875731 13
+owner 12 877731 13
+owner 12 876732 13
+owner 12 875732 13
+owner 12 877732 13
+owner 12 876733 13
+owner 12 875733 13
+owner 12 877733 13
+owner 12 874733 13
+owner 12 874732 13
+owner 12 873732 13
+owner 12 874731 13
+owner 12 873731 13
+owner 12 874730 13
+owner 12 873730 13
+owner 12 874729 13
+owner 12 873729 13
+owner 12 875729 13
+owner 12 874728 13
+owner 12 873728 13
+owner 12 875728 13
+owner 12 874727 13
+owner 12 873727 13
+owner 12 875727 13
+owner 12 874726 13
+owner 12 875726 13
+owner 12 876726 13
+owner 12 877726 13
+owner 12 876727 13
+owner 12 877727 13
+owner 12 876728 13
+owner 12 877728 13
+owner 12 878728 13
+owner 12 877729 13
+owner 12 878729 13
+owner 12 879729 13
+owner 12 878730 13
+owner 12 879730 13
+owner 12 878731 13
+owner 12 879731 13
+owner 12 878732 13
+owner 12 879728 13
+owner 12 878727 13
+owner 12 872728 13
+owner 12 872729 13
+owner 12 872730 13
+owner 12 872731 13
+prev 12 107254
+prev 12 334545
+prev 12 767276
+prev 12 298498
+prev 12 271614
+prev 12 705481
+prev 12 944611
+prev 12 89583
+prev 12 896690
+prev 12 331181
+prev 12 468222
+prev 12 876730
+owned 12 277681
+owned 12 277682
+owned 12 277683
+owned 12 277684
+owned 12 278680
+owned 12 278681
+owned 12 278682
+owned 12 278683
+owned 12 278684
+owned 12 278685
+owned 12 279679
+owned 12 279680
+owned 12 279681
+owned 12 279682
+owned 12 279683
+owned 12 279684
+owned 12 279685
+owned 12 279686
+owned 12 280679
+owned 12 280680
+owned 12 280681
+owned 12 280682
+owned 12 280683
+owned 12 280684
+owned 12 280685
+owned 12 280686
+owned 12 281679
+owned 12 281680
+owned 12 281681
+owned 12 281682
+owned 12 281683
+owned 12 281684
+owned 12 281685
+owned 12 281686
+owned 12 282679
+owned 12 282680
+owned 12 282681
+owned 12 282682
+owned 12 282683
+owned 12 282684
+owned 12 282685
+owned 12 282686
+owned 12 283680
+owned 12 283681
+owned 12 283682
+owned 12 283683
+owned 12 283684
+owned 12 283685
+owned 12 284681
+owned 12 284682
+owned 12 284683
+owned 12 284684
+bot 13 15 vybu8oes 2095769353 224588 588 224 52
+owner 13 107254 2
+owner 13 106254 2
+owner 13 108254 2
+owner 13 107253 2
+owner 13 107255 2
+owner 13 106255 2
+owner 13 108255 2
+owner 13 107256 2
+owner 13 106256 2
+owner 13 108256 2
+owner 13 107257 2
+owner 13 106257 2
+owner 13 108257 2
+owner 13 105257 2
+owner 13 105256 2
+owner 13 104256 2
+owner 13 105255 2
+owner 13 104255 2
+owner 13 105254 2
+owner 13 104254 2
+owner 13 105253 2
+owner 13 104253 2
+owner 13 106253 2
+owner 13 105252 2
+owner 13 104252 2
+owner 13 106252 2
+owner 13 105251 2
+owner 13 104251 2
+owner 13 106251 2
+owner 13 105250 2
+owner 13 106250 2
+owner 13 107250 2
+owner 13 108250 2
+owner 13 107251 2
+owner 13 108251 2
+owner 13 107252 2
+owner 13 108252 2
+owner 13 109252 2
+owner 13 108253 2
+owner 13 109253 2
+owner 13 110253 2
+owner 13 109254 2
+owner 13 110254 2
+owner 13 109255 2
+owner 13 110255 2
+owner 13 109256 2
+owner 13 110252 2
+owner 13 109251 2
+owner 13 103252 2
+owner 13 103253 2
+owner 13 103254 2
+owner 13 103255 2
+owner 13 334545 3
+owner 13 333545 3
+owner 13 335545 3
+owner 13 334544 3
+owner 13 334546 3
+owner 13 333546 3
+owner 13 335546 3
+owner 13 334547 3
+owner 13 333547 3
+owner 13 335547 3
+owner 13 334548 3
+owner 13 333548 3
+owner 13 335548 3
+owner 13 332548 3
+owner 13 332547 3
+owner 13 331547 3
+owner 13 332546 3
+owner 13 331546 3
+owner 13 332545 3
+owner 13 331545 3
+owner 13 332544 3
+owner 13 331544 3
+owner 13 333544 3
+owner 13 332543 3
+owner 13 331543 3
+owner 13 333543 3
+owner 13 332542 3
+owner 13 331542 3
+owner 13 333542 3
+owner 13 332541 3
+owner 13 333541 3
+owner 13 334541 3
+owner 13 335541 3
+owner 13 334542 3
+owner 13 335542 3
+owner 13 334543 3
+owner 13 335543 3
+owner 13 336543 3
+owner 13 335544 3
+owner 13 336544 3
+owner 13 337544 3
+owner 13 336545 3
+owner 13 337545 3
+owner 13 336546 3
+owner 13 337546 3
+owner 13 336547 3
+owner 13 337543 3
+owner 13 336542 3
+owner 13 330543 3
+owner 13 330544 3
+owner 13 330545 3
+owner 13 330546 3
+owner 13 767276 4
+owner 13 766276 4
+owner 13 768276 4
+owner 13 767275 4
+owner 13 767277 4
+owner 13 766277 4
+owner 13 768277 4
+owner 13 767278 4
+owner 13 766278 4
+owner 13 768278 4
+owner 13 767279 4
+owner 13 766279 4
+owner 13 768279 4
+owner 13 765279 4
+owner 13 765278 4
+owner 13 764278 4
+owner 13 765277 4
+owner 13 764277 4
+owner 13 765276 4
+owner 13 764276 4
+owner 13 765275 4
+owner 13 764275 4
+owner 13 766275 4
+owner 13 765274 4
+owner 13 764274 4
+owner 13 766274 4
+owner 13 765273 4
+owner 13 764273 4
+owner 13 766273 4
+owner 13 765272 4
+owner 13 766272 4
+owner 13 767272 4
+owner 13 768272 4
+owner 13 767273 4
+owner 13 768273 4
+owner 13 767274 4
+owner 13 768274 4
+owner 13 769274 4
+owner 13 768275 4
+owner 13 769275 4
+owner 13 770275 4
+owner 13 769276 4
+owner 13 770276 4
+owner 13 769277 4
+owner 13 770277 4
+owner 13 769278 4
+owner 13 770274 4
+owner 13 769273 4
+owner 13 763274 4
+owner 13 763275 4
+owner 13 763276 4
+owner 13 763277 4
+owner 13 298498 5
+owner 13 297498 5
+owner 13 299498 5
+owner 13 298497 5
+owner 13 298499 5
+owner 13 297499 5
+owner 13 299499 5
+owner 13 298500 5
+owner 13 297500 5
+owner 13 299500 5
+owner 13 298501 5
+owner 13 297501 5
+owner 13 299501 5
+owner 13 296501 5
+owner 13 296500 5
+owner 13 295500 5
+owner 13 296499 5
+owner 13 295499 5
+owner 13 296498 5
+owner 13 295498 5
+owner 13 296497 5
+owner 13 295497 5
+owner 13 297497 5
+owner 13 296496 5
+owner 13 295496 5
+owner 13 297496 5
+owner 13 296495 5
+owner 13 295495 5
+owner 13 297495 5
+owner 13 296494 5
+owner 13 297494 5
+owner 13 298494 5
+owner 13 299494 5
+owner 13 298495 5
+owner 13 299495 5
+owner 13 298496 5
+owner 13 299496 5
+owner 13 300496 5
+owner 13 299497 5
+owner 13 300497 5
+owner 13 301497 5
+owner 13 300498 5
+owner 13 301498 5
+owner 13 300499 5
+owner 13 301499 5
+owner 13 300500 5
+owner 13 301496 5
+owner 13 300495 5
+owner 13 294496 5
+owner 13 294497 5
+owner 13 294498 5
+owner 13 294499 5
+owner 13 271614 6
+owner 13 270614 6
+owner 13 272614 6
+owner 13 271613 6
+owner 13 271615 6
+owner 13 270615 6
+owner 13 272615 6
+owner 13 271616 6
+owner 13 270616 6
+owner 13 272616 6
+owner 13 271617 6
+owner 13 270617 6
+owner 13 272617 6
+owner 13 269617 6
+owner 13 269616 6
+owner 13 268616 6
+owner 13 269615 6
+owner 13 268615 6
+owner 13 269614 6
+owner 13 268614 6
+owner 13 269613 6
+owner 13 268613 6
+owner 13 270613 6
+owner 13 269612 6
+owner 13 268612 6
+owner 13 270612 6
+owner 13 269611 6
+owner 13 268611 6
+owner 13 270611 6
+owner 13 269610 6
+owner 13 270610 6
+owner 13 271610 6
+owner 13 272610 6
+owner 13 271611 6
+owner 13 272611 6
+owner 13 271612 6
+owner 13 272612 6
+owner 13 273612 6
+owner 13 272613 6
+owner 13 273613 6
+owner 13 274613 6
+owner 13 273614 6
+owner 13 274614 6
+owner 13 273615 6
+owner 13 274615 6
+owner 13 273616 6
+owner 13 274612 6
+owner 13 273611 6
+owner 13 267612 6
+owner 13 267613 6
+owner 13 267614 6
+owner 13 267615 6
+owner 13 705481 7
+owner 13 704481 7
+owner 13 706481 7
+owner 13 705480 7
+owner 13 705482 7
+owner 13 704482 7
+owner 13 706482 7
+owner 13 705483 7
+owner 13 704483 7
+owner 13 706483 7
+owner 13 705484 7
+owner 13 704484 7
+owner 13 706484 7
+owner 13 703484 7
+owner 13 703483 7
+owner 13 702483 7
+owner 13 703482 7
+owner 13 702482 7
+owner 13 703481 7
+owner 13 702481 7
+owner 13 703480 7
+owner 13 702480 7
+owner 13 704480 7
+owner 13 703479 7
+owner 13 702479 7
+owner 13 704479 7
+owner 13 703478 7
+owner 13 702478 7
+owner 13 704478 7
+owner 13 703477 7
+owner 13 704477 7
+owner 13 705477 7
+owner 13 706477 7
+owner 13 705478 7
+owner 13 706478 7
+owner 13 705479 7
+owner 13 706479 7
+owner 13 707479 7
+owner 13 706480 7
+owner 13 707480 7
+owner 13 708480 7
+owner 13 707481 7
+owner 13 708481 7
+owner 13 707482 7
+owner 13 708482 7
+owner 13 707483 7
+owner 13 708479 7
+owner 13 707478 7
+owner 13 701479 7
+owner 13 701480 7
+owner 13 701481 7
+owner 13 701482 7
+owner 13 944611 8
+owner 13 943611 8
+owner 13 945611 8
+owner 13 944610 8
+owner 13 944612 8
+owner 13 943612 8
+owner 13 945612 8
+owner 13 944613 8
+owner 13 943613 8
+owner 13 945613 8
+owner 13 944614 8
+owner 13 943614 8
+owner 13 945614 8
+owner 13 942614 8
+owner 13 942613 8
+owner 13 941613 8
+owner 13 942612 8
+owner 13 941612 8
+owner 13 942611 8
+owner 13 941611 8
+owner 13 942610 8
+owner 13 941610 8
+owner 13 943610 8
+owner 13 942609 8
+owner 13 941609 8
+owner 13 943609 8
+owner 13 942608 8
+owner 13 941608 8
+owner 13 943608 8
+owner 13 942607 8
+owner 13 943607 8
+owner 13 944607 8
+owner 13 945607 8
+owner 13 944608 8
+owner 13 945608 8
+owner 13 944609 8
+owner 13 945609 8
+owner 13 946609 8
+owner 13 945610 8
+owner 13 946610 8
+owner 13 947610 8
+owner 13 946611 8
+owner 13 947611 8
+owner 13 946612 8
+owner 13 947612 8
+owner 13 946613 8
+owner 13 947609 8
+owner 13 946608 8
+owner 13 940609 8
+owner 13 940610 8
+owner 13 940611 8
+owner 13 940612 8
+owner 13 89583 9
+owner 13 88583 9
+owner 13 90583 9
+owner 13 89582 9
+owner 13 89584 9
+owner 13 88584 9
+owner 13 90584 9
+owner 13 89585 9
+owner 13 88585 9
+owner 13 90585 9
+owner 13 89586 9
+owner 13 88586 9
+owner 13 90586 9
+owner 13 87586 9
+owner 13 87585 9
+owner 13 86585 9
+owner 13 87584 9
+owner 13 86584 9
+owner 13 87583 9
+owner 13 86583 9
+owner 13 87582 9
+owner 13 86582 9
+owner 13 88582 9
+owner 13 87581 9
+owner 13 86581 9
+owner 13 88581 9
+owner 13 87580 9
+owner 13 86580 9
+owner 13 88580 9
+owner 13 87579 9
+owner 13 88579 9
+owner 13 89579 9
+owner 13 90579 9
+owner 13 89580 9
+owner 13 90580 9
+owner 13 89581 9
+owner 13 90581 9
+owner 13 91581 9
+owner 13 90582 9
+owner 13 91582 9
+owner 13 92582 9
+owner 13 91583 9
+owner 13 92583 9
+owner 13 91584 9
+owner 13 92584 9
+owner 13 91585 9
+owner 13 92581 9
+owner 13 91580 9
+owner 13 85581 9
+owner 13 85582 9
+owner 13 85583 9
+owner 13 85584 9
+owner 13 896690 10
+owner 13 895690 10
+owner 13 897690 10
+owner 13 896689 10
+owner 13 896691 10
+owner 13 895691 10
+owner 13 897691 10
+owner 13 896692 10
+owner 13 895692 10
+owner 13 897692 10
+owner 13 896693 10
+owner 13 895693 10
+owner 13 897693 10
+owner 13 894693 10
+owner 13 894692 10
+owner 13 893692 10
+owner 13 894691 10
+owner 13 893691 10
+owner 13 894690 10
+owner 13 893690 10
+owner 13 894689 10
+owner 13 893689 10
+owner 13 895689 10
+owner 13 894688 10
+owner 13 893688 10
+owner 13 895688 10
+owner 13 894687 10
+owner 13 893687 10
+owner 13 895687 10
+owner 13 894686 10
+owner 13 895686 10
+owner 13 896686 10
+owner 13 897686 10
+owner 13 896687 10
+owner 13 897687 10
+owner 13 896688 10
+owner 13 897688 10
+owner 13 898688 10
+owner 13 897689 10
+owner 13 898689 10
+owner 13 899689 10
+owner 13 898690 10
+owner 13 899690 10
+owner 13 898691 10
+owner 13 899691 10
+owner 13 898692 10
+owner 13 899688 10
+owner 13 898687 10
+owner 13 892688 10
+owner 13 892689 10
+owner 13 892690 10
+owner 13 892691 10
+owner 13 331181 11
+owner 13 330181 11
+owner 13 332181 11
+owner 13 331180 11
+owner 13 331182 11
+owner 13 330182 11
+owner 13 332182 11
+owner 13 331183 11
+owner 13 330183 11
+owner 13 332183 11
+owner 13 331184 11
+owner 13 330184 11
+owner 13 332184 11
+owner 13 329184 11
+owner 13 329183 11
+owner 13 328183 11
+owner 13 329182 11
+owner 13 328182 11
+owner 13 329181 11
+owner 13 328181 11
+owner 13 329180 11
+owner 13 328180 11
+owner 13 330180 11
+owner 13 329179 11
+owner 13 328179 11
+owner 13 330179 11
+owner 13 329178 11
+owner 13 328178 11
+owner 13 330178 11
+owner 13 329177 11
+owner 13 330177 11
+owner 13 331177 11
+owner 13 332177 11
+owner 13 331178 11
+owner 13 332178 11
+owner 13 331179 11
+owner 13 332179 11
+owner 13 333179 11
+owner 13 332180 11
+owner 13 333180 11
+owner 13 334180 11
+owner 13 333181 11
+owner 13 334181 11
+owner 13 333182 11
+owner 13 334182 11
+owner 13 333183 11
+owner 13 334179 11
+owner 13 333178 11
+owner 13 327179 11
+owner 13 327180 11
+owner 13 327181 11
+owner 13 327182 11
+owner 13 468222 12
+owner 13 467222 12
+owner 13 469222 12
+owner 13 468221 12
+owner 13 468223 12
+owner 13 467223 12
+owner 13 469223 12
+owner 13 468224 12
+owner 13 467224 12
+owner 13 469224 12
+owner 13 468225 12
+owner 13 467225 12
+owner 13 469225 12
+owner 13 466225 12
+owner 13 466224 12
+owner 13 465224 12
+owner 13 466223 12
+owner 13 465223 12
+owner 13 466222 12
+owner 13 465222 12
+owner 13 466221 12
+owner 13 465221 12
+owner 13 467221 12
+owner 13 466220 12
+owner 13 465220 12
+owner 13 467220 12
+owner 13 466219 12
+owner 13 465219 12
+owner 13 467219 12
+owner 13 466218 12
+owner 13 467218 12
+owner 13 468218 12
+owner 13 469218 12
+owner 13 468219 12
+owner 13 469219 12
+owner 13 468220 12
+owner 13 469220 12
+owner 13 470220 12
+owner 13 469221 12
+owner 13 470221 12
+owner 13 471221 12
+owner 13 470222 12
+owner 13 471222 12
+owner 13 470223 12
+owner 13 471223 12
+owner 13 470224 12
+owner 13 471220 12
+owner 13 470219 12
+owner 13 464220 12
+owner 13 464221 12
+owner 13 464222 12
+owner 13 464223 12
+owner 13 876730 13
+owner 13 875730 13
+owner 13 877730 13
+owner 13 876729 13
+owner 13 876731 13
+owner 13 875731 13
+owner 13 877731 13
+owner 13 876732 13
+owner 13 875732 13
+owner 13 877732 13
+owner 13 876733 13
+owner 13 875733 13
+owner 13 877733 13
+owner 13 874733 13
+owner 13 874732 13
+owner 13 873732 13
+owner 13 874731 13
+owner 13 873731 13
+owner 13 874730 13
+owner 13 873730 13
+owner 13 874729 13
+owner 13 873729 13
+owner 13 875729 13
+owner 13 874728 13
+owner 13 873728 13
+owner 13 875728 13
+owner 13 874727 13
+owner 13 873727 13
+owner 13 875727 13
+owner 13 874726 13
+owner 13 875726 13
+owner 13 876726 13
+owner 13 877726 13
+owner 13 876727 13
+owner 13 877727 13
+owner 13 876728 13
+owner 13 877728 13
+owner 13 878728 13
+owner 13 877729 13
+owner 13 878729 13
+owner 13 879729 13
+owner 13 878730 13
+owner 13 879730 13
+owner 13 878731 13
+owner 13 879731 13
+owner 13 878732 13
+owner 13 879728 13
+owner 13 878727 13
+owner 13 872728 13
+owner 13 872729 13
+owner 13 872730 13
+owner 13 872731 13
+owner 13 281683 14
+owner 13 280683 14
+owner 13 282683 14
+owner 13 281682 14
+owner 13 281684 14
+owner 13 280684 14
+owner 13 282684 14
+owner 13 281685 14
+owner 13 280685 14
+owner 13 282685 14
+owner 13 281686 14
+owner 13 280686 14
+owner 13 282686 14
+owner 13 279686 14
+owner 13 279685 14
+owner 13 278685 14
+owner 13 279684 14
+owner 13 278684 14
+owner 13 279683 14
+owner 13 278683 14
+owner 13 279682 14
+owner 13 278682 14
+owner 13 280682 14
+owner 13 279681 14
+owner 13 278681 14
+owner 13 280681 14
+owner 13 279680 14
+owner 13 278680 14
+owner 13 280680 14
+owner 13 279679 14
+owner 13 280679 14
+owner 13 281679 14
+owner 13 282679 14
+owner 13 281680 14
+owner 13 282680 14
+owner 13 281681 14
+owner 13 282681 14
+owner 13 283681 14
+owner 13 282682 14
+owner 13 283682 14
+owner 13 284682 14
+owner 13 283683 14
+owner 13 284683 14
+owner 13 283684 14
+owner 13 284684 14
+owner 13 283685 14
+owner 13 284681 14
+owner 13 283680 14
+owner 13 277681 14
+owner 13 277682 14
+owner 13 277683 14
+owner 13 277684 14
+prev 13 107254
+prev 13 334545
+prev 13 767276
+prev 13 298498
+prev 13 271614
+prev 13 705481
+prev 13 944611
+prev 13 89583
+prev 13 896690
+prev 13 331181
+prev 13 468222
+prev 13 876730
+prev 13 281683
+owned 13 220586
+owned 13 220587
+owned 13 220588
+owned 13 220589
+owned 13 221585
+owned 13 221586
+owned 13 221587
+owned 13 221588
+owned 13 221589
+owned 13 221590
+owned 13 222584
+owned 13 222585
+owned 13 222586
+owned 13 222587
+owned 13 222588
+owned 13 222589
+owned 13 222590
+owned 13 222591
+owned 13 223584
+owned 13 223585
+owned 13 223586
+owned 13 223587
+owned 13 223588
+owned 13 223589
+owned 13 223590
+owned 13 223591
+owned 13 224584
+owned 13 224585
+owned 13 224586
+owned 13 224587
+owned 13 224588
+owned 13 224589
+owned 13 224590
+owned 13 224591
+owned 13 225584
+owned 13 225585
+owned 13 225586
+owned 13 225587
+owned 13 225588
+owned 13 225589
+owned 13 225590
+owned 13 225591
+owned 13 226585
+owned 13 226586
+owned 13 226587
+owned 13 226588
+owned 13 226589
+owned 13 226590
+owned 13 227586
+owned 13 227587
+owned 13 227588
+owned 13 227589
+bot 14 16 tlx2iciq 1076827768 365649 649 365 52
+owner 14 107254 2
+owner 14 106254 2
+owner 14 108254 2
+owner 14 107253 2
+owner 14 107255 2
+owner 14 106255 2
+owner 14 108255 2
+owner 14 107256 2
+owner 14 106256 2
+owner 14 108256 2
+owner 14 107257 2
+owner 14 106257 2
+owner 14 108257 2
+owner 14 105257 2
+owner 14 105256 2
+owner 14 104256 2
+owner 14 105255 2
+owner 14 104255 2
+owner 14 105254 2
+owner 14 104254 2
+owner 14 105253 2
+owner 14 104253 2
+owner 14 106253 2
+owner 14 105252 2
+owner 14 104252 2
+owner 14 106252 2
+owner 14 105251 2
+owner 14 104251 2
+owner 14 106251 2
+owner 14 105250 2
+owner 14 106250 2
+owner 14 107250 2
+owner 14 108250 2
+owner 14 107251 2
+owner 14 108251 2
+owner 14 107252 2
+owner 14 108252 2
+owner 14 109252 2
+owner 14 108253 2
+owner 14 109253 2
+owner 14 110253 2
+owner 14 109254 2
+owner 14 110254 2
+owner 14 109255 2
+owner 14 110255 2
+owner 14 109256 2
+owner 14 110252 2
+owner 14 109251 2
+owner 14 103252 2
+owner 14 103253 2
+owner 14 103254 2
+owner 14 103255 2
+owner 14 334545 3
+owner 14 333545 3
+owner 14 335545 3
+owner 14 334544 3
+owner 14 334546 3
+owner 14 333546 3
+owner 14 335546 3
+owner 14 334547 3
+owner 14 333547 3
+owner 14 335547 3
+owner 14 334548 3
+owner 14 333548 3
+owner 14 335548 3
+owner 14 332548 3
+owner 14 332547 3
+owner 14 331547 3
+owner 14 332546 3
+owner 14 331546 3
+owner 14 332545 3
+owner 14 331545 3
+owner 14 332544 3
+owner 14 331544 3
+owner 14 333544 3
+owner 14 332543 3
+owner 14 331543 3
+owner 14 333543 3
+owner 14 332542 3
+owner 14 331542 3
+owner 14 333542 3
+owner 14 332541 3
+owner 14 333541 3
+owner 14 334541 3
+owner 14 335541 3
+owner 14 334542 3
+owner 14 335542 3
+owner 14 334543 3
+owner 14 335543 3
+owner 14 336543 3
+owner 14 335544 3
+owner 14 336544 3
+owner 14 337544 3
+owner 14 336545 3
+owner 14 337545 3
+owner 14 336546 3
+owner 14 337546 3
+owner 14 336547 3
+owner 14 337543 3
+owner 14 336542 3
+owner 14 330543 3
+owner 14 330544 3
+owner 14 330545 3
+owner 14 330546 3
+owner 14 767276 4
+owner 14 766276 4
+owner 14 768276 4
+owner 14 767275 4
+owner 14 767277 4
+owner 14 766277 4
+owner 14 768277 4
+owner 14 767278 4
+owner 14 766278 4
+owner 14 768278 4
+owner 14 767279 4
+owner 14 766279 4
+owner 14 768279 4
+owner 14 765279 4
+owner 14 765278 4
+owner 14 764278 4
+owner 14 765277 4
+owner 14 764277 4
+owner 14 765276 4
+owner 14 764276 4
+owner 14 765275 4
+owner 14 764275 4
+owner 14 766275 4
+owner 14 765274 4
+owner 14 764274 4
+owner 14 766274 4
+owner 14 765273 4
+owner 14 764273 4
+owner 14 766273 4
+owner 14 765272 4
+owner 14 766272 4
+owner 14 767272 4
+owner 14 768272 4
+owner 14 767273 4
+owner 14 768273 4
+owner 14 767274 4
+owner 14 768274 4
+owner 14 769274 4
+owner 14 768275 4
+owner 14 769275 4
+owner 14 770275 4
+owner 14 769276 4
+owner 14 770276 4
+owner 14 769277 4
+owner 14 770277 4
+owner 14 769278 4
+owner 14 770274 4
+owner 14 769273 4
+owner 14 763274 4
+owner 14 763275 4
+owner 14 763276 4
+owner 14 763277 4
+owner 14 298498 5
+owner 14 297498 5
+owner 14 299498 5
+owner 14 298497 5
+owner 14 298499 5
+owner 14 297499 5
+owner 14 299499 5
+owner 14 298500 5
+owner 14 297500 5
+owner 14 299500 5
+owner 14 298501 5
+owner 14 297501 5
+owner 14 299501 5
+owner 14 296501 5
+owner 14 296500 5
+owner 14 295500 5
+owner 14 296499 5
+owner 14 295499 5
+owner 14 296498 5
+owner 14 295498 5
+owner 14 296497 5
+owner 14 295497 5
+owner 14 297497 5
+owner 14 296496 5
+owner 14 295496 5
+owner 14 297496 5
+owner 14 296495 5
+owner 14 295495 5
+owner 14 297495 5
+owner 14 296494 5
+owner 14 297494 5
+owner 14 298494 5
+owner 14 299494 5
+owner 14 298495 5
+owner 14 299495 5
+owner 14 298496 5
+owner 14 299496 5
+owner 14 300496 5
+owner 14 299497 5
+owner 14 300497 5
+owner 14 301497 5
+owner 14 300498 5
+owner 14 301498 5
+owner 14 300499 5
+owner 14 301499 5
+owner 14 300500 5
+owner 14 301496 5
+owner 14 300495 5
+owner 14 294496 5
+owner 14 294497 5
+owner 14 294498 5
+owner 14 294499 5
+owner 14 271614 6
+owner 14 270614 6
+owner 14 272614 6
+owner 14 271613 6
+owner 14 271615 6
+owner 14 270615 6
+owner 14 272615 6
+owner 14 271616 6
+owner 14 270616 6
+owner 14 272616 6
+owner 14 271617 6
+owner 14 270617 6
+owner 14 272617 6
+owner 14 269617 6
+owner 14 269616 6
+owner 14 268616 6
+owner 14 269615 6
+owner 14 268615 6
+owner 14 269614 6
+owner 14 268614 6
+owner 14 269613 6
+owner 14 268613 6
+owner 14 270613 6
+owner 14 269612 6
+owner 14 268612 6
+owner 14 270612 6
+owner 14 269611 6
+owner 14 268611 6
+owner 14 270611 6
+owner 14 269610 6
+owner 14 270610 6
+owner 14 271610 6
+owner 14 272610 6
+owner 14 271611 6
+owner 14 272611 6
+owner 14 271612 6
+owner 14 272612 6
+owner 14 273612 6
+owner 14 272613 6
+owner 14 273613 6
+owner 14 274613 6
+owner 14 273614 6
+owner 14 274614 6
+owner 14 273615 6
+owner 14 274615 6
+owner 14 273616 6
+owner 14 274612 6
+owner 14 273611 6
+owner 14 267612 6
+owner 14 267613 6
+owner 14 267614 6
+owner 14 267615 6
+owner 14 705481 7
+owner 14 704481 7
+owner 14 706481 7
+owner 14 705480 7
+owner 14 705482 7
+owner 14 704482 7
+owner 14 706482 7
+owner 14 705483 7
+owner 14 704483 7
+owner 14 706483 7
+owner 14 705484 7
+owner 14 704484 7
+owner 14 706484 7
+owner 14 703484 7
+owner 14 703483 7
+owner 14 702483 7
+owner 14 703482 7
+owner 14 702482 7
+owner 14 703481 7
+owner 14 702481 7
+owner 14 703480 7
+owner 14 702480 7
+owner 14 704480 7
+owner 14 703479 7
+owner 14 702479 7
+owner 14 704479 7
+owner 14 703478 7
+owner 14 702478 7
+owner 14 704478 7
+owner 14 703477 7
+owner 14 704477 7
+owner 14 705477 7
+owner 14 706477 7
+owner 14 705478 7
+owner 14 706478 7
+owner 14 705479 7
+owner 14 706479 7
+owner 14 707479 7
+owner 14 706480 7
+owner 14 707480 7
+owner 14 708480 7
+owner 14 707481 7
+owner 14 708481 7
+owner 14 707482 7
+owner 14 708482 7
+owner 14 707483 7
+owner 14 708479 7
+owner 14 707478 7
+owner 14 701479 7
+owner 14 701480 7
+owner 14 701481 7
+owner 14 701482 7
+owner 14 944611 8
+owner 14 943611 8
+owner 14 945611 8
+owner 14 944610 8
+owner 14 944612 8
+owner 14 943612 8
+owner 14 945612 8
+owner 14 944613 8
+owner 14 943613 8
+owner 14 945613 8
+owner 14 944614 8
+owner 14 943614 8
+owner 14 945614 8
+owner 14 942614 8
+owner 14 942613 8
+owner 14 941613 8
+owner 14 942612 8
+owner 14 941612 8
+owner 14 942611 8
+owner 14 941611 8
+owner 14 942610 8
+owner 14 941610 8
+owner 14 943610 8
+owner 14 942609 8
+owner 14 941609 8
+owner 14 943609 8
+owner 14 942608 8
+owner 14 941608 8
+owner 14 943608 8
+owner 14 942607 8
+owner 14 943607 8
+owner 14 944607 8
+owner 14 945607 8
+owner 14 944608 8
+owner 14 945608 8
+owner 14 944609 8
+owner 14 945609 8
+owner 14 946609 8
+owner 14 945610 8
+owner 14 946610 8
+owner 14 947610 8
+owner 14 946611 8
+owner 14 947611 8
+owner 14 946612 8
+owner 14 947612 8
+owner 14 946613 8
+owner 14 947609 8
+owner 14 946608 8
+owner 14 940609 8
+owner 14 940610 8
+owner 14 940611 8
+owner 14 940612 8
+owner 14 89583 9
+owner 14 88583 9
+owner 14 90583 9
+owner 14 89582 9
+owner 14 89584 9
+owner 14 88584 9
+owner 14 90584 9
+owner 14 89585 9
+owner 14 88585 9
+owner 14 90585 9
+owner 14 89586 9
+owner 14 88586 9
+owner 14 90586 9
+owner 14 87586 9
+owner 14 87585 9
+owner 14 86585 9
+owner 14 87584 9
+owner 14 86584 9
+owner 14 87583 9
+owner 14 86583 9
+owner 14 87582 9
+owner 14 86582 9
+owner 14 88582 9
+owner 14 87581 9
+owner 14 86581 9
+owner 14 88581 9
+owner 14 87580 9
+owner 14 86580 9
+owner 14 88580 9
+owner 14 87579 9
+owner 14 88579 9
+owner 14 89579 9
+owner 14 90579 9
+owner 14 89580 9
+owner 14 90580 9
+owner 14 89581 9
+owner 14 90581 9
+owner 14 91581 9
+owner 14 90582 9
+owner 14 91582 9
+owner 14 92582 9
+owner 14 91583 9
+owner 14 92583 9
+owner 14 91584 9
+owner 14 92584 9
+owner 14 91585 9
+owner 14 92581 9
+owner 14 91580 9
+owner 14 85581 9
+owner 14 85582 9
+owner 14 85583 9
+owner 14 85584 9
+owner 14 896690 10
+owner 14 895690 10
+owner 14 897690 10
+owner 14 896689 10
+owner 14 896691 10
+owner 14 895691 10
+owner 14 897691 10
+owner 14 896692 10
+owner 14 895692 10
+owner 14 897692 10
+owner 14 896693 10
+owner 14 895693 10
+owner 14 897693 10
+owner 14 894693 10
+owner 14 894692 10
+owner 14 893692 10
+owner 14 894691 10
+owner 14 893691 10
+owner 14 894690 10
+owner 14 893690 10
+owner 14 894689 10
+owner 14 893689 10
+owner 14 895689 10
+owner 14 894688 10
+owner 14 893688 10
+owner 14 895688 10
+owner 14 894687 10
+owner 14 893687 10
+owner 14 895687 10
+owner 14 894686 10
+owner 14 895686 10
+owner 14 896686 10
+owner 14 897686 10
+owner 14 896687 10
+owner 14 897687 10
+owner 14 896688 10
+owner 14 897688 10
+owner 14 898688 10
+owner 14 897689 10
+owner 14 898689 10
+owner 14 899689 10
+owner 14 898690 10
+owner 14 899690 10
+owner 14 898691 10
+owner 14 899691 10
+owner 14 898692 10
+owner 14 899688 10
+owner 14 898687 10
+owner 14 892688 10
+owner 14 892689 10
+owner 14 892690 10
+owner 14 892691 10
+owner 14 331181 11
+owner 14 330181 11
+owner 14 332181 11
+owner 14 331180 11
+owner 14 331182 11
+owner 14 330182 11
+owner 14 332182 11
+owner 14 331183 11
+owner 14 330183 11
+owner 14 332183 11
+owner 14 331184 11
+owner 14 330184 11
+owner 14 332184 11
+owner 14 329184 11
+owner 14 329183 11
+owner 14 328183 11
+owner 14 329182 11
+owner 14 328182 11
+owner 14 329181 11
+owner 14 328181 11
+owner 14 329180 11
+owner 14 328180 11
+owner 14 330180 11
+owner 14 329179 11
+owner 14 328179 11
+owner 14 330179 11
+owner 14 329178 11
+owner 14 328178 11
+owner 14 330178 11
+owner 14 329177 11
+owner 14 330177 11
+owner 14 331177 11
+owner 14 332177 11
+owner 14 331178 11
+owner 14 332178 11
+owner 14 331179 11
+owner 14 332179 11
+owner 14 333179 11
+owner 14 332180 11
+owner 14 333180 11
+owner 14 334180 11
+owner 14 333181 11
+owner 14 334181 11
+owner 14 333182 11
+owner 14 334182 11
+owner 14 333183 11
+owner 14 334179 11
+owner 14 333178 11
+owner 14 327179 11
+owner 14 327180 11
+owner 14 327181 11
+owner 14 327182 11
+owner 14 468222 12
+owner 14 467222 12
+owner 14 469222 12
+owner 14 468221 12
+owner 14 468223 12
+owner 14 467223 12
+owner 14 469223 12
+owner 14 468224 12
+owner 14 467224 12
+owner 14 469224 12
+owner 14 468225 12
+owner 14 467225 12
+owner 14 469225 12
+owner 14 466225 12
+owner 14 466224 12
+owner 14 465224 12
+owner 14 466223 12
+owner 14 465223 12
+owner 14 466222 12
+owner 14 465222 12
+owner 14 466221 12
+owner 14 465221 12
+owner 14 467221 12
+owner 14 466220 12
+owner 14 465220 12
+owner 14 467220 12
+owner 14 466219 12
+owner 14 465219 12
+owner 14 467219 12
+owner 14 466218 12
+owner 14 467218 12
+owner 14 468218 12
+owner 14 469218 12
+owner 14 468219 12
+owner 14 469219 12
+owner 14 468220 12
+owner 14 469220 12
+owner 14 470220 12
+owner 14 469221 12
+owner 14 470221 12
+owner 14 471221 12
+owner 14 470222 12
+owner 14 471222 12
+owner 14 470223 12
+owner 14 471223 12
+owner 14 470224 12
+owner 14 471220 12
+owner 14 470219 12
+owner 14 464220 12
+owner 14 464221 12
+owner 14 464222 12
+owner 14 464223 12
+owner 14 876730 13
+owner 14 875730 13
+owner 14 877730 13
+owner 14 876729 13
+owner 14 876731 13
+owner 14 875731 13
+owner 14 877731 13
+owner 14 876732 13
+owner 14 875732 13
+owner 14 877732 13
+owner 14 876733 13
+owner 14 875733 13
+owner 14 877733 13
+owner 14 874733 13
+owner 14 874732 13
+owner 14 873732 13
+owner 14 874731 13
+owner 14 873731 13
+owner 14 874730 13
+owner 14 873730 13
+owner 14 874729 13
+owner 14 873729 13
+owner 14 875729 13
+owner 14 874728 13
+owner 14 873728 13
+owner 14 875728 13
+owner 14 874727 13
+owner 14 873727 13
+owner 14 875727 13
+owner 14 874726 13
+owner 14 875726 13
+owner 14 876726 13
+owner 14 877726 13
+owner 14 876727 13
+owner 14 877727 13
+owner 14 876728 13
+owner 14 877728 13
+owner 14 878728 13
+owner 14 877729 13
+owner 14 878729 13
+owner 14 879729 13
+owner 14 878730 13
+owner 14 879730 13
+owner 14 878731 13
+owner 14 879731 13
+owner 14 878732 13
+owner 14 879728 13
+owner 14 878727 13
+owner 14 872728 13
+owner 14 872729 13
+owner 14 872730 13
+owner 14 872731 13
+owner 14 281683 14
+owner 14 280683 14
+owner 14 282683 14
+owner 14 281682 14
+owner 14 281684 14
+owner 14 280684 14
+owner 14 282684 14
+owner 14 281685 14
+owner 14 280685 14
+owner 14 282685 14
+owner 14 281686 14
+owner 14 280686 14
+owner 14 282686 14
+owner 14 279686 14
+owner 14 279685 14
+owner 14 278685 14
+owner 14 279684 14
+owner 14 278684 14
+owner 14 279683 14
+owner 14 278683 14
+owner 14 279682 14
+owner 14 278682 14
+owner 14 280682 14
+owner 14 279681 14
+owner 14 278681 14
+owner 14 280681 14
+owner 14 279680 14
+owner 14 278680 14
+owner 14 280680 14
+owner 14 279679 14
+owner 14 280679 14
+owner 14 281679 14
+owner 14 282679 14
+owner 14 281680 14
+owner 14 282680 14
+owner 14 281681 14
+owner 14 282681 14
+owner 14 283681 14
+owner 14 282682 14
+owner 14 283682 14
+owner 14 284682 14
+owner 14 283683 14
+owner 14 284683 14
+owner 14 283684 14
+owner 14 284684 14
+owner 14 283685 14
+owner 14 284681 14
+owner 14 283680 14
+owner 14 277681 14
+owner 14 277682 14
+owner 14 277683 14
+owner 14 277684 14
+owner 14 224588 15
+owner 14 223588 15
+owner 14 225588 15
+owner 14 224587 15
+owner 14 224589 15
+owner 14 223589 15
+owner 14 225589 15
+owner 14 224590 15
+owner 14 223590 15
+owner 14 225590 15
+owner 14 224591 15
+owner 14 223591 15
+owner 14 225591 15
+owner 14 222591 15
+owner 14 222590 15
+owner 14 221590 15
+owner 14 222589 15
+owner 14 221589 15
+owner 14 222588 15
+owner 14 221588 15
+owner 14 222587 15
+owner 14 221587 15
+owner 14 223587 15
+owner 14 222586 15
+owner 14 221586 15
+owner 14 223586 15
+owner 14 222585 15
+owner 14 221585 15
+owner 14 223585 15
+owner 14 222584 15
+owner 14 223584 15
+owner 14 224584 15
+owner 14 225584 15
+owner 14 224585 15
+owner 14 225585 15
+owner 14 224586 15
+owner 14 225586 15
+owner 14 226586 15
+owner 14 225587 15
+owner 14 226587 15
+owner 14 227587 15
+owner 14 226588 15
+owner 14 227588 15
+owner 14 226589 15
+owner 14 227589 15
+owner 14 226590 15
+owner 14 227586 15
+owner 14 226585 15
+owner 14 220586 15
+owner 14 220587 15
+owner 14 220588 15
+owner 14 220589 15
+prev 14 107254
+prev 14 334545
+prev 14 767276
+prev 14 298498
+prev 14 271614
+prev 14 705481
+prev 14 944611
+prev 14 89583
+prev 14 896690
+prev 14 331181
+prev 14 468222
+prev 14 876730
+prev 14 281683
+prev 14 224588
+owned 14 361647
+owned 14 361648
+owned 14 361649
+owned 14 361650
+owned 14 362646
+owned 14 362647
+owned 14 362648
+owned 14 362649
+owned 14 362650
+owned 14 362651
+owned 14 363645
+owned 14 363646
+owned 14 363647
+owned 14 363648
+owned 14 363649
+owned 14 363650
+owned 14 363651
+owned 14 363652
+owned 14 364645
+owned 14 364646
+owned 14 364647
+owned 14 364648
+owned 14 364649
+owned 14 364650
+owned 14 364651
+owned 14 364652
+owned 14 365645
+owned 14 365646
+owned 14 365647
+owned 14 365648
+owned 14 365649
+owned 14 365650
+owned 14 365651
+owned 14 365652
+owned 14 366645
+owned 14 366646
+owned 14 366647
+owned 14 366648
+owned 14 366649
+owned 14 366650
+owned 14 366651
+owned 14 366652
+owned 14 367646
+owned 14 367647
+owned 14 367648
+owned 14 367649
+owned 14 367650
+owned 14 367651
+owned 14 368647
+owned 14 368648
+owned 14 368649
+owned 14 368650
+bot 15 17 8i7cuo9t 1041878418 384665 665 384 52
+owner 15 107254 2
+owner 15 106254 2
+owner 15 108254 2
+owner 15 107253 2
+owner 15 107255 2
+owner 15 106255 2
+owner 15 108255 2
+owner 15 107256 2
+owner 15 106256 2
+owner 15 108256 2
+owner 15 107257 2
+owner 15 106257 2
+owner 15 108257 2
+owner 15 105257 2
+owner 15 105256 2
+owner 15 104256 2
+owner 15 105255 2
+owner 15 104255 2
+owner 15 105254 2
+owner 15 104254 2
+owner 15 105253 2
+owner 15 104253 2
+owner 15 106253 2
+owner 15 105252 2
+owner 15 104252 2
+owner 15 106252 2
+owner 15 105251 2
+owner 15 104251 2
+owner 15 106251 2
+owner 15 105250 2
+owner 15 106250 2
+owner 15 107250 2
+owner 15 108250 2
+owner 15 107251 2
+owner 15 108251 2
+owner 15 107252 2
+owner 15 108252 2
+owner 15 109252 2
+owner 15 108253 2
+owner 15 109253 2
+owner 15 110253 2
+owner 15 109254 2
+owner 15 110254 2
+owner 15 109255 2
+owner 15 110255 2
+owner 15 109256 2
+owner 15 110252 2
+owner 15 109251 2
+owner 15 103252 2
+owner 15 103253 2
+owner 15 103254 2
+owner 15 103255 2
+owner 15 334545 3
+owner 15 333545 3
+owner 15 335545 3
+owner 15 334544 3
+owner 15 334546 3
+owner 15 333546 3
+owner 15 335546 3
+owner 15 334547 3
+owner 15 333547 3
+owner 15 335547 3
+owner 15 334548 3
+owner 15 333548 3
+owner 15 335548 3
+owner 15 332548 3
+owner 15 332547 3
+owner 15 331547 3
+owner 15 332546 3
+owner 15 331546 3
+owner 15 332545 3
+owner 15 331545 3
+owner 15 332544 3
+owner 15 331544 3
+owner 15 333544 3
+owner 15 332543 3
+owner 15 331543 3
+owner 15 333543 3
+owner 15 332542 3
+owner 15 331542 3
+owner 15 333542 3
+owner 15 332541 3
+owner 15 333541 3
+owner 15 334541 3
+owner 15 335541 3
+owner 15 334542 3
+owner 15 335542 3
+owner 15 334543 3
+owner 15 335543 3
+owner 15 336543 3
+owner 15 335544 3
+owner 15 336544 3
+owner 15 337544 3
+owner 15 336545 3
+owner 15 337545 3
+owner 15 336546 3
+owner 15 337546 3
+owner 15 336547 3
+owner 15 337543 3
+owner 15 336542 3
+owner 15 330543 3
+owner 15 330544 3
+owner 15 330545 3
+owner 15 330546 3
+owner 15 767276 4
+owner 15 766276 4
+owner 15 768276 4
+owner 15 767275 4
+owner 15 767277 4
+owner 15 766277 4
+owner 15 768277 4
+owner 15 767278 4
+owner 15 766278 4
+owner 15 768278 4
+owner 15 767279 4
+owner 15 766279 4
+owner 15 768279 4
+owner 15 765279 4
+owner 15 765278 4
+owner 15 764278 4
+owner 15 765277 4
+owner 15 764277 4
+owner 15 765276 4
+owner 15 764276 4
+owner 15 765275 4
+owner 15 764275 4
+owner 15 766275 4
+owner 15 765274 4
+owner 15 764274 4
+owner 15 766274 4
+owner 15 765273 4
+owner 15 764273 4
+owner 15 766273 4
+owner 15 765272 4
+owner 15 766272 4
+owner 15 767272 4
+owner 15 768272 4
+owner 15 767273 4
+owner 15 768273 4
+owner 15 767274 4
+owner 15 768274 4
+owner 15 769274 4
+owner 15 768275 4
+owner 15 769275 4
+owner 15 770275 4
+owner 15 769276 4
+owner 15 770276 4
+owner 15 769277 4
+owner 15 770277 4
+owner 15 769278 4
+owner 15 770274 4
+owner 15 769273 4
+owner 15 763274 4
+owner 15 763275 4
+owner 15 763276 4
+owner 15 763277 4
+owner 15 298498 5
+owner 15 297498 5
+owner 15 299498 5
+owner 15 298497 5
+owner 15 298499 5
+owner 15 297499 5
+owner 15 299499 5
+owner 15 298500 5
+owner 15 297500 5
+owner 15 299500 5
+owner 15 298501 5
+owner 15 297501 5
+owner 15 299501 5
+owner 15 296501 5
+owner 15 296500 5
+owner 15 295500 5
+owner 15 296499 5
+owner 15 295499 5
+owner 15 296498 5
+owner 15 295498 5
+owner 15 296497 5
+owner 15 295497 5
+owner 15 297497 5
+owner 15 296496 5
+owner 15 295496 5
+owner 15 297496 5
+owner 15 296495 5
+owner 15 295495 5
+owner 15 297495 5
+owner 15 296494 5
+owner 15 297494 5
+owner 15 298494 5
+owner 15 299494 5
+owner 15 298495 5
+owner 15 299495 5
+owner 15 298496 5
+owner 15 299496 5
+owner 15 300496 5
+owner 15 299497 5
+owner 15 300497 5
+owner 15 301497 5
+owner 15 300498 5
+owner 15 301498 5
+owner 15 300499 5
+owner 15 301499 5
+owner 15 300500 5
+owner 15 301496 5
+owner 15 300495 5
+owner 15 294496 5
+owner 15 294497 5
+owner 15 294498 5
+owner 15 294499 5
+owner 15 271614 6
+owner 15 270614 6
+owner 15 272614 6
+owner 15 271613 6
+owner 15 271615 6
+owner 15 270615 6
+owner 15 272615 6
+owner 15 271616 6
+owner 15 270616 6
+owner 15 272616 6
+owner 15 271617 6
+owner 15 270617 6
+owner 15 272617 6
+owner 15 269617 6
+owner 15 269616 6
+owner 15 268616 6
+owner 15 269615 6
+owner 15 268615 6
+owner 15 269614 6
+owner 15 268614 6
+owner 15 269613 6
+owner 15 268613 6
+owner 15 270613 6
+owner 15 269612 6
+owner 15 268612 6
+owner 15 270612 6
+owner 15 269611 6
+owner 15 268611 6
+owner 15 270611 6
+owner 15 269610 6
+owner 15 270610 6
+owner 15 271610 6
+owner 15 272610 6
+owner 15 271611 6
+owner 15 272611 6
+owner 15 271612 6
+owner 15 272612 6
+owner 15 273612 6
+owner 15 272613 6
+owner 15 273613 6
+owner 15 274613 6
+owner 15 273614 6
+owner 15 274614 6
+owner 15 273615 6
+owner 15 274615 6
+owner 15 273616 6
+owner 15 274612 6
+owner 15 273611 6
+owner 15 267612 6
+owner 15 267613 6
+owner 15 267614 6
+owner 15 267615 6
+owner 15 705481 7
+owner 15 704481 7
+owner 15 706481 7
+owner 15 705480 7
+owner 15 705482 7
+owner 15 704482 7
+owner 15 706482 7
+owner 15 705483 7
+owner 15 704483 7
+owner 15 706483 7
+owner 15 705484 7
+owner 15 704484 7
+owner 15 706484 7
+owner 15 703484 7
+owner 15 703483 7
+owner 15 702483 7
+owner 15 703482 7
+owner 15 702482 7
+owner 15 703481 7
+owner 15 702481 7
+owner 15 703480 7
+owner 15 702480 7
+owner 15 704480 7
+owner 15 703479 7
+owner 15 702479 7
+owner 15 704479 7
+owner 15 703478 7
+owner 15 702478 7
+owner 15 704478 7
+owner 15 703477 7
+owner 15 704477 7
+owner 15 705477 7
+owner 15 706477 7
+owner 15 705478 7
+owner 15 706478 7
+owner 15 705479 7
+owner 15 706479 7
+owner 15 707479 7
+owner 15 706480 7
+owner 15 707480 7
+owner 15 708480 7
+owner 15 707481 7
+owner 15 708481 7
+owner 15 707482 7
+owner 15 708482 7
+owner 15 707483 7
+owner 15 708479 7
+owner 15 707478 7
+owner 15 701479 7
+owner 15 701480 7
+owner 15 701481 7
+owner 15 701482 7
+owner 15 944611 8
+owner 15 943611 8
+owner 15 945611 8
+owner 15 944610 8
+owner 15 944612 8
+owner 15 943612 8
+owner 15 945612 8
+owner 15 944613 8
+owner 15 943613 8
+owner 15 945613 8
+owner 15 944614 8
+owner 15 943614 8
+owner 15 945614 8
+owner 15 942614 8
+owner 15 942613 8
+owner 15 941613 8
+owner 15 942612 8
+owner 15 941612 8
+owner 15 942611 8
+owner 15 941611 8
+owner 15 942610 8
+owner 15 941610 8
+owner 15 943610 8
+owner 15 942609 8
+owner 15 941609 8
+owner 15 943609 8
+owner 15 942608 8
+owner 15 941608 8
+owner 15 943608 8
+owner 15 942607 8
+owner 15 943607 8
+owner 15 944607 8
+owner 15 945607 8
+owner 15 944608 8
+owner 15 945608 8
+owner 15 944609 8
+owner 15 945609 8
+owner 15 946609 8
+owner 15 945610 8
+owner 15 946610 8
+owner 15 947610 8
+owner 15 946611 8
+owner 15 947611 8
+owner 15 946612 8
+owner 15 947612 8
+owner 15 946613 8
+owner 15 947609 8
+owner 15 946608 8
+owner 15 940609 8
+owner 15 940610 8
+owner 15 940611 8
+owner 15 940612 8
+owner 15 89583 9
+owner 15 88583 9
+owner 15 90583 9
+owner 15 89582 9
+owner 15 89584 9
+owner 15 88584 9
+owner 15 90584 9
+owner 15 89585 9
+owner 15 88585 9
+owner 15 90585 9
+owner 15 89586 9
+owner 15 88586 9
+owner 15 90586 9
+owner 15 87586 9
+owner 15 87585 9
+owner 15 86585 9
+owner 15 87584 9
+owner 15 86584 9
+owner 15 87583 9
+owner 15 86583 9
+owner 15 87582 9
+owner 15 86582 9
+owner 15 88582 9
+owner 15 87581 9
+owner 15 86581 9
+owner 15 88581 9
+owner 15 87580 9
+owner 15 86580 9
+owner 15 88580 9
+owner 15 87579 9
+owner 15 88579 9
+owner 15 89579 9
+owner 15 90579 9
+owner 15 89580 9
+owner 15 90580 9
+owner 15 89581 9
+owner 15 90581 9
+owner 15 91581 9
+owner 15 90582 9
+owner 15 91582 9
+owner 15 92582 9
+owner 15 91583 9
+owner 15 92583 9
+owner 15 91584 9
+owner 15 92584 9
+owner 15 91585 9
+owner 15 92581 9
+owner 15 91580 9
+owner 15 85581 9
+owner 15 85582 9
+owner 15 85583 9
+owner 15 85584 9
+owner 15 896690 10
+owner 15 895690 10
+owner 15 897690 10
+owner 15 896689 10
+owner 15 896691 10
+owner 15 895691 10
+owner 15 897691 10
+owner 15 896692 10
+owner 15 895692 10
+owner 15 897692 10
+owner 15 896693 10
+owner 15 895693 10
+owner 15 897693 10
+owner 15 894693 10
+owner 15 894692 10
+owner 15 893692 10
+owner 15 894691 10
+owner 15 893691 10
+owner 15 894690 10
+owner 15 893690 10
+owner 15 894689 10
+owner 15 893689 10
+owner 15 895689 10
+owner 15 894688 10
+owner 15 893688 10
+owner 15 895688 10
+owner 15 894687 10
+owner 15 893687 10
+owner 15 895687 10
+owner 15 894686 10
+owner 15 895686 10
+owner 15 896686 10
+owner 15 897686 10
+owner 15 896687 10
+owner 15 897687 10
+owner 15 896688 10
+owner 15 897688 10
+owner 15 898688 10
+owner 15 897689 10
+owner 15 898689 10
+owner 15 899689 10
+owner 15 898690 10
+owner 15 899690 10
+owner 15 898691 10
+owner 15 899691 10
+owner 15 898692 10
+owner 15 899688 10
+owner 15 898687 10
+owner 15 892688 10
+owner 15 892689 10
+owner 15 892690 10
+owner 15 892691 10
+owner 15 331181 11
+owner 15 330181 11
+owner 15 332181 11
+owner 15 331180 11
+owner 15 331182 11
+owner 15 330182 11
+owner 15 332182 11
+owner 15 331183 11
+owner 15 330183 11
+owner 15 332183 11
+owner 15 331184 11
+owner 15 330184 11
+owner 15 332184 11
+owner 15 329184 11
+owner 15 329183 11
+owner 15 328183 11
+owner 15 329182 11
+owner 15 328182 11
+owner 15 329181 11
+owner 15 328181 11
+owner 15 329180 11
+owner 15 328180 11
+owner 15 330180 11
+owner 15 329179 11
+owner 15 328179 11
+owner 15 330179 11
+owner 15 329178 11
+owner 15 328178 11
+owner 15 330178 11
+owner 15 329177 11
+owner 15 330177 11
+owner 15 331177 11
+owner 15 332177 11
+owner 15 331178 11
+owner 15 332178 11
+owner 15 331179 11
+owner 15 332179 11
+owner 15 333179 11
+owner 15 332180 11
+owner 15 333180 11
+owner 15 334180 11
+owner 15 333181 11
+owner 15 334181 11
+owner 15 333182 11
+owner 15 334182 11
+owner 15 333183 11
+owner 15 334179 11
+owner 15 333178 11
+owner 15 327179 11
+owner 15 327180 11
+owner 15 327181 11
+owner 15 327182 11
+owner 15 468222 12
+owner 15 467222 12
+owner 15 469222 12
+owner 15 468221 12
+owner 15 468223 12
+owner 15 467223 12
+owner 15 469223 12
+owner 15 468224 12
+owner 15 467224 12
+owner 15 469224 12
+owner 15 468225 12
+owner 15 467225 12
+owner 15 469225 12
+owner 15 466225 12
+owner 15 466224 12
+owner 15 465224 12
+owner 15 466223 12
+owner 15 465223 12
+owner 15 466222 12
+owner 15 465222 12
+owner 15 466221 12
+owner 15 465221 12
+owner 15 467221 12
+owner 15 466220 12
+owner 15 465220 12
+owner 15 467220 12
+owner 15 466219 12
+owner 15 465219 12
+owner 15 467219 12
+owner 15 466218 12
+owner 15 467218 12
+owner 15 468218 12
+owner 15 469218 12
+owner 15 468219 12
+owner 15 469219 12
+owner 15 468220 12
+owner 15 469220 12
+owner 15 470220 12
+owner 15 469221 12
+owner 15 470221 12
+owner 15 471221 12
+owner 15 470222 12
+owner 15 471222 12
+owner 15 470223 12
+owner 15 471223 12
+owner 15 470224 12
+owner 15 471220 12
+owner 15 470219 12
+owner 15 464220 12
+owner 15 464221 12
+owner 15 464222 12
+owner 15 464223 12
+owner 15 876730 13
+owner 15 875730 13
+owner 15 877730 13
+owner 15 876729 13
+owner 15 876731 13
+owner 15 875731 13
+owner 15 877731 13
+owner 15 876732 13
+owner 15 875732 13
+owner 15 877732 13
+owner 15 876733 13
+owner 15 875733 13
+owner 15 877733 13
+owner 15 874733 13
+owner 15 874732 13
+owner 15 873732 13
+owner 15 874731 13
+owner 15 873731 13
+owner 15 874730 13
+owner 15 873730 13
+owner 15 874729 13
+owner 15 873729 13
+owner 15 875729 13
+owner 15 874728 13
+owner 15 873728 13
+owner 15 875728 13
+owner 15 874727 13
+owner 15 873727 13
+owner 15 875727 13
+owner 15 874726 13
+owner 15 875726 13
+owner 15 876726 13
+owner 15 877726 13
+owner 15 876727 13
+owner 15 877727 13
+owner 15 876728 13
+owner 15 877728 13
+owner 15 878728 13
+owner 15 877729 13
+owner 15 878729 13
+owner 15 879729 13
+owner 15 878730 13
+owner 15 879730 13
+owner 15 878731 13
+owner 15 879731 13
+owner 15 878732 13
+owner 15 879728 13
+owner 15 878727 13
+owner 15 872728 13
+owner 15 872729 13
+owner 15 872730 13
+owner 15 872731 13
+owner 15 281683 14
+owner 15 280683 14
+owner 15 282683 14
+owner 15 281682 14
+owner 15 281684 14
+owner 15 280684 14
+owner 15 282684 14
+owner 15 281685 14
+owner 15 280685 14
+owner 15 282685 14
+owner 15 281686 14
+owner 15 280686 14
+owner 15 282686 14
+owner 15 279686 14
+owner 15 279685 14
+owner 15 278685 14
+owner 15 279684 14
+owner 15 278684 14
+owner 15 279683 14
+owner 15 278683 14
+owner 15 279682 14
+owner 15 278682 14
+owner 15 280682 14
+owner 15 279681 14
+owner 15 278681 14
+owner 15 280681 14
+owner 15 279680 14
+owner 15 278680 14
+owner 15 280680 14
+owner 15 279679 14
+owner 15 280679 14
+owner 15 281679 14
+owner 15 282679 14
+owner 15 281680 14
+owner 15 282680 14
+owner 15 281681 14
+owner 15 282681 14
+owner 15 283681 14
+owner 15 282682 14
+owner 15 283682 14
+owner 15 284682 14
+owner 15 283683 14
+owner 15 284683 14
+owner 15 283684 14
+owner 15 284684 14
+owner 15 283685 14
+owner 15 284681 14
+owner 15 283680 14
+owner 15 277681 14
+owner 15 277682 14
+owner 15 277683 14
+owner 15 277684 14
+owner 15 224588 15
+owner 15 223588 15
+owner 15 225588 15
+owner 15 224587 15
+owner 15 224589 15
+owner 15 223589 15
+owner 15 225589 15
+owner 15 224590 15
+owner 15 223590 15
+owner 15 225590 15
+owner 15 224591 15
+owner 15 223591 15
+owner 15 225591 15
+owner 15 222591 15
+owner 15 222590 15
+owner 15 221590 15
+owner 15 222589 15
+owner 15 221589 15
+owner 15 222588 15
+owner 15 221588 15
+owner 15 222587 15
+owner 15 221587 15
+owner 15 223587 15
+owner 15 222586 15
+owner 15 221586 15
+owner 15 223586 15
+owner 15 222585 15
+owner 15 221585 15
+owner 15 223585 15
+owner 15 222584 15
+owner 15 223584 15
+owner 15 224584 15
+owner 15 225584 15
+owner 15 224585 15
+owner 15 225585 15
+owner 15 224586 15
+owner 15 225586 15
+owner 15 226586 15
+owner 15 225587 15
+owner 15 226587 15
+owner 15 227587 15
+owner 15 226588 15
+owner 15 227588 15
+owner 15 226589 15
+owner 15 227589 15
+owner 15 226590 15
+owner 15 227586 15
+owner 15 226585 15
+owner 15 220586 15
+owner 15 220587 15
+owner 15 220588 15
+owner 15 220589 15
+owner 15 365649 16
+owner 15 364649 16
+owner 15 366649 16
+owner 15 365648 16
+owner 15 365650 16
+owner 15 364650 16
+owner 15 366650 16
+owner 15 365651 16
+owner 15 364651 16
+owner 15 366651 16
+owner 15 365652 16
+owner 15 364652 16
+owner 15 366652 16
+owner 15 363652 16
+owner 15 363651 16
+owner 15 362651 16
+owner 15 363650 16
+owner 15 362650 16
+owner 15 363649 16
+owner 15 362649 16
+owner 15 363648 16
+owner 15 362648 16
+owner 15 364648 16
+owner 15 363647 16
+owner 15 362647 16
+owner 15 364647 16
+owner 15 363646 16
+owner 15 362646 16
+owner 15 364646 16
+owner 15 363645 16
+owner 15 364645 16
+owner 15 365645 16
+owner 15 366645 16
+owner 15 365646 16
+owner 15 366646 16
+owner 15 365647 16
+owner 15 366647 16
+owner 15 367647 16
+owner 15 366648 16
+owner 15 367648 16
+owner 15 368648 16
+owner 15 367649 16
+owner 15 368649 16
+owner 15 367650 16
+owner 15 368650 16
+owner 15 367651 16
+owner 15 368647 16
+owner 15 367646 16
+owner 15 361647 16
+owner 15 361648 16
+owner 15 361649 16
+owner 15 361650 16
+prev 15 107254
+prev 15 334545
+prev 15 767276
+prev 15 298498
+prev 15 271614
+prev 15 705481
+prev 15 944611
+prev 15 89583
+prev 15 896690
+prev 15 331181
+prev 15 468222
+prev 15 876730
+prev 15 281683
+prev 15 224588
+prev 15 365649
+owned 15 380663
+owned 15 380664
+owned 15 380665
+owned 15 380666
+owned 15 381662
+owned 15 381663
+owned 15 381664
+owned 15 381665
+owned 15 381666
+owned 15 381667
+owned 15 382661
+owned 15 382662
+owned 15 382663
+owned 15 382664
+owned 15 382665
+owned 15 382666
+owned 15 382667
+owned 15 382668
+owned 15 383661
+owned 15 383662
+owned 15 383663
+owned 15 383664
+owned 15 383665
+owned 15 383666
+owned 15 383667
+owned 15 383668
+owned 15 384661
+owned 15 384662
+owned 15 384663
+owned 15 384664
+owned 15 384665
+owned 15 384666
+owned 15 384667
+owned 15 384668
+owned 15 385661
+owned 15 385662
+owned 15 385663
+owned 15 385664
+owned 15 385665
+owned 15 385666
+owned 15 385667
+owned 15 385668
+owned 15 386662
+owned 15 386663
+owned 15 386664
+owned 15 386665
+owned 15 386666
+owned 15 386667
+owned 15 387663
+owned 15 387664
+owned 15 387665
+owned 15 387666
+bot 16 18 ay8xa67r 1238569276 622435 435 622 52
+owner 16 107254 2
+owner 16 106254 2
+owner 16 108254 2
+owner 16 107253 2
+owner 16 107255 2
+owner 16 106255 2
+owner 16 108255 2
+owner 16 107256 2
+owner 16 106256 2
+owner 16 108256 2
+owner 16 107257 2
+owner 16 106257 2
+owner 16 108257 2
+owner 16 105257 2
+owner 16 105256 2
+owner 16 104256 2
+owner 16 105255 2
+owner 16 104255 2
+owner 16 105254 2
+owner 16 104254 2
+owner 16 105253 2
+owner 16 104253 2
+owner 16 106253 2
+owner 16 105252 2
+owner 16 104252 2
+owner 16 106252 2
+owner 16 105251 2
+owner 16 104251 2
+owner 16 106251 2
+owner 16 105250 2
+owner 16 106250 2
+owner 16 107250 2
+owner 16 108250 2
+owner 16 107251 2
+owner 16 108251 2
+owner 16 107252 2
+owner 16 108252 2
+owner 16 109252 2
+owner 16 108253 2
+owner 16 109253 2
+owner 16 110253 2
+owner 16 109254 2
+owner 16 110254 2
+owner 16 109255 2
+owner 16 110255 2
+owner 16 109256 2
+owner 16 110252 2
+owner 16 109251 2
+owner 16 103252 2
+owner 16 103253 2
+owner 16 103254 2
+owner 16 103255 2
+owner 16 334545 3
+owner 16 333545 3
+owner 16 335545 3
+owner 16 334544 3
+owner 16 334546 3
+owner 16 333546 3
+owner 16 335546 3
+owner 16 334547 3
+owner 16 333547 3
+owner 16 335547 3
+owner 16 334548 3
+owner 16 333548 3
+owner 16 335548 3
+owner 16 332548 3
+owner 16 332547 3
+owner 16 331547 3
+owner 16 332546 3
+owner 16 331546 3
+owner 16 332545 3
+owner 16 331545 3
+owner 16 332544 3
+owner 16 331544 3
+owner 16 333544 3
+owner 16 332543 3
+owner 16 331543 3
+owner 16 333543 3
+owner 16 332542 3
+owner 16 331542 3
+owner 16 333542 3
+owner 16 332541 3
+owner 16 333541 3
+owner 16 334541 3
+owner 16 335541 3
+owner 16 334542 3
+owner 16 335542 3
+owner 16 334543 3
+owner 16 335543 3
+owner 16 336543 3
+owner 16 335544 3
+owner 16 336544 3
+owner 16 337544 3
+owner 16 336545 3
+owner 16 337545 3
+owner 16 336546 3
+owner 16 337546 3
+owner 16 336547 3
+owner 16 337543 3
+owner 16 336542 3
+owner 16 330543 3
+owner 16 330544 3
+owner 16 330545 3
+owner 16 330546 3
+owner 16 767276 4
+owner 16 766276 4
+owner 16 768276 4
+owner 16 767275 4
+owner 16 767277 4
+owner 16 766277 4
+owner 16 768277 4
+owner 16 767278 4
+owner 16 766278 4
+owner 16 768278 4
+owner 16 767279 4
+owner 16 766279 4
+owner 16 768279 4
+owner 16 765279 4
+owner 16 765278 4
+owner 16 764278 4
+owner 16 765277 4
+owner 16 764277 4
+owner 16 765276 4
+owner 16 764276 4
+owner 16 765275 4
+owner 16 764275 4
+owner 16 766275 4
+owner 16 765274 4
+owner 16 764274 4
+owner 16 766274 4
+owner 16 765273 4
+owner 16 764273 4
+owner 16 766273 4
+owner 16 765272 4
+owner 16 766272 4
+owner 16 767272 4
+owner 16 768272 4
+owner 16 767273 4
+owner 16 768273 4
+owner 16 767274 4
+owner 16 768274 4
+owner 16 769274 4
+owner 16 768275 4
+owner 16 769275 4
+owner 16 770275 4
+owner 16 769276 4
+owner 16 770276 4
+owner 16 769277 4
+owner 16 770277 4
+owner 16 769278 4
+owner 16 770274 4
+owner 16 769273 4
+owner 16 763274 4
+owner 16 763275 4
+owner 16 763276 4
+owner 16 763277 4
+owner 16 298498 5
+owner 16 297498 5
+owner 16 299498 5
+owner 16 298497 5
+owner 16 298499 5
+owner 16 297499 5
+owner 16 299499 5
+owner 16 298500 5
+owner 16 297500 5
+owner 16 299500 5
+owner 16 298501 5
+owner 16 297501 5
+owner 16 299501 5
+owner 16 296501 5
+owner 16 296500 5
+owner 16 295500 5
+owner 16 296499 5
+owner 16 295499 5
+owner 16 296498 5
+owner 16 295498 5
+owner 16 296497 5
+owner 16 295497 5
+owner 16 297497 5
+owner 16 296496 5
+owner 16 295496 5
+owner 16 297496 5
+owner 16 296495 5
+owner 16 295495 5
+owner 16 297495 5
+owner 16 296494 5
+owner 16 297494 5
+owner 16 298494 5
+owner 16 299494 5
+owner 16 298495 5
+owner 16 299495 5
+owner 16 298496 5
+owner 16 299496 5
+owner 16 300496 5
+owner 16 299497 5
+owner 16 300497 5
+owner 16 301497 5
+owner 16 300498 5
+owner 16 301498 5
+owner 16 300499 5
+owner 16 301499 5
+owner 16 300500 5
+owner 16 301496 5
+owner 16 300495 5
+owner 16 294496 5
+owner 16 294497 5
+owner 16 294498 5
+owner 16 294499 5
+owner 16 271614 6
+owner 16 270614 6
+owner 16 272614 6
+owner 16 271613 6
+owner 16 271615 6
+owner 16 270615 6
+owner 16 272615 6
+owner 16 271616 6
+owner 16 270616 6
+owner 16 272616 6
+owner 16 271617 6
+owner 16 270617 6
+owner 16 272617 6
+owner 16 269617 6
+owner 16 269616 6
+owner 16 268616 6
+owner 16 269615 6
+owner 16 268615 6
+owner 16 269614 6
+owner 16 268614 6
+owner 16 269613 6
+owner 16 268613 6
+owner 16 270613 6
+owner 16 269612 6
+owner 16 268612 6
+owner 16 270612 6
+owner 16 269611 6
+owner 16 268611 6
+owner 16 270611 6
+owner 16 269610 6
+owner 16 270610 6
+owner 16 271610 6
+owner 16 272610 6
+owner 16 271611 6
+owner 16 272611 6
+owner 16 271612 6
+owner 16 272612 6
+owner 16 273612 6
+owner 16 272613 6
+owner 16 273613 6
+owner 16 274613 6
+owner 16 273614 6
+owner 16 274614 6
+owner 16 273615 6
+owner 16 274615 6
+owner 16 273616 6
+owner 16 274612 6
+owner 16 273611 6
+owner 16 267612 6
+owner 16 267613 6
+owner 16 267614 6
+owner 16 267615 6
+owner 16 705481 7
+owner 16 704481 7
+owner 16 706481 7
+owner 16 705480 7
+owner 16 705482 7
+owner 16 704482 7
+owner 16 706482 7
+owner 16 705483 7
+owner 16 704483 7
+owner 16 706483 7
+owner 16 705484 7
+owner 16 704484 7
+owner 16 706484 7
+owner 16 703484 7
+owner 16 703483 7
+owner 16 702483 7
+owner 16 703482 7
+owner 16 702482 7
+owner 16 703481 7
+owner 16 702481 7
+owner 16 703480 7
+owner 16 702480 7
+owner 16 704480 7
+owner 16 703479 7
+owner 16 702479 7
+owner 16 704479 7
+owner 16 703478 7
+owner 16 702478 7
+owner 16 704478 7
+owner 16 703477 7
+owner 16 704477 7
+owner 16 705477 7
+owner 16 706477 7
+owner 16 705478 7
+owner 16 706478 7
+owner 16 705479 7
+owner 16 706479 7
+owner 16 707479 7
+owner 16 706480 7
+owner 16 707480 7
+owner 16 708480 7
+owner 16 707481 7
+owner 16 708481 7
+owner 16 707482 7
+owner 16 708482 7
+owner 16 707483 7
+owner 16 708479 7
+owner 16 707478 7
+owner 16 701479 7
+owner 16 701480 7
+owner 16 701481 7
+owner 16 701482 7
+owner 16 944611 8
+owner 16 943611 8
+owner 16 945611 8
+owner 16 944610 8
+owner 16 944612 8
+owner 16 943612 8
+owner 16 945612 8
+owner 16 944613 8
+owner 16 943613 8
+owner 16 945613 8
+owner 16 944614 8
+owner 16 943614 8
+owner 16 945614 8
+owner 16 942614 8
+owner 16 942613 8
+owner 16 941613 8
+owner 16 942612 8
+owner 16 941612 8
+owner 16 942611 8
+owner 16 941611 8
+owner 16 942610 8
+owner 16 941610 8
+owner 16 943610 8
+owner 16 942609 8
+owner 16 941609 8
+owner 16 943609 8
+owner 16 942608 8
+owner 16 941608 8
+owner 16 943608 8
+owner 16 942607 8
+owner 16 943607 8
+owner 16 944607 8
+owner 16 945607 8
+owner 16 944608 8
+owner 16 945608 8
+owner 16 944609 8
+owner 16 945609 8
+owner 16 946609 8
+owner 16 945610 8
+owner 16 946610 8
+owner 16 947610 8
+owner 16 946611 8
+owner 16 947611 8
+owner 16 946612 8
+owner 16 947612 8
+owner 16 946613 8
+owner 16 947609 8
+owner 16 946608 8
+owner 16 940609 8
+owner 16 940610 8
+owner 16 940611 8
+owner 16 940612 8
+owner 16 89583 9
+owner 16 88583 9
+owner 16 90583 9
+owner 16 89582 9
+owner 16 89584 9
+owner 16 88584 9
+owner 16 90584 9
+owner 16 89585 9
+owner 16 88585 9
+owner 16 90585 9
+owner 16 89586 9
+owner 16 88586 9
+owner 16 90586 9
+owner 16 87586 9
+owner 16 87585 9
+owner 16 86585 9
+owner 16 87584 9
+owner 16 86584 9
+owner 16 87583 9
+owner 16 86583 9
+owner 16 87582 9
+owner 16 86582 9
+owner 16 88582 9
+owner 16 87581 9
+owner 16 86581 9
+owner 16 88581 9
+owner 16 87580 9
+owner 16 86580 9
+owner 16 88580 9
+owner 16 87579 9
+owner 16 88579 9
+owner 16 89579 9
+owner 16 90579 9
+owner 16 89580 9
+owner 16 90580 9
+owner 16 89581 9
+owner 16 90581 9
+owner 16 91581 9
+owner 16 90582 9
+owner 16 91582 9
+owner 16 92582 9
+owner 16 91583 9
+owner 16 92583 9
+owner 16 91584 9
+owner 16 92584 9
+owner 16 91585 9
+owner 16 92581 9
+owner 16 91580 9
+owner 16 85581 9
+owner 16 85582 9
+owner 16 85583 9
+owner 16 85584 9
+owner 16 896690 10
+owner 16 895690 10
+owner 16 897690 10
+owner 16 896689 10
+owner 16 896691 10
+owner 16 895691 10
+owner 16 897691 10
+owner 16 896692 10
+owner 16 895692 10
+owner 16 897692 10
+owner 16 896693 10
+owner 16 895693 10
+owner 16 897693 10
+owner 16 894693 10
+owner 16 894692 10
+owner 16 893692 10
+owner 16 894691 10
+owner 16 893691 10
+owner 16 894690 10
+owner 16 893690 10
+owner 16 894689 10
+owner 16 893689 10
+owner 16 895689 10
+owner 16 894688 10
+owner 16 893688 10
+owner 16 895688 10
+owner 16 894687 10
+owner 16 893687 10
+owner 16 895687 10
+owner 16 894686 10
+owner 16 895686 10
+owner 16 896686 10
+owner 16 897686 10
+owner 16 896687 10
+owner 16 897687 10
+owner 16 896688 10
+owner 16 897688 10
+owner 16 898688 10
+owner 16 897689 10
+owner 16 898689 10
+owner 16 899689 10
+owner 16 898690 10
+owner 16 899690 10
+owner 16 898691 10
+owner 16 899691 10
+owner 16 898692 10
+owner 16 899688 10
+owner 16 898687 10
+owner 16 892688 10
+owner 16 892689 10
+owner 16 892690 10
+owner 16 892691 10
+owner 16 331181 11
+owner 16 330181 11
+owner 16 332181 11
+owner 16 331180 11
+owner 16 331182 11
+owner 16 330182 11
+owner 16 332182 11
+owner 16 331183 11
+owner 16 330183 11
+owner 16 332183 11
+owner 16 331184 11
+owner 16 330184 11
+owner 16 332184 11
+owner 16 329184 11
+owner 16 329183 11
+owner 16 328183 11
+owner 16 329182 11
+owner 16 328182 11
+owner 16 329181 11
+owner 16 328181 11
+owner 16 329180 11
+owner 16 328180 11
+owner 16 330180 11
+owner 16 329179 11
+owner 16 328179 11
+owner 16 330179 11
+owner 16 329178 11
+owner 16 328178 11
+owner 16 330178 11
+owner 16 329177 11
+owner 16 330177 11
+owner 16 331177 11
+owner 16 332177 11
+owner 16 331178 11
+owner 16 332178 11
+owner 16 331179 11
+owner 16 332179 11
+owner 16 333179 11
+owner 16 332180 11
+owner 16 333180 11
+owner 16 334180 11
+owner 16 333181 11
+owner 16 334181 11
+owner 16 333182 11
+owner 16 334182 11
+owner 16 333183 11
+owner 16 334179 11
+owner 16 333178 11
+owner 16 327179 11
+owner 16 327180 11
+owner 16 327181 11
+owner 16 327182 11
+owner 16 468222 12
+owner 16 467222 12
+owner 16 469222 12
+owner 16 468221 12
+owner 16 468223 12
+owner 16 467223 12
+owner 16 469223 12
+owner 16 468224 12
+owner 16 467224 12
+owner 16 469224 12
+owner 16 468225 12
+owner 16 467225 12
+owner 16 469225 12
+owner 16 466225 12
+owner 16 466224 12
+owner 16 465224 12
+owner 16 466223 12
+owner 16 465223 12
+owner 16 466222 12
+owner 16 465222 12
+owner 16 466221 12
+owner 16 465221 12
+owner 16 467221 12
+owner 16 466220 12
+owner 16 465220 12
+owner 16 467220 12
+owner 16 466219 12
+owner 16 465219 12
+owner 16 467219 12
+owner 16 466218 12
+owner 16 467218 12
+owner 16 468218 12
+owner 16 469218 12
+owner 16 468219 12
+owner 16 469219 12
+owner 16 468220 12
+owner 16 469220 12
+owner 16 470220 12
+owner 16 469221 12
+owner 16 470221 12
+owner 16 471221 12
+owner 16 470222 12
+owner 16 471222 12
+owner 16 470223 12
+owner 16 471223 12
+owner 16 470224 12
+owner 16 471220 12
+owner 16 470219 12
+owner 16 464220 12
+owner 16 464221 12
+owner 16 464222 12
+owner 16 464223 12
+owner 16 876730 13
+owner 16 875730 13
+owner 16 877730 13
+owner 16 876729 13
+owner 16 876731 13
+owner 16 875731 13
+owner 16 877731 13
+owner 16 876732 13
+owner 16 875732 13
+owner 16 877732 13
+owner 16 876733 13
+owner 16 875733 13
+owner 16 877733 13
+owner 16 874733 13
+owner 16 874732 13
+owner 16 873732 13
+owner 16 874731 13
+owner 16 873731 13
+owner 16 874730 13
+owner 16 873730 13
+owner 16 874729 13
+owner 16 873729 13
+owner 16 875729 13
+owner 16 874728 13
+owner 16 873728 13
+owner 16 875728 13
+owner 16 874727 13
+owner 16 873727 13
+owner 16 875727 13
+owner 16 874726 13
+owner 16 875726 13
+owner 16 876726 13
+owner 16 877726 13
+owner 16 876727 13
+owner 16 877727 13
+owner 16 876728 13
+owner 16 877728 13
+owner 16 878728 13
+owner 16 877729 13
+owner 16 878729 13
+owner 16 879729 13
+owner 16 878730 13
+owner 16 879730 13
+owner 16 878731 13
+owner 16 879731 13
+owner 16 878732 13
+owner 16 879728 13
+owner 16 878727 13
+owner 16 872728 13
+owner 16 872729 13
+owner 16 872730 13
+owner 16 872731 13
+owner 16 281683 14
+owner 16 280683 14
+owner 16 282683 14
+owner 16 281682 14
+owner 16 281684 14
+owner 16 280684 14
+owner 16 282684 14
+owner 16 281685 14
+owner 16 280685 14
+owner 16 282685 14
+owner 16 281686 14
+owner 16 280686 14
+owner 16 282686 14
+owner 16 279686 14
+owner 16 279685 14
+owner 16 278685 14
+owner 16 279684 14
+owner 16 278684 14
+owner 16 279683 14
+owner 16 278683 14
+owner 16 279682 14
+owner 16 278682 14
+owner 16 280682 14
+owner 16 279681 14
+owner 16 278681 14
+owner 16 280681 14
+owner 16 279680 14
+owner 16 278680 14
+owner 16 280680 14
+owner 16 279679 14
+owner 16 280679 14
+owner 16 281679 14
+owner 16 282679 14
+owner 16 281680 14
+owner 16 282680 14
+owner 16 281681 14
+owner 16 282681 14
+owner 16 283681 14
+owner 16 282682 14
+owner 16 283682 14
+owner 16 284682 14
+owner 16 283683 14
+owner 16 284683 14
+owner 16 283684 14
+owner 16 284684 14
+owner 16 283685 14
+owner 16 284681 14
+owner 16 283680 14
+owner 16 277681 14
+owner 16 277682 14
+owner 16 277683 14
+owner 16 277684 14
+owner 16 224588 15
+owner 16 223588 15
+owner 16 225588 15
+owner 16 224587 15
+owner 16 224589 15
+owner 16 223589 15
+owner 16 225589 15
+owner 16 224590 15
+owner 16 223590 15
+owner 16 225590 15
+owner 16 224591 15
+owner 16 223591 15
+owner 16 225591 15
+owner 16 222591 15
+owner 16 222590 15
+owner 16 221590 15
+owner 16 222589 15
+owner 16 221589 15
+owner 16 222588 15
+owner 16 221588 15
+owner 16 222587 15
+owner 16 221587 15
+owner 16 223587 15
+owner 16 222586 15
+owner 16 221586 15
+owner 16 223586 15
+owner 16 222585 15
+owner 16 221585 15
+owner 16 223585 15
+owner 16 222584 15
+owner 16 223584 15
+owner 16 224584 15
+owner 16 225584 15
+owner 16 224585 15
+owner 16 225585 15
+owner 16 224586 15
+owner 16 225586 15
+owner 16 226586 15
+owner 16 225587 15
+owner 16 226587 15
+owner 16 227587 15
+owner 16 226588 15
+owner 16 227588 15
+owner 16 226589 15
+owner 16 227589 15
+owner 16 226590 15
+owner 16 227586 15
+owner 16 226585 15
+owner 16 220586 15
+owner 16 220587 15
+owner 16 220588 15
+owner 16 220589 15
+owner 16 365649 16
+owner 16 364649 16
+owner 16 366649 16
+owner 16 365648 16
+owner 16 365650 16
+owner 16 364650 16
+owner 16 366650 16
+owner 16 365651 16
+owner 16 364651 16
+owner 16 366651 16
+owner 16 365652 16
+owner 16 364652 16
+owner 16 366652 16
+owner 16 363652 16
+owner 16 363651 16
+owner 16 362651 16
+owner 16 363650 16
+owner 16 362650 16
+owner 16 363649 16
+owner 16 362649 16
+owner 16 363648 16
+owner 16 362648 16
+owner 16 364648 16
+owner 16 363647 16
+owner 16 362647 16
+owner 16 364647 16
+owner 16 363646 16
+owner 16 362646 16
+owner 16 364646 16
+owner 16 363645 16
+owner 16 364645 16
+owner 16 365645 16
+owner 16 366645 16
+owner 16 365646 16
+owner 16 366646 16
+owner 16 365647 16
+owner 16 366647 16
+owner 16 367647 16
+owner 16 366648 16
+owner 16 367648 16
+owner 16 368648 16
+owner 16 367649 16
+owner 16 368649 16
+owner 16 367650 16
+owner 16 368650 16
+owner 16 367651 16
+owner 16 368647 16
+owner 16 367646 16
+owner 16 361647 16
+owner 16 361648 16
+owner 16 361649 16
+owner 16 361650 16
+owner 16 384665 17
+owner 16 383665 17
+owner 16 385665 17
+owner 16 384664 17
+owner 16 384666 17
+owner 16 383666 17
+owner 16 385666 17
+owner 16 384667 17
+owner 16 383667 17
+owner 16 385667 17
+owner 16 384668 17
+owner 16 383668 17
+owner 16 385668 17
+owner 16 382668 17
+owner 16 382667 17
+owner 16 381667 17
+owner 16 382666 17
+owner 16 381666 17
+owner 16 382665 17
+owner 16 381665 17
+owner 16 382664 17
+owner 16 381664 17
+owner 16 383664 17
+owner 16 382663 17
+owner 16 381663 17
+owner 16 383663 17
+owner 16 382662 17
+owner 16 381662 17
+owner 16 383662 17
+owner 16 382661 17
+owner 16 383661 17
+owner 16 384661 17
+owner 16 385661 17
+owner 16 384662 17
+owner 16 385662 17
+owner 16 384663 17
+owner 16 385663 17
+owner 16 386663 17
+owner 16 385664 17
+owner 16 386664 17
+owner 16 387664 17
+owner 16 386665 17
+owner 16 387665 17
+owner 16 386666 17
+owner 16 387666 17
+owner 16 386667 17
+owner 16 387663 17
+owner 16 386662 17
+owner 16 380663 17
+owner 16 380664 17
+owner 16 380665 17
+owner 16 380666 17
+prev 16 107254
+prev 16 334545
+prev 16 767276
+prev 16 298498
+prev 16 271614
+prev 16 705481
+prev 16 944611
+prev 16 89583
+prev 16 896690
+prev 16 331181
+prev 16 468222
+prev 16 876730
+prev 16 281683
+prev 16 224588
+prev 16 365649
+prev 16 384665
+owned 16 618433
+owned 16 618434
+owned 16 618435
+owned 16 618436
+owned 16 619432
+owned 16 619433
+owned 16 619434
+owned 16 619435
+owned 16 619436
+owned 16 619437
+owned 16 620431
+owned 16 620432
+owned 16 620433
+owned 16 620434
+owned 16 620435
+owned 16 620436
+owned 16 620437
+owned 16 620438
+owned 16 621431
+owned 16 621432
+owned 16 621433
+owned 16 621434
+owned 16 621435
+owned 16 621436
+owned 16 621437
+owned 16 621438
+owned 16 622431
+owned 16 622432
+owned 16 622433
+owned 16 622434
+owned 16 622435
+owned 16 622436
+owned 16 622437
+owned 16 622438
+owned 16 623431
+owned 16 623432
+owned 16 623433
+owned 16 623434
+owned 16 623435
+owned 16 623436
+owned 16 623437
+owned 16 623438
+owned 16 624432
+owned 16 624433
+owned 16 624434
+owned 16 624435
+owned 16 624436
+owned 16 624437
+owned 16 625433
+owned 16 625434
+owned 16 625435
+owned 16 625436
+bot 17 19 fha1xhrw -2086814691 384416 416 384 52
+owner 17 107254 2
+owner 17 106254 2
+owner 17 108254 2
+owner 17 107253 2
+owner 17 107255 2
+owner 17 106255 2
+owner 17 108255 2
+owner 17 107256 2
+owner 17 106256 2
+owner 17 108256 2
+owner 17 107257 2
+owner 17 106257 2
+owner 17 108257 2
+owner 17 105257 2
+owner 17 105256 2
+owner 17 104256 2
+owner 17 105255 2
+owner 17 104255 2
+owner 17 105254 2
+owner 17 104254 2
+owner 17 105253 2
+owner 17 104253 2
+owner 17 106253 2
+owner 17 105252 2
+owner 17 104252 2
+owner 17 106252 2
+owner 17 105251 2
+owner 17 104251 2
+owner 17 106251 2
+owner 17 105250 2
+owner 17 106250 2
+owner 17 107250 2
+owner 17 108250 2
+owner 17 107251 2
+owner 17 108251 2
+owner 17 107252 2
+owner 17 108252 2
+owner 17 109252 2
+owner 17 108253 2
+owner 17 109253 2
+owner 17 110253 2
+owner 17 109254 2
+owner 17 110254 2
+owner 17 109255 2
+owner 17 110255 2
+owner 17 109256 2
+owner 17 110252 2
+owner 17 109251 2
+owner 17 103252 2
+owner 17 103253 2
+owner 17 103254 2
+owner 17 103255 2
+owner 17 334545 3
+owner 17 333545 3
+owner 17 335545 3
+owner 17 334544 3
+owner 17 334546 3
+owner 17 333546 3
+owner 17 335546 3
+owner 17 334547 3
+owner 17 333547 3
+owner 17 335547 3
+owner 17 334548 3
+owner 17 333548 3
+owner 17 335548 3
+owner 17 332548 3
+owner 17 332547 3
+owner 17 331547 3
+owner 17 332546 3
+owner 17 331546 3
+owner 17 332545 3
+owner 17 331545 3
+owner 17 332544 3
+owner 17 331544 3
+owner 17 333544 3
+owner 17 332543 3
+owner 17 331543 3
+owner 17 333543 3
+owner 17 332542 3
+owner 17 331542 3
+owner 17 333542 3
+owner 17 332541 3
+owner 17 333541 3
+owner 17 334541 3
+owner 17 335541 3
+owner 17 334542 3
+owner 17 335542 3
+owner 17 334543 3
+owner 17 335543 3
+owner 17 336543 3
+owner 17 335544 3
+owner 17 336544 3
+owner 17 337544 3
+owner 17 336545 3
+owner 17 337545 3
+owner 17 336546 3
+owner 17 337546 3
+owner 17 336547 3
+owner 17 337543 3
+owner 17 336542 3
+owner 17 330543 3
+owner 17 330544 3
+owner 17 330545 3
+owner 17 330546 3
+owner 17 767276 4
+owner 17 766276 4
+owner 17 768276 4
+owner 17 767275 4
+owner 17 767277 4
+owner 17 766277 4
+owner 17 768277 4
+owner 17 767278 4
+owner 17 766278 4
+owner 17 768278 4
+owner 17 767279 4
+owner 17 766279 4
+owner 17 768279 4
+owner 17 765279 4
+owner 17 765278 4
+owner 17 764278 4
+owner 17 765277 4
+owner 17 764277 4
+owner 17 765276 4
+owner 17 764276 4
+owner 17 765275 4
+owner 17 764275 4
+owner 17 766275 4
+owner 17 765274 4
+owner 17 764274 4
+owner 17 766274 4
+owner 17 765273 4
+owner 17 764273 4
+owner 17 766273 4
+owner 17 765272 4
+owner 17 766272 4
+owner 17 767272 4
+owner 17 768272 4
+owner 17 767273 4
+owner 17 768273 4
+owner 17 767274 4
+owner 17 768274 4
+owner 17 769274 4
+owner 17 768275 4
+owner 17 769275 4
+owner 17 770275 4
+owner 17 769276 4
+owner 17 770276 4
+owner 17 769277 4
+owner 17 770277 4
+owner 17 769278 4
+owner 17 770274 4
+owner 17 769273 4
+owner 17 763274 4
+owner 17 763275 4
+owner 17 763276 4
+owner 17 763277 4
+owner 17 298498 5
+owner 17 297498 5
+owner 17 299498 5
+owner 17 298497 5
+owner 17 298499 5
+owner 17 297499 5
+owner 17 299499 5
+owner 17 298500 5
+owner 17 297500 5
+owner 17 299500 5
+owner 17 298501 5
+owner 17 297501 5
+owner 17 299501 5
+owner 17 296501 5
+owner 17 296500 5
+owner 17 295500 5
+owner 17 296499 5
+owner 17 295499 5
+owner 17 296498 5
+owner 17 295498 5
+owner 17 296497 5
+owner 17 295497 5
+owner 17 297497 5
+owner 17 296496 5
+owner 17 295496 5
+owner 17 297496 5
+owner 17 296495 5
+owner 17 295495 5
+owner 17 297495 5
+owner 17 296494 5
+owner 17 297494 5
+owner 17 298494 5
+owner 17 299494 5
+owner 17 298495 5
+owner 17 299495 5
+owner 17 298496 5
+owner 17 299496 5
+owner 17 300496 5
+owner 17 299497 5
+owner 17 300497 5
+owner 17 301497 5
+owner 17 300498 5
+owner 17 301498 5
+owner 17 300499 5
+owner 17 301499 5
+owner 17 300500 5
+owner 17 301496 5
+owner 17 300495 5
+owner 17 294496 5
+owner 17 294497 5
+owner 17 294498 5
+owner 17 294499 5
+owner 17 271614 6
+owner 17 270614 6
+owner 17 272614 6
+owner 17 271613 6
+owner 17 271615 6
+owner 17 270615 6
+owner 17 272615 6
+owner 17 271616 6
+owner 17 270616 6
+owner 17 272616 6
+owner 17 271617 6
+owner 17 270617 6
+owner 17 272617 6
+owner 17 269617 6
+owner 17 269616 6
+owner 17 268616 6
+owner 17 269615 6
+owner 17 268615 6
+owner 17 269614 6
+owner 17 268614 6
+owner 17 269613 6
+owner 17 268613 6
+owner 17 270613 6
+owner 17 269612 6
+owner 17 268612 6
+owner 17 270612 6
+owner 17 269611 6
+owner 17 268611 6
+owner 17 270611 6
+owner 17 269610 6
+owner 17 270610 6
+owner 17 271610 6
+owner 17 272610 6
+owner 17 271611 6
+owner 17 272611 6
+owner 17 271612 6
+owner 17 272612 6
+owner 17 273612 6
+owner 17 272613 6
+owner 17 273613 6
+owner 17 274613 6
+owner 17 273614 6
+owner 17 274614 6
+owner 17 273615 6
+owner 17 274615 6
+owner 17 273616 6
+owner 17 274612 6
+owner 17 273611 6
+owner 17 267612 6
+owner 17 267613 6
+owner 17 267614 6
+owner 17 267615 6
+owner 17 705481 7
+owner 17 704481 7
+owner 17 706481 7
+owner 17 705480 7
+owner 17 705482 7
+owner 17 704482 7
+owner 17 706482 7
+owner 17 705483 7
+owner 17 704483 7
+owner 17 706483 7
+owner 17 705484 7
+owner 17 704484 7
+owner 17 706484 7
+owner 17 703484 7
+owner 17 703483 7
+owner 17 702483 7
+owner 17 703482 7
+owner 17 702482 7
+owner 17 703481 7
+owner 17 702481 7
+owner 17 703480 7
+owner 17 702480 7
+owner 17 704480 7
+owner 17 703479 7
+owner 17 702479 7
+owner 17 704479 7
+owner 17 703478 7
+owner 17 702478 7
+owner 17 704478 7
+owner 17 703477 7
+owner 17 704477 7
+owner 17 705477 7
+owner 17 706477 7
+owner 17 705478 7
+owner 17 706478 7
+owner 17 705479 7
+owner 17 706479 7
+owner 17 707479 7
+owner 17 706480 7
+owner 17 707480 7
+owner 17 708480 7
+owner 17 707481 7
+owner 17 708481 7
+owner 17 707482 7
+owner 17 708482 7
+owner 17 707483 7
+owner 17 708479 7
+owner 17 707478 7
+owner 17 701479 7
+owner 17 701480 7
+owner 17 701481 7
+owner 17 701482 7
+owner 17 944611 8
+owner 17 943611 8
+owner 17 945611 8
+owner 17 944610 8
+owner 17 944612 8
+owner 17 943612 8
+owner 17 945612 8
+owner 17 944613 8
+owner 17 943613 8
+owner 17 945613 8
+owner 17 944614 8
+owner 17 943614 8
+owner 17 945614 8
+owner 17 942614 8
+owner 17 942613 8
+owner 17 941613 8
+owner 17 942612 8
+owner 17 941612 8
+owner 17 942611 8
+owner 17 941611 8
+owner 17 942610 8
+owner 17 941610 8
+owner 17 943610 8
+owner 17 942609 8
+owner 17 941609 8
+owner 17 943609 8
+owner 17 942608 8
+owner 17 941608 8
+owner 17 943608 8
+owner 17 942607 8
+owner 17 943607 8
+owner 17 944607 8
+owner 17 945607 8
+owner 17 944608 8
+owner 17 945608 8
+owner 17 944609 8
+owner 17 945609 8
+owner 17 946609 8
+owner 17 945610 8
+owner 17 946610 8
+owner 17 947610 8
+owner 17 946611 8
+owner 17 947611 8
+owner 17 946612 8
+owner 17 947612 8
+owner 17 946613 8
+owner 17 947609 8
+owner 17 946608 8
+owner 17 940609 8
+owner 17 940610 8
+owner 17 940611 8
+owner 17 940612 8
+owner 17 89583 9
+owner 17 88583 9
+owner 17 90583 9
+owner 17 89582 9
+owner 17 89584 9
+owner 17 88584 9
+owner 17 90584 9
+owner 17 89585 9
+owner 17 88585 9
+owner 17 90585 9
+owner 17 89586 9
+owner 17 88586 9
+owner 17 90586 9
+owner 17 87586 9
+owner 17 87585 9
+owner 17 86585 9
+owner 17 87584 9
+owner 17 86584 9
+owner 17 87583 9
+owner 17 86583 9
+owner 17 87582 9
+owner 17 86582 9
+owner 17 88582 9
+owner 17 87581 9
+owner 17 86581 9
+owner 17 88581 9
+owner 17 87580 9
+owner 17 86580 9
+owner 17 88580 9
+owner 17 87579 9
+owner 17 88579 9
+owner 17 89579 9
+owner 17 90579 9
+owner 17 89580 9
+owner 17 90580 9
+owner 17 89581 9
+owner 17 90581 9
+owner 17 91581 9
+owner 17 90582 9
+owner 17 91582 9
+owner 17 92582 9
+owner 17 91583 9
+owner 17 92583 9
+owner 17 91584 9
+owner 17 92584 9
+owner 17 91585 9
+owner 17 92581 9
+owner 17 91580 9
+owner 17 85581 9
+owner 17 85582 9
+owner 17 85583 9
+owner 17 85584 9
+owner 17 896690 10
+owner 17 895690 10
+owner 17 897690 10
+owner 17 896689 10
+owner 17 896691 10
+owner 17 895691 10
+owner 17 897691 10
+owner 17 896692 10
+owner 17 895692 10
+owner 17 897692 10
+owner 17 896693 10
+owner 17 895693 10
+owner 17 897693 10
+owner 17 894693 10
+owner 17 894692 10
+owner 17 893692 10
+owner 17 894691 10
+owner 17 893691 10
+owner 17 894690 10
+owner 17 893690 10
+owner 17 894689 10
+owner 17 893689 10
+owner 17 895689 10
+owner 17 894688 10
+owner 17 893688 10
+owner 17 895688 10
+owner 17 894687 10
+owner 17 893687 10
+owner 17 895687 10
+owner 17 894686 10
+owner 17 895686 10
+owner 17 896686 10
+owner 17 897686 10
+owner 17 896687 10
+owner 17 897687 10
+owner 17 896688 10
+owner 17 897688 10
+owner 17 898688 10
+owner 17 897689 10
+owner 17 898689 10
+owner 17 899689 10
+owner 17 898690 10
+owner 17 899690 10
+owner 17 898691 10
+owner 17 899691 10
+owner 17 898692 10
+owner 17 899688 10
+owner 17 898687 10
+owner 17 892688 10
+owner 17 892689 10
+owner 17 892690 10
+owner 17 892691 10
+owner 17 331181 11
+owner 17 330181 11
+owner 17 332181 11
+owner 17 331180 11
+owner 17 331182 11
+owner 17 330182 11
+owner 17 332182 11
+owner 17 331183 11
+owner 17 330183 11
+owner 17 332183 11
+owner 17 331184 11
+owner 17 330184 11
+owner 17 332184 11
+owner 17 329184 11
+owner 17 329183 11
+owner 17 328183 11
+owner 17 329182 11
+owner 17 328182 11
+owner 17 329181 11
+owner 17 328181 11
+owner 17 329180 11
+owner 17 328180 11
+owner 17 330180 11
+owner 17 329179 11
+owner 17 328179 11
+owner 17 330179 11
+owner 17 329178 11
+owner 17 328178 11
+owner 17 330178 11
+owner 17 329177 11
+owner 17 330177 11
+owner 17 331177 11
+owner 17 332177 11
+owner 17 331178 11
+owner 17 332178 11
+owner 17 331179 11
+owner 17 332179 11
+owner 17 333179 11
+owner 17 332180 11
+owner 17 333180 11
+owner 17 334180 11
+owner 17 333181 11
+owner 17 334181 11
+owner 17 333182 11
+owner 17 334182 11
+owner 17 333183 11
+owner 17 334179 11
+owner 17 333178 11
+owner 17 327179 11
+owner 17 327180 11
+owner 17 327181 11
+owner 17 327182 11
+owner 17 468222 12
+owner 17 467222 12
+owner 17 469222 12
+owner 17 468221 12
+owner 17 468223 12
+owner 17 467223 12
+owner 17 469223 12
+owner 17 468224 12
+owner 17 467224 12
+owner 17 469224 12
+owner 17 468225 12
+owner 17 467225 12
+owner 17 469225 12
+owner 17 466225 12
+owner 17 466224 12
+owner 17 465224 12
+owner 17 466223 12
+owner 17 465223 12
+owner 17 466222 12
+owner 17 465222 12
+owner 17 466221 12
+owner 17 465221 12
+owner 17 467221 12
+owner 17 466220 12
+owner 17 465220 12
+owner 17 467220 12
+owner 17 466219 12
+owner 17 465219 12
+owner 17 467219 12
+owner 17 466218 12
+owner 17 467218 12
+owner 17 468218 12
+owner 17 469218 12
+owner 17 468219 12
+owner 17 469219 12
+owner 17 468220 12
+owner 17 469220 12
+owner 17 470220 12
+owner 17 469221 12
+owner 17 470221 12
+owner 17 471221 12
+owner 17 470222 12
+owner 17 471222 12
+owner 17 470223 12
+owner 17 471223 12
+owner 17 470224 12
+owner 17 471220 12
+owner 17 470219 12
+owner 17 464220 12
+owner 17 464221 12
+owner 17 464222 12
+owner 17 464223 12
+owner 17 876730 13
+owner 17 875730 13
+owner 17 877730 13
+owner 17 876729 13
+owner 17 876731 13
+owner 17 875731 13
+owner 17 877731 13
+owner 17 876732 13
+owner 17 875732 13
+owner 17 877732 13
+owner 17 876733 13
+owner 17 875733 13
+owner 17 877733 13
+owner 17 874733 13
+owner 17 874732 13
+owner 17 873732 13
+owner 17 874731 13
+owner 17 873731 13
+owner 17 874730 13
+owner 17 873730 13
+owner 17 874729 13
+owner 17 873729 13
+owner 17 875729 13
+owner 17 874728 13
+owner 17 873728 13
+owner 17 875728 13
+owner 17 874727 13
+owner 17 873727 13
+owner 17 875727 13
+owner 17 874726 13
+owner 17 875726 13
+owner 17 876726 13
+owner 17 877726 13
+owner 17 876727 13
+owner 17 877727 13
+owner 17 876728 13
+owner 17 877728 13
+owner 17 878728 13
+owner 17 877729 13
+owner 17 878729 13
+owner 17 879729 13
+owner 17 878730 13
+owner 17 879730 13
+owner 17 878731 13
+owner 17 879731 13
+owner 17 878732 13
+owner 17 879728 13
+owner 17 878727 13
+owner 17 872728 13
+owner 17 872729 13
+owner 17 872730 13
+owner 17 872731 13
+owner 17 281683 14
+owner 17 280683 14
+owner 17 282683 14
+owner 17 281682 14
+owner 17 281684 14
+owner 17 280684 14
+owner 17 282684 14
+owner 17 281685 14
+owner 17 280685 14
+owner 17 282685 14
+owner 17 281686 14
+owner 17 280686 14
+owner 17 282686 14
+owner 17 279686 14
+owner 17 279685 14
+owner 17 278685 14
+owner 17 279684 14
+owner 17 278684 14
+owner 17 279683 14
+owner 17 278683 14
+owner 17 279682 14
+owner 17 278682 14
+owner 17 280682 14
+owner 17 279681 14
+owner 17 278681 14
+owner 17 280681 14
+owner 17 279680 14
+owner 17 278680 14
+owner 17 280680 14
+owner 17 279679 14
+owner 17 280679 14
+owner 17 281679 14
+owner 17 282679 14
+owner 17 281680 14
+owner 17 282680 14
+owner 17 281681 14
+owner 17 282681 14
+owner 17 283681 14
+owner 17 282682 14
+owner 17 283682 14
+owner 17 284682 14
+owner 17 283683 14
+owner 17 284683 14
+owner 17 283684 14
+owner 17 284684 14
+owner 17 283685 14
+owner 17 284681 14
+owner 17 283680 14
+owner 17 277681 14
+owner 17 277682 14
+owner 17 277683 14
+owner 17 277684 14
+owner 17 224588 15
+owner 17 223588 15
+owner 17 225588 15
+owner 17 224587 15
+owner 17 224589 15
+owner 17 223589 15
+owner 17 225589 15
+owner 17 224590 15
+owner 17 223590 15
+owner 17 225590 15
+owner 17 224591 15
+owner 17 223591 15
+owner 17 225591 15
+owner 17 222591 15
+owner 17 222590 15
+owner 17 221590 15
+owner 17 222589 15
+owner 17 221589 15
+owner 17 222588 15
+owner 17 221588 15
+owner 17 222587 15
+owner 17 221587 15
+owner 17 223587 15
+owner 17 222586 15
+owner 17 221586 15
+owner 17 223586 15
+owner 17 222585 15
+owner 17 221585 15
+owner 17 223585 15
+owner 17 222584 15
+owner 17 223584 15
+owner 17 224584 15
+owner 17 225584 15
+owner 17 224585 15
+owner 17 225585 15
+owner 17 224586 15
+owner 17 225586 15
+owner 17 226586 15
+owner 17 225587 15
+owner 17 226587 15
+owner 17 227587 15
+owner 17 226588 15
+owner 17 227588 15
+owner 17 226589 15
+owner 17 227589 15
+owner 17 226590 15
+owner 17 227586 15
+owner 17 226585 15
+owner 17 220586 15
+owner 17 220587 15
+owner 17 220588 15
+owner 17 220589 15
+owner 17 365649 16
+owner 17 364649 16
+owner 17 366649 16
+owner 17 365648 16
+owner 17 365650 16
+owner 17 364650 16
+owner 17 366650 16
+owner 17 365651 16
+owner 17 364651 16
+owner 17 366651 16
+owner 17 365652 16
+owner 17 364652 16
+owner 17 366652 16
+owner 17 363652 16
+owner 17 363651 16
+owner 17 362651 16
+owner 17 363650 16
+owner 17 362650 16
+owner 17 363649 16
+owner 17 362649 16
+owner 17 363648 16
+owner 17 362648 16
+owner 17 364648 16
+owner 17 363647 16
+owner 17 362647 16
+owner 17 364647 16
+owner 17 363646 16
+owner 17 362646 16
+owner 17 364646 16
+owner 17 363645 16
+owner 17 364645 16
+owner 17 365645 16
+owner 17 366645 16
+owner 17 365646 16
+owner 17 366646 16
+owner 17 365647 16
+owner 17 366647 16
+owner 17 367647 16
+owner 17 366648 16
+owner 17 367648 16
+owner 17 368648 16
+owner 17 367649 16
+owner 17 368649 16
+owner 17 367650 16
+owner 17 368650 16
+owner 17 367651 16
+owner 17 368647 16
+owner 17 367646 16
+owner 17 361647 16
+owner 17 361648 16
+owner 17 361649 16
+owner 17 361650 16
+owner 17 384665 17
+owner 17 383665 17
+owner 17 385665 17
+owner 17 384664 17
+owner 17 384666 17
+owner 17 383666 17
+owner 17 385666 17
+owner 17 384667 17
+owner 17 383667 17
+owner 17 385667 17
+owner 17 384668 17
+owner 17 383668 17
+owner 17 385668 17
+owner 17 382668 17
+owner 17 382667 17
+owner 17 381667 17
+owner 17 382666 17
+owner 17 381666 17
+owner 17 382665 17
+owner 17 381665 17
+owner 17 382664 17
+owner 17 381664 17
+owner 17 383664 17
+owner 17 382663 17
+owner 17 381663 17
+owner 17 383663 17
+owner 17 382662 17
+owner 17 381662 17
+owner 17 383662 17
+owner 17 382661 17
+owner 17 383661 17
+owner 17 384661 17
+owner 17 385661 17
+owner 17 384662 17
+owner 17 385662 17
+owner 17 384663 17
+owner 17 385663 17
+owner 17 386663 17
+owner 17 385664 17
+owner 17 386664 17
+owner 17 387664 17
+owner 17 386665 17
+owner 17 387665 17
+owner 17 386666 17
+owner 17 387666 17
+owner 17 386667 17
+owner 17 387663 17
+owner 17 386662 17
+owner 17 380663 17
+owner 17 380664 17
+owner 17 380665 17
+owner 17 380666 17
+owner 17 622435 18
+owner 17 621435 18
+owner 17 623435 18
+owner 17 622434 18
+owner 17 622436 18
+owner 17 621436 18
+owner 17 623436 18
+owner 17 622437 18
+owner 17 621437 18
+owner 17 623437 18
+owner 17 622438 18
+owner 17 621438 18
+owner 17 623438 18
+owner 17 620438 18
+owner 17 620437 18
+owner 17 619437 18
+owner 17 620436 18
+owner 17 619436 18
+owner 17 620435 18
+owner 17 619435 18
+owner 17 620434 18
+owner 17 619434 18
+owner 17 621434 18
+owner 17 620433 18
+owner 17 619433 18
+owner 17 621433 18
+owner 17 620432 18
+owner 17 619432 18
+owner 17 621432 18
+owner 17 620431 18
+owner 17 621431 18
+owner 17 622431 18
+owner 17 623431 18
+owner 17 622432 18
+owner 17 623432 18
+owner 17 622433 18
+owner 17 623433 18
+owner 17 624433 18
+owner 17 623434 18
+owner 17 624434 18
+owner 17 625434 18
+owner 17 624435 18
+owner 17 625435 18
+owner 17 624436 18
+owner 17 625436 18
+owner 17 624437 18
+owner 17 625433 18
+owner 17 624432 18
+owner 17 618433 18
+owner 17 618434 18
+owner 17 618435 18
+owner 17 618436 18
+prev 17 107254
+prev 17 334545
+prev 17 767276
+prev 17 298498
+prev 17 271614
+prev 17 705481
+prev 17 944611
+prev 17 89583
+prev 17 896690
+prev 17 331181
+prev 17 468222
+prev 17 876730
+prev 17 281683
+prev 17 224588
+prev 17 365649
+prev 17 384665
+prev 17 622435
+owned 17 380414
+owned 17 380415
+owned 17 380416
+owned 17 380417
+owned 17 381413
+owned 17 381414
+owned 17 381415
+owned 17 381416
+owned 17 381417
+owned 17 381418
+owned 17 382412
+owned 17 382413
+owned 17 382414
+owned 17 382415
+owned 17 382416
+owned 17 382417
+owned 17 382418
+owned 17 382419
+owned 17 383412
+owned 17 383413
+owned 17 383414
+owned 17 383415
+owned 17 383416
+owned 17 383417
+owned 17 383418
+owned 17 383419
+owned 17 384412
+owned 17 384413
+owned 17 384414
+owned 17 384415
+owned 17 384416
+owned 17 384417
+owned 17 384418
+owned 17 384419
+owned 17 385412
+owned 17 385413
+owned 17 385414
+owned 17 385415
+owned 17 385416
+owned 17 385417
+owned 17 385418
+owned 17 385419
+owned 17 386413
+owned 17 386414
+owned 17 386415
+owned 17 386416
+owned 17 386417
+owned 17 386418
+owned 17 387414
+owned 17 387415
+owned 17 387416
+owned 17 387417

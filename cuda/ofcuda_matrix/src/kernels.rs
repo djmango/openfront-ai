@@ -1,0 +1,475 @@
+//! Device module for `ofcuda_matrix`.
+//!
+//! The device core is NOT copied here: `include!` pulls in the canonical
+//! `ofcuda_tick/src/core_impl.rs` (the same file `ofcuda_tick`'s host reference
+//! and `ofcuda_env`'s `gpu_env` use), so the PRNG, the flat heap, the
+//! `add_neighbors` draw-binding and the pop loop have exactly one
+//! implementation. The float budget and the terrain cost helpers are
+//! `ofcuda_env`'s, called from device code - the same two the composed CPU tick
+//! calls.
+//!
+//! # Shape
+//!
+//! One launch = ONE attack tick, run by thread 0. The engine ticks its `execs`
+//! in one global order and mutates the owner plane IN PLACE as tiles are
+//! conquered (`map.set_owner`), so two attacks in the same tick see each other
+//! - the plane therefore lives on the device across the whole cell and is never
+//! re-uploaded per tick. (The CPU `ofcuda_env::Attack` passes a tick-start plane
+//! plus its own accumulating claims list, which is equivalent only for a single
+//! live attack per contested tile; the in-place device plane is the engine's own
+//! semantics.)
+//!
+//! # Two buffer classes
+//!
+//! * PERSISTENT, indexed `slot * STRIDE` and never read back per tick:
+//!   `heap_tiles`/`heap_pri` (`HEAP_CAP`, the carried `to_conquer` heap),
+//!   `border` (`BC`, the attack's `border_tiles` set = the budget's only
+//!   adjacency input, `attack.rs:240`), `prng` (5 sfc32 words,
+//!   `PseudoRandom::new(123)`), `troops` (the carried `f64`), `scal`
+//!   (`SCAL`: heap_len, border_len, claims_len, alive, drops, peak, rsvd,
+//!   rsvd).
+//! * SCRATCH, one small buffer shared by every launch, copied back after each
+//!   launch: `out` (`SCAL_OUT` words: this tick's claim count, alive, drops,
+//!   peak) and `claims` (`MAXC`, THIS tick's claims in pop order).
+//!
+//! `ob_meta[owner_col*2]` / `[owner_col*2+1]` = (offset, length) of that owner's
+//! `border_tiles` in the flat `oborder` array for THIS tick - the input to
+//! `refresh_to_conquer` (`attack.rs:1265-1274`), which fires at attack creation
+//! and on a mid-tick heap-empty retreat.
+
+use cuda_device::{kernel, launch_bounds, thread};
+use cuda_host::cuda_module;
+use ofcuda_env::{attack_tiles_per_tick, attacker_troop_loss, tiles_used};
+use ofcuda_tick::{add_neighbors, has_attacker_neighbor, Heap, Prng, HEAP_CAP, ORDER_NSWE};
+
+/// Capacity of one attack's border set (device only; the CPU `Attack` uses a
+/// `Vec`). Overflow is COUNTED in `scal[slot*8+4]`, never silently dropped.
+pub const BC: usize = 8192;
+/// Capacity of one attack's per-tick claim list. Overflow is counted too.
+pub const MAXC: usize = 512;
+/// Persistent scalars per slot.
+pub const SCAL: usize = 8;
+/// Scratch scalars written per launch.
+pub const SCAL_OUT: usize = 4;
+/// Threads per block. Thread 0 runs the tick; the rest return immediately.
+pub const BLOCK: u32 = 256;
+
+#[cuda_module]
+pub mod device {
+    use super::*;
+
+    include!("../../ofcuda_tick/src/core_impl.rs");
+
+    fn border_insert(b: &mut [u32], blen: &mut usize, t: u32) {
+        let mut i = 0usize;
+        while i < *blen {
+            if b[i] == t {
+                return;
+            }
+            i += 1;
+        }
+        if *blen < b.len() {
+            b[*blen] = t;
+            *blen += 1;
+        }
+    }
+
+    fn border_remove(b: &mut [u32], blen: &mut usize, t: u32) {
+        let mut i = 0usize;
+        while i < *blen {
+            if b[i] == t {
+                let mut j = i;
+                while j + 1 < *blen {
+                    b[j] = b[j + 1];
+                    j += 1;
+                }
+                *blen -= 1;
+                return;
+            }
+            i += 1;
+        }
+    }
+
+    /// `ofcuda_env::Attack::offer_neighbours` (`attack.rs:1353-1386`): insert
+    /// the border tile for exactly the neighbours `add_neighbors` enqueues, then
+    /// let the crate's own `add_neighbors` do the draw-binding and priority.
+    #[allow(clippy::too_many_arguments)]
+    fn offer_dev(
+        heap: &mut Heap,
+        pr: &mut Prng,
+        border: &mut [u32],
+        blen: &mut usize,
+        plane: &[u16],
+        owner_col: u16,
+        terrain: &[u8],
+        tile: u32,
+        w: u32,
+        h: u32,
+        tick: u32,
+    ) -> u32 {
+        let mut nbuf = [0u32; 4];
+        let n = neighbors4(ORDER_NSWE, tile, w, h, &mut nbuf);
+        let mut i = 0usize;
+        while i < n as usize {
+            let nb = nbuf[i];
+            i += 1;
+            if terrain[nb as usize] & 0x80 == 0 {
+                continue; // water (attack.rs:1354)
+            }
+            if plane[nb as usize] != 0 {
+                continue; // not terra nullius (attack.rs:1359)
+            }
+            border_insert(border, blen, nb); // attack.rs:1363
+        }
+        let empty: [u32; 0] = [];
+        add_neighbors(
+            heap,
+            pr,
+            tile,
+            plane,
+            &empty[..],
+            owner_col,
+            terrain,
+            w,
+            h,
+            ORDER_NSWE,
+            tick,
+        )
+    }
+
+    /// `AttackExecution::refresh_to_conquer` (`attack.rs:1265-1274`): clear the
+    /// heap AND the border set, then offer every neighbour of the owner's
+    /// current border.
+    #[allow(clippy::too_many_arguments)]
+    fn refresh_dev(
+        heap: &mut Heap,
+        pr: &mut Prng,
+        border: &mut [u32],
+        blen: &mut usize,
+        plane: &[u16],
+        owner_col: u16,
+        terrain: &[u8],
+        w: u32,
+        h: u32,
+        tick: u32,
+        oborder: &[u32],
+        oboff: usize,
+        obn: usize,
+    ) {
+        heap.clear();
+        *blen = 0;
+        let mut j = 0usize;
+        while j < obn {
+            let bt = oborder[oboff + j];
+            j += 1;
+            offer_dev(heap, pr, border, blen, plane, owner_col, terrain, bt, w, h, tick);
+        }
+    }
+
+    /// ONE TICK of one attack (`AttackExecution::tick`, `attack.rs:206-324`).
+    /// Returns whether the attack is still alive. `tick` is the ENGINE's tick
+    /// index (`game.ticks()`), because it enters every enqueued tile's priority.
+    #[allow(clippy::too_many_arguments)]
+    fn tick_once(
+        heap: &mut Heap,
+        pr: &mut Prng,
+        troop_count: &mut f64,
+        bsub: &mut [u32],
+        blen: &mut usize,
+        psub: &mut [u16],
+        claims: &mut [u32],
+        ncl: &mut usize,
+        drops: &mut u32,
+        terrain: &[u8],
+        w: u32,
+        h: u32,
+        tick: u32,
+        owner_col: u16,
+        is_bot: u32,
+        oborder: &[u32],
+        oboff: usize,
+        obn: usize,
+    ) -> bool {
+        // attack.rs:239-255 - the one extra draw, taken BEFORE the pop loop.
+        let draw = pr.next_int(0, 5);
+        let budget = attack_tiles_per_tick(*troop_count, false, 0.0, *blen as f64 + draw as f64);
+        let mut num = budget;
+
+        while num > 0.0 {
+            if *troop_count < 1.0 {
+                *troop_count = 0.0;
+                return false; // attack.rs:258-262 starved
+            }
+            if heap.is_empty() {
+                // attack.rs:264-268: refresh_to_conquer, then RETREAT (death).
+                refresh_dev(
+                    heap, pr, bsub, blen, psub, owner_col, terrain, w, h, tick, oborder, oboff, obn,
+                );
+                *troop_count = 0.0;
+                return false;
+            }
+            let Some((tile, _pri)) = heap.dequeue() else {
+                break; // attack.rs:271
+            };
+            border_remove(bsub, blen, tile); // attack.rs:275
+            if psub[tile as usize] != 0 {
+                continue; // attack.rs:284 not terra nullius
+            }
+            if !has_attacker_neighbor(psub, &[], owner_col, tile, w, h, ORDER_NSWE) {
+                continue; // attack.rs:284
+            }
+            if terrain[tile as usize] & 0x80 == 0 {
+                continue; // attack.rs:288
+            }
+            offer_dev(heap, pr, bsub, blen, psub, owner_col, terrain, tile, w, h, tick); // attack.rs:292
+            num -= tiles_used(*troop_count, terrain[tile as usize]); // attack.rs:313
+            *troop_count -= attacker_troop_loss(terrain[tile as usize], is_bot != 0); // attack.rs:314
+            if *ncl < claims.len() {
+                claims[*ncl] = tile;
+                *ncl += 1;
+            } else {
+                *drops += 1;
+            }
+            psub[tile as usize] = owner_col; // conquer, IN PLACE (map.set_owner)
+        }
+        if *troop_count < 0.0 {
+            *troop_count = 0.0; // attack.rs:322-323
+        }
+        true
+    }
+
+    /// Load the slot's persistent state, run ONE tick, write it back. The
+    /// scratch `out`/`claims` describe exactly this launch's tick.
+    #[kernel]
+    #[launch_bounds(256)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn attack_tick(
+        terrain: &[u8],
+        w: u32,
+        h: u32,
+        tick: u32,
+        slot: u32,
+        owner_col: u16,
+        is_bot: u32,
+        mut plane: &mut [u16],
+        mut heap_tiles: &mut [u32],
+        mut heap_pri: &mut [f32],
+        mut border: &mut [u32],
+        mut prng: &mut [u32],
+        mut troops: &mut [f64],
+        mut scal: &mut [u32],
+        mut out: &mut [u32],
+        mut claims: &mut [u32],
+        oborder: &[u32],
+        ob_meta: &[u32],
+    ) {
+        let e = thread::index_1d().get();
+        if e != 0 {
+            return;
+        }
+        let s = slot as usize;
+        let soff = s * SCAL;
+        let hoff = s * HEAP_CAP;
+        let boff = s * BC;
+        let pse = s * 5;
+        out[0] = 0; // a fresh tick: no claims yet
+        out[1] = 0;
+        out[2] = scal[soff + 4];
+        out[3] = scal[soff + 5];
+        if scal[soff + 3] == 0 {
+            return; // dead: the engine ticks it once and it draws nothing
+        }
+        let mut hl = scal[soff] as usize;
+        if hl > HEAP_CAP {
+            hl = HEAP_CAP;
+        }
+        let mut heap = Heap::new();
+        heap.load(&heap_tiles[hoff..hoff + hl], &heap_pri[hoff..hoff + hl]);
+        let mut pr = Prng::from_state(&prng[pse..pse + 5]);
+        let mut troop_count = troops[s];
+        let mut blen = scal[soff + 1] as usize;
+        if blen > BC {
+            blen = BC;
+        }
+        let mut ncl = 0usize;
+        let mut drops = scal[soff + 4];
+        let om = owner_col as usize * 2;
+        let oboff = ob_meta[om] as usize;
+        let obn = ob_meta[om + 1] as usize;
+
+        let alive = tick_once(
+            &mut heap,
+            &mut pr,
+            &mut troop_count,
+            &mut border[boff..boff + BC],
+            &mut blen,
+            plane,
+            claims,
+            &mut ncl,
+            &mut drops,
+            terrain,
+            w,
+            h,
+            tick,
+            owner_col,
+            is_bot,
+            oborder,
+            oboff,
+            obn,
+        );
+
+        scal[soff] = heap.len as u32;
+        scal[soff + 1] = blen as u32;
+        scal[soff + 2] = ncl as u32;
+        troops[s] = troop_count;
+        scal[soff + 3] = if alive { 1 } else { 0 };
+        scal[soff + 4] = drops;
+        scal[soff + 5] = if heap.peak as u32 > scal[soff + 5] {
+            heap.peak as u32
+        } else {
+            scal[soff + 5]
+        };
+        out[0] = ncl as u32;
+        out[1] = if alive { 1 } else { 0 };
+        out[2] = drops;
+        out[3] = scal[soff + 5];
+        let mut j = 0usize;
+        while j < heap.len {
+            heap_tiles[hoff + j] = heap.tiles[j];
+            heap_pri[hoff + j] = heap.pri[j];
+            j += 1;
+        }
+        let mut pw = [0u32; 5];
+        pr.state_words(&mut pw);
+        let mut j = 0usize;
+        while j < 5 {
+            prng[pse + j] = pw[j];
+            j += 1;
+        }
+    }
+
+    /// The attack's creation: `AttackExecution::init`'s `refresh_to_conquer`
+    /// (`attack.rs:160-164`), run on the device, with the plane as of the
+    /// boundary the attack appears at and stamped with `game.ticks()` as it was
+    /// during the tick the init ran in.
+    #[kernel]
+    #[launch_bounds(256)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn attack_init(
+        terrain: &[u8],
+        w: u32,
+        h: u32,
+        tick: u32,
+        slot: u32,
+        owner_col: u16,
+        plane: &mut [u16],
+        mut heap_tiles: &mut [u32],
+        mut heap_pri: &mut [f32],
+        mut border: &mut [u32],
+        mut prng: &mut [u32],
+        mut scal: &mut [u32],
+        mut out: &mut [u32],
+        oborder: &[u32],
+        ob_meta: &[u32],
+    ) {
+        let e = thread::index_1d().get();
+        if e != 0 {
+            return;
+        }
+        let s = slot as usize;
+        let soff = s * SCAL;
+        let boff = s * BC;
+        let pse = s * 5;
+        scal[soff] = 0;
+        scal[soff + 1] = 0;
+        scal[soff + 2] = 0;
+        scal[soff + 4] = 0;
+        scal[soff + 5] = 0;
+        scal[soff + 3] = 1;
+        let mut heap = Heap::new();
+        let mut pr = Prng::from_state(&prng[pse..pse + 5]);
+        let mut blen = 0usize;
+        let om = owner_col as usize * 2;
+        let oboff = ob_meta[om] as usize;
+        let obn = ob_meta[om + 1] as usize;
+        refresh_dev(
+            &mut heap,
+            &mut pr,
+            &mut border[boff..boff + BC],
+            &mut blen,
+            plane,
+            owner_col,
+            terrain,
+            w,
+            h,
+            tick,
+            oborder,
+            oboff,
+            obn,
+        );
+        scal[soff] = heap.len as u32;
+        scal[soff + 1] = blen as u32;
+        scal[soff + 5] = heap.peak as u32;
+        out[0] = 0;
+        out[1] = 1;
+        out[2] = 0;
+        out[3] = heap.peak as u32;
+        let mut j = 0usize;
+        while j < heap.len {
+            heap_tiles[s * HEAP_CAP + j] = heap.tiles[j];
+            heap_pri[s * HEAP_CAP + j] = heap.pri[j];
+            j += 1;
+        }
+        let mut pw = [0u32; 5];
+        pr.state_words(&mut pw);
+        let mut j = 0usize;
+        while j < 5 {
+            prng[pse + j] = pw[j];
+            j += 1;
+        }
+    }
+
+    /// FNV-1a-64 of the whole owner plane, one thread. `ofcuda_hash`'s function,
+    /// not a re-implementation.
+    #[kernel]
+    #[launch_bounds(64)]
+    pub fn plane_hash(plane: &[u16], wh: u32, out: &mut [u64]) {
+        let i = thread::index_1d().get();
+        if i != 0 {
+            return;
+        }
+        out[0] = ofcuda_hash::fnv1a_u16_le(ofcuda_hash::FNV_OFFSET_BASIS, &plane[..wh as usize]);
+    }
+
+    /// Owned-tile count per owner column, straight off the device plane.
+    #[kernel]
+    #[launch_bounds(256)]
+    pub fn plane_counts(
+        plane: &[u16],
+        wh: u32,
+        mut counts: &mut [cuda_device::atomic::DeviceAtomicU32],
+    ) {
+        let i = thread::index_1d().get();
+        if i >= wh as usize {
+            return;
+        }
+        let o = plane[i] as usize;
+        if o != 0 && o < counts.len() {
+            counts[o].fetch_add(1, cuda_device::atomic::AtomicOrdering::Relaxed);
+        }
+    }
+
+    /// Copy a slice of the device plane out, for the renderer.
+    #[kernel]
+    #[launch_bounds(256)]
+    pub fn plane_copy(plane: &[u16], wh: u32, mut out: &mut [u16]) {
+        let i = thread::index_1d().get();
+        if i >= wh as usize {
+            return;
+        }
+        out[i] = plane[i];
+    }
+}
+
+// `kernels::device::{load, LoadedModule, *kernels}` is the module the
+// `#[cuda_module]` attribute generates.

@@ -1,0 +1,31 @@
+map	w	h	N	nations	ticks	init_sets	init_hash	tick_match	tick_total	hash_match	hash_total	count_match	count_total	troops_match	troops_total	churn_skipped	engine_evictions	reinits	dev_claims	first_div	note
+pangaea	1000	1000	2	0	60	yes	yes	14	14	60	60	180	180	12	12	0	0	0	212	none	
+pangaea	1000	1000	7	0	60	yes	yes	134	134	60	60	480	480	128	128	0	0	0	1407	none	
+pangaea	1000	1000	18	0	60	yes	yes	290	291	48	49	930	931	290	291	0	0	1	3451	boundary 49 (engine tick 52): plane hash 0x61b0e89a7b2f8eaa != engine 0xcb610bbde0ea2b22; player 9 engine 430 tiles vs device 432	
+pangaea	1000	1000	64	0	60	yes	yes	1050	1051	48	49	3184	3185	1050	1051	0	0	1	12015	boundary 49 (engine tick 52): plane hash 0x4c8ad56c2684cc1c != engine 0xf9b34d7a1bd27544; player 9 engine 430 tiles vs device 432	
+pangaea	1000	1000	488	0	60	yes	yes	8014	8015	44	45	22004	22005	8014	8015	0	0	1	81350	boundary 45 (engine tick 48): plane hash 0x55da02810a33be96 != engine 0x144f594abed8af36; player 341 engine 301 tiles vs device 305	
+africa	1948	2032	2	0	60	yes	yes	14	14	60	60	180	180	12	12	0	0	0	209	none	
+africa	1948	2032	18	0	60	yes	yes	290	291	48	49	930	931	290	291	0	0	1	3338	boundary 49 (engine tick 52): plane hash 0xcb0c12b8bf7a1087 != engine 0xbe193b3151da8e16; player 9 engine 432 tiles vs device 435	
+africa	1948	2032	64	0	60	yes	yes	1050	1051	48	49	3184	3185	1050	1051	0	0	1	11543	boundary 49 (engine tick 52): plane hash 0xed93441f27196bc1 != engine 0xa36cf090ca5900c0; player 9 engine 432 tiles vs device 435	
+africa	1948	2032	488	0	60	yes	yes	8014	8015	44	45	22004	22005	8014	8015	0	0	1	79452	boundary 45 (engine tick 48): plane hash 0x57f17a0103d94568 != engine 0x39830654fd6b04ac; player 341 engine 373 tiles vs device 375	
+onion	512	512	7	0	60	yes	yes	134	134	60	60	480	480	128	128	0	0	0	1083	none	
+onion	512	512	18	0	60	yes	yes	290	291	48	49	930	931	290	291	0	0	1	2573	boundary 49 (engine tick 52): plane hash 0xd9b83e1a18334364 != engine 0xe09f281bfb3f96e5; player 9 engine 380 tiles vs device 383	
+onion	512	512	64	0	60	yes	yes	1050	1051	48	49	3184	3185	1050	1051	0	0	1	8788	boundary 49 (engine tick 52): plane hash 0x2dc7b7a9508b5812 != engine 0xf860e3018f5e3dd3; player 9 engine 380 tiles vs device 383	
+onion	512	512	488	0	60	yes	yes	5387	5388	45	46	22493	22494	5387	5388	0	0	1	41215	boundary 46 (engine tick 49): plane hash 0x6e87f07109fe6963 != engine 0xb1a3beb3bdfaff24; player 159 engine 537 tiles vs device 538	PORT FAILED TO PLACE SOME BOT
+europe	2904	1672	2	0	60	yes	yes	14	14	60	60	180	180	12	12	0	0	0	168	none	
+europe	2904	1672	7	0	60	yes	yes	134	134	60	60	480	480	128	128	0	0	0	1548	none	
+europe	2904	1672	18	0	60	yes	yes	290	291	48	49	930	931	290	291	0	0	1	3993	boundary 49 (engine tick 52): plane hash 0xba60125ce2b2c8c0 != engine 0xfcc543f7bdc23798; player 9 engine 580 tiles vs device 582	
+world	2000	1000	18	0	60	yes	yes	290	291	48	49	930	931	290	291	0	0	1	3663	boundary 49 (engine tick 52): plane hash 0xdff507e3052c56b1 != engine 0x2c7af2e953c8bd91; player 9 engine 507 tiles vs device 509	
+world	2000	1000	64	0	60	yes	yes	1050	1051	48	49	3184	3185	1050	1051	0	0	1	11720	boundary 49 (engine tick 52): plane hash 0xe1ed47eb5f0f9592 != engine 0x8b287adbec5c7ec2; player 9 engine 507 tiles vs device 509	
+amazonriver	5536	276	18	0	60	yes	yes	290	291	48	49	930	931	290	291	0	0	1	4171	boundary 49 (engine tick 52): plane hash 0xcf2a16a5a8edc9c0 != engine 0xb83a5934a23db009; player 9 engine 570 tiles vs device 571	
+amazonriver	5536	276	488	0	60	yes	yes	8014	8015	44	45	22004	22005	8014	8015	0	0	1	93278	boundary 45 (engine tick 48): plane hash 0x7e6d2f1add43b531 != engine 0x546633ebbbb0be93; player 341 engine 370 tiles vs device 373	
+thebox	2048	2048	18	0	60	yes	yes	290	291	48	49	930	931	290	291	0	0	1	4302	boundary 49 (engine tick 52): plane hash 0x6ffd458e35361bee != engine 0x0fa47f3ef795837e; player 9 engine 581 tiles vs device 583	
+thebox	2048	2048	488	0	60	yes	yes	8014	8015	44	45	22004	22005	8014	8015	0	0	1	101546	boundary 45 (engine tick 48): plane hash 0xdac206c41ff178fa != engine 0xb53b2d3e7dd83ebc; player 341 engine 370 tiles vs device 373	
+giantworldmap	4108	1948	7	0	60	yes	yes	134	134	60	60	480	480	128	128	0	0	0	1477	none	
+giantworldmap	4108	1948	18	0	60	yes	yes	290	291	48	49	930	931	290	291	0	0	1	3625	boundary 49 (engine tick 52): plane hash 0xba626cea69a68529 != engine 0x9aadde86763b5041; player 9 engine 436 tiles vs device 438	
+passage	6000	400	18	0	60	yes	yes	290	291	48	49	930	931	290	291	0	0	1	3898	boundary 49 (engine tick 52): plane hash 0x9e4048493238dbbf != engine 0xd5945298fa0de296; player 9 engine 586 tiles vs device 587	
+passage	6000	400	488	0	60	yes	yes	8014	8015	44	45	22004	22005	8014	8015	0	0	1	93146	boundary 45 (engine tick 48): plane hash 0x93d40f469213f174 != engine 0x8e873b6feae60496; player 341 engine 371 tiles vs device 374	
+mississippiriver	400	4200	18	0	60	yes	yes	290	291	48	49	930	931	290	291	0	0	1	4158	boundary 49 (engine tick 52): plane hash 0x95c4e7914cd2a151 != engine 0x1248f6b16a2117c1; player 9 engine 581 tiles vs device 583	
+mississippiriver	400	4200	488	0	60	yes	yes	8014	8015	44	45	22004	22005	8014	8015	0	0	1	93044	boundary 45 (engine tick 48): plane hash 0xd494ccd19347e583 != engine 0xc7072ab58f32d975; player 341 engine 278 tiles vs device 281	
+pangaea	1000	1000	18	1	60	NO	NO	0	0	0	0	0	0	0	0	0	0	0	0		INIT MISMATCH
+pangaea	1000	1000	18	2	60	NO	NO	0	0	0	0	0	0	0	0	0	0	0	0		INIT MISMATCH

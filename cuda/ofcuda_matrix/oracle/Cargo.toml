@@ -1,0 +1,23 @@
+[package]
+name = "ofcuda_matrix_oracle"
+version = "0.1.0"
+edition = "2021"
+default-run = "oracle"
+
+# Standalone workspace root: lives INSIDE ofcuda_matrix/ but must NOT join the
+# CUDA crate's workspace (that would drag the engine crate into a cuda-oxide
+# nightly build). An empty `[workspace]` table keeps it standalone while still
+# allowing a path dependency on the engine crate, exactly like ofcuda_ref /
+# ofcuda_spawn do.
+[workspace]
+
+[dependencies]
+openfront-engine = { path = "/opt/data/workspaces/skg/openfront-ai/rust/engine" }
+serde_json = "1"
+
+[[bin]]
+name = "oracle"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 2

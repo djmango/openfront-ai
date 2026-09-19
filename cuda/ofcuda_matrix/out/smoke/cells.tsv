@@ -1,0 +1,4 @@
+map	w	h	N	nations	ticks	init_sets	init_hash	tick_match	tick_total	hash_match	hash_total	count_match	count_total	troops_match	troops_total	churn_skipped	engine_evictions	dev_claims	first_div	note
+pangaea	1000	1000	7	0	60	yes	yes	22	23	30	31	247	248	22	26	0	0	187	boundary 31 (engine tick 34): plane hash 0x80b3fa78b4e777e1 != engine 0x12750a52e09e2645; player 4 engine 226 tiles vs device 229	
+pangaea	1000	1000	7	0	60	yes	yes	22	23	30	31	247	248	22	26	0	0	187	boundary 9 (engine tick 12): attack owner 4 target 0 troops engine 0x40ad881d4436d444 vs device 0x0000000000000000 (troop arithmetic diverged)	
+pangaea	1000	1000	7	0	60	yes	yes	134	134	60	60	480	480	128	128	0	0	1407	none	

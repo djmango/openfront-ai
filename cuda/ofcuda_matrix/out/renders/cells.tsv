@@ -1,0 +1,16 @@
+map	w	h	N	nations	ticks	init_sets	init_hash	tick_match	tick_total	hash_match	hash_total	count_match	count_total	troops_match	troops_total	churn_skipped	engine_evictions	dev_claims	first_div	note
+pangaea	1000	1000	488	0	60	yes	yes	8384	8385	45	46	22493	22494	8382	8385	0	0	85396	boundary 45 (engine tick 48): attack owner 341 target 0 troops engine 0x40a239db5ab52d58 vs device 0x4092bb09e9d09ea0 (troop arithmetic diverged)	
+pangaea	1000	1000	2	0	60	yes	yes	14	14	60	60	180	180	12	12	0	0	212	none	
+africa	1948	2032	18	0	60	yes	yes	302	303	49	50	949	950	301	303	0	0	3481	boundary 49 (engine tick 52): attack owner 9 target 0 troops engine 0x40a19c7a4e81b532 vs device 0x409616476f5c76f8 (troop arithmetic diverged)	
+europe	2904	1672	18	0	60	yes	yes	302	303	49	50	949	950	301	303	0	0	4162	boundary 49 (engine tick 52): attack owner 9 target 0 troops engine 0x40978e755903c808 vs device 0x40931e476f5c76f8 (troop arithmetic diverged)	
+world	2000	1000	18	0	60	yes	yes	302	303	49	50	949	950	301	303	0	0	3825	boundary 49 (engine tick 52): attack owner 9 target 0 troops engine 0x409b2972f7a1182c vs device 0x40927e476f5c76f8 (troop arithmetic diverged)	
+amazonriver	5536	276	18	0	60	yes	yes	302	303	49	50	949	950	301	303	0	0	4339	boundary 49 (engine tick 52): attack owner 9 target 0 troops engine 0x4097fa5c65de0960 vs device 0x4092ee476f5c76f8 (troop arithmetic diverged)	
+thebox	2048	2048	64	0	60	yes	yes	1095	1096	49	50	3249	3250	1094	1096	0	0	15420	boundary 49 (engine tick 52): attack owner 9 target 0 troops engine 0x4097c753a18a1c2c vs device 0x40935e476f5c76f8 (troop arithmetic diverged)	
+onion	512	512	7	0	60	yes	yes	134	134	60	60	480	480	128	128	0	0	1083	none	
+giantworldmap	4108	1948	7	0	60	yes	yes	134	134	60	60	480	480	128	128	0	0	1477	none	
+passage	6000	400	18	0	60	yes	yes	302	303	49	50	949	950	301	303	0	0	4072	boundary 49 (engine tick 52): attack owner 9 target 0 troops engine 0x4096cbd364f05a50 vs device 0x4092ae476f5c76f8 (troop arithmetic diverged)	
+mississippiriver	400	4200	18	0	60	yes	yes	302	303	49	50	949	950	301	303	0	0	4334	boundary 49 (engine tick 52): attack owner 9 target 0 troops engine 0x4097c753a18a1c2c vs device 0x40935e476f5c76f8 (troop arithmetic diverged)	
+pangaea	1000	1000	18	0	400	yes	yes	302	303	49	50	949	950	301	303	0	0	0	3600	boundary 49 (engine tick 52): attack owner 9 target 0 troops engine 0x40a1b60dc5561886 vs device 0x409616476f5c76f8 (troop arithmetic diverged)	
+onion	512	512	64	0	400	yes	yes	1095	1096	49	50	3249	3250	1094	1096	0	0	0	9195	boundary 49 (engine tick 52): attack owner 9 target 0 troops engine 0x40a4469d8a55d92a vs device 0x4097fe476f5c76f8 (troop arithmetic diverged)	
+pangaea	1000	1000	18	0	400	yes	yes	290	291	48	49	930	931	290	291	0	0	1	3451	boundary 49 (engine tick 52): plane hash 0x61b0e89a7b2f8eaa != engine 0xcb610bbde0ea2b22; player 9 engine 430 tiles vs device 432	
+onion	512	512	64	0	400	yes	yes	1050	1051	48	49	3184	3185	1050	1051	0	0	1	8788	boundary 49 (engine tick 52): plane hash 0x2dc7b7a9508b5812 != engine 0xf860e3018f5e3dd3; player 9 engine 380 tiles vs device 383	

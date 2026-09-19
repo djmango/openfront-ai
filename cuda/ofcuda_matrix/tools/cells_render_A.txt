@@ -1,0 +1,5 @@
+giantworldmap 7
+africa 18
+europe 18
+pangaea 488
+passage 18

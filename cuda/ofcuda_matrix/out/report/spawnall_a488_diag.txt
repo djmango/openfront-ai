@@ -1,0 +1,988 @@
+wrote /opt/data/workspaces/skg/ofcuda_spawn/refs/n0_a488.txt (agents=488 spawned=488 players=489 tick=1)
+# device: NVIDIA GeForce RTX 5080, 610.57.04
+# reference: /opt/data/workspaces/skg/ofcuda_spawn/refs/n0_a488.txt
+=== CUDA port vs engine (spawn/initial-state) ===
+map Pangaea  seed parity  game_id QqkIuyke  agents 488  nations 0  humans 1
+ids 488/488  spawned 488/488  tiles 488/488  owned-set 488/488  counts 488/488  
+bit_exact true
+gpu_vs_hostcpu_spawn 488/488
+--- per-bot ---
+bot   0 id=7kmb47oc   engine=  107254 hostcpu=  107254 gpu=  107254 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot   1 id=su965kfe   engine=  334545 hostcpu=  334545 gpu=  334545 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot   2 id=4918e5rs   engine=  767276 hostcpu=  767276 gpu=  767276 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot   3 id=0grah7qg   engine=  298498 hostcpu=  298498 gpu=  298498 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot   4 id=79lbhuod   engine=  271614 hostcpu=  271614 gpu=  271614 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot   5 id=0eay8wsu   engine=  705481 hostcpu=  705481 gpu=  705481 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot   6 id=l4g4juu8   engine=  944611 hostcpu=  944611 gpu=  944611 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot   7 id=gsw4n5km   engine=   89583 hostcpu=   89583 gpu=   89583 spawned=true n_tiles= 52 attempts=   7 draws=   14 GPU==CPU
+bot   8 id=ooz4f963   engine=  896690 hostcpu=  896690 gpu=  896690 spawned=true n_tiles= 52 attempts=   9 draws=   18 GPU==CPU
+bot   9 id=g49bog52   engine=  331181 hostcpu=  331181 gpu=  331181 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot  10 id=vl3arc4y   engine=  468222 hostcpu=  468222 gpu=  468222 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  11 id=26spmsu2   engine=  876730 hostcpu=  876730 gpu=  876730 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot  12 id=666fmd2f   engine=  281683 hostcpu=  281683 gpu=  281683 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  13 id=vybu8oes   engine=  224588 hostcpu=  224588 gpu=  224588 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot  14 id=tlx2iciq   engine=  365649 hostcpu=  365649 gpu=  365649 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot  15 id=8i7cuo9t   engine=  384665 hostcpu=  384665 gpu=  384665 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  16 id=ay8xa67r   engine=  622435 hostcpu=  622435 gpu=  622435 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot  17 id=fha1xhrw   engine=  384416 hostcpu=  384416 gpu=  384416 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot  18 id=0n5m7v7w   engine=   65538 hostcpu=   65538 gpu=   65538 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot  19 id=g1kcotxi   engine=  846621 hostcpu=  846621 gpu=  846621 spawned=true n_tiles= 52 attempts=  10 draws=   20 GPU==CPU
+bot  20 id=onu80sk7   engine=  208173 hostcpu=  208173 gpu=  208173 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot  21 id=mt378h9n   engine=  149561 hostcpu=  149561 gpu=  149561 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot  22 id=bo2xv2tw   engine=  448425 hostcpu=  448425 gpu=  448425 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot  23 id=4j0jwl8e   engine=  238626 hostcpu=  238626 gpu=  238626 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  24 id=2q1yboxl   engine=  142348 hostcpu=  142348 gpu=  142348 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot  25 id=uf1afynu   engine=  493240 hostcpu=  493240 gpu=  493240 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot  26 id=hnp5jsyu   engine=   84630 hostcpu=   84630 gpu=   84630 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  27 id=3ks2xdvj   engine=  656155 hostcpu=  656155 gpu=  656155 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot  28 id=6udu18l9   engine=  180833 hostcpu=  180833 gpu=  180833 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  29 id=u9qkgxb0   engine=   62653 hostcpu=   62653 gpu=   62653 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  30 id=gxzvzcy1   engine=  212652 hostcpu=  212652 gpu=  212652 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  31 id=soumc8lx   engine=  889613 hostcpu=  889613 gpu=  889613 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  32 id=pbtdxhy8   engine=  330605 hostcpu=  330605 gpu=  330605 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot  33 id=7qca320q   engine=  687641 hostcpu=  687641 gpu=  687641 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot  34 id=qu4dw13r   engine=  176481 hostcpu=  176481 gpu=  176481 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot  35 id=uf42rmom   engine=  320475 hostcpu=  320475 gpu=  320475 spawned=true n_tiles= 52 attempts=   6 draws=   12 GPU==CPU
+bot  36 id=5pzo5nyp   engine=  551600 hostcpu=  551600 gpu=  551600 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot  37 id=lpeu6a40   engine=  818645 hostcpu=  818645 gpu=  818645 spawned=true n_tiles= 52 attempts=   6 draws=   12 GPU==CPU
+bot  38 id=m01qyq41   engine=  272210 hostcpu=  272210 gpu=  272210 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot  39 id=qp5j7mcl   engine=  737537 hostcpu=  737537 gpu=  737537 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  40 id=daoks386   engine=  589464 hostcpu=  589464 gpu=  589464 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  41 id=1adrc0if   engine=  258584 hostcpu=  258584 gpu=  258584 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot  42 id=z2sjy7tl   engine=  600444 hostcpu=  600444 gpu=  600444 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  43 id=2a2pcqq2   engine=  483131 hostcpu=  483131 gpu=  483131 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot  44 id=965x3zic   engine=  224285 hostcpu=  224285 gpu=  224285 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot  45 id=yytwuuvv   engine=  639448 hostcpu=  639448 gpu=  639448 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  46 id=0bq4zvkx   engine=  573527 hostcpu=  573527 gpu=  573527 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  47 id=fqo7elia   engine=  642405 hostcpu=  642405 gpu=  642405 spawned=true n_tiles= 52 attempts=   7 draws=   14 GPU==CPU
+bot  48 id=xb2eodru   engine=  845418 hostcpu=  845418 gpu=  845418 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  49 id=dn2a1fmz   engine=  431286 hostcpu=  431286 gpu=  431286 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot  50 id=c657fqi1   engine=  572154 hostcpu=  572154 gpu=  572154 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  51 id=3oa0wbik   engine=  286266 hostcpu=  286266 gpu=  286266 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  52 id=bbor86ta   engine=  602314 hostcpu=  602314 gpu=  602314 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  53 id=ke481hq3   engine=  763642 hostcpu=  763642 gpu=  763642 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot  54 id=1p7me35b   engine=  672445 hostcpu=  672445 gpu=  672445 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot  55 id=ros1fefm   engine=  113363 hostcpu=  113363 gpu=  113363 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot  56 id=bbj4439d   engine=  747387 hostcpu=  747387 gpu=  747387 spawned=true n_tiles= 52 attempts=   7 draws=   14 GPU==CPU
+bot  57 id=50euwmgf   engine=  213568 hostcpu=  213568 gpu=  213568 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot  58 id=6ifrrqwg   engine=  348286 hostcpu=  348286 gpu=  348286 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot  59 id=t3qojvzx   engine=  122609 hostcpu=  122609 gpu=  122609 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  60 id=e39s2b1x   engine=  172698 hostcpu=  172698 gpu=  172698 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  61 id=8elalp3o   engine=  608388 hostcpu=  608388 gpu=  608388 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot  62 id=drzdgt29   engine=  830758 hostcpu=  830758 gpu=  830758 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  63 id=a5l13l40   engine=  600642 hostcpu=  600642 gpu=  600642 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot  64 id=15jsgukl   engine=  407389 hostcpu=  407389 gpu=  407389 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot  65 id=457rtifd   engine=  236182 hostcpu=  236182 gpu=  236182 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot  66 id=nvln8mx2   engine=  526183 hostcpu=  526183 gpu=  526183 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  67 id=xdf4q9ey   engine=  879703 hostcpu=  879703 gpu=  879703 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot  68 id=aehphxxq   engine=  763313 hostcpu=  763313 gpu=  763313 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  69 id=r69884b7   engine=  146677 hostcpu=  146677 gpu=  146677 spawned=true n_tiles= 52 attempts=  12 draws=   24 GPU==CPU
+bot  70 id=1fi956n2   engine=  525258 hostcpu=  525258 gpu=  525258 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot  71 id=x0s75hnx   engine=  100653 hostcpu=  100653 gpu=  100653 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot  72 id=jjcxe8w7   engine=   68478 hostcpu=   68478 gpu=   68478 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  73 id=pa9du0an   engine=  745344 hostcpu=  745344 gpu=  745344 spawned=true n_tiles= 52 attempts=   8 draws=   16 GPU==CPU
+bot  74 id=wr1iodtv   engine=  125223 hostcpu=  125223 gpu=  125223 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot  75 id=q4t061qn   engine=  196795 hostcpu=  196795 gpu=  196795 spawned=true n_tiles= 52 attempts=   9 draws=   18 GPU==CPU
+bot  76 id=5walu3qw   engine=  692242 hostcpu=  692242 gpu=  692242 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  77 id=9qsdvg22   engine=  106555 hostcpu=  106555 gpu=  106555 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  78 id=kxhibxlj   engine=  703545 hostcpu=  703545 gpu=  703545 spawned=true n_tiles= 52 attempts=   7 draws=   14 GPU==CPU
+bot  79 id=3lvh3hh1   engine=  882541 hostcpu=  882541 gpu=  882541 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  80 id=hhxd8zhc   engine=  607165 hostcpu=  607165 gpu=  607165 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  81 id=68hvehkn   engine=  292548 hostcpu=  292548 gpu=  292548 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot  82 id=0ysk38le   engine=  449355 hostcpu=  449355 gpu=  449355 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot  83 id=p9mtmjen   engine=  781486 hostcpu=  781486 gpu=  781486 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot  84 id=vtv2qiiq   engine=  318389 hostcpu=  318389 gpu=  318389 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot  85 id=npcd7vse   engine=  132704 hostcpu=  132704 gpu=  132704 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  86 id=fyrg30wr   engine=  577247 hostcpu=  577247 gpu=  577247 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  87 id=qg4cg39i   engine=  324340 hostcpu=  324340 gpu=  324340 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot  88 id=kqu8z0ef   engine=  677475 hostcpu=  677475 gpu=  677475 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  89 id=bdv4tpd7   engine=  767606 hostcpu=  767606 gpu=  767606 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  90 id=ok13k4z3   engine=  515283 hostcpu=  515283 gpu=  515283 spawned=true n_tiles= 52 attempts=   7 draws=   14 GPU==CPU
+bot  91 id=hkwcx197   engine=  479192 hostcpu=  479192 gpu=  479192 spawned=true n_tiles= 52 attempts=   8 draws=   16 GPU==CPU
+bot  92 id=ko4t02h4   engine=  454498 hostcpu=  454498 gpu=  454498 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  93 id=a769y4e5   engine=  230525 hostcpu=  230525 gpu=  230525 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot  94 id=po0wxlw1   engine=  595119 hostcpu=  595119 gpu=  595119 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot  95 id=o8264l3e   engine=  807590 hostcpu=  807590 gpu=  807590 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot  96 id=9rke6fm3   engine=  246233 hostcpu=  246233 gpu=  246233 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  97 id=gyjc9x52   engine=  799335 hostcpu=  799335 gpu=  799335 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot  98 id=x793lc6c   engine=  230410 hostcpu=  230410 gpu=  230410 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot  99 id=93k3li8n   engine=  175515 hostcpu=  175515 gpu=  175515 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 100 id=a1hte6qb   engine=  276450 hostcpu=  276450 gpu=  276450 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot 101 id=jklgnd18   engine=  282168 hostcpu=  282168 gpu=  282168 spawned=true n_tiles= 52 attempts=   9 draws=   18 GPU==CPU
+bot 102 id=vfadfhgj   engine=  506443 hostcpu=  506443 gpu=  506443 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 103 id=cwni1kcb   engine=  787621 hostcpu=  787621 gpu=  787621 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot 104 id=8z4z0zds   engine=  647199 hostcpu=  647199 gpu=  647199 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 105 id=cdzck1ki   engine=  119479 hostcpu=  119479 gpu=  119479 spawned=true n_tiles= 52 attempts=   7 draws=   14 GPU==CPU
+bot 106 id=zbaa3l3a   engine=  442210 hostcpu=  442210 gpu=  442210 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot 107 id=xm369xbs   engine=  773702 hostcpu=  773702 gpu=  773702 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 108 id=e4dqhzo1   engine=  392195 hostcpu=  392195 gpu=  392195 spawned=true n_tiles= 52 attempts=   7 draws=   14 GPU==CPU
+bot 109 id=fepimk2i   engine=  737598 hostcpu=  737598 gpu=  737598 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot 110 id=o2es7ebc   engine=  467383 hostcpu=  467383 gpu=  467383 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot 111 id=l4opv4e9   engine=  700441 hostcpu=  700441 gpu=  700441 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot 112 id=4b3f45hy   engine=  249319 hostcpu=  249319 gpu=  249319 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 113 id=r3pvfglh   engine=  488301 hostcpu=  488301 gpu=  488301 spawned=true n_tiles= 52 attempts=   9 draws=   18 GPU==CPU
+bot 114 id=fnl5ocw8   engine=  652613 hostcpu=  652613 gpu=  652613 spawned=true n_tiles= 52 attempts=  11 draws=   22 GPU==CPU
+bot 115 id=7391zjkf   engine=  920520 hostcpu=  920520 gpu=  920520 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 116 id=ow5basj8   engine=  189555 hostcpu=  189555 gpu=  189555 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 117 id=olinuy4r   engine=  532375 hostcpu=  532375 gpu=  532375 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot 118 id=2e2jcypv   engine=  346566 hostcpu=  346566 gpu=  346566 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 119 id=nx0it9ss   engine=  505365 hostcpu=  505365 gpu=  505365 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 120 id=tt57j91k   engine=  245567 hostcpu=  245567 gpu=  245567 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 121 id=87aoci2n   engine=  167647 hostcpu=  167647 gpu=  167647 spawned=true n_tiles= 52 attempts=   8 draws=   16 GPU==CPU
+bot 122 id=wk147shp   engine=  410509 hostcpu=  410509 gpu=  410509 spawned=true n_tiles= 52 attempts=  15 draws=   30 GPU==CPU
+bot 123 id=q8jb2dnz   engine=  757452 hostcpu=  757452 gpu=  757452 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot 124 id=4yzxt2gp   engine=  120321 hostcpu=  120321 gpu=  120321 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 125 id=755xej7w   engine=  799275 hostcpu=  799275 gpu=  799275 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 126 id=hjhprwfn   engine=   74354 hostcpu=   74354 gpu=   74354 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot 127 id=n66i0csf   engine=  715253 hostcpu=  715253 gpu=  715253 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 128 id=am3stnxi   engine=  834384 hostcpu=  834384 gpu=  834384 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 129 id=pmeqlcvs   engine=  829477 hostcpu=  829477 gpu=  829477 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 130 id=xl8vnvj2   engine=  855514 hostcpu=  855514 gpu=  855514 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 131 id=0f3l9cg5   engine=   65308 hostcpu=   65308 gpu=   65308 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 132 id=siocmotr   engine=  853707 hostcpu=  853707 gpu=  853707 spawned=true n_tiles= 52 attempts=  11 draws=   22 GPU==CPU
+bot 133 id=uf75fjkr   engine=  572404 hostcpu=  572404 gpu=  572404 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 134 id=3nuksgyo   engine=  616189 hostcpu=  616189 gpu=  616189 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot 135 id=isfwwr01   engine=  720659 hostcpu=  720659 gpu=  720659 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot 136 id=auuv9uim   engine=  671229 hostcpu=  671229 gpu=  671229 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 137 id=mdro7fya   engine=  572610 hostcpu=  572610 gpu=  572610 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot 138 id=8qfmz7a7   engine=  819542 hostcpu=  819542 gpu=  819542 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 139 id=m8j6zoax   engine=  809704 hostcpu=  809704 gpu=  809704 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 140 id=7236xcde   engine=  303610 hostcpu=  303610 gpu=  303610 spawned=true n_tiles= 52 attempts=  11 draws=   22 GPU==CPU
+bot 141 id=n4vtdnwp   engine=  724302 hostcpu=  724302 gpu=  724302 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot 142 id=yggevgbl   engine=   54617 hostcpu=   54617 gpu=   54617 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 143 id=beijdl2w   engine=  415234 hostcpu=  415234 gpu=  415234 spawned=true n_tiles= 52 attempts=  13 draws=   26 GPU==CPU
+bot 144 id=d2oo7mhj   engine=  561329 hostcpu=  561329 gpu=  561329 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 145 id=wrheiirw   engine=  383368 hostcpu=  383368 gpu=  383368 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot 146 id=d03y3hz5   engine=  765248 hostcpu=  765248 gpu=  765248 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 147 id=5xaek3av   engine=  162609 hostcpu=  162609 gpu=  162609 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot 148 id=gz34o9hq   engine=  187397 hostcpu=  187397 gpu=  187397 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot 149 id=37xw489f   engine=  117575 hostcpu=  117575 gpu=  117575 spawned=true n_tiles= 52 attempts=  10 draws=   20 GPU==CPU
+bot 150 id=k3srrvn9   engine=  600485 hostcpu=  600485 gpu=  600485 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot 151 id=5isbkj04   engine=  839552 hostcpu=  839552 gpu=  839552 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot 152 id=r73y2vzl   engine=  606570 hostcpu=  606570 gpu=  606570 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 153 id=36x3kyhk   engine=  793415 hostcpu=  793415 gpu=  793415 spawned=true n_tiles= 52 attempts=  16 draws=   32 GPU==CPU
+bot 154 id=01ob2tlo   engine=  628505 hostcpu=  628505 gpu=  628505 spawned=true n_tiles= 52 attempts=   7 draws=   14 GPU==CPU
+bot 155 id=cb13fbp5   engine=  697597 hostcpu=  697597 gpu=  697597 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 156 id=vmmrq63s   engine=  763420 hostcpu=  763420 gpu=  763420 spawned=true n_tiles= 52 attempts=  12 draws=   24 GPU==CPU
+bot 157 id=nkjckjq8   engine=  444154 hostcpu=  444154 gpu=  444154 spawned=true n_tiles= 52 attempts=  12 draws=   24 GPU==CPU
+bot 158 id=wcggivof   engine=  925493 hostcpu=  925493 gpu=  925493 spawned=true n_tiles= 52 attempts=   7 draws=   14 GPU==CPU
+bot 159 id=1w1ciciy   engine=  795562 hostcpu=  795562 gpu=  795562 spawned=true n_tiles= 52 attempts=  30 draws=   60 GPU==CPU
+bot 160 id=2a0v7iem   engine=  537432 hostcpu=  537432 gpu=  537432 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 161 id=jcz64pkr   engine=  794369 hostcpu=  794369 gpu=  794369 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot 162 id=v0ljq6tk   engine=  914641 hostcpu=  914641 gpu=  914641 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot 163 id=adg8798c   engine=  220492 hostcpu=  220492 gpu=  220492 spawned=true n_tiles= 52 attempts=  20 draws=   40 GPU==CPU
+bot 164 id=5ghp3e6u   engine=  871496 hostcpu=  871496 gpu=  871496 spawned=true n_tiles= 52 attempts=  14 draws=   28 GPU==CPU
+bot 165 id=h5bdt6q4   engine=  830716 hostcpu=  830716 gpu=  830716 spawned=true n_tiles= 52 attempts=   6 draws=   12 GPU==CPU
+bot 166 id=5oce5zsz   engine=  677517 hostcpu=  677517 gpu=  677517 spawned=true n_tiles= 52 attempts=  16 draws=   32 GPU==CPU
+bot 167 id=xka3bnm9   engine=  625322 hostcpu=  625322 gpu=  625322 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 168 id=3w1tydq6   engine=  326631 hostcpu=  326631 gpu=  326631 spawned=true n_tiles= 52 attempts=   7 draws=   14 GPU==CPU
+bot 169 id=upd1qyae   engine=  918429 hostcpu=  918429 gpu=  918429 spawned=true n_tiles= 52 attempts=  17 draws=   34 GPU==CPU
+bot 170 id=v4u31rox   engine=   91428 hostcpu=   91428 gpu=   91428 spawned=true n_tiles= 52 attempts=  16 draws=   32 GPU==CPU
+bot 171 id=q9vm95if   engine=  904482 hostcpu=  904482 gpu=  904482 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot 172 id=0yu8n2tu   engine=  261276 hostcpu=  261276 gpu=  261276 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot 173 id=sc2ctn85   engine=  483575 hostcpu=  483575 gpu=  483575 spawned=true n_tiles= 52 attempts=   7 draws=   14 GPU==CPU
+bot 174 id=z0gmspsi   engine=  223445 hostcpu=  223445 gpu=  223445 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot 175 id=z7avk2un   engine=  494425 hostcpu=  494425 gpu=  494425 spawned=true n_tiles= 52 attempts=  12 draws=   24 GPU==CPU
+bot 176 id=8efmeybn   engine=  417360 hostcpu=  417360 gpu=  417360 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot 177 id=bifxmou2   engine=  552633 hostcpu=  552633 gpu=  552633 spawned=true n_tiles= 52 attempts=  21 draws=   42 GPU==CPU
+bot 178 id=plh6en5t   engine=  105287 hostcpu=  105287 gpu=  105287 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot 179 id=ay3m2wg5   engine=  524541 hostcpu=  524541 gpu=  524541 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 180 id=1zmogxmk   engine=  517594 hostcpu=  517594 gpu=  517594 spawned=true n_tiles= 52 attempts=   6 draws=   12 GPU==CPU
+bot 181 id=55yraoi7   engine=   98519 hostcpu=   98519 gpu=   98519 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot 182 id=1sc05h43   engine=  387239 hostcpu=  387239 gpu=  387239 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot 183 id=37ibwik8   engine=  887411 hostcpu=  887411 gpu=  887411 spawned=true n_tiles= 52 attempts=  16 draws=   32 GPU==CPU
+bot 184 id=uec16uxz   engine=  114447 hostcpu=  114447 gpu=  114447 spawned=true n_tiles= 52 attempts=   6 draws=   12 GPU==CPU
+bot 185 id=9fd5ewrs   engine=  838281 hostcpu=  838281 gpu=  838281 spawned=true n_tiles= 52 attempts=   8 draws=   16 GPU==CPU
+bot 186 id=pe2p79c6   engine=  209223 hostcpu=  209223 gpu=  209223 spawned=true n_tiles= 52 attempts=  11 draws=   22 GPU==CPU
+bot 187 id=h1r85byk   engine=  187659 hostcpu=  187659 gpu=  187659 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot 188 id=exulggll   engine=  224201 hostcpu=  224201 gpu=  224201 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 189 id=zouqcp7v   engine=  255465 hostcpu=  255465 gpu=  255465 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 190 id=k39sgybe   engine=  817735 hostcpu=  817735 gpu=  817735 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot 191 id=orxhfzvz   engine=  605211 hostcpu=  605211 gpu=  605211 spawned=true n_tiles= 52 attempts=   9 draws=   18 GPU==CPU
+bot 192 id=uz8ynaez   engine=  338448 hostcpu=  338448 gpu=  338448 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot 193 id=ubigewsr   engine=  939541 hostcpu=  939541 gpu=  939541 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 194 id=w0ozvjdh   engine=  857392 hostcpu=  857392 gpu=  857392 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 195 id=f7yj98q8   engine=  563483 hostcpu=  563483 gpu=  563483 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot 196 id=2xzw4gp3   engine=  262505 hostcpu=  262505 gpu=  262505 spawned=true n_tiles= 52 attempts=  35 draws=   70 GPU==CPU
+bot 197 id=9rkdgj28   engine=  553296 hostcpu=  553296 gpu=  553296 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot 198 id=aw987uy7   engine=  150306 hostcpu=  150306 gpu=  150306 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot 199 id=gr243zlh   engine=  527408 hostcpu=  527408 gpu=  527408 spawned=true n_tiles= 52 attempts=  30 draws=   60 GPU==CPU
+bot 200 id=zowu9kf4   engine=  478480 hostcpu=  478480 gpu=  478480 spawned=true n_tiles= 52 attempts=   6 draws=   12 GPU==CPU
+bot 201 id=2dtf8q4x   engine=  390161 hostcpu=  390161 gpu=  390161 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot 202 id=y9oft8w2   engine=  136534 hostcpu=  136534 gpu=  136534 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot 203 id=ed7kjxq3   engine=  711396 hostcpu=  711396 gpu=  711396 spawned=true n_tiles= 52 attempts=   6 draws=   12 GPU==CPU
+bot 204 id=nxt1ptsi   engine=  760502 hostcpu=  760502 gpu=  760502 spawned=true n_tiles= 52 attempts=   6 draws=   12 GPU==CPU
+bot 205 id=p825v2fd   engine=  185233 hostcpu=  185233 gpu=  185233 spawned=true n_tiles= 52 attempts=  14 draws=   28 GPU==CPU
+bot 206 id=wyarb4qo   engine=  404322 hostcpu=  404322 gpu=  404322 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot 207 id=qfs7b4z4   engine=  612255 hostcpu=  612255 gpu=  612255 spawned=true n_tiles= 52 attempts=  21 draws=   42 GPU==CPU
+bot 208 id=ms13gmzm   engine=  651366 hostcpu=  651366 gpu=  651366 spawned=true n_tiles= 52 attempts=   7 draws=   14 GPU==CPU
+bot 209 id=ym8zggo3   engine=  367523 hostcpu=  367523 gpu=  367523 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 210 id=8jahbnpg   engine=  505499 hostcpu=  505499 gpu=  505499 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 211 id=b0djjiez   engine=  539350 hostcpu=  539350 gpu=  539350 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot 212 id=s9xysw8i   engine=  708284 hostcpu=  708284 gpu=  708284 spawned=true n_tiles= 52 attempts=   8 draws=   16 GPU==CPU
+bot 213 id=t3s2qgvc   engine=  383299 hostcpu=  383299 gpu=  383299 spawned=true n_tiles= 52 attempts=   6 draws=   12 GPU==CPU
+bot 214 id=aquue8ni   engine=  418189 hostcpu=  418189 gpu=  418189 spawned=true n_tiles= 52 attempts=   9 draws=   18 GPU==CPU
+bot 215 id=u3k8ktyr   engine=  759551 hostcpu=  759551 gpu=  759551 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot 216 id=i7egn3zz   engine=  741672 hostcpu=  741672 gpu=  741672 spawned=true n_tiles= 52 attempts=   7 draws=   14 GPU==CPU
+bot 217 id=o3vgfhge   engine=   93324 hostcpu=   93324 gpu=   93324 spawned=true n_tiles= 52 attempts=  20 draws=   40 GPU==CPU
+bot 218 id=m4aem5hx   engine=  127423 hostcpu=  127423 gpu=  127423 spawned=true n_tiles= 52 attempts=   6 draws=   12 GPU==CPU
+bot 219 id=p6i95qgo   engine=  709325 hostcpu=  709325 gpu=  709325 spawned=true n_tiles= 52 attempts=  14 draws=   28 GPU==CPU
+bot 220 id=gvho8qeo   engine=   77387 hostcpu=   77387 gpu=   77387 spawned=true n_tiles= 52 attempts=  26 draws=   52 GPU==CPU
+bot 221 id=9iatvpoi   engine=  364388 hostcpu=  364388 gpu=  364388 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 222 id=zd9jsqbj   engine=  111396 hostcpu=  111396 gpu=  111396 spawned=true n_tiles= 52 attempts=  19 draws=   38 GPU==CPU
+bot 223 id=zw1dwnig   engine=  316159 hostcpu=  316159 gpu=  316159 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot 224 id=be5xt98q   engine=  475405 hostcpu=  475405 gpu=  475405 spawned=true n_tiles= 52 attempts=  10 draws=   20 GPU==CPU
+bot 225 id=522b0ju8   engine=   18556 hostcpu=   18556 gpu=   18556 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot 226 id=ibxwtyy7   engine=  222243 hostcpu=  222243 gpu=  222243 spawned=true n_tiles= 52 attempts=  17 draws=   34 GPU==CPU
+bot 227 id=zjhashkb   engine=  472343 hostcpu=  472343 gpu=  472343 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot 228 id=89ttdia6   engine=  520229 hostcpu=  520229 gpu=  520229 spawned=true n_tiles= 52 attempts=  10 draws=   20 GPU==CPU
+bot 229 id=6o2o0nvl   engine=  877588 hostcpu=  877588 gpu=  877588 spawned=true n_tiles= 52 attempts=  30 draws=   60 GPU==CPU
+bot 230 id=xldl70se   engine=  722355 hostcpu=  722355 gpu=  722355 spawned=true n_tiles= 52 attempts=  38 draws=   76 GPU==CPU
+bot 231 id=qrwgzvzz   engine=   94233 hostcpu=   94233 gpu=   94233 spawned=true n_tiles= 52 attempts=  25 draws=   50 GPU==CPU
+bot 232 id=h711p697   engine=  199457 hostcpu=  199457 gpu=  199457 spawned=true n_tiles= 52 attempts=  12 draws=   24 GPU==CPU
+bot 233 id=g4ulqqm0   engine=  258671 hostcpu=  258671 gpu=  258671 spawned=true n_tiles= 52 attempts=  23 draws=   46 GPU==CPU
+bot 234 id=v18jrx10   engine=  314295 hostcpu=  314295 gpu=  314295 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 235 id=8sd3i7p8   engine=  800506 hostcpu=  800506 gpu=  800506 spawned=true n_tiles= 52 attempts=   7 draws=   14 GPU==CPU
+bot 236 id=l5o27mtm   engine=  670285 hostcpu=  670285 gpu=  670285 spawned=true n_tiles= 52 attempts=  42 draws=   84 GPU==CPU
+bot 237 id=b6f6r0t2   engine=  335665 hostcpu=  335665 gpu=  335665 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 238 id=7j5a3pfw   engine=  818292 hostcpu=  818292 gpu=  818292 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot 239 id=m5sg1z4l   engine=  454253 hostcpu=  454253 gpu=  454253 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 240 id=ehpglvfz   engine=  655426 hostcpu=  655426 gpu=  655426 spawned=true n_tiles= 52 attempts=   8 draws=   16 GPU==CPU
+bot 241 id=wu3zthbo   engine=  377624 hostcpu=  377624 gpu=  377624 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot 242 id=yeh875u5   engine=  774527 hostcpu=  774527 gpu=  774527 spawned=true n_tiles= 52 attempts=  10 draws=   20 GPU==CPU
+bot 243 id=8nuwzyn1   engine=  169362 hostcpu=  169362 gpu=  169362 spawned=true n_tiles= 52 attempts=  14 draws=   28 GPU==CPU
+bot 244 id=t0zwn9eb   engine=  656528 hostcpu=  656528 gpu=  656528 spawned=true n_tiles= 52 attempts=   9 draws=   18 GPU==CPU
+bot 245 id=8zjwwdck   engine=  636238 hostcpu=  636238 gpu=  636238 spawned=true n_tiles= 52 attempts=  11 draws=   22 GPU==CPU
+bot 246 id=jwrhd5ij   engine=  837354 hostcpu=  837354 gpu=  837354 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 247 id=jyb8rp14   engine=  182429 hostcpu=  182429 gpu=  182429 spawned=true n_tiles= 52 attempts=  44 draws=   88 GPU==CPU
+bot 248 id=wl7sxu3v   engine=  868319 hostcpu=  868319 gpu=  868319 spawned=true n_tiles= 52 attempts=  18 draws=   36 GPU==CPU
+bot 249 id=y0r0fu1j   engine=  529322 hostcpu=  529322 gpu=  529322 spawned=true n_tiles= 52 attempts=  68 draws=  136 GPU==CPU
+bot 250 id=kneohbbr   engine=  582551 hostcpu=  582551 gpu=  582551 spawned=true n_tiles= 52 attempts=   9 draws=   18 GPU==CPU
+bot 251 id=qc8m814x   engine=  162333 hostcpu=  162333 gpu=  162333 spawned=true n_tiles= 52 attempts=   6 draws=   12 GPU==CPU
+bot 252 id=ix3jngmf   engine=  532133 hostcpu=  532133 gpu=  532133 spawned=true n_tiles= 52 attempts=   6 draws=   12 GPU==CPU
+bot 253 id=9mzpcgft   engine=  532457 hostcpu=  532457 gpu=  532457 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot 254 id=l5z5w588   engine=  788761 hostcpu=  788761 gpu=  788761 spawned=true n_tiles= 52 attempts=  10 draws=   20 GPU==CPU
+bot 255 id=pt0jqntf   engine=  670671 hostcpu=  670671 gpu=  670671 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot 256 id=2e8alk85   engine=  872368 hostcpu=  872368 gpu=  872368 spawned=true n_tiles= 52 attempts=   9 draws=   18 GPU==CPU
+bot 257 id=hwe3kfal   engine=  450178 hostcpu=  450178 gpu=  450178 spawned=true n_tiles= 52 attempts=  15 draws=   30 GPU==CPU
+bot 258 id=47li627l   engine=  296664 hostcpu=  296664 gpu=  296664 spawned=true n_tiles= 52 attempts=  45 draws=   90 GPU==CPU
+bot 259 id=3asdumaj   engine=  827444 hostcpu=  827444 gpu=  827444 spawned=true n_tiles= 52 attempts=  39 draws=   78 GPU==CPU
+bot 260 id=l75txeu7   engine=  274525 hostcpu=  274525 gpu=  274525 spawned=true n_tiles= 52 attempts=  13 draws=   26 GPU==CPU
+bot 261 id=tbcz7mf1   engine=  790730 hostcpu=  790730 gpu=  790730 spawned=true n_tiles= 52 attempts=  16 draws=   32 GPU==CPU
+bot 262 id=o1ilw638   engine=  672323 hostcpu=  672323 gpu=  672323 spawned=true n_tiles= 52 attempts=  10 draws=   20 GPU==CPU
+bot 263 id=la4ytzgl   engine=  502562 hostcpu=  502562 gpu=  502562 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 264 id=in2bq49j   engine=  644265 hostcpu=  644265 gpu=  644265 spawned=true n_tiles= 52 attempts=   7 draws=   14 GPU==CPU
+bot 265 id=5irnw7ij   engine=  344354 hostcpu=  344354 gpu=  344354 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 266 id=noxeflvy   engine=  566446 hostcpu=  566446 gpu=  566446 spawned=true n_tiles= 52 attempts=  10 draws=   20 GPU==CPU
+bot 267 id=8gn7568f   engine=  346242 hostcpu=  346242 gpu=  346242 spawned=true n_tiles= 52 attempts=  23 draws=   46 GPU==CPU
+bot 268 id=5c1omdu5   engine=   86495 hostcpu=   86495 gpu=   86495 spawned=true n_tiles= 52 attempts=   6 draws=   12 GPU==CPU
+bot 269 id=yc2b3pvx   engine=  897456 hostcpu=  897456 gpu=  897456 spawned=true n_tiles= 52 attempts=  21 draws=   42 GPU==CPU
+bot 270 id=lml55dcl   engine=  830319 hostcpu=  830319 gpu=  830319 spawned=true n_tiles= 52 attempts=  15 draws=   30 GPU==CPU
+bot 271 id=1o5etbis   engine=  593513 hostcpu=  593513 gpu=  593513 spawned=true n_tiles= 52 attempts=  16 draws=   32 GPU==CPU
+bot 272 id=bulnhjw5   engine=  720620 hostcpu=  720620 gpu=  720620 spawned=true n_tiles= 52 attempts=  46 draws=   92 GPU==CPU
+bot 273 id=c6y4cfry   engine=  128747 hostcpu=  128747 gpu=  128747 spawned=true n_tiles= 52 attempts=  32 draws=   64 GPU==CPU
+bot 274 id=kbpw8sak   engine=  621593 hostcpu=  621593 gpu=  621593 spawned=true n_tiles= 52 attempts=  16 draws=   32 GPU==CPU
+bot 275 id=65e8qmsr   engine=  450311 hostcpu=  450311 gpu=  450311 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 276 id=furhe0mp   engine=  656650 hostcpu=  656650 gpu=  656650 spawned=true n_tiles= 52 attempts=  47 draws=   94 GPU==CPU
+bot 277 id=92npvjrt   engine=  472164 hostcpu=  472164 gpu=  472164 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 278 id=c56xdfdl   engine=  153388 hostcpu=  153388 gpu=  153388 spawned=true n_tiles= 52 attempts=  26 draws=   52 GPU==CPU
+bot 279 id=jul4zb4e   engine=  318510 hostcpu=  318510 gpu=  318510 spawned=true n_tiles= 52 attempts=  34 draws=   68 GPU==CPU
+bot 280 id=mpuzdlvw   engine=  890663 hostcpu=  890663 gpu=  890663 spawned=true n_tiles= 52 attempts=  14 draws=   28 GPU==CPU
+bot 281 id=plrlx715   engine=  283479 hostcpu=  283479 gpu=  283479 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 282 id=yl9vsjpk   engine=  547507 hostcpu=  547507 gpu=  547507 spawned=true n_tiles= 52 attempts=  38 draws=   76 GPU==CPU
+bot 283 id=mkfgkn7r   engine=   50422 hostcpu=   50422 gpu=   50422 spawned=true n_tiles= 52 attempts=  16 draws=   32 GPU==CPU
+bot 284 id=v5nlafkw   engine=  621468 hostcpu=  621468 gpu=  621468 spawned=true n_tiles= 52 attempts=   7 draws=   14 GPU==CPU
+bot 285 id=2p3gb961   engine=  869436 hostcpu=  869436 gpu=  869436 spawned=true n_tiles= 52 attempts=  10 draws=   20 GPU==CPU
+bot 286 id=uc4jshlt   engine=  949584 hostcpu=  949584 gpu=  949584 spawned=true n_tiles= 52 attempts=  10 draws=   20 GPU==CPU
+bot 287 id=6xdips73   engine=  247487 hostcpu=  247487 gpu=  247487 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 288 id=fqxqj0bu   engine=  568191 hostcpu=  568191 gpu=  568191 spawned=true n_tiles= 52 attempts=  20 draws=   40 GPU==CPU
+bot 289 id=yen0iwte   engine=  639338 hostcpu=  639338 gpu=  639338 spawned=true n_tiles= 52 attempts=  18 draws=   36 GPU==CPU
+bot 290 id=77ucsgzt   engine=  305643 hostcpu=  305643 gpu=  305643 spawned=true n_tiles= 52 attempts=  22 draws=   44 GPU==CPU
+bot 291 id=4c1d18ro   engine=  734638 hostcpu=  734638 gpu=  734638 spawned=true n_tiles= 52 attempts=   7 draws=   14 GPU==CPU
+bot 292 id=bz5je7hx   engine=  225132 hostcpu=  225132 gpu=  225132 spawned=true n_tiles= 52 attempts=  12 draws=   24 GPU==CPU
+bot 293 id=fn7ax8sx   engine=  148447 hostcpu=  148447 gpu=  148447 spawned=true n_tiles= 52 attempts=   7 draws=   14 GPU==CPU
+bot 294 id=owdtos2u   engine=  397283 hostcpu=  397283 gpu=  397283 spawned=true n_tiles= 52 attempts=  16 draws=   32 GPU==CPU
+bot 295 id=f33f3rln   engine=  360313 hostcpu=  360313 gpu=  360313 spawned=true n_tiles= 52 attempts=  30 draws=   60 GPU==CPU
+bot 296 id=shy7v4eo   engine=  350409 hostcpu=  350409 gpu=  350409 spawned=true n_tiles= 52 attempts=   6 draws=   12 GPU==CPU
+bot 297 id=qi05x4jp   engine=  137467 hostcpu=  137467 gpu=  137467 spawned=true n_tiles= 52 attempts=  18 draws=   36 GPU==CPU
+bot 298 id=rtwhvg9g   engine=  250424 hostcpu=  250424 gpu=  250424 spawned=true n_tiles= 52 attempts=  13 draws=   26 GPU==CPU
+bot 299 id=xebmdu02   engine=  239345 hostcpu=  239345 gpu=  239345 spawned=true n_tiles= 52 attempts= 105 draws=  210 GPU==CPU
+bot 300 id=minv0qzi   engine=  915588 hostcpu=  915588 gpu=  915588 spawned=true n_tiles= 52 attempts=  14 draws=   28 GPU==CPU
+bot 301 id=s3tsi6x9   engine=  560576 hostcpu=  560576 gpu=  560576 spawned=true n_tiles= 52 attempts=  33 draws=   66 GPU==CPU
+bot 302 id=k4ol3ovv   engine=  141787 hostcpu=  141787 gpu=  141787 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 303 id=my4alddo   engine=  695359 hostcpu=  695359 gpu=  695359 spawned=true n_tiles= 52 attempts=   7 draws=   14 GPU==CPU
+bot 304 id=j2kjyzt1   engine=  400132 hostcpu=  400132 gpu=  400132 spawned=true n_tiles= 52 attempts=  20 draws=   40 GPU==CPU
+bot 305 id=x5ff4utp   engine=  735441 hostcpu=  735441 gpu=  735441 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot 306 id=lokk2xdf   engine=  111198 hostcpu=  111198 gpu=  111198 spawned=true n_tiles= 52 attempts=   6 draws=   12 GPU==CPU
+bot 307 id=sylg30cf   engine=  160421 hostcpu=  160421 gpu=  160421 spawned=true n_tiles= 52 attempts=   4 draws=    8 GPU==CPU
+bot 308 id=sahbcu7b   engine=  367451 hostcpu=  367451 gpu=  367451 spawned=true n_tiles= 52 attempts=  22 draws=   44 GPU==CPU
+bot 309 id=zuvsbbzm   engine=  663385 hostcpu=  663385 gpu=  663385 spawned=true n_tiles= 52 attempts=  11 draws=   22 GPU==CPU
+bot 310 id=n4n57mjy   engine=  469597 hostcpu=  469597 gpu=  469597 spawned=true n_tiles= 52 attempts=  45 draws=   90 GPU==CPU
+bot 311 id=8s3w15kq   engine=  201617 hostcpu=  201617 gpu=  201617 spawned=true n_tiles= 52 attempts=  39 draws=   78 GPU==CPU
+bot 312 id=a6z0gp5d   engine=  643490 hostcpu=  643490 gpu=  643490 spawned=true n_tiles= 52 attempts=  11 draws=   22 GPU==CPU
+bot 313 id=momzwuew   engine=   62504 hostcpu=   62504 gpu=   62504 spawned=true n_tiles= 52 attempts=  14 draws=   28 GPU==CPU
+bot 314 id=swknlr19   engine=  802470 hostcpu=  802470 gpu=  802470 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot 315 id=68tli42a   engine=  804672 hostcpu=  804672 gpu=  804672 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 316 id=43wn7pvq   engine=  187592 hostcpu=  187592 gpu=  187592 spawned=true n_tiles= 52 attempts=  13 draws=   26 GPU==CPU
+bot 317 id=ssod81st   engine=  124515 hostcpu=  124515 gpu=  124515 spawned=true n_tiles= 52 attempts=  87 draws=  174 GPU==CPU
+bot 318 id=9fudx3o3   engine=  544241 hostcpu=  544241 gpu=  544241 spawned=true n_tiles= 52 attempts=  13 draws=   26 GPU==CPU
+bot 319 id=cm4ig7bz   engine=  118665 hostcpu=  118665 gpu=  118665 spawned=true n_tiles= 52 attempts=   9 draws=   18 GPU==CPU
+bot 320 id=ajwm3pcu   engine=  289577 hostcpu=  289577 gpu=  289577 spawned=true n_tiles= 52 attempts=  18 draws=   36 GPU==CPU
+bot 321 id=wcn2fdks   engine=  868633 hostcpu=  868633 gpu=  868633 spawned=true n_tiles= 52 attempts=  14 draws=   28 GPU==CPU
+bot 322 id=0a4r00hz   engine=  583221 hostcpu=  583221 gpu=  583221 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot 323 id=548y287t   engine=   36596 hostcpu=   36596 gpu=   36596 spawned=true n_tiles= 52 attempts=  25 draws=   50 GPU==CPU
+bot 324 id=rkqmpoqo   engine=  826407 hostcpu=  826407 gpu=  826407 spawned=true n_tiles= 52 attempts=  19 draws=   38 GPU==CPU
+bot 325 id=nrv83khf   engine=  296216 hostcpu=  296216 gpu=  296216 spawned=true n_tiles= 52 attempts=  61 draws=  122 GPU==CPU
+bot 326 id=00wyr0st   engine=  740472 hostcpu=  740472 gpu=  740472 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 327 id=dhvz0u2j   engine=   46564 hostcpu=   46564 gpu=   46564 spawned=true n_tiles= 52 attempts=  13 draws=   26 GPU==CPU
+bot 328 id=87uy1srx   engine=  512156 hostcpu=  512156 gpu=  512156 spawned=true n_tiles= 52 attempts=  15 draws=   30 GPU==CPU
+bot 329 id=26wgkglj   engine=  922388 hostcpu=  922388 gpu=  922388 spawned=true n_tiles= 52 attempts=  29 draws=   58 GPU==CPU
+bot 330 id=s4otxlhb   engine=   75561 hostcpu=   75561 gpu=   75561 spawned=true n_tiles= 52 attempts=  15 draws=   30 GPU==CPU
+bot 331 id=65ikynwk   engine=  449553 hostcpu=  449553 gpu=  449553 spawned=true n_tiles= 52 attempts=   2 draws=    4 GPU==CPU
+bot 332 id=goxpy54y   engine=   70239 hostcpu=   70239 gpu=   70239 spawned=true n_tiles= 52 attempts=  61 draws=  122 GPU==CPU
+bot 333 id=etvrjl78   engine=  395468 hostcpu=  395468 gpu=  395468 spawned=true n_tiles= 52 attempts=  32 draws=   64 GPU==CPU
+bot 334 id=y58lji80   engine=  803436 hostcpu=  803436 gpu=  803436 spawned=true n_tiles= 52 attempts=  21 draws=   42 GPU==CPU
+bot 335 id=13dy28ag   engine=  148629 hostcpu=  148629 gpu=  148629 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot 336 id=0dg1h5h5   engine=  588339 hostcpu=  588339 gpu=  588339 spawned=true n_tiles= 52 attempts=  57 draws=  114 GPU==CPU
+bot 337 id=e9ncqhcw   engine=  376485 hostcpu=  376485 gpu=  376485 spawned=true n_tiles= 52 attempts=  13 draws=   26 GPU==CPU
+bot 338 id=uhxjrdbv   engine=  622150 hostcpu=  622150 gpu=  622150 spawned=true n_tiles= 52 attempts=  35 draws=   70 GPU==CPU
+bot 339 id=gv359a4k   engine=  510337 hostcpu=  510337 gpu=  510337 spawned=true n_tiles= 52 attempts=  56 draws=  112 GPU==CPU
+bot 340 id=p4ehczm2   engine=  698209 hostcpu=  698209 gpu=  698209 spawned=true n_tiles= 52 attempts=  13 draws=   26 GPU==CPU
+bot 341 id=p2xbynef   engine=   35399 hostcpu=   35399 gpu=   35399 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 342 id=co561w2j   engine=  375219 hostcpu=  375219 gpu=  375219 spawned=true n_tiles= 52 attempts=  11 draws=   22 GPU==CPU
+bot 343 id=wz0zkd1s   engine=  915551 hostcpu=  915551 gpu=  915551 spawned=true n_tiles= 52 attempts=   6 draws=   12 GPU==CPU
+bot 344 id=m7jnfagf   engine=  962528 hostcpu=  962528 gpu=  962528 spawned=true n_tiles= 52 attempts=   8 draws=   16 GPU==CPU
+bot 345 id=rq439wc6   engine=  209266 hostcpu=  209266 gpu=  209266 spawned=true n_tiles= 52 attempts=  18 draws=   36 GPU==CPU
+bot 346 id=lkklizjr   engine=  664347 hostcpu=  664347 gpu=  664347 spawned=true n_tiles= 52 attempts=   6 draws=   12 GPU==CPU
+bot 347 id=2uyam605   engine=  733708 hostcpu=  733708 gpu=  733708 spawned=true n_tiles= 52 attempts=  74 draws=  148 GPU==CPU
+bot 348 id=er3wo1bg   engine=  911672 hostcpu=  911672 gpu=  911672 spawned=true n_tiles= 52 attempts=  39 draws=   78 GPU==CPU
+bot 349 id=ezt35u0l   engine=  593266 hostcpu=  593266 gpu=  593266 spawned=true n_tiles= 52 attempts=  70 draws=  140 GPU==CPU
+bot 350 id=593d2qcb   engine=  257702 hostcpu=  257702 gpu=  257702 spawned=true n_tiles= 52 attempts=  14 draws=   28 GPU==CPU
+bot 351 id=y51cphtm   engine=  764364 hostcpu=  764364 gpu=  764364 spawned=true n_tiles= 52 attempts=  44 draws=   88 GPU==CPU
+bot 352 id=g94go6fd   engine=  731561 hostcpu=  731561 gpu=  731561 spawned=true n_tiles= 52 attempts=  61 draws=  122 GPU==CPU
+bot 353 id=9ksqwgqt   engine=  839590 hostcpu=  839590 gpu=  839590 spawned=true n_tiles= 52 attempts=  18 draws=   36 GPU==CPU
+bot 354 id=ykirk4lg   engine=  364155 hostcpu=  364155 gpu=  364155 spawned=true n_tiles= 52 attempts=  27 draws=   54 GPU==CPU
+bot 355 id=jurxvo26   engine=  481277 hostcpu=  481277 gpu=  481277 spawned=true n_tiles= 52 attempts=   9 draws=   18 GPU==CPU
+bot 356 id=to8bcohn   engine=  688408 hostcpu=  688408 gpu=  688408 spawned=true n_tiles= 52 attempts=  25 draws=   50 GPU==CPU
+bot 357 id=ensatih4   engine=  517475 hostcpu=  517475 gpu=  517475 spawned=true n_tiles= 52 attempts=  15 draws=   30 GPU==CPU
+bot 358 id=nbbu08hb   engine=  235660 hostcpu=  235660 gpu=  235660 spawned=true n_tiles= 52 attempts=  11 draws=   22 GPU==CPU
+bot 359 id=rxlhv8ic   engine=  315570 hostcpu=  315570 gpu=  315570 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 360 id=aiowrq52   engine=  672625 hostcpu=  672625 gpu=  672625 spawned=true n_tiles= 52 attempts=  73 draws=  146 GPU==CPU
+bot 361 id=bo94our7   engine=  205514 hostcpu=  205514 gpu=  205514 spawned=true n_tiles= 52 attempts=  38 draws=   76 GPU==CPU
+bot 362 id=jxqkb7y6   engine=  636576 hostcpu=  636576 gpu=  636576 spawned=true n_tiles= 52 attempts=   8 draws=   16 GPU==CPU
+bot 363 id=ikezntfk   engine=  123274 hostcpu=  123274 gpu=  123274 spawned=true n_tiles= 52 attempts=  59 draws=  118 GPU==CPU
+bot 364 id=j4e63dwu   engine=  376723 hostcpu=  376723 gpu=  376723 spawned=true n_tiles= 52 attempts=  30 draws=   60 GPU==CPU
+bot 365 id=t0b9mavx   engine=  947505 hostcpu=  947505 gpu=  947505 spawned=true n_tiles= 52 attempts=   6 draws=   12 GPU==CPU
+bot 366 id=bu0hz5bz   engine=  197708 hostcpu=  197708 gpu=  197708 spawned=true n_tiles= 52 attempts=   8 draws=   16 GPU==CPU
+bot 367 id=368l6a1p   engine=  412419 hostcpu=  412419 gpu=  412419 spawned=true n_tiles= 52 attempts=  90 draws=  180 GPU==CPU
+bot 368 id=6cr9h8xa   engine=  537567 hostcpu=  537567 gpu=  537567 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot 369 id=8y4zfq0g   engine=  653309 hostcpu=  653309 gpu=  653309 spawned=true n_tiles= 52 attempts=   6 draws=   12 GPU==CPU
+bot 370 id=tz0sezi7   engine=  837501 hostcpu=  837501 gpu=  837501 spawned=true n_tiles= 52 attempts=  24 draws=   48 GPU==CPU
+bot 371 id=dazr70tn   engine=  861603 hostcpu=  861603 gpu=  861603 spawned=true n_tiles= 52 attempts=  36 draws=   72 GPU==CPU
+bot 372 id=tx1pjsyg   engine=  668593 hostcpu=  668593 gpu=  668593 spawned=true n_tiles= 52 attempts=  57 draws=  114 GPU==CPU
+bot 373 id=ndjtlp8r   engine=  376267 hostcpu=  376267 gpu=  376267 spawned=true n_tiles= 52 attempts=  16 draws=   32 GPU==CPU
+bot 374 id=bsklet6g   engine=  721229 hostcpu=  721229 gpu=  721229 spawned=true n_tiles= 52 attempts= 112 draws=  224 GPU==CPU
+bot 375 id=hsozrzu4   engine=  152487 hostcpu=  152487 gpu=  152487 spawned=true n_tiles= 52 attempts=  21 draws=   42 GPU==CPU
+bot 376 id=otmybkm3   engine=  278240 hostcpu=  278240 gpu=  278240 spawned=true n_tiles= 52 attempts=  99 draws=  198 GPU==CPU
+bot 377 id=yfm1nyqy   engine=  853467 hostcpu=  853467 gpu=  853467 spawned=true n_tiles= 52 attempts=   5 draws=   10 GPU==CPU
+bot 378 id=kr6ytu3l   engine=   84276 hostcpu=   84276 gpu=   84276 spawned=true n_tiles= 52 attempts=  64 draws=  128 GPU==CPU
+bot 379 id=3pagyfng   engine=  762580 hostcpu=  762580 gpu=  762580 spawned=true n_tiles= 52 attempts=   9 draws=   18 GPU==CPU
+bot 380 id=w1mobjvk   engine=  357191 hostcpu=  357191 gpu=  357191 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot 381 id=xm7i5x3m   engine=  348683 hostcpu=  348683 gpu=  348683 spawned=true n_tiles= 52 attempts=  27 draws=   54 GPU==CPU
+bot 382 id=8u02tf2g   engine=  585368 hostcpu=  585368 gpu=  585368 spawned=true n_tiles= 52 attempts=  16 draws=   32 GPU==CPU
+bot 383 id=lp6sri88   engine=  629288 hostcpu=  629288 gpu=  629288 spawned=true n_tiles= 52 attempts=  78 draws=  156 GPU==CPU
+bot 384 id=sb1tap3p   engine=  155819 hostcpu=  155819 gpu=  155819 spawned=true n_tiles= 52 attempts=  19 draws=   38 GPU==CPU
+bot 385 id=mv01333k   engine=  546391 hostcpu=  546391 gpu=  546391 spawned=true n_tiles= 52 attempts=  62 draws=  124 GPU==CPU
+bot 386 id=g9mp2ife   engine=  718586 hostcpu=  718586 gpu=  718586 spawned=true n_tiles= 52 attempts=  49 draws=   98 GPU==CPU
+bot 387 id=jtq0seut   engine=  588586 hostcpu=  588586 gpu=  588586 spawned=true n_tiles= 52 attempts=  11 draws=   22 GPU==CPU
+bot 388 id=525mh9ql   engine=  631550 hostcpu=  631550 gpu=  631550 spawned=true n_tiles= 52 attempts=  90 draws=  180 GPU==CPU
+bot 389 id=fvbpmsvz   engine=   69593 hostcpu=   69593 gpu=   69593 spawned=true n_tiles= 52 attempts=  53 draws=  106 GPU==CPU
+bot 390 id=xwn3ivem   engine=  178257 hostcpu=  178257 gpu=  178257 spawned=true n_tiles= 52 attempts=  59 draws=  118 GPU==CPU
+bot 391 id=fqbyj4jd   engine=  778387 hostcpu=  778387 gpu=  778387 spawned=true n_tiles= 52 attempts=   3 draws=    6 GPU==CPU
+bot 392 id=xfiw8ywg   engine=  854743 hostcpu=  854743 gpu=  854743 spawned=true n_tiles= 52 attempts=  68 draws=  136 GPU==CPU
+bot 393 id=iw3dqxmq   engine=  849308 hostcpu=  849308 gpu=  849308 spawned=true n_tiles= 52 attempts=  29 draws=   58 GPU==CPU
+bot 394 id=yc0ao6et   engine=  437406 hostcpu=  437406 gpu=  437406 spawned=true n_tiles= 52 attempts=  62 draws=  124 GPU==CPU
+bot 395 id=ixj6ihi7   engine=  545274 hostcpu=  545274 gpu=  545274 spawned=true n_tiles= 52 attempts= 144 draws=  288 GPU==CPU
+bot 396 id=9l5wwvr3   engine=  494174 hostcpu=  494174 gpu=  494174 spawned=true n_tiles= 52 attempts=  20 draws=   40 GPU==CPU
+bot 397 id=2w6i33lv   engine=  321230 hostcpu=  321230 gpu=  321230 spawned=true n_tiles= 52 attempts= 192 draws=  384 GPU==CPU
+bot 398 id=sba949vb   engine=   30625 hostcpu=   30625 gpu=   30625 spawned=true n_tiles= 52 attempts=  50 draws=  100 GPU==CPU
+bot 399 id=ijcmefns   engine=  265184 hostcpu=  265184 gpu=  265184 spawned=true n_tiles= 52 attempts=  60 draws=  120 GPU==CPU
+bot 400 id=isnsszoo   engine=  731505 hostcpu=  731505 gpu=  731505 spawned=true n_tiles= 52 attempts= 234 draws=  468 GPU==CPU
+bot 401 id=9z76va23   engine=  341215 hostcpu=  341215 gpu=  341215 spawned=true n_tiles= 52 attempts= 147 draws=  294 GPU==CPU
+bot 402 id=h1wbhdhm   engine=  284345 hostcpu=  284345 gpu=  284345 spawned=true n_tiles= 52 attempts= 195 draws=  390 GPU==CPU
+bot 403 id=tewvulrm   engine=  153740 hostcpu=  153740 gpu=  153740 spawned=true n_tiles= 52 attempts=   9 draws=   18 GPU==CPU
+bot 404 id=wp3bxzsu   engine=  440521 hostcpu=  440521 gpu=  440521 spawned=true n_tiles= 52 attempts=  85 draws=  170 GPU==CPU
+bot 405 id=d0g6avrv   engine=  304356 hostcpu=  304356 gpu=  304356 spawned=true n_tiles= 52 attempts= 169 draws=  338 GPU==CPU
+bot 406 id=hsyivnsn   engine=  172575 hostcpu=  172575 gpu=  172575 spawned=true n_tiles= 52 attempts= 154 draws=  308 GPU==CPU
+bot 407 id=ox9ept1k   engine=  671560 hostcpu=  671560 gpu=  671560 spawned=true n_tiles= 52 attempts=  63 draws=  126 GPU==CPU
+bot 408 id=ny87grni   engine=  262149 hostcpu=  262149 gpu=  262149 spawned=true n_tiles= 52 attempts=  38 draws=   76 GPU==CPU
+bot 409 id=k2th9538   engine=  162538 hostcpu=  162538 gpu=  162538 spawned=true n_tiles= 52 attempts=  65 draws=  130 GPU==CPU
+bot 410 id=ysltjm94   engine=  303253 hostcpu=  303253 gpu=  303253 spawned=true n_tiles= 52 attempts= 308 draws=  616 GPU==CPU
+bot 411 id=u5klj2eh   engine=  576282 hostcpu=  576282 gpu=  576282 spawned=true n_tiles= 52 attempts=  43 draws=   86 GPU==CPU
+bot 412 id=k7ka2ci1   engine=  382697 hostcpu=  382697 gpu=  382697 spawned=true n_tiles= 52 attempts= 181 draws=  362 GPU==CPU
+bot 413 id=qtul4azs   engine=  678262 hostcpu=  678262 gpu=  678262 spawned=true n_tiles= 52 attempts=  47 draws=   94 GPU==CPU
+bot 414 id=ll69i57o   engine=  741239 hostcpu=  741239 gpu=  741239 spawned=true n_tiles= 52 attempts=   8 draws=   16 GPU==CPU
+bot 415 id=9vuokjnw   engine=  861348 hostcpu=  861348 gpu=  861348 spawned=true n_tiles= 52 attempts=  78 draws=  156 GPU==CPU
+bot 416 id=ggb3bab1   engine=  431340 hostcpu=  431340 gpu=  431340 spawned=true n_tiles= 52 attempts=  83 draws=  166 GPU==CPU
+bot 417 id=drdo3t90   engine=  608612 hostcpu=  608612 gpu=  608612 spawned=true n_tiles= 52 attempts=  25 draws=   50 GPU==CPU
+bot 418 id=xieaxa2f   engine=  683172 hostcpu=  683172 gpu=  683172 spawned=true n_tiles= 52 attempts= 174 draws=  348 GPU==CPU
+bot 419 id=kqp7ewus   engine=  324417 hostcpu=  324417 gpu=  324417 spawned=true n_tiles= 52 attempts=   8 draws=   16 GPU==CPU
+bot 420 id=3kitma91   engine=  309191 hostcpu=  309191 gpu=  309191 spawned=true n_tiles= 52 attempts=  65 draws=  130 GPU==CPU
+bot 421 id=m7y3u0aw   engine=  862562 hostcpu=  862562 gpu=  862562 spawned=true n_tiles= 52 attempts= 100 draws=  200 GPU==CPU
+bot 422 id=epuw8vpi   engine=  855673 hostcpu=  855673 gpu=  855673 spawned=true n_tiles= 52 attempts=  82 draws=  164 GPU==CPU
+bot 423 id=nzx54fm6   engine=  258641 hostcpu=  258641 gpu=  258641 spawned=true n_tiles= 52 attempts= 163 draws=  326 GPU==CPU
+bot 424 id=fsk2kd7w   engine=  336306 hostcpu=  336306 gpu=  336306 spawned=true n_tiles= 52 attempts= 287 draws=  574 GPU==CPU
+bot 425 id=p8jddnkm   engine=  555211 hostcpu=  555211 gpu=  555211 spawned=true n_tiles= 52 attempts=  79 draws=  158 GPU==CPU
+bot 426 id=wvgzie3u   engine=  496389 hostcpu=  496389 gpu=  496389 spawned=true n_tiles= 52 attempts= 211 draws=  422 GPU==CPU
+bot 427 id=mwh2z96c   engine=  721422 hostcpu=  721422 gpu=  721422 spawned=true n_tiles= 52 attempts=  41 draws=   82 GPU==CPU
+bot 428 id=l4ku27pt   engine=  290397 hostcpu=  290397 gpu=  290397 spawned=true n_tiles= 52 attempts= 154 draws=  308 GPU==CPU
+bot 429 id=jpvsmxxx   engine=  221546 hostcpu=  221546 gpu=  221546 spawned=true n_tiles= 52 attempts=  42 draws=   84 GPU==CPU
+bot 430 id=s4xo3abv   engine=  414302 hostcpu=  414302 gpu=  414302 spawned=true n_tiles= 52 attempts=  25 draws=   50 GPU==CPU
+bot 431 id=zte7u069   engine=  609540 hostcpu=  609540 gpu=  609540 spawned=true n_tiles= 52 attempts= 299 draws=  598 GPU==CPU
+bot 432 id=azlpbpke   engine=  180735 hostcpu=  180735 gpu=  180735 spawned=true n_tiles= 52 attempts=  26 draws=   52 GPU==CPU
+bot 433 id=0pmbiw8o   engine=  371344 hostcpu=  371344 gpu=  371344 spawned=true n_tiles= 52 attempts=  24 draws=   48 GPU==CPU
+bot 434 id=rygf4mvr   engine=  714524 hostcpu=  714524 gpu=  714524 spawned=true n_tiles= 52 attempts= 144 draws=  288 GPU==CPU
+bot 435 id=mg9pgnw7   engine=  260552 hostcpu=  260552 gpu=  260552 spawned=true n_tiles= 52 attempts= 212 draws=  424 GPU==CPU
+bot 436 id=8olnebf1   engine=  557365 hostcpu=  557365 gpu=  557365 spawned=true n_tiles= 52 attempts=  82 draws=  164 GPU==CPU
+bot 437 id=rzlsw9x1   engine=  629376 hostcpu=  629376 gpu=  629376 spawned=true n_tiles= 52 attempts=  65 draws=  130 GPU==CPU
+bot 438 id=o0jhfyxc   engine=   15583 hostcpu=   15583 gpu=   15583 spawned=true n_tiles= 52 attempts=   1 draws=    2 GPU==CPU
+bot 439 id=vki91ouc   engine=  325274 hostcpu=  325274 gpu=  325274 spawned=true n_tiles= 52 attempts=  75 draws=  150 GPU==CPU
+bot 440 id=0onssx3n   engine=   57459 hostcpu=   57459 gpu=   57459 spawned=true n_tiles= 52 attempts=  16 draws=   32 GPU==CPU
+bot 441 id=ymrho9y4   engine=  675201 hostcpu=  675201 gpu=  675201 spawned=true n_tiles= 52 attempts= 229 draws=  458 GPU==CPU
+bot 442 id=4jjh2h8g   engine=  393527 hostcpu=  393527 gpu=  393527 spawned=true n_tiles= 52 attempts=  17 draws=   34 GPU==CPU
+bot 443 id=af8k17d8   engine=  558420 hostcpu=  558420 gpu=  558420 spawned=true n_tiles= 52 attempts= 215 draws=  430 GPU==CPU
+bot 444 id=qt2a41r9   engine=  438376 hostcpu=  438376 gpu=  438376 spawned=true n_tiles= 52 attempts= 394 draws=  788 GPU==CPU
+bot 445 id=dmqr8rk9   engine=  488457 hostcpu=  488457 gpu=  488457 spawned=true n_tiles= 52 attempts=  43 draws=   86 GPU==CPU
+bot 446 id=gdvex2np   engine=  145589 hostcpu=  145589 gpu=  145589 spawned=true n_tiles= 52 attempts= 202 draws=  404 GPU==CPU
+bot 447 id=z6dhj6lz   engine=  135376 hostcpu=  135376 gpu=  135376 spawned=true n_tiles= 52 attempts=  37 draws=   74 GPU==CPU
+bot 448 id=ztlqrwwc   engine=  789296 hostcpu=  789296 gpu=  789296 spawned=true n_tiles= 52 attempts=  46 draws=   92 GPU==CPU
+bot 449 id=qk845cyd   engine=  712683 hostcpu=  712683 gpu=  712683 spawned=true n_tiles= 52 attempts=  10 draws=   20 GPU==CPU
+bot 450 id=g5ubwqld   engine=  893504 hostcpu=  893504 gpu=  893504 spawned=true n_tiles= 52 attempts= 330 draws=  660 GPU==CPU
+bot 451 id=voc18itg   engine=  735406 hostcpu=  735406 gpu=  735406 spawned=true n_tiles= 52 attempts=  26 draws=   52 GPU==CPU
+bot 452 id=3noal342   engine=  203683 hostcpu=  203683 gpu=  203683 spawned=true n_tiles= 52 attempts=  34 draws=   68 GPU==CPU
+bot 453 id=r8slsgxy   engine=  719457 hostcpu=  719457 gpu=  719457 spawned=true n_tiles= 52 attempts= 197 draws=  394 GPU==CPU
+bot 454 id=kwh9u6xu   engine=   84678 hostcpu=   84678 gpu=   84678 spawned=true n_tiles= 52 attempts=  28 draws=   56 GPU==CPU
+bot 455 id=8k335xf9   engine=   40484 hostcpu=   40484 gpu=   40484 spawned=true n_tiles= 52 attempts= 108 draws=  216 GPU==CPU
+bot 456 id=r8oeocye   engine=  508198 hostcpu=  508198 gpu=  508198 spawned=true n_tiles= 52 attempts=  97 draws=  194 GPU==CPU
+bot 457 id=aux9eznz   engine=  435133 hostcpu=  435133 gpu=  435133 spawned=true n_tiles= 52 attempts=  26 draws=   52 GPU==CPU
+bot 458 id=tl8i4sqm   engine=  583175 hostcpu=  583175 gpu=  583175 spawned=true n_tiles= 52 attempts= 193 draws=  386 GPU==CPU
+bot 459 id=5tvnmw0x   engine=  190289 hostcpu=  190289 gpu=  190289 spawned=true n_tiles= 52 attempts=  18 draws=   36 GPU==CPU
+bot 460 id=iaxyjwg2   engine=  738269 hostcpu=  738269 gpu=  738269 spawned=true n_tiles= 52 attempts= 237 draws=  474 GPU==CPU
+bot 461 id=vsouyzqb   engine=  278294 hostcpu=  278294 gpu=  278294 spawned=true n_tiles= 52 attempts=  54 draws=  108 GPU==CPU
+bot 462 id=qo2yiqyt   engine=  634127 hostcpu=  634127 gpu=  634127 spawned=true n_tiles= 52 attempts=  16 draws=   32 GPU==CPU
+bot 463 id=4b0bsp77   engine=  772670 hostcpu=  772670 gpu=  772670 spawned=true n_tiles= 52 attempts= 447 draws=  894 GPU==CPU
+bot 464 id=zt5za47g   engine=  806397 hostcpu=  806397 gpu=  806397 spawned=true n_tiles= 52 attempts=  31 draws=   62 GPU==CPU
+bot 465 id=ialnkrtf   engine=  343483 hostcpu=  343483 gpu=  343483 spawned=true n_tiles= 52 attempts=  81 draws=  162 GPU==CPU
+bot 466 id=euhp0q2h   engine=  396435 hostcpu=  396435 gpu=  396435 spawned=true n_tiles= 52 attempts=  15 draws=   30 GPU==CPU
+bot 467 id=hxtuit3a   engine=  518517 hostcpu=  518517 gpu=  518517 spawned=true n_tiles= 52 attempts= 514 draws= 1028 GPU==CPU
+bot 468 id=cfqynmub   engine=  237113 hostcpu=  237113 gpu=  237113 spawned=true n_tiles= 52 attempts= 407 draws=  814 GPU==CPU
+bot 469 id=kp4qpq36   engine=  838660 hostcpu=  838660 gpu=  838660 spawned=true n_tiles= 52 attempts= 125 draws=  250 GPU==CPU
+bot 470 id=m4sv56ts   engine=  618351 hostcpu=  618351 gpu=  618351 spawned=true n_tiles= 52 attempts=  15 draws=   30 GPU==CPU
+bot 471 id=90lwnghk   engine=  894573 hostcpu=  894573 gpu=  894573 spawned=true n_tiles= 52 attempts=  63 draws=  126 GPU==CPU
+bot 472 id=6s4qrb66   engine=  365606 hostcpu=  365606 gpu=  365606 spawned=true n_tiles= 52 attempts=  12 draws=   24 GPU==CPU
+bot 473 id=zm2durya   engine=  635167 hostcpu=  635167 gpu=  635167 spawned=true n_tiles= 52 attempts=  66 draws=  132 GPU==CPU
+bot 474 id=r78jt2dp   engine=  376179 hostcpu=  376179 gpu=  376179 spawned=true n_tiles= 52 attempts=  67 draws=  134 GPU==CPU
+bot 475 id=2l6px65c   engine=  592416 hostcpu=  592416 gpu=  592416 spawned=true n_tiles= 52 attempts=  43 draws=   86 GPU==CPU
+bot 476 id=8m9tfbvi   engine=   57341 hostcpu=   57341 gpu=   57341 spawned=true n_tiles= 52 attempts=  46 draws=   92 GPU==CPU
+bot 477 id=9mt34ypn   engine=  498530 hostcpu=  498530 gpu=  498530 spawned=true n_tiles= 52 attempts= 407 draws=  814 GPU==CPU
+bot 478 id=7q708nxs   engine=  508126 hostcpu=  508126 gpu=  508126 spawned=true n_tiles= 52 attempts=  64 draws=  128 GPU==CPU
+bot 479 id=vaum2ag5   engine=  309533 hostcpu=  309533 gpu=  309533 spawned=true n_tiles= 52 attempts= 602 draws= 1204 GPU==CPU
+bot 480 id=lhw012op   engine=  237692 hostcpu=  237692 gpu=  237692 spawned=true n_tiles= 52 attempts= 116 draws=  232 GPU==CPU
+bot 481 id=ov7icohk   engine=  342516 hostcpu=  342516 gpu=  342516 spawned=true n_tiles= 52 attempts= 852 draws= 1704 GPU==CPU
+bot 482 id=wdgpft73   engine=   84463 hostcpu=   84463 gpu=   84463 spawned=true n_tiles= 52 attempts= 103 draws=  206 GPU==CPU
+bot 483 id=77xjevxo   engine=  890380 hostcpu=  890380 gpu=  890380 spawned=true n_tiles= 52 attempts= 586 draws= 1172 GPU==CPU
+bot 484 id=oqm2d2ls   engine=  696506 hostcpu=  696506 gpu=  696506 spawned=true n_tiles= 52 attempts= 100 draws=  200 GPU==CPU
+bot 485 id=s4bnz7gf   engine=  241260 hostcpu=  241260 gpu=  241260 spawned=true n_tiles= 52 attempts= 417 draws=  834 GPU==CPU
+bot 486 id=qareow7n   engine=  820571 hostcpu=  820571 gpu=  820571 spawned=true n_tiles= 52 attempts=  73 draws=  146 GPU==CPU
+bot 487 id=0qjiaqhk   engine=  778442 hostcpu=  778442 gpu=  778442 spawned=true n_tiles= 52 attempts= 970 draws= 1940 GPU==CPU
+--- engine players (initial state) ---
+player small_id=1 type=H id=nd8079oo spawn_tile=-1 spawn_tick=0 tiles_owned=0
+player small_id=2 type=B id=7kmb47oc spawn_tile=107254 spawn_tick=1 tiles_owned=52
+player small_id=3 type=B id=su965kfe spawn_tile=334545 spawn_tick=1 tiles_owned=52
+player small_id=4 type=B id=4918e5rs spawn_tile=767276 spawn_tick=1 tiles_owned=52
+player small_id=5 type=B id=0grah7qg spawn_tile=298498 spawn_tick=1 tiles_owned=52
+player small_id=6 type=B id=79lbhuod spawn_tile=271614 spawn_tick=1 tiles_owned=52
+player small_id=7 type=B id=0eay8wsu spawn_tile=705481 spawn_tick=1 tiles_owned=52
+player small_id=8 type=B id=l4g4juu8 spawn_tile=944611 spawn_tick=1 tiles_owned=52
+player small_id=9 type=B id=gsw4n5km spawn_tile=89583 spawn_tick=1 tiles_owned=52
+player small_id=10 type=B id=ooz4f963 spawn_tile=896690 spawn_tick=1 tiles_owned=52
+player small_id=11 type=B id=g49bog52 spawn_tile=331181 spawn_tick=1 tiles_owned=52
+player small_id=12 type=B id=vl3arc4y spawn_tile=468222 spawn_tick=1 tiles_owned=52
+player small_id=13 type=B id=26spmsu2 spawn_tile=876730 spawn_tick=1 tiles_owned=52
+player small_id=14 type=B id=666fmd2f spawn_tile=281683 spawn_tick=1 tiles_owned=52
+player small_id=15 type=B id=vybu8oes spawn_tile=224588 spawn_tick=1 tiles_owned=52
+player small_id=16 type=B id=tlx2iciq spawn_tile=365649 spawn_tick=1 tiles_owned=52
+player small_id=17 type=B id=8i7cuo9t spawn_tile=384665 spawn_tick=1 tiles_owned=52
+player small_id=18 type=B id=ay8xa67r spawn_tile=622435 spawn_tick=1 tiles_owned=52
+player small_id=19 type=B id=fha1xhrw spawn_tile=384416 spawn_tick=1 tiles_owned=52
+player small_id=20 type=B id=0n5m7v7w spawn_tile=65538 spawn_tick=1 tiles_owned=52
+player small_id=21 type=B id=g1kcotxi spawn_tile=846621 spawn_tick=1 tiles_owned=52
+player small_id=22 type=B id=onu80sk7 spawn_tile=208173 spawn_tick=1 tiles_owned=52
+player small_id=23 type=B id=mt378h9n spawn_tile=149561 spawn_tick=1 tiles_owned=52
+player small_id=24 type=B id=bo2xv2tw spawn_tile=448425 spawn_tick=1 tiles_owned=52
+player small_id=25 type=B id=4j0jwl8e spawn_tile=238626 spawn_tick=1 tiles_owned=52
+player small_id=26 type=B id=2q1yboxl spawn_tile=142348 spawn_tick=1 tiles_owned=52
+player small_id=27 type=B id=uf1afynu spawn_tile=493240 spawn_tick=1 tiles_owned=52
+player small_id=28 type=B id=hnp5jsyu spawn_tile=84630 spawn_tick=1 tiles_owned=52
+player small_id=29 type=B id=3ks2xdvj spawn_tile=656155 spawn_tick=1 tiles_owned=52
+player small_id=30 type=B id=6udu18l9 spawn_tile=180833 spawn_tick=1 tiles_owned=52
+player small_id=31 type=B id=u9qkgxb0 spawn_tile=62653 spawn_tick=1 tiles_owned=52
+player small_id=32 type=B id=gxzvzcy1 spawn_tile=212652 spawn_tick=1 tiles_owned=52
+player small_id=33 type=B id=soumc8lx spawn_tile=889613 spawn_tick=1 tiles_owned=52
+player small_id=34 type=B id=pbtdxhy8 spawn_tile=330605 spawn_tick=1 tiles_owned=52
+player small_id=35 type=B id=7qca320q spawn_tile=687641 spawn_tick=1 tiles_owned=52
+player small_id=36 type=B id=qu4dw13r spawn_tile=176481 spawn_tick=1 tiles_owned=52
+player small_id=37 type=B id=uf42rmom spawn_tile=320475 spawn_tick=1 tiles_owned=52
+player small_id=38 type=B id=5pzo5nyp spawn_tile=551600 spawn_tick=1 tiles_owned=52
+player small_id=39 type=B id=lpeu6a40 spawn_tile=818645 spawn_tick=1 tiles_owned=52
+player small_id=40 type=B id=m01qyq41 spawn_tile=272210 spawn_tick=1 tiles_owned=52
+player small_id=41 type=B id=qp5j7mcl spawn_tile=737537 spawn_tick=1 tiles_owned=52
+player small_id=42 type=B id=daoks386 spawn_tile=589464 spawn_tick=1 tiles_owned=52
+player small_id=43 type=B id=1adrc0if spawn_tile=258584 spawn_tick=1 tiles_owned=52
+player small_id=44 type=B id=z2sjy7tl spawn_tile=600444 spawn_tick=1 tiles_owned=52
+player small_id=45 type=B id=2a2pcqq2 spawn_tile=483131 spawn_tick=1 tiles_owned=52
+player small_id=46 type=B id=965x3zic spawn_tile=224285 spawn_tick=1 tiles_owned=52
+player small_id=47 type=B id=yytwuuvv spawn_tile=639448 spawn_tick=1 tiles_owned=52
+player small_id=48 type=B id=0bq4zvkx spawn_tile=573527 spawn_tick=1 tiles_owned=52
+player small_id=49 type=B id=fqo7elia spawn_tile=642405 spawn_tick=1 tiles_owned=52
+player small_id=50 type=B id=xb2eodru spawn_tile=845418 spawn_tick=1 tiles_owned=52
+player small_id=51 type=B id=dn2a1fmz spawn_tile=431286 spawn_tick=1 tiles_owned=52
+player small_id=52 type=B id=c657fqi1 spawn_tile=572154 spawn_tick=1 tiles_owned=52
+player small_id=53 type=B id=3oa0wbik spawn_tile=286266 spawn_tick=1 tiles_owned=52
+player small_id=54 type=B id=bbor86ta spawn_tile=602314 spawn_tick=1 tiles_owned=52
+player small_id=55 type=B id=ke481hq3 spawn_tile=763642 spawn_tick=1 tiles_owned=52
+player small_id=56 type=B id=1p7me35b spawn_tile=672445 spawn_tick=1 tiles_owned=52
+player small_id=57 type=B id=ros1fefm spawn_tile=113363 spawn_tick=1 tiles_owned=52
+player small_id=58 type=B id=bbj4439d spawn_tile=747387 spawn_tick=1 tiles_owned=52
+player small_id=59 type=B id=50euwmgf spawn_tile=213568 spawn_tick=1 tiles_owned=52
+player small_id=60 type=B id=6ifrrqwg spawn_tile=348286 spawn_tick=1 tiles_owned=52
+player small_id=61 type=B id=t3qojvzx spawn_tile=122609 spawn_tick=1 tiles_owned=52
+player small_id=62 type=B id=e39s2b1x spawn_tile=172698 spawn_tick=1 tiles_owned=52
+player small_id=63 type=B id=8elalp3o spawn_tile=608388 spawn_tick=1 tiles_owned=52
+player small_id=64 type=B id=drzdgt29 spawn_tile=830758 spawn_tick=1 tiles_owned=52
+player small_id=65 type=B id=a5l13l40 spawn_tile=600642 spawn_tick=1 tiles_owned=52
+player small_id=66 type=B id=15jsgukl spawn_tile=407389 spawn_tick=1 tiles_owned=52
+player small_id=67 type=B id=457rtifd spawn_tile=236182 spawn_tick=1 tiles_owned=52
+player small_id=68 type=B id=nvln8mx2 spawn_tile=526183 spawn_tick=1 tiles_owned=52
+player small_id=69 type=B id=xdf4q9ey spawn_tile=879703 spawn_tick=1 tiles_owned=52
+player small_id=70 type=B id=aehphxxq spawn_tile=763313 spawn_tick=1 tiles_owned=52
+player small_id=71 type=B id=r69884b7 spawn_tile=146677 spawn_tick=1 tiles_owned=52
+player small_id=72 type=B id=1fi956n2 spawn_tile=525258 spawn_tick=1 tiles_owned=52
+player small_id=73 type=B id=x0s75hnx spawn_tile=100653 spawn_tick=1 tiles_owned=52
+player small_id=74 type=B id=jjcxe8w7 spawn_tile=68478 spawn_tick=1 tiles_owned=52
+player small_id=75 type=B id=pa9du0an spawn_tile=745344 spawn_tick=1 tiles_owned=52
+player small_id=76 type=B id=wr1iodtv spawn_tile=125223 spawn_tick=1 tiles_owned=52
+player small_id=77 type=B id=q4t061qn spawn_tile=196795 spawn_tick=1 tiles_owned=52
+player small_id=78 type=B id=5walu3qw spawn_tile=692242 spawn_tick=1 tiles_owned=52
+player small_id=79 type=B id=9qsdvg22 spawn_tile=106555 spawn_tick=1 tiles_owned=52
+player small_id=80 type=B id=kxhibxlj spawn_tile=703545 spawn_tick=1 tiles_owned=52
+player small_id=81 type=B id=3lvh3hh1 spawn_tile=882541 spawn_tick=1 tiles_owned=52
+player small_id=82 type=B id=hhxd8zhc spawn_tile=607165 spawn_tick=1 tiles_owned=52
+player small_id=83 type=B id=68hvehkn spawn_tile=292548 spawn_tick=1 tiles_owned=52
+player small_id=84 type=B id=0ysk38le spawn_tile=449355 spawn_tick=1 tiles_owned=52
+player small_id=85 type=B id=p9mtmjen spawn_tile=781486 spawn_tick=1 tiles_owned=52
+player small_id=86 type=B id=vtv2qiiq spawn_tile=318389 spawn_tick=1 tiles_owned=52
+player small_id=87 type=B id=npcd7vse spawn_tile=132704 spawn_tick=1 tiles_owned=52
+player small_id=88 type=B id=fyrg30wr spawn_tile=577247 spawn_tick=1 tiles_owned=52
+player small_id=89 type=B id=qg4cg39i spawn_tile=324340 spawn_tick=1 tiles_owned=52
+player small_id=90 type=B id=kqu8z0ef spawn_tile=677475 spawn_tick=1 tiles_owned=52
+player small_id=91 type=B id=bdv4tpd7 spawn_tile=767606 spawn_tick=1 tiles_owned=52
+player small_id=92 type=B id=ok13k4z3 spawn_tile=515283 spawn_tick=1 tiles_owned=52
+player small_id=93 type=B id=hkwcx197 spawn_tile=479192 spawn_tick=1 tiles_owned=52
+player small_id=94 type=B id=ko4t02h4 spawn_tile=454498 spawn_tick=1 tiles_owned=52
+player small_id=95 type=B id=a769y4e5 spawn_tile=230525 spawn_tick=1 tiles_owned=52
+player small_id=96 type=B id=po0wxlw1 spawn_tile=595119 spawn_tick=1 tiles_owned=52
+player small_id=97 type=B id=o8264l3e spawn_tile=807590 spawn_tick=1 tiles_owned=52
+player small_id=98 type=B id=9rke6fm3 spawn_tile=246233 spawn_tick=1 tiles_owned=52
+player small_id=99 type=B id=gyjc9x52 spawn_tile=799335 spawn_tick=1 tiles_owned=52
+player small_id=100 type=B id=x793lc6c spawn_tile=230410 spawn_tick=1 tiles_owned=52
+player small_id=101 type=B id=93k3li8n spawn_tile=175515 spawn_tick=1 tiles_owned=52
+player small_id=102 type=B id=a1hte6qb spawn_tile=276450 spawn_tick=1 tiles_owned=52
+player small_id=103 type=B id=jklgnd18 spawn_tile=282168 spawn_tick=1 tiles_owned=52
+player small_id=104 type=B id=vfadfhgj spawn_tile=506443 spawn_tick=1 tiles_owned=52
+player small_id=105 type=B id=cwni1kcb spawn_tile=787621 spawn_tick=1 tiles_owned=52
+player small_id=106 type=B id=8z4z0zds spawn_tile=647199 spawn_tick=1 tiles_owned=52
+player small_id=107 type=B id=cdzck1ki spawn_tile=119479 spawn_tick=1 tiles_owned=52
+player small_id=108 type=B id=zbaa3l3a spawn_tile=442210 spawn_tick=1 tiles_owned=52
+player small_id=109 type=B id=xm369xbs spawn_tile=773702 spawn_tick=1 tiles_owned=52
+player small_id=110 type=B id=e4dqhzo1 spawn_tile=392195 spawn_tick=1 tiles_owned=52
+player small_id=111 type=B id=fepimk2i spawn_tile=737598 spawn_tick=1 tiles_owned=52
+player small_id=112 type=B id=o2es7ebc spawn_tile=467383 spawn_tick=1 tiles_owned=52
+player small_id=113 type=B id=l4opv4e9 spawn_tile=700441 spawn_tick=1 tiles_owned=52
+player small_id=114 type=B id=4b3f45hy spawn_tile=249319 spawn_tick=1 tiles_owned=52
+player small_id=115 type=B id=r3pvfglh spawn_tile=488301 spawn_tick=1 tiles_owned=52
+player small_id=116 type=B id=fnl5ocw8 spawn_tile=652613 spawn_tick=1 tiles_owned=52
+player small_id=117 type=B id=7391zjkf spawn_tile=920520 spawn_tick=1 tiles_owned=52
+player small_id=118 type=B id=ow5basj8 spawn_tile=189555 spawn_tick=1 tiles_owned=52
+player small_id=119 type=B id=olinuy4r spawn_tile=532375 spawn_tick=1 tiles_owned=52
+player small_id=120 type=B id=2e2jcypv spawn_tile=346566 spawn_tick=1 tiles_owned=52
+player small_id=121 type=B id=nx0it9ss spawn_tile=505365 spawn_tick=1 tiles_owned=52
+player small_id=122 type=B id=tt57j91k spawn_tile=245567 spawn_tick=1 tiles_owned=52
+player small_id=123 type=B id=87aoci2n spawn_tile=167647 spawn_tick=1 tiles_owned=52
+player small_id=124 type=B id=wk147shp spawn_tile=410509 spawn_tick=1 tiles_owned=52
+player small_id=125 type=B id=q8jb2dnz spawn_tile=757452 spawn_tick=1 tiles_owned=52
+player small_id=126 type=B id=4yzxt2gp spawn_tile=120321 spawn_tick=1 tiles_owned=52
+player small_id=127 type=B id=755xej7w spawn_tile=799275 spawn_tick=1 tiles_owned=52
+player small_id=128 type=B id=hjhprwfn spawn_tile=74354 spawn_tick=1 tiles_owned=52
+player small_id=129 type=B id=n66i0csf spawn_tile=715253 spawn_tick=1 tiles_owned=52
+player small_id=130 type=B id=am3stnxi spawn_tile=834384 spawn_tick=1 tiles_owned=52
+player small_id=131 type=B id=pmeqlcvs spawn_tile=829477 spawn_tick=1 tiles_owned=52
+player small_id=132 type=B id=xl8vnvj2 spawn_tile=855514 spawn_tick=1 tiles_owned=52
+player small_id=133 type=B id=0f3l9cg5 spawn_tile=65308 spawn_tick=1 tiles_owned=52
+player small_id=134 type=B id=siocmotr spawn_tile=853707 spawn_tick=1 tiles_owned=52
+player small_id=135 type=B id=uf75fjkr spawn_tile=572404 spawn_tick=1 tiles_owned=52
+player small_id=136 type=B id=3nuksgyo spawn_tile=616189 spawn_tick=1 tiles_owned=52
+player small_id=137 type=B id=isfwwr01 spawn_tile=720659 spawn_tick=1 tiles_owned=52
+player small_id=138 type=B id=auuv9uim spawn_tile=671229 spawn_tick=1 tiles_owned=52
+player small_id=139 type=B id=mdro7fya spawn_tile=572610 spawn_tick=1 tiles_owned=52
+player small_id=140 type=B id=8qfmz7a7 spawn_tile=819542 spawn_tick=1 tiles_owned=52
+player small_id=141 type=B id=m8j6zoax spawn_tile=809704 spawn_tick=1 tiles_owned=52
+player small_id=142 type=B id=7236xcde spawn_tile=303610 spawn_tick=1 tiles_owned=52
+player small_id=143 type=B id=n4vtdnwp spawn_tile=724302 spawn_tick=1 tiles_owned=52
+player small_id=144 type=B id=yggevgbl spawn_tile=54617 spawn_tick=1 tiles_owned=52
+player small_id=145 type=B id=beijdl2w spawn_tile=415234 spawn_tick=1 tiles_owned=52
+player small_id=146 type=B id=d2oo7mhj spawn_tile=561329 spawn_tick=1 tiles_owned=52
+player small_id=147 type=B id=wrheiirw spawn_tile=383368 spawn_tick=1 tiles_owned=52
+player small_id=148 type=B id=d03y3hz5 spawn_tile=765248 spawn_tick=1 tiles_owned=52
+player small_id=149 type=B id=5xaek3av spawn_tile=162609 spawn_tick=1 tiles_owned=52
+player small_id=150 type=B id=gz34o9hq spawn_tile=187397 spawn_tick=1 tiles_owned=52
+player small_id=151 type=B id=37xw489f spawn_tile=117575 spawn_tick=1 tiles_owned=52
+player small_id=152 type=B id=k3srrvn9 spawn_tile=600485 spawn_tick=1 tiles_owned=52
+player small_id=153 type=B id=5isbkj04 spawn_tile=839552 spawn_tick=1 tiles_owned=52
+player small_id=154 type=B id=r73y2vzl spawn_tile=606570 spawn_tick=1 tiles_owned=52
+player small_id=155 type=B id=36x3kyhk spawn_tile=793415 spawn_tick=1 tiles_owned=52
+player small_id=156 type=B id=01ob2tlo spawn_tile=628505 spawn_tick=1 tiles_owned=52
+player small_id=157 type=B id=cb13fbp5 spawn_tile=697597 spawn_tick=1 tiles_owned=52
+player small_id=158 type=B id=vmmrq63s spawn_tile=763420 spawn_tick=1 tiles_owned=52
+player small_id=159 type=B id=nkjckjq8 spawn_tile=444154 spawn_tick=1 tiles_owned=52
+player small_id=160 type=B id=wcggivof spawn_tile=925493 spawn_tick=1 tiles_owned=52
+player small_id=161 type=B id=1w1ciciy spawn_tile=795562 spawn_tick=1 tiles_owned=52
+player small_id=162 type=B id=2a0v7iem spawn_tile=537432 spawn_tick=1 tiles_owned=52
+player small_id=163 type=B id=jcz64pkr spawn_tile=794369 spawn_tick=1 tiles_owned=52
+player small_id=164 type=B id=v0ljq6tk spawn_tile=914641 spawn_tick=1 tiles_owned=52
+player small_id=165 type=B id=adg8798c spawn_tile=220492 spawn_tick=1 tiles_owned=52
+player small_id=166 type=B id=5ghp3e6u spawn_tile=871496 spawn_tick=1 tiles_owned=52
+player small_id=167 type=B id=h5bdt6q4 spawn_tile=830716 spawn_tick=1 tiles_owned=52
+player small_id=168 type=B id=5oce5zsz spawn_tile=677517 spawn_tick=1 tiles_owned=52
+player small_id=169 type=B id=xka3bnm9 spawn_tile=625322 spawn_tick=1 tiles_owned=52
+player small_id=170 type=B id=3w1tydq6 spawn_tile=326631 spawn_tick=1 tiles_owned=52
+player small_id=171 type=B id=upd1qyae spawn_tile=918429 spawn_tick=1 tiles_owned=52
+player small_id=172 type=B id=v4u31rox spawn_tile=91428 spawn_tick=1 tiles_owned=52
+player small_id=173 type=B id=q9vm95if spawn_tile=904482 spawn_tick=1 tiles_owned=52
+player small_id=174 type=B id=0yu8n2tu spawn_tile=261276 spawn_tick=1 tiles_owned=52
+player small_id=175 type=B id=sc2ctn85 spawn_tile=483575 spawn_tick=1 tiles_owned=52
+player small_id=176 type=B id=z0gmspsi spawn_tile=223445 spawn_tick=1 tiles_owned=52
+player small_id=177 type=B id=z7avk2un spawn_tile=494425 spawn_tick=1 tiles_owned=52
+player small_id=178 type=B id=8efmeybn spawn_tile=417360 spawn_tick=1 tiles_owned=52
+player small_id=179 type=B id=bifxmou2 spawn_tile=552633 spawn_tick=1 tiles_owned=52
+player small_id=180 type=B id=plh6en5t spawn_tile=105287 spawn_tick=1 tiles_owned=52
+player small_id=181 type=B id=ay3m2wg5 spawn_tile=524541 spawn_tick=1 tiles_owned=52
+player small_id=182 type=B id=1zmogxmk spawn_tile=517594 spawn_tick=1 tiles_owned=52
+player small_id=183 type=B id=55yraoi7 spawn_tile=98519 spawn_tick=1 tiles_owned=52
+player small_id=184 type=B id=1sc05h43 spawn_tile=387239 spawn_tick=1 tiles_owned=52
+player small_id=185 type=B id=37ibwik8 spawn_tile=887411 spawn_tick=1 tiles_owned=52
+player small_id=186 type=B id=uec16uxz spawn_tile=114447 spawn_tick=1 tiles_owned=52
+player small_id=187 type=B id=9fd5ewrs spawn_tile=838281 spawn_tick=1 tiles_owned=52
+player small_id=188 type=B id=pe2p79c6 spawn_tile=209223 spawn_tick=1 tiles_owned=52
+player small_id=189 type=B id=h1r85byk spawn_tile=187659 spawn_tick=1 tiles_owned=52
+player small_id=190 type=B id=exulggll spawn_tile=224201 spawn_tick=1 tiles_owned=52
+player small_id=191 type=B id=zouqcp7v spawn_tile=255465 spawn_tick=1 tiles_owned=52
+player small_id=192 type=B id=k39sgybe spawn_tile=817735 spawn_tick=1 tiles_owned=52
+player small_id=193 type=B id=orxhfzvz spawn_tile=605211 spawn_tick=1 tiles_owned=52
+player small_id=194 type=B id=uz8ynaez spawn_tile=338448 spawn_tick=1 tiles_owned=52
+player small_id=195 type=B id=ubigewsr spawn_tile=939541 spawn_tick=1 tiles_owned=52
+player small_id=196 type=B id=w0ozvjdh spawn_tile=857392 spawn_tick=1 tiles_owned=52
+player small_id=197 type=B id=f7yj98q8 spawn_tile=563483 spawn_tick=1 tiles_owned=52
+player small_id=198 type=B id=2xzw4gp3 spawn_tile=262505 spawn_tick=1 tiles_owned=52
+player small_id=199 type=B id=9rkdgj28 spawn_tile=553296 spawn_tick=1 tiles_owned=52
+player small_id=200 type=B id=aw987uy7 spawn_tile=150306 spawn_tick=1 tiles_owned=52
+player small_id=201 type=B id=gr243zlh spawn_tile=527408 spawn_tick=1 tiles_owned=52
+player small_id=202 type=B id=zowu9kf4 spawn_tile=478480 spawn_tick=1 tiles_owned=52
+player small_id=203 type=B id=2dtf8q4x spawn_tile=390161 spawn_tick=1 tiles_owned=52
+player small_id=204 type=B id=y9oft8w2 spawn_tile=136534 spawn_tick=1 tiles_owned=52
+player small_id=205 type=B id=ed7kjxq3 spawn_tile=711396 spawn_tick=1 tiles_owned=52
+player small_id=206 type=B id=nxt1ptsi spawn_tile=760502 spawn_tick=1 tiles_owned=52
+player small_id=207 type=B id=p825v2fd spawn_tile=185233 spawn_tick=1 tiles_owned=52
+player small_id=208 type=B id=wyarb4qo spawn_tile=404322 spawn_tick=1 tiles_owned=52
+player small_id=209 type=B id=qfs7b4z4 spawn_tile=612255 spawn_tick=1 tiles_owned=52
+player small_id=210 type=B id=ms13gmzm spawn_tile=651366 spawn_tick=1 tiles_owned=52
+player small_id=211 type=B id=ym8zggo3 spawn_tile=367523 spawn_tick=1 tiles_owned=52
+player small_id=212 type=B id=8jahbnpg spawn_tile=505499 spawn_tick=1 tiles_owned=52
+player small_id=213 type=B id=b0djjiez spawn_tile=539350 spawn_tick=1 tiles_owned=52
+player small_id=214 type=B id=s9xysw8i spawn_tile=708284 spawn_tick=1 tiles_owned=52
+player small_id=215 type=B id=t3s2qgvc spawn_tile=383299 spawn_tick=1 tiles_owned=52
+player small_id=216 type=B id=aquue8ni spawn_tile=418189 spawn_tick=1 tiles_owned=52
+player small_id=217 type=B id=u3k8ktyr spawn_tile=759551 spawn_tick=1 tiles_owned=52
+player small_id=218 type=B id=i7egn3zz spawn_tile=741672 spawn_tick=1 tiles_owned=52
+player small_id=219 type=B id=o3vgfhge spawn_tile=93324 spawn_tick=1 tiles_owned=52
+player small_id=220 type=B id=m4aem5hx spawn_tile=127423 spawn_tick=1 tiles_owned=52
+player small_id=221 type=B id=p6i95qgo spawn_tile=709325 spawn_tick=1 tiles_owned=52
+player small_id=222 type=B id=gvho8qeo spawn_tile=77387 spawn_tick=1 tiles_owned=52
+player small_id=223 type=B id=9iatvpoi spawn_tile=364388 spawn_tick=1 tiles_owned=52
+player small_id=224 type=B id=zd9jsqbj spawn_tile=111396 spawn_tick=1 tiles_owned=52
+player small_id=225 type=B id=zw1dwnig spawn_tile=316159 spawn_tick=1 tiles_owned=52
+player small_id=226 type=B id=be5xt98q spawn_tile=475405 spawn_tick=1 tiles_owned=52
+player small_id=227 type=B id=522b0ju8 spawn_tile=18556 spawn_tick=1 tiles_owned=52
+player small_id=228 type=B id=ibxwtyy7 spawn_tile=222243 spawn_tick=1 tiles_owned=52
+player small_id=229 type=B id=zjhashkb spawn_tile=472343 spawn_tick=1 tiles_owned=52
+player small_id=230 type=B id=89ttdia6 spawn_tile=520229 spawn_tick=1 tiles_owned=52
+player small_id=231 type=B id=6o2o0nvl spawn_tile=877588 spawn_tick=1 tiles_owned=52
+player small_id=232 type=B id=xldl70se spawn_tile=722355 spawn_tick=1 tiles_owned=52
+player small_id=233 type=B id=qrwgzvzz spawn_tile=94233 spawn_tick=1 tiles_owned=52
+player small_id=234 type=B id=h711p697 spawn_tile=199457 spawn_tick=1 tiles_owned=52
+player small_id=235 type=B id=g4ulqqm0 spawn_tile=258671 spawn_tick=1 tiles_owned=52
+player small_id=236 type=B id=v18jrx10 spawn_tile=314295 spawn_tick=1 tiles_owned=52
+player small_id=237 type=B id=8sd3i7p8 spawn_tile=800506 spawn_tick=1 tiles_owned=52
+player small_id=238 type=B id=l5o27mtm spawn_tile=670285 spawn_tick=1 tiles_owned=52
+player small_id=239 type=B id=b6f6r0t2 spawn_tile=335665 spawn_tick=1 tiles_owned=52
+player small_id=240 type=B id=7j5a3pfw spawn_tile=818292 spawn_tick=1 tiles_owned=52
+player small_id=241 type=B id=m5sg1z4l spawn_tile=454253 spawn_tick=1 tiles_owned=52
+player small_id=242 type=B id=ehpglvfz spawn_tile=655426 spawn_tick=1 tiles_owned=52
+player small_id=243 type=B id=wu3zthbo spawn_tile=377624 spawn_tick=1 tiles_owned=52
+player small_id=244 type=B id=yeh875u5 spawn_tile=774527 spawn_tick=1 tiles_owned=52
+player small_id=245 type=B id=8nuwzyn1 spawn_tile=169362 spawn_tick=1 tiles_owned=52
+player small_id=246 type=B id=t0zwn9eb spawn_tile=656528 spawn_tick=1 tiles_owned=52
+player small_id=247 type=B id=8zjwwdck spawn_tile=636238 spawn_tick=1 tiles_owned=52
+player small_id=248 type=B id=jwrhd5ij spawn_tile=837354 spawn_tick=1 tiles_owned=52
+player small_id=249 type=B id=jyb8rp14 spawn_tile=182429 spawn_tick=1 tiles_owned=52
+player small_id=250 type=B id=wl7sxu3v spawn_tile=868319 spawn_tick=1 tiles_owned=52
+player small_id=251 type=B id=y0r0fu1j spawn_tile=529322 spawn_tick=1 tiles_owned=52
+player small_id=252 type=B id=kneohbbr spawn_tile=582551 spawn_tick=1 tiles_owned=52
+player small_id=253 type=B id=qc8m814x spawn_tile=162333 spawn_tick=1 tiles_owned=52
+player small_id=254 type=B id=ix3jngmf spawn_tile=532133 spawn_tick=1 tiles_owned=52
+player small_id=255 type=B id=9mzpcgft spawn_tile=532457 spawn_tick=1 tiles_owned=52
+player small_id=256 type=B id=l5z5w588 spawn_tile=788761 spawn_tick=1 tiles_owned=52
+player small_id=257 type=B id=pt0jqntf spawn_tile=670671 spawn_tick=1 tiles_owned=52
+player small_id=258 type=B id=2e8alk85 spawn_tile=872368 spawn_tick=1 tiles_owned=52
+player small_id=259 type=B id=hwe3kfal spawn_tile=450178 spawn_tick=1 tiles_owned=52
+player small_id=260 type=B id=47li627l spawn_tile=296664 spawn_tick=1 tiles_owned=52
+player small_id=261 type=B id=3asdumaj spawn_tile=827444 spawn_tick=1 tiles_owned=52
+player small_id=262 type=B id=l75txeu7 spawn_tile=274525 spawn_tick=1 tiles_owned=52
+player small_id=263 type=B id=tbcz7mf1 spawn_tile=790730 spawn_tick=1 tiles_owned=52
+player small_id=264 type=B id=o1ilw638 spawn_tile=672323 spawn_tick=1 tiles_owned=52
+player small_id=265 type=B id=la4ytzgl spawn_tile=502562 spawn_tick=1 tiles_owned=52
+player small_id=266 type=B id=in2bq49j spawn_tile=644265 spawn_tick=1 tiles_owned=52
+player small_id=267 type=B id=5irnw7ij spawn_tile=344354 spawn_tick=1 tiles_owned=52
+player small_id=268 type=B id=noxeflvy spawn_tile=566446 spawn_tick=1 tiles_owned=52
+player small_id=269 type=B id=8gn7568f spawn_tile=346242 spawn_tick=1 tiles_owned=52
+player small_id=270 type=B id=5c1omdu5 spawn_tile=86495 spawn_tick=1 tiles_owned=52
+player small_id=271 type=B id=yc2b3pvx spawn_tile=897456 spawn_tick=1 tiles_owned=52
+player small_id=272 type=B id=lml55dcl spawn_tile=830319 spawn_tick=1 tiles_owned=52
+player small_id=273 type=B id=1o5etbis spawn_tile=593513 spawn_tick=1 tiles_owned=52
+player small_id=274 type=B id=bulnhjw5 spawn_tile=720620 spawn_tick=1 tiles_owned=52
+player small_id=275 type=B id=c6y4cfry spawn_tile=128747 spawn_tick=1 tiles_owned=52
+player small_id=276 type=B id=kbpw8sak spawn_tile=621593 spawn_tick=1 tiles_owned=52
+player small_id=277 type=B id=65e8qmsr spawn_tile=450311 spawn_tick=1 tiles_owned=52
+player small_id=278 type=B id=furhe0mp spawn_tile=656650 spawn_tick=1 tiles_owned=52
+player small_id=279 type=B id=92npvjrt spawn_tile=472164 spawn_tick=1 tiles_owned=52
+player small_id=280 type=B id=c56xdfdl spawn_tile=153388 spawn_tick=1 tiles_owned=52
+player small_id=281 type=B id=jul4zb4e spawn_tile=318510 spawn_tick=1 tiles_owned=52
+player small_id=282 type=B id=mpuzdlvw spawn_tile=890663 spawn_tick=1 tiles_owned=52
+player small_id=283 type=B id=plrlx715 spawn_tile=283479 spawn_tick=1 tiles_owned=52
+player small_id=284 type=B id=yl9vsjpk spawn_tile=547507 spawn_tick=1 tiles_owned=52
+player small_id=285 type=B id=mkfgkn7r spawn_tile=50422 spawn_tick=1 tiles_owned=52
+player small_id=286 type=B id=v5nlafkw spawn_tile=621468 spawn_tick=1 tiles_owned=52
+player small_id=287 type=B id=2p3gb961 spawn_tile=869436 spawn_tick=1 tiles_owned=52
+player small_id=288 type=B id=uc4jshlt spawn_tile=949584 spawn_tick=1 tiles_owned=52
+player small_id=289 type=B id=6xdips73 spawn_tile=247487 spawn_tick=1 tiles_owned=52
+player small_id=290 type=B id=fqxqj0bu spawn_tile=568191 spawn_tick=1 tiles_owned=52
+player small_id=291 type=B id=yen0iwte spawn_tile=639338 spawn_tick=1 tiles_owned=52
+player small_id=292 type=B id=77ucsgzt spawn_tile=305643 spawn_tick=1 tiles_owned=52
+player small_id=293 type=B id=4c1d18ro spawn_tile=734638 spawn_tick=1 tiles_owned=52
+player small_id=294 type=B id=bz5je7hx spawn_tile=225132 spawn_tick=1 tiles_owned=52
+player small_id=295 type=B id=fn7ax8sx spawn_tile=148447 spawn_tick=1 tiles_owned=52
+player small_id=296 type=B id=owdtos2u spawn_tile=397283 spawn_tick=1 tiles_owned=52
+player small_id=297 type=B id=f33f3rln spawn_tile=360313 spawn_tick=1 tiles_owned=52
+player small_id=298 type=B id=shy7v4eo spawn_tile=350409 spawn_tick=1 tiles_owned=52
+player small_id=299 type=B id=qi05x4jp spawn_tile=137467 spawn_tick=1 tiles_owned=52
+player small_id=300 type=B id=rtwhvg9g spawn_tile=250424 spawn_tick=1 tiles_owned=52
+player small_id=301 type=B id=xebmdu02 spawn_tile=239345 spawn_tick=1 tiles_owned=52
+player small_id=302 type=B id=minv0qzi spawn_tile=915588 spawn_tick=1 tiles_owned=52
+player small_id=303 type=B id=s3tsi6x9 spawn_tile=560576 spawn_tick=1 tiles_owned=52
+player small_id=304 type=B id=k4ol3ovv spawn_tile=141787 spawn_tick=1 tiles_owned=52
+player small_id=305 type=B id=my4alddo spawn_tile=695359 spawn_tick=1 tiles_owned=52
+player small_id=306 type=B id=j2kjyzt1 spawn_tile=400132 spawn_tick=1 tiles_owned=52
+player small_id=307 type=B id=x5ff4utp spawn_tile=735441 spawn_tick=1 tiles_owned=52
+player small_id=308 type=B id=lokk2xdf spawn_tile=111198 spawn_tick=1 tiles_owned=52
+player small_id=309 type=B id=sylg30cf spawn_tile=160421 spawn_tick=1 tiles_owned=52
+player small_id=310 type=B id=sahbcu7b spawn_tile=367451 spawn_tick=1 tiles_owned=52
+player small_id=311 type=B id=zuvsbbzm spawn_tile=663385 spawn_tick=1 tiles_owned=52
+player small_id=312 type=B id=n4n57mjy spawn_tile=469597 spawn_tick=1 tiles_owned=52
+player small_id=313 type=B id=8s3w15kq spawn_tile=201617 spawn_tick=1 tiles_owned=52
+player small_id=314 type=B id=a6z0gp5d spawn_tile=643490 spawn_tick=1 tiles_owned=52
+player small_id=315 type=B id=momzwuew spawn_tile=62504 spawn_tick=1 tiles_owned=52
+player small_id=316 type=B id=swknlr19 spawn_tile=802470 spawn_tick=1 tiles_owned=52
+player small_id=317 type=B id=68tli42a spawn_tile=804672 spawn_tick=1 tiles_owned=52
+player small_id=318 type=B id=43wn7pvq spawn_tile=187592 spawn_tick=1 tiles_owned=52
+player small_id=319 type=B id=ssod81st spawn_tile=124515 spawn_tick=1 tiles_owned=52
+player small_id=320 type=B id=9fudx3o3 spawn_tile=544241 spawn_tick=1 tiles_owned=52
+player small_id=321 type=B id=cm4ig7bz spawn_tile=118665 spawn_tick=1 tiles_owned=52
+player small_id=322 type=B id=ajwm3pcu spawn_tile=289577 spawn_tick=1 tiles_owned=52
+player small_id=323 type=B id=wcn2fdks spawn_tile=868633 spawn_tick=1 tiles_owned=52
+player small_id=324 type=B id=0a4r00hz spawn_tile=583221 spawn_tick=1 tiles_owned=52
+player small_id=325 type=B id=548y287t spawn_tile=36596 spawn_tick=1 tiles_owned=52
+player small_id=326 type=B id=rkqmpoqo spawn_tile=826407 spawn_tick=1 tiles_owned=52
+player small_id=327 type=B id=nrv83khf spawn_tile=296216 spawn_tick=1 tiles_owned=52
+player small_id=328 type=B id=00wyr0st spawn_tile=740472 spawn_tick=1 tiles_owned=52
+player small_id=329 type=B id=dhvz0u2j spawn_tile=46564 spawn_tick=1 tiles_owned=52
+player small_id=330 type=B id=87uy1srx spawn_tile=512156 spawn_tick=1 tiles_owned=52
+player small_id=331 type=B id=26wgkglj spawn_tile=922388 spawn_tick=1 tiles_owned=52
+player small_id=332 type=B id=s4otxlhb spawn_tile=75561 spawn_tick=1 tiles_owned=52
+player small_id=333 type=B id=65ikynwk spawn_tile=449553 spawn_tick=1 tiles_owned=52
+player small_id=334 type=B id=goxpy54y spawn_tile=70239 spawn_tick=1 tiles_owned=52
+player small_id=335 type=B id=etvrjl78 spawn_tile=395468 spawn_tick=1 tiles_owned=52
+player small_id=336 type=B id=y58lji80 spawn_tile=803436 spawn_tick=1 tiles_owned=52
+player small_id=337 type=B id=13dy28ag spawn_tile=148629 spawn_tick=1 tiles_owned=52
+player small_id=338 type=B id=0dg1h5h5 spawn_tile=588339 spawn_tick=1 tiles_owned=52
+player small_id=339 type=B id=e9ncqhcw spawn_tile=376485 spawn_tick=1 tiles_owned=52
+player small_id=340 type=B id=uhxjrdbv spawn_tile=622150 spawn_tick=1 tiles_owned=52
+player small_id=341 type=B id=gv359a4k spawn_tile=510337 spawn_tick=1 tiles_owned=52
+player small_id=342 type=B id=p4ehczm2 spawn_tile=698209 spawn_tick=1 tiles_owned=52
+player small_id=343 type=B id=p2xbynef spawn_tile=35399 spawn_tick=1 tiles_owned=52
+player small_id=344 type=B id=co561w2j spawn_tile=375219 spawn_tick=1 tiles_owned=52
+player small_id=345 type=B id=wz0zkd1s spawn_tile=915551 spawn_tick=1 tiles_owned=52
+player small_id=346 type=B id=m7jnfagf spawn_tile=962528 spawn_tick=1 tiles_owned=52
+player small_id=347 type=B id=rq439wc6 spawn_tile=209266 spawn_tick=1 tiles_owned=52
+player small_id=348 type=B id=lkklizjr spawn_tile=664347 spawn_tick=1 tiles_owned=52
+player small_id=349 type=B id=2uyam605 spawn_tile=733708 spawn_tick=1 tiles_owned=52
+player small_id=350 type=B id=er3wo1bg spawn_tile=911672 spawn_tick=1 tiles_owned=52
+player small_id=351 type=B id=ezt35u0l spawn_tile=593266 spawn_tick=1 tiles_owned=52
+player small_id=352 type=B id=593d2qcb spawn_tile=257702 spawn_tick=1 tiles_owned=52
+player small_id=353 type=B id=y51cphtm spawn_tile=764364 spawn_tick=1 tiles_owned=52
+player small_id=354 type=B id=g94go6fd spawn_tile=731561 spawn_tick=1 tiles_owned=52
+player small_id=355 type=B id=9ksqwgqt spawn_tile=839590 spawn_tick=1 tiles_owned=52
+player small_id=356 type=B id=ykirk4lg spawn_tile=364155 spawn_tick=1 tiles_owned=52
+player small_id=357 type=B id=jurxvo26 spawn_tile=481277 spawn_tick=1 tiles_owned=52
+player small_id=358 type=B id=to8bcohn spawn_tile=688408 spawn_tick=1 tiles_owned=52
+player small_id=359 type=B id=ensatih4 spawn_tile=517475 spawn_tick=1 tiles_owned=52
+player small_id=360 type=B id=nbbu08hb spawn_tile=235660 spawn_tick=1 tiles_owned=52
+player small_id=361 type=B id=rxlhv8ic spawn_tile=315570 spawn_tick=1 tiles_owned=52
+player small_id=362 type=B id=aiowrq52 spawn_tile=672625 spawn_tick=1 tiles_owned=52
+player small_id=363 type=B id=bo94our7 spawn_tile=205514 spawn_tick=1 tiles_owned=52
+player small_id=364 type=B id=jxqkb7y6 spawn_tile=636576 spawn_tick=1 tiles_owned=52
+player small_id=365 type=B id=ikezntfk spawn_tile=123274 spawn_tick=1 tiles_owned=52
+player small_id=366 type=B id=j4e63dwu spawn_tile=376723 spawn_tick=1 tiles_owned=52
+player small_id=367 type=B id=t0b9mavx spawn_tile=947505 spawn_tick=1 tiles_owned=52
+player small_id=368 type=B id=bu0hz5bz spawn_tile=197708 spawn_tick=1 tiles_owned=52
+player small_id=369 type=B id=368l6a1p spawn_tile=412419 spawn_tick=1 tiles_owned=52
+player small_id=370 type=B id=6cr9h8xa spawn_tile=537567 spawn_tick=1 tiles_owned=52
+player small_id=371 type=B id=8y4zfq0g spawn_tile=653309 spawn_tick=1 tiles_owned=52
+player small_id=372 type=B id=tz0sezi7 spawn_tile=837501 spawn_tick=1 tiles_owned=52
+player small_id=373 type=B id=dazr70tn spawn_tile=861603 spawn_tick=1 tiles_owned=52
+player small_id=374 type=B id=tx1pjsyg spawn_tile=668593 spawn_tick=1 tiles_owned=52
+player small_id=375 type=B id=ndjtlp8r spawn_tile=376267 spawn_tick=1 tiles_owned=52
+player small_id=376 type=B id=bsklet6g spawn_tile=721229 spawn_tick=1 tiles_owned=52
+player small_id=377 type=B id=hsozrzu4 spawn_tile=152487 spawn_tick=1 tiles_owned=52
+player small_id=378 type=B id=otmybkm3 spawn_tile=278240 spawn_tick=1 tiles_owned=52
+player small_id=379 type=B id=yfm1nyqy spawn_tile=853467 spawn_tick=1 tiles_owned=52
+player small_id=380 type=B id=kr6ytu3l spawn_tile=84276 spawn_tick=1 tiles_owned=52
+player small_id=381 type=B id=3pagyfng spawn_tile=762580 spawn_tick=1 tiles_owned=52
+player small_id=382 type=B id=w1mobjvk spawn_tile=357191 spawn_tick=1 tiles_owned=52
+player small_id=383 type=B id=xm7i5x3m spawn_tile=348683 spawn_tick=1 tiles_owned=52
+player small_id=384 type=B id=8u02tf2g spawn_tile=585368 spawn_tick=1 tiles_owned=52
+player small_id=385 type=B id=lp6sri88 spawn_tile=629288 spawn_tick=1 tiles_owned=52
+player small_id=386 type=B id=sb1tap3p spawn_tile=155819 spawn_tick=1 tiles_owned=52
+player small_id=387 type=B id=mv01333k spawn_tile=546391 spawn_tick=1 tiles_owned=52
+player small_id=388 type=B id=g9mp2ife spawn_tile=718586 spawn_tick=1 tiles_owned=52
+player small_id=389 type=B id=jtq0seut spawn_tile=588586 spawn_tick=1 tiles_owned=52
+player small_id=390 type=B id=525mh9ql spawn_tile=631550 spawn_tick=1 tiles_owned=52
+player small_id=391 type=B id=fvbpmsvz spawn_tile=69593 spawn_tick=1 tiles_owned=52
+player small_id=392 type=B id=xwn3ivem spawn_tile=178257 spawn_tick=1 tiles_owned=52
+player small_id=393 type=B id=fqbyj4jd spawn_tile=778387 spawn_tick=1 tiles_owned=52
+player small_id=394 type=B id=xfiw8ywg spawn_tile=854743 spawn_tick=1 tiles_owned=52
+player small_id=395 type=B id=iw3dqxmq spawn_tile=849308 spawn_tick=1 tiles_owned=52
+player small_id=396 type=B id=yc0ao6et spawn_tile=437406 spawn_tick=1 tiles_owned=52
+player small_id=397 type=B id=ixj6ihi7 spawn_tile=545274 spawn_tick=1 tiles_owned=52
+player small_id=398 type=B id=9l5wwvr3 spawn_tile=494174 spawn_tick=1 tiles_owned=52
+player small_id=399 type=B id=2w6i33lv spawn_tile=321230 spawn_tick=1 tiles_owned=52
+player small_id=400 type=B id=sba949vb spawn_tile=30625 spawn_tick=1 tiles_owned=52
+player small_id=401 type=B id=ijcmefns spawn_tile=265184 spawn_tick=1 tiles_owned=52
+player small_id=402 type=B id=isnsszoo spawn_tile=731505 spawn_tick=1 tiles_owned=52
+player small_id=403 type=B id=9z76va23 spawn_tile=341215 spawn_tick=1 tiles_owned=52
+player small_id=404 type=B id=h1wbhdhm spawn_tile=284345 spawn_tick=1 tiles_owned=52
+player small_id=405 type=B id=tewvulrm spawn_tile=153740 spawn_tick=1 tiles_owned=52
+player small_id=406 type=B id=wp3bxzsu spawn_tile=440521 spawn_tick=1 tiles_owned=52
+player small_id=407 type=B id=d0g6avrv spawn_tile=304356 spawn_tick=1 tiles_owned=52
+player small_id=408 type=B id=hsyivnsn spawn_tile=172575 spawn_tick=1 tiles_owned=52
+player small_id=409 type=B id=ox9ept1k spawn_tile=671560 spawn_tick=1 tiles_owned=52
+player small_id=410 type=B id=ny87grni spawn_tile=262149 spawn_tick=1 tiles_owned=52
+player small_id=411 type=B id=k2th9538 spawn_tile=162538 spawn_tick=1 tiles_owned=52
+player small_id=412 type=B id=ysltjm94 spawn_tile=303253 spawn_tick=1 tiles_owned=52
+player small_id=413 type=B id=u5klj2eh spawn_tile=576282 spawn_tick=1 tiles_owned=52
+player small_id=414 type=B id=k7ka2ci1 spawn_tile=382697 spawn_tick=1 tiles_owned=52
+player small_id=415 type=B id=qtul4azs spawn_tile=678262 spawn_tick=1 tiles_owned=52
+player small_id=416 type=B id=ll69i57o spawn_tile=741239 spawn_tick=1 tiles_owned=52
+player small_id=417 type=B id=9vuokjnw spawn_tile=861348 spawn_tick=1 tiles_owned=52
+player small_id=418 type=B id=ggb3bab1 spawn_tile=431340 spawn_tick=1 tiles_owned=52
+player small_id=419 type=B id=drdo3t90 spawn_tile=608612 spawn_tick=1 tiles_owned=52
+player small_id=420 type=B id=xieaxa2f spawn_tile=683172 spawn_tick=1 tiles_owned=52
+player small_id=421 type=B id=kqp7ewus spawn_tile=324417 spawn_tick=1 tiles_owned=52
+player small_id=422 type=B id=3kitma91 spawn_tile=309191 spawn_tick=1 tiles_owned=52
+player small_id=423 type=B id=m7y3u0aw spawn_tile=862562 spawn_tick=1 tiles_owned=52
+player small_id=424 type=B id=epuw8vpi spawn_tile=855673 spawn_tick=1 tiles_owned=52
+player small_id=425 type=B id=nzx54fm6 spawn_tile=258641 spawn_tick=1 tiles_owned=52
+player small_id=426 type=B id=fsk2kd7w spawn_tile=336306 spawn_tick=1 tiles_owned=52
+player small_id=427 type=B id=p8jddnkm spawn_tile=555211 spawn_tick=1 tiles_owned=52
+player small_id=428 type=B id=wvgzie3u spawn_tile=496389 spawn_tick=1 tiles_owned=52
+player small_id=429 type=B id=mwh2z96c spawn_tile=721422 spawn_tick=1 tiles_owned=52
+player small_id=430 type=B id=l4ku27pt spawn_tile=290397 spawn_tick=1 tiles_owned=52
+player small_id=431 type=B id=jpvsmxxx spawn_tile=221546 spawn_tick=1 tiles_owned=52
+player small_id=432 type=B id=s4xo3abv spawn_tile=414302 spawn_tick=1 tiles_owned=52
+player small_id=433 type=B id=zte7u069 spawn_tile=609540 spawn_tick=1 tiles_owned=52
+player small_id=434 type=B id=azlpbpke spawn_tile=180735 spawn_tick=1 tiles_owned=52
+player small_id=435 type=B id=0pmbiw8o spawn_tile=371344 spawn_tick=1 tiles_owned=52
+player small_id=436 type=B id=rygf4mvr spawn_tile=714524 spawn_tick=1 tiles_owned=52
+player small_id=437 type=B id=mg9pgnw7 spawn_tile=260552 spawn_tick=1 tiles_owned=52
+player small_id=438 type=B id=8olnebf1 spawn_tile=557365 spawn_tick=1 tiles_owned=52
+player small_id=439 type=B id=rzlsw9x1 spawn_tile=629376 spawn_tick=1 tiles_owned=52
+player small_id=440 type=B id=o0jhfyxc spawn_tile=15583 spawn_tick=1 tiles_owned=52
+player small_id=441 type=B id=vki91ouc spawn_tile=325274 spawn_tick=1 tiles_owned=52
+player small_id=442 type=B id=0onssx3n spawn_tile=57459 spawn_tick=1 tiles_owned=52
+player small_id=443 type=B id=ymrho9y4 spawn_tile=675201 spawn_tick=1 tiles_owned=52
+player small_id=444 type=B id=4jjh2h8g spawn_tile=393527 spawn_tick=1 tiles_owned=52
+player small_id=445 type=B id=af8k17d8 spawn_tile=558420 spawn_tick=1 tiles_owned=52
+player small_id=446 type=B id=qt2a41r9 spawn_tile=438376 spawn_tick=1 tiles_owned=52
+player small_id=447 type=B id=dmqr8rk9 spawn_tile=488457 spawn_tick=1 tiles_owned=52
+player small_id=448 type=B id=gdvex2np spawn_tile=145589 spawn_tick=1 tiles_owned=52
+player small_id=449 type=B id=z6dhj6lz spawn_tile=135376 spawn_tick=1 tiles_owned=52
+player small_id=450 type=B id=ztlqrwwc spawn_tile=789296 spawn_tick=1 tiles_owned=52
+player small_id=451 type=B id=qk845cyd spawn_tile=712683 spawn_tick=1 tiles_owned=52
+player small_id=452 type=B id=g5ubwqld spawn_tile=893504 spawn_tick=1 tiles_owned=52
+player small_id=453 type=B id=voc18itg spawn_tile=735406 spawn_tick=1 tiles_owned=52
+player small_id=454 type=B id=3noal342 spawn_tile=203683 spawn_tick=1 tiles_owned=52
+player small_id=455 type=B id=r8slsgxy spawn_tile=719457 spawn_tick=1 tiles_owned=52
+player small_id=456 type=B id=kwh9u6xu spawn_tile=84678 spawn_tick=1 tiles_owned=52
+player small_id=457 type=B id=8k335xf9 spawn_tile=40484 spawn_tick=1 tiles_owned=52
+player small_id=458 type=B id=r8oeocye spawn_tile=508198 spawn_tick=1 tiles_owned=52
+player small_id=459 type=B id=aux9eznz spawn_tile=435133 spawn_tick=1 tiles_owned=52
+player small_id=460 type=B id=tl8i4sqm spawn_tile=583175 spawn_tick=1 tiles_owned=52
+player small_id=461 type=B id=5tvnmw0x spawn_tile=190289 spawn_tick=1 tiles_owned=52
+player small_id=462 type=B id=iaxyjwg2 spawn_tile=738269 spawn_tick=1 tiles_owned=52
+player small_id=463 type=B id=vsouyzqb spawn_tile=278294 spawn_tick=1 tiles_owned=52
+player small_id=464 type=B id=qo2yiqyt spawn_tile=634127 spawn_tick=1 tiles_owned=52
+player small_id=465 type=B id=4b0bsp77 spawn_tile=772670 spawn_tick=1 tiles_owned=52
+player small_id=466 type=B id=zt5za47g spawn_tile=806397 spawn_tick=1 tiles_owned=52
+player small_id=467 type=B id=ialnkrtf spawn_tile=343483 spawn_tick=1 tiles_owned=52
+player small_id=468 type=B id=euhp0q2h spawn_tile=396435 spawn_tick=1 tiles_owned=52
+player small_id=469 type=B id=hxtuit3a spawn_tile=518517 spawn_tick=1 tiles_owned=52
+player small_id=470 type=B id=cfqynmub spawn_tile=237113 spawn_tick=1 tiles_owned=52
+player small_id=471 type=B id=kp4qpq36 spawn_tile=838660 spawn_tick=1 tiles_owned=52
+player small_id=472 type=B id=m4sv56ts spawn_tile=618351 spawn_tick=1 tiles_owned=52
+player small_id=473 type=B id=90lwnghk spawn_tile=894573 spawn_tick=1 tiles_owned=52
+player small_id=474 type=B id=6s4qrb66 spawn_tile=365606 spawn_tick=1 tiles_owned=52
+player small_id=475 type=B id=zm2durya spawn_tile=635167 spawn_tick=1 tiles_owned=52
+player small_id=476 type=B id=r78jt2dp spawn_tile=376179 spawn_tick=1 tiles_owned=52
+player small_id=477 type=B id=2l6px65c spawn_tile=592416 spawn_tick=1 tiles_owned=52
+player small_id=478 type=B id=8m9tfbvi spawn_tile=57341 spawn_tick=1 tiles_owned=52
+player small_id=479 type=B id=9mt34ypn spawn_tile=498530 spawn_tick=1 tiles_owned=52
+player small_id=480 type=B id=7q708nxs spawn_tile=508126 spawn_tick=1 tiles_owned=52
+player small_id=481 type=B id=vaum2ag5 spawn_tile=309533 spawn_tick=1 tiles_owned=52
+player small_id=482 type=B id=lhw012op spawn_tile=237692 spawn_tick=1 tiles_owned=52
+player small_id=483 type=B id=ov7icohk spawn_tile=342516 spawn_tick=1 tiles_owned=52
+player small_id=484 type=B id=wdgpft73 spawn_tile=84463 spawn_tick=1 tiles_owned=52
+player small_id=485 type=B id=77xjevxo spawn_tile=890380 spawn_tick=1 tiles_owned=52
+player small_id=486 type=B id=oqm2d2ls spawn_tile=696506 spawn_tick=1 tiles_owned=52
+player small_id=487 type=B id=s4bnz7gf spawn_tile=241260 spawn_tick=1 tiles_owned=52
+player small_id=488 type=B id=qareow7n spawn_tile=820571 spawn_tick=1 tiles_owned=52
+player small_id=489 type=B id=0qjiaqhk spawn_tile=778442 spawn_tick=1 tiles_owned=52
+HOST_BIT_EXACT true  GPU_VS_ENGINE true  ALL_BIT_EXACT true

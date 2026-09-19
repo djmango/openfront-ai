@@ -1,0 +1,8 @@
+# ofcuda_matrix spawn plateau (bots actually placed, engine)
+# seed parity difficulty Easy human_agents 1
+map	requested	placed
+pangaea	700	557
+pangaea	1200	565
+pangaea	2000	566
+pangaea	3000	569
+pangaea	5000	569

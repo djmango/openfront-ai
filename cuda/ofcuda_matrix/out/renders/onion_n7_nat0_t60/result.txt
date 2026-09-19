@@ -1,0 +1,159 @@
+# ofcuda_matrix cell onion n=7 nations=0 ticks=60
+# engine oracle /opt/data/workspaces/skg/ofcuda_matrix/out/matrix/oracle/onion_n7_nat0_t60.dump
+# spawn init    /opt/data/workspaces/skg/ofcuda_matrix/out/matrix/refs/onion_a7.init.txt
+# map          /opt/data/workspaces/skg/openfront-ai/openfront/resources/maps/onion (512x512, land 210555 from BYTES)
+# engine land from manifest 210555
+### INIT (engine spawn output vs the CUDA spawn/init dump)
+init_plane_hash 0x95e38ee239c37e55 engine_boundary0_hash 0x95e38ee239c37e55 match yes
+per-player owned sets match: yes
+engine boundary0 owned_total 364, port plane owned 364
+BOT 0 sid=2 id=7kmb47oc spawn_tile=27778 n_owned=52
+BOT 1 sid=3 id=su965kfe spawn_tile=61062 n_owned=52
+BOT 2 sid=4 id=4918e5rs spawn_tile=207925 n_owned=52
+BOT 3 sid=5 id=0grah7qg spawn_tile=112589 n_owned=52
+BOT 4 sid=6 id=79lbhuod spawn_tile=7747 n_owned=52
+BOT 5 sid=7 id=0eay8wsu spawn_tile=185078 n_owned=52
+BOT 6 sid=8 id=l4g4juu8 spawn_tile=131680 n_owned=52
+SELFCHECK engine owned_tiles-vs-plane diff 0 (nonzero => the engine's own two representations disagree; PLAYER counts are then not a plane count)
+TROOPS boundary 1:
+TICK boundary 1 engine_tick 4: dev_hash 0x95e38ee239c37e55 engine_hash 0x95e38ee239c37e55 match=yes | claims 0 | dev_claims_total 0 | live_attacks 0 | engine_attacks 0
+TROOPS boundary 2:
+TICK boundary 2 engine_tick 5: dev_hash 0x95e38ee239c37e55 engine_hash 0x95e38ee239c37e55 match=yes | claims 0 | dev_claims_total 0 | live_attacks 0 | engine_attacks 0
+TROOPS boundary 3:
+TICK boundary 3 engine_tick 6: dev_hash 0x95e38ee239c37e55 engine_hash 0x95e38ee239c37e55 match=yes | claims 0 | dev_claims_total 0 | live_attacks 0 | engine_attacks 0
+TROOPS boundary 4:
+TICK boundary 4 engine_tick 7: dev_hash 0x95e38ee239c37e55 engine_hash 0x95e38ee239c37e55 match=yes | claims 0 | dev_claims_total 0 | live_attacks 0 | engine_attacks 0
+TROOPS boundary 5:
+TICK boundary 5 engine_tick 8: dev_hash 0x95e38ee239c37e55 engine_hash 0x95e38ee239c37e55 match=yes | claims 0 | dev_claims_total 0 | live_attacks 0 | engine_attacks 0
+TROOPS boundary 6:
+TICK boundary 6 engine_tick 9: dev_hash 0x95e38ee239c37e55 engine_hash 0x95e38ee239c37e55 match=yes | claims 0 | dev_claims_total 0 | live_attacks 0 | engine_attacks 0
+TROOPS boundary 7:
+TICK boundary 7 engine_tick 10: dev_hash 0x95e38ee239c37e55 engine_hash 0x95e38ee239c37e55 match=yes | claims 0 | dev_claims_total 0 | live_attacks 0 | engine_attacks 0
+TROOPS boundary 8:
+TICK boundary 8 engine_tick 11: dev_hash 0x95e38ee239c37e55 engine_hash 0x95e38ee239c37e55 match=yes | claims 0 | dev_claims_total 0 | live_attacks 0 | engine_attacks 0
+TROOPS boundary 9: [4/0 eng 0x40ad881d4436d444 device: not created yet (deferred to the next transition)]
+TICK boundary 9 engine_tick 12: dev_hash 0x95e38ee239c37e55 engine_hash 0x95e38ee239c37e55 match=yes | claims 0 | dev_claims_total 0 | live_attacks 0 | engine_attacks 1
+INIT_ATTACK at boundary 10 (engine tick 12) slot 0: owner=4 target=0 troops_bits=0x40ad881d4436d444 heap_len=32 border_len=24 heap_peak=32 (device-computed)
+TROOPS boundary 10: [4/0 eng 0x40ad101d4436d444 dev 0x40ad101d4436d444 ok]
+TICK boundary 10 engine_tick 13: dev_hash 0xbe5755798e76b1d1 engine_hash 0xbe5755798e76b1d1 match=yes | claims 5 | dev_claims_total 5 | live_attacks 1 | engine_attacks 1
+TROOPS boundary 11: [4/0 eng 0x40ac981d4436d444 dev 0x40ac981d4436d444 ok]
+TICK boundary 11 engine_tick 14: dev_hash 0x2a0f14ebef120995 engine_hash 0x2a0f14ebef120995 match=yes | claims 5 | dev_claims_total 10 | live_attacks 1 | engine_attacks 1
+TROOPS boundary 12: [4/0 eng 0x40ac201d4436d444 dev 0x40ac201d4436d444 ok]
+TICK boundary 12 engine_tick 15: dev_hash 0x9763586fd3888ed1 engine_hash 0x9763586fd3888ed1 match=yes | claims 5 | dev_claims_total 15 | live_attacks 1 | engine_attacks 1
+TROOPS boundary 13: [4/0 eng 0x40aba81d4436d444 dev 0x40aba81d4436d444 ok]
+TICK boundary 13 engine_tick 16: dev_hash 0xa05648e035d52cd5 engine_hash 0xa05648e035d52cd5 match=yes | claims 5 | dev_claims_total 20 | live_attacks 1 | engine_attacks 1
+TROOPS boundary 14: [4/0 eng 0x40ab301d4436d444 dev 0x40ab301d4436d444 ok]
+TICK boundary 14 engine_tick 17: dev_hash 0x3543602a3c935851 engine_hash 0x3543602a3c935851 match=yes | claims 5 | dev_claims_total 25 | live_attacks 1 | engine_attacks 1
+TROOPS boundary 15: [4/0 eng 0x40aab81d4436d444 dev 0x40aab81d4436d444 ok]
+TICK boundary 15 engine_tick 18: dev_hash 0x058497bf63eab575 engine_hash 0x058497bf63eab575 match=yes | claims 5 | dev_claims_total 30 | live_attacks 1 | engine_attacks 1
+TROOPS boundary 16: [4/0 eng 0x40aa401d4436d444 dev 0x40aa401d4436d444 ok]
+TICK boundary 16 engine_tick 19: dev_hash 0x58e9e96df17b5a71 engine_hash 0x58e9e96df17b5a71 match=yes | claims 5 | dev_claims_total 35 | live_attacks 1 | engine_attacks 1
+TROOPS boundary 17: [4/0 eng 0x40a9c81d4436d444 dev 0x40a9c81d4436d444 ok]
+TICK boundary 17 engine_tick 20: dev_hash 0x71bbba06b11bbab5 engine_hash 0x71bbba06b11bbab5 match=yes | claims 5 | dev_claims_total 40 | live_attacks 1 | engine_attacks 1
+TROOPS boundary 18: [4/0 eng 0x40a9501d4436d444 dev 0x40a9501d4436d444 ok]
+TICK boundary 18 engine_tick 21: dev_hash 0x122058d328b55111 engine_hash 0x122058d328b55111 match=yes | claims 5 | dev_claims_total 45 | live_attacks 1 | engine_attacks 1
+TROOPS boundary 19: [4/0 eng 0x40a8d81d4436d444 dev 0x40a8d81d4436d444 ok]
+TICK boundary 19 engine_tick 22: dev_hash 0x6b01d1cb8a74c455 engine_hash 0x6b01d1cb8a74c455 match=yes | claims 5 | dev_claims_total 50 | live_attacks 1 | engine_attacks 1
+TROOPS boundary 20: [4/0 eng 0x40a8601d4436d444 dev 0x40a8601d4436d444 ok]
+TICK boundary 20 engine_tick 23: dev_hash 0x93e3239f1e65d5b1 engine_hash 0x93e3239f1e65d5b1 match=yes | claims 5 | dev_claims_total 55 | live_attacks 1 | engine_attacks 1
+TROOPS boundary 21: [4/0 eng 0x40a7e81d4436d444 dev 0x40a7e81d4436d444 ok]
+TICK boundary 21 engine_tick 24: dev_hash 0xd6456e0629e545d5 engine_hash 0xd6456e0629e545d5 match=yes | claims 5 | dev_claims_total 60 | live_attacks 1 | engine_attacks 1
+TROOPS boundary 22: [4/0 eng 0x40a7701d4436d444 dev 0x40a7701d4436d444 ok]
+TICK boundary 22 engine_tick 25: dev_hash 0xb465a23d6df529f1 engine_hash 0xb465a23d6df529f1 match=yes | claims 5 | dev_claims_total 65 | live_attacks 1 | engine_attacks 1
+TROOPS boundary 23: [4/0 eng 0x40a6e01d4436d444 dev 0x40a6e01d4436d444 ok]
+TICK boundary 23 engine_tick 26: dev_hash 0xa01f08af88a2a251 engine_hash 0xa01f08af88a2a251 match=yes | claims 6 | dev_claims_total 71 | live_attacks 1 | engine_attacks 1
+TROOPS boundary 24: [4/0 eng 0x40a6501d4436d444 dev 0x40a6501d4436d444 ok]
+TICK boundary 24 engine_tick 27: dev_hash 0x803490d78ba9f7b1 engine_hash 0x803490d78ba9f7b1 match=yes | claims 6 | dev_claims_total 77 | live_attacks 1 | engine_attacks 1
+TROOPS boundary 25: [4/0 eng 0x40a5c01d4436d444 dev 0x40a5c01d4436d444 ok]
+TICK boundary 25 engine_tick 28: dev_hash 0x4afc10ccb8864ef1 engine_hash 0x4afc10ccb8864ef1 match=yes | claims 6 | dev_claims_total 83 | live_attacks 1 | engine_attacks 1
+TROOPS boundary 26: [4/0 eng 0x40a5301d4436d444 dev 0x40a5301d4436d444 ok]
+TICK boundary 26 engine_tick 29: dev_hash 0xe7548aec4feaac31 engine_hash 0xe7548aec4feaac31 match=yes | claims 6 | dev_claims_total 89 | live_attacks 1 | engine_attacks 1
+TROOPS boundary 27: [4/0 eng 0x40a4b81d4436d444 dev 0x40a4b81d4436d444 ok]
+TICK boundary 27 engine_tick 30: dev_hash 0x21f59262ad1d50f5 engine_hash 0x21f59262ad1d50f5 match=yes | claims 5 | dev_claims_total 94 | live_attacks 1 | engine_attacks 1
+TROOPS boundary 28: [4/0 eng 0x40a4401d4436d444 dev 0x40a4401d4436d444 ok]
+TICK boundary 28 engine_tick 31: dev_hash 0x65a9a3fb2bddba51 engine_hash 0x65a9a3fb2bddba51 match=yes | claims 5 | dev_claims_total 99 | live_attacks 1 | engine_attacks 1
+TROOPS boundary 29: [4/0 eng 0x40a3c81d4436d444 dev 0x40a3c81d4436d444 ok]
+TICK boundary 29 engine_tick 32: dev_hash 0x93cb57be4ef91995 engine_hash 0x93cb57be4ef91995 match=yes | claims 5 | dev_claims_total 104 | live_attacks 1 | engine_attacks 1
+TROOPS boundary 30: [4/0 eng 0x40a3381d4436d444 dev 0x40a3381d4436d444 ok] [6/0 eng 0x40bc19de037e6038 device: not created yet (deferred to the next transition)]
+TICK boundary 30 engine_tick 33: dev_hash 0xa50ff3b9145d9a95 engine_hash 0xa50ff3b9145d9a95 match=yes | claims 6 | dev_claims_total 110 | live_attacks 1 | engine_attacks 2
+INIT_ATTACK at boundary 31 (engine tick 33) slot 1: owner=6 target=0 troops_bits=0x40bc19de037e6038 heap_len=32 border_len=24 heap_peak=32 (device-computed)
+TROOPS boundary 31: [4/0 eng 0x40a2c01d4436d444 dev 0x40a2c01d4436d444 ok] [6/0 eng 0x40bbadde037e6038 dev 0x40bbadde037e6038 ok] [7/0 eng 0x40b61e0ea21b6a22 device: not created yet (deferred to the next transition)]
+TICK boundary 31 engine_tick 34: dev_hash 0x397c1625accb6377 engine_hash 0x397c1625accb6377 match=yes | claims 14 | dev_claims_total 124 | live_attacks 2 | engine_attacks 3
+INIT_ATTACK at boundary 32 (engine tick 34) slot 2: owner=7 target=0 troops_bits=0x40b61e0ea21b6a22 heap_len=32 border_len=24 heap_peak=32 (device-computed)
+TROOPS boundary 32: [4/0 eng 0x40a2481d4436d444 dev 0x40a2481d4436d444 ok] [6/0 eng 0x40bb4dde037e6038 dev 0x40bb4dde037e6038 ok] [7/0 eng 0x40b5ca0ea21b6a22 dev 0x40b5ca0ea21b6a22 ok]
+TICK boundary 32 engine_tick 35: dev_hash 0xd3fed6f165f41d44 engine_hash 0xd3fed6f165f41d44 match=yes | claims 20 | dev_claims_total 144 | live_attacks 3 | engine_attacks 3
+TROOPS boundary 33: [4/0 eng 0x40a1d01d4436d444 dev 0x40a1d01d4436d444 ok] [6/0 eng 0x40bad5de037e6038 dev 0x40bad5de037e6038 ok] [7/0 eng 0x40b5760ea21b6a22 dev 0x40b5760ea21b6a22 ok]
+TICK boundary 33 engine_tick 36: dev_hash 0xf130045472db792f engine_hash 0xf130045472db792f match=yes | claims 22 | dev_claims_total 166 | live_attacks 3 | engine_attacks 3
+TROOPS boundary 34: [4/0 eng 0x40a1581d4436d444 dev 0x40a1581d4436d444 ok] [6/0 eng 0x40ba5dde037e6038 dev 0x40ba5dde037e6038 ok] [7/0 eng 0x40b5220ea21b6a22 dev 0x40b5220ea21b6a22 ok]
+TICK boundary 34 engine_tick 37: dev_hash 0xa11bb7b089642cd4 engine_hash 0xa11bb7b089642cd4 match=yes | claims 22 | dev_claims_total 188 | live_attacks 3 | engine_attacks 3
+TROOPS boundary 35: [4/0 eng 0x40a0e01d4436d444 dev 0x40a0e01d4436d444 ok] [6/0 eng 0x40b9e5de037e6038 dev 0x40b9e5de037e6038 ok] [7/0 eng 0x40b4ce0ea21b6a22 dev 0x40b4ce0ea21b6a22 ok]
+TICK boundary 35 engine_tick 38: dev_hash 0x5e2b6be001cac4f7 engine_hash 0x5e2b6be001cac4f7 match=yes | claims 22 | dev_claims_total 210 | live_attacks 3 | engine_attacks 3
+TROOPS boundary 36: [4/0 eng 0x40a0681d4436d444 dev 0x40a0681d4436d444 ok] [6/0 eng 0x40b96dde037e6038 dev 0x40b96dde037e6038 ok] [7/0 eng 0x40b46e0ea21b6a22 dev 0x40b46e0ea21b6a22 ok]
+TICK boundary 36 engine_tick 39: dev_hash 0xb29de6a73bdd730b engine_hash 0xb29de6a73bdd730b match=yes | claims 23 | dev_claims_total 233 | live_attacks 3 | engine_attacks 3
+TROOPS boundary 37: [4/0 eng 0x409fe03a886da888 dev 0x409fe03a886da888 ok] [6/0 eng 0x40b8e9de037e6038 dev 0x40b8e9de037e6038 ok] [7/0 eng 0x40b40e0ea21b6a22 dev 0x40b40e0ea21b6a22 ok]
+TICK boundary 37 engine_tick 40: dev_hash 0xe3178569c2e6eb19 engine_hash 0xe3178569c2e6eb19 match=yes | claims 24 | dev_claims_total 257 | live_attacks 3 | engine_attacks 3
+TROOPS boundary 38: [4/0 eng 0x409ef03a886da888 dev 0x409ef03a886da888 ok] [6/0 eng 0x40b865de037e6038 dev 0x40b865de037e6038 ok] [7/0 eng 0x40b3ae0ea21b6a22 dev 0x40b3ae0ea21b6a22 ok]
+TICK boundary 38 engine_tick 41: dev_hash 0xbf47dc7972c3882b engine_hash 0xbf47dc7972c3882b match=yes | claims 24 | dev_claims_total 281 | live_attacks 3 | engine_attacks 3
+TROOPS boundary 39: [4/0 eng 0x409e303a886da888 dev 0x409e303a886da888 ok] [6/0 eng 0x40b7d5de037e6038 dev 0x40b7d5de037e6038 ok] [7/0 eng 0x40b3420ea21b6a22 dev 0x40b3420ea21b6a22 ok]
+TICK boundary 39 engine_tick 42: dev_hash 0x1721e8da55ae56e4 engine_hash 0x1721e8da55ae56e4 match=yes | claims 25 | dev_claims_total 306 | live_attacks 3 | engine_attacks 3
+TROOPS boundary 40: [4/0 eng 0x409d403a886da888 dev 0x409d403a886da888 ok] [6/0 eng 0x40b745de037e6038 dev 0x40b745de037e6038 ok] [7/0 eng 0x40b2d60ea21b6a22 dev 0x40b2d60ea21b6a22 ok]
+TICK boundary 40 engine_tick 43: dev_hash 0x7ec786aa2621a937 engine_hash 0x7ec786aa2621a937 match=yes | claims 26 | dev_claims_total 332 | live_attacks 3 | engine_attacks 3
+TROOPS boundary 41: [4/0 eng 0x409c503a886da888 dev 0x409c503a886da888 ok] [6/0 eng 0x40b6b5de037e6038 dev 0x40b6b5de037e6038 ok] [7/0 eng 0x40b26a0ea21b6a22 dev 0x40b26a0ea21b6a22 ok]
+TICK boundary 41 engine_tick 44: dev_hash 0x46bc6b3499b4966c engine_hash 0x46bc6b3499b4966c match=yes | claims 26 | dev_claims_total 358 | live_attacks 3 | engine_attacks 3
+TROOPS boundary 42: [4/0 eng 0x409b903a886da888 dev 0x409b903a886da888 ok] [6/0 eng 0x40b625de037e6038 dev 0x40b625de037e6038 ok] [7/0 eng 0x40b1fe0ea21b6a22 dev 0x40b1fe0ea21b6a22 ok]
+TICK boundary 42 engine_tick 45: dev_hash 0xaaebfe9e4cafa893 engine_hash 0xaaebfe9e4cafa893 match=yes | claims 25 | dev_claims_total 383 | live_attacks 3 | engine_attacks 3
+TROOPS boundary 43: [4/0 eng 0x409aa03a886da888 dev 0x409aa03a886da888 ok] [6/0 eng 0x40b595de037e6038 dev 0x40b595de037e6038 ok] [7/0 eng 0x40b1920ea21b6a22 dev 0x40b1920ea21b6a22 ok]
+TICK boundary 43 engine_tick 46: dev_hash 0xe0ff73082bfcc2d0 engine_hash 0xe0ff73082bfcc2d0 match=yes | claims 26 | dev_claims_total 409 | live_attacks 3 | engine_attacks 3
+TROOPS boundary 44: [4/0 eng 0x4099e03a886da888 dev 0x4099e03a886da888 ok] [6/0 eng 0x40b505de037e6038 dev 0x40b505de037e6038 ok] [7/0 eng 0x40b1260ea21b6a22 dev 0x40b1260ea21b6a22 ok]
+TICK boundary 44 engine_tick 47: dev_hash 0xc3576ac45da61b17 engine_hash 0xc3576ac45da61b17 match=yes | claims 25 | dev_claims_total 434 | live_attacks 3 | engine_attacks 3
+TROOPS boundary 45: [4/0 eng 0x4099203a886da888 dev 0x4099203a886da888 ok] [6/0 eng 0x40b475de037e6038 dev 0x40b475de037e6038 ok] [7/0 eng 0x40b0ba0ea21b6a22 dev 0x40b0ba0ea21b6a22 ok]
+TICK boundary 45 engine_tick 48: dev_hash 0xbec030f14b0fb828 engine_hash 0xbec030f14b0fb828 match=yes | claims 25 | dev_claims_total 459 | live_attacks 3 | engine_attacks 3
+TROOPS boundary 46: [4/0 eng 0x4098603a886da888 dev 0x4098603a886da888 ok] [6/0 eng 0x40b3d9de037e6038 dev 0x40b3d9de037e6038 ok] [7/0 eng 0x40b04e0ea21b6a22 dev 0x40b04e0ea21b6a22 ok]
+TICK boundary 46 engine_tick 49: dev_hash 0x77bc19ca9ec0f3e1 engine_hash 0x77bc19ca9ec0f3e1 match=yes | claims 26 | dev_claims_total 485 | live_attacks 3 | engine_attacks 3
+TROOPS boundary 47: [4/0 eng 0x4097a03a886da888 dev 0x4097a03a886da888 ok] [6/0 eng 0x40b349de037e6038 dev 0x40b349de037e6038 ok] [7/0 eng 0x40afac1d4436d444 dev 0x40afac1d4436d444 ok]
+TICK boundary 47 engine_tick 50: dev_hash 0xacee60e036a553a1 engine_hash 0xacee60e036a553a1 match=yes | claims 26 | dev_claims_total 511 | live_attacks 3 | engine_attacks 3
+TROOPS boundary 48: [4/0 eng 0x4096e03a886da888 dev 0x4096e03a886da888 ok] [6/0 eng 0x40b2b9de037e6038 dev 0x40b2b9de037e6038 ok] [7/0 eng 0x40aed41d4436d444 dev 0x40aed41d4436d444 ok]
+TICK boundary 48 engine_tick 51: dev_hash 0x8dce341c36af9886 engine_hash 0x8dce341c36af9886 match=yes | claims 25 | dev_claims_total 536 | live_attacks 3 | engine_attacks 3
+TROOPS boundary 49: [4/0 eng 0x4096203a886da888 dev 0x4096203a886da888 ok] [6/0 eng 0x40b21dde037e6038 dev 0x40b21dde037e6038 ok] [7/0 eng 0x40adfc1d4436d444 dev 0x40adfc1d4436d444 ok]
+TICK boundary 49 engine_tick 52: dev_hash 0x3ea3562ef6889d2f engine_hash 0x3ea3562ef6889d2f match=yes | claims 26 | dev_claims_total 562 | live_attacks 3 | engine_attacks 3
+TROOPS boundary 50: [4/0 eng 0x4095603a886da888 dev 0x4095603a886da888 ok] [6/0 eng 0x40b18dde037e6038 dev 0x40b18dde037e6038 ok] [7/0 eng 0x40ad241d4436d444 dev 0x40ad241d4436d444 ok] [2/0 eng 0x40bfdf7652cce52d device: not created yet (deferred to the next transition)] [8/0 eng 0x40c0ba151592d159 device: not created yet (deferred to the next transition)]
+TICK boundary 50 engine_tick 53: dev_hash 0x1fd04091092e28c8 engine_hash 0x1fd04091092e28c8 match=yes | claims 25 | dev_claims_total 587 | live_attacks 3 | engine_attacks 5
+INIT_ATTACK at boundary 51 (engine tick 53) slot 3: owner=2 target=0 troops_bits=0x40bfdf7652cce52d heap_len=32 border_len=24 heap_peak=32 (device-computed)
+INIT_ATTACK at boundary 51 (engine tick 53) slot 4: owner=8 target=0 troops_bits=0x40c0ba151592d159 heap_len=32 border_len=24 heap_peak=32 (device-computed)
+TROOPS boundary 51: [4/0 eng 0x4094a03a886da888 dev 0x4094a03a886da888 ok] [6/0 eng 0x40b109de037e6038 dev 0x40b109de037e6038 ok] [7/0 eng 0x40ac4c1d4436d444 dev 0x40ac4c1d4436d444 ok] [2/0 eng 0x40bf677652cce52d dev 0x40bf677652cce52d ok] [8/0 eng 0x40c084151592d159 dev 0x40c084151592d159 ok]
+TICK boundary 51 engine_tick 54: dev_hash 0x69f744cb451324f9 engine_hash 0x69f744cb451324f9 match=yes | claims 45 | dev_claims_total 632 | live_attacks 5 | engine_attacks 5
+TROOPS boundary 52: [4/0 eng 0x4093e03a886da888 dev 0x4093e03a886da888 ok] [6/0 eng 0x40b079de037e6038 dev 0x40b079de037e6038 ok] [7/0 eng 0x40ab741d4436d444 dev 0x40ab741d4436d444 ok] [2/0 eng 0x40bee37652cce52d dev 0x40bee37652cce52d ok] [8/0 eng 0x40c054151592d159 dev 0x40c054151592d159 ok]
+TICK boundary 52 engine_tick 55: dev_hash 0xb7df08e6ab82453c engine_hash 0xb7df08e6ab82453c match=yes | claims 45 | dev_claims_total 677 | live_attacks 5 | engine_attacks 5
+TROOPS boundary 53: [4/0 eng 0x4093203a886da888 dev 0x4093203a886da888 ok] [6/0 eng 0x40afd3bc06fcc070 dev 0x40afd3bc06fcc070 ok] [7/0 eng 0x40aa9c1d4436d444 dev 0x40aa9c1d4436d444 ok] [2/0 eng 0x40be6b7652cce52d dev 0x40be6b7652cce52d ok] [8/0 eng 0x40c024151592d159 dev 0x40c024151592d159 ok]
+TICK boundary 53 engine_tick 56: dev_hash 0xc847f2e56c44cf33 engine_hash 0xc847f2e56c44cf33 match=yes | claims 44 | dev_claims_total 721 | live_attacks 5 | engine_attacks 5
+TROOPS boundary 54: [4/0 eng 0x4092903a886da888 dev 0x4092903a886da888 ok] [6/0 eng 0x40aeb3bc06fcc070 dev 0x40aeb3bc06fcc070 ok] [7/0 eng 0x40a9c41d4436d444 dev 0x40a9c41d4436d444 ok] [2/0 eng 0x40bde77652cce52d dev 0x40bde77652cce52d ok] [8/0 eng 0x40bfe02a2b25a2b2 dev 0x40bfe02a2b25a2b2 ok]
+TICK boundary 54 engine_tick 57: dev_hash 0xaec0a5862c9e1a1a engine_hash 0xaec0a5862c9e1a1a match=yes | claims 45 | dev_claims_total 766 | live_attacks 5 | engine_attacks 5
+TROOPS boundary 55: [4/0 eng 0x4092003a886da888 dev 0x4092003a886da888 ok] [6/0 eng 0x40adabbc06fcc070 dev 0x40adabbc06fcc070 ok] [7/0 eng 0x40a9041d4436d444 dev 0x40a9041d4436d444 ok] [2/0 eng 0x40bd577652cce52d dev 0x40bd577652cce52d ok] [8/0 eng 0x40bf782a2b25a2b2 dev 0x40bf782a2b25a2b2 ok]
+TICK boundary 55 engine_tick 58: dev_hash 0x390b6e189a5dc648 engine_hash 0x390b6e189a5dc648 match=yes | claims 43 | dev_claims_total 809 | live_attacks 5 | engine_attacks 5
+TROOPS boundary 56: [4/0 eng 0x4091703a886da888 dev 0x4091703a886da888 ok] [6/0 eng 0x40aca3bc06fcc070 dev 0x40aca3bc06fcc070 ok] [7/0 eng 0x40a8441d4436d444 dev 0x40a8441d4436d444 ok] [2/0 eng 0x40bcbb7652cce52d dev 0x40bcbb7652cce52d ok] [8/0 eng 0x40bf102a2b25a2b2 dev 0x40bf102a2b25a2b2 ok] [3/0 eng 0x40c0fdbb29667296 device: not created yet (deferred to the next transition)]
+TICK boundary 56 engine_tick 59: dev_hash 0xd2ca0969ece2a230 engine_hash 0xd2ca0969ece2a230 match=yes | claims 44 | dev_claims_total 853 | live_attacks 5 | engine_attacks 6
+INIT_ATTACK at boundary 57 (engine tick 59) slot 5: owner=3 target=0 troops_bits=0x40c0fdbb29667296 heap_len=32 border_len=24 heap_peak=32 (device-computed)
+TROOPS boundary 57: [4/0 eng 0x4090e03a886da888 dev 0x4090e03a886da888 ok] [6/0 eng 0x40abb3bc06fcc070 dev 0x40abb3bc06fcc070 ok] [7/0 eng 0x40a7841d4436d444 dev 0x40a7841d4436d444 ok] [2/0 eng 0x40bc1f7652cce52d dev 0x40bc1f7652cce52d ok] [8/0 eng 0x40be982a2b25a2b2 dev 0x40be982a2b25a2b2 ok] [3/0 eng 0x40c0c1bb29667296 dev 0x40c0c1bb29667296 ok]
+TICK boundary 57 engine_tick 60: dev_hash 0x1b4febcd10d95f0e engine_hash 0x1b4febcd10d95f0e match=yes | claims 55 | dev_claims_total 908 | live_attacks 6 | engine_attacks 6
+TROOPS boundary 58: [4/0 eng 0x4090503a886da888 dev 0x4090503a886da888 ok] [6/0 eng 0x40aac3bc06fcc070 dev 0x40aac3bc06fcc070 ok] [7/0 eng 0x40a6c41d4436d444 dev 0x40a6c41d4436d444 ok] [2/0 eng 0x40bb837652cce52d dev 0x40bb837652cce52d ok] [8/0 eng 0x40be1c2a2b25a2b2 dev 0x40be1c2a2b25a2b2 ok] [3/0 eng 0x40c07fbb29667296 dev 0x40c07fbb29667296 ok]
+TICK boundary 58 engine_tick 61: dev_hash 0x919e45da9fd13b83 engine_hash 0x919e45da9fd13b83 match=yes | claims 57 | dev_claims_total 965 | live_attacks 6 | engine_attacks 6
+TROOPS boundary 59: [4/0 eng 0x408f807510db5110 dev 0x408f807510db5110 ok] [6/0 eng 0x40a9d3bc06fcc070 dev 0x40a9d3bc06fcc070 ok] [7/0 eng 0x40a6041d4436d444 dev 0x40a6041d4436d444 ok] [2/0 eng 0x40badb7652cce52d dev 0x40badb7652cce52d ok] [8/0 eng 0x40bd882a2b25a2b2 dev 0x40bd882a2b25a2b2 ok] [3/0 eng 0x40c03dbb29667296 dev 0x40c03dbb29667296 ok]
+TICK boundary 59 engine_tick 62: dev_hash 0xb69b9cca7404a76c engine_hash 0xb69b9cca7404a76c match=yes | claims 59 | dev_claims_total 1024 | live_attacks 6 | engine_attacks 6
+TROOPS boundary 60:
+TICK boundary 60 engine_tick 63: dev_hash 0x303d909460e84f18 engine_hash 0x303d909460e84f18 match=yes | claims 59 | dev_claims_total 1083 | live_attacks 6 | engine_attacks 0
+
+### DEVICE RESOURCES (gpu_env's own limits, measured here)
+slots used 6 (max 1024), live at the end 6, max heap peak 155 of HEAP_CAP 1024, max border_len 76 of BC 8192, claim-list overflows 0
+
+### RESULT
+init_sets yes
+init_hash yes
+tick claims matched 134/134
+hash matched 60/60
+owned counts matched 480/480
+troops matched 128/128
+churn-skipped owners 0
+engine evictions 0
+device claims total 1083
+first divergence: none
+note: 

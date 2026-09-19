@@ -1,0 +1,32 @@
+[package]
+name = "ofcuda_matrix"
+version = "0.1.0"
+edition = "2024"
+default-run = "ofcuda_matrix"
+
+# Own workspace on purpose: never a member of `openfront-ai/rust`, so nothing
+# here can perturb the live training workspace. The oracle lives in `oracle/`
+# with its OWN Cargo.toml and its own (stable) toolchain file, so the engine
+# crate never enters this cuda-oxide nightly build.
+[workspace]
+
+[dependencies]
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git" }
+cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git" }
+cuda-core = "0.3.1"
+serde_json = "1"
+# The proven slices, reused READ-ONLY as libraries. No file of theirs is edited,
+# and no copy of `core_impl.rs` lives here: the device module `include!`s the
+# canonical one.
+ofcuda_map = { path = "../ofcuda_map" }
+ofcuda_prng = { path = "../ofcuda_prng" }
+ofcuda_tick = { path = "../ofcuda_tick" }
+ofcuda_env = { path = "../ofcuda_env" }
+ofcuda_hash = { path = "../ofcuda_hash" }
+
+[[bin]]
+name = "ofcuda_matrix"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3

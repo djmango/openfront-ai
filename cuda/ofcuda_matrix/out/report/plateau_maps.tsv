@@ -1,0 +1,33 @@
+# ofcuda_matrix spawn plateau (bots actually placed, engine)
+# seed parity difficulty Easy human_agents 1
+map	requested	placed
+thebox	800	800
+thebox	2000	2000
+thebox	5000	4988
+onion	800	311
+onion	2000	313
+onion	5000	313
+amazonriver	800	800
+amazonriver	2000	1646
+amazonriver	5000	1677
+europe	800	800
+europe	2000	2000
+europe	5000	3155
+passage	800	800
+passage	2000	1196
+passage	5000	1216
+mississippiriver	800	800
+mississippiriver	2000	1972
+mississippiriver	5000	2099
+world	800	794
+world	2000	924
+world	5000	934
+africa	800	800
+africa	2000	2000
+africa	5000	2860
+giantworldmap	800	800
+giantworldmap	2000	2000
+giantworldmap	5000	3180
+pangaea	800	561
+pangaea	2000	566
+pangaea	5000	569

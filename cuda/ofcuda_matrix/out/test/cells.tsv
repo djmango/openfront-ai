@@ -1,0 +1,2 @@
+map	w	h	N	nations	ticks	init_sets	init_hash	tick_match	tick_total	hash_match	hash_total	count_match	count_total	troops_match	troops_total	churn_skipped	engine_evictions	reinits	dev_claims	first_div	note
+europe	2904	1672	18	0	60	yes	yes	290	291	48	49	930	931	290	291	0	0	1	3993	boundary 49 (engine tick 52): plane hash 0xba60125ce2b2c8c0 != engine 0xfcc543f7bdc23798; player 9 engine 580 tiles vs device 582	
