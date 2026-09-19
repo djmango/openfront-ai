@@ -57,6 +57,14 @@ const MAX_SLOTS: usize = 1024;
 /// `ob_meta` is indexed by owner small_id. A small_id >= this is a hard cell
 /// error (the device array is indexed without a guard).
 const COLS: usize = 8192;
+/// Largest `defender_tiles` the host-precomputed `1.0 - sigmoid(defender_tiles,
+/// LN_2/50_000, 150_000)` table covers. The engine's sigmoid is a pure function
+/// of an INTEGER tile count, so evaluating it on the host with the engine's own
+/// expression makes the device's value bit-identical instead of approximate
+/// (CUDA's `exp` and Rust's libm `exp` are different implementations). Beyond
+/// this count the table saturates - raise it before driving a map where a
+/// defender can own more tiles than this.
+const DEFSIG_N: usize = 2_000_000;
 /// Threads for the one-thread kernels.
 const ONE: u32 = 1;
 
@@ -619,9 +627,9 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
             .iter()
             .find(|p| p.sid == *sid)
             .map(|p| p.troops)
-            .unwrap_or(-1);
+            .unwrap_or(-1.0);
         let port_troops = init.nation_troops.get(&ni).copied().unwrap_or(f64::NAN);
-        if eng_troops as f64 != port_troops {
+        if eng_troops != port_troops {
             nation_ok = false;
             nation_fail.push(format!(
                 "nation {ni} troops engine {eng_troops} vs port {port_troops}"
@@ -746,6 +754,28 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
     let mut troops_host = vec![0f64; MAX_SLOTS];
     let mut ob_meta = vec![0u32; 2 * COLS];
 
+    // --- per-player state for a non-terra-nullius target ---------------------
+    // `attack_logic_at_tile`'s player branch (`game.rs:784-878`) reads the
+    // TARGET's live troops and tiles, and the budget reads its troops too. The
+    // engine records both on every `PLAYER` line, so they are host-seeded from
+    // the record each boundary and the DEVICE applies its own intra-tick
+    // decrements (`remove_troops` / `conquer`), exactly as `tick` does.
+    // `pst[sid*3]` = troops, `[sid*3+1]` = owned tiles, `[sid*3+2]` = type
+    // (1 Bot, 2 Nation, 0 Human) for `player_type` comparisons.
+    let mut pst_host = vec![0f64; COLS * 3];
+    let mut d_pst = DeviceBuffer::<f64>::zeroed(&stream, COLS * 3).map_err(es)?;
+    let defsig_host: Vec<f64> = (0..=DEFSIG_N)
+        .map(|n| {
+            // `1.0 - sigmoid(defender_tiles as f64, LN_2/50_000, 150_000)` with
+            // the engine's own expression, so the device reads a bit-identical
+            // value instead of calling a second `exp` implementation.
+            let k = std::f64::consts::LN_2 / 50_000.0;
+            let x = n as f64;
+            1.0 - 1.0 / (1.0 + (-k * (x - 150_000.0)).exp())
+        })
+        .collect();
+    let d_defsig = DeviceBuffer::from_host(&stream, &defsig_host).map_err(es)?;
+
     let mut slots: Vec<Slot> = Vec::new();
     let mut frames: Vec<u16> = Vec::new();
     if a.dump_planes {
@@ -755,6 +785,12 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
     let mut first_div = String::from("none");
     let mut first_div_at: Option<u32> = None;
     let mut oborder = vec![0u32; obcap];
+
+        // Diagnostic-only: the first boundary at which a live attack's DEVICE
+        // frontier size differs from the engine's own recorded `to_conquer`
+        // size. Never a pass condition; reported so a silent frontier drift is
+        // measured instead of inferred.
+        let mut frontier_seen: HashMap<(u16, u16), usize> = HashMap::new();
 
     for b in 1..=(c.ticks as usize) {
         let prev = &orc.boundaries[b - 1];
@@ -777,6 +813,25 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         }
         let mut d_oborder = DeviceBuffer::from_host(&stream, &oborder[..off.max(1)]).map_err(es)?;
         d_ob_meta.copy_from_host(&stream, &ob_meta).map_err(es)?;
+
+        // --- 1b. the per-player state this boundary's tick starts from ---
+        // `prev` is the boundary the tick is leaving, i.e. the state the
+        // engine's own `tick` read. Nothing is carried over: the record is the
+        // source, so a device-side drift cannot accumulate silently.
+        pst_host.fill(0.0);
+        for p in &prev.players {
+            let i = p.sid as usize * 3;
+            if i + 2 < pst_host.len() {
+                pst_host[i] = p.troops;
+                pst_host[i + 1] = p.tiles as f64;
+                pst_host[i + 2] = match p.ptype {
+                    'B' => 1.0,
+                    'N' => 2.0,
+                    _ => 0.0,
+                };
+            }
+        }
+        d_pst.copy_from_host(&stream, &pst_host).map_err(es)?;
 
         // --- 2. bind the engine's live attacks to device slots ---
         // Matched on (owner, target) and NOT on troop bits: the engine can
@@ -929,6 +984,11 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
                                 init_tick,
                                 idx as u32,
                                 snap.owner,
+                                snap.target,
+                                // `attack.rs:160-164`: a recorded `source_tile`
+                                // seeds the frontier from the source tile's own
+                                // neighbours instead of the owner's border set.
+                                snap.source.unwrap_or(u32::MAX),
                                 1, // fresh stream: a new exec mints
                                    // `PseudoRandom::new(123)` (attack.rs:47-57)
                                 &d_plane,
@@ -993,8 +1053,53 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
             row.note = format!("{} engine_evictions", row.note).trim().to_string();
         }
 
-        // --- 4. one device launch per live attack, in the engine's order ---
+        // --- 3b. transport-ship landings -------------------------------------
+        // `TransportShipExecution::land` (`transport_ship.rs:374-401`) CONQUERS
+        // the shore tile the boat reaches (`game.conquer`, :383) and only then
+        // creates an attack whose `source_tile` IS that tile (:386). The device
+        // models no units, so a landing is visible in the record only as an
+        // attack that carries a `source_tile` and is NOT in the previous
+        // boundary's attack list - and the recorded `source` is exactly the tile
+        // `land()` conquered in THIS tick. Applying it before the tick puts the
+        // tile on the plane for this boundary's hash, like every other conquest
+        // of the same tick.
         let mut mine: HashMap<u16, Vec<u32>> = HashMap::new();
+        for cs in &cur.attacks {
+            let Some(src) = cs.source else { continue };
+            if prev
+                .attacks
+                .iter()
+                .any(|p| p.owner == cs.owner && p.target == cs.target)
+            {
+                continue; // already bound: not a landing of THIS tick
+            }
+            unsafe {
+                module
+                    .land_dev(
+                        &stream,
+                        cfg(ONE),
+                        src,
+                        cs.owner,
+                        &mut d_plane,
+                        &mut d_claims,
+                        &mut d_out,
+                    )
+                    .map_err(es)?;
+            }
+            let lo = d_out.to_host_vec(&stream).map_err(es)?;
+            if lo[0] > 0 {
+                let cl = d_claims.to_host_vec(&stream).map_err(es)?;
+                mine.entry(cs.owner).or_default().push(cl[0]);
+                row.dev_claims += 1;
+            }
+            detail.push_str(&format!(
+                "TRANSPORT_LANDING boundary {b} (engine tick {tick}): owner {} landed on tile {} \
+                 (source_tile of attack {}); engine frontier heap {} border {}\n",
+                cs.owner, src, cs.attack_id, cs.heap_len, cs.border_len
+            ));
+        }
+
+        // --- 4. one device launch per live attack, in the engine's order ---
         let mut troop_pairs: Vec<(usize, u64)> = Vec::new();
         for (i, _snap) in &plan {
             let s = &slots[*i];
@@ -1012,12 +1117,15 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
                         tick,
                         s.idx as u32,
                         s.owner,
+                        s.target,
                         // The engine's troop-loss branch is chosen by the
                         // ATTACKER's player type (`game.rs:890`): bots take the
                         // bot branch, nations/humans the other one. The type
                         // comes from the engine roster in the oracle dump, not
                         // from a guess about which cells exist.
                         if bot_sids.contains(&s.owner) { 1 } else { 0 },
+                        &mut d_pst,
+                        &d_defsig,
                         &mut d_plane,
                         &mut d_heap_tiles,
                         &mut d_heap_pri,
@@ -1093,6 +1201,8 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
                         init_tick,
                         sidx as u32,
                         s.owner,
+                        s.target,
+                        cs.source.unwrap_or(u32::MAX),
                         1, // RE-CREATE: fresh `PseudoRandom::new(123)`
                         &d_plane,
                         &mut d_heap_tiles,
@@ -1147,6 +1257,32 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
 
         // troop count after the tick, for the surviving attacks
         let troops_after = d_troops.to_host_vec(&stream).map_err(es)?;
+
+        // FRONTIER LEAK CHECK - diagnostic, never a pass condition. A live
+        // attack's `to_conquer` size is recorded by the engine (`ATTACK ...`),
+        // and the device's slot holds the same quantity after the same tick
+        // (`scal[soff]`). While they agree the two frontiers hold the same
+        // NUMBER of tiles; the first tick that pops a tile only one of them
+        // holds is where the claim sets part, so a drift is worth naming at the
+        // boundary it starts rather than at the boundary it is popped.
+        {
+            let scal_after = d_scal.to_host_vec(&stream).map_err(es)?;
+            for a in &cur.attacks {
+                let found = slots
+                    .iter()
+                    .find(|s| s.alive && s.owner == a.owner && s.target == a.target);
+                let Some(s) = found else { continue };
+                let dev_heap = scal_after[s.idx * SCAL] as usize;
+                if dev_heap != a.heap_len && !frontier_seen.contains_key(&(a.owner, a.target)) {
+                    frontier_seen.insert((a.owner, a.target), dev_heap);
+                    detail.push_str(&format!(
+                        "FRONTIER_LEAK boundary {b} (engine tick {tick}): owner {} target {} device \
+                         heap {} vs engine {} (engine border {})\n",
+                        a.owner, a.target, dev_heap, a.heap_len, a.border_len
+                    ));
+                }
+            }
+        }
 
         // --- 5. the plane: device hash + host counts (same bytes) ---
         unsafe {
@@ -1337,16 +1473,19 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
     let mut drops = 0u64;
     let mut max_border = 0u32;
     let mut live = 0usize;
+    let mut refused = 0u64;
     for s in 0..slots.len() {
         max_peak = max_peak.max(scal_end[s * SCAL + 5]);
         drops += scal_end[s * SCAL + 4] as u64;
+        refused += scal_end[s * SCAL + 6] as u64;
         max_border = max_border.max(scal_end[s * SCAL + 1]);
         live += (scal_end[s * SCAL + 3] == 1) as usize;
     }
     detail.push_str(&format!(
         "\n### DEVICE RESOURCES (gpu_env's own limits, measured here)\n\
          slots used {} (max {MAX_SLOTS}), live at the end {}, max heap peak {} of HEAP_CAP {HEAP_CAP}, \
-         max border_len {} of BC {BC}, claim-list overflows {drops}\n",
+         max border_len {} of BC {BC}, claim-list overflows {drops}, \
+         heap candidates refused at HEAP_CAP {refused}\n",
         slots.len(),
         live,
         max_peak,
@@ -1355,8 +1494,21 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
     if drops > 0 {
         row.note = format!("{} claim-list overflows {drops}", row.note).trim().to_string();
     }
-    if max_border as usize > BC {
-        return Err("border set exceeded BC".into());
+    if refused > 0 {
+        row.note = format!("{} heap cap refusals {refused}", row.note).trim().to_string();
+    }
+    // A capacity refusal is a CORRECTNESS DEFECT, not a statistic: a refused
+    // frontier candidate is a silently dropped tile, i.e. a parity break. That is
+    // exactly how the 256-entry cap first desynced claim order (tick 558) and how
+    // 1024 did it again in this window (boundary 806). `border_insert` refuses a
+    // tile when the set is full and leaves the length AT the cap, so `>=` (not
+    // `>`) is the value that means "a tile was dropped".
+    if max_border as usize >= BC {
+        return Err(format!(
+            "border set reached BC={BC} (max border_len {max_border}): a tile was refused, which is a \
+             parity break - raise BC from a measured border set, never by guesswork"
+        )
+        .into());
     }
 
     row.first_div = first_div;
@@ -1386,6 +1538,21 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         row.note
     ));
     write_cell(a, c, &detail, Some(&frames), Some(&terrain))?;
+    // FAIL LOUDLY on a saturated frontier. The detail file above already holds
+    // the evidence, but a cell that carried a capacity refusal to completion must
+    // not be able to read as anything but failed: every refused candidate is a
+    // dropped tile, so the plane beyond it is meaningless no matter how many
+    // boundaries "matched" before it.
+    if refused > 0 {
+        return Err(format!(
+            "HEAP CAPACITY REFUSAL: {refused} frontier candidates were refused at HEAP_CAP={HEAP_CAP} \
+             (device high-water mark {max_peak}); a refused candidate is a dropped tile = a parity \
+             break, so this cell is failed deliberately. Raise HEAP_CAP in \
+             ofcuda_tick/src/core_impl.rs from a measured peak with real headroom - this run measured \
+             {max_peak}."
+        )
+        .into());
+    }
     Ok(row)
 }
 

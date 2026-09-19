@@ -1,0 +1,5 @@
+# Decisive test: the SAME 1000-tick pangaea N=18 window with NO nations.
+# If this ALSO diverges, the long-window gap is general (attack-event emission),
+# not the nation layer.
+# Format: <map> <agents> [nations] [ticks]
+pangaea 18 0 1000

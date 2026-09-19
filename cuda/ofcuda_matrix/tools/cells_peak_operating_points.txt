@@ -1,0 +1,6 @@
+# Restore check (250-tick cells must pass again at HEAP_CAP 8192) plus the
+# capacity requirement at a different operating point: high agent count (N=488)
+# and the largest map (giantworldmap 4108x1948).
+pangaea 18 1 250
+pangaea 488 0 250
+giantworldmap 18 0 250

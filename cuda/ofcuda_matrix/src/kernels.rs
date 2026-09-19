@@ -39,8 +39,19 @@
 
 use cuda_device::{kernel, launch_bounds, thread};
 use cuda_host::cuda_module;
-use ofcuda_env::{attack_tiles_per_tick, attacker_troop_loss, tiles_used};
-use ofcuda_tick::{add_neighbors, has_attacker_neighbor, Heap, Prng, HEAP_CAP, ORDER_NSWE};
+use ofcuda_env::{attack_tiles_per_tick, attacker_troop_loss, terrain_mag, terrain_speed, tiles_used};
+use ofcuda_tick::{
+    attacker_neighbor_count, has_attacker_neighbor, mag2_from_terrain, neighbors4, priority_f32, Heap, Prng,
+    HEAP_CAP, ORDER_NSWE,
+};
+
+/// `Util.within(value, min, max)` (`util.rs:16-18`) = `value.max(min).min(max)`,
+/// spelled with branches so it lowers to the same pair of selects in device code.
+#[inline]
+fn within(v: f64, lo: f64, hi: f64) -> f64 {
+    let a = if v > lo { v } else { lo };
+    if a < hi { a } else { hi }
+}
 
 /// Capacity of one attack's border set (device only; the CPU `Attack` uses a
 /// `Vec`). Overflow is COUNTED in `scal[slot*8+4]`, never silently dropped.
@@ -101,6 +112,7 @@ pub mod device {
         blen: &mut usize,
         plane: &[u16],
         owner_col: u16,
+        target_col: u16,
         terrain: &[u8],
         tile: u32,
         w: u32,
@@ -116,25 +128,58 @@ pub mod device {
             if terrain[nb as usize] & 0x80 == 0 {
                 continue; // water (attack.rs:1354)
             }
-            if plane[nb as usize] != 0 {
-                continue; // not terra nullius (attack.rs:1359)
+            if plane[nb as usize] != target_col {
+                continue; // not owned by the TARGET (attack.rs:1359)
             }
             border_insert(border, blen, nb); // attack.rs:1363
         }
-        let empty: [u32; 0] = [];
-        add_neighbors(
-            heap,
-            pr,
-            tile,
-            plane,
-            &empty[..],
-            owner_col,
-            terrain,
-            w,
-            h,
-            ORDER_NSWE,
-            tick,
+        add_neighbors_t(
+            heap, pr, tile, plane, owner_col, target_col, terrain, w, h, tick,
         )
+    }
+
+    /// `AttackExecution::add_neighbors` (`attack.rs:1340-1386`) with the target
+    /// as a parameter instead of the crate's hardcoded terra nullius.
+    ///
+    /// `attack.rs:1359` skips any neighbour whose `owner_id` is not
+    /// `self.target_small_id`; the crate's `ofcuda_tick::add_neighbors` spells
+    /// that as `is_terra_nullius(...)`, which is the same predicate only while
+    /// the attack targets terra nullius (owner 0). The body below is otherwise
+    /// the crate's function verbatim - same N,S,W,E visit order, same
+    /// ONE draw per ENQUEUED neighbour, the draw-binding site.
+    #[allow(clippy::too_many_arguments)]
+    fn add_neighbors_t(
+        heap: &mut Heap,
+        pr: &mut Prng,
+        tile: u32,
+        plane: &[u16],
+        owner_col: u16,
+        target_col: u16,
+        terrain: &[u8],
+        w: u32,
+        h: u32,
+        tick: u32,
+    ) -> u32 {
+        let mut nbuf = [0u32; 4];
+        let n = neighbors4(ORDER_NSWE, tile, w, h, &mut nbuf);
+        let mut enq = 0u32;
+        let mut i = 0usize;
+        while i < n as usize {
+            let nb = nbuf[i];
+            i += 1;
+            if terrain[nb as usize] & 0x80 == 0 {
+                continue; // water (attack.rs:1354)
+            }
+            if plane[nb as usize] != target_col {
+                continue; // wrong owner (attack.rs:1359)
+            }
+            let k = attacker_neighbor_count(plane, &[], owner_col, nb, w, h, ORDER_NSWE);
+            let r = pr.next_int(0, 7);
+            let mag2 = mag2_from_terrain(terrain[nb as usize]);
+            heap.enqueue(nb, priority_f32(r, k, mag2, tick));
+            enq += 1;
+        }
+        enq
     }
 
     /// `AttackExecution::refresh_to_conquer` (`attack.rs:1265-1274`): clear the
@@ -148,6 +193,7 @@ pub mod device {
         blen: &mut usize,
         plane: &[u16],
         owner_col: u16,
+        target_col: u16,
         terrain: &[u8],
         w: u32,
         h: u32,
@@ -162,8 +208,40 @@ pub mod device {
         while j < obn {
             let bt = oborder[oboff + j];
             j += 1;
-            offer_dev(heap, pr, border, blen, plane, owner_col, terrain, bt, w, h, tick);
+            offer_dev(
+                heap, pr, border, blen, plane, owner_col, target_col, terrain, bt, w, h, tick,
+            );
         }
+    }
+
+    /// `TransportShipExecution::land` (`transport_ship.rs:374-401`): a boat that
+    /// reaches shore CONQUERS its destination tile and only then creates an
+    /// attack whose `source_tile` is that destination
+    /// (`game.add_land_attack_from(owner, None, Some(troops), Some(dst))`,
+    /// `transport_ship.rs:383-386`).
+    ///
+    /// The device has no units, so the record's own attack list is where a
+    /// landing is observable: an attack that carries a `source_tile` and was not
+    /// there at the previous boundary is a boat's landing, and its source tile is
+    /// the tile `land()` conquered in that tick. This kernel applies exactly that
+    /// one `game.conquer(owner, dst)` - the plane cell and the tick's claim list,
+    /// the same two effects a `tick_once` conquest has.
+    #[kernel]
+    #[launch_bounds(256)]
+    pub fn land_dev(
+        tile: u32,
+        owner_col: u16,
+        mut plane: &mut [u16],
+        mut claims: &mut [u32],
+        mut out: &mut [u32],
+    ) {
+        let e = thread::index_1d().get();
+        if e != 0 {
+            return;
+        }
+        plane[tile as usize] = owner_col;
+        claims[0] = tile;
+        out[0] = 1;
     }
 
     /// ONE TICK of one attack (`AttackExecution::tick`, `attack.rs:206-324`).
@@ -185,14 +263,30 @@ pub mod device {
         h: u32,
         tick: u32,
         owner_col: u16,
+        target_col: u16,
         is_bot: u32,
+        pst: &mut [f64],
+        defsig: &[f64],
         oborder: &[u32],
         oboff: usize,
         obn: usize,
     ) -> bool {
         // attack.rs:239-255 - the one extra draw, taken BEFORE the pop loop.
+        // The budget's branch (`attack.rs:246-252`) is selected by
+        // `target_is_player` and reads the TARGET's live troop count, not 0.
+        let player_target = target_col != 0;
         let draw = pr.next_int(0, 5);
-        let budget = attack_tiles_per_tick(*troop_count, false, 0.0, *blen as f64 + draw as f64);
+        let defender_troops = if player_target {
+            pst[target_col as usize * 3]
+        } else {
+            0.0
+        };
+        let budget = attack_tiles_per_tick(
+            *troop_count,
+            player_target,
+            defender_troops,
+            *blen as f64 + draw as f64,
+        );
         let mut num = budget;
 
         while num > 0.0 {
@@ -203,7 +297,8 @@ pub mod device {
             if heap.is_empty() {
                 // attack.rs:264-268: refresh_to_conquer, then RETREAT (death).
                 refresh_dev(
-                    heap, pr, bsub, blen, psub, owner_col, terrain, w, h, tick, oborder, oboff, obn,
+                    heap, pr, bsub, blen, psub, owner_col, target_col, terrain, w, h, tick, oborder,
+                    oboff, obn,
                 );
                 *troop_count = 0.0;
                 return false;
@@ -212,8 +307,8 @@ pub mod device {
                 break; // attack.rs:271
             };
             border_remove(bsub, blen, tile); // attack.rs:275
-            if psub[tile as usize] != 0 {
-                continue; // attack.rs:284 not terra nullius
+            if psub[tile as usize] != target_col {
+                continue; // attack.rs:284 wrong owner for this target
             }
             if !has_attacker_neighbor(psub, &[], owner_col, tile, w, h, ORDER_NSWE) {
                 continue; // attack.rs:284
@@ -221,9 +316,47 @@ pub mod device {
             if terrain[tile as usize] & 0x80 == 0 {
                 continue; // attack.rs:288
             }
-            offer_dev(heap, pr, bsub, blen, psub, owner_col, terrain, tile, w, h, tick); // attack.rs:292
-            num -= tiles_used(*troop_count, terrain[tile as usize]); // attack.rs:313
-            *troop_count -= attacker_troop_loss(terrain[tile as usize], is_bot != 0); // attack.rs:314
+            offer_dev(
+                heap, pr, bsub, blen, psub, owner_col, target_col, terrain, tile, w, h, tick,
+            ); // attack.rs:292
+            if player_target {
+                // `game.attack_logic_at_tile(.., defender_is_player = true)`
+                // (`game.rs:784-878`), the branch a player-target attack takes.
+                let tidx = target_col as usize * 3;
+                let dtroops = pst[tidx];
+                let raw_tiles = pst[tidx + 1];
+                let dtiles = if raw_tiles < 1.0 { 1.0 } else { raw_tiles };
+                let mut mag = terrain_mag(terrain[tile as usize]);
+                let speed = terrain_speed(terrain[tile as usize]);
+                // `matches!(attacker_type, Human | Nation) && defender == Bot`.
+                let attacker_bot = pst[owner_col as usize * 3 + 2] == 1.0;
+                let defender_bot = pst[tidx + 2] == 1.0;
+                if !attacker_bot && defender_bot {
+                    mag *= 0.7;
+                }
+                // `1.0 - sigmoid(defender_tiles, LN_2/50_000, 150_000)`: a pure
+                // function of the integer tile count, so the host evaluates it
+                // with the engine's own expression and the device reads it.
+                let di = if raw_tiles < 1.0 { 1usize } else { raw_tiles as usize };
+                let dsig = if di < defsig.len() {
+                    defsig[di]
+                } else {
+                    defsig[defsig.len() - 1]
+                };
+                let dbuf = 0.7 + 0.3 * dsig;
+                let def_loss = dtroops / dtiles;
+                let cur = within(dtroops / *troop_count, 0.6, 2.0) * mag * 0.8 * dbuf;
+                let alt = 1.3 * def_loss * (mag / 100.0);
+                let attack_loss = 0.6 * cur + 0.4 * alt;
+                let t_used = within(dtroops / (5.0 * *troop_count), 0.2, 1.5) * speed * dbuf;
+                num -= t_used; // attack.rs:311
+                *troop_count -= attack_loss; // attack.rs:312
+                pst[tidx] = dtroops - def_loss; // game.remove_troops(target, ..)
+                pst[tidx + 1] = raw_tiles - 1.0; // game.conquer(owner, tile)
+            } else {
+                num -= tiles_used(*troop_count, terrain[tile as usize]); // attack.rs:313
+                *troop_count -= attacker_troop_loss(terrain[tile as usize], is_bot != 0); // attack.rs:314
+            }
             if *ncl < claims.len() {
                 claims[*ncl] = tile;
                 *ncl += 1;
@@ -250,7 +383,10 @@ pub mod device {
         tick: u32,
         slot: u32,
         owner_col: u16,
+        target_col: u16,
         is_bot: u32,
+        mut pst: &mut [f64],
+        defsig: &[f64],
         mut plane: &mut [u16],
         mut heap_tiles: &mut [u32],
         mut heap_pri: &mut [f32],
@@ -312,7 +448,10 @@ pub mod device {
             h,
             tick,
             owner_col,
+            target_col,
             is_bot,
+            pst,
+            defsig,
             oborder,
             oboff,
             obn,
@@ -324,6 +463,13 @@ pub mod device {
         troops[s] = troop_count;
         scal[soff + 3] = if alive { 1 } else { 0 };
         scal[soff + 4] = drops;
+        // DIAGNOSTIC: `Heap::drops` (candidates REFUSED because the fixed
+        // HEAP_CAP was reached). The engine's `FlatBinaryHeap` is a growable
+        // `Vec` (`flat_heap.rs:11-13`), so a refusal here is a tile the engine
+        // would have enqueued and claimed later - it is the one frontier loss
+        // that leaves no trace in the plane until it is popped. Accumulated per
+        // slot so the driver can report it; never used as a pass condition.
+        scal[soff + 6] += heap.drops as u32;
         scal[soff + 5] = if heap.peak as u32 > scal[soff + 5] {
             heap.peak as u32
         } else {
@@ -384,6 +530,13 @@ pub mod device {
         tick: u32,
         slot: u32,
         owner_col: u16,
+        target_col: u16,
+        // The attack's `source_tile` (`attack.rs:19`), `u32::MAX` for none.
+        // `init` seeds the frontier from it when it is set (`attack.rs:160-164`),
+        // and the ONLY engine call sites that pass one are transport-ship
+        // landings (`transport_ship.rs:386,391`) and nation-structure attacks
+        // (`nation_structures.rs:1892`).
+        source: u32,
         fresh_prng: u32,
         plane: &[u16],
         mut heap_tiles: &mut [u32],
@@ -407,6 +560,7 @@ pub mod device {
         scal[soff + 1] = 0;
         scal[soff + 2] = 0;
         scal[soff + 4] = 0;
+        scal[soff + 6] = 0;
         scal[soff + 5] = 0;
         scal[soff + 3] = 1;
         let mut heap = Heap::new();
@@ -419,21 +573,45 @@ pub mod device {
         let om = owner_col as usize * 2;
         let oboff = ob_meta[om] as usize;
         let obn = ob_meta[om + 1] as usize;
-        refresh_dev(
-            &mut heap,
-            &mut pr,
-            &mut border[boff..boff + BC],
-            &mut blen,
-            plane,
-            owner_col,
-            terrain,
-            w,
-            h,
-            tick,
-            oborder,
-            oboff,
-            obn,
-        );
+        if source != u32::MAX {
+            // `attack.rs:160-164`: with a `source_tile` the frontier is seeded
+            // from the SOURCE TILE's own neighbours (`add_neighbors(src)`), not
+            // from the owner's border set. `offer_dev` is that call plus the
+            // attack-border insert (`offer_neighbours`, `attack.rs:1353-1386`),
+            // in the same N,S,W,E order with the same one draw per enqueued
+            // neighbour.
+            offer_dev(
+                &mut heap,
+                &mut pr,
+                &mut border[boff..boff + BC],
+                &mut blen,
+                plane,
+                owner_col,
+                target_col,
+                terrain,
+                source,
+                w,
+                h,
+                tick,
+            );
+        } else {
+            refresh_dev(
+                &mut heap,
+                &mut pr,
+                &mut border[boff..boff + BC],
+                &mut blen,
+                plane,
+                owner_col,
+                target_col,
+                terrain,
+                w,
+                h,
+                tick,
+                oborder,
+                oboff,
+                obn,
+            );
+        }
         scal[soff] = heap.len as u32;
         scal[soff + 1] = blen as u32;
         scal[soff + 5] = heap.peak as u32;

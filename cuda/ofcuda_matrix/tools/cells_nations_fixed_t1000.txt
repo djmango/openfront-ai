@@ -1,0 +1,5 @@
+# Re-run of the exact long window that failed, after porting the non-terra-nullius
+# target path into the device attack kernels.
+# Format: <map> <agents> [nations] [ticks]
+pangaea 18 1 1000
+pangaea 18 0 1000

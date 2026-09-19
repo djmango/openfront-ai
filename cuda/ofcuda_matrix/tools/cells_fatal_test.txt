@@ -1,0 +1,2 @@
+pangaea 18 1 250
+pangaea 18 2 250

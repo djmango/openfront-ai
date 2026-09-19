@@ -50,7 +50,11 @@ pub struct PlayerSnap {
     pub ptype: char,
     pub id: String,
     pub tiles: i32,
-    pub troops: i32,
+    /// **f64, not i32**: the engine prints `p.troops` with `{}` on an f64, so the
+    /// record round-trips exactly; parsing it as an integer threw away the
+    /// fractional part that `attack_logic_at_tile` divides by for a player
+    /// target (`defender_troops / defender_tiles`).
+    pub troops: f64,
     pub gold: i64,
     pub nvec: usize,
     pub prefix: usize,
@@ -180,14 +184,14 @@ pub fn parse_oracle(path: &Path) -> Result<Oracle, String> {
                     ptype: it.next().unwrap_or("B").chars().next().unwrap_or('B'),
                     id: String::new(),
                     tiles: 0,
-                    troops: 0,
+                    troops: 0.0,
                     gold: 0,
                     nvec: 0,
                     prefix: 0,
                 };
                 p.id = it.next().unwrap_or("").to_string();
                 p.tiles = it.next().unwrap_or("0").parse().unwrap_or(0);
-                p.troops = it.next().unwrap_or("0").parse().unwrap_or(0);
+                p.troops = it.next().unwrap_or("0").parse().unwrap_or(0.0);
                 p.gold = it.next().unwrap_or("0").parse().unwrap_or(0);
                 p.nvec = it.next().unwrap_or("0").parse().unwrap_or(0);
                 p.prefix = it.next().unwrap_or("0").parse().unwrap_or(0);

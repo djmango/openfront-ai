@@ -32,14 +32,25 @@
 /// Enqueue capacity of the host-side flat heap.
 ///
 /// The engine's `FlatBinaryHeap` is a growable `Vec` (`Vec::with_capacity(1024)`
-/// is only a hint - `execution/flat_heap.rs:8,26-27`), i.e. unbounded. A fixed
-/// 256 silently DROPPED 13180 candidates in the composed b002 window and its
-/// high-water mark sat exactly on the cap, which is what first desynced the
-/// claim order (tick 558). 8192 is a bound, not the engine's behaviour, so the
-/// run reports `Heap::drops` and `Heap::peak` instead of assuming it is not
-/// binding - and `STATE_HEAP_CAP` below keeps the *serialized* width at the
-/// device module's own 256.
-pub const HEAP_CAP: usize = 1024;
+/// is only a hint - `execution/flat_heap.rs:8,26-27`), i.e. its frontier is
+/// unbounded. A fixed 256 silently DROPPED 13180 candidates in the composed
+/// b002 window and its high-water mark sat exactly on the cap, which is what
+/// first desynced the claim order (tick 558). 1024 was raised from that, and it
+/// saturated AGAIN in the 1000-tick pangaea n18 window: the ENGINE's own
+/// recorded `to_conquer` reached 1062 tiles (boundary 873 / engine tick 876,
+/// owner 2) and the device refused 17 candidates with its high-water mark
+/// exactly on 1024 - which is the missing-tile divergence at boundary 806
+/// (device heap 1009 vs engine 1014, engine border 338).
+///
+/// INVARIANT - checked, never assumed: the device must never refuse a
+/// candidate, because a refused candidate is a silently dropped tile and
+/// therefore a parity break. A refusal is now FATAL (the device module fails the
+/// cell and prints both the refusal count and the measured high-water mark), so
+/// this constant must be raised from a MEASURED peak with real headroom, never
+/// by guesswork: 8192 is 7.7x the largest frontier the engine has recorded in a
+/// 1000-tick window (1062). If a refusal ever fires, take `max heap peak` from
+/// the run's `### DEVICE RESOURCES` block and raise this from that number.
+pub const HEAP_CAP: usize = 8192;
 
 /// Width of the heap in the *serialized* attack state (`STATE_WORDS`). This is
 /// deliberately separate from [`HEAP_CAP`]: the device module (`src/main.rs`)

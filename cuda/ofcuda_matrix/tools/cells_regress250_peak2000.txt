@@ -1,0 +1,8 @@
+# 250-tick regression (was fully exact before the capacity/landing work: must stay
+# fully exact) plus the 2000-tick requirement measurement for the sibling limits.
+# The driver stops the device at its first plane divergence, but the ORACLE replay
+# covers all 2000 boundaries, so the engine's own recorded to_conquer / border /
+# attack-count peaks over 2000 ticks are still measurable from its dump.
+pangaea 18 1 250
+pangaea 18 2 250
+pangaea 18 1 2000

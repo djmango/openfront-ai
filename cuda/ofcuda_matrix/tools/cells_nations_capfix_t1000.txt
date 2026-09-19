@@ -1,0 +1,5 @@
+# Re-run of the long window after sizing the frontier heap from a measurement
+# (HEAP_CAP 1024 -> 8192, refusal now fatal) and after the transport-ship-landing
+# bridge + source-seeded attack init.
+pangaea 18 1 1000
+pangaea 18 0 1000
