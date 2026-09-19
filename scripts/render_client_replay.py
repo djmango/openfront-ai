@@ -346,6 +346,10 @@ def _client_game_map_values() -> dict[str, str]:
     `NorthAmerica = "North America"`. Native GameRecords often write the
     PascalCase id; that fails schema validation and the replay button never
     appears. Europe/World/Onion work only because id == value.
+
+    Keys are emitted case-insensitively (plus a lowercase fold of every enum
+    value) because the engine writes lowercase map-dir keys (`pangaea`) that
+    must resolve to `Pangaea`.
     """
     maps_gen = REPO / "openfront/src/core/game/Maps.gen.ts"
     if not maps_gen.is_file():
@@ -356,12 +360,14 @@ def _client_game_map_values() -> dict[str, str]:
     m = re.search(r"export enum GameMapType \{([^}]*)\}", text, re.S)
     if not m:
         return {}
-    return {
-        name: value
-        for name, value in re.findall(
-            r'([A-Za-z0-9_]+)\s*=\s*"([^"]*)"', m.group(1)
-        )
-    }
+    out: dict[str, str] = {}
+    for name, value in re.findall(
+        r'([A-Za-z0-9_]+)\s*=\s*"([^"]*)"', m.group(1)
+    ):
+        out[name] = value
+        out.setdefault(name.lower(), value)
+        out.setdefault(value.lower(), value)
+    return out
 
 
 def sanitize_record_for_client(record: Path, dest_dir: Path) -> Path:
@@ -383,17 +389,30 @@ def sanitize_record_for_client(record: Path, dest_dir: Path) -> Path:
         gm = cfg.get("gameMap")
         if isinstance(gm, str):
             mapping = _client_game_map_values()
-            # Prefer id→value; also accept already-correct values.
+            # Prefer id→value; also accept already-correct values. Native envs
+            # write the lowercase map-dir key ("pangaea"), the enum uses the
+            # UpperCamelCase key with a display-string value — match either
+            # case-insensitively before giving up.
             values = set(mapping.values())
+            lowered = {k.lower(): v for k, v in mapping.items()}
             if gm in mapping and mapping[gm] != gm:
                 cfg["gameMap"] = mapping[gm]
                 changed = True
                 print(f"rewrote gameMap {gm!r} -> {mapping[gm]!r} for client Zod")
             elif gm not in values and gm not in mapping:
-                print(
-                    f"WARNING: gameMap {gm!r} not in GameMapType; "
-                    "client may reject the record"
-                )
+                if gm.lower() in lowered:
+                    resolved = lowered[gm.lower()]
+                    cfg["gameMap"] = resolved
+                    changed = True
+                    print(
+                        f"rewrote gameMap {gm!r} -> {resolved!r} "
+                        "(case-insensitive GameMapType match) for client Zod"
+                    )
+                else:
+                    print(
+                        f"WARNING: gameMap {gm!r} not in GameMapType; "
+                        "client may reject the record"
+                    )
         # Native stage-0 writes nations=0; GameConfigSchema is min(1) or
         # "default"/"disabled". Zero fails Zod and the replay button never
         # appears (JoinLobbyModal treats it as version_mismatch).

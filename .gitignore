@@ -25,3 +25,13 @@ rust/ofrs/Cargo.lock
 
 # Exported AE encoder weights (regenerate via scripts/export_safetensors.py)
 weights/ae/
+
+# CUDA port build outputs and regenerable ground-truth dumps
+rust/target-base/
+cuda/**/target/
+cuda/**/*.ll
+cuda/**/*.opt.ll
+# Multi-MB case dumps stay out of git (records/ convention); regenerate them with the
+# committed tools: cuda/ofcuda_cluster/tools/dump_case and gen_case_files.py.
+cuda/*/cases/*.json
+replays-rl/
