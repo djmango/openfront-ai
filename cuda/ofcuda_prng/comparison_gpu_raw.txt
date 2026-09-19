@@ -1,0 +1,115 @@
+=========================================
+RUSTC-CODEGEN-CUDA: ofcuda_prng
+=========================================
+
+Detected GPU arch: sm_120a (via nvidia-smi)
+
+This is the proper cargo workflow:
+  CARGO_ENCODED_RUSTFLAGS=<cuda-oxide flags> cargo run
+
+Building and running ofcuda_prng (bin: ofcuda_prng)...
+
+   Compiling ofcuda_prng v0.1.0 (/var/lib/hermes/data/workspaces/skg/ofcuda_prng)
+warning: value assigned to `sp` is never read
+   --> src/lib.rs:324:22
+    |
+324 |         let mut sp = 0usize;
+    |                      ^^^^^^ this value is reassigned later and never used
+...
+329 |         sp = 1;
+    |         ------ `sp` is overwritten here before the previous value is read
+    |
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: `ofcuda_prng` (lib) generated 1 warning
+    Finished `release` profile [optimized] target(s) in 3.79s
+     Running `target/release/ofcuda_prng`
+# gpu: map /opt/data/workspaces/skg/openfront-ai/openfront/resources/maps/pangaea 1000x1000  terrain_bytes 1000000
+# device: NVIDIA GeForce RTX 5080, 610.57.04
+# device: NVIDIA GeForce RTX 5080, 610.57.04
+# gpu reference: reference.txt
+=== CUDA kernel vs engine reference ===
+map Pangaea  bots 2
+seeds parity=pyr6b8nU alpha=clU96jeF bravo=mDGLYXUh charlie=Yp83yTcr
+next() 24 raw u32 per seed: 96/96 match
+next_int 16 draws x 4 ranges x 4 seeds: 256/256 match
+simple_hash(player_id)-seeded 24 u32: 96/96 match
+semantics: chance(100)x16: 64/64 match | chance(2)x16: 64/64 match | chance(1)x16: 4/4 match | rand_element(7)x3: 12/12 match |   +next3: 12/12 match | rand_element(empty) consumed/next3: 16/16 match | shuffle_array(8): 32/32 match
+shuffle_array(8) +next3: 12/12 match
+simple_hash(strings): 20/20 match
+simple_hash vs engine-dumped hashes/seed sums: 16/16 match
+--- spawn tiles ---
+seed0 bot0 id=yko2bcl3 seed=1124266125 engine_tile=63461 (461,63) port_tile=63461 (461,63) attempts=2 draws=4 after=[456a5f03 fe0f8ef9 a9592ddb] MATCH
+seed0 bot1 id=6go4bw8s seed=1181624292 engine_tile=866675 (675,866) port_tile=866675 (675,866) attempts=1 draws=2 after=[0f4656f6 24d4593a f232e534] MATCH
+seed0 human id=g8bhtfpp seed=1143292083 engine_tile=333333 (333,333) port_tile=333333 (333,333) attempts=0 draws=0 after=[a8930871 b8e39daa 83d4ab38] MATCH
+seed1 bot0 id=h0dh3v43 seed=1113732852 engine_tile=850530 (530,850) port_tile=850530 (530,850) attempts=1 draws=2 after=[8c7284d7 d892561d c250459b] MATCH
+seed1 bot1 id=xg9wkirb seed=1940974781 engine_tile=824470 (470,824) port_tile=824470 (470,824) attempts=2 draws=4 after=[7154d9ce c7870605 4be765cc] MATCH
+seed1 human id=hgmekjth seed=1297906700 engine_tile=333333 (333,333) port_tile=333333 (333,333) attempts=0 draws=0 after=[727653bf 4ce8ec29 a7d37585] MATCH
+seed2 bot0 id=ep3zbo4r seed=-1191936337 engine_tile=159388 (388,159) port_tile=159388 (388,159) attempts=3 draws=6 after=[328acbd6 db9562bf b7a1131c] MATCH
+seed2 bot1 id=vprge7br seed=1804600353 engine_tile=369608 (608,369) port_tile=369608 (608,369) attempts=5 draws=10 after=[28580e0a 35308c3c 584ff782] MATCH
+seed2 human id=xpa9wn0c seed=-1180741748 engine_tile=333333 (333,333) port_tile=333333 (333,333) attempts=0 draws=0 after=[632b46a0 1a1bab82 b6dd838d] MATCH
+seed3 bot0 id=yvwozt45 seed=-1470449836 engine_tile=86290 (290,86) port_tile=86290 (290,86) attempts=2 draws=4 after=[7bdce02e 9a42de45 90bcb395] MATCH
+seed3 bot1 id=44gbrxt1 seed=-846713082 engine_tile=809631 (631,809) port_tile=809631 (631,809) attempts=1 draws=2 after=[ea6c1b95 32fdccac 7e5e94ad] MATCH
+seed3 human id=49nbx46n seed=-1189779785 engine_tile=333333 (333,333) port_tile=333333 (333,333) attempts=0 draws=0 after=[b10a620b f605c0a0 f7a2ef7f] MATCH
+spawn tiles: 12/12 match
+spawn x/y: 24/24 match
+post-spawn next3 draws: 0/0 match
+GPU vs CPU cross check: 60/60 match
+FIRST DIVERGENCE: none
+bit_exact true
+--- CPU companion (same crate, no CUDA) ---
+=== CPU port vs engine reference ===
+map Pangaea  bots 2
+seeds parity=pyr6b8nU alpha=clU96jeF bravo=mDGLYXUh charlie=Yp83yTcr
+next() 24 raw u32 per seed: 96/96 match
+next_int 16 draws x 4 ranges x 4 seeds: 256/256 match
+simple_hash(player_id)-seeded 24 u32: 96/96 match
+semantics: chance(100)x16: 64/64 match | chance(2)x16: 64/64 match | chance(1)x16: 4/4 match | rand_element(7)x3: 12/12 match |   +next3: 12/12 match | rand_element(empty) consumed/next3: 16/16 match | shuffle_array(8): 32/32 match
+shuffle_array(8) +next3: 12/12 match
+simple_hash(strings): 20/20 match
+simple_hash vs engine-dumped hashes/seed sums: 16/16 match
+--- spawn tiles ---
+seed0 bot0 id=yko2bcl3 seed=1124266125 engine_tile=63461 (461,63) port_tile=63461 (461,63) attempts=2 draws=4 after=[456a5f03 fe0f8ef9 a9592ddb] MATCH
+seed0 bot1 id=6go4bw8s seed=1181624292 engine_tile=866675 (675,866) port_tile=866675 (675,866) attempts=1 draws=2 after=[0f4656f6 24d4593a f232e534] MATCH
+seed0 human id=g8bhtfpp seed=1143292083 engine_tile=333333 (333,333) port_tile=333333 (333,333) attempts=0 draws=0 after=[a8930871 b8e39daa 83d4ab38] MATCH
+seed1 bot0 id=h0dh3v43 seed=1113732852 engine_tile=850530 (530,850) port_tile=850530 (530,850) attempts=1 draws=2 after=[8c7284d7 d892561d c250459b] MATCH
+seed1 bot1 id=xg9wkirb seed=1940974781 engine_tile=824470 (470,824) port_tile=824470 (470,824) attempts=2 draws=4 after=[7154d9ce c7870605 4be765cc] MATCH
+seed1 human id=hgmekjth seed=1297906700 engine_tile=333333 (333,333) port_tile=333333 (333,333) attempts=0 draws=0 after=[727653bf 4ce8ec29 a7d37585] MATCH
+seed2 bot0 id=ep3zbo4r seed=-1191936337 engine_tile=159388 (388,159) port_tile=159388 (388,159) attempts=3 draws=6 after=[328acbd6 db9562bf b7a1131c] MATCH
+seed2 bot1 id=vprge7br seed=1804600353 engine_tile=369608 (608,369) port_tile=369608 (608,369) attempts=5 draws=10 after=[28580e0a 35308c3c 584ff782] MATCH
+seed2 human id=xpa9wn0c seed=-1180741748 engine_tile=333333 (333,333) port_tile=333333 (333,333) attempts=0 draws=0 after=[632b46a0 1a1bab82 b6dd838d] MATCH
+seed3 bot0 id=yvwozt45 seed=-1470449836 engine_tile=86290 (290,86) port_tile=86290 (290,86) attempts=2 draws=4 after=[7bdce02e 9a42de45 90bcb395] MATCH
+seed3 bot1 id=44gbrxt1 seed=-846713082 engine_tile=809631 (631,809) port_tile=809631 (631,809) attempts=1 draws=2 after=[ea6c1b95 32fdccac 7e5e94ad] MATCH
+seed3 human id=49nbx46n seed=-1189779785 engine_tile=333333 (333,333) port_tile=333333 (333,333) attempts=0 draws=0 after=[b10a620b f605c0a0 f7a2ef7f] MATCH
+spawn tiles: 12/12 match
+spawn x/y: 24/24 match
+post-spawn next3 draws: 0/0 match
+GPU vs CPU cross check: 0/0 match
+FIRST DIVERGENCE: none
+bit_exact true
+--- raw streams (engine vs GPU) ---
+seed0 engine 736bcd04 030abf88 df04d584 831eb185 36fd9e0a 12ac11f8 3ef78860 88a65a21 3b6734b7 f9e825ce 522a0651 3aea81b6 bd31a42f bf52dcab c1ae26eb 9ac47afa a932ca98 a0d6c816 cc17ef89 a705eb6a c3704947 b2b9f25d 4a35ec3a 586fd5c7
+seed0 gpu    736bcd04 030abf88 df04d584 831eb185 36fd9e0a 12ac11f8 3ef78860 88a65a21 3b6734b7 f9e825ce 522a0651 3aea81b6 bd31a42f bf52dcab c1ae26eb 9ac47afa a932ca98 a0d6c816 cc17ef89 a705eb6a c3704947 b2b9f25d 4a35ec3a 586fd5c7
+seed1 engine 7c2c1cf5 aeea2371 5f777d7e e4c6fa9c 58cdbdd3 22d9ec72 d3e43035 ab4fa318 165a0605 920024a0 f7bba49d e1687967 d5f6d3bb 90283314 6fdca526 3c45671d 389d4974 c3dbca0a 94761242 c9e01b2b 2b65a6f1 56c464db 023501f0 088fdc81
+seed1 gpu    7c2c1cf5 aeea2371 5f777d7e e4c6fa9c 58cdbdd3 22d9ec72 d3e43035 ab4fa318 165a0605 920024a0 f7bba49d e1687967 d5f6d3bb 90283314 6fdca526 3c45671d 389d4974 c3dbca0a 94761242 c9e01b2b 2b65a6f1 56c464db 023501f0 088fdc81
+seed2 engine efa94c21 21f8ecd7 11be6953 6eed8178 ddb9029f 3996afc7 c18aeb19 f41955db f99709c1 1ebabd75 0c4ab3de 6bcbc81d 67e2c8c9 a7e346a7 511c6c2e d8f981a0 e940b657 9763ba97 27c9d647 f0cc3df3 2acaa227 f599fc44 854dddca 5c308a01
+seed2 gpu    efa94c21 21f8ecd7 11be6953 6eed8178 ddb9029f 3996afc7 c18aeb19 f41955db f99709c1 1ebabd75 0c4ab3de 6bcbc81d 67e2c8c9 a7e346a7 511c6c2e d8f981a0 e940b657 9763ba97 27c9d647 f0cc3df3 2acaa227 f599fc44 854dddca 5c308a01
+seed3 engine 1e59a948 66e2bf58 180fd43a 86e6acb8 0676260c 1c94bcae df7e3d2f 7c8150c7 013f20a6 c3c93a8e 80a4289a ef673235 6cb69f68 e25d2786 b661f6b0 ddcc2882 43628366 cc0c49d7 8906e860 8448b8b2 cef930eb c61176e5 0d2a481e 9ed0bade
+seed3 gpu    1e59a948 66e2bf58 180fd43a 86e6acb8 0676260c 1c94bcae df7e3d2f 7c8150c7 013f20a6 c3c93a8e 80a4289a ef673235 6cb69f68 e25d2786 b661f6b0 ddcc2882 43628366 cc0c49d7 8906e860 8448b8b2 cef930eb c61176e5 0d2a481e 9ed0bade
+--- spawn table (engine vs GPU) ---
+seed0 bot0 engine_tile=63461 gpu_tile=63461 engine_seed=1124266125
+seed0 bot1 engine_tile=866675 gpu_tile=866675 engine_seed=1181624292
+seed0 human engine_tile=333333 gpu_tile=333333
+seed1 bot0 engine_tile=850530 gpu_tile=850530 engine_seed=1113732852
+seed1 bot1 engine_tile=824470 gpu_tile=824470 engine_seed=1940974781
+seed1 human engine_tile=333333 gpu_tile=333333
+seed2 bot0 engine_tile=159388 gpu_tile=159388 engine_seed=-1191936337
+seed2 bot1 engine_tile=369608 gpu_tile=369608 engine_seed=1804600353
+seed2 human engine_tile=333333 gpu_tile=333333
+seed3 bot0 engine_tile=86290 gpu_tile=86290 engine_seed=-1470449836
+seed3 bot1 engine_tile=809631 gpu_tile=809631 engine_seed=-846713082
+seed3 human engine_tile=333333 gpu_tile=333333
+GPU_VS_ENGINE_BIT_EXACT true
+CPU_VS_ENGINE_BIT_EXACT true
+GPU_VS_CPU_CROSS 60/60
+ALL_BIT_EXACT true

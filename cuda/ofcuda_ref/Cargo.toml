@@ -1,0 +1,21 @@
+[package]
+name = "ofcuda_ref"
+version = "0.1.0"
+edition = "2021"
+default-run = "ofcuda_ref"
+
+# Own workspace root: this crate lives inside the openfront-ai checkout but must
+# NOT join `rust/Cargo.toml`'s member list (that would modify the reference
+# repo). An empty `[workspace]` table makes it standalone while still allowing
+# a path dependency on the engine crate.
+[workspace]
+
+[dependencies]
+openfront-engine = { path = "/opt/data/workspaces/skg/openfront-ai/rust/engine" }
+
+[[bin]]
+name = "ofcuda_ref"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 2

@@ -1,0 +1,294 @@
+# ofcuda_prng reference dump v1
+# engine openfront-engine; prng rust/engine/src/prng.rs
+# repo /var/lib/hermes/data/workspaces/skg/openfront-ai/rust/engine/../..
+map Pangaea
+bots 2
+seeds 4
+seed 0 parity pyr6b8nU 956595082
+stream 0 736bcd04 030abf88 df04d584 831eb185 36fd9e0a 12ac11f8 3ef78860 88a65a21 3b6734b7 f9e825ce 522a0651 3aea81b6 bd31a42f bf52dcab c1ae26eb 9ac47afa a932ca98 a0d6c816 cc17ef89 a705eb6a c3704947 b2b9f25d 4a35ec3a 586fd5c7
+draws 0 0 100 45 1 87 51 21 7 24 53 23 97 32 23 73 74 75 60
+draws 0 40 80 58 40 74 60 48 42 49 61 49 79 52 49 69 69 70 64
+draws 0 0 7 3 0 6 3 1 0 1 3 1 6 2 1 5 5 5 4
+draws 0 0 5 2 0 4 2 1 0 1 2 1 4 1 1 3 3 3 3
+sem 0 chance100 0000000000000000
+sem 0 chance2 0000001100010000
+sem 0 chance1_all true
+sem 0 rand7 3 0 6 831eb185 36fd9e0a 12ac11f8
+sem 0 rand_empty None consumed 0 next 736bcd04 030abf88 df04d584
+sem 0 shuffle8 1 4 7 6 2 5 0 3 next 88a65a21 3b6734b7 f9e825ce
+pstream 0 DUMPPLAYER0 982138629 cd1166f4 9e2df925 9d40e73e f1bdd404 6a70dd48 ea59602f b3aa4f19 34b7535c f64ebf7e e1fff28f a0154531 40e8e091 e8aa75e4 3e4b7bdc 49cb0231 8fe4450e d2fd5888 6b998280 cf0196c9 c76eac71 a436fa86 17e2b01b d9f65e1a 4aa1170e
+seed 1 alpha clU96jeF 293513378
+stream 1 7c2c1cf5 aeea2371 5f777d7e e4c6fa9c 58cdbdd3 22d9ec72 d3e43035 ab4fa318 165a0605 920024a0 f7bba49d e1687967 d5f6d3bb 90283314 6fdca526 3c45671d 389d4974 c3dbca0a 94761242 c9e01b2b 2b65a6f1 56c464db 023501f0 088fdc81
+draws 1 0 100 48 68 37 89 34 13 82 66 8 57 96 88 83 56 43 23
+draws 1 40 80 59 67 54 75 53 45 73 66 43 62 78 75 73 62 57 49
+draws 1 0 7 3 4 2 6 2 0 5 4 0 3 6 6 5 3 3 1
+draws 1 0 5 2 3 1 4 1 0 4 3 0 2 4 4 4 2 2 1
+sem 1 chance100 0000000000000000
+sem 1 chance2 1000111100110010
+sem 1 chance1_all true
+sem 1 rand7 3 4 2 e4c6fa9c 58cdbdd3 22d9ec72
+sem 1 rand_empty None consumed 0 next 7c2c1cf5 aeea2371 5f777d7e
+sem 1 shuffle8 5 7 0 1 6 2 4 3 next ab4fa318 165a0605 920024a0
+pstream 1 DUMPPLAYER1 982138628 9c993d05 5c32a216 13d0b46e cfd6a528 748d0cd6 173a03e5 1cc6cb46 7643df10 c32d499f 53fa89ac 09e02cde 84cae578 2239dafc 8abc4629 0fb955d2 427b10e1 b3edb24e 0e9dc937 eb50b507 30a0c710 8cbab9b0 9f6ddb12 70aa4a1f 2e8f96b4
+seed 2 bravo mDGLYXUh 980897618
+stream 2 efa94c21 21f8ecd7 11be6953 6eed8178 ddb9029f 3996afc7 c18aeb19 f41955db f99709c1 1ebabd75 0c4ab3de 6bcbc81d 67e2c8c9 a7e346a7 511c6c2e d8f981a0 e940b657 9763ba97 27c9d647 f0cc3df3 2acaa227 f599fc44 854dddca 5c308a01
+draws 2 0 100 93 13 6 43 86 22 75 95 97 12 4 42 40 65 31 84
+draws 2 40 80 77 45 42 57 74 48 70 78 78 44 41 56 56 66 52 73
+draws 2 0 7 6 0 0 3 6 1 5 6 6 0 0 2 2 4 2 5
+draws 2 0 5 4 0 0 2 4 1 3 4 4 0 0 2 2 3 1 4
+sem 2 chance100 0000000000000000
+sem 2 chance2 0010100111000101
+sem 2 chance1_all true
+sem 2 rand7 6 0 0 6eed8178 ddb9029f 3996afc7
+sem 2 rand_empty None consumed 0 next efa94c21 21f8ecd7 11be6953
+sem 2 shuffle8 4 1 5 3 2 6 0 7 next f41955db f99709c1 1ebabd75
+pstream 2 DUMPPLAYER2 982138627 fabf916e c24343d8 2605113d b8630694 3ab06039 e3ce9132 3fbcaeb3 5a3aa90c 64fc0e47 2671c83b 1400eca0 80e86761 8763694b 908219dc 8eb2f890 8dcd4de7 779a6c24 a7f27d53 15296792 0f6241e7 967d4189 86c67578 52680029 358cc8be
+seed 3 charlie Yp83yTcr 1533485028
+stream 3 1e59a948 66e2bf58 180fd43a 86e6acb8 0676260c 1c94bcae df7e3d2f 7c8150c7 013f20a6 c3c93a8e 80a4289a ef673235 6cb69f68 e25d2786 b661f6b0 ddcc2882 43628366 cc0c49d7 8906e860 8448b8b2 cef930eb c61176e5 0d2a481e 9ed0bade
+draws 3 0 100 11 40 9 52 2 11 87 48 0 76 50 93 42 88 71 86
+draws 3 40 80 44 56 43 61 41 44 74 59 40 70 60 77 56 75 68 74
+draws 3 0 7 0 2 0 3 0 0 6 3 0 5 3 6 2 6 4 6
+draws 3 0 5 0 2 0 2 0 0 4 2 0 3 2 4 2 4 3 4
+sem 3 chance100 0000000010000000
+sem 3 chance2 1000001000100001
+sem 3 chance1_all true
+sem 3 rand7 0 2 0 86e6acb8 0676260c 1c94bcae
+sem 3 rand_empty None consumed 0 next 1e59a948 66e2bf58 180fd43a
+sem 3 shuffle8 4 1 3 5 6 7 2 0 next 7c8150c7 013f20a6 c3c93a8e
+pstream 3 DUMPPLAYER3 982138626 eed6648f 1bd7c29e 28107cd2 09d717bc 47022f2f de711512 53142fe8 7b5d120c 31c57f6d e88350d3 f2d0bfca c990b755 7c1e8f50 b41c167c da56a591 4b7abc8c 341619e8 bc7afa99 52a68f2b 71b51e53 8363faff 216368dc 6a033301 1b100c8d
+dims 0 1000 1000
+players 0 1:H:g8bhtfpp
+ownerplane_before_bot1 0 0
+spawn 0 0 yko2bcl3 1124266125 63461 461 63 0 0
+spawn 0 1 6go4bw8s 1181624292 866675 675 866 52 1
+owner 0 1 59459 2
+owner 0 1 59460 2
+owner 0 1 59461 2
+owner 0 1 59462 2
+owner 0 1 60458 2
+owner 0 1 60459 2
+owner 0 1 60460 2
+owner 0 1 60461 2
+owner 0 1 60462 2
+owner 0 1 60463 2
+owner 0 1 61457 2
+owner 0 1 61458 2
+owner 0 1 61459 2
+owner 0 1 61460 2
+owner 0 1 61461 2
+owner 0 1 61462 2
+owner 0 1 61463 2
+owner 0 1 61464 2
+owner 0 1 62457 2
+owner 0 1 62458 2
+owner 0 1 62459 2
+owner 0 1 62460 2
+owner 0 1 62461 2
+owner 0 1 62462 2
+owner 0 1 62463 2
+owner 0 1 62464 2
+owner 0 1 63457 2
+owner 0 1 63458 2
+owner 0 1 63459 2
+owner 0 1 63460 2
+owner 0 1 63461 2
+owner 0 1 63462 2
+owner 0 1 63463 2
+owner 0 1 63464 2
+owner 0 1 64457 2
+owner 0 1 64458 2
+owner 0 1 64459 2
+owner 0 1 64460 2
+owner 0 1 64461 2
+owner 0 1 64462 2
+owner 0 1 64463 2
+owner 0 1 64464 2
+owner 0 1 65458 2
+owner 0 1 65459 2
+owner 0 1 65460 2
+owner 0 1 65461 2
+owner 0 1 65462 2
+owner 0 1 65463 2
+owner 0 1 66459 2
+owner 0 1 66460 2
+owner 0 1 66461 2
+owner 0 1 66462 2
+prev 0 1 63461
+human 0 g8bhtfpp 1143292083 333333 333 333 true Some(333333)
+dims 1 1000 1000
+players 1 1:H:hgmekjth
+ownerplane_before_bot1 1 0
+spawn 1 0 h0dh3v43 1113732852 850530 530 850 0 0
+spawn 1 1 xg9wkirb 1940974781 824470 470 824 52 1
+owner 1 1 846528 2
+owner 1 1 846529 2
+owner 1 1 846530 2
+owner 1 1 846531 2
+owner 1 1 847527 2
+owner 1 1 847528 2
+owner 1 1 847529 2
+owner 1 1 847530 2
+owner 1 1 847531 2
+owner 1 1 847532 2
+owner 1 1 848526 2
+owner 1 1 848527 2
+owner 1 1 848528 2
+owner 1 1 848529 2
+owner 1 1 848530 2
+owner 1 1 848531 2
+owner 1 1 848532 2
+owner 1 1 848533 2
+owner 1 1 849526 2
+owner 1 1 849527 2
+owner 1 1 849528 2
+owner 1 1 849529 2
+owner 1 1 849530 2
+owner 1 1 849531 2
+owner 1 1 849532 2
+owner 1 1 849533 2
+owner 1 1 850526 2
+owner 1 1 850527 2
+owner 1 1 850528 2
+owner 1 1 850529 2
+owner 1 1 850530 2
+owner 1 1 850531 2
+owner 1 1 850532 2
+owner 1 1 850533 2
+owner 1 1 851526 2
+owner 1 1 851527 2
+owner 1 1 851528 2
+owner 1 1 851529 2
+owner 1 1 851530 2
+owner 1 1 851531 2
+owner 1 1 851532 2
+owner 1 1 851533 2
+owner 1 1 852527 2
+owner 1 1 852528 2
+owner 1 1 852529 2
+owner 1 1 852530 2
+owner 1 1 852531 2
+owner 1 1 852532 2
+owner 1 1 853528 2
+owner 1 1 853529 2
+owner 1 1 853530 2
+owner 1 1 853531 2
+prev 1 1 850530
+human 1 hgmekjth 1297906700 333333 333 333 true Some(333333)
+dims 2 1000 1000
+players 2 1:H:xpa9wn0c
+ownerplane_before_bot1 2 0
+spawn 2 0 ep3zbo4r -1191936337 159388 388 159 0 0
+spawn 2 1 vprge7br 1804600353 369608 608 369 52 1
+owner 2 1 155386 2
+owner 2 1 155387 2
+owner 2 1 155388 2
+owner 2 1 155389 2
+owner 2 1 156385 2
+owner 2 1 156386 2
+owner 2 1 156387 2
+owner 2 1 156388 2
+owner 2 1 156389 2
+owner 2 1 156390 2
+owner 2 1 157384 2
+owner 2 1 157385 2
+owner 2 1 157386 2
+owner 2 1 157387 2
+owner 2 1 157388 2
+owner 2 1 157389 2
+owner 2 1 157390 2
+owner 2 1 157391 2
+owner 2 1 158384 2
+owner 2 1 158385 2
+owner 2 1 158386 2
+owner 2 1 158387 2
+owner 2 1 158388 2
+owner 2 1 158389 2
+owner 2 1 158390 2
+owner 2 1 158391 2
+owner 2 1 159384 2
+owner 2 1 159385 2
+owner 2 1 159386 2
+owner 2 1 159387 2
+owner 2 1 159388 2
+owner 2 1 159389 2
+owner 2 1 159390 2
+owner 2 1 159391 2
+owner 2 1 160384 2
+owner 2 1 160385 2
+owner 2 1 160386 2
+owner 2 1 160387 2
+owner 2 1 160388 2
+owner 2 1 160389 2
+owner 2 1 160390 2
+owner 2 1 160391 2
+owner 2 1 161385 2
+owner 2 1 161386 2
+owner 2 1 161387 2
+owner 2 1 161388 2
+owner 2 1 161389 2
+owner 2 1 161390 2
+owner 2 1 162386 2
+owner 2 1 162387 2
+owner 2 1 162388 2
+owner 2 1 162389 2
+prev 2 1 159388
+human 2 xpa9wn0c -1180741748 333333 333 333 true Some(333333)
+dims 3 1000 1000
+players 3 1:H:49nbx46n
+ownerplane_before_bot1 3 0
+spawn 3 0 yvwozt45 -1470449836 86290 290 86 0 0
+spawn 3 1 44gbrxt1 -846713082 809631 631 809 52 1
+owner 3 1 82288 2
+owner 3 1 82289 2
+owner 3 1 82290 2
+owner 3 1 82291 2
+owner 3 1 83287 2
+owner 3 1 83288 2
+owner 3 1 83289 2
+owner 3 1 83290 2
+owner 3 1 83291 2
+owner 3 1 83292 2
+owner 3 1 84286 2
+owner 3 1 84287 2
+owner 3 1 84288 2
+owner 3 1 84289 2
+owner 3 1 84290 2
+owner 3 1 84291 2
+owner 3 1 84292 2
+owner 3 1 84293 2
+owner 3 1 85286 2
+owner 3 1 85287 2
+owner 3 1 85288 2
+owner 3 1 85289 2
+owner 3 1 85290 2
+owner 3 1 85291 2
+owner 3 1 85292 2
+owner 3 1 85293 2
+owner 3 1 86286 2
+owner 3 1 86287 2
+owner 3 1 86288 2
+owner 3 1 86289 2
+owner 3 1 86290 2
+owner 3 1 86291 2
+owner 3 1 86292 2
+owner 3 1 86293 2
+owner 3 1 87286 2
+owner 3 1 87287 2
+owner 3 1 87288 2
+owner 3 1 87289 2
+owner 3 1 87290 2
+owner 3 1 87291 2
+owner 3 1 87292 2
+owner 3 1 87293 2
+owner 3 1 88287 2
+owner 3 1 88288 2
+owner 3 1 88289 2
+owner 3 1 88290 2
+owner 3 1 88291 2
+owner 3 1 88292 2
+owner 3 1 89288 2
+owner 3 1 89289 2
+owner 3 1 89290 2
+owner 3 1 89291 2
+prev 3 1 86290
+human 3 49nbx46n -1189779785 333333 333 333 true Some(333333)
