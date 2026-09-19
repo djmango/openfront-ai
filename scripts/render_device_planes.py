@@ -2,23 +2,39 @@
 """Render a planes.bin-style file to an MP4 + PNG stills (stdlib + ffmpeg/magick).
 
 Usage:
-  render_planes.py <planes.bin> <terrain.bin> <out.mp4> <still_prefix>
+  render_planes.py <planes.bin> <terrain.bin> <out.mp4> <still_prefix> [W H]
+
+W and H are the map's real tile dimensions (from its manifest.json). They are
+optional only for backwards compatibility, where they default to 1000x1000:
+pass them for any non-square map, otherwise the plane is squashed into a square
+and the picture lies about the geometry.
 
 Water = the 12 most frequent terrain values (measured: 63 is open ocean, then the
-shallow-water gradient). Owners get a coral-red / sky-blue palette.
+shallow-water gradient). Owners get a coral-red / sky-blue palette. Stills keep
+the plane's true aspect ratio (fitted into an 800x800 box, never squared) and the
+video is letterboxed onto a square canvas the same way.
 """
 import array, collections, os, subprocess, sys
 
 if len(sys.argv) >= 5:
     planes_path, terrain_path, out_mp4, still_prefix = sys.argv[1:5]
+    W = int(sys.argv[5]) if len(sys.argv) > 5 else 1000
+    H = int(sys.argv[6]) if len(sys.argv) > 6 else W
 else:
     # Backwards-compatible default (original single-argument-free invocation).
     planes_path = "/tmp/ofhash_record_late/planes.bin"
     terrain_path = "/tmp/ofhash_record_late/terrain.bin"
     out_mp4 = "/tmp/cuda_game.mp4"
     still_prefix = "/tmp/cuda_still"
-W = H = 1000
-FRAMES = os.path.getsize(planes_path) // (W * H * 2)
+    W = H = 1000
+_psz = os.path.getsize(planes_path)
+if _psz % (W * H * 2) != 0:
+    sys.exit(
+        f"FATAL: {planes_path} is {_psz} bytes, not a multiple of "
+        f"W*H*2 = {W * H * 2} for {W}x{H} - wrong W/H for this plane"
+    )
+FRAMES = _psz // (W * H * 2)
+print(f"planes {planes_path} {W}x{H} frames={FRAMES}", flush=True)
 
 terrain = open(terrain_path, "rb").read()
 hist = collections.Counter(terrain)
@@ -62,7 +78,8 @@ def frame_rgb(owners):
 planes = open(planes_path, "rb")
 cmd = ["ffmpeg", "-y", "-loglevel", "error",
        "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", "12", "-i", "-",
-       "-vf", "scale=720:720:flags=neighbor",
+       "-vf", f"scale=720:720:force_original_aspect_ratio=decrease:flags=neighbor,"
+              f"pad=720:720:(ow-iw)/2:(oh-ih)/2:color=0x101010",
        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20", out_mp4]
 enc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
 

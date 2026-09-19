@@ -3,7 +3,9 @@
 import array, collections, os, subprocess, sys
 
 D = "/tmp/ofhash_record_late"
-W = H = 1000
+# Real map tile dimensions; argv 1/2 override (W H), else 1000x1000.
+W = int(sys.argv[1]) if len(sys.argv) > 1 else 1000
+H = int(sys.argv[2]) if len(sys.argv) > 2 else W
 FRAMES = os.path.getsize(f"{D}/planes.bin") // (W * H * 2)
 
 terrain = open(f"{D}/terrain.bin", "rb").read()
@@ -53,7 +55,7 @@ def frame_rgb(owners):
 planes = open(f"{D}/planes.bin", "rb")
 cmd = ["ffmpeg", "-y", "-loglevel", "error",
        "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", "12", "-i", "-",
-       "-vf", "scale=720:720:flags=neighbor",
+       "-vf", "scale=720:720:force_original_aspect_ratio=decrease:flags=neighbor,pad=720:720:(ow-iw)/2:(oh-ih)/2:color=0x101010",
        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20", "/tmp/cuda_game.mp4"]
 enc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
 

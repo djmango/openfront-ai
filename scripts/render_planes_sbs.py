@@ -14,8 +14,12 @@ into the label bar of every frame.
 import array, collections, os, subprocess, sys
 
 dev_path, ref_path, terrain_path, out_mp4, still_prefix = sys.argv[1:6]
-W = H = 1000
-PANES_H = 1000
+# Real map tile dimensions (argv 6/7); default 1000x1000 only for the historical
+# square pangaea-style dump. A non-square plane MUST pass its W/H or it is
+# squashed into a square and every pane lies about the geometry.
+W = int(sys.argv[6]) if len(sys.argv) > 6 else 1000
+H = int(sys.argv[7]) if len(sys.argv) > 7 else W
+PANES_H = H
 BAR_H = 64
 FRAME_W = 2 * W
 FRAME_H = PANES_H + BAR_H
