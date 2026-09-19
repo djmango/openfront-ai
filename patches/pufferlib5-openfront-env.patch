@@ -1,0 +1,622 @@
+From 3665be0ced52fb1028226303d429f357eb15955d Mon Sep 17 00:00:00 2001
+From: hermes <28496988+djmango@users.noreply.github.com>
+Date: Fri, 18 Sep 2026 18:40:40 -0700
+Subject: [PATCH] openfront: RL env C ABI, curriculum-state persistence, state
+ round-trip test
+
+Local commit of the OpenFront integration for PufferLib. This checkout's
+only remote is upstream PufferAI/PufferLib, so it is not pushable from here;
+the identical change is also exported to djmango/openfront-ai under patches/
+so it survives independently of this working tree.
+
+- ocean/openfront/openfront.h  +177  env C ABI surface
+- src/pufferenv.h              +31   env declarations
+- src/pufferl.cu               +39   curriculum state: a per-env sidecar written
+                                     in the same atomic save as the weights, so
+                                     the stage index and the gate's win/death
+                                     window survive a resume instead of every env
+                                     being rebuilt at stage 0
+- openfront_state_test.c + build_state_test.sh   state round-trip test
+---
+ ocean/openfront/build_state_test.sh    |  45 +++++
+ ocean/openfront/openfront.h            | 177 +++++++++++++++++++
+ ocean/openfront/openfront_state_test.c | 230 +++++++++++++++++++++++++
+ src/pufferenv.h                        |  31 ++++
+ src/pufferl.cu                         |  39 +++++
+ 5 files changed, 522 insertions(+)
+ create mode 100644 ocean/openfront/build_state_test.sh
+ create mode 100644 ocean/openfront/openfront_state_test.c
+
+diff --git a/ocean/openfront/build_state_test.sh b/ocean/openfront/build_state_test.sh
+new file mode 100644
+index 0000000..e67682d
+--- /dev/null
++++ b/ocean/openfront/build_state_test.sh
+@@ -0,0 +1,45 @@
++#!/usr/bin/env bash
++# Focused build + run of the OpenFront curriculum-resume sidecar tests.
++#
++#   bash ocean/openfront/build_state_test.sh
++#
++# Same shape as build_smoke.sh (no raylib, no window, no CUDA: the engine's
++# prebuilt cdylib supplies ofenv_*). Unlike build_smoke.sh it does not call
++# `nix shell nixpkgs#gcc`, so it works with whatever compiler is already on
++# PATH - pass CC_BIN to override.
++#
++#   OF_REPO   openfront-ai checkout   (default /opt/data/workspaces/skg/openfront-ai)
++#   CC_BIN    compiler                (default gcc)
++#   OUT       output binary           (default ocean/openfront/openfront_state_test)
++set -euo pipefail
++
++HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++ROOT="$(cd "$HERE/../.." && pwd)"   # PufferLib5 root
++OF_REPO="${OF_REPO:-/opt/data/workspaces/skg/openfront-ai}"
++OUT="${OUT:-$HERE/openfront_state_test}"
++CC_BIN="${CC_BIN:-gcc}"
++
++LIB_DIR="$OF_REPO/rust/target/release"
++ABI_HDR="$OF_REPO/include/openfront_env.h"
++
++if [ ! -f "$LIB_DIR/libopenfront_engine.so" ]; then
++    echo "missing $LIB_DIR/libopenfront_engine.so" >&2
++    exit 1
++fi
++if [ ! -f "$ABI_HDR" ]; then
++    echo "missing $ABI_HDR" >&2
++    exit 1
++fi
++
++echo "== building $OUT =="
++set -x
++"$CC_BIN" -O2 -g -Wall -Wno-unused-function \
++    -I"$HERE" -I"$HERE/shim" -I"$ROOT/src" -I"$ROOT/vendor" \
++    -DOPENFRONT_ENV_ABI="\"$ABI_HDR\"" \
++    "$HERE/openfront_state_test.c" \
++    -L"$LIB_DIR" -lopenfront_engine \
++    -lm -lpthread -o "$OUT"
++set +x
++
++echo "== running $OUT =="
++LD_LIBRARY_PATH="$LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$OUT"
+\ No newline at end of file
+diff --git a/ocean/openfront/openfront.h b/ocean/openfront/openfront.h
+index 5ff7120..b357e5e 100644
+--- a/ocean/openfront/openfront.h
++++ b/ocean/openfront/openfront.h
+@@ -109,6 +109,11 @@
+ #include <time.h>
+ 
+ typedef float obs_t;
++/* This env carries resume state the weights do not encode (the curriculum
++ * stage gate); implement the optional save/load hooks declared there. Must be
++ * defined before the include. See puf_save_state/puf_load_state at the end of
++ * this file. */
++#define PUF_HAS_STATE_HOOKS 1
+ #include "pufferenv.h"
+ 
+ /* The whole conditional block is one head: ACT_SIZES must equal
+@@ -1533,6 +1538,178 @@ void puf_close(Env* env) {
+ #endif
+ }
+ 
++/* ======================================================================== */
++/* curriculum resume state (src/pufferl.cu calls these at checkpoint I/O)    */
++/* ======================================================================== */
++/* The weights checkpoint holds the policy; the curriculum stage does NOT
++ * follow from the weights. `stage` is the env's own progress gate - it moves
++ * only when a full OPENFRONT_WINDOW window of finished episodes beats the
++ * stage's win_at (or falls under the demote floor) - and until this sidecar
++ * existed nothing serialized it. A LOAD=auto restart therefore rebuilt every
++ * session at cfg `stage` (0) and the run re-climbed stages it had already
++ * earned.
++ *
++ * Resume semantics (why restoring is safe, not a gate skip):
++ *   - The sidecar is written in the same save as the weights and names that
++ *     checkpoint, so (weights, stage, window) always describe one step. The
++ *     restore hands the agent exactly the stage its own restored weights had
++ *     already earned; it cannot confer a stage the policy never reached,
++ *     because the stage is read from the file rather than inferred.
++ *   - The rolling window travels with it so the next gate decision is taken
++ *     over the same 40 episodes instead of waiting for 40 fresh ones. An
++ *     advance still needs win_rate > win_at over that window: the window is
++ *     evidence, not a promotion.
++ *   - A missing sidecar (every checkpoint written before this change, and any
++ *     weights-only artifact) is not an error: the env keeps its cfg stage and
++ *     says so. A sidecar that names a different checkpoint (copied/renamed
++ *     weights), an out-of-table stage, or a torn window is refused outright.
++ *   - OPENFRONT_HOLD_STAGE (pinned eval) suppresses the restore so an eval
++ *     measures the stage it was told to, never the one left in the sidecar.
++ */
++#define OPENFRONT_STATE_KIND "openfront-curriculum-state"
++#define OPENFRONT_STATE_VERSION 1
++
++static void of_state_ckpt_name(const char* checkpoint_path, char* out, size_t cap) {
++    const char* slash = strrchr(checkpoint_path, '/');
++    snprintf(out, cap, "%s", (slash != NULL) ? slash + 1 : checkpoint_path);
++}
++
++void puf_save_state(Env* env, const char* state_path, const char* checkpoint_path) {
++    char ckpt_name[OPENFRONT_MAX_PATH];
++    of_state_ckpt_name(checkpoint_path, ckpt_name, sizeof(ckpt_name));
++
++    char win_s[OPENFRONT_WINDOW + 1];
++    char death_s[OPENFRONT_WINDOW + 1];
++    for (int i = 0; i < OPENFRONT_WINDOW; i++) {
++        win_s[i] = env->win_hist[i] ? '1' : '0';
++        death_s[i] = env->death_hist[i] ? '1' : '0';
++    }
++    win_s[OPENFRONT_WINDOW] = '\0';
++    death_s[OPENFRONT_WINDOW] = '\0';
++
++    char tmp[OPENFRONT_MAX_PATH + 64];
++    snprintf(tmp, sizeof(tmp), "%s.tmp", state_path);
++    FILE* f = fopen(tmp, "w");
++    if (f == NULL) {
++        fprintf(stderr, "openfront: curriculum state: cannot write %s (%s)\n",
++                tmp, strerror(errno));
++        return; /* best effort: never fail a checkpoint over the sidecar */
++    }
++    fprintf(f, "{\n");
++    fprintf(f, "  \"kind\": \"%s\",\n", OPENFRONT_STATE_KIND);
++    fprintf(f, "  \"version\": %d,\n", OPENFRONT_STATE_VERSION);
++    fprintf(f, "  \"checkpoint\": \"%s\",\n", ckpt_name);
++    fprintf(f, "  \"stage\": %d,\n", env->stage);
++    fprintf(f, "  \"stage_win_at\": %.6f,\n", (double)env->stage_win_at);
++    fprintf(f, "  \"stage_wins\": %.6f,\n", (double)env->stage_wins);
++    fprintf(f, "  \"stage_advances\": %.6f,\n", (double)env->log.stage_advances);
++    fprintf(f, "  \"hist_n\": %d,\n", env->hist_n);
++    fprintf(f, "  \"hist_idx\": %d,\n", env->hist_idx);
++    fprintf(f, "  \"win_hist\": \"%s\",\n", win_s);
++    fprintf(f, "  \"death_hist\": \"%s\"\n", death_s);
++    fprintf(f, "}\n");
++    if (fclose(f) != 0) {
++        fprintf(stderr, "openfront: curriculum state: write of %s failed (%s)\n",
++                tmp, strerror(errno));
++        remove(tmp);
++        return;
++    }
++    if (rename(tmp, state_path) != 0) {
++        fprintf(stderr, "openfront: curriculum state: rename %s -> %s failed (%s)\n",
++                tmp, state_path, strerror(errno));
++        remove(tmp);
++    }
++}
++
++int puf_load_state(Env* env, const char* state_path, const char* checkpoint_path) {
++    /* Pinned eval: the requested stage is the measurement, not the run's. */
++    if (getenv("OPENFRONT_HOLD_STAGE") != NULL) {
++        return 0;
++    }
++    FILE* f = fopen(state_path, "r");
++    if (f == NULL) {
++        fprintf(stderr,
++                "openfront: curriculum state: no sidecar %s; keeping cfg stage %d "
++                "(curriculum progress NOT restored; the gate will re-earn its stages)\n",
++                state_path, env->stage);
++        return 0;
++    }
++    char buf[8192];
++    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
++    fclose(f);
++    buf[n] = '\0';
++
++    char kind[64];
++    of_json_str(buf, "kind", kind, sizeof(kind));
++    if (strcmp(kind, OPENFRONT_STATE_KIND) != 0) {
++        fprintf(stderr, "openfront: curriculum state: %s is not a %s sidecar; refused\n",
++                state_path, OPENFRONT_STATE_KIND);
++        return -1;
++    }
++    char want[OPENFRONT_MAX_PATH];
++    char have[OPENFRONT_MAX_PATH];
++    of_state_ckpt_name(checkpoint_path, have, sizeof(have));
++    of_json_str(buf, "checkpoint", want, sizeof(want));
++    if (strcmp(have, want) != 0) {
++        fprintf(stderr,
++                "openfront: curriculum state: %s names checkpoint %s, not %s; "
++                "refused (stage stays %d)\n",
++                state_path, want, have, env->stage);
++        return -1;
++    }
++    int stage = of_json_int(buf, "stage", -1);
++    int n_stages = ofenv_stage_count();
++    if (stage < 0 || stage >= n_stages) {
++        fprintf(stderr, "openfront: curriculum state: %s stage=%d outside 0..%d; refused\n",
++                state_path, stage, n_stages - 1);
++        return -1;
++    }
++    char win_s[OPENFRONT_WINDOW + 1];
++    char death_s[OPENFRONT_WINDOW + 1];
++    of_json_str(buf, "win_hist", win_s, sizeof(win_s));
++    of_json_str(buf, "death_hist", death_s, sizeof(death_s));
++    if ((int)strlen(win_s) != OPENFRONT_WINDOW ||
++        (int)strlen(death_s) != OPENFRONT_WINDOW) {
++        fprintf(stderr, "openfront: curriculum state: %s window is not %d episodes; refused\n",
++                state_path, OPENFRONT_WINDOW);
++        return -1;
++    }
++
++    /* Apply the stage to the engine session exactly as the runtime gate does on
++     * an advance: ofenv_set_stage rebuilds bots/nations/difficulty/cadence. */
++    if (stage != env->stage) {
++        if (ofenv_set_stage(env->of, stage) != 0) {
++            fprintf(stderr,
++                    "openfront: curriculum state: ofenv_set_stage(%d) failed: %s; "
++                    "stage stays %d\n",
++                    stage, ofenv_last_error(), env->stage);
++            return -1;
++        }
++        env->stage = stage;
++        of_sync_meta(env);
++        of_derive_roster(env);
++    }
++    int hist_n = of_json_int(buf, "hist_n", 0);
++    int hist_idx = of_json_int(buf, "hist_idx", 0);
++    env->stage_win_at = of_json_float(buf, "stage_win_at", env->stage_win_at);
++    env->stage_wins = of_json_float(buf, "stage_wins", 0.0f);
++    env->log.stage_advances = of_json_float(buf, "stage_advances", 0.0f);
++    env->hist_n = (hist_n < 0) ? 0 : ((hist_n > OPENFRONT_WINDOW) ? OPENFRONT_WINDOW : hist_n);
++    env->hist_idx = (hist_idx < 0 || hist_idx >= OPENFRONT_WINDOW) ? 0 : hist_idx;
++    for (int i = 0; i < OPENFRONT_WINDOW; i++) {
++        env->win_hist[i] = (win_s[i] == '1') ? 1 : 0;
++        env->death_hist[i] = (death_s[i] == '1') ? 1 : 0;
++    }
++    env->log.stage = (float)env->stage;
++    env->log.stage_wins = env->stage_wins;
++    fprintf(stderr,
++            "openfront: curriculum state restored from %s: stage=%d window=%d/%d "
++            "stage_wins=%.1f advances=%.1f\n",
++            state_path, env->stage, env->hist_n, OPENFRONT_WINDOW,
++            (double)env->stage_wins, (double)env->log.stage_advances);
++    return 1;
++}
++
+ #ifndef OPENFRONT_RENDER
+ /* pufferl.cu's eval loop calls puf_render unconditionally, so a headless build
+  * still needs the symbol: no-op (no window, no raylib). */
+diff --git a/ocean/openfront/openfront_state_test.c b/ocean/openfront/openfront_state_test.c
+new file mode 100644
+index 0000000..cec0b15
+--- /dev/null
++++ b/ocean/openfront/openfront_state_test.c
+@@ -0,0 +1,230 @@
++/* Focused tests for the OpenFront curriculum resume sidecar.
++ *
++ * Covers puf_save_state / puf_load_state in ocean/openfront/openfront.h:
++ *   1. round trip: the stage, its win gate, the rolling 40-episode window and
++ *      the advance counter all come back (this is the defect - before this the
++ *      stage reset to cfg 0 on every LOAD=auto restart);
++ *   2. missing sidecar: env keeps its cfg stage, ret 0, no crash (this is what
++ *      every checkpoint written before the change looks like);
++ *   3. a sidecar that names another checkpoint is refused (ret -1): a copied or
++ *      renamed weights file must not smuggle in a stage its own weights never
++ *      earned;
++ *   4. an out-of-table stage is refused;
++ *   5. a non-sidecar / truncated window is refused;
++ *   6. OPENFRONT_HOLD_STAGE (pinned eval) suppresses the restore.
++ *
++ * Needs the engine cdylib: the restore applies the stage through
++ * ofenv_set_stage, exactly as a runtime advance does, so the session really is
++ * rebuilt at the restored stage.
++ *
++ * Build/run: bash ocean/openfront/build_state_test.sh
++ */
++#include <assert.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++
++#include "openfront.h"
++
++static int failures = 0;
++
++static void check(int cond, const char* what) {
++    printf("  %s: %s\n", cond ? "PASS" : "FAIL", what);
++    if (!cond) {
++        failures++;
++    }
++}
++
++/* Mirrors puf_env_state_path in src/pufferl.cu (the trainer owns the name). */
++static void state_path(char* out, size_t cap, const char* ckpt, int idx) {
++    snprintf(out, cap, "%s.env%03d.state.json", ckpt, idx);
++}
++
++static void fill_window(Env* env, int n) {
++    for (int i = 0; i < OPENFRONT_WINDOW; i++) {
++        env->win_hist[i] = (i < n) ? 1 : 0;
++        env->death_hist[i] = (i >= OPENFRONT_WINDOW - 2) ? 1 : 0;
++    }
++}
++
++static int window_is(Env* env, int n) {
++    for (int i = 0; i < OPENFRONT_WINDOW; i++) {
++        if (env->win_hist[i] != ((i < n) ? 1 : 0)) {
++            return 0;
++        }
++        if (env->death_hist[i] != ((i >= OPENFRONT_WINDOW - 2) ? 1 : 0)) {
++            return 0;
++        }
++    }
++    return 1;
++}
++
++static void write_file(const char* path, const char* text) {
++    FILE* f = fopen(path, "w");
++    assert(f != NULL);
++    fputs(text, f);
++    fclose(f);
++}
++
++int main(void) {
++    const char* dir = "/tmp/of-curriculum-state-test";
++    mkdir(dir, 0777);
++
++    char ckpt[512];
++    char sidecar[1024];
++    snprintf(ckpt, sizeof(ckpt), "%s/0000000010650112.bin", dir);
++    state_path(sidecar, sizeof(sidecar), ckpt, 0);
++
++    printf("== OpenFront curriculum resume sidecar tests ==\n");
++
++    static Env env;
++    memset(&env, 0, sizeof(env));
++    static obs_t obs[OPENFRONT_MAX_AGENTS * OBS_SIZE];
++    static float actions[OPENFRONT_MAX_AGENTS * NUM_ATNS];
++    static float rewards[OPENFRONT_MAX_AGENTS];
++    static float terminals[OPENFRONT_MAX_AGENTS];
++    static unsigned char mask[OPENFRONT_MAX_AGENTS * OPENFRONT_NUM_ACTIONS];
++
++    Dict kw = {0};
++    kw.name = "env";
++    dict_set_str(&kw, "repo_root", "/opt/data/workspaces/skg/openfront-ai");
++    dict_set_str(&kw, "map", "pangaea");
++    dict_set_str(&kw, "seed", "state-test");
++    dict_set_str(&kw, "difficulty", "Easy");
++    dict_set(&kw, "bots", 3);
++    dict_set(&kw, "n_agents", 1);
++    dict_set(&kw, "ticks_per_decision", 15);
++    dict_set(&kw, "max_episode_ticks", 21000);
++    dict_set(&kw, "quantity_frac", 0.25);
++    dict_set(&kw, "seed_int", 7);
++
++    puf_init(&env, &kw);
++    for (int i = 0; i < env.num_agents; i++) {
++        env.agents[i].observations = obs + i * OBS_SIZE;
++        env.agents[i].actions = actions + i * NUM_ATNS;
++        env.agents[i].rewards = rewards + i;
++        env.agents[i].terminals = terminals + i;
++        env.agents[i].action_mask = mask + i * OPENFRONT_NUM_ACTIONS;
++        env.agents[i].policy = i;
++    }
++    puf_reset(&env);
++    printf("env up: stage=%d stages=%d\n", env.stage, ofenv_stage_count());
++    check(env.stage == 0, "fresh env starts on cfg stage 0");
++    check(ofenv_stage_count() > 2, "stage table has room for a 2-stage climb");
++
++    /* ---- 1. round trip ---------------------------------------------------- */
++    printf("[1] round trip (stage 2, full window)\n");
++    env.stage = 2;
++    env.stage_win_at = 0.35f;
++    env.stage_wins = 5.0f;
++    env.log.stage_advances = 2.0f;
++    env.hist_n = OPENFRONT_WINDOW;
++    env.hist_idx = 17;
++    fill_window(&env, 31);
++    puf_save_state(&env, sidecar, ckpt);
++
++    struct stat st;
++    check(stat(sidecar, &st) == 0 && st.st_size > 0, "sidecar written");
++    char text[4096];
++    memset(text, 0, sizeof(text));
++    FILE* f = fopen(sidecar, "r");
++    if (f != NULL) {
++        size_t got = fread(text, 1, sizeof(text) - 1, f);
++        (void)got;
++        fclose(f);
++    }
++    check(strstr(text, "openfront-curriculum-state") != NULL, "sidecar names its kind");
++    check(strstr(text, "0000000010650112.bin") != NULL, "sidecar names the checkpoint");
++
++    /* Wipe the env as a fresh restart would: stage back to cfg 0, window gone. */
++    env.stage = 0;
++    env.stage_wins = 0.0f;
++    env.log.stage_advances = 0.0f;
++    env.hist_n = 0;
++    env.hist_idx = 0;
++    memset(env.win_hist, 0, sizeof(env.win_hist));
++    memset(env.death_hist, 0, sizeof(env.death_hist));
++
++    int rc = puf_load_state(&env, sidecar, ckpt);
++    check(rc == 1, "load reports a restore");
++    check(env.stage == 2, "stage restored (engine session rebuilt at stage 2)");
++    check(env.hist_n == OPENFRONT_WINDOW, "hist_n restored");
++    check(env.hist_idx == 17, "hist_idx restored");
++    check(window_is(&env, 31), "40-episode win/death window restored bit-exactly");
++    check(env.stage_wins == 5.0f, "stage_wins restored");
++    check(env.log.stage_advances == 2.0f, "stage_advances restored");
++    check(env.log.stage == 2.0f, "published log.stage follows the restore");
++    check(((float)env.stage_win_at - 0.35f) < 1e-6f && ((float)env.stage_win_at - 0.35f) > -1e-6f,
++        "stage_win_at restored");
++
++    /* ---- 2. missing sidecar ---------------------------------------------- */
++    printf("[2] missing sidecar (old checkpoints)\n");
++    char missing[1024];
++    char other_ckpt[1024];
++    snprintf(other_ckpt, sizeof(other_ckpt), "%s/0000000009999999.bin", dir);
++    state_path(missing, sizeof(missing), ckpt, 3); /* env 3 never saved */
++    env.stage = 0;
++    memset(env.win_hist, 0, sizeof(env.win_hist));
++    rc = puf_load_state(&env, missing, ckpt);
++    check(rc == 0, "missing sidecar is not an error");
++    check(env.stage == 0, "env keeps its cfg stage when there is no sidecar");
++
++    /* ---- 3. sidecar for a different checkpoint is refused ---------------- */
++    printf("[3] sidecar naming another checkpoint is refused\n");
++    env.stage = 0;
++    rc = puf_load_state(&env, sidecar, other_ckpt);
++    check(rc == -1, "mismatched checkpoint identity is refused");
++    check(env.stage == 0, "no stage smuggled in from the other checkpoint's sidecar");
++
++    /* ---- 4. out-of-table stage is refused -------------------------------- */
++    printf("[4] out-of-table stage is refused\n");
++    {
++        char bad[1024];
++        char body[1024];
++        state_path(bad, sizeof(bad), ckpt, 9);
++        snprintf(body, sizeof(body),
++            "{\"kind\":\"openfront-curriculum-state\",\"version\":1,"
++            "\"checkpoint\":\"0000000010650112.bin\",\"stage\":99999,"
++            "\"hist_n\":0,\"hist_idx\":0,\"win_hist\":\"%s\",\"death_hist\":\"%s\"}",
++            "0000000000000000000000000000000000000000",
++            "0000000000000000000000000000000000000000");
++        write_file(bad, body);
++        env.stage = 0;
++        rc = puf_load_state(&env, bad, ckpt);
++        check(rc == -1, "stage outside 0..N-1 is refused");
++        check(env.stage == 0, "stage unchanged after a refused sidecar");
++    }
++
++    /* ---- 5. torn / foreign sidecar is refused ---------------------------- */
++    printf("[5] torn window / foreign file is refused\n");
++    {
++        char bad[1024];
++        state_path(bad, sizeof(bad), ckpt, 8);
++        write_file(bad, "{\"kind\":\"openfront-curriculum-state\",\"checkpoint\":\"0000000010650112.bin\",\"stage\":1,\"win_hist\":\"11\"}");
++        env.stage = 0;
++        rc = puf_load_state(&env, bad, ckpt);
++        check(rc == -1, "short window is refused");
++        write_file(bad, "not json at all");
++        rc = puf_load_state(&env, bad, ckpt);
++        check(rc == -1, "foreign file is refused");
++        check(env.stage == 0, "stage unchanged after torn input");
++    }
++
++    /* ---- 6. pinned eval suppresses the restore --------------------------- */
++    printf("[6] OPENFRONT_HOLD_STAGE suppresses the restore\n");
++    setenv("OPENFRONT_HOLD_STAGE", "1", 1);
++    env.stage = 0;
++    rc = puf_load_state(&env, sidecar, ckpt);
++    unsetenv("OPENFRONT_HOLD_STAGE");
++    check(rc == 0, "pinned eval does not restore");
++    check(env.stage == 0, "pinned eval keeps the stage it was told to measure");
++
++    /* The intact sidecar still restores after all of that. */
++    rc = puf_load_state(&env, sidecar, ckpt);
++    check(rc == 1 && env.stage == 2, "original sidecar still restores");
++
++    printf("\n%d failure(s)\n", failures);
++    fflush(stdout);
++    return failures == 0 ? 0 : 1;
++}
+\ No newline at end of file
+diff --git a/src/pufferenv.h b/src/pufferenv.h
+index fe40d54..22db645 100644
+--- a/src/pufferenv.h
++++ b/src/pufferenv.h
+@@ -56,6 +56,37 @@ static inline void puf_set_bot_policy(Env* env, int bot_policy) {
+ }
+ #endif
+ 
++// Optional resume-state hooks. The trainer calls these once per env when a
++// checkpoint is written or restored, because some progress does not follow
++// from the weights and would otherwise be thrown away on every LOAD=auto
++// restart (the openfront curriculum stage is the motivating case). Envs whose
++// progress IS the weights simply keep the no-ops below.
++//
++//   state_path      per-env sidecar the caller wants written/read. The trainer
++//                   owns the name (<ckpt>.env<NN>.state.json) because a single
++//                   env does not know its index in the vector.
++//   checkpoint_path the weights checkpoint the sidecar belongs to, so the env
++//                   can refuse a sidecar that names a different checkpoint.
++//
++// save: best effort - must never abort a checkpoint if the sidecar can't be
++//       written. load: 1 = state restored, 0 = nothing to restore (no sidecar,
++//       or deliberately suppressed), -1 = sidecar present but refused.
++#ifndef PUF_HAS_STATE_HOOKS
++static inline void puf_save_state(Env* env, const char* state_path,
++        const char* checkpoint_path) {
++    (void)env;
++    (void)state_path;
++    (void)checkpoint_path;
++}
++static inline int puf_load_state(Env* env, const char* state_path,
++        const char* checkpoint_path) {
++    (void)env;
++    (void)state_path;
++    (void)checkpoint_path;
++    return 0;
++}
++#endif
++
+ typedef uint16_t bf16;
+ 
+ static inline bf16 f32_to_bf16(float f) {
+diff --git a/src/pufferl.cu b/src/pufferl.cu
+index c93ecae..9795ddb 100644
+--- a/src/pufferl.cu
++++ b/src/pufferl.cu
+@@ -3152,6 +3152,16 @@ EvalResult run_eval(Ini* ini, TrainContext* ctx, int mode, int verbose,
+     return r;
+ }
+ 
++/* Per-env resume-state sidecar path: "<checkpoint>.env<NN>.state.json". The
++ * trainer owns the name because a single env does not know its index in the
++ * vector; the env owns the contents (see puf_save_state/puf_load_state). The
++ * ".json" suffix keeps it out of the ".bin" checkpoint walk that LOAD=auto and
++ * puf_find_latest_checkpoint use. */
++static void puf_env_state_path(char* out, size_t cap, const char* checkpoint,
++        int env_index) {
++    snprintf(out, cap, "%s.env%03d.state.json", checkpoint, env_index);
++}
++
+ TrainResult run_train(Ini* ini, TrainContext* ctx) {
+     int use_selfplay = puf_ini_get(ini, "selfplay", "enabled");
+     if (!use_selfplay) {
+@@ -3215,6 +3225,25 @@ TrainResult run_train(Ini* ini, TrainContext* ctx) {
+         if (load_path) {
+             pufferl_load_policy(pufferl, 0, load_path);
+             puf_resume_schedule(pufferl, load_path);
++            /* Curriculum progress lives in the env, not in the weights. Without
++             * this the stage reset to cfg 0 on every LOAD=auto restart and the
++             * run re-climbed stages the policy had already earned. Each env
++             * reads its own sidecar; a missing one is not an error (it keeps
++             * the cfg stage and says so). */
++            int restored = 0, refused = 0;
++            for (int i = 0; i < pufferl->vec->size; i++) {
++                char state_path[4096];
++                puf_env_state_path(state_path, sizeof(state_path), load_path, i);
++                int rc = puf_load_state(&pufferl->vec->envs[i], state_path, load_path);
++                if (rc > 0) {
++                    restored++;
++                } else if (rc < 0) {
++                    refused++;
++                }
++            }
++            printf("pufferl: curriculum state: %d/%d envs restored from %s sidecars, %d refused\n",
++                restored, pufferl->vec->size, load_path, refused);
++            fflush(stdout);
+         } else {
+             printf("pufferl: no load_model_path; training from random init\n");
+             fflush(stdout);
+@@ -3307,6 +3336,16 @@ TrainResult run_train(Ini* ini, TrainContext* ctx) {
+                 "%s/%016ld.bin", checkpoint_dir, pufferl->global_step);
+             if (ctx->artifact_owner || use_selfplay) {
+                 puf_save_weights(pufferl, saved_checkpoint);
++                /* Same save, same step: each env's curriculum state goes next
++                 * to the weights it belongs to, so a later restore can only
++                 * hand back a stage those exact weights had earned. */
++                for (int i = 0; i < pufferl->vec->size; i++) {
++                    char state_path[4096];
++                    puf_env_state_path(state_path, sizeof(state_path),
++                        saved_checkpoint, i);
++                    puf_save_state(&pufferl->vec->envs[i], state_path,
++                        saved_checkpoint);
++                }
+             }
+             if (ctx->artifact_owner) {
+                 snprintf(final_checkpoint, sizeof(final_checkpoint),
+-- 
+2.55.0
+
