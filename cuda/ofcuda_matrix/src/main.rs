@@ -1129,7 +1129,24 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         // `land()` conquered in THIS tick. Applying it before the tick puts the
         // tile on the plane for this boundary's hash, like every other conquest
         // of the same tick.
+        // The conquer itself is ORDERED: `execute_next_tick` ticks `execs` in
+        // list order (`game.rs:3662-3669`) and `TransportShipExecution::land`
+        // (`transport_ship.rs:374-401`) calls `game.conquer(owner, dst)` at the
+        // SHIP's own exec position, so only attacks whose exec index is greater
+        // than the ship's can see `dst` as owned - the engine's
+        // `add_neighbors`/`refresh_to_conquer` owner filter
+        // (`attack.rs:1300-1340`) rejects it for the ones that ticked earlier.
+        // The oracle emits each ship's `(exec_index, owner, dst, natk)` where
+        // `natk` is the number of live attacks ahead of it, so the landing is
+        // applied after exactly `natk` plan entries instead of before all of
+        // them. Applying it first is what dropped tile 422259 from player 108's
+        // frontier at boundary 206 (N=488/250t): player 51's ship sat at exec
+        // 998 and 108's attack at exec 989, so the engine's 108 enqueued 422259
+        // while the device already saw it as 51's.
         let mut mine: HashMap<u16, Vec<u32>> = HashMap::new();
+        // (natk, owner, src, attack_id, heap_len, border_len)
+        let mut landings: Vec<(usize, u16, u32, String, usize, usize)> = Vec::new();
+        let mut used_ships: Vec<usize> = Vec::new();
         for cs in &cur.attacks {
             let Some(src) = cs.source else { continue };
             if prev
@@ -1139,35 +1156,74 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
             {
                 continue; // already bound: not a landing of THIS tick
             }
-            unsafe {
-                module
-                    .land_dev(
-                        &stream,
-                        cfg(ONE),
-                        src,
-                        cs.owner,
-                        &mut d_plane,
-                        &mut d_claims,
-                        &mut d_out,
-                    )
-                    .map_err(es)?;
-            }
-            let lo = d_out.to_host_vec(&stream).map_err(es)?;
-            if lo[0] > 0 {
-                let cl = d_claims.to_host_vec(&stream).map_err(es)?;
-                mine.entry(cs.owner).or_default().push(cl[0]);
-                row.dev_claims += 1;
-            }
-            detail.push_str(&format!(
-                "TRANSPORT_LANDING boundary {b} (engine tick {tick}): owner {} landed on tile {} \
-                 (source_tile of attack {}); engine frontier heap {} border {}\n",
-                cs.owner, src, cs.attack_id, cs.heap_len, cs.border_len
-            ));
+            let hit = cur
+                .transports
+                .iter()
+                .enumerate()
+                .find(|(k, (_, o, d, _))| {
+                    *o == cs.owner && *d == src as i64 && !used_ships.contains(k)
+                })
+                .map(|(k, (_, _, _, natk))| (k, *natk));
+            let natk = match hit {
+                Some((k, n)) => {
+                    used_ships.push(k);
+                    n
+                }
+                None => 0, // no ship recorded: keep the old "before every attack"
+            };
+            // A/B CONTROL, not a code path: `OFCUDA_MATRIX_LAND_FIRST=1` restores
+            // the pre-fix ordering (every landing applied before every attack,
+            // i.e. `natk = 0`) so the effect of the exec-order fix on any cell can
+            // be measured on demand instead of argued. The matrix is run without it.
+            let natk = if std::env::var_os("OFCUDA_MATRIX_LAND_FIRST").is_some() {
+                0
+            } else {
+                natk
+            };
+            landings.push((natk, cs.owner, src, cs.attack_id.clone(), cs.heap_len, cs.border_len));
         }
+        landings.sort_by_key(|x| x.0);
 
         // --- 4. one device launch per live attack, in the engine's order ---
         let mut troop_pairs: Vec<(usize, u64)> = Vec::new();
-        for (i, _snap) in &plan {
+        let plan_len = plan.len();
+        let mut nland = 0usize;
+        for p in 0..=plan_len {
+            // Landings whose ship ticked ahead of the p-th attack: the engine
+            // applies them exactly here (see 3b), so the attacks that ticked
+            // before `p` did NOT see the landed tile as owned.
+            while nland < landings.len() && landings[nland].0 <= p {
+                let (_, lowner, lsrc, laid, lhl, lbl) = landings[nland].clone();
+                unsafe {
+                    module
+                        .land_dev(
+                            &stream,
+                            cfg(ONE),
+                            lsrc,
+                            lowner,
+                            &mut d_plane,
+                            &mut d_claims,
+                            &mut d_out,
+                        )
+                        .map_err(es)?;
+                }
+                let lo = d_out.to_host_vec(&stream).map_err(es)?;
+                if lo[0] > 0 {
+                    let cl = d_claims.to_host_vec(&stream).map_err(es)?;
+                    mine.entry(lowner).or_default().push(cl[0]);
+                    row.dev_claims += 1;
+                }
+                detail.push_str(&format!(
+                    "TRANSPORT_LANDING boundary {b} (engine tick {tick}): owner {} landed on tile {} \
+                     (source_tile of attack {}); engine frontier heap {} border {}; applied after {} of {} plan attacks (ship exec order)\n",
+                    lowner, lsrc, laid, lhl, lbl, p, plan_len
+                ));
+                nland += 1;
+            }
+            if p == plan_len {
+                break;
+            }
+            let (i, _snap) = &plan[p];
             let s = &slots[*i];
             if !s.alive {
                 continue;
@@ -1333,6 +1389,44 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         // boundary it starts rather than at the boundary it is popped.
         {
             let scal_after = d_scal.to_host_vec(&stream).map_err(es)?;
+            // MEASUREMENT-ONLY diagnostic (`OF_LEAK_OWNER=<sid>`): dump the
+            // device's carried frontier (tiles + f32 priority bits) and its
+            // attack border size for one owner at every boundary, next to the
+            // engine's own recorded `ATTACK` sizes. This is what names whether a
+            // frontier defect is a different SET (a tile present on one side
+            // only) or the SAME set in a different ORDER (a priority/tie-break
+            // difference). Never a pass condition.
+            let leak_owner: Option<u16> = std::env::var("OF_LEAK_OWNER")
+                .ok()
+                .and_then(|s| s.parse().ok());
+            if let Some(lo) = leak_owner {
+                for a in &cur.attacks {
+                    if a.owner != lo {
+                        continue;
+                    }
+                    let found = slots
+                        .iter()
+                        .find(|s| s.alive && s.owner == a.owner && s.target == a.target);
+                    let Some(s) = found else { continue };
+                    let dev_heap = scal_after[s.idx * SCAL] as usize;
+                    let dev_border = scal_after[s.idx * SCAL + 1] as usize;
+                    let htiles = d_heap_tiles.to_host_vec(&stream).map_err(es)?;
+                    let hpri = d_heap_pri.to_host_vec(&stream).map_err(es)?;
+                    let base = s.idx * HEAP_CAP;
+                    let mut tiles: Vec<String> = Vec::with_capacity(dev_heap);
+                    for j in 0..dev_heap.min(HEAP_CAP) {
+                        tiles.push(format!("{}:{:08x}", htiles[base + j], hpri[base + j].to_bits()));
+                    }
+                    detail.push_str(&format!(
+                        "HEAPDUMP boundary {b} (engine tick {tick}) owner {lo} target {}: \
+                         dev_heap {dev_heap} eng_heap {} dev_border {dev_border} eng_border {} | {}\n",
+                        a.target,
+                        a.heap_len,
+                        a.border_len,
+                        tiles.join(" ")
+                    ));
+                }
+            }
             for a in &cur.attacks {
                 let found = slots
                     .iter()

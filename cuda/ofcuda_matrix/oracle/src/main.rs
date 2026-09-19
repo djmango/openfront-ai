@@ -321,6 +321,12 @@ fn replay_cell(
         .ok()
         .and_then(|s| s.parse().ok());
     let mut trace_out = String::new();
+    // MEASUREMENT-ONLY: dump the engine's `execs` order (the order
+    // `execute_next_tick` actually ticks them, `game.rs:3662-3669`) at each
+    // boundary, so a transport ship's position relative to each attack is
+    // directly observable.
+    let trace_execs = std::env::var("OF_TRACE_EXECS").is_ok();
+    let mut exec_out = String::new();
     let mut snap = |game: &Game, b: u32, tag: &str| -> Option<()> {
         let (o_id, t_id) = trace?;
         let a = game
@@ -353,12 +359,51 @@ fn replay_cell(
                 ));
             }
         }
+        // MEASUREMENT-ONLY: the engine's OWN carried conquest frontier, in heap
+        // array order with each enqueue priority's f32 bits. This is the
+        // reference side of the device `HEAPDUMP` diagnostic; together they
+        // decide "different tile set" vs "same set, different order".
+        if std::env::var("OF_TRACE_ENGINE_HEAP").is_ok() {
+            let (tiles, pri) = a.to_conquer_debug();
+            let joined: Vec<String> = tiles
+                .iter()
+                .zip(pri.iter())
+                .map(|(t, p)| format!("{t}:{:08x}", p.to_bits()))
+                .collect();
+            line.push_str(&format!(
+                "ENGINEHEAP {b} {tag} owner={o_id} target={t_id} len={} | {}\n",
+                tiles.len(),
+                joined.join(" ")
+            ));
+        }
         trace_out.push_str(&line);
         Some(())
     };
 
     // ---- the post-spawn ticks ---------------------------------------------
     for b in 1..=ticks {
+        // Transport-ship exec positions for the tick that is about to run: the
+        // landing's `game.conquer` happens at THIS exec position, so the port
+        // must apply it after exactly `natk` of this tick's attacks.
+        for (i, owner, dst, natk) in session.game.transport_exec_positions() {
+            o.push_str(&format!(
+                "TRANSPORT {b} {i} {owner} {} {natk}\n",
+                dst.map(|t| t as i64).unwrap_or(-1)
+            ));
+        }
+        if trace_execs {
+            let labels = session.game.exec_labels();
+            let joined: Vec<String> = labels
+                .iter()
+                .enumerate()
+                .map(|(i, l)| format!("{i}={l}"))
+                .collect();
+            exec_out.push_str(&format!(
+                "EXECS {b} n={} | {}\n",
+                labels.len(),
+                joined.join(" ")
+            ));
+        }
         snap(&session.game, b, "pre");
         session.game.execute_next_tick();
         let game = &session.game;
@@ -398,6 +443,7 @@ fn replay_cell(
         prev_owned = players.iter().map(|p| p.owned_tiles.clone()).collect();
     }
     o.push_str(&trace_out);
+    o.push_str(&exec_out);
     Ok(o)
 }
 

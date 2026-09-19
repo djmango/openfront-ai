@@ -1366,6 +1366,31 @@ impl Game {
             .collect()
     }
 
+    /// MEASUREMENT-ONLY (read-only): for every live `TransportShipExecution`, its
+    /// position in `execs` together with the owner, the motion-plan destination
+    /// (`target_tile()`, the exact tile `land()` conquers, see
+    /// `transport_ship.rs:305-362`) and the number of ATTACK execs that precede
+    /// it. `execute_next_tick` (`game.rs:3662-3669`) ticks `execs` strictly in
+    /// list order, so `natk` is exactly how many land attacks tick BEFORE this
+    /// landing's `game.conquer` in the same tick - i.e. how many of them can NOT
+    /// see the landed tile as owned.
+    pub fn transport_exec_positions(&self) -> Vec<(usize, u16, Option<TileRef>, usize)> {
+        self.execs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| match e {
+                ExecEnum::TransportShip(t) if e.is_active() => {
+                    let natk = self.execs[..i]
+                        .iter()
+                        .filter(|x| matches!(x, ExecEnum::Attack(a) if a.attack_live()))
+                        .count();
+                    Some((i, t.owner_small_id(), t.target_tile(), natk))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn exec_labels(&self) -> Vec<String> {
         self.execs.iter().map(|e| e.debug_label()).collect()
     }

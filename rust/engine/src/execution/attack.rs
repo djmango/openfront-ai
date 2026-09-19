@@ -1199,6 +1199,17 @@ impl AttackExecution {
         self.to_conquer.len()
     }
 
+    /// MEASUREMENT-ONLY (read-only): the carried conquest-frontier tiles, in
+    /// the heap's own array order, alongside the priority each was enqueued
+    /// at. Used to name whether a frontier defect is a different tile SET or
+    /// the same set in a different ORDER. Cannot affect the simulation.
+    pub fn to_conquer_debug(&self) -> (Vec<TileRef>, Vec<f32>) {
+        (
+            self.to_conquer.debug_tiles().to_vec(),
+            self.to_conquer.debug_priorities().to_vec(),
+        )
+    }
+
     /// TS `Attack.delete()` - remove from outgoing/incoming registries, defer exec cleanup.
     pub fn kill_attack(&mut self, game: &mut Game) {
         if self.attack_live {

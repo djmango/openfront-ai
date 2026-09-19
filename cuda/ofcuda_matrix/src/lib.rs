@@ -77,6 +77,13 @@ pub struct Boundary {
     /// players whose `owned_tiles` vector was reordered/pruned, so the
     /// tail-diff above is not a claim set for them at this boundary.
     pub churn: Vec<(u16, usize)>,
+    /// Live transport-ship exec positions for the tick that ENDS at this
+    /// boundary: `(exec_index, owner, motion_plan_dst, natk)` where `natk` is
+    /// the number of live ATTACK execs ahead of the ship in `execs`.
+    /// `Game::execute_next_tick` ticks `execs` in list order, so the ship's
+    /// `land()` -> `game.conquer(dst)` is visible only to attacks ticking after
+    /// index `exec_index`; `natk` is how many attacks tick BEFORE it.
+    pub transports: Vec<(usize, u16, i64, usize)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -128,6 +135,9 @@ pub fn parse_oracle(path: &Path) -> Result<Oracle, String> {
         let mut it = line.split_whitespace();
         let Some(tag) = it.next() else { continue };
         match tag {
+            // Measurement-only trace channels (see oracle/src/main.rs):
+            // ignored here, never part of a comparison.
+            "TRACE" | "TRACELOGIC" | "ENGINEHEAP" | "EXECS" => {}
             "#" | "REPO" | "DIFFICULTY" => {}
             "MAP" => o.map = it.next().unwrap_or("").to_string(),
             "SEED" => o.seed = it.next().unwrap_or("").to_string(),
@@ -169,6 +179,14 @@ pub fn parse_oracle(path: &Path) -> Result<Oracle, String> {
                 let n: usize = it.next().unwrap_or("0").parse().unwrap_or(0);
                 let tiles: Vec<u32> = it.take(n).filter_map(|x| x.parse().ok()).collect();
                 get!(b).owned0.insert(sid, tiles);
+            }
+            "TRANSPORT" => {
+                let b: u32 = it.next().unwrap_or("0").parse().unwrap_or(0);
+                let i: usize = it.next().unwrap_or("0").parse().unwrap_or(0);
+                let owner: u16 = it.next().unwrap_or("0").parse().unwrap_or(0);
+                let dst: i64 = it.next().unwrap_or("-1").parse().unwrap_or(-1);
+                let natk: usize = it.next().unwrap_or("0").parse().unwrap_or(0);
+                get!(b).transports.push((i, owner, dst, natk));
             }
             "BORDER" => {
                 let b: u32 = it.next().unwrap_or("0").parse().unwrap_or(0);
