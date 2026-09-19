@@ -1,0 +1,26 @@
+[package]
+name = "ofcuda_env"
+version = "0.1.0"
+edition = "2024"
+default-run = "ofcuda_env"
+
+# Own workspace on purpose: never a member of `openfront-ai/rust`, so nothing
+# here can perturb the live training workspace.
+[workspace]
+
+[dependencies]
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git" }
+cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git" }
+cuda-core = "0.3.1"
+serde_json = "1"
+# The four verified slices, reused as libraries - this crate adds NO fifth copy
+# of `core_impl.rs`.
+ofcuda_tick = { path = "../ofcuda_tick" }
+ofcuda_cluster = { path = "../ofcuda_cluster" }
+ofcuda_econ = { path = "../ofcuda_econ" }
+ofcuda_hash = { path = "../ofcuda_hash" }
+ofcuda_map = { path = "../ofcuda_map" }
+
+[[bin]]
+name = "ofcuda_env"
+path = "src/main.rs"

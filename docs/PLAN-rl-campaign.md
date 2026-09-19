@@ -306,7 +306,7 @@ rebalancing whose premise is falsified.
 `v8x_*` bonuses are the large part, and they live in `puffer_ffi.rs`, not in the
 `curriculum.rs` constant the plan quoted.
 
-### E7 — persist the curriculum stage across restarts [NEXT, at the next restart]
+### E7 — persist the curriculum stage across restarts [DONE 2026-09-18 18:45 — first live restore verified]
 `env->stage` and the 40-episode window live nowhere but memory, so every restart
 drops all envs to stage 0 with an empty window. With the gate working this is a
 pure waste: write the stage to a sidecar next to each checkpoint and restore it
@@ -856,9 +856,43 @@ fresh run cannot have either. All 64 sidecars were cross-checked programmaticall
 restore lines with 0 mismatches. Behavioural proof: envs re-advanced `stage 0 -> 1` after ~5 minutes
 against ~94 minutes for the first climb on a fresh window.
 
-**Still unproven after all four:** the budget is still **exogenous** (the real float
-`attack_tiles_per_tick` cannot be exercised until the troop counts are wired in, which is now
-possible since slice 3 landed); the nonzero-stage `ofenv_set_stage` branch at startup never fired; all
+**THE COMPOSED TICK MATCHES 59 CONSECUTIVE TICKS WITH A COMPUTED BUDGET 2026-09-18 (`ofcuda_env`).**
+The four slices now run as one tick in `/opt/data/workspaces/skg/ofcuda_env` with **no changes to the
+other four crates** (all four already exposed library entry points). Composition order, cited per call in
+`src/lib.rs`: economy -> budget -> persistent-heap expansion -> cluster capture -> plane -> hash.
+
+**The claim budget is COMPUTED, not observed.** `2 * (tracked_border_size + next_int(0,5))` with the
+single draw taken before the pop loop (`attack.rs:253`), and it reproduces the engine's claim counts
+exactly across ticks **318..376, 59 consecutive ticks**, including the 12-claim ticks and tick 320 = 9.
+`ofcuda_tick` deliberately does not carry the border set (its README says the budget is exogenous), so
+this crate tracks it: `add_border_tile` on every enqueued candidate (`attack.rs:1363`),
+`remove_border_tile` on every pop including skipped ones (`attack.rs:275`). That was the whole gap and no
+other crate changed.
+
+**Two named stops, both unported mechanics rather than fudge factors:**
+- tick 359 with a truncated `tiles_used` input: six claims byte-identical, engine takes a 7th.
+  `sum(tiles_used) = 174.046526` against a budget of `2*(86+1) = 174`, i.e. **0.047 short**. Cause:
+  `tick_dump.rs:326` writes `AttackSnapshot.troops = troops as i64`, truncating the true `1363.4`, and
+  `tiles_used` divides by it. The missing input is the attack's exact `f64` start troops =
+  `attacker.troops - max_troops_for(owner) * expand_ratio` (`ai_attack.rs:9-18`, `tribe.rs:42`), which is
+  economy output rather than the record's integer.
+- tick 377 with the float input: engine claims 10, the crate 3 - `sid2` has **two concurrent land attacks**
+  that merge the following tick. **Multi-attack + merge is unported**, and that is the proven boundary.
+
+**Also found and fixed:** the crate was carrying init priorities at `tick` instead of `tick-1`. An attack
+created in tick T first appears in rec[T+1], so its `refresh_to_conquer` runs with `game.ticks() == T-1`.
+A uniform one-tick shift that reordered init-enqueued against tick-enqueued candidates. Found by
+heap-diffing against a Python mirror rather than by guessing.
+
+**Not claimed, and this matters:** ticks 300..1200 are **not** claimed - the model stops at 377 without
+the merge mechanic. The end-to-end FNV hash is also **not** claimed: the engine's `gameHash` is not the
+plain owner plane (0/0 on that diagnostic), so the composed hash stage currently rests on `ofcuda_hash`'s
+separate 200/200 result rather than on this crate's own plane reconstruction. Cluster capture is wired but
+fires only on a player loss, of which there are none in this window.
+
+**Still unproven after all four:** the budget's *value* is now computed (see the composed-tick block
+above) but its `tiles_used` divisor still takes a truncated troop count from the record, so the attack's
+true `f64` start troops remain unwired; the nonzero-stage `ofenv_set_stage` branch at startup never fired; all
 five refusal guards are untested live (0 refused); **optimizer state is not serialized at all**
 (`puf_save_weights` writes only the fp32 master weights, 101,933,056 B = 25.5M x 4, so Adam moments
 restart every time); the env RNG and in-episode state are not restored; and no save/restore
@@ -1203,3 +1237,42 @@ faithful world did not change the ladder's shape.
 closeout prices at -50 vs -33 for dying early, i.e. it argues against committing to the 80% takeover the
 stage requires) is the leading candidate, but it is an engine edit and must not be made while the parity
 worker is rebuilding that tree. E8 (AGENTS=128) stays blocked: 8.3G available against ~+5G needed.
+
+### E7 — VERIFIED ON THE LIVE RUN 2026-09-18 18:45 (operator tick)
+
+The outstanding proof was "a restart after the first sidecar-carrying checkpoint". That restart
+happened: an orderly stop/start at **17:46:34-35** (`systemd[1]: Stopping ... Deactivated
+successfully`, MainPID **2316667**) resumed from `1789771591260/0000000011469312.bin` (11,469,312 =
+the first checkpoint the E7-enabled process wrote, 17:09, and therefore the first carrying
+sidecars). Verbatim from the live segment of `current.log`:
+
+```
+pufferl: resumed schedule from 0000000011469312.bin at step 11469312 (epoch 1400/2441, 57.4% into the cosine)
+pufferl: curriculum state: 64/64 envs restored from .../0000000011469312.bin sidecars, 0 refused
+openfront: curriculum state restored from .../0000000011469312.bin.env000.state.json: stage=0 window=32/40 stage_wins=32.0 advances=0.0
+openfront: curriculum state restored ... env003 ... window=38/40 stage_wins=38.0
+openfront: curriculum state restored ... env025 ... window=25/40 stage_wins=25.0
+```
+
+Evidence that the values came from the **file** rather than the cfg default, in order of strength:
+
+1. the windows are heterogeneous and mostly full (25/40 .. 38/40) and `stage_wins` equals the
+   window count per env (env000 32/40 & 32.0). A fresh process reads `window=0/40 stage_wins=0.0`
+   for every env - that is what the 15:47 segment's `0/64 restored` produced;
+2. **behavioural**: with the window already ~32/40 populated, the envs re-promoted `stage 0 -> 1`
+   within ~30 min of the restart - 20 promotions in the live segment at `win_rate 0.950-1.000` -
+   against ~94 min for the first climb on a fresh window. The gate can only fire that early if the
+   restored window is feeding it;
+3. `0 refused` means all 64 sidecars passed the identity check against the checkpoint they sit
+   beside (the guard exists and did not reject a legitimate restore).
+
+Cost of the fix, measured: the ~1.7M-step / ~94-minute ladder re-warm after every restart is gone.
+`stage` itself restored as 0 for every env because that checkpoint recorded stage 0 (the run only
+climbed to 1 afterwards) - expected, not a silent reset.
+
+**Still not proven, carried forward:** none of the four refusal guards has ever fired live
+(identity mismatch, out-of-range stage, window-length mismatch, `OPENFRONT_HOLD_STAGE`
+suppression) - they need a deliberate negative probe, not an inference from "0 refused".
+**Optimizer state is still not serialized** (`puf_save_weights` writes only the fp32 master
+weights, 101,933,056 B = 25.5M x 4), so Adam's moments restart at every launch, as do the env RNG
+and in-episode state. That is the next durability gap after this one.
