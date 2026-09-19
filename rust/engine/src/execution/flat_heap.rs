@@ -45,6 +45,16 @@ impl FlatBinaryHeap {
         self.tiles[i] = tile;
     }
 
+    /// MEASUREMENT-ONLY (read-only): the heap's tile array in heap order.
+    pub fn debug_tiles(&self) -> &[TileRef] {
+        &self.tiles
+    }
+
+    /// MEASUREMENT-ONLY (read-only): the heap's priority array in heap order.
+    pub fn debug_priorities(&self) -> &[f32] {
+        &self.pri
+    }
+
     pub fn dequeue(&mut self) -> Option<TileRef> {
         if self.pri.is_empty() {
             return None;
