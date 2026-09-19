@@ -1,0 +1,26 @@
+[package]
+name = "ofcuda_hash"
+version = "0.1.0"
+edition = "2024"
+default-run = "ofcuda_hash"
+
+[workspace]
+
+[dependencies]
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git" }
+cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git" }
+# Shared host-side runtime, published from NVlabs/cutile-rs.
+cuda-core = "0.3.1"
+serde_json = "1"
+
+[[bin]]
+name = "ofcuda_hash"
+path = "src/main.rs"
+
+# CPU-only companion: same shared crate (`src/lib.rs`), same dump, same
+# serializer + hash definition, but no CUDA dependency at all - so it builds
+# and runs without the CUDA environment and is an independent reference for
+# what the GPU must produce.
+[[bin]]
+name = "ofcuda_hash_cpu"
+path = "src/bin/cpu.rs"

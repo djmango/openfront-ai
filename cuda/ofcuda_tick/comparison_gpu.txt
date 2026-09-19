@@ -1,0 +1,144 @@
+# ofcuda_tick - attack/expansion FRONTIER step
+# device: NVIDIA GeForce RTX 5080, 610.57.04
+# map plane from /opt/data/workspaces/skg/openfront-ai/openfront/resources/maps 1000x1000
+# recorded 2026-09-18 with the pre-fix native engine (W,E,N,S); the current tip uses N,S,W,E
+
+=== b002-s1-pangaea tick 319 (Frankish Duchy 5iznss4u) ===
+player 5iznss4u Frankish Duchy; claim_tick 319; priority_tick 318 (measured); cursor 0; order 1 (W,E,N,S); border 20 tiles; owned_mine 52; owned_any 104; expected claims 8
+cpu : enqueued 32; raw pops 32; claim order [460260, 459254, 453260, 459261, 453255, 454261, 454254, 460255, 461257, 457262, 455262, 458262, 458253, 455253, 452258, 452259, 461258, 452257, 456262, 457253, 461259, 461256, 456253, 452256] priorities [325.5, 325.5, 325.5, 326.25, 326.25, 327.0, 327.0, 328.5, 330.5, 330.5, 330.5, 330.5, 331.75, 333.0, 334.25, 335.5, 335.5, 335.5, 336.75, 336.75, 338.0, 338.0, 338.0, 338.0]
+gpu : threads launched 64; claim order [460260, 459254, 453260, 459261, 453255, 454261, 454254, 460255] priorities [325.5, 325.5, 325.5, 326.25, 326.25, 327.0, 327.0, 328.5]
+gpu : full queue remainder (unobservable in the record): 16 tiles, first extra priority [330.5]
+GPU vs CPU raw pop sequence (32 entries, tile + priority bits): 32/32 match
+GPU-vs-CPU enqueue count: thread 32 wrote 4294967295 (u32::MAX = heap empty) -> MATCH
+expected claim order    [460260, 459254, 453260, 459261, 453255, 454261, 454254, 460255]
+expected priorities     [325.5, 325.5, 325.5, 326.25, 326.25, 327.0, 327.0, 328.5]
+gpu priority units      [10, 10, 10, 11, 11, 12, 12, 14] (expected [10, 10, 10, 11, 11, 12, 12, 14]) -> MATCH
+GPU claim order         MATCH
+GPU priorities          MATCH
+priority f32 vs engine f64 evaluation: 32/32 identical
+same case under N,S,W,E (the other order): enqueued 32; claim order [459261, 454261, 460255, 454254, 459254, 453260, 453255, 460260] priorities [325.5, 325.5, 325.5, 326.25, 326.25, 327.0, 328.5, 328.5, 330.5, 330.5, 330.5, 330.5, 331.75, 333.0, 333.0, 334.25, 334.25, 335.5, 335.5, 335.5, 336.75, 336.75, 338.0, 338.0]
+other engine recorded   [459261, 454261, 460255, 454254, 459254, 453260, 453255, 460260]
+other order reproduces  true
+
+=== b004-s2-pangaea tick 309 (Armenian Supremacy be0bsg87) ===
+player be0bsg87 Armenian Supremacy; claim_tick 309; priority_tick 308 (measured); cursor 0; order 1 (W,E,N,S); border 20 tiles; owned_mine 52; owned_any 208; expected claims 8
+cpu : enqueued 32; raw pops 32; claim order [203582, 202576, 196582, 202583, 196577, 197583, 197576, 203577, 204579, 200584, 198584, 201584, 201575, 198575, 195580, 204578, 204580, 195581, 195579, 199584, 200575, 204581, 199575, 195578] priorities [318.0, 318.0, 318.0, 319.0, 319.0, 320.0, 320.0, 322.0, 323.0, 323.0, 323.0, 323.0, 324.5, 326.0, 327.5, 328.0, 329.0, 329.0, 329.0, 330.5, 330.5, 332.0, 332.0, 332.0]
+gpu : threads launched 64; claim order [203582, 202576, 196582, 202583, 196577, 197583, 197576, 203577] priorities [318.0, 318.0, 318.0, 319.0, 319.0, 320.0, 320.0, 322.0]
+gpu : full queue remainder (unobservable in the record): 16 tiles, first extra priority [323.0]
+GPU vs CPU raw pop sequence (32 entries, tile + priority bits): 32/32 match
+GPU-vs-CPU enqueue count: thread 32 wrote 4294967295 (u32::MAX = heap empty) -> MATCH
+expected claim order    [203582, 202576, 196582, 202583, 196577, 197583, 197576, 203577]
+expected priorities     [318.0, 318.0, 318.0, 319.0, 319.0, 320.0, 320.0, 322.0]
+gpu priority units      [10, 10, 10, 11, 11, 12, 12, 14] (expected [10, 10, 10, 11, 11, 12, 12, 14]) -> MATCH
+GPU claim order         MATCH
+GPU priorities          MATCH
+priority f32 vs engine f64 evaluation: 32/32 identical
+same case under N,S,W,E (the other order): enqueued 32; claim order [202583, 197583, 203577, 197576, 202576, 196582, 196577, 203582] priorities [318.0, 318.0, 318.0, 319.0, 319.0, 320.0, 322.0, 322.0, 323.0, 323.0, 323.0, 323.0, 324.5, 325.5, 326.0, 326.0, 327.5, 327.5, 329.0, 329.0, 330.5, 330.5, 332.0, 332.0]
+other engine recorded   [202583, 197583, 203577, 197576, 202576, 196582, 196577, 203582]
+other order reproduces  true
+
+
+===== PART 1: contested-border case =====
+curr-b007-s3-pangaea tick 581 (contested border, Maori Council 2) 
+  border 146 tiles; owned_mine 1832; owned_any 14332; rival tiles 12500; border tiles with >=1 rival neighbour 7; expected claims 27
+  |owned_any| = 14332; |owned_mine| = 1832; |owned_any ∩ owned_mine| = 1832; |owned_any \ owned_mine| = 12500
+  host, eligibility = owned_any  (as shipped): enqueued 211; claim order [838541, 885551, 884539, 868569, 884554, 863570, 873525, 838547, 840553, 838539, 838548, 841561, 839538, 840531, 844565, 843529, 842563, 848567, 849568, 838543, 838545, 846566, 839550, 843564, 840557, 847526, 858568, 873569, 844528, 879567, 854524, 885553, 885548, 859569, 881533, 840559, 841530, 876526, 871523, 883537, 874568, 880566, 861570, 870569, 857568, 877527, 871569, 853569, 839551, 852569, 837542, 839534, 850569, 879529, 885545, 865523, 845527, 880531, 881565, 885547, 872524, 851569, 839536, 866570]
+  host, eligibility = owned_mine (conflated): enqueued 220; claim order [838541, 885551, 884539, 863570, 884554, 873525, 868569, 839550, 844565, 843529, 842563, 838547, 846566, 838545, 838548, 840557, 840553, 839538, 843564, 840531, 849568, 838539, 838543, 840559, 870569, 882562, 858568, 874568, 881565, 845527, 844528, 857568, 885547, 884556, 859569, 876526, 883559, 872524, 841530, 841561, 885553, 879529, 848525, 885545, 871569, 877527, 848567, 866570, 854569, 840554, 837540, 861570, 847526, 861524, 881533, 865523, 840556, 839551, 851569, 837542, 839534, 847567, 885548, 880566]
+  CONFLATION COST: enqueue count 211 -> 220 (delta 9); claim order first differs at index 3
+  cpu: enqueued 211; raw pops 211; first [838541, 838541, 838541, 885551, 884539, 884539, 885551, 885551]
+  gpu: threads 256; device-observed enqueue count 211; claim order [838541, 885551, 884539, 868569, 884554, 863570, 873525, 838547, 840553, 838539, 838548, 841561, 839538, 840531, 844565, 843529, 842563, 848567, 849568, 838543, 838545, 846566, 839550, 843564, 840557, 847526, 858568]
+  engine recorded: [838541, 885551, 884539, 868569, 884554, 863570, 873525, 838547, 840553, 838539, 838548, 841561, 839538, 840531, 844565, 843529, 842563, 848567, 849568, 838543, 838545, 846566, 839550, 838544, 843564, 840557, 847526]
+  ONE-PASS KERNEL (as shipped) vs ENGINE claim order: DIFFERENT (first difference at index 23)
+  cpu vs gpu claim order: identical
+  gpu vs cpu over ALL pops (not just the recorded prefix): tiles identical for 211/211; priority bits identical on 211/211; full claim sequence (beyond the recorded prefix, unobservable) 143 pops
+  in-tick re-enqueue model: enqueued 266 (single pass: 211); claims [838541, 885551, 884539, 868569, 884554, 863570, 873525, 838547, 838548, 840553, 838539, 841561, 839538, 840531, 844565, 842563, 843529, 848567, 847567, 849568, 848568, 847568, 838543, 838538, 838545, 838544, 846566]
+  in-tick re-enqueue vs ENGINE: different (first difference at index 8)
+  engine-loop model (budget draw skipped): cursors reproducing the engine's 27 claims exactly: 0; best prefix 15/27 at cursor 0 (draws 256, enqueues 256); claims [838541, 885551, 884539, 868569, 884554, 863570, 873525, 838547, 840553, 838539, 838548, 841561, 839538, 840531, 844565, 842563, 843529, 848567, 849568, 838543, 838545, 838544, 846566, 839550, 843564, 840557, 847526]
+  engine-loop model (budget draw consumed): cursors reproducing the engine's 27 claims exactly: 0; best prefix 7/27 at cursor 1172 (draws 1429, enqueues 256); claims [838541, 885551, 884539, 868569, 884554, 863570, 873525, 838548, 838539, 839538, 843564, 841530, 838547, 838543, 842563, 840557, 840559, 838545, 840553, 848567, 839550, 844565, 841561, 838544, 846566, 874568, 858568]
+  ENG-LOOP cpu (engine_tick, persistent heap, in-tick add_neighbors): claims [838541, 885551, 884539, 868569, 884554, 863570, 873525, 838547, 840553, 838539, 838548, 841561, 839538, 840531, 844565, 843529, 842563, 848567, 849568, 838543, 838545, 846566, 839550, 838544, 843564, 840557, 847526]; enqueued 256; draws 269; refreshes 1; N,S,W,E order 0
+  ENG-LOOP gpu (same kernel, one thread per claim index): claims [838541, 885551, 884539, 868569, 884554, 863570, 873525, 838547, 840553, 838539, 838548, 841561, 839538, 840531, 844565, 843529, 842563, 848567, 849568, 838543, 838545, 846566, 839550, 838544, 843564, 840557, 847526]
+  ENGINE recorded (dump, tick 582): [838541, 885551, 884539, 868569, 884554, 863570, 873525, 838547, 840553, 838539, 838548, 841561, 839538, 840531, 844565, 843529, 842563, 848567, 849568, 838543, 838545, 846566, 839550, 838544, 843564, 840557, 847526]
+  FIRST DIFFERING INDEX vs engine: gpu none (identical) / cpu none (identical) / one-pass model 23
+  claim #23: engine 838544 - gpu 838544 - cpu 838544; gpu==cpu==engine on all 27 claims: true
+  carried state after the life (prng s0..s3, calls, heap len + 512 heap words): gpu == cpu: true; heap len 207; calls 269
+  pop priorities (f32 bits) gpu vs cpu: 27/27 identical
+
+
+===== PART 2: composed tick, b002 ticks 300..331 =====
+game curr-b002-s1-pangaea; tick0 300; players0 2 (104 tiles); steps 32
+hash contract: FNV-1a 64, offset cbf29ce484222325, prime 00000100000001b3, over 1000000 u16 LE (offset 6334dfb980453d25 for an all-zero plane)
+  tick 300: hash 0x315d521eaa6433b5  hash_ok true  claims_ok true  plane_equals_engine true
+  tick 301: hash 0x315d521eaa6433b5  hash_ok true  claims_ok true  plane_equals_engine true
+  tick 302: hash 0x315d521eaa6433b5  hash_ok true  claims_ok true  plane_equals_engine true
+  tick 303: hash 0x315d521eaa6433b5  hash_ok true  claims_ok true  plane_equals_engine true
+  tick 304: hash 0x315d521eaa6433b5  hash_ok true  claims_ok true  plane_equals_engine true
+  tick 305: hash 0x315d521eaa6433b5  hash_ok true  claims_ok true  plane_equals_engine true
+  tick 306: hash 0x315d521eaa6433b5  hash_ok true  claims_ok true  plane_equals_engine true
+  tick 307: hash 0x315d521eaa6433b5  hash_ok true  claims_ok true  plane_equals_engine true
+  tick 308: hash 0x315d521eaa6433b5  hash_ok true  claims_ok true  plane_equals_engine true
+  tick 309: hash 0x315d521eaa6433b5  hash_ok true  claims_ok true  plane_equals_engine true
+  tick 310: hash 0x315d521eaa6433b5  hash_ok true  claims_ok true  plane_equals_engine true
+  tick 311: hash 0x315d521eaa6433b5  hash_ok true  claims_ok true  plane_equals_engine true
+  tick 312: hash 0x315d521eaa6433b5  hash_ok true  claims_ok true  plane_equals_engine true
+  tick 313: hash 0x315d521eaa6433b5  hash_ok true  claims_ok true  plane_equals_engine true
+  tick 314: hash 0x315d521eaa6433b5  hash_ok true  claims_ok true  plane_equals_engine true
+  tick 315: hash 0x315d521eaa6433b5  hash_ok true  claims_ok true  plane_equals_engine true
+  tick 316: hash 0x315d521eaa6433b5  hash_ok true  claims_ok true  plane_equals_engine true
+  tick 317: hash 0x315d521eaa6433b5  hash_ok true  claims_ok true  plane_equals_engine true
+  tick 318: hash 0x315d521eaa6433b5  hash_ok true  claims_ok true  plane_equals_engine true
+  tick 319: hash 0xe5c9d1c89662b8f5  hash_ok true  claims_ok true  plane_equals_engine true
+
+FIRST MISMATCH: tick 320 
+  kernel hash 0x9b1f8cbd04fcb667  engine hash 0x27fa079cb9eb27e7
+  plane equal to the engine's (applying the engine's OWN claim sets): false
+  tile-owner differences vs the engine plane at this tick: 6
+  sid 2: engine claims (9) [461257, 461259, 461258, 457262, 452259, 460261, 453254, 458262, 455253]
+             kernel claims (9) [460261, 453261, 453254, 460254, 461260, 457262, 455253, 458262, 461258]
+  claim SETS: missing 3 [461257, 461259, 452259]; extra 3 [453261, 460254, 461260]
+  missing-tile provenance: adjacent to a tile claimed in the SAME tick 2; only adjacent to a pre-tick border tile 1; neither 0 (the last class is outside the pre-tick frontier entirely)
+  one-pass cursor sweep 0..2999 (host, same core): 0 cursors reproduce this tick's claim order exactly; best common prefix 0/9 
+  engine-loop model (in-tick add_neighbors + budget draw skipped): 0 cursors reproduce tick 320 exactly; best prefix 0/9 at cursor 0 (draws 0, enqueues 0); claims []
+  engine-loop model (in-tick add_neighbors + budget draw consumed): 0 cursors reproduce tick 320 exactly; best prefix 0/9 at cursor 0 (draws 0, enqueues 0); claims []
+  PERSISTENT-HEAP TEST (single pass, prev tick 319 frontier): pops 8..17 = [461257, 461259, 452259, 457262, 458262, 455253, 452256, 455262, 452258]
+     vs this tick's engine claims [461257, 461259, 461258, 457262, 452259, 460261, 453254, 458262, 455253]
+     -> no match (first difference at index 2)
+  PERSISTENT-HEAP TEST (engine loop, in-tick add_neighbors): cursors whose tail reproduces 9 exactly: 0 (best prefix 3/9); e.g. cursor 0: []
+  tick 320: hash 0x9b1f8cbd04fcb667  hash_ok false  claims_ok false  plane_equals_engine false
+  tick 321: hash 0xdea4a2a25e608495  hash_ok false  claims_ok false  plane_equals_engine false
+  tick 322: hash 0x6b4b4b26abc15507  hash_ok false  claims_ok false  plane_equals_engine false
+  tick 323: hash 0x46904e056c6a61f5  hash_ok false  claims_ok false  plane_equals_engine false
+  tick 324: hash 0xddee8ca67f88d435  hash_ok false  claims_ok false  plane_equals_engine false
+  tick 325: hash 0x9c326ef4d0405c05  hash_ok false  claims_ok false  plane_equals_engine false
+  tick 326: hash 0x2ce114f4dc1995a5  hash_ok false  claims_ok false  plane_equals_engine false
+  tick 327: hash 0x6a5013e0242d3c07  hash_ok false  claims_ok false  plane_equals_engine false
+  tick 328: hash 0x68d1a6d68eb37aa7  hash_ok false  claims_ok false  plane_equals_engine false
+  tick 329: hash 0xa39f23db766d8987  hash_ok false  claims_ok false  plane_equals_engine false
+  tick 330: hash 0xb4a85659bed719b7  hash_ok false  claims_ok false  plane_equals_engine false
+  tick 331: hash 0xad9ca9542ecebad7  hash_ok false  claims_ok false  plane_equals_engine false
+
+PART 2 tally (compose_tick, the ONE-PASS model as shipped): 20/32 ticks match the engine's per-tick state hash; first mismatching tick 320; engine-side reconstruction complete: true
+matched ticks: 300,301,302,303,304,305,306,307,308,309,310,311,312,313,314,315,316,317,318,319
+
+THE FIX: engine loop over the window. attack owner 2; init tick 317; pop ticks 317+1..330; per-tick budgets [8, 9, 9, 9, 9, 10, 10, 12, 11, 10, 12, 12, 12]; total claims 133 (recorded 133); platform border N,S,W,E
+  ENG-LOOP cpu: 32/32 ticks match the engine's per-tick FNV-1a-64 hash; first mismatching tick none (all matched); claims 32/133 in the engine's order; draws 341; refreshes 1; matched ticks (all)
+    (first 13 ticks, sanity: [300, 301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 311, 312])
+  ENG-LOOP gpu: 133 claims; identical to the cpu engine loop: true (first difference none); identical to the engine's recorded per-tick claim sets: true
+  carried state after tick 331: gpu == cpu: true; heap len 114 
+  gpu, THE FIX (budget draw + in-tick add_neighbors): 32/32 ticks match the engine's per-tick state hash; first mismatching tick none (all matched); claim order identical to the engine's until index none
+  gpu, control: no in-tick add_neighbors: 20/32 ticks match the engine's per-tick state hash; first mismatching tick 320; claim order identical to the engine's until index 10
+  gpu, control: no budget draw: 20/32 ticks match the engine's per-tick state hash; first mismatching tick 320; claim order identical to the engine's until index 14
+  controls (cpu, same code path): in-tick add_neighbors off 20/32; budget draw off 20/32
+  device FNV over the plane the GPU's own claims imply, tick 331: 0x52735b9ab5848067 (engine 0x52735b9ab5848067) -> true
+
+WINDOW RE-MEASURED: 32/32 ticks match the engine's per-tick FNV-1a-64 hash; first mismatching tick none (all matched); engine-loop fix on the window MATCHES
+  matched ticks: 300,301,302,303,304,305,306,307,308,309,310,311,312,313,314,315,316,317,318,319,320,321,322,323,324,325,326,327,328,329,330,331
+
+PTX of `frontier_step` (read from ofcuda_tick.ptx, not eyeballed): 
+  fma.rn.f32 1, mul.f32 1, add.f32 1, sub.f32 1
+  -> one contraction, for `(r + 10) * f + tick`; `1 - k*0.5 + mag*0.5` not contracted.
+
+FMA contraction: the PTX of `frontier_step` contains one `fma.rn.f32`
+  (for `(r + 10) * f + tick`), which is NOT what a Rust f32 host computes.
+  Contracted vs two-step agree on 1219/1219 points of (r, owner-count, terrain, tick): no divergence - the contraction is inert for this arithmetic
+
+PROOF claim_order_and_priorities_reproduced true

@@ -1,0 +1,28 @@
+[package]
+name = "ofcuda_cluster"
+version = "0.1.0"
+edition = "2024"
+default-run = "ofcuda_cluster"
+
+# Own workspace on purpose: this crate is not a member of `openfront-ai/rust`,
+# so nothing here can perturb the live training workspace.
+[workspace]
+
+[dependencies]
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git" }
+cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git" }
+# Shared host-side runtime, published from NVlabs/cutile-rs.
+cuda-core = "0.3.1"
+serde_json = "1"
+base64 = "0.22"
+# Verified map loader + FNV hashes (terrain 0xebffa87c2568cc58), reused rather
+# than re-derived.
+ofcuda_map = { path = "../ofcuda_map" }
+
+[[bin]]
+name = "ofcuda_cluster"
+path = "src/main.rs"
+
+[[bin]]
+name = "ofcuda_cluster_cpu"
+path = "src/bin/cpu.rs"

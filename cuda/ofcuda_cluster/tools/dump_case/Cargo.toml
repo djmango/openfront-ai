@@ -1,0 +1,15 @@
+[package]
+name = "dump_case"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone: depends on the CURRENT in-tree engine (path dep). Not a
+# workspace member of openfront-ai/rust, so it cannot perturb that build.
+[dependencies]
+openfront-engine = { path = "../../../openfront-ai/rust/engine" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+flate2 = "1"
+
+[workspace]

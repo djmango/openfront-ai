@@ -1,0 +1,15 @@
+[package]
+name = "ofhash_oracle"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone workspace: this crate lives *outside* the openfront-ai rust
+# workspace and only ever reads the engine library through a path dependency.
+# Absolute path on purpose - a relative path here is one level too shallow
+# (`ofcuda_hash/oracle/` -> `skg/openfront-ai`, not `workspaces/openfront-ai`).
+[workspace]
+
+[dependencies]
+openfront-engine = { path = "/opt/data/workspaces/skg/openfront-ai/rust/engine" }
+serde_json = "1"
+flate2 = "1"

@@ -1,0 +1,30 @@
+[package]
+name = "ofcuda_econ"
+version = "0.1.0"
+edition = "2024"
+default-run = "ofcuda_econ"
+
+[workspace]
+
+[dependencies]
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", optional = true }
+cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git", optional = true }
+# Shared host-side runtime, published from NVlabs/cutile-rs.
+cuda-core = { version = "0.3.1", optional = true }
+serde_json = "1"
+
+[features]
+default = ["cuda"]
+# The GPU path. `--no-default-features` leaves the shared core + host reference
+# buildable with no CUDA in the dependency graph at all, which is what
+# `ofcuda_econ_cpu` is for.
+cuda = ["dep:cuda-device", "dep:cuda-host", "dep:cuda-core"]
+
+[[bin]]
+name = "ofcuda_econ"
+path = "src/main.rs"
+required-features = ["cuda"]
+
+[[bin]]
+name = "ofcuda_econ_cpu"
+path = "src/bin/cpu.rs"

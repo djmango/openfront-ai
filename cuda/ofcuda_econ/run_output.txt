@@ -1,0 +1,120 @@
+=========================================
+RUSTC-CODEGEN-CUDA: ofcuda_econ
+=========================================
+
+Detected GPU arch: sm_120a (via nvidia-smi)
+
+This is the proper cargo workflow:
+  CARGO_ENCODED_RUSTFLAGS=<cuda-oxide flags> cargo run
+
+Building and running ofcuda_econ...
+
+   Compiling ofcuda_econ v0.1.0 (/var/lib/hermes/data/workspaces/skg/ofcuda_econ)
+    Finished `release` profile [optimized] target(s) in 2.65s
+     Running `target/release/ofcuda_econ`
+# ofcuda_econ - per-tick ECONOMY / STATE-PLANE update (slice "econ")
+# TS authority: openfront/src/core/execution/PlayerExecution.ts:75-81 +
+#   openfront/src/core/configuration/Config.ts:791-868
+# engine cross-check: rust/engine/src/execution/player.rs:82-88,
+#   rust/engine/src/core/config.rs:363-481, rust/engine/src/game.rs:1130-1155
+
+=== recorded, bot-only, zero-intent episode ===
+  record curr-b000-s3-onion (source b000s3.ndjson, 599 rows)
+  GPU vs CPU reference (same core, one on the device): rows=599 exact_out=313 (52.25375626043406%) raw_income_bits_equal=593 (98.9983305509182%)
+  field diffs GPU-vs-CPU (one row per field, first differing tick):
+    field            first tick             identity                 cpu                      gpu
+    rawIncome(bits)  417                    nation:Outer Enclave     0x40709fb48ff898c0 (265.98158261402205) 0x40709fb48ff89880 (265.9815826140184)
+    maxTroops(bits)  345                    nation:Outer Enclave     0x40f35670fae29612 (79207.0612512457) 0x40f35670fae29613 (79207.06125124572)
+    tilesPow06(bits) 313                    nation:Outer Enclave     0x402fe33e7ff7ff62 (15.9438362112266) 0x402fe33e7ff7ff61 (15.943836211226598)
+    troopsPow073(bits) 305                    nation:Outer Enclave     0x408078a279552368 (527.0793329860144) 0x408078a279552367 (527.0793329860143)
+  field divergence counts GPU-vs-CPU:
+      troops(running)     0/599
+      gold(running)       0/599
+      rawIncome(bits)     6/599
+      maxTroops(bits)     80/599
+      tilesPow06(bits)    170/599
+      troopsPow073(bits)  164/599
+  raw_income float: worst |delta| 7.276e-12 (worst |ULP| 128 - ULP is relative, and raw_income is near-cancelled at maxTroops); narrowed to f32 the device and host agree on 599/599
+  engine agreement: predicted troops+gold == engine's own next-tick dump on 591/599 rows (98.6644407345576%)
+  differing rows: 8 (first tick 302), of which 0 have no engine attack snapshot nearby
+    tick     identity                 type     troops    pred      observed   residual  dTiles    attacks
+    302      nation:Outer Enclave     Nation   6250      126       -1124      -1250     5         2
+    377      nation:Outer Enclave     Nation   17898     232       -4242      -4474     2         5
+    452      nation:Outer Enclave     Nation   32740     296       -17345     -17641    0         1
+    527      nation:Outer Enclave     Nation   37051     348       -16745     -17093    0         1
+    602      nation:Outer Enclave     Nation   45575     397       -21543     -21940    0         1
+    677      nation:Outer Enclave     Nation   52214     442       -24181     -24623    0         1
+    752      nation:Outer Enclave     Nation   59130     484       -27238     -27722    0         1
+    827      nation:Outer Enclave     Nation   65725     525       -29949     -30474    0         1
+  maxTroops attribution: pow-induced divergence 80/599 (device pow vs host pow, same two-step form); the contraction the backend emits without `survive_opt` would perturb 74/599; device maxTroops equals the two-step form on 599/599 and the contracted form on 525/599
+  PASS state_bitexact true | float_f32_identical true | engine_diffs_all_attack_labelled true
+
+=== recorded, bot-only, zero-intent episode ===
+  record curr-b005-s0-onion (source b005s0.ndjson, 7192 rows)
+  GPU vs CPU reference (same core, one on the device): rows=7192 exact_out=4012 (55.78420467185762%) raw_income_bits_equal=7163 (99.59677419354838%)
+  field diffs GPU-vs-CPU (one row per field, first differing tick):
+    field            first tick             identity                 cpu                      gpu
+    rawIncome(bits)  355                    nation:Inner Tribe       0x406a6372e7192440 (211.10777621183843) 0x406a6372e7192400 (211.1077762118366)
+    maxTroops(bits)  311                    nation:Maori Confederation 0x40e3577bc8dd595b (39611.86826960995) 0x40e3577bc8dd595c (39611.86826960996)
+    tilesPow06(bits) 302                    nation:Outer Enclave     0x401a3f7ecfc7a163 (6.5620071855158555) 0x401a3f7ecfc7a162 (6.562007185515855)
+    troopsPow073(bits) 303                    nation:Maori Confederation 0x408a24eda802d7e9 (836.6160431120053) 0x408a24eda802d7ea (836.6160431120054)
+  field divergence counts GPU-vs-CPU:
+      troops(running)     0/7192
+      gold(running)       0/7192
+      rawIncome(bits)     29/7192
+      maxTroops(bits)     1033/7192
+      tilesPow06(bits)    1777/7192
+      troopsPow073(bits)  1901/7192
+  raw_income float: worst |delta| 1.455e-11 (worst |ULP| 256 - ULP is relative, and raw_income is near-cancelled at maxTroops); narrowed to f32 the device and host agree on 7192/7192
+  engine agreement: predicted troops+gold == engine's own next-tick dump on 7102/7192 rows (98.74860956618465%)
+  differing rows: 90 (first tick 306), of which 0 have no engine attack snapshot nearby
+    tick     identity                 type     troops    pred      observed   residual  dTiles    attacks
+    306      nation:Inner Tribe       Nation   6767      133       -227       -360      8         7
+    307      nation:Maori Confederation Bot      10404     82        -3408      -3490     0         8
+    321      nation:Canaanite Metropolis Bot      11590     86        -6733      -6819     0         9
+    337      nation:Rashidun Regime   Bot      12982     88        -5697      -5785     0         11
+    359      nation:Cham Monkdom      Bot      14951     91        -8475      -8566     0         10
+    370      nation:Tuareg Wilderness Bot      15924     91        -11107     -11198    0         11
+    372      nation:Canaanite Metropolis Bot      8366      83        -1051      -1134     4         13
+    383      nation:Rashidun Regime   Bot      11050     95        -108       -203      5         13
+    384      nation:Maori Confederation Bot      13417     99        -4113      -4212     2         14
+    386      nation:Leafer Confederation Nation   22512     251       -9232      -9483     0         12
+    ... 80 more
+  maxTroops attribution: pow-induced divergence 1033/7192 (device pow vs host pow, same two-step form); the contraction the backend emits without `survive_opt` would perturb 734/7192; device maxTroops equals the two-step form on 7192/7192 and the contracted form on 6458/7192
+  PASS state_bitexact true | float_f32_identical true | engine_diffs_all_attack_labelled true
+
+=== SYNTHESISED city-level sweep ===
+  record SYNTHESISED (source synthesised in this crate (no recorded episode builds a city before tick 1200), 300 rows)  [SYNTHESISED]
+  GPU vs CPU reference (same core, one on the device): rows=300 exact_out=240 (80%) raw_income_bits_equal=300 (100%)
+  field diffs GPU-vs-CPU (one row per field, first differing tick):
+    field            first tick             identity                 cpu                      gpu
+    troopsPow073(bits) 0                      synthetic:Human/Easy/city0/tiles5000 0x40b3eeba0a02ca79 (5102.726715254242) 0x40b3eeba0a02ca78 (5102.726715254241)
+  field divergence counts GPU-vs-CPU:
+      troops(running)     0/300
+      gold(running)       0/300
+      rawIncome(bits)     0/300
+      maxTroops(bits)     0/300
+      tilesPow06(bits)    0/300
+      troopsPow073(bits)  60/300
+  raw_income float: worst |delta| 0.000e0 (worst |ULP| 0 - ULP is relative, and raw_income is near-cancelled at maxTroops); narrowed to f32 the device and host agree on 300/300
+  engine agreement: predicted troops+gold == engine's own next-tick dump on 204/300 rows (68%)
+  differing rows: 96 (first tick 0), of which 96 have no engine attack snapshot nearby
+    tick     identity                 type     troops    pred      observed   residual  dTiles    attacks
+    0        synthetic:Human/Easy/city1/tiles1000 Human    9000      198       194        -4        0         0
+    0        synthetic:Human/Easy/city1/tiles5000 Human    120000    1059      928        -131      0         0
+    0        synthetic:Human/Easy/city1/tiles50000 Human    1000000   2408      1775       -633      0         0
+    0        synthetic:Human/Easy/city2/tiles1000 Human    9000      200       194        -6        0         0
+    0        synthetic:Human/Easy/city2/tiles5000 Human    120000    1120      928        -192      0         0
+    0        synthetic:Human/Easy/city2/tiles50000 Human    1000000   2877      1775       -1102     0         0
+    0        synthetic:Human/Easy/city3/tiles1000 Human    9000      200       194        -6        0         0
+    0        synthetic:Human/Easy/city3/tiles5000 Human    120000    1155      928        -227      0         0
+    0        synthetic:Human/Easy/city3/tiles50000 Human    1000000   3238      1775       -1463     0         0
+    0        synthetic:Human/Easy/city4/tiles1000 Human    9000      201       194        -7        0         0
+    ... 86 more
+  maxTroops attribution: pow-induced divergence 0/300 (device pow vs host pow, same two-step form); the contraction the backend emits without `survive_opt` would perturb 0/300; device maxTroops equals the two-step form on 300/300 and the contracted form on 300/300
+  PASS state_bitexact true | float_f32_identical true | engine_diffs_all_attack_labelled true (no engine truth: SYNTHESISED)
+
+=== FMA contraction sensitivity (host arithmetic) ===
+  points tested 4416; two-step vs mul_add differ on 58 (first (15, 0) -> a: 55077.55639198741 vs 55077.556391987404)
+
+PROOF gpu_matches_cpu_on_every_row true
