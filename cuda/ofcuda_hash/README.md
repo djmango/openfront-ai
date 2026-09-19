@@ -131,6 +131,26 @@ OF=/opt/data/workspaces/skg/ofcuda_hash
 /opt/data/workspaces/skg/ofcuda_env.sh ./target/release/ofcuda_hash_cpu /tmp/ofhash_record_late
 ```
 
+To dump the **device's own** per-tick plane bytes (the `serialize_state_le`
+output read back from `d_bytes`, never the reference file), add
+`--dump-device-planes <dir>`:
+
+```bash
+/opt/data/workspaces/skg/ofcuda_env.sh ./target/release/ofcuda_hash \
+    /tmp/ofhash_record_late --dump-device-planes /tmp/ofhash_devicedump
+```
+
+This writes `<dir>/device_planes.bin` (same layout as the oracle's
+`planes.bin`: `frames x w*h` LE `u16`) and, per tick, the number of tiles whose
+`u16` differs from the reference plane, plus a `diff_bytes` count over the raw
+serialized bytes. On the ticks 500..699 window both counts are 0 on all 200
+ticks, and `device_planes.bin` is byte-identical to `planes.bin`
+(sha256 `9df2284f5562f8f8c9aa53e63a99ffb157cbee829f8504c9b90121213ce271e5`).
+The dumped file is non-degenerate (2 985 non-zero tiles on tick 500, 1 032 607
+across the window), so it cannot be a zeroed buffer that the kernel never wrote.
+`device_planes_all_identical` is added to the verdict: a tick whose device bytes
+differ from the reference fails the run.
+
 Full outputs: `/tmp/run_late_gpu.out`, `/tmp/run_parity_gpu.out`,
 `/tmp/run_record_gpu.out` (+ `_cpu` companions).
 

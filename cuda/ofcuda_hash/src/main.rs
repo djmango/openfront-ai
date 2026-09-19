@@ -220,14 +220,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dump_dir = std::env::args()
         .nth(1)
         .map(PathBuf::from)
-        .ok_or("usage: ofcuda_hash <dump-dir> [--max-ticks N]")?;
+        .ok_or(
+            "usage: ofcuda_hash <dump-dir> [--max-ticks N] [--dump-device-planes <out-dir>]",
+        )?;
     let mut max_ticks = usize::MAX;
+    // Where (if anywhere) to dump the *device-written* per-tick plane bytes.
+    // Nothing here is copied back into this file from the reference: the bytes
+    // written are the ones `serialize_state_le` produced on the device, read
+    // back verbatim with `to_host_vec`.
+    let mut device_dump_dir: Option<PathBuf> = None;
     let argv: Vec<String> = std::env::args().skip(2).collect();
     let mut i = 0;
     while i < argv.len() {
         match argv[i].as_str() {
             "--max-ticks" => {
                 max_ticks = argv[i + 1].parse()?;
+                i += 2;
+            }
+            "--dump-device-planes" => {
+                device_dump_dir = Some(PathBuf::from(&argv[i + 1]));
                 i += 2;
             }
             other => return Err(format!("unknown arg {other}").into()),
@@ -520,10 +531,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // =====================================================================
     println!();
     println!("== per-tick state hash: GPU vs engine ({} ticks) ==", n_ticks);
+    if let Some(dir) = &device_dump_dir {
+        println!(
+            "# dumping device-written planes to {}/device_planes.bin ({} bytes/tick, LE u16)",
+            dir.display(),
+            n_bytes
+        );
+    }
     println!(
         "  {:<8} {:<20} {:<20} {:<20} {:<6} {}",
         "tick", "gpu_serialized", "gpu_direct_u16", "engine_expected", "match", "gameHashBits"
     );
+
+    // Device-plane dump: the file is written from `d_bytes` (device-written),
+    // never from the reference plane, and the per-tick tile diff is counted by
+    // decoding those device bytes back to u16 and comparing word for word
+    // against the reference plane for the same tick.
+    let mut device_dump: Option<std::fs::File> = match &device_dump_dir {
+        Some(dir) => {
+            std::fs::create_dir_all(dir)?;
+            Some(std::fs::File::create(dir.join("device_planes.bin"))?)
+        }
+        None => None,
+    };
+    let mut dump_rows: Vec<(u32, usize, usize, bool)> = Vec::new();
+
     let mut matches = 0usize;
     let mut first_disagreement: Option<(u32, u64, u64)> = None;
     for idx in 0..n_ticks {
@@ -531,6 +563,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let plane = dump.plane(idx);
         d_state.copy_from_host(&stream, &plane)?;
         module.serialize_state_le(&stream, &p_ser, &d_state, &mut d_bytes)?;
+        // Read the device-written serializer output back (this is the only
+        // readback the dump needs, and it is the device's own bytes).
+        let device_bytes = d_bytes.to_host_vec(&stream)?;
         module.fnv_chain_bytes(&stream, &p_chain, &d_bytes, n_bytes as u32, &mut d_out)?;
         let h_bytes = one_u64!(stream, d_out);
         module.fnv_chain_u16(&stream, &p_u16, &d_state, n as u32, &mut d_out2)?;
@@ -544,6 +579,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Cross-check the CPU reference on the same plane, same code path.
         let cpu = ofcuda_hash::state_hash(&plane);
         let cpu_ok = cpu == tl.state_hash;
+        if let Some(f) = device_dump.as_mut() {
+            use std::io::{Seek, SeekFrom, Write};
+            f.seek(SeekFrom::Start((idx * n_bytes) as u64))?;
+            f.write_all(&device_bytes)?;
+            let mut diff_tiles = 0usize;
+            for k in 0..n {
+                if u16::from_le_bytes([device_bytes[2 * k], device_bytes[2 * k + 1]]) != plane[k] {
+                    diff_tiles += 1;
+                }
+            }
+            let ref_bytes = serialize_u16_le(&plane);
+            let diff_bytes = device_bytes
+                .iter()
+                .zip(ref_bytes.iter())
+                .filter(|(a, b)| a != b)
+                .count();
+            let row_ok = diff_tiles == 0 && diff_bytes == 0;
+            println!(
+                "  device_planes tick={:<8} diff_tiles={:<8} diff_bytes={:<8} identical={}",
+                tl.tick, diff_tiles, diff_bytes, row_ok
+            );
+            dump_rows.push((tl.tick, diff_tiles, diff_bytes, row_ok));
+        }
         println!(
             "  {:<8} {:<20} {:<20} {:<20} {:<6} {}",
             tl.tick,
@@ -560,6 +618,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("per_tick_checked  {n_ticks}");
     println!("per_tick_matches  {matches}");
     println!("per_tick_mismatches {}", n_ticks - matches);
+    if let Some(f) = device_dump.as_mut() {
+        use std::io::Write;
+        f.flush()?;
+        f.sync_all()?;
+    }
+    if let Some(dir) = &device_dump_dir {
+        let written = dump_rows.len();
+        let bad_rows = dump_rows.iter().filter(|r| !r.3).count();
+        let total_diff_tiles: usize = dump_rows.iter().map(|r| r.1).sum();
+        let total_diff_bytes: usize = dump_rows.iter().map(|r| r.2).sum();
+        println!(
+            "device_planes_dump {} ({} ticks, {} bytes/plane)",
+            dir.join("device_planes.bin").display(),
+            written,
+            n_bytes
+        );
+        println!("device_planes_ticks_dumped {written}");
+        println!("device_planes_rows_not_identical {bad_rows}");
+        println!("device_planes_total_diff_tiles {total_diff_tiles}");
+        println!("device_planes_total_diff_bytes {total_diff_bytes}");
+        println!("device_planes_all_identical {}", bad_rows == 0 && written == n_ticks);
+        if bad_rows != 0 || written != n_ticks {
+            failures += 1;
+        }
+    }
     match first_disagreement {
         None => println!("first_disagreement none"),
         Some((t, gpu, exp)) => {
