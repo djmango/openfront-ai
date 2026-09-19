@@ -890,9 +890,47 @@ plain owner plane (0/0 on that diagnostic), so the composed hash stage currently
 separate 200/200 result rather than on this crate's own plane reconstruction. Cluster capture is wired but
 fires only on a player loss, of which there are none in this window.
 
-**Still unproven after all four:** the budget's *value* is now computed (see the composed-tick block
-above) but its `tiles_used` divisor still takes a truncated troop count from the record, so the attack's
-true `f64` start troops remain unwired; the nonzero-stage `ofenv_set_stage` branch at startup never fired; all
+**THE COMPOSED TICK NOW MATCHES THE WHOLE RECORD 2026-09-18 (`ofcuda_env`).** Ticks **2..1301, no
+mismatch: 2598/2598 (tick,player) pairs** reproduce the engine's claim set AND order, 1966/1966 from the
+first attack at 318. Three stops were found and closed, and the third only became visible once the first
+two were gone:
+- **tick 359** - the truncated `tiles_used` input, closed by computing the attack's real f64 start troops
+  from the economy instead of the record's `i64`.
+- **tick 377** - two concurrent attacks, closed by porting the LIVE merge path:
+  `AttackExecution::init` (attack.rs:177-184, land attacks only) -> **`merge_outgoing_land_attacks`
+  (game.rs:2122-2156)**, which walks `Player.outgoing_land_attacks` (game.rs:125, pushed :2020, retained
+  :2040), adds same-owner + same-target troops, and `kill_attack`s the absorbed exec (attack.rs:215-218).
+  `try_merge_land_attack` (game.rs:1991) is confirmed dead: one occurrence in the tree, the definition,
+  no caller. Arithmetic: rec377 `start 1353.332073 + absorbed 557.462201 -> 1910.794274`, floor 1910 =
+  the record. So it is a real merge, not two racing attacks.
+- **tick 557->558** - **the heap was a fixed 256-entry array that DROPS a candidate when full, while the
+  engine's `FlatBinaryHeap` is a growable `Vec`** (flat_heap.rs:8,26-27; `Vec::with_capacity(1024)` is only
+  a hint). Our heap peaked at exactly 256 and **13180 candidates were dropped**, which is why divergence
+  appeared only at the first tick whose heap saturated. Raised to 1024 with `STATE_HEAP_CAP` held at 256 so
+  the device layout and `STATE_WORDS`=518 stay unchanged. After the fix: peak 851, **0 drops**.
+
+Per-tick claim counts match everywhere, e.g. 318..333 = `8 9 9 9 9 10 10 12 11 10 12 12 12 12 12 13`.
+Accounted: 36 creations (24/24 floor-matched), 12 merges (12/12 floor-matched), 24 starved deaths, 0
+heap-dry retreats, 12 lingering no-op ticks, 0 unexplained evictions.
+
+**The hash question is resolved, and my earlier framing of it was wrong in a way worth recording:**
+`gameHash` is NOT a plane hash. It is the engine's JS sync checksum `1.0 + sum_p id_hash*(troops+tiles) +
+sum_units unit_hash` (hash.rs:7-22, `id_hash=|simple_hash(id)|`). Re-evaluated from the record's own fields
+it reproduces **1001/1001**; FNV over the owner plane versus `gameHash` is **0/1001** because they are
+different objects, not because FNV is wrong. What the composed tick does reproduce is the plane itself:
+composed plane == engine plane **1001/1001 word-for-word**, hence FNV-1a-64(composed) == FNV-1a-64(engine)
+**1001/1001**. A `gameHash` from composed state is still not reproduced, since its inputs are player-level
+troops/tiles and composed player troops remain record-seeded.
+
+**Assumed:** `ownedOrder` is the claim log, `borderOrder` is the engine's iteration order, one PRNG per
+attack at `SEED=123`, and **the record still supplies which attacks exist and when** - so the model aligns
+to the record's attack list and a window must begin at or before the first attack (`--t0 548` on the same
+dump fails immediately for exactly that reason). **Unported:** player-vs-player budgets, mid-tick
+`refresh_to_conquer`, fallout/defense modifiers, boat attacks, and cluster capture, which needs a player
+loss and there is none in this window.
+
+**Still unproven after all four:** the `tiles_used` divisor's true `f64` start troops are now wired (see
+the composed-tick block above), so what remains is the following: the nonzero-stage `ofenv_set_stage` branch at startup never fired; all
 five refusal guards are untested live (0 refused); **optimizer state is not serialized at all**
 (`puf_save_weights` writes only the fp32 master weights, 101,933,056 B = 25.5M x 4, so Adam moments
 restart every time); the env RNG and in-episode state are not restored; and no save/restore
@@ -1276,3 +1314,56 @@ suppression) - they need a deliberate negative probe, not an inference from "0 r
 **Optimizer state is still not serialized** (`puf_save_weights` writes only the fp32 master
 weights, 101,933,056 B = 25.5M x 4), so Adam's moments restart at every launch, as do the env RNG
 and in-episode state. That is the next durability gap after this one.
+
+### E5-c — matched stage-2 control on the faithful engine [DONE 2026-09-18 19:20, n=160]
+
+The 16:32 stage-2 reading (80/160 = 0.500) was taken against a **pre-parity** control. This is the
+matched one, same engine (post-parity cdylib, sha256 `43c16d48…`, inode 9608558), same stage,
+n=160, 8 envs:
+
+| policy | wins/n | win rate | score |
+|---|---|---|---|
+| trained (ckpt `10650112`, 16:32) | 80/160 | **0.500** | 142.60 |
+| all-zero control (post-parity, 19:20) | 16/161 | **0.099** | -5.68 |
+| all-zero control (pre-parity, 13:22) | 12/120 | 0.100 | +11.21 |
+
+Read: **+0.401 win rate (SE ~0.043, z~9) and +148.3 return** - the policy is decisive over random
+legal play at stage 2, and still 0.40 below the 0.90 gate. The wall is a policy/curriculum
+problem, neither a stale control nor a broken gate. Note which channel is comparable across the
+two engines: the **win rate reproduces (0.099 vs 0.100)** while the return does not (+11.21 ->
+-5.68), because the parity fixes change the games a zero policy plays (different game ids, spawn
+tiles, expansion order). Post-parity control by stage: 0.298 (s0) / 0.600 (s1) / 0.099 (s2).
+
+### D12 — the watchdog raced the eval's thaw [FIXED in `eval_policy.sh`, NOT yet exercised]
+
+`stall-report.txt`, 2026-09-18 19:20:43: `watchdog: frozen: log untouched for 2416s -> systemctl
+restart openfront-train.service`, i.e. **48 s after the eval's SIGCONT** at 19:19:55. The stall
+check compares `current.log`'s mtime against now, and a SIGSTOP freeze leaves that mtime at the
+moment of the freeze (18:40:27) - so the instant `WATCHDOG_OFF` is removed, every eval that
+outlasted `STALL=900s` (all of them) hands the watchdog a "frozen" trainer. The SIGSTOP design
+that keeps the ladder alive was thus defeated by the watchdog on the way out.
+
+E7 turned the damage into a cheap restart (64/64 sidecars restored, envs re-promoted `0 -> 1`
+inside a minute) but the in-flight epoch and the Adam moments were still lost. Fix, in
+`eval_policy.sh`: after the thaw, wait (bounded, `FRESH_LOG_TIMEOUT=180s`) for a fresh log write
+before removing `WATCHDOG_OFF`, using pure-bash `-nt` so there is no `stat` dependency on the cron
+PATH; on timeout it says so and releases the watchdog anyway, because a genuinely dead trainer must
+still be restartable. Not exercised yet - the next eval is its first test.
+Independent hardening still available on the watchdog side (treat a stale log as frozen only if
+`/proc/<pid>/stat` CPU time is *also* not advancing); that lives in the flake and needs a
+`nixos-rebuild`, so it was deliberately not done from an unattended tick.
+
+### Next step, ranked (2026-09-18 19:30)
+
+1. **Do not change the reward yet.** D10's `v10_timeout_after_closeout_penalty = -20.0` is still the
+   only stage-2 lever with a stated mechanism, but its premise is unmeasured: nothing counts how
+   often an episode actually takes the timeout-after-closeout path at stage 2, and E6's lesson is
+   that a reward-misalignment claim built on a named constant rather than the composed terminal is
+   how a day gets spent. Instrument the path (a counter through `puf_log`) before pricing it.
+2. **E8 (AGENTS=128) stays blocked**: `free -h` reads 4.8G available with 5.8G swap already in use,
+   against the ~+5G the doubled env state needs, on a box whose trainer has already been
+   OOM-killed once at 6.7G peak RSS + 5.5G swap peak. Do not run it until RAM is freed.
+3. **A fresh run is not indicated yet.** The user directive ("kill the runs once we have parity")
+   authorises it, and parity for stages 0-7 is in hand, but a from-random-init run would re-climb
+   the ~11.5M steps of progress this run already has while the current LR (57% into the cosine) is
+   still learning. Revisit if stage 2 is still at ~0.50 when the cosine ends (8.5M steps, ~18h).

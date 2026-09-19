@@ -71,11 +71,24 @@ mod kernels {
 //                                           the END of a tick, so its first `tick()` is the
 //                                           NEXT tick: `init` refresh at T, pops from T+1)
 
-/// Enqueue capacity of the flat heap.  The recorded cases enqueue 32-44
-/// candidates; the contested case (b007-s3 tick 581) enqueues 211 and the
-/// composed b002 window reaches 62, so 256 covers both without costing the
-/// device thread more than 2 KiB of local memory.
-pub const HEAP_CAP: usize = 256;
+/// Enqueue capacity of the host-side flat heap.
+///
+/// The engine's `FlatBinaryHeap` is a growable `Vec` (`Vec::with_capacity(1024)`
+/// is only a hint - `execution/flat_heap.rs:8,26-27`), i.e. unbounded. A fixed
+/// 256 silently DROPPED 13180 candidates in the composed b002 window and its
+/// high-water mark sat exactly on the cap, which is what first desynced the
+/// claim order (tick 558). 8192 is a bound, not the engine's behaviour, so the
+/// run reports `Heap::drops` and `Heap::peak` instead of assuming it is not
+/// binding - and `STATE_HEAP_CAP` below keeps the *serialized* width at the
+/// device module's own 256.
+pub const HEAP_CAP: usize = 1024;
+
+/// Width of the heap in the *serialized* attack state (`STATE_WORDS`). This is
+/// deliberately separate from [`HEAP_CAP`]: the device module (`src/main.rs`)
+/// has its own fixed 256-entry heap and reads `STATE_WORDS` from here, so the
+/// serialization stride must stay 256 even if the host-side heap grows to match
+/// the engine's (unbounded, growable) `FlatBinaryHeap`.
+pub const STATE_HEAP_CAP: usize = 256;
 
 /// The border-tile iteration order. It is an *input*, not a constant, because
 /// the two engines disagree about it and which one a record was produced under
@@ -276,6 +289,13 @@ pub struct Heap {
     pub pri: [f32; HEAP_CAP],
     pub tiles: [u32; HEAP_CAP],
     pub len: usize,
+    /// Candidates refused because `len == HEAP_CAP`. The engine's
+    /// `FlatBinaryHeap` is a growable `Vec`, so a *nonzero* value here is a
+    /// divergence, not a detail: the refused tile would have been claimed later.
+    pub drops: u64,
+    /// High-water mark of `len` over the heap's life, so a run can say whether
+    /// `HEAP_CAP` is anywhere near binding instead of assuming it is not.
+    pub peak: usize,
 }
 
 impl Heap {
@@ -284,6 +304,8 @@ impl Heap {
             pri: [0.0; HEAP_CAP],
             tiles: [0; HEAP_CAP],
             len: 0,
+            drops: 0,
+            peak: 0,
         }
     }
 
@@ -297,14 +319,19 @@ impl Heap {
 
     pub fn enqueue(&mut self, tile: u32, priority: f32) {
         // Bound guard: the engine's FlatBinaryHeap is a growable Vec, this one
-        // is a fixed array for the device. Overflowing it would be UB in
-        // release, so a full heap drops the candidate instead. HEAP_CAP is
-        // sized above every frontier this crate feeds it (max 211).
+        // is a fixed array. Overflowing it would be UB in release, so a full
+        // heap drops the candidate instead - and a dropped candidate is a tile
+        // the engine would have claimed later, so `drops` is reported rather
+        // than assumed away (`HEAP_CAP` is sized from the measured `peak`).
         if self.len >= HEAP_CAP {
+            self.drops += 1;
             return;
         }
         let mut i = self.len;
         self.len += 1;
+        if self.len > self.peak {
+            self.peak = self.len;
+        }
         while i > 0 {
             let parent = (i - 1) >> 1;
             if priority >= self.pri[parent] {
@@ -451,7 +478,7 @@ pub const CLAIM_CAP: usize = 256;
 
 /// Words of one attack's carried state (`EngineAttack::state_words`):
 /// `[s0,s1,s2,s3,calls, heap_len, heap tiles[HEAP_CAP], heap priority bits[HEAP_CAP]]`.
-pub const STATE_WORDS: usize = 6 + 2 * HEAP_CAP;
+pub const STATE_WORDS: usize = 6 + 2 * STATE_HEAP_CAP;
 
 impl Heap {
     /// Copy a carried heap back in (`to_conquer` persisting across ticks,
@@ -937,9 +964,9 @@ impl EngineAttack {
         }
         out[5] = self.heap.len as u32;
         let mut j = 0usize;
-        while j < HEAP_CAP {
+        while j < STATE_HEAP_CAP {
             out[6 + j] = if j < self.heap.len { self.heap.tiles[j] } else { u32::MAX };
-            out[6 + HEAP_CAP + j] = self.heap.pri[j].to_bits();
+            out[6 + STATE_HEAP_CAP + j] = self.heap.pri[j].to_bits();
             j += 1;
         }
     }
@@ -949,8 +976,8 @@ impl EngineAttack {
     /// `claims` carry the attack's conquest map, which is a separate array.
     pub fn from_state_words(words: &[u32], claims_so_far: u32, claims: &mut [u32; CLAIM_CAP]) -> Self {
         let mut len = words[5] as usize;
-        if len > HEAP_CAP {
-            len = HEAP_CAP;
+        if len > STATE_HEAP_CAP {
+            len = STATE_HEAP_CAP;
         }
         let mut a = EngineAttack {
             heap: Heap::new(),
@@ -964,10 +991,12 @@ impl EngineAttack {
         let mut i = 0usize;
         while i < len {
             a.heap.tiles[i] = words[6 + i];
-            a.heap.pri[i] = f32::from_bits(words[6 + HEAP_CAP + i]);
+            a.heap.pri[i] = f32::from_bits(words[6 + STATE_HEAP_CAP + i]);
             i += 1;
         }
         a.heap.len = len;
+        a.heap.peak = len;
+        a.heap.drops = 0;
         let mut k = 0usize;
         while k < claims_so_far as usize && k < CLAIM_CAP {
             a.claims[k] = claims[k];

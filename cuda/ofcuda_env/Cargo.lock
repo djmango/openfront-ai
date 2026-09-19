@@ -449,6 +449,7 @@ dependencies = [
  "ofcuda_econ",
  "ofcuda_hash",
  "ofcuda_map",
+ "ofcuda_prng",
  "ofcuda_tick",
  "serde_json",
 ]
@@ -465,6 +466,16 @@ dependencies = [
 
 [[package]]
 name = "ofcuda_map"
+version = "0.1.0"
+dependencies = [
+ "cuda-core",
+ "cuda-device",
+ "cuda-host",
+ "serde_json",
+]
+
+[[package]]
+name = "ofcuda_prng"
 version = "0.1.0"
 dependencies = [
  "cuda-core",

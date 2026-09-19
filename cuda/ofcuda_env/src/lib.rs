@@ -139,6 +139,97 @@ pub fn land_attack_troops(owner_troops: f64, max_troops: f64, expand_ratio: f64)
     if troops < 1.0 { None } else { Some(troops) }
 }
 
+// ---------------------------------------------------------------------------
+// The true f64 start troops: economy output + max_troops_for + expand_ratio
+// ---------------------------------------------------------------------------
+
+/// `bot/tribe.rs:29-42` `TribeExecution::new` - the tribe's five construction
+/// draws. All five come off one `PseudoRandom::new(simple_hash(player_id))`
+/// (`tribe.rs:31`), so a single pass reproduces the tribe's own `expand_ratio`.
+///
+/// This is the term `ai_attack.rs:9-18` multiplies `max_troops_for` by, and it
+/// is a per-player CONSTANT: it is drawn once, at tribe construction, and is
+/// not a record field anywhere.
+#[derive(Clone, Copy, Debug)]
+pub struct TribeRatios {
+    pub attack_rate: i32,
+    pub attack_tick: i32,
+    pub trigger_ratio: f64,
+    pub reserve_ratio: f64,
+    pub expand_ratio: f64,
+}
+
+pub fn tribe_ratios(player_id: &str) -> TribeRatios {
+    let mut r = ofcuda_prng::PseudoRandom::new(ofcuda_prng::simple_hash(player_id));
+    let attack_rate = r.next_int(40, 80);
+    let attack_tick = r.next_int(0, attack_rate);
+    let trigger_ratio = r.next_int(50, 60) as f64 / 100.0;
+    let reserve_ratio = r.next_int(30, 40) as f64 / 100.0;
+    let expand_ratio = r.next_int(10, 20) as f64 / 100.0;
+    TribeRatios {
+        attack_rate,
+        attack_tick,
+        trigger_ratio,
+        reserve_ratio,
+        expand_ratio,
+    }
+}
+
+/// The attack's exact `f64` start troops, from the lawful producers:
+///
+/// * `attacker.troops as f64` (`ai_attack.rs:13`) - the owner's troop count at
+///   the moment the AI reads it. The owner's troops are `i32`, so the only
+///   lawful f64 source for this term is the economy step itself: the row's
+///   `troops_after` (`ofcuda_econ::step_row`, `execution/player.rs:82-88`).
+/// * `max_troops_for(owner) * ratio` (`game.rs:1780-1787` ->
+///   `core/config.rs:363-385`, `wire.max_troops`) - `StepOut::max_troops` is
+///   that same function, reused rather than re-implemented.
+/// * `ratio` - the tribe's `expand_ratio` for a terra-nullius target
+///   (`ai_attack.rs:398-407` -> `land_attack_troops`), the `reserve_ratio` for
+///   a player target (`ai_attack.rs:499-505`).
+///
+/// The two multiplies stay separate, in the engine's own order
+/// (`target_troops = max_troops * reserve_or_expand_ratio`, then `troops -
+/// target_troops`): `f64` subtraction is not associative.
+pub fn land_attack_start_troops(row: &ofcuda_econ::Row, ratio: f64) -> Option<f64> {
+    let step = ofcuda_econ::step_row(row);
+    let troops = step.troops_after as f64 - step.max_troops * ratio;
+    if troops < 1.0 { None } else { Some(troops) }
+}
+
+/// `execution/player.rs:82-88` as one row - the economy step's input, straight
+/// from the previous record. `city_levels` is 0 throughout the measured window
+/// (no unit is ever built before tick 1300 in this record).
+#[allow(clippy::too_many_arguments)]
+pub fn econ_row(
+    tick: u32,
+    troops: i32,
+    tiles: i32,
+    city_levels: i64,
+    gold: i64,
+    player_type: u32,
+) -> ofcuda_econ::Row {
+    ofcuda_econ::Row {
+        tick,
+        troops,
+        tiles,
+        city_levels,
+        gold,
+        player_type,
+        // Only the `Nation` arm of `troop_increase_rate_raw` reads difficulty;
+        // this window is all `Bot`, whose arm does not (`config.rs:425-438`).
+        difficulty: ofcuda_econ::core_impl::DIFF_EASY,
+        gold_multiplier: 1.0,
+        infinite_troops: false,
+        next_troops: 0,
+        next_gold: 0,
+        attack_activity: 0,
+        d_tiles: 0,
+        identity: String::new(),
+        synthetic: false,
+    }
+}
+
 /// One land attack: the persistent heap plus the engine's `border_tiles` set.
 pub struct Attack {
     pub owner_sid: u16,
@@ -151,6 +242,9 @@ pub struct Attack {
     pub border: Vec<u32>,
     /// The whole-life claim list (`claimed_so_far` + this tick's claims).
     pub claims: Vec<u32>,
+    /// `AttackExecution.attack_live` (`attack.rs:30`): false after `delete()`,
+    /// while the exec itself stays in `execs` for one more tick.
+    pub attack_live: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -159,8 +253,14 @@ pub struct TickOut {
     pub budget_draw: i32,
     pub border_size: u32,
     pub claims: Vec<u32>,
-    pub refilled: bool,
-    pub killed: bool,
+    /// The engine ran the `to_conquer.is_empty()` branch (`attack.rs:264-268`)
+    /// and therefore refreshed and then RETREATED: the attack is deleted, its
+    /// survivors go back to the owner and it claims nothing more this tick.
+    pub retreated: bool,
+    /// `troop_count < 1.0` (`attack.rs:258-262`).
+    pub starved: bool,
+    /// The attack is dead after this tick (either path above).
+    pub dead: bool,
     pub troops_after: f64,
 }
 
@@ -175,6 +275,7 @@ impl Attack {
             pr: Prng::new(seed),
             border: Vec::new(),
             claims: Vec::new(),
+            attack_live: true,
         }
     }
 
@@ -265,6 +366,21 @@ impl Attack {
         defender_troops: f64,
         defender_is_player: bool,
     ) -> TickOut {
+        // attack.rs:215-218: a killed attack still ticks once and does nothing
+        // (this is the tick that clears its `active` flag and evicts it from
+        // `execs`). It draws NOTHING - the guard is before the budget draw.
+        if !self.attack_live {
+            return TickOut {
+                budget: 0.0,
+                budget_draw: 0,
+                border_size: self.border.len() as u32,
+                claims: Vec::new(),
+                retreated: false,
+                starved: false,
+                dead: true,
+                troops_after: 0.0,
+            };
+        }
         // attack.rs:233-237
         let mut troop_count = self.troops;
         // attack.rs:239-255 - the one extra draw, taken BEFORE the pop loop.
@@ -278,30 +394,45 @@ impl Attack {
         );
         let mut num = budget;
         let n0 = self.claims.len();
-        let mut refilled = false;
-        let mut killed = false;
+        let mut retreated = false;
+        let mut starved = false;
 
         // attack.rs:257 `while num_tiles_per_tick > 0.0`
         while num > 0.0 {
             // attack.rs:258-262
             if troop_count < 1.0 {
                 self.troops = 0.0;
-                killed = true;
+                starved = true;
                 return TickOut {
                     budget,
                     budget_draw: draw,
                     border_size,
                     claims: self.claims[n0..].to_vec(),
-                    refilled,
-                    killed,
+                    retreated,
+                    starved,
+                    dead: true,
                     troops_after: 0.0,
                 };
             }
-            // attack.rs:264-268
+            // attack.rs:264-268: the heap ran dry. The engine refreshes and then
+            // RETREATS - `self.troops = troop_count; self.retreat(game, 0.0)`,
+            // which deletes the attack and returns `troops` to the owner. It
+            // claims nothing more this tick and is gone from `execs` when the
+            // tick ends, so this is a DEATH, not a refill-and-continue.
             if self.heap.is_empty() {
                 self.refresh(owner_border, plane, terrain, w, h, tick);
-                refilled = true;
-                break;
+                retreated = true;
+                self.troops = 0.0;
+                return TickOut {
+                    budget,
+                    budget_draw: draw,
+                    border_size,
+                    claims: self.claims[n0..].to_vec(),
+                    retreated,
+                    starved,
+                    dead: true,
+                    troops_after: 0.0,
+                };
             }
             let Some((tile, _pri)) = self.heap.dequeue() else {
                 break; // attack.rs:271
@@ -327,10 +458,20 @@ impl Attack {
             budget_draw: draw,
             border_size,
             claims: self.claims[n0..].to_vec(),
-            refilled,
-            killed,
+            retreated,
+            starved,
+            dead: false,
             troops_after: self.troops,
         }
+    }
+
+    /// `AttackExecution::kill_attack` (`attack.rs:1216-1226`): unregister, set
+    /// `attack_live = false`. The attack's own `active` flag is untouched - it
+    /// stays in `execs` for one more tick and is retained only if it is still
+    /// `active`, which is why a merged-away attack shows up in the record with
+    /// `active = true, attackLive = false` for exactly one tick.
+    pub fn kill(&mut self) {
+        self.attack_live = false;
     }
 }
 

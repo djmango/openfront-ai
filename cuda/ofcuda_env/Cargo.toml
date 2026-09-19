@@ -20,6 +20,9 @@ ofcuda_cluster = { path = "../ofcuda_cluster" }
 ofcuda_econ = { path = "../ofcuda_econ" }
 ofcuda_hash = { path = "../ofcuda_hash" }
 ofcuda_map = { path = "../ofcuda_map" }
+# The tribe's own ratios (`bot/tribe.rs:29-42`) come off the seeded PseudoRandom,
+# i.e. the same `simple_hash`/`PseudoRandom` the engine uses - reused, not copied.
+ofcuda_prng = { path = "../ofcuda_prng" }
 
 [[bin]]
 name = "ofcuda_env"
