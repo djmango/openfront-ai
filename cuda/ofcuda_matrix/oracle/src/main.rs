@@ -537,9 +537,17 @@ fn replay_cell(
         emit_cadence(&mut o, b, &players);
         emit_friends(&mut o, b, game, &players, &mut friend_sig);
         emit_borders(&mut o, b, &players);
-        if b < ticks {
-            emit_attacks(&mut o, b, game);
-        }
+        // ALWAYS emitted, including at `b == ticks`. Omitting the final boundary
+        // used to leave every fresh dump with ZERO `ATTACK` rows at its own last
+        // boundary (the `if b < ticks` guard this replaces), while the same
+        // boundary in a longer dump for the same cell - or the same dump
+        // regenerated with this fix - lists the engine's real live attacks there
+        // (pangaea N=488: 149 at boundary 434). A driver that compares its own
+        // attack list against the record therefore read "the engine has none" at
+        // a cell's final boundary and reported the device's whole live list as
+        // extra. That is a dump artefact, and it made the final boundary's
+        // create/evict/troop tallies unreadable as agreement evidence.
+        emit_attacks(&mut o, b, game);
         prev_owned = players.iter().map(|p| p.owned_tiles.clone()).collect();
     }
     o.push_str(&trace_out);

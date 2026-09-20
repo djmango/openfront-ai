@@ -1189,6 +1189,55 @@ struct Slot {
     attack_id: String,
 }
 
+/// Allocate a device slot for an attack the device is CREATING.
+///
+/// `MAX_SLOTS` bounds the attacks the device arrays hold SIMULTANEOUSLY, not the
+/// number of allocations ever made. A slot whose attack has died - an engine
+/// eviction, a `kill_attack` at the end of its own tick, a `cancel_opposing`
+/// kill, a merge into a re-issued exec, an alliance retreat - is REUSED.
+///
+/// Without reuse the record-driven replay of a long game exhausts all 1024
+/// entries on CUMULATIVE churn while never holding more than a couple of hundred
+/// attacks at once. Measured on the record for pangaea N=488 (t500): the engine
+/// never holds more than 488 attacks at once, yet 1191 attack births happen
+/// across boundaries 2..500 - 1024 cumulative allocations at boundary 436
+/// against 146 live - and the pre-fix replay refused at boundary 435 asking for
+/// slot 1024. That refusal was a harness limit wearing a divergence's clothes: it
+/// stopped the freeze arms and the plain replay at a boundary the engine
+/// completes. The pre-fix behaviour is reproduced on demand by the pinned
+/// pre-fix binary; the append-only allocation is not kept behind a flag.
+///
+/// The returned value is BOTH the position in `slots` and the slot id used to
+/// index every device array. `slots[pos].idx == pos` is an invariant the strict
+/// `(owner, target)` binder relies on (see section 2), and reuse preserves it:
+/// a dead slot is reused at its OWN position and a slot is only ever APPENDED at
+/// `idx == slots.len()`, so positions never shift and never diverge from ids.
+/// (`taken` is kept in lockstep with `slots` and is indexed the same way.)
+fn alloc_slot(slots: &mut Vec<Slot>, taken: &mut Vec<bool>) -> Result<usize, String> {
+    if let Some(p) = slots.iter().position(|s| !s.alive) {
+        return Ok(p);
+    }
+    let idx = slots.len();
+    if idx >= MAX_SLOTS {
+        return Err(format!(
+            "more than {MAX_SLOTS} CONCURRENT attacks: all {idx} slots are live and a new \
+             attack is being created - raise MAX_SLOTS"
+        ));
+    }
+    taken.push(false);
+    Ok(idx)
+}
+
+/// Write an attack the device just created into its slot: OVERWRITE a reused
+/// position, or append at the end. `idx == slots.len()` holds only on append.
+fn place_slot(slots: &mut Vec<Slot>, idx: usize, slot: Slot) {
+    if idx == slots.len() {
+        slots.push(slot);
+    } else {
+        slots[idx] = slot;
+    }
+}
+
 fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
     let oracle_path = ensure_oracle(a, c)?;
     let init_path = ensure_init(a, c)?;
@@ -1931,10 +1980,13 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
             match exact {
                 Some(i) => {
                     taken[i] = true;
-                    // `i` is a POSITION and `taken` is indexed by SLOT ID; they are
-                    // the same only because `slots` is never compacted (no
-                    // retain/remove/swap_remove/drain) and `idx == slots.len()` at
-                    // push. Adding any removal makes this silently wrong.
+                    // `i` is a POSITION and `taken` is indexed by SLOT ID; they
+                    // are the same because `slots` is never compacted (no
+                    // retain/remove/swap_remove/drain), a slot is only ever
+                    // APPENDED at `idx == slots.len()`, and a dead slot is REUSED
+                    // at its own position (`alloc_slot`). Adding any removal, or
+                    // reusing a slot at a position other than its own, makes this
+                    // silently wrong.
                     let mut s = std::mem::replace(
                         &mut slots[i],
                         Slot {
@@ -2066,11 +2118,10 @@ n",
                         continue;
                     }
                     // NEW attack: created on the device, stamped with the engine
-                    // tick of the boundary BEFORE the one it appears at.
-                    let idx = slots.len();
-                    if idx >= MAX_SLOTS {
-                        return Err(format!("more than {MAX_SLOTS} simultaneous attacks"));
-                    }
+                    // tick of the boundary BEFORE the one it appears at. A slot
+                    // freed by an earlier death is REUSED (`alloc_slot`), so the
+                    // capacity check bounds CONCURRENT attacks, not allocations.
+                    let idx = alloc_slot(&mut slots, &mut taken)?;
                     let init_tick = if b >= 2 {
                         orc.boundaries[b - 2].engine_tick
                     } else {
@@ -2131,19 +2182,21 @@ n",
                         sc[idx * SCAL + 1],
                         o[3],
                     ));
-                    slots.push(Slot {
-                        owner: snap.owner,
-                        target: snap.target,
+                    place_slot(
+                        &mut slots,
                         idx,
-                        alive: true,
-                        created_at: b as u32,
-                        troops_bits: snap.troops.to_bits(),
-                        attack_id: snap.attack_id.clone(),
-                    });
-                    taken.push(false);
-                    let i = slots.len() - 1;
-                    taken[i] = true;
-                    plan.push((i, snap.clone()));
+                        Slot {
+                            owner: snap.owner,
+                            target: snap.target,
+                            idx,
+                            alive: true,
+                            created_at: b as u32,
+                            troops_bits: snap.troops.to_bits(),
+                            attack_id: snap.attack_id.clone(),
+                        },
+                    );
+                    taken[idx] = true;
+                    plan.push((idx, snap.clone()));
                 }
             }
         }
@@ -3611,24 +3664,21 @@ n",
                         slots[i].idx
                     }
                     None => {
-                        let idx = slots.len();
-                        if idx >= MAX_SLOTS {
-                            return Err(format!(
-                                "boundary {b}: self-drive needs slot {idx} >= MAX_SLOTS \
-                                 {MAX_SLOTS}; raise it"
-                            ));
-                        }
+                        let idx = alloc_slot(&mut slots, &mut taken)?;
                         troops_now[idx] = *amount;
-                        slots.push(Slot {
-                            owner: *sid,
-                            target: 0,
+                        place_slot(
+                            &mut slots,
                             idx,
-                            alive: true,
-                            created_at: b as u32,
-                            troops_bits: amount.to_bits(),
-                            attack_id: String::new(),
-                        });
-                        taken.push(false);
+                            Slot {
+                                owner: *sid,
+                                target: 0,
+                                idx,
+                                alive: true,
+                                created_at: b as u32,
+                                troops_bits: amount.to_bits(),
+                                attack_id: String::new(),
+                            },
+                        );
                         orig_idx.push((*sid, idx));
                         sd_created += 1;
                         if sd_created <= 8 {
@@ -3778,24 +3828,21 @@ n",
                         slots[i].idx
                     }
                     None => {
-                        let idx = slots.len();
-                        if idx >= MAX_SLOTS {
-                            return Err(format!(
-                                "boundary {b}: self-drive player origination needs slot {idx} >= \
-                                 MAX_SLOTS {MAX_SLOTS}; raise it"
-                            ));
-                        }
+                        let idx = alloc_slot(&mut slots, &mut taken)?;
                         troops_now[idx] = troops_final;
-                        slots.push(Slot {
-                            owner: *sid,
-                            target: *tgt,
+                        place_slot(
+                            &mut slots,
                             idx,
-                            alive: true,
-                            created_at: b as u32,
-                            troops_bits: troops_final.to_bits(),
-                            attack_id: String::new(),
-                        });
-                        taken.push(false);
+                            Slot {
+                                owner: *sid,
+                                target: *tgt,
+                                idx,
+                                alive: true,
+                                created_at: b as u32,
+                                troops_bits: troops_final.to_bits(),
+                                attack_id: String::new(),
+                            },
+                        );
                         orig_idx.push((*sid, idx));
                         sd_created += 1;
                         if sd_created <= 8 {
@@ -3902,24 +3949,21 @@ n",
                         slots[i].idx
                     }
                     None => {
-                        let idx = slots.len();
-                        if idx >= MAX_SLOTS {
-                            return Err(format!(
-                                "boundary {b}: ship landing needs slot {idx} >= MAX_SLOTS \
-                                 {MAX_SLOTS}; raise it"
-                            ));
-                        }
+                        let idx = alloc_slot(&mut slots, &mut taken)?;
                         troops_now[idx] = *cargo0;
-                        slots.push(Slot {
-                            owner: *owner0,
-                            target: *tgt0,
+                        place_slot(
+                            &mut slots,
                             idx,
-                            alive: true,
-                            created_at: b as u32,
-                            troops_bits: cargo0.to_bits(),
-                            attack_id: String::new(),
-                        });
-                        taken.push(false);
+                            Slot {
+                                owner: *owner0,
+                                target: *tgt0,
+                                idx,
+                                alive: true,
+                                created_at: b as u32,
+                                troops_bits: cargo0.to_bits(),
+                                attack_id: String::new(),
+                            },
+                        );
                         sd_ship_created_attacks += 1;
                         idx
                     }
@@ -4528,7 +4572,9 @@ n",
     }
     detail.push_str(&format!(
         "\n### DEVICE RESOURCES (gpu_env's own limits, measured here)\n\
-         slots used {} (max {MAX_SLOTS}), live at the end {}, max heap peak {} of HEAP_CAP {HEAP_CAP}, \
+         slot positions allocated {} of a ceiling of {MAX_SLOTS} CONCURRENT attacks (a position \
+         is reused the moment its attack dies, so this is the PEAK concurrent count, not the \
+         number of allocations), live at the end {}, max heap peak {} of HEAP_CAP {HEAP_CAP}, \
          max border_len {} of BC {BC}, claim-list overflows {drops}, \
          heap candidates refused at HEAP_CAP {refused}\n",
         slots.len(),
