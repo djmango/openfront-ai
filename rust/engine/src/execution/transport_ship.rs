@@ -300,6 +300,24 @@ impl Execution for TransportShipExecution {
         self.path_idx = 0;
         self.path_dst = None;
         self.motion_plan_dst = Some(dst);
+        // MEASUREMENT ONLY (env-gated, no semantic effect): the boat's spawn
+        // shore, landing tile, cargo and the full planned water path, so a port
+        // has the exact route and landing tick instead of guessing them.
+        if std::env::var_os("OF_ENG_BOAT").is_some() {
+            let p = game.planned_water_path().to_vec();
+            let joined: Vec<String> = p.iter().map(|t| t.to_string()).collect();
+            eprintln!(
+                "ENG_BOAT_INIT tick={} owner={} ref={} dst={} src={} troops={:.17} pathlen={} path={}",
+                tick,
+                self.owner_small_id,
+                self.ref_tile,
+                dst,
+                src,
+                troops,
+                p.len(),
+                joined.join(",")
+            );
+        }
     }
 
     fn tick(&mut self, game: &mut Game, tick: u32) {
@@ -352,6 +370,12 @@ impl Execution for TransportShipExecution {
             return;
         };
         game.move_unit(self.owner_small_id, uid, next);
+        if std::env::var_os("OF_ENG_BOAT").is_some() {
+            eprintln!(
+                "ENG_BOAT_MOVE tick={} owner={} uid={} from={} to={}",
+                tick, self.owner_small_id, uid, from, next
+            );
+        }
         if records_new_motion_plan {
             // TS `pathFinder.findPath(boat.tile(), dst)` → third `ensureFresh`,
             // then warms shared HPA caches.
@@ -407,6 +431,17 @@ impl TransportShipExecution {
         }
         game.remove_unit(self.owner_small_id, uid);
         self.active = false;
+        if std::env::var_os("OF_ENG_BOAT").is_some() {
+            eprintln!(
+                "ENG_BOAT_LAND tick={} owner={} dst={} live_dst_owner={} target={:?} troops={:.17}",
+                game.ticks(),
+                self.owner_small_id,
+                dst,
+                live_dst_owner,
+                self.target_small_id,
+                troops
+            );
+        }
     }
 }
 

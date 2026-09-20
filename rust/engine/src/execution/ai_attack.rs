@@ -397,8 +397,21 @@ pub fn send_boat_attack_to_nearby_tn(game: &mut Game, small_id: u16) -> bool {
     });
 
     let Some(&dst) = candidates.iter().find(|&&t| can_build_transport_ship(game, small_id, t).is_some()) else {
+        if std::env::var_os("OF_ENG_BOAT").is_some() {
+            eprintln!(
+                "ENG_BOAT_CANDS owner={} tick={} shore_i={} candidates={:?} -> NONE",
+                small_id, game.ticks(), shore_i, candidates
+            );
+        }
         return false;
     };
+    if std::env::var_os("OF_ENG_BOAT").is_some() {
+        let cbs = can_build_transport_ship(game, small_id, dst);
+        eprintln!(
+            "ENG_BOAT_CANDS owner={} tick={} shore_i={} candidates={:?} -> chosen {} cbs={:?}",
+            small_id, game.ticks(), shore_i, candidates, dst, cbs
+        );
+    }
     // TS `sendBoatAttackToNearbyTerraNullius`: `troops = this.player.troops() / 5`
     // - unlike `Config.boatAttackAmount()`, this is NOT floored.
     let troops = game

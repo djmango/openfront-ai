@@ -441,6 +441,422 @@ fn fmt_f64(v: f64) -> String {
     format!("{v}")
 }
 
+/// `ai_attack.rs:187-204` `has_land_border_with_terra_nullius` /
+/// `ai_attack.rs:147-168` `has_land_border_tn`, over the SAME device border
+/// array the `bot_ai` kernel reads (`kernels.rs:828-856`).
+fn dev_land_border_tn(
+    terrain: &[u8],
+    plane: &[u16],
+    oborder: &[u32],
+    ob_meta: &[u32],
+    w: u32,
+    h: u32,
+    sid: u16,
+) -> bool {
+    let om = sid as usize * 2;
+    let off = ob_meta[om] as usize;
+    let n = ob_meta[om + 1] as usize;
+    for i in 0..n {
+        let t = oborder[off + i];
+        let mut buf = [0u32; 4];
+        let c = t_neigh4(t, w, h, &mut buf);
+        for &nb in buf.iter().take(c) {
+            if t_land(terrain, nb) && plane[nb as usize] == 0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// `ai_attack.rs:214-248` `has_shore_reachable_tn` (`kernels.rs:863-917`).
+fn dev_shore_reachable_tn(
+    terrain: &[u8],
+    plane: &[u16],
+    oborder: &[u32],
+    ob_meta: &[u32],
+    w: u32,
+    h: u32,
+    sid: u16,
+) -> bool {
+    let om = sid as usize * 2;
+    let off = ob_meta[om] as usize;
+    let n = ob_meta[om + 1] as usize;
+    const DIRS: [(i32, i32); 4] = [(0, -1), (0, 1), (-1, 0), (1, 0)];
+    let mut shore_i = 0usize;
+    for i in 0..n {
+        let t = oborder[off + i];
+        if !t_shore(terrain, t) {
+            continue;
+        }
+        if shore_i % 10 == 0 {
+            let x = (t % w) as i32;
+            let y = (t / w) as i32;
+            for (dx, dy) in DIRS {
+                let (x1, y1) = (x + dx, y + dy);
+                let (nx, ny) = (x + dx * 5, y + dy * 5);
+                if x1 < 0 || y1 < 0 || x1 as u32 >= w || y1 as u32 >= h {
+                    continue;
+                }
+                if nx < 0 || ny < 0 || nx as u32 >= w || ny as u32 >= h {
+                    continue;
+                }
+                let t1 = (y1 as u32) * w + (x1 as u32);
+                let tn = (ny as u32) * w + (nx as u32);
+                if !t_land(terrain, t1) && t_land(terrain, tn) && plane[tn as usize] == 0 {
+                    return true;
+                }
+            }
+        }
+        shore_i += 1;
+    }
+    false
+}
+
+/// One live TransportShip, modelled on device state. `init`
+/// (`transport_ship.rs:100-298`) placed it at `path[0]` at the END of
+/// `created_tick`; at tick `created_tick + k` it moves one node, and at
+/// `created_tick + path.len()` it is already on `dst` at the tick's start and
+/// `land()`s (`transport_ship.rs:374-401`).
+struct DevShip {
+    owner: u16,
+    dst: u32,
+    src: u32,
+    cargo: f64,
+    target: u16,
+    path: Vec<u32>,
+    created_tick: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Transport-ship (boat) origination - device state only
+// ---------------------------------------------------------------------------
+//
+// Port of the engine's `send_boat_attack_to_nearby_tn`
+// (`rust/engine/src/execution/ai_attack.rs:349-413`) plus the geometry it
+// depends on (`spatial.rs`'s `target_transport_tile` / `can_build_transport_ship`
+// / `closest_shore_by_water`, `water.rs`'s shore-coercing water path and
+// `map.rs`'s `bfs_with_scratch`). EVERY input here is the DEVICE's own: the
+// terrain bytes, the owner plane the device has built for this boundary and the
+// device's per-player troop state. No oracle record is read.
+
+#[inline]
+fn t_land(terrain: &[u8], t: u32) -> bool {
+    terrain[t as usize] & 0x80 != 0
+}
+
+#[inline]
+fn t_shore(terrain: &[u8], t: u32) -> bool {
+    let b = terrain[t as usize];
+    b & 0x80 != 0 && b & (1 << 6) != 0
+}
+
+#[inline]
+fn t_water(terrain: &[u8], t: u32) -> bool {
+    terrain[t as usize] & 0x80 == 0
+}
+
+/// `map.rs` `map.for_each_neighbor4` order: N, S, W, E (the `ORDER_NSWE` the
+/// device core uses).
+#[inline]
+fn t_neigh4(t: u32, w: u32, h: u32, out: &mut [u32; 4]) -> usize {
+    let x = t % w;
+    let mut n = 0usize;
+    if t >= w {
+        out[n] = t - w;
+        n += 1;
+    }
+    if t < (h - 1) * w {
+        out[n] = t + w;
+        n += 1;
+    }
+    if x != 0 {
+        out[n] = t - 1;
+        n += 1;
+    }
+    if x != w - 1 {
+        out[n] = t + 1;
+        n += 1;
+    }
+    n
+}
+
+/// `spatial.rs:156-159` `target_transport_tile` = `land_bfs_nearest_shore(map,
+/// bfs, tile, 50, owner)`: `bfs_with_scratch` over ALL tiles within manhattan
+/// 50, keep the `is_shore && owner == owner` candidates, stable-sort by
+/// manhattan distance and take the first. The BFS is a LIFO stack (the engine's
+/// `q.pop()`), so discovery order is reproduced exactly.
+fn dev_target_transport_tile(terrain: &[u8], plane: &[u16], w: u32, h: u32, from: u32, owner: u16) -> Option<u32> {
+    const MAX_DIST: u32 = 50;
+    let fx = from % w;
+    let fy = from / w;
+    let mut seen = vec![false; terrain.len()];
+    let mut stack: Vec<u32> = Vec::with_capacity(64);
+    let mut tiles: Vec<u32> = Vec::with_capacity(64);
+    let manh = |t: u32| -> u32 {
+        let x = t % w;
+        let y = t / w;
+        (x.max(fx) - x.min(fx)) + (y.max(fy) - y.min(fy))
+    };
+    if manh(from) <= MAX_DIST {
+        seen[from as usize] = true;
+        stack.push(from);
+        tiles.push(from);
+    }
+    while let Some(cur) = stack.pop() {
+        let mut buf = [0u32; 4];
+        let n = t_neigh4(cur, w, h, &mut buf);
+        for &nb in buf.iter().take(n) {
+            if seen[nb as usize] || manh(nb) > MAX_DIST {
+                continue;
+            }
+            seen[nb as usize] = true;
+            stack.push(nb);
+            tiles.push(nb);
+        }
+    }
+    let mut cands: Vec<u32> = tiles
+        .into_iter()
+        .filter(|&t| t_shore(terrain, t) && plane[t as usize] == owner)
+        .collect();
+    if cands.is_empty() {
+        return None;
+    }
+    cands.sort_by_key(|&t| manh(t)); // stable, like the engine's sort_by_key
+    Some(cands[0])
+}
+
+/// `water.rs:272-292` `coerce_shore_to_water`: the adjacent water tile with the
+/// most water 4-neighbours (ties: first in N,S,W,E order).
+fn dev_coerce_to_water(terrain: &[u8], w: u32, h: u32, tile: u32) -> Option<u32> {
+    if t_water(terrain, tile) {
+        return Some(tile);
+    }
+    let mut buf = [0u32; 4];
+    let n = t_neigh4(tile, w, h, &mut buf);
+    let mut best: Option<u32> = None;
+    let mut max_score = -1i32;
+    for &nb in buf.iter().take(n) {
+        if !t_water(terrain, nb) {
+            continue;
+        }
+        let mut b2 = [0u32; 4];
+        let n2 = t_neigh4(nb, w, h, &mut b2);
+        let score = b2.iter().take(n2).filter(|&&x| t_water(terrain, x)).count() as i32;
+        if score > max_score {
+            max_score = score;
+            best = Some(nb);
+        }
+    }
+    best
+}
+
+/// The eight tiles a `TransportShip` may step to in one tick. The engine's ship
+/// walks the UPSCALED minimap path (`water.rs:1040-1070` `upscale_cells` +
+/// `water.rs:1025-1038` `fix_path_extremes`): consecutive cells of that path
+/// differ by at most one in each axis, and the destination fix contributes one
+/// DIAGONAL final step. The ship's route is therefore 8-connected water, and the
+/// number of steps - which is what decides the landing tick - is the Chebyshev
+/// water distance, not the Manhattan one.
+fn t_neigh8(t: u32, w: u32, h: u32, out: &mut [u32; 8]) -> usize {
+    let x = (t % w) as i32;
+    let y = (t / w) as i32;
+    let mut n = 0usize;
+    for (dx, dy) in [
+        (0i32, -1i32),
+        (1, -1),
+        (1, 0),
+        (1, 1),
+        (0, 1),
+        (-1, 1),
+        (-1, 0),
+        (-1, -1),
+    ] {
+        let (nx, ny) = (x + dx, y + dy);
+        if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+            continue;
+        }
+        out[n] = ny as u32 * w + nx as u32;
+        n += 1;
+    }
+    n
+}
+
+/// Shortest 4-adjacency water path (BFS) from every source to `goal_water`,
+/// returning `(chosen_source_index, path)` where `path` is the full tile list
+/// starting at the source's coerced water tile and ending at `goal_water`.
+fn dev_water_bfs_multi(
+    terrain: &[u8],
+    w: u32,
+    h: u32,
+    water_srcs: &[u32],
+    goal_water: u32,
+) -> Option<(usize, Vec<u32>)> {
+    let n = terrain.len();
+    let mut seen = vec![false; n];
+    let mut parent = vec![u32::MAX; n];
+    let mut owner_of = vec![usize::MAX; n];
+    let mut q: std::collections::VecDeque<u32> = std::collections::VecDeque::new();
+    for (i, &s) in water_srcs.iter().enumerate() {
+        if !seen[s as usize] {
+            seen[s as usize] = true;
+            owner_of[s as usize] = i;
+            q.push_back(s);
+        }
+    }
+    let mut found = false;
+    while let Some(cur) = q.pop_front() {
+        if cur == goal_water {
+            found = true;
+            break;
+        }
+        let mut buf = [0u32; 8];
+        let k = t_neigh8(cur, w, h, &mut buf);
+        for &nb in buf.iter().take(k) {
+            if seen[nb as usize] || !t_water(terrain, nb) {
+                continue;
+            }
+            seen[nb as usize] = true;
+            parent[nb as usize] = cur;
+            owner_of[nb as usize] = owner_of[cur as usize];
+            q.push_back(nb);
+        }
+    }
+    if !found {
+        return None;
+    }
+    let src_i = owner_of[goal_water as usize];
+    let start = water_srcs.get(src_i).copied().unwrap_or(u32::MAX);
+    let mut p = Vec::new();
+    let mut cur = goal_water;
+    loop {
+        p.push(cur);
+        if cur == start {
+            break;
+        }
+        let par = parent[cur as usize];
+        if par == u32::MAX {
+            break;
+        }
+        cur = par;
+    }
+    p.reverse();
+    Some((src_i, p))
+}
+
+/// The boat decision for ONE bot firing, over device state.
+///
+/// Returns `(ref_tile, dst_landing_tile, src_shore_tile, land_path)` - the
+/// candidate tile the engine hands to `add_transport_attack`, the tile
+/// `TransportShipExecution::init` refines it to (`target_transport_tile`), the
+/// owner shore tile it spawns at (`closest_shore_by_water`) and the water path
+/// the ship then sails.
+#[allow(clippy::too_many_arguments)]
+fn dev_send_boat_attack_to_nearby_tn(
+    terrain: &[u8],
+    plane: &[u16],
+    source_tiles: &[u32],
+    w: u32,
+    h: u32,
+    owner: u16,
+) -> Option<(u32, u32, u32, Vec<u32>)> {
+    // `send_boat_attack_to_nearby_tn`'s candidate walk.
+    let directions: [(i32, i32); 4] = [(0, -1), (0, 1), (-1, 0), (1, 0)];
+    let mut shore_i = 0usize;
+    let mut candidates: Vec<u32> = Vec::new();
+    for &border in source_tiles {
+        if !t_shore(terrain, border) {
+            continue;
+        }
+        shore_i += 1;
+        if shore_i % 10 != 1 {
+            continue;
+        }
+        let bx = (border % w) as i32;
+        let by = (border / w) as i32;
+        for (dx, dy) in directions {
+            let (x1, y1) = (bx + dx, by + dy);
+            let (nx, ny) = (bx + dx * 5, by + dy * 5);
+            if x1 < 0 || y1 < 0 || x1 as u32 >= w || y1 as u32 >= h {
+                continue;
+            }
+            if nx < 0 || ny < 0 || nx as u32 >= w || ny as u32 >= h {
+                continue;
+            }
+            let t1 = (y1 as u32) * w + (x1 as u32);
+            if !t_water(terrain, t1) {
+                continue;
+            }
+            let tile = (ny as u32) * w + (nx as u32);
+            if t_land(terrain, tile) && plane[tile as usize] == 0 {
+                candidates.push(tile);
+            }
+        }
+    }
+    if std::env::var_os("OFCUDA_MATRIX_BOATDBG").is_some() {
+        eprintln!(
+            "DEV_BOAT_CANDS owner={owner} shore_i={shore_i} ncand={} candidates={:?}",
+            candidates.len(),
+            &candidates[..candidates.len().min(8)]
+        );
+    }
+    for &cand in &candidates {
+        // `can_build_transport_ship(owner, cand)` (`spatial.rs:187-211`).
+        let Some(dst) = dev_target_transport_tile(terrain, plane, w, h, cand, plane[cand as usize]) else {
+            continue;
+        };
+        let target_owner = plane[cand as usize];
+        if target_owner == owner {
+            continue;
+        }
+        if target_owner != 0 {
+            // `can_attack_player(owner, target_owner)` needs the engage table the
+            // device does not carry; a TN candidate (the only kind this walk
+            // produces) never reaches it.
+            continue;
+        }
+    let mut srcs: Vec<u32> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for &t in source_tiles {
+            if t_shore(terrain, t) && t_land(terrain, t) && plane[t as usize] == owner {
+                if seen.insert(t) {
+                    srcs.push(t);
+                }
+            }
+        }
+        let Some(goal_water) = dev_coerce_to_water(terrain, w, h, dst) else {
+            continue;
+        };
+        let mut water_srcs: Vec<u32> = Vec::new();
+        let mut src_idx: Vec<u32> = Vec::new();
+        for &s in &srcs {
+            if let Some(ws) = dev_coerce_to_water(terrain, w, h, s) {
+                water_srcs.push(ws);
+                src_idx.push(s);
+            }
+        }
+        if water_srcs.is_empty() {
+            continue;
+        }
+        let Some((si, water_path)) = dev_water_bfs_multi(terrain, w, h, &water_srcs, goal_water) else {
+            continue;
+        };
+        let src = src_idx[si];
+        // The engine's `refine_start_tile` returns `path[0]` for paths of 50
+        // nodes or fewer (the only regime this port reaches); for longer ones it
+        // may pick a different owner shore. Recorded as a limitation.
+        let mut path: Vec<u32> = Vec::with_capacity(water_path.len() + 2);
+        path.push(src);
+        path.extend_from_slice(&water_path);
+        if path.last() != Some(&dst) {
+            path.push(dst);
+        }
+        // The engine keeps the path belonging to the chosen source.
+        return Some((cand, dst, src, path));
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Input acquisition - the composition of the three proven pieces
 // ---------------------------------------------------------------------------
@@ -1016,6 +1432,19 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
     let mut sd_pc_troops = 0usize;
     let mut sd_pc_exact = 0usize;
     let mut sd_acts = [0usize; 8];
+    // TRANSPORT-SHIP (BOAT) ORIGINATION, device state only. `ships` is the
+    // device's own set of live TransportShips (spawned on the owner's shore,
+    // sailed one water node per tick, landed at `created_tick + path.len()`);
+    // the counters below are diagnostics, never pass conditions.
+    let mut ships: Vec<DevShip> = Vec::new();
+    let mut sd_ships_created = 0usize;
+    let mut sd_ship_landed = 0usize;
+    let mut sd_ship_created_attacks = 0usize;
+    let mut sd_ship_merged = 0usize;
+    let mut sd_ship_reowned = 0usize;
+    let mut sd_ship_friendly = 0usize;
+    let mut sd_ship_other_target = 0usize;
+    let mut sd_ship_untimed = 0usize;
     // The last boundary at which the device's own attack list agreed with the
     // record in EVERY respect - the self-drive distance, measured not inferred.
     let mut sd_last_exact: Option<usize> = None;
@@ -1119,6 +1548,12 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
     let d_bot_rrow = DeviceBuffer::from_host(&stream, &b_rrow).map_err(es)?;
     let d_bot_ff = DeviceBuffer::from_host(&stream, &b_ff).map_err(es)?;
     let mut d_bot_state = DeviceBuffer::from_host(&stream, &b_state_host).map_err(es)?;
+    // Per-bot "this firing takes the engine's BOAT path" mask, written by the
+    // host's own `send_boat_attack_to_nearby_tn` port (section 3a-ter) and read by
+    // `bot_ai` so that firing RETURNS like the engine's `send_tn_attack` does.
+    // All zero unless self-drive is on, which is what keeps every replay cell
+    // byte-identical.
+    let mut d_bot_boat = DeviceBuffer::<u32>::zeroed(&stream, nb_cap).map_err(es)?;
     let d_maxtroops = DeviceBuffer::from_host(&stream, &maxtroops_host).map_err(es)?;
     let mut d_bout = DeviceBuffer::<f64>::zeroed(&stream, 3 * nb_cap).map_err(es)?;
 
@@ -1697,6 +2132,124 @@ n",
         // it returns are applied after the tick below (section 4c), where the
         // engine's `add_execution` -> `init` pipeline runs them.
         let mut bot_orig: Vec<(u16, f64)> = Vec::new();
+        // --- 3a-ter. the device's OWN TransportShip origination (self-drive) --
+        // `TribeExecution`'s firing calls `send_tn_attack` -> `try_send_tn_attack`
+        // (`ai_attack.rs:409-422`); with no LAND border to Terra Nullius that is
+        // `send_boat_attack_to_nearby_tn` (`ai_attack.rs:349-413`), which decides
+        // to send a TransportShip from the DEVICE's own plane, terrain, border
+        // array and player state. The ship itself is a device-state object: it is
+        // spawned on the owner's shore tile, sailed one water node per tick and
+        // landed by `dev_sail_ships` below, and its CARGO (the troops the engine
+        // removed from the owner's pool at `TransportShipExecution::init`) becomes
+        // the troops of the land attack its landing creates
+        // (`transport_ship.rs:386-401`).
+        let mut dev_boat_mask = vec![0u32; nb_cap];
+        let mut dev_land_now: Vec<(u16, u32, f64, u16)> = Vec::new();
+        if freeze_at.is_some_and(|fa| b + 1 >= fa) && nbots > 0 {
+            let plane_now = d_plane.to_host_vec(&stream).map_err(es)?;
+            let pst_now = d_pst.to_host_vec(&stream).map_err(es)?;
+            for k in 0..nbots {
+                let sid = bot_sched[k].0;
+                let rate = bot_sched[k].1;
+                if !(tick > spawn_end_tick && rate > 0 && tick % rate == bot_sched[k].2) {
+                    continue;
+                }
+                if pst_now[sid as usize * 3 + 1] < 1.0 {
+                    continue; // `tiles_owned < 1`
+                }
+                let first = tick <= b_ff[k];
+                let land = dev_land_border_tn(&terrain, &plane_now, &oborder, &ob_meta, w, h, sid);
+                // `send_boat_attack_to_nearby_tn` is reached only when there is NO
+                // land border: on the first firing unconditionally, later only
+                // with `neighbors_terra_nullius` set and a shore-reachable TN.
+                let try_boat = if land {
+                    false
+                } else if first {
+                    true
+                } else {
+                    b_state_host[k] & 2 != 0
+                        && dev_shore_reachable_tn(
+                            &terrain, &plane_now, &oborder, &ob_meta, w, h, sid,
+                        )
+                };
+                if !try_boat {
+                    continue;
+                }
+                // `let troops = p.troops / 5.0; if troops < 1.0 { return false }`
+                // (`ai_attack.rs:355-358`).
+                let troops = pst_now[sid as usize * 3] / 5.0;
+                if !(troops >= 1.0) {
+                    continue;
+                }
+                let om0 = sid as usize * 2;
+                let off0 = ob_meta[om0] as usize;
+                let n0 = ob_meta[om0 + 1] as usize;
+                let sid_tiles = &oborder[off0..off0 + n0];
+                let Some((rt, dst, src, path)) =
+                    dev_send_boat_attack_to_nearby_tn(&terrain, &plane_now, sid_tiles, w, h, sid)
+                else {
+                    continue;
+                };
+                dev_boat_mask[k] = 1;
+                // `TransportShipExecution::init` runs at the END of this tick: the
+                // ship is at `path[0]` from tick+1 on, moves one node per tick and
+                // lands on `dst` at `tick + path.len()`.
+                ships.push(DevShip {
+                    owner: sid,
+                    dst,
+                    src,
+                    cargo: troops,
+                    path,
+                    created_tick: tick,
+                    target: plane_now[rt as usize],
+                });
+                sd_ships_created += 1;
+                if sd_ships_created <= 12 {
+                    detail.push_str(&format!(
+                        "SELFDRIVE_BOAT_CREATE boundary {b} (engine tick {tick}): owner {sid} \
+                         ref {rt} -> dst {dst} src {src} cargo {} pathlen {}\n",
+                        fmt_f64(troops),
+                        ships.last().map(|s| s.path.len()).unwrap_or(0)
+                    ));
+                }
+            }
+            d_bot_boat
+                .copy_from_host(&stream, &dev_boat_mask)
+                .map_err(es)?;
+        }
+
+        // --- 3a-quater. sail the device's own ships --------------------------
+        // `TransportShipExecution::tick` (`transport_ship.rs:352-372`) checks
+        // `game.unit_count_at(uid)` and `from == dst` FIRST: the ship is placed on
+        // `path[0]` by `init` at the end of its creation tick, moves one node per
+        // tick, and therefore stands on `dst` at the start of tick
+        // `created_tick + path.len()` - the tick it lands on. The route is the
+        // device's own water BFS (`dev_send_boat_attack_to_nearby_tn`), never a
+        // recorded one.
+        if !ships.is_empty() {
+            let mut keep: Vec<DevShip> = Vec::with_capacity(ships.len());
+            for s in ships.drain(..) {
+                if tick >= s.created_tick + s.path.len() as u32 {
+                    dev_land_now.push((s.owner, s.dst, s.cargo, s.target));
+                    sd_ship_landed += 1;
+                    if sd_ship_landed <= 12 {
+                        detail.push_str(&format!(
+                            "SELFDRIVE_BOAT_LAND boundary {b} (engine tick {tick}): owner {} \
+                             dst {} cargo {} (pathlen {}, created tick {})\n",
+                            s.owner,
+                            s.dst,
+                            fmt_f64(s.cargo),
+                            s.path.len(),
+                            s.created_tick
+                        ));
+                    }
+                } else {
+                    keep.push(s);
+                }
+            }
+            ships = keep;
+        }
+
         // `b + 1 >= fa`: a bot's decision at tick T is visible in the record one
         // boundary later (an attack created at the END of tick T first pops at
         // T+1), so to be clean at boundary `fa` the device has to own the
@@ -1727,6 +2280,7 @@ n",
                         &d_bot_rrow,
                         &d_bot_ff,
                         &mut d_bot_state,
+                        &d_bot_boat,
                         &d_maxtroops,
                         &d_tgt,
                         &mut d_bout,
@@ -1798,6 +2352,17 @@ n",
             {
                 continue; // already bound: not a landing of THIS tick
             }
+            // The DEVICE modelled this landing itself (section 3a-ter spawned a
+            // ship, 3a-quater sailed it onto `dst` at this tick). Applying the
+            // record's copy as well would conquer the same tile twice and append a
+            // second claim to `mine`, so the record's is dropped and the device's
+            // own ship entry below stands in for it. ONLY the (owner, tile) timing
+            // is taken from the record here - the tile, the cargo and the attack
+            // are the device's.
+            if dev_land_now.iter().any(|(o, t, _, _)| *o == cs.owner && *t == src) {
+                used_ships.push(usize::MAX);
+                continue;
+            }
             let hit = cur
                 .transports
                 .iter()
@@ -1823,6 +2388,39 @@ n",
                 natk
             };
             landings.push((natk, cs.owner, src, cs.attack_id.clone(), cs.heap_len, cs.border_len));
+        }
+        landings.sort_by_key(|x| x.0);
+
+        // --- 3b-bis. the DEVICE's own ship landings --------------------------
+        // `TransportShipExecution::land` (`transport_ship.rs:374-401`) conquers
+        // `dst` at the SHIP's exec position, so the conquer is ordered by the
+        // number of live attacks that tick ahead of the ship. The ship's exec was
+        // appended when its own `init` ran (end of its creation tick), so the
+        // attacks ahead of it are the ones that already existed then - the
+        // record's `TRANSPORT` row carries exactly that count for the same
+        // (owner, dst) landing, and it is used ONLY for that ordering, exactly as
+        // section 3b already does for landings the device does NOT model.
+        let mut dev_attack_creates: Vec<(u16, u32, f64)> = Vec::new();
+        // (owner, dst) -> the ship's own cargo and the target owner snapshotted
+        // by `TransportShipExecution::init`. `land()` (`transport_ship.rs:397-445`)
+        // branches on these, so the conquer/attack decision is made at the ship's
+        // OWN position in the plan (below), not here.
+        let mut dev_land_meta: Vec<(u16, u32, f64, u16)> = Vec::new();
+        for (o, t, cargo, tgt) in dev_land_now.iter() {
+            let mut natk = 0usize;
+            if let Some((k, (_, _, _, n))) = cur
+                .transports
+                .iter()
+                .enumerate()
+                .find(|(k, (_, oo, dd, _))| *oo == *o && *dd == *t as i64 && !used_ships.contains(k))
+            {
+                used_ships.push(k);
+                natk = *n;
+            } else {
+                sd_ship_untimed += 1;
+            }
+            landings.push((natk, *o, *t, String::new(), 0, 0));
+            dev_land_meta.push((*o, *t, *cargo, *tgt));
         }
         landings.sort_by_key(|x| x.0);
 
@@ -1852,24 +2450,83 @@ n",
             // before `p` did NOT see the landed tile as owned.
             while nland < landings.len() && landings[nland].0 <= p {
                 let (_, lowner, lsrc, laid, lhl, lbl) = landings[nland].clone();
-                unsafe {
-                    module
-                        .land_dev(
-                            &stream,
-                            cfg(ONE),
-                            lsrc,
-                            lowner,
-                            &mut d_plane,
-                            &mut d_claims,
-                            &mut d_out,
-                        )
-                        .map_err(es)?;
+                // `TransportShipExecution::land` (`transport_ship.rs:412-431`),
+                // evaluated HERE because it reads the owner of `dst` as it stands
+                // when the SHIP's exec ticks, i.e. after the attacks that ticked
+                // before it.
+                let dmeta = dev_land_meta
+                    .iter()
+                    .find(|(o, t, _, _)| *o == lowner && *t == lsrc)
+                    .cloned();
+                let mut conquered = false;
+                if let Some((o, t, cargo, tgt)) = dmeta {
+                    let ph = d_plane.to_host_vec(&stream).map_err(es)?;
+                    if ph[t as usize] == o {
+                        // `game.add_troops(owner, troops * 0.75)`: the cargo goes
+                        // back to the pool and NO attack is created.
+                        let mut pn = d_pst.to_host_vec(&stream).map_err(es)?;
+                        pn[o as usize * 3] += (cargo * 0.75).floor();
+                        d_pst.copy_from_host(&stream, &pn).map_err(es)?;
+                        sd_ship_reowned += 1;
+                        detail.push_str(&format!(
+                            "SELFDRIVE_BOAT_REOWN boundary {b} (engine tick {tick}): owner {o} ship \
+                             landed on {t} it ALREADY owned; land() adds {} troops (0.75*cargo) and \
+                             creates NO attack\n",
+                            fmt_f64((cargo * 0.75).floor())
+                        ));
+                    } else if tgt == 0 {
+                        conquered = true;
+                        dev_attack_creates.push((o, t, cargo));
+                    } else if o == tgt
+                        || cur.friends.iter().any(|(x, y)| {
+                            (*x == o && *y == tgt) || (*x == tgt && *y == o)
+                        })
+                    {
+                        // `game.is_friendly(owner, target_owner)` -> the troops
+                        // join the pool instead of an attack.
+                        let mut pn = d_pst.to_host_vec(&stream).map_err(es)?;
+                        pn[o as usize * 3] += cargo.floor();
+                        d_pst.copy_from_host(&stream, &pn).map_err(es)?;
+                        sd_ship_friendly += 1;
+                        detail.push_str(&format!(
+                            "SELFDRIVE_BOAT_FRIENDLY boundary {b} (engine tick {tick}): owner {o} \
+                             ship landed on {t} targeting {tgt} (friendly); land() adds {} troops \
+                             and creates NO attack\n",
+                            fmt_f64(cargo.floor())
+                        ));
+                    } else {
+                        conquered = true;
+                        dev_attack_creates.push((o, t, cargo));
+                        sd_ship_other_target += 1;
+                        detail.push_str(&format!(
+                            "SELFDRIVE_BOAT_OTHER_TARGET boundary {b} (engine tick {tick}): owner \
+                             {o} ship landed on {t} targeting {tgt}; created as a TN attack (the \
+                             non-TN target id is NOT modelled)\n"
+                        ));
+                    }
+                } else {
+                    conquered = true;
                 }
-                let lo = d_out.to_host_vec(&stream).map_err(es)?;
-                if lo[0] > 0 {
-                    let cl = d_claims.to_host_vec(&stream).map_err(es)?;
-                    mine.entry(lowner).or_default().push(cl[0]);
-                    row.dev_claims += 1;
+                if conquered {
+                    unsafe {
+                        module
+                            .land_dev(
+                                &stream,
+                                cfg(ONE),
+                                lsrc,
+                                lowner,
+                                &mut d_plane,
+                                &mut d_claims,
+                                &mut d_out,
+                            )
+                            .map_err(es)?;
+                    }
+                    let lo = d_out.to_host_vec(&stream).map_err(es)?;
+                    if lo[0] > 0 {
+                        let cl = d_claims.to_host_vec(&stream).map_err(es)?;
+                        mine.entry(lowner).or_default().push(cl[0]);
+                        row.dev_claims += 1;
+                    }
                 }
                 detail.push_str(&format!(
                     "TRANSPORT_LANDING boundary {b} (engine tick {tick}): owner {} landed on tile {} \
@@ -2346,6 +3003,130 @@ n",
                         q[idx * 5 + 2],
                         q[idx * 5 + 3],
                         q[idx * 5 + 4]
+                    ));
+                }
+            }
+        }
+
+        // --- 4c-bis. the LAND ATTACK a device ship's landing CREATES ----------
+        // `TransportShipExecution::land` (`transport_ship.rs:386-401`) ends with
+        // `game.add_land_attack_from(owner_small_id, None, Some(self.troops),
+        // Some(dst))`: the attack's troops ARE the ship's remaining CARGO and its
+        // `source_tile` IS the tile the ship landed on, so `attack_init` seeds the
+        // frontier from `dst`'s own neighbours (`attack.rs:160-164`) and the exec
+        // mints a fresh stream - the same shape as section 4c's
+        // `add_land_attack_from(sid, None, ..)`, with `source_tile = None` in 4c
+        // and `source_tile = Some(dst)` here. Everything below comes from the
+        // device's own ship (owner, dst, cargo) computed in 3a-ter/3a-quater.
+        if freeze_at.is_some_and(|fa| b + 1 >= fa) && !dev_attack_creates.is_empty() {
+            let mut coff = 0usize;
+            let mut coborder = vec![0u32; obcap];
+            let mut cob_meta = vec![0u32; 2 * COLS];
+            for (osid, tiles) in &cur.borders {
+                if *osid as usize >= COLS {
+                    return Err(format!(
+                        "boundary {b}: border owner {osid} >= COLS {COLS} (raise COLS)"
+                    ));
+                }
+                let n = tiles.len().min(obcap - coff);
+                coborder[coff..coff + n].copy_from_slice(&tiles[..n]);
+                cob_meta[*osid as usize * 2] = coff as u32;
+                cob_meta[*osid as usize * 2 + 1] = n as u32;
+                coff += n;
+            }
+            let d_coborder = DeviceBuffer::from_host(&stream, &coborder[..coff.max(1)]).map_err(es)?;
+            let mut d_cob_meta = DeviceBuffer::<u32>::zeroed(&stream, 2 * COLS).map_err(es)?;
+            d_cob_meta.copy_from_host(&stream, &cob_meta).map_err(es)?;
+
+            for (owner0, dst0, cargo0) in &dev_attack_creates {
+                // `merge_outgoing_land_attacks` (`game.rs:1139-1174`): the engine
+                // merges into an existing outgoing (owner, TerraNullius) attack
+                // rather than minting a second one.
+                let mut troops_now = d_troops.to_host_vec(&stream).map_err(es)?;
+                let mut prng_now = d_prng.to_host_vec(&stream).map_err(es)?;
+                let idx = match slots
+                    .iter()
+                    .position(|s| s.alive && s.owner == *owner0 && s.target == 0)
+                {
+                    Some(i) => {
+                        troops_now[slots[i].idx] += *cargo0;
+                        sd_ship_merged += 1;
+                        slots[i].idx
+                    }
+                    None => {
+                        let idx = slots.len();
+                        if idx >= MAX_SLOTS {
+                            return Err(format!(
+                                "boundary {b}: ship landing needs slot {idx} >= MAX_SLOTS \
+                                 {MAX_SLOTS}; raise it"
+                            ));
+                        }
+                        troops_now[idx] = *cargo0;
+                        slots.push(Slot {
+                            owner: *owner0,
+                            target: 0,
+                            idx,
+                            alive: true,
+                            created_at: b as u32,
+                            troops_bits: cargo0.to_bits(),
+                            attack_id: String::new(),
+                        });
+                        taken.push(false);
+                        sd_ship_created_attacks += 1;
+                        idx
+                    }
+                };
+                if sd_ship_created_attacks + sd_ship_merged <= 10 {
+                    detail.push_str(&format!(
+                        "SELFDRIVE_BOAT_ATTACK boundary {b} (engine tick {tick}): the device's \
+                         own ship land creates attack owner {owner0} target 0 troops {} src {dst0} \
+                         (engine records {:?})\n",
+                        fmt_f64(*cargo0),
+                        cur.attacks
+                            .iter()
+                            .find(|a| a.owner == *owner0 && a.target == 0 && a.source == Some(*dst0))
+                            .map(|a| fmt_f64(a.troops))
+                    ));
+                }
+                let pr = Prng::new(SEED);
+                let mut pw = [0u32; 5];
+                pr.state_words(&mut pw);
+                prng_now[idx * 5..idx * 5 + 5].copy_from_slice(&pw);
+                d_prng.copy_from_host(&stream, &prng_now).map_err(es)?;
+                d_troops.copy_from_host(&stream, &troops_now).map_err(es)?;
+                unsafe {
+                    module
+                        .attack_init(
+                            &stream,
+                            cfg(kernels::BLOCK),
+                            &d_terrain,
+                            w,
+                            h,
+                            tick,
+                            idx as u32,
+                            *owner0,
+                            0,       // TERRA_NULLIUS_ID
+                            *dst0,   // source_tile = Some(dst): the landed tile
+                            1,       // fresh stream
+                            &d_plane,
+                            &mut d_heap_tiles,
+                            &mut d_heap_pri,
+                            &mut d_border,
+                            &mut d_prng,
+                            &mut d_scal,
+                            &mut d_out,
+                            &d_coborder,
+                            &d_cob_meta,
+                        )
+                        .map_err(es)?;
+                }
+                if std::env::var_os("OFCUDA_MATRIX_ORIGDBG").is_some() {
+                    let o3 = d_out.to_host_vec(&stream).map_err(es)?;
+                    detail.push_str(&format!(
+                        "BOATDBG boundary {b} (engine tick {tick}) owner {owner0} slot {idx} \
+                         src {dst0} post-init heap {} border {}\n",
+                        o3[idx * 16] as u32,
+                        o3[idx * 16 + 1] as u32
                     ));
                 }
             }
@@ -2884,6 +3665,13 @@ n",
         detail.push_str(&format!(
             "SELFDRIVE totals: {sd_create} engine-created attacks not created, {sd_evict} \
              evictions not applied, {sd_reinit} re-creates not re-stamped\n"
+        ));
+        detail.push_str(&format!(
+            "SELFDRIVE boat path: {sd_ships_created} ships the device decided to send, \
+             {sd_ship_landed} sailed to their dst and landed, {sd_ship_created_attacks} land \
+             attacks created from the ship's own cargo, {sd_ship_merged} merged into an \
+             existing (owner,TN) exec, {sd_ship_untimed} landings with no matching record \
+             TRANSPORT row\n"
         ));
         detail.push_str(&format!(
             "SELFDRIVE bot AI: {sd_fires} firings, {sd_created} attacks originated, \

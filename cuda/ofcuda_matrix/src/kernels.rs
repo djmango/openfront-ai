@@ -960,6 +960,13 @@ pub mod device {
         bot_rrow: &[u32],
         bot_ff: &[u32],
         bot_state: &mut [u32],
+        // Per-bot mask, set by the host ONLY in self-drive mode: 1 = the port's
+        // own `send_boat_attack_to_nearby_tn` port (`dev_send_boat_attack_to_nearby_tn`,
+        // main.rs) decided this bot sends a TransportShip at THIS firing, so the
+        // engine would have returned from `send_tn_attack` and never reached the
+        // trigger-ratio / retaliate branch. 0 everywhere else, which leaves the
+        // kernel's behaviour byte-identical to before.
+        bot_boat: &[u32],
         maxtroops: &[f64],
         tgt: &[f64],
         out: &mut [f64],
@@ -1020,7 +1027,17 @@ pub mod device {
                         false
                     };
                     let mut sent = false;
-                    if nearby {
+                    let boat = bot_boat[k] != 0;
+                    if boat {
+                        // The engine's `send_tn_attack` -> `try_send_tn_attack` ->
+                        // `send_boat_attack_to_nearby_tn` succeeded (the host
+                        // resolved the candidate against the device plane), so
+                        // `tribe_maybe_attack` RETURNS: no trigger-ratio gate, no
+                        // retaliate. The ship itself is sailed and landed by the
+                        // host's ship model.
+                        out[k * 3 + 2] = 7.0;
+                        sent = true;
+                    } else if nearby {
                         // `land_attack_troops` (`ai_attack.rs:9-17`). `max_troops
                         // * expand_ratio` is looked up PRE-MULTIPLIED: CUDA
                         // contracts `a - b * c` into one fma (one rounding) while
