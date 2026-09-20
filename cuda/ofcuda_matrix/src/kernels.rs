@@ -157,72 +157,9 @@ pub mod device {
         );
     }
 
-    fn border_insert(b: &mut [u32], blen: &mut usize, t: u32) {
-        let mut i = 0usize;
-        while i < *blen {
-            if b[i] == t {
-                return;
-            }
-            i += 1;
-        }
-        if *blen < b.len() {
-            b[*blen] = t;
-            *blen += 1;
-        }
-    }
-
-    fn border_remove(b: &mut [u32], blen: &mut usize, t: u32) {
-        let mut i = 0usize;
-        while i < *blen {
-            if b[i] == t {
-                let mut j = i;
-                while j + 1 < *blen {
-                    b[j] = b[j + 1];
-                    j += 1;
-                }
-                *blen -= 1;
-                return;
-            }
-            i += 1;
-        }
-    }
-
     /// `ofcuda_env::Attack::offer_neighbours` (`attack.rs:1353-1386`): insert
     /// the border tile for exactly the neighbours `add_neighbors` enqueues, then
     /// let the crate's own `add_neighbors` do the draw-binding and priority.
-    #[allow(clippy::too_many_arguments)]
-    fn offer_dev(
-        heap: &mut Heap,
-        pr: &mut Prng,
-        border: &mut [u32],
-        blen: &mut usize,
-        plane: &[u16],
-        owner_col: u16,
-        target_col: u16,
-        terrain: &[u8],
-        tile: u32,
-        w: u32,
-        h: u32,
-        tick: u32,
-    ) -> u32 {
-        let mut nbuf = [0u32; 4];
-        let n = neighbors4(ORDER_NSWE, tile, w, h, &mut nbuf);
-        let mut i = 0usize;
-        while i < n as usize {
-            let nb = nbuf[i];
-            i += 1;
-            if terrain[nb as usize] & 0x80 == 0 {
-                continue; // water (attack.rs:1354)
-            }
-            if plane[nb as usize] != target_col {
-                continue; // not owned by the TARGET (attack.rs:1359)
-            }
-            border_insert(border, blen, nb); // attack.rs:1363
-        }
-        add_neighbors_t(
-            heap, pr, tile, plane, owner_col, target_col, terrain, w, h, tick,
-        )
-    }
 
     /// `AttackExecution::add_neighbors` (`attack.rs:1340-1386`) with the target
     /// as a parameter instead of the crate's hardcoded terra nullius.
@@ -233,72 +170,10 @@ pub mod device {
     /// the attack targets terra nullius (owner 0). The body below is otherwise
     /// the crate's function verbatim - same N,S,W,E visit order, same
     /// ONE draw per ENQUEUED neighbour, the draw-binding site.
-    #[allow(clippy::too_many_arguments)]
-    fn add_neighbors_t(
-        heap: &mut Heap,
-        pr: &mut Prng,
-        tile: u32,
-        plane: &[u16],
-        owner_col: u16,
-        target_col: u16,
-        terrain: &[u8],
-        w: u32,
-        h: u32,
-        tick: u32,
-    ) -> u32 {
-        let mut nbuf = [0u32; 4];
-        let n = neighbors4(ORDER_NSWE, tile, w, h, &mut nbuf);
-        let mut enq = 0u32;
-        let mut i = 0usize;
-        while i < n as usize {
-            let nb = nbuf[i];
-            i += 1;
-            if terrain[nb as usize] & 0x80 == 0 {
-                continue; // water (attack.rs:1354)
-            }
-            if plane[nb as usize] != target_col {
-                continue; // wrong owner (attack.rs:1359)
-            }
-            let k = attacker_neighbor_count(plane, &[], owner_col, nb, w, h, ORDER_NSWE);
-            let r = pr.next_int(0, 7);
-            let mag2 = mag2_from_terrain(terrain[nb as usize]);
-            heap.enqueue(nb, priority_f32(r, k, mag2, tick));
-            enq += 1;
-        }
-        enq
-    }
 
     /// `AttackExecution::refresh_to_conquer` (`attack.rs:1265-1274`): clear the
     /// heap AND the border set, then offer every neighbour of the owner's
     /// current border.
-    #[allow(clippy::too_many_arguments)]
-    fn refresh_dev(
-        heap: &mut Heap,
-        pr: &mut Prng,
-        border: &mut [u32],
-        blen: &mut usize,
-        plane: &[u16],
-        owner_col: u16,
-        target_col: u16,
-        terrain: &[u8],
-        w: u32,
-        h: u32,
-        tick: u32,
-        oborder: &[u32],
-        oboff: usize,
-        obn: usize,
-    ) {
-        heap.clear();
-        *blen = 0;
-        let mut j = 0usize;
-        while j < obn {
-            let bt = oborder[oboff + j];
-            j += 1;
-            offer_dev(
-                heap, pr, border, blen, plane, owner_col, target_col, terrain, bt, w, h, tick,
-            );
-        }
-    }
 
     /// `TransportShipExecution::land` (`transport_ship.rs:374-401`): a boat that
     /// reaches shore CONQUERS its destination tile and only then creates an
@@ -382,7 +257,7 @@ pub mod device {
             }
             if heap.is_empty() {
                 // attack.rs:264-268: refresh_to_conquer, then RETREAT (death).
-                refresh_dev(
+                orig_refresh_dev(
                     heap, pr, bsub, blen, psub, owner_col, target_col, terrain, w, h, tick, oborder,
                     oboff, obn,
                 );
@@ -420,7 +295,7 @@ pub mod device {
             let Some((tile, _pri)) = heap.dequeue() else {
                 break; // attack.rs:271
             };
-            border_remove(bsub, blen, tile); // attack.rs:275
+            orig_border_remove(bsub, blen, tile); // attack.rs:275
             if psub[tile as usize] != target_col {
                 continue; // attack.rs:284 wrong owner for this target
             }
@@ -430,7 +305,7 @@ pub mod device {
             if terrain[tile as usize] & 0x80 == 0 {
                 continue; // attack.rs:288
             }
-            offer_dev(
+            orig_offer_dev(
                 heap, pr, bsub, blen, psub, owner_col, target_col, terrain, tile, w, h, tick,
             ); // attack.rs:292
             if player_target {
@@ -766,11 +641,11 @@ pub mod device {
         if source != u32::MAX {
             // `attack.rs:160-164`: with a `source_tile` the frontier is seeded
             // from the SOURCE TILE's own neighbours (`add_neighbors(src)`), not
-            // from the owner's border set. `offer_dev` is that call plus the
+            // from the owner's border set. `orig_offer_dev` is that call plus the
             // attack-border insert (`offer_neighbours`, `attack.rs:1353-1386`),
             // in the same N,S,W,E order with the same one draw per enqueued
             // neighbour.
-            offer_dev(
+            orig_offer_dev(
                 &mut heap,
                 &mut pr,
                 &mut border[boff..boff + BC],
@@ -785,7 +660,7 @@ pub mod device {
                 tick,
             );
         } else {
-            refresh_dev(
+            orig_refresh_dev(
                 &mut heap,
                 &mut pr,
                 &mut border[boff..boff + BC],
@@ -838,17 +713,9 @@ pub mod device {
     // -----------------------------------------------------------------------
 
     /// `GameMap::is_land` (`map.rs:128-130`): terrain bit 7.
-    #[inline]
-    fn dev_is_land(terrain: &[u8], t: u32) -> bool {
-        terrain[t as usize] & 0x80 != 0
-    }
 
     /// `GameMap::is_shore` (`map.rs:144-146`): `is_land && is_shoreline`, i.e.
     /// terrain bits 7 and 6 (the shoreline bit is precomputed in the map bytes).
-    #[inline]
-    fn dev_is_shore(terrain: &[u8], t: u32) -> bool {
-        terrain[t as usize] & 0xc0 == 0xc0
-    }
 
     /// `has_land_border_with_terra_nullius` (`ai_attack.rs:187-204`) and
     /// `has_land_border_tn` (`ai_attack.rs:147-168`, the TN probe inside
@@ -856,100 +723,13 @@ pub mod device {
     /// N,S,W,E neighbour that is land and unowned. The two engine predicates
     /// differ only by a `has_fallout` guard on the neighbour, and this port
     /// models no fallout, so they collapse into one scan.
-    fn bot_land_border_tn(
-        terrain: &[u8],
-        w: u32,
-        h: u32,
-        plane: &[u16],
-        oborder: &[u32],
-        ob_meta: &[u32],
-        sid: u16,
-    ) -> bool {
-        let om = sid as usize * 2;
-        let off = ob_meta[om] as usize;
-        let n = ob_meta[om + 1] as usize;
-        let mut i = 0usize;
-        while i < n {
-            let t = oborder[off + i];
-            let mut buf = [0u32; 4];
-            let c = neighbors4(ORDER_NSWE, t, w, h, &mut buf) as usize;
-            let mut j = 0usize;
-            while j < c {
-                let nb = buf[j];
-                if dev_is_land(terrain, nb) && plane[nb as usize] == 0 {
-                    return true;
-                }
-                j += 1;
-            }
-            i += 1;
-        }
-        false
-    }
 
     /// `has_shore_reachable_tn` (`ai_attack.rs:214-248`): over
     /// `sampled_shore_tiles` (`ai_attack.rs:206-212` - the owner's border tiles
     /// filtered to shore, then `step_by(10)`), for each of the four directions
     /// (0,-1),(0,1),(-1,0),(1,0), the near tile must be water and the tile five
     /// steps out must be valid, land and unowned.
-    fn bot_shore_reachable_tn(
-        terrain: &[u8],
-        w: u32,
-        h: u32,
-        plane: &[u16],
-        oborder: &[u32],
-        ob_meta: &[u32],
-        sid: u16,
-    ) -> bool {
-        let om = sid as usize * 2;
-        let off = ob_meta[om] as usize;
-        let n = ob_meta[om + 1] as usize;
-        const DIRS: [(i32, i32); 4] = [(0, -1), (0, 1), (-1, 0), (1, 0)];
-        let mut shore_i = 0usize;
-        let mut i = 0usize;
-        while i < n {
-            let t = oborder[off + i];
-            if dev_is_shore(terrain, t) {
-                if shore_i % 10 == 0 {
-                    let x = (t % w) as i32;
-                    let y = (t / w) as i32;
-                    let mut d = 0usize;
-                    while d < 4 {
-                        let (dx, dy) = DIRS[d];
-                        let x1 = x + dx;
-                        let y1 = y + dy;
-                        let nx = x + dx * 5;
-                        let ny = y + dy * 5;
-                        if x1 >= 0
-                            && y1 >= 0
-                            && (x1 as u32) < w
-                            && (y1 as u32) < h
-                            && nx >= 0
-                            && ny >= 0
-                            && (nx as u32) < w
-                            && (ny as u32) < h
-                        {
-                            let t1 = (y1 as u32) * w + (x1 as u32);
-                            let tn = (ny as u32) * w + (nx as u32);
-                            if !dev_is_land(terrain, t1)
-                                && dev_is_land(terrain, tn)
-                                && plane[tn as usize] == 0
-                            {
-                                return true;
-                            }
-                        }
-                        d += 1;
-                    }
-                }
-                shore_i += 1;
-            }
-            i += 1;
-        }
-        false
-    }
-
-    /// ONE bot's attack decision, on the device, for one tick.
-    ///
-    /// `out` is `3 * nbots`: `[fire, troops, action]`.
+   /// `out` is `3 * nbots`: `[fire, troops, action]`.
     ///   action 1 = a TN land attack is originated (`send_tn_attack` ->
     ///              `add_land_attack_from(sid, None, Some(troops))`);
     ///   action 3 = fired, no Terra Nullius in reach (the engine's BOAT path,
@@ -964,10 +744,13 @@ pub mod device {
     ///   action 0 = did not fire this tick.
     ///
     /// `bot_state` bit 0 = `attack_behavior_init`, bit 1 = `neighbors_terra_nullius`.
+    /// `#[kernel]` wrapper only: the bot's decision body now lives in the
+    /// canonical device core (`core_impl.rs::bot_ai_core`), so `ofcuda_env`'s
+    /// `gpu_env` - which `include!`s the same core - runs the SAME origination.
     #[kernel]
     #[launch_bounds(1)]
     #[allow(clippy::too_many_arguments)]
-    pub fn bot_ai(
+        pub fn bot_ai(
         terrain: &[u8],
         w: u32,
         h: u32,
@@ -1006,125 +789,30 @@ pub mod device {
         if thread::index_1d().get() != 0 {
             return;
         }
-        let n = nbots as usize;
-        let mcap = maxtroops.len();
-        let mut k = 0usize;
-        while k < n {
-            out[k * 3] = 0.0;
-            out[k * 3 + 1] = 0.0;
-            out[k * 3 + 2] = 0.0;
-            let sid = bot_sid[k] as u16;
-            let rate = bot_rate[k];
-            // `bot/tribe.rs:114-122`: inactive while `game.in_spawn_phase()`
-            // (ticks <= spawn_end_tick), then only on `tick % attack_rate ==
-            // attack_tick`.
-            if tick > spawn_end_tick && rate > 0 && tick % rate == bot_at[k] {
-                let ti = sid as usize * 3;
-                // `tick` first reads `p.troops`/`p.tiles_owned` after the player
-                // execs have ticked, so this is the post-income, post-cluster
-                // state the device holds right now.
-                let tiles = pst[ti + 1];
-                let troops = pst[ti];
-                if tiles >= 1.0 {
-                    let st = bot_state[k];
-                    // `attack_behavior_init` is set at the bot's FIRST ever
-                    // scheduled firing; that firing calls `send_tn_attack` and
-                    // RETURNS.
-                    let first = tick <= bot_ff[k];
-                    // `attack_behavior_init` is set on the FIRST firing whatever
-                    // the outcome (`bot/tribe.rs:127-131`) and that firing calls
-                    // `send_tn_attack` and RETURNS - it never reaches
-                    // `tribe_maybe_attack`.
-                    if first {
-                        bot_state[k] = st | 1;
-                    }
-                    let idx = if (tiles as usize) < mcap {
-                        tiles as usize
-                    } else {
-                        mcap - 1
-                    };
-                    // `has_land_border_with_terra_nullius` for the first firing
-                    // (`try_send_tn_attack`, `ai_attack.rs:409-422`); for later
-                    // firings `tribe_maybe_attack` first gates on
-                    // `neighbors_terra_nullius` and `has_nearby_terra_nullius` =
-                    // land border OR shore-reachable (`ai_attack.rs:1743-1748`).
-                    let land = bot_land_border_tn(terrain, w, h, plane, oborder, ob_meta, sid);
-                    let nearby = if first {
-                        land
-                    } else if st & 2 != 0 {
-                        land
-                            || bot_shore_reachable_tn(terrain, w, h, plane, oborder, ob_meta, sid)
-                    } else {
-                        false
-                    };
-                    let mut sent = false;
-                    let boat = bot_boat[k] != 0;
-                    if boat {
-                        // The engine's `send_tn_attack` -> `try_send_tn_attack` ->
-                        // `send_boat_attack_to_nearby_tn` succeeded (the host
-                        // resolved the candidate against the device plane), so
-                        // `tribe_maybe_attack` RETURNS: no trigger-ratio gate, no
-                        // retaliate. The ship itself is sailed and landed by the
-                        // host's ship model.
-                        out[k * 3 + 2] = 7.0;
-                        sent = true;
-                    } else if nearby {
-                        // `land_attack_troops` (`ai_attack.rs:9-17`). `max_troops
-                        // * expand_ratio` is looked up PRE-MULTIPLIED: CUDA
-                        // contracts `a - b * c` into one fma (one rounding) while
-                        // the engine rounds the product and the subtraction
-                        // separately, and that is measurably 1 ulp. The product
-                        // is therefore evaluated by the host with the engine's
-                        // own expression.
-                        let amount =
-                            troops - tgt[bot_trow[k] as usize * mcap + idx];
-                        if land && amount >= 1.0 {
-                            out[k * 3] = 1.0;
-                            out[k * 3 + 1] = amount;
-                            out[k * 3 + 2] = 1.0;
-                            sent = true;
-                        } else if land {
-                            // fired, `land_attack_troops` < 1.
-                            out[k * 3 + 2] = 4.0;
-                        } else {
-                            // no LAND border: the engine's BOAT path
-                            // (`send_boat_attack_to_nearby_tn`) and the port
-                            // models no boats.
-                            out[k * 3 + 2] = 3.0;
-                        }
-                    } else if !first {
-                        // `ai_attack.rs:2189-2191`.
-                        bot_state[k] = bot_state[k] & !2;
-                    }
-                    // A failed `send_tn_attack` does NOT return: the engine falls
-                    // through to the trigger-ratio gate (`ai_attack.rs:2194-2199`).
-                    if !sent && !first {
-                        if maxtroops[idx] <= 0.0 || !(troops / maxtroops[idx] >= bot_trigger[k]) {
-                            // `!has_trigger_ratio` (`ai_attack.rs:42-50`).
-                            out[k * 3 + 2] = 6.0;
-                        } else {
-                            out[k * 3 + 2] = 5.0;
-                            // `has_trigger_ratio` passed, so the engine now runs the
-                            // RETALIATE branch (`ai_attack.rs:2211-2230`):
-                            // `find_incoming_attacker` then
-                            // `try_send_player_attack_forced(.., force=true)`, whose
-                            // LAND path sizes the new attack with
-                            // `land_attack_troops(attacker, reserve_ratio)` and then
-                            // `cap_player_attack_troops` (`ai_attack.rs:509-527`).
-                            // Compute that amount HERE, off the device's own
-                            // post-cluster player state, so the cancel-opposing model
-                            // has the engine's exact `start` without reading the
-                            // oracle record. `land_ratio` is `reserve_ratio` because
-                            // every player on this map is a Bot and no Bot owns
-                            // structure units (`ai_attack.rs:511-515`).
-                            let pstart = troops - tgt[bot_rrow[k] as usize * mcap + idx];
-                            out[k * 3 + 1] = if pstart >= 1.0 { pstart } else { 0.0 };
-                        }
-                    }
-                }
-            }
-            k += 1;
-        }
+        bot_ai_core(
+            terrain,
+            w,
+            h,
+            tick,
+            spawn_end_tick,
+            plane,
+            pst,
+            oborder,
+            ob_meta,
+            bot_sid,
+            bot_rate,
+            bot_at,
+            bot_trigger,
+            bot_trow,
+            bot_rrow,
+            bot_ff,
+            bot_state,
+            bot_boat,
+            maxtroops,
+            tgt,
+            out,
+            nbots,
+        );
     }
 
     /// FNV-1a-64 of the whole owner plane, one thread. `ofcuda_hash`'s function,

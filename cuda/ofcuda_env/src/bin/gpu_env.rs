@@ -857,6 +857,144 @@ mod kernels {
         out[kidx as usize * n_envs as usize + e] =
             ofcuda_hash::fnv1a_u16_le(ofcuda_hash::FNV_OFFSET_BASIS, &plane[off..off + wh as usize]);
     }
+
+    // =================================================================
+    // The bot attack AI, now reachable FROM THIS CRATE.
+    //
+    // Both kernels below call the canonical core (`core_impl.rs`): the bot
+    // DECISION is `bot_ai_core` and the attack's ORIGINATION is
+    // `orig_refresh_dev` / `orig_offer_dev` / `orig_add_neighbors_t` - the same
+    // functions the matrix's `bot_ai` / `attack_init` call. Before the move the
+    // env `include!`d a core that had neither, so the batch env could not
+    // originate an attack at all: it had to be handed one per tick from the
+    // oracle.
+    // =================================================================
+
+    /// The bot's decision, verbatim `bot_ai_core`, launched from this crate.
+    /// `out` is `3 * nbots`: `[fire, troops, action]` (see `bot_ai_core`).
+    #[kernel]
+    #[launch_bounds(1)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn bot_ai(
+        terrain: &[u8],
+        w: u32,
+        h: u32,
+        tick: u32,
+        spawn_end_tick: u32,
+        plane: &[u16],
+        pst: &[f64],
+        oborder: &[u32],
+        ob_meta: &[u32],
+        bot_sid: &[u32],
+        bot_rate: &[u32],
+        bot_at: &[u32],
+        bot_trigger: &[f64],
+        bot_trow: &[u32],
+        bot_rrow: &[u32],
+        bot_ff: &[u32],
+        mut bot_state: &mut [u32],
+        bot_boat: &[u32],
+        maxtroops: &[f64],
+        tgt: &[f64],
+        out: &mut [f64],
+        nbots: u32,
+    ) {
+        bot_ai_core(
+            terrain,
+            w,
+            h,
+            tick,
+            spawn_end_tick,
+            plane,
+            pst,
+            oborder,
+            ob_meta,
+            bot_sid,
+            bot_rate,
+            bot_at,
+            bot_trigger,
+            bot_trow,
+            bot_rrow,
+            bot_ff,
+            bot_state,
+            bot_boat,
+            maxtroops,
+            tgt,
+            out,
+            nbots,
+        );
+    }
+
+    /// DEVICE-SIDE ORIGINATION. Builds an attack's frontier from the OWNER's
+    /// border set with the core's `orig_refresh_dev` (`AttackExecution::init`,
+    /// `attack.rs:156-164` -> `refresh_to_conquer`, `attack.rs:1265-1274`) and
+    /// writes the heap / border / PRNG state straight into this env's device
+    /// buffers. `out` = [heap_len, border_len, peak, prng_calls].
+    #[kernel]
+    #[launch_bounds(1)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn originate_env(
+        terrain: &[u8],
+        w: u32,
+        h: u32,
+        tick: u32,
+        owner_col: u16,
+        target_col: u16,
+        plane: &[u16],
+        oborder: &[u32],
+        oboff: u32,
+        obn: u32,
+        mut heap_tiles: &mut [u32],
+        mut heap_pri: &mut [f32],
+        mut border: &mut [u32],
+        mut prng: &mut [u32],
+        mut scal: &mut [u32],
+        out: &mut [u32],
+    ) {
+        if thread::index_1d().get() != 0 {
+            return;
+        }
+        let mut heap = Heap::new();
+        let mut pr = Prng::new(SEED);
+        let mut blen = 0usize;
+        orig_refresh_dev(
+            &mut heap,
+            &mut pr,
+            border,
+            &mut blen,
+            plane,
+            owner_col,
+            target_col,
+            terrain,
+            w,
+            h,
+            tick,
+            oborder,
+            oboff as usize,
+            obn as usize,
+        );
+        scal[0] = heap.len as u32;
+        scal[1] = blen as u32;
+        scal[5] = 1; // alive (the env's layout: 5 = alive, 7 = heap peak)
+        scal[7] = heap.peak as u32;
+        let mut j = 0usize;
+        while j < heap.len {
+            heap_tiles[j] = heap.tiles[j];
+            heap_pri[j] = heap.pri[j];
+            j += 1;
+        }
+        let mut pw = [0u32; 5];
+        pr.state_words(&mut pw);
+        let mut j = 0usize;
+        while j < 5 {
+            prng[j] = pw[j];
+            j += 1;
+        }
+        out[0] = heap.len as u32;
+        out[1] = blen as u32;
+        out[2] = heap.peak as u32;
+        out[3] = pr.calls;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1403,6 +1541,134 @@ fn run_batch(
 
 // ---------------------------------------------------------------------------
 
+/// `--originate`: the ENV crate originates an attack ON THE DEVICE from the
+/// moved bot AI - no oracle, no host re-injection. Runs the core's
+/// `bot_ai_core` decision, then the core's `orig_refresh_dev` to build the
+/// attack's heap/border/PRNG state in this env's own device buffers.
+///
+/// The bot schedule below is FORCED to fire at `tick` (rate 1, at 0, trigger 0,
+/// `maxtroops = troops + 1`, zero pre-multiplied rows) because the point is the
+/// ORIGINATION path, not the cadence: the same kernel with the engine's real
+/// `tribe_ratios` schedule is what the trainer will run once the roster feeds
+/// it. Both kernels are the canonical core's - the identical code the matrix's
+/// `bot_ai` / `attack_init` wrappers call.
+fn originate_demo(
+    ctx: &std::sync::Arc<CudaContext>,
+    module: &kernels::LoadedModule,
+    env: &EnvState,
+    a: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let stream = ctx.default_stream();
+    let envs = vec![env0_copy(env)?];
+    let mut b = DevBatch::new(ctx, module, &envs, 1)?;
+    let (w, h) = (env.w, env.h);
+    let tick = env.tick0 + a.ticks.max(1);
+    let obn = env.oborder.len() as u32;
+    let owned = env.plane.iter().filter(|x| **x == env.owner_col).count();
+
+    // ---- 1. the bot DECISION, launched from this crate --------------------
+    let mcap = 1usize;
+    let mut pst = vec![0f64; (env.owner_sid as usize + 1) * 3];
+    pst[env.owner_sid as usize * 3] = env.troops;
+    pst[env.owner_sid as usize * 3 + 1] = owned as f64;
+    let d_pst = DeviceBuffer::<f64>::from_host(&stream, &pst)?;
+    let d_sid = DeviceBuffer::<u32>::from_host(&stream, &[env.owner_sid as u32])?;
+    let d_rate = DeviceBuffer::<u32>::from_host(&stream, &[1u32])?;
+    let d_at = DeviceBuffer::<u32>::from_host(&stream, &[0u32])?;
+    let d_trig = DeviceBuffer::<f64>::from_host(&stream, &[0.0f64])?;
+    let d_trow = DeviceBuffer::<u32>::from_host(&stream, &[0u32])?;
+    let d_rrow = DeviceBuffer::<u32>::from_host(&stream, &[0u32])?;
+    let d_ff = DeviceBuffer::<u32>::from_host(&stream, &[0u32])?;
+    let mut d_state = DeviceBuffer::<u32>::from_host(&stream, &[2u32])?;
+    let d_boat = DeviceBuffer::<u32>::from_host(&stream, &[0u32])?;
+    let d_max = DeviceBuffer::<f64>::from_host(&stream, &[env.troops + 1.0])?;
+    let d_tgt = DeviceBuffer::<f64>::from_host(&stream, &vec![0.0f64; 2 * mcap])?;
+    // `ob_meta` is indexed `sid * 2` by the core (`bot_land_border_tn`), so it
+    // must carry a row for the owner's own sid even though we only fill one.
+    let mut h_meta = vec![0u32; (env.owner_sid as usize + 1) * 2];
+    h_meta[env.owner_sid as usize * 2] = 0;
+    h_meta[env.owner_sid as usize * 2 + 1] = obn;
+    let d_meta = DeviceBuffer::<u32>::from_host(&stream, &h_meta)?;
+    let mut d_out = DeviceBuffer::<f64>::zeroed(&stream, 3)?;
+    unsafe {
+        module.bot_ai(
+            &stream,
+            cfg_for_block(1, 1),
+            &b.d_terrain,
+            w,
+            h,
+            tick,
+            0u32,
+            &b.d_plane,
+            &d_pst,
+            &b.d_oborder,
+            &d_meta,
+            &d_sid,
+            &d_rate,
+            &d_at,
+            &d_trig,
+            &d_trow,
+            &d_rrow,
+            &d_ff,
+            &mut d_state,
+            &d_boat,
+            &d_max,
+            &d_tgt,
+            &mut d_out,
+            1u32,
+        )?;
+    }
+    let dec = d_out.to_host_vec(&stream)?;
+    println!(
+        "DEV_BOT_AI (env crate, device): fired={} action={} troops={}",
+        dec[0], dec[2], dec[1]
+    );
+
+    // ---- 2. ORIGINATION, on the device, from the canonical core -----------
+    let mut d_orig = DeviceBuffer::<u32>::zeroed(&stream, 4)?;
+    unsafe {
+        module.originate_env(
+            &stream,
+            cfg_for_block(1, 1),
+            &b.d_terrain,
+            w,
+            h,
+            tick,
+            env.owner_col,
+            0u16,
+            &b.d_plane,
+            &b.d_oborder,
+            0u32,
+            obn,
+            &mut b.d_heap_tiles,
+            &mut b.d_heap_pri,
+            &mut b.d_border,
+            &mut b.d_prng,
+            &mut b.d_scal,
+            &mut d_orig,
+        )?;
+    }
+    let o = d_orig.to_host_vec(&stream)?;
+    let scal = b.d_scal.to_host_vec(&stream)?;
+    let tiles = b.d_heap_tiles.to_host_vec(&stream)?;
+    println!(
+        "DEV_ORIGINATE (env crate, device): heap_len={} border_len={} peak={} prng_calls={} scal_alive={}",
+        o[0], o[1], o[2], o[3], scal[5]
+    );
+    let ht = tiles.first().copied().unwrap_or(0);
+    println!(
+        "  frontier head tile={} (x={} y={}) owner_at_head={} env_owner_col={} owner_border_tiles={} owned_tiles={}",
+        ht,
+        ht % w,
+        ht / w,
+        env.plane.get(ht as usize).copied().unwrap_or(0xffff),
+        env.owner_col,
+        obn,
+        owned
+    );
+    Ok(())
+}
+
 struct Args {
     dump: PathBuf,
     map: PathBuf,
@@ -1417,6 +1683,9 @@ struct Args {
     /// Skip the player-clusters pass (throughput A/B only; never used for
     /// parity or training).
     no_clusters: bool,
+    /// `--originate`: the env crate originates an attack on the device from
+    /// the moved bot AI (see `originate_demo`).
+    originate: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -1432,6 +1701,7 @@ fn parse_args() -> Result<Args, String> {
         verify_max: 256,
         dump_states: false,
         no_clusters: false,
+        originate: false,
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -1487,6 +1757,10 @@ fn parse_args() -> Result<Args, String> {
             }
             "--selftest" => {
                 a.selftest = true;
+                i += 1;
+            }
+            "--originate" => {
+                a.originate = true;
                 i += 1;
             }
             o => return Err(format!("unknown arg {o}").into()),
@@ -1638,6 +1912,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // ---- device ----------------------------------------------------------
     let ctx = CudaContext::new(0)?;
     let module = unsafe { kernels::load(&ctx)? };
+
+    // `--originate`: prove the env crate can originate an attack from the
+    // moved bot AI, with no oracle re-injection. Early-out mode.
+    if a.originate {
+        return originate_demo(&ctx, &module, &env0, &a);
+    }
 
     // Self-test: device vs the CPU reference, per tick, on identical state.
     if a.selftest || a.mode == "both" {
