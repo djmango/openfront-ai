@@ -1827,19 +1827,22 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         // engine's own `tick` read. Nothing is carried over: the record is the
         // source, so a device-side drift cannot accumulate silently.
         //
-        // `PlayerExecution::tick` INCOME, PORTED (`execution/player.rs:84-88`):
-        // the engine runs `game.add_troops(small_id, game.troop_increase_rate_raw_for(small_id))`
+        // `PlayerExecution::tick` INCOME (`execution/player.rs:82-84`): the engine
+        // runs `game.add_troops(small_id, game.troop_increase_rate_raw_for(small_id))`
         // for every player. Every `PlayerExecution` is created at spawn and every
         // `AttackExecution` is appended to `execs` when it is created, so ALL the
         // player executions precede ALL the attacks in `execute_next_tick`'s exec
-        // order: the income is a pure TICK-START mutation of each player's live
-        // troop count, and an attack that targets a player reads `p.troops`
-        // AFTER it. The port previously seeded `pst` from the per-boundary record
-        // and never added income, so a player-target attack opened ~3.6e-4
-        // relative lower (a smaller `defender_troops`, so a smaller
-        // `alt_attacker_loss`), the device's attacker lost slightly less per pop
-        // and drifted ABOVE the engine - the exact `device >= engine` drift this
-        // harness was chasing.
+        // order: an attack that targets a player reads `p.troops` AFTER it.
+        //
+        // The income is NOT applied here. It is applied in section 3b, after the
+        // player-clusters pass and before any attack, because it is not a
+        // tick-start quantity: `PlayerExecution::tick` runs the income
+        // (`player.rs:82-84`) BEFORE its own `maybe_remove_clusters`
+        // (`player.rs:92`), and the execs run in ascending order, so a player's
+        // income reads the tile count it holds AT ITS OWN EXEC TURN - the
+        // tick-start tiles plus every cluster a LOWER-ordered victim's pass has
+        // already handed it this tick. Applying it here used the tick-start tile
+        // count and under-added income for exactly those players.
         pst_host.fill(0.0);
         for p in &prev.players {
             let i = p.sid as usize * 3;
@@ -1853,24 +1856,8 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
                 };
             }
         }
-        // Applied as a second pass so each player's income uses its OWN
-        // tick-start troops/tiles, exactly as `troop_increase_rate_raw_for` does.
-        for p in &prev.players {
-            let i = p.sid as usize * 3;
-            if i + 2 >= pst_host.len() || p.tiles <= 0 {
-                continue; // `PlayerExecution::tick` returns early with no tiles
-            }
-            let inc = troop_increase_rate_raw(p.ptype, pst_host[i], p.tiles as f64);
-            // `game.add_troops` (`game.rs:1147-1155`): `p.troops += to_int(amount)`,
-            // `to_int` is `floor` (`util.rs:26`). A negative rate means
-            // `add_troops` forwards to `remove_troops` -> `to_int(-amount)`, i.e.
-            // the magnitude is floored before being negated.
-            if inc < 0.0 {
-                pst_host[i] -= (-inc).floor();
-            } else {
-                pst_host[i] += inc.floor();
-            }
-        }
+        // The income is applied in section 3b (after the player-clusters pass):
+        // see the note above this seeding pass.
         d_pst.copy_from_host(&stream, &pst_host).map_err(es)?;
 
         // --- 2. bind the engine's live attacks to device slots ---
@@ -2282,6 +2269,79 @@ n",
                      captor {captor} tiles {n} first {:?}\n",
                     &tiles[..tiles.len().min(8)]
                 ));
+            }
+            // --- 3b. the income, at the player's OWN exec turn -------------------
+            // `PlayerExecution::tick` applies the income (`player.rs:82-84`)
+            // BEFORE its own `maybe_remove_clusters` (`player.rs:92`), and the
+            // player execs run in `cl_order` (the engine's own `PEXEC` order), so
+            // a player's income reads the tile count it holds AT ITS OWN EXEC
+            // TURN: the tick-start tiles PLUS every cluster a LOWER-ordered
+            // victim's pass has already handed to it in this tick, and minus
+            // nothing (a cluster it loses is removed after its income). Applying
+            // the income in the seeding pass above - before this cluster pass -
+            // used the tick-start count and under-added for exactly those
+            // players. Measured on pangaea N=488 nat=0, boundary 401 (engine tick
+            // 404): `ENG_CLUSTER_REMOVE tick=404 victim=260 captor=425 tiles=95`
+            // fires during sid 260's exec, 260 < 425, so player 425's income read
+            // 988 tiles, not the record's 893: `troop_increase_rate_raw('B',
+            // 40663, 988)` = 135.0219... -> +135, where the seeded pass added
+            // `floor(129.626...)` = +129. The attack 25 -> 425 then read
+            // `defender_troops` 40792 instead of the engine's 40798, and its
+            // `alt_attacker_loss` was low by 6 per pop.
+            {
+                let mut cpos: HashMap<u16, usize> = HashMap::new();
+                for (k, sid) in cl_order.iter().enumerate() {
+                    cpos.entry(*sid as u16).or_insert(k);
+                }
+                let mut pn = d_pst.to_host_vec(&stream).map_err(es)?;
+                let mut inc_ordered = 0usize;
+                for p in &prev.players {
+                    let i = p.sid as usize * 3;
+                    if i + 2 >= pn.len() || p.tiles <= 0 {
+                        continue; // `PlayerExecution::tick` returns early with no tiles
+                    }
+                    let ppos = cpos.get(&p.sid).copied().unwrap_or(usize::MAX);
+                    let mut tiles_at_turn = p.tiles as f64;
+                    for (victim, captor, n) in &dev_this {
+                        if *captor == p.sid
+                            && cpos.get(victim).copied().unwrap_or(usize::MAX) < ppos
+                        {
+                            tiles_at_turn += *n as f64;
+                        }
+                    }
+                    let inc = troop_increase_rate_raw(p.ptype, pn[i], tiles_at_turn);
+                    if tiles_at_turn != p.tiles as f64 {
+                        inc_ordered += 1;
+                        if std::env::var_os("OFCUDA_MATRIX_INCOME_ORDER").is_some() {
+                            eprintln!(
+                                "INCOME_ORDER b={b} tick={tick} sid={} record_tiles={} \
+                                 tiles_at_turn={} troops={} inc={:.9} added={}",
+                                p.sid,
+                                p.tiles,
+                                tiles_at_turn,
+                                pn[i],
+                                inc,
+                                inc.floor()
+                            );
+                        }
+                    }
+                    // `game.add_troops` (`game.rs:1147-1155`): `p.troops += to_int(amount)`,
+                    // `to_int` is `floor` (`util.rs:26`). A negative rate means
+                    // `add_troops` forwards to `remove_troops` -> `to_int(-amount)`, i.e.
+                    // the magnitude is floored before being negated.
+                    if inc < 0.0 {
+                        pn[i] -= (-inc).floor();
+                    } else {
+                        pn[i] += inc.floor();
+                    }
+                }
+                if inc_ordered > 0 && std::env::var_os("OFCUDA_MATRIX_INCOME_ORDER").is_some() {
+                    detail.push_str(&format!(
+                        "INCOME_ORDER b={b} (engine tick {tick}): {inc_ordered} players' income \
+                         read tiles handed to them by a lower-ordered victim's cluster pass\n"
+                    ));
+                }
+                d_pst.copy_from_host(&stream, &pn).map_err(es)?;
             }
             // --- the stream diff against the engine's own `ENG_CLUSTER_REMOVE` ---
             let eng_this = eng_cluster.get(&tick).cloned().unwrap_or_default();
