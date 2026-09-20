@@ -53,6 +53,37 @@ fn within(v: f64, lo: f64, hi: f64) -> f64 {
     if a < hi { a } else { hi }
 }
 
+/// A multiply the NVPTX device backend is not allowed to contract into an FMA.
+///
+/// The engine is host Rust, and there `a * b + c` is TWO roundings: the product
+/// is rounded, then the sum is rounded. This backend marks every `fmul`/`fadd`
+/// with LLVM's `contract` fast-math flag (the generated IR carries
+/// `fadd contract` and `fmul contract`), so it fuses the pattern into a single
+/// `fma.rn.f64` (ONE rounding) - a 1-ULP difference, and 1 ULP of a troop count
+/// is a comparator-visible divergence.
+///
+/// This was not hypothetical. The generated PTX carried exactly two such
+/// contracts, both in the player-target branch of `attack_tick` - a path the port
+/// never used to exercise, because a player-targeted land attack arriving by boat
+/// landing did not exist in the device until `land()`'s branches were ported:
+///
+///   `fma.rn.f64 %rd286, %rd285, 0d3FD3333333333333, 0d3FE6666666666666`
+///       = fma(0.3, dsig, 0.7)                  <- `dbuf`
+///   `fma.rn.f64 %rd418, %rd296, 0d3FD999999999999A, %rd297`
+///       = fma(0.4, alt, 0.6 * cur)             <- `attack_loss`
+///
+/// `#[inline(never)]` cannot stop it: this backend's IR carries only
+/// `attributes #0 = { convergent }`, so the attribute is dropped and the callee
+/// is inlined anyway. A VOLATILE read is the barrier that survives: the product
+/// has to be materialised in memory, so the backend cannot fold it into the
+/// following add. No value is changed - this restores the engine's own double
+/// rounding, it is not a correction towards it.
+#[inline]
+fn mul_round(a: f64, b: f64) -> f64 {
+    let p = a * b;
+    unsafe { core::ptr::read_volatile(&p) }
+}
+
 /// Capacity of one attack's border set (device only; the CPU `Attack` uses a
 /// `Vec`). Overflow is COUNTED in `scal[slot*8+4]`, never silently dropped.
 pub const BC: usize = 8192;
@@ -426,14 +457,14 @@ pub mod device {
                 } else {
                     defsig[defsig.len() - 1]
                 };
-                let dbuf = 0.7 + 0.3 * dsig;
+                let dbuf = 0.7 + mul_round(0.3, dsig);
                 // `defender_troop_loss` stays the EXACT fraction - it feeds
                 // `alt_attacker_loss` below, and the engine computes it that way
                 // (`attack.rs`: `defender_troops as f64 / defender_tiles as f64`).
                 let def_loss = dtroops / dtiles;
                 let cur = within(dtroops / *troop_count, 0.6, 2.0) * mag * 0.8 * dbuf;
                 let alt = 1.3 * def_loss * (mag / 100.0);
-                let attack_loss = 0.6 * cur + 0.4 * alt;
+                let attack_loss = mul_round(0.6, cur) + mul_round(0.4, alt);
                 let t_used = within(dtroops / (5.0 * *troop_count), 0.2, 1.5) * speed * dbuf;
                 num -= t_used; // attack.rs:311
                 *troop_count -= attack_loss; // attack.rs:312

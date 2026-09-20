@@ -1341,7 +1341,7 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
     let mut sd_ship_merged = 0usize;
     let mut sd_ship_reowned = 0usize;
     let mut sd_ship_friendly = 0usize;
-    let mut sd_ship_other_target = 0usize;
+    let mut sd_ship_player_target = 0usize;
     let mut sd_ship_untimed = 0usize;
     // The last boundary at which the device's own attack list agreed with the
     // record in EVERY respect - the self-drive distance, measured not inferred.
@@ -2304,7 +2304,13 @@ n",
         // record's `TRANSPORT` row carries exactly that count for the same
         // (owner, dst) landing, and it is used ONLY for that ordering, exactly as
         // section 3b already does for landings the device does NOT model.
-        let mut dev_attack_creates: Vec<(u16, u32, f64)> = Vec::new();
+        // (owner, dst, cargo, target): the attack a landing CREATES, with the
+        // target owner `land()` resolved (`transport_ship.rs:417`). A TN landing
+        // carries target 0; a landing on a tile that changed hands mid-voyage
+        // carries the snapshotted player target and is modelled as
+        // `add_land_attack_from(owner, Some(def.id), ..)` (`transport_ship.rs:424`),
+        // NOT as a TerraNullius attack.
+        let mut dev_attack_creates: Vec<(u16, u32, f64, u16)> = Vec::new();
         // (owner, dst) -> the ship's own cargo and the target owner snapshotted
         // by `TransportShipExecution::init`. `land()` (`transport_ship.rs:397-445`)
         // branches on these, so the conquer/attack decision is made at the ship's
@@ -2380,7 +2386,7 @@ n",
                         ));
                     } else if tgt == 0 {
                         conquered = true;
-                        dev_attack_creates.push((o, t, cargo));
+                        dev_attack_creates.push((o, t, cargo, 0));
                     } else if o == tgt
                         || cur.friends.iter().any(|(x, y)| {
                             (*x == o && *y == tgt) || (*x == tgt && *y == o)
@@ -2399,13 +2405,24 @@ n",
                             fmt_f64(cargo.floor())
                         ));
                     } else {
+                        // `transport_ship.rs:422-429`'s THIRD branch:
+                        // `else if let Some(def) = game.player_by_small_id(target_owner)` ->
+                        // `add_land_attack_from(owner, Some(def.id), Some(troops), Some(dst))`.
+                        // The device creates the SAME PLAYER-TARGETED attack: the
+                        // snapshotted target owner and the ship's own cargo, with
+                        // `dst` as `source_tile`. Section 4c-bis hands `tgt` to
+                        // `attack_init` as the target column, so the frontier is
+                        // built over the TARGET player's tiles exactly as
+                        // `add_neighbors` does for `self.target_small_id`.
                         conquered = true;
-                        dev_attack_creates.push((o, t, cargo));
-                        sd_ship_other_target += 1;
+                        dev_attack_creates.push((o, t, cargo, tgt));
+                        sd_ship_player_target += 1;
                         detail.push_str(&format!(
-                            "SELFDRIVE_BOAT_OTHER_TARGET boundary {b} (engine tick {tick}): owner \
-                             {o} ship landed on {t} targeting {tgt}; created as a TN attack (the \
-                             non-TN target id is NOT modelled)\n"
+                            "SELFDRIVE_BOAT_PLAYER_TARGET boundary {b} (engine tick {tick}): \
+                             owner {o} ship landed on {t} targeting {tgt}; land()'s \
+                             non-TerraNullius branch creates a PLAYER-TARGETED land attack \
+                             owner {o} target {tgt} troops {} src {t}\n",
+                            fmt_f64(cargo)
                         ));
                     }
                 } else {
@@ -2913,15 +2930,21 @@ n",
         }
 
         // --- 4c-bis. the LAND ATTACK a device ship's landing CREATES ----------
-        // `TransportShipExecution::land` (`transport_ship.rs:386-401`) ends with
+        // `TransportShipExecution::land` (`transport_ship.rs:397-445`) ends its
+        // conquer branch with one of
         // `game.add_land_attack_from(owner_small_id, None, Some(self.troops),
-        // Some(dst))`: the attack's troops ARE the ship's remaining CARGO and its
-        // `source_tile` IS the tile the ship landed on, so `attack_init` seeds the
-        // frontier from `dst`'s own neighbours (`attack.rs:160-164`) and the exec
-        // mints a fresh stream - the same shape as section 4c's
-        // `add_land_attack_from(sid, None, ..)`, with `source_tile = None` in 4c
-        // and `source_tile = Some(dst)` here. Everything below comes from the
-        // device's own ship (owner, dst, cargo) computed in 3a-ter/3a-quater.
+        // Some(dst))` (Terra Nullius, `:419`) or
+        // `game.add_land_attack_from(owner_small_id, Some(def.id), Some(troops),
+        // Some(dst))` (the snapshotted target is a real player, `:424-429`): the
+        // attack's troops ARE the ship's remaining CARGO and its `source_tile` IS
+        // the tile the ship landed on, so `attack_init` seeds the frontier from
+        // `dst`'s own neighbours (`attack.rs:160-164`) over tiles owned by the
+        // attack's TARGET. Everything below comes from the device's own ship
+        // (owner, dst, cargo, target) computed in 3a-ter/3a-quater, and the target
+        // is handed to `attack_init` as its `target_col` - the SAME parameter a
+        // record-driven attack uses, with `Some(target)` for a player target and 0
+        // for Terra Nullius, exactly as `AttackExecution::init` resolves
+        // `target_small_id`.
         if freeze_at.is_some_and(|fa| b + 1 >= fa) && !dev_attack_creates.is_empty() {
             let mut coff = 0usize;
             let mut coborder = vec![0u32; obcap];
@@ -2942,15 +2965,15 @@ n",
             let mut d_cob_meta = DeviceBuffer::<u32>::zeroed(&stream, 2 * COLS).map_err(es)?;
             d_cob_meta.copy_from_host(&stream, &cob_meta).map_err(es)?;
 
-            for (owner0, dst0, cargo0) in &dev_attack_creates {
+            for (owner0, dst0, cargo0, tgt0) in &dev_attack_creates {
                 // `merge_outgoing_land_attacks` (`game.rs:1139-1174`): the engine
-                // merges into an existing outgoing (owner, TerraNullius) attack
-                // rather than minting a second one.
+                // merges into an existing outgoing (owner, target) attack rather
+                // than minting a second one.
                 let mut troops_now = d_troops.to_host_vec(&stream).map_err(es)?;
                 let mut prng_now = d_prng.to_host_vec(&stream).map_err(es)?;
                 let idx = match slots
                     .iter()
-                    .position(|s| s.alive && s.owner == *owner0 && s.target == 0)
+                    .position(|s| s.alive && s.owner == *owner0 && s.target == *tgt0)
                 {
                     Some(i) => {
                         troops_now[slots[i].idx] += *cargo0;
@@ -2968,7 +2991,7 @@ n",
                         troops_now[idx] = *cargo0;
                         slots.push(Slot {
                             owner: *owner0,
-                            target: 0,
+                            target: *tgt0,
                             idx,
                             alive: true,
                             created_at: b as u32,
@@ -2983,12 +3006,14 @@ n",
                 if sd_ship_created_attacks + sd_ship_merged <= 10 {
                     detail.push_str(&format!(
                         "SELFDRIVE_BOAT_ATTACK boundary {b} (engine tick {tick}): the device's \
-                         own ship land creates attack owner {owner0} target 0 troops {} src {dst0} \
-                         (engine records {:?})\n",
+                         own ship land creates attack owner {owner0} target {tgt0} troops {} src \
+                         {dst0} (engine records {:?})\n",
                         fmt_f64(*cargo0),
                         cur.attacks
                             .iter()
-                            .find(|a| a.owner == *owner0 && a.target == 0 && a.source == Some(*dst0))
+                            .find(|a| a.owner == *owner0
+                                && a.target == *tgt0
+                                && a.source == Some(*dst0))
                             .map(|a| fmt_f64(a.troops))
                     ));
                 }
@@ -3009,9 +3034,12 @@ n",
                             tick,
                             idx as u32,
                             *owner0,
-                            0,       // TERRA_NULLIUS_ID
-                            *dst0,   // source_tile = Some(dst): the landed tile
-                            1,       // fresh stream
+                            // `target_small_id`: the player target
+                            // `land()` resolved (`Some(def.id)` -> its
+                            // small id) or TerraNullius (0).
+                            *tgt0,
+                            *dst0, // source_tile = Some(dst): the landed tile
+                            1,     // fresh stream
                             &d_plane,
                             &mut d_heap_tiles,
                             &mut d_heap_pri,
@@ -3590,8 +3618,9 @@ n",
             "SELFDRIVE boat path: {sd_ships_created} ships the device decided to send, \
              {sd_ship_landed} sailed to their dst and landed, {sd_ship_created_attacks} land \
              attacks created from the ship's own cargo, {sd_ship_merged} merged into an \
-             existing (owner,TN) exec, {sd_ship_untimed} landings with no matching record \
-             TRANSPORT row\n"
+             existing (owner,target) exec, {sd_ship_untimed} landings with no matching record \
+             TRANSPORT row; land() branches: {sd_ship_player_target} player-targeted attacks, \
+             {sd_ship_friendly} friendly (troops returned), {sd_ship_reowned} re-owned (0.75 cargo)\n"
         ));
         detail.push_str(&format!(
             "SELFDRIVE bot AI: {sd_fires} firings, {sd_created} attacks originated, \
