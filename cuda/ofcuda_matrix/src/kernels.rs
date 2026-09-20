@@ -951,6 +951,14 @@ pub mod device {
         bot_at: &[u32],
         bot_trigger: &[f64],
         bot_trow: &[u32],
+        // `reserve_ratio` row of the same pre-multiplied `max_troops * ratio`
+        // table (`bot/tribe.rs:34-56` draws it 4th, between `trigger_ratio` and
+        // `expand_ratio`). Used ONLY for the player-attack amount the engine's
+        // retaliate branch would size this firing with (`land_attack_troops(..,
+        // reserve_ratio)`, `ai_attack.rs:515-520`), which the cancel-opposing
+        // model needs.
+        bot_rrow: &[u32],
+        bot_ff: &[u32],
         bot_state: &mut [u32],
         maxtroops: &[f64],
         tgt: &[f64],
@@ -981,7 +989,10 @@ pub mod device {
                 let troops = pst[ti];
                 if tiles >= 1.0 {
                     let st = bot_state[k];
-                    let first = st & 1 == 0;
+                    // `attack_behavior_init` is set at the bot's FIRST ever
+                    // scheduled firing; that firing calls `send_tn_attack` and
+                    // RETURNS.
+                    let first = tick <= bot_ff[k];
                     // `attack_behavior_init` is set on the FIRST firing whatever
                     // the outcome (`bot/tribe.rs:127-131`) and that firing calls
                     // `send_tn_attack` and RETURNS - it never reaches
@@ -1045,6 +1056,21 @@ pub mod device {
                             out[k * 3 + 2] = 6.0;
                         } else {
                             out[k * 3 + 2] = 5.0;
+                            // `has_trigger_ratio` passed, so the engine now runs the
+                            // RETALIATE branch (`ai_attack.rs:2211-2230`):
+                            // `find_incoming_attacker` then
+                            // `try_send_player_attack_forced(.., force=true)`, whose
+                            // LAND path sizes the new attack with
+                            // `land_attack_troops(attacker, reserve_ratio)` and then
+                            // `cap_player_attack_troops` (`ai_attack.rs:509-527`).
+                            // Compute that amount HERE, off the device's own
+                            // post-cluster player state, so the cancel-opposing model
+                            // has the engine's exact `start` without reading the
+                            // oracle record. `land_ratio` is `reserve_ratio` because
+                            // every player on this map is a Bot and no Bot owns
+                            // structure units (`ai_attack.rs:511-515`).
+                            let pstart = troops - tgt[bot_rrow[k] as usize * mcap + idx];
+                            out[k * 3 + 1] = if pstart >= 1.0 { pstart } else { 0.0 };
                         }
                     }
                 }

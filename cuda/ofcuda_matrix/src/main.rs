@@ -406,6 +406,35 @@ fn yn(b: bool) -> &'static str {
     if b { "yes" } else { "NO" }
 }
 
+/// `Game::shares_land_border_with(a, b)`: some tile in `a`'s BORDER set has a
+/// 4-neighbour owned by `b`. `a`'s border set is the engine's own
+/// `border_tiles_of(a)` as the record dumped it for this boundary (`BORDER`
+/// rows); the neighbour owners come from the DEVICE's plane read back after the
+/// tick. Used by the ported `cancel_opposing_land_attacks`, which the engine only
+/// runs on the LAND branch of the attacking bot's send (the boat branch sends a
+/// transport instead and registers no land attack, so no cancel).
+fn shares_land_border(
+    borders: &HashMap<u16, Vec<u32>>,
+    plane: &[u16],
+    w: u32,
+    h: u32,
+    a: u16,
+    b: u16,
+) -> bool {
+    let Some(bl) = borders.get(&a) else { return false };
+    for &tile in bl {
+        let x = (tile % w) as i32;
+        let y = (tile / w) as i32;
+        for (dx, dy) in [(0i32, -1i32), (0, 1), (-1, 0), (1, 0)] {
+            let (nx, ny) = (x + dx, y + dy);
+            if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 { continue; }
+            let ni = (ny as u32 * w + nx as u32) as usize;
+            if ni < plane.len() && plane[ni] == b { return true; }
+        }
+    }
+    false
+}
+
 /// Human-readable f64 for the diagnostic lines (Rust's shortest round-trip
 /// representation, so an exact match prints identically).
 fn fmt_f64(v: f64) -> String {
@@ -1003,7 +1032,7 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
     // made by the `bot_ai` kernel against the DEVICE's own plane and player
     // state, so the port originates the attack instead of reading it.
     let spawn_end_tick = orc.spawn_end_tick;
-    let mut bot_sched: Vec<(u16, u32, u32, f64, f64)> = Vec::new();
+    let mut bot_sched: Vec<(u16, u32, u32, f64, f64, f64)> = Vec::new();
     for (sid, ptype, pid, _) in &orc.roster {
         if *ptype != 'B' {
             continue;
@@ -1012,9 +1041,9 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         let rate = r.next_int(40, 80) as u32;
         let at = r.next_int(0, rate as i32) as u32;
         let trigger = r.next_int(50, 60) as f64 / 100.0;
-        let _reserve = r.next_int(30, 40) as f64 / 100.0;
+        let reserve = r.next_int(30, 40) as f64 / 100.0;
         let expand = r.next_int(10, 20) as f64 / 100.0;
-        bot_sched.push((*sid, rate, at, trigger, expand));
+        bot_sched.push((*sid, rate, at, trigger, reserve, expand));
     }
     let nbots = bot_sched.len();
     let nb_cap = nbots.max(1);
@@ -1025,13 +1054,40 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
     // Row of the pre-multiplied `max_troops * expand_ratio` table: `expand_ratio`
     // only ever takes `next_int(10, 20)`/100, i.e. 0.10 ..= 0.19.
     let mut b_trow = vec![0u32; nb_cap];
-    let mut b_state_host = vec![0u32; nb_cap];
-    for (k, (sid, rate, at, trigger, expand)) in bot_sched.iter().enumerate() {
+    // Row of the same table for `reserve_ratio` (`next_int(30, 40)`/100, i.e.
+    // 0.30 ..= 0.39). Used by the cancel-opposing model to size the player attack
+    // the engine's retaliate branch would send.
+    let mut b_rrow = vec![0u32; nb_cap];
+    // Tick of each bot's FIRST ever scheduled firing: the smallest tick with
+    // `tick > spawn_end_tick && tick % rate == at`. The kernel uses it to decide
+    // whether a firing is the engine's first (`send_tn_attack`) or a later one
+    // (`tribe_maybe_attack`).
+    let mut b_ff = vec![0u32; nb_cap];
+    // `TribeExecution::neighbors_terra_nullius` is `true` at construction
+    // (`bot/tribe.rs:53`) and is only ever CLEARED, inside
+    // `tribe_maybe_attack` (`ai_attack.rs:2201-2208`) when the owner has no
+    // nearby Terra Nullius at all. So bit 1 of a bot's device state starts SET:
+    // with it clear the device never takes the non-first-firing TN gate and
+    // misses every re-origination `tribe_maybe_attack` makes (measured: owner
+    // 162's second firing at engine tick 63, ai 73.20417994594482, was not
+    // originated and the attack-list agreement stopped one boundary later).
+    let mut b_state_host = vec![2u32; nb_cap];
+    for (k, (sid, rate, at, trigger, reserve, expand)) in bot_sched.iter().enumerate() {
         b_sid[k] = *sid as u32;
         b_rate[k] = *rate;
         b_at[k] = *at;
         b_trigger[k] = *trigger;
-        b_trow[k] = (expand * 100.0).round() as u32 - 10;
+        b_trow[k] = (expand * 100.0).round() as u32;
+        b_rrow[k] = (reserve * 100.0).round() as u32;
+        let mut ff = spawn_end_tick + 1;
+        if *rate > 0 {
+            let mut guard = 0u32;
+            while ff % *rate != *at && guard < 4096 {
+                ff += 1;
+                guard += 1;
+            }
+        }
+        b_ff[k] = ff;
     }
     // `Config::max_troops` for a Bot, as a table over the integer tile count: the
     // engine's own `tiles.powf(0.6)` expression, evaluated by Rust's libm on the
@@ -1050,14 +1106,18 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
     // then `land_attack_troops`'s product, `ai_attack.rs:10-11`). The kernel only
     // subtracts: CUDA contracts `troops - maxtroops * expand` into a single fma
     // and that is measurably 1 ulp away from the engine's two roundings.
-    let mut tgt_host: Vec<f64> = vec![0.0; 10 * MAXTROOPS_N];
-    for r in 0..10usize {
-        let ratio = (r as f64 + 10.0) / 100.0;
+    // Rows `0..39` are `ratio = row / 100`, so `bot_trow` (expand 0.10..=0.19)
+    // and `bot_rrow` (reserve 0.30..=0.39) both index the same table.
+    let mut tgt_host: Vec<f64> = vec![0.0; 40 * MAXTROOPS_N];
+    for r in 0..40usize {
+        let ratio = r as f64 / 100.0;
         for t in 0..MAXTROOPS_N {
             tgt_host[r * MAXTROOPS_N + t] = maxtroops_host[t] * ratio;
         }
     }
     let d_tgt = DeviceBuffer::from_host(&stream, &tgt_host).map_err(es)?;
+    let d_bot_rrow = DeviceBuffer::from_host(&stream, &b_rrow).map_err(es)?;
+    let d_bot_ff = DeviceBuffer::from_host(&stream, &b_ff).map_err(es)?;
     let mut d_bot_state = DeviceBuffer::from_host(&stream, &b_state_host).map_err(es)?;
     let d_maxtroops = DeviceBuffer::from_host(&stream, &maxtroops_host).map_err(es)?;
     let mut d_bout = DeviceBuffer::<f64>::zeroed(&stream, 3 * nb_cap).map_err(es)?;
@@ -1067,6 +1127,11 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         // size. Never a pass condition; reported so a silent frontier drift is
         // measured instead of inferred.
         let mut frontier_seen: HashMap<(u16, u16), usize> = HashMap::new();
+
+    // PORTED `cancel_opposing_land_attacks` TOTALS (see section 4d-bis).
+    let mut dev_cancel_reduces = 0usize;
+    let mut dev_cancel_kills = 0usize;
+    let mut dev_cancel_shown = 0usize;
 
     for b in 1..=(c.ticks as usize) {
         let prev = &orc.boundaries[b - 1];
@@ -1078,6 +1143,10 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         // -> `merge_outgoing_land_attacks`). In self-drive mode the device must
         // reproduce that merge with its OWN state; section 4d checks it.
         let mut reinit_pairs: Vec<(u16, u16)> = Vec::new();
+        // (attacker, start) for every bot firing this boundary that reached the
+        // engine's RETALIATE branch, with `start` computed by the `bot_ai`
+        // kernel. Consumed by the ported cancel-opposing pass.
+        let mut player_att: Vec<(u16, f64)> = Vec::new();
 
         // --- 1. the owner border arrays for THIS tick (engine order) ---
         let mut off = 0usize;
@@ -1655,6 +1724,8 @@ n",
                         &d_bot_at,
                         &d_bot_trigger,
                         &d_bot_trow,
+                        &d_bot_rrow,
+                        &d_bot_ff,
                         &mut d_bot_state,
                         &d_maxtroops,
                         &d_tgt,
@@ -1672,6 +1743,15 @@ n",
                 }
                 if bout[k * 3] > 0.0 {
                     bot_orig.push((bot_sched[k].0, bout[k * 3 + 1]));
+                } else if act == 5 && bout[k * 3 + 1] >= 1.0 {
+                    // The engine reached the RETALIATE branch of
+                    // `tribe_maybe_attack` at this firing (`has_trigger_ratio`
+                    // passed). `bout[k*3+1]` is the amount `bot_ai` computed for
+                    // the attack that branch would send -
+                    // `land_attack_troops(attacker, reserve_ratio)` - so the
+                    // cancel-opposing model below has the engine's `start`
+                    // without reading the record.
+                    player_att.push((bot_sched[k].0, bout[k * 3 + 1]));
                 }
             }
             sd_fires += bot_orig.len();
@@ -1973,6 +2053,103 @@ n",
             // `attack_init` re-arms the slot, and the engine's attack exists
             // regardless of how the OLD one's last tick ended.
             s.alive = true;
+        }
+
+        // --- 4d-bis. the PORTED `cancel_opposing_land_attacks` ----------------
+        // `AttackExecution::init` runs at the END of the tick (`game.rs:3739-3760`)
+        // and calls `cancel_opposing_land_attacks(owner, target, ..)`
+        // (`game.rs:2118-2165`). For every bot that fired this boundary and
+        // reached the RETALIATE branch, the engine sends `attacker -> T` with
+        // `start = land_attack_troops(attacker, reserve_ratio)`. The cancel then
+        // looks at `T`'s own attack on `attacker` (mutual attack) and:
+        //   * REDUCE (incoming > start): `set_troops(incoming - start)`, the new
+        //     attack is VOIDED (never enters the record);
+        //   * KILL   (incoming <= start): the opposing attack dies.
+        // EVERY number here is the device's own: `start` was computed by the
+        // `bot_ai` kernel from the device's post-cluster player state, `incoming`
+        // is the opposing slot's post-tick troops, and the pairing/land/liveness
+        // tests come from the device's own attack list, plane and roster. The
+        // oracle record is NOT read. Section 4e (the oracle-informed overwrite)
+        // stays for comparison and is switched off by
+        // `OFCUDA_MATRIX_NO_CANCEL_MODEL=1`.
+        if freeze_at.is_some_and(|fa| b + 1 >= fa) && !player_att.is_empty() {
+            let plane_now = d_plane.to_host_vec(&stream).map_err(es)?;
+            let mut ctn = d_troops.to_host_vec(&stream).map_err(es)?;
+            let mut killed: Vec<usize> = Vec::new();
+            let mut reduces_here = 0usize;
+            for (a, start) in &player_att {
+                if *start < 1.0 {
+                    continue;
+                }
+                // `find_incoming_land_attacker(a, Bot)`: the largest live attack
+                // aimed AT `a`, skipping self/terra-nullius, attackers with no
+                // tiles and friends (`game.rs:1128-1160`).
+                let mut best: Option<(usize, f64)> = None;
+                for (i, s) in slots.iter().enumerate() {
+                    if !s.alive || s.target != *a || s.owner == *a || s.owner == 0 {
+                        continue;
+                    }
+                    if pst_host[s.owner as usize * 3 + 1] <= 0.0 {
+                        continue;
+                    }
+                    let friendly = cur.friends.iter().any(|(p, q)| {
+                        (*p == *a && *q == s.owner) || (*p == s.owner && *q == *a)
+                    });
+                    if friendly {
+                        continue;
+                    }
+                    let t = ctn[s.idx];
+                    if best.map_or(true, |(_, bt)| t > bt) {
+                        best = Some((i, t));
+                    }
+                }
+                let Some((si, incoming)) = best else { continue };
+                let tt = slots[si].owner;
+                // The engine only reaches the cancel through the LAND branch of
+                // the send (`ai_attack.rs:1815-1845`); with no shared land border
+                // it sends a transport instead, which registers no land attack.
+                if !shares_land_border(&cur.borders, &plane_now, w, h, *a, tt) {
+                    continue;
+                }
+                if incoming > *start {
+                    ctn[slots[si].idx] = incoming - *start;
+                    dev_cancel_reduces += 1;
+                    reduces_here += 1;
+                    if dev_cancel_shown < 24 {
+                        dev_cancel_shown += 1;
+                        detail.push_str(&format!(
+                            "CANCEL_DEVICE boundary {b} (engine tick {tick}): new {a}->{tt} \
+                             start {:#018x} REDUCES incoming {tt}->{a} {:#018x} -> {:#018x} \
+                             (delta {:#018x})\n",
+                            start.to_bits(),
+                            incoming.to_bits(),
+                            (incoming - *start).to_bits(),
+                            start.to_bits()
+                        ));
+                    }
+                } else {
+                    killed.push(si);
+                    dev_cancel_kills += 1;
+                }
+            }
+            if reduces_here > 0 || !killed.is_empty() {
+                d_troops.copy_from_host(&stream, &ctn).map_err(es)?;
+                if !killed.is_empty() {
+                    let mut sc = d_scal.to_host_vec(&stream).map_err(es)?;
+                    for si in &killed {
+                        sc[slots[*si].idx * SCAL + 3] = 0;
+                    }
+                    d_scal.copy_from_host(&stream, &sc).map_err(es)?;
+                    for si in &killed {
+                        detail.push_str(&format!(
+                            "CANCEL_DEVICE_KILL boundary {b} (engine tick {tick}): the device's \
+                             own cancel port kills incoming {}->{} (troops {} <= start)\n",
+                            slots[*si].owner, slots[*si].target, fmt_f64(ctn[slots[*si].idx])
+                        ));
+                        slots[*si].alive = false;
+                    }
+                }
+            }
         }
 
         // --- 4c. the device's OWN attack origination (self-drive only) --------
@@ -2319,7 +2496,7 @@ n",
         // pre-correction value is still what `troops_match` and the plane are
         // compared against, so a genuine troop-arithmetic defect cannot hide here.
         let mut cancel_reduces = 0usize;
-        {
+        if std::env::var_os("OFCUDA_MATRIX_NO_CANCEL_MODEL").is_none() {
             let mut fixed: Option<Vec<f64>> = None;
             for a in &cur.attacks {
                 let Some(s) = slots
@@ -2370,6 +2547,12 @@ n",
             if let Some(fixed) = fixed {
                 d_troops.copy_from_host(&stream, &fixed).map_err(es)?;
             }
+        } else if b == 1 {
+            detail.push_str(
+                "CANCEL_MODEL_OFF: OFCUDA_MATRIX_NO_CANCEL_MODEL is set - the \
+                 oracle-informed section-4e correction is DISABLED; the only cancel \
+                 handling left is the device's own port in section 4d-bis.\n",
+            );
         }
 
         // FRONTIER LEAK CHECK - diagnostic, never a pass condition. A live

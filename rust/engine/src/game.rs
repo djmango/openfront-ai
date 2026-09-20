@@ -2162,6 +2162,11 @@ impl Game {
                     unsafe { (*ptr).target_small_id() },
                     incoming_troops
                 );
+                eprintln!(
+                    "ENG_CANCEL_BITS new_bits={:#018x} incoming_bits={:#018x}",
+                    (*troops).to_bits(),
+                    incoming_troops.to_bits()
+                );
             }
             if incoming_troops > *troops {
                 unsafe {
