@@ -70,7 +70,7 @@ use cuda_device::{kernel, launch_bounds, thread};
 use cuda_host::cuda_module;
 use ofcuda_env::{
     attack_tiles_per_tick, attacker_troop_loss, econ_row, land_attack_start_troops, state_hash,
-    tribe_ratios, tiles_used, Attack,
+    tribe_ratios, tiles_used, Attack, TribeRatios,
 };
 use ofcuda_tick::{
     add_neighbors, attacker_neighbor_count, has_attacker_neighbor, mag2_from_terrain, neighbors4,
@@ -1108,6 +1108,118 @@ mod kernels {
         out[2] = heap.peak as u32;
         out[3] = pr.calls;
     }
+
+    /// MULTI-PATH ORIGINATION. The batched env's `env_step_multi` ticks a SET of
+    /// live attacks per env, one SLOT each; this kernel builds a NEW attack
+    /// directly into slot `g = env * SLOTS + slot` from the OWNER's border set
+    /// and the DEVICE's own plane, then stamps everything the next
+    /// `env_step_multi` needs to tick it (owner, bot flag, start troops, alive,
+    /// and the slot's own refresh input). The frontier itself is the canonical
+    /// core's `orig_refresh_dev` (`AttackExecution::init` -> `refresh_to_conquer`,
+    /// `attack.rs:156-164`), the SAME code the single-env `originate_env` runs -
+    /// only the strides differ, because here one slot's worth of state lives at
+    /// a per-`(env, slot)` offset instead of per env.
+    ///
+    /// Every input is device state (`plane`, the owner border the host computed
+    /// from that same plane) plus the owner's small id, bot flag and the start
+    /// troops the bot decision produced. Nothing here reads the record.
+    #[kernel]
+    #[launch_bounds(1)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn env_orig_slot(
+        terrain: &[u8],
+        w: u32,
+        h: u32,
+        tick: u32,
+        owner_col: u16,
+        target_col: u16,
+        plane: &[u16],
+        oborder: &[u32],
+        oboff: u32,
+        obn: u32,
+        mut heap_tiles: &mut [u32],
+        mut heap_pri: &mut [f32],
+        mut border: &mut [u32],
+        mut prng: &mut [u32],
+        mut scal: &mut [u32],
+        mut troops: &mut [f64],
+        mut owner: &mut [u16],
+        mut isbot: &mut [u32],
+        mut moborder: &mut [u32],
+        g: u32,
+        owner_sid: u32,
+        ib: u32,
+        start_troops: f64,
+        out: &mut [u32],
+    ) {
+        if thread::index_1d().get() != 0 {
+            return;
+        }
+        let gi = g as usize;
+        let hb = gi * HEAP_CAP;
+        let bb = gi * BC;
+        let pb = gi * 5;
+        let sb = gi * SCAL;
+        let ob = gi * OB;
+        let mut heap = Heap::new();
+        let mut pr = Prng::new(SEED);
+        let mut blen = 0usize;
+        {
+            let bsub = &mut border[bb..bb + BC];
+            orig_refresh_dev(
+                &mut heap,
+                &mut pr,
+                bsub,
+                &mut blen,
+                plane,
+                owner_col,
+                target_col,
+                terrain,
+                w,
+                h,
+                tick,
+                oborder,
+                oboff as usize,
+                obn as usize,
+            );
+        }
+        let mut j = 0usize;
+        while j < heap.len {
+            heap_tiles[hb + j] = heap.tiles[j];
+            heap_pri[hb + j] = heap.pri[j];
+            j += 1;
+        }
+        let mut pw = [0u32; 5];
+        pr.state_words(&mut pw);
+        let mut j = 0usize;
+        while j < 5 {
+            prng[pb + j] = pw[j];
+            j += 1;
+        }
+        // The attack's OWN owner-border copy (the `refresh_to_conquer` input
+        // used if its frontier ever runs empty). The engine's `AttackExecution`
+        // holds the same set; keeping it makes a mid-flight refill tick the way
+        // the engine does instead of starving.
+        let on = if obn as usize > OB { OB } else { obn as usize };
+        let mut j = 0usize;
+        while j < on {
+            moborder[ob + j] = oborder[oboff as usize + j];
+            j += 1;
+        }
+        scal[sb] = heap.len as u32; // heap_len
+        scal[sb + 1] = blen as u32; // border_len
+        scal[sb + 2] = 0; // this tick's claim count (fresh attack)
+        scal[sb + 5] = 1; // alive
+        scal[sb + 7] = heap.peak as u32; // heap peak
+        scal[sb + 8] = on as u32; // owner-border copy length
+        troops[gi] = start_troops;
+        owner[gi] = owner_sid as u16;
+        isbot[gi] = ib;
+        out[0] = heap.len as u32;
+        out[1] = blen as u32;
+        out[2] = heap.peak as u32;
+        out[3] = pr.calls;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1880,6 +1992,10 @@ struct Args {
     /// `--multi`: the whole-game path - one env holds a SET of live attacks and
     /// runs with no oracle after setup (see `run_multi_demo`).
     multi: bool,
+    /// `--orig` with `--multi`: the batched env ORIGINATES the bots' land
+    /// attacks itself (schedule + device frontier + device bot decision),
+    /// instead of only ticking the attack SET captured at the snapshot.
+    orig: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -1897,6 +2013,7 @@ fn parse_args() -> Result<Args, String> {
         no_clusters: false,
         originate: false,
         multi: false,
+        orig: false,
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -1962,6 +2079,10 @@ fn parse_args() -> Result<Args, String> {
                 a.multi = true;
                 i += 1;
             }
+            "--orig" => {
+                a.orig = true;
+                i += 1;
+            }
             o => return Err(format!("unknown arg {o}").into()),
         }
     }
@@ -2006,6 +2127,9 @@ fn find_t0(
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let a = parse_args()?;
     if a.multi {
+        if a.orig {
+            return run_multi_orig(&a);
+        }
         return run_multi_demo(&a);
     }
     let map = ofcuda_tick::load_map(&a.map)?;
@@ -2980,6 +3104,644 @@ fn run_multi_demo(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `--multi --orig`: the batched env ORIGINATES as it ticks
+// ---------------------------------------------------------------------------
+
+/// The owner's BORDER tiles - owned tiles with a 4-neighbour that is not the
+/// owner's - in ascending tile order. This is the `border_tiles` set the
+/// engine's `refresh_to_conquer` walks (`AttackExecution::init`); here it is
+/// derived from the DEVICE's own plane, so it costs the loop no record read.
+fn border_of_plane(pl: &[u16], w: u32, h: u32, sid: u16, out: &mut [u32]) -> usize {
+    let ww = w as usize;
+    let hh = h as usize;
+    let mut n = 0usize;
+    let lim = pl.len().min(ww * hh);
+    for i in 0..lim {
+        if pl[i] != sid {
+            continue;
+        }
+        let x = i % ww;
+        let y = i / ww;
+        let mut touch = false;
+        if x > 0 && pl[i - 1] != sid {
+            touch = true;
+        }
+        if x + 1 < ww && pl[i + 1] != sid {
+            touch = true;
+        }
+        if y > 0 && pl[i - ww] != sid {
+            touch = true;
+        }
+        if y + 1 < hh && pl[i + ww] != sid {
+            touch = true;
+        }
+        if touch {
+            if n >= out.len() {
+                break;
+            }
+            out[n] = i as u32;
+            n += 1;
+        }
+    }
+    n
+}
+
+/// The engine's `MAXTROOPS_N`: the `tiles` -> `wire.max_troops` table and the
+/// pre-multiplied `max_troops * expand_ratio` rows are indexed by a TILE COUNT
+/// (`min(tiles, mcap-1)`), so this is a cap on tiles, not troops.
+const MTC: usize = 262144;
+/// `expand_ratio * 100` is `next_int(10, 20)`, so rows 10..=19 are the only
+/// ones `bot_trow` can name; 21 covers every tribe with margin.
+const TROW_N: usize = 21;
+
+/// `--multi --orig`. The batched env advances the WHOLE game: it runs the
+/// economy, takes the bots' decisions on the DEVICE (`bot_ai`, the canonical
+/// core), ORIGINATES the land attacks those decisions call for straight into
+/// the batch's slots (`env_orig_slot` -> the core's `orig_refresh_dev`), and
+/// ticks everything with one `env_step_multi` per tick.
+///
+/// The ONLY record-derived inputs are the setup snapshot: the boundary plane
+/// (`build_env_at`), the per-player econ row at `t0`, and the per-bot owner
+/// border set at `t0`. The per-bot SCHEDULE is a pure function of the player id
+/// (`ofcuda_env::tribe_ratios` over `PseudoRandom::new(simple_hash(id))`, see
+/// `ofcuda_env/src/lib.rs:162-176`) and the bot behaviour flags are the
+/// engine's constants. Inside the tick loop the record is read ONLY in verify
+/// mode, to hash-compare - nothing is fed back.
+fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    let map = ofcuda_tick::load_map(&a.map)?;
+    let (w, h) = (map.width, map.height);
+    let terrain = map.terrain.clone();
+    let dump = ofcuda_tick::parse_dump(&a.dump)?;
+    let ex = extras(&a.dump)?;
+
+    // ---- the boundary snapshot: same all-fresh scan as run_multi_demo ----
+    let mut best_t: Option<u32> = None;
+    let mut best_n = 0usize;
+    for t in a.t0..a.t0 + 400 {
+        let Some(list) = ex.attacks.get(&t) else {
+            continue;
+        };
+        let live: Vec<&extras::AttRec> = list.iter().filter(|x| x.live && x.target == 0).collect();
+        if live.is_empty() || dump.get(&(t - 1)).is_none() {
+            continue;
+        }
+        let mut fresh = 0usize;
+        for att in &live {
+            let Some(api) = ex.p.get(&(t - 1)).and_then(|m| m.get(&att.owner)) else {
+                continue;
+            };
+            let ratios = tribe_ratios(&api.id);
+            let row = econ_row(t - 1, api.troops, api.tiles, 0, api.gold, api.ptype as u32);
+            let Some(start) = land_attack_start_troops(&row, ratios.expand_ratio) else {
+                continue;
+            };
+            if start.floor() as i64 == att.troops {
+                fresh += 1;
+            }
+        }
+        if fresh == live.len() && live.len() > best_n {
+            best_n = live.len();
+            best_t = Some(t);
+            if best_n >= SLOTS.min(3) {
+                break;
+            }
+        }
+    }
+    let Some(best_t) = best_t else {
+        println!(
+            "no boundary in [{}, {}) whose live land-attack SET is entirely fresh creations",
+            a.t0,
+            a.t0 + 400
+        );
+        return Ok(());
+    };
+    let env0 = build_env_at(&dump, &ex, w, h, &terrain, best_t)?;
+    let t0 = env0.tick0;
+    let n = a.envs.first().copied().unwrap_or(1).max(1);
+
+    // ---- roster + schedule (pure function of player id) ----
+    let pinfo = ex
+        .p
+        .get(&t0)
+        .or_else(|| ex.p.get(&(t0.saturating_sub(1))))
+        .ok_or("no player table at the boundary")?;
+    let mut maxsid = 0usize;
+    for s in pinfo.keys() {
+        maxsid = maxsid.max(*s as usize);
+    }
+    let npl = maxsid + 1;
+    if npl > 4096 {
+        return Err(format!("roster of {npl} players is too large for the env's pst").into());
+    }
+    let mut bots: Vec<(u16, TribeRatios)> = Vec::new();
+    let mut h_pst = vec![0f64; npl * 3];
+    let mut h_border = vec![0u32; npl * OB];
+    let mut h_obmeta = vec![0u32; npl * 2];
+    let mut h_troops = vec![0i32; npl];
+    let mut h_gold = vec![0i64; npl];
+    let mut h_ptype = vec![0u8; npl];
+    for (sid, pi) in pinfo.iter() {
+        let s = *sid as usize;
+        h_pst[s * 3] = pi.troops as f64;
+        h_pst[s * 3 + 1] = pi.tiles as f64;
+        h_pst[s * 3 + 2] = pi.ptype as f64;
+        h_troops[s] = pi.troops;
+        h_gold[s] = pi.gold;
+        h_ptype[s] = pi.ptype;
+        if pi.ptype as u32 == ofcuda_econ::core_impl::PT_BOT {
+            bots.push((*sid, tribe_ratios(&pi.id)));
+        }
+    }
+    if let Some(ps) = dump.get(&t0) {
+        for p in ps.values() {
+            let s = p.small_id as usize;
+            if s >= npl {
+                continue;
+            }
+            let nb = p.border_order.len().min(OB);
+            h_border[s * OB..s * OB + nb].copy_from_slice(&p.border_order[..nb]);
+            h_obmeta[s * 2] = (s * OB) as u32;
+            h_obmeta[s * 2 + 1] = nb as u32;
+        }
+    }
+    let nb = bots.len().max(1);
+    println!(
+        "MULTI-ORIG env: map={}x{} t0={} seeded_SET={} envs={} slots={} bots={} (npl={})",
+        w, h, t0, env0.attacks.len(), n, SLOTS, bots.len(), npl
+    );
+    for (sid, r) in bots.iter() {
+        println!(
+            "  schedule sid={} rate={} at={} trigger={:.2} reserve={:.2} expand={:.2}",
+            sid, r.attack_rate, r.attack_tick, r.trigger_ratio, r.reserve_ratio, r.expand_ratio
+        );
+    }
+
+    let ctx = CudaContext::new(0)?;
+    let module = unsafe { kernels::load(&ctx)? };
+    let mut b = MultiBatch::new(&ctx, &module, &[env0.clone()], n)?;
+    let stream = ctx.default_stream();
+
+    // ---- device roster state ----
+    let mut d_pst = DeviceBuffer::<f64>::from_host(&stream, &h_pst)?;
+    let mut d_oborder = DeviceBuffer::<u32>::from_host(&stream, &h_border)?;
+    let mut d_obmeta = DeviceBuffer::<u32>::from_host(&stream, &h_obmeta)?;
+    let mut b_sid = vec![0u32; nb];
+    let mut b_rate = vec![0u32; nb];
+    let mut b_at = vec![0u32; nb];
+    let mut b_trigger = vec![0f64; nb];
+    let mut b_trow = vec![0u32; nb];
+    let mut b_rrow = vec![0u32; nb];
+    let mut b_ff = vec![0u32; nb];
+    // `spawn_end_tick`: the env seeds from a mid-game boundary, so the bots are
+    // long past it. 0 keeps the core's `tick > spawn_end_tick` gate open, which
+    // is what the engine sees at t0.
+    let spawn_end_tick = 0u32;
+    for (k, (sid, r)) in bots.iter().enumerate() {
+        b_sid[k] = *sid as u32;
+        b_rate[k] = r.attack_rate as u32;
+        b_at[k] = r.attack_tick as u32;
+        b_trigger[k] = r.trigger_ratio;
+        b_trow[k] = (r.expand_ratio * 100.0).round() as u32;
+        b_rrow[k] = (r.reserve_ratio * 100.0).round() as u32;
+        // `bot_ff`: the bot's first-ever scheduled firing tick (`main.rs:1766`).
+        let mut ff = spawn_end_tick + 1;
+        while b_rate[k] > 0 && ff % b_rate[k] != b_at[k] {
+            ff += 1;
+        }
+        b_ff[k] = ff;
+    }
+    let d_bsid = DeviceBuffer::<u32>::from_host(&stream, &b_sid)?;
+    let d_brate = DeviceBuffer::<u32>::from_host(&stream, &b_rate)?;
+    let d_bat = DeviceBuffer::<u32>::from_host(&stream, &b_at)?;
+    let d_btrig = DeviceBuffer::<f64>::from_host(&stream, &b_trigger)?;
+    let d_btrow = DeviceBuffer::<u32>::from_host(&stream, &b_trow)?;
+    let d_brrow = DeviceBuffer::<u32>::from_host(&stream, &b_rrow)?;
+    let d_bff = DeviceBuffer::<u32>::from_host(&stream, &b_ff)?;
+    let mut d_bstate = DeviceBuffer::<u32>::from_host(&stream, &vec![2u32; nb])?;
+    let d_bboat = DeviceBuffer::<u32>::zeroed(&stream, nb)?;
+    // The engine's pre-multiplied tables. `max_troops` is the econ core's own
+    // function (`wire.max_troops`), and the rows are `max_troops * ratio` with
+    // the product rounded exactly as the engine rounds it.
+    let mut mtr = vec![0f64; MTC];
+    for (t, m) in mtr.iter_mut().enumerate() {
+        *m = ofcuda_econ::core_impl::max_troops(
+            ofcuda_econ::core_impl::PT_BOT,
+            t as i32,
+            0,
+            ofcuda_econ::core_impl::DIFF_EASY,
+            false,
+        );
+    }
+    let mut tgt = vec![0f64; TROW_N * MTC];
+    for r in 0..TROW_N {
+        let ratio = r as f64 / 100.0;
+        for t in 0..MTC {
+            tgt[r * MTC + t] = mtr[t] * ratio;
+        }
+    }
+    let d_mtr = DeviceBuffer::<f64>::from_host(&stream, &mtr)?;
+    let d_tgt = DeviceBuffer::<f64>::from_host(&stream, &tgt)?;
+    let mut d_bout = DeviceBuffer::<f64>::zeroed(&stream, nb * 3)?;
+    let mut d_orig_out = DeviceBuffer::<u32>::zeroed(&stream, 4)?;
+
+    println!(
+        "device: batch_bytes={:.1} MB total ({:.2} MB/env); bots table {:.1} MB",
+        b.bytes as f64 / 1e6,
+        b.bytes as f64 / 1e6 / n as f64,
+        (tgt.len() as f64 * 8.0 + mtr.len() as f64 * 8.0) / 1e6
+    );
+
+    // ---- the unaided loop ----
+    let cfg = cfg_for(n);
+    let hcfg = cfg_hash(n);
+    let mut d_hashes = DeviceBuffer::<u64>::zeroed(&stream, n.max(1))?;
+    stream.synchronize()?;
+    let wall = Instant::now();
+    let mut hashes: Vec<u64> = Vec::new();
+    let mut origs = 0usize;
+    let mut orig_slot_ovf = 0usize;
+    let mut decisions = 0usize;
+    let mut live_last = 0usize;
+    let mut diverged: Option<(u32, u64, u64)> = None;
+    let mut pending_diff: Option<u32> = None;
+    let orig_border_from_record =
+        std::env::var("OFCUDA_ENV_ORIG_BORDER").map(|v| v == "record").unwrap_or(false);
+    let mut h_tiles_now = vec![0i32; npl];
+    let mut h_plane_scratch: Vec<u16> = Vec::new();
+    let mut scal0 = b.d_mscal.to_host_vec(&stream)?;
+    for k in 0..a.ticks {
+        let tick = t0 + k;
+        // The engine's OWN tick that this iteration executes. `env_step_multi`'s
+        // `tick` is the device's offer-order convention (measured: `t0 + k` is
+        // what keeps the pre-existing attack's conquests byte-exact), but the
+        // SCHEDULE domain is the engine's: `PlayerExecution::tick` runs income,
+        // then the bot decision, then the attack execs, all inside engine tick
+        // `t0 + k + 1`, reading the post-income troops of that same tick. Hence
+        // `sched_tick = t0 + k + 1` for the decision while the plane/border
+        // inputs stay at `t0 + k` - the matrix's `prev` (state) vs
+        // `prev.engine_tick` (tick) split.
+        let sched_tick = t0 + k + 1;
+
+        // (1) economy, host-side, from the DEVICE's own plane of env 0.
+        let plane_h = b.d_plane.to_host_vec(&stream)?;
+        h_plane_scratch.clear();
+        h_plane_scratch.extend_from_slice(&plane_h[..b.wh]);
+        if let Some(dt) = pending_diff {
+            if dt == tick {
+                if let Some(engp) = {
+                    let ps = dump.get(&dt);
+                    ps.map(|ps| {
+                        let players: Vec<(u32, Vec<u32>)> = ps
+                            .values()
+                            .map(|p| (p.small_id, p.owned_tiles.clone()))
+                            .collect();
+                        ofcuda_env::state_plane(&players, w, h)
+                    })
+                } {
+                    print_plane_diff(&h_plane_scratch, &engp, dt);
+                }
+                pending_diff = None;
+            }
+        }
+        for t in h_tiles_now.iter_mut() {
+            *t = 0;
+        }
+        for &v in h_plane_scratch.iter() {
+            let s = v as usize;
+            if s < npl {
+                h_tiles_now[s] += 1;
+            }
+        }
+        for s in 1..npl {
+            if h_tiles_now[s] <= 0 {
+                continue;
+            }
+            let row = econ_row(
+                tick,
+                h_troops[s],
+                h_tiles_now[s],
+                0,
+                h_gold[s],
+                h_ptype[s] as u32,
+            );
+            let st = ofcuda_econ::step_row(&row);
+            h_troops[s] = st.troops_after;
+            h_gold[s] = st.gold_after;
+            h_pst[s * 3] = st.troops_after as f64;
+            h_pst[s * 3 + 1] = h_tiles_now[s] as f64;
+        }
+        d_pst.copy_from_host(&stream, &h_pst)?;
+
+        // (2) each bot's live owner-border, from the device plane.
+        for (sid, _) in bots.iter() {
+            let s = *sid as usize;
+            let nb2 = border_of_plane(
+                &h_plane_scratch,
+                w,
+                h,
+                *sid,
+                &mut h_border[s * OB..s * OB + OB],
+            );
+            h_obmeta[s * 2 + 1] = nb2 as u32;
+        }
+        d_oborder.copy_from_host(&stream, &h_border)?;
+        d_obmeta.copy_from_host(&stream, &h_obmeta)?;
+
+        // (3) the bots' decisions, ON THE DEVICE (canonical `bot_ai_core`).
+        unsafe {
+            module.bot_ai(
+                &stream,
+                cfg_for_block(1, 1),
+                &b.d_terrain,
+                w,
+                h,
+                tick,
+                spawn_end_tick,
+                &b.d_plane,
+                &d_pst,
+                &d_oborder,
+                &d_obmeta,
+                &d_bsid,
+                &d_brate,
+                &d_bat,
+                &d_btrig,
+                &d_btrow,
+                &d_brrow,
+                &d_bff,
+                &mut d_bstate,
+                &d_bboat,
+                &d_mtr,
+                &d_tgt,
+                &mut d_bout,
+                nb as u32,
+            )?;
+        }
+        let bout = d_bout.to_host_vec(&stream)?;
+        decisions += nb;
+
+        // (4) one device launch per tick: advance the whole batch FIRST, so an
+        //     attack created below first conquers into the NEXT tick's plane.
+        unsafe {
+            module.env_step_multi(
+                &stream,
+                cfg,
+                &b.d_terrain,
+                b.w,
+                b.h,
+                tick,
+                n as u32,
+                b.slots as u32,
+                &mut b.d_plane,
+                &mut b.d_mheap_tiles,
+                &mut b.d_mheap_pri,
+                &mut b.d_mborder,
+                &mut b.d_mclaims,
+                &mut b.d_mprng,
+                &mut b.d_mtroops,
+                &mut b.d_mscal,
+                &b.d_mowner,
+                &b.d_misbot,
+                &b.d_moborder,
+                &mut b.d_cad,
+            )?;
+        }
+
+        // (5) ORIGINATION: a firing bot's land attack is built straight into a
+        //     free slot of every env by the canonical `orig_refresh_dev`. It is
+        //     built AFTER this tick's step, so it pops live exactly as the
+        //     engine's `add_land_attack_from` does (appended to `execs` after
+        //     the tick's attack execs, first conquest one tick later).
+        scal0 = b.d_mscal.to_host_vec(&stream)?;
+        // DIAGNOSTIC ONLY (env `OFCUDA_ENV_ORIG_BORDER=record`): replace the
+        // plane-derived owner-border for every BOT with the record's own
+        // `borderOrder` at this state's tick. This is the one part of
+        // origination the plane cannot carry - the engine's `border_tiles`
+        // iteration order, which `offer_dev` binds its per-neighbour
+        // `next_int(0,7)` draws to, hence the heap priorities. Proving the
+        // residual is exactly this is the point; the shipped path never reads
+        // it.
+        if orig_border_from_record {
+            for (sid, _) in bots.iter() {
+                let s = *sid as usize;
+                if let Some(ps) = dump.get(&tick) {
+                    if let Some(p) = ps.values().find(|p| p.small_id == *sid as u32) {
+                        let nb2 = p.border_order.len().min(OB);
+                        h_border[s * OB..s * OB + nb2].copy_from_slice(&p.border_order[..nb2]);
+                        h_obmeta[s * 2 + 1] = nb2 as u32;
+                    }
+                }
+            }
+            d_oborder.copy_from_host(&stream, &h_border)?;
+            d_obmeta.copy_from_host(&stream, &h_obmeta)?;
+        }
+        let mut used: Vec<usize> = Vec::new();
+        for (bi, (sid, _)) in bots.iter().enumerate() {
+            let fire = bout[bi * 3];
+            let action = bout[bi * 3 + 2];
+            if fire != 1.0 || action != 1.0 {
+                continue;
+            }
+            let start = bout[bi * 3 + 1];
+            if start < 1.0 {
+                continue;
+            }
+            let mut slot: Option<usize> = None;
+            for s in 0..b.slots {
+                if used.contains(&s) {
+                    continue;
+                }
+                if scal0[(s * SCAL) + 5] == 0 {
+                    slot = Some(s);
+                    break;
+                }
+            }
+            let Some(slot) = slot else {
+                orig_slot_ovf += 1;
+                continue;
+            };
+            used.push(slot);
+            let s = *sid as usize;
+            let obn = h_obmeta[s * 2 + 1];
+            for e in 0..n {
+                let g = (e * b.slots + slot) as u32;
+                unsafe {
+                    module.env_orig_slot(
+                        &stream,
+                        cfg_for_block(1, 1),
+                        &b.d_terrain,
+                        w,
+                        h,
+                        tick,
+                        *sid,
+                        0u16,
+                        &b.d_plane,
+                        &d_oborder,
+                        (s * OB) as u32,
+                        obn,
+                        &mut b.d_mheap_tiles,
+                        &mut b.d_mheap_pri,
+                        &mut b.d_mborder,
+                        &mut b.d_mprng,
+                        &mut b.d_mscal,
+                        &mut b.d_mtroops,
+                        &mut b.d_mowner,
+                        &mut b.d_misbot,
+                        &mut b.d_moborder,
+                        g,
+                        *sid as u32,
+                        1u32,
+                        start,
+                        &mut d_orig_out,
+                    )?;
+                }
+                if e == 0 && origs < 6 {
+                    let oo = d_orig_out.to_host_vec(&stream)?;
+                    println!(
+                        "  ORIG tick={} sid={} slot={} start={:.1} heap={} border={} peak={} own_border={}",
+                        tick, sid, slot, start, oo[0], oo[1], oo[2], obn
+                    );
+                }
+            }
+            origs += 1;
+        }
+
+        // (6) the ONLY record touch after setup: hash-compare, in verify mode.
+        if a.verify_max > 0 {
+            unsafe {
+                module.env_hash(
+                    &stream,
+                    hcfg,
+                    &b.d_plane,
+                    b.wh as u32,
+                    n as u32,
+                    0,
+                    &mut d_hashes,
+                )?;
+            }
+            let hh = d_hashes.to_host_vec(&stream)?[0];
+            hashes.push(hh);
+            if diverged.is_none() {
+                if let Some(eh) = engine_hash_at(&dump, w, h, tick + 1) {
+                    if eh != hh {
+                        diverged = Some((tick + 1, hh, eh));
+                        pending_diff = Some(tick + 1);
+                    }
+                }
+            }
+        }
+    }
+    stream.synchronize()?;
+    let ms = wall.elapsed().as_secs_f64() * 1000.0;
+    let scal_end = b.d_mscal.to_host_vec(&stream)?;
+    for e in 0..n {
+        for s in 0..b.slots {
+            if scal_end[(e * b.slots + s) * SCAL + 5] != 0 {
+                live_last += 1;
+            }
+        }
+    }
+
+    // ---- report ----
+    let per_tick = ms / a.ticks.max(1) as f64;
+    println!(
+        "MULTI-ORIG run: ticks={} wall={:.1} ms ({:.3} ms/tick) {:.0} env-ticks/s {:.0} decisions/s live_slots_after={}",
+        a.ticks,
+        ms,
+        per_tick,
+        if per_tick > 0.0 { n as f64 / per_tick * 1000.0 } else { 0.0 },
+        if per_tick > 0.0 { decisions as f64 / (ms / 1000.0) } else { 0.0 },
+        live_last
+    );
+    println!(
+        "MULTI-ORIG origination: attacks_originated_unaided={} (one per firing bot per env) slot_overflow={} decisions={}",
+        origs, orig_slot_ovf, decisions
+    );
+    let mut matched = 0usize;
+    let mut matched_total = 0usize;
+    for (k, hh) in hashes.iter().enumerate() {
+        match engine_hash_at(&dump, w, h, t0 + 1 + k as u32) {
+            Some(eh) if eh == *hh => {
+                matched_total += 1;
+                if matched == k {
+                    matched += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    println!(
+        "MULTI-ORIG engine agreement: {}/{} ticks matched (prefix, unaided); {} total exact ticks",
+        matched,
+        a.ticks,
+        matched_total
+    );
+    if matched < hashes.len() {
+        let k = matched;
+        println!(
+            "MULTI-ORIG first divergence: tick {} dev_hash={:016x} engine_hash={:016x}",
+            t0 + 1 + k as u32,
+            hashes.get(k).copied().unwrap_or(0),
+            engine_hash_at(&dump, w, h, t0 + 1 + k as u32).unwrap_or(0)
+        );
+    } else {
+        println!("MULTI-ORIG first divergence: NONE in {} ticks", a.ticks);
+    }
+    // ENGINE CREATIONS the env was supposed to originate. `AttRec` carries no
+    // attack id, so a creation is counted the only way the record allows: a tick
+    // in which an owner's LIVE land-attack count rises.
+    let live_by_owner = |v: &Vec<extras::AttRec>| -> std::collections::HashMap<u16, i32> {
+        let mut m = std::collections::HashMap::new();
+        for x in v.iter().filter(|x| x.live && x.target == 0) {
+            *m.entry(x.owner).or_insert(0) += 1;
+        }
+        m
+    };
+    let mut eng_creations = 0usize;
+    let mut prev_counts = ex.attacks.get(&t0).map(live_by_owner).unwrap_or_default();
+    for t in (t0 + 1)..=(t0 + a.ticks) {
+        let cur = ex.attacks.get(&t).map(live_by_owner).unwrap_or_default();
+        for (owner, n) in cur.iter() {
+            let p = prev_counts.get(owner).copied().unwrap_or(0);
+            if *n > p {
+                eng_creations += (*n - p) as usize;
+            }
+        }
+        prev_counts = cur;
+    }
+    println!(
+        "MULTI-ORIG engine creations in window: {} (env originated {})",
+        eng_creations, origs
+    );
+    Ok(())
+}
+
+/// Print the tile-level difference between the env's plane and the engine's at
+/// one tick, with the `(dev, eng)` pairs that account for it.
+fn print_plane_diff(dev: &[u16], eng: &[u16], tick: u32) {
+    let mut diff = 0usize;
+    let mut seen: std::collections::HashMap<(u16, u16), usize> = std::collections::HashMap::new();
+    let mut samples = Vec::new();
+    for (i, (a1, b1)) in dev.iter().zip(eng.iter()).enumerate() {
+        if a1 != b1 {
+            diff += 1;
+            *seen.entry((*a1, *b1)).or_insert(0) += 1;
+            if samples.len() < 6 {
+                samples.push((i, *a1, *b1));
+            }
+        }
+    }
+    println!("MULTI-ORIG tile diff at tick {}: {} tiles differ", tick, diff);
+    let mut pairs: Vec<((u16, u16), usize)> = seen.into_iter().collect();
+    pairs.sort_by(|x, y| y.1.cmp(&x.1));
+    for p in pairs.iter().take(6) {
+        println!("   dev={} eng={} count={}", p.0 .0, p.0 .1, p.1);
+    }
+    for s in samples {
+        println!("   sample tile {}: dev={} eng={}", s.0, s.1, s.2);
+    }
 }
 
 fn main() {
