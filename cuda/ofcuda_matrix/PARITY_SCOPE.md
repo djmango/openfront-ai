@@ -137,3 +137,10 @@ shuffled-random-target pick (all 13 device picks reproduce the engine's shuffled
 neighbour one-for-one), terra-nullius expansion, merges, cancels, boat sends and
 landings, and exact ship routes. Everything above is device state only - no oracle
 value is written into the device anywhere in the new code.
+
+| **413 (current)** | **393** | **a single 4-tile flip between two players at engine tick 416** (plane hash 0x7bc2de3015ba3247 vs engine 0xb32d2cb08a891e7b; reported as player 90 884/880 or player 486 972/976 depending on scan order - same event, opposite signs), plus 1 engine-created attack the device did not create and 1 eviction it did not apply at the same break. Pre-dates the income fix (a pinned pre-fix control has identical claims/hash/counts at 413). |
+| **401 (fixed)** | **381** | **the income second pass was seeded from the record tick-start tile count.** In the engine, `PlayerExecution::tick` applies income BEFORE that player own cluster pass, and player execs run in ascending order, so a captor has already received tiles from a lower-ordered victim when its income runs (tick 404: victim 260 captor 425, tiles 893 -> 988). Fixed by applying income at the player own exec turn after the device cluster pass. |
+
+## Reading the divergence line
+
+The reported player in `first divergence: boundary N ... player P engine A tiles vs device B` is NOT run-stable: the same divergence is reported from whichever side of a tile flip the mismatch scan reaches first, and the two sides differ in sign (e.g. 90: 884/880 vs 486: 972/976 at boundary 413). Compare the plane hash and the counts across runs; do not treat the reported player as an identifier. Making it deterministic is an open cosmetic fix.
