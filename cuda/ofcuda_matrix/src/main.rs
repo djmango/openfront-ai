@@ -772,6 +772,162 @@ fn dev_target_transport_tile(terrain: &[u8], plane: &[u16], w: u32, h: u32, from
     Some(cands[0])
 }
 
+/// `spatial.rs:146-151` `shore_border_tiles`: the owner's border tiles in the
+/// engine's `for_each_border_tile` order, filtered to `is_shore`. The device's
+/// `oborder` slice for an owner IS that order (the record's `BORDER` rows are
+/// the engine's own `border_tiles` vector), so the filter is the whole port.
+fn dev_shore_border_tiles(terrain: &[u8], border: &[u32]) -> Vec<u32> {
+    border
+        .iter()
+        .copied()
+        .filter(|&t| t_shore(terrain, t))
+        .collect()
+}
+
+/// `spatial.rs:110-143` `closest_two_tiles`: the x-sweep, NOT a brute-force
+/// nearest pair - which tile the sweep lands on is a property of the sweep, so
+/// it is ported verbatim (`map.x(t) == t % w`, `manhattan_dist` = |dx| + |dy|).
+fn dev_closest_two_tiles(w: u32, xs: &[u32], ys: &[u32]) -> Option<(u32, u32)> {
+    if xs.is_empty() || ys.is_empty() {
+        return None;
+    }
+    let mut x_sorted: Vec<u32> = xs.to_vec();
+    let mut y_sorted: Vec<u32> = ys.to_vec();
+    x_sorted.sort_by_key(|t| *t % w);
+    y_sorted.sort_by_key(|t| *t % w);
+    let manh = |a: u32, b: u32| -> u32 {
+        (a % w).abs_diff(b % w) + (a / w).abs_diff(b / w)
+    };
+    let mut i = 0usize;
+    let mut j = 0usize;
+    let mut min_distance = u32::MAX;
+    let mut result = (x_sorted[0], y_sorted[0]);
+    while i < x_sorted.len() && j < y_sorted.len() {
+        let current_x = x_sorted[i];
+        let current_y = y_sorted[j];
+        let distance = manh(current_x, current_y);
+        if distance < min_distance {
+            min_distance = distance;
+            result = (current_x, current_y);
+        }
+        if i == x_sorted.len() - 1 {
+            j += 1;
+        } else if j == y_sorted.len() - 1 {
+            i += 1;
+        } else if current_x % w < current_y % w {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    Some(result)
+}
+
+/// `Config::boat_max_number()` (`core/config.rs:96-102`): 3 while the transport
+/// unit is enabled (it is on every cell in scope - `OFCUDA_MATRIX_BOATDBG` and
+/// the engine's own `BOATCAP` trace both show an enabled transport). The device
+/// models this config constant as it models `max_troops`.
+const DEV_BOAT_MAX_NUMBER: usize = 3;
+
+/// Port of `ai_attack.rs:620-634` `boat_attack_destination_to_player`: the
+/// `sendBoatAttack` branch's destination, i.e. the tile the engine hands to
+/// `add_transport_attack(attacker, dst_shore, troops)` when the chosen player
+/// target shares NO land border. Returns
+/// `(ref_tile, landing_tile, src_shore, land_path, target_owner)`:
+///   * `ref_tile` = the `closest_two_tiles` sweep's target-side shore, which is
+///     what `TransportShipExecution::new` stores as `ref_tile`;
+///   * `landing_tile` = `target_transport_tile(ref_tile)` (the tile `init`
+///     resolves the landing to);
+///   * `src_shore` = `closest_shore_by_water(attacker, landing_tile)`;
+///   * `land_path` = the water route `init` records for the ship;
+///   * `target_owner` = `owner_id(ref_tile)`, the owner `init` snapshots into
+///     `target_small_id` and `land()` uses to decide what the landing creates.
+/// EVERY input is device state: the terrain bytes, the owner plane the device
+/// has built for this boundary, the engine-order border array, the per-player
+/// troop state and the ported half-resolution water HPA. Nothing is read from
+/// the oracle record.
+///
+/// `can_build_transport_ship`'s `unit_count(owner, TRANSPORT) >=
+/// boat_max_number()` cap: PROVEN non-binding, not modelled as a silent drop -
+/// see `dev_inflight_transports` below.
+#[allow(clippy::too_many_arguments)]
+fn dev_boat_attack_destination_to_player(
+    full: &water_hpa_port::WMap<'_>,
+    mini: &water_hpa_port::WMap<'_>,
+    hpa: &mut water_hpa_port::WaterHierarchical,
+    plane: &[u16],
+    oborder: &[u32],
+    ob_meta: &[u32],
+    attacker: u16,
+    target: u16,
+    friends: &[(u16, u16)],
+    inflight: usize,
+) -> Option<(u32, u32, u32, Vec<u32>, u16)> {
+    let terrain = full.t;
+    let (w, h) = (full.w, full.h);
+    let om_a = attacker as usize * 2;
+    let a_off = ob_meta[om_a] as usize;
+    let a_n = ob_meta[om_a + 1] as usize;
+    let a_border = &oborder[a_off..a_off + a_n];
+    let om_t = target as usize * 2;
+    let t_off = ob_meta[om_t] as usize;
+    let t_n = ob_meta[om_t + 1] as usize;
+    let t_border = &oborder[t_off..t_off + t_n];
+    let a_shores = dev_shore_border_tiles(terrain, a_border);
+    let t_shores = dev_shore_border_tiles(terrain, t_border);
+    let (_src_shore, dst_shore) = dev_closest_two_tiles(w, &a_shores, &t_shores)?;
+
+    // `can_build_transport_ship(attacker, dst_shore)` (`spatial.rs:187-211`),
+    // in the engine's own order. Its FIRST check is the transport-unit cap; it
+    // is evaluated here against the device's own in-flight ship count (the
+    // device's ship list IS the engine's live TRANSPORT unit set - a unit is
+    // built by `TransportShipExecution::init` and removed by `land`/death, and
+    // the device spawns/lands at exactly those points), so the cap is a
+    // faithful model rather than a copied engine value.
+    if inflight >= DEV_BOAT_MAX_NUMBER {
+        return None;
+    }
+    let target_owner = plane[dst_shore as usize];
+    let dst = dev_target_transport_tile(terrain, plane, w, h, dst_shore, target_owner)?;
+    if target_owner == attacker {
+        return None;
+    }
+    // `can_attack_player(attacker, target_owner)` (`game.rs:3426-3450`): every
+    // `tribe_maybe_attack` attacker on this map is a Bot, and
+    // `can_attack_player_ex` returns true for a non-Human attacker - so the
+    // ONLY way the engine can refuse here is `is_friendly`. `friends` is the
+    // boundary's own `FRIEND` table.
+    if target_owner != 0
+        && friends.iter().any(|(p, q)| {
+            (*p == attacker && *q == target_owner) || (*p == target_owner && *q == attacker)
+        })
+    {
+        return None;
+    }
+    let src = water_hpa_port::closest_shore_by_water(full, mini, hpa, a_border, dst)?;
+    let path = water_hpa_port::plan_water_path(full, mini, hpa, src, dst)?;
+    Some((dst_shore, dst, src, path, target_owner))
+}
+
+/// The device's own count of in-flight transport ships owned by `owner` - the
+/// faithful stand-in for the engine's `game.unit_count(owner, TRANSPORT)`,
+/// which is what `can_build_transport_ship`'s cap compares against
+/// `boat_max_number()`. A `TransportShip` unit is built by
+/// `TransportShipExecution::init` and removed by `land`/`retreat` (or death), so
+/// the live UNIT set is exactly the set of ships the device has spawned and not
+/// yet landed - the same lifetime the device's `ships` vector tracks.
+///
+/// EVIDENCE that the cap never binds in these cells (`OF_ENG_BOATCAP`, engine
+/// oracle, N=488 pangaea t=500): 142 calls to `can_build_transport_ship` across
+/// the whole run - the 42 `sendBoatAttack` destinations among them - ALL report
+/// `unit_count=0` and ZERO bind. `OF_ENG_BOATPLAYER` reports the same for every
+/// one of the 42 player-boat calls. The cap is therefore modelled here (cheap,
+/// device state, never a copied engine value) rather than silently dropped; it
+/// is a provable no-op on every cell in scope.
+fn dev_inflight_transports(ships: &[DevShip], owner: u16) -> usize {
+    ships.iter().filter(|s| s.owner == owner).count()
+}
+
 /// The boat decision for ONE bot firing, over device state.
 ///
 /// Returns `(ref_tile, dst_landing_tile, src_shore_tile, land_path)` - the
@@ -1476,6 +1632,13 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
     let mut sd_player_retal = 0usize;
     let mut sd_player_random = 0usize;
     let mut sd_player_boat_miss = 0usize;
+    // PLAYER-AIMED BOAT SENDS (the `sendBoatAttack` branch): the device's own
+    // `boat_attack_destination_to_player` port resolved a destination and the
+    // ship was registered. `sd_player_boat_miss` now counts only the sends whose
+    // destination came back `None` (the engine's `try_send_player_attack` then
+    // returns false and the ladder CONTINUES - it does not return).
+    let mut sd_player_boat_sent = 0usize;
+    let mut sd_player_boat_shown = 0usize;
     let mut sd_player_shown = 0usize;
     let mut sd_player_voided = 0usize;
     // TRANSPORT-SHIP (BOAT) ORIGINATION, device state only. `ships` is the
@@ -1622,6 +1785,9 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
     // PORTED `cancel_opposing_land_attacks` TOTALS (see section 4d-bis).
     let mut dev_cancel_reduces = 0usize;
     let mut dev_cancel_kills = 0usize;
+    // Section 4d-bis pairs handed to 4c (which owns the full cancel for a
+    // `dev_player_orig` retaliate). Diagnostic only.
+    let mut dev_cancel_handoff = 0usize;
     let mut dev_cancel_shown = 0usize;
 
     for b in 1..=(c.ticks as usize) {
@@ -2428,13 +2594,69 @@ n",
                         sd_player_retal += 1;
                         sent = true;
                     } else {
-                        // The engine takes the sendBoatAttack branch here, which
-                        // registers a TransportShip rather than a land attack -
-                        // not modelled on this path yet. It still RETURNS from
-                        // `tribe_maybe_attack`, so the shuffle below must not
-                        // run (that would mis-align the bot's PRNG stream).
-                        sd_player_boat_miss += 1;
-                        sent = true;
+                        // The engine takes the `sendBoatAttack` branch here
+                        // (`ai_attack.rs:565-608`): `boat_attack_destination_to_player`
+                        // and then `add_transport_attack`, i.e. a TransportShip
+                        // whose LANDING creates the land attack - no land attack
+                        // is registered now. The destination is the device's own
+                        // port of that chain, over the device border array, the
+                        // device plane and the ported water HPA; nothing is read
+                        // from the record. Troops are `p.troops / 5.0` (NOT
+                        // `amount`, which is `land_attack_troops`).
+                        let boat_troops = pst_now[sid as usize * 3] / 5.0;
+                        let inflight = dev_inflight_transports(&ships, sid);
+                        if let Some((rt, dst, src, path, tgt_owner)) =
+                            dev_boat_attack_destination_to_player(
+                                &full_map,
+                                &mini_map,
+                                &mut water_hpa,
+                                &plane_now,
+                                &oborder,
+                                &ob_meta,
+                                sid,
+                                tt,
+                                &cur.friends,
+                                inflight,
+                            )
+                        {
+                            // `cap_player_attack_troops` is the identity for a
+                            // Bot attacker (`troop_send_cap` = INFINITY,
+                            // `is_attack_too_weak` = false), so the only gate
+                            // left is `troops >= 1.0`.
+                            if boat_troops >= 1.0 {
+                                ships.push(DevShip {
+                                    owner: sid,
+                                    dst,
+                                    src,
+                                    cargo: boat_troops,
+                                    target: tgt_owner,
+                                    rt,
+                                    path,
+                                    created_tick: tick,
+                                });
+                                sd_player_boat_sent += 1;
+                                sd_ships_created += 1;
+                                sent = true;
+                                if sd_player_boat_shown < 8 {
+                                    sd_player_boat_shown += 1;
+                                    detail.push_str(&format!(
+                                        "SELFDRIVE_PLAYER_BOAT boundary {b} (engine tick {tick}): \
+                                         bot {sid} RETALIATE target {tt} -> sendBoatAttack ref {rt} \
+                                         dst {dst} src {src} troops {} pathlen {}\n",
+                                        fmt_f64(boat_troops),
+                                        ships.last().map(|s| s.path.len()).unwrap_or(0)
+                                    ));
+                                }
+                            } else {
+                                sd_player_boat_miss += 1;
+                            }
+                        } else {
+                            // No destination: `try_send_player_attack` returns
+                            // false, the engine does NOT return from
+                            // `tribe_maybe_attack`, and the ladder falls through
+                            // to the traitor roll and the shuffle.
+                            sd_player_boat_miss += 1;
+                        }
                     }
                 }
                 if sent {
@@ -2491,8 +2713,56 @@ n",
                         }
                         break;
                     } else {
+                        // The shuffled-random-target branch of the SAME
+                        // `sendBoatAttack` ladder. A `Some` destination means the
+                        // engine sent and RETURNED; `None` (or troops < 1) means
+                        // `try_send_player_attack` returned false and the loop
+                        // moves to the NEXT shuffled candidate - it does not stop.
+                        let boat_troops = pst_now[sid as usize * 3] / 5.0;
+                        let inflight = dev_inflight_transports(&ships, sid);
+                        if let Some((rt, dst, src, path, tgt_owner)) =
+                            dev_boat_attack_destination_to_player(
+                                &full_map,
+                                &mini_map,
+                                &mut water_hpa,
+                                &plane_now,
+                                &oborder,
+                                &ob_meta,
+                                sid,
+                                tgt,
+                                &cur.friends,
+                                inflight,
+                            )
+                        {
+                            if boat_troops >= 1.0 {
+                                ships.push(DevShip {
+                                    owner: sid,
+                                    dst,
+                                    src,
+                                    cargo: boat_troops,
+                                    target: tgt_owner,
+                                    rt,
+                                    path,
+                                    created_tick: tick,
+                                });
+                                sd_player_boat_sent += 1;
+                                sd_ships_created += 1;
+                                if sd_player_boat_shown < 8 {
+                                    sd_player_boat_shown += 1;
+                                    detail.push_str(&format!(
+                                        "SELFDRIVE_PLAYER_BOAT boundary {b} (engine tick {tick}): \
+                                         bot {sid} RANDOM target {tgt} (neighbours {list:?} \
+                                         shuffled {arr:?}) -> sendBoatAttack ref {rt} dst {dst} \
+                                         src {src} troops {} pathlen {}\n",
+                                        fmt_f64(boat_troops),
+                                        ships.last().map(|s| s.path.len()).unwrap_or(0)
+                                    ));
+                                }
+                                break;
+                            }
+                        }
                         sd_player_boat_miss += 1;
-                        break;
+                        continue;
                     }
                 }
             }
@@ -2652,8 +2922,20 @@ n",
                     .find(|(o, t, _, _)| *o == lowner && *t == lsrc)
                     .cloned();
                 let mut conquered = false;
+                // `game.conquer(owner, dst)` (`transport_ship.rs:423`) also runs
+                // `conquer_one` (`game.rs:1233-1267`), which moves ONE tile into
+                // the owner's pool and OUT of the previous owner's:
+                // `p.tiles_owned += 1` for the lander and `prev.tiles_owned -= 1`
+                // for whoever owned `dst` (only when `prev > 0`). Both counts are
+                // read LIVE by every later attack in the same tick through
+                // `defender_tiles` (`game.rs:847`) and `large_defender_attack_debuff`,
+                // so the plane update alone is not enough - the device's player
+                // state has to move with it or the attacks that tick after the
+                // landing compute `alt_attacker_loss` against a stale tile count.
+                let mut prev_owner: u16 = 0;
                 if let Some((o, t, cargo, tgt)) = dmeta {
                     let ph = d_plane.to_host_vec(&stream).map_err(es)?;
+                    prev_owner = ph[t as usize];
                     if ph[t as usize] == o {
                         // `game.add_troops(owner, troops * 0.75)`: the cargo goes
                         // back to the pool and NO attack is created.
@@ -2725,6 +3007,14 @@ n",
                             )
                             .map_err(es)?;
                     }
+                    // The tile move itself, live for every attack that ticks
+                    // after this landing (`conquer_one`'s tile bookkeeping).
+                    let mut pn = d_pst.to_host_vec(&stream).map_err(es)?;
+                    pn[lowner as usize * 3 + 1] += 1.0;
+                    if prev_owner > 0 && prev_owner != lowner {
+                        pn[prev_owner as usize * 3 + 1] -= 1.0;
+                    }
+                    d_pst.copy_from_host(&stream, &pn).map_err(es)?;
                     let lo = d_out.to_host_vec(&stream).map_err(es)?;
                     if lo[0] > 0 {
                         let cl = d_claims.to_host_vec(&stream).map_err(es)?;
@@ -2970,6 +3260,20 @@ n",
                 // the send (`ai_attack.rs:1815-1845`); with no shared land border
                 // it sends a transport instead, which registers no land attack.
                 if !shares_land_border(&cur.borders, &plane_now, w, h, *a, tt) {
+                    continue;
+                }
+                // Section 4c applies this SAME cancel for every `dev_player_orig`
+                // RETALIATE entry - from the same pair, with the incoming attack
+                // still alive - and it applies BOTH halves of `game.rs:2185-2196`:
+                // the kill AND `*troops -= incoming_troops` on the new attack.
+                // Mutating the incoming here first would (a) lose that subtraction
+                // (4c can no longer find the slot) and (b) double-apply the REDUCE
+                // branch. Hand the pair over to 4c.
+                if dev_player_orig
+                    .iter()
+                    .any(|(s, t, _, br)| *s == *a && *t == tt && *br == "retaliate")
+                {
+                    dev_cancel_handoff += 1;
                     continue;
                 }
                 if incoming > *start {
@@ -4064,10 +4368,16 @@ n",
              6=trigger ratio not met)\n"
         ));
         detail.push_str(&format!(
+            "SELFDRIVE cancel port: {dev_cancel_reduces} reduces, {dev_cancel_kills} kills, \
+             {dev_cancel_handoff} section-4d-bis pairs handed to section 4c (they own the same \
+             cancel; 4c applies the engine's full rule)\n"
+        ));
+        detail.push_str(&format!(
             "SELFDRIVE player path: {sd_player_random} random-target sends + {sd_player_retal} \
              retaliate sends the device decided to send, {sd_player_voided} voided by the device's \
-             own cancel_opposing port, {sd_player_boat_miss} sends the engine routed to \
-             sendBoatAttack (NOT modelled here)\n"
+             own cancel_opposing port, {sd_player_boat_sent} sends the engine routed to \
+             sendBoatAttack and the device launched as a player-aimed boat, {sd_player_boat_miss} \
+             sendBoatAttack attempts whose destination/troops the device found unsatisfiable\n"
         ));
         detail.push_str(&format!(
             "SELFDRIVE attack-list agreement: {sd_exact_bounds} boundaries fully identical to \

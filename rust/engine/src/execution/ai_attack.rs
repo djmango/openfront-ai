@@ -622,14 +622,59 @@ fn boat_attack_destination_to_player(
     attacker_small_id: u16,
     target_small_id: u16,
 ) -> Option<TileRef> {
+    let diag = std::env::var_os("OF_ENG_BOATPLAYER").is_some();
     if game.wire.is_unit_disabled(crate::core::schemas::unit_type::TRANSPORT) {
+        if diag {
+            eprintln!(
+                "BOATPLAYER tick={} a={} t={} result=disabled",
+                game.ticks(),
+                attacker_small_id,
+                target_small_id
+            );
+        }
         return None;
     }
 
+    let unit_count =
+        game.unit_count(attacker_small_id, crate::core::schemas::unit_type::TRANSPORT);
     let attacker_shores = shore_border_tiles(game, attacker_small_id);
     let target_shores = shore_border_tiles(game, target_small_id);
-    let (_src_shore, dst_shore) = closest_two_tiles(game, &attacker_shores, &target_shores)?;
-    can_build_transport_ship(game, attacker_small_id, dst_shore)?;
+    if diag {
+        eprintln!(
+            "BOATPLAYER tick={} a={} t={} unit_count={} bmax={} ashores={} tshores={}",
+            game.ticks(),
+            attacker_small_id,
+            target_small_id,
+            unit_count,
+            game.wire.boat_max_number(),
+            attacker_shores.len(),
+            target_shores.len()
+        );
+    }
+    let Some((_src_shore, dst_shore)) = closest_two_tiles(game, &attacker_shores, &target_shores)
+    else {
+        if diag {
+            eprintln!(
+                "BOATPLAYER tick={} a={} t={} result=no_pair",
+                game.ticks(),
+                attacker_small_id,
+                target_small_id
+            );
+        }
+        return None;
+    };
+    let built = can_build_transport_ship(game, attacker_small_id, dst_shore);
+    if diag {
+        eprintln!(
+            "BOATPLAYER tick={} a={} t={} dst_shore={} can_build={:?}",
+            game.ticks(),
+            attacker_small_id,
+            target_small_id,
+            dst_shore,
+            built
+        );
+    }
+    built?;
     Some(dst_shore)
 }
 

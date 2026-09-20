@@ -874,6 +874,29 @@ impl Game {
             let alt_attacker_loss = 1.3 * defender_troop_loss * (mag / 100.0) * traitor_mod;
             let attacker_troop_loss = 0.6 * current_attacker_loss + 0.4 * alt_attacker_loss;
 
+            // MEASUREMENT ONLY (env-gated, no semantic effect): the exact inputs
+            // of the player-target attacker loss, so a port can be checked term
+            // by term instead of by back-solving the total.
+            if std::env::var_os("OF_ENG_ALOSS").is_some() {
+                eprintln!(
+                    "ENG_ALOSS tick={} a={} t={} tile={} mag={:.17} speed={:.17} dtroops={} dtiles={} atiles={} dbuf={:#018x} cur={:#018x} alt={:#018x} loss={:#018x} T={:#018x}",
+                    self.ticks(),
+                    attacker_small_id,
+                    defender_small_id,
+                    tile,
+                    mag,
+                    speed,
+                    defender_troops,
+                    defender_tiles,
+                    attacker_tiles,
+                    large_defender_attack_debuff.to_bits(),
+                    current_attacker_loss.to_bits(),
+                    alt_attacker_loss.to_bits(),
+                    attacker_troop_loss.to_bits(),
+                    attack_troops.to_bits(),
+                );
+            }
+
             let traitor_speed = if self.is_traitor(defender_small_id) {
                 self.wire.traitor_speed_debuff()
             } else {

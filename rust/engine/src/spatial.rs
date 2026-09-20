@@ -192,10 +192,29 @@ pub fn can_build_transport_ship(
     if game.wire.is_unit_disabled(crate::core::schemas::unit_type::TRANSPORT) {
         return None;
     }
-    if game.unit_count(owner_small_id, crate::core::schemas::unit_type::TRANSPORT)
-        >= game.wire.boat_max_number()
-    {
+    let uc = game.unit_count(owner_small_id, crate::core::schemas::unit_type::TRANSPORT);
+    if uc >= game.wire.boat_max_number() {
+        if std::env::var_os("OF_ENG_BOATCAP").is_some() {
+            eprintln!(
+                "BOATCAP_BIND tick={} owner={} unit_count={} bmax={} tile={}",
+                game.ticks(),
+                owner_small_id,
+                uc,
+                game.wire.boat_max_number(),
+                tile
+            );
+        }
         return None;
+    }
+    if std::env::var_os("OF_ENG_BOATCAP").is_some() {
+        eprintln!(
+            "BOATCAP_OK tick={} owner={} unit_count={} bmax={} tile={}",
+            game.ticks(),
+            owner_small_id,
+            uc,
+            game.wire.boat_max_number(),
+            tile
+        );
     }
     let dst = target_transport_tile(game, tile)?;
     let target_owner = game.map.owner_id(tile);
