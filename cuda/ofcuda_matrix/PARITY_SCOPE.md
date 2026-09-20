@@ -87,7 +87,16 @@ boundaries, breaking on a self-originated terra-nullius attack's troop amount.
 6. `cancel_opposing_land_attacks`, both branches: now PORTED device-side
    (main.rs section 4d-bis), REDUCE and KILL, with the engine's own start bits
    reproduced. The oracle-informed 4e correction is still present and should be
-   deleted once the device port is proven load-bearing in self-drive;
+   deleted once the device port is proven load-bearing in self-drive. The KILL
+   branch is now ALSO ported on the RECORD-DRIVEN replay path (main.rs section
+   2c): it has no numeric input at all - the record's live list either still
+   holds the mutual attack or it does not - so the device can make the engine's
+   own decision (kill its own slot: the `attack_live` word `scal[+3]` goes to 0)
+   at the engine's own moment, with no record value copied. The REDUCE branch
+   CANNOT be ported on that path: its input is the VOIDED attack's troops, which
+   no record field carries, so section 4e stays a model there - and the plain
+   replay keeps reporting the pre-correction value that 4e corrects, which is
+   the deliberate "a defect cannot hide here" report, never a masked one;
 7. the cluster cadence counters (ported into the env);
 8. the nation post-spawn AI (not ported).
 
@@ -152,11 +161,36 @@ The reported player in `first divergence: boundary N ... player P engine A tiles
 - **A fresh dump lists ZERO ATTACK rows at its own final boundary** (t413, t434, t437) while the complete t500 dump lists 149 there, so pc_create/pc_evict/pc_troops at a cell final boundary are an artefact and must not be read as agreement evidence. Genuine extras through boundary 250 are near zero (pc_evict 3).
 - **The reported first-mismatching player in the divergence line is a scan artefact, not an identifier.** The scan iterated a HashMap (randomised order), so one 4-tile flip was reported from either side (player 90 engine 884 vs device 880, or player 486 engine 972 vs device 976 - the same flip, opposite signs). Compare hashes and counts, never the printed player. It is now sorted by sid, so at least it is run-stable.
 
-| **500/500 (record end)** | **480** | **no divergence: both freeze arms run the record full window with hash 500/500, claims 83545/83545, owned counts 244500/244500, troops 87798/87798 (b=20) and 87508/87508 (b=60), self-drive totals 0/0/0, first divergence NONE.** The previous stop was never a divergence: the host allocator used slots.len() as the index and never freed a position, so MAX_SLOTS bounded allocations ever made rather than live attacks. With reuse it bounds concurrency - 488 positions against a 1024 ceiling, and 488 is the peak concurrent count in the record itself (boundary 79). The plain replay now also completes 500 boundaries; its only remaining divergence is the boundary-296 engine eviction. |
+| **500/500 (record end)** | **480** | **no divergence: both freeze arms run the record full window with hash 500/500, claims 83545/83545, owned counts 244500/244500, troops 87798/87798 (b=20) and 87508/87508 (b=60), self-drive totals 0/0/0, first divergence NONE.** The previous stop was never a divergence: the host allocator used slots.len() as the index and never freed a position, so MAX_SLOTS bounded allocations ever made rather than live attacks. With reuse it bounds concurrency - 488 positions against a 1024 ceiling, and 488 is the peak concurrent count in the record itself (boundary 79). The plain replay now also completes 500 boundaries. Its engine EVICTIONS are gone: 113 -> 0 with the KILL branch ported to the replay path (section 2c), the 113 device kills reproducing the old eviction triples (boundary/sid/slot) one for one. Its remaining first divergence is the boundary-311 cancel REDUCE report (335->339, the pre-correction value section 4e deliberately still shows), NOT a liveness break: hash 500/500, claims 83545/83545, owned counts 244500/244500 and troops 86714/86748 are byte-identical to the pre-fix run. |
 
 ### Harness fact: the dump final boundary (FIXED 40afc85)
 
 The oracle emitted its ATTACK section only when b < ticks, so every cell carried ZERO attack rows at its own final boundary and pc_create/pc_evict/pc_troops there could not be read as agreement evidence. It is now emitted unconditionally; regenerating the t500 dump adds exactly 131 ATTACK 500 rows and nothing else. Plane hashes, tick claims, owned counts and troops never read that section, so earlier numbers stand unchanged.
+
+### The engine's cancel KILL, ported on the record-driven path (FIXED fb0873c)
+
+`AttackExecution::init` ends in `cancel_opposing_land_attacks` (`game.rs:2141-2215`),
+which runs at the END of the tick in which an opposed attack inits. The KILL arm
+(`incoming_troops <= new_troops`, `game.rs:2209-2213`) kills the EXISTING mutual
+attack, so the record's next live list simply no longer holds it. The record-driven
+device had no port of that arm - it lived only inside the self-drive gate (section
+4d-bis) - so the blind list-diff in section 3 saw its own device slot still live,
+applied the death itself and then reported it as `sid 161: engine dropped an attack
+the device kept alive`, the run's first divergence at boundary 296.
+
+Evidence, in full. The engine's own trace (`OF_ENG_CANCEL=1`, t500):
+
+    ENG_CANCEL new=488->161 new_troops=12571.130059 incoming=f3mqg1wx 161->488 incoming_troops=12409.856607
+
+`incoming_troops <= new_troops`, so the KILL arm runs and `161->488` dies; no
+`ENG_CANCEL_REDUCE` line follows for that pair. The record's live list drops
+`161->488` at boundary 296 while `488->161` is created there, and the device's
+slot 19 is exactly that attack. Across the whole record the engine takes the KILL
+arm 114 times and the device kills 113 slots; the 113 match the engine's victims
+one for one, and the 114th (`18->44`) is a create-and-kill pair inside ONE tick's
+`uninit` drain, so it never appears at any boundary and the device never had a
+slot for it (no divergence, nothing to port). Every one of the old 113
+`ENGINE_EVICTION` lines had exactly one `CANCEL_REPLAY_KILL` counterpart.
 
 ### Harness fact: slot ids are not stable identifiers
 
