@@ -1,0 +1,7 @@
+# Player-clusters port: the two target cells + the regression cells.
+pangaea 18 0 2000
+pangaea 18 1 2000
+pangaea 488 0 500
+pangaea 488 0 250
+pangaea 18 0 1000
+pangaea 18 1 1000

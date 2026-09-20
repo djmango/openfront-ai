@@ -41,6 +41,7 @@
 //! largest N at which the engine places every bot (the spawn ceiling).
 
 use openfront_engine::game::{Game, PlayerType};
+use openfront_engine::map::TileRef;
 use openfront_engine::rl::RlSession;
 use openfront_engine::util::simple_hash;
 use serde_json::json;
@@ -151,6 +152,91 @@ fn type_tag(t: PlayerType) -> &'static str {
         PlayerType::Bot => "B",
         PlayerType::Nation => "N",
     }
+}
+
+/// The `PlayerExecution`s' own order, read from `Game::exec_labels()`
+/// (`game.rs:1414`, `ExecEnum::debug_label`, `exec_enum.rs:305`). The PLAYER
+/// rows are emitted in `all_players()` order, which is NOT necessarily the order
+/// `execute_next_tick` ticks the player executions in - and the cluster pass
+/// (`PlayerExecution::tick` -> `maybe_remove_clusters`) mutates the owner plane
+/// mid-tick, so that order is observable. MEASUREMENT ONLY: nothing in the port
+/// is derived from it beyond the loop it drives.
+fn emit_pexec(o: &mut String, game: &Game) {
+    let sids: Vec<u16> = game
+        .exec_labels()
+        .iter()
+        .filter_map(|l| {
+            l.strip_prefix("Player(")
+                .and_then(|r| r.strip_suffix(')'))
+                .and_then(|n| n.parse::<u16>().ok())
+        })
+        .collect();
+    let joined: Vec<String> = sids.iter().map(|s| s.to_string()).collect();
+    o.push_str(&format!("PEXEC {} {}\n", sids.len(), joined.join(" ")));
+}
+
+/// `Player::last_cluster_calc` / `last_tile_change` (`game.rs:96-97`, both
+/// `pub`): the two counters `maybe_remove_clusters` gates on
+/// (`player_clusters.rs:358-389`). Read-only dump of existing engine state - the
+/// device maintains its own copy and this is the reference it is checked
+/// against, exactly as `BORDER` is for `refresh_to_conquer`.
+fn emit_cadence(o: &mut String, b: u32, players: &[openfront_engine::game::Player]) {
+    for p in players {
+        o.push_str(&format!(
+            "CADENCE {b} {} {} {} {}\n",
+            p.small_id,
+            p.last_cluster_calc,
+            p.last_tile_change,
+            if p.is_disconnected { 1 } else { 0 }
+        ));
+    }
+}
+
+/// `Game::is_friendly(a, b)` for the ordered pairs that are friendly, so the port
+/// never has to model alliances or teams. Emitted only when the signature of the
+/// inputs (alliance list, team membership, disconnected flags) changes: it is an
+/// O(n^2) scan, and on a 488-player cell it must not run 500 times for nothing.
+fn emit_friends(
+    o: &mut String,
+    b: u32,
+    game: &Game,
+    players: &[openfront_engine::game::Player],
+    sig: &mut u64,
+) {
+    let mut s: u64 = 0;
+    for a in &game.alliances {
+        s = s
+            .wrapping_mul(1000003)
+            .wrapping_add(((a.requestor_small_id as u64) << 16) | a.recipient_small_id as u64);
+    }
+    for p in players {
+        if p.is_disconnected {
+            s = s.wrapping_mul(1000003).wrapping_add(1_000_000 + p.small_id as u64);
+        }
+        if let Some(t) = &p.team {
+            let mut h: u64 = 7;
+            for c in t.bytes() {
+                h = h.wrapping_mul(31).wrapping_add(c as u64);
+            }
+            s = s.wrapping_mul(1000003).wrapping_add(h & 0xffff);
+        }
+    }
+    if *sig == s && b != 0 {
+        return;
+    }
+    *sig = s;
+    let mut pairs: Vec<String> = Vec::new();
+    for a in players {
+        for c in players {
+            if a.small_id == c.small_id {
+                continue;
+            }
+            if game.is_friendly_ex(a.small_id, c.small_id, false) {
+                pairs.push(format!("{}:{}", a.small_id, c.small_id));
+            }
+        }
+    }
+    o.push_str(&format!("FRIEND {b} {}\n", pairs.join(" ")));
 }
 
 fn reset_once(
@@ -285,6 +371,11 @@ fn replay_cell(
 
     // ---- boundary 0: the engine's spawn output -----------------------------
     let mut prev_owned: Vec<Vec<u32>> = Vec::new();
+    let mut friend_sig: u64 = 0;
+    // NOTE: `PEXEC` is emitted at boundary 1, not here. `Game::add_execution`
+    // (`game.rs:1418`) pushes into `uninit`, and only `execute_next_tick`
+    // (`game.rs:3657-3700`) moves them into `execs` - so right after the spawn
+    // phase `execs` is still EMPTY and `exec_labels()` reports nothing.
     {
         let game = &session.game;
         let plane = engine_plane(game);
@@ -301,14 +392,120 @@ fn replay_cell(
         }
         selfcheck(&mut o, game, &players, &plane);
         emit_players(&mut o, 0, &players, &prev_owned);
+        emit_cadence(&mut o, 0, &players);
+        emit_friends(&mut o, 0, game, &players, &mut friend_sig);
         emit_borders(&mut o, 0, &players);
         emit_attacks(&mut o, 0, game);
     }
 
+    // ---- optional single-attack trace -------------------------------------
+    // `OF_TRACE_ATK=owner:target` (and optionally `OF_TRACE_TILE=<tile>`)
+    // prints, per boundary, the engine's OWN live values for that attack and its
+    // target player immediately BEFORE the tick and immediately AFTER it. This
+    // is the only way to see what the engine's intra-tick executions actually
+    // changed, since the per-boundary dump only exposes the post-tick record.
+    let trace: Option<(u16, u16)> =
+        std::env::var("OF_TRACE_ATK").ok().and_then(|s| {
+            let mut it = s.split(':');
+            Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+        });
+    let trace_tile: Option<TileRef> = std::env::var("OF_TRACE_TILE")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    let mut trace_out = String::new();
+    // MEASUREMENT-ONLY: dump the engine's `execs` order (the order
+    // `execute_next_tick` actually ticks them, `game.rs:3662-3669`) at each
+    // boundary, so a transport ship's position relative to each attack is
+    // directly observable.
+    let trace_execs = std::env::var("OF_TRACE_EXECS").is_ok();
+    let mut exec_out = String::new();
+    let mut snap = |game: &Game, b: u32, tag: &str| -> Option<()> {
+        let (o_id, t_id) = trace?;
+        let a = game
+            .live_attacks()
+            .find(|a| a.owner_small_id() == o_id && a.target_small_id() == t_id)?;
+        let p = game.player_by_small_id(t_id);
+        let (dtroops, dtiles) = p.map(|p| (p.troops, p.tiles_owned)).unwrap_or((-1, -1));
+        let inc = if p.is_some() {
+            game.troop_increase_rate_raw_for(t_id)
+        } else {
+            f64::NAN
+        };
+        let atiles = game
+            .player_by_small_id(o_id)
+            .map(|p| p.tiles_owned)
+            .unwrap_or(-1);
+        let mut line = format!(
+            "TRACE {b} {tag} owner={o_id} target={t_id} atk={:.12} atk_bits={:#018x} atk_tiles={atiles} def_troops={dtroops} def_tiles={dtiles} def_inc_raw={inc:.12}\n",
+            a.troops(),
+            a.troops().to_bits(),
+        );
+        if tag == "pre" {
+            if let Some(t) = trace_tile {
+                let (mag, speed, attacker_loss) =
+                    game.attack_logic_at_tile(a.troops(), o_id, t_id, t, true);
+                line.push_str(&format!(
+                    "TRACELOGIC {b} tile={t} mag={mag} speed={speed} attacker_loss={attacker_loss:.12} loss_bits={:#018x} def_troops={dtroops} def_tiles={dtiles} atk={:.12}\n",
+                    attacker_loss.to_bits(),
+                    a.troops(),
+                ));
+            }
+        }
+        // MEASUREMENT-ONLY: the engine's OWN carried conquest frontier, in heap
+        // array order with each enqueue priority's f32 bits. This is the
+        // reference side of the device `HEAPDUMP` diagnostic; together they
+        // decide "different tile set" vs "same set, different order".
+        if std::env::var("OF_TRACE_ENGINE_HEAP").is_ok() {
+            let (tiles, pri) = a.to_conquer_debug();
+            let joined: Vec<String> = tiles
+                .iter()
+                .zip(pri.iter())
+                .map(|(t, p)| format!("{t}:{:08x}", p.to_bits()))
+                .collect();
+            line.push_str(&format!(
+                "ENGINEHEAP {b} {tag} owner={o_id} target={t_id} len={} | {}\n",
+                tiles.len(),
+                joined.join(" ")
+            ));
+        }
+        trace_out.push_str(&line);
+        Some(())
+    };
+
     // ---- the post-spawn ticks ---------------------------------------------
     for b in 1..=ticks {
+        // Transport-ship exec positions for the tick that is about to run: the
+        // landing's `game.conquer` happens at THIS exec position, so the port
+        // must apply it after exactly `natk` of this tick's attacks.
+        for (i, owner, dst, natk) in session.game.transport_exec_positions() {
+            o.push_str(&format!(
+                "TRANSPORT {b} {i} {owner} {} {natk}\n",
+                dst.map(|t| t as i64).unwrap_or(-1)
+            ));
+        }
+        if trace_execs {
+            let labels = session.game.exec_labels();
+            let joined: Vec<String> = labels
+                .iter()
+                .enumerate()
+                .map(|(i, l)| format!("{i}={l}"))
+                .collect();
+            exec_out.push_str(&format!(
+                "EXECS {b} n={} | {}\n",
+                labels.len(),
+                joined.join(" ")
+            ));
+        }
+        snap(&session.game, b, "pre");
         session.game.execute_next_tick();
+        if b == 1 {
+            // The engine's own player-exec order, read once `execute_next_tick`
+            // has moved the spawn-phase `uninit` execs into `execs`
+            // (`game.rs:1418` / `:3657-3700`).
+            emit_pexec(&mut o, &session.game);
+        }
         let game = &session.game;
+        snap(game, b, "post");
         let plane = engine_plane(game);
         emit_boundary(&mut o, b, game.ticks(), &plane);
         let players: Vec<_> = game.all_players().to_vec();
@@ -337,12 +534,16 @@ fn replay_cell(
             o.push_str(&format!("CHURN {b}{churn_bad}\n"));
         }
         emit_players(&mut o, b, &players, &prev_owned);
+        emit_cadence(&mut o, b, &players);
+        emit_friends(&mut o, b, game, &players, &mut friend_sig);
         emit_borders(&mut o, b, &players);
         if b < ticks {
             emit_attacks(&mut o, b, game);
         }
         prev_owned = players.iter().map(|p| p.owned_tiles.clone()).collect();
     }
+    o.push_str(&trace_out);
+    o.push_str(&exec_out);
     Ok(o)
 }
 

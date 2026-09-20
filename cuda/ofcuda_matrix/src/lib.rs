@@ -77,6 +77,25 @@ pub struct Boundary {
     /// players whose `owned_tiles` vector was reordered/pruned, so the
     /// tail-diff above is not a claim set for them at this boundary.
     pub churn: Vec<(u16, usize)>,
+    /// sid -> `(last_cluster_calc, last_tile_change, is_disconnected)` as the
+    /// ENGINE held them at this boundary (`Player::last_cluster_calc` /
+    /// `last_tile_change`, `game.rs:96-97`). The device maintains its own copy
+    /// and these are the reference it is checked against.
+    pub cadence: HashMap<u16, (u32, u32, bool)>,
+    /// `(a, b)` ordered pairs with `Game::is_friendly(a, b) == true` at this
+    /// boundary. Emitted only when the alliance/team/disconnected signature
+    /// changes, so a boundary with no FRIEND row inherits the previous one.
+    pub friends: Vec<(u16, u16)>,
+    /// The dump carried a FRIEND row for this boundary (`friends` is
+    /// authoritative). A boundary without one inherits the previous row.
+    pub friends_emitted: bool,
+    /// Live transport-ship exec positions for the tick that ENDS at this
+    /// boundary: `(exec_index, owner, motion_plan_dst, natk)` where `natk` is
+    /// the number of live ATTACK execs ahead of the ship in `execs`.
+    /// `Game::execute_next_tick` ticks `execs` in list order, so the ship's
+    /// `land()` -> `game.conquer(dst)` is visible only to attacks ticking after
+    /// index `exec_index`; `natk` is how many attacks tick BEFORE it.
+    pub transports: Vec<(usize, u16, i64, usize)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -96,6 +115,11 @@ pub struct Oracle {
     pub roster: Vec<(u16, char, String, i64)>,
     pub selfcheck_diff: usize,
     pub selfcheck_owned: i64,
+    /// The engine's own player-exec order, from `Game::exec_labels()`
+    /// (`game.rs:1414-1416`) filtered to the `Player(<sid>)` labels:
+    /// `execute_next_tick` (`game.rs:3662-3669`) ticks `execs` in list order,
+    /// and the cluster pass walks the players in that order.
+    pub pexec: Vec<u16>,
     pub boundaries: Vec<Boundary>,
 }
 
@@ -128,6 +152,9 @@ pub fn parse_oracle(path: &Path) -> Result<Oracle, String> {
         let mut it = line.split_whitespace();
         let Some(tag) = it.next() else { continue };
         match tag {
+            // Measurement-only trace channels (see oracle/src/main.rs):
+            // ignored here, never part of a comparison.
+            "TRACE" | "TRACELOGIC" | "ENGINEHEAP" | "EXECS" => {}
             "#" | "REPO" | "DIFFICULTY" => {}
             "MAP" => o.map = it.next().unwrap_or("").to_string(),
             "SEED" => o.seed = it.next().unwrap_or("").to_string(),
@@ -169,6 +196,14 @@ pub fn parse_oracle(path: &Path) -> Result<Oracle, String> {
                 let n: usize = it.next().unwrap_or("0").parse().unwrap_or(0);
                 let tiles: Vec<u32> = it.take(n).filter_map(|x| x.parse().ok()).collect();
                 get!(b).owned0.insert(sid, tiles);
+            }
+            "TRANSPORT" => {
+                let b: u32 = it.next().unwrap_or("0").parse().unwrap_or(0);
+                let i: usize = it.next().unwrap_or("0").parse().unwrap_or(0);
+                let owner: u16 = it.next().unwrap_or("0").parse().unwrap_or(0);
+                let dst: i64 = it.next().unwrap_or("-1").parse().unwrap_or(-1);
+                let natk: usize = it.next().unwrap_or("0").parse().unwrap_or(0);
+                get!(b).transports.push((i, owner, dst, natk));
             }
             "BORDER" => {
                 let b: u32 = it.next().unwrap_or("0").parse().unwrap_or(0);
@@ -216,6 +251,32 @@ pub fn parse_oracle(path: &Path) -> Result<Oracle, String> {
                 }
                 get!(b).churn = v;
             }
+            "PEXEC" => {
+                let n: usize = it.next().unwrap_or("0").parse().unwrap_or(0);
+                o.pexec = it.take(n).filter_map(|x| x.parse().ok()).collect();
+            }
+            "CADENCE" => {
+                let b: u32 = it.next().unwrap_or("0").parse().unwrap_or(0);
+                let sid: u16 = it.next().unwrap_or("0").parse().unwrap_or(0);
+                let lcc: u32 = it.next().unwrap_or("0").parse().unwrap_or(0);
+                let ltc: u32 = it.next().unwrap_or("0").parse().unwrap_or(0);
+                let disc = it.next().unwrap_or("0").parse::<u32>().unwrap_or(0) != 0;
+                get!(b).cadence.insert(sid, (lcc, ltc, disc));
+            }
+            "FRIEND" => {
+                let b: u32 = it.next().unwrap_or("0").parse().unwrap_or(0);
+                let mut v = Vec::new();
+                for tok in it {
+                    if let Some((a, c)) = tok.split_once(':') {
+                        if let (Ok(a), Ok(c)) = (a.parse::<u16>(), c.parse::<u16>()) {
+                            v.push((a, c));
+                        }
+                    }
+                }
+                let e = get!(b);
+                e.friends = v;
+                e.friends_emitted = true;
+            }
             "ATTACK" => {
                 let b: u32 = it.next().unwrap_or("0").parse().unwrap_or(0);
                 let owner: u16 = it.next().unwrap_or("0").parse().unwrap_or(0);
@@ -251,6 +312,22 @@ pub fn parse_oracle(path: &Path) -> Result<Oracle, String> {
     }
     by_b.sort_by_key(|(b, _)| *b);
     o.boundaries = by_b.into_iter().map(|(_, v)| v).collect();
+    // `FRIEND` rows are emitted only when the friendly-pair SET changes (it is
+    // an O(n^2) `is_friendly` sweep in the oracle), so a boundary without one
+    // inherits the most recent preceding row. Boundaries before the first
+    // `FRIEND` row keep the empty default - the oracle emits boundary 0.
+    {
+        let mut cur: Vec<(u16, u16)> = Vec::new();
+        let mut seen = false;
+        for bd in o.boundaries.iter_mut() {
+            if bd.friends_emitted {
+                cur = bd.friends.clone();
+                seen = true;
+            } else if seen {
+                bd.friends = cur.clone();
+            }
+        }
+    }
     if o.boundaries.is_empty() {
         return Err(format!("{}: no boundaries", path.display()));
     }

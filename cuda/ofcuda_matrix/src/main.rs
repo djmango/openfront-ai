@@ -278,16 +278,33 @@ struct Row {
     reinit_checked: usize,
     reinit_agree: usize,
     dev_claims: usize,
+    /// The player-clusters stream: the engine's own `ENG_CLUSTER_REMOVE` lines
+    /// for this cell, the device's removal records, and how many of those agree
+    /// on `(engine tick, victim, captor, tiles)`. This is the direct parity
+    /// check for the cluster pass - a long run can be exact in every boundary
+    /// while the stream is not, and each removal is visible individually.
+    cluster_eng: usize,
+    cluster_dev: usize,
+    cluster_match: usize,
+    /// Times the pass actually ran `calculate_clusters` (its trigger), and any
+    /// capacity overflow it hit (border set, cluster storage, `flood_owned`).
+    cluster_fires: usize,
+    cluster_ovf: usize,
+    /// The device's own `last_cluster_calc` after the tick vs the engine's, for
+    /// every player at every boundary: the trigger rule (`player_clusters.rs:
+    /// 358-393`) checked independently of whether it produced a removal.
+    cadence_match: usize,
+    cadence_total: usize,
     note: String,
 }
 
 impl Row {
     fn tsv_header() -> &'static str {
-        "map\tw\th\tN\tnations\tticks\tinit_sets\tinit_hash\ttick_match\ttick_total\thash_match\thash_total\tcount_match\tcount_total\ttroops_match\ttroops_total\tchurn_skipped\tengine_evictions\treinits\treinit_checked\treinit_agree\tdev_claims\tfirst_div\tnote"
+        "map\tw\th\tN\tnations\tticks\tinit_sets\tinit_hash\ttick_match\ttick_total\thash_match\thash_total\tcount_match\tcount_total\ttroops_match\ttroops_total\tchurn_skipped\tengine_evictions\treinits\treinit_checked\treinit_agree\tdev_claims\tcluster_eng\tcluster_dev\tcluster_match\tcluster_fires\tcluster_ovf\tcadence_match\tcadence_total\tfirst_div\tnote"
     }
     fn tsv(&self) -> String {
         format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             self.map,
             self.w,
             self.h,
@@ -310,6 +327,13 @@ impl Row {
             self.reinit_checked,
             self.reinit_agree,
             self.dev_claims,
+            self.cluster_eng,
+            self.cluster_dev,
+            self.cluster_match,
+            self.cluster_fires,
+            self.cluster_ovf,
+            self.cadence_match,
+            self.cadence_total,
             self.first_div,
             self.note,
         )
@@ -323,7 +347,48 @@ impl Row {
             && self.count_match == self.count_total
             // A re-create the device could not reproduce is a failure, not a note.
             && self.reinit_agree == self.reinit_checked
+            // The cluster-removal stream must match the engine's, removal for
+            // removal. Nothing is weakened here: every pre-existing criterion
+            // above still applies.
+            && self.cluster_eng == self.cluster_dev
+            && self.cluster_eng == self.cluster_match
+            && self.cluster_ovf == 0
+            && self.cadence_match == self.cadence_total
     }
+}
+
+/// `Config::max_troops` (`core/config.rs:363-388`), difficulty `Easy` and
+/// `city_level_sum = 0`.
+///
+/// `city_level_sum` needs `ConstructionExecution` (completed cities), which this
+/// port does not model. The traced cells agree with 0, but the assumption is
+/// explicit rather than implied: a cell with completed cities would need
+/// `city_troop_increase()` added here.
+fn eng_max_troops(ptype: char, tiles: f64) -> f64 {
+    let mut m = 2.0 * (tiles.powf(0.6) * 1000.0 + 50_000.0);
+    match ptype {
+        'B' => m /= 3.0,
+        'N' => m *= 0.5, // difficulty "Easy"
+        // 'H' only differs when `game_config.infinite_troops`, which no cell sets.
+        _ => {}
+    }
+    m
+}
+
+/// `Config::troop_increase_rate_raw` (`core/config.rs:433-458`), difficulty
+/// `Easy`, `city_level_sum = 0`. Returns the RAW f64; the caller floors it the
+/// way `game.add_troops` does.
+fn troop_increase_rate_raw(ptype: char, troops: f64, tiles: f64) -> f64 {
+    let max = eng_max_troops(ptype, tiles);
+    let mut to_add = 10.0 + troops.powf(0.73) / 4.0;
+    to_add *= 1.0 - troops / max;
+    if ptype == 'B' {
+        to_add *= 0.5;
+    }
+    if ptype == 'N' {
+        to_add *= 0.9; // difficulty "Easy"
+    }
+    (troops + to_add).min(max) - troops
 }
 
 fn yn(b: bool) -> &'static str {
@@ -776,6 +841,100 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         .collect();
     let d_defsig = DeviceBuffer::from_host(&stream, &defsig_host).map_err(es)?;
 
+    // --- player-clusters pass state (`kernels.rs` `cluster_pass`) ------------
+    // Persists across ticks: `d_cad` is the device's own `last_cluster_calc` /
+    // `last_tile_change` / `tiles_owned` / `alive` per small id (the trigger,
+    // seeded from the engine's `CADENCE` rows and then advanced by the pass
+    // itself), `d_mark` is the `flood_owned` generation mark, and `d_t2b` maps
+    // a border tile to its position in the tick's border array (`u32::MAX`
+    // outside it) - the equivalent of the engine's `border.contains` +
+    // `HashSet<TileRef> visited` pair.
+    let mut d_cad = DeviceBuffer::<u32>::zeroed(&stream, COLS * kernels::device::CSTATE).map_err(es)?;
+    let mut d_t2b =
+        DeviceBuffer::from_host(&stream, &vec![u32::MAX; wh]).map_err(es)?;
+    let mut d_cmark = DeviceBuffer::<u32>::zeroed(&stream, wh).map_err(es)?;
+    let mut d_cbuf = DeviceBuffer::<u32>::zeroed(&stream, kernels::device::CS).map_err(es)?;
+    let mut d_clen = DeviceBuffer::<u32>::zeroed(&stream, kernels::device::CB).map_err(es)?;
+    let mut d_coff = DeviceBuffer::<u32>::zeroed(&stream, kernels::device::CB).map_err(es)?;
+    let mut d_cvis =
+        DeviceBuffer::<u32>::zeroed(&stream, kernels::device::CB / 32).map_err(es)?;
+    let mut d_cstack =
+        DeviceBuffer::<u32>::zeroed(&stream, kernels::device::CSTACK).map_err(es)?;
+    let mut d_cowned =
+        DeviceBuffer::<u32>::zeroed(&stream, kernels::device::COWN).map_err(es)?;
+    let mut d_crem = DeviceBuffer::<u32>::zeroed(&stream, kernels::device::CREM).map_err(es)?;
+    let mut d_cout = DeviceBuffer::<u32>::zeroed(&stream, kernels::device::CSTAT).map_err(es)?;
+    let mut d_cfriends =
+        DeviceBuffer::<u32>::zeroed(&stream, kernels::device::CNB + 1).map_err(es)?;
+    let mut d_cidhash = DeviceBuffer::<u32>::zeroed(&stream, COLS).map_err(es)?;
+    let mut d_corder = DeviceBuffer::<u32>::zeroed(&stream, COLS).map_err(es)?;
+    let mut d_atk_owner = DeviceBuffer::<u16>::zeroed(&stream, MAX_SLOTS).map_err(es)?;
+    let mut d_atk_target = DeviceBuffer::<u16>::zeroed(&stream, MAX_SLOTS).map_err(es)?;
+    let mut d_atk_troops = DeviceBuffer::<f64>::zeroed(&stream, MAX_SLOTS).map_err(es)?;
+    // `p.last_id_hash = simple_hash(p.id)` (`player_clusters.rs:370` via
+    // `util.rs:5-27`) is fixed per player id, so it is computed once here from
+    // the engine's own roster ids with the engine's own hash.
+    {
+        let mut idh = vec![0u32; COLS];
+        for r in &orc.roster {
+            idh[r.0 as usize] = ofcuda_prng::simple_hash(&r.2).max(0) as u32;
+        }
+        d_cidhash
+            .copy_from_host(&stream, &idh)
+            .map_err(es)?;
+    }
+    // The pass walks the engine's exec order. `PEXEC` is the engine's own
+    // `exec_labels()` filtered to the `Player(<sid>)` execs, i.e. exactly the
+    // order `execute_next_tick` ticks them; the roster order is the fallback
+    // for an oracle predating that row.
+    let mut cl_order: Vec<u32> = orc.pexec.iter().map(|s| *s as u32).collect();
+    if cl_order.is_empty() {
+        let mut v: Vec<u16> = orc.roster.iter().map(|r| r.0).collect();
+        v.sort_unstable();
+        cl_order = v.into_iter().map(|s| s as u32).collect();
+    }
+    {
+        let mut ord = vec![0u32; COLS];
+        ord[..cl_order.len()].copy_from_slice(&cl_order);
+        d_corder.copy_from_host(&stream, &ord).map_err(es)?;
+    }
+    // The engine's own cluster-removal stream for this cell (`OF_ENG_CLUSTER=1`
+    // -> `ENG_CLUSTER_REMOVE tick=.. victim=.. captor=.. tiles=..`), written by
+    // `tools/gen_oracles.sh` as `<dump>.clusters`.
+    let mut eng_cluster: HashMap<u32, Vec<(u16, u16, usize)>> = HashMap::new();
+    let mut eng_cluster_n = 0usize;
+    {
+        let cp = oracle_path.with_extension("dump.clusters");
+        if let Ok(txt) = std::fs::read_to_string(&cp) {
+            for line in txt.lines() {
+                let mut it = line.split_whitespace();
+                if it.next() != Some("ENG_CLUSTER_REMOVE") {
+                    continue;
+                }
+                let mut tk = 0u32;
+                let mut vi = 0u16;
+                let mut ca = 0u16;
+                let mut ti = 0usize;
+                for tok in it {
+                    let (k, v) = tok.split_once('=').unwrap_or(("", ""));
+                    match k {
+                        "tick" => tk = v.parse().unwrap_or(0),
+                        "victim" => vi = v.parse().unwrap_or(0),
+                        "captor" => ca = v.parse().unwrap_or(0),
+                        "tiles" => ti = v.parse().unwrap_or(0),
+                        _ => {}
+                    }
+                }
+                eng_cluster.entry(tk).or_default().push((vi, ca, ti));
+                eng_cluster_n += 1;
+            }
+        }
+    }
+    // `cluster_eng` is accumulated per REACHED tick inside the boundary loop,
+    // not taken from the whole dump: a cell that stops early must be judged on
+    // the ticks it actually ran, otherwise a run that never reached the
+    // engine's later removals would be reported as a stream mismatch.
+
     let mut slots: Vec<Slot> = Vec::new();
     let mut frames: Vec<u16> = Vec::new();
     if a.dump_planes {
@@ -818,6 +977,20 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         // `prev` is the boundary the tick is leaving, i.e. the state the
         // engine's own `tick` read. Nothing is carried over: the record is the
         // source, so a device-side drift cannot accumulate silently.
+        //
+        // `PlayerExecution::tick` INCOME, PORTED (`execution/player.rs:84-88`):
+        // the engine runs `game.add_troops(small_id, game.troop_increase_rate_raw_for(small_id))`
+        // for every player. Every `PlayerExecution` is created at spawn and every
+        // `AttackExecution` is appended to `execs` when it is created, so ALL the
+        // player executions precede ALL the attacks in `execute_next_tick`'s exec
+        // order: the income is a pure TICK-START mutation of each player's live
+        // troop count, and an attack that targets a player reads `p.troops`
+        // AFTER it. The port previously seeded `pst` from the per-boundary record
+        // and never added income, so a player-target attack opened ~3.6e-4
+        // relative lower (a smaller `defender_troops`, so a smaller
+        // `alt_attacker_loss`), the device's attacker lost slightly less per pop
+        // and drifted ABOVE the engine - the exact `device >= engine` drift this
+        // harness was chasing.
         pst_host.fill(0.0);
         for p in &prev.players {
             let i = p.sid as usize * 3;
@@ -829,6 +1002,24 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
                     'N' => 2.0,
                     _ => 0.0,
                 };
+            }
+        }
+        // Applied as a second pass so each player's income uses its OWN
+        // tick-start troops/tiles, exactly as `troop_increase_rate_raw_for` does.
+        for p in &prev.players {
+            let i = p.sid as usize * 3;
+            if i + 2 >= pst_host.len() || p.tiles <= 0 {
+                continue; // `PlayerExecution::tick` returns early with no tiles
+            }
+            let inc = troop_increase_rate_raw(p.ptype, pst_host[i], p.tiles as f64);
+            // `game.add_troops` (`game.rs:1147-1155`): `p.troops += to_int(amount)`,
+            // `to_int` is `floor` (`util.rs:26`). A negative rate means
+            // `add_troops` forwards to `remove_troops` -> `to_int(-amount)`, i.e.
+            // the magnitude is floored before being negated.
+            if inc < 0.0 {
+                pst_host[i] -= (-inc).floor();
+            } else {
+                pst_host[i] += inc.floor();
             }
         }
         d_pst.copy_from_host(&stream, &pst_host).map_err(es)?;
@@ -1053,6 +1244,194 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
             row.note = format!("{} engine_evictions", row.note).trim().to_string();
         }
 
+        // --- 3a. the player-clusters pass -------------------------------------
+        // `PlayerExecution::tick` (`execution/player.rs:92`) calls
+        // `maybe_remove_clusters` (`execution/player_clusters.rs:358`), and the
+        // player execs are ticked BEFORE the attack execs in
+        // `execute_next_tick` - so this runs here, after the income phase and
+        // before ANY attack of the tick. That ordering is the whole reason the
+        // pass breaks parity: a cluster handed to a captor is already the
+        // captor's when the tick's attacks pop, so the device's claim set
+        // without it is the engine's MINUS those tiles, and the captor's
+        // `owned_tiles` gains them at claim index 0.
+        //
+        // Everything the pass reads is the tick's OWN start state: the border
+        // sets (`prev.borders` == what the engine's live `border_tiles` held
+        // when the player execs ticked), each player's `last_cluster_calc` and
+        // `last_tile_change` (`prev.cadence`), the roster's `simple_hash(id)`,
+        // the engine's live attacks (`prev.attacks`, for
+        // `largest_incoming_land_attack_from_neighbors`) and the friendly pairs.
+        let mut mine: HashMap<u16, Vec<u32>> = HashMap::new();
+        {
+            let cst = kernels::device::CSTATE;
+            let mut cadh = d_cad.to_host_vec(&stream).map_err(es)?;
+            for p in &prev.players {
+                if p.sid as usize >= COLS {
+                    continue;
+                }
+                let i = p.sid as usize * cst;
+                let (lcc, ltc, _) = prev.cadence.get(&p.sid).copied().unwrap_or((0, 0, false));
+                cadh[i] = lcc;
+                cadh[i + 1] = ltc;
+                cadh[i + 2] = p.tiles.max(0) as u32;
+                cadh[i + 3] = if p.tiles > 0 { 1 } else { 0 };
+            }
+            d_cad.copy_from_host(&stream, &cadh).map_err(es)?;
+            // `Game::is_friendly(a, b)` as the engine evaluates it for this
+            // tick: the oracle's own `FRIEND` pairs.
+            let nf = prev.friends.len().min(kernels::device::CNB);
+            let mut fr = vec![0xFFFF_FFFFu32; kernels::device::CNB + 1];
+            for (k, (fa, fb)) in prev.friends.iter().take(nf).enumerate() {
+                fr[k] = ((*fa as u32) << 16) | *fb as u32;
+            }
+            d_cfriends.copy_from_host(&stream, &fr).map_err(es)?;
+            let na = prev.attacks.len().min(MAX_SLOTS);
+            let mut aow = vec![0u16; MAX_SLOTS];
+            let mut atg = vec![0u16; MAX_SLOTS];
+            let mut atr = vec![0f64; MAX_SLOTS];
+            for (k, at) in prev.attacks.iter().take(na).enumerate() {
+                aow[k] = at.owner;
+                atg[k] = at.target;
+                atr[k] = at.troops;
+            }
+            d_atk_owner.copy_from_host(&stream, &aow).map_err(es)?;
+            d_atk_target.copy_from_host(&stream, &atg).map_err(es)?;
+            d_atk_troops.copy_from_host(&stream, &atr).map_err(es)?;
+            unsafe {
+                module
+                    .cluster_pass(
+                        &stream,
+                        cfg(ONE),
+                        &d_terrain,
+                        w,
+                        h,
+                        tick,
+                        cl_order.len() as u32,
+                        &d_corder,
+                        &d_cidhash,
+                        &mut d_cad,
+                        &mut d_plane,
+                        &mut d_t2b,
+                        &mut d_cmark,
+                        &mut d_cbuf,
+                        &mut d_clen,
+                        &mut d_coff,
+                        &mut d_cvis,
+                        &mut d_cstack,
+                        &mut d_cowned,
+                        &mut d_crem,
+                        &mut d_cout,
+                        &d_oborder,
+                        &d_ob_meta,
+                        &d_cfriends,
+                        nf as u32,
+                        &d_atk_owner,
+                        &d_atk_target,
+                        &d_atk_troops,
+                        na as u32,
+                        &mut d_pst,
+                    )
+                    .map_err(es)?;
+            }
+            let co = d_cout.to_host_vec(&stream).map_err(es)?;
+            row.cluster_fires += co[0] as usize;
+            row.cluster_ovf += (co[2] + co[3] + co[4] + co[5]) as usize;
+            if co[2] + co[3] + co[4] + co[5] > 0 {
+                detail.push_str(&format!(
+                    "CLUSTER_OVERFLOW boundary {b} (engine tick {tick}): border {} cluster {} \
+                     owned {} neighbour {} - a capacity refusal drops a removal\n",
+                    co[2], co[3], co[4], co[5]
+                ));
+            }
+            let nrem = co[1] as usize;
+            row.cluster_dev += nrem;
+            let words = co[6] as usize;
+            let rem = d_crem.to_host_vec(&stream).map_err(es)?;
+            let mut woff = 0usize;
+            let mut dev_this: Vec<(u16, u16, usize)> = Vec::new();
+            let mut ri = 0usize;
+            while ri < nrem && woff + 3 <= words {
+                let victim = rem[woff] as u16;
+                let captor = rem[woff + 1] as u16;
+                let n = rem[woff + 2] as usize;
+                woff += 3;
+                if woff + n > words {
+                    break;
+                }
+                let tiles = &rem[woff..woff + n];
+                // The captor's `owned_tiles` gains these BEFORE any attack of
+                // this tick (`game.conquer_one` pushes `owned_tiles`).
+                mine.entry(captor).or_default().extend_from_slice(tiles);
+                row.dev_claims += n;
+                dev_this.push((victim, captor, n));
+                woff += n;
+                ri += 1;
+                detail.push_str(&format!(
+                    "CLUSTER_DEVICE_REMOVE boundary {b} (engine tick {tick}): victim {victim} \
+                     captor {captor} tiles {n} first {:?}\n",
+                    &tiles[..tiles.len().min(8)]
+                ));
+            }
+            // --- the stream diff against the engine's own `ENG_CLUSTER_REMOVE` ---
+            let eng_this = eng_cluster.get(&tick).cloned().unwrap_or_default();
+            row.cluster_eng += eng_this.len();
+            let mut d2 = dev_this.clone();
+            let mut shown = 0usize;
+            for x in &eng_this {
+                if let Some(p) = d2.iter().position(|y| y == x) {
+                    d2.remove(p);
+                } else if shown < 8 {
+                    shown += 1;
+                    detail.push_str(&format!(
+                        "CLUSTER_ENGINE_ONLY boundary {b} (engine tick {tick}): victim {} captor \
+                         {} tiles {} - the engine removed a cluster the device did not\n",
+                        x.0, x.1, x.2
+                    ));
+                    if first_div_at.is_none() {
+                        first_div = format!(
+                            "boundary {b} (engine tick {tick}) cluster removal victim {} captor {} \
+                             tiles {} not reproduced by the device",
+                            x.0, x.1, x.2
+                        );
+                        first_div_at = Some(b as u32);
+                    }
+                }
+            }
+            for x in &d2 {
+                if shown < 8 {
+                    shown += 1;
+                    detail.push_str(&format!(
+                        "CLUSTER_DEVICE_ONLY boundary {b} (engine tick {tick}): victim {} captor {} \
+                         tiles {} - the device removed a cluster the engine did not\n",
+                        x.0, x.1, x.2
+                    ));
+                }
+            }
+            row.cluster_match += eng_this.len() - d2.len();
+
+            // --- the trigger itself, checked against the engine ---------------
+            // After the pass the device's own `last_cluster_calc` must equal the
+            // engine's post-tick value for EVERY player: the gate
+            // (`player_clusters.rs:384-389`, including the `last_calc == 0`
+            // seeding at :375-382) is then verified tick by tick, not inferred
+            // from the removal stream alone.
+            let cad2 = d_cad.to_host_vec(&stream).map_err(es)?;
+            for p in &cur.players {
+                let (elcc, _, _) = cur.cadence.get(&p.sid).copied().unwrap_or((0, 0, false));
+                row.cadence_total += 1;
+                let dlcc = cad2[p.sid as usize * cst];
+                if dlcc == elcc {
+                    row.cadence_match += 1;
+                } else if row.cadence_total - row.cadence_match <= 8 {
+                    detail.push_str(&format!(
+                        "CLUSTER_CADENCE boundary {b} (engine tick {tick}) player {}: device \
+                         last_cluster_calc {dlcc} vs engine {elcc}\n",
+                        p.sid
+                    ));
+                }
+            }
+        }
+
         // --- 3b. transport-ship landings -------------------------------------
         // `TransportShipExecution::land` (`transport_ship.rs:374-401`) CONQUERS
         // the shore tile the boat reaches (`game.conquer`, :383) and only then
@@ -1063,7 +1442,28 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         // `land()` conquered in THIS tick. Applying it before the tick puts the
         // tile on the plane for this boundary's hash, like every other conquest
         // of the same tick.
-        let mut mine: HashMap<u16, Vec<u32>> = HashMap::new();
+        // The conquer itself is ORDERED: `execute_next_tick` ticks `execs` in
+        // list order (`game.rs:3662-3669`) and `TransportShipExecution::land`
+        // (`transport_ship.rs:374-401`) calls `game.conquer(owner, dst)` at the
+        // SHIP's own exec position, so only attacks whose exec index is greater
+        // than the ship's can see `dst` as owned - the engine's
+        // `add_neighbors`/`refresh_to_conquer` owner filter
+        // (`attack.rs:1300-1340`) rejects it for the ones that ticked earlier.
+        // The oracle emits each ship's `(exec_index, owner, dst, natk)` where
+        // `natk` is the number of live attacks ahead of it, so the landing is
+        // applied after exactly `natk` plan entries instead of before all of
+        // them. Applying it first is what dropped tile 422259 from player 108's
+        // frontier at boundary 206 (N=488/250t): player 51's ship sat at exec
+        // 998 and 108's attack at exec 989, so the engine's 108 enqueued 422259
+        // while the device already saw it as 51's.
+        // `mine` is created in 3a (the clusters pass fills the captors' entries
+        // first, because the player execs tick BEFORE the attacks) and every
+        // landing/attack claim appends to it here. It must NOT be re-declared:
+        // a second `let mut mine` would shadow the cluster claims and drop the
+        // captor's cluster tiles from the claim comparison.
+        // (natk, owner, src, attack_id, heap_len, border_len)
+        let mut landings: Vec<(usize, u16, u32, String, usize, usize)> = Vec::new();
+        let mut used_ships: Vec<usize> = Vec::new();
         for cs in &cur.attacks {
             let Some(src) = cs.source else { continue };
             if prev
@@ -1073,35 +1473,74 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
             {
                 continue; // already bound: not a landing of THIS tick
             }
-            unsafe {
-                module
-                    .land_dev(
-                        &stream,
-                        cfg(ONE),
-                        src,
-                        cs.owner,
-                        &mut d_plane,
-                        &mut d_claims,
-                        &mut d_out,
-                    )
-                    .map_err(es)?;
-            }
-            let lo = d_out.to_host_vec(&stream).map_err(es)?;
-            if lo[0] > 0 {
-                let cl = d_claims.to_host_vec(&stream).map_err(es)?;
-                mine.entry(cs.owner).or_default().push(cl[0]);
-                row.dev_claims += 1;
-            }
-            detail.push_str(&format!(
-                "TRANSPORT_LANDING boundary {b} (engine tick {tick}): owner {} landed on tile {} \
-                 (source_tile of attack {}); engine frontier heap {} border {}\n",
-                cs.owner, src, cs.attack_id, cs.heap_len, cs.border_len
-            ));
+            let hit = cur
+                .transports
+                .iter()
+                .enumerate()
+                .find(|(k, (_, o, d, _))| {
+                    *o == cs.owner && *d == src as i64 && !used_ships.contains(k)
+                })
+                .map(|(k, (_, _, _, natk))| (k, *natk));
+            let natk = match hit {
+                Some((k, n)) => {
+                    used_ships.push(k);
+                    n
+                }
+                None => 0, // no ship recorded: keep the old "before every attack"
+            };
+            // A/B CONTROL, not a code path: `OFCUDA_MATRIX_LAND_FIRST=1` restores
+            // the pre-fix ordering (every landing applied before every attack,
+            // i.e. `natk = 0`) so the effect of the exec-order fix on any cell can
+            // be measured on demand instead of argued. The matrix is run without it.
+            let natk = if std::env::var_os("OFCUDA_MATRIX_LAND_FIRST").is_some() {
+                0
+            } else {
+                natk
+            };
+            landings.push((natk, cs.owner, src, cs.attack_id.clone(), cs.heap_len, cs.border_len));
         }
+        landings.sort_by_key(|x| x.0);
 
         // --- 4. one device launch per live attack, in the engine's order ---
         let mut troop_pairs: Vec<(usize, u64)> = Vec::new();
-        for (i, _snap) in &plan {
+        let plan_len = plan.len();
+        let mut nland = 0usize;
+        for p in 0..=plan_len {
+            // Landings whose ship ticked ahead of the p-th attack: the engine
+            // applies them exactly here (see 3b), so the attacks that ticked
+            // before `p` did NOT see the landed tile as owned.
+            while nland < landings.len() && landings[nland].0 <= p {
+                let (_, lowner, lsrc, laid, lhl, lbl) = landings[nland].clone();
+                unsafe {
+                    module
+                        .land_dev(
+                            &stream,
+                            cfg(ONE),
+                            lsrc,
+                            lowner,
+                            &mut d_plane,
+                            &mut d_claims,
+                            &mut d_out,
+                        )
+                        .map_err(es)?;
+                }
+                let lo = d_out.to_host_vec(&stream).map_err(es)?;
+                if lo[0] > 0 {
+                    let cl = d_claims.to_host_vec(&stream).map_err(es)?;
+                    mine.entry(lowner).or_default().push(cl[0]);
+                    row.dev_claims += 1;
+                }
+                detail.push_str(&format!(
+                    "TRANSPORT_LANDING boundary {b} (engine tick {tick}): owner {} landed on tile {} \
+                     (source_tile of attack {}); engine frontier heap {} border {}; applied after {} of {} plan attacks (ship exec order)\n",
+                    lowner, lsrc, laid, lhl, lbl, p, plan_len
+                ));
+                nland += 1;
+            }
+            if p == plan_len {
+                break;
+            }
+            let (i, _snap) = &plan[p];
             let s = &slots[*i];
             if !s.alive {
                 continue;
@@ -1267,6 +1706,44 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         // boundary it starts rather than at the boundary it is popped.
         {
             let scal_after = d_scal.to_host_vec(&stream).map_err(es)?;
+            // MEASUREMENT-ONLY diagnostic (`OF_LEAK_OWNER=<sid>`): dump the
+            // device's carried frontier (tiles + f32 priority bits) and its
+            // attack border size for one owner at every boundary, next to the
+            // engine's own recorded `ATTACK` sizes. This is what names whether a
+            // frontier defect is a different SET (a tile present on one side
+            // only) or the SAME set in a different ORDER (a priority/tie-break
+            // difference). Never a pass condition.
+            let leak_owner: Option<u16> = std::env::var("OF_LEAK_OWNER")
+                .ok()
+                .and_then(|s| s.parse().ok());
+            if let Some(lo) = leak_owner {
+                for a in &cur.attacks {
+                    if a.owner != lo {
+                        continue;
+                    }
+                    let found = slots
+                        .iter()
+                        .find(|s| s.alive && s.owner == a.owner && s.target == a.target);
+                    let Some(s) = found else { continue };
+                    let dev_heap = scal_after[s.idx * SCAL] as usize;
+                    let dev_border = scal_after[s.idx * SCAL + 1] as usize;
+                    let htiles = d_heap_tiles.to_host_vec(&stream).map_err(es)?;
+                    let hpri = d_heap_pri.to_host_vec(&stream).map_err(es)?;
+                    let base = s.idx * HEAP_CAP;
+                    let mut tiles: Vec<String> = Vec::with_capacity(dev_heap);
+                    for j in 0..dev_heap.min(HEAP_CAP) {
+                        tiles.push(format!("{}:{:08x}", htiles[base + j], hpri[base + j].to_bits()));
+                    }
+                    detail.push_str(&format!(
+                        "HEAPDUMP boundary {b} (engine tick {tick}) owner {lo} target {}: \
+                         dev_heap {dev_heap} eng_heap {} dev_border {dev_border} eng_border {} | {}\n",
+                        a.target,
+                        a.heap_len,
+                        a.border_len,
+                        tiles.join(" ")
+                    ));
+                }
+            }
             for a in &cur.attacks {
                 let found = slots
                     .iter()
@@ -1406,11 +1883,58 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         // troops after the tick, where the engine still lists the attack
         let mut troop_log = String::new();
         for snap in &cur.attacks {
-            let mine_bits = slots
+            // Prefer the LIVE slot for this `(owner, target)`. `slots` is never
+            // compacted, so a re-created attack leaves its dead predecessor
+            // (troops already zeroed on the death path) at a LOWER index than
+            // the live successor; matching the first slot blindly reported the
+            // dead sibling's 0x0 as a `device` value and invented a troop
+            // divergence that the simulation does not have. Matching the live
+            // slot reflects what the device is actually running.
+            //
+            // A slot that EXISTS but is dead while the engine still lists the
+            // attack is a REAL divergence (the device dropped an attack the
+            // engine kept) and must still be reported - so the dead slot's
+            // zeroed troops are used as the fallback, not dropped as a
+            // "not created yet" deferral.
+            let live = slots
                 .iter()
-                .filter(|s| s.owner == snap.owner && s.target == snap.target)
-                .map(|s| troops_after[s.idx].to_bits())
-                .next();
+                .find(|s| s.alive && s.owner == snap.owner && s.target == snap.target);
+            let mine_bits = match live {
+                Some(s) => Some(troops_after[s.idx].to_bits()),
+                None => {
+                    // No LIVE slot models this `(owner, target)`. Two very
+                    // different situations land here and they must not be
+                    // confused:
+                    //
+                    //  * the engine STARTED this attack this tick (a fresh
+                    //    attack, or a re-create whose predecessor already died)
+                    //    -> the device creates its slot in the NEXT transition
+                    //    (`init` runs at the very end of the tick that produced
+                    //    this boundary), a deferral, counted as neither. A stale
+                    //    DEAD predecessor left at a lower index by an earlier
+                    //    instance of the same `(owner, target)` must NOT be read
+                    //    as the live attack - that is the phantom `device 0x0`
+                    //    this check used to report.
+                    //
+                    //  * the device WAS modelling this attack at the start of
+                    //    the tick (`prev.attacks` lists it) but its slot is dead
+                    //    now -> the device dropped an attack the engine kept
+                    //    alive. That IS a real divergence: report it against the
+                    //    dead slot's zeroed troops.
+                    let modelled_before = prev
+                        .attacks
+                        .iter()
+                        .any(|p| p.owner == snap.owner && p.target == snap.target);
+                    if modelled_before {
+                        slots
+                            .iter()
+                            .find(|s| s.owner == snap.owner && s.target == snap.target)
+                            .map(|s| troops_after[s.idx].to_bits())
+                    } else {
+                        None
+                    }
+                }
+            };
             let Some(mine_bits) = mine_bits else {
                 // First boundary this attack appears at: the device creates it
                 // in the NEXT transition (its `init` runs at the very end of the

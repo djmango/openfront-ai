@@ -974,3 +974,983 @@ impl EngineAttack {
         a
     }
 }
+
+    // =====================================================================
+    // player-clusters pass (`engine/src/execution/player_clusters.rs`)
+    // =====================================================================
+    //
+    // `PlayerExecution::tick` (`execution/player.rs:92`) calls
+    // `maybe_remove_clusters` (`player_clusters.rs:358`) for EVERY player exec,
+    // and the player execs are ticked BEFORE the attack execs in
+    // `execute_next_tick`, so a cluster handed to a captor is already owned by
+    // the captor when that tick's attacks run. Without this pass the device's
+    // claim set is the engine's MINUS those tiles - the boundary-1667 stop at
+    // N=18/2000t (one removal in 1671 ticks, tile 141384) and the
+    // boundary-302 stop at N=488/500t (64 tiles to player 369).
+    //
+    // Run by ONE thread: the pass walks the engine's exec order and each
+    // player's border set in ORDER, and every `remove_cluster` mutates the
+    // plane in place for the players after it, exactly as the engine's
+    // `game.conquer` does. A parallel kernel would need a different order
+    // guarantee than the engine has.
+
+    /// `player_clusters.rs:8`.
+    pub const TICKS_PER_CLUSTER_CALC: u32 = 20;
+    /// Capacity of one player's border set in the cluster pass. Measured: the
+    /// engine's own `border_tiles` peaks around a few thousand on these maps.
+    pub const CB: usize = 8192;
+    /// Cluster tile storage for ONE player's pass: the clusters partition the
+    /// border set, so their tile counts sum to at most the border length.
+    pub const CS: usize = 8192;
+    /// Flood stack for the border-cluster flood (`<= CB` entries by
+    /// construction: a tile is pushed at most once).
+    pub const CSTACK: usize = 8192;
+    /// Flood stack / result buffer for `flood_owned`. Capacity is counted, not
+    /// assumed: `owned_overflow` in `CSTAT` is non-zero if any component was
+    /// larger.
+    pub const COWN: usize = 8192;
+    /// `u32` words of cluster state per player id.
+    pub const CSTATE: usize = 4;
+    /// `u32` words of cluster-pass statistics (`out`).
+    pub const CSTAT: usize = 8;
+    /// Words per removal record in the `rem` stream.
+    pub const CWR: usize = 4;
+    /// Distinct bordering enemies tracked by `get_capturing_player`.
+    pub const CNB: usize = 4096;
+    /// Capacity of the `rem` stream.
+    pub const CREM: usize = 16384;
+
+    #[inline]
+    fn cl_bit_get(v: &[u32], i: usize) -> u32 {
+        (v[i >> 5] >> (i & 31)) & 1
+    }
+
+    #[inline]
+    fn cl_bit_set(v: &mut [u32], i: usize) {
+        v[i >> 5] |= 1u32 << (i & 31);
+    }
+
+    #[inline]
+    fn cl_bit_clear(v: &mut [u32], nbits: usize) {
+        let mut i = 0usize;
+        let words = (nbits + 31) / 32;
+        while i < words {
+            v[i] = 0;
+            i += 1;
+        }
+    }
+
+    #[inline]
+    fn cl_is_land(terrain: &[u8], t: u32) -> bool {
+        terrain[t as usize] & 0x80 != 0
+    }
+
+    #[inline]
+    fn cl_is_ocean(terrain: &[u8], t: u32) -> bool {
+        terrain[t as usize] & (1 << 5) != 0
+    }
+
+    /// `map.rs:144` `is_shore` = land and shoreline.
+    #[inline]
+    fn cl_is_shore(terrain: &[u8], t: u32) -> bool {
+        let b = terrain[t as usize];
+        b & 0x80 != 0 && b & (1 << 6) != 0
+    }
+
+    /// `map.rs:282-301`. NOTE the order dependence is only on the *result*
+    /// (any ocean 4-neighbour), so W,E,N,S is equivalent here.
+    #[inline]
+    fn cl_is_ocean_shore(terrain: &[u8], w: u32, h: u32, t: u32) -> bool {
+        if !cl_is_land(terrain, t) {
+            return false;
+        }
+        let x = t % w;
+        if x > 0 && cl_is_ocean(terrain, t - 1) {
+            return true;
+        }
+        if x + 1 < w && cl_is_ocean(terrain, t + 1) {
+            return true;
+        }
+        if t >= w && cl_is_ocean(terrain, t - w) {
+            return true;
+        }
+        if t < (h - 1) * w && cl_is_ocean(terrain, t + w) {
+            return true;
+        }
+        false
+    }
+
+    /// `map.rs:303-307`.
+    #[inline]
+    fn cl_is_edge(w: u32, h: u32, t: u32) -> bool {
+        let x = t % w;
+        let y = t / w;
+        x == 0 || x + 1 == w || y == 0 || y + 1 == h
+    }
+
+    /// `map.rs:363-380` `neighbors_nswe`: north, south, west, east.
+    #[inline]
+    fn cl_neighbors4(w: u32, h: u32, t: u32, buf: &mut [u32; 4]) -> usize {
+        let x = t % w;
+        let mut n = 0usize;
+        if t >= w {
+            buf[n] = t - w;
+            n += 1;
+        }
+        if t < (h - 1) * w {
+            buf[n] = t + w;
+            n += 1;
+        }
+        if x > 0 {
+            buf[n] = t - 1;
+            n += 1;
+        }
+        if x + 1 < w {
+            buf[n] = t + 1;
+            n += 1;
+        }
+        n
+    }
+
+    /// `map.rs:251-281` `for_each_neighbor8`: NW, W, SW, N, S, NE, E, SE.
+    #[inline]
+    fn cl_neighbors8(w: u32, h: u32, t: u32, buf: &mut [u32; 8]) -> usize {
+        let x = t % w;
+        let has_n = t >= w;
+        let has_s = t < (h - 1) * w;
+        let mut n = 0usize;
+        if x > 0 {
+            if has_n {
+                buf[n] = t - 1 - w;
+                n += 1;
+            }
+            buf[n] = t - 1;
+            n += 1;
+            if has_s {
+                buf[n] = t - 1 + w;
+                n += 1;
+            }
+        }
+        if has_n {
+            buf[n] = t - w;
+            n += 1;
+        }
+        if has_s {
+            buf[n] = t + w;
+            n += 1;
+        }
+        if x + 1 < w {
+            if has_n {
+                buf[n] = t + 1 - w;
+                n += 1;
+            }
+            buf[n] = t + 1;
+            n += 1;
+            if has_s {
+                buf[n] = t + 1 + w;
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// `Game::is_friendly(a, b)` (`game.rs:3341` -> `is_friendly_ex(a,b,false)`):
+    /// `a == b`, else NOT friendly if `b` is disconnected, else same team or
+    /// allied. The pairs are PRE-COMPUTED on the host from the engine's own
+    /// `alliances`/`team`/`is_disconnected` state (the oracle's `FRIEND` rows),
+    /// so the disconnected rule and the alliance list live in exactly one place.
+    #[inline]
+    fn cl_friendly(friends: &[u32], nfriends: u32, a: u16, b: u16) -> bool {
+        if a == b {
+            return true;
+        }
+        let key = ((a as u32) << 16) | b as u32;
+        let mut i = 0u32;
+        while i < nfriends {
+            if friends[i as usize] == key {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+
+    fn cl_bbox_of(w: u32, cluster: &[u32], bb: &mut [u32; 4]) {
+        let mut min_x = u32::MAX;
+        let mut min_y = u32::MAX;
+        let mut max_x = 0u32;
+        let mut max_y = 0u32;
+        let mut i = 0usize;
+        while i < cluster.len() {
+            let t = cluster[i];
+            i += 1;
+            let x = t % w;
+            let y = t / w;
+            if x < min_x {
+                min_x = x;
+            }
+            if y < min_y {
+                min_y = y;
+            }
+            if x > max_x {
+                max_x = x;
+            }
+            if y > max_y {
+                max_y = y;
+            }
+        }
+        bb[0] = min_x;
+        bb[1] = min_y;
+        bb[2] = max_x;
+        bb[3] = max_y;
+    }
+
+    #[inline]
+    fn cl_inscribed(o: &[u32; 4], i: &[u32; 4]) -> bool {
+        o[0] <= i[0] && o[1] <= i[1] && o[2] >= i[2] && o[3] >= i[3]
+    }
+
+    /// `player_clusters.rs:93-119` `flood_border_cluster`. Marked on
+    /// DISCOVERY, not on pop (`player_clusters.rs:86-92`), and the resulting
+    /// tile order is the engine's `OrderedTiles` insertion order - it feeds
+    /// `cluster.first()` in `remove_cluster` (:334) and `get_capturing_player`'s
+    /// first-seen neighbour order (:264-280), so it is load-bearing.
+    /// `visited` is indexed by the tile's position in `border` (`t2b`), which is
+    /// equivalent to the engine's `HashSet<TileRef> visited` because every
+    /// candidate neighbour is tested with `border.contains(&n)` first.
+    #[allow(clippy::too_many_arguments)]
+    fn cl_flood_cluster(
+        w: u32,
+        h: u32,
+        border: &[u32],
+        t2b: &[u32],
+        start_pos: u32,
+        vis: &mut [u32],
+        stack: &mut [u32],
+        cbuf: &mut [u32],
+        cbase: usize,
+        slen: &mut usize,
+    ) -> usize {
+        let mut n = 0usize;
+        if cl_bit_get(vis, start_pos as usize) == 0 {
+            cl_bit_set(vis, start_pos as usize);
+            cbuf[cbase] = border[start_pos as usize];
+            n = 1;
+            stack[0] = start_pos;
+            *slen = 1;
+        }
+        while *slen > 0 {
+            *slen -= 1;
+            let p = stack[*slen];
+            let t = border[p as usize];
+            let mut nb = [0u32; 8];
+            let cnt = cl_neighbors8(w, h, t, &mut nb);
+            let mut i = 0usize;
+            while i < cnt {
+                let q = t2b[nb[i] as usize];
+                i += 1;
+                if q == u32::MAX || cl_bit_get(vis, q as usize) != 0 {
+                    continue;
+                }
+                cl_bit_set(vis, q as usize);
+                if cbase + n < CS {
+                    cbuf[cbase + n] = border[q as usize];
+                    n += 1;
+                }
+                if *slen < CSTACK {
+                    stack[*slen] = q;
+                    *slen += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// `player_clusters.rs:121-141` `calculate_clusters`. Starts are walked in
+    /// the border set's own order; `visited` is shared across starts.
+    #[allow(clippy::too_many_arguments)]
+    fn cl_calculate_clusters(
+        w: u32,
+        h: u32,
+        border: &[u32],
+        blen: usize,
+        t2b: &[u32],
+        vis: &mut [u32],
+        stack: &mut [u32],
+        cbuf: &mut [u32],
+        clen: &mut [u32],
+        coff: &mut [u32],
+        overflow: &mut u32,
+    ) -> usize {
+        cl_bit_clear(vis, blen);
+        let mut ncl = 0usize;
+        let mut cbase = 0usize;
+        let mut slen = 0usize;
+        let mut j = 0usize;
+        while j < blen {
+            if cl_bit_get(vis, j) != 0 {
+                j += 1;
+                continue;
+            }
+            let n = cl_flood_cluster(
+                w,
+                h,
+                border,
+                t2b,
+                j as u32,
+                vis,
+                stack,
+                cbuf,
+                cbase,
+                &mut slen,
+            );
+            if n > 0 {
+                if ncl >= CB || cbase + n > CS {
+                    *overflow += 1;
+                } else {
+                    clen[ncl] = n as u32;
+                    coff[ncl] = cbase as u32;
+                    ncl += 1;
+                    cbase += n;
+                }
+            }
+            j += 1;
+        }
+        ncl
+    }
+
+    /// `player_clusters.rs:143-208` `surrounded_by_same_enemy`. Returns the
+    /// enemy small id, or `u16::MAX` for the engine's `None`.
+    #[allow(clippy::too_many_arguments)]
+    fn cl_surrounded_by_same_enemy(
+        terrain: &[u8],
+        plane: &[u16],
+        w: u32,
+        h: u32,
+        friends: &[u32],
+        nfriends: u32,
+        sid: u16,
+        cluster: &[u32],
+        cbb: &[u32; 4],
+    ) -> u16 {
+        let mut enemy: u16 = u16::MAX;
+        let mut ebb = [0u32; 4];
+        let mut init = false;
+        let mut i = 0usize;
+        while i < cluster.len() {
+            let tile = cluster[i];
+            i += 1;
+            if cl_is_ocean_shore(terrain, w, h, tile) || cl_is_edge(w, h, tile) {
+                return u16::MAX;
+            }
+            let mut nb = [0u32; 4];
+            let n = cl_neighbors4(w, h, tile, &mut nb);
+            let mut j = 0usize;
+            while j < n {
+                let nt = nb[j];
+                j += 1;
+                let owner = plane[nt as usize];
+                if owner == 0 {
+                    return u16::MAX;
+                }
+                if owner == sid {
+                    continue;
+                }
+                if enemy == u16::MAX {
+                    enemy = owner;
+                } else if enemy != owner {
+                    return u16::MAX;
+                }
+                let x = nt % w;
+                let y = nt / w;
+                if !init {
+                    ebb[0] = x;
+                    ebb[1] = y;
+                    ebb[2] = x;
+                    ebb[3] = y;
+                    init = true;
+                } else {
+                    if x < ebb[0] {
+                        ebb[0] = x;
+                    }
+                    if y < ebb[1] {
+                        ebb[1] = y;
+                    }
+                    if x > ebb[2] {
+                        ebb[2] = x;
+                    }
+                    if y > ebb[3] {
+                        ebb[3] = y;
+                    }
+                }
+            }
+            if enemy == u16::MAX {
+                return u16::MAX;
+            }
+        }
+        if enemy == u16::MAX {
+            return u16::MAX;
+        }
+        if cl_friendly(friends, nfriends, enemy, sid) {
+            return u16::MAX;
+        }
+        if cl_inscribed(&ebb, cbb) {
+            enemy
+        } else {
+            u16::MAX
+        }
+    }
+
+    /// `player_clusters.rs:210-256` `is_surrounded`.
+    #[allow(clippy::too_many_arguments)]
+    fn cl_is_surrounded(
+        terrain: &[u8],
+        plane: &[u16],
+        w: u32,
+        h: u32,
+        sid: u16,
+        cluster: &[u32],
+    ) -> bool {
+        let mut has_enemy = false;
+        let mut ebb = [0u32; 4];
+        let mut init = false;
+        let mut i = 0usize;
+        while i < cluster.len() {
+            let tile = cluster[i];
+            i += 1;
+            if cl_is_shore(terrain, tile) || cl_is_edge(w, h, tile) {
+                return false;
+            }
+            let mut nb = [0u32; 4];
+            let n = cl_neighbors4(w, h, tile, &mut nb);
+            let mut j = 0usize;
+            while j < n {
+                let nt = nb[j];
+                j += 1;
+                let owner = plane[nt as usize];
+                if owner == 0 || owner == sid {
+                    continue;
+                }
+                has_enemy = true;
+                let x = nt % w;
+                let y = nt / w;
+                if !init {
+                    ebb[0] = x;
+                    ebb[1] = y;
+                    ebb[2] = x;
+                    ebb[3] = y;
+                    init = true;
+                } else {
+                    if x < ebb[0] {
+                        ebb[0] = x;
+                    }
+                    if y < ebb[1] {
+                        ebb[1] = y;
+                    }
+                    if x > ebb[2] {
+                        ebb[2] = x;
+                    }
+                    if y > ebb[3] {
+                        ebb[3] = y;
+                    }
+                }
+            }
+        }
+        if !has_enemy {
+            return false;
+        }
+        let mut cbb = [0u32; 4];
+        cl_bbox_of(w, cluster, &mut cbb);
+        cl_inscribed(&ebb, &cbb)
+    }
+
+    fn cl_flood_owned(
+        plane: &[u16],
+        w: u32,
+        h: u32,
+        sid: u16,
+        start: u32,
+        marks: &mut [u32],
+        fgen: u32,
+        stack: &mut [u32],
+        res: &mut [u32],
+    ) -> usize {
+        let mut n = 0usize;
+        let mut slen = 0usize;
+        if plane[start as usize] == sid {
+            marks[start as usize] = fgen;
+            res[0] = start;
+            n = 1;
+            stack[0] = start;
+            slen = 1;
+        }
+        while slen > 0 {
+            slen -= 1;
+            let t = stack[slen];
+            let mut nb = [0u32; 4];
+            let cnt = cl_neighbors4(w, h, t, &mut nb);
+            let mut i = 0usize;
+            while i < cnt {
+                let nt = nb[i];
+                i += 1;
+                if marks[nt as usize] == fgen || plane[nt as usize] != sid {
+                    continue;
+                }
+                marks[nt as usize] = fgen;
+                if n < COWN {
+                    res[n] = nt;
+                    n += 1;
+                }
+                if slen < COWN {
+                    stack[slen] = nt;
+                    slen += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// The whole player-clusters pass for ONE engine tick, in the engine's exec
+    /// order. `out` = `[fires, removals, border_overflow, cluster_overflow,
+    /// own_overflow, nb_overflow, rem_words, 0]`. `rem` is a flat stream of
+    /// `victim, captor, count, tile...` records the driver replays into the
+    /// captor's claim list (the engine's `owned_tiles` push order).
+    #[allow(clippy::too_many_arguments)]
+    pub fn cluster_pass_core(
+        terrain: &[u8],
+        w: u32,
+        h: u32,
+        tick: u32,
+        npl: u32,
+        order: &[u32],
+        idhash: &[u32],
+        mut cad: &mut [u32],
+        mut plane: &mut [u16],
+        mut t2b: &mut [u32],
+        mut marks: &mut [u32],
+        mut cbuf: &mut [u32],
+        mut clen: &mut [u32],
+        mut coff: &mut [u32],
+        mut vis: &mut [u32],
+        mut stack: &mut [u32],
+        mut owned: &mut [u32],
+        mut rem: &mut [u32],
+        mut out: &mut [u32],
+        oborder: &[u32],
+        obmeta: &[u32],
+        friends: &[u32],
+        nfriends: u32,
+        atk_owner: &[u16],
+        atk_target: &[u16],
+        atk_troops: &[f64],
+        natk: u32,
+        mut pst: &mut [f64],
+    ) {
+        let mut fires = 0u32;
+        let mut removals = 0u32;
+        let mut border_ovf = 0u32;
+        let mut cluster_ovf = 0u32;
+        let mut own_ovf = 0u32;
+        let mut nb_ovf = 0u32;
+        let mut rem_words = 0usize;
+        // Flood generation marks: unique per `flood_owned` call, so no clearing
+        // is needed between calls or between ticks.
+        let mut fgen: u32 = tick.wrapping_mul(1 << 16);
+
+        let mut pi = 0u32;
+        while pi < npl {
+            let sid = order[pi as usize] as u16;
+            pi += 1;
+            let cs = sid as usize * CSTATE;
+            if cad[cs + 3] == 0 {
+                continue; // `!p.alive`
+            }
+            let tiles_owned = cad[cs + 2] as i32;
+            if tiles_owned == 0 {
+                continue;
+            }
+            let mut last_calc = cad[cs];
+            if last_calc == 0 {
+                // `player_clusters.rs:375-382`.
+                last_calc = tick.wrapping_add(idhash[sid as usize] % TICKS_PER_CLUSTER_CALC);
+                cad[cs] = last_calc;
+            }
+            if tick.saturating_sub(last_calc) <= TICKS_PER_CLUSTER_CALC && tiles_owned >= 100 {
+                continue;
+            }
+            if cad[cs + 1] < last_calc {
+                continue; // `last_change < last_calc` (:387)
+            }
+            cad[cs] = tick;
+            fires += 1;
+
+            let boff = obmeta[sid as usize * 2] as usize;
+            let blen = obmeta[sid as usize * 2 + 1] as usize;
+            if blen == 0 {
+                continue;
+            }
+            if blen > CB {
+                border_ovf += 1;
+                continue;
+            }
+            let border: &[u32] = &oborder[boff..boff + blen];
+
+            // `t2b`: border tile -> position in `border` (u32::MAX = absent).
+            // Only this player's border entries are touched, and they are
+            // restored before the next player, so the array stays `u32::MAX`
+            // everywhere outside the current player's border set.
+            let mut k = 0usize;
+            while k < blen {
+                t2b[border[k] as usize] = k as u32;
+                k += 1;
+            }
+            let mut slen = 0usize;
+            let ncl = cl_calculate_clusters(
+                w,
+                h,
+                border,
+                blen,
+                t2b,
+                vis,
+                stack,
+                cbuf,
+                clen,
+                coff,
+                &mut cluster_ovf,
+            );
+            let _ = slen;
+
+            if ncl > 0 {
+                let mut largest_idx = 0usize;
+                let mut largest_size = clen[0] as usize;
+                let mut idx = 1usize;
+                while idx < ncl {
+                    let sz = clen[idx] as usize;
+                    if sz > largest_size {
+                        largest_size = sz;
+                        largest_idx = idx;
+                    }
+                    idx += 1;
+                }
+
+                let loff = coff[largest_idx] as usize;
+                let llen = clen[largest_idx] as usize;
+                let mut lbb = [0u32; 4];
+                cl_bbox_of(w, &cbuf[loff..loff + llen], &mut lbb);
+                let hit = cl_surrounded_by_same_enemy(
+                    terrain,
+                    plane,
+                    w,
+                    h,
+                    friends,
+                    nfriends,
+                    sid,
+                    &cbuf[loff..loff + llen],
+                    &lbb,
+                );
+                if hit != u16::MAX {
+                    // --- remove_cluster (:325-356) for the largest cluster ---
+                    let cluster = &cbuf[loff..loff + llen];
+                    // `:326-330`: every cluster tile must still be the victim's.
+                    let mut ok = true;
+                    let mut q = 0usize;
+                    while q < llen {
+                        if plane[cluster[q] as usize] != sid {
+                            ok = false;
+                            break;
+                        }
+                        q += 1;
+                    }
+                    if ok {
+                        // --- get_capturing_player (:258-298) ---
+                        let mut nbsid = [0u16; CNB];
+                        let mut nbcount = [0u32; CNB];
+                        let mut nnb = 0usize;
+                        let mut q = 0usize;
+                        while q < llen {
+                            let mut nb = [0u32; 4];
+                            let nn = cl_neighbors4(w, h, cluster[q], &mut nb);
+                            q += 1;
+                            let mut j = 0usize;
+                            while j < nn {
+                                let owner = plane[nb[j] as usize];
+                                j += 1;
+                                if owner == 0 || owner == sid {
+                                    continue;
+                                }
+                                if cl_friendly(friends, nfriends, owner, sid) {
+                                    continue;
+                                }
+                                let mut f = 0usize;
+                                while f < nnb {
+                                    if nbsid[f] == owner {
+                                        nbcount[f] += 1;
+                                        break;
+                                    }
+                                    f += 1;
+                                }
+                                if f == nnb {
+                                    if nnb < CNB {
+                                        nbsid[nnb] = owner;
+                                        nbcount[nnb] = 1;
+                                        nnb += 1;
+                                    } else {
+                                        nb_ovf += 1;
+                                    }
+                                }
+                            }
+                        }
+                        if nnb > 0 {
+                            // `largest_incoming_land_attack_from_neighbors`
+                            // (`game.rs:2235-2264`): outer loop over the
+                            // first-seen neighbour order, inner over `execs`;
+                            // strictly-greater keeps the EARLIEST on ties.
+                            let mut largest = 0.0f64;
+                            let mut captor: u16 = u16::MAX;
+                            let mut a = 0usize;
+                            while a < nnb {
+                                let who = nbsid[a];
+                                a += 1;
+                                let mut e = 0u32;
+                                while e < natk {
+                                    if atk_owner[e as usize] == who
+                                        && atk_target[e as usize] == sid
+                                        && atk_troops[e as usize] > largest
+                                    {
+                                        largest = atk_troops[e as usize];
+                                        captor = who;
+                                    }
+                                    e += 1;
+                                }
+                            }
+                            if captor == u16::MAX {
+                                // TS `getMode`: first neighbour with strictly
+                                // greatest count.
+                                let mut best: u16 = u16::MAX;
+                                let mut bestc = 0u32;
+                                let mut a = 0usize;
+                                while a < nnb {
+                                    if best == u16::MAX || nbcount[a] > bestc {
+                                        best = nbsid[a];
+                                        bestc = nbcount[a];
+                                    }
+                                    a += 1;
+                                }
+                                captor = best;
+                            }
+                            if captor != u16::MAX {
+                                fgen = fgen.wrapping_add(1);
+                                let first = cluster[0];
+                                let nown = cl_flood_owned(
+                                    plane,
+                                    w,
+                                    h,
+                                    sid,
+                                    first,
+                                    marks,
+                                    fgen,
+                                    stack,
+                                    owned,
+                                );
+                                if nown >= COWN {
+                                    own_ovf += 1;
+                                }
+                                // Wipe-all reaches `Game::conquer_player`
+                                // (`game.rs:1177`): ship transfer only for a
+                                // disconnected SAME-TEAM conqueror, plus a gold
+                                // transfer. The device models no units and the
+                                // harness compares no gold, so the plane effect
+                                // (none) is what is ported.
+                                if rem_words + CWR + nown <= CREM {
+                                    rem[rem_words] = sid as u32;
+                                    rem[rem_words + 1] = captor as u32;
+                                    rem[rem_words + 2] = nown as u32;
+                                    let mut q = 0usize;
+                                    while q < nown {
+                                        rem[rem_words + 3 + q] = owned[q];
+                                        q += 1;
+                                    }
+                                    rem_words += CWR + nown;
+                                    removals += 1;
+                                }
+                                // `game.conquer(captor, t)` for each tile, in
+                                // the flood's insertion order.
+                                let mut q = 0usize;
+                                while q < nown {
+                                    let t = owned[q];
+                                    q += 1;
+                                    plane[t as usize] = captor;
+                                    marks[t as usize] = 0; // no longer the victim's
+                                    if (sid as usize) * 3 + 1 < pst.len() {
+                                        pst[sid as usize * 3 + 1] -= 1.0;
+                                    }
+                                    if (captor as usize) * 3 + 1 < pst.len() {
+                                        pst[captor as usize * 3 + 1] += 1.0;
+                                    }
+                                }
+                                cad[sid as usize * CSTATE + 1] = tick;
+                                cad[sid as usize * CSTATE + 2] = (tiles_owned - nown as i32).max(0) as u32;
+                                cad[captor as usize * CSTATE + 1] = tick;
+                                cad[captor as usize * CSTATE + 2] += nown as u32;
+                            }
+                        }
+                    }
+                }
+
+                // --- every other cluster, in order (:421-428) ---
+                let mut idx = 0usize;
+                while idx < ncl {
+                    if idx != largest_idx {
+                        let o0 = coff[idx] as usize;
+                        let n0 = clen[idx] as usize;
+                        let cluster = &cbuf[o0..o0 + n0];
+                        if cl_is_surrounded(terrain, plane, w, h, sid, cluster) {
+                            let mut ok = true;
+                            let mut q = 0usize;
+                            while q < n0 {
+                                if plane[cluster[q] as usize] != sid {
+                                    ok = false;
+                                    break;
+                                }
+                                q += 1;
+                            }
+                            if ok {
+                                let mut nbsid = [0u16; CNB];
+                                let mut nbcount = [0u32; CNB];
+                                let mut nnb = 0usize;
+                                let mut q = 0usize;
+                                while q < n0 {
+                                    let mut nb = [0u32; 4];
+                                    let nn = cl_neighbors4(w, h, cluster[q], &mut nb);
+                                    q += 1;
+                                    let mut j = 0usize;
+                                    while j < nn {
+                                        let owner = plane[nb[j] as usize];
+                                        j += 1;
+                                        if owner == 0 || owner == sid {
+                                            continue;
+                                        }
+                                        if cl_friendly(friends, nfriends, owner, sid) {
+                                            continue;
+                                        }
+                                        let mut f = 0usize;
+                                        while f < nnb {
+                                            if nbsid[f] == owner {
+                                                nbcount[f] += 1;
+                                                break;
+                                            }
+                                            f += 1;
+                                        }
+                                        if f == nnb {
+                                            if nnb < CNB {
+                                                nbsid[nnb] = owner;
+                                                nbcount[nnb] = 1;
+                                                nnb += 1;
+                                            } else {
+                                                nb_ovf += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                                if nnb > 0 {
+                                    let mut largest = 0.0f64;
+                                    let mut captor: u16 = u16::MAX;
+                                    let mut a = 0usize;
+                                    while a < nnb {
+                                        let who = nbsid[a];
+                                        a += 1;
+                                        let mut e = 0u32;
+                                        while e < natk {
+                                            if atk_owner[e as usize] == who
+                                                && atk_target[e as usize] == sid
+                                                && atk_troops[e as usize] > largest
+                                            {
+                                                largest = atk_troops[e as usize];
+                                                captor = who;
+                                            }
+                                            e += 1;
+                                        }
+                                    }
+                                    if captor == u16::MAX {
+                                        let mut best: u16 = u16::MAX;
+                                        let mut bestc = 0u32;
+                                        let mut a = 0usize;
+                                        while a < nnb {
+                                            if best == u16::MAX || nbcount[a] > bestc {
+                                                best = nbsid[a];
+                                                bestc = nbcount[a];
+                                            }
+                                            a += 1;
+                                        }
+                                        captor = best;
+                                    }
+                                    if captor != u16::MAX {
+                                        fgen = fgen.wrapping_add(1);
+                                        let nown = cl_flood_owned(
+                                            plane,
+                                            w,
+                                            h,
+                                            sid,
+                                            cluster[0],
+                                            marks,
+                                            fgen,
+                                            stack,
+                                            owned,
+                                        );
+                                        if nown >= COWN {
+                                            own_ovf += 1;
+                                        }
+                                        if rem_words + CWR + nown <= CREM {
+                                            rem[rem_words] = sid as u32;
+                                            rem[rem_words + 1] = captor as u32;
+                                            rem[rem_words + 2] = nown as u32;
+                                            let mut q = 0usize;
+                                            while q < nown {
+                                                rem[rem_words + 3 + q] = owned[q];
+                                                q += 1;
+                                            }
+                                            rem_words += CWR + nown;
+                                            removals += 1;
+                                        }
+                                        let mut q = 0usize;
+                                        while q < nown {
+                                            let t = owned[q];
+                                            q += 1;
+                                            plane[t as usize] = captor;
+                                            marks[t as usize] = 0;
+                                            if (sid as usize) * 3 + 1 < pst.len() {
+                                                pst[sid as usize * 3 + 1] -= 1.0;
+                                            }
+                                            if (captor as usize) * 3 + 1 < pst.len() {
+                                                pst[captor as usize * 3 + 1] += 1.0;
+                                            }
+                                        }
+                                        cad[sid as usize * CSTATE + 1] = tick;
+                                        cad[sid as usize * CSTATE + 2] = (tiles_owned - nown as i32).max(0) as u32;
+                                        cad[captor as usize * CSTATE + 1] = tick;
+                                        cad[captor as usize * CSTATE + 2] += nown as u32;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    idx += 1;
+                }
+            }
+
+            let mut k = 0usize;
+            while k < blen {
+                t2b[border[k] as usize] = u32::MAX;
+                k += 1;
+            }
+        }
+
+        out[0] = fires;
+        out[1] = removals;
+        out[2] = border_ovf;
+        out[3] = cluster_ovf;
+        out[4] = own_ovf;
+        out[5] = nb_ovf;
+        out[6] = rem_words as u32;
+        out[7] = 0;
+    }
