@@ -92,6 +92,10 @@ const CC: usize = 8192;
 const MAXC: usize = 2048;
 /// Capacity of the per-env owner-border (refresh input) copy.
 const OB: usize = 16384;
+/// Live-attack SLOTS per env in the multi-attack path. One env is a whole
+/// game, so it holds a SET of live attacks; the device carries one slot's
+/// worth of attack state per `(env, slot)` instead of one per env.
+const SLOTS: usize = 8;
 /// Scalars per environment in the `scal` buffer.
 const SCAL: usize = 9;
 /// Threads per block for `env_step`.
@@ -443,6 +447,115 @@ mod kernels {
         while j < 5 {
             prng[pse + j] = pw[j];
             j += 1;
+        }
+    }
+
+    /// MULTI-ATTACK: one thread per env, looping every live SLOT that env holds.
+    /// Slots are ticked in creation order and each slot's conquests are written
+    /// into the SHARED per-env plane in place, so a later slot in the same tick
+    /// sees the earlier slot's claims - the engine's own exec order. Slots are
+    /// otherwise independent (own heap, border, PRNG stream and troop count).
+    /// One launch ticks a whole set for every env; no host round-trip, and
+    /// nothing here reads an oracle after setup.
+    #[kernel]
+    #[launch_bounds(256)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn env_step_multi(
+        terrain: &[u8],
+        w: u32,
+        h: u32,
+        tick: u32,
+        n_envs: u32,
+        n_slots: u32,
+        mut plane: &mut [u16],
+        mut mheap_tiles: &mut [u32],
+        mut mheap_pri: &mut [f32],
+        mut mborder: &mut [u32],
+        mut mclaims: &mut [u32],
+        mut mprng: &mut [u32],
+        mut mtroops: &mut [f64],
+        mut mscal: &mut [u32],
+        mowner: &[u16],
+        misbot: &[u32],
+        moborder: &[u32],
+        mut cad: &mut [u32],
+    ) {
+        let e = thread::index_1d().get();
+        if e >= n_envs as usize {
+            return;
+        }
+        let wh = (w as usize) * (h as usize);
+        let poff = e * wh;
+        let cspan = CCOLS * CSTATE;
+        let slots = n_slots as usize;
+        let mut s = 0usize;
+        while s < slots {
+            let g = e * slots + s;
+            let soff = g * SCAL;
+            mscal[soff + 3] = 0; // this slot's claim count for this tick
+            if mscal[soff + 5] == 0 {
+                s += 1;
+                continue; // dead slot: it ticks once and draws nothing
+            }
+            let owner_col = mowner[g];
+            let is_bot = misbot[g];
+            let hoff = g * HEAP_CAP;
+            let mut hl = mscal[soff] as usize;
+            if hl > HEAP_CAP {
+                hl = HEAP_CAP;
+            }
+            let mut heap = Heap::new();
+            heap.load(&mheap_tiles[hoff..hoff + hl], &mheap_pri[hoff..hoff + hl]);
+            let pse = g * 5;
+            let mut pr = Prng::from_state(&mprng[pse..pse + 5]);
+            let mut troop_count = mtroops[g];
+            let boff = g * BC;
+            let mut blen = mscal[soff + 1] as usize;
+            if blen > BC {
+                blen = BC;
+            }
+            let coff = g * CC;
+            let mut ncl = mscal[soff + 2] as usize;
+            if ncl > CC {
+                ncl = CC;
+            }
+            let mut drops = mscal[soff + 6];
+            let oboff = g * OB;
+            let mut obn = mscal[soff + 8] as usize;
+            if obn > OB {
+                obn = OB;
+            }
+            let alive = {
+                let psub = &mut plane[poff..poff + wh];
+                let bsub = &mut mborder[boff..boff + BC];
+                let cadsub = &mut cad[e * cspan..(e + 1) * cspan];
+                tick_once(
+                    &mut heap, &mut pr, &mut troop_count, bsub, &mut blen, psub, mclaims, coff,
+                    &mut ncl, &mut drops, terrain, w, h, tick, owner_col, is_bot, moborder,
+                    oboff, obn, cadsub,
+                )
+            };
+            mscal[soff + 3] = 1;
+            mscal[soff] = heap.len as u32;
+            mscal[soff + 1] = blen as u32;
+            mscal[soff + 2] = ncl as u32;
+            mtroops[g] = troop_count;
+            mscal[soff + 5] = if alive { 1 } else { 0 };
+            mscal[soff + 6] = drops;
+            let mut j = 0usize;
+            while j < heap.len {
+                mheap_tiles[hoff + j] = heap.tiles[j];
+                mheap_pri[hoff + j] = heap.pri[j];
+                j += 1;
+            }
+            let mut pw = [0u32; 5];
+            pr.state_words(&mut pw);
+            let mut j = 0usize;
+            while j < 5 {
+                mprng[pse + j] = pw[j];
+                j += 1;
+            }
+            s += 1;
         }
     }
 
@@ -1001,6 +1114,25 @@ mod kernels {
 // The environment: one real attack reconstructed from the record
 // ---------------------------------------------------------------------------
 
+/// One live attack inside a multi-attack env: the per-`(env, slot)` device
+/// state. Same fields the single-attack env carried per ENV, now per SLOT.
+#[derive(Clone)]
+struct AttackState {
+    owner_sid: u16,
+    target_sid: u16,
+    is_bot: bool,
+    troops: f64,
+    heap_tiles: Vec<u32>,
+    heap_pri: Vec<f32>,
+    heap_len: usize,
+    prng: [u32; 5],
+    border: Vec<u32>,
+    oborder: Vec<u32>,
+    claims: Vec<u32>,
+    alive: bool,
+}
+
+#[derive(Clone)]
 struct EnvState {
     w: u32,
     h: u32,
@@ -1022,6 +1154,11 @@ struct EnvState {
     oborder: Vec<u32>,
     claims: Vec<u32>,
     alive: bool,
+    /// The SET of live attacks this env's game starts from. The single-attacker
+    /// fields above are `attacks[0]` (kept so the one-attack parity selftest
+    /// runs on exactly the code path it always did); the multi-attack path
+    /// drives every element of this vector.
+    attacks: Vec<AttackState>,
 }
 
 /// Reconstruct the attack the record says is live at `s`, exactly as the
@@ -1069,6 +1206,59 @@ fn build_env_at(
 
     let mut prng = [0u32; 5];
     atk.pr.state_words(&mut prng);
+
+    // ---- the SET of live attacks (one env = one whole game) ----------------
+    // Every live land attack at `s`, each reconstructed exactly like the chosen
+    // one is: computed float start troops, then `refresh_to_conquer` over ITS
+    // owner's border at `s` with the plane of `s`, stamped `s-1`. This reads
+    // the record at `s` and `s-1` ONLY - initial condition, never a per-tick
+    // input. Attacks that are not a fresh creation (their recorded `troops`
+    // disagrees with the computed start, i.e. a merge or an older attack whose
+    // heap has already evolved) are flagged and dropped from the set: their
+    // exact heap/PRNG at `s` is not recoverable from the record at `s` alone,
+    // so seeding them would be a guess, not a reconstruction.
+    let mut set: Vec<AttackState> = Vec::new();
+    for (ti, a) in attacks.iter().enumerate() {
+        if !a.live || a.target != 0 {
+            continue;
+        }
+        let Some(api) = ex.p.get(&(s - 1)).and_then(|m| m.get(&a.owner)) else {
+            continue;
+        };
+        let aratios = tribe_ratios(&api.id);
+        let arow = econ_row(s - 1, api.troops, api.tiles, 0, api.gold, api.ptype as u32);
+        let Some(astart) = land_attack_start_troops(&arow, aratios.expand_ratio) else {
+            continue;
+        };
+        if astart as i64 != a.troops {
+            continue; // not a fresh non-merged creation at `s`
+        }
+        let aoborder = ps
+            .values()
+            .find(|p| p.small_id == a.owner as u32)
+            .map(|p| p.border_order.clone())
+            .unwrap_or_default();
+        let mut aatk = Attack::new(a.owner, 0, api.ptype == ofcuda_econ::core_impl::PT_BOT as u8, astart, ofcuda_tick::SEED);
+        aatk.refresh(&aoborder, &plane, terrain, w, h, s - 1);
+        let mut aprng = [0u32; 5];
+        aatk.pr.state_words(&mut aprng);
+        set.push(AttackState {
+            owner_sid: a.owner,
+            target_sid: 0,
+            is_bot: api.ptype == ofcuda_econ::core_impl::PT_BOT as u8,
+            troops: aatk.troops,
+            heap_tiles: aatk.heap.tiles[..aatk.heap.len].to_vec(),
+            heap_pri: aatk.heap.pri[..aatk.heap.len].to_vec(),
+            heap_len: aatk.heap.len,
+            prng: aprng,
+            border: aatk.border.clone(),
+            oborder: aoborder,
+            claims: aatk.claims.clone(),
+            alive: aatk.attack_live,
+        });
+        let _ = ti;
+    }
+
     Ok(EnvState {
         w,
         h,
@@ -1088,6 +1278,7 @@ fn build_env_at(
         oborder,
         claims: atk.claims.clone(),
         alive: atk.attack_live,
+        attacks: set,
     })
 }
 
@@ -1686,6 +1877,9 @@ struct Args {
     /// `--originate`: the env crate originates an attack on the device from
     /// the moved bot AI (see `originate_demo`).
     originate: bool,
+    /// `--multi`: the whole-game path - one env holds a SET of live attacks and
+    /// runs with no oracle after setup (see `run_multi_demo`).
+    multi: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -1702,6 +1896,7 @@ fn parse_args() -> Result<Args, String> {
         dump_states: false,
         no_clusters: false,
         originate: false,
+        multi: false,
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -1763,6 +1958,10 @@ fn parse_args() -> Result<Args, String> {
                 a.originate = true;
                 i += 1;
             }
+            "--multi" => {
+                a.multi = true;
+                i += 1;
+            }
             o => return Err(format!("unknown arg {o}").into()),
         }
     }
@@ -1806,6 +2005,9 @@ fn find_t0(
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let a = parse_args()?;
+    if a.multi {
+        return run_multi_demo(&a);
+    }
     let map = ofcuda_tick::load_map(&a.map)?;
     let (w, h) = (map.width, map.height);
     let terrain = map.terrain.clone();
@@ -2226,7 +2428,558 @@ fn env0_copy(e: &EnvState) -> Result<EnvState, String> {
         oborder: e.oborder.clone(),
         claims: e.claims.clone(),
         alive: e.alive,
+        attacks: e.attacks.clone(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// The multi-attack batch: one env = a whole game with a SET of live attacks
+// ---------------------------------------------------------------------------
+
+struct MultiBatch {
+    d_plane: DeviceBuffer<u16>,
+    d_terrain: DeviceBuffer<u8>,
+    d_mheap_tiles: DeviceBuffer<u32>,
+    d_mheap_pri: DeviceBuffer<f32>,
+    d_mborder: DeviceBuffer<u32>,
+    d_mclaims: DeviceBuffer<u32>,
+    d_mprng: DeviceBuffer<u32>,
+    d_mtroops: DeviceBuffer<f64>,
+    d_mscal: DeviceBuffer<u32>,
+    d_mowner: DeviceBuffer<u16>,
+    d_misbot: DeviceBuffer<u32>,
+    d_moborder: DeviceBuffer<u32>,
+    d_cad: DeviceBuffer<u32>,
+    n: usize,
+    slots: usize,
+    wh: usize,
+    w: u32,
+    h: u32,
+    /// Total bytes held on the device by this batch (all buffers).
+    bytes: usize,
+}
+
+impl MultiBatch {
+    fn new(
+        ctx: &std::sync::Arc<CudaContext>,
+        module: &kernels::LoadedModule,
+        envs: &[EnvState],
+        n: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let stream = ctx.default_stream();
+        let w = envs[0].w;
+        let h = envs[0].h;
+        let wh = (w as usize) * (h as usize);
+        let mut d_plane = DeviceBuffer::<u16>::zeroed(&stream, n * wh)?;
+        let d_tmpl = DeviceBuffer::<u16>::from_host(&stream, &envs[0].plane)?;
+        unsafe {
+            module.plane_fill(
+                &stream,
+                cfg_for_block_from_total(n * wh, 256),
+                &d_tmpl,
+                wh as u32,
+                n as u32,
+                &mut d_plane,
+            )?;
+        }
+        let g = n * SLOTS;
+        let mut mscal = vec![0u32; g * SCAL];
+        let mut mtroops = vec![0f64; g];
+        let mut mowner = vec![0u16; g];
+        let mut misbot = vec![0u32; g];
+        let mut prng = vec![0u32; g * 5];
+        let mut heap_tiles = vec![0u32; g * HEAP_CAP];
+        let mut heap_pri = vec![0f32; g * HEAP_CAP];
+        let mut border = vec![0u32; g * BC];
+        let mut claims = vec![0u32; g * CC];
+        let mut oborder = vec![0u32; g * OB];
+        let cspan = CCOLS * kernels::CSTATE;
+        let mut cad = vec![0u32; n * cspan];
+        for e in 0..n {
+            let env = &envs[if envs.len() == 1 { 0 } else { e }];
+            let sid = env.owner_sid as usize;
+            if sid < CCOLS {
+                let co = e * cspan + sid * kernels::CSTATE;
+                cad[co + 1] = env.tick0; // last_tile_change: the plane IS tick t0
+                cad[co + 2] = env.plane.iter().filter(|v| **v == env.owner_col).count() as u32;
+                cad[co + 3] = 1;
+            }
+            for (si, a) in env.attacks.iter().enumerate() {
+                if si >= SLOTS {
+                    break;
+                }
+                let gi = e * SLOTS + si;
+                let so = gi * SCAL;
+                mowner[gi] = a.owner_sid;
+                misbot[gi] = if a.is_bot { 1 } else { 0 };
+                mtroops[gi] = a.troops;
+                mscal[so] = a.heap_len as u32;
+                mscal[so + 1] = a.border.len() as u32;
+                mscal[so + 2] = a.claims.len() as u32;
+                mscal[so + 5] = if a.alive { 1 } else { 0 };
+                let on = a.oborder.len().min(OB);
+                mscal[so + 8] = on as u32;
+                prng[gi * 5..gi * 5 + 5].copy_from_slice(&a.prng);
+                heap_tiles[gi * HEAP_CAP..gi * HEAP_CAP + a.heap_len]
+                    .copy_from_slice(&a.heap_tiles[..a.heap_len]);
+                heap_pri[gi * HEAP_CAP..gi * HEAP_CAP + a.heap_len]
+                    .copy_from_slice(&a.heap_pri[..a.heap_len]);
+                border[gi * BC..gi * BC + a.border.len()].copy_from_slice(&a.border);
+                claims[gi * CC..gi * CC + a.claims.len()].copy_from_slice(&a.claims);
+                oborder[gi * OB..gi * OB + on].copy_from_slice(&a.oborder[..on]);
+            }
+        }
+        let bytes = n * wh * 2
+            + g * HEAP_CAP * 4
+            + g * HEAP_CAP * 4
+            + g * BC * 4
+            + g * CC * 4
+            + g * 5 * 4
+            + g * 8
+            + g * SCAL * 4
+            + g * 2
+            + g * 4
+            + g * OB * 4
+            + n * cspan * 4;
+        Ok(MultiBatch {
+            d_plane,
+            d_terrain: DeviceBuffer::from_host(&stream, &envs[0].terrain)?,
+            d_mheap_tiles: DeviceBuffer::from_host(&stream, &heap_tiles)?,
+            d_mheap_pri: DeviceBuffer::from_host(&stream, &heap_pri)?,
+            d_mborder: DeviceBuffer::from_host(&stream, &border)?,
+            d_mclaims: DeviceBuffer::from_host(&stream, &claims)?,
+            d_mprng: DeviceBuffer::from_host(&stream, &prng)?,
+            d_mtroops: DeviceBuffer::from_host(&stream, &mtroops)?,
+            d_mscal: DeviceBuffer::from_host(&stream, &mscal)?,
+            d_mowner: DeviceBuffer::from_host(&stream, &mowner)?,
+            d_misbot: DeviceBuffer::from_host(&stream, &misbot)?,
+            d_moborder: DeviceBuffer::from_host(&stream, &oborder)?,
+            d_cad: DeviceBuffer::from_host(&stream, &cad)?,
+            n,
+            slots: SLOTS,
+            wh,
+            w,
+            h,
+            bytes,
+        })
+    }
+}
+
+/// The engine's plane hash at a tick, straight from the record: the plane is
+/// rebuilt from the per-player `ownedTiles` the record carries at that tick.
+fn engine_hash_at(dump: &ofcuda_tick::Dump, w: u32, h: u32, t: u32) -> Option<u64> {
+    let ps = dump.get(&t)?;
+    let players: Vec<(u32, Vec<u32>)> = ps
+        .values()
+        .map(|p| (p.small_id, p.owned_tiles.clone()))
+        .collect();
+    Some(state_hash(&ofcuda_env::state_plane(&players, w, h)))
+}
+
+/// One batched multi-attack run with NO oracle: every tick is one device launch
+/// of `env_step_multi` over the whole set. In verify mode the per-env plane
+/// hash is read back after each tick and compared against the record's plane
+/// for that tick - the ONLY place the record is touched after setup, and it is
+/// never fed back into the simulation.
+#[allow(clippy::too_many_arguments)]
+fn run_multi(
+    ctx: &std::sync::Arc<CudaContext>,
+    module: &kernels::LoadedModule,
+    b: &mut MultiBatch,
+    env: &EnvState,
+    ticks: u32,
+    base_tick: u32,
+    verify: bool,
+) -> Result<(f64, Vec<u64>, Vec<u32>, usize), Box<dyn std::error::Error>> {
+    let stream = ctx.default_stream();
+    let n = b.n;
+    let cfg = cfg_for(n);
+    let hcfg = cfg_hash(n);
+    let mut d_hashes = DeviceBuffer::<u64>::zeroed(&stream, n.max(1))?;
+    stream.synchronize()?;
+    let t0 = Instant::now();
+    let mut hashes = Vec::new();
+    for k in 0..ticks {
+        unsafe {
+            module.env_step_multi(
+                &stream,
+                cfg,
+                &b.d_terrain,
+                b.w,
+                b.h,
+                base_tick + k,
+                n as u32,
+                b.slots as u32,
+                &mut b.d_plane,
+                &mut b.d_mheap_tiles,
+                &mut b.d_mheap_pri,
+                &mut b.d_mborder,
+                &mut b.d_mclaims,
+                &mut b.d_mprng,
+                &mut b.d_mtroops,
+                &mut b.d_mscal,
+                &b.d_mowner,
+                &b.d_misbot,
+                &b.d_moborder,
+                &mut b.d_cad,
+            )?;
+        }
+        if verify {
+            unsafe {
+                module.env_hash(&stream, hcfg, &b.d_plane, b.wh as u32, n as u32, 0, &mut d_hashes)?;
+            }
+            hashes.push(d_hashes.to_host_vec(&stream)?[0]);
+        }
+    }
+    stream.synchronize()?;
+    let wall_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let scal = b.d_mscal.to_host_vec(&stream)?;
+    let mut live = 0usize;
+    let mut drops = 0u32;
+    for e in 0..n {
+        for s in 0..b.slots {
+            let so = (e * b.slots + s) * SCAL;
+            if scal[so + 5] != 0 {
+                live += 1;
+            }
+            drops += scal[so + 6];
+        }
+    }
+    let _ = env;
+    Ok((wall_ms, hashes, scal, live))
+}
+
+/// The tick at which `owner`'s land attack that is live at `s` was born: the
+/// earliest tick of the contiguous run of live-ness that ends at `s`.
+/// `(owner, target)` is an identity key because the engine merges two live
+/// attacks between the same pair, so at most one exists at a time.
+fn attack_birth(ex: &extras::Extra, owner: u16, s: u32, back: u32) -> u32 {
+    let mut b = s;
+    let lo = s.saturating_sub(back);
+    while b > lo {
+        let t = b - 1;
+        let live = ex
+            .attacks
+            .get(&t)
+            .map(|v| v.iter().any(|a| a.owner == owner && a.target == 0 && a.live))
+            .unwrap_or(false);
+        if !live {
+            break;
+        }
+        b = t;
+    }
+    b
+}
+
+/// The record's plane at tick `t`, cached: rebuilding a plane is O(tiles) and
+/// a replay needs one per tick of the attack's life.
+fn plane_at(
+    dump: &ofcuda_tick::Dump,
+    w: u32,
+    h: u32,
+    t: u32,
+    cache: &mut std::collections::HashMap<u32, Vec<u16>>,
+) -> Option<Vec<u16>> {
+    if let Some(p) = cache.get(&t) {
+        return Some(p.clone());
+    }
+    let ps = dump.get(&t)?;
+    let players: Vec<(u32, Vec<u32>)> = ps
+        .values()
+        .map(|p| (p.small_id, p.owned_tiles.clone()))
+        .collect();
+    let p = ofcuda_env::state_plane(&players, w, h);
+    cache.insert(t, p.clone());
+    Some(p)
+}
+
+/// `owner`'s `border_tiles` at tick `t` - the input to a mid-tick
+/// `refresh_to_conquer`.
+fn owner_border(
+    dump: &ofcuda_tick::Dump,
+    owner: u16,
+    t: u32,
+) -> Option<Vec<u32>> {
+    dump.get(&t)?
+        .values()
+        .find(|p| p.small_id == owner as u32)
+        .map(|p| p.border_order.clone())
+}
+
+/// Reconstruct ONE live attack exactly, at tick `s`, from the record alone:
+/// find its birth tick, create it the way the engine's creation path does
+/// (`refresh_to_conquer` over the owner's border with the plane of the birth
+/// tick, stamped `birth-1`), then replay it tick by tick up to `s` feeding it
+/// the RECORD's plane for each of those pre-`s` ticks. Every input is a tick
+/// `< s`, so the result is the initial condition at `s` - not per-tick input.
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_attack(
+    dump: &ofcuda_tick::Dump,
+    ex: &extras::Extra,
+    w: u32,
+    h: u32,
+    terrain: &[u8],
+    owner: u16,
+    s: u32,
+    cache: &mut std::collections::HashMap<u32, Vec<u16>>,
+) -> Option<AttackState> {
+    let b = attack_birth(ex, owner, s, 4096);
+    let pi = ex.p.get(&(b - 1)).and_then(|m| m.get(&owner))?;
+    let ratios = tribe_ratios(&pi.id);
+    let row = econ_row(b - 1, pi.troops, pi.tiles, 0, pi.gold, pi.ptype as u32);
+    let start = land_attack_start_troops(&row, ratios.expand_ratio)?;
+    let is_bot = pi.ptype == ofcuda_econ::core_impl::PT_BOT as u8;
+    let ob_b = owner_border(dump, owner, b)?;
+    let p_b = plane_at(dump, w, h, b, cache)?;
+    let mut atk = Attack::new(owner, 0, is_bot, start, ofcuda_tick::SEED);
+    atk.refresh(&ob_b, &p_b, terrain, w, h, b - 1);
+    for t in b..s {
+        let pt = plane_at(dump, w, h, t, cache)?;
+        let obt = owner_border(dump, owner, t)?;
+        let _ = atk.tick(&pt, terrain, w, h, t, &obt, 0.0, false);
+    }
+    let oborder = owner_border(dump, owner, s).unwrap_or_default();
+    let mut prng = [0u32; 5];
+    atk.pr.state_words(&mut prng);
+    Some(AttackState {
+        owner_sid: owner,
+        target_sid: 0,
+        is_bot,
+        troops: atk.troops,
+        heap_tiles: atk.heap.tiles[..atk.heap.len].to_vec(),
+        heap_pri: atk.heap.pri[..atk.heap.len].to_vec(),
+        heap_len: atk.heap.len,
+        prng,
+        border: atk.border.clone(),
+        oborder,
+        claims: atk.claims.clone(),
+        alive: atk.attack_live,
+    })
+}
+
+/// `--multi`: the whole-game path. Builds the env at `t0` with its SET of live
+/// attacks, ticks it on the device with NO oracle after setup, and reports how
+/// many ticks the device plane matched the engine's plane at that tick.
+fn run_multi_demo(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    let map = ofcuda_tick::load_map(&a.map)?;
+    let (w, h) = (map.width, map.height);
+    let terrain = map.terrain.clone();
+    let dump = ofcuda_tick::parse_dump(&a.dump)?;
+    let ex = extras(&a.dump)?;
+
+    // Pick the boundary whose live land-attack SET is ENTIRELY fresh
+    // creations: every live land attack's recorded `troops` equals the start the
+    // engine's own creation path computes (`floor(land_attack_start_troops) ==
+    // record troops`). At such a boundary the record IS the device's initial
+    // condition - each live attack is exactly `Attack::new(start)` +
+    // `refresh_to_conquer` over its owner's border at that plane - so NO attack
+    // needs replaying from a record. This is the one honest way to seed a
+    // whole-game env from a record: a mid-flight attack's carried heap/PRNG
+    // cannot be reconstructed from a record at all (README section 5, and
+    // measured: replaying owner 1 at t=613 yields `troops=0` because the engine
+    // re-created that attack's exec).
+    //
+    // Availability, not preference: `ofcuda_env` has no bot-origination
+    // schedule wired into the device loop yet, so a run can only be exact while
+    // it does not need to originate - i.e. until the engine's next creation.
+    let mut best_t: Option<u32> = None;
+    let mut best_n = 0usize;
+    let mut best_live = 0usize;
+    for t in a.t0..a.t0 + 400 {
+        let Some(list) = ex.attacks.get(&t) else {
+            continue;
+        };
+        let live: Vec<&extras::AttRec> = list
+            .iter()
+            .filter(|x| x.live && x.target == 0)
+            .collect();
+        if live.is_empty() || dump.get(&(t - 1)).is_none() {
+            continue;
+        }
+        let mut fresh = 0usize;
+        for att in &live {
+            let Some(api) = ex.p.get(&(t - 1)).and_then(|m| m.get(&att.owner)) else {
+                continue;
+            };
+            let ratios = tribe_ratios(&api.id);
+            let row = econ_row(t - 1, api.troops, api.tiles, 0, api.gold, api.ptype as u32);
+            let Some(start) = land_attack_start_troops(&row, ratios.expand_ratio) else {
+                continue;
+            };
+            if start.floor() as i64 == att.troops {
+                fresh += 1;
+            }
+        }
+        if fresh == live.len() && live.len() > best_n {
+            best_n = live.len();
+            best_live = live.len();
+            best_t = Some(t);
+            if best_n >= SLOTS.min(3) {
+                break; // a 3+ all-fresh SET is already a strong multi-attack seed
+            }
+        }
+    }
+    let Some(best_t) = best_t else {
+        println!(
+            "no boundary in [{}, {}) whose live land-attack SET is entirely fresh creations",
+            a.t0,
+            a.t0 + 400
+        );
+        return Ok(());
+    };
+    let env0 = build_env_at(&dump, &ex, w, h, &terrain, best_t)?;
+    // `build_env_at` builds the SET itself: only fresh non-merged creations
+    // (its `set` loop drops anything whose computed start != the record's
+    // troops). With the scan above requiring `fresh == live`, `env0.attacks` is
+    // the whole live land-attack set - no reconstruction, no replay.
+    let _ = best_live;
+    let t0 = env0.tick0;
+    let n = a.envs.first().copied().unwrap_or(1).max(1);
+    println!(
+        "MULTI env: map={}x{} t0={} attacks_in_SET={} envs={} slots={} mem/env={:.1} MB (plane {:.2})",
+        w,
+        h,
+        t0,
+        env0.attacks.len(),
+        n,
+        SLOTS,
+        (env0.attacks.len() as f64 * (HEAP_CAP * 8 + BC * 4 + CC * 4 + OB * 4) as f64
+            + (w as f64) * (h as f64) * 2.0)
+            / 1e6,
+        (w as f64) * (h as f64) * 2.0 / 1e6,
+    );
+    for (i, at) in env0.attacks.iter().enumerate() {
+        println!(
+            "  slot {}: owner_sid={} bot={} troops={:.3} heap={} border={} oborder={}",
+            i,
+            at.owner_sid,
+            at.is_bot,
+            at.troops,
+            at.heap_len,
+            at.border.len(),
+            at.oborder.len()
+        );
+    }
+
+    let ctx = CudaContext::new(0)?;
+    let module = unsafe { kernels::load(&ctx)? };
+    let mut b = MultiBatch::new(&ctx, &module, &[env0.clone()], n)?;
+    println!(
+        "device: batch_bytes={:.1} MB total ({:.2} MB/env)",
+        b.bytes as f64 / 1e6,
+        b.bytes as f64 / 1e6 / n as f64
+    );
+
+    let (ms, hashes, _scal, live) = run_multi(&ctx, &module, &mut b, &env0, a.ticks, t0, true)?;
+    let per_tick = ms / a.ticks.max(1) as f64;
+    let ticks_matched = {
+        let mut m = 0usize;
+        for (k, hh) in hashes.iter().enumerate().take(a.ticks as usize) {
+            match engine_hash_at(&dump, w, h, t0 + 1 + k as u32) {
+                Some(eh) if eh == *hh => m += 1,
+                _ => break,
+            }
+        }
+        m
+    };
+    println!(
+        "MULTI run: ticks={} wall={:.1} ms ({:.3} ms/tick) {:.0} env-ticks/s {:.1} decisions/s live_slots_after={}",
+        a.ticks,
+        ms,
+        per_tick,
+        if per_tick > 0.0 { n as f64 / per_tick * 1000.0 } else { 0.0 },
+        if per_tick > 0.0 { (n as f64 * env0.attacks.len() as f64) / per_tick * 1000.0 } else { 0.0 },
+        live
+    );
+    println!(
+        "MULTI align: init_plane={:016x} eng(t0)={:016x} eng(t0+1)={:016x} dev[0]={:016x} dev[1]={:016x} dev[2]={:016x}",
+        state_hash(&env0.plane),
+        engine_hash_at(&dump, w, h, t0).unwrap_or(0),
+        engine_hash_at(&dump, w, h, t0 + 1).unwrap_or(0),
+        hashes.first().copied().unwrap_or(0),
+        hashes.get(1).copied().unwrap_or(0),
+        hashes.get(2).copied().unwrap_or(0),
+    );
+    // Tile-level divergence AT THE TICK IT HAPPENS. The first version of this
+    // diagnostic read `b.d_plane` after the whole run and compared it against
+    // the engine plane at the divergence tick, which is 40 ticks of drift
+    // mistaken for one tick's difference. Re-run exactly `k+1` ticks on a fresh
+    // batch so the plane read IS the plane at the first mismatching tick.
+    if ticks_matched < a.ticks as usize {
+        let k = ticks_matched;
+        let mut b2 = MultiBatch::new(&ctx, &module, &[env0.clone()], n)?;
+        let _ = run_multi(&ctx, &module, &mut b2, &env0, k as u32 + 1, t0, false)?;
+        let stream2 = ctx.default_stream();
+        let devp = b2.d_plane.to_host_vec(&stream2)?;
+        if let Some(engp) = {
+            let ps = dump.get(&(t0 + 1 + k as u32));
+            ps.map(|ps| {
+                let players: Vec<(u32, Vec<u32>)> = ps
+                    .values()
+                    .map(|p| (p.small_id, p.owned_tiles.clone()))
+                    .collect();
+                ofcuda_env::state_plane(&players, w, h)
+            })
+        } {
+            let mut diff = 0usize;
+            let mut samples = Vec::new();
+            let mut seen: std::collections::HashMap<(u16, u16), usize> =
+                std::collections::HashMap::new();
+            for (i, (a1, b1)) in devp[..b2.wh].iter().zip(engp.iter()).enumerate() {
+                if a1 != b1 {
+                    diff += 1;
+                    *seen.entry((*a1, *b1)).or_insert(0) += 1;
+                    if samples.len() < 6 {
+                        samples.push((i, *a1, *b1));
+                    }
+                }
+            }
+            println!(
+                "MULTI tile diff at tick {} (plane after {} of {} ticks): {} tiles differ (of {}); (dev,eng) pairs top:",
+                t0 + 1 + k as u32,
+                k + 1,
+                a.ticks,
+                diff,
+                b2.wh
+            );
+            let mut pairs: Vec<((u16, u16), usize)> = seen.into_iter().collect();
+            pairs.sort_by(|x, y| y.1.cmp(&x.1));
+            for p in pairs.iter().take(6) {
+                println!("   dev={} eng={} count={}", p.0 .0, p.0 .1, p.1);
+            }
+            for s in samples {
+                println!("   sample tile {}: dev={} eng={}", s.0, s.1, s.2);
+            }
+        }
+    }
+    // Unaided origination: the multi path has NO bot-origination schedule wired
+    // in, so the SET it starts from is the SET it ends with. That is the honest
+    // reason a run can only be exact until the engine's next attack creation -
+    // it is not an oracle input (the loop never reads the record), it is a
+    // MISSING device capability.
+    let mut started = 0usize;
+    for at in env0.attacks.iter() {
+        if at.alive {
+            started += 1;
+        }
+    }
+    println!(
+        "MULTI origination: attacks_seeded={} attacks_originated_unaided=0 (no origination schedule in this path); live_slots_after={}",
+        started, live
+    );
+    println!("MULTI engine agreement: {}/{} ticks matched", ticks_matched, a.ticks);
+    if ticks_matched < a.ticks as usize {
+        let k = ticks_matched;
+        let eh = engine_hash_at(&dump, w, h, t0 + 1 + k as u32).unwrap_or(0);
+        let dh = hashes.get(k).copied().unwrap_or(0);
+        println!(
+            "MULTI first divergence: tick {} dev_hash={:016x} engine_hash={:016x}",
+            t0 + 1 + k as u32,
+            dh,
+            eh
+        );
+    }
+    Ok(())
 }
 
 fn main() {
