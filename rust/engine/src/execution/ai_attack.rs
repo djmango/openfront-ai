@@ -551,6 +551,15 @@ fn try_send_player_attack_forced(
                 );
             }
         }
+        if std::env::var_os("OF_ENG_TM").is_some() {
+            eprintln!(
+                "TM_LAND_SEND tick={} a={} target_sid={} troops={:#018x}",
+                game.ticks(),
+                attacker_small_id,
+                target_small_id,
+                troops.to_bits()
+            );
+        }
         game.add_land_attack(attacker_small_id, Some(target_id), Some(troops));
         return true;
     }
@@ -2187,15 +2196,39 @@ pub fn tribe_maybe_attack(
     let mut bot_attack_troops_sent = 0.0;
     let difficulty_owned = game.wire.game_config().difficulty.clone();
     let difficulty = difficulty_owned.as_str();
+    // Diagnostics only (`OF_ENG_TM=1`): names which branch of the ladder sends.
+    let tm = std::env::var_os("OF_ENG_TM").is_some();
+    if tm {
+        eprintln!(
+            "TM_ENTER tick={} a={} trigger={:#018x} reserve={:#018x} expand={:#018x} ntn={}",
+            game.ticks(),
+            attacker_small_id,
+            trigger_ratio.to_bits(),
+            reserve_ratio.to_bits(),
+            expand_ratio.to_bits(),
+            *neighbors_terra_nullius
+        );
+    }
 
     // TS `TribeExecution.maybeAttack()`: roll a traitor-neighbor attack first.
     // Odds are 1/6 if we're (still) allied with the traitor, 1/3 otherwise; on
     // success the alliance (if any) is broken before the attack is sent.
     if let Some(traitor) = get_neighbor_traitor_to_attack(game, random, attacker_small_id) {
         let odds = if game.is_friendly(attacker_small_id, traitor) { 6 } else { 3 };
-        if random.chance(odds) {
+        let chance_ok = random.chance(odds);
+        if tm {
+            eprintln!(
+                "TM_TRAITOR1 tick={} a={} traitor={} odds={} ok={}",
+                game.ticks(),
+                attacker_small_id,
+                traitor,
+                odds,
+                chance_ok
+            );
+        }
+        if chance_ok {
             game.break_alliance_between(attacker_small_id, traitor);
-            if try_send_player_attack(
+            let sent = try_send_player_attack(
                 game,
                 random,
                 attacker_small_id,
@@ -2205,14 +2238,35 @@ pub fn tribe_maybe_attack(
                 &mut bot_attack_troops_sent,
                 difficulty,
                 None,
-            ) {
+            );
+            if tm {
+                eprintln!(
+                    "TM_TRAITOR1_SEND tick={} a={} traitor={} sent={}",
+                    game.ticks(),
+                    attacker_small_id,
+                    traitor,
+                    sent
+                );
+            }
+            if sent {
                 return;
             }
         }
+    } else if tm {
+        eprintln!("TM_TRAITOR1 tick={} a={} traitor=None", game.ticks(), attacker_small_id);
     }
 
     if *neighbors_terra_nullius {
-        if has_nearby_terra_nullius(game, attacker_small_id) {
+        let nearby = has_nearby_terra_nullius(game, attacker_small_id);
+        if tm {
+            eprintln!(
+                "TM_TN tick={} a={} has_nearby={}",
+                game.ticks(),
+                attacker_small_id,
+                nearby
+            );
+        }
+        if nearby {
             if send_tn_attack(game, attacker_small_id, expand_ratio) {
                 return;
             }
@@ -2224,12 +2278,30 @@ pub fn tribe_maybe_attack(
     // TS `AiAttackBehavior.attackRandomTarget()`: trigger-ratio gate first, then
     // retaliation against the largest incoming attacker, then another traitor
     // roll (odds 1/3, unconditional on alliance), then a random shuffled pick.
-    if !has_trigger_ratio(game, attacker_small_id, trigger_ratio) {
+    let trig_ok = has_trigger_ratio(game, attacker_small_id, trigger_ratio);
+    if tm {
+        eprintln!(
+            "TM_TRIGGER tick={} a={} ok={}",
+            game.ticks(),
+            attacker_small_id,
+            trig_ok
+        );
+    }
+    if !trig_ok {
         return;
     }
 
-    if let Some(attacker) = find_incoming_attacker(game, attacker_small_id) {
-        if try_send_player_attack_forced(
+    let inc = find_incoming_attacker(game, attacker_small_id);
+    if tm {
+        eprintln!(
+            "TM_INCOMING tick={} a={} attacker={:?}",
+            game.ticks(),
+            attacker_small_id,
+            inc
+        );
+    }
+    if let Some(attacker) = inc {
+        let sent = try_send_player_attack_forced(
             game,
             random,
             attacker_small_id,
@@ -2240,7 +2312,17 @@ pub fn tribe_maybe_attack(
             difficulty,
             None,
             true,
-        ) {
+        );
+        if tm {
+            eprintln!(
+                "TM_RETALIATE_SEND tick={} a={} target={} sent={}",
+                game.ticks(),
+                attacker_small_id,
+                attacker,
+                sent
+            );
+        }
+        if sent {
             return;
         }
     }
@@ -2265,6 +2347,15 @@ pub fn tribe_maybe_attack(
 
     let neighbors = nearby_players_ts_order(game, attacker_small_id);
     let shuffled = random.shuffle_array(&neighbors);
+    if tm {
+        eprintln!(
+            "TM_SHUFFLE tick={} a={} neighbors={:?} shuffled={:?}",
+            game.ticks(),
+            attacker_small_id,
+            neighbors,
+            shuffled
+        );
+    }
     for target_sid in shuffled {
         let Some(target) = game.player_by_small_id(target_sid) else {
             continue;
@@ -2277,7 +2368,7 @@ pub fn tribe_maybe_attack(
                 continue;
             }
         }
-        if try_send_player_attack(
+        let sent = try_send_player_attack(
             game,
             random,
             attacker_small_id,
@@ -2287,7 +2378,17 @@ pub fn tribe_maybe_attack(
             &mut bot_attack_troops_sent,
             difficulty,
             None,
-        ) {
+        );
+        if tm {
+            eprintln!(
+                "TM_RANDOM_SEND tick={} a={} target={} sent={}",
+                game.ticks(),
+                attacker_small_id,
+                target_sid,
+                sent
+            );
+        }
+        if sent {
             return;
         }
     }

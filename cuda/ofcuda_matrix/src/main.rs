@@ -514,7 +514,146 @@ fn dev_shore_reachable_tn(
     false
 }
 
-/// One live TransportShip, modelled on device state. `init`
+/// `ai_attack.rs:680-749` `nearby_players_ts_order(a)`, over the SAME device
+/// border array the `bot_ai` kernel reads. This is the list
+/// `tribe_maybe_attack` shuffles for its random-target branch, and the shuffle
+/// draws `len - 1` PRNG values, so the list has to be EXACTLY the engine's -
+/// including Terra Nullius (owner 0), which the engine pushes like any other
+/// non-self owner even though the later `player_by_small_id(0)` is `None`.
+fn dev_nearby_players_ts_order(
+    terrain: &[u8],
+    plane: &[u16],
+    oborder: &[u32],
+    ob_meta: &[u32],
+    w: u32,
+    h: u32,
+    sid: u16,
+) -> Vec<u16> {
+    let mut seen: std::collections::HashSet<u16> = std::collections::HashSet::new();
+    let mut ordered: Vec<u16> = Vec::new();
+    let om = sid as usize * 2;
+    let off = ob_meta[om] as usize;
+    let n = ob_meta[om + 1] as usize;
+    let btiles = &oborder[off..off + n];
+    // Tip `PlayerImpl.nearby()`: N,S,W,E land-only neighbours of the border set.
+    for &t in btiles {
+        let mut buf = [0u32; 4];
+        let c = t_neigh4(t, w, h, &mut buf);
+        for &nb in buf.iter().take(c) {
+            if !t_land(terrain, nb) {
+                continue;
+            }
+            let o = plane[nb as usize];
+            if o != sid && seen.insert(o) {
+                ordered.push(o);
+            }
+        }
+    }
+    // Then `shoreReachableNeighbors` over every tenth shore border tile.
+    const DIRS: [(i32, i32); 4] = [(0, -1), (0, 1), (-1, 0), (1, 0)];
+    let mut shore_i = 0usize;
+    for &t in btiles {
+        if !t_shore(terrain, t) {
+            continue;
+        }
+        if shore_i % 10 == 0 {
+            let x = (t % w) as i32;
+            let y = (t / w) as i32;
+            for (dx, dy) in DIRS {
+                let (x1, y1) = (x + dx, y + dy);
+                if x1 < 0 || y1 < 0 || x1 as u32 >= w || y1 as u32 >= h {
+                    continue;
+                }
+                let t1 = (y1 as u32) * w + (x1 as u32);
+                if t_land(terrain, t1) {
+                    continue; // must be water
+                }
+                let (nx, ny) = (x + dx * 5, y + dy * 5);
+                if nx < 0 || ny < 0 || nx as u32 >= w || ny as u32 >= h {
+                    continue;
+                }
+                let tn = (ny as u32) * w + (nx as u32);
+                if !t_land(terrain, tn) {
+                    continue; // must be land
+                }
+                let o = plane[tn as usize];
+                if o != sid && seen.insert(o) {
+                    ordered.push(o);
+                }
+            }
+        }
+        shore_i += 1;
+    }
+    ordered
+}
+
+/// `Game::shares_land_border_with(a, b)` against the device's own border array
+/// and plane (`game.rs`): a tile in `a`'s border set has a 4-neighbour owned by
+/// `b`. Distinct from the record-driven `shares_land_border` above, which uses
+/// the dumped `BORDER` rows; this one is the `tribe_maybe_attack` gate and must
+/// read the same array the bot kernel reads.
+fn dev_shares_land_border(
+    terrain: &[u8],
+    plane: &[u16],
+    oborder: &[u32],
+    ob_meta: &[u32],
+    w: u32,
+    h: u32,
+    a: u16,
+    b: u16,
+) -> bool {
+    let _ = terrain;
+    let om = a as usize * 2;
+    let off = ob_meta[om] as usize;
+    let n = ob_meta[om + 1] as usize;
+    for i in 0..n {
+        let t = oborder[off + i];
+        let mut buf = [0u32; 4];
+        let c = t_neigh4(t, w, h, &mut buf);
+        for &nb in buf.iter().take(c) {
+            if plane[nb as usize] == b {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// `Game::find_incoming_land_attacker(defender, Bot)` (`game.rs:2340-2380`) run
+/// on the DEVICE's own attack list at the pre-tick state the tribe exec sees:
+/// the largest live attack aimed at `defender`, skipping self/TerraNullius,
+/// attackers with no tiles and friendlies.
+fn dev_find_incoming_land_attacker(
+    slots: &[Slot],
+    troops: &[f64],
+    pst: &[f64],
+    friends: &[(u16, u16)],
+    defender: u16,
+) -> Option<u16> {
+    let mut largest = 0.0f64;
+    let mut best: Option<u16> = None;
+    for s in slots {
+        if !s.alive || s.target != defender || s.owner == defender || s.owner == 0 {
+            continue;
+        }
+        if pst[s.owner as usize * 3 + 1] <= 0.0 {
+            continue;
+        }
+        if friends
+            .iter()
+            .any(|(p, q)| (*p == defender && *q == s.owner) || (*p == s.owner && *q == defender))
+        {
+            continue;
+        }
+        if troops[s.idx] > largest {
+            largest = troops[s.idx];
+            best = Some(s.owner);
+        }
+    }
+    best
+}
+
+
 /// (`transport_ship.rs:100-298`) placed it at `path[0]` at the END of
 /// `created_tick`; at tick `created_tick + k` it moves one node, and at
 /// `created_tick + path.len()` it is already on `dst` at the tick's start and
@@ -1330,6 +1469,15 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
     let mut sd_pc_troops = 0usize;
     let mut sd_pc_exact = 0usize;
     let mut sd_acts = [0usize; 8];
+    // THE LADDER PAST `has_trigger_ratio` (section 3a-quinquies): the
+    // player-target land attacks the device's own bot AI decides to send
+    // (`dev_player_orig`), split by the branch that produced them. Diagnostics
+    // only, never pass conditions.
+    let mut sd_player_retal = 0usize;
+    let mut sd_player_random = 0usize;
+    let mut sd_player_boat_miss = 0usize;
+    let mut sd_player_shown = 0usize;
+    let mut sd_player_voided = 0usize;
     // TRANSPORT-SHIP (BOAT) ORIGINATION, device state only. `ships` is the
     // device's own set of live TransportShips (spawned on the owner's shore,
     // sailed one water node per tick, landed at `created_tick + path.len()`);
@@ -1360,6 +1508,12 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
     // state, so the port originates the attack instead of reading it.
     let spawn_end_tick = orc.spawn_end_tick;
     let mut bot_sched: Vec<(u16, u32, u32, f64, f64, f64)> = Vec::new();
+    // The CONTINUING stream of each bot's `TribeExecution.random`
+    // (`bot/tribe.rs:37-42`): `PseudoRandom::new(simple_hash(player_id))` after
+    // the five construction draws above. `tribe_maybe_attack` keeps drawing from
+    // this SAME stream every firing (`shuffle_array` over the neighbour list),
+    // so a self-driving device must carry it forward rather than re-seed it.
+    let mut bot_tribe_rng: Vec<PseudoRandom> = Vec::new();
     for (sid, ptype, pid, _) in &orc.roster {
         if *ptype != 'B' {
             continue;
@@ -1371,7 +1525,11 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         let reserve = r.next_int(30, 40) as f64 / 100.0;
         let expand = r.next_int(10, 20) as f64 / 100.0;
         bot_sched.push((*sid, rate, at, trigger, reserve, expand));
+        bot_tribe_rng.push(r);
     }
+    // Live per-bot tribe stream, advanced by every firing that reaches the
+    // shared throw ladder (`tribe_maybe_attack`).
+    let mut tribe_rng = bot_tribe_rng;
     let nbots = bot_sched.len();
     let nb_cap = nbots.max(1);
     let mut b_sid = vec![0u32; nb_cap];
@@ -2030,6 +2188,14 @@ n",
         // it returns are applied after the tick below (section 4c), where the
         // engine's `add_execution` -> `init` pipeline runs them.
         let mut bot_orig: Vec<(u16, f64)> = Vec::new();
+        // Player-target land attacks the device's own ladder (3a-quinquies)
+        // decided to send this tick, as `(owner, target, troops, branch)`. Applied
+        // in section 4c through the same `add_land_attack_from` ->
+        // `AttackExecution::init` pipeline as a boat landing, INCLUDING the
+        // cancel-opposing step (`add_land_attack_from` -> `init` ->
+        // `cancel_opposing_land_attacks`), which is why the entry carries the
+        // pre-cancel `troops` and 4c applies the cancel itself.
+        let mut dev_player_orig: Vec<(u16, u16, f64, &'static str)> = Vec::new();
         // --- 3a-ter. the device's OWN TransportShip origination (self-drive) --
         // `TribeExecution`'s firing calls `send_tn_attack` -> `try_send_tn_attack`
         // (`ai_attack.rs:409-422`); with no LAND border to Terra Nullius that is
@@ -2213,6 +2379,123 @@ n",
                 }
             }
             sd_fires += bot_orig.len();
+
+            // --- 3a-quinquies. the ladder PAST `has_trigger_ratio` ------------
+            // `bot_ai` stops at the trigger gate: it reports act 5 for a firing
+            // that passed it and then leaves the rest of `tribe_maybe_attack`
+            // unmodelled, because the engine's remaining steps (retaliate,
+            // traitor roll, shuffled random target) all END in
+            // `add_land_attack_from` - an attack the port could not originate
+            // while it had no bot AI. That is the last self-drive miss: at
+            // boundary 227 (engine tick 230) the engine, for bot 440 at its tick
+            // 229 firing, found no incoming attacker, rolled no traitor, and
+            // shuffled its neighbour list `[325, 227, 329]` to `[227, 325, 329]`
+            // (`TM_SHUFFLE`), then sent 440 -> 227 with
+            // `troops = 0x40c3bab7dafdd302` (`TM_LAND_SEND`). The port has to
+            // reproduce the SAME target from device state, which means
+            //   (a) the engine's own `nearby_players_ts_order` list over the
+            //       device border array (`dev_nearby_players_ts_order`), and
+            //   (b) the bot's CONTINUING `TribeExecution.random` stream
+            //       (`tribe_rng`, set up beside `bot_sched`) advanced by the
+            //       shuffle, so the drawn permutation is the engine's.
+            // EVERY input is device state; the record is not read. `OF_ENG_TM=1`
+            // on the oracle prints the matching engine lines (`TM_TRIGGER` /
+            // `TM_INCOMING` / `TM_SHUFFLE` / `TM_LAND_SEND`).
+            let plane_now = d_plane.to_host_vec(&stream).map_err(es)?;
+            let pst_now = d_pst.to_host_vec(&stream).map_err(es)?;
+            let troops_pre = d_troops.to_host_vec(&stream).map_err(es)?;
+            for k in 0..nbots {
+                if bout[k * 3 + 2] as usize != 5 {
+                    continue;
+                }
+                let sid = bot_sched[k].0;
+                let amount = bout[k * 3 + 1];
+                let mut sent = false;
+                // `find_incoming_attacker(&game, attacker, PlayerType::Bot)`
+                // (`ai_attack.rs:462`) against the PRE-tick attack list: the
+                // execs tick in list order and every Player/Tribe exec precedes
+                // every attack, so the tribe sees the attacks' troops as of the
+                // START of the tick - `d_troops` before section 4 ticks them.
+                if let Some(tt) =
+                    dev_find_incoming_land_attacker(&slots, &troops_pre, &pst_now, &cur.friends, sid)
+                {
+                    if dev_shares_land_border(
+                        &terrain, &plane_now, &oborder, &ob_meta, w, h, sid, tt,
+                    ) {
+                        // `try_send_player_attack_forced(.., true)` LAND branch:
+                        // unconditional, the engine returns without shuffling.
+                        dev_player_orig.push((sid, tt, amount, "retaliate"));
+                        sd_player_retal += 1;
+                        sent = true;
+                    } else {
+                        // The engine takes the sendBoatAttack branch here, which
+                        // registers a TransportShip rather than a land attack -
+                        // not modelled on this path yet. It still RETURNS from
+                        // `tribe_maybe_attack`, so the shuffle below must not
+                        // run (that would mis-align the bot's PRNG stream).
+                        sd_player_boat_miss += 1;
+                        sent = true;
+                    }
+                }
+                if sent {
+                    continue;
+                }
+                // Step 5 is the second traitor roll (`random.chance(3)`) and
+                // step 1 the first; both draw ONLY when `get_neighbor_traitor`
+                // returned `Some`, i.e. when some non-friendly neighbour is
+                // marked traitor. No bot is ever marked in this port (no human
+                // declares war), so both rolls are skipped and the stream goes
+                // straight from the schedule draws to the shuffle.
+                let list =
+                    dev_nearby_players_ts_order(&terrain, &plane_now, &oborder, &ob_meta, w, h, sid);
+                let mut arr: Vec<i32> = list.iter().map(|&x| x as i32).collect();
+                tribe_rng[k].shuffle_array(&mut arr);
+                for &t in &arr {
+                    if t == 0 {
+                        // `player_by_small_id(0)` is `None`: TerraNullius has no
+                        // Player row, so the engine's `let Some(target) = .. else
+                        // { continue }` skips it like any other dead id.
+                        continue;
+                    }
+                    let tgt = t as u16;
+                    if tgt == sid {
+                        continue;
+                    }
+                    if cur
+                        .friends
+                        .iter()
+                        .any(|(p, q)| (*p == sid && *q == tgt) || (*p == tgt && *q == sid))
+                    {
+                        continue;
+                    }
+                    // `try_send_player_attack` (non-forced): both sides are Bots
+                    // so `should_attack` returns true with no PRNG draw, the
+                    // target-is-bot/nation branches are skipped, and
+                    // `land_attack_troops(sid, reserve_ratio)` is exactly the
+                    // amount `bot_ai` already put in `bout[k*3+1]`.
+                    if dev_shares_land_border(
+                        &terrain, &plane_now, &oborder, &ob_meta, w, h, sid, tgt,
+                    ) {
+                        if amount >= 1.0 {
+                            dev_player_orig.push((sid, tgt, amount, "random"));
+                            sd_player_random += 1;
+                            if sd_player_shown < 12 {
+                                sd_player_shown += 1;
+                                detail.push_str(&format!(
+                                    "SELFDRIVE_PLAYER_SEND boundary {b} (engine tick {tick}): bot \
+                                     {sid} chooses target {tgt} (neighbours {list:?} shuffled \
+                                     {arr:?}) amount {:#018x}\n",
+                                    amount.to_bits()
+                                ));
+                            }
+                        }
+                        break;
+                    } else {
+                        sd_player_boat_miss += 1;
+                        break;
+                    }
+                }
+            }
         }
 
         // --- 3b. transport-ship landings -------------------------------------
@@ -2763,7 +3046,7 @@ n",
             .map(|(_, cs, _)| (cs.owner, cs.target))
             .collect();
         let mut sd_orig_dupe = 0usize;
-        if freeze_at.is_some_and(|fa| b + 1 >= fa) && !bot_orig.is_empty() {
+        if freeze_at.is_some_and(|fa| b + 1 >= fa) && (!bot_orig.is_empty() || !dev_player_orig.is_empty()) {
             let mut coff = 0usize;
             let mut coborder = vec![0u32; obcap];
             let mut cob_meta = vec![0u32; 2 * COLS];
@@ -2925,6 +3208,158 @@ n",
                         q[idx * 5 + 3],
                         q[idx * 5 + 4]
                     ));
+                }
+            }
+
+            // The LADDER's own player-target sends (section 3a-quinquies). The
+            // same `add_land_attack_from` -> `AttackExecution::init` pipeline the
+            // TN origination above uses, with the player target the engine chose:
+            // `init` sizes `troops = min(ai_troops, owner.troops)` (the owner's
+            // pool is reseeded from the record, so the deduction is not modelled),
+            // then `refresh_to_conquer` seeds the frontier from the OWNER's border
+            // set filtered to `target_small_id`, then
+            // `cancel_opposing_land_attacks(owner, target)` folds in the target's
+            // incoming attack from the owner, then (if still alive)
+            // `merge_outgoing_land_attacks`. That cancel step is why these sends
+            // are NOT simply added to the attack list: a mutual pair nets off, and
+            // at ticks 250+ exactly that happens for the engine.
+            for (sid, tgt, amount, branch) in &dev_player_orig {
+                let mut troops_now = d_troops.to_host_vec(&stream).map_err(es)?;
+                let mut prng_now = d_prng.to_host_vec(&stream).map_err(es)?;
+                let mut troops_final = *amount;
+                let mut active = true;
+                if let Some(oi) = slots
+                    .iter()
+                    .position(|s| s.alive && s.owner == *tgt && s.target == *sid)
+                {
+                    let inc_troops = troops_now[slots[oi].idx];
+                    if inc_troops > troops_final {
+                        // `attack.rs:1210-1236`: the incoming attack is only
+                        // REDUCED and the new attack is `retreat`ed (voided) - the
+                        // engine registers it and then drops it, so nothing
+                        // survives and the frontier it built is discarded.
+                        troops_now[slots[oi].idx] = inc_troops - troops_final;
+                        active = false;
+                        dev_cancel_reduces += 1;
+                        if dev_cancel_shown < 24 {
+                            dev_cancel_shown += 1;
+                            detail.push_str(&format!(
+                                "CANCEL_DEVICE boundary {b} (engine tick {tick}): own send \
+                                 {sid}->{tgt} ({branch}) start {:#018x} REDUCES incoming \
+                                 {tgt}->{sid} {:#018x} -> {:#018x} (delta {:#018x})\n",
+                                amount.to_bits(),
+                                inc_troops.to_bits(),
+                                (inc_troops - troops_final).to_bits(),
+                                amount.to_bits()
+                            ));
+                        }
+                    } else {
+                        troops_final -= inc_troops;
+                        troops_now[slots[oi].idx] = 0.0;
+                        let mut sc = d_scal.to_host_vec(&stream).map_err(es)?;
+                        sc[slots[oi].idx * SCAL + 3] = 0;
+                        d_scal.copy_from_host(&stream, &sc).map_err(es)?;
+                        slots[oi].alive = false;
+                        dev_cancel_kills += 1;
+                        if dev_cancel_shown < 24 {
+                            dev_cancel_shown += 1;
+                            detail.push_str(&format!(
+                                "CANCEL_DEVICE_KILL boundary {b} (engine tick {tick}): own send \
+                                 {sid}->{tgt} ({branch}) KILLS incoming {tgt}->{sid} \
+                                 (troops {} <= start {:#018x}); new exec keeps {}\n",
+                                fmt_f64(inc_troops),
+                                amount.to_bits(),
+                                fmt_f64(troops_final)
+                            ));
+                        }
+                    }
+                    d_troops.copy_from_host(&stream, &troops_now).map_err(es)?;
+                }
+                if !active {
+                    sd_player_voided += 1;
+                    continue;
+                }
+                let idx = match slots
+                    .iter()
+                    .position(|s| s.alive && s.owner == *sid && s.target == *tgt)
+                {
+                    Some(i) => {
+                        let merged = troops_final + troops_now[slots[i].idx];
+                        merged_this.push((*sid, *tgt));
+                        troops_now[slots[i].idx] = merged;
+                        orig_idx.push((*sid, slots[i].idx));
+                        sd_merged += 1;
+                        slots[i].idx
+                    }
+                    None => {
+                        let idx = slots.len();
+                        if idx >= MAX_SLOTS {
+                            return Err(format!(
+                                "boundary {b}: self-drive player origination needs slot {idx} >= \
+                                 MAX_SLOTS {MAX_SLOTS}; raise it"
+                            ));
+                        }
+                        troops_now[idx] = troops_final;
+                        slots.push(Slot {
+                            owner: *sid,
+                            target: *tgt,
+                            idx,
+                            alive: true,
+                            created_at: b as u32,
+                            troops_bits: troops_final.to_bits(),
+                            attack_id: String::new(),
+                        });
+                        taken.push(false);
+                        orig_idx.push((*sid, idx));
+                        sd_created += 1;
+                        if sd_created <= 8 {
+                            detail.push_str(&format!(
+                                "SELFDRIVE_ORIGIN_CREATE boundary {b} (engine tick {tick}): owner \
+                                 {sid} target {tgt} ai {} ({branch}) (engine record {:?})\n",
+                                fmt_f64(troops_final),
+                                cur.attacks
+                                    .iter()
+                                    .find(|a| a.owner == *sid && a.target == *tgt)
+                                    .map(|a| fmt_f64(a.troops))
+                            ));
+                        }
+                        idx
+                    }
+                };
+                // A re-issued exec mints a FRESH `PseudoRandom::new(123)` and an
+                // empty frontier (`attack.rs:47-57`), exactly as every other
+                // origination path does.
+                let pr = Prng::new(SEED);
+                let mut pw = [0u32; 5];
+                pr.state_words(&mut pw);
+                prng_now[idx * 5..idx * 5 + 5].copy_from_slice(&pw);
+                d_prng.copy_from_host(&stream, &prng_now).map_err(es)?;
+                d_troops.copy_from_host(&stream, &troops_now).map_err(es)?;
+                unsafe {
+                    module
+                        .attack_init(
+                            &stream,
+                            cfg(kernels::BLOCK),
+                            &d_terrain,
+                            w,
+                            h,
+                            tick,
+                            idx as u32,
+                            *sid,
+                            *tgt,
+                            u32::MAX, // source_tile = None
+                            1,        // fresh stream
+                            &d_plane,
+                            &mut d_heap_tiles,
+                            &mut d_heap_pri,
+                            &mut d_border,
+                            &mut d_prng,
+                            &mut d_scal,
+                            &mut d_out,
+                            &d_coborder,
+                            &d_cob_meta,
+                        )
+                        .map_err(es)?;
                 }
             }
         }
@@ -3625,8 +4060,14 @@ n",
         detail.push_str(&format!(
             "SELFDRIVE bot AI: {sd_fires} firings, {sd_created} attacks originated, \
              {sd_merged} merges, actions {sd_acts:?} \
-             (1=TN land,3=no TN land border,4=troops<1,5=tribe_maybe_attack not modelled,\
+             (1=TN land,3=no TN land border,4=troops<1,5=tribe_maybe_attack past the trigger gate,\
              6=trigger ratio not met)\n"
+        ));
+        detail.push_str(&format!(
+            "SELFDRIVE player path: {sd_player_random} random-target sends + {sd_player_retal} \
+             retaliate sends the device decided to send, {sd_player_voided} voided by the device's \
+             own cancel_opposing port, {sd_player_boat_miss} sends the engine routed to \
+             sendBoatAttack (NOT modelled here)\n"
         ));
         detail.push_str(&format!(
             "SELFDRIVE attack-list agreement: {sd_exact_bounds} boundaries fully identical to \
