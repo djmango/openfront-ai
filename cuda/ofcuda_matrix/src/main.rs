@@ -442,12 +442,36 @@ fn fmt_f64(v: f64) -> String {
     format!("{v}")
 }
 
+/// The owner plane AS OF one engine exec position.
+///
+/// The engine ticks `execs` in list order, and every spawned bot contributes
+/// its `PlayerExecution` immediately followed by its `TribeExecution`
+/// (`spawn_util.rs:43-66`: `PlayerExecution::new` pushed, then
+/// `TribeExecution::new` pushed), so a bot's `tribe_maybe_attack` decision runs
+/// BEFORE the cluster handover of every player that spawned after it. The
+/// device's `cluster_pass` has already applied ALL of them by the time the
+/// ladder runs, so `revert` maps each tile handed over by a LATER exec position
+/// back to its pre-handover owner, and the ladder then reads the plane the
+/// engine's tribe exec actually saw. Only ownership moves that redistribute
+/// tiles BETWEEN two players need this: `== 0` (Terra Nullius) tests are
+/// invariant under it, because a handover never moves a tile to or from owner 0.
+type Revert = std::collections::HashMap<u32, u16>;
+
+#[inline]
+fn owner_at(plane: &[u16], revert: &Revert, t: u32) -> u16 {
+    match revert.get(&t) {
+        Some(v) => *v,
+        None => plane[t as usize],
+    }
+}
+
 /// `ai_attack.rs:187-204` `has_land_border_with_terra_nullius` /
 /// `ai_attack.rs:147-168` `has_land_border_tn`, over the SAME device border
 /// array the `bot_ai` kernel reads (`kernels.rs:828-856`).
 fn dev_land_border_tn(
     terrain: &[u8],
     plane: &[u16],
+    revert: &Revert,
     oborder: &[u32],
     ob_meta: &[u32],
     w: u32,
@@ -462,7 +486,7 @@ fn dev_land_border_tn(
         let mut buf = [0u32; 4];
         let c = t_neigh4(t, w, h, &mut buf);
         for &nb in buf.iter().take(c) {
-            if t_land(terrain, nb) && plane[nb as usize] == 0 {
+            if t_land(terrain, nb) && owner_at(plane, revert, nb) == 0 {
                 return true;
             }
         }
@@ -474,6 +498,7 @@ fn dev_land_border_tn(
 fn dev_shore_reachable_tn(
     terrain: &[u8],
     plane: &[u16],
+    revert: &Revert,
     oborder: &[u32],
     ob_meta: &[u32],
     w: u32,
@@ -504,7 +529,7 @@ fn dev_shore_reachable_tn(
                 }
                 let t1 = (y1 as u32) * w + (x1 as u32);
                 let tn = (ny as u32) * w + (nx as u32);
-                if !t_land(terrain, t1) && t_land(terrain, tn) && plane[tn as usize] == 0 {
+                if !t_land(terrain, t1) && t_land(terrain, tn) && owner_at(plane, revert, tn) == 0 {
                     return true;
                 }
             }
@@ -523,6 +548,7 @@ fn dev_shore_reachable_tn(
 fn dev_nearby_players_ts_order(
     terrain: &[u8],
     plane: &[u16],
+    revert: &Revert,
     oborder: &[u32],
     ob_meta: &[u32],
     w: u32,
@@ -543,7 +569,7 @@ fn dev_nearby_players_ts_order(
             if !t_land(terrain, nb) {
                 continue;
             }
-            let o = plane[nb as usize];
+            let o = owner_at(plane, revert, nb);
             if o != sid && seen.insert(o) {
                 ordered.push(o);
             }
@@ -576,7 +602,7 @@ fn dev_nearby_players_ts_order(
                 if !t_land(terrain, tn) {
                     continue; // must be land
                 }
-                let o = plane[tn as usize];
+                let o = owner_at(plane, revert, tn);
                 if o != sid && seen.insert(o) {
                     ordered.push(o);
                 }
@@ -595,6 +621,7 @@ fn dev_nearby_players_ts_order(
 fn dev_shares_land_border(
     terrain: &[u8],
     plane: &[u16],
+    revert: &Revert,
     oborder: &[u32],
     ob_meta: &[u32],
     w: u32,
@@ -611,7 +638,7 @@ fn dev_shares_land_border(
         let mut buf = [0u32; 4];
         let c = t_neigh4(t, w, h, &mut buf);
         for &nb in buf.iter().take(c) {
-            if plane[nb as usize] == b {
+            if owner_at(plane, revert, nb) == b {
                 return true;
             }
         }
@@ -732,7 +759,15 @@ fn t_neigh4(t: u32, w: u32, h: u32, out: &mut [u32; 4]) -> usize {
 /// 50, keep the `is_shore && owner == owner` candidates, stable-sort by
 /// manhattan distance and take the first. The BFS is a LIFO stack (the engine's
 /// `q.pop()`), so discovery order is reproduced exactly.
-fn dev_target_transport_tile(terrain: &[u8], plane: &[u16], w: u32, h: u32, from: u32, owner: u16) -> Option<u32> {
+fn dev_target_transport_tile(
+    terrain: &[u8],
+    plane: &[u16],
+    revert: &Revert,
+    w: u32,
+    h: u32,
+    from: u32,
+    owner: u16,
+) -> Option<u32> {
     const MAX_DIST: u32 = 50;
     let fx = from % w;
     let fy = from / w;
@@ -763,7 +798,7 @@ fn dev_target_transport_tile(terrain: &[u8], plane: &[u16], w: u32, h: u32, from
     }
     let mut cands: Vec<u32> = tiles
         .into_iter()
-        .filter(|&t| t_shore(terrain, t) && plane[t as usize] == owner)
+        .filter(|&t| t_shore(terrain, t) && owner_at(plane, revert, t) == owner)
         .collect();
     if cands.is_empty() {
         return None;
@@ -856,6 +891,7 @@ fn dev_boat_attack_destination_to_player(
     mini: &water_hpa_port::WMap<'_>,
     hpa: &mut water_hpa_port::WaterHierarchical,
     plane: &[u16],
+    revert: &Revert,
     oborder: &[u32],
     ob_meta: &[u32],
     attacker: u16,
@@ -887,8 +923,8 @@ fn dev_boat_attack_destination_to_player(
     if inflight >= DEV_BOAT_MAX_NUMBER {
         return None;
     }
-    let target_owner = plane[dst_shore as usize];
-    let dst = dev_target_transport_tile(terrain, plane, w, h, dst_shore, target_owner)?;
+    let target_owner = owner_at(plane, revert, dst_shore);
+    let dst = dev_target_transport_tile(terrain, plane, revert, w, h, dst_shore, target_owner)?;
     if target_owner == attacker {
         return None;
     }
@@ -945,6 +981,7 @@ fn dev_send_boat_attack_to_nearby_tn(
     mini: &water_hpa_port::WMap<'_>,
     hpa: &mut water_hpa_port::WaterHierarchical,
     plane: &[u16],
+    revert: &Revert,
     source_tiles: &[u32],
     owner: u16,
 ) -> Option<(u32, u32, u32, Vec<u32>)> {
@@ -978,7 +1015,7 @@ fn dev_send_boat_attack_to_nearby_tn(
                 continue;
             }
             let tile = (ny as u32) * w + (nx as u32);
-            if t_land(terrain, tile) && plane[tile as usize] == 0 {
+            if t_land(terrain, tile) && owner_at(plane, revert, tile) == 0 {
                 candidates.push(tile);
             }
         }
@@ -992,11 +1029,19 @@ fn dev_send_boat_attack_to_nearby_tn(
     }
     for &cand in &candidates {
         // `can_build_transport_ship(owner, cand)` (`spatial.rs:187-211`).
-        let Some(dst) = dev_target_transport_tile(terrain, plane, w, h, cand, plane[cand as usize])
+        let Some(dst) = dev_target_transport_tile(
+            terrain,
+            plane,
+            revert,
+            w,
+            h,
+            cand,
+            owner_at(plane, revert, cand),
+        )
         else {
             continue;
         };
-        let target_owner = plane[cand as usize];
+        let target_owner = owner_at(plane, revert, cand);
         if target_owner == owner {
             continue;
         }
@@ -2160,6 +2205,20 @@ n",
         // the engine's live attacks (`prev.attacks`, for
         // `largest_incoming_land_attack_from_neighbors`) and the friendly pairs.
         let mut mine: HashMap<u16, Vec<u32>> = HashMap::new();
+        // The engine's exec positions for this tick (`PEXEC` order): the
+        // `Player(<sid>)` exec list, which is also the order the cluster pass
+        // walks. `Tribe(k)` ticks immediately after `Player(k)`, so
+        // `cpos_all` doubles as "everything at or before this position has
+        // already run" for the bot ladder (section 3a-ter / 3a-quinquies).
+        let cpos_all: HashMap<u16, usize> = cl_order
+            .iter()
+            .enumerate()
+            .map(|(k, s)| (*s as u16, k))
+            .collect();
+        // This tick's cluster handovers in exec order: `(victim exec position,
+        // victim, tiles)`. `dev_removed_ord` is what `revert_for` folds into a
+        // per-bot exec-time plane view.
+        let mut dev_removed_ord: Vec<(usize, u16, Vec<u32>)> = Vec::new();
         {
             let cst = kernels::device::CSTATE;
             let mut cadh = d_cad.to_host_vec(&stream).map_err(es)?;
@@ -2257,6 +2316,11 @@ n",
                     break;
                 }
                 let tiles = &rem[woff..woff + n];
+                dev_removed_ord.push((
+                    *cpos_all.get(&victim).unwrap_or(&usize::MAX),
+                    victim,
+                    tiles.to_vec(),
+                ));
                 // The captor's `owned_tiles` gains these BEFORE any attack of
                 // this tick (`game.conquer_one` pushes `owned_tiles`).
                 mine.entry(captor).or_default().extend_from_slice(tiles);
@@ -2403,6 +2467,31 @@ n",
             }
         }
 
+        // The bot ladder's exec-time plane view. `Tribe(sid)` ticks right after
+        // `Player(sid)`, BEFORE the cluster handover of every player whose
+        // `Player` exec is later in `PEXEC` order - so any tile handed over by a
+        // LATER-ordered victim still belonged to that victim when this bot
+        // decided. `revert` restores exactly those tiles, and `owner_at`
+        // consults it. Measured on pangaea N=488 nat=0, boundary 412 (engine
+        // tick 415): `ENG_CLUSTER_REMOVE tick=415 victim=286 captor=314` fires
+        // during sid 286's exec, but `Player(90)`, `Tribe(90)` (stderr line
+        // 218241/218242) both precede sid 286's `C2IN` (line 218469). The engine
+        // therefore shuffled 8 neighbours `[.., 286]` while the device - whose
+        // plane already held 314's tiles - shuffled only 7, drawing one PRNG
+        // value less and picking 168 instead of 486.
+        let revert_for = |sid: u16| -> Revert {
+            let p = *cpos_all.get(&sid).unwrap_or(&usize::MAX);
+            let mut m = Revert::new();
+            for (vpos, victim, tiles) in dev_removed_ord.iter() {
+                if *vpos > p {
+                    for &t in tiles {
+                        m.insert(t, *victim);
+                    }
+                }
+            }
+            m
+        };
+
         // --- 3a-bis. the bots' OWN attack decision (self-drive only) ----------
         // `execute_next_tick` (`game.rs:3729-3737`) ticks `execs` in list order and
         // the tribe execs sit AFTER every player exec and BEFORE every attack
@@ -2447,8 +2536,10 @@ n",
                 if pst_now[sid as usize * 3 + 1] < 1.0 {
                     continue; // `tiles_owned < 1`
                 }
+                let revert = revert_for(sid);
                 let first = tick <= b_ff[k];
-                let land = dev_land_border_tn(&terrain, &plane_now, &oborder, &ob_meta, w, h, sid);
+                let land =
+                    dev_land_border_tn(&terrain, &plane_now, &revert, &oborder, &ob_meta, w, h, sid);
                 // `send_boat_attack_to_nearby_tn` is reached only when there is NO
                 // land border: on the first firing unconditionally, later only
                 // with `neighbors_terra_nullius` set and a shore-reachable TN.
@@ -2459,7 +2550,7 @@ n",
                 } else {
                     b_state_host[k] & 2 != 0
                         && dev_shore_reachable_tn(
-                            &terrain, &plane_now, &oborder, &ob_meta, w, h, sid,
+                            &terrain, &plane_now, &revert, &oborder, &ob_meta, w, h, sid,
                         )
                 };
                 if !try_boat {
@@ -2480,6 +2571,7 @@ n",
                     &mini_map,
                     &mut water_hpa,
                     &plane_now,
+                    &revert,
                     sid_tiles,
                     sid,
                 ) else {
@@ -2635,6 +2727,7 @@ n",
                     continue;
                 }
                 let sid = bot_sched[k].0;
+                let revert = revert_for(sid);
                 let amount = bout[k * 3 + 1];
                 let mut sent = false;
                 // `find_incoming_attacker(&game, attacker, PlayerType::Bot)`
@@ -2646,7 +2739,7 @@ n",
                     dev_find_incoming_land_attacker(&slots, &troops_pre, &pst_now, &cur.friends, sid)
                 {
                     if dev_shares_land_border(
-                        &terrain, &plane_now, &oborder, &ob_meta, w, h, sid, tt,
+                        &terrain, &plane_now, &revert, &oborder, &ob_meta, w, h, sid, tt,
                     ) {
                         // `try_send_player_attack_forced(.., true)` LAND branch:
                         // unconditional, the engine returns without shuffling.
@@ -2671,6 +2764,7 @@ n",
                                 &mini_map,
                                 &mut water_hpa,
                                 &plane_now,
+                                &revert,
                                 &oborder,
                                 &ob_meta,
                                 sid,
@@ -2728,10 +2822,37 @@ n",
                 // marked traitor. No bot is ever marked in this port (no human
                 // declares war), so both rolls are skipped and the stream goes
                 // straight from the schedule draws to the shuffle.
-                let list =
-                    dev_nearby_players_ts_order(&terrain, &plane_now, &oborder, &ob_meta, w, h, sid);
+                let list = dev_nearby_players_ts_order(
+                    &terrain, &plane_now, &revert, &oborder, &ob_meta, w, h, sid,
+                );
                 let mut arr: Vec<i32> = list.iter().map(|&x| x as i32).collect();
+                let ladder_dbg = std::env::var("OFCUDA_MATRIX_LADDER_DBG")
+                    .ok()
+                    .map(|spec| {
+                        spec.split(',')
+                            .filter_map(|x| x.trim().parse::<u16>().ok())
+                            .any(|x| x == sid)
+                    })
+                    .unwrap_or(false);
+                let rng_before = (tribe_rng[k].s0, tribe_rng[k].s1, tribe_rng[k].s2, tribe_rng[k].s3);
+                let calls_before = tribe_rng[k].calls;
                 tribe_rng[k].shuffle_array(&mut arr);
+                if ladder_dbg {
+                    detail.push_str(&format!(
+                        "LADDER_DBG boundary {b} (engine tick {tick}) bot {sid} amount {:#018x} \
+                         self_troops {} nlist {list:?} shuffled {arr:?} rng_before {:08x} {:08x} \
+                         {:08x} {:08x} calls_before {} calls_after {} is_first {}\n",
+                        amount.to_bits(),
+                        fmt_f64(pst_now[sid as usize * 3]),
+                        rng_before.0 as u32,
+                        rng_before.1 as u32,
+                        rng_before.2 as u32,
+                        rng_before.3 as u32,
+                        calls_before,
+                        tribe_rng[k].calls,
+                        tick <= b_ff[k]
+                    ));
+                }
                 for &t in &arr {
                     if t == 0 {
                         // `player_by_small_id(0)` is `None`: TerraNullius has no
@@ -2756,7 +2877,7 @@ n",
                     // `land_attack_troops(sid, reserve_ratio)` is exactly the
                     // amount `bot_ai` already put in `bout[k*3+1]`.
                     if dev_shares_land_border(
-                        &terrain, &plane_now, &oborder, &ob_meta, w, h, sid, tgt,
+                        &terrain, &plane_now, &revert, &oborder, &ob_meta, w, h, sid, tgt,
                     ) {
                         if amount >= 1.0 {
                             dev_player_orig.push((sid, tgt, amount, "random"));
@@ -2786,6 +2907,7 @@ n",
                                 &mini_map,
                                 &mut water_hpa,
                                 &plane_now,
+                                &revert,
                                 &oborder,
                                 &ob_meta,
                                 sid,
@@ -4175,9 +4297,22 @@ n",
             let eng_counts: HashMap<u16, i32> =
                 cur.players.iter().map(|p| (p.sid, p.tiles)).collect();
             let mut diff = String::new();
-            for (sid, c) in &eng_counts {
-                let mine_n = cnt.get(sid).map(|v| v.len()).unwrap_or(0) as i32;
-                if mine_n != *c {
+            // DETERMINISTIC scan. `eng_counts` is a `HashMap`, and Rust's
+            // `HashMap` iteration order is randomised per process, so which
+            // player this scan named varied between runs of the SAME cell: the
+            // b=20 arm said `player 486 engine 972 tiles vs device 976` and the
+            // b=60 arm said `player 90 engine 884 tiles vs device 880` for the
+            // ONE 4-tile flip at boundary 413 (486 +4 / 90 -4 are the two sides
+            // of it, whichever side the scan reached first). Walk the sids in
+            // ASCENDING order so the same divergence always names the same
+            // player, and compare across runs by hash/counts rather than by
+            // this string.
+            let mut sids: Vec<u16> = eng_counts.keys().copied().collect();
+            sids.sort_unstable();
+            for sid in sids {
+                let c = eng_counts[&sid];
+                let mine_n = cnt.get(&sid).map(|v| v.len()).unwrap_or(0) as i32;
+                if mine_n != c {
                     diff = format!("player {sid} engine {c} tiles vs device {mine_n}");
                     break;
                 }

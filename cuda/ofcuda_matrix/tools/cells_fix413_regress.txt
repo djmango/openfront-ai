@@ -1,0 +1,7 @@
+# boundary-413 fix: regression subset (plain replays; self-drive branch is not entered)
+pangaea 2
+pangaea 7
+pangaea 18
+pangaea 64
+pangaea 488 0 250
+pangaea 18 1 250
