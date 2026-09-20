@@ -339,7 +339,15 @@ mod kernels {
         // per-tick host plane scan the economy used to need.
         ptiles: &mut [u32],
         do_ob: u32,
+        // ENGINE `retreat`'s troop return (`attack.rs:1278-1297`), per tick:
+        // 0.0 unless this tick's death was the `to_conquer.is_empty()` branch,
+        // in which case it is the attack's surviving troop count. The caller
+        // owns the owner's ledger (`Game::add_troops`, `game.rs:1170-1178`); the
+        // attack's own troop_count is zeroed on this path exactly as before, so
+        // every path that does not settle a ledger is byte-identical.
+        retreat_survivors: &mut f64,
     ) -> bool {
+        *retreat_survivors = 0.0;
         // attack.rs:239-255: the one extra draw, taken BEFORE the pop loop, and
         // the budget's border term read after it.
         let draw = pr.next_int(0, 5);
@@ -349,7 +357,7 @@ mod kernels {
         while num > 0.0 {
             if *troop_count < 1.0 {
                 *troop_count = 0.0;
-                return false; // attack.rs:258-262 starved
+                return false; // attack.rs:258-262 starved (kill_attack: NO return)
             }
             if heap.is_empty() {
                 // attack.rs:264-268 `refresh_to_conquer`, then RETREAT (death).
@@ -380,6 +388,10 @@ mod kernels {
                         offer_dev(heap, pr, bsub, blen, psub, owner_col, terrain, bt, w, h, tick);
                     }
                 }
+                // attack.rs:266-267 `self.troops = troop_count; self.retreat(game, 0.0)`:
+                // the survivors go back to the owner (`attack.rs:1278-1297`).
+                // Carried out to the caller; the attack's own count stays 0.
+                *retreat_survivors = *troop_count;
                 *troop_count = 0.0;
                 return false;
             }
@@ -560,6 +572,7 @@ mod kernels {
             &mut [],
             &mut [],
             0,
+            &mut 0.0,
         );
 
         // ---- write the persistent state back (device-resident, no copy-out) --
@@ -672,6 +685,7 @@ mod kernels {
             if obn > OB {
                 obn = OB;
             }
+            let mut survivors = 0.0f64;
             let alive = {
                 let psub = &mut plane[poff..poff + wh];
                 let bsub = &mut mborder[boff..boff + BC];
@@ -705,13 +719,17 @@ mod kernels {
                     &mut poblen[lle..lle + npl_u],
                     &mut ptiles[lle..lle + npl_u],
                     do_ob,
+                    &mut survivors,
                 )
             };
             mscal[soff + 3] = 1;
             mscal[soff] = heap.len as u32;
             mscal[soff + 1] = blen as u32;
             mscal[soff + 2] = ncl as u32;
-            mtroops[g] = troop_count;
+            // A slot that DIED on `to_conquer.is_empty()` carries its surviving
+            // troops here (engine `retreat`, attack.rs:1278-1297) so the host can
+            // settle the owner's ledger; a starved slot carries 0.
+            mtroops[g] = if alive { troop_count } else { survivors };
             mscal[soff + 5] = if alive { 1 } else { 0 };
             mscal[soff + 6] = drops;
             let mut j = 0usize;
@@ -863,6 +881,7 @@ mod kernels {
                 &mut [],
                 &mut [],
                 0,
+                &mut 0.0,
             );
             ran += 1;
             if !alive {
@@ -3595,6 +3614,25 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut pending_diff: Option<u32> = None;
     let orig_border_from_record =
         std::env::var("OFCUDA_ENV_ORIG_BORDER").map(|v| v == "record").unwrap_or(false);
+    // DIAGNOSTIC (env `OFCUDA_ENV_ATK_DEBUG=1`): MEASUREMENT ONLY. After the
+    // tick's step, print each live slot's device-side attack state (owner,
+    // heap_len, border_len, troops) beside the record's own live land-attack
+    // list at the same engine tick. The attack's own `border_tiles` set is the
+    // one attack-side register the record cannot carry (only its OWNER's
+    // `borderOrder` is dumped), so the budget's `border_size` and the per-pop
+    // `remove_border_tile`/`add_border_tile` maintenance are checked against the
+    // record through what they DO move: the troop count (one
+    // `attacker_troop_loss` per popped tile) and the live-attack set.
+    let atk_debug = std::env::var("OFCUDA_ENV_ATK_DEBUG").map(|v| v == "1").unwrap_or(false);
+    let atk_dbg_from: u32 = std::env::var("OFCUDA_ENV_ATK_FROM")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let atk_dbg_to: u32 = std::env::var("OFCUDA_ENV_ATK_TO")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(u32::MAX);
+    let mut atk_dbg_first: Option<u32> = None;
     // DIAGNOSTIC (env `OFCUDA_ENV_OB_DEBUG=1`): compare the DEVICE's evolved
     // owner-border set, tile for tile and in order, with the record's own
     // `borderOrder` rows. Used to locate the first tick at which the ported
@@ -3603,6 +3641,23 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut ob_debug_first: Option<u32> = None;
     let mut h_tiles_now = vec![0i32; npl];
     let mut scal0 = b.d_mscal.to_host_vec(&stream)?;
+    // ---- OWNER TROOP LEDGER (the attack side of the economy) ----------------
+    // `AttackExecution`'s own troop movements, which the record carries only
+    // indirectly, through the owner's `troops`: `init`'s `remove_troops`
+    // (`attack.rs:146-149`, the attack's start paid out of the owner's pool) and
+    // `retreat`'s `add_troops` (`attack.rs:1278-1297`, the survivors paid back).
+    // The device reports both - the created attack's `start` is the amount it
+    // debits, and a slot that died on the `to_conquer.is_empty()` branch carries
+    // its survivors in `mtroops` - and the host applies them to the same
+    // `h_troops` the next bot decision reads. Without it the owner's pool only
+    // ever grows, the next attack's `start` is too large, and `tiles_used`
+    // (`within((2000*speed.max(10))/attack_troops, 5, 100)`, `game.rs:896`) stays
+    // clamped at 5 while the engine's has already risen above it.
+    let mut prev_alive: Vec<bool> = (0..b.slots).map(|s| scal0[s * SCAL + 5] != 0).collect();
+    let mut ledger_debits: u64 = 0;
+    let mut ledger_debit_total: i64 = 0;
+    let mut ledger_credits: u64 = 0;
+    let mut ledger_credit_total: i64 = 0;
     for k in 0..a.ticks {
         let tick = t0 + k;
         // The engine's OWN tick that this iteration executes. `env_step_multi`'s
@@ -3740,6 +3795,87 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
             )?;
         }
 
+        // DIAGNOSTIC (OFCUDA_ENV_ATK_DEBUG=1): the attack-side state after this
+        // tick's step, against the record's own live land attacks at the same
+        // engine tick (`t0 + k + 1`). Prints the first tick whose live SET or
+        // whose per-owner troop count (floored, the record's own truncation)
+        // disagrees, then every tick in [ATK_FROM, ATK_TO].
+        if atk_debug {
+            let sc = b.d_mscal.to_host_vec(&stream)?;
+            let tr = b.d_mtroops.to_host_vec(&stream)?;
+            let ow = b.d_mowner.to_host_vec(&stream)?;
+            let et = t0 + k + 1;
+            let mut rec: Vec<(u16, i64)> = ex
+                .attacks
+                .get(&et)
+                .map(|v| {
+                    v.iter()
+                        .filter(|x| x.live && x.target == 0)
+                        .map(|x| (x.owner, x.troops))
+                        .collect()
+                })
+                .unwrap_or_default();
+            rec.sort_unstable();
+            let mut dev: Vec<(u16, i64, u32, u32)> = Vec::new();
+            for s in 0..b.slots {
+                if sc[s * SCAL + 5] != 0 {
+                    dev.push((
+                        ow[s],
+                        tr[s].floor() as i64,
+                        sc[s * SCAL],
+                        sc[s * SCAL + 1],
+                    ));
+                }
+            }
+            let mut dev_keys: Vec<(u16, i64)> = dev.iter().map(|d| (d.0, d.1)).collect();
+            dev_keys.sort_unstable();
+            // Player-troop ledger: the host's `h_troops` (the value the NEXT
+            // bot decision reads) against the record's own player rows.
+            let mut led: Vec<(u16, i32, i32)> = Vec::new();
+            for (sid, _) in bots.iter() {
+                let s = *sid as usize;
+                let rt = ex
+                    .p
+                    .get(&et)
+                    .and_then(|m| m.get(sid))
+                    .map(|p| p.troops)
+                    .unwrap_or(i32::MIN);
+                led.push((*sid, h_troops[s], rt));
+            }
+            let led_bad: Vec<(u16, i32, i32)> =
+                led.iter().copied().filter(|l| l.1 != l.2).collect();
+            let mismatch = dev_keys != rec || !led_bad.is_empty();
+            if mismatch && atk_dbg_first.is_none() {
+                atk_dbg_first = Some(et);
+            }
+            if mismatch && atk_dbg_first == Some(et) {
+                println!(
+                    "ATKDBG first mismatch engine_tick={et} dev={:?} rec={:?} ledger(sid,dev_h,rec)={:?}",
+                    dev, rec, led
+                );
+                let t = et.saturating_sub(1);
+                let tprev = t.saturating_sub(1);
+                for tt in [tprev, t, et] {
+                    if let Some(v) = ex.attacks.get(&tt) {
+                        let l: Vec<(u16, i64)> = v
+                            .iter()
+                            .filter(|x| x.live && x.target == 0)
+                            .map(|x| (x.owner, x.troops))
+                            .collect();
+                        println!("   rec attacks at {tt}: {l:?}");
+                    }
+                    if let Some(m) = ex.p.get(&tt) {
+                        let l: Vec<(u16, i32)> =
+                            m.iter().map(|(s, p)| (*s, p.troops)).collect();
+                        println!("   rec troops at {tt}: {l:?}");
+                    }
+                }
+            }
+            if et >= atk_dbg_from && et <= atk_dbg_to {
+                println!("ATKDBG tick={et} dev={dev:?} rec={rec:?} ledger={led:?}");
+            }
+        }
+
         // DIAGNOSTIC: did the device's evolved set stay identical (order and
         // all) to the record's own `borderOrder` at this tick? Prints only the
         // first mismatching tick per run.
@@ -3793,6 +3929,39 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
         //     engine's `add_land_attack_from` does (appended to `execs` after
         //     the tick's attack execs, first conquest one tick later).
         scal0 = b.d_mscal.to_host_vec(&stream)?;
+        // (4a) OWNER TROOP LEDGER - the retreat side. A slot that went from live
+        //      to dead during the step just launched is either `retreat` (its
+        //      survivors are in `mtroops`) or a starved `kill_attack` (0).
+        //      `Game::add_troops` (`game.rs:1170-1178`) adds `floor(survivors)`,
+        //      and only when `survivors >= 1.0` (`attack.rs:1284-1287`). Settled
+        //      here, before the next iteration's income, which is the engine's own
+        //      order (income runs ahead of the attack execs).
+        let mut dead_slots: Vec<usize> = Vec::new();
+        for s in 0..b.slots {
+            if prev_alive[s] && scal0[s * SCAL + 5] == 0 {
+                dead_slots.push(s);
+            }
+        }
+        if !dead_slots.is_empty() {
+            let tr = b.d_mtroops.to_host_vec(&stream)?;
+            let ow = b.d_mowner.to_host_vec(&stream)?;
+            for s in dead_slots.iter() {
+                let g = *s; // env 0: every env in the batch is the same clone
+                let surv = tr[g];
+                if surv >= 1.0 {
+                    let owner = ow[g] as usize;
+                    if owner < npl {
+                        let add = surv.floor() as i32;
+                        h_troops[owner] += add;
+                        ledger_credits += 1;
+                        ledger_credit_total += add as i64;
+                    }
+                }
+            }
+        }
+        for s in 0..b.slots {
+            prev_alive[s] = scal0[s * SCAL + 5] != 0;
+        }
         // DIAGNOSTIC ONLY (env `OFCUDA_ENV_ORIG_BORDER=record`): replace the
         // plane-derived owner-border for every BOT with the record's own
         // `borderOrder` at this state's tick. This is the one part of
@@ -3850,6 +4019,17 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
             };
             used.push(slot);
             let s = *sid as usize;
+            // OWNER TROOP LEDGER - the creation side. `AttackExecution::init`
+            // (`attack.rs:146-149`) pays the attack's `start` troops out of the
+            // OWNER's own pool: `Game::remove_troops(owner, start)`
+            // (`game.rs:1153-1164`, `min(troops, floor(start))`). `start` is the
+            // value the bot decision produced (the un-floored f64 the attack is
+            // given), and the debit lands after this tick's income and before the
+            // next one, which is the engine's own phase order.
+            let debit = (start.floor() as i32).min(h_troops[s]).max(0);
+            h_troops[s] -= debit;
+            ledger_debits += 1;
+            ledger_debit_total += debit as i64;
             let obn = h_obmeta[s * 2 + 1];
             for e in 0..n {
                 let g = (e * b.slots + slot) as u32;
@@ -3958,6 +4138,10 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
             _ => {}
         }
     }
+    println!(
+        "MULTI-ORIG owner troop ledger: debits={} total_debited={} credits={} total_credited={}",
+        ledger_debits, ledger_debit_total, ledger_credits, ledger_credit_total
+    );
     println!(
         "MULTI-ORIG engine agreement: {}/{} ticks matched (prefix, unaided); {} total exact ticks",
         matched,
