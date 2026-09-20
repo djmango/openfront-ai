@@ -144,3 +144,10 @@ value is written into the device anywhere in the new code.
 ## Reading the divergence line
 
 The reported player in `first divergence: boundary N ... player P engine A tiles vs device B` is NOT run-stable: the same divergence is reported from whichever side of a tile flip the mismatch scan reaches first, and the two sides differ in sign (e.g. 90: 884/880 vs 486: 972/976 at boundary 413). Compare the plane hash and the counts across runs; do not treat the reported player as an identifier. Making it deterministic is an open cosmetic fix.
+
+| **435 = capacity wall** | **414** | **neither a divergence nor a parity failure: at boundary 435 the device needs a 1025th attack slot while the record holds 149 live attacks there.** Both freeze arms are byte-exact to 434/434 (hash 434/434, claims 76578/76578, owned counts 212226/212226, troops 79274/79274 for b=20 and 78984/78984 for b=60) with self-drive tallies 0/0/0 and first divergence NONE; the 413 divergence is closed. The record-driven plain replay burns 1024 slot indices by 437 while staying claim/hash-exact, so the burn is the allocation scheme never reusing freed slots, NOT self-drive leaking attacks. |
+
+### Two harness facts that make readings lie
+
+- **A fresh dump lists ZERO ATTACK rows at its own final boundary** (t413, t434, t437) while the complete t500 dump lists 149 there, so pc_create/pc_evict/pc_troops at a cell final boundary are an artefact and must not be read as agreement evidence. Genuine extras through boundary 250 are near zero (pc_evict 3).
+- **The reported first-mismatching player in the divergence line is a scan artefact, not an identifier.** The scan iterated a HashMap (randomised order), so one 4-tile flip was reported from either side (player 90 engine 884 vs device 880, or player 486 engine 972 vs device 976 - the same flip, opposite signs). Compare hashes and counts, never the printed player. It is now sorted by sid, so at least it is run-stable.
