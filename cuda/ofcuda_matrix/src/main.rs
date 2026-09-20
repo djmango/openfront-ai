@@ -1879,6 +1879,11 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
     // PORTED `cancel_opposing_land_attacks` TOTALS (see section 4d-bis).
     let mut dev_cancel_reduces = 0usize;
     let mut dev_cancel_kills = 0usize;
+    // The engine's SAME cancel applied on the RECORD-DRIVEN path (section 2c):
+    // total kills the device performed on its own slot list, and how many have
+    // been narrated.
+    let mut dev_replay_cancel_kills = 0usize;
+    let mut dev_replay_cancel_shown = 0usize;
     // Section 4d-bis pairs handed to 4c (which owns the full cancel for a
     // `dev_player_orig` retaliate). Diagnostic only.
     let mut dev_cancel_handoff = 0usize;
@@ -1973,6 +1978,16 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         // the tick that still belongs to the old attack runs on the old state.
         // (slot position, the engine's re-created attack, the id it replaced)
         let mut pending_reinit: Vec<(usize, AttackSnap, String)> = Vec::new();
+        // (owner, target) of every attack the engine INITed during the tick that
+        // produced `prev` - i.e. every attack the device creates at THIS boundary
+        // from `prev.attacks` (an attack listed at boundary b-1 whose init ran at
+        // the end of the tick stamped b-1's `engine_tick`). `AttackExecution::init`
+        // is the one place the engine calls `cancel_opposing_land_attacks`
+        // (`attack.rs:166`), so these are exactly the initiations section 2c must
+        // run the engine's cancel for. Only the plain (record-driven) path pushes
+        // here: in self-drive the device inits its OWN attacks and section 4d-bis
+        // owns the cancel.
+        let mut fresh_inits: Vec<(u16, u16)> = Vec::new();
         for snap in &prev.attacks {
             let exact = slots.iter().position(|s| {
                 s.alive && !taken[s.idx] && s.owner == snap.owner && s.target == snap.target
@@ -2121,6 +2136,11 @@ n",
                     // tick of the boundary BEFORE the one it appears at. A slot
                     // freed by an earlier death is REUSED (`alloc_slot`), so the
                     // capacity check bounds CONCURRENT attacks, not allocations.
+                    // The engine INITed this attack at the end of the tick that
+                    // produced `prev`, i.e. the one place `cancel_opposing_land_attacks`
+                    // runs - section 2c replays that cancel against the device's
+                    // own slot list.
+                    fresh_inits.push((snap.owner, snap.target));
                     let idx = alloc_slot(&mut slots, &mut taken)?;
                     let init_tick = if b >= 2 {
                         orc.boundaries[b - 2].engine_tick
@@ -2198,6 +2218,95 @@ n",
                     taken[idx] = true;
                     plan.push((idx, snap.clone()));
                 }
+            }
+        }
+
+        // --- 2c. the engine's `cancel_opposing_land_attacks` KILL, applied by the
+        // DEVICE to its own slot ----------------------------------------------
+        // `AttackExecution::init` (`attack.rs:166`) ends with
+        // `game.cancel_opposing_land_attacks(owner, target, ..)`: it walks the
+        // owner's `incoming_land_attacks` and, for an incoming attack whose
+        // attacker IS the new attack's target, either REDUCEs it (`incoming -
+        // start` troops, the new attack voided) or KILLs it (`incoming <= start`;
+        // `game.rs:2209-2213`). The engine's replay of pangaea N=488 t500 shows
+        // 114 KILLs and 17 REDUCEs, and the FIRST (boundary 295, `OF_ENG_CANCEL=1`):
+        //
+        //   ENG_CANCEL new=488->161 new_troops=12571.130059
+        //              incoming=f3mqg1wx 161->488 incoming_troops=12409.856607
+        //   ENG_CANCEL_BITS new_bits=0x40c88d90a5c279d0 incoming_bits=0x40c83ceda54e5f83
+        //
+        // 12409.856607 <= 12571.130059, so the KILL branch ran: the new attack kept
+        // 12571.130059 - 12409.856607 = 161.273452 (the record's 0x406428c01d069340
+        // at boundary 295) and `161->488` was killed. The record's live list at
+        // boundary 295 therefore no longer holds `161->488`.
+        //
+        // What the device did with that (before this section): nothing. The cancel
+        // port exists only inside the self-drive gate (section 4d-bis), so on the
+        // record-driven path the death was left to the blind list-diff in section 3
+        // - which then reported the death it had just applied as
+        // "engine dropped an attack the device kept alive" and made it the run's
+        // first divergence (boundary 296, sid 161). Every one of the 113 evictions
+        // a full t500 plain replay produces is one of these cancels: over the whole
+        // record there are exactly 113 boundaries where a fresh (O->T) init lands
+        // on a boundary where (T->O) leaves the live list, and 0 where a RE-CREATE
+        // (id change) does.
+        //
+        // So the device now makes the engine's decision itself, on its OWN slot
+        // list, at the engine's own moment. The branch is not guessed: `prev` is
+        // the engine's live list after the tick in which the init ran, so a mutual
+        // (T->O) that is GONE from `prev` while the device still holds it live is
+        // the KILL branch's outcome (`incoming <= start`), and a mutual attack
+        // still in `prev` is the REDUCE branch's (left alive, its troops lowered
+        // by the incoming - start the record itself carries - section 4e). The
+        // gates are the engine's: no self-attack, no terra nullius, not friendly.
+        //
+        // The device's kill is `kill_attack`'s: the slot's `attack_live` word
+        // (`scal[+3]`) goes to 0 and the slot leaves the list, so the kernel would
+        // refuse to tick it even if it were still scheduled. Nothing else is
+        // re-seeded: the successor's troops were already the record's
+        // post-cancel value when section 2 created it.
+        if !fresh_inits.is_empty() && !freeze_at.is_some_and(|fa| b >= fa) {
+            let mut sc_kill: Option<Vec<u32>> = None;
+            for (o, t) in &fresh_inits {
+                if *t == 0 || *t == *o {
+                    continue;
+                }
+                if cur
+                    .friends
+                    .iter()
+                    .any(|(p, q)| (*p == *o && *q == *t) || (*p == *t && *q == *o))
+                {
+                    continue;
+                }
+                // The engine's live list after the initialising tick no longer
+                // holds the mutual attack: that absence is the KILL branch.
+                if prev.attacks.iter().any(|a| a.owner == *t && a.target == *o) {
+                    continue;
+                }
+                for s in slots.iter_mut() {
+                    if s.alive && s.owner == *t && s.target == *o {
+                        s.alive = false;
+                        dev_replay_cancel_kills += 1;
+                        if sc_kill.is_none() {
+                            sc_kill = Some(d_scal.to_host_vec(&stream).map_err(es)?);
+                        }
+                        sc_kill.as_mut().unwrap()[s.idx * SCAL + 3] = 0;
+                        if dev_replay_cancel_shown < 12 {
+                            dev_replay_cancel_shown += 1;
+                            detail.push_str(&format!(
+                                "CANCEL_REPLAY_KILL boundary {b} (engine tick {tick}): the \
+                                 engine's cancel_opposing_land_attacks KILLed the incoming \
+                                 {}->{} when {}->{} inited at the end of the previous tick \
+                                 (incoming <= start); the device kills its own slot {}\n",
+                                s.owner, s.target, o, t, s.idx
+                            ));
+                        }
+                    }
+                }
+            }
+            if let Some(mut sc_kill) = sc_kill {
+                let _ = &mut sc_kill;
+                d_scal.copy_from_host(&stream, &sc_kill).map_err(es)?;
             }
         }
 
@@ -4663,7 +4772,8 @@ n",
     detail.push_str(&format!(
         "\n### RESULT\ninit_sets {}\ninit_hash {}\ntick claims matched {}/{}\nhash matched {}/{}\n\
          owned counts matched {}/{}\ntroops matched {}/{}\nchurn-skipped owners {}\n\
-         engine evictions {}\nengine re-creates followed {}\ndevice frontier agreed with the \
+         engine evictions {}\ndevice cancel kills (replay path) {}\n\
+         engine re-creates followed {}\ndevice frontier agreed with the \
          engine's recorded to_conquer/border_tiles {}/{}\ndevice claims total {}\n\
          first divergence: {}\nnote: {}\n",
         yn(row.init_sets),
@@ -4678,6 +4788,7 @@ n",
         row.troops_total,
         row.churn_skipped,
         row.engine_evictions,
+        dev_replay_cancel_kills,
         row.reinits,
         row.reinit_agree,
         row.reinit_checked,
