@@ -90,3 +90,28 @@ boundaries, breaking on a self-originated terra-nullius attack's troop amount.
    deleted once the device port is proven load-bearing in self-drive;
 7. the cluster cadence counters (ported into the env);
 8. the nation post-spawn AI (not ported).
+
+## Ceiling ladder (updated as it moves)
+
+Self-drive (`OFCUDA_MATRIX_FREEZE_ATTACKS=b`) first-divergence boundary, and what
+the ceiling turned out to be each time. Every step was proven by re-breaking it
+with a control, never by assertion.
+
+| divergence | past freeze (b=20) | ceiling was |
+|---|---|---|
+| 20 (at the freeze) | 0 | no bot AI at all - the port could not originate an attack |
+| 60 | 40 | wrong PRNG draw count (`refresh_to_conquer` draws) |
+| 102 | 82 | wrong troop amount on self-originated TN attacks |
+| 154 | 134 | unmodelled `cancel_opposing_land_attacks`; then unmodelled boats |
+| 166 | 146 | wrong ship ROUTES (Chebyshev BFS vs the half-res water HPA) |
+| **166 (current)** | **146** | **player-targeted BOAT LANDINGS**: `TransportShipExecution::init` snapshots `target_small_id` from the END-of-tick plane, so a ship landing on a just-conquered tile attacks that player (engine: owner 441 target 269, cargo 3554.6, claiming 337264 at boundary 166). The device's origination gate refuses non-TN land attacks and creates a TN one. |
+
+Ship ROUTES are now exact: a launch-by-launch comparison of the engine's own
+`OF_ENG_BOAT=1` path trace against the device's `OFCUDA_MATRIX_BOATDBG=1`
+`DEV_BOAT_PLAN` output gave 12/12 exact tile sequences, including a route
+(566150,565150,564150,563150,562150,561150,560150,561151) that falls then rises
+and so cannot come from a shortest-path search.
+
+The landed-but-unexercised surface: `land()`'s `target != 0 && !friendly` and
+`target != owner && friendly` branches, and the aircraft-carrier branch
+(`transport_ship.rs:404-410`, needs FlightDeck), which is not modelled at all.
