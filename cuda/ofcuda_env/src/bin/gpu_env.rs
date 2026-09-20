@@ -92,6 +92,11 @@ const CC: usize = 8192;
 const MAXC: usize = 2048;
 /// Capacity of the per-env owner-border (refresh input) copy.
 const OB: usize = 16384;
+/// Per-PLAYER capacity of the device-maintained, insertion-ordered owner-border
+/// set (`Player.border_tiles`). One such set per player per env, so the device
+/// cost is `n * npl * PB * 4` bytes. 4096 holds far more than the measured
+/// engine border (a few thousand) at a mid-game boundary.
+const PB: usize = 4096;
 /// Live-attack SLOTS per env in the multi-attack path. One env is a whole
 /// game, so it holds a SET of live attacks; the device carries one slot's
 /// worth of attack state per `(env, slot)` instead of one per env.
@@ -150,6 +155,95 @@ mod kernels {
                 *blen -= 1;
                 return;
             }
+            i += 1;
+        }
+    }
+
+    // ---- INCREMENTAL, DEVICE-RESIDENT owner-border maintenance ---------------
+    //
+    // The engine keeps each player's `border_tiles` as an insertion-ordered
+    // `OrderedTiles` (`execution/ordered_tiles.rs`), maintained incrementally by
+    // `Game::update_border_status` / `refresh_borders_around` (`game.rs:1122-1155`)
+    // and called from `conquer_one` (`game.rs:1296`). This is the port: the same
+    // membership rule (`GameMap::is_border`, `map.rs:397-413`) and the same
+    // visit order (the tile, then its cardinal neighbours in N,S,W,E order,
+    // `map.rs`/`GameMap.ts:393-403`). Appends land in engine order, so the set
+    // is faithful where the old plane-derived ascending-index scan was not.
+    //
+    // Storage: one flat `[npl * PB]` slice per env; player `p`'s set occupies
+    // `p * PB .. p * PB + plen[p]`, and `plen[p]` is its length. Membership is a
+    // linear scan, exactly as `OrderedTiles::insert`/`remove` behave externally.
+    #[inline]
+    fn ob_is_border(plane: &[u16], w: u32, h: u32, t: u32, owner: u16) -> bool {
+        let x = t % w;
+        if x > 0 && plane[(t - 1) as usize] != owner {
+            return true;
+        }
+        if x + 1 < w && plane[(t + 1) as usize] != owner {
+            return true;
+        }
+        if t >= w && plane[(t - w) as usize] != owner {
+            return true;
+        }
+        if t < (h - 1) * w && plane[(t + w) as usize] != owner {
+            return true;
+        }
+        false
+    }
+
+    /// `Game::update_border_status(tile)` (`game.rs:1122-1135`): no-op unless the
+    /// tile has an owner; otherwise insert on border (preserving position when
+    /// already present), remove otherwise.
+    #[inline]
+    fn ob_update(plane: &[u16], w: u32, h: u32, t: u32, pb: &mut [u32], plen: &mut [u32]) {
+        let owner = plane[t as usize] as usize;
+        if owner == 0 || owner >= plen.len() {
+            return;
+        }
+        let base = owner * PB;
+        let len = plen[owner] as usize;
+        if ob_is_border(plane, w, h, t, owner as u16) {
+            let mut i = 0usize;
+            while i < len {
+                if pb[base + i] == t {
+                    return; // re-add of a present value keeps its position
+                }
+                i += 1;
+            }
+            if len < PB {
+                pb[base + len] = t;
+                plen[owner] = (len + 1) as u32;
+            }
+        } else {
+            let mut i = 0usize;
+            while i < len {
+                if pb[base + i] == t {
+                    let mut j = i;
+                    while j + 1 < len {
+                        pb[base + j] = pb[base + j + 1];
+                        j += 1;
+                    }
+                    plen[owner] = (len - 1) as u32;
+                    return;
+                }
+                i += 1;
+            }
+        }
+    }
+
+    /// `Game::refresh_borders_around(tile)` (`game.rs:1141-1155`): the tile
+    /// itself, then its four cardinal neighbours in **N,S,W,E** order. The visit
+    /// order is observable - each call appends a newly-border tile to the
+    /// player's ordered set, and `refresh_to_conquer` later walks that set while
+    /// drawing one PRNG value per enqueued neighbour.
+    #[inline]
+    fn ob_refresh_around(plane: &[u16], w: u32, h: u32, t: u32, pb: &mut [u32], plen: &mut [u32]) {
+        ob_update(plane, w, h, t, pb, plen);
+        let mut nbuf = [0u32; 4];
+        let n = neighbors4(ORDER_NSWE, t, w, h, &mut nbuf);
+        let mut i = 0usize;
+        while i < n as usize {
+            ob_update(plane, w, h, nbuf[i], pb, plen);
             i += 1;
         }
     }
@@ -234,6 +328,17 @@ mod kernels {
         oboff: usize,
         obn: usize,
         cad: &mut [u32],
+        // INCREMENTAL OWNER-BORDER (device, per player): this env's
+        // `[npl * PB]` ordered sets and their per-player lengths. Empty and
+        // `do_ob == 0` on every path that does not maintain them (the
+        // single-attack `env_step`), which leaves that path byte-identical.
+        ob: &mut [u32],
+        oblen: &mut [u32],
+        // Per-player owned-tile counts for THIS env, maintained incrementally
+        // exactly as `Game::conquer_one` grows `tiles_owned`. Replaces the
+        // per-tick host plane scan the economy used to need.
+        ptiles: &mut [u32],
+        do_ob: u32,
     ) -> bool {
         // attack.rs:239-255: the one extra draw, taken BEFORE the pop loop, and
         // the budget's border term read after it.
@@ -247,14 +352,33 @@ mod kernels {
                 return false; // attack.rs:258-262 starved
             }
             if heap.is_empty() {
-                // attack.rs:264-268 refresh_to_conquer, then RETREAT (death).
+                // attack.rs:264-268 `refresh_to_conquer`, then RETREAT (death).
+                // The refill iterates the OWNER's CURRENT `border_tiles` - live,
+                // in its insertion order - NOT a snapshot taken at creation. With
+                // the device-maintained set (`do_ob != 0`) that live set is `ob`
+                // for the owner; the flat-snapshot path keeps the old behaviour.
                 heap.clear();
                 *blen = 0;
                 let mut j = 0usize;
-                while j < obn {
-                    let bt = oborder[oboff + j];
-                    j += 1;
-                    offer_dev(heap, pr, bsub, blen, psub, owner_col, terrain, bt, w, h, tick);
+                if do_ob != 0 {
+                    let base = owner_col as usize * PB;
+                    let ol = if (owner_col as usize) < oblen.len() {
+                        oblen[owner_col as usize] as usize
+                    } else {
+                        0
+                    };
+                    let ol = ol.min(PB);
+                    while j < ol {
+                        let bt = ob[base + j];
+                        j += 1;
+                        offer_dev(heap, pr, bsub, blen, psub, owner_col, terrain, bt, w, h, tick);
+                    }
+                } else {
+                    while j < obn {
+                        let bt = oborder[oboff + j];
+                        j += 1;
+                        offer_dev(heap, pr, bsub, blen, psub, owner_col, terrain, bt, w, h, tick);
+                    }
                 }
                 *troop_count = 0.0;
                 return false;
@@ -282,6 +406,17 @@ mod kernels {
                 *drops += 1;
             }
             psub[tile as usize] = owner_col; // conquer, in place
+            // `Game::conquer_one` (`game.rs:1278-1300`): the plane write, then
+            // `refresh_borders_around(tile)` - insert/remove the tile and its
+            // N,S,W,E neighbours in the owner's ordered `border_tiles`. The
+            // plane write happens FIRST so `is_border` sees the new owner, as in
+            // the engine.
+            if do_ob != 0 {
+                ob_refresh_around(psub, w, h, tile, ob, oblen);
+            }
+            if (owner_col as usize) < ptiles.len() {
+                ptiles[owner_col as usize] += 1; // grow `tiles_owned`
+            }
             // `Game::conquer_one` (`game.rs:1278-1282`): this tick's conquest
             // sets the owner's `last_tile_change` and grows its `tiles_owned`.
             // The device cadence is the env's OWN, accumulated here - never
@@ -421,6 +556,10 @@ mod kernels {
             oboff,
             obn,
             cadsub,
+            &mut [],
+            &mut [],
+            &mut [],
+            0,
         );
 
         // ---- write the persistent state back (device-resident, no copy-out) --
@@ -479,6 +618,14 @@ mod kernels {
         misbot: &[u32],
         moborder: &[u32],
         mut cad: &mut [u32],
+        // Incremental device owner-border: `n_envs * pbnpl * PB` ordered sets,
+        // `n_envs * pbnpl` lengths and `n_envs * pbnpl` owned-tile counters.
+        // `do_ob == 0` disables maintenance (and the buffers are never touched).
+        mut pob: &mut [u32],
+        mut poblen: &mut [u32],
+        mut ptiles: &mut [u32],
+        pbnpl: u32,
+        do_ob: u32,
     ) {
         let e = thread::index_1d().get();
         if e >= n_envs as usize {
@@ -529,10 +676,35 @@ mod kernels {
                 let psub = &mut plane[poff..poff + wh];
                 let bsub = &mut mborder[boff..boff + BC];
                 let cadsub = &mut cad[e * cspan..(e + 1) * cspan];
+                let npl_u = pbnpl as usize;
+                let obspan = npl_u * PB;
+                let obe = e * obspan;
+                let lle = e * npl_u;
                 tick_once(
-                    &mut heap, &mut pr, &mut troop_count, bsub, &mut blen, psub, mclaims, coff,
-                    &mut ncl, &mut drops, terrain, w, h, tick, owner_col, is_bot, moborder,
-                    oboff, obn, cadsub,
+                    &mut heap,
+                    &mut pr,
+                    &mut troop_count,
+                    bsub,
+                    &mut blen,
+                    psub,
+                    mclaims,
+                    coff,
+                    &mut ncl,
+                    &mut drops,
+                    terrain,
+                    w,
+                    h,
+                    tick,
+                    owner_col,
+                    is_bot,
+                    moborder,
+                    oboff,
+                    obn,
+                    cadsub,
+                    &mut pob[obe..obe + obspan],
+                    &mut poblen[lle..lle + npl_u],
+                    &mut ptiles[lle..lle + npl_u],
+                    do_ob,
                 )
             };
             mscal[soff + 3] = 1;
@@ -687,6 +859,10 @@ mod kernels {
                 oboff,
                 obn,
                 cadsub,
+                &mut [],
+                &mut [],
+                &mut [],
+                0,
             );
             ran += 1;
             if !alive {
@@ -2573,10 +2749,18 @@ struct MultiBatch {
     d_mowner: DeviceBuffer<u16>,
     d_misbot: DeviceBuffer<u32>,
     d_moborder: DeviceBuffer<u32>,
+    /// Incremental device owner-border sets: `n * npl * PB` words, plus
+    /// `n * npl` lengths and `n * npl` owned-tile counters. Maintained by
+    /// `env_step_multi` in the engine's insertion order; seeded from the
+    /// record at t0 and thereafter evolved entirely on the device.
+    d_pob: DeviceBuffer<u32>,
+    d_poblen: DeviceBuffer<u32>,
+    d_ptiles: DeviceBuffer<u32>,
     d_cad: DeviceBuffer<u32>,
     n: usize,
     slots: usize,
     wh: usize,
+    npl: usize,
     w: u32,
     h: u32,
     /// Total bytes held on the device by this batch (all buffers).
@@ -2589,11 +2773,13 @@ impl MultiBatch {
         module: &kernels::LoadedModule,
         envs: &[EnvState],
         n: usize,
+        npl: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let stream = ctx.default_stream();
         let w = envs[0].w;
         let h = envs[0].h;
         let wh = (w as usize) * (h as usize);
+        let npl = npl.max(1);
         let mut d_plane = DeviceBuffer::<u16>::zeroed(&stream, n * wh)?;
         let d_tmpl = DeviceBuffer::<u16>::from_host(&stream, &envs[0].plane)?;
         unsafe {
@@ -2664,7 +2850,10 @@ impl MultiBatch {
             + g * 2
             + g * 4
             + g * OB * 4
-            + n * cspan * 4;
+            + n * cspan * 4
+            + n * npl * PB * 4
+            + n * npl * 4
+            + n * npl * 4;
         Ok(MultiBatch {
             d_plane,
             d_terrain: DeviceBuffer::from_host(&stream, &envs[0].terrain)?,
@@ -2678,10 +2867,14 @@ impl MultiBatch {
             d_mowner: DeviceBuffer::from_host(&stream, &mowner)?,
             d_misbot: DeviceBuffer::from_host(&stream, &misbot)?,
             d_moborder: DeviceBuffer::from_host(&stream, &oborder)?,
+            d_pob: DeviceBuffer::<u32>::zeroed(&stream, n * npl * PB)?,
+            d_poblen: DeviceBuffer::<u32>::zeroed(&stream, n * npl)?,
+            d_ptiles: DeviceBuffer::<u32>::zeroed(&stream, n * npl)?,
             d_cad: DeviceBuffer::from_host(&stream, &cad)?,
             n,
             slots: SLOTS,
             wh,
+            npl,
             w,
             h,
             bytes,
@@ -2746,6 +2939,11 @@ fn run_multi(
                 &b.d_misbot,
                 &b.d_moborder,
                 &mut b.d_cad,
+                &mut b.d_pob,
+                &mut b.d_poblen,
+                &mut b.d_ptiles,
+                0,
+                0,
             )?;
         }
         if verify {
@@ -2987,7 +3185,7 @@ fn run_multi_demo(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
 
     let ctx = CudaContext::new(0)?;
     let module = unsafe { kernels::load(&ctx)? };
-    let mut b = MultiBatch::new(&ctx, &module, &[env0.clone()], n)?;
+    let mut b = MultiBatch::new(&ctx, &module, &[env0.clone()], n, 1)?;
     println!(
         "device: batch_bytes={:.1} MB total ({:.2} MB/env)",
         b.bytes as f64 / 1e6,
@@ -3031,7 +3229,7 @@ fn run_multi_demo(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
     // batch so the plane read IS the plane at the first mismatching tick.
     if ticks_matched < a.ticks as usize {
         let k = ticks_matched;
-        let mut b2 = MultiBatch::new(&ctx, &module, &[env0.clone()], n)?;
+        let mut b2 = MultiBatch::new(&ctx, &module, &[env0.clone()], n, 1)?;
         let _ = run_multi(&ctx, &module, &mut b2, &env0, k as u32 + 1, t0, false)?;
         let stream2 = ctx.default_stream();
         let devp = b2.d_plane.to_host_vec(&stream2)?;
@@ -3238,8 +3436,11 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut bots: Vec<(u16, TribeRatios)> = Vec::new();
     let mut h_pst = vec![0f64; npl * 3];
-    let mut h_border = vec![0u32; npl * OB];
     let mut h_obmeta = vec![0u32; npl * 2];
+    // ONE env's seed: the record's INSERTION-ORDERED border sets at t0 (the
+    // engine's `Player.border_tiles`). `h_oblen_seed[s]` is that set's length.
+    let mut h_ob_seed = vec![0u32; npl * PB];
+    let mut h_oblen_seed = vec![0u32; npl];
     let mut h_troops = vec![0i32; npl];
     let mut h_gold = vec![0i64; npl];
     let mut h_ptype = vec![0u8; npl];
@@ -3261,9 +3462,10 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
             if s >= npl {
                 continue;
             }
-            let nb = p.border_order.len().min(OB);
-            h_border[s * OB..s * OB + nb].copy_from_slice(&p.border_order[..nb]);
-            h_obmeta[s * 2] = (s * OB) as u32;
+            let nb = p.border_order.len().min(PB);
+            h_ob_seed[s * PB..s * PB + nb].copy_from_slice(&p.border_order[..nb]);
+            h_oblen_seed[s] = nb as u32;
+            h_obmeta[s * 2] = (s * PB) as u32;
             h_obmeta[s * 2 + 1] = nb as u32;
         }
     }
@@ -3281,12 +3483,36 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
 
     let ctx = CudaContext::new(0)?;
     let module = unsafe { kernels::load(&ctx)? };
-    let mut b = MultiBatch::new(&ctx, &module, &[env0.clone()], n)?;
+    let mut b = MultiBatch::new(&ctx, &module, &[env0.clone()], n, npl)?;
     let stream = ctx.default_stream();
+
+    // ---- incremental device owner-border + owned-tile counters ----
+    // Every env is a clone of the same t0 state, so the seed block is repeated
+    // `n` times. From here on the sets and the counts are evolved ENTIRELY on
+    // the device by `env_step_multi`; the host never rebuilds them from a plane.
+    let mut h_pob = vec![0u32; n * npl * PB];
+    let mut h_poblen = vec![0u32; n * npl];
+    let mut h_ptiles = vec![0u32; n * npl];
+    {
+        let mut cnt = vec![0u32; npl];
+        for &v in env0.plane.iter() {
+            let s = v as usize;
+            if s < npl {
+                cnt[s] += 1;
+            }
+        }
+        for e in 0..n {
+            h_pob[e * npl * PB..(e + 1) * npl * PB].copy_from_slice(&h_ob_seed);
+            h_poblen[e * npl..(e + 1) * npl].copy_from_slice(&h_oblen_seed);
+            h_ptiles[e * npl..(e + 1) * npl].copy_from_slice(&cnt);
+        }
+    }
+    b.d_pob.copy_from_host(&stream, &h_pob)?;
+    b.d_poblen.copy_from_host(&stream, &h_poblen)?;
+    b.d_ptiles.copy_from_host(&stream, &h_ptiles)?;
 
     // ---- device roster state ----
     let mut d_pst = DeviceBuffer::<f64>::from_host(&stream, &h_pst)?;
-    let mut d_oborder = DeviceBuffer::<u32>::from_host(&stream, &h_border)?;
     let mut d_obmeta = DeviceBuffer::<u32>::from_host(&stream, &h_obmeta)?;
     let mut b_sid = vec![0u32; nb];
     let mut b_rate = vec![0u32; nb];
@@ -3369,8 +3595,13 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut pending_diff: Option<u32> = None;
     let orig_border_from_record =
         std::env::var("OFCUDA_ENV_ORIG_BORDER").map(|v| v == "record").unwrap_or(false);
+    // DIAGNOSTIC (env `OFCUDA_ENV_OB_DEBUG=1`): compare the DEVICE's evolved
+    // owner-border set, tile for tile and in order, with the record's own
+    // `borderOrder` rows. Used to locate the first tick at which the ported
+    // maintenance diverges from the engine's, without feeding anything.
+    let ob_debug = std::env::var("OFCUDA_ENV_OB_DEBUG").map(|v| v == "1").unwrap_or(false);
+    let mut ob_debug_first: Option<u32> = None;
     let mut h_tiles_now = vec![0i32; npl];
-    let mut h_plane_scratch: Vec<u16> = Vec::new();
     let mut scal0 = b.d_mscal.to_host_vec(&stream)?;
     for k in 0..a.ticks {
         let tick = t0 + k;
@@ -3385,12 +3616,26 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
         // `prev.engine_tick` (tick) split.
         let sched_tick = t0 + k + 1;
 
-        // (1) economy, host-side, from the DEVICE's own plane of env 0.
-        let plane_h = b.d_plane.to_host_vec(&stream)?;
-        h_plane_scratch.clear();
-        h_plane_scratch.extend_from_slice(&plane_h[..b.wh]);
+        // (1) economy, host-side, from the DEVICE's own MAINTAINED state: the
+        //     owned-tile counters `env_step_multi` grows on every conquest
+        //     (`Game::conquer_one` -> `tiles_owned += 1`), and the owner-border
+        //     lengths. The plane is NOT read back: no `n*wh` host copy per tick.
+        let ptile_h = b.d_ptiles.to_host_vec(&stream)?;
+        let oblen_h = b.d_poblen.to_host_vec(&stream)?;
+        for s in 0..npl {
+            h_tiles_now[s] = ptile_h[s] as i32; // every env is the same clone
+        }
+        for (sid, _) in bots.iter() {
+            let s = *sid as usize;
+            // `d_obmeta` indexes env 0's block of `d_pob`: `s * PB`.
+            h_obmeta[s * 2] = (s * PB) as u32;
+            h_obmeta[s * 2 + 1] = oblen_h[s].min(PB as u32);
+        }
+        // Divergence diagnosis only (verify mode): read the plane back ONCE, at
+        // the first mismatching tick, to print the differing tiles.
         if let Some(dt) = pending_diff {
             if dt == tick {
+                let plane_h = b.d_plane.to_host_vec(&stream)?;
                 if let Some(engp) = {
                     let ps = dump.get(&dt);
                     ps.map(|ps| {
@@ -3401,18 +3646,9 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
                         ofcuda_env::state_plane(&players, w, h)
                     })
                 } {
-                    print_plane_diff(&h_plane_scratch, &engp, dt);
+                    print_plane_diff(&plane_h[..b.wh], &engp, dt);
                 }
                 pending_diff = None;
-            }
-        }
-        for t in h_tiles_now.iter_mut() {
-            *t = 0;
-        }
-        for &v in h_plane_scratch.iter() {
-            let s = v as usize;
-            if s < npl {
-                h_tiles_now[s] += 1;
             }
         }
         for s in 1..npl {
@@ -3435,19 +3671,9 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
         }
         d_pst.copy_from_host(&stream, &h_pst)?;
 
-        // (2) each bot's live owner-border, from the device plane.
-        for (sid, _) in bots.iter() {
-            let s = *sid as usize;
-            let nb2 = border_of_plane(
-                &h_plane_scratch,
-                w,
-                h,
-                *sid,
-                &mut h_border[s * OB..s * OB + OB],
-            );
-            h_obmeta[s * 2 + 1] = nb2 as u32;
-        }
-        d_oborder.copy_from_host(&stream, &h_border)?;
+        // (2) the bots' owner-border sets live on the DEVICE now (maintained in
+        //     the engine's insertion order by `env_step_multi`); the host only
+        //     publishes the per-player lengths `bot_ai` reads through `obmeta`.
         d_obmeta.copy_from_host(&stream, &h_obmeta)?;
 
         // (3) the bots' decisions, ON THE DEVICE (canonical `bot_ai_core`).
@@ -3462,7 +3688,7 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 spawn_end_tick,
                 &b.d_plane,
                 &d_pst,
-                &d_oborder,
+                &b.d_pob,
                 &d_obmeta,
                 &d_bsid,
                 &d_brate,
@@ -3506,7 +3732,59 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 &b.d_misbot,
                 &b.d_moborder,
                 &mut b.d_cad,
+                &mut b.d_pob,
+                &mut b.d_poblen,
+                &mut b.d_ptiles,
+                b.npl as u32,
+                1,
             )?;
+        }
+
+        // DIAGNOSTIC: did the device's evolved set stay identical (order and
+        // all) to the record's own `borderOrder` at this tick? Prints only the
+        // first mismatching tick per run.
+        if ob_debug && ob_debug_first.is_none() {
+            let hp = b.d_pob.to_host_vec(&stream)?;
+            let hl = b.d_poblen.to_host_vec(&stream)?;
+            if let Some(ps) = dump.get(&(tick + 1)) {
+                for (sid, _) in bots.iter() {
+                    let s = *sid as usize;
+                    let Some(p) = ps.values().find(|p| p.small_id == *sid as u32) else {
+                        continue;
+                    };
+                    let nd = hl[s] as usize;
+                    let dev = &hp[s * PB..s * PB + nd];
+                    let eng = &p.border_order;
+                    let mut a: Vec<u32> = dev.to_vec();
+                    let mut e2: Vec<u32> = eng.clone();
+                    a.sort_unstable();
+                    e2.sort_unstable();
+                    let set_ok = a == e2;
+                    let order_ok = dev.len() == eng.len()
+                        && dev.iter().zip(eng.iter()).all(|(x, y)| x == y);
+                    if !set_ok || !order_ok {
+                        ob_debug_first = Some(tick + 1);
+                        println!(
+                            "OBDEBUG first mismatch at tick={} sid={} dev_len={} eng_len={} set_ok={} order_ok={}",
+                            tick + 1,
+                            sid,
+                            dev.len(),
+                            eng.len(),
+                            set_ok,
+                            order_ok
+                        );
+                        let mut shown = 0;
+                        for j in 0..dev.len().max(eng.len()) {
+                            let d = dev.get(j).copied().unwrap_or(u32::MAX);
+                            let e = eng.get(j).copied().unwrap_or(u32::MAX);
+                            if d != e && shown < 8 {
+                                println!("  j={} dev={} eng={}", j, d, e);
+                                shown += 1;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // (5) ORIGINATION: a firing bot's land attack is built straight into a
@@ -3524,17 +3802,25 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
         // residual is exactly this is the point; the shipped path never reads
         // it.
         if orig_border_from_record {
-            for (sid, _) in bots.iter() {
-                let s = *sid as usize;
-                if let Some(ps) = dump.get(&tick) {
-                    if let Some(p) = ps.values().find(|p| p.small_id == *sid as u32) {
-                        let nb2 = p.border_order.len().min(OB);
-                        h_border[s * OB..s * OB + nb2].copy_from_slice(&p.border_order[..nb2]);
-                        h_obmeta[s * 2 + 1] = nb2 as u32;
+            let mut h_ob = vec![0u32; n * npl * PB];
+            let mut h_ol = vec![0u32; n * npl];
+            if let Some(ps) = dump.get(&tick) {
+                for p in ps.values() {
+                    let s = p.small_id as usize;
+                    if s >= npl {
+                        continue;
                     }
+                    let nn = p.border_order.len().min(PB);
+                    for e in 0..n {
+                        h_ob[e * npl * PB + s * PB..e * npl * PB + s * PB + nn]
+                            .copy_from_slice(&p.border_order[..nn]);
+                        h_ol[e * npl + s] = nn as u32;
+                    }
+                    h_obmeta[s * 2 + 1] = nn as u32;
                 }
             }
-            d_oborder.copy_from_host(&stream, &h_border)?;
+            b.d_pob.copy_from_host(&stream, &h_ob)?;
+            b.d_poblen.copy_from_host(&stream, &h_ol)?;
             d_obmeta.copy_from_host(&stream, &h_obmeta)?;
         }
         let mut used: Vec<usize> = Vec::new();
@@ -3578,8 +3864,8 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
                         *sid,
                         0u16,
                         &b.d_plane,
-                        &d_oborder,
-                        (s * OB) as u32,
+                        &b.d_pob,
+                        (e * npl * PB + s * PB) as u32,
                         obn,
                         &mut b.d_mheap_tiles,
                         &mut b.d_mheap_pri,
