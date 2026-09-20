@@ -97,6 +97,20 @@ const SCAL: usize = 9;
 /// Threads per block for `env_step`.
 const BLOCK: u32 = 256;
 
+// ---- player-clusters pass (canonical `cluster_pass_core`) -------------------
+// The device side of the pass is `kernels::*` (included from the canonical
+// `ofcuda_tick/src/core_impl.rs`); these are the HOST-side capacities, taken
+// from that same file so there is no second source of truth. `CCOLS` is the
+// per-env column count for the per-player row-indexed arrays (`cad`, `obmeta`,
+// `order`, `idhash`, `pst`), and matches `ofcuda_matrix`'s `COLS`.
+const CCOLS: usize = 8192;
+const CSPAN: usize = CCOLS * kernels::CSTATE;
+/// Per-env cluster scratch capacities. `CT2B`/`CMARK` are indexed by TILE, so
+/// they are `wh`-sized per env - the one non-trivial per-env memory cost of the
+/// pass (4 bytes each per tile).
+const CSCRATCH: usize = kernels::CB;
+const CFRIEND_MAX: usize = 1;
+
 #[cuda_module]
 mod kernels {
     use super::*;
@@ -215,6 +229,7 @@ mod kernels {
         oborder: &[u32],
         oboff: usize,
         obn: usize,
+        cad: &mut [u32],
     ) -> bool {
         // attack.rs:239-255: the one extra draw, taken BEFORE the pop loop, and
         // the budget's border term read after it.
@@ -263,6 +278,13 @@ mod kernels {
                 *drops += 1;
             }
             psub[tile as usize] = owner_col; // conquer, in place
+            // `Game::conquer_one` (`game.rs:1278-1282`): this tick's conquest
+            // sets the owner's `last_tile_change` and grows its `tiles_owned`.
+            // The device cadence is the env's OWN, accumulated here - never
+            // re-seeded from the record.
+            let cs = owner_col as usize * CSTATE;
+            cad[cs + 1] = tick;
+            cad[cs + 2] += 1;
         }
         if *troop_count < 0.0 {
             *troop_count = 0.0; // attack.rs:322-323
@@ -293,6 +315,26 @@ mod kernels {
         mut claims: &mut [u32],
         oborder: &[u32],
         mut troops: &mut [f64],
+        cad: &mut [u32],
+        t2b: &mut [u32],
+        marks: &mut [u32],
+        cbuf: &mut [u32],
+        clen: &mut [u32],
+        coffc: &mut [u32],
+        vis: &mut [u32],
+        cstack: &mut [u32],
+        cowned: &mut [u32],
+        crem: &mut [u32],
+        cout: &mut [u32],
+        corder: &[u32],
+        cidhash: &[u32],
+        cobmeta: &[u32],
+        cfriends: &[u32],
+        catkow: &[u16],
+        catktg: &[u16],
+        catktr: &[f64],
+        cpst: &mut [f64],
+        do_clusters: u32,
     ) {
         let e = thread::index_1d().get();
         if e >= n_envs as usize {
@@ -304,8 +346,27 @@ mod kernels {
             return; // dead: the engine still ticks once and draws nothing
         }
         let wh = (w as usize) * (h as usize);
+        // --- the player-clusters pass, BEFORE the attack plan of this tick ---
+        // `PlayerExecution::tick` -> `maybe_remove_clusters` runs for every
+        // player exec, and the player execs are ticked ahead of the attack execs
+        // in `execute_next_tick`. A cluster handed to a captor is therefore
+        // owned by the captor before any attack pops, which is the whole reason
+        // the pass cannot run after the attack. One launch, one thread per env.
+        // `do_clusters == 0` is a throughput A/B only: the pass is skipped and
+        // every other byte of the tick is identical.
+        if do_clusters != 0 {
+            cluster_pass_env(
+                e, n_envs as usize, terrain, w, h, tick, 1, cad, plane, t2b, marks, cbuf, clen,
+                coffc, vis, cstack, cowned, crem, cout, corder, cidhash, oborder, cobmeta, cfriends,
+                0, catkow, catktg, catktr, 1, cpst,
+            );
+        }
         let poff = e * wh;
         let psub = &mut plane[poff..poff + wh];
+        // `tick_once`'s cadence update must land in THIS env's `cad` span, not
+        // env 0's: hand it the per-env sub-slice.
+        let cspan = CCOLS * kernels::CSTATE;
+        let cadsub = &mut cad[e * cspan..(e + 1) * cspan];
         let hoff = e * HEAP_CAP;
         let mut hl = scal[soff] as usize;
         if hl > HEAP_CAP {
@@ -355,6 +416,7 @@ mod kernels {
             oborder,
             oboff,
             obn,
+            cadsub,
         );
 
         // ---- write the persistent state back (device-resident, no copy-out) --
@@ -413,6 +475,26 @@ mod kernels {
         mut claims: &mut [u32],
         oborder: &[u32],
         mut troops: &mut [f64],
+        cad: &mut [u32],
+        t2b: &mut [u32],
+        marks: &mut [u32],
+        cbuf: &mut [u32],
+        clen: &mut [u32],
+        coffc: &mut [u32],
+        vis: &mut [u32],
+        cstack: &mut [u32],
+        cowned: &mut [u32],
+        crem: &mut [u32],
+        cout: &mut [u32],
+        corder: &[u32],
+        cidhash: &[u32],
+        cobmeta: &[u32],
+        cfriends: &[u32],
+        catkow: &[u16],
+        catktg: &[u16],
+        catktr: &[f64],
+        cpst: &mut [f64],
+        do_clusters: u32,
     ) {
         let e = thread::index_1d().get();
         if e >= n_envs as usize {
@@ -425,7 +507,6 @@ mod kernels {
         }
         let wh = (w as usize) * (h as usize);
         let poff = e * wh;
-        let psub = &mut plane[poff..poff + wh];
         let hoff = e * HEAP_CAP;
         let mut hl = scal[soff] as usize;
         if hl > HEAP_CAP {
@@ -458,6 +539,20 @@ mod kernels {
         let mut alive = true;
         let mut ran = 0u32;
         while ran < nticks {
+            // The player-clusters pass, once per tick, BEFORE the attack plan
+            // (engine order: player execs tick ahead of attack execs). `plane`
+            // is reborrowed here rather than held as `psub`, so the batched
+            // per-env slice can be handed to the pass.
+            if do_clusters != 0 {
+                cluster_pass_env(
+                    e, n_envs as usize, terrain, w, h, tick + ran, 1, cad, plane, t2b, marks, cbuf,
+                    clen, coffc, vis, cstack, cowned, crem, cout, corder, cidhash, oborder, cobmeta,
+                    cfriends, 0, catkow, catktg, catktr, 1, cpst,
+                );
+            }
+            let psub = &mut plane[poff..poff + wh];
+            let cspan = CCOLS * kernels::CSTATE;
+            let cadsub = &mut cad[e * cspan..(e + 1) * cspan];
             alive = tick_once(
                 &mut heap,
                 &mut pr,
@@ -478,6 +573,7 @@ mod kernels {
                 oborder,
                 oboff,
                 obn,
+                cadsub,
             );
             ran += 1;
             if !alive {
@@ -508,6 +604,228 @@ mod kernels {
         while j < 5 {
             prng[pse + j] = pw[j];
             j += 1;
+        }
+    }
+
+    /// BATCHED form of the canonical `cluster_pass_core`. The pass is
+    /// inherently serial within one environment (it walks the engine's exec
+    /// order and each player's border set in order, mutating the plane in place,
+    /// exactly as the engine's `game.conquer` does), so the batched env runs it
+    /// one-thread-per-environment: thread `e` owns environment `e` and the whole
+    /// pass over that environment's sub-slices runs on it. That is the matrix
+    /// driver's one-thread launch, N times in parallel with no cross-env
+    /// ordering requirement. Buffer strides are all `len / n_envs`, the env's
+    /// own batching convention.
+    #[kernel]
+    #[launch_bounds(256)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn cluster_pass_batch(
+        terrain: &[u8],
+        w: u32,
+        h: u32,
+        tick: u32,
+        n_envs: u32,
+        npl: u32,
+        cad: &mut [u32],
+        plane: &mut [u16],
+        t2b: &mut [u32],
+        marks: &mut [u32],
+        cbuf: &mut [u32],
+        clen: &mut [u32],
+        coff: &mut [u32],
+        vis: &mut [u32],
+        stack: &mut [u32],
+        owned: &mut [u32],
+        rem: &mut [u32],
+        out: &mut [u32],
+        order: &[u32],
+        idhash: &[u32],
+        oborder: &[u32],
+        obmeta: &[u32],
+        friends: &[u32],
+        nfriends: u32,
+        atk_owner: &[u16],
+        atk_target: &[u16],
+        atk_troops: &[f64],
+        natk: u32,
+        pst: &mut [f64],
+    ) {
+        let e = thread::index_1d().get();
+        if e >= n_envs as usize {
+            return;
+        }
+        cluster_pass_env(
+            e, n_envs as usize, terrain, w, h, tick, npl, cad, plane, t2b, marks, cbuf, clen,
+            coff, vis, stack, owned, rem, out, order, idhash, oborder, obmeta, friends, nfriends,
+            atk_owner, atk_target, atk_troops, natk, pst,
+        );
+    }
+
+    /// One environment's whole cluster pass, over slices that hold the whole
+    /// batch: the offsets are `e * stride` with the stride derived from each
+    /// buffer's length. Shared by the standalone `cluster_pass_batch` kernel and
+    /// by `env_step` / `env_step_loop`, so the tick's inlined pass and the
+    /// parity harness run the SAME code on the SAME layout.
+    #[allow(clippy::too_many_arguments)]
+    fn cluster_pass_env(
+        e: usize,
+        ne: usize,
+        terrain: &[u8],
+        w: u32,
+        h: u32,
+        tick: u32,
+        npl: u32,
+        cad: &mut [u32],
+        plane: &mut [u16],
+        t2b: &mut [u32],
+        marks: &mut [u32],
+        cbuf: &mut [u32],
+        clen: &mut [u32],
+        coff: &mut [u32],
+        vis: &mut [u32],
+        stack: &mut [u32],
+        owned: &mut [u32],
+        rem: &mut [u32],
+        out: &mut [u32],
+        order: &[u32],
+        idhash: &[u32],
+        oborder: &[u32],
+        obmeta: &[u32],
+        friends: &[u32],
+        nfriends: u32,
+        atk_owner: &[u16],
+        atk_target: &[u16],
+        atk_troops: &[f64],
+        natk: u32,
+        pst: &mut [f64],
+    ) {
+        let wh = (w as usize) * (h as usize);
+        let csp = CCOLS * CSTATE;
+        let poff = e * wh;
+        let cadoff = e * csp;
+        let t2boff = e * wh;
+        let mkoff = e * wh;
+        let cboff = e * CS;
+        let cloff = e * CB;
+        let coffo = e * CB;
+        let visoff = e * (CB / 32);
+        let stoff = e * CSTACK;
+        let owoff = e * COWN;
+        let remoff = e * CREM;
+        let oooff = e * CSTAT;
+        let ord = e * (order.len() / ne);
+        let idh = e * (idhash.len() / ne);
+        let om = e * (obmeta.len() / ne);
+        let ob = e * (oborder.len() / ne);
+        let fr = e * (friends.len() / ne);
+        let ats = atk_owner.len() / ne;
+        let at = e * ats;
+        let ps = e * (pst.len() / ne);
+        cluster_pass_core(
+            terrain,
+            w,
+            h,
+            tick,
+            npl,
+            &order[ord..ord + CCOLS],
+            &idhash[idh..idh + CCOLS],
+            &mut cad[cadoff..cadoff + csp],
+            &mut plane[poff..poff + wh],
+            &mut t2b[t2boff..t2boff + wh],
+            &mut marks[mkoff..mkoff + wh],
+            &mut cbuf[cboff..cboff + CS],
+            &mut clen[cloff..cloff + CB],
+            &mut coff[coffo..coffo + CB],
+            &mut vis[visoff..visoff + CB / 32],
+            &mut stack[stoff..stoff + CSTACK],
+            &mut owned[owoff..owoff + COWN],
+            &mut rem[remoff..remoff + CREM],
+            &mut out[oooff..oooff + CSTAT],
+            &oborder[ob..ob + OB],
+            &obmeta[om..om + 2 * CCOLS],
+            &friends[fr..fr + (CNB + 1)],
+            nfriends,
+            &atk_owner[at..at + ats],
+            &atk_target[at..at + ats],
+            &atk_troops[at..at + ats],
+            natk,
+            &mut pst[ps..ps + CCOLS * 3],
+        );
+    }
+
+    /// Fill a `u32` buffer with `u32::MAX`. Setup only: `t2b` ("border tile ->
+    /// position in the border set", `u32::MAX` = absent) must start absent
+    /// everywhere, and it is `wh`-sized PER ENV, so it is written on the device
+    /// rather than copied from a host vector that would be 4 MB per env.
+    #[kernel]
+    #[launch_bounds(256)]
+    pub fn fill_max(n: u32, mut buf: &mut [u32]) {
+        let i = thread::index_1d().get();
+        if i >= n as usize {
+            return;
+        }
+        buf[i] = u32::MAX;
+    }
+
+    /// The engine's `Game::conquer_one` (`game.rs:1246-1287`) for a batch of
+    /// this tick's conquests, applied to the DEVICE cadence counters. This is
+    /// what makes the env's `last_tile_change` / `tiles_owned` self-accumulated
+    /// instead of oracle-re-seeded: `last_tile_change = tick` for both the tile's
+    /// previous owner and its new one, `tiles_owned` -1 / +1, and the old owner
+    /// is marked dead when it hits zero. A tile the pass ALREADY handed to the
+    /// captor in the same tick is skipped (the plane already reads `owner`), so a
+    /// cluster removal is never double-counted by the claim stream that contains
+    /// it.
+    ///
+    /// ONE thread processes the whole list: the engine's conquest order is the
+    /// order `tiles_owned`/`last_tile_change` see, so it is not parallelised.
+    #[kernel]
+    #[launch_bounds(1)]
+    pub fn apply_claims(
+        claims: &[u32],
+        n_claims: u32,
+        tick: u32,
+        plane: &mut [u16],
+        cad: &mut [u32],
+    ) {
+        if thread::index_1d().get() != 0 {
+            return;
+        }
+        let mut i = 0usize;
+        let mut c = 0u32;
+        while c < n_claims {
+            if i + 1 >= claims.len() {
+                break;
+            }
+            let owner = claims[i] as u16;
+            let n = claims[i + 1] as usize;
+            i += 2;
+            let os = owner as usize * CSTATE;
+            let mut j = 0usize;
+            while j < n && i < claims.len() {
+                let t = claims[i] as usize;
+                i += 1;
+                j += 1;
+                let prev = plane[t];
+                if prev == owner {
+                    continue; // already this owner (e.g. the pass's removal)
+                }
+                if prev != 0 {
+                    let cs = prev as usize * CSTATE;
+                    if cad[cs + 2] > 0 {
+                        cad[cs + 2] -= 1;
+                    }
+                    cad[cs + 1] = tick;
+                    if cad[cs + 2] == 0 {
+                        cad[cs + 3] = 0;
+                    }
+                }
+                plane[t] = owner;
+                cad[os + 2] += 1;
+                cad[os + 1] = tick;
+                cad[os + 3] = 1;
+            }
+            c += 1;
         }
     }
 
@@ -552,6 +870,9 @@ struct EnvState {
     plane: Vec<u16>,
     owner_sid: u16,
     owner_col: u16,
+    /// The owner's engine roster id string; `simple_hash` of it is the cluster
+    /// cadence phase (`player_clusters.rs:375-382`).
+    owner_id: String,
     is_bot: bool,
     tick0: u32,
     troops: f64,
@@ -617,6 +938,7 @@ fn build_env_at(
         plane,
         owner_sid: owner,
         owner_col: owner, // the plane word IS the raw small id
+        owner_id: pi.id.clone(),
         is_bot,
         tick0: s,
         troops: atk.troops,
@@ -695,6 +1017,34 @@ struct DevBatch {
     d_oborder: DeviceBuffer<u32>,
     d_troops: DeviceBuffer<f64>,
     d_terrain: DeviceBuffer<u8>,
+    // ---- player-clusters pass: PERSISTENT per-env device state ---------------
+    // One flat allocation per array, stride `len / n` (the env's batching
+    // convention). `d_ccad` carries each env's own `last_cluster_calc` /
+    // `last_tile_change` / `tiles_owned` / `alive` and is NEVER re-seeded from
+    // an oracle: `tiles_owned` is counted from the device plane at setup and
+    // then advanced by `tick_once`'s conquests, `last_tile_change` is written
+    // by those same conquests, `last_cluster_calc` is written by the pass. That
+    // self-accumulation is the whole point - the matrix harness re-seeds all
+    // three from the engine's CADENCE rows every tick, which the trainer cannot.
+    d_ccad: DeviceBuffer<u32>,
+    d_ct2b: DeviceBuffer<u32>,
+    d_cmark: DeviceBuffer<u32>,
+    d_cbuf: DeviceBuffer<u32>,
+    d_clen: DeviceBuffer<u32>,
+    d_coff: DeviceBuffer<u32>,
+    d_cvis: DeviceBuffer<u32>,
+    d_cstack: DeviceBuffer<u32>,
+    d_cowned: DeviceBuffer<u32>,
+    d_crem: DeviceBuffer<u32>,
+    d_cout: DeviceBuffer<u32>,
+    d_corder: DeviceBuffer<u32>,
+    d_cidhash: DeviceBuffer<u32>,
+    d_cobmeta: DeviceBuffer<u32>,
+    d_cfriends: DeviceBuffer<u32>,
+    d_catkow: DeviceBuffer<u16>,
+    d_catktg: DeviceBuffer<u16>,
+    d_catktr: DeviceBuffer<f64>,
+    d_cpst: DeviceBuffer<f64>,
     n: usize,
     wh: usize,
 }
@@ -750,6 +1100,58 @@ impl DevBatch {
             claims[e * CC..e * CC + env.claims.len()].copy_from_slice(&env.claims);
             oborder[e * OB..e * OB + env.oborder.len()].copy_from_slice(&env.oborder);
         }
+
+        // ---- player-clusters pass setup ----------------------------------
+        // Per-env cluster state, allocated once and NEVER re-uploaded. The only
+        // values seeded from outside the device are the ones the trainer can
+        // know without an oracle: the ROSTER (`simple_hash(id)` phase, legible
+        // from the player's own id) and the exec ORDER. `tiles_owned` is counted
+        // from the setup plane and `last_tile_change` = the setup tick (the
+        // plane IS the map at that tick); `last_cluster_calc` is left 0 so the
+        // pass seeds it with the engine's own `:375-382` rule. Nothing here is
+        // refreshed per tick.
+        let cst = kernels::CSTATE;
+        let csp = CCOLS * cst;
+        let mut cad = vec![0u32; n * csp];
+        let mut corder = vec![0u32; n * CCOLS];
+        let mut cidhash = vec![0u32; n * CCOLS];
+        let mut cobmeta = vec![0u32; n * 2 * CCOLS];
+        let mut catkow = vec![0u16; n];
+        let mut catktg = vec![0u16; n];
+        let mut catktr = vec![0f64; n];
+        for e in 0..n {
+            let env = &envs[if envs.len() == 1 { 0 } else { e }];
+            let sid = env.owner_sid as usize;
+            if sid >= CCOLS {
+                continue;
+            }
+            let co = e * csp + sid * cst;
+            let owned = env.plane.iter().filter(|v| **v == env.owner_col).count();
+            cad[co] = 0; // `last_cluster_calc`: unset -> seeded by the pass
+            cad[co + 1] = env.tick0; // `last_tile_change`: the plane is tick t0
+            cad[co + 2] = owned as u32; // `tiles_owned`, counted once
+            cad[co + 3] = env.alive as u32;
+            corder[e * CCOLS] = sid as u32;
+            cidhash[e * CCOLS + sid] =
+                ofcuda_prng::simple_hash(&env.owner_id).max(0) as u32;
+            // OFFSET IS RELATIVE TO THE PER-ENV `oborder` SLICE the pass gets:
+            // the core indexes `&oborder[boff..boff+blen]` inside that slice, so
+            // an absolute `e*OB` here runs off the end of every env but 0.
+            cobmeta[e * 2 * CCOLS + sid * 2] = 0;
+            cobmeta[e * 2 * CCOLS + sid * 2 + 1] = env.oborder.len() as u32;
+            catkow[e] = env.owner_sid;
+            catktg[e] = 0; // the env's live attack is a `target == 0` land attack
+            catktr[e] = env.troops;
+        }
+        let mut d_ct2b = DeviceBuffer::<u32>::zeroed(&stream, n * wh)?;
+        unsafe {
+            module.fill_max(
+                &stream,
+                cfg_for_block_from_total(n * wh, 256),
+                (n * wh) as u32,
+                &mut d_ct2b,
+            )?;
+        }
         Ok(DevBatch {
             d_plane,
             d_heap_tiles: DeviceBuffer::from_host(&stream, &h_tiles)?,
@@ -761,6 +1163,25 @@ impl DevBatch {
             d_oborder: DeviceBuffer::from_host(&stream, &oborder)?,
             d_troops: DeviceBuffer::from_host(&stream, &h_troops)?,
             d_terrain: DeviceBuffer::from_host(&stream, &envs[0].terrain)?,
+            d_ccad: DeviceBuffer::from_host(&stream, &cad)?,
+            d_ct2b,
+            d_cmark: DeviceBuffer::<u32>::zeroed(&stream, n * wh)?,
+            d_cbuf: DeviceBuffer::<u32>::zeroed(&stream, n * kernels::CS)?,
+            d_clen: DeviceBuffer::<u32>::zeroed(&stream, n * kernels::CB)?,
+            d_coff: DeviceBuffer::<u32>::zeroed(&stream, n * kernels::CB)?,
+            d_cvis: DeviceBuffer::<u32>::zeroed(&stream, n * (kernels::CB / 32))?,
+            d_cstack: DeviceBuffer::<u32>::zeroed(&stream, n * kernels::CSTACK)?,
+            d_cowned: DeviceBuffer::<u32>::zeroed(&stream, n * kernels::COWN)?,
+            d_crem: DeviceBuffer::<u32>::zeroed(&stream, n * kernels::CREM)?,
+            d_cout: DeviceBuffer::<u32>::zeroed(&stream, n * kernels::CSTAT)?,
+            d_corder: DeviceBuffer::from_host(&stream, &corder)?,
+            d_cidhash: DeviceBuffer::from_host(&stream, &cidhash)?,
+            d_cobmeta: DeviceBuffer::from_host(&stream, &cobmeta)?,
+            d_cfriends: DeviceBuffer::<u32>::zeroed(&stream, n * (kernels::CNB + 1))?,
+            d_catkow: DeviceBuffer::from_host(&stream, &catkow)?,
+            d_catktg: DeviceBuffer::from_host(&stream, &catktg)?,
+            d_catktr: DeviceBuffer::from_host(&stream, &catktr)?,
+            d_cpst: DeviceBuffer::<f64>::zeroed(&stream, n * CCOLS * 3)?,
             n,
             wh,
         })
@@ -816,9 +1237,12 @@ fn run_batch(
     verify: bool,
     launch_only: bool,
     loop_mode: bool,
+    do_clusters: bool,
 ) -> Result<RunOut, Box<dyn std::error::Error>> {
     let stream = ctx.default_stream();
     let n = b.n;
+    let dc = do_clusters as u32;
+    let trace_cad = std::env::var_os("OF_CAD_TRACE").is_some();
     let mut d_hashes = DeviceBuffer::<u64>::zeroed(&stream, (n.max(1)) * ticks as usize)?;
     let n_envs_arg = if launch_only { 0u32 } else { n as u32 };
     let cfg = cfg_for(if launch_only { 0 } else { n });
@@ -853,6 +1277,26 @@ fn run_batch(
                 &mut b.d_claims,
                 &b.d_oborder,
                 &mut b.d_troops,
+                &mut b.d_ccad,
+                &mut b.d_ct2b,
+                &mut b.d_cmark,
+                &mut b.d_cbuf,
+                &mut b.d_clen,
+                &mut b.d_coff,
+                &mut b.d_cvis,
+                &mut b.d_cstack,
+                &mut b.d_cowned,
+                &mut b.d_crem,
+                &mut b.d_cout,
+                &b.d_corder,
+                &b.d_cidhash,
+                &b.d_cobmeta,
+                &b.d_cfriends,
+                &b.d_catkow,
+                &b.d_catktg,
+                &b.d_catktr,
+                &mut b.d_cpst,
+                dc,
             )?;
         }
     } else {
@@ -878,8 +1322,52 @@ fn run_batch(
                 &mut b.d_claims,
                 &b.d_oborder,
                 &mut b.d_troops,
+                &mut b.d_ccad,
+                &mut b.d_ct2b,
+                &mut b.d_cmark,
+                &mut b.d_cbuf,
+                &mut b.d_clen,
+                &mut b.d_coff,
+                &mut b.d_cvis,
+                &mut b.d_cstack,
+                &mut b.d_cowned,
+                &mut b.d_crem,
+                &mut b.d_cout,
+                &b.d_corder,
+                &b.d_cidhash,
+                &b.d_cobmeta,
+                &b.d_cfriends,
+                &b.d_catkow,
+                &b.d_catktg,
+                &b.d_catktr,
+                &mut b.d_cpst,
+                dc,
             )?
         };
+        if trace_cad {
+            // Read the pass's own book-keeping back after the tick so the
+            // cadence progression can be compared with the engine's CADENCE
+            // rows. Verification-only readback.
+            let cad_v = b.d_ccad.to_host_vec(&stream)?;
+            let out_v = b.d_cout.to_host_vec(&stream)?;
+            let cs = (env.owner_col as usize) * kernels::CSTATE;
+            eprintln!(
+                "CADTRACE tick={} sid={} lcc={} ltc={} tiles={} alive={} fires={} removals={} rem_words={} ovf={},{},{},{}",
+                tick,
+                env.owner_sid,
+                cad_v[cs],
+                cad_v[cs + 1],
+                cad_v[cs + 2],
+                cad_v[cs + 3],
+                out_v[0],
+                out_v[1],
+                out_v[6],
+                out_v[2],
+                out_v[3],
+                out_v[4],
+                out_v[5],
+            );
+        }
         if verify && !launch_only {
             unsafe {
                 module.env_hash(&stream, hcfg, &b.d_plane, b.wh as u32, n as u32, k, &mut d_hashes)?
@@ -926,6 +1414,9 @@ struct Args {
     selftest: bool,
     verify_max: usize,
     dump_states: bool,
+    /// Skip the player-clusters pass (throughput A/B only; never used for
+    /// parity or training).
+    no_clusters: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -940,6 +1431,7 @@ fn parse_args() -> Result<Args, String> {
         selftest: false,
         verify_max: 256,
         dump_states: false,
+        no_clusters: false,
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -987,6 +1479,10 @@ fn parse_args() -> Result<Args, String> {
             }
             "--dump-states" => {
                 a.dump_states = true;
+                i += 1;
+            }
+            "--no-clusters" => {
+                a.no_clusters = true;
                 i += 1;
             }
             "--selftest" => {
@@ -1148,7 +1644,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let envs = vec![env0_copy(&env0)?];
         let mut b = DevBatch::new(&ctx, &module, &envs, 1)?;
         let out = run_batch(
-            &ctx, &module, &mut b, &env0, a.ticks, env0.tick0, true, false, false,
+            &ctx, &module, &mut b, &env0, a.ticks, env0.tick0, true, false, false, true,
         )
         .map_err(|e| e.to_string())?;
         let n = b.n;
@@ -1240,6 +1736,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             false,
             false,
             true,
+            true,
         )
         .map_err(|e| e.to_string())?;
         let stream = ctx.default_stream();
@@ -1279,7 +1776,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     {
         let envs = vec![env0_copy(&env0)?];
         let mut b = DevBatch::new(&ctx, &module, &envs, 1)?;
-        let out = run_batch(&ctx, &module, &mut b, &env0, a.ticks, env0.tick0, false, true, false)
+        let out = run_batch(&ctx, &module, &mut b, &env0, a.ticks, env0.tick0, false, true, false, true)
             .map_err(|e| e.to_string())?;
         println!(
             "launch overhead ({} launches, no work): device {:.4} ms/tick, wall {:.4} ms/tick",
@@ -1305,7 +1802,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let verify = (a.mode == "verify" || a.mode == "both") && n <= a.verify_max;
         // warmup (untimed): the same batch object, a few ticks.
         let mut b = DevBatch::new(&ctx, &module, &envs, n)?;
-        run_batch(&ctx, &module, &mut b, &env0, 4, env0.tick0, false, false, false)
+        run_batch(&ctx, &module, &mut b, &env0, 4, env0.tick0, false, false, false, true)
             .map_err(|e| e.to_string())?;
 
         for (tag, loop_mode, verify_tag) in [
@@ -1327,6 +1824,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 verify_tag,
                 false,
                 loop_mode,
+                !a.no_clusters,
             )
             .map_err(|e| e.to_string())?;
             let ticks = a.ticks as f64;
@@ -1436,6 +1934,7 @@ fn env0_copy(e: &EnvState) -> Result<EnvState, String> {
         plane: e.plane.clone(),
         owner_sid: e.owner_sid,
         owner_col: e.owner_col,
+        owner_id: e.owner_id.clone(),
         is_bot: e.is_bot,
         tick0: e.tick0,
         troops: e.troops,
