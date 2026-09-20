@@ -115,3 +115,17 @@ and so cannot come from a shortest-path search.
 The landed-but-unexercised surface: `land()`'s `target != 0 && !friendly` and
 `target != owner && friendly` branches, and the aircraft-carrier branch
 (`transport_ship.rs:404-410`, needs FlightDeck), which is not modelled at all.
+
+| **227 (current)** | **207** | **a bot-AI/landing origination gap**: the engine creates attack owner 440 target 227 via `add_land_attack_from -> AttackExecution::init` and the device originates nothing, so player 440's 13 tiles flip to player 227. Note the same 13-tile flip is reported from either side depending on which player the comparison loop reaches first (the diagnostic's iteration order varies between arms; the plane hash does not). |
+
+### The `contract` fast-math flag: a device-path 1-ULP trap
+
+The device backend marks IR with LLVM's `contract` and drops `#[inline(never)]`,
+so any expression of the form a*b + c*d compiles to `fma.rn.f64` and differs from
+host Rust by 1 ULP. This was the true cause of the long-carried "1-ULP troop
+drift" (boundary-192 attack 441->269) that capped several cells over three
+sessions - not a type width, not a rounding mode, and never to be papered over
+with an epsilon. Fix with a volatile-read rounding barrier (`mul_round` in
+`ofcuda_matrix/src/kernels.rs`) and verify with
+`grep -c 'fma.rn.f64' ofcuda_matrix.ptx` == 0. Treat any newly-exercised device
+path that computes a multiply-add as suspect until that count is checked.
