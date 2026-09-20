@@ -381,6 +381,26 @@ pub fn maybe_remove_clusters(game: &mut Game, small_id: u16, tick: u32) {
         }
     }
 
+    if std::env::var_os("OF_ENG_CLUST2").is_some() {
+        let want = std::env::var("OF_ENG_C2SID")
+            .ok()
+            .and_then(|s| s.parse::<u16>().ok());
+        if want.map_or(true, |s| s == small_id) {
+            if let Some(p) = game.player_by_small_id(small_id) {
+                let mut h: u64 = 0xcbf29ce484222325;
+                for &t in p.border_tiles.as_slice() {
+                    h ^= t as u64;
+                    h = h.wrapping_mul(0x100000001b3);
+                }
+                eprintln!(
+                    "C2IN tick={} sid={} tiles_owned={} last_calc={} last_change={} alive={} border_len={} border_hash={:#018x}",
+                    tick, small_id, p.tiles_owned, last_calc, p.last_tile_change, p.alive,
+                    p.border_tiles.len(), h
+                );
+            }
+        }
+    }
+
     if tick.saturating_sub(last_calc) <= TICKS_PER_CLUSTER_CALC && tiles_owned >= 100 {
         return;
     }
@@ -414,7 +434,26 @@ pub fn maybe_remove_clusters(game: &mut Game, small_id: u16, tick: u32) {
     if let Some(p) = game.player_by_small_id_mut(small_id) {
         p.largest_cluster_bounding_box = Some(player_bounding_box(largest_bb.clone()));
     }
-    if surrounded_by_same_enemy(game, small_id, &largest, largest_bb).is_some() {
+    let diag = std::env::var_os("OF_ENG_CLUST2").is_some();
+    let diag_sid = std::env::var("OF_ENG_C2SID")
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok());
+    let diag_here = diag && diag_sid.map_or(true, |s| s == small_id);
+    let sbe = surrounded_by_same_enemy(game, small_id, &largest, largest_bb);
+    if diag_here {
+        eprintln!(
+            "C2 tick={} sid={} tiles_owned={} ncl={} idx=largest size={} first={} same_enemy={} captor={:?}",
+            game.ticks(),
+            small_id,
+            game.player_by_small_id(small_id).map(|p| p.tiles_owned).unwrap_or(-1),
+            clusters.len(),
+            largest.len(),
+            largest.first().unwrap_or(u32::MAX),
+            sbe.is_some(),
+            get_capturing_player(game, small_id, &largest)
+        );
+    }
+    if sbe.is_some() {
         remove_cluster(game, small_id, &largest);
     }
 
@@ -422,7 +461,67 @@ pub fn maybe_remove_clusters(game: &mut Game, small_id: u16, tick: u32) {
         if i == largest_idx {
             continue;
         }
-        if is_surrounded(game, small_id, &cluster) {
+        let sur = is_surrounded(game, small_id, &cluster);
+        if diag_here {
+            let mut nd = String::new();
+            if cluster.len() <= 2 {
+                for t in cluster.iter() {
+                    let mut nb = [TileRef::MAX; 4];
+                    let mut n = 0usize;
+                    game.map.for_each_neighbor4(t, |x| {
+                        if n < 4 {
+                            nb[n] = x;
+                            n += 1;
+                        }
+                    });
+                    nd.push_str(&format!(
+                        " T{t}=({},{}) shore={} edge={}",
+                        game.map.x(t),
+                        game.map.y(t),
+                        game.is_shore(t),
+                        game.map.is_on_edge_of_map(t)
+                    ));
+                    for i in 0..n {
+                        nd.push_str(&format!(
+                            " n[{}]={} o={} ({},{})",
+                            i,
+                            nb[i],
+                            game.map.owner_id(nb[i]),
+                            game.map.x(nb[i]),
+                            game.map.y(nb[i])
+                        ));
+                    }
+                }
+            }
+            let cbb = bbox_from_tiles(game, &cluster);
+            let mut atks = String::new();
+            for a in game.live_attacks() {
+                if a.target_small_id() == small_id {
+                    atks.push_str(&format!(
+                        " (o{} bits={:#018x})",
+                        a.owner_small_id(),
+                        a.troops().to_bits()
+                    ));
+                }
+            }
+            eprintln!(
+                "C2 tick={} sid={} idx={} size={} first={} surrounded={} captor={:?} cbb=({},{},{},{}){} ATKING162:{}",
+                game.ticks(),
+                small_id,
+                i,
+                cluster.len(),
+                cluster.first().unwrap_or(u32::MAX),
+                sur,
+                get_capturing_player(game, small_id, &cluster),
+                cbb.min_x,
+                cbb.min_y,
+                cbb.max_x,
+                cbb.max_y,
+                nd,
+                atks
+            );
+        }
+        if sur {
             remove_cluster(game, small_id, &cluster);
         }
     }

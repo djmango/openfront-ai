@@ -1055,8 +1055,19 @@ impl EngineAttack {
     pub const CSTATE: usize = 4;
     /// `u32` words of cluster-pass statistics (`out`).
     pub const CSTAT: usize = 8;
-    /// Words per removal record in the `rem` stream.
-    pub const CWR: usize = 4;
+    /// FIXED (header) words per removal record in the `rem` stream: `victim`,
+    /// `captor`, `count`, then `count` tile words (see `cluster_pass_core`'s
+    /// doc). The driver walks the stream with that same 3-word header
+    /// (`ofcuda_matrix/src/main.rs`: `victim = rem[woff]`, `captor =
+    /// rem[woff+1]`, `n = rem[woff+2]`, `woff += 3`, then `woff += n`), so the
+    /// per-record advance must be `CWR + count`. Advancing by 4 instead left a
+    /// word of STALE data between records: the first record of a tick still
+    /// parsed, but the second was read one word late - its `victim` was the
+    /// stale word and its `count` was the real `captor`, which overran the
+    /// stream and made the driver `break`. The removal then vanished from the
+    /// captor's claim list (engine tick 366 / boundary 363 was the first pass
+    /// with two removals, so the first to show it).
+    pub const CWR: usize = 3;
     /// Distinct bordering enemies tracked by `get_capturing_player`.
     pub const CNB: usize = 4096;
     /// Capacity of the `rem` stream.
