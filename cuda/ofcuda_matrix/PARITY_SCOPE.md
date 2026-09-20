@@ -151,3 +151,13 @@ The reported player in `first divergence: boundary N ... player P engine A tiles
 
 - **A fresh dump lists ZERO ATTACK rows at its own final boundary** (t413, t434, t437) while the complete t500 dump lists 149 there, so pc_create/pc_evict/pc_troops at a cell final boundary are an artefact and must not be read as agreement evidence. Genuine extras through boundary 250 are near zero (pc_evict 3).
 - **The reported first-mismatching player in the divergence line is a scan artefact, not an identifier.** The scan iterated a HashMap (randomised order), so one 4-tile flip was reported from either side (player 90 engine 884 vs device 880, or player 486 engine 972 vs device 976 - the same flip, opposite signs). Compare hashes and counts, never the printed player. It is now sorted by sid, so at least it is run-stable.
+
+| **500/500 (record end)** | **480** | **no divergence: both freeze arms run the record full window with hash 500/500, claims 83545/83545, owned counts 244500/244500, troops 87798/87798 (b=20) and 87508/87508 (b=60), self-drive totals 0/0/0, first divergence NONE.** The previous stop was never a divergence: the host allocator used slots.len() as the index and never freed a position, so MAX_SLOTS bounded allocations ever made rather than live attacks. With reuse it bounds concurrency - 488 positions against a 1024 ceiling, and 488 is the peak concurrent count in the record itself (boundary 79). The plain replay now also completes 500 boundaries; its only remaining divergence is the boundary-296 engine eviction. |
+
+### Harness fact: the dump final boundary (FIXED 40afc85)
+
+The oracle emitted its ATTACK section only when b < ticks, so every cell carried ZERO attack rows at its own final boundary and pc_create/pc_evict/pc_troops there could not be read as agreement evidence. It is now emitted unconditionally; regenerating the t500 dump adds exactly 131 ATTACK 500 rows and nothing else. Plane hashes, tick claims, owned counts and troops never read that section, so earlier numbers stand unchanged.
+
+### Harness fact: slot ids are not stable identifiers
+
+A position is now reused as soon as its attack dies, so an old log reading slot 560 and a new one reading slot 19 are the same divergence (sid 161). Compare sid/owner/target/boundary, never slot position.
