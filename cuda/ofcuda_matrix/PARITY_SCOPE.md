@@ -68,10 +68,19 @@ boundaries, breaking on a self-originated terra-nullius attack's troop amount.
    the canonical `ofcuda_tick/src/core_impl.rs`, so the env does NOT have it.
    Move the AI into the canonical core (as was done for the player-clusters pass)
    before the env can originate anything;
-2. TransportShip boat landings: `send_boat_attack_to_nearby_tn` -> TransportShip
-   -> `land` -> `add_land_attack_from`, with troops = the ship's cargo. NOT
-   ported, and this is the current hard self-drive ceiling (boundary 102 of both
-   freeze arms, on `ATTACK 101 456 0 ... uprp5m7q`);
+2. TransportShip boat landings: PORTED device-side (the decision to send, the
+   sailing, the landing and the cargo transfer), and the self-drive ceiling moved
+   102 -> 154 on both freeze arms with `0 engine-created attacks not created`.
+   The remaining gap is the ROUTE, and it is a fidelity gap rather than a missing
+   draw: the engine plans a ship's water path with the half-resolution HPA
+   (`water_hpa.rs plan_water_path` + `upscale_cells` + `fix_path_extremes`), while
+   the device substitutes an 8-connected Chebyshev water BFS that reproduces the
+   engine's path length in only 4 of 15 measured launches (off by 1-4 otherwise,
+   and the engine's routes visibly wobble, which a shortest-path search cannot
+   produce). So the 154 stop is a MIS-TIMED LANDING - the device lands ~1 tick
+   early and creates an attack the engine had not yet created. Port the water HPA;
+   also unexercised: `land()`'s non-TerraNullius branches and the
+   aircraft-carrier branch (`transport_ship.rs:404-410`, needs FlightDeck);
 3. the border insertion order (device-side `refresh_to_conquer` order);
 4. per-player state and the friendship table (derivable device-side);
 5. re-creates and merges (ported);
