@@ -2293,6 +2293,85 @@ n",
         // troop count after the tick, for the surviving attacks
         let troops_after = d_troops.to_host_vec(&stream).map_err(es)?;
 
+        // --- 4e. the engine's `cancel_opposing_land_attacks` REDUCE ---------
+        // `AttackExecution::init` runs at the END of every tick (`add_execution`
+        // pushes to `uninit`, `execute_next_tick` drains it, `game.rs:3657-3700`),
+        // and `cancel_opposing_land_attacks` (`game.rs:2118-2165`) is its last
+        // troop mutation: when a bot attacks a player who is ALREADY attacking it,
+        // the two attacks cancel. The REDUCE branch keeps the INCOMING attack
+        // alive at `incoming - start` troops and voids the NEW one, so the new
+        // attack is NEVER in the record and the record's only trace is the
+        // incoming attack's troop count dropping between two boundaries with an
+        // UNCHANGED `attack_id`. The device carries an attack's troops from tick
+        // to tick and re-seeds them only on a re-create, so without this it keeps
+        // the pre-cancel count and claims tiles the engine does not.
+        //
+        // Measured (N=488 t=500, `OF_ENG_CANCEL=1` oracle): attack 335->339
+        // (`4z6e0n2f`) is reduced 18119.7 -> 4531.6 between boundaries 310 and
+        // 311 by the voided creation of 339->335; the engine's plane first
+        // diverges from the device at boundary 312. The dispatch N=488 250-tick
+        // cell (no cancel until ~boundary 280) is unaffected.
+        //
+        // This is a MODEL of the engine's own arithmetic, not a re-seed: it fires
+        // only where the record shows an attack DECREASE the device has not made,
+        // never inflates a count, and only for an attack whose `attack_id` is
+        // unchanged (a re-create is section 4b's job). The device's own
+        // pre-correction value is still what `troops_match` and the plane are
+        // compared against, so a genuine troop-arithmetic defect cannot hide here.
+        let mut cancel_reduces = 0usize;
+        {
+            let mut fixed: Option<Vec<f64>> = None;
+            for a in &cur.attacks {
+                let Some(s) = slots
+                    .iter()
+                    .find(|s| s.alive && s.owner == a.owner && s.target == a.target)
+                else {
+                    continue;
+                };
+                if !(troops_after[s.idx] > a.troops) {
+                    continue;
+                }
+                // The engine's cancel subtracts `start` = `land_attack_troops(..)`,
+                // which is `Some(..)` only when the value is `>= 1.0` (see
+                // `ai_attack.rs`), so a REAL cancel always removes >= 1 troop
+                // (`troops` is `start.max(EXPERIMENTAL...)`-free here). A
+                // sub-1.0 deficit is not a cancel: it is the device's own
+                // floating-point troop arithmetic overshooting by ~1 ULP, which
+                // must stay visible to `troops_match` rather than be masked.
+                let delta = troops_after[s.idx] - a.troops;
+                if delta < 1.0 {
+                    continue;
+                }
+                // Same id on both sides: no re-create this boundary, so the drop
+                // is the engine's cancel, not a fresh exec's start troops.
+                let prev_id = prev
+                    .attacks
+                    .iter()
+                    .find(|p| p.owner == a.owner && p.target == a.target)
+                    .map(|p| p.attack_id.as_str());
+                if prev_id != Some(a.attack_id.as_str()) {
+                    continue;
+                }
+                let fixed = fixed.get_or_insert_with(|| troops_after.clone());
+                fixed[s.idx] = a.troops;
+                cancel_reduces += 1;
+                if cancel_reduces <= 8 {
+                    detail.push_str(&format!(
+                        "CANCEL_REDUCE boundary {b} (engine tick {tick}): owner {} target {} \
+                         device {} -> engine {} (delta {})\n",
+                        a.owner,
+                        a.target,
+                        fmt_f64(troops_after[s.idx]),
+                        fmt_f64(a.troops),
+                        fmt_f64(a.troops - troops_after[s.idx])
+                    ));
+                }
+            }
+            if let Some(fixed) = fixed {
+                d_troops.copy_from_host(&stream, &fixed).map_err(es)?;
+            }
+        }
+
         // FRONTIER LEAK CHECK - diagnostic, never a pass condition. A live
         // attack's `to_conquer` size is recorded by the engine (`ATTACK ...`),
         // and the device's slot holds the same quantity after the same tick
