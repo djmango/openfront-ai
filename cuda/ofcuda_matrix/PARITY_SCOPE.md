@@ -129,3 +129,11 @@ with an epsilon. Fix with a volatile-read rounding barrier (`mul_round` in
 `ofcuda_matrix/src/kernels.rs`) and verify with
 `grep -c 'fma.rn.f64' ofcuda_matrix.ptx` == 0. Treat any newly-exercised device
 path that computes a multiply-add as suspect until that count is checked.
+
+| **280 (current)** | **260** | **the `sendBoatAttack` branch of the bot AI**: when the chosen target shares no land border, the engine does not create a land attack - it launches a TransportShip (`try_send_player_attack` -> `boat_attack_destination_to_player` -> `add_transport_attack`). 42 launches over 500 ticks, 2 inside the self-driven range; first at tick 278, owner 398 -> target 68. |
+
+The bot attack ladder is now ported in full apart from that branch: retaliation, the
+shuffled-random-target pick (all 13 device picks reproduce the engine's shuffled
+neighbour one-for-one), terra-nullius expansion, merges, cancels, boat sends and
+landings, and exact ship routes. Everything above is device state only - no oracle
+value is written into the device anywhere in the new code.
