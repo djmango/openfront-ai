@@ -1991,6 +1991,23 @@ n",
         //     boundary's `BORDER` record (`cur.borders`), not `prev`'s.
         let mut merged_this: Vec<(u16, u16)> = Vec::new();
         let mut orig_idx: Vec<(u16, usize)> = Vec::new();
+        // `b == fa - 1` is the ONE boundary where BOTH origination paths can act:
+        // section 2 still takes the record (`b >= fa` is false) so section 4b has
+        // ALREADY applied every re-create the record shows, while section 4c
+        // already self-drives (`b + 1 >= fa`). The device's own bot AI can and
+        // does fire for the SAME `(owner, 0)` at that boundary, applying the
+        // engine's merge TWICE. Measured at `fa = 60`, boundary 59, owner 118:
+        // the pre-merge value 4c read was ALREADY the engine's post-merge
+        // 3119.588986662421 (written by 4b), and 4c added the AI's 2280.23 on top
+        // -> device 5399.82333220475 where the record says 3119.588986662421;
+        // owners 292 (2326.222113498893 -> 2858.47), 376 (3826.39 -> 4896.80) and
+        // 378 (3078.54 -> 5518.44) the same. The record-driven re-create is the
+        // exact one, so 4c must not re-originate what 4b just did.
+        let reinit_this: Vec<(u16, u16)> = pending_reinit
+            .iter()
+            .map(|(_, cs, _)| (cs.owner, cs.target))
+            .collect();
+        let mut sd_orig_dupe = 0usize;
         if freeze_at.is_some_and(|fa| b + 1 >= fa) && !bot_orig.is_empty() {
             let mut coff = 0usize;
             let mut coborder = vec![0u32; obcap];
@@ -2011,13 +2028,39 @@ n",
             let mut d_cob_meta = DeviceBuffer::<u32>::zeroed(&stream, 2 * COLS).map_err(es)?;
             d_cob_meta.copy_from_host(&stream, &cob_meta).map_err(es)?;
 
-            let mut troops_now = d_troops.to_host_vec(&stream).map_err(es)?;
-            // Refresh the host mirrors from the DEVICE first: uploading a stale
-            // whole-array copy resets every OTHER slot's PRNG stream, and a slot's
-            // stream decides its `offer_neighbours` draws, i.e. which tiles it
-            // claims next.
-            let mut prng_now = d_prng.to_host_vec(&stream).map_err(es)?;
+            // DEVICE-FIRST MIRRORS, RE-READ PER ORIGINATION - this is the fix.
+            // `AttackExecution::init` seeds the frontier with
+            // `refresh_to_conquer` (`attack.rs:160-164`), which spends ONE draw
+            // of the attack's OWN stream per enqueued neighbour
+            // (`add_neighbors`, `attack.rs:1380`) - measured: 32 enqueues for
+            // owner 42 at boundary 19, so the engine's attack stream stands at
+            // `PseudoRandom::new(123)` + 32 draws. The device's `attack_init`
+            // makes exactly those draws, but this loop used to upload the WHOLE
+            // `d_prng`/`d_troops` array from mirrors captured ONCE before it, so
+            // each iteration restored the pre-init state of every slot the
+            // previous iteration had already advanced, and the attack went into
+            // its first tick at the PRISTINE state - taking the wrong budget
+            // draw (`attack.rs:253`, `border_size + next_int(0,5)`) and claiming
+            // one tile fewer. Re-reading both mirrors here keeps each slot's
+            // carried stream (and its merged troop count) as of NOW.
             for (sid, amount) in &bot_orig {
+                // Section 4b already applied the record's own re-create for this
+                // (owner, target) at THIS boundary (only possible at `b == fa-1`).
+                // Re-originating it here double-counts the engine's merge.
+                if reinit_this.iter().any(|(o, t)| o == sid && *t == 0) {
+                    sd_orig_dupe += 1;
+                    if sd_orig_dupe <= 8 {
+                        detail.push_str(&format!(
+                            "SELFDRIVE_ORIGIN_SKIP boundary {b} (engine tick {tick}): owner \
+                             {sid} target 0 ai {} NOT re-originated - section 4b already \
+                             applied the record's re-create for this (owner, target)\n",
+                            fmt_f64(*amount)
+                        ));
+                    }
+                    continue;
+                }
+                let mut troops_now = d_troops.to_host_vec(&stream).map_err(es)?;
+                let mut prng_now = d_prng.to_host_vec(&stream).map_err(es)?;
                 let idx = match slots
                     .iter()
                     .position(|s| s.alive && s.owner == *sid && s.target == 0)
@@ -2111,6 +2154,22 @@ n",
                             &d_cob_meta,
                         )
                         .map_err(es)?;
+                }
+                // MEASUREMENT ONLY (`OFCUDA_MATRIX_ORIGDBG=1`): the slot's own
+                // carried PRNG state immediately after THIS `attack_init`, so a
+                // later overwrite of the whole array cannot be mistaken for the
+                // init itself not having drawn.
+                if std::env::var_os("OFCUDA_MATRIX_ORIGDBG").is_some() {
+                    let q = d_prng.to_host_vec(&stream).map_err(es)?;
+                    detail.push_str(&format!(
+                        "ORIGDBG boundary {b} (engine tick {tick}) owner {sid} slot {idx} \
+                         post-init prng5 {:#010x} {:#010x} {:#010x} {:#010x} calls {}\n",
+                        q[idx * 5],
+                        q[idx * 5 + 1],
+                        q[idx * 5 + 2],
+                        q[idx * 5 + 3],
+                        q[idx * 5 + 4]
+                    ));
                 }
             }
         }
