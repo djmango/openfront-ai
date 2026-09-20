@@ -59,12 +59,25 @@ boundaries, breaking on a self-originated terra-nullius attack's troop amount.
 
 ## Work list: what the env must supply for itself
 
-1. attack origination: when, against what, with how many troops (partially
-   ported; the troop amount still diverges at the self-drive break);
-2. the border insertion order (device-side `refresh_to_conquer` order);
-3. per-player state and the friendship table (derivable device-side);
-4. re-creates and merges (ported);
-5. `cancel_opposing_land_attacks`, both branches (KILL reproduced implicitly,
-   REDUCE NOT ported);
-6. the cluster cadence counters (ported into the env);
-7. the nation post-spawn AI (not ported).
+1. attack origination: when, against what, with how many troops (ported, and it
+   now self-drives 86 boundaries past the freeze; the remaining cap is a missing
+   feature, not a wrong draw). **Where that code lives matters:** the bot AI is
+   currently in `ofcuda_matrix/src/main.rs` (the origination pass) and
+   `ofcuda_matrix/src/kernels.rs` (the `bot_ai` decision/metric kernel) - i.e.
+   device code in the MATRIX crate. `ofcuda_env/src/bin/gpu_env.rs` includes only
+   the canonical `ofcuda_tick/src/core_impl.rs`, so the env does NOT have it.
+   Move the AI into the canonical core (as was done for the player-clusters pass)
+   before the env can originate anything;
+2. TransportShip boat landings: `send_boat_attack_to_nearby_tn` -> TransportShip
+   -> `land` -> `add_land_attack_from`, with troops = the ship's cargo. NOT
+   ported, and this is the current hard self-drive ceiling (boundary 102 of both
+   freeze arms, on `ATTACK 101 456 0 ... uprp5m7q`);
+3. the border insertion order (device-side `refresh_to_conquer` order);
+4. per-player state and the friendship table (derivable device-side);
+5. re-creates and merges (ported);
+6. `cancel_opposing_land_attacks`, both branches: now PORTED device-side
+   (main.rs section 4d-bis), REDUCE and KILL, with the engine's own start bits
+   reproduced. The oracle-informed 4e correction is still present and should be
+   deleted once the device port is proven load-bearing in self-drive;
+7. the cluster cadence counters (ported into the env);
+8. the nation post-spawn AI (not ported).
