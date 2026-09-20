@@ -39,6 +39,7 @@
 //! The engine's claim SETS and ORDER per tick are the check, not the input.
 
 mod kernels;
+mod water_hpa_port;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -524,6 +525,12 @@ struct DevShip {
     src: u32,
     cargo: f64,
     target: u16,
+    /// The engine's `ref_tile`: `TransportShipExecution::init` sets
+    /// `target_small_id = owner_id(ref_tile)` when the tick's new executions are
+    /// initialised - at the END of the creation tick, after every attack exec of
+    /// that tick has conquered. The device takes the boat decision mid-tick, so
+    /// the ref tile is kept and `target` re-read from the end-of-tick plane.
+    rt: u32,
     path: Vec<u32>,
     created_tick: u32,
 }
@@ -626,140 +633,28 @@ fn dev_target_transport_tile(terrain: &[u8], plane: &[u16], w: u32, h: u32, from
     Some(cands[0])
 }
 
-/// `water.rs:272-292` `coerce_shore_to_water`: the adjacent water tile with the
-/// most water 4-neighbours (ties: first in N,S,W,E order).
-fn dev_coerce_to_water(terrain: &[u8], w: u32, h: u32, tile: u32) -> Option<u32> {
-    if t_water(terrain, tile) {
-        return Some(tile);
-    }
-    let mut buf = [0u32; 4];
-    let n = t_neigh4(tile, w, h, &mut buf);
-    let mut best: Option<u32> = None;
-    let mut max_score = -1i32;
-    for &nb in buf.iter().take(n) {
-        if !t_water(terrain, nb) {
-            continue;
-        }
-        let mut b2 = [0u32; 4];
-        let n2 = t_neigh4(nb, w, h, &mut b2);
-        let score = b2.iter().take(n2).filter(|&&x| t_water(terrain, x)).count() as i32;
-        if score > max_score {
-            max_score = score;
-            best = Some(nb);
-        }
-    }
-    best
-}
-
-/// The eight tiles a `TransportShip` may step to in one tick. The engine's ship
-/// walks the UPSCALED minimap path (`water.rs:1040-1070` `upscale_cells` +
-/// `water.rs:1025-1038` `fix_path_extremes`): consecutive cells of that path
-/// differ by at most one in each axis, and the destination fix contributes one
-/// DIAGONAL final step. The ship's route is therefore 8-connected water, and the
-/// number of steps - which is what decides the landing tick - is the Chebyshev
-/// water distance, not the Manhattan one.
-fn t_neigh8(t: u32, w: u32, h: u32, out: &mut [u32; 8]) -> usize {
-    let x = (t % w) as i32;
-    let y = (t / w) as i32;
-    let mut n = 0usize;
-    for (dx, dy) in [
-        (0i32, -1i32),
-        (1, -1),
-        (1, 0),
-        (1, 1),
-        (0, 1),
-        (-1, 1),
-        (-1, 0),
-        (-1, -1),
-    ] {
-        let (nx, ny) = (x + dx, y + dy);
-        if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
-            continue;
-        }
-        out[n] = ny as u32 * w + nx as u32;
-        n += 1;
-    }
-    n
-}
-
-/// Shortest 4-adjacency water path (BFS) from every source to `goal_water`,
-/// returning `(chosen_source_index, path)` where `path` is the full tile list
-/// starting at the source's coerced water tile and ending at `goal_water`.
-fn dev_water_bfs_multi(
-    terrain: &[u8],
-    w: u32,
-    h: u32,
-    water_srcs: &[u32],
-    goal_water: u32,
-) -> Option<(usize, Vec<u32>)> {
-    let n = terrain.len();
-    let mut seen = vec![false; n];
-    let mut parent = vec![u32::MAX; n];
-    let mut owner_of = vec![usize::MAX; n];
-    let mut q: std::collections::VecDeque<u32> = std::collections::VecDeque::new();
-    for (i, &s) in water_srcs.iter().enumerate() {
-        if !seen[s as usize] {
-            seen[s as usize] = true;
-            owner_of[s as usize] = i;
-            q.push_back(s);
-        }
-    }
-    let mut found = false;
-    while let Some(cur) = q.pop_front() {
-        if cur == goal_water {
-            found = true;
-            break;
-        }
-        let mut buf = [0u32; 8];
-        let k = t_neigh8(cur, w, h, &mut buf);
-        for &nb in buf.iter().take(k) {
-            if seen[nb as usize] || !t_water(terrain, nb) {
-                continue;
-            }
-            seen[nb as usize] = true;
-            parent[nb as usize] = cur;
-            owner_of[nb as usize] = owner_of[cur as usize];
-            q.push_back(nb);
-        }
-    }
-    if !found {
-        return None;
-    }
-    let src_i = owner_of[goal_water as usize];
-    let start = water_srcs.get(src_i).copied().unwrap_or(u32::MAX);
-    let mut p = Vec::new();
-    let mut cur = goal_water;
-    loop {
-        p.push(cur);
-        if cur == start {
-            break;
-        }
-        let par = parent[cur as usize];
-        if par == u32::MAX {
-            break;
-        }
-        cur = par;
-    }
-    p.reverse();
-    Some((src_i, p))
-}
-
 /// The boat decision for ONE bot firing, over device state.
 ///
 /// Returns `(ref_tile, dst_landing_tile, src_shore_tile, land_path)` - the
 /// candidate tile the engine hands to `add_transport_attack`, the tile
 /// `TransportShipExecution::init` refines it to (`target_transport_tile`), the
 /// owner shore tile it spawns at (`closest_shore_by_water`) and the water path
-/// the ship then sails.
+/// the ship then sails. All three are computed from DEVICE state by the ported
+/// engine chain in `water_hpa_port`: the route is the engine's HALF-RESOLUTION
+/// water HPA on the mini map (`game.rs:471` -> `water.rs:1205-1300` ->
+/// `water_hpa::WaterHierarchical::find_path`), upscaled by `upscale_cells` and
+/// smoothed by `fix_path_extremes`. Nothing is read from the oracle record.
 #[allow(clippy::too_many_arguments)]
 fn dev_send_boat_attack_to_nearby_tn(
-    terrain: &[u8],
+    full: &water_hpa_port::WMap<'_>,
+    mini: &water_hpa_port::WMap<'_>,
+    hpa: &mut water_hpa_port::WaterHierarchical,
     plane: &[u16],
     source_tiles: &[u32],
-    w: u32,
-    h: u32,
     owner: u16,
 ) -> Option<(u32, u32, u32, Vec<u32>)> {
+    let terrain = full.t;
+    let (w, h) = (full.w, full.h);
     // `send_boat_attack_to_nearby_tn`'s candidate walk.
     let directions: [(i32, i32); 4] = [(0, -1), (0, 1), (-1, 0), (1, 0)];
     let mut shore_i = 0usize;
@@ -802,7 +697,8 @@ fn dev_send_boat_attack_to_nearby_tn(
     }
     for &cand in &candidates {
         // `can_build_transport_ship(owner, cand)` (`spatial.rs:187-211`).
-        let Some(dst) = dev_target_transport_tile(terrain, plane, w, h, cand, plane[cand as usize]) else {
+        let Some(dst) = dev_target_transport_tile(terrain, plane, w, h, cand, plane[cand as usize])
+        else {
             continue;
         };
         let target_owner = plane[cand as usize];
@@ -815,43 +711,24 @@ fn dev_send_boat_attack_to_nearby_tn(
             // produces) never reaches it.
             continue;
         }
-    let mut srcs: Vec<u32> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for &t in source_tiles {
-            if t_shore(terrain, t) && t_land(terrain, t) && plane[t as usize] == owner {
-                if seen.insert(t) {
-                    srcs.push(t);
-                }
-            }
-        }
-        let Some(goal_water) = dev_coerce_to_water(terrain, w, h, dst) else {
+        // `closest_shore_by_water(owner, dst)` (`water.rs:1158-1176`): the source
+        // shores restricted to `dst`'s water component, then the engine's own
+        // multi-source hierarchical search picks the spawn tile.
+        let Some(src) = water_hpa_port::closest_shore_by_water(full, mini, hpa, source_tiles, dst)
+        else {
             continue;
         };
-        let mut water_srcs: Vec<u32> = Vec::new();
-        let mut src_idx: Vec<u32> = Vec::new();
-        for &s in &srcs {
-            if let Some(ws) = dev_coerce_to_water(terrain, w, h, s) {
-                water_srcs.push(ws);
-                src_idx.push(s);
-            }
-        }
-        if water_srcs.is_empty() {
-            continue;
-        }
-        let Some((si, water_path)) = dev_water_bfs_multi(terrain, w, h, &water_srcs, goal_water) else {
+        // `TransportShipExecution::init` -> `water_path(src, dst)`.
+        let Some(path) = water_hpa_port::plan_water_path(full, mini, hpa, src, dst) else {
             continue;
         };
-        let src = src_idx[si];
-        // The engine's `refine_start_tile` returns `path[0]` for paths of 50
-        // nodes or fewer (the only regime this port reaches); for longer ones it
-        // may pick a different owner shore. Recorded as a limitation.
-        let mut path: Vec<u32> = Vec::with_capacity(water_path.len() + 2);
-        path.push(src);
-        path.extend_from_slice(&water_path);
-        if path.last() != Some(&dst) {
-            path.push(dst);
+        if std::env::var_os("OFCUDA_MATRIX_BOATDBG").is_some() {
+            eprintln!(
+                "DEV_BOAT_PLAN owner={owner} ref={cand} dst={dst} src={src} len={} path={:?}",
+                path.len(),
+                path
+            );
         }
-        // The engine keeps the path belonging to the chosen source.
         return Some((cand, dst, src, path));
     }
     None
@@ -1023,6 +900,27 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         ));
     }
     let land_from_bytes = ofcuda_map::land_tiles(&terrain);
+
+    // ---- half-resolution water plane + HPA the engine plans ships on --------
+    // The engine routes every transport ship on the mini map (`manifest.map4x`,
+    // half the linear size) through `water::transport_path_into` ->
+    // `water_hpa::WaterHierarchical` (`game.rs:471`, `core/terrain.rs:114`).
+    // The ported device must do the same or it lands the ship on the wrong
+    // tick: an 8-connected full-resolution BFS is NOT the engine's route.
+    let (mini_meta, mini_terrain) = ofcuda_map::load_map_plane(&mdir, ofcuda_map::MapSize::X4)?;
+    if mini_meta.width * 2 != w || mini_meta.height * 2 != h {
+        return Err(format!(
+            "{}: map4x.bin {}x{} is not half of the full map {}x{}",
+            mdir.display(),
+            mini_meta.width,
+            mini_meta.height,
+            w,
+            h
+        ));
+    }
+    let full_map = water_hpa_port::WMap::new(&terrain, w, h);
+    let mini_map = water_hpa_port::WMap::new(&mini_terrain, mini_meta.width, mini_meta.height);
+    let mut water_hpa = water_hpa_port::WaterHierarchical::new(&mini_map, true);
 
     let mut row = Row {
         map: c.map.to_lowercase(),
@@ -2185,9 +2083,14 @@ n",
                 let off0 = ob_meta[om0] as usize;
                 let n0 = ob_meta[om0 + 1] as usize;
                 let sid_tiles = &oborder[off0..off0 + n0];
-                let Some((rt, dst, src, path)) =
-                    dev_send_boat_attack_to_nearby_tn(&terrain, &plane_now, sid_tiles, w, h, sid)
-                else {
+                let Some((rt, dst, src, path)) = dev_send_boat_attack_to_nearby_tn(
+                    &full_map,
+                    &mini_map,
+                    &mut water_hpa,
+                    &plane_now,
+                    sid_tiles,
+                    sid,
+                ) else {
                     continue;
                 };
                 dev_boat_mask[k] = 1;
@@ -2199,12 +2102,13 @@ n",
                     dst,
                     src,
                     cargo: troops,
+                    target: plane_now[rt as usize],
+                    rt,
                     path,
                     created_tick: tick,
-                    target: plane_now[rt as usize],
                 });
                 sd_ships_created += 1;
-                if sd_ships_created <= 12 {
+                if sd_ships_created <= 20 {
                     detail.push_str(&format!(
                         "SELFDRIVE_BOAT_CREATE boundary {b} (engine tick {tick}): owner {sid} \
                          ref {rt} -> dst {dst} src {src} cargo {} pathlen {}\n",
@@ -2224,15 +2128,15 @@ n",
         // `path[0]` by `init` at the end of its creation tick, moves one node per
         // tick, and therefore stands on `dst` at the start of tick
         // `created_tick + path.len()` - the tick it lands on. The route is the
-        // device's own water BFS (`dev_send_boat_attack_to_nearby_tn`), never a
-        // recorded one.
+        // engine's own half-resolution water HPA (`dev_send_boat_attack_to_nearby_tn`),
+        // never a recorded one.
         if !ships.is_empty() {
             let mut keep: Vec<DevShip> = Vec::with_capacity(ships.len());
             for s in ships.drain(..) {
                 if tick >= s.created_tick + s.path.len() as u32 {
                     dev_land_now.push((s.owner, s.dst, s.cargo, s.target));
                     sd_ship_landed += 1;
-                    if sd_ship_landed <= 12 {
+                    if sd_ship_landed <= 20 {
                         detail.push_str(&format!(
                             "SELFDRIVE_BOAT_LAND boundary {b} (engine tick {tick}): owner {} \
                              dst {} cargo {} (pathlen {}, created tick {})\n",
@@ -3408,6 +3312,22 @@ n",
         }
         let dev_hash = d_hash.to_host_vec(&stream).map_err(es)?[0];
         let plane = d_plane.to_host_vec(&stream).map_err(es)?;
+
+        // `TransportShipExecution::init` resolves the boat's LANDING TARGET from
+        // `owner_id(ref_tile)` when the tick's new executions are INITIALISED -
+        // i.e. against the END-of-tick plane, after every attack exec of this
+        // tick has conquered (`transport_ship.rs:238` `self.target_small_id =
+        // Some(ref_owner)`, :259). The boat DECISION (section 3a-ter) runs
+        // mid-tick, so a ref tile that is Terra Nullius when the AI walks the
+        // border but owned by the time init runs would otherwise keep target 0.
+        // Measured (N=488 self-drive, b=20): owner 441's boat at ref 338264 was
+        // TN during the AI pass and 269 at init, so the engine created 441->269
+        // and the device 441->0. Re-read the target from the tick-end plane, as
+        // the engine does - the ref tile is device state, the plane is device
+        // state, nothing comes from the record.
+        for s in ships.iter_mut().filter(|s| s.created_tick == tick) {
+            s.target = plane[s.rt as usize];
+        }
         let host_hash = fnv1a_u16_le(&plane);
         if dev_hash != host_hash {
             detail.push_str(&format!(
