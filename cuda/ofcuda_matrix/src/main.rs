@@ -50,6 +50,7 @@ use kernels::{BC, MAXC, SCAL, SCAL_OUT};
 use ofcuda_matrix::{
     fnv1a_u16_le, owners_of, parse_init, parse_oracle, plane_from_init, AttackSnap, Oracle,
 };
+use ofcuda_prng::{simple_hash, PseudoRandom};
 use ofcuda_tick::{Prng, HEAP_CAP, SEED};
 
 /// Simultaneous attacks the device array can hold. Overflow is a hard error.
@@ -65,6 +66,13 @@ const COLS: usize = 8192;
 /// this count the table saturates - raise it before driving a map where a
 /// defender can own more tiles than this.
 const DEFSIG_N: usize = 2_000_000;
+/// Entries in the host-precomputed `max_troops` table (indexed by a player's
+/// integer tile count). `tiles^0.6` is evaluated by Rust's libm on the host
+/// because CUDA's `powf` is a different implementation and this value multiplies
+/// straight into an attack's started troops; a tile count at or beyond the cap
+/// clamps to the last entry (no player on these maps comes close: 488 bots share
+/// ~1e6 tiles).
+const MAXTROOPS_N: usize = 262_144;
 /// Threads for the one-thread kernels.
 const ONE: u32 = 1;
 
@@ -396,6 +404,12 @@ fn troop_increase_rate_raw(ptype: char, troops: f64, tiles: f64) -> f64 {
 
 fn yn(b: bool) -> &'static str {
     if b { "yes" } else { "NO" }
+}
+
+/// Human-readable f64 for the diagnostic lines (Rust's shortest round-trip
+/// representation, so an exact match prints identically).
+fn fmt_f64(v: f64) -> String {
+    format!("{v}")
 }
 
 // ---------------------------------------------------------------------------
@@ -960,8 +974,95 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
     let mut sd_create = 0usize;
     let mut sd_evict = 0usize;
     let mut sd_reinit = 0usize;
+    // SELF-DRIVE diagnostics: what the device's own bot-AI originator did, and
+    // where its post-tick attack list stops agreeing with the record.
+    // SELF-DRIVE diagnostics (never pass conditions): the bot-AI originations the
+    // device performed itself, and the post-tick comparison of the device's OWN
+    // attack list against the record for the boundary it has just simulated.
+    let mut sd_fires = 0usize;
+    let mut sd_created = 0usize;
+    let mut sd_merged = 0usize;
+    let mut sd_pc_create = 0usize;
+    let mut sd_pc_evict = 0usize;
+    let mut sd_pc_troops = 0usize;
+    let mut sd_pc_exact = 0usize;
+    let mut sd_acts = [0usize; 8];
+    // The last boundary at which the device's own attack list agreed with the
+    // record in EVERY respect - the self-drive distance, measured not inferred.
+    let mut sd_last_exact: Option<usize> = None;
+    let mut sd_exact_bounds = 0usize;
 
-        // Diagnostic-only: the first boundary at which a live attack's DEVICE
+    // ---- the device's own bot attack-origination policy ----------------------
+    // `TribeExecution::new` (`openfront-ai/rust/engine/src/bot/tribe.rs:34-56`)
+    // seeds a `PseudoRandom::new(simple_hash(player_id))` and draws the schedule
+    // in exactly this order: attack_rate (40..80), attack_tick (0..rate),
+    // trigger_ratio (0.50..0.60), reserve_ratio (0.30..0.40), expand_ratio
+    // (0.10..0.20). The schedule is therefore a constant per bot and is built
+    // here; EVERY decision that depends on the game state (when the tick lands,
+    // whether Terra Nullius is in reach, how many troops the attack takes) is
+    // made by the `bot_ai` kernel against the DEVICE's own plane and player
+    // state, so the port originates the attack instead of reading it.
+    let spawn_end_tick = orc.spawn_end_tick;
+    let mut bot_sched: Vec<(u16, u32, u32, f64, f64)> = Vec::new();
+    for (sid, ptype, pid, _) in &orc.roster {
+        if *ptype != 'B' {
+            continue;
+        }
+        let mut r = PseudoRandom::new(simple_hash(pid));
+        let rate = r.next_int(40, 80) as u32;
+        let at = r.next_int(0, rate as i32) as u32;
+        let trigger = r.next_int(50, 60) as f64 / 100.0;
+        let _reserve = r.next_int(30, 40) as f64 / 100.0;
+        let expand = r.next_int(10, 20) as f64 / 100.0;
+        bot_sched.push((*sid, rate, at, trigger, expand));
+    }
+    let nbots = bot_sched.len();
+    let nb_cap = nbots.max(1);
+    let mut b_sid = vec![0u32; nb_cap];
+    let mut b_rate = vec![0u32; nb_cap];
+    let mut b_at = vec![0u32; nb_cap];
+    let mut b_trigger = vec![0f64; nb_cap];
+    // Row of the pre-multiplied `max_troops * expand_ratio` table: `expand_ratio`
+    // only ever takes `next_int(10, 20)`/100, i.e. 0.10 ..= 0.19.
+    let mut b_trow = vec![0u32; nb_cap];
+    let mut b_state_host = vec![0u32; nb_cap];
+    for (k, (sid, rate, at, trigger, expand)) in bot_sched.iter().enumerate() {
+        b_sid[k] = *sid as u32;
+        b_rate[k] = *rate;
+        b_at[k] = *at;
+        b_trigger[k] = *trigger;
+        b_trow[k] = (expand * 100.0).round() as u32 - 10;
+    }
+    // `Config::max_troops` for a Bot, as a table over the integer tile count: the
+    // engine's own `tiles.powf(0.6)` expression, evaluated by Rust's libm on the
+    // host (CUDA's `powf` is a different implementation and this value multiplies
+    // straight into an attack's started troops).
+    let maxtroops_host: Vec<f64> = (0..MAXTROOPS_N)
+        .map(|t| eng_max_troops('B', t as f64))
+        .collect();
+    let d_bot_sid = DeviceBuffer::from_host(&stream, &b_sid).map_err(es)?;
+    let d_bot_rate = DeviceBuffer::from_host(&stream, &b_rate).map_err(es)?;
+    let d_bot_at = DeviceBuffer::from_host(&stream, &b_at).map_err(es)?;
+    let d_bot_trigger = DeviceBuffer::from_host(&stream, &b_trigger).map_err(es)?;
+    let d_bot_trow = DeviceBuffer::from_host(&stream, &b_trow).map_err(es)?;
+    // `max_troops_for(sid) * expand_ratio`, per expand row, evaluated HERE with
+    // the engine's own expression (`Config::max_troops`, `core/config.rs:363-390`
+    // then `land_attack_troops`'s product, `ai_attack.rs:10-11`). The kernel only
+    // subtracts: CUDA contracts `troops - maxtroops * expand` into a single fma
+    // and that is measurably 1 ulp away from the engine's two roundings.
+    let mut tgt_host: Vec<f64> = vec![0.0; 10 * MAXTROOPS_N];
+    for r in 0..10usize {
+        let ratio = (r as f64 + 10.0) / 100.0;
+        for t in 0..MAXTROOPS_N {
+            tgt_host[r * MAXTROOPS_N + t] = maxtroops_host[t] * ratio;
+        }
+    }
+    let d_tgt = DeviceBuffer::from_host(&stream, &tgt_host).map_err(es)?;
+    let mut d_bot_state = DeviceBuffer::from_host(&stream, &b_state_host).map_err(es)?;
+    let d_maxtroops = DeviceBuffer::from_host(&stream, &maxtroops_host).map_err(es)?;
+    let mut d_bout = DeviceBuffer::<f64>::zeroed(&stream, 3 * nb_cap).map_err(es)?;
+
+    // Diagnostic-only: the first boundary at which a live attack's DEVICE
         // frontier size differs from the engine's own recorded `to_conquer`
         // size. Never a pass condition; reported so a silent frontier drift is
         // measured instead of inferred.
@@ -971,6 +1072,12 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         let prev = &orc.boundaries[b - 1];
         let cur = &orc.boundaries[b];
         let tick = prev.engine_tick;
+        // SELF-DRIVE: the (owner, target) pairs whose recorded `attack_id` changed
+        // across this transition, i.e. the attacks the engine RE-CREATED during
+        // this boundary's tick (`add_land_attack_from` -> `AttackExecution::init`
+        // -> `merge_outgoing_land_attacks`). In self-drive mode the device must
+        // reproduce that merge with its OWN state; section 4d checks it.
+        let mut reinit_pairs: Vec<(u16, u16)> = Vec::new();
 
         // --- 1. the owner border arrays for THIS tick (engine order) ---
         let mut off = 0usize;
@@ -1133,12 +1240,19 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
                         .attacks
                         .iter()
                         .find(|a| a.owner == snap.owner && a.target == snap.target)
-                        .filter(|cs| !cs.attack_id.is_empty() && cs.attack_id != prev_id)
+                        .filter(|cs| {
+                            // A self-drive-originated attack carries no record id
+                            // until its SECOND boundary, so an empty -> non-empty
+                            // id transition is NOT an engine re-create.
+                            !prev_id.is_empty()
+                                && !cs.attack_id.is_empty()
+                                && cs.attack_id != prev_id
+                        })
                         .cloned();
                     if let Some(cs) = reinit {
                         if freeze_at.is_some_and(|fa| b >= fa) {
-                            sd_reinit += 1;
-                            if sd_reinit <= 8 {
+                            reinit_pairs.push((snap.owner, snap.target));
+                            if reinit_pairs.len() <= 8 {
                                 detail.push_str(&format!(
                                     "SELFDRIVE_MISS_REINIT boundary {b} (engine tick {tick}): the \
                                      engine re-created attack owner {} target {} (id {} -> {}) via \
@@ -1148,8 +1262,11 @@ n",
                                     cs.owner, cs.target, prev_id, cs.attack_id
                                 ));
                             }
-                            continue;
+                            // NOT `continue`: the device has not merged yet, it
+                            // merges in section 4c with its OWN troops and 4d
+                            // checks the result against this record.
                         }
+                        if !freeze_at.is_some_and(|fa| b >= fa) {
                         // A/B CONTROL, not a code path: `OFCUDA_MATRIX_PRETICK_REALLOC=1`
                         // re-instates the OLD ordering (re-seed the re-issued attack's
                         // troops BEFORE the tick, when the tick still belongs to the old
@@ -1168,6 +1285,7 @@ n",
                             ));
                         }
                         pending_reinit.push((i, cs, prev_id));
+                        }
                     }
                 }
                 None => {
@@ -1499,6 +1617,66 @@ n",
             }
         }
 
+        // --- 3a-bis. the bots' OWN attack decision (self-drive only) ----------
+        // `execute_next_tick` (`game.rs:3729-3737`) ticks `execs` in list order and
+        // the tribe execs sit AFTER every player exec and BEFORE every attack
+        // exec, so this is exactly where a bot decides: the plane is the
+        // post-cluster (player-exec) plane and `pst` is the post-income,
+        // post-cluster player state, while NO attack of this tick has popped yet.
+        // Nothing here reads the record's `ATTACK` list: the kernel decides from
+        // the device's own plane, borders and player state, and the originations
+        // it returns are applied after the tick below (section 4c), where the
+        // engine's `add_execution` -> `init` pipeline runs them.
+        let mut bot_orig: Vec<(u16, f64)> = Vec::new();
+        // `b + 1 >= fa`: a bot's decision at tick T is visible in the record one
+        // boundary later (an attack created at the END of tick T first pops at
+        // T+1), so to be clean at boundary `fa` the device has to own the
+        // decisions from tick fa+2 - i.e. from the boundary BEFORE fa.
+        if freeze_at.is_some_and(|fa| b + 1 >= fa) && nbots > 0 {
+            d_bot_state
+                .copy_from_host(&stream, &b_state_host)
+                .map_err(es)?;
+            unsafe {
+                module
+                    .bot_ai(
+                        &stream,
+                        cfg(ONE),
+                        &d_terrain,
+                        w,
+                        h,
+                        tick,
+                        spawn_end_tick,
+                        &d_plane,
+                        &d_pst,
+                        &d_oborder,
+                        &d_ob_meta,
+                        &d_bot_sid,
+                        &d_bot_rate,
+                        &d_bot_at,
+                        &d_bot_trigger,
+                        &d_bot_trow,
+                        &mut d_bot_state,
+                        &d_maxtroops,
+                        &d_tgt,
+                        &mut d_bout,
+                        nbots as u32,
+                    )
+                    .map_err(es)?;
+            }
+            b_state_host = d_bot_state.to_host_vec(&stream).map_err(es)?;
+            let bout = d_bout.to_host_vec(&stream).map_err(es)?;
+            for k in 0..nbots {
+                let act = bout[k * 3 + 2] as usize;
+                if act < sd_acts.len() {
+                    sd_acts[act] += 1;
+                }
+                if bout[k * 3] > 0.0 {
+                    bot_orig.push((bot_sched[k].0, bout[k * 3 + 1]));
+                }
+            }
+            sd_fires += bot_orig.len();
+        }
+
         // --- 3b. transport-ship landings -------------------------------------
         // `TransportShipExecution::land` (`transport_ship.rs:374-401`) CONQUERS
         // the shore tile the boat reaches (`game.conquer`, :383) and only then
@@ -1795,6 +1973,262 @@ n",
             // `attack_init` re-arms the slot, and the engine's attack exists
             // regardless of how the OLD one's last tick ended.
             s.alive = true;
+        }
+
+        // --- 4c. the device's OWN attack origination (self-drive only) --------
+        // `AttackExecution::init` runs at the END of the tick (`add_execution`
+        // pushes to `uninit`, `execute_next_tick` drains it, `game.rs:3739-3760`),
+        // so everything here happens after the tick this boundary simulated:
+        //   * `start = min(ai_troops, owner.troops)` then `remove_troops`
+        //     (`attack.rs:110`), the owner's pool is NOT re-derived on the device
+        //     (it is reseeded from the record every boundary), so the deduction
+        //     is not modelled;
+        //   * `merge_outgoing_land_attacks` (`game.rs:2167-2223`): a new exec for
+        //     the same (owner, target) ABSORBS the old exec's troops - and the old
+        //     exec has already ticked THIS tick, so the absorbed count is its
+        //     POST-tick count, which is why this is not part of section 4b;
+        //   * `refresh_to_conquer` walks `border_tiles` as of NOW, i.e. this
+        //     boundary's `BORDER` record (`cur.borders`), not `prev`'s.
+        let mut merged_this: Vec<(u16, u16)> = Vec::new();
+        let mut orig_idx: Vec<(u16, usize)> = Vec::new();
+        if freeze_at.is_some_and(|fa| b + 1 >= fa) && !bot_orig.is_empty() {
+            let mut coff = 0usize;
+            let mut coborder = vec![0u32; obcap];
+            let mut cob_meta = vec![0u32; 2 * COLS];
+            for (osid, tiles) in &cur.borders {
+                if *osid as usize >= COLS {
+                    return Err(format!(
+                        "boundary {b}: border owner {osid} >= COLS {COLS} (raise COLS)"
+                    ));
+                }
+                let n = tiles.len().min(obcap - coff);
+                coborder[coff..coff + n].copy_from_slice(&tiles[..n]);
+                cob_meta[*osid as usize * 2] = coff as u32;
+                cob_meta[*osid as usize * 2 + 1] = n as u32;
+                coff += n;
+            }
+            let d_coborder = DeviceBuffer::from_host(&stream, &coborder[..coff.max(1)]).map_err(es)?;
+            let mut d_cob_meta = DeviceBuffer::<u32>::zeroed(&stream, 2 * COLS).map_err(es)?;
+            d_cob_meta.copy_from_host(&stream, &cob_meta).map_err(es)?;
+
+            let mut troops_now = d_troops.to_host_vec(&stream).map_err(es)?;
+            // Refresh the host mirrors from the DEVICE first: uploading a stale
+            // whole-array copy resets every OTHER slot's PRNG stream, and a slot's
+            // stream decides its `offer_neighbours` draws, i.e. which tiles it
+            // claims next.
+            let mut prng_now = d_prng.to_host_vec(&stream).map_err(es)?;
+            for (sid, amount) in &bot_orig {
+                let idx = match slots
+                    .iter()
+                    .position(|s| s.alive && s.owner == *sid && s.target == 0)
+                {
+                    Some(i) => {
+                        let merged = *amount + troops_now[slots[i].idx];
+                        merged_this.push((*sid, 0));
+                        sd_merged += 1;
+                        if sd_merged <= 8 {
+                            detail.push_str(&format!(
+                                "SELFDRIVE_ORIGIN_MERGE boundary {b} (engine tick {tick}): owner \
+                                 {sid} target 0 ai {} + old exec {} = {} (engine record {:?})\n",
+                                fmt_f64(*amount),
+                                fmt_f64(troops_now[slots[i].idx]),
+                                fmt_f64(merged),
+                                cur.attacks
+                                    .iter()
+                                    .find(|a| a.owner == *sid && a.target == 0)
+                                    .map(|a| fmt_f64(a.troops))
+                            ));
+                        }
+                        troops_now[slots[i].idx] = merged;
+                        orig_idx.push((*sid, slots[i].idx));
+                        slots[i].idx
+                    }
+                    None => {
+                        let idx = slots.len();
+                        if idx >= MAX_SLOTS {
+                            return Err(format!(
+                                "boundary {b}: self-drive needs slot {idx} >= MAX_SLOTS \
+                                 {MAX_SLOTS}; raise it"
+                            ));
+                        }
+                        troops_now[idx] = *amount;
+                        slots.push(Slot {
+                            owner: *sid,
+                            target: 0,
+                            idx,
+                            alive: true,
+                            created_at: b as u32,
+                            troops_bits: amount.to_bits(),
+                            attack_id: String::new(),
+                        });
+                        taken.push(false);
+                        orig_idx.push((*sid, idx));
+                        sd_created += 1;
+                        if sd_created <= 8 {
+                            detail.push_str(&format!(
+                                "SELFDRIVE_ORIGIN_CREATE boundary {b} (engine tick {tick}): owner \
+                                 {sid} target 0 ai {} (engine record {:?})\n",
+                                fmt_f64(*amount),
+                                cur.attacks
+                                    .iter()
+                                    .find(|a| a.owner == *sid && a.target == 0)
+                                    .map(|a| fmt_f64(a.troops))
+                            ));
+                        }
+                        idx
+                    }
+                };
+                // A re-issued exec mints a FRESH `PseudoRandom::new(123)` and an
+                // empty frontier (`attack.rs:47-57`), exactly as section 4b does.
+                let pr = Prng::new(SEED);
+                let mut pw = [0u32; 5];
+                pr.state_words(&mut pw);
+                prng_now[idx * 5..idx * 5 + 5].copy_from_slice(&pw);
+                d_prng.copy_from_host(&stream, &prng_now).map_err(es)?;
+                d_troops.copy_from_host(&stream, &troops_now).map_err(es)?;
+                unsafe {
+                    module
+                        .attack_init(
+                            &stream,
+                            cfg(kernels::BLOCK),
+                            &d_terrain,
+                            w,
+                            h,
+                            tick,
+                            idx as u32,
+                            *sid,
+                            0,          // TERRA_NULLIUS_ID
+                            u32::MAX,   // source_tile = None
+                            1,          // fresh stream
+                            &d_plane,
+                            &mut d_heap_tiles,
+                            &mut d_heap_pri,
+                            &mut d_border,
+                            &mut d_prng,
+                            &mut d_scal,
+                            &mut d_out,
+                            &d_coborder,
+                            &d_cob_meta,
+                        )
+                        .map_err(es)?;
+                }
+            }
+        }
+
+        // The engine records the frontier sizes it built at `init` (`heap_len`,
+        // `border_len`), so the device's post-init frontier is CHECKED rather than
+        // assumed to be right.
+        if freeze_at.is_some_and(|fa| b + 1 >= fa) && !orig_idx.is_empty() {
+            let sc3 = d_scal.to_host_vec(&stream).map_err(es)?;
+            let p3 = d_prng.to_host_vec(&stream).map_err(es)?;
+            for (sid2, idx2) in orig_idx.iter().take(8) {
+                let rec = cur.attacks.iter().find(|a| a.owner == *sid2 && a.target == 0);
+                detail.push_str(&format!(
+                    "SELFDRIVE_ORIGIN_FRONTIER boundary {b} (engine tick {tick}): owner {sid2} \
+                     device heap {} border {} vs engine heap {:?} border {:?} prng6 \
+                     {:#010x} {:#010x} {:#010x} {:#010x} {:#010x}\n",
+                    sc3[idx2 * SCAL],
+                    sc3[idx2 * SCAL + 1],
+                    rec.map(|a| a.heap_len),
+                    rec.map(|a| a.border_len),
+                    p3[idx2 * 5],
+                    p3[idx2 * 5 + 1],
+                    p3[idx2 * 5 + 2],
+                    p3[idx2 * 5 + 3],
+                    p3[idx2 * 5 + 4]
+                ));
+            }
+        }
+
+        // --- 4d. SELF-DRIVE CHECK: the device's attack list vs the record ----
+        // `boundaries[b]` is the engine's state at the END of the tick this
+        // boundary simulated, i.e. exactly the moment section 4c just reached, so
+        // a self-driving device's live attacks must equal `cur.attacks` - owner,
+        // target and troop count bit-for-bit. Never a pass condition: this is the
+        // DISTANCE MEASUREMENT. A hit here that the record disagrees with is the
+        // boundary at which the self-drive stops being exact.
+        if freeze_at.is_some_and(|fa| b + 1 >= fa) {
+            let pc0 = (sd_pc_create, sd_pc_evict, sd_pc_troops, sd_reinit);
+            let tr = d_troops.to_host_vec(&stream).map_err(es)?;
+            for a in &cur.attacks {
+                match slots
+                    .iter()
+                    .find(|s| s.alive && s.owner == a.owner && s.target == a.target)
+                {
+                    None => {
+                        sd_pc_create += 1;
+                        if sd_pc_create <= 6 {
+                            detail.push_str(&format!(
+                                "SELFDRIVE_PC_CREATE boundary {b} (engine tick {tick}): the engine \
+                                 lists attack owner {} target {} troops {:#018x} - the device has \
+                                 none after its own origination pass\n",
+                                a.owner,
+                                a.target,
+                                a.troops.to_bits()
+                            ));
+                        }
+                    }
+                    Some(s) => {
+                        if tr[s.idx].to_bits() != a.troops.to_bits() {
+                            let merged = merged_this
+                                .iter()
+                                .any(|(o, t)| *o == a.owner && *t == a.target);
+                            let reinited =
+                                reinit_pairs.iter().any(|(o, t)| *o == a.owner && *t == a.target);
+                            if merged || reinited {
+                                sd_reinit += 1;
+                                if sd_reinit <= 6 {
+                                    detail.push_str(&format!(
+                                        "SELFDRIVE_PC_REINIT boundary {b} (engine tick {tick}): \
+                                         owner {} target {} device {:#018x} vs engine {:#018x} \
+                                         (delta {})\n",
+                                        a.owner,
+                                        a.target,
+                                        tr[s.idx].to_bits(),
+                                        a.troops.to_bits(),
+                                        fmt_f64(tr[s.idx] - a.troops)
+                                    ));
+                                }
+                            } else {
+                                sd_pc_troops += 1;
+                                if sd_pc_troops <= 6 {
+                                    detail.push_str(&format!(
+                                        "SELFDRIVE_PC_TROOPS boundary {b} (engine tick {tick}): \
+                                         owner {} target {} device {:#018x} vs engine {:#018x} \
+                                         (delta {})\n",
+                                        a.owner,
+                                        a.target,
+                                        tr[s.idx].to_bits(),
+                                        a.troops.to_bits(),
+                                        fmt_f64(tr[s.idx] - a.troops)
+                                    ));
+                                }
+                            }
+                        } else {
+                            sd_pc_exact += 1;
+                        }
+                    }
+                }
+            }
+            for s in slots.iter().filter(|s| s.alive) {
+                if !cur.attacks.iter().any(|a| a.owner == s.owner && a.target == s.target) {
+                    sd_pc_evict += 1;
+                    if sd_pc_evict <= 6 {
+                        detail.push_str(&format!(
+                            "SELFDRIVE_PC_EXTRA boundary {b} (engine tick {tick}): the device holds \
+                             a live attack owner {} target {} troops {} that the engine does not \
+                             have\n",
+                            s.owner,
+                            s.target,
+                            fmt_f64(tr[s.idx])
+                        ));
+                    }
+                }
+            }
+            if (sd_pc_create, sd_pc_evict, sd_pc_troops, sd_reinit) == pc0 {
+                sd_last_exact = Some(b);
+                sd_exact_bounds += 1;
+            }
         }
 
         // troop count after the tick, for the surviving attacks
@@ -2130,11 +2564,27 @@ n",
             "SELFDRIVE totals: {sd_create} engine-created attacks not created, {sd_evict} \
              evictions not applied, {sd_reinit} re-creates not re-stamped\n"
         ));
+        detail.push_str(&format!(
+            "SELFDRIVE bot AI: {sd_fires} firings, {sd_created} attacks originated, \
+             {sd_merged} merges, actions {sd_acts:?} \
+             (1=TN land,3=no TN land border,4=troops<1,5=tribe_maybe_attack not modelled,\
+             6=trigger ratio not met)\n"
+        ));
+        detail.push_str(&format!(
+            "SELFDRIVE attack-list agreement: {sd_exact_bounds} boundaries fully identical to \
+             the record, last exact boundary {:?}, post-tick create_miss {sd_pc_create}, \
+             evict_miss {sd_pc_evict}, troops_mismatch {sd_pc_troops}, reinit_miss {sd_reinit}, \
+             exact {sd_pc_exact}\n",
+            sd_last_exact
+        ));
         row.note = format!(
             "{} selfdrive(no attack reseed from {}) create_miss {sd_create} evict_miss {sd_evict} \
-             reinit_miss {sd_reinit}",
+             reinit_miss {sd_reinit} | bot_ai fires {sd_fires} orig {sd_created} merge {sd_merged} \
+             | list exact x{sd_exact_bounds} last {:?} pc_create {sd_pc_create} pc_evict \
+             {sd_pc_evict} pc_troops {sd_pc_troops}",
             row.note,
-            freeze_at.unwrap()
+            freeze_at.unwrap(),
+            sd_last_exact
         )
         .trim()
         .to_string();

@@ -11,6 +11,23 @@ pub fn land_attack_troops(game: &Game, small_id: u16, reserve_or_expand_ratio: f
     let max_troops = game.max_troops_for(attacker.small_id);
     let target_troops = max_troops * reserve_or_expand_ratio;
     let troops = attacker.troops as f64 - target_troops;
+    // Diagnostics only (`OF_ENG_BTAI=1`): prints the exact inputs of the bot's
+    // attack-sizing decision so a port that reproduces it can be checked against
+    // the engine's own values instead of against a re-derivation. Behaviour is
+    // unchanged (stderr only, and only when the variable is set).
+    if std::env::var_os("OF_ENG_BTAI").is_some() {
+        eprintln!(
+            "BTAI sid {small_id} troops {} {:#018x} tiles {} max_troops {:#018x} \
+             ratio {:#018x} target {:#018x} result {:#018x}",
+            attacker.troops,
+            (attacker.troops as f64).to_bits(),
+            attacker.tiles_owned,
+            max_troops.to_bits(),
+            reserve_or_expand_ratio.to_bits(),
+            target_troops.to_bits(),
+            troops.to_bits()
+        );
+    }
     if troops < 1.0 {
         return None;
     }
