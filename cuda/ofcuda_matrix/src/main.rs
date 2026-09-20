@@ -262,6 +262,9 @@ struct Row {
     /// Nations (if any) matched the engine on id/sid/tile/tick/owned/troops.
     init_nations: bool,
     tick_match: usize,
+    /// MEASUREMENT ONLY: attacks killed by the engine's alliance retreat
+    /// (`attack.rs:222-229`) on the boundary the engine killed them.
+    friendly_retreats: usize,
     tick_total: usize,
     hash_match: usize,
     hash_total: usize,
@@ -944,6 +947,19 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
     let mut first_div = String::from("none");
     let mut first_div_at: Option<u32> = None;
     let mut oborder = vec![0u32; obcap];
+    // MEASUREMENT ONLY (`OFCUDA_MATRIX_FREEZE_ATTACKS=<b>`): from boundary b on
+    // the device keeps its OWN attack list - it creates no attack from `ATTACK`,
+    // applies no eviction and re-stamps no engine re-create - so a run with it
+    // set measures how far the port can SELF-DRIVE a game instead of replaying
+    // the oracle's attack schedule. Never a pass condition; the matrix runs
+    // without it. The border re-seed is deliberately LEFT ON so the number
+    // isolates the attack list (say so in any report of it).
+    let freeze_at: Option<usize> = std::env::var("OFCUDA_MATRIX_FREEZE_ATTACKS")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    let mut sd_create = 0usize;
+    let mut sd_evict = 0usize;
+    let mut sd_reinit = 0usize;
 
         // Diagnostic-only: the first boundary at which a live attack's DEVICE
         // frontier size differs from the engine's own recorded `to_conquer`
@@ -1077,7 +1093,7 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
                     // (`attack.rs:156`), so a CHANGED id for a live
                     // `(owner, target)` means the engine built a NEW exec object:
                     // the bot AI re-issued the attack
-                    // (`game.add_land_attack_from`, `game.rs:1469-1484`), and
+                    // (`game.add_land_attack_from`, `game.rs:1514`), and
                     // `init` coalesced it with the outgoing attack of the same
                     // target (`merge_outgoing_land_attacks`, `game.rs:2122-2156`)
                     // by ADDING the old attack's remaining troops into `troops`
@@ -1120,6 +1136,20 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
                         .filter(|cs| !cs.attack_id.is_empty() && cs.attack_id != prev_id)
                         .cloned();
                     if let Some(cs) = reinit {
+                        if freeze_at.is_some_and(|fa| b >= fa) {
+                            sd_reinit += 1;
+                            if sd_reinit <= 8 {
+                                detail.push_str(&format!(
+                                    "SELFDRIVE_MISS_REINIT boundary {b} (engine tick {tick}): the \
+                                     engine re-created attack owner {} target {} (id {} -> {}) via \
+                                     add_land_attack_from + merge_outgoing_land_attacks \
+                                     (game.rs:2167) - the device keeps the old exec's state\
+n",
+                                    cs.owner, cs.target, prev_id, cs.attack_id
+                                ));
+                            }
+                            continue;
+                        }
                         // A/B CONTROL, not a code path: `OFCUDA_MATRIX_PRETICK_REALLOC=1`
                         // re-instates the OLD ordering (re-seed the re-issued attack's
                         // troops BEFORE the tick, when the tick still belongs to the old
@@ -1141,6 +1171,24 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
                     }
                 }
                 None => {
+                    // SELF-DRIVE MEASUREMENT: from `freeze_at` on the device is not
+                    // allowed to create an attack from `ATTACK` - it has no bot AI,
+                    // so an attack the engine's AI issued is an instruction it
+                    // cannot originate. Logged so the FIRST thing that breaks is
+                    // named rather than inferred from the stop boundary.
+                    if freeze_at.is_some_and(|fa| b >= fa) {
+                        sd_create += 1;
+                        if sd_create <= 8 {
+                            detail.push_str(&format!(
+                                "SELFDRIVE_MISS_CREATE boundary {b} (engine tick {tick}): the \
+                                 engine created attack owner {} target {} id {} \
+                                 (game.add_land_attack_from -> AttackExecution::init, \
+                                 game.rs:1514) - the device has no AI to originate it\n",
+                                snap.owner, snap.target, snap.attack_id
+                            ));
+                        }
+                        continue;
+                    }
                     // NEW attack: created on the device, stamped with the engine
                     // tick of the boundary BEFORE the one it appears at.
                     let idx = slots.len();
@@ -1226,11 +1274,30 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
 
         // --- 3. evictions: my slot alive, the engine no longer lists it ---
         let mut evicted = Vec::new();
-        for (i, s) in slots.iter_mut().enumerate() {
-            if s.alive && !taken[i] {
-                s.alive = false;
-                row.engine_evictions += 1;
-                evicted.push(format!("sid {} slot {} at boundary {b}", s.owner, s.idx));
+        if freeze_at.is_some_and(|fa| b >= fa) {
+            // SELF-DRIVE MEASUREMENT: the device keeps its own attack list, so a
+            // list-diff eviction is not applied at all. That is precisely the
+            // difference between replaying a schedule and simulating a game.
+            for (i, s) in slots.iter_mut().enumerate() {
+                if s.alive && !taken[i] {
+                    sd_evict += 1;
+                    if sd_evict <= 8 {
+                        detail.push_str(&format!(
+                            "SELFDRIVE_MISS_EVICT boundary {b} (engine tick {tick}): owner {} \
+                             target {} is gone from the engine's list and the device keeps it\
+n",
+                            s.owner, s.target
+                        ));
+                    }
+                }
+            }
+        } else {
+            for (i, s) in slots.iter_mut().enumerate() {
+                if s.alive && !taken[i] {
+                    s.alive = false;
+                    row.engine_evictions += 1;
+                    evicted.push(format!("sid {} slot {} at boundary {b}", s.owner, s.idx));
+                }
             }
         }
         for e in &evicted {
@@ -1501,6 +1568,22 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         }
         landings.sort_by_key(|x| x.0);
 
+        // --- 3c. the friendship table the ATTACK TICKS read -----------------
+        // `cluster_pass` above consumed `prev.friends`, because the cluster
+        // removal it models reads the tick's own START state. The attack tick's
+        // alliance retreat (`attack.rs:222-229`) instead reads the state the
+        // engine holds DURING this boundary: `FRIEND` for THIS boundary, which
+        // the oracle emits before the execs run. So the same device table is
+        // re-uploaded here, after the cluster pass and before the ticks.
+        let nf_t = cur.friends.len().min(kernels::device::CNB);
+        {
+            let mut fr = vec![0xFFFF_FFFFu32; kernels::device::CNB + 1];
+            for (k, (fa, fb)) in cur.friends.iter().take(nf_t).enumerate() {
+                fr[k] = ((*fa as u32) << 16) | *fb as u32;
+            }
+            d_cfriends.copy_from_host(&stream, &fr).map_err(es)?;
+        }
+
         // --- 4. one device launch per live attack, in the engine's order ---
         let mut troop_pairs: Vec<(usize, u64)> = Vec::new();
         let plan_len = plan.len();
@@ -1576,6 +1659,8 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
                         &mut d_claims,
                         &d_oborder,
                         &d_ob_meta,
+                        &d_cfriends,
+                        nf_t as u32,
                     )
                     .map_err(es)?;
             }
@@ -1588,6 +1673,24 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
             }
             troop_pairs.push((s.idx, 0));
             if o[1] == 0 {
+                // Tell the alliance retreat apart from an ordinary death instead
+                // of assuming it: the same rule the device just applied is
+                // re-evaluated on the host from the boundary's own FRIEND row.
+                if s.target != 0
+                    && s.target != s.owner
+                    && cur
+                        .friends
+                        .iter()
+                        .any(|(fa, fb)| *fa == s.owner && *fb == s.target)
+                {
+                    row.friendly_retreats += 1;
+                    detail.push_str(&format!(
+                        "FRIENDLY_RETREAT boundary {b} (engine tick {tick}): owner {} target {} \
+                         retreated at the top of its own tick with 0 claims \
+                         (attack.rs:222-229, is_friendly)\n",
+                        s.owner, s.target
+                    ));
+                }
                 slots[*i].alive = false;
             }
         }
@@ -2015,6 +2118,27 @@ fn run_cell(a: &Args, c: &Cell) -> Result<Row, String> {
         max_peak,
         max_border,
     ));
+    if row.friendly_retreats > 0 {
+        detail.push_str(&format!(
+            "FRIENDLY_RETREATS total {} (alliance retreats applied on the boundary the engine \
+             killed them)\n",
+            row.friendly_retreats
+        ));
+    }
+    if freeze_at.is_some() {
+        detail.push_str(&format!(
+            "SELFDRIVE totals: {sd_create} engine-created attacks not created, {sd_evict} \
+             evictions not applied, {sd_reinit} re-creates not re-stamped\n"
+        ));
+        row.note = format!(
+            "{} selfdrive(no attack reseed from {}) create_miss {sd_create} evict_miss {sd_evict} \
+             reinit_miss {sd_reinit}",
+            row.note,
+            freeze_at.unwrap()
+        )
+        .trim()
+        .to_string();
+    }
     if drops > 0 {
         row.note = format!("{} claim-list overflows {drops}", row.note).trim().to_string();
     }

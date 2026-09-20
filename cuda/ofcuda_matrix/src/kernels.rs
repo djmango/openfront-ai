@@ -518,6 +518,12 @@ pub mod device {
         mut claims: &mut [u32],
         oborder: &[u32],
         ob_meta: &[u32],
+        // `Game::is_friendly(a, b)` for THIS boundary: the oracle's own `FRIEND`
+        // pairs, the same table `cluster_pass` already consumes. Needed by the
+        // alliance retreat at the top of the attack's own tick
+        // (`attack.rs:222-229`).
+        friends: &[u32],
+        nfriends: u32,
     ) {
         let e = thread::index_1d().get();
         if e != 0 {
@@ -534,6 +540,39 @@ pub mod device {
         out[3] = scal[soff + 5];
         if scal[soff + 3] == 0 {
             return; // dead: the engine ticks it once and it draws nothing
+        }
+
+        // `AttackExecution::tick` (`attack.rs:222-229`):
+        //
+        // ```ignore
+        // if self.target_is_player {
+        //     if game.is_friendly(self.owner_small_id, self.target_small_id) {
+        //         self.retreat(game, 0.0); // every remaining troop returned
+        //         return;
+        //     }
+        // }
+        // ```
+        //
+        // The retreat is at the TOP of the attack's OWN tick, i.e. BEFORE it pops
+        // a single tile, and `retreat` ends in `kill_attack` + `active = false`
+        // (`attack.rs:1279-1295`). So an alliance (or same team) that holds by
+        // this boundary costs the attack this tick's whole claim set AND its
+        // life. This is the one engine eviction the record cannot report in time:
+        // the attack is still in `prev.ATTACK` and gone from `cur.ATTACK`, so a
+        // listener that only diffs the two lists kills it one boundary LATE - and
+        // the tick it claims in the meantime is exactly what made the device's
+        // per-player claim list a SUPERSET of the engine's (pangaea N=18 nat=1
+        // boundary 1709: engine 40 tiles, device 112). Computing the rule here
+        // from the engine's own friendship pairs for this boundary kills it on
+        // the tick the engine killed it.
+        if target_col != 0
+            && target_col != owner_col
+            && cl_friendly(friends, nfriends, owner_col, target_col)
+        {
+            scal[soff + 3] = 0; // `kill_attack`: dead from here on
+            scal[soff] = 0;
+            out[1] = 0;
+            return;
         }
         let mut hl = scal[soff] as usize;
         if hl > HEAP_CAP {

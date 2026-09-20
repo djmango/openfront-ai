@@ -2148,9 +2148,32 @@ impl Game {
                 continue;
             }
             let incoming_troops = unsafe { (*ptr).troops() };
+            // Diagnostics only (`OF_ENG_CANCEL=1`): the two branches below are the
+            // only place outside an attack's own `tick` where its troops change.
+            let tr = std::env::var("OF_ENG_CANCEL").is_ok();
+            if tr {
+                eprintln!(
+                    "ENG_CANCEL new={}->{} new_troops={:.6} incoming={} {}->{} incoming_troops={:.6}",
+                    owner_small_id,
+                    target_small_id,
+                    *troops,
+                    id,
+                    unsafe { (*ptr).owner_small_id() },
+                    unsafe { (*ptr).target_small_id() },
+                    incoming_troops
+                );
+            }
             if incoming_troops > *troops {
                 unsafe {
                     (*ptr).set_troops(incoming_troops - *troops);
+                }
+                if tr {
+                    eprintln!(
+                        "ENG_CANCEL_REDUCE -> {} troops {:.6} -> {:.6}; new attack voided",
+                        id,
+                        incoming_troops,
+                        incoming_troops - *troops
+                    );
                 }
                 *active = false;
                 return;
