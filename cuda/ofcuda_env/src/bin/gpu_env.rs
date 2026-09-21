@@ -1418,6 +1418,153 @@ mod kernels {
         out[3] = pr.calls;
     }
 
+    /// The bot DECISION PER ENV: one thread per env, looping the bots and
+    /// calling the canonical `bot_ai_core` on that env's OWN plane, player state
+    /// and owner-border metadata. `bot_ai` (one thread per bot, env 0's state)
+    /// is only correct while every env is a clone of the same game; with the RL
+    /// ACTION channel live the envs take different actions and diverge, and each
+    /// one then needs its own decision.
+    ///
+    /// `ob_meta` carries ABSOLUTE offsets into `oborder` (env e's block starts at
+    /// `e * npl * PB`), so the same `bot_ai_core` can be called with each env's
+    /// own `pst` sub-slice and the whole owner-border array.
+    #[kernel]
+    #[launch_bounds(64)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn bot_ai_multi(
+        terrain: &[u8],
+        w: u32,
+        h: u32,
+        tick: u32,
+        spawn_end_tick: u32,
+        plane: &[u16],
+        pst: &[f64],
+        oborder: &[u32],
+        ob_meta: &[u32],
+        bot_sid: &[u32],
+        bot_rate: &[u32],
+        bot_at: &[u32],
+        bot_trigger: &[f64],
+        bot_trow: &[u32],
+        bot_rrow: &[u32],
+        bot_ff: &[u32],
+        mut bot_state: &mut [u32],
+        bot_boat: &[u32],
+        maxtroops: &[f64],
+        tgt: &[f64],
+        mut out: &mut [f64],
+        n_envs: u32,
+        npl: u32,
+        nbots: u32,
+    ) {
+        let e = thread::index_1d().get();
+        if e >= n_envs as usize {
+            return;
+        }
+        let wh = (w as usize) * (h as usize);
+        let np = npl as usize;
+        let nb = nbots as usize;
+        bot_ai_core(
+            terrain,
+            w,
+            h,
+            tick,
+            spawn_end_tick,
+            &plane[e * wh..e * wh + wh],
+            &pst[e * np * 3..(e + 1) * np * 3],
+            oborder,
+            &ob_meta[e * np * 2..(e + 1) * np * 2],
+            bot_sid,
+            bot_rate,
+            bot_at,
+            bot_trigger,
+            bot_trow,
+            bot_rrow,
+            bot_ff,
+            &mut bot_state[e * nb..(e + 1) * nb],
+            bot_boat,
+            maxtroops,
+            tgt,
+            &mut out[e * nb * 3..(e + 1) * nb * 3],
+            nbots,
+        );
+    }
+
+    /// THE ATTACK THE ENV'S OWN BOT AI WOULD CREATE FOR THIS PLAYER, with the
+    /// SCHEDULE GATE REMOVED.
+    ///
+    /// This is `bot_ai_core`'s terra-nullius land branch (`core_impl.rs:2298-2312`)
+    /// with `tick > spawn_end_tick && tick % rate == at` deleted - nothing else.
+    /// The RL `expand` action therefore does not invent a mechanic: it presses
+    /// the button the bot AI presses, and the attack it creates is the bot's own
+    /// (`land_attack_troops(owner, max_troops * expand_ratio)`), built by the
+    /// same `env_orig_slot` / `orig_refresh_dev` the scheduled firings use.
+    ///
+    /// `plane`/`oborder`/`ob_meta`/`pst` are the whole batch arrays; `poff`,
+    /// `oboff` and `pstoff` select ENV `e`, so the action channel is per env.
+    ///
+    /// `out` = `[amount, fired, why]`: `why` 0 = fired, 1 = no land border with
+    /// terra nullius (the bot's own `land` gate), 2 = `amount < 1.0` (the bot's
+    /// own `land_attack_troops` refusal), 3 = the player holds no tile (the
+    /// kernel's own `tiles >= 1.0` gate).
+    #[kernel]
+    #[launch_bounds(1)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn agent_expand_fire(
+        terrain: &[u8],
+        w: u32,
+        h: u32,
+        plane: &[u16],
+        poff: u32,
+        oborder: &[u32],
+        ob_meta: &[u32],
+        pst: &[f64],
+        pstoff: u32,
+        tgt: &[f64],
+        mcap: u32,
+        trow_row: u32,
+        sid: u32,
+        out: &mut [f64],
+    ) {
+        if thread::index_1d().get() != 0 {
+            return;
+        }
+        out[0] = 0.0;
+        out[1] = 0.0;
+        out[2] = 0.0;
+        let wh = (w as usize) * (h as usize);
+        let ps = pstoff as usize;
+        let ti = sid as usize;
+        let tiles = pst[ps + ti * 3 + 1];
+        let troops = pst[ps + ti * 3];
+        if tiles < 1.0 {
+            out[2] = 3.0;
+            return;
+        }
+        let mc = mcap as usize;
+        let idx = if (tiles as usize) < mc {
+            tiles as usize
+        } else {
+            mc - 1
+        };
+        let psubp = &plane[poff as usize..poff as usize + wh];
+        if !bot_land_border_tn(terrain, w, h, psubp, oborder, ob_meta, sid as u16) {
+            out[2] = 1.0;
+            return;
+        }
+        // `troops - tgt[row * mcap + idx]`: the same PRE-MULTIPLIED table lookup
+        // `bot_ai_core` uses, so the engine's two separate roundings are
+        // preserved and no fma contraction can shift the value by 1 ulp.
+        let amount = troops - tgt[trow_row as usize * mc + idx];
+        if amount < 1.0 {
+            out[2] = 2.0;
+            return;
+        }
+        out[0] = amount;
+        out[1] = 1.0;
+        out[2] = 0.0;
+    }
+
     /// Kill one slot of the batch: `AttackExecution::kill_attack`'s
     /// `attack_live = false` (`attack.rs:1205-1215`). Used by the ORIGINATION
     /// MERGE (`Game::merge_outgoing_land_attacks`, `game.rs:2122-2156`): the
@@ -2225,6 +2372,31 @@ struct Args {
     /// Scripted agent action per decision (action ids from the mask's
     /// `legal_actions` block). Empty = all-noop. 0 noop, 2 expand.
     rl_actions: Vec<usize>,
+    /// WIRE THE ACTION INTO THE SIM. With this on, the chosen action is not
+    /// merely recorded: it drives the controlled player's attack origination.
+    /// `A_EXPAND` creates exactly the terra-nullius land attack the env's own
+    /// bot AI would have created for that player (see `agent_expand_fire`),
+    /// and the player's own SCHEDULED firings are suppressed so the agent - not
+    /// the bot - is playing that player.
+    rl_control: bool,
+    /// Per-env action scripts, `env:list` blocks joined by `;` (e.g.
+    /// `0:0,2,2,2;1:0,0,0,0`). Different scripts in different envs are what
+    /// makes the batch DIVERGE, and is how the per-env correctness of the
+    /// origination path is measured. Envs with no block use `--rl-actions`.
+    rl_actions_env: Vec<(usize, Vec<usize>)>,
+}
+
+/// The scripted ACTION for env `e` at decision index `i`: env `e`'s own block
+/// of `--rl-actions-env` if it has one, else the shared `--rl-actions` list,
+/// else noop. Different blocks in different envs are what makes a batch
+/// DIVERGE, which is how the per-env correctness of the action channel and of
+/// the origination path is measured.
+fn rl_script(table: &[(usize, Vec<usize>)], base: &[usize], e: usize, i: usize) -> usize {
+    if let Some((_, v)) = table.iter().find(|(ee, _)| *ee == e) {
+        v.get(i).copied().unwrap_or(ofcuda_env::rl::A_NOOP)
+    } else {
+        base.get(i).copied().unwrap_or(ofcuda_env::rl::A_NOOP)
+    }
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -2249,6 +2421,8 @@ fn parse_args() -> Result<Args, String> {
         rl_agent: None,
         rl_decisions: 0,
         rl_actions: Vec::new(),
+        rl_control: false,
+        rl_actions_env: Vec::new(),
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -2344,6 +2518,32 @@ fn parse_args() -> Result<Args, String> {
                     .filter(|x| !x.trim().is_empty())
                     .map(|x| x.trim().parse::<usize>().map_err(|e| format!("rl-actions: {e}")))
                     .collect::<Result<Vec<_>, _>>()?;
+                i += 2;
+            }
+            "--rl-control" => {
+                a.rl_control = true;
+                i += 1;
+            }
+            "--rl-actions-env" => {
+                for blk in val(i)?.split(';').filter(|x| !x.trim().is_empty()) {
+                    let (e, list) = blk
+                        .split_once(':')
+                        .ok_or_else(|| format!("rl-actions-env block needs `env:list`: {blk}"))?;
+                    let e: usize = e
+                        .trim()
+                        .parse()
+                        .map_err(|x| format!("rl-actions-env env: {x}"))?;
+                    let acts = list
+                        .split(',')
+                        .filter(|x| !x.trim().is_empty())
+                        .map(|x| {
+                            x.trim()
+                                .parse::<usize>()
+                                .map_err(|x| format!("rl-actions-env: {x}"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    a.rl_actions_env.push((e, acts));
+                }
                 i += 2;
             }
             o => return Err(format!("unknown arg {o}").into()),
@@ -3578,22 +3778,28 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("roster of {npl} players is too large for the env's pst").into());
     }
     let mut bots: Vec<(u16, TribeRatios)> = Vec::new();
-    let mut h_pst = vec![0f64; npl * 3];
-    let mut h_obmeta = vec![0u32; npl * 2];
+    // EVERY per-player table is PER ENV (`e * npl + s`), because with the RL
+    // action channel live the envs stop being clones and each one's economy,
+    // decisions and origination must run on its own state. The RL agent's
+    // action enters exactly here, as one more firing source for ONE env.
+    let mut h_pst = vec![0f64; n * npl * 3];
+    let mut h_obmeta = vec![0u32; n * npl * 2];
     // ONE env's seed: the record's INSERTION-ORDERED border sets at t0 (the
     // engine's `Player.border_tiles`). `h_oblen_seed[s]` is that set's length.
     let mut h_ob_seed = vec![0u32; npl * PB];
     let mut h_oblen_seed = vec![0u32; npl];
-    let mut h_troops = vec![0i32; npl];
-    let mut h_gold = vec![0i64; npl];
+    let mut h_troops = vec![0i32; n * npl];
+    let mut h_gold = vec![0i64; n * npl];
     let mut h_ptype = vec![0u8; npl];
     for (sid, pi) in pinfo.iter() {
         let s = *sid as usize;
-        h_pst[s * 3] = pi.troops as f64;
-        h_pst[s * 3 + 1] = pi.tiles as f64;
-        h_pst[s * 3 + 2] = pi.ptype as f64;
-        h_troops[s] = pi.troops;
-        h_gold[s] = pi.gold;
+        for e in 0..n {
+            h_pst[(e * npl + s) * 3] = pi.troops as f64;
+            h_pst[(e * npl + s) * 3 + 1] = pi.tiles as f64;
+            h_pst[(e * npl + s) * 3 + 2] = pi.ptype as f64;
+            h_troops[e * npl + s] = pi.troops;
+            h_gold[e * npl + s] = pi.gold;
+        }
         h_ptype[s] = pi.ptype;
         if pi.ptype as u32 == ofcuda_econ::core_impl::PT_BOT {
             bots.push((*sid, tribe_ratios(&pi.id)));
@@ -3608,8 +3814,13 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
             let nb = p.border_order.len().min(PB);
             h_ob_seed[s * PB..s * PB + nb].copy_from_slice(&p.border_order[..nb]);
             h_oblen_seed[s] = nb as u32;
-            h_obmeta[s * 2] = (s * PB) as u32;
-            h_obmeta[s * 2 + 1] = nb as u32;
+            // `ob_meta` offsets are ABSOLUTE into the whole `d_pob` (env e's
+            // block is `e * npl * PB`), so the same `bot_ai_core` can be handed
+            // each env's `pst` sub-slice and keep its `sid`-only indexing.
+            for e in 0..n {
+                h_obmeta[(e * npl + s) * 2] = ((e * npl + s) * PB) as u32;
+                h_obmeta[(e * npl + s) * 2 + 1] = nb as u32;
+            }
         }
     }
     let nb = bots.len().max(1);
@@ -3702,7 +3913,7 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let d_btrow = DeviceBuffer::<u32>::from_host(&stream, &b_trow)?;
     let d_brrow = DeviceBuffer::<u32>::from_host(&stream, &b_rrow)?;
     let d_bff = DeviceBuffer::<u32>::from_host(&stream, &b_ff)?;
-    let mut d_bstate = DeviceBuffer::<u32>::from_host(&stream, &vec![2u32; nb])?;
+    let mut d_bstate = DeviceBuffer::<u32>::from_host(&stream, &vec![2u32; nb * n])?;
     let d_bboat = DeviceBuffer::<u32>::zeroed(&stream, nb)?;
     // The engine's pre-multiplied tables. `max_troops` is the econ core's own
     // function (`wire.max_troops`), and the rows are `max_troops * ratio` with
@@ -3726,7 +3937,9 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
     let d_mtr = DeviceBuffer::<f64>::from_host(&stream, &mtr)?;
     let d_tgt = DeviceBuffer::<f64>::from_host(&stream, &tgt)?;
-    let mut d_bout = DeviceBuffer::<f64>::zeroed(&stream, nb * 3)?;
+    let mut d_bout = DeviceBuffer::<f64>::zeroed(&stream, nb * n * 3)?;
+    // The RL action channel's own device readback: [amount, fired, why].
+    let mut d_agent_out = DeviceBuffer::<f64>::zeroed(&stream, 4)?;
     let mut d_orig_out = DeviceBuffer::<u32>::zeroed(&stream, 4)?;
 
     println!(
@@ -3777,7 +3990,14 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
     // maintenance diverges from the engine's, without feeding anything.
     let ob_debug = std::env::var("OFCUDA_ENV_OB_DEBUG").map(|v| v == "1").unwrap_or(false);
     let mut ob_debug_first: Option<u32> = None;
-    let mut h_tiles_now = vec![0i32; npl];
+    // MEASUREMENT ONLY (`OFCUDA_ENV_HASH_ALL=1`): print every env's plane hash
+    // at every tick, so a divergent batch's env-by-env hash sequence can be
+    // compared with the same env run alone. This is the per-env separation
+    // proof: env e in the batch must be bit-identical to env e alone.
+    let hash_all = std::env::var("OFCUDA_ENV_HASH_ALL")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let mut h_tiles_now = vec![0i32; n * npl];
     let mut scal0 = b.d_mscal.to_host_vec(&stream)?;
     // ---- OWNER TROOP LEDGER (the attack side of the economy) ----------------
     // `AttackExecution`'s own troop movements, which the record carries only
@@ -3791,11 +4011,35 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
     // ever grows, the next attack's `start` is too large, and `tiles_used`
     // (`within((2000*speed.max(10))/attack_troops, 5, 100)`, `game.rs:896`) stays
     // clamped at 5 while the engine's has already risen above it.
-    let mut prev_alive: Vec<bool> = (0..b.slots).map(|s| scal0[s * SCAL + 5] != 0).collect();
+    let mut prev_alive: Vec<bool> = (0..n * b.slots)
+        .map(|s| scal0[s * SCAL + 5] != 0)
+        .collect();
     let mut ledger_debits: u64 = 0;
     let mut ledger_debit_total: i64 = 0;
     let mut ledger_credits: u64 = 0;
     let mut ledger_credit_total: i64 = 0;
+    // ---- THE RL ACTION CHANNEL'S OWN COUNTERS ---------------------------
+    // `--rl-control` is what makes the action channel part of the SIM; these
+    // count what it actually did, so a run can prove the action landed.
+    let mut rl_action_expand = 0usize;
+    let mut rl_action_fired = 0usize;
+    let mut rl_action_no_effect = 0usize;
+    let mut rl_action_refused_no_border = 0usize;
+    let mut rl_action_refused_amount = 0usize;
+    let mut rl_action_refused_no_tiles = 0usize;
+    let mut rl_action_not_expand = 0usize;
+    let mut rl_action_unsupported_player = 0usize;
+    let mut rl_suppressed_bot_firings = 0usize;
+    let mut rl_action_last = usize::MAX;
+    // How many decisions have already had their action APPLIED. One action =
+    // ONE button press: the decision's action is applied on the single tick
+    // that follows it, not replayed on all `rl_dt` ticks of its window.
+    let mut rl_applied: usize = 0;
+    // MEASUREMENT ONLY: prints each applied action beside the host's own
+    // `land_attack_start_troops` recomputation (the engine's expression).
+    let agent_act_debug = std::env::var("OFCUDA_ENV_ACT_DEBUG")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     // ======================= TRAINING interface (`--rl`) =====================
     // The RL env the trainer drives sits ON TOP of this unaided multi-attack
     // game: one decision every `rl_dt` ticks, an observation (4270 f32) and an
@@ -3865,14 +4109,17 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
         //     lengths. The plane is NOT read back: no `n*wh` host copy per tick.
         let ptile_h = b.d_ptiles.to_host_vec(&stream)?;
         let oblen_h = b.d_poblen.to_host_vec(&stream)?;
-        for s in 0..npl {
-            h_tiles_now[s] = ptile_h[s] as i32; // every env is the same clone
-        }
-        for (sid, _) in bots.iter() {
-            let s = *sid as usize;
-            // `d_obmeta` indexes env 0's block of `d_pob`: `s * PB`.
-            h_obmeta[s * 2] = (s * PB) as u32;
-            h_obmeta[s * 2 + 1] = oblen_h[s].min(PB as u32);
+        // PER ENV (`e * npl + s`): the envs are clones only until the RL action
+        // channel is live, so every per-player table is indexed by env.
+        for e in 0..n {
+            for s in 0..npl {
+                h_tiles_now[e * npl + s] = ptile_h[e * npl + s] as i32;
+            }
+            for (sid, _) in bots.iter() {
+                let g = e * npl + *sid as usize;
+                h_obmeta[g * 2] = (g * PB) as u32;
+                h_obmeta[g * 2 + 1] = oblen_h[g].min(PB as u32);
+            }
         }
         // Divergence diagnosis only (verify mode): read the plane back ONCE, at
         // the first mismatching tick, to print the differing tiles.
@@ -3894,23 +4141,26 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 pending_diff = None;
             }
         }
-        for s in 1..npl {
-            if h_tiles_now[s] <= 0 {
-                continue;
+        for e in 0..n {
+            for s in 1..npl {
+                let g = e * npl + s;
+                if h_tiles_now[g] <= 0 {
+                    continue;
+                }
+                let row = econ_row(
+                    tick,
+                    h_troops[g],
+                    h_tiles_now[g],
+                    0,
+                    h_gold[g],
+                    h_ptype[s] as u32,
+                );
+                let st = ofcuda_econ::step_row(&row);
+                h_troops[g] = st.troops_after;
+                h_gold[g] = st.gold_after;
+                h_pst[g * 3] = st.troops_after as f64;
+                h_pst[g * 3 + 1] = h_tiles_now[g] as f64;
             }
-            let row = econ_row(
-                tick,
-                h_troops[s],
-                h_tiles_now[s],
-                0,
-                h_gold[s],
-                h_ptype[s] as u32,
-            );
-            let st = ofcuda_econ::step_row(&row);
-            h_troops[s] = st.troops_after;
-            h_gold[s] = st.gold_after;
-            h_pst[s * 3] = st.troops_after as f64;
-            h_pst[s * 3 + 1] = h_tiles_now[s] as f64;
         }
         d_pst.copy_from_host(&stream, &h_pst)?;
 
@@ -3919,11 +4169,14 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
         //     publishes the per-player lengths `bot_ai` reads through `obmeta`.
         d_obmeta.copy_from_host(&stream, &h_obmeta)?;
 
-        // (3) the bots' decisions, ON THE DEVICE (canonical `bot_ai_core`).
+        // (3) the bots' decisions, ON THE DEVICE (canonical `bot_ai_core`),
+        //     PER ENV: the decisions of env e are taken from env e's own plane,
+        //     player state and owner-border metadata, which is what makes a
+        //     divergent batch legal. One thread per env (`#[launch_bounds(64)]`).
         unsafe {
-            module.bot_ai(
+            module.bot_ai_multi(
                 &stream,
-                cfg_for_block(1, 1),
+                cfg_for_block(n, 64),
                 &b.d_terrain,
                 w,
                 h,
@@ -3945,11 +4198,13 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 &d_mtr,
                 &d_tgt,
                 &mut d_bout,
+                n as u32,
+                npl as u32,
                 nb as u32,
             )?;
         }
         let bout = d_bout.to_host_vec(&stream)?;
-        decisions += nb;
+        decisions += nb * n;
 
         // (4) one device launch per tick: advance the whole batch FIRST, so an
         //     attack created below first conquers into the NEXT tick's plane.
@@ -4125,7 +4380,7 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
         //      here, before the next iteration's income, which is the engine's own
         //      order (income runs ahead of the attack execs).
         let mut dead_slots: Vec<usize> = Vec::new();
-        for s in 0..b.slots {
+        for s in 0..n * b.slots {
             if prev_alive[s] && scal0[s * SCAL + 5] == 0 {
                 dead_slots.push(s);
             }
@@ -4134,20 +4389,21 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
             let tr = b.d_mtroops.to_host_vec(&stream)?;
             let ow = b.d_mowner.to_host_vec(&stream)?;
             for s in dead_slots.iter() {
-                let g = *s; // env 0: every env in the batch is the same clone
-                let surv = tr[g];
+                // Absolute slot id: env `s / b.slots`, owner from that env's
+                // own slot table, credit into that env's OWN troop ledger.
+                let surv = tr[*s];
                 if surv >= 1.0 {
-                    let owner = ow[g] as usize;
+                    let owner = ow[*s] as usize;
                     if owner < npl {
                         let add = surv.floor() as i32;
-                        h_troops[owner] += add;
+                        h_troops[(*s / b.slots) * npl + owner] += add;
                         ledger_credits += 1;
                         ledger_credit_total += add as i64;
                     }
                 }
             }
         }
-        for s in 0..b.slots {
+        for s in 0..n * b.slots {
             prev_alive[s] = scal0[s * SCAL + 5] != 0;
         }
         // DIAGNOSTIC ONLY (env `OFCUDA_ENV_ORIG_BORDER=record`): replace the
@@ -4192,24 +4448,153 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
         // game (measured at t0=318: engine tick 376, sid 2 - the record's single
         // attack goes 589 -> 1910, the merged sum, while an unmerged port held two
         // slots and diverged one tick later).
+        // ---- THE FIRINGS OF THIS TICK, PER ENV -------------------------------
+        // A firing is `(env, owner sid, start troops)` = "create this owner's
+        // land attack in THIS env's slot table". There are exactly two sources:
+        //
+        //   (a) the bots' own SCHEDULE, from `bot_ai_multi`'s per-env decision;
+        //   (b) THE RL AGENT'S ACTION, for the envs whose script asked for an
+        //       expansion (below).
+        //
+        // With `--rl-control` off, (b) is empty and (a) fires in every env -
+        // the unaided batch, unchanged.
+        let mut firings: Vec<(usize, u16, f64)> = Vec::new();
+        for e in 0..n {
+            for (bi, (sid, _)) in bots.iter().enumerate() {
+                let o = e * nb * 3 + bi * 3;
+                if bout[o] != 1.0 || bout[o + 2] != 1.0 || bout[o + 1] < 1.0 {
+                    continue;
+                }
+                if a.rl_control && *sid == rl_agent {
+                    // The agent PLAYS this player: its own scheduled firing is
+                    // suppressed, because the action channel REPLACES the bot
+                    // AI's button press rather than adding a second attack on
+                    // top of it.
+                    rl_suppressed_bot_firings += 1;
+                    continue;
+                }
+                firings.push((e, *sid, bout[o + 1]));
+            }
+        }
+
+        // ---- THE RL ACTION, WIRED INTO THE SIM -------------------------------
+        // The decision consumed here is the one emitted at the END of the
+        // previous iteration: its `sched_tick` is the engine tick this
+        // origination pass belongs to, so the attack is created from the state
+        // the policy actually SAW.
+        //
+        // `A_EXPAND` creates THE ATTACK THE ENV'S OWN BOT AI WOULD HAVE CREATED
+        // for the controlled player at this tick: `agent_expand_fire` is
+        // `bot_ai_core`'s terra-nullius land branch with its schedule gate
+        // removed, and the attack it produces is then built by the SAME
+        // slot/merge/ledger path as a bot's, below. So the agent does not get a
+        // different mechanic - it gets the bot's own attack, on demand.
+        //
+        // `A_ATTACK` names a target player's tiles; every attack this port
+        // carries is a terra-nullius land attack (target column 0) and there is
+        // no per-player target column to aim, so the action is RECORDED and
+        // changes nothing. That is the one legal action the sim cannot yet play.
+        if a.rl_control && rl_decisions > rl_applied {
+            let di = rl_decisions - 1;
+            rl_applied = rl_decisions;
+            for e in 0..n {
+                let act = rl_script(&a.rl_actions_env, &a.rl_actions, e, di);
+                rl_action_last = act;
+                if act != rl::A_EXPAND {
+                    rl_action_not_expand += 1;
+                    continue;
+                }
+                rl_action_expand += 1;
+                let Some((_, ratios)) = bots.iter().find(|(sid, _)| *sid == rl_agent) else {
+                    // A controlled player that is not a bot has no
+                    // `expand_ratio`, so there is no bot AI to borrow an attack
+                    // from: the action cannot be wired for this player.
+                    rl_action_unsupported_player += 1;
+                    continue;
+                };
+                let trow_row = (ratios.expand_ratio * 100.0).round() as u32;
+                unsafe {
+                    module.agent_expand_fire(
+                        &stream,
+                        cfg_for_block(1, 1),
+                        &b.d_terrain,
+                        w,
+                        h,
+                        &b.d_plane,
+                        (e * b.wh) as u32,
+                        &b.d_pob,
+                        &d_obmeta,
+                        &d_pst,
+                        (e * npl * 3) as u32,
+                        &d_tgt,
+                        MTC as u32,
+                        trow_row,
+                        rl_agent as u32,
+                        &mut d_agent_out,
+                    )?;
+                }
+                let ao = d_agent_out.to_host_vec(&stream)?;
+                if agent_act_debug {
+                    let gt = e * npl + rl_agent as usize;
+                    // INDEPENDENT CHECK that the attack the action creates IS the
+                    // engine's own. `land_attack_start_troops` is the port's
+                    // engine-faithful `land_attack_troops` (`step.troops_after -
+                    // step.max_troops * ratio`), and it ADVANCES the economy step,
+                    // so the step's own income is subtracted back off to land on
+                    // the same quantity the device took from the bot's
+                    // PRE-MULTIPLIED table row. Bit equality is the claim.
+                    let row = econ_row(
+                        tick,
+                        h_troops[gt],
+                        h_tiles_now[gt],
+                        0,
+                        h_gold[gt],
+                        h_ptype[rl_agent as usize] as u32,
+                    );
+                    let st = ofcuda_econ::step_row(&row);
+                    let inc = st.troops_after - h_troops[gt];
+                    let host_amt = ofcuda_env::land_attack_start_troops(&row, ratios.expand_ratio)
+                        .map(|v| v - inc as f64);
+                    println!(
+                        "  ACT tick={} env={} sid={} troops={} tiles={} grow={} device_amount={:.3} device_fired={} why={} engine_amount={:?} equal={}",
+                        tick,
+                        e,
+                        rl_agent,
+                        h_troops[gt],
+                        h_tiles_now[gt],
+                        trow_row,
+                        ao[0],
+                        ao[1] == 1.0,
+                        ao[2] as i64,
+                        host_amt,
+                        host_amt.map(|v| v == ao[0]).unwrap_or(false)
+                    );
+                }
+                if ao[1] == 1.0 {
+                    firings.push((e, rl_agent, ao[0]));
+                    rl_action_fired += 1;
+                } else {
+                    rl_action_no_effect += 1;
+                    match ao[2] as i32 {
+                        1 => rl_action_refused_no_border += 1,
+                        2 => rl_action_refused_amount += 1,
+                        _ => rl_action_refused_no_tiles += 1,
+                    }
+                }
+            }
+        }
+
         let mut used: Vec<usize> = Vec::new();
-        let any_fire = bots.iter().enumerate().any(|(bi, _)| {
-            bout[bi * 3] == 1.0 && bout[bi * 3 + 2] == 1.0 && bout[bi * 3 + 1] >= 1.0
-        });
-        // For `n > 1` every env in the batch is a CLONE of the same game (the
-        // same boundary snapshot, the same schedule), so env 0's slot columns
-        // are the ones the absorbed/merged sets need; the `n == 1` branch is
-        // byte-identical to what the unaided parity runs measured.
-        let (mtroops_h, mowner_h) = if any_fire && n == 1 {
+        let mut used_env: usize = usize::MAX;
+        let any_fire = !firings.is_empty();
+        // The merge reads the PRE-TICK slot table (`scal0`) and the slots' own
+        // `troops`/`owner` columns, for EVERY env now: env e's absorbed set is
+        // built from env e's slots only.
+        let (mtroops_h, mowner_h) = if any_fire {
             (
                 b.d_mtroops.to_host_vec(&stream)?,
                 b.d_mowner.to_host_vec(&stream)?,
             )
-        } else if any_fire {
-            let tr = b.d_mtroops.to_host_vec(&stream)?;
-            let ow = b.d_mowner.to_host_vec(&stream)?;
-            let k = b.slots.min(tr.len());
-            (tr[..k].to_vec(), ow[..k].to_vec())
         } else {
             (Vec::new(), Vec::new())
         };
@@ -4225,29 +4610,28 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
         // heap candidate too few, and one tile of plane divergence at 387.
         if any_fire {
             let oblen_now = b.d_poblen.to_host_vec(&stream)?;
-            for (sid, _) in bots.iter() {
-                let s = *sid as usize;
-                h_obmeta[s * 2] = (s * PB) as u32;
-                h_obmeta[s * 2 + 1] = oblen_now[s].min(PB as u32);
+            for e in 0..n {
+                for (sid, _) in bots.iter() {
+                    let g = e * npl + *sid as usize;
+                    h_obmeta[g * 2] = (g * PB) as u32;
+                    h_obmeta[g * 2 + 1] = oblen_now[g].min(PB as u32);
+                }
             }
         }
-        for (bi, (sid, _)) in bots.iter().enumerate() {
-            let fire = bout[bi * 3];
-            let action = bout[bi * 3 + 2];
-            if fire != 1.0 || action != 1.0 {
-                continue;
+        for (e, sid, start) in firings.iter().copied() {
+            // `used`/`absorbed` are PER ENV: the envs are independent games.
+            if e != used_env {
+                used.clear();
+                used_env = e;
             }
-            let start = bout[bi * 3 + 1];
-            if start < 1.0 {
-                continue;
-            }
-            let sb = *sid as usize;
-            // The absorbed set: the owner's OTHER live slots at the pre-tick
-            // state (`scal0`/`mowner_h`), i.e. the engine's
+            let sb = sid as usize;
+            let so = e * b.slots;
+            // The absorbed set: the owner's OTHER live slots of THIS ENV at the
+            // pre-tick state (`scal0`/`mowner_h`), i.e. the engine's
             // `Player.outgoing_land_attacks` walk minus the new attack itself.
             let mut absorbed: Vec<usize> = Vec::new();
             let mut merged_sum = 0.0f64;
-            for s in 0..b.slots {
+            for s in so..so + b.slots {
                 if used.contains(&s) {
                     continue;
                 }
@@ -4257,11 +4641,11 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             let mut slot: Option<usize> = None;
-            for s in 0..b.slots {
-                if used.contains(&s) {
+            for s in so..so + b.slots {
+                if used.contains(&s) || absorbed.contains(&s) {
                     continue;
                 }
-                if scal0[(s * SCAL) + 5] == 0 && !absorbed.contains(&s) {
+                if scal0[(s * SCAL) + 5] == 0 {
                     slot = Some(s);
                     break;
                 }
@@ -4280,8 +4664,9 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
             // attack is given - the engine debits before the merge), and the debit
             // lands after this tick's income and before the next one, which is the
             // engine's own phase order.
-            let debit = (start.floor() as i32).min(h_troops[s]).max(0);
-            h_troops[s] -= debit;
+            let gt = e * npl + s;
+            let debit = (start.floor() as i32).min(h_troops[gt]).max(0);
+            h_troops[gt] -= debit;
             ledger_debits += 1;
             ledger_debit_total += debit as i64;
             // Kill the absorbed slots FIRST (host bookkeeping), then create the
@@ -4289,56 +4674,60 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
             // the retreat-credit pass never pays their survivors back: they are
             // inside the new attack's `troops` now.
             for a in absorbed.iter() {
-                for e in 0..n {
-                    let g = (e * b.slots + *a) as u32;
-                    unsafe {
-                        module.env_kill_slot(&stream, cfg_for_block(1, 1), &mut b.d_mscal, g)?;
-                    }
+                unsafe {
+                    module.env_kill_slot(&stream, cfg_for_block(1, 1), &mut b.d_mscal, *a as u32)?;
                 }
                 prev_alive[*a] = false;
             }
             merged_absorbed += absorbed.len();
             let merged_start = start + merged_sum;
-            let obn = h_obmeta[s * 2 + 1];
-            for e in 0..n {
-                let g = (e * b.slots + slot) as u32;
-                unsafe {
-                    module.env_orig_slot(
-                        &stream,
-                        cfg_for_block(1, 1),
-                        &b.d_terrain,
-                        w,
-                        h,
-                        tick,
-                        *sid,
-                        0u16,
-                        &b.d_plane,
-                        &b.d_pob,
-                        (e * npl * PB + s * PB) as u32,
-                        obn,
-                        &mut b.d_mheap_tiles,
-                        &mut b.d_mheap_pri,
-                        &mut b.d_mborder,
-                        &mut b.d_mprng,
-                        &mut b.d_mscal,
-                        &mut b.d_mtroops,
-                        &mut b.d_mowner,
-                        &mut b.d_misbot,
-                        &mut b.d_moborder,
-                        g,
-                        *sid as u32,
-                        1u32,
-                        merged_start,
-                        &mut d_orig_out,
-                    )?;
-                }
-                if e == 0 && origs < 6 {
-                    let oo = d_orig_out.to_host_vec(&stream)?;
-                    println!(
-                        "  ORIG tick={} sid={} slot={} start={:.1} merged_start={:.1} absorbed={} heap={} border={} peak={} own_border={}",
-                        tick, sid, slot, start, merged_start, absorbed.len(), oo[0], oo[1], oo[2], obn
-                    );
-                }
+            let obn = h_obmeta[gt * 2 + 1];
+            unsafe {
+                module.env_orig_slot(
+                    &stream,
+                    cfg_for_block(1, 1),
+                    &b.d_terrain,
+                    w,
+                    h,
+                    tick,
+                    sid,
+                    0u16,
+                    &b.d_plane,
+                    &b.d_pob,
+                    (e * npl * PB + s * PB) as u32,
+                    obn,
+                    &mut b.d_mheap_tiles,
+                    &mut b.d_mheap_pri,
+                    &mut b.d_mborder,
+                    &mut b.d_mprng,
+                    &mut b.d_mscal,
+                    &mut b.d_mtroops,
+                    &mut b.d_mowner,
+                    &mut b.d_misbot,
+                    &mut b.d_moborder,
+                    slot as u32,
+                    sid as u32,
+                    1u32,
+                    merged_start,
+                    &mut d_orig_out,
+                )?;
+            }
+            if origs < 6 {
+                let oo = d_orig_out.to_host_vec(&stream)?;
+                println!(
+                    "  ORIG tick={} env={} sid={} slot={} start={:.1} merged_start={:.1} absorbed={} heap={} border={} peak={} own_border={}",
+                    tick,
+                    e,
+                    sid,
+                    slot - e * b.slots,
+                    start,
+                    merged_start,
+                    absorbed.len(),
+                    oo[0],
+                    oo[1],
+                    oo[2],
+                    obn
+                );
             }
             origs += 1;
         }
@@ -4356,8 +4745,16 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
                     &mut d_hashes,
                 )?;
             }
-            let hh = d_hashes.to_host_vec(&stream)?[0];
+            let hh_all = d_hashes.to_host_vec(&stream)?;
+            let hh = hh_all[0];
             hashes.push(hh);
+            if hash_all {
+                let mut line = format!("HASHES tick={}", tick + 1);
+                for e in 0..n {
+                    line.push_str(&format!(" e{}=>{}", e, hh_all[e]));
+                }
+                println!("{line}");
+            }
             if diverged.is_none() {
                 if let Some(eh) = engine_hash_at(&dump, w, h, tick + 1) {
                     if eh != hh {
@@ -4455,13 +4852,14 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
                     use std::io::Write as _;
                     writeln!(
                         f,
-                        "{{\"env\":0,\"agent\":{},\"decision\":{},\"tick\":{},\"dt\":{},\"action\":{},\"action_legal\":{},\"n_alive\":{},\"n_live_attacks\":{},\"tiles\":{},\"troops\":{},\"gold\":{},\"reward\":{:.9},\"terminal\":{:.9},\"done\":{},\"won\":{},\"died\":{},\"timed_out\":{},\"obs_hash\":{},\"mask_hash\":{},\"stream_hash\":{}}}",
+                        "{{\"env\":0,\"agent\":{},\"decision\":{},\"tick\":{},\"dt\":{},\"action\":{},\"action_legal\":{},\"action_control\":{},\"n_alive\":{},\"n_live_attacks\":{},\"tiles\":{},\"troops\":{},\"gold\":{},\"reward\":{:.9},\"terminal\":{:.9},\"done\":{},\"won\":{},\"died\":{},\"timed_out\":{},\"obs_hash\":{},\"mask_hash\":{},\"stream_hash\":{}}}",
                         rl_agent,
                         rl_decisions,
                         sched_tick,
                         a.rl_dt.max(1),
                         action,
                         action_legal,
+                        a.rl_control,
                         world.players.iter().filter(|p| p.alive).count(),
                         world.attacks_by(rl_agent).len(),
                         me.tiles,
@@ -4545,6 +4943,26 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 rl_hashes.len()
             );
         }
+        println!(
+            "RL action channel: control={} agent={} expand_requested={} fired={} no_effect={} refused_no_tn_border={} refused_amount_lt_1={} refused_no_tiles={} not_expand={} unsupported_player={} suppressed_bot_firings={} applied={} last_action={}",
+            a.rl_control,
+            rl_agent,
+            rl_action_expand,
+            rl_action_fired,
+            rl_action_no_effect,
+            rl_action_refused_no_border,
+            rl_action_refused_amount,
+            rl_action_refused_no_tiles,
+            rl_action_not_expand,
+            rl_action_unsupported_player,
+            rl_suppressed_bot_firings,
+            rl_applied,
+            if rl_action_last == usize::MAX {
+                -1i64
+            } else {
+                rl_action_last as i64
+            }
+        );
     }
 
     // ---- report ----
