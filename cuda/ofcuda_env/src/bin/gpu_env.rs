@@ -72,6 +72,8 @@ use ofcuda_env::{
     attack_tiles_per_tick, attacker_troop_loss, econ_row, land_attack_start_troops, state_hash,
     tribe_ratios, tiles_used, Attack, TribeRatios,
 };
+/// The TRAINING interface: obs / action mask / reward from device state.
+use ofcuda_env::rl;
 use ofcuda_tick::{
     add_neighbors, attacker_neighbor_count, has_attacker_neighbor, mag2_from_terrain, neighbors4,
     priority_f32, Heap, Prng, HEAP_CAP, ORDER_NSWE,
@@ -2208,6 +2210,21 @@ struct Args {
     /// attacks itself (schedule + device frontier + device bot decision),
     /// instead of only ticking the attack SET captured at the snapshot.
     orig: bool,
+    /// `--rl`: emit the TRAINING interface (`ofcuda_env::rl`): per-decision
+    /// observation (4270 f32), action mask (40893 f32) and reward, derived
+    /// from the device state of the unaided multi-attack game.
+    rl: bool,
+    /// Where to write the RL decision stream (JSONL). `None` = summary only.
+    rl_out: Option<PathBuf>,
+    /// Ticks per decision (the curriculum's `decision_ticks`, default 15).
+    rl_dt: u32,
+    /// The RL agent's small id. `None` = the first bot in the roster.
+    rl_agent: Option<u16>,
+    /// Cap on emitted decisions (0 = every decision in the window).
+    rl_decisions: usize,
+    /// Scripted agent action per decision (action ids from the mask's
+    /// `legal_actions` block). Empty = all-noop. 0 noop, 2 expand.
+    rl_actions: Vec<usize>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -2226,6 +2243,12 @@ fn parse_args() -> Result<Args, String> {
         originate: false,
         multi: false,
         orig: false,
+        rl: false,
+        rl_out: None,
+        rl_dt: 15,
+        rl_agent: None,
+        rl_decisions: 0,
+        rl_actions: Vec::new(),
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -2295,10 +2318,51 @@ fn parse_args() -> Result<Args, String> {
                 a.orig = true;
                 i += 1;
             }
+            "--rl" => {
+                a.rl = true;
+                i += 1;
+            }
+            "--rl-out" => {
+                a.rl_out = Some(PathBuf::from(val(i)?));
+                i += 2;
+            }
+            "--rl-dt" => {
+                a.rl_dt = val(i)?.parse().map_err(|e| format!("rl-dt: {e}"))?;
+                i += 2;
+            }
+            "--rl-agent" => {
+                a.rl_agent = Some(val(i)?.parse().map_err(|e| format!("rl-agent: {e}"))?);
+                i += 2;
+            }
+            "--rl-decisions" => {
+                a.rl_decisions = val(i)?.parse().map_err(|e| format!("rl-decisions: {e}"))?;
+                i += 2;
+            }
+            "--rl-actions" => {
+                a.rl_actions = val(i)?
+                    .split(',')
+                    .filter(|x| !x.trim().is_empty())
+                    .map(|x| x.trim().parse::<usize>().map_err(|e| format!("rl-actions: {e}")))
+                    .collect::<Result<Vec<_>, _>>()?;
+                i += 2;
+            }
             o => return Err(format!("unknown arg {o}").into()),
         }
     }
     Ok(a)
+}
+
+/// FNV-1a 64 over a decision tensor's f32 little-endian bytes - the RL stream's
+/// per-tensor hash (`obs_hash` / `mask_hash` in the JSONL stream). Same family
+/// as the parity traces' plane hash, so both are directly comparable in a log.
+fn rl_hash_f32(v: &[f32]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for x in v {
+        for b in x.to_le_bytes() {
+            h = (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    h
 }
 
 /// The driver's conditions for a creation that is NOT a merge: exactly one
@@ -3732,6 +3796,56 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut ledger_debit_total: i64 = 0;
     let mut ledger_credits: u64 = 0;
     let mut ledger_credit_total: i64 = 0;
+    // ======================= TRAINING interface (`--rl`) =====================
+    // The RL env the trainer drives sits ON TOP of this unaided multi-attack
+    // game: one decision every `rl_dt` ticks, an observation (4270 f32) and an
+    // action mask (40893 f32) per agent, plus the reward, all derived from the
+    // DEVICE state of the game in progress - `d_mscal`/`d_mtroops`/`d_mowner`
+    // (the live attack slots), the loop's own `d_ptiles`/`d_poblen` counters
+    // and the host troop/gold ledger. Nothing here feeds the simulation: the
+    // RL path is an observer, and `--rl-actions` only RECORDS the agent's
+    // action (the action -> env application is not wired - see the report).
+    // The observation/mask SEMANTICS are `ofcuda_env::rl`'s (the policy's own
+    // 4270/40893 fp32 layout): this block only supplies the device World.
+    let rl_agent: u16 = a
+        .rl_agent
+        .unwrap_or_else(|| bots.first().map(|b| b.0).unwrap_or(1));
+    let rl_max_episode_ticks: i64 = 21000; // curriculum's episode cap (`curriculum.rs`)
+    let map_land: u32 = terrain.iter().filter(|t| **t & 0x80 != 0).count() as u32;
+    let mut rl_stream_fnv: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut rl_decisions: usize = 0;
+    let mut rl_decision_ticks: u32 = 0;
+    let mut rl_reward_sum: f64 = 0.0;
+    let mut rl_terminal_seen: usize = 0;
+    let mut rl_derive_ns: u128 = 0;
+    let mut rl_inv = rl::Inventory::default();
+    let mut rl_reward_state = rl::RewardState::default();
+    let mut rl_hashes: Vec<u64> = Vec::new();
+    let mut rl_out_file: Option<std::fs::File> = match a.rl_out.as_ref() {
+        Some(p) => Some(std::fs::File::create(p).map_err(|e| format!("rl-out: {e}"))?),
+        None => None,
+    };
+    if a.rl {
+        let hdr = rl::header_check(std::path::Path::new(
+            "/opt/data/workspaces/skg/openfront-ai/include/openfront_env.h",
+        ));
+        let (hdr_n, hdr_bad) = match &hdr {
+            Ok((n, bad)) => (*n, bad.join("; ")),
+            Err(e) => (0, e.clone()),
+        };
+        println!(
+            "RL interface: agent={} rl_dt={} policy_tensor=B,99,gh,gw obs_per_agent={} mask_per_agent={} map_land={}/{} spawn_end_tick={} header_consts_checked={} header_mismatches=[{}]",
+            rl_agent,
+            a.rl_dt.max(1),
+            rl::OBS_PER_AGENT,
+            rl::MASK_PER_AGENT,
+            map_land,
+            w * h,
+            spawn_end_tick,
+            hdr_n,
+            hdr_bad
+        );
+    }
     for k in 0..a.ticks {
         let tick = t0 + k;
         // The engine's OWN tick that this iteration executes. `env_step_multi`'s
@@ -4082,11 +4196,20 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
         let any_fire = bots.iter().enumerate().any(|(bi, _)| {
             bout[bi * 3] == 1.0 && bout[bi * 3 + 2] == 1.0 && bout[bi * 3 + 1] >= 1.0
         });
+        // For `n > 1` every env in the batch is a CLONE of the same game (the
+        // same boundary snapshot, the same schedule), so env 0's slot columns
+        // are the ones the absorbed/merged sets need; the `n == 1` branch is
+        // byte-identical to what the unaided parity runs measured.
         let (mtroops_h, mowner_h) = if any_fire && n == 1 {
             (
                 b.d_mtroops.to_host_vec(&stream)?,
                 b.d_mowner.to_host_vec(&stream)?,
             )
+        } else if any_fire {
+            let tr = b.d_mtroops.to_host_vec(&stream)?;
+            let ow = b.d_mowner.to_host_vec(&stream)?;
+            let k = b.slots.min(tr.len());
+            (tr[..k].to_vec(), ow[..k].to_vec())
         } else {
             (Vec::new(), Vec::new())
         };
@@ -4244,6 +4367,123 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+
+        // ---- TRAINING interface: one decision every `rl_dt` ticks ----------
+        if a.rl {
+            rl_decision_ticks += 1;
+            if rl_decision_ticks >= a.rl_dt.max(1)
+                && (a.rl_decisions == 0 || rl_decisions < a.rl_decisions)
+            {
+                rl_decision_ticks = 0;
+                let t_der = std::time::Instant::now();
+                // The live attack slots, straight off the device (`d_mscal`'s
+                // slot column and the per-slot `mtroops`/`mowner`).
+                let mscal_r = b.d_mscal.to_host_vec(&stream)?;
+                let mtroops_r = b.d_mtroops.to_host_vec(&stream)?;
+                let mowner_r = b.d_mowner.to_host_vec(&stream)?;
+                // --- players: device tiles/border + the loop's own ledger ---
+                let mut players: Vec<rl::PlayerRow> = Vec::new();
+                for (sid, _) in bots.iter() {
+                    let s = *sid as usize;
+                    if s >= npl {
+                        continue;
+                    }
+                    players.push(rl::PlayerRow {
+                        sid: *sid,
+                        slot: *sid as u8, // roster order: sid == slot in this env
+                        alive: ptile_h[s] as i32 > 0 || h_troops[s] > 0,
+                        troops: h_troops[s] as f64,
+                        gold: h_gold[s] as f64,
+                        tiles: ptile_h[s] as f64,
+                        border_len: oblen_h[s] as u32,
+                    });
+                }
+                let mut attacks: Vec<rl::AttackRow> = Vec::new();
+                for s in 0..b.slots {
+                    if mscal_r[s * SCAL + 5] != 0 {
+                        attacks.push(rl::AttackRow {
+                            owner: mowner_r[s],
+                            target: 0, // this env originates neutral-land attacks only
+                            troops: mtroops_r[s] as f64,
+                            alive: true,
+                        });
+                    }
+                }
+                let world = rl::World {
+                    tick: sched_tick as i64,
+                    spawn_end_tick,
+                    max_episode_ticks: rl_max_episode_ticks,
+                    map_land: map_land as i64,
+                    w,
+                    h,
+                    me: rl_agent,
+                    me_slot: rl_agent as usize,
+                    players,
+                    attacks,
+                };
+                let o = rl::obs(&world, &mut rl_inv);
+                // No spawn tile predicate post-spawn: the tile block is the
+                // all-ones legal-region plane inside the fixed 150x250 grid.
+                let m = rl::mask(&world, None, &mut rl_inv);
+                let out = rl::decision_reward(&world, &mut rl_reward_state);
+                // The decision stream hash, in the trainer's consumption order
+                // (obs, mask, reward) as little-endian f32: FNV-1a 64, the same
+                // hash family the parity traces use.
+                for v in o.iter().chain(m.iter()) {
+                    for byte in v.to_le_bytes() {
+                        rl_stream_fnv =
+                            (rl_stream_fnv ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
+                    }
+                }
+                for byte in out.reward.to_le_bytes() {
+                    rl_stream_fnv =
+                        (rl_stream_fnv ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
+                }
+                rl_reward_sum += out.reward;
+                if out.done {
+                    rl_terminal_seen += 1;
+                }
+                let action = a
+                    .rl_actions
+                    .get(rl_decisions)
+                    .copied()
+                    .unwrap_or(rl::A_NOOP);
+                let action_legal =
+                    m[rl::MASK_ACTIONS_OFF + action.min(rl::N_ACTIONS - 1)] > 0.0;
+                let me = world.me_row().cloned().unwrap_or_default();
+                if let Some(f) = rl_out_file.as_mut() {
+                    use std::io::Write as _;
+                    writeln!(
+                        f,
+                        "{{\"env\":0,\"agent\":{},\"decision\":{},\"tick\":{},\"dt\":{},\"action\":{},\"action_legal\":{},\"n_alive\":{},\"n_live_attacks\":{},\"tiles\":{},\"troops\":{},\"gold\":{},\"reward\":{:.9},\"terminal\":{:.9},\"done\":{},\"won\":{},\"died\":{},\"timed_out\":{},\"obs_hash\":{},\"mask_hash\":{},\"stream_hash\":{}}}",
+                        rl_agent,
+                        rl_decisions,
+                        sched_tick,
+                        a.rl_dt.max(1),
+                        action,
+                        action_legal,
+                        world.players.iter().filter(|p| p.alive).count(),
+                        world.attacks_by(rl_agent).len(),
+                        me.tiles,
+                        me.troops,
+                        me.gold,
+                        out.reward,
+                        out.terminal,
+                        out.done,
+                        out.won,
+                        out.died,
+                        out.timed_out,
+                        rl_hash_f32(&o),
+                        rl_hash_f32(&m),
+                        rl_stream_fnv
+                    )
+                    .map_err(|e| format!("rl-out: {e}"))?;
+                }
+                rl_hashes.push(rl_stream_fnv);
+                rl_derive_ns += t_der.elapsed().as_nanos();
+                rl_decisions += 1;
+            }
+        }
     }
     stream.synchronize()?;
     let ms = wall.elapsed().as_secs_f64() * 1000.0;
@@ -4253,6 +4493,57 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
             if scal_end[(e * b.slots + s) * SCAL + 5] != 0 {
                 live_last += 1;
             }
+        }
+    }
+
+    // ---- TRAINING interface report ---------------------------------------
+    if a.rl {
+        let dt = a.rl_dt.max(1) as u64;
+        let derive_ms = rl_derive_ns as f64 / 1e6;
+        println!(
+            "RL interface: decisions={} rl_dt={} env_ticks={} obs_per_agent={} mask_per_agent={} obs_written={} ({:.4}) mask_written={} ({:.4})",
+            rl_decisions,
+            dt,
+            rl_decisions as u64 * dt,
+            rl::OBS_PER_AGENT,
+            rl::MASK_PER_AGENT,
+            rl_inv.obs_written,
+            rl_inv.obs_frac(),
+            rl_inv.mask_written,
+            rl_inv.mask_frac()
+        );
+        println!(
+            "RL interface: derive={:.3} ms total ({:.4} ms/decision) reward_sum={:.6} terminals={} stream_fnv1a={:016x}",
+            derive_ms,
+            if rl_decisions > 0 {
+                derive_ms / rl_decisions as f64
+            } else {
+                0.0
+            },
+            rl_reward_sum,
+            rl_terminal_seen,
+            rl_stream_fnv
+        );
+        let secs = (ms / 1000.0).max(1e-9);
+        println!(
+            "RL interface: env_ticks/s={:.0} decisions/s={:.1} obs_mask_bytes_per_decision={} (n={} envs)",
+            (n as f64 * a.ticks as f64) / secs,
+            rl_decisions as f64 / secs,
+            (rl::OBS_PER_AGENT + rl::MASK_PER_AGENT) * 4,
+            n
+        );
+        if !rl_hashes.is_empty() {
+            let head: Vec<String> = rl_hashes
+                .iter()
+                .take(4)
+                .map(|h| format!("{h:016x}"))
+                .collect();
+            println!(
+                "RL interface: first_decision_hashes={} last_decision_hash={:016x} n_hashes={}",
+                head.join(","),
+                rl_hashes[rl_hashes.len() - 1],
+                rl_hashes.len()
+            );
         }
     }
 

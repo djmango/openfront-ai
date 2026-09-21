@@ -53,6 +53,10 @@ use ofcuda_tick::{
     Prng, ORDER_NSWE,
 };
 
+/// The training interface: observation, action mask and reward derived from the
+/// device state of the unaided multi-attack game. See `rl.rs`.
+pub mod rl;
+
 /// `util.rs` `within(value, min, max)`.
 #[inline]
 pub fn within(v: f64, lo: f64, hi: f64) -> f64 {
