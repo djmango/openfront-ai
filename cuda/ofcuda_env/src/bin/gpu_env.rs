@@ -1415,6 +1415,23 @@ mod kernels {
         out[2] = heap.peak as u32;
         out[3] = pr.calls;
     }
+
+    /// Kill one slot of the batch: `AttackExecution::kill_attack`'s
+    /// `attack_live = false` (`attack.rs:1205-1215`). Used by the ORIGINATION
+    /// MERGE (`Game::merge_outgoing_land_attacks`, `game.rs:2122-2156`): the
+    /// engine folds an owner's OTHER live land attacks of the same target into
+    /// the new one and kills them, paying NOTHING back - their `troops` were
+    /// already debited from the owner when they were created and now ride in the
+    /// new attack's `troops`, so the host must not treat the death as a retreat.
+    #[kernel]
+    #[launch_bounds(1)]
+    pub fn env_kill_slot(mut scal: &mut [u32], g: u32) {
+        if thread::index_1d().get() != 0 {
+            return;
+        }
+        let sb = g as usize * SCAL;
+        scal[sb + 5] = 0; // `attack_live = false`
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3374,6 +3391,40 @@ const MTC: usize = 262144;
 /// ones `bot_trow` can name; 21 covers every tribe with margin.
 const TROW_N: usize = 21;
 
+/// The engine's own `spawn_end_tick`, read off the record.
+///
+/// `Game::end_spawn_phase` (`game.rs:724-727`) sets `spawn_end_tick =
+/// Some(self.ticks)` at the moment the RL session leaves the spawn phase, and
+/// the dump carries `Game::in_spawn_phase()` (`game.rs:720-722`, `self.spawn_phase`)
+/// on EVERY row. The phase flag is false from the first row whose tick is
+/// strictly greater than `spawn_end_tick`, so the largest tick whose row still
+/// says `inSpawnPhase: true` IS the engine's `spawn_end_tick` - derived from the
+/// engine's own field, never passed in.
+///
+/// A dump that starts mid-game carries no `inSpawnPhase: true` row at all and
+/// yields 0. That is exactly the mid-game regime: with `spawn_end_tick = 0`
+/// every scheduled firing in the window is `tick > spawn_end_tick` and, because
+/// `bot_ff` is then below the window, every firing is a LATER one - the port's
+/// pre-existing behaviour, unchanged for every start point that never saw the
+/// spawn phase.
+fn spawn_end_tick_from_dump(path: &std::path::Path) -> u32 {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return 0;
+    };
+    let mut end = 0u32;
+    for line in text.lines() {
+        if !line.contains("\"inSpawnPhase\":true") {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Some(t) = v.get("tick").and_then(|x| x.as_u64()) {
+                end = end.max(t as u32);
+            }
+        }
+    }
+    end
+}
+
 /// `--multi --orig`. The batched env advances the WHOLE game: it runs the
 /// economy, takes the bots' decisions on the DEVICE (`bot_ai`, the canonical
 /// core), ORIGINATES the land attacks those decisions call for straight into
@@ -3387,12 +3438,21 @@ const TROW_N: usize = 21;
 /// `ofcuda_env/src/lib.rs:162-176`) and the bot behaviour flags are the
 /// engine's constants. Inside the tick loop the record is read ONLY in verify
 /// mode, to hash-compare - nothing is fed back.
+///
+/// The SPAWN PHASE is no longer passed in: `spawn_end_tick` and the per-bot
+/// first-firing schedule (`bot_ff`) are DERIVED, see `spawn_end_tick_from_dump`.
 fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let map = ofcuda_tick::load_map(&a.map)?;
     let (w, h) = (map.width, map.height);
     let terrain = map.terrain.clone();
     let dump = ofcuda_tick::parse_dump(&a.dump)?;
     let ex = extras(&a.dump)?;
+    // ---- the SPAWN PHASE: the engine's own `spawn_end_tick`, derived from the
+    //      record rather than passed as 0. See `spawn_end_tick_from_dump`.
+    let spawn_end_tick = std::env::var("OFCUDA_ENV_SPAWN_END")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or_else(|| spawn_end_tick_from_dump(&a.dump));
 
     // ---- the boundary snapshot: same all-fresh scan as run_multi_demo ----
     let mut best_t: Option<u32> = None;
@@ -3540,10 +3600,15 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut b_trow = vec![0u32; nb];
     let mut b_rrow = vec![0u32; nb];
     let mut b_ff = vec![0u32; nb];
-    // `spawn_end_tick`: the env seeds from a mid-game boundary, so the bots are
-    // long past it. 0 keeps the core's `tick > spawn_end_tick` gate open, which
-    // is what the engine sees at t0.
-    let spawn_end_tick = 0u32;
+    // `spawn_end_tick` is the ENGINE's own (`game.rs:724-731`
+    // `end_spawn_phase` sets `spawn_end_tick = self.ticks`), derived above from
+    // the record's `inSpawnPhase` column. `bot/tribe.rs:118-122` gates the whole
+    // tribe exec on `game.in_spawn_phase()` and the schedule test on
+    // `tick % attack_rate == attack_tick`, so every firing at `tick <=
+    // spawn_end_tick` is skipped by both sides; the FIRST firing is therefore the
+    // smallest tick STRICTLY ABOVE `spawn_end_tick` that lands on the phase, which
+    // is what `bot_ff` carries into `bot_ai_core`'s `first` test.
+    //
     for (k, (sid, r)) in bots.iter().enumerate() {
         b_sid[k] = *sid as u32;
         b_rate[k] = r.attack_rate as u32;
@@ -3558,6 +3623,14 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
         }
         b_ff[k] = ff;
     }
+    println!(
+        "MULTI-ORIG spawn: spawn_end_tick={} (derived from the record's inSpawnPhase), first firings: {:?}",
+        spawn_end_tick,
+        b_ff.iter()
+            .zip(bots.iter())
+            .map(|(f, (sid, _))| format!("sid{sid}@{f}"))
+            .collect::<Vec<_>>()
+    );
     let d_bsid = DeviceBuffer::<u32>::from_host(&stream, &b_sid)?;
     let d_brate = DeviceBuffer::<u32>::from_host(&stream, &b_rate)?;
     let d_bat = DeviceBuffer::<u32>::from_host(&stream, &b_at)?;
@@ -3607,6 +3680,7 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let wall = Instant::now();
     let mut hashes: Vec<u64> = Vec::new();
     let mut origs = 0usize;
+    let mut merged_absorbed = 0usize;
     let mut orig_slot_ovf = 0usize;
     let mut decisions = 0usize;
     let mut live_last = 0usize;
@@ -3992,7 +4066,48 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
             b.d_poblen.copy_from_host(&stream, &h_ol)?;
             d_obmeta.copy_from_host(&stream, &h_obmeta)?;
         }
+        // ENGINE MERGE (`Game::merge_outgoing_land_attacks`, `game.rs:2122-2156`,
+        // called from `AttackExecution::init`, `attack.rs:177-184`): a newly
+        // created land attack ABSORBS every OTHER live land attack of the same
+        // owner and the same target - their CURRENT `troops` are added into the
+        // new attack's `troops` and they are killed (no owner credit; the troops
+        // were debited when those attacks were created). Every attack this port
+        // carries is a Terra-Nullius land attack (target column 0), so the new
+        // attack absorbs every other LIVE slot of its owner. This is what a bot
+        // re-firing while its previous attack is still running does in the early
+        // game (measured at t0=318: engine tick 376, sid 2 - the record's single
+        // attack goes 589 -> 1910, the merged sum, while an unmerged port held two
+        // slots and diverged one tick later).
         let mut used: Vec<usize> = Vec::new();
+        let any_fire = bots.iter().enumerate().any(|(bi, _)| {
+            bout[bi * 3] == 1.0 && bout[bi * 3 + 2] == 1.0 && bout[bi * 3 + 1] >= 1.0
+        });
+        let (mtroops_h, mowner_h) = if any_fire && n == 1 {
+            (
+                b.d_mtroops.to_host_vec(&stream)?,
+                b.d_mowner.to_host_vec(&stream)?,
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        // The owner-border length the ORIGINATION must refresh from. The engine
+        // runs `AttackExecution::init` (which calls `refresh_to_conquer`,
+        // `attack.rs:1299-1308`) in the tick's `uninit` DRAIN - after that tick's
+        // attack execs - so the border it iterates is the one the tick's own
+        // conquests just produced, not the length published for this tick's bot
+        // DECISION. The device holds the set (`d_pob`); its length must be read
+        // back NOW rather than reusing `h_obmeta`, which was filled at the top of
+        // this iteration. Measured at t0=318: reusing it cost sid 1 the two border
+        // tiles that appeared during engine tick 385 (86 vs the record's 88), one
+        // heap candidate too few, and one tile of plane divergence at 387.
+        if any_fire {
+            let oblen_now = b.d_poblen.to_host_vec(&stream)?;
+            for (sid, _) in bots.iter() {
+                let s = *sid as usize;
+                h_obmeta[s * 2] = (s * PB) as u32;
+                h_obmeta[s * 2 + 1] = oblen_now[s].min(PB as u32);
+            }
+        }
         for (bi, (sid, _)) in bots.iter().enumerate() {
             let fire = bout[bi * 3];
             let action = bout[bi * 3 + 2];
@@ -4003,12 +4118,27 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
             if start < 1.0 {
                 continue;
             }
+            let sb = *sid as usize;
+            // The absorbed set: the owner's OTHER live slots at the pre-tick
+            // state (`scal0`/`mowner_h`), i.e. the engine's
+            // `Player.outgoing_land_attacks` walk minus the new attack itself.
+            let mut absorbed: Vec<usize> = Vec::new();
+            let mut merged_sum = 0.0f64;
+            for s in 0..b.slots {
+                if used.contains(&s) {
+                    continue;
+                }
+                if scal0[s * SCAL + 5] != 0 && mowner_h[s] as usize == sb {
+                    merged_sum += mtroops_h[s];
+                    absorbed.push(s);
+                }
+            }
             let mut slot: Option<usize> = None;
             for s in 0..b.slots {
                 if used.contains(&s) {
                     continue;
                 }
-                if scal0[(s * SCAL) + 5] == 0 {
+                if scal0[(s * SCAL) + 5] == 0 && !absorbed.contains(&s) {
                     slot = Some(s);
                     break;
                 }
@@ -4018,18 +4148,34 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             };
             used.push(slot);
-            let s = *sid as usize;
+            let s = sb;
             // OWNER TROOP LEDGER - the creation side. `AttackExecution::init`
             // (`attack.rs:146-149`) pays the attack's `start` troops out of the
             // OWNER's own pool: `Game::remove_troops(owner, start)`
             // (`game.rs:1153-1164`, `min(troops, floor(start))`). `start` is the
-            // value the bot decision produced (the un-floored f64 the attack is
-            // given), and the debit lands after this tick's income and before the
-            // next one, which is the engine's own phase order.
+            // PRE-MERGE value the bot decision produced (the un-floored f64 the
+            // attack is given - the engine debits before the merge), and the debit
+            // lands after this tick's income and before the next one, which is the
+            // engine's own phase order.
             let debit = (start.floor() as i32).min(h_troops[s]).max(0);
             h_troops[s] -= debit;
             ledger_debits += 1;
             ledger_debit_total += debit as i64;
+            // Kill the absorbed slots FIRST (host bookkeeping), then create the
+            // merged attack in the free slot. `prev_alive` is cleared for them so
+            // the retreat-credit pass never pays their survivors back: they are
+            // inside the new attack's `troops` now.
+            for a in absorbed.iter() {
+                for e in 0..n {
+                    let g = (e * b.slots + *a) as u32;
+                    unsafe {
+                        module.env_kill_slot(&stream, cfg_for_block(1, 1), &mut b.d_mscal, g)?;
+                    }
+                }
+                prev_alive[*a] = false;
+            }
+            merged_absorbed += absorbed.len();
+            let merged_start = start + merged_sum;
             let obn = h_obmeta[s * 2 + 1];
             for e in 0..n {
                 let g = (e * b.slots + slot) as u32;
@@ -4059,15 +4205,15 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
                         g,
                         *sid as u32,
                         1u32,
-                        start,
+                        merged_start,
                         &mut d_orig_out,
                     )?;
                 }
                 if e == 0 && origs < 6 {
                     let oo = d_orig_out.to_host_vec(&stream)?;
                     println!(
-                        "  ORIG tick={} sid={} slot={} start={:.1} heap={} border={} peak={} own_border={}",
-                        tick, sid, slot, start, oo[0], oo[1], oo[2], obn
+                        "  ORIG tick={} sid={} slot={} start={:.1} merged_start={:.1} absorbed={} heap={} border={} peak={} own_border={}",
+                        tick, sid, slot, start, merged_start, absorbed.len(), oo[0], oo[1], oo[2], obn
                     );
                 }
             }
@@ -4122,8 +4268,8 @@ fn run_multi_orig(a: &Args) -> Result<(), Box<dyn std::error::Error>> {
         live_last
     );
     println!(
-        "MULTI-ORIG origination: attacks_originated_unaided={} (one per firing bot per env) slot_overflow={} decisions={}",
-        origs, orig_slot_ovf, decisions
+        "MULTI-ORIG origination: attacks_originated_unaided={} (one per firing bot per env) merged_absorbed={} slot_overflow={} decisions={}",
+        origs, merged_absorbed, orig_slot_ovf, decisions
     );
     let mut matched = 0usize;
     let mut matched_total = 0usize;
