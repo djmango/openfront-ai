@@ -1,63 +1,164 @@
 # openfront-ai
 
-Toward a self-play RL agent for [OpenFront.io](https://openfront.io): headless
-data generation on the real game engine, a learned spatial observation
-encoder, and PPO self-play over the full action surface.
+A self-play reinforcement learning agent for [OpenFront.io](https://openfront.io). It
+covers headless data generation on the real game engine and a learned spatial
+observation encoder. PPO trains over the full action surface of the game.
+
+The project is finished. This README describes the last and strongest run
+(`ppo_v11`), what it reached, and what the whole attempt taught us.
 
 **Devlog:** [djmango.github.io/openfront-ai/devlog.html](https://djmango.github.io/openfront-ai/devlog.html) - run ledger, timeline, bugs,
-lessons, and the full AE v3.1 bake-off. **Living spec:**
-[DESIGN.md](DESIGN.md).
+lessons, and the full AE v3.1 bake-off. **Living spec:** [DESIGN.md](DESIGN.md).
+**Play against a checkpoint in the browser:** [openfrontai.skg.gg](https://openfrontai.skg.gg).
 
-## Status (Jul 14)
+## The final run: `ppo_v11`
 
-- **375k bot + 420k human** full-state snapshots; human games replayed
-  deterministically from the public archive.
-- **Spatial AE v3.1** concluded: latent *resolution* (1/8, not channel count)
-  fixes the human/bot border-accuracy gap. Policy encoder: **`ae_v31_d8c32`**
-  (32ch @ 1/8, 88.2% human / 95.5% bot borders). AE train/prefeaturize via
-  Rust **`ofae`** (Python `ae/` removed).
-- **PPO via Rust `oftrain`** (Python `rl/` stack removed). ~6M-param policy,
-  win-gated curriculum, safetensors checkpoints, native + Node engine hedge.
-- Showcase / live play: `ofshowcase` + webbot ONNX (`scripts/export_onnx.py`,
-  `scripts/play_live.sh`). Thin Python remains for ONNX/Playwright/libtorch.
+| | |
+|---|---|
+| Policy | 38.6M parameters, 133 tensors, safetensors |
+| Observation | 99 grid channels (100 on the fine grid), 28 player features, 57 transient planes, 11 scalars, 5 local planes, 32 unit slots |
+| Action surface | 21 action types, 7 build types, 5 nuke types, a continuous quantity head |
+| Recurrence | LSTM, hidden 512, state 1024, BPTT 24, rollout 48, `action-outcome-v1` context |
+| Encoders | frozen `ae_v32_nostatic` at 1/8 (fine, 32ch) and 1/16 (coarse, 32ch) |
+| Reward / curriculum | `v10-anti-spiral-v1` over the 100-stage `v10` ladder |
+| Final checkpoint | update 2561, stage 26, 16.8M environment steps |
+| Weights | [djmango/openfront-rl](https://huggingface.co/djmango/openfront-rl), `ppo_v11/latest.safetensors` |
+
+Every number above is read from the published `manifest.json` and
+`latest.state.json`, not from a plan document.
+
+### What it reached
+
+The curriculum starts on Onion against bots only and ends on 16 maps at
+Impossible. `ppo_v11` entered the ladder at stage 0 and left it at stage 26.
+
+- Stages 0 to 14 are bots-only Easy lobbies with a 95% win gate. The run cleared
+  them at a high rate and reached stage 24 by update 1306.
+- From update 1780 the run sat on one rung, stage 23, for about 1200 updates.
+  The rolling win rate there ran between 0.15 and 0.45 against a gate near 0.8.
+- Two late advances took it to 26 (updates 2536 and 2553) before training ended.
+
+The honest summary is that the agent clears the easy tiers comfortably and
+stops where several nations share the map.
+
+![ppo_v11 ladder](docs/graphs/v11_ladder.png)
+
+Conversion, the share of episodes that reach the endgame, stays near 0.8 while
+the win rate sinks. The agent reaches the endgame in most episodes, then loses
+the game at the end.
+
+![ppo_v11 endgame](docs/graphs/v11_endgame.png)
+
+Both figures come from `docs/v11_milestones.csv`, extracted from the published
+checkpoints, and are drawn by `scripts/make_v11_graphs.py`.
+
+## The agent playing, in the real client
+
+These clips are the OpenFront client replaying recorded `ppo_v11` episodes. The
+agent is the nation named `Agent`. The panel on the left is its own policy
+head, so you can read the action probabilities as it plays.
+
+World, an African start that grows into a continent:
+
+![ppo_v11 on the World map](docs/clips/ppo_v11_s23_world.gif)
+
+Europe, where the agent holds the north and runs into a larger power:
+
+![ppo_v11 on the Europe map](docs/clips/ppo_v11_s23_europe.gif)
+
+Full clips of the real client:
+
+- [Europe, 110 s](https://share.skg.gg/u/4iMMic.webm)
+- [World, 85 s](https://share.skg.gg/u/0xCL4E.webm)
+- [Europe, harder probe, 53 s](https://share.skg.gg/u/66idcY.webm)
+
+Reproduce one with `scripts/render_client_replay.py`, which boots the engine in
+Node, opens headless Chromium, and films the client.
+
+## Results across the project
+
+| Run | Setting | Best measured result |
+|---|---|---|
+| `ppo_v10` | 100-stage Easy ladder, 4×A40 | 0 to 27 stages in about 12 hours. Conversion 0.98, timeout-after-closeout about 0. Ended at update 12581 / stage 25. |
+| `ppo_v11` | the ladder plus the V11 observation and LSTM, 4×A100 then 1×H100 | stage 26 at update 2561. Bots-only Easy tiers cleared at a high rate, then stalls where nations appear. |
+| `ppo_duo` (run G) | two-human team mode, one RTX 3070 | 101 wins in 245 episodes (WR 0.41). Caucasus 44/46 (0.96), Onion 38/51, Pangaea 7/9, water maps 12/139. |
+| CUDA environment port | PufferLib 5.0 on one RTX 5080 | 727,110 environment ticks per second at 1024 envs. Parity with the Rust engine is a ladder, not a switch. |
+
+Team mode ran on a teammate-aware observation stack and never solved water maps.
+The win rule there is 95% combined land, and the agent was unable to hold
+a continent and cross an ocean in the same episode.
+
+## What we tried and what we learned
+
+- **Make wins reachable before making them valuable.** Staging 1v1 then 1v3
+  turned the win bonus from a theoretical number into a dense signal. Win
+  detection itself was silently broken for days, because the engine reports a
+  clientID and the checker read a username.
+- **A one-bit fact rebuilt at 95% is worse than reading the bit.** The first
+  autoencoder compressed all state, and tiny exact facts fought the map for
+  latent capacity. Compress the map. Pass diplomacy, scalars and unit identity
+  through untouched.
+- **Spatial precision is not bought with channels.** Halving the latent patch
+  size beat adding 50% more channels: human border accuracy went from 71.8% to
+  88.2%, while overall tile accuracy had looked finished at 87%.
+- **Log the metric you care about, and watch the agent play.** Border accuracy
+  and replay tooling each found a bug that no reward curve would have shown.
+- **The reward and the curriculum stopped paying before the encoder did.**
+  `ppo_v10` and `ppo_v11` climbed the same ladder with different encoders and
+  different memory. The bottleneck at stage 23 was not another reward term.
+- **Test the reward stream as a stream.** A measured audit of the stage-0
+  reward in the PufferLib port found 91% of the return in the terminal term,
+  which fires on 0.19% of decisions. A uniform random policy won 6 of 6 stage-0
+  games while every deliberate policy lost. See
+  [docs/stage0-reward-audit.md](docs/stage0-reward-audit.md).
+
+![stage-0 reward shares](docs/graphs/stage0_reward_shares.png)
+
+- **Warm starts inherit stale habits.** A run resumed onto a new curriculum
+  lost to a from-scratch run inside a day. Retrain when the reward or the
+  curriculum changes in a material way.
+- **A GPU environment needs a parity ladder.** Exact where exactness is cheap,
+  statistical where it is not. The port has seven levels, and a level that has
+  not passed makes every number above it a throughput claim, never a result.
+- **Long training runs do not belong in a terminal.** Jobs launched from an
+  agent shell died with their parent. Systemd units, a stall watchdog and a
+  timer that restarts a dead run are what kept overnight training alive.
+- **A config key that nothing reads looks like a working one.** The trainer
+  ignored `load_model_path` for weeks. The flag was read back correctly from the
+  unit and the log the whole time.
 
 ## Architecture: compress the map, bypass the rest
 
-The observation design went through three iterations (see `DESIGN.md`):
+The observation design went through three iterations, all documented in
+`DESIGN.md`:
 
-1. **v1** - tile-only autoencoder over ownership + terrain.
-2. **v2** - one unified AE compressing *all* state (tiles, players, units,
-   diplomacy) into a joint latent. Spatial recon was excellent but tiny exact
-   facts fought the bottleneck: alliance pairs peaked at F1 0.67 and relative
-   troop strength at 0.81, no matter how losses were weighted.
-3. **v3 (current)** - **only compress what is actually big.** The AE
-   compresses the map (tile ownership, terrain, fallout, static structures).
-   Everything small and exact bypasses the latent: pairwise diplomacy bits,
-   per-player scalars, transient units (nukes in flight with impact points,
-   transports, warships), attack aggregates, legality masks.
-
-**The lesson: a one-bit fact reconstructed at 95% is strictly worse than
-reading the bit.** Autoencoders are for high-dimensional state; exact small
-state should never fight the map for latent capacity.
+1. **v1** - tile-only autoencoder over ownership and terrain.
+2. **v2** - one unified autoencoder over all state (tiles, players, units,
+   diplomacy). Spatial reconstruction was good; small exact facts were not.
+   Alliance pairs peaked at F1 0.67 and relative troop strength at 0.81,
+   whatever the loss weighting.
+3. **v3 (final)** - compress only what is big. The autoencoder carries tile
+   ownership, terrain, fallout and static structures. Everything small and exact
+   bypasses the latent: diplomacy bits, per-player scalars, transient units
+   (nukes in flight with impact points, transports, warships), attack
+   aggregates, legality masks.
 
 ### AE v3.1: border accuracy
 
-Overall tile accuracy saturates near 99% (water inflates it); **border-tile
-accuracy** is the honest metric. Benchmarking the bot-trained v3 on human
-games exposed a 16-point domain gap (87.5% bot borders vs 71.8% human).
-Mixed bot+human retraining helped; the architectural fix was **halving the
-latent patch size** (1/8 resolution instead of 1/16):
+Overall tile accuracy saturates near 99% because water inflates it. Border-tile
+accuracy is the honest metric. Benchmarking the bot-trained v3 on human games
+showed a 16-point domain gap. The fix was to halve the latent patch size:
 
 | model | latent | border (human) | border (bot) |
 |---|---|---|---|
 | v3 bot-only | 64ch @ 1/16 | 71.8% | 87.5% |
-| v3 on bot+human mix | 64ch @ 1/16 | 80.1% | 86.8% |
+| v3 on a bot+human mix | 64ch @ 1/16 | 80.1% | 86.8% |
 | v3.1 @ 1/8 res | 64ch @ 1/8 | **89.3%** | **96.1%** |
 | **v3.1 d8c32 (policy)** | **32ch @ 1/8** | **88.2%** | **95.5%** |
 
-Structure detection stayed at precision/recall 1.0 per class throughout.
-The policy also gets a raw **64×64 local owner-crop** around ego territory for
-exact borders where the agent acts; the latent carries global context.
+Structure detection stayed at precision and recall 1.0 per class throughout.
+The policy also reads a raw 64x64 owner crop around its own territory for exact
+borders where it acts. The latent carries the global context.
 
 Original v3 training curves and reconstructions (64ch @ 1/16):
 
@@ -67,73 +168,22 @@ Original v3 training curves and reconstructions (64ch @ 1/16):
 
 ![Latent PCA](assets/latent_pca_v3_world.png)
 
-## RL progress
-
-Curriculum v2: 11 stages over 7 maps (Onion → Pangaea → Caucasus → …),
-win-gated advancement (rolling win rate > 0.5 over last 40 on-stage episodes),
-25% rehearsal against earlier maps at current difficulty, dense wins from 1v1
-stage 0. Strength-index reward (land + military + economy), not raw territory.
-
-![Curriculum progress](docs/graphs/curriculum_progress.png)
-
-![Throughput engineering](docs/graphs/throughput.png)
-
-![BC pipeline](docs/graphs/bc_pipeline.png)
-
-Graphs from `scripts/make_progress_graphs.py`. Highlights:
-
-- **Curriculum:** `ppo_v4` matched `ppo_v3`'s pace despite the heavier 1/8
-  stack, learned spawns, and two mid-run restarts. Warm-started `ppo_v2c`
-  stalled at stage 3 while from-scratch v3 reached stage 4.
-- **Throughput:** fp16 transfers + pinned staging + prefetch took stage-3–4
-  game-ticks/s from ~590 → ~2100; v4.1 async rollout/update overlap hides
-  the rollout phase inside the update.
-- **BC (historical):** prefeaturized cache cut sample cost from ~15–20 ms to
-  ~1.5 ms; Python BC trainer since removed (moratorium / oftrain-only path).
-
-Sample agent replay: [assets/replay_v2_stage3.webm](assets/replay_v2_stage3.webm)
-(`ppo_v2c` on stage 3 - Onion, 80 Medium bots; peaks ~13k tiles before dying
-at tick 3891).
-
-## Key learnings
-
-Condensed from the [devlog](https://djmango.github.io/openfront-ai/devlog.html#lessons):
-
-- **Make wins reachable before making them valuable.** 1v1 → 1v3 staging turned
-  the win bonus from theoretical to dense; win detection was silently broken
-  until Jul 6 (checked username, engine emits clientID).
-- **Warm starts inherit stale habits.** `ppo_v2c` resumed v2b weights under
-  the new curriculum; from-scratch `ppo_v3` overtook it in one day. Retrain
-  when reward or curriculum changes materially.
-- **Benchmark on the distribution you'll deploy on.** Bot data underrepresents
-  human gnarl (naval invasions, enclaves, diplomacy).
-- **Spatial precision can't be bought with channels.** Halving the latent patch
-  beat +50% channels; don't make the latent re-encode static side-information
-  (terrain) the policy already has.
-- **Log the metric you care about.** Border accuracy cost one line; overall
-  tile accuracy looked done at 87% while human borders were 16 points worse.
-- **Pad to the batch, not the maximum.** Most of a "GPU too slow" problem was
-  wasted convolution on small-map batches.
-- **Watch the agent play.** Replay tooling caught the win-detection bug; curves
-  never would have.
-
 ## Layout
 
-- `datagen/` - TypeScript headless game runner. Boots the real
-  (deterministic) OpenFront engine in Node, plays bot/nation games, dumps
-  full-state snapshots every 10 ticks.
-- `rust/` - `oftrain` (PPO), `ofae` (spatial AE train/prefeaturize), `ofhub`
-  (HF sync + showcase), `ofcore` (feat/curriculum), `engine` (native sim).
-- `webbot_export/` - slim Policy + AE encoder + safetensors→ONNX helpers for
-  browser play (thin Python island; Torch also provides libtorch for `tch`).
-- `bridge/` - persistent Node process wrapping the engine (JSONL reset/step
-  over stdio, binary tile IPC).
-- `scripts/` - ONNX export, client replay render, HF upload, `pod_train_v10.sh`
-  (RunPod launcher; `pod_train_v8.sh` is a compatibility shim), `fetch_ae_encoders.sh`.
-- `docs/` - devlog and training graphs.
+- `datagen/` - TypeScript headless game runner. Boots the real deterministic
+  OpenFront engine in Node, plays bot and nation games, and writes full-state
+  snapshots every 10 ticks.
+- `rust/` - `oftrain` (PPO), `ofae` (spatial autoencoder), `ofhub` (HF sync and
+  showcase), `ofcore` (features and curriculum), `engine` (native simulation).
+- `webbot_export/` - slim policy, encoder and safetensors to ONNX helpers for
+  browser play.
+- `bridge/` - persistent Node process that wraps the engine over stdio.
+- `scripts/` - checkpoint sync, ONNX export, client replay rendering, progress
+  graphs, and the RunPod launchers.
+- `docs/` - devlog, training graphs, and the reward audit.
 - `openfront/` - git submodule of
-  [openfrontio/OpenFrontIO](https://github.com/openfrontio/OpenFrontIO),
-  pinned to a known-good engine commit.
+  [openfrontio/OpenFrontIO](https://github.com/openfrontio/OpenFrontIO), pinned
+  to a known-good engine commit.
 
 ## Setup
 
@@ -146,106 +196,66 @@ uv sync
 ## Generate data
 
 ```bash
-# single map
+# one map
 openfront/node_modules/.bin/tsx datagen/generate.ts --map Onion --games 20
 
-# the 10-map bot dataset (25 games each, 10 in parallel)
+# the 10-map bot dataset, 25 games each, 10 in parallel
 bash datagen/gen_all.sh 25 10
 
-# human archive → deterministic replay → snapshots
+# human archive to deterministic replay to snapshots
 bash datagen/replay_all.sh
 ```
 
-Snapshots are written every 10 ticks (1s of game time). Format details in the
+Snapshots are written every 10 ticks, which is one second of game time. The
+format is described in the
 [dataset card](https://huggingface.co/datasets/djmango/openfront-snapshots).
 
 ## Train
 
 ```bash
-# one-time: convert gzip+JSON snapshots to fast zstd caches
+# one-time: turn gzip+JSON snapshots into fast zstd caches
 cd rust && cargo run --release -p ofae -- prefeaturize --data ../data --workers 8
 
-# spatial AE (v3.2 no-static) - buildings bypass AE into the policy grid
+# spatial autoencoder, v3.2 no-static
 cargo run --release -p ofae -- train \
     --data ../data,../data-human \
     --steps 40000 --batch-size 64 --latent-down 8 --latent-c 32 \
     --out ../runs/ae_v32_nostatic_d8c32
 
-# optional: filter a full ckpt → encoder-only (train already writes encoder)
-cargo run --release -p ofae -- export-encoder \
-    --ckpt ../runs/ae_v32_nostatic_d8c32/ae_v3.safetensors \
-    --out ../weights/ae/ae_v32_nostatic_d8c32.encoder.safetensors
-
-# or pull frozen encoders from HF
+# optional: pull frozen encoders from HF
 bash ../scripts/fetch_ae_encoders.sh
 
-# PPO (oftrain) - see scripts/pod_train_v10.sh for the RunPod launcher
+# PPO; see scripts/pod_train_v10.sh for the RunPod launcher
 cargo build --release -p oftrain --features native-engine
-# then: ./target/release/oftrain --help  /  bash ../scripts/pod_train_v10.sh
+./target/release/oftrain --help
 ```
 
-AE details: owner IDs relabeled to static per-game spawn slots (any player
-count, fixed channels); fully convolutional training on border-dense random
-crops; v3.2 drops structures from the latent (exact 6-plane bypass on the
-policy grid, `C_GRID=95`). Breaking vs `ae_v31_*` - retrain PPO after swapping
-encoders.
+Autoencoder details: owner IDs are relabeled to static per-game spawn slots, so
+any player count fits a fixed channel count. Training is fully convolutional on
+border-dense random crops. v3.2 drops structures from the latent, because they
+pass to the policy grid as 6 exact planes (`C_GRID=95`). Swapping the encoder
+breaks a policy, so retrain PPO after a swap.
 
-## Artifacts
+## Watch the agent play
 
-- Bot snapshots: [djmango/openfront-snapshots](https://huggingface.co/datasets/djmango/openfront-snapshots)
-  (~375k frames, 250 games, 10 maps)
-- Human games: [djmango/openfront-human-games](https://huggingface.co/datasets/djmango/openfront-human-games)
-  (285 hash-verified replays + raw intent records)
-- RL GameRecords: [djmango/openfront-replays](https://huggingface.co/datasets/djmango/openfront-replays)
-  (sparse-turn parquet shards from training/watch; `ofhf replays` / `ofhf replays-pull`)
-- Encoders: [djmango/openfront-tile-autoencoder](https://huggingface.co/djmango/openfront-tile-autoencoder)
-  (`ae_v32_nostatic_*` / legacy `ae_v31_*`)
-- RL policies: [djmango/openfront-rl](https://huggingface.co/djmango/openfront-rl)
-  — **latest is `ppo_v11/latest.safetensors`** (see the
-  [model card](docs/hf/openfront-rl/README.md); Hub README is the same file).
-  Sparse milestones + curriculum snapshots only; prune with
-  `scripts/hf_prune_openfront_rl.py`.
-
-## RL stack (Rust oftrain)
-
-- **`bridge/env.ts`** - persistent Node process: JSONL reset/step, binary tile
-  IPC, exact legality masks from engine calls each decision step (TS engine
-  path / `--node-fraction` hedge).
-- **`rust/ofcore`** - obs featurization + curriculum (port of the old Python
-  obs/curriculum). Frozen AE latent + ego planes + local crop + bypass.
-- **`rust/oftrain`** - PPO + GAE, entropy anneal, stage LR warmdown, win-gate,
-  safetensors checkpoints, native or Node engine.
-- **`rust/ofhub`** - HF sync (`ofhf`), showcase hub/archive (`ofshowcase`),
-  encoder filter (`ofexport`).
-
-### Watching the agent play
-
-`oftrain --watch` runs a **stochastic** episode (same sampling as PPO
-rollouts / WR windows — not greedy argmax) and saves an engine `GameRecord` -
-the same format openfront.io archives - which the **real game client**
-replays with the full UI. Showcase automation: `ofshowcase daemon`.
-Use the shared train tick budget (`--max-episode-ticks`, default 21000).
+`oftrain --watch` runs a stochastic episode, the same sampling that PPO rollouts
+and win-rate windows use, and it saves an engine `GameRecord`. That is the same
+format openfront.io archives, so the real client replays it with the full UI.
+Greedy argmax is debug-only: it freezes near spawn and shows behaviour that
+training never measured. Showcase automation runs as `ofshowcase daemon`.
 
 ```bash
-# after building oftrain (see rust/README.md)
-./rust/target/release/oftrain --watch --help
-```
-
-**Client video** - `scripts/render_client_replay.py` replays the record in the
-actual OpenFront client (headless Chromium). Prefer a real NVIDIA GPU (full
-Chromium + Xvfb + Vulkan); SoftGL clips are a last resort. For human-facing
-batches use a **variety of maps** — do not ship Onion-only showcases (see
-`.cursor/rules/showcase-clips.mdc` and `showcase-clips/run_watches.sh`).
-
-```bash
-uv run playwright install chromium   # one-time
+uv run playwright install chromium   # one time
 uv run python scripts/render_client_replay.py \
     --record records-rl/game.json --out replays/game_client.webm
 ```
 
-### Playing against the agent
+Prefer a real NVIDIA GPU for the render (full Chromium, Xvfb, Vulkan). For a
+human-facing batch, use several maps. Onion-only showcase runs mislead.
 
-In-browser webbot (ONNX) via showcase hub `/play` or locally:
+## Play against the agent
+
+The showcase hub serves an in-browser webbot over ONNX at `/play`. Locally:
 
 ```bash
 bash scripts/play_live.sh --game '<lobby URL or 8-char ID>'
@@ -255,16 +265,32 @@ Export ONNX from an oftrain checkpoint:
 
 ```bash
 PYTHONPATH=. uv run python scripts/export_onnx.py \
-    --ae runs/ae_v31_d8c32/ae_v3.pt \
-    --policy rust/checkpoints/ppo_v10/latest.safetensors \
+    --ae runs/ae_v32_nostatic_d8c32/ae_v3.safetensors \
+    --policy rust/checkpoints/ppo_v11/latest.safetensors \
     --out openfront/resources/webbot/models
 ```
 
-## Roadmap
+## Artifacts
 
-1. ~~Headless datagen + spatial autoencoder~~ (done)
-2. ~~Environment bridge + obs builder + PPO scaffold~~ (done)
-3. ~~AE v3.1 border-accuracy push + policy stack~~ (done)
-4. ~~Rust oftrain PPO + native engine~~ (done; Python RL removed)
-5. Scale PPO: reward shaping audit, recurrence, self-play league
-6. ~~Port AE training to Rust (`ofae`)~~ (done; Python `ae/` removed)
+- Bot snapshots: [djmango/openfront-snapshots](https://huggingface.co/datasets/djmango/openfront-snapshots)
+  (about 375k frames, 250 games, 10 maps)
+- Human games: [djmango/openfront-human-games](https://huggingface.co/datasets/djmango/openfront-human-games)
+  (285 hash-verified replays plus raw intent records)
+- RL GameRecords: [djmango/openfront-replays](https://huggingface.co/datasets/djmango/openfront-replays)
+  (sparse-turn parquet shards from training and watch runs)
+- Encoders: [djmango/openfront-tile-autoencoder](https://huggingface.co/djmango/openfront-tile-autoencoder)
+  (`ae_v32_nostatic_*`, legacy `ae_v31_*`)
+- Policies: [djmango/openfront-rl](https://huggingface.co/djmango/openfront-rl), with
+  `ppo_v11/latest.safetensors` as the production pointer and prior runs
+  (`ppo_v10`, `ppo_v9`, `ppo_v86` to `ppo_v81`, `ppo_duo`) kept as latest plus
+  manifest. See the [model card](docs/hf/openfront-rl/README.md).
+
+## Where this stopped
+
+- Stage 26 of 100. The ladder is the measurement, and the run did not reach the
+  harder maps at Medium or above.
+- Team mode holds a continent and loses the ocean. Water maps are 12 wins in
+  139 episodes.
+- The GPU environment port reaches high throughput. Closing the last parity
+  levels is what would let a policy train on it, and that work is on the
+  `puffer-env` branch.

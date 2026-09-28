@@ -23,11 +23,14 @@
 </head>
 <body>
 <h1>openfront-ai devlog</h1>
-<p class="d">Self-play RL on <a href="https://openfront.io">OpenFront.io</a>, real engine, ~two days in.
+<p class="d">Self-play RL on <a href="https://openfront.io">OpenFront.io</a>, real engine.
+Project closed September 2026: datagen, spatial encoder, curriculum, PPO, replays.
 <a href="../DESIGN.md">DESIGN.md</a> · <a href="../README.md">README</a></p>
 
 <nav class="toc">
   <a href="#now">Now</a> ·
+  <a href="#final">Sep 28 final results</a> ·
+  <a href="#sep7">Sep 7 duo V dead</a> ·
   <a href="#duo-easy">Aug 26-28 duo Easy</a> ·
   <a href="#duo-learned">duo learnings</a> ·
   <a href="#v11-4x">Jul 25 4×A100</a> ·
@@ -86,7 +89,169 @@
 </nav>
 
 <div class="now" id="now">
-  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Now - September 7th, 2026</h2>
+  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">Closed - September 28th, 2026</h2>
+  <p><b>The project is finished. Nothing is training.</b> The last run,
+    <code>ppo_v11</code>, stopped at <b>update 2561 / stage 26 of 100</b>
+    (16.8M environment steps, 38.6M parameters). It clears the bots-only
+    Easy tiers at a high rate and stops at the rung where several nations
+    share the map. Weights:
+    <a href="https://huggingface.co/djmango/openfront-rl/tree/main/ppo_v11">ppo_v11/</a>.
+    The duo run (team mode) died in a CUDA OOM in September and was not
+    restarted.</p>
+  <p class="d" style="margin:.75rem 0 0">Final writeup below:
+    <a href="#final">results, clips, and what we learned</a>.
+    Play against a checkpoint:
+    <a href="https://openfrontai.skg.gg">openfrontai.skg.gg</a>.</p>
+</div>
+
+<h2 class="date" id="final">Sep 28, 2026 - Final results, and what the whole attempt taught us</h2>
+<p class="session">Project closed. Every number here was measured, not planned: the
+curves come from the checkpoints the trainer published, and the clips are the real
+OpenFront client replaying recorded episodes.</p>
+
+<h3 id="final-run">The strongest run: <code>ppo_v11</code></h3>
+<table>
+  <tr><th></th><th></th></tr>
+  <tr><td>policy</td><td>38.6M parameters, 133 tensors, safetensors</td></tr>
+  <tr><td>observation</td><td>99 grid channels (100 on the fine grid), 28 player
+    features, 57 transient planes, 11 scalars, 5 local planes, 32 unit slots</td></tr>
+  <tr><td>action surface</td><td>21 action types, 7 build types, 5 nuke types, a
+    continuous quantity head</td></tr>
+  <tr><td>recurrence</td><td>LSTM, hidden 512, state 1024, BPTT 24, rollout 48,
+    <code>action-outcome-v1</code> context</td></tr>
+  <tr><td>encoders</td><td>frozen <code>ae_v32_nostatic</code> at 1/8 (fine, 32ch)
+    and 1/16 (coarse, 32ch)</td></tr>
+  <tr><td>reward / curriculum</td><td><code>v10-anti-spiral-v1</code> over the
+    100-stage <code>v10</code> ladder</td></tr>
+  <tr><td>final checkpoint</td><td>update 2561, stage 26, 16.8M environment steps</td></tr>
+</table>
+
+<p>The curriculum starts on Onion against bots only and ends on 16 maps at
+Impossible. <code>ppo_v11</code> entered the ladder at stage 0 and left it at
+stage 26:</p>
+<ul>
+  <li>Stages 0-14 are bots-only Easy lobbies with a 95% win gate. The run cleared
+    them at a high rate and reached stage 24 by update 1306.</li>
+  <li>From update 1780 it sat on one rung, stage 23, for about 1200 updates. The
+    rolling win rate there ran between 0.15 and 0.45 against a gate near 0.8.</li>
+  <li>Two late advances took it to 26 (updates 2536 and 2553) before training
+    ended.</li>
+</ul>
+<p>The honest summary: the agent clears the easy tiers comfortably and stops
+where several nations share the map.</p>
+
+<img src="graphs/v11_ladder.png" alt="ppo_v11 curriculum ladder and rolling win rate" />
+
+<p>Conversion, the share of episodes that reach the endgame, stays near 0.8 while
+the win rate sinks. The agent reaches the endgame in most episodes, then loses
+the game at the end.</p>
+
+<img src="graphs/v11_endgame.png" alt="ppo_v11 conversion and death rate" />
+
+<p>Both figures come from <code>docs/v11_milestones.csv</code>, extracted from the
+published checkpoints, and are drawn by <code>scripts/make_v11_graphs.py</code>.</p>
+
+<h3 id="final-clips">The agent playing, in the real client</h3>
+<p>The nation named <b>Agent</b> is the policy. The panel on the left is its own
+policy head, so the action probabilities stay readable while it plays. Full clips:
+<a href="https://share.skg.gg/u/4iMMic.webm">Europe, 110&nbsp;s</a>,
+<a href="https://share.skg.gg/u/0xCL4E.webm">World, 85&nbsp;s</a>,
+<a href="https://share.skg.gg/u/66idcY.webm">Europe, harder probe,
+53&nbsp;s</a>.</p>
+
+<img src="clips/ppo_v11_s23_world.gif" alt="ppo_v11 playing a World-map episode in the real client" />
+<p class="d">World: an African start that grows into a continent.</p>
+
+<img src="clips/ppo_v11_s23_europe.gif" alt="ppo_v11 playing a Europe-map episode in the real client" />
+<p class="d">Europe: the agent holds the north and runs into a larger power.</p>
+
+<img src="clips/ppo_v11_s36_medium_europe.gif" alt="ppo_v11 on a harder Europe probe" />
+<p class="d">Europe again, at a harder rung than the run ever trained on. This one is a
+probe of what the policy does outside its ladder.</p>
+
+<h3 id="final-board">Best measured result, per run</h3>
+<table>
+  <tr><th>run</th><th>setting</th><th>best measured result</th></tr>
+  <tr><td><code>ppo_v11</code></td><td>ladder + V11 observation + LSTM, 4×A100 then 1×H100</td>
+    <td>stage 26 at update 2561. Bots-only Easy tiers cleared at a high rate, then
+    stalls where nations appear.</td></tr>
+  <tr><td><code>ppo_v10</code></td><td>100-stage Easy ladder, 4×A40</td>
+    <td>0 to 27 stages in about 12 hours. Conversion 0.98, timeout-after-closeout
+    about 0. Ended at update 12581 / stage 25.</td></tr>
+  <tr><td><code>ppo_duo</code> (run G)</td><td>two-human team mode, one RTX 3070</td>
+    <td>101 wins in 245 episodes (WR 0.41). Caucasus 44/46 (0.96), Onion 38/51,
+    Pangaea 7/9, water maps 12/139.</td></tr>
+  <tr><td>CUDA port</td><td>PufferLib 5.0 on one RTX 5080</td>
+    <td>727,110 environment ticks per second at 1024 envs. Parity with the Rust
+    engine is a ladder, not a switch.</td></tr>
+</table>
+<p>Team mode ran on a teammate-aware observation stack and never solved water
+maps. The win rule there is 95% combined land, and the agent was unable to hold
+a continent and cross an ocean in the same episode.</p>
+
+<h3 id="final-audit">The reward audit that explains the stage-0 stall</h3>
+<p>Late in the project we stopped trusting the reward function and measured it as a
+stream. The harness played 12,696 decisions at stage 0 with four scripted
+behaviours and logged every reward component.</p>
+<img src="graphs/stage0_reward_shares.png" alt="share of total return per reward component at stage 0" />
+<p>The terminal term was <b>91% of the return</b> and fired on <b>0.19%</b> of
+decisions. A uniform random policy won 6 of 6 stage-0 games while every
+deliberate policy lost, and the deliberate policies were within <code>d &lt;
+0.02</code> of each other. A policy-gradient learner maximising advantage on that
+stream is pushed toward maximum entropy. The live run agreed: entropy 7.4-8.3,
+policy loss near zero, <code>stage_advances 0</code>. Full report:
+<a href="stage0-reward-audit.md">stage0-reward-audit.md</a>.</p>
+
+<h3 id="final-lessons">What we learned</h3>
+<ul>
+  <li><b>Make wins reachable before making them valuable.</b> Staging 1v1 then 1v3
+    turned the win bonus from a theoretical number into a dense signal. Win
+    detection itself was silently broken for days, because the engine reports a
+    clientID and the checker read a username.</li>
+  <li><b>A one-bit fact rebuilt at 95% is worse than reading the bit.</b> The first
+    autoencoder compressed all state, and tiny exact facts fought the map for
+    latent capacity. Compress the map. Pass diplomacy, scalars and unit identity
+    through untouched.</li>
+  <li><b>Spatial precision is not bought with channels.</b> Halving the latent
+    patch size beat adding 50% more channels: human border accuracy went from
+    71.8% to 88.2%, while overall tile accuracy had looked finished at 87%.</li>
+  <li><b>Log the metric you care about, and watch the agent play.</b> Border
+    accuracy and replay tooling each found a bug that no reward curve would have
+    shown.</li>
+  <li><b>Reward and curriculum move before representation does, then stop
+    moving.</b> <code>ppo_v10</code> and <code>ppo_v11</code> climbed the same
+    ladder with different encoders and different memory. The bottleneck at stage
+    23 was not another reward term.</li>
+  <li><b>Test the reward stream as a stream.</b> See
+    <a href="#final-audit">the audit above</a>.</li>
+  <li><b>Warm starts inherit stale habits.</b> A run resumed onto a new curriculum
+    lost to a from-scratch run inside a day. Retrain when the reward or the
+    curriculum changes in a material way.</li>
+  <li><b>A GPU environment needs a parity ladder.</b> Exact where exactness is
+    cheap, statistical where it is not. The port has seven levels, and a level
+    that has not passed makes every number above it a throughput claim, never a
+    result.</li>
+  <li><b>Long training runs do not belong in a terminal.</b> Jobs launched from an
+    agent shell died with their parent. Systemd units, a stall watchdog and a
+    timer that restarts a dead run are what kept overnight training alive.</li>
+  <li><b>A config key that nothing reads looks like a working one.</b> The trainer
+    ignored <code>load_model_path</code> for weeks. The flag was read back
+    correctly from the unit and the log the whole time.</li>
+</ul>
+
+<h3 id="final-stopped">Where this stopped</h3>
+<ul>
+  <li>Stage 26 of 100. The ladder is the measurement, and the run did not reach
+    the harder maps at Medium or above.</li>
+  <li>Team mode holds a continent and loses the ocean. Water maps are 12 wins in
+    139 episodes.</li>
+  <li>The GPU environment port reaches high throughput. Closing the last parity
+    levels is what would let a policy train on it, and that work is on the
+    <code>puffer-env</code> branch.</li>
+</ul>
+
+<div class="now" id="sep7">
+  <h2 style="font-size:1rem;margin:0 0 .5rem;text-transform:uppercase;letter-spacing:.04em">September 7th, 2026 - Experiment V is dead</h2>
   <p><b>Experiment V is dead.</b> Started 2026-09-03T19:06:09Z
     (<code>--init</code> M, inclusive 80% team win, partner-tiles 0.4 /
     leftover-continent 0.25 / boat-land 0.2). CUDA OOM at
@@ -2377,7 +2542,7 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
 <code>ae_v3.pt</code> until the v3.1 winner is wired into <code>rl/obs.py</code>.</p>
 <table>
   <tr><th>run</th><th>status</th><th>notes</th></tr>
-  <tr><td><code>ppo_duo</code></td><td><b>live</b> Aug 30 (homelab 3070)</td>
+  <tr><td><code>ppo_duo</code></td><td><b>killed</b> Sep 4 (CUDA OOM); last V checkpoint u11835</td>
     <td>Two-human Team-mode Easy. Experiment N live (boat-commit PBRS
     on M weights; started 07:41:36Z). M opened Easy including water
     then fail-c. Carry-forward stack (MAPPO V + comms + boat-commit +
@@ -2385,11 +2550,14 @@ Numbers: 375k bot + 420k human full-state snapshots · AE border accuracy 71.8% 
     delete).
     <a href="#duo-scoreboard">A–N</a>.
     <a href="https://github.com/djmango/openfront-ai/pull/118">#118</a>.</td></tr>
-  <tr><td><code>ppo_v11</code></td><td><b>live</b> Jul 26 (4×A100 80GB)</td>
+  <tr><td><code>ppo_v11</code></td><td><b>final</b> - parked Sep 2026 at u2561 / stage 26</td>
     <td>Util stack + AE v3.2 no-static + recurrent LSTM. V10 Easy ramp:
     u571 / stage 19 / ~1.71M steps / 32 envs/shard (24 bots + 1 nation;
     overnight 16→19). Surpass-V10 target stage 28+; Medium at 68.
-    See <a href="#v11-soak">soak</a>, <a href="#v11-plan">plan</a>,
+    <b>Final:</b> update 2561 / stage 26 / 16.8M env steps, after ~1200
+    updates on the stage-23 rung. Project closed Sep 28.
+    See <a href="#final">final results</a>, <a href="#v11-soak">soak</a>,
+    <a href="#v11-plan">plan</a>,
     <a href="#v11-4x">4×</a>.
     HF <a href="https://huggingface.co/djmango/openfront-rl/tree/main/ppo_v11">ppo_v11/</a>.</td></tr>
   <tr><td><code>ppo_v10</code></td><td><b>killed</b> Jul 23 (4×A40)</td>
@@ -4624,6 +4792,10 @@ precompute to disk (at 1/8 a latent is ~2.4MB/snapshot ≈ 200GB corpus - the GP
 from the raw cache IS that idea, done right).</p>
 
 <h3 id="next">Open threads</h3>
+<p><b>Closed Sep 28, 2026.</b> The project is finished, and none of the threads
+below was carried past the point noted. They are kept as a record of what was
+next, not as plans. The short list of what actually stopped the work is in
+<a href="#final-stopped">the final results</a>.</p>
 <ul>
   <li><b>Duo Easy (overnight lock, Sep 1):</b> experiment U lets M
     learn (N–T PBRS peeled). Hold through 2026-09-02T12:00Z.
