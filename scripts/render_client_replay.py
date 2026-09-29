@@ -8,6 +8,11 @@ record's engine commit so the openfront submodule stays clean):
   - replayViewAs: the viewer adopts the agent's identity - self-player
     styling, gold spawn ring, crown when first, "You Won!" modal
   - replayFitMap: whole-map camera for showcase clips
+  - GPU-less boxes: set OF_CHROMIUM_EXECUTABLE to the full Chromium binary
+    (headless-shell has no WebGL), plus OF_HEADED_SOFTGL=1 with a real DISPLAY
+    when new-headless still reports no WebGL.
+  - REPLAY_FIT_MAP / REPLAY_SKIP_VISUAL_UNTIL override the camera and the
+    visual fast-forward tick, so a clip can open on the action.
   - Full-episode capture by default (GPU preferred; SoftGL is slow but complete).
   - RlDebugOverlay: in-client model panel (chosen action, value,
     action-probability bars, recent-actions log) synced to the sim tick,
@@ -588,6 +593,26 @@ def render_record(
                     launch_kwargs["env"] = dict(os.environ)
                 else:
                     launch_kwargs["headless"] = not headed
+                    if os.environ.get("OF_HEADED_SOFTGL", "").strip() in (
+                        "1",
+                        "true",
+                        "yes",
+                    ):
+                        # SwiftShader under a real X display: glx/swiftshader
+                        # works where new-headless reports no WebGL at all.
+                        launch_kwargs["headless"] = False
+                        print(f"headed SoftGL on DISPLAY={os.environ.get('DISPLAY')}")
+                    # chrome-headless-shell reports no WebGL at all; the full
+                    # Chromium binary in new-headless mode still gets SwiftShader
+                    # WebGL, which is the only path on a GPU-less box.
+                    soft_bin = os.environ.get("OF_CHROMIUM_EXECUTABLE", "").strip()
+                    if soft_bin and Path(soft_bin).is_file():
+                        launch_kwargs["executable_path"] = soft_bin
+                        launch_kwargs["env"] = dict(os.environ)
+                        print(
+                            "using full Chromium (headless) for SoftGL WebGL: "
+                            f"{soft_bin}"
+                        )
                 browser = pw.chromium.launch(**launch_kwargs)
                 ctx = browser.new_context(
                     viewport={"width": render_width, "height": render_height},
@@ -609,7 +634,9 @@ def render_record(
                 ctx.add_init_script(
                     f'localStorage.setItem("apiHost", "http://127.0.0.1:{api_port}");'
                     'localStorage.setItem("replayViewAs", "1");'
-                    'localStorage.setItem("replayFitMap", "1");'
+                    f'localStorage.setItem("replayFitMap", "'
+                    + os.environ.get("REPLAY_FIT_MAP", "1").strip()
+                    + '");'
                     f'localStorage.setItem("rlDebugOverlay", "{overlay_flag}");'
                     f'localStorage.setItem("rlAllowSoftwareGL", "{allow_sw}");'
                     f'localStorage.setItem("replayRenderEvery", "{render_every}");'
@@ -617,7 +644,9 @@ def render_record(
                     # Solid fills at whole-map zoom (patterns read as "dots").
                     'localStorage.setItem("settings.territoryPatterns", "false");'
                     'localStorage.setItem("username", "AGENT");'
-                    'localStorage.setItem("replaySkipVisualUntil", "0");'
+                    f'localStorage.setItem("replaySkipVisualUntil", "'
+                    + os.environ.get("REPLAY_SKIP_VISUAL_UNTIL", "0").strip()
+                    + '");'
                 )
                 page = ctx.new_page()
                 page_open_t0 = time.time()

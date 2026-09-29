@@ -12,7 +12,7 @@
     th{font-weight:600}
     code{font-size:.85em}
     pre{font-size:14px;overflow-x:auto;background:#f5f5f5;padding:8px 12px}
-    img{max-width:100%;height:auto;display:block;margin:1rem 0}
+    img,video{max-width:100%;height:auto;display:block;margin:1rem 0}
     .d{color:#666;font-size:16px}
     .now{background:#fafafa;border:1px solid #e8e8e8;padding:14px 16px;margin:1.5rem 0;font-size:16px}
     h2.date{font-size:1.35rem;margin:2.5rem 0 .35rem;border-top:1px solid #ddd;padding-top:1.25rem}
@@ -159,15 +159,27 @@ policy head, so the action probabilities stay readable while it plays. Full clip
 <a href="https://share.skg.gg/u/66idcY.webm">Europe, harder probe,
 53&nbsp;s</a>.</p>
 
-<img src="clips/ppo_v11_s23_world.gif" alt="ppo_v11 playing a World-map episode in the real client" />
-<p class="d">World: an African start that grows into a continent.</p>
+<video src="clips/ppo_v11_s23_europe_nuke.mp4" poster="clips/ppo_v11_s23_europe_nuke.jpg" autoplay loop muted playsinline></video>
+<p class="d">Europe. The agent launches an atom bomb at tick 16306. The client shows
+the inbound warning, the blast lands in southern Russia, and Russia's troop count
+falls from 419K to 114K.</p>
 
-<img src="clips/ppo_v11_s23_europe.gif" alt="ppo_v11 playing a Europe-map episode in the real client" />
-<p class="d">Europe: the agent holds the north and runs into a larger power.</p>
+<video src="clips/ppo_v11_s23_europe_growth.mp4" poster="clips/ppo_v11_s23_europe_growth.jpg" autoplay loop muted playsinline></video>
+<p class="d">Europe, early. At tick 1710 the agent holds 31,278 tiles. It builds a
+City and sends two boats, one with 128K troops and one with 396K.</p>
 
-<img src="clips/ppo_v11_s36_medium_europe.gif" alt="ppo_v11 on a harder Europe probe" />
-<p class="d">Europe again, at a harder rung than the run ever trained on. This one is a
-probe of what the policy does outside its ladder.</p>
+<video src="clips/ppo_v11_s23_world_build.mp4" poster="clips/ppo_v11_s23_world_build.jpg" autoplay loop muted playsinline></video>
+<p class="d">World. At tick 7708 the agent holds Africa with 86,516 tiles and fills
+the border with Defense Posts.</p>
+
+<video src="clips/ppo_v11_s23_world_fleet.mp4" poster="clips/ppo_v11_s23_world_fleet.jpg" autoplay loop muted playsinline></video>
+<p class="d">World, late. At tick 12903 the agent holds 140,935 tiles, keeps five
+warships and two missile bases, and loads a boat with 1.9M troops.</p>
+
+<p class="d">Each clip is a cut from a full client render, so the footage is the
+real client and the panel is the policy's own output. The harder Europe probe
+from the same set is still up as
+<a href="https://share.skg.gg/u/66idcY.webm">a 53&nbsp;s clip</a>.</p>
 
 <h3 id="final-board">Best measured result, per run</h3>
 <table>
@@ -1284,11 +1296,8 @@ AGENTRL2, red = bots. Not OpenFront WebGL.</p>
   <li>BlackSea win <code>qdqFa72D</code></li>
   <li>GreatLakes win <code>ribkxC5k</code> (first U GL)</li>
 </ul>
-<video src="/workspace/artifacts/duo_u_clips/duo_u_onion_win_2hYhgXmj.mp4" controls></video>
-<video src="/workspace/artifacts/duo_u_clips/duo_u_caucasus_win_nK1C3g1M.mp4" controls></video>
-<video src="/workspace/artifacts/duo_u_clips/duo_u_britannia_win_2paxGhGN.mp4" controls></video>
-<video src="/workspace/artifacts/duo_u_clips/duo_u_blacksea_win_qdqFa72D.mp4" controls></video>
-<video src="/workspace/artifacts/duo_u_clips/duo_u_greatlakes_win_ribkxC5k.mp4" controls></video>
+<p class="d">The five clips behind those codes were hosted on the run's pod and are no
+longer online. The codes are kept here as the record of the run.</p>
 
 <h3 id="duo-next">What is still open</h3>
 <ul>

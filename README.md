@@ -55,16 +55,30 @@ checkpoints, and are drawn by `scripts/make_v11_graphs.py`.
 ## The agent playing, in the real client
 
 These clips are the OpenFront client replaying recorded `ppo_v11` episodes. The
-agent is the nation named `Agent`. The panel on the left is its own policy
-head, so you can read the action probabilities as it plays.
+agent is the nation named `Agent`. The panel on the left is its own policy head,
+so you can read the action probabilities while it plays. Each clip is a cut from
+a full client render, so the footage is the real game.
 
-World, an African start that grows into a continent:
+Europe. The agent launches an atom bomb at tick 16306. The client shows the
+inbound warning, the blast lands in southern Russia, and Russia's troop count
+falls from 419K to 114K:
 
-![ppo_v11 on the World map](docs/clips/ppo_v11_s23_world.gif)
+![ppo_v11 launches an atom bomb on the Europe map](docs/clips/ppo_v11_s23_europe_nuke.gif)
 
-Europe, where the agent holds the north and runs into a larger power:
+Europe, early. At tick 1710 the agent holds 31,278 tiles. It builds a City and
+sends two boats, one with 128K troops and one with 396K:
 
-![ppo_v11 on the Europe map](docs/clips/ppo_v11_s23_europe.gif)
+![ppo_v11 builds a City and invades by boat on the Europe map](docs/clips/ppo_v11_s23_europe_growth.gif)
+
+World. At tick 7708 the agent holds Africa with 86,516 tiles and fills the
+border with Defense Posts:
+
+![ppo_v11 builds Defense Posts across Africa on the World map](docs/clips/ppo_v11_s23_world_build.gif)
+
+World, late. At tick 12903 the agent holds 140,935 tiles, keeps five warships
+and two missile bases, and loads a boat with 1.9M troops:
+
+![ppo_v11 with a large empire and a fleet on the World map](docs/clips/ppo_v11_s23_world_fleet.gif)
 
 Full clips of the real client:
 
